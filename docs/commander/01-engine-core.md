@@ -77,8 +77,7 @@ scheduleNext(TICK_MS=3s) ──▶ runEnginePass
 | `conflictReworks` :1406 | 統合 conflict の rebase 委譲回数。`MAX_CONFLICT_REWORKS`=3(:248)— `reworks` とは**別予算**(conflict は worker のコード品質でなく trunk が動いた結果) | 予算リセット |
 | `stuckMoves` :1413 | Board 列 move が kept され続けるカードの追跡。`MOVE_STUCK_MAX_RETRIES`=5(:226)で anomaly 化 | — |
 | `nudges` :1423 | terminalId ごとの stall nudge 予算(count / lastNudgeAt / escalated) | — |
-| `rateLimited` :1430 | terminalId ごとの rate-limit hold 開始時刻(`since`) | **消えると hold 時計がリセット** — 再起動直後は grace を数え直す |
-| `permissionWaits` :1437 | 権限/trust プロンプト待ちの開始時刻 + auto-accept 済みフラグ | 同上 |
+| ~~`rateLimited`~~ / ~~`permissionWaits`~~ | **【0813 削除】** 20分 hold と permission 腕は PTY センサー層ごと削除(quota 停止は即 requeue — 02 章 §5.5(a)) | — |
 | `questionRaised` :1445 / `questionWaits` :1453 | 自由文質問の escalation 受付キー / hold 時計(`QUESTION_GRACE_MS` :372) | 同上 |
 | `log` :1455 | journal ring buffer(`MAX_LOG_LINES`=200 :201、`logLine` :1762) | **再起動で全消え** — 過去の dispatch/integrate 履歴は git log とカードにしか残らない |
 | `anomalies` :1458 | 直近 pass の検出結果(毎 pass 再構築 :5693) | — |
@@ -182,12 +181,12 @@ roster の各 worker を pass-start の board スナップショット(`byId`)�
 | 4a | **reworkAt 抑制**: 差し戻し直後は心拍ファイルが古い `readyToMerge:true` のままなので、差し戻しより**新しい**心拍が出るまで promote を落とす(re-promote race 対策)。落とした後も **fall through して stall/作業上限の監視は受ける**(ready 済みなので上限に当たっても暴走扱いにはならない — 02 章 §5.6) | | :5284-5292 |
 | 4b | promote 成立(`commitsAhead>0 ∧ (ready ∨ (dead ∧ ¬blocked))` :1019-1022) | doing→review move(:5297)。kept なら `recordKeptMove` + 次 pass 再試行(:5335。**kept でも「納品した」事実は `readyAt` に刻む** — 02 章 §5.5(b))。**move 成功直後 = done 検知点で、その worker のセッション JSONL を計量した `consumption: 手数… 束ね… 文脈max… 出力…`(サブエージェントを使ったカードだけ末尾に `sub出力…(手数…)`)info 行を journal に 1 行記録**(2026-07-18 card swarm-token — optional dep `deps.readConsumption` :5310-5317。JSONL 不在/読取失敗/例外は黙って skip = fail-safe で promote・監視を一切妨げない。kind 無しなので KPI カウンタも汚さない。計量器の定義は §9 末尾) | :5294-5356 |
 | 5 | 死亡 & 非 promote | `recoverLost`(crash)— teardown + 列回収 | :3977-3980 |
-| 6 | **作業上限**: 生死問わず `(now - startedAt) - 控除 >= MAX_EXEC_MS`(:364 既定 90 分・env 可)。控除 = rate-limit hold + 統合待ち(`executionCredit` :2163 — 02 章 §5.5)。**wall-clock ではない** | 全 bookkeeping 掃除 → `pendingFatal` enqueue → `recoverLost`。理由は `readyAt` で二分(:5460): 未 ready は `'runaway'`(→blocked)、ready 済み(=差し戻し後の再作業)は `'integration-wait'`(→review・02 章 §5.6)。**`commitsAhead>0` を witness に足してはいけない** — worker は ready 前にコミットするよう規律で指示されているので commit は常態であり、足すと防御が実質消える(02 章 §5.6 の囲み) | :5431-5595 |
+| 6 | **作業上限**: 生死問わず `(now - startedAt) - 控除 >= MAX_EXEC_MS`(:364 既定 90 分・env 可)。控除 = 統合待ちのみ(`executionCredit` — 02 章 §5.5。rate-limit hold 控除は 0813 に hold ごと削除)。**wall-clock ではない** | 全 bookkeeping 掃除 → `pendingFatal` enqueue → `recoverLost`。理由は `readyAt` で二分(:5460): 未 ready は `'runaway'`(→blocked)、ready 済み(=差し戻し後の再作業)は `'integration-wait'`(→review・02 章 §5.6)。**`commitsAhead>0` を witness に足してはいけない** — worker は ready 前にコミットするよう規律で指示されているので commit は常態であり、足すと防御が実質消える(02 章 §5.6 の囲み) | :5431-5595 |
 | 7 | stall 判定を先に計算(:4042-4056)。**silentMs >= STALL_SILENCE_MS(10 分 :292)の worker だけ**画面を読む(:4064-4067)— 出力が流れている worker は画面に何が書いてあっても絶対に触らない(false-kill guard :3984-3991) | | |
-| 7a | 画面 = rate-limited(`classifyOutput` :1256 → `RATE_LIMIT_PATTERNS` :1123) | **hold**(nudge しない・reclaim しない)。初回 sighting で quota 層へ `markRateLimited`(:4093-4103 — worker の起動 tier に帰属)。`RATE_LIMIT_GRACE_MS`(:409 既定 20 分、`MAX_EXEC_MS-60s` 未満に clamp)を超えて**まだ**限定中なら `recoverLost`('rate-limit') → **'todo' 再 queue**(コミット済み作業は branch に残る) | :4080-4116 |
-| 7b | 画面 = permission-wait(:1165)∧ commitsAhead===0 | 初回に Enter で auto-accept(:4130-4141)。`PERMISSION_WAIT_GRACE_MS`(2 分 :463)超で `recoverLost`('permission') → **'blocked'**(bypass が壊れている = 人が要る) | :4118-4149 |
+| 7a | **【0813 改訂】** プールの `quotaBlocked` 判定 ∧ 沈黙 `QUOTA_STOP_DEBOUNCE_MS`(60秒) | 同一 pass で `markRateLimited`(起動 tier に帰属・model 不明なら mark しない)→ `recoverLost`('rate-limit') → **'todo' 即 requeue**(hold なし。コミット済み作業は branch・未コミットは WIP コミットで保全) | swarmQuotaStopFailFast.test.ts |
+| ~~7b~~ | **【0813 削除】** permission-wait 腕(trust ダイアログは PTY の TUI フレーム — SDK セッションには存在しない) | — | — |
 | 7c | 画面 = question(自由文質問) | escalations inbox へ 1 回 raise(:4180-4211、overseer 有効時は S4 に委譲 :4179)。`QUESTION_GRACE_MS`(:472 既定 30 分)超で `recoverLost`('question') → **'blocked'** | :4151-4228 |
-| 8 | 通常 stall 経路(silent かつ画面 normal) | `classifyStall`(:1047)の action に従う: `nudge`(Enter、`STALL_MAX_NUDGES`=2 :281)→ `escalate`(ESC + continue 指示を 1 回だけ :4249-4269)→ `reclaim` = `recoverLost`('stall')。nudge 後 `STALL_ECHO_GUARD_MS`(30s :291)内の出力は **Enter エコーとして無視**(:1065-1071)。実回復(新しい心拍 or guard 越えの持続出力)で予算リセット(:4286-4292) | :4237-4293 |
+| 8 | 通常 stall 経路(silent かつ output normal) | `classifyStall` の action に従う: `nudge`(SDK input で「Continue.」1ターン、`STALL_MAX_NUDGES`=2)→ `escalate`(`say` で continue 指示を 1 回だけ — ESC ダンスは 0813 に PTY ごと削除)→ `reclaim` = `recoverLost`('stall')。nudge 後 `STALL_ECHO_GUARD_MS`(30s)内の出力はエコーとして無視。実回復(新しい心拍 or guard 越えの持続出力)で予算リセット | — |
 
 **`recoverLost` の回収先**(:4972 + `recoveryColumn` :1097-1119)。**この表は実装の評価順どおりに並べてある** — 上から順に最初に当たった行で決まる。順序自体が仕様なので、並べ替えて読まないこと:
 

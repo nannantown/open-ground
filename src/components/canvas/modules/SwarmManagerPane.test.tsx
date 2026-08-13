@@ -102,7 +102,7 @@ const mount = (session: ManagerSession | null) => {
       error={null}
       onToggleOverseer={() => {}}
       sandboxWarning={false}
-      runtimeDials={{ worker: 'sdk', manager: 'sdk', workerCap: 1 }}
+      runtimeDials={{ manager: 'sdk' }}
       onToggleRuntime={() => {}}
     />,
   )
@@ -183,7 +183,7 @@ describe('the commander beacon follows the SDK desk (②)', () => {
         error={null}
         onToggleOverseer={() => {}}
         sandboxWarning={false}
-        runtimeDials={{ worker: 'sdk', manager: 'sdk', workerCap: 1 }}
+        runtimeDials={{ manager: 'sdk' }}
         onToggleRuntime={() => {}}
       />,
     )
@@ -211,7 +211,7 @@ describe('the command bar is keyed by the DESK, not by a PTY id (③)', () => {
         error={null}
         onToggleOverseer={() => {}}
         sandboxWarning={false}
-        runtimeDials={{ worker: 'sdk', manager: 'sdk', workerCap: 1 }}
+        runtimeDials={{ manager: 'sdk' }}
         onToggleRuntime={() => {}}
       />,
     )

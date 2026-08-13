@@ -29,6 +29,7 @@ import { resolvedClaudeBin, absoluteClaudeOnPath } from './claudeConnection'
 import { makeSdkGuardHook, verifySdkGuard, type GuardEvaluate } from './sdkGuardHook'
 import { buildOrderInjection, WORKER_RESUME_INJECTION } from './swarmWorker'
 import { swarmLaunchDefaults } from './swarmLaunch'
+import { languageDirective, type PromptLang } from './promptLang'
 import type { ClaudeEffort } from '../types'
 
 /** The oldest CLI whose stream-json contract this integration was measured
@@ -183,6 +184,11 @@ export interface SdkWorkerOptsInput {
   evaluateFn?: GuardEvaluate
   guardPath?: string
   onDeny?: (info: { toolName: string; reason: string; agentId?: string }) => void
+  /** Settings.language, resolved by the caller. REQUIRED — not optional — so
+   *  a caller that forgets to thread it through fails `tsc` instead of
+   *  silently spawning an SDK worker whose replies ignore the setting (see
+   *  buildOrderInjection's doc comment, swarmWorker.ts, for why). */
+  lang: PromptLang
 }
 
 export interface SdkWorkerLaunchPlan {
@@ -244,8 +250,8 @@ export const sdkWorkerLaunchPlan = (opts: SdkWorkerOptsInput): SdkWorkerLaunchPl
   return {
     options,
     initialPrompt: opts.resume
-      ? WORKER_RESUME_INJECTION
-      : buildOrderInjection(opts.title, opts.notes, opts.priorFailure),
+      ? WORKER_RESUME_INJECTION + languageDirective(opts.lang)
+      : buildOrderInjection(opts.title, opts.notes, opts.priorFailure, opts.lang),
     warnings,
   }
 }

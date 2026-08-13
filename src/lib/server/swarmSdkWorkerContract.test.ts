@@ -99,14 +99,12 @@ import {
   isSdkSessionReaped,
   getSdkSession,
   listActiveSdkCwds,
-  listSdkSessions,
   listSdkSessionsIn,
   isSdkSessionLive,
   __resetSdkSessionsForTests,
   __setQuotaPrefixesForTests,
   type SdkQueryFn,
 } from './sdkSession'
-import { liveSdkWorkerCount, sdkSlotLimit, chooseWorkerRuntime } from './swarmWorkerRuntimeDial'
 import { sdkWorkerRuntime } from './workerRuntime'
 import { listAllActiveDesks } from './liveDesks'
 import { afterEach, beforeEach } from 'vitest'
@@ -298,88 +296,12 @@ describe('the engine can SEE an SDK worker’s quota stop', () => {
   })
 })
 
-describe('the SDK slot cap counts the FLEET, not one roster', () => {
-  it('counts a pool worker the caller’s roster does not know about', () => {
-    // The curl-direct dispatch path passes NO roster (there is none), so a
-    // roster-only count was 0 forever and the cap never applied — on the
-    // commander's primary dispatch path, while the switch promised "at most N".
-    const a = spawnSdkSession({ cwd: '/wt/a', role: 'worker', options: {}, queryFn: idleQuery })
-    const b = spawnSdkSession({ cwd: '/wt/b', role: 'worker', options: {}, queryFn: idleQuery })
-    expect(liveSdkWorkerCount([], [{ id: a.id, role: 'worker', status: 'working' }, { id: b.id, role: 'worker', status: 'working' }])).toBe(2)
-    terminateSdkSession(a.id)
-    terminateSdkSession(b.id)
-  })
-
-  it('dedupes a worker present in BOTH the pool and the roster', () => {
-    expect(
-      liveSdkWorkerCount(
-        [{ runtime: 'sdk', sdkSessionId: 's1' }],
-        [{ id: 's1', role: 'worker', status: 'working' }],
-      ),
-    ).toBe(1)
-  })
-
-  it('still counts a roster entry that carries no session id', () => {
-    // Dropping these is how the counter first regressed the shipped tests: the
-    // engine believes it dispatched that worker, so a cap ignoring it under-counts.
-    expect(liveSdkWorkerCount([{ runtime: 'sdk' }], [])).toBe(1)
-  })
-
-  it('ignores finished sessions, and non-worker roles (a commander is not a slot)', () => {
-    // Production shape: a session that has actually finished carries `reaped`
-    // (the pump's finally stamps it, as does the spawn-failure path). The first
-    // version of this fixture set only `status`, which production never produces
-    // for a finished session — and it therefore certified the status-based rule
-    // that the very fix under test had to delete.
-    expect(
-      liveSdkWorkerCount([], [
-        { id: 'x', role: 'worker', status: 'exited', reaped: true },
-        { id: 'y', role: 'worker', status: 'failed', reaped: true },
-        { id: 'z', role: 'manager', status: 'working' },
-      ]),
-    ).toBe(0)
-  })
-
-  it('an "exited" session that has NOT been reaped is still a slot', () => {
-    // The dangerous shape, and the only one that matters: terminate flips status
-    // synchronously while claude keeps unwinding. Counting it as finished frees
-    // the slot for a replacement that lands in the same worktree.
-    expect(liveSdkWorkerCount([], [{ id: 'x', role: 'worker', status: 'exited' }])).toBe(1)
-  })
-
-  it('the shipped default budget is ONE', () => {
-    expect(sdkSlotLimit({ swarmWorkerRuntime: { mode: 'sdk' } })).toBe(1)
-  })
-})
-
-describe('the cap is WIRED, not merely computable', () => {
-  it('an empty roster + a live pool worker still fills the slot (curl-direct dispatch)', () => {
-    // The wiring, not the counter: chooseWorkerRuntime used `countSdkWorkers(opts.workers)`,
-    // and every curl-direct dispatch passes `workers: []` because no roster exists
-    // there. So `live` was 0 forever and the dial's own budget never applied on the
-    // commander's PRIMARY dispatch path.
-    const c = chooseWorkerRuntime({
-      settings: { swarmWorkerRuntime: { mode: 'sdk' } }, // budget = 1
-      workers: [], // ← the curl-direct path
-      worktree: '/wt/next',
-      poolSessions: () => [{ id: 'already-running', role: 'worker', status: 'working' }],
-      preflight: () => ({ ok: true, problems: [], claudeBin: '/bin/claude', cliVersion: '2.1.220' }) as never,
-    })
-    expect(c.runtime).toBe('pty')
-    expect(c.fellBackBecause).toMatch(/slots are full \(1\/1\)/)
-  })
-
-  it('…and an empty pool with an empty roster still dispatches on the SDK', () => {
-    const c = chooseWorkerRuntime({
-      settings: { swarmWorkerRuntime: { mode: 'sdk' } },
-      workers: [],
-      worktree: '/wt/next',
-      poolSessions: () => [],
-      preflight: () => ({ ok: true, problems: [], claudeBin: '/bin/claude', cliVersion: '2.1.220' }) as never,
-    })
-    expect(c.runtime).toBe('sdk')
-  })
-})
+// (The 「SDK slot cap」 describes that lived here — liveSdkWorkerCount /
+// sdkSlotLimit / chooseWorkerRuntime — died 2026-08-13 with the worker dial:
+// workers are SDK-only and uncapped, so there is no slot budget to count. The
+// liveness property they leaned on ("a terminated-but-unwinding session is
+// still live: select on `reaped`, never on status") survives below through the
+// cleaner / gate / beacon / singleton seams.)
 
 describe('the quota notice DECAYS (a recovered worker is not reclaimed forever)', () => {
   /** Refuse, then — on the next turn — do real work. */
@@ -467,38 +389,6 @@ describe('a spawn that fails synchronously leaves a FINISHED entry, not a ghost'
     expect(s.status).toBe('failed')
     expect(isSdkSessionReaped(s.id)).toBe(true)
     expect(terminateSdkSessionsInDir('/wt/ghost')).toEqual([])
-  })
-})
-
-describe('the cap does not let FINISHED work hold a slot', () => {
-  it('a roster worker whose session already ended is not counted', () => {
-    // A worker sitting in review, waiting to be integrated, still has a roster
-    // entry. Counting it would shut the slot with nothing running, and the dial
-    // would silently stop dispatching on the SDK.
-    expect(
-      liveSdkWorkerCount(
-        [{ runtime: 'sdk', sdkSessionId: 'done-1' }],
-        // Production shape for a session that has really ended: `reaped` set.
-        [{ id: 'done-1', role: 'worker', status: 'exited', reaped: true }],
-      ),
-    ).toBe(0)
-  })
-
-  it('a roster worker the pool does NOT know is finished, not live', () => {
-    // This assertion used to expect 1, on the theory that an unknown id might be
-    // a worker recorded before the pool saw it. That reasoning was wrong and the
-    // rule it pinned expired on a timer: the pool only ever FORGETS sessions that
-    // closed (the 30-minute retention sweep), and a pool reset means the process
-    // died and took every session with it. Either way an id the pool cannot find
-    // is not running — and counting it charged a slot for work that had finished
-    // half an hour earlier, silently jamming the dial shut.
-    expect(liveSdkWorkerCount([{ runtime: 'sdk', sdkSessionId: 'unknown-1' }], [])).toBe(0)
-  })
-
-  it('…but a roster worker with NO id at all still counts', () => {
-    // The one case the pool genuinely cannot answer: nothing to look up. The
-    // engine believes it dispatched this worker, so ignoring it under-counts.
-    expect(liveSdkWorkerCount([{ runtime: 'sdk' }], [])).toBe(1)
   })
 })
 
@@ -619,7 +509,7 @@ describe('the park latches EVERY time, not just the first', () => {
   })
 })
 
-describe('ALL FOUR liveness seams answer with `reaped`, never with status', () => {
+describe('the session snapshot carries the ONE liveness bit every seam applies', () => {
   const stuck = (control: { stop?: () => void }): SdkQueryFn =>
     (() => ({
       async *[Symbol.asyncIterator]() {
@@ -627,23 +517,6 @@ describe('ALL FOUR liveness seams answer with `reaped`, never with status', () =
         yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
       },
     })) as SdkQueryFn
-
-  it('a terminated-but-unwinding worker still HOLDS ITS SLOT', async () => {
-    // The third sibling of the same rule, missed twice. A status filter releases
-    // the slot of a worker whose claude is still unwinding in its worktree, so
-    // the dial dispatches a replacement immediately — the cap is exceeded by
-    // exactly the workers hardest to see, and two claudes share one worktree.
-    const control: { stop?: () => void } = {}
-    const s = spawnSdkSession({ cwd: '/wt/slot', role: 'worker', options: {}, initialPrompt: 'go', queryFn: stuck(control) })
-    await new Promise((r) => setTimeout(r, 20))
-    terminateSdkSession(s.id) // status is now 'exited'; the pump has NOT unwound
-
-    expect(liveSdkWorkerCount([], listSdkSessions())).toBe(1)
-
-    control.stop?.()
-    await new Promise((r) => setTimeout(r, 20))
-    expect(liveSdkWorkerCount([], listSdkSessions())).toBe(0) // …and released once gone
-  })
 
   it('the session snapshot EXPOSES reaped, so every consumer can apply one rule', async () => {
     const control: { stop?: () => void } = {}

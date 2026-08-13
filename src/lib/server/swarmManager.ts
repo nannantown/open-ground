@@ -58,6 +58,7 @@ import {
 } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { resolveSwarmSession, recordSwarmSession, forgetSwarmSessionIf } from './swarmSessions'
+import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
 // ⚠ PTY-ONLY functions are deliberately NOT imported here. `listLiveDesksIn` /
 // `isTerminalProcessAlive` answer desk presence for one pool, and a commander
 // desk can live on either — asking them is how a TWIN commander gets seated.
@@ -68,7 +69,11 @@ import { markRateLimited, isModelTier } from './swarmQuota'
 import { installOgManageSkill } from './ogManageSkill'
 import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
 import { listManagerDesks } from './swarmManagerRuntime'
-import { sdkManagerPreflight, sdkManagerLaunchPlan } from './swarmManagerSdk'
+import {
+  sdkManagerPreflight,
+  sdkManagerLaunchPlan,
+  SdkManagerUnavailableError,
+} from './swarmManagerSdk'
 import {
   spawnSdkSession,
   preloadSdk,
@@ -421,7 +426,18 @@ export interface SpawnSwarmManagerOpts {
 export const managerLaunchOpts = (
   cwd: string,
   agentSessionId: string,
-  opts: { cols?: number; rows?: number; resume?: boolean; remoteName?: string } = {},
+  opts: {
+    cols?: number
+    rows?: number
+    resume?: boolean
+    remoteName?: string
+    // Settings.language, resolved by the caller. REQUIRED — not optional, no
+    // default `{}` on `opts` any more — so a caller that forgets to thread it
+    // through fails `tsc` instead of silently spawning a commander whose
+    // replies ignore the setting (see buildOrderInjection's doc comment,
+    // swarmWorker.ts, for the 2026-08-13 rework rationale).
+    lang: PromptLang
+  },
   // Mode-resolved model/effort (omitted ⇒ opus/max, back-compat).
   me?: { model: string; effort?: ClaudeEffort },
 ): LaunchClaudeOpts => ({
@@ -449,7 +465,8 @@ export const managerLaunchOpts = (
   cols: opts.cols,
   rows: opts.rows,
   ...(opts.resume ? { resume: true } : {}),
-  initialPrompt: opts.resume ? MANAGER_RESUME_INJECTION : MANAGER_INJECTION,
+  initialPrompt:
+    (opts.resume ? MANAGER_RESUME_INJECTION : MANAGER_INJECTION) + languageDirective(opts.lang),
 })
 
 /** ONE DESK PER PROJECT, decided on the POOL (2026-07-19 incident): if a labelled
@@ -743,25 +760,29 @@ const launchNewDesk = async (
   // and when the `.catch` below actually fires — is documented in ONE place:
   // store.getManagerRuntimeDial. Do not restate it here.
   const dial = await getManagerRuntimeDial().catch(() => ({ mode: 'pty' as const }))
-  // Why this desk is a PTY even though the dial said 'sdk'. Carried into the
-  // response so the owner READS it — a console.warn inside a forked server in a
-  // packaged app reaches nobody, and an invisible degrade looks exactly like a
-  // switch that does not work.
-  let fellBackBecause
+  // Settings.language ⇒ the commander's user-facing replies follow it — resolved
+  // once and threaded into both the SDK and PTY launch paths below.
+  const lang = await getPromptLang()
   if (dial.mode === 'sdk') {
-    const sdk = await launchSdkDesk(opts, session, me)
-    if (sdk.desk) return sdk.desk
-    // Fell through ⇒ the SDK path could not be established (no usable claude,
-    // CLI too old). DEGRADE to the PTY commander rather than leaving the project
-    // without one: a desk on the known-good runtime beats no desk at all.
-    fellBackBecause = sdk.fellBackBecause
+    // FAIL-FAST (2026-08-13, with the worker fallback's deletion): an SDK dial
+    // either seats an SDK desk or THROWS SdkManagerUnavailableError — the
+    // silent DEGRADE-to-PTY that used to live here is gone. The reason: an
+    // invisible degrade looks exactly like a switch that does not work, and a
+    // fallback that absorbs real breakage keeps it broken forever. The PTY
+    // launch below is now reachable ONLY from an explicit 'pty' dial (or the
+    // unreadable-file fail-closed path) — it is the manual kill switch, not a
+    // safety net. Callers already carry the failure: the 司令官 button's route
+    // answers 500 with the reason, and the engine's resurrection reflex reads a
+    // wakeManager throw as a failed attempt (grace → 3-strike fatal bell →
+    // 30-min re-arm — its own backoff-and-bell, no new machinery needed).
+    return await launchSdkDesk(opts, session, me, lang)
   }
   const remoteName = await resolveSwarmRemoteName('manager', opts.projectPath)
   const ref = launchClaude(
     managerLaunchOpts(
       opts.projectPath,
       session.agentSessionId,
-      { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName },
+      { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName, lang },
       me,
     ),
   )
@@ -784,19 +805,23 @@ const launchNewDesk = async (
   return {
     terminalId: ref.terminalId,
     runtime: 'pty',
-    ...(fellBackBecause ? { fellBackBecause } : {}),
     agentSessionId: session.agentSessionId,
     resumed: session.resume,
   }
 }
 
-/** Spawn the commander on the Agent SDK runtime, or return null when it cannot
- *  be established (the caller then falls back to a PTY desk).
+/** Spawn the commander on the Agent SDK runtime, or THROW
+ *  {@link SdkManagerUnavailableError} when it cannot be established.
  *
- *  NEVER throws for a preflight reason — "this project has no commander" is a
- *  worse outcome than "this project's commander is a PTY", and the engine's
- *  reflex treats a throw as "retry next pass", which would leave review cards
- *  waiting on a runtime that is simply unavailable on this machine.
+ *  ⚠ THIS USED TO DEGRADE INSTEAD OF THROW (until 2026-08-13): every failure
+ *  below returned `{ fellBackBecause }` and the caller seated a PTY desk, on
+ *  the theory that "a PTY commander beats no commander". That fallback died
+ *  with the worker's: it absorbed real breakage so quietly that a broken SDK
+ *  runtime looked like a switch that does not work. Now the failure is LOUD
+ *  and the retry is the caller's: the route answers 500 with the reason, and
+ *  the engine's resurrection reflex counts a failed wake (grace → 3-strike
+ *  'manager-unrevivable' bell → 30-min re-arm) until the machine recovers.
+ *  The PTY commander still exists — behind the EXPLICIT dial only.
  *
  *  What is deliberately NOT here, compared with the PTY branch:
  *   - no Remote Control (the flag is inert outside a REPL — the supply desk is
@@ -809,22 +834,18 @@ const launchNewDesk = async (
  *     SESSION POINTER are about the tier and the session record, not about how the
  *     conversation was carried, and an SDK commander was getting NEITHER. Both are
  *     armed below via {@link watchSdkDeskForDeathOnArrival}, driven by the
- *     session's own `quota_refusal` event instead of a screen race.
- *
- *  Returns `{ desk }` on success and `{ fellBackBecause }` otherwise. The reason
- *  is RETURNED, not merely logged: a console.warn inside a forked server in a
- *  packaged app reaches nobody, so an invisible degrade is indistinguishable
- *  from a switch that does not work. The caller puts it in the response. */
+ *     session's own `quota_refusal` event instead of a screen race. */
 const launchSdkDesk = async (
   opts: SpawnSwarmManagerOpts,
   session: { agentSessionId: string; resume: boolean },
   me: { model: string; effort?: ClaudeEffort },
-): Promise<{ desk?: SpawnSwarmManagerResponse; fellBackBecause?: string }> => {
+  lang: PromptLang,
+): Promise<SpawnSwarmManagerResponse> => {
   const pre = sdkManagerPreflight()
   if (!pre.ok || !pre.claudeBin) {
-    const why = `SDK preflight failed (${pre.problems.join('; ')})`
-    console.warn(`[swarmManager] SDK commander unavailable — ${why}; この卓は PTY で起動する`)
-    return { fellBackBecause: why }
+    throw new SdkManagerUnavailableError(
+      pre.problems.length ? pre.problems : ['no claude binary resolved for the SDK commander'],
+    )
   }
   const plan = sdkManagerLaunchPlan({
     projectPath: opts.projectPath,
@@ -832,13 +853,14 @@ const launchSdkDesk = async (
     resume: session.resume,
     me,
     claudeBin: pre.claudeBin,
+    lang,
   })
   for (const w of plan.warnings) console.warn(`[swarmManager] ${w}`)
   // The SDK is ESM-only and this runs from a CJS bundle in the packaged app, so
   // the module has to be imported BEFORE the synchronous spawn below — see
   // sdkSession.preloadSdk. A load failure is reported by the spawn as a failed
   // session, which the `status === 'failed'` check further down already turns
-  // into a PTY desk, so nothing is caught here.
+  // into a throw, so nothing is caught here.
   const sdkReady = await preloadSdk()
   let sdkSession: SdkSessionInfo
   try {
@@ -851,18 +873,18 @@ const launchSdkDesk = async (
       sdk: sdkReady,
     })
   } catch (e) {
-    const why = `SDK spawn failed (${String((e as Error)?.message ?? e).slice(0, 200)})`
-    console.warn(`[swarmManager] ${why} — PTY で起動する`)
-    return { fellBackBecause: why }
+    throw new SdkManagerUnavailableError([
+      `SDK spawn failed (${String((e as Error)?.message ?? e).slice(0, 200)})`,
+    ])
   }
   // A session that died inside spawnSdkSession (the SDK threw while building the
   // query) reports 'failed' synchronously. Treat it exactly like a preflight
-  // miss: drop it and let the caller seat a PTY desk, rather than recording a
-  // session id for a conversation that does not exist.
+  // miss: throw rather than recording a session id for a conversation that does
+  // not exist.
   if (sdkSession.status === 'failed') {
-    const why = `the SDK session died at start (${sdkSession.exitReason ?? 'unknown'})`
-    console.warn(`[swarmManager] SDK commander — ${why}; PTY で起動する`)
-    return { fellBackBecause: why }
+    throw new SdkManagerUnavailableError([
+      `the SDK session died at start (${sdkSession.exitReason ?? 'unknown'})`,
+    ])
   }
   // The model-limit watch, wired at the SOURCE instead of on a sampling timer:
   // the CLI's refusal arrives as an event on this session's own stream, so there
@@ -891,13 +913,11 @@ const launchSdkDesk = async (
     session.resume,
   )
   return {
-    desk: {
-      // EMPTY by the identity invariant — an SDK desk has no terminal.
-      terminalId: '',
-      runtime: 'sdk',
-      sdkSessionId: sdkSession.id,
-      agentSessionId: session.agentSessionId,
-      resumed: session.resume,
-    },
+    // EMPTY by the identity invariant — an SDK desk has no terminal.
+    terminalId: '',
+    runtime: 'sdk',
+    sdkSessionId: sdkSession.id,
+    agentSessionId: session.agentSessionId,
+    resumed: session.resume,
   }
 }

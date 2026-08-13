@@ -178,9 +178,20 @@ swarmQuota.ts:364-372。上から順に試し、**過去時刻は無視して次
 - echo 割引(1065-1071)は **nudge 後(count>0)の echo だけ**を除外する仕組みで、**平常時の装飾再描画には無力**(1069 の `count > 0` 条件)。→ ケーススタディ原因②。
 - **`0d1f7f0` 後**: terminal.ts の無条件スタンプは残るが、**limit 文言が画面を占有している間は stall クロックの出力チャネルを文言出現時刻でクランプ**(`engine.limitScreen` + `stallLastOut`)— 文言保持中の repaint は chrome とみなす。心拍はクランプしない(打てる worker は働いている)。requeue は grace 経過に加え raw 沈黙 45 秒も要求。正典 = TARGET-STATE §1。
 
-### 3.4 worker arm — 検知したら「hold → cool → 20分後 requeue」(hold 中の時間は実行時間から控除される)
+### 3.4 worker arm — 【0813 改訂】検知したら「cool → 即 requeue」(20分 hold と控除台帳は削除)
 
-monitor(`monitorWorkers`、dispatch pass の一部)にて、silent かつ `classifyOutput === 'rate-limited'` の worker:
+**2026-08-13、PTY worker センサー層ごと全面改訂。** 検知は文言マッチではなく
+**プールの自己申告**(`quotaBlocked` — `quota-parked` status / 生きた
+`lastQuotaRefusalText`)になり、確認は `QUOTA_STOP_DEBOUNCE_MS`(60秒)の沈黙
+1本だけ。成立したら**同一 pass 内で**: `markRateLimited(tier, …)`(冷却書込・
+model 不明なら mark しない)→ journal `worker quota-stopped` → `recoverLost('rate-limit')`
+で card を 'todo' へ・worker teardown(WIP コミットで作業保全)。再試行の速度は
+冷却時計そのもの — tier が温まれば自動で再配車される。20分 hold・
+`engine.rateLimited`/`limitScreen`/`endRateLimitHold`/`rateLimitHoldCredit`/
+`HOLD_CREDIT_CAP_MS`・early-confirm・scrape 間欠読みは**存在しない**。
+番人: `swarmQuotaStopFailFast.test.ts`。以下は hold 時代(〜0813)の記録:
+
+monitor(`monitorWorkers`、dispatch pass の一部)にて、silent かつ `classifyOutput === 'rate-limited'` の worker(**旧仕様**):
 
 1. 初回 sighting: `engine.rateLimited.set(terminalId, {since: now, holdSince: limitSince ?? now})`。`since` は **requeue クロック**(下記 4)の起点、`holdSince` は **hold 台帳**(下記 6)の起点で、後者は limit 文言が画面を掴んだ瞬間(`engine.limitScreen` の onset)まで遡る。
 2. **QUOTA SENSOR**(冷却テーブルへの生産書込): `w.model` が梯子上の tier のときだけ `markRateLimited(tier, {ptyText: screen, a5ResetsAt: a5CoolingHint(), graceMs: RATE_LIMIT_GRACE_MS, now})`(4093-4101)。model 不明の worker は**何も mark しない**(推測で冷やさない、4090-4092)。`w.model` は spawn 時に `SpawnSwarmWorkerResponse.model` から記録される(4583、swarmWorker.ts:503、types.ts:1014-1019)。

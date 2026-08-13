@@ -298,9 +298,9 @@ describe('④ the evidence tail comes from the worker’s OWN runtime', () => {
 
 const T0 = Date.parse('2026-06-25T00:00:00Z')
 const RULE = '─'.repeat(100)
-/** A live-faithful idle question frame (provenance: swarmQuestions.test.ts). The
- *  CLI's own chrome — not a shape invented here — because `detectFreeTextQuestion`
- *  is production code and must do the classifying. */
+/** A live-faithful idle question frame (provenance: swarmQuestions.test.ts). Kept
+ *  as the NEGATIVE control since 2026-08-13: the PTY question detector is deleted,
+ *  so however live-faithful this frame is, a 'pty' kind must classify nothing. */
 const QUESTION_SCREEN = [
   '⏺ 質問がひとつあります。',
   '  どのデータベースを使いますか？',
@@ -356,8 +356,6 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine =>
     conflictReworks: new Map(),
     stuckMoves: new Map(),
     nudges: new Map(),
-    rateLimited: new Map(),
-    permissionWaits: new Map(),
     log: [],
     anomalies: [],
     selfSupply: initSelfSupplyRuntime(),
@@ -448,11 +446,10 @@ describe('② the RAISER hands the inbox a complete address', () => {
     expect(raised[0].runtime).toBe('sdk')
   })
 
-  it('a PTY worker still waits the full ten minutes — the fast lane is sdk-question-shaped only', async () => {
-    // The false-kill fix must survive: a PTY worker PRINTING question-shaped
-    // text mid-work is only proven idle by long silence. Widening the fast lane
-    // to PTY would re-create the 2026-07 false-positive class the 10-minute
-    // gate was built against.
+  it('a legacy PTY roster row NEVER raises — the PTY question detector died with the PTY worker runtime (2026-08-13)', async () => {
+    // A dead terminal has no screen to ask questions on: however question-shaped
+    // its last frame and however long the silence, the seam routes a 'pty' kind
+    // to null and the row takes the ordinary stall ladder instead.
     const engine = newEngine({
       workers: [
         {
@@ -471,9 +468,9 @@ describe('② the RAISER hands the inbox a complete address', () => {
       screens: new Map([['pty-a-1', QUESTION_SCREEN]]),
     })
     await runDispatchPass(engine, deps, T0 + SDK_QUESTION_SILENCE_MS + 1_000)
-    expect(raised).toHaveLength(0) // one minute is NOT enough for a PTY
+    expect(raised).toHaveLength(0) // not at one minute…
     await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
-    expect(raised).toHaveLength(1) // ten minutes is, exactly as before
+    expect(raised).toHaveLength(0) // …and not at ten either — the arm is SDK-only now
   })
 
   it('carries runtime + sdkSessionId, not just the (empty) terminalId', async () => {
@@ -521,50 +518,6 @@ describe('② the RAISER hands the inbox a complete address', () => {
     expect(seams.queued).toHaveLength(0)
   })
 })
-
-describe('③ an unattended runtime degrade is ANNOUNCED', () => {
-  it('records fellBackBecause in the engine log when the engine dispatches', async () => {
-    // On the manual route this reason rides the HTTP response and the Swarm panel
-    // shows it. The engine holds no response, and the server is a forked child in
-    // a packaged app, so swarmWorker's console.warn reaches nobody: without this
-    // line the owner flips the SDK dial on, every worker comes up as a PTY, and
-    // there is no explanation anywhere.
-    const engine = newEngine()
-    const { deps } = makeDeps({
-      cards: [card('a')],
-      spawn: { fellBackBecause: 'SDK worker slots are full (2/2) — this worker runs as a PTY' },
-    })
-    await runDispatchPass(engine, deps, T0)
-
-    const line = engine.log.find((l) => l.message.includes('SDK worker slots are full'))
-    expect(line, 'the fallback reason must reach the engine journal').toBeTruthy()
-    expect(line?.level).toBe('warn')
-    // NOT counted as a failed dispatch — the worker IS running, just on the other
-    // runtime. A `kind:'dispatch'` here would move the dispatchFailed KPI.
-    expect(line?.kind).toBeUndefined()
-    expect(engine.metrics?.dispatchFailed ?? 0).toBe(0)
-  })
-
-  it('says nothing when there was no fallback (no noise on the normal path)', async () => {
-    const engine = newEngine()
-    const { deps } = makeDeps({ cards: [card('a')] })
-    await runDispatchPass(engine, deps, T0)
-    expect(engine.log.some((l) => l.message.includes('runtime fallback'))).toBe(false)
-  })
-})
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ⑤ THE RECORD'S `runtime` DECIDES — never "whichever id is truthy".
-//
-// `deliverAnswer`'s comment calls this load-bearing, and it is: the ONE thing it
-// buys over "prefer the id that is set" is a record carrying BOTH ids, which is
-// exactly what a hand-edited / half-migrated / forward-compat file produces. Not
-// one of the runtime tests above had ever passed such a record through, so the
-// claim was untested in both directions — the failure is silent (the answer goes
-// to the DEAD desk and the record is stamped 'injected').
-//
-// Two cases, because a one-sided test only pins one preference order.
-// ─────────────────────────────────────────────────────────────────────────────
 
 describe('⑤ a record carrying BOTH ids delivers by `runtime`, not by truthiness', () => {
   /** Write one record straight to disk — today's writer NORMALIZES to a single

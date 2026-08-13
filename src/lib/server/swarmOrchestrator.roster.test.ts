@@ -65,8 +65,6 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine => ({
   conflictReworks: new Map(),
   stuckMoves: new Map(),
   nudges: new Map(),
-  rateLimited: new Map(),
-  permissionWaits: new Map(),
   log: [],
   anomalies: [],
   selfSupply: initSelfSupplyRuntime(),

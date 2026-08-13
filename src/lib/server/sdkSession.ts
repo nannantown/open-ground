@@ -80,7 +80,8 @@ interface SpawnSdkSessionCore {
  *
  *  This spawn is SYNCHRONOUS and the SDK is an ESM package a CJS bundle can only
  *  reach with `await import()`, so a caller that has not preloaded gets a session
- *  that fails at birth. That is safe — it degrades to a PTY — but it is SILENT,
+ *  that fails at birth. Today that fails the spawn loudly (fail-fast, 2026-08-13);
+ *  in the fallback era it silently degraded to a PTY,
  *  and silence is how it got missed: `scripts/probe-sdk-manager-launch.mts` (the
  *  canonical "boot a real commander" verifier, docs/SDK_CLIENT_INVESTIGATION.md
  *  §662) called this without preloading, so the verifier would have started
@@ -242,13 +243,14 @@ const sweepClosedSessions = (now = Date.now()): void => {
     // D-state git (the 2026-07-28 machine freeze) keeps its tree protected
     // forever rather than having it deleted out from under it after 30 minutes.
     //
-    // The cost of that choice is real and was argued twice in review: such an
-    // entry also holds an SDK slot forever, so once the cap fills every later
-    // worker falls back to PTY. That is the tolerable half — the fallback works,
-    // it announces itself (`fellBackBecause: "SDK worker slots are full"`), and
-    // the commander's own stall check still fires on the frozen desk. Trading a
-    // visible degradation for a possible deleted-out-from-under-claude is the
-    // wrong direction, so there is no reaper timeout here on purpose.
+    // The cost of that choice was argued twice in review, in the slot-cap era:
+    // such an entry held an SDK slot forever, and once the cap filled every
+    // later worker fell back to PTY. Both halves of that trade are gone
+    // (2026-08-13 — no cap, no fallback), which only strengthens the choice:
+    // today a wedged entry costs a stale pool row and nothing else, while the
+    // commander's own stall check still fires on the frozen desk. Trading that
+    // for a possible deleted-out-from-under-claude is the wrong direction, so
+    // there is no reaper timeout here on purpose.
     //
     // `closedAt !== undefined` used to be equivalent to `reaped` by accident
     // (both are written in the pump's finally). Stating the real predicate keeps
@@ -313,16 +315,16 @@ const realSdkImport: SdkImporter = () => import('@anthropic-ai/claude-agent-sdk'
 let importSdk: SdkImporter = realSdkImport
 
 /** Import the SDK once. NEVER REJECTS — the failure is recorded and re-thrown
- *  synchronously by {@link sdkNow}, which is what keeps the degrade contract
- *  described on {@link preloadSdk} intact.
+ *  synchronously by {@link sdkNow}, which is what keeps the failure-at-the-spawn
+ *  contract described on {@link preloadSdk} intact.
  *
  *  ⚠ EVICT ON FAILURE. `??=` alone memoises the FAILURE for the life of the
  *  process — and because this promise RESOLVES rather than rejects, it memoises
  *  it as a success, so nothing ever retries. One transient miss (EMFILE, an NFS
- *  blip, a dispatch racing an install) would then mean "every worker on this
- *  machine runs as a PTY until the app restarts", and in a packaged app the
- *  server lives as long as the app does. It would also be SILENT: the degrade
- *  only ever announces itself in `fellBackBecause`. paths.ts:203-209 and
+ *  blip, a dispatch racing an install) would then mean "every worker spawn on
+ *  this machine FAILS until the app restarts" (in the fallback era: every worker
+ *  silently ran as a PTY), and in a packaged app the server lives as long as
+ *  the app does. paths.ts:203-209 and
  *  registry.ts:39-42 each learned this same rule the hard way. Retrying costs
  *  one import per spawn attempt, which is rate-limited by dispatch itself.
  *
@@ -370,13 +372,13 @@ export interface SdkPreloadResult {
    *  unmintable needs a `unique symbol`, which was NOT done because there is
    *  nothing to protect: `spawnSdkSession` never reads `opts.sdk` at runtime, so
    *  a forged one changes nothing — `sdkNow()` still throws, the session is still
-   *  recorded `failed`, and the callers still degrade to a PTY. The value here is
+   *  recorded `failed`, and the callers still fail the spawn. The value here is
    *  entirely in catching the accident (a new call site that forgot), and nobody
    *  writes that property by accident. */
   readonly __sdkPreloaded: true
   /** The ESM module resolved and its exports are in hand. */
   loaded: boolean
-  /** Why not, when `loaded` is false — the sentence a degrade should quote. */
+  /** Why not, when `loaded` is false — the sentence the spawn failure quotes. */
   error?: string
   /** How many usage-limit prefixes the SDK actually exposes. CONTENT, not just
    *  "some module object came back": this is the number that lets a bundle test
@@ -389,10 +391,11 @@ export interface SdkPreloadResult {
  *
  *  ⚠ WHY THE CALLERS AWAIT THIS INSTEAD OF THE POOL AWAITING IT ITSELF. Both
  *  spawn callers — swarmWorker's SDK arm and swarmManager.launchSdkDesk — decide
- *  "fall back to a PTY" from the status `spawnSdkSession` returns SYNCHRONOUSLY,
+ *  "this spawn FAILED" (fail-fast since 2026-08-13; a PTY fallback before that)
+ *  from the status `spawnSdkSession` returns SYNCHRONOUSLY,
  *  and both say so in a comment at the call site. A module-load failure has to
- *  be visible in that return value or a broken SDK seats a DEAD SDK desk instead
- *  of a working PTY one, which is the exact failure the fallback exists to
+ *  be visible in that return value or a broken SDK seats a DEAD SDK desk that
+ *  looks spawned, which is the exact failure this ordering exists to
  *  prevent. Making the pool async would move the decision after the fact;
  *  handing back a handle that loads lazily on first iteration would do the same
  *  thing more quietly. So the async step happens HERE, before the spawn, and
@@ -403,9 +406,9 @@ export interface SdkPreloadResult {
 export const preloadSdk = async (): Promise<SdkPreloadResult> => {
   await loadSdkModule()
   // Returned — NOT thrown — even on failure: the caller's job is to hand this to
-  // the spawn, and the spawn is what turns a missing module into the PTY degrade
-  // both call sites already implement. Rejecting would need a try/catch at every
-  // site and would route around that one path.
+  // the spawn, and the spawn is what turns a missing module into the failed
+  // session both call sites already turn into their own typed throw. Rejecting
+  // would need a try/catch at every site and would route around that one path.
   if (!sdkModule) {
     return { __sdkPreloaded: true, loaded: false, error: sdkLoadError ?? 'unknown', quotaPrefixCount: 0 }
   }
@@ -413,7 +416,7 @@ export const preloadSdk = async (): Promise<SdkPreloadResult> => {
 }
 
 /** The loaded module, or a SYNCHRONOUS throw that the spawn path records as a
- *  failed session (and the callers turn into a PTY fallback). */
+ *  failed session (and the callers turn into their fail-fast throw). */
 const sdkNow = (): SdkModule => {
   if (sdkModule) return sdkModule
   if (sdkLoadError) throw new Error(`could not load @anthropic-ai/claude-agent-sdk: ${sdkLoadError}`)

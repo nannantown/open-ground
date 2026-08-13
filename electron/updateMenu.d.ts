@@ -99,11 +99,13 @@ export type UpdateDialogKind =
   | 'downloading'
   | 'error'
   | 'downloaded'
+  | 'download-failed'
 
 export interface UpdateDialogText {
   message: string
   detail: string
-  /** Present only for 'downloaded' (the Restart now / Later choice). */
+  /** Present only for 'downloaded' (Restart now / Later) and 'download-failed'
+   *  (Open release page / Close). */
   buttons?: string[]
   defaultId?: number
   cancelId?: number

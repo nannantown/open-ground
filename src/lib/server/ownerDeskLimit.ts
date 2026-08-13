@@ -62,13 +62,14 @@ import type { SwarmInfoNotification } from '../types'
  *  already being tracked is re-sampled every pass regardless, so a conversation
  *  that comes back to life is noticed promptly.
  *
- *  CALIBRATED FROM the worker arm's scrape gate (RATE_LIMIT_SCRAPE_QUIET_MS, 45s)
- *  but deliberately its OWN constant. Review (2026-07-18) caught the first cut
- *  importing the engine's value: the two windows answer different questions — the
- *  engine's is "how long before this WORKER's screen is worth reading", tuned
- *  against spawn behaviour — so retuning it for a worker-side reason would move
- *  the owner's notification timing silently. Copying a NUMBER is safe; the WORDING
- *  is what must never be copied, and that still comes from the shared module. */
+ *  CALIBRATED FROM the worker arm's scrape gate of the PTY era
+ *  (RATE_LIMIT_SCRAPE_QUIET_MS, 45s — deleted 2026-08-13 with that sensor
+ *  layer) but deliberately its OWN constant, which is why it SURVIVES the
+ *  donor's deletion unchanged. Review (2026-07-18) caught the first cut
+ *  importing the engine's value: the two windows answer different questions,
+ *  so retuning one for the other's reason would move the owner's notification
+ *  timing silently. Copying a NUMBER is safe; the WORDING is what must never
+ *  be copied, and that still comes from the shared module. */
 export const OWNER_DESK_QUIET_MS = 45_000
 
 /** How long the notice must HOLD a desk's screen before the owner is told — the
@@ -76,9 +77,9 @@ export const OWNER_DESK_QUIET_MS = 45_000
  *  and clears) never raises a notification. Combined with the quiet gate the owner
  *  hears about a stopped conversation roughly 1.5–2 minutes in — the same order as
  *  the engine's own 1m42s detection on 2026-07-18. Own constant for the same
- *  reason as {@link OWNER_DESK_QUIET_MS}: the engine's counterpart
- *  (RATE_LIMIT_EARLY_CONFIRM_MS) is defined as "how long an AT-SPAWN notice must
- *  hold", a question a desk never asks. */
+ *  reason as {@link OWNER_DESK_QUIET_MS}: its PTY-era counterpart
+ *  (RATE_LIMIT_EARLY_CONFIRM_MS, deleted 0813) was defined as "how long an
+ *  AT-SPAWN notice must hold", a question a desk never asks. */
 export const OWNER_DESK_CONFIRM_MS = 45_000
 
 /** How many CONSECUTIVE normal screens re-arm a desk after a stop.

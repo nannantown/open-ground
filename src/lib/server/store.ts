@@ -316,65 +316,44 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   'executionMode',
   'swarmAllowedModels',
   'swarmPaneOrder',
-  'swarmWorkerRuntime',
+  // NOTE `swarmWorkerRuntime` is DELIBERATELY ABSENT since 2026-08-13: workers
+  // are SDK-only (the PTY worker runtime was deleted), so the old worker dial
+  // key is no longer user-settable. An old client that still POSTs it gets the
+  // key silently dropped here — the required back-compat — and a stale key in
+  // an existing settings.json is simply never read (readJson is tolerant).
   'swarmManagerRuntime',
   'lockdownMode',
 ]
 
-/** Narrow an untrusted runtime dial to `{ mode }` (+ the worker's optional
- *  `sdkMaxWorkers`). Anything else returns undefined so the key is DROPPED and
- *  the previous value survives — the same "refuse a meaningless patch" stance as
- *  the swarmAllowedModels all-off and swarmPaneOrder all-garbage guards.
+/** Narrow an untrusted runtime dial to `{ mode }`. Anything else returns
+ *  undefined so the key is DROPPED and the previous value survives — the same
+ *  "refuse a meaningless patch" stance as the swarmAllowedModels all-off and
+ *  swarmPaneOrder all-garbage guards.
  *
  *  Only a literal 'pty' or 'sdk' is persisted; anything else (absent, null, a
  *  forged string) drops the key rather than storing a value a reader would have
- *  to guess at. What the two dial READERS then make of a MISSING key is ONE
- *  shared rule again as of 2026-08-02: absent ⇒ 'sdk' on both
- *  (getManagerRuntimeDial flipped that day, getWorkerRuntimeDial the same day —
- *  it had been left behind by the 08-01 worker flip and shipped a fleet that
- *  disagreed with its own switch). An unrecognised MODE VALUE ⇒ pty is shared
- *  too — but a CONTAINER we cannot read `mode` out of is NOT that case (a
- *  non-object, or an object with no `mode` key: `?.mode` is then undefined, so
- *  both readers resolve it to 'sdk'). This normalizer
- *  does NOT implement that half either. It REFUSES a garbage patch (returns
- *  undefined; the caller drops it from the PATCH) so the PREVIOUS dial survives rather than falling
- *  to any default — pinned by settingsRuntimeDials.test.ts. On a machine that
- *  had no dial written yet, that refusal therefore leaves the key ABSENT, which
- *  the commander's reader resolves to 'sdk'. These keys are deliberately inert with respect to
- *  the validateProjectPath allowlist — they select a runtime, they cannot widen
- *  any boundary — so admitting them to USER_SETTINGS_KEYS does not weaken the
- *  narrowing this function's caller exists to perform. */
-const normalizeRuntimeDial = (
-  v: unknown,
-  withMaxWorkers: boolean,
-): { mode: 'pty' | 'sdk'; sdkMaxWorkers?: number } | undefined => {
+ *  to guess at. What the dial READER then makes of a MISSING key:
+ *  absent ⇒ 'sdk' (since 2026-08-02); an unrecognised MODE VALUE ⇒ pty — but a
+ *  CONTAINER we cannot read `mode` out of is NOT that case (a non-object, or an
+ *  object with no `mode` key: `?.mode` is then undefined, so the reader
+ *  resolves it to 'sdk'). This normalizer does NOT implement that half either.
+ *  It REFUSES a garbage patch (returns undefined; the caller drops it from the
+ *  PATCH) so the PREVIOUS dial survives rather than falling to any default —
+ *  pinned by settingsRuntimeDials.test.ts. On a machine that had no dial
+ *  written yet, that refusal therefore leaves the key ABSENT, which the
+ *  commander's reader resolves to 'sdk'. The key is deliberately inert with
+ *  respect to the validateProjectPath allowlist — it selects a runtime, it
+ *  cannot widen any boundary — so admitting it to USER_SETTINGS_KEYS does not
+ *  weaken the narrowing this function's caller exists to perform.
+ *
+ *  (Until 2026-08-13 this narrower also served the worker dial and carried its
+ *  optional `sdkMaxWorkers` slot cap. The PTY worker runtime was deleted —
+ *  workers are SDK-only, so there is no worker dial and nothing to cap.) */
+const normalizeRuntimeDial = (v: unknown): { mode: 'pty' | 'sdk' } | undefined => {
   if (v === null || typeof v !== 'object' || Array.isArray(v)) return undefined
-  const raw = v as { mode?: unknown; sdkMaxWorkers?: unknown }
+  const raw = v as { mode?: unknown }
   if (raw.mode !== 'pty' && raw.mode !== 'sdk') return undefined
-  const cap = raw.sdkMaxWorkers
-  // `sdkMaxWorkers: 0` IS A MEANINGFUL SETTING — "keep the dial on sdk but run
-  // NO SDK workers" — and the old `cap > 0` test threw it away as falsy. The key
-  // then vanished from the persisted dial, the reader fell back to
-  // DEFAULT_SDK_MAX_WORKERS (1), and the result was the worst kind of silence:
-  // the panel showed 0, the server kept seating one SDK worker, and nothing
-  // logged the disagreement. Zero is precisely the value an owner reaches for to
-  // stop the experiment without losing the setting, so it is the one that must
-  // survive the round trip.
-  //
-  // The accept predicate is deliberately IDENTICAL to the reader's
-  // (swarmWorkerRuntimeDial.sdkSlotLimit): finite, >= 0, floored. When writer and
-  // reader disagree, the same number means two different things depending on
-  // whether it arrived by POST /api/settings or by a hand-edited settings.json —
-  // and this dial is one people hand-edit. Everything else (negative, NaN,
-  // Infinity, a string, absent) OMITS the key, so the reader's documented default
-  // applies rather than an unbounded fleet. No upper clamp: a silly-large cap
-  // only ever means "do not cap", and every worker it admits still has to clear
-  // the SDK preflight.
-  const capOk = typeof cap === 'number' && Number.isFinite(cap) && cap >= 0
-  return {
-    mode: raw.mode,
-    ...(withMaxWorkers && capOk ? { sdkMaxWorkers: Math.floor(cap) } : {}),
-  }
+  return { mode: raw.mode }
 }
 
 /** Narrow an untrusted `swarmPaneOrder` body to the known pane ids, in the
@@ -435,16 +414,13 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
     if (clean) safe.swarmPaneOrder = clean
     else delete safe.swarmPaneOrder
   }
-  // The two Agent-SDK runtime dials, narrowed to `{ mode }` — see
+  // The commander's Agent-SDK runtime dial, narrowed to `{ mode }` — see
   // normalizeRuntimeDial. A garbage patch is refused rather than persisted, so a
   // UI bug can never leave an unreadable shape where a runtime decision is made.
-  if (Object.prototype.hasOwnProperty.call(safe, 'swarmWorkerRuntime')) {
-    const clean = normalizeRuntimeDial(safe.swarmWorkerRuntime, true)
-    if (clean) safe.swarmWorkerRuntime = clean
-    else delete safe.swarmWorkerRuntime
-  }
+  // (The worker dial is gone — workers are SDK-only since 2026-08-13; a POSTed
+  // `swarmWorkerRuntime` never reaches here because USER_SETTINGS_KEYS dropped it.)
   if (Object.prototype.hasOwnProperty.call(safe, 'swarmManagerRuntime')) {
-    const clean = normalizeRuntimeDial(safe.swarmManagerRuntime, false)
+    const clean = normalizeRuntimeDial(safe.swarmManagerRuntime)
     if (clean) safe.swarmManagerRuntime = { mode: clean.mode }
     else delete safe.swarmManagerRuntime
   }
@@ -490,59 +466,20 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
 export const getAllowedModelTiers = async (): Promise<SwarmAllowedModels> =>
   normalizeAllowedModels((await getSettings()).swarmAllowedModels)
 
-// ─── Swarm worker runtime dial (Settings.swarmWorkerRuntime) ─────────────────
-// The kill switch for the Agent SDK worker migration. Read through here rather
-// than straight from getSettings so the resolution lives in ONE place: an
-// unreadable file or a hand-corrupted value degrades to PTY, never to an
-// experimental runtime.
-//
-// ⚠ THIS READER IS WHERE THE 2026-08-01 DEFAULT FLIP ACTUALLY LANDS, and for a
-// day it was the one place the flip did NOT reach. `chooseWorkerRuntime` resolved
-// an ABSENT dial to 'sdk' and the Swarm panel drew the switch ON — but the only
-// production caller (swarmWorker.ts) feeds that decision THIS function's output,
-// and this function turned absent into an explicit {mode:'pty'}. So the flip
-// could never arrive: measured 2026-08-02 (isolated HOME, nothing written), the
-// composed path dispatched PTY workers under a switch drawn ON, and it shipped
-// that way in 0.11.47. The rule inside chooseWorkerRuntime was unreachable for
-// the one machine state that matters, a fresh install.
-//
-// Fixed by giving this reader the SAME polarity as the commander's below —
-// explicit ⇒ that runtime, ABSENT ⇒ sdk, anything else ⇒ pty — so the two dials
-// answer a missing key the same way and neither can drift from the rule alone.
-// Pinned end-to-end by swarmRuntimeDialParity.test.ts, which now composes
-// exactly as dispatch does instead of calling chooseWorkerRuntime directly (the
-// shortcut that let this defect ship green).
-export const getWorkerRuntimeDial = async (): Promise<{
-  mode: 'pty' | 'sdk'
-  sdkMaxWorkers?: number
-}> => {
-  const { settings, health } = await getSettingsWithHealth()
-  // FILE-level fail-closed, and since the flip above it is doing REAL work: it
-  // used to agree with the absent-default by coincidence (absent resolved pty
-  // here too), and that coincidence has now expired. A settings.json we cannot
-  // read is not consent to run the experimental runtime — whatever it said
-  // before it broke. ABSENT is NOT this case: nothing written yet is a fresh
-  // install, and its rule is sdk. `sdkMaxWorkers` is dropped with the mode: a
-  // PTY fleet has no SDK slot budget. Pinned by runtimeDialFileHealth.test.ts.
-  if (health === 'unreadable') return { mode: 'pty' }
-  const raw = settings.swarmWorkerRuntime
-  const m = raw?.mode
-  // Explicit ⇒ that runtime. ABSENT ⇒ sdk. Anything else ⇒ pty — including a
-  // CONTAINER we cannot read `mode` out of (a non-object, or an object with no
-  // `mode` key), which `?.mode` reports as undefined and therefore rides the
-  // absent rule. Identical to getManagerRuntimeDial by design.
-  const mode = m === 'pty' ? 'pty' : m === 'sdk' || m === undefined ? 'sdk' : 'pty'
-  return { mode, ...(typeof raw?.sdkMaxWorkers === 'number' ? { sdkMaxWorkers: raw.sdkMaxWorkers } : {}) }
-}
+// (The worker runtime dial and its reader `getWorkerRuntimeDial` were DELETED
+// on 2026-08-13 — workers are SDK-only; a worker spawn that cannot establish
+// the SDK runtime now fails fast instead of degrading to a PTY. A stale
+// `swarmWorkerRuntime` key in an existing settings.json is simply never read.)
 
 // ─── Swarm COMMANDER runtime dial (Settings.swarmManagerRuntime) ─────────────
-// The stage-3 kill switch, read through here for the same reason as the worker
-// dial: the resolution must live in ONE place. WHAT that resolution is changed
-// on 2026-08-02 — absent ⇒ sdk, explicit 'pty' and anything unrecognised ⇒ pty
-// (the polarity note on the function has the evidence). The commander's default
-// matters more than the worker's, because it costs the owner's phone window (an
-// SDK desk has no Remote Control) — which is why it moved a day later, and only
-// once the twin-prevention race was covered on BOTH runtimes.
+// The commander's kill switch, read through here so the resolution lives in ONE
+// place: an unreadable file or a hand-corrupted value degrades to PTY, never to
+// an experimental runtime. WHAT that resolution is changed on 2026-08-02 —
+// absent ⇒ sdk, explicit 'pty' and anything unrecognised ⇒ pty (the polarity
+// note on the function has the evidence). This dial deliberately SURVIVED the
+// 2026-08-13 worker-dial deletion: unlike a worker, a PTY commander desk is a
+// real product surface (the owner's phone window rides Remote Control), so the
+// manual switch stays.
 /** Which runtime this project's commander desk runs on. Absent ⇒ SDK.
  *
  *  ⚠ THIS DEFAULT MOVED A DAY AFTER THE WORKER'S (2026-08-02), and the delay was

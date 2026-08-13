@@ -272,8 +272,6 @@ const newEngine = (proj: string, over: Partial<ProjectEngine> = {}): ProjectEngi
   reworkReasons: new Map(),
   conflictReworks: new Map(),
   stuckMoves: new Map(),
-  rateLimited: new Map(),
-  permissionWaits: new Map(),
   log: [],
   anomalies: [],
   selfSupply: initSelfSupplyRuntime(),

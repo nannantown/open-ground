@@ -157,6 +157,7 @@ const EVENT_LABEL: Record<SwarmFatalEvent, string> = {
   'review-panel-failed': 'Swarm — review panel failed (merge withheld)',
   'high-risk-hold': 'Swarm — high-risk paths (awaiting manual merge)',
   'manager-unrevivable': 'Swarm — commander keeps dying (check it manually)',
+  'worker-spawn-failed': 'Swarm — workers cannot start (dispatch held)',
   // Fires from TWO distinct causes (swarmOrchestrator.ts resumeEngines): the
   // crash-loop breaker tripping (repeated restarts) OR the breaker's own boot
   // ring failing to persist (a disk fault — e.g. a first-ever launch before a

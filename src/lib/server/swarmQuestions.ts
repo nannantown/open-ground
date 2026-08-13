@@ -1,15 +1,13 @@
 // swarmQuestions — C3 of the overseer EPIC (spec: docs/OVERSEER_DESIGN.md §10 C3):
-// detect a worker's `claude` sitting IDLE on a FREE-TEXT question (the one
-// blocking state the A1 sandbox leaves — permission menus are gone under
-// bypass), and the answer pipe that turns that question into a proxy-you
-// answer injected back into the worker's PTY.
+// detect an SDK worker sitting IDLE on a FREE-TEXT question, and the answer
+// pipe that turns that question into a proxy-you answer delivered back into
+// the worker's session.
 //
 // Two exports matter:
-//  • detectFreeTextQuestion — a PURE screen classifier (the 'question' arm of
-//    swarmOrchestrator's classifyOutput). Its false-POSITIVE direction is the
-//    dangerous one (actively typing into someone's PTY — the inverse of the
-//    rate-limit/permission arms, whose FPs merely grant grace), so every
-//    condition below is AND-ed and any uncertainty yields null (fail-closed).
+//  • detectSdkFreeTextQuestion (via the detectWorkerFreeTextQuestion seam) — a
+//    PURE classifier over the SDK runtime's recentOutput (the 'question' arm
+//    of swarmOrchestrator's classifyOutput). Fail-closed: every condition is
+//    AND-ed and any uncertainty yields null.
 //  • handleWorkerQuestion — the full T1 pipe (context → C2 answerAsOwner →
 //    C4-gated answer → W16 injection, else the T3 inbox). It is a LIBRARY for
 //    C-core: nothing in this module runs it on a schedule — budget, single
@@ -18,28 +16,12 @@
 //    degradation instead: raise the bare question straight to the inbox
 //    (LLM-free) — see swarmOrchestrator's 'question' arm.
 //
-// Screen signature (verified against live `claude` TUI frames, 2026-07-06 —
-// the card's mandated first work item):
-//   idle footer   "? for shortcuts"      ← present ONLY at an idle input box
-//   working footer "esc to interrupt"    ← present ONLY while generating
-//   input box      last "❯"-prefixed row (empty / placeholder `Try "…"` when
-//                  idle; the pasted text when a paste is pending unsent)
-//   assistant turn "⏺ …" block; its continuation lines are indented
-// A permission/trust MENU frame additionally carries numbered options, which
-// claudeMenu.detectMenu recognises — menu frames are EXCLUDED here (they are
-// the permission-wait arm's business; "menu 誤検出ゼロ" is a Done condition).
+// (Until 2026-08-13 the headline export was detectFreeTextQuestion — a PTY TUI
+// screen classifier reading idle/working footers, the ❯ input box, ⏺ turn
+// markers and menu frames, whose false-POSITIVE direction was typing into
+// someone's PTY. It died with the PTY worker runtime; the SDK detector below
+// is the whole worker-question surface now.)
 
-import { detectMenu } from '@/lib/claudeMenu'
-import {
-  IDLE_FOOTER_RE,
-  PLACEHOLDER_RE,
-  PROMPT_ROW_RE,
-  RULE_ROW_RE,
-  WORKING_FOOTER_RE,
-  isChromeRow,
-  lastPromptRow,
-  readInputBoxText,
-} from '@/lib/claudeScreen'
 import type { OwnerAnswer, OwnerQuestion } from './swarmOverseerBrain'
 import { answerAsOwner, runOverseerBrain } from './swarmOverseerBrain'
 import type { OpenEscalationInput } from './swarmEscalations'
@@ -90,63 +72,11 @@ export interface DetectedFreeTextQuestion {
  *  output that HAPPENS to end in '?' and is not worth the FP risk. */
 const QUESTION_BLOCK_MAX_ROWS = 8
 
-/**
- * Detect "claude asked the owner a free-text question and is now idle at an
- * EMPTY input box". ALL of (fail-closed — see file header for why FP is the
- * dangerous direction here):
- *  1. no interactive menu on screen (claudeMenu — the permission arm's turf);
- *  2. the idle footer is present and the working footer is absent;
- *  3. the input box exists and is empty (or the stock `Try "…"` placeholder) —
- *     a pending unsent paste must never be double-answered;
- *  4. the last real (non-chrome) row above the input box ends in '?' / '？';
- *  5. that row's utterance block stays within QUESTION_BLOCK_MAX_ROWS.
- * Returns the reassembled question text, or null.
- */
-export const detectFreeTextQuestion = (
-  screen: string | null,
-): DetectedFreeTextQuestion | null => {
-  if (!screen) return null
-  if (WORKING_FOOTER_RE.test(screen)) return null
-  if (!IDLE_FOOTER_RE.test(screen)) return null
-  if (detectMenu(screen)) return null
-
-  const rows = screen.split('\n')
-  const p = lastPromptRow(rows)
-  if (p < 0) return null
-  const boxText = readInputBoxText(screen) ?? ''
-  if (boxText && !PLACEHOLDER_RE.test(boxText)) return null
-
-  // The input box is fenced by rules; the conversation log ends above its top
-  // rule. Walk up from there, skipping chrome, to the last real utterance row.
-  let top = p
-  while (top > 0 && !RULE_ROW_RE.test(rows[top - 1])) top--
-  let i = top - 1
-  while (i >= 0 && RULE_ROW_RE.test(rows[i])) i--
-  while (i >= 0 && isChromeRow(rows[i])) i--
-  if (i < 0) return null
-  const lastReal = rows[i].trim()
-  if (!/[?？]$/.test(lastReal)) return null
-  // A row that itself reads as a prompt/menu artifact is not an utterance.
-  if (PROMPT_ROW_RE.test(rows[i])) return null
-
-  // Reassemble the utterance block: walk further up while rows belong to the
-  // same assistant turn (indented continuations), stopping at (and including)
-  // the `⏺` turn marker, a chrome row, another prompt row, or the row cap.
-  const block: string[] = [lastReal]
-  for (let j = i - 1; j >= 0 && block.length < QUESTION_BLOCK_MAX_ROWS; j--) {
-    const raw = rows[j]
-    const t = raw.trim()
-    if (!t || isChromeRow(raw) || PROMPT_ROW_RE.test(raw) || RULE_ROW_RE.test(raw)) break
-    if (/^⏺/.test(t)) {
-      block.unshift(t.replace(/^⏺\s*/, ''))
-      break
-    }
-    block.unshift(t)
-  }
-  const question = block.join(' ').replace(/\s+/g, ' ').trim().slice(0, MAX_ESCALATION_QUESTION)
-  if (!question) return null
-  return { question }
-}
+// (detectFreeTextQuestion — the PTY TUI question detector: idle-footer /
+// input-box / menu-frame reading over a rendered screen — was DELETED
+// 2026-08-13 with the PTY worker runtime. The SDK detector below is the only
+// worker question detector; detectWorkerFreeTextQuestion routes a legacy
+// 'pty' kind to null.)
 
 // ─── The SDK arm (2026-08-03 — the seam workerRuntime reserved) ──────────────
 //
@@ -221,13 +151,13 @@ export const detectSdkFreeTextQuestion = (
 
 /** THE question detector — one call, whatever runtime carries the worker.
  *  This is the seam the two call sites (classifyOutput's 'question' arm and the
- *  monitor's raise) go through, so neither can ever ask a PTY-shaped question
- *  of an SDK worker's output again. */
+ *  monitor's raise) go through. A legacy 'pty' kind yields null: the PTY
+ *  detector died with the PTY worker runtime (2026-08-13), and a legacy roster
+ *  row's dead terminal has no screen to ask questions on anyway. */
 export const detectWorkerFreeTextQuestion = (
   kind: WorkerRuntimeKind,
   out: string | null,
-): DetectedFreeTextQuestion | null =>
-  kind === 'sdk' ? detectSdkFreeTextQuestion(out) : detectFreeTextQuestion(out)
+): DetectedFreeTextQuestion | null => (kind === 'sdk' ? detectSdkFreeTextQuestion(out) : null)
 
 // ─── The T1 pipe (C-core's library — NOT self-scheduling; see file header) ────
 

@@ -148,6 +148,16 @@ export interface WorkerRuntime {
   quotaBlocked(w: WorkerHandle): boolean
 }
 
+// ⚠ THE PTY ADAPTER SURVIVES THE PTY WORKER'S DELETION (2026-08-13), on
+// purpose. No spawn path can mint a PTY worker anymore — but persisted roster
+// rows from the fallback era (runtime absent ⇒ 'pty', or explicit 'pty' with a
+// terminalId) still arrive at boot, and the engine must be able to MONITOR
+// THEM TO DEATH: isAlive answers false for their dead terminals, the
+// lost-worker recovery requeues their cards, and the teardown addresses the
+// right pool. Deleting this adapter would instead make workerKey/runtimeOf
+// throw on every legacy row — an upgrade that bricks the engine on the first
+// boot after it. The adapter is pure delegation to terminal.ts (which survives
+// for the supply/manager/reviewer desks), so its cost is this comment.
 export const ptyWorkerRuntime: WorkerRuntime = {
   kind: 'pty',
   isAlive: (w) => {

@@ -5,7 +5,6 @@ import {
   sdkSessionEnv,
   SDK_WORKER_MIN_CLI_VERSION,
 } from './swarmWorkerSdk'
-import { workerLaunchOpts } from './swarmWorker'
 import type { GuardEvaluate } from './sdkGuardHook'
 
 const WT = '/Users/tester/.openground/projects/uuid1/worktrees/wt1'
@@ -20,6 +19,9 @@ const okGuard: GuardEvaluate = (p) => {
   return cmd.includes('push') ? { decision: 'deny', reason: 'push ban' } : { decision: 'allow' }
 }
 
+// `lang` is a REQUIRED field on SdkWorkerOptsInput (2026-08-13 rework) — the
+// default fixture fixes it to 'en' so tests unrelated to language don't have
+// to think about it; the dedicated describe block below exercises 'en'/'ja'.
 const plan = (over: Partial<Parameters<typeof sdkWorkerLaunchPlan>[0]> = {}) =>
   sdkWorkerLaunchPlan({
     worktree: WT,
@@ -29,10 +31,11 @@ const plan = (over: Partial<Parameters<typeof sdkWorkerLaunchPlan>[0]> = {}) =>
     claudeBin: BIN,
     evaluateFn: okGuard,
     env: { PATH: '/usr/bin', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDECODE: '1', FOO: 'bar' } as NodeJS.ProcessEnv,
+    lang: 'en',
     ...over,
   })
 
-describe('sdkWorkerLaunchPlan — parity with the PTY worker contract', () => {
+describe('sdkWorkerLaunchPlan — the worker launch contract (SDK-only since 2026-08-13)', () => {
   it('runs in the worktree and drives the USER\'S claude, not the SDK\'s bundled one', () => {
     const o = plan().options
     expect(o.cwd).toBe(WT)
@@ -40,16 +43,14 @@ describe('sdkWorkerLaunchPlan — parity with the PTY worker contract', () => {
     expect(o.pathToClaudeCodeExecutable).toBe(BIN)
   })
 
-  it('is unattended: bypassPermissions, exactly like workerLaunchOpts', () => {
+  it('is unattended: bypassPermissions — a worker must never sit on an approval prompt', () => {
     expect(plan().options.permissionMode).toBe('bypassPermissions')
-    expect(workerLaunchOpts(WT, SID, { title: 't' }).permissionMode).toBe('bypass')
   })
 
   it('loads NO mcp servers — mcp__* tools sit outside the veto', () => {
     const o = plan().options
     expect(o.strictMcpConfig).toBe(true)
     expect(o.mcpServers).toEqual({})
-    expect(workerLaunchOpts(WT, SID, { title: 't' }).strictMcpConfig).toBe(true)
   })
 
   it('arms a PreToolUse hook (the SDK loads no filesystem settings, so this is the only veto)', () => {
@@ -97,8 +98,16 @@ describe('sdkWorkerLaunchPlan — parity with the PTY worker contract', () => {
         home: HOME,
         claudeBin: BIN,
         evaluateFn: okGuard,
+        lang: 'en',
       }).initialPrompt,
     )
+  })
+
+  it('threads Settings.language into the SDK initial prompt (opts.lang, literal marker)', () => {
+    expect(plan({ lang: 'en' }).initialPrompt).toContain('[Reply language]')
+    expect(plan({ lang: 'en' }).initialPrompt).not.toContain('【返答言語】')
+    expect(plan({ resume: true, lang: 'ja' }).initialPrompt).toContain('【返答言語】')
+    expect(plan({ resume: true, lang: 'ja' }).initialPrompt).not.toContain('[Reply language]')
   })
 
   it('passes extra read dirs only when there are some', () => {

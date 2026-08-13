@@ -155,7 +155,7 @@ import { removeClaudeFolderTrust } from './claudeTrust'
 import { SWARM_LAUNCH_MODEL, execModeMaxWorkers, resolveAvailableTierProbed } from './swarmLaunch'
 // The limit-wording detector, extracted to swarmRateLimitText.ts (2026-07-13) so
 // the pre-launch tier probe shares it — see the re-export further down.
-import { normalizeScreen, matchesRateLimit, endsInRateLimit } from './swarmRateLimitText'
+import { endsInRateLimit } from './swarmRateLimitText'
 // [Quota] the engine is BOTH sides of the quota loop now: the rate-limit
 // sighting in monitorWorkers is the swarm's SENSOR (markRateLimited — the one
 // production write into the cooling table, attributing the sighting to the tier
@@ -181,6 +181,7 @@ import {
   ensureSwarmWorktreeForBranch,
   type ReusableWork,
 } from './swarmWorker'
+import { SdkWorkerUnavailableError } from './swarmWorkerSdk'
 import { centralWorktreesDir } from './paths'
 import { projectUUIDFromPath } from './projectDataPath'
 import { appendEngineJournalLine } from './engineJournal'
@@ -233,7 +234,7 @@ import type {
 import { createSwarmFatalNotification, createSwarmInfoNotification } from './swarmNotifications'
 // Manager-only integration (2026-07-15): the engine no longer merges — it WAKES the
 // commander when a worker is ready. These are the seams the default wake dep uses.
-import { spawnSwarmManager, MANAGER_DESK_LABEL } from './swarmManager'
+import { spawnSwarmManager } from './swarmManager'
 import {
   listManagerDesks,
   managerDeskForSession,
@@ -448,15 +449,15 @@ const envInt = (name: string, def: number, min: number, max: number): number => 
  *  it only catches the genuinely-unbounded. Adjustable via env. Min 10m guards
  *  against an env typo bricking every worker.
  *
- *  IT COUNTS *WORKING* TIME, NOT RAW WALL-CLOCK: the time a worker sat frozen on
- *  a rate-limit hold is CREDITED BACK (engine.rateLimitHeldMs — see
- *  {@link rateLimitHoldCredit} / {@link isRunaway}). It used to count wall-clock
- *  INCLUDING quota waits, on the assumption that "the band is wide enough" — and
- *  on 2026-07-12 that assumption broke in the field: a worker waited 20m on a
- *  limit, then worked 84m (104m wall-clock), was judged runaway at 90m, and was
- *  torn down with 15 uncommitted files (47KB) still in its worktree. A quota wait
- *  is not the worker's doing and must not spend its budget. (The other half of
- *  that fix is {@link commitWipBeforeTeardown} — no reclaim, for ANY reason, may
+ *  IT COUNTS *WORKING* TIME, NOT RAW WALL-CLOCK: 統合待ち (idle in review,
+ *  pending the commander) is CREDITED BACK ({@link isRunaway}'s idleMs). The
+ *  2026-07-12 field loss taught the rule — a worker waited 20m on a quota
+ *  limit, then worked 84m (104m wall-clock), was judged runaway at 90m, and
+ *  was torn down with 15 uncommitted files (47KB) still in its worktree. The
+ *  rate-limit HOLD that credit compensated died 2026-08-13 (a quota-stopped
+ *  worker is requeued within ~a minute, never held against its budget), so
+ *  the surviving credit is the integration wait. (The other half of that fix
+ *  is {@link commitWipBeforeTeardown} — no reclaim, for ANY reason, may
  *  destroy uncommitted work again.) */
 export const MAX_EXEC_MS = envMinutesMs('OPENGROUND_SWARM_MAX_EXEC_MIN', 90, 10, 600)
 
@@ -513,15 +514,6 @@ export const MAX_EXEC_MS = envMinutesMs('OPENGROUND_SWARM_MAX_EXEC_MIN', 90, 10,
  *  the first cut made this the one bare literal in the family. */
 export const BG_TASK_GRACE_MS = envMinutesMs('OPENGROUND_SWARM_BG_TASK_GRACE_MIN', 90, 5, 600)
 
-/** CEILING on the rate-limit credit one worker may subtract from its execution
- *  clock. Without it, a worker cycling limit → work → limit → … could defer the
- *  runaway check forever and the 暴走 defense would have no teeth at all. With it,
- *  a worker's ABSOLUTE wall-clock lifetime is bounded by MAX_EXEC_MS + this (180m
- *  at the defaults) however long it spent waiting — the runaway ceiling stays a
- *  real ceiling while an honest quota wait is still forgiven. Tied to MAX_EXEC_MS
- *  on purpose (one knob to retune, not two). */
-export const HOLD_CREDIT_CAP_MS = MAX_EXEC_MS
-
 /** CEILING on the 統合待ち credit (2026-07-19). A card sitting in 'review'
  *  early-continues the monitor, so while it waits its worker is subject to NO
  *  ceiling, NO stall check and NO heartbeat check — and the whole span is credited
@@ -545,17 +537,13 @@ export const HOLD_CREDIT_CAP_MS = MAX_EXEC_MS
  *  outcome; unbounded token burn is not. */
 export const WAIT_CREDIT_CAP_MS = envMinutesMs('OPENGROUND_SWARM_WAIT_CREDIT_CAP_MIN', 480, 30, 2880)
 
-/** RATE-LIMIT GRACE — how long a worker WAITING on a usage / quota / overload
- *  limit is HELD before its card is requeued to 'todo' (slot recovery). A
- *  rate-limited worker is NOT a stall: Enter won't lift the limit and reclaiming
- *  it throws away committed work + re-dispatches into the SAME wall, so the
- *  engine never nudges it and never reclaims it on the (much shorter) silence
- *  clock. It just waits — the worker's own `claude` resumes when the limit
- *  resets. Only if it is STILL limited this long does the engine free the slot
- *  and requeue (the work already on its branch is preserved; a later attempt
- *  retries once the limit has cleared). Kept under STALE_HEARTBEAT_MS so a
- *  legitimately-waiting worker is requeued before it would be mislabelled
- *  "hung". Adjustable via env. */
+/** RATE-LIMIT GRACE — the DEFAULT cooling span for a tier that hit a usage /
+ *  quota / overload wall when no reset time can be parsed from the refusal text
+ *  or the A5 usage cache (see swarmQuota.resolveCoolingUntil). (Until 2026-08-13
+ *  this also drove the monitor's 20-minute in-place HOLD of a rate-limited PTY
+ *  worker; the hold died with the PTY worker runtime — a quota-stopped SDK
+ *  worker is requeued after {@link QUOTA_STOP_DEBOUNCE_MS}, and the pace of the
+ *  retry is governed by this cooling span instead.) Adjustable via env. */
 export const RATE_LIMIT_GRACE_MS = Math.min(
   envMinutesMs('OPENGROUND_SWARM_RATE_LIMIT_GRACE_MIN', 20, 2, 360),
   // CLAMP strictly under the runaway ceiling so a transient waiter is requeued
@@ -564,53 +552,19 @@ export const RATE_LIMIT_GRACE_MS = Math.min(
   MAX_EXEC_MS - 60_000,
 )
 
-/** QUOTA-DETECTION FAST PATH (the 21-minute detection lag, 2026-07-09): three
- *  workers hit "You've reached your Fable 5 limit." FOUR SECONDS after spawn, yet
- *  the tier only cooled 21m30s later — the sighting sat behind (a) the 10-min
- *  silence gate (built for HUNG workers, blind to instantly-rejected ones) and
- *  (b) lastOutputAt counting a decorative TUI repaint (a "Plugin updated" toast)
- *  as activity, pushing the gate back 6m40s per repaint. The three constants
- *  below drive the fix in monitorWorkers: sample the screen after a SHORT output
- *  lull, track how long a rate-limit notice has HELD the screen in real time
- *  (engine.limitScreen), clamp the stall clock to that onset so chrome repaints
- *  can't reset it, and confirm an at-spawn rejection without waiting the full
- *  stall gate. */
-
-/** How long the PTY output must lull before the monitor samples a worker's
- *  screen for a rate-limit notice. Far under STALL_SILENCE_MS — the whole point
- *  — but long enough that a BUSY worker (output streaming) is never scraped
- *  each pass (the per-pass-TUI-scrape cost the silence gate was protecting
- *  against). A worker whose screen is already being tracked (engine.limitScreen
- *  / engine.rateLimited) is re-sampled every pass regardless, so a lifted limit
- *  is noticed promptly. */
-export const RATE_LIMIT_SCRAPE_QUIET_MS = 45_000
-
-/** How soon after dispatch a rate-limit notice must FIRST be sighted for the
- *  early confirmation below to apply — "the worker walked into the wall at
- *  spawn". An instantly-rejected worker shows the notice within seconds (plus
- *  one scrape-quiet window before the monitor samples); a worker that did real
- *  work first shows it minutes later and takes the ordinary (clamped) stall
- *  gate instead. This onset window is what keeps the early path away from a
- *  worker merely EDITING rate-limit wording (this very file's fixtures): that
- *  happens deep into a session, never in the first two minutes. */
-export const RATE_LIMIT_EARLY_ONSET_MS = 2 * 60_000
-
-/** How long the at-spawn notice must HOLD the screen before the early path
- *  confirms rate-limited (with zero commits and no heartbeat since the notice).
- *  Short — the card's contract is sighting-to-cooling under two minutes
- *  (scrape-quiet + this + a tick ≈ 95s) — but enough that one transient frame
- *  (a flash mid-boot) never cools a healthy tier. */
-export const RATE_LIMIT_EARLY_CONFIRM_MS = 45_000
-
-/** PERMISSION-WAIT GRACE — how long after auto-accepting a startup permission /
- *  trust prompt the engine waits for the worker to move on before parking it in
- *  'blocked'. Workers launch with permissionMode:'bypass'
- *  (--dangerously-skip-permissions), so a prompt should NEVER appear; this is the
- *  backstop for when one slips through anyway (a `claude` that ignored bypass, an
- *  unexpected first-run dialog). Short — once Enter accepts the (default-Yes)
- *  trust dialog the worker proceeds within seconds; still stuck after this means
- *  bypass is genuinely broken and a human is needed. */
-export const PERMISSION_WAIT_GRACE_MS = 2 * 60_000
+/** QUOTA-STOP DEBOUNCE (SDK-only workers, 2026-08-13). How long the pool's own
+ *  quota verdict (`quotaBlocked` — 'quota-parked' status / a live
+ *  `lastQuotaRefusalText`) must hold, with the worker silent, before the engine
+ *  cools the tier and requeues the card. Short — the verdict is the CLI's own
+ *  refusal event, not a wording guess, so there is no 10-minute silence gate to
+ *  wait out (the PTY era's screen-scrape fast path — RATE_LIMIT_SCRAPE_QUIET /
+ *  EARLY_ONSET / EARLY_CONFIRM and the engine.limitScreen onset clock — was
+ *  deleted with the PTY worker runtime). Non-zero on purpose: a worker whose
+ *  LAST event echoed refusal-like text but is still working clears the verdict
+ *  with its next real event (lastQuotaRefusalText decays), so one debounce
+ *  window is what separates "parked on the wall" from "mentioned the wall".
+ *  Same length and rationale as {@link SDK_QUESTION_SILENCE_MS}. */
+export const QUOTA_STOP_DEBOUNCE_MS = 60_000
 
 /** FREE-TEXT QUESTION GRACE — how long a worker that idles at a detected free-text
  *  question is HELD (so the owner's escalation answer can W16-inject into the live
@@ -1356,7 +1310,8 @@ export type WorkerRecoveryReason =
   | 'runaway'
   | 'integration-wait'
   | 'rate-limit'
-  | 'permission'
+  // ('permission' died 2026-08-13 with the PTY worker runtime — the trust
+  // dialog it parked on is a TUI frame an SDK session can never render.)
   | 'question'
 
 /** WHY a worker's worktree is being torn down. The recovery reasons above PLUS the
@@ -1388,10 +1343,9 @@ export type TeardownReason = WorkerRecoveryReason | 'stopped' | 'rework'
  *      stale `ready` from before the 差し戻し. It does NOT jump `heartbeat.blocked`
  *      — that is the worker's own LIVE report that a human is needed, and routing
  *      it to 'review' would discard the one signal it managed to raise.
- *    • 'runaway' / 'permission' ⇒ 'blocked' — a human is needed: a task that blows
- *      the time ceiling WITHOUT ever producing integrable work would just overrun
- *      again on retry, and a prompt bypass can't clear means the environment is
- *      wrong. Park, don't loop.
+ *    • 'runaway' ⇒ 'blocked' — a human is needed: a task that blows the time
+ *      ceiling WITHOUT ever producing integrable work would just overrun again
+ *      on retry. Park, don't loop.
  *  Otherwise (crash / stall — a possibly-transient failure) the heartbeat +
  *  COMMITTED-WORK signal + retry budget decide:
  *    • heartbeat `ready` ⇒ 'blocked' — it DECLARED itself done yet has nothing
@@ -1410,7 +1364,7 @@ export type TeardownReason = WorkerRecoveryReason | 'stopped' | 'rework'
  *      same "never auto-redo work the engine can already see" principle as the
  *      `ready ⇒ blocked` rule above; a BARE crash (0 commits) still auto-retries via
  *      the budget below — an empty branch has nothing to orphan. (rate-limit /
- *      runaway / permission / question / integration-wait all returned ABOVE, so
+ *      runaway / question / integration-wait all returned ABOVE, so
  *      this rule only ever governs a plain crash or stall.)
  *    • retry budget spent (`requeues >= maxRequeues`) ⇒ 'blocked' — a card that
  *      reliably kills its worker escalates instead of spinning forever.
@@ -1436,7 +1390,7 @@ export const recoveryColumn = (
   reason: WorkerRecoveryReason = 'crash',
 ): 'todo' | 'blocked' | 'review' => {
   if (reason === 'rate-limit') return 'todo'
-  if (reason === 'runaway' || reason === 'permission' || reason === 'question') return 'blocked'
+  if (reason === 'runaway' || reason === 'question') return 'blocked'
   // A worker's OWN blocked declaration outranks the integration-wait exemption.
   // The exemption exists to jump ONE rule — `heartbeat.ready ⇒ blocked` below,
   // which a 差し戻し'd worker still trips on its pre-差し戻し heartbeat (the 0718
@@ -1673,18 +1627,10 @@ export const classifyStall = (
 export { RATE_LIMIT_PATTERNS, RATE_LIMIT_TAIL_MAX, endsInRateLimit } from './swarmRateLimitText'
 
 
-/** Markers of a permission / trust prompt blocking a worker. DELIBERATELY NARROW
- *  — only `claude`'s literal directory-trust dialog phrasing, which a worker's
- *  ordinary output (planning lists like "1. Yes, proceed…", a "press Enter to
- *  continue" aside, or source/diff text) does NOT reproduce verbatim. The earlier
- *  loose option-line / "press enter" patterns matched normal claude output and
- *  were dropped (they risked the exact false KILL this card forbids). Consulted
- *  only for an already-SILENT worker (see the monitor), so even this exact phrase
- *  appearing in code is harmless: a streaming worker is never classified. */
-export const PERMISSION_PROMPT_PATTERNS: readonly RegExp[] = [
-  /do you trust the files in this (?:folder|directory)/,
-  /do you want to (?:proceed|trust|allow) .{0,40}\?/, // claude's trust/allow confirmation line
-]
+// (PERMISSION_PROMPT_PATTERNS and the permission-wait arm were DELETED
+// 2026-08-13 with the PTY worker runtime: the trust dialog is a claude TUI
+// frame on a PTY, and an SDK session — launched with bypassPermissions
+// structurally — can never render one.)
 
 /** The reset time A5 (the CLI usage sensor) offers as a cooling horizon, or null.
  *
@@ -1703,54 +1649,41 @@ const a5CoolingHint = (): string | null => {
   return null
 }
 
-/** Classify a worker's current screen into WHY it might not be progressing:
- *    • 'permission-wait' — a startup trust/permission dialog is blocking it.
- *    • 'rate-limited'    — it is waiting on a usage/quota/overload limit.
- *    • 'question'        — claude asked a FREE-TEXT question and idles at an
- *                          empty input box awaiting the owner (C3; detector in
- *                          swarmQuestions.ts — menu frames stay the permission
- *                          arm's business, so this can never shadow them).
- *    • 'normal'          — none of those; ordinary work (the silence-based
- *                          stall path then applies if it has also gone quiet).
- *  Permission is checked first: at boot it blocks ALL progress and is the more
- *  urgent unblock. The question check runs LAST so both existing arms keep
- *  exactly their pre-C3 precedence, and on the RAW screen (its signature is
- *  row-structural — normalizeScreen would flatten it away). PURE (the only
- *  input is the text) — the TIMING gates (startup window, grace clocks) live
- *  in the monitor, so this stays trivially testable.
- *  A null/empty screen ⇒ 'normal' (no signal — never invent a wait). */
+/** Classify a worker's recent output into WHY it might not be progressing:
+ *    • 'question' — claude asked a FREE-TEXT question and idles awaiting the
+ *                   owner (C3; detector in swarmQuestions.ts).
+ *    • 'normal'   — otherwise; ordinary work (the silence-based stall path then
+ *                   applies if it has also gone quiet).
+ *  PURE (the only input is the text) — the TIMING gates live in the monitor.
+ *  A null/empty output ⇒ 'normal' (no signal — never invent a wait).
+ *
+ *  ⚠ SHRUNK 2026-08-13 with the PTY worker runtime. Two arms died here:
+ *  'permission-wait' (a PTY-only TUI frame — see the note above) and the
+ *  'rate-limited' WORDING route (matchesRateLimit over a rendered screen). A
+ *  quota stop is now decided by the pool's own verdict — the monitor's
+ *  `quotaBlocked` read — which already outranked wording ("You're out of usage
+ *  credits…" matched none of our patterns, 2026-08-04), not by guessing at
+ *  text. `kind` is REQUIRED now (it used to default to 'pty'): every caller
+ *  states which runtime's question detector it wants, and a legacy 'pty' kind
+ *  simply yields 'normal' (the PTY question detector died too). */
 export const classifyOutput = (
   screen: string | null,
-  // The worker's runtime, because the QUESTION arm has two shapes: the PTY one
-  // reads TUI furniture, the SDK one reads the pool's status head + distilled
-  // tail (detectWorkerFreeTextQuestion — the seam). Defaults to 'pty' so every
-  // existing caller/test keeps its exact old meaning; the monitor passes the
-  // real kind. Until 2026-08-03 this function was runtime-blind, which made an
-  // SDK worker's prose question permanently invisible ('normal' forever — only
-  // the heartbeat `blocked` route reached the owner).
-  kind: WorkerRuntimeKind = 'pty',
-): 'rate-limited' | 'permission-wait' | 'question' | 'normal' => {
+  kind: WorkerRuntimeKind,
+): 'question' | 'normal' => {
   if (!screen) return 'normal'
-  const text = normalizeScreen(screen)
-  if (!text) return 'normal'
-  if (PERMISSION_PROMPT_PATTERNS.some((re) => re.test(text))) return 'permission-wait'
-  if (matchesRateLimit(text)) return 'rate-limited'
   if (detectWorkerFreeTextQuestion(kind, screen)) return 'question'
   return 'normal'
 }
 
 /** Has a worker blown the hard execution ceiling? Judged on its WORKING time:
  *  wall-clock since dispatch MINUS `idleMs`, every span it was demonstrably NOT
- *  working (see {@link executionCredit}). Two such spans exist, each learned the
- *  hard way in the field:
- *    • a RATE-LIMIT hold — frozen on a quota wall ({@link rateLimitHoldCredit}).
- *      The 2026-07-12 loss: 20m of limit + 84m of real work = 104m ⇒ reclaimed at
- *      the 90m ceiling, taking 15 uncommitted files with it.
- *    • an INTEGRATION wait — READY, idle, pending the commander
- *      ({@link integrationWaitCredit}). The 2026-07-18 loss: ready at 04:18, 差し
- *      戻し at 04:46, judged "runaway 91m" one pass later and parked in 'blocked'
- *      — 28 minutes of queue latency charged to the worker as work.
- *  Neither is the worker's doing and neither may spend its budget.
+ *  working (see {@link executionCredit}) — today that is the INTEGRATION wait:
+ *  READY, idle, pending the commander ({@link integrationWaitCredit}). The
+ *  2026-07-18 loss: ready at 04:18, 差し戻し at 04:46, judged "runaway 91m" one
+ *  pass later and parked in 'blocked' — 28 minutes of queue latency charged to
+ *  the worker as work. Not the worker's doing; must not spend its budget.
+ *  (The RATE-LIMIT hold credit — the 2026-07-12 sibling — died 2026-08-13 with
+ *  the hold itself: a quota-stopped worker is requeued, not held.)
  *
  *  True iff its dispatch time is known (finite, > 0) and `maxExecMs` of WORKING
  *  time has elapsed. The finite/positive guard is load-bearing: a worker with an
@@ -1890,6 +1823,14 @@ export interface ProjectEngine {
    *  rework transition) does no I/O — the plan §3 "書くのは状態遷移点のみ" guard.
    *  In-memory only; a fresh boot starts undefined so the first sync always writes. */
   rosterSig?: string
+  /** SDK spawn-failure backoff (SDK-only workers, 2026-08-13). Set when
+   *  deps.spawnWorker throws SdkWorkerUnavailableError; while `until` is in the
+   *  future the fill stage attempts NO new spawns (monitor/promote/reclaim run
+   *  unaffected). Cleared by the first successful spawn. `failures` walks the
+   *  backoff ladder; `notifiedAt` throttles the owner bell. In-memory like the
+   *  rest of the engine's cognition — a restart retries immediately, which is
+   *  the right bias (the cause may have been fixed while we were down). */
+  sdkSpawnHold?: { until: number; failures: number; reason: string; notifiedAt: number }
   /** Read-only integration readiness of the review-column swarm cards, refreshed
    *  each integration pass (the "統合可" display). */
   reviews: OrchestratorReview[]
@@ -2105,30 +2046,12 @@ export interface ProjectEngine {
    *  (Card stall self-healing; escalation added 2026-07 after a field test showed
    *  a bare Enter alone can leave a worker wedged — see {@link classifyStall}.) */
   nudges: Map<string, { count: number; lastNudgeAt: number; escalated?: boolean }>
-  /** Per-worker (keyed by terminalId) RATE-LIMIT bookkeeping: when we first saw
-   *  this worker waiting on a usage/quota/overload limit (`since`, epoch ms). Set
-   *  the pass its screen first reads as rate-limited, cleared the moment its
-   *  screen reads normal again (it resumed) or it leaves the live set. Drives the
-   *  "hold, don't nudge, requeue only after RATE_LIMIT_GRACE_MS" path — NOT the
-   *  stall clock. In-memory only. (Card 4880e9c6 — 進まない分類.)
-   *
-   *  `holdSince` is the epoch ms this hold ACTUALLY began — the limit notice's
-   *  onset (engine.limitScreen), which precedes `since` by however long the
-   *  confirmation gates took (up to STALL_SILENCE_MS). `since` still drives the
-   *  RATE_LIMIT_GRACE_MS requeue clock (unchanged); `holdSince` drives the
-   *  execution-time CREDIT ({@link rateLimitHoldCredit}) so the worker is repaid
-   *  for the whole wait, not just its confirmed tail. Optional: an engine literal
-   *  from an older build / a test fixture falls back to `since`. */
-  rateLimited: Map<string, { since: number; holdSince?: number }>
-  /** Per-worker (keyed by terminalId) BANKED rate-limit hold, in ms: the total
-   *  time this worker has already spent frozen on (now-ended) rate-limit holds.
-   *  Credited back to its execution clock so a quota wait never spends the
-   *  MAX_EXEC_MS budget (the 2026-07-12 loss). Added to on every hold RELEASE
-   *  ({@link endRateLimitHold} — the single seam that clears engine.rateLimited),
-   *  read with any in-flight hold by {@link rateLimitHoldCredit}, dropped when the
-   *  worker leaves the live set. Optional (older-build backfill). In-memory
-   *  only. */
-  rateLimitHeldMs?: Map<string, number>
+  /* (The rate-limit HOLD ledger — `rateLimited`, `rateLimitHeldMs`,
+   * `limitScreen`, `permissionWaits` — was DELETED 2026-08-13 with the PTY
+   * worker sensor layer. A quota-stopped worker is requeued after
+   * QUOTA_STOP_DEBOUNCE_MS instead of being held in place for 20 minutes, so
+   * there is no hold span left to credit back to the execution clock; the
+   * integration-wait credit below is the surviving half.) */
   /** Per-worker (keyed by terminalId) INTEGRATION-WAIT stamp: the epoch ms this
    *  worker was promoted to 'review' and started WAITING for the commander to
    *  integrate it. Set by {@link beginIntegrationWait} on every promote, banked +
@@ -2143,25 +2066,6 @@ export interface ProjectEngine {
    *  every 差し戻し ({@link endIntegrationWait}), dropped when the worker leaves
    *  the live set. Optional (older-build backfill). In-memory only. */
   integrationWaitMs?: Map<string, number>
-  /** Per-worker (keyed by terminalId) LIMIT-SCREEN clock (quota-detection fast
-   *  path): the epoch ms a rate-limit notice was FIRST sighted holding this
-   *  worker's screen. Unlike `rateLimited.since` (stamped only once the worker
-   *  is CONFIRMED limited) this tracks the raw sighting, so the monitor can
-   *  (a) measure how long the notice has held the screen in REAL time — immune
-   *  to decorative TUI repaints (toasts) resetting lastOutputAt — and (b)
-   *  confirm an at-spawn rejection early (RATE_LIMIT_EARLY_*). Set when a
-   *  sampled screen reads rate-limited, cleared the moment a sampled screen
-   *  reads anything else (the notice scrolled away ⇒ real work resumed) or the
-   *  worker leaves the live set. Optional (older-build backfill). In-memory
-   *  only. */
-  limitScreen?: Map<string, number>
-  /** Per-worker (keyed by terminalId) PERMISSION-WAIT bookkeeping for a startup
-   *  trust/permission prompt that slipped past bypass: `since` (epoch ms first
-   *  seen) and whether the auto-accept Enter was delivered. Set on first sight in
-   *  the startup window, cleared when the screen reads normal or the worker leaves
-   *  the live set. Drives the auto-accept → park-if-persists path. In-memory only.
-   *  (Card 4880e9c6.) */
-  permissionWaits: Map<string, { since: number; accepted: boolean }>
   /** Per-worker (keyed by terminalId) FREE-TEXT-QUESTION bookkeeping (C3): the
    *  escalation receiptKey of the question last raised to the T3 inbox for this
    *  worker — so one question is raised once (openEscalation is idempotent too;
@@ -2285,12 +2189,9 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       conflictReworks: new Map(),
       stuckMoves: new Map(),
       nudges: new Map(),
-      rateLimited: new Map(),
-      rateLimitHeldMs: new Map(),
       integrationWaitSince: new Map(),
       reviewSeenAt: new Map(),
       integrationWaitMs: new Map(),
-      permissionWaits: new Map(),
       questionRaised: new Map(),
       questionWaits: new Map(),
       log: [],
@@ -2326,14 +2227,10 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.conflictReworks ??= new Map()
     engine.stuckMoves ??= new Map()
     engine.nudges ??= new Map()
-    engine.rateLimited ??= new Map()
-    engine.rateLimitHeldMs ??= new Map()
     engine.integrationWaitSince ??= new Map()
     engine.integrationWaitMs ??= new Map()
     engine.reviewSeenAt ??= new Map()
-    engine.limitScreen ??= new Map()
     engine.integrateInFlight ??= false
-    engine.permissionWaits ??= new Map()
     engine.questionRaised ??= new Map()
     engine.questionWaits ??= new Map()
     engine.selfSupply ??= initSelfSupplyRuntime()
@@ -2836,51 +2733,15 @@ const clearKeptMove = (engine: ProjectEngine, taskId: string): void => {
   engine.stuckMoves.delete(taskId)
 }
 
-// ── Rate-limit hold ledger (the execution clock's credit side) ────────────────
-// A worker frozen on a usage/quota limit is not WORKING, so that time must not
-// spend its MAX_EXEC_MS budget (the 2026-07-12 loss: 20m limit + 84m work = 104m
-// ⇒ runaway at 90m, 15 uncommitted files destroyed with the worktree). The engine
-// therefore banks every hold it observes and subtracts the total from the runaway
-// check. Two functions own the whole ledger: END a hold (banking its span) and
-// READ the credit (banked + any hold still in flight).
+// (The rate-limit HOLD ledger — endRateLimitHold / rateLimitHoldCredit /
+// HOLD_CREDIT_CAP_MS, the execution clock's other credit side — was DELETED
+// 2026-08-13 with the 20-minute in-place hold it measured: a quota-stopped
+// worker is now requeued after QUOTA_STOP_DEBOUNCE_MS, so no hold span exists
+// to credit back. The 2026-07-12 loss the ledger fixed cannot recur in this
+// shape: a worker is torn down within ~1 minute of a quota stop, never held
+// against its MAX_EXEC_MS budget.)
 
-/** END a worker's rate-limit hold, BANKING its span into the execution-time
- *  credit ledger. THE single seam that clears `engine.rateLimited` on a live
- *  worker — clearing the map directly would silently drop the credit and re-open
- *  the 2026-07-12 hole, so route every release through here.
- *
- *  The span is measured from `holdSince` (the limit notice's onset) when present,
- *  else `since` (the confirmed-hold stamp) — an older-build / fixture entry
- *  without `holdSince` still banks its confirmed tail rather than nothing.
- *  Idempotent: a worker not on hold banks nothing. A clock that runs backwards
- *  (a fixture, an NTP step) banks 0, never a negative credit. */
-const endRateLimitHold = (engine: ProjectEngine, key: string, now: number): void => {
-  const rl = engine.rateLimited.get(key)
-  engine.rateLimited.delete(key)
-  if (!rl) return
-  const from = rl.holdSince ?? rl.since
-  const held = Number.isFinite(from) ? Math.max(0, now - from) : 0
-  if (held <= 0) return
-  engine.rateLimitHeldMs ??= new Map() // lazy backfill (older-build engine / test literal)
-  engine.rateLimitHeldMs.set(key, (engine.rateLimitHeldMs.get(key) ?? 0) + held)
-}
-
-/** How much rate-limit hold to CREDIT BACK to this worker's execution clock:
- *  everything banked by {@link endRateLimitHold} PLUS any hold still IN FLIGHT
- *  (a worker frozen right now is being repaid in real time — it must not cross
- *  the ceiling while it sits there waiting). Capped at {@link HOLD_CREDIT_CAP_MS}
- *  so a limit↔work cycle can't defer the runaway check forever: the absolute
- *  wall-clock lifetime of any worker stays bounded by MAX_EXEC_MS + the cap. */
-const rateLimitHoldCredit = (engine: ProjectEngine, key: string, now: number): number => {
-  const banked = engine.rateLimitHeldMs?.get(key) ?? 0
-  const rl = engine.rateLimited.get(key)
-  const from = rl ? (rl.holdSince ?? rl.since) : null
-  const live = from !== null && Number.isFinite(from) ? Math.max(0, now - from) : 0
-  const total = (Number.isFinite(banked) ? Math.max(0, banked) : 0) + live
-  return Math.min(total, HOLD_CREDIT_CAP_MS)
-}
-
-// ── Integration-wait ledger (the execution clock's OTHER credit side) ─────────
+// ── Integration-wait ledger (the execution clock's credit side) ───────────────
 // THE 2026-07-18 LOSS: a worker reached ready at 04:18, its card sat in 'review'
 // waiting for the commander, and at 04:46 the commander 差し戻し'd it (review→
 // doing). The very next pass judged it "runaway — worked 91m ≥ 90m execution
@@ -2903,14 +2764,10 @@ const rateLimitHoldCredit = (engine: ProjectEngine, key: string, now: number): n
 // such time was never on the execution clock to begin with (a review card
 // early-continues out of the monitor), so carrying it forward changes nothing.
 //
-// BOTH credits are capped, for DIFFERENT reasons (this one gained its cap on
-// 2026-07-19 — see WAIT_CREDIT_CAP_MS). A rate-limit hold is INFERRED from a
-// screen scrape, so a sticky misread could over-credit time the worker really was
-// working ON THE CARD — hence HOLD_CREDIT_CAP_MS. This credit cannot make that
-// mistake (it only ever covers time the card was outside 'doing'), but it has its
-// own: while a card sits in 'review' the monitor early-continues, so the worker is
-// unwatched, and the engine cannot tell an idle waiter from a PTY still burning
-// tokens in an /order loop. Uncapped, the burning one bought unlimited runway.
+// The credit is capped (2026-07-19 — see WAIT_CREDIT_CAP_MS): while a card
+// sits in 'review' the monitor early-continues, so the worker is unwatched,
+// and the engine cannot tell an idle waiter from a desk still burning tokens
+// in an /order loop. Uncapped, the burning one bought unlimited runway.
 //
 // An earlier version of this comment argued the opposite — that capping would
 // re-open the 2026-07-18 bug, because "a card left in review overnight and then
@@ -2965,11 +2822,11 @@ const integrationWaitCredit = (engine: ProjectEngine, key: string): number => {
   return Math.min(Math.max(0, banked), WAIT_CREDIT_CAP_MS)
 }
 
-/** The FULL non-working credit for one worker's execution clock: rate-limit holds
- *  plus 統合待ち. Both are time the worker was NOT working on this card, and the
- *  execution ceiling judges WORKING time only ({@link isRunaway}). Returns the
- *  parts too — the log line names each one so an owner reading "stopped at the
- *  ceiling" can see exactly what was forgiven.
+/** The non-working credit for one worker's execution clock: 統合待ち — time the
+ *  worker was FINISHED and idle pending the commander, which the execution
+ *  ceiling must not charge as work ({@link isRunaway}). (Until 2026-08-13 this
+ *  also summed rate-limit holds; the hold died with the PTY sensor layer — a
+ *  quota-stopped worker is requeued within ~a minute, so no hold span exists.)
  *
  *  ORDERING CONTRACT: call {@link endIntegrationWait} first (see the ceiling check
  *  in monitorWorkers). {@link integrationWaitCredit} reads the bank only, so an
@@ -2977,11 +2834,9 @@ const integrationWaitCredit = (engine: ProjectEngine, key: string): number => {
 const executionCredit = (
   engine: ProjectEngine,
   key: string,
-  now: number,
-): { heldMs: number; waitedMs: number; creditMs: number } => {
-  const heldMs = rateLimitHoldCredit(engine, key, now)
+): { waitedMs: number; creditMs: number } => {
   const waitedMs = integrationWaitCredit(engine, key)
-  return { heldMs, waitedMs, creditMs: heldMs + waitedMs }
+  return { waitedMs, creditMs: waitedMs }
 }
 
 const emptyState = (): SwarmOrchestratorState => ({
@@ -3097,10 +2952,6 @@ export interface OrchestratorDeps {
     // creating a fresh one. Both omitted on a normal dispatch (unchanged).
     worktree?: string
     resumeSessionId?: string
-    /** The engine's current roster — read ONLY to count live SDK worker slots
-     *  when the runtime dial is on (docs/SDK_WORKER_MIGRATION_PLAN.md §8).
-     *  Optional so every existing fake keeps compiling unchanged. */
-    liveWorkers?: readonly WorkerHandle[]
   }) => Promise<SpawnSwarmWorkerResponse>
   /** Is this worker's PTY still alive? (A freed slot ⇒ refill.) */
   isAlive: (w: WorkerHandle) => boolean
@@ -4562,13 +4413,22 @@ export const defaultNotifyManagerReady = async (
   }
 }
 
-/** WAKE the commander ({@link IntegrationDeps.wakeManager}): spawn/resume its PTY
+/** WAKE the commander ({@link IntegrationDeps.wakeManager}): spawn/resume its desk
  *  (spawnSwarmManager — resumes the days-long integration conversation, else fresh)
  *  and post ONE info notification naming the waiting review branches. The spawned
  *  `/og-manage` reads the Board and finds the review cards itself; the notification
  *  is the durable, human-facing record. NEVER throws — a NoAllowedModelTierError
  *  (every tier OFF/cooling) or any spawn fault ⇒ false, so the engine retries the
- *  wake next pass instead of marking the branches handed-off. */
+ *  wake next pass instead of marking the branches handed-off.
+ *
+ *  Since the 2026-08-13 fail-fast change, SdkManagerUnavailableError (SDK dial +
+ *  a machine that cannot establish the SDK — CLI signed out / missing / too old)
+ *  ALSO lands in this catch as `false`. That rides the reflex's EXISTING
+ *  backoff: grace → 3-strike 'manager-unrevivable' fatal bell → the 30-min
+ *  transient re-arm (an un-seated wake sets lastWakeSpawned=false ⇒
+ *  transientWall). The 30-min retry against a signed-out CLI is deliberate and
+ *  cheap — no desk was seated, nothing to tear down — and it is what makes the
+ *  recovery automatic the moment the owner signs back in. */
 const defaultWakeManager = async (
   projectPath: string,
   cards: readonly { branch: string; title: string }[],
@@ -4811,32 +4671,47 @@ const defaultSpawnWorker = async (opts: {
   return spawnSwarmWorker(opts)
 }
 
-/** Announce a RUNTIME DEGRADE on an unattended dispatch.
- *
- *  `fellBackBecause` is set when the owner's dial asked for an SDK worker and the
- *  worker came up as a PTY anyway (slots full, preflight refused, the session died
- *  at start). On the manual route the reason rides the HTTP response and the Swarm
- *  panel shows it — but the ENGINE spawns unattended: nobody is holding a response,
- *  and the server is a forked child in a packaged app, so the `console.warn` inside
- *  swarmWorker.ts reaches NOBODY. The whole slot-holding design was accepted on the
- *  premise that a degrade announces itself; on the engine's path it did not, and an
- *  owner who switched the dial on would have watched every worker come up as a PTY
- *  with no explanation anywhere.
- *
- *  The engine LOG is the right sink (not the worker row, not the roster): the
- *  fallback is an EVENT at launch, not a property of the running worker — the
- *  worker's actual runtime is already on its roster row, and a per-worker copy of
- *  the reason would have to be invented, persisted and expired. logLine is also
- *  append-through to the on-disk journal, so the explanation outlives the ring
- *  buffer and the restart. Deliberately NO `kind`: this is not a dispatch failure
- *  (the worker IS running) and must not move the dispatchFailed counter. */
-const noteRuntimeFallback = (
-  engine: ProjectEngine,
-  spawn: SpawnSwarmWorkerResponse,
-  title: string,
-): void => {
-  if (!spawn.fellBackBecause) return
-  logLine(engine, 'warn', `runtime fallback (SDK→PTY): ${shorten(title)} — ${spawn.fellBackBecause}`)
+// ── SDK spawn-failure backoff (SDK-only workers, 2026-08-13) ────────────────
+// The PTY fallback used to absorb a broken SDK environment silently; with it
+// deleted, a persistent failure (signed-out CLI, too-old CLI, unarmed guard)
+// would otherwise burn a spawn attempt — and a fresh worktree+branch rollback —
+// every 3s tick, invisibly. fail-fast means: hold NEW dispatch on a ladder
+// (1m → 5m → 15m), tell the owner ONCE (bell + OS toast, re-notified hourly at
+// most), and recover by ITSELF on the first successful spawn after the cause is
+// fixed. Monitor / promote / reclaim are untouched by the hold — only the fill
+// stage skips.
+const SDK_SPAWN_HOLD_LADDER_MS = [60_000, 300_000, 900_000] as const
+const SDK_SPAWN_NOTIFY_THROTTLE_MS = 60 * 60_000
+
+const holdSdkSpawn = async (engine: ProjectEngine, reason: string, now: number): Promise<void> => {
+  const prev = engine.sdkSpawnHold
+  const failures = (prev?.failures ?? 0) + 1
+  const step =
+    SDK_SPAWN_HOLD_LADDER_MS[Math.min(failures - 1, SDK_SPAWN_HOLD_LADDER_MS.length - 1)]
+  const renotify =
+    !prev || prev.reason !== reason || now - prev.notifiedAt >= SDK_SPAWN_NOTIFY_THROTTLE_MS
+  engine.sdkSpawnHold = {
+    until: now + step,
+    failures,
+    reason,
+    notifiedAt: renotify ? now : (prev as NonNullable<typeof prev>).notifiedAt,
+  }
+  logLine(
+    engine,
+    'warn',
+    `worker spawn failed (SDK) — holding new dispatch for ${Math.round(step / 60_000)}m (attempt ${failures}): ${reason}`,
+  )
+  if (renotify) {
+    // Awaited so a test can read the store right after the pass; the catch keeps
+    // a notification-store fault from ever disturbing the pass itself.
+    await createSwarmFatalNotification({
+      event: 'worker-spawn-failed',
+      detail: `worker を起動できません: ${reason}`,
+      projectPath: engine.path,
+      logHint:
+        'claude へのサインインし直し(または CLI の更新)で直ることが多いです。原因が解消すれば自動で再開します — 再操作は不要。',
+    }).catch(() => {})
+  }
 }
 
 // (isWorkerAlive / defaultLastOutputAt / defaultNudge lived here until 2026-07-30.
@@ -5192,56 +5067,28 @@ export const defaultRecoverWorker = async (
   }
 }
 
-// Control bytes that must never reach the raw PTY write below: taskTitle is
-// card-derived and attacker-reachable in git-shared mode (a teammate writes the
-// card JSON) — the same threat pastePrompt.ts's ESC strip closes for the paste
-// conduit. This write is NOT bracketed-paste (it auto-submits with a trailing
-// CR), so an embedded ESC/CSI here is MORE dangerous, not less: it would reach
-// `claude`'s TUI as a raw, auto-submitted control sequence. \s already folds any
-// embedded \r/\n into a single space below, so only ESC/C0/C1 need stripping here.
-// eslint-disable-next-line no-control-regex
-const ESCALATE_CONTROL_BYTES = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u0080-\u009f]/g
-
-/** ESC + continue-instruction — the stall ESCALATION tried once after the cheap
- *  Enter-nudge budget is spent and the worker is STILL silent. A bare Enter can't
- *  cancel a request `claude` is already mid-generation on; our OWN ESC (chr 27)
- *  interrupts it, and — after {@link STALL_ESCALATE_DELAY_MS} lets that settle —
- *  a short instruction (naming the card so the worker knows which goal to
- *  resume) submits with a trailing CR, mirroring the manually-verified field
- *  recovery (2026-07-02: 3 of 4 wedged Fable/max workers recovered immediately
- *  via this exact sequence). Runs over the raw PTY write path (terminal.ts), NOT
- *  pastePrompt's bracketed-paste conduit, so this function's OWN ESC byte is
- *  never itself stripped by that unrelated sanitizer — but `taskTitle` (untrusted
- *  card data) IS stripped of control bytes here before it reaches the PTY (see
- *  {@link ESCALATE_CONTROL_BYTES}). Returns true only when BOTH writes landed on
- *  a live PTY; `sleep` is DI'd (default: real timer) so a unit test can skip the
- *  real delay. */
-export const defaultEscalate = async (
-  w: WorkerHandle,
-  taskTitle: string,
-  deps?: { write?: typeof writeInput; sleep?: (ms: number) => Promise<void> },
-): Promise<boolean> => {
-  const safeTitle = taskTitle.replace(ESCALATE_CONTROL_BYTES, '').replace(/\s+/g, ' ').trim()
+/** The stall ESCALATION — tried once after the cheap nudge budget is spent and
+ *  the worker is STILL silent: a short instruction (naming the card so the
+ *  worker knows which goal to resume) delivered as a turn via the runtime seam.
+ *
+ *  ⚠ SHRUNK 2026-08-13 with the PTY worker runtime. The PTY arm was an
+ *  ESC → settle ({@link STALL_ESCALATE_DELAY_MS}) → line+CR dance over the raw
+ *  PTY write path, with a control-byte strip (ESCALATE_CONTROL_BYTES) guarding
+ *  the card-derived title on that raw, auto-submitting conduit. An SDK worker
+ *  has no half-typed line to dismiss and no CR to submit — the message IS the
+ *  turn — so the dance and the strip died with the runtime that needed them
+ *  (`say` delivers over the SDK protocol, where a control byte is inert text).
+ *  A legacy PTY roster row reaches `say` on the dead PTY adapter and simply
+ *  reports false — its recovery is the reclaim ladder, not the escalation. */
+export const defaultEscalate = async (w: WorkerHandle, taskTitle: string): Promise<boolean> => {
+  const safeTitle = taskTitle.replace(/\s+/g, ' ').trim()
   const line = `続けてください。${safeTitle} のゴールを続行。完了条件: 実装+テスト緑+コミット。`
-
-  // An SDK worker has no input box to clear and no CR to submit: the message IS
-  // the turn. The ESC + delay + CR dance below exists ONLY because a PTY has a
-  // half-typed line to dismiss first — the mechanism the migration removes.
-  if (workerRuntimeKind(w) === 'sdk') return runtimeOf(w).say(w, line)
-
-  const write = deps?.write ?? writeInput
-  const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
-  const terminalId = workerKey(w)
-  if (!write(terminalId, '\x1b')) return false
-  await sleep(STALL_ESCALATE_DELAY_MS)
-  return write(terminalId, `${line}\r`)
+  return runtimeOf(w).say(w, line)
 }
 
 /** The worker's current recent output, or null — the source classifyOutput
- *  inspects to spot a rate-limit wait / permission prompt. Read-only.
- *  Routed through workerRuntime so the meaning of "recent output" follows HOW
- *  the worker runs; for a PTY worker this is byte-for-byte the previous
- *  behaviour (terminal.ts reconstructs the frame without touching the PTY). */
+ *  inspects for a free-text question. Read-only. Routed through workerRuntime
+ *  so the meaning of "recent output" follows HOW the worker runs. */
 const defaultRecentOutput = (w: WorkerHandle): string | null => runtimeOf(w).recentOutput(w)
 
 // (defaultInstructRework lived here until 2026-08-01. It wrote a one-line 差し戻し
@@ -7041,12 +6888,10 @@ const monitorWorkers = async (
                 ? '実作業が作業上限に到達 — 停止(待ち時間が原因ではない・暴走でもない: ready 済みの成果がブランチにある)'
                 : '差し戻し後の再作業で作業上限に到達 — 停止(暴走ではない: ready 済みの成果がブランチにある)'
             : reason === 'rate-limit'
-              ? 'rate/usage-limited too long — requeued'
-              : reason === 'permission'
-                ? 'permission/trust prompt unresolved — parked'
-                : reason === 'question'
-                  ? 'free-text question unanswered too long — parked'
-                  : 'lost'
+              ? 'quota-stopped — requeued'
+              : reason === 'question'
+                ? 'free-text question unanswered too long — parked'
+                : 'lost'
     let teardown: {
       removed: boolean
       reason?: string
@@ -7327,9 +7172,15 @@ const monitorWorkers = async (
     //     produced up to MAX_TEARDOWN_RETRIES+1 identical bells and OS toasts,
     //     and the later ones quoted 「rate-limit待ち 0分 / 統合待ち 0分」 because
     //     the spans had been deleted: contradictory numbers about one event.
-    //   • the rate-limit arm calls endRateLimitHold first, so the next pass
-    //     re-entered "first sighting" and called markRateLimited again — a real
-    //     write into the quota cooling table — and restarted the grace clock.
+    //   • the rate-limit arm (hold era, pre-0813) called endRateLimitHold
+    //     first, so the next pass re-entered "first sighting" and called
+    //     markRateLimited again — a real write into the quota cooling table —
+    //     and restarted the grace clock. (The hold died 2026-08-13. The
+    //     fail-fast quota arm still marks BEFORE recovering — a refused board
+    //     write must not cost the cooling write, or dispatch relaunches into
+    //     the wall — so a kept-move retry CAN re-mark the table next pass.
+    //     Accepted: markRateLimited re-marking merely refreshes the same
+    //     cooling window, and the kept-move case is the rare one.)
     //   • the question arm deletes questionWaits/questionRaised, so the retry
     //     waited another QUESTION_GRACE_MS.
     // The last two also meant "retry next pass" silently became "retry next grace
@@ -7632,18 +7483,18 @@ const monitorWorkers = async (
     // reclaimed terminalId never carries stale state into a future spawn.
     //
     // The clock is the WORKING clock: repay every span this worker demonstrably
-    // was NOT working before comparing against the ceiling — rate-limit holds
-    // (banked + in flight, capped at HOLD_CREDIT_CAP_MS) AND 統合待ち (idle in
-    // review, pending the commander). Charging non-work to the worker is what
-    // destroyed 47KB of finished work on 2026-07-12 (quota wait) and tore down a
-    // ready worker as "runaway 91m" on 2026-07-18 (integration wait). See
+    // was NOT working before comparing against the ceiling — 統合待ち (idle in
+    // review, pending the commander; the 2026-07-18 "runaway 91m" teardown of a
+    // ready worker). Charging non-work to the worker is the harm. (The
+    // rate-limit hold credit died 2026-08-13 with the 20-minute hold itself —
+    // a quota-stopped worker is requeued, not held against its budget.) See
     // MAX_EXEC_MS / executionCredit.
     //
     // Ending the 統合待ち here is DEFENSIVE and idempotent: the 差し戻し observation
     // above is the semantic seam, but if any transition were ever missed, a stale
     // stamp must not keep growing once the worker is back at work.
     endIntegrationWait(engine, workerKey(w), now)
-    const { heldMs, waitedMs, creditMs } = executionCredit(engine, workerKey(w), now)
+    const { waitedMs, creditMs } = executionCredit(engine, workerKey(w))
     // The RAW wait, before the cap — captured here because the ceiling branch below
     // clears the ledger before it builds its message, and the honest version of
     // "why did this stop" needs both numbers: what was waited and what was forgiven.
@@ -7701,10 +7552,8 @@ const monitorWorkers = async (
     // Credit only what the NEW origin does not already exclude. The 統合待ち bank
     // is closed by the 差し戻し by construction (endIntegrationWait runs there), so
     // every banked minute is pre-rework — subtracting it again would forgive the
-    // same minutes twice and let a re-work run to 2× its budget. Rate-limit holds
-    // can fall on either side, and crediting one that predates the 差し戻し is only
-    // ever lenient (it is capped), so they ride through unchanged.
-    const budgetCreditMs = budgetFromMs === startedMs ? creditMs : heldMs
+    // same minutes twice and let a re-work run to 2× its budget.
+    const budgetCreditMs = budgetFromMs === startedMs ? creditMs : 0
     if (isRunaway(budgetFromMs, now, MAX_EXEC_MS, budgetCreditMs)) {
       // A worker that has ALREADY reached ready is NOT a 暴走: it produced
       // integrable, committed work, so the failure mode this ceiling defends
@@ -7736,15 +7585,10 @@ const monitorWorkers = async (
       // delivered only when it SAW the delivery.
       const reason: WorkerRecoveryReason = w.readyAt ? 'integration-wait' : 'runaway'
       engine.nudges.delete(workerKey(w))
-      engine.rateLimited.delete(workerKey(w))
-      engine.rateLimitHeldMs?.delete(workerKey(w))
-      engine.limitScreen?.delete(workerKey(w))
-      engine.permissionWaits.delete(workerKey(w))
       engine.questionRaised?.delete(workerKey(w))
       engine.questionWaits?.delete(workerKey(w))
       engine.integrationWaitMs?.delete(workerKey(w))
       const ranMin = Math.floor((now - startedMs) / 60_000)
-      const heldMin = Math.floor(heldMs / 60_000)
       const waitedMin = Math.floor(waitedMs / 60_000)
       // The CHARGED time — the number the ceiling actually compared, so 「worked
       // Xm ≥ 90m」 can never be a figure the check did not use. For a re-working
@@ -7762,8 +7606,8 @@ const monitorWorkers = async (
       // figure would dwarf the charged one and read as the reason for the stop.
       const creditNote =
         budgetFromMs === startedMs
-          ? `alive ${ranMin}m; ${heldMin}m rate-limit hold + ${waitedMin}m 統合待ち credited back`
-          : `alive ${ranMin}m; 計上は差し戻し以降のみ(統合待ち ${waitedMin}m は計上対象外) + ${heldMin}m rate-limit hold credited back`
+          ? `alive ${ranMin}m; ${waitedMin}m 統合待ち credited back`
+          : `alive ${ranMin}m; 計上は差し戻し以降のみ(統合待ち ${waitedMin}m は計上対象外)`
       // SAY ONLY WHAT ACTUALLY HAPPENED — the single rule this whole card exists to
       // enforce. A ready worker reaches this check in TWO very different ways, and
       // `readyAt` cannot tell them apart because it only means "delivered once":
@@ -7861,9 +7705,9 @@ const monitorWorkers = async (
         execTimeoutShape: reason === 'integration-wait' ? shape : undefined,
         detail:
           reason !== 'integration-wait'
-            ? `ワーカーが実行時間上限 ${limitMin}分 を超過（実作業 ${workedMin}分・通算 ${ranMin}分／うち rate-limit 待ち ${heldMin}分・統合待ち ${waitedMin}分は控除済み）→ 強制回収。未コミットの作業はブランチに WIP コミットで保全されます（未検証）。`
+            ? `ワーカーが実行時間上限 ${limitMin}分 を超過（実作業 ${workedMin}分・通算 ${ranMin}分／うち統合待ち ${waitedMin}分は控除済み）→ 強制回収。未コミットの作業はブランチに WIP コミットで保全されます（未検証）。`
             : shape === 'rework'
-              ? `一度 ready に到達したワーカーが、差し戻し後の再作業で作業上限 ${limitMin}分 に到達（実作業 ${workedMin}分・通算 ${ranMin}分／うち rate-limit 待ち ${heldMin}分・統合待ち ${waitedMin}分は控除済み）→ 停止。暴走ではありません（統合可能な成果を一度出しています）。カードは review へ戻します。ただし再作業は途中で打ち切られ、未コミット分は WIP コミットで保全されるだけなので、ブランチ ${w.branch} の先端は未検証です — そのまま統合せず、まず差分を確認してください。`
+              ? `一度 ready に到達したワーカーが、差し戻し後の再作業で作業上限 ${limitMin}分 に到達（実作業 ${workedMin}分・通算 ${ranMin}分／うち統合待ち ${waitedMin}分は控除済み）→ 停止。暴走ではありません（統合可能な成果を一度出しています）。カードは review へ戻します。ただし再作業は途中で打ち切られ、未コミット分は WIP コミットで保全されるだけなので、ブランチ ${w.branch} の先端は未検証です — そのまま統合せず、まず差分を確認してください。`
               : shape === 'capped-wait'
                 ? `一度 ready に到達したワーカーが、統合待ちが長引いたため停止しました（統合待ち ${rawWaitedMin}分 のうち控除できるのは上限 ${capMin}分 まで。超過分が計上され、判定時間 ${workedMin}分 が上限 ${limitMin}分 に達しました／通算 ${ranMin}分）。上限に達した原因は待ち時間であって作業ではありません — このワーカーの再作業は ${reworkedMin}分 です。暴走でもありません。ブランチ ${w.branch} の先端は ready 到達時のままなので、そのまま統合を判断できます（停止時に未コミットの変更があった場合のみ WIP コミットが 1 つ乗ります — engine log の WIP 行で分かります）。カードは review に残ります。`
                 : `一度 ready に到達したワーカーが、作業上限 ${limitMin}分 に到達したため停止しました（実作業 ${workedMin}分・通算 ${ranMin}分／統合待ち ${rawWaitedMin}分 は全額控除済み・再作業 ${reworkedMin}分）。待ち時間が原因ではありません — 上限に達したのは実作業です。暴走でもありません（統合可能な成果を一度出しています）。カードは review へ移します。ブランチ ${w.branch} の先端は打ち切り時点のもので未検証です — そのまま統合せず、まず差分を確認してください。`,
@@ -7908,65 +7752,33 @@ const monitorWorkers = async (
     }
     const hbMs = heartbeat?.at ? Date.parse(heartbeat.at) : Number.NaN
 
-    // ── LIMIT-SCREEN CLOCK (quota-detection fast path — the 21-minute lag fix) ──
-    // Sample the screen once the PTY output has merely LULLED (45s), not only
-    // after the full 10-min silence gate, and remember WHEN a rate-limit notice
-    // first appeared (engine.limitScreen). Two properties fall out:
-    //  • Decorative repaints can't defer detection: while the notice HOLDS the
-    //    screen, later PTY output (a "Plugin updated" toast, a status-line
-    //    repaint) is chrome ON the limit screen, not work — so the stall clock
-    //    below is clamped to the notice's onset. If real work resumes, either a
-    //    heartbeat lands (activity by the other channel) or new output scrolls
-    //    the notice off screen (a sampled screen reads normal ⇒ clock cleared).
-    //  • An at-spawn rejection is confirmed in ~1.5 min (the early path below)
-    //    instead of 10+, so the tier cools while its slots can still be re-aimed.
-    // A busy worker (output flowing, nothing tracked) is still never scraped —
-    // the lull gate keeps the per-pass TUI-scrape cost where it was; a tracked
-    // worker is re-sampled every pass so a lifted limit is noticed promptly.
-    engine.limitScreen ??= new Map() // lazy backfill (older-build engine / test literal)
-    const outQuietMs =
-      now - Math.max(lastOut ?? Number.NEGATIVE_INFINITY, Number.isFinite(startedMs) ? startedMs : 0)
-    const sampleScreen =
-      outQuietMs >= RATE_LIMIT_SCRAPE_QUIET_MS ||
-      engine.limitScreen.has(workerKey(w)) ||
-      engine.rateLimited.has(workerKey(w))
+    // ── OUTPUT + QUOTA VERDICT (SDK-native since 2026-08-13) ──────────────────
+    // The PTY era sampled a rendered screen behind a 45s lull gate, tracked how
+    // long a limit notice HELD the screen (engine.limitScreen), clamped the
+    // stall clock to that onset, and early-confirmed at-spawn rejections — all
+    // workarounds for reading a repainting TUI picture. An SDK worker's recent
+    // output is a cheap ring-buffer read and its quota verdict is the pool's
+    // own event, so the whole scrape apparatus is gone: read the tail every
+    // pass, ask the pool.
     let screen: string | null = null
-    if (sampleScreen) {
-      try {
-        screen = deps.recentOutput(w)
-      } catch {
-        /* unknown → classifyOutput('normal') → ordinary stall handling below */
-      }
+    try {
+      screen = deps.recentOutput(w)
+    } catch {
+      /* unknown → classifyOutput('normal') → ordinary stall handling below */
     }
-    // The runtime's OWN quota verdict outranks the wording matcher: an SDK
-    // session parked on the SDK's exported refusal vocabulary is quota-blocked
-    // even when its sentence matches none of our patterns ("You're out of usage
-    // credits…" matched nothing, so the tier never cooled and dispatch kept
-    // launching into it — overnight review 2026-08-04). Text remains the only
-    // evidence for a PTY, whose arm reports false.
-    let output = classifyOutput(screen, workerRuntimeKind(w))
-    if (output !== 'rate-limited') {
-      try {
-        if (deps.quotaBlocked?.(w) ?? runtimeOf(w).quotaBlocked(w)) output = 'rate-limited'
-      } catch {
-        /* pool read failed → keep the text verdict */
-      }
+    // The runtime's OWN quota verdict — the ONLY rate-limit trigger since the
+    // wording matcher died with the PTY sensor layer. An SDK session parked on
+    // the SDK's exported refusal vocabulary is quota-blocked even when its
+    // sentence matches none of our old patterns ("You're out of usage credits…"
+    // matched nothing, so the tier never cooled and dispatch kept launching
+    // into it — overnight review 2026-08-04). A legacy PTY roster row's arm
+    // reports constant false (its runtime is dead; it can only be torn down).
+    let output: 'rate-limited' | 'question' | 'normal' = classifyOutput(screen, workerRuntimeKind(w))
+    try {
+      if (deps.quotaBlocked?.(w) ?? runtimeOf(w).quotaBlocked(w)) output = 'rate-limited'
+    } catch {
+      /* pool read failed → keep the text verdict */
     }
-    if (sampleScreen) {
-      if (output === 'rate-limited') {
-        if (!engine.limitScreen.has(workerKey(w))) engine.limitScreen.set(workerKey(w), now)
-      } else {
-        engine.limitScreen.delete(workerKey(w))
-      }
-    }
-    const limitSince = engine.limitScreen.get(workerKey(w)) ?? null
-
-    // Clamp the stall clock's output channel to the notice's onset: output that
-    // lands WHILE the limit notice holds the screen is a decorative repaint, not
-    // activity (the measured failure: one toast pushed detection back 6m40s).
-    // Heartbeats are NOT clamped — a worker that beats is working, whatever its
-    // screen shows, and stays out of every branch below via silentMs.
-    const stallLastOut = limitSince !== null && lastOut !== null && lastOut > limitSince ? limitSince : lastOut
     const stallParams = {
       stallMs: STALL_SILENCE_MS,
       cooldownMs: STALL_NUDGE_COOLDOWN_MS,
@@ -7988,7 +7800,7 @@ const monitorWorkers = async (
     const cheapStall = classifyStall(
       {
         heartbeatAtMs: Number.isFinite(hbMs) ? hbMs : null,
-        lastOutputAtMs: stallLastOut,
+        lastOutputAtMs: lastOut,
         startedAtMs: Number.isFinite(startedMs) ? startedMs : 0,
         nudge: engine.nudges.get(workerKey(w)),
       },
@@ -8053,7 +7865,7 @@ const monitorWorkers = async (
         stall = classifyStall(
           {
             heartbeatAtMs: Number.isFinite(hbMs) ? hbMs : null,
-            lastOutputAtMs: stallLastOut,
+            lastOutputAtMs: lastOut,
             startedAtMs: Number.isFinite(startedMs) ? startedMs : 0,
             agentActivityAtMs: agentAt,
             bgTaskAliveAtMs: bgAliveAt,
@@ -8065,158 +7877,64 @@ const monitorWorkers = async (
       }
     }
 
-    // EARLY CONFIRMATION — a worker REJECTED AT SPAWN (the 2026-07-09 shape:
-    // "You've reached your Fable 5 limit." four seconds in) must not wait out the
-    // 10-min silence gate built for hung workers. Confirm rate-limited once the
-    // notice (a) appeared within the spawn onset window, (b) has held the screen
-    // for the confirm window, (c) with zero commits and (d) no heartbeat since
-    // the notice — i.e. the worker demonstrably never started working. A worker
-    // merely EDITING limit wording fails (a): that happens minutes into a
-    // session, past the onset window, and takes the ordinary clamped gate.
-    const earlyLimitConfirmed =
-      limitSince !== null &&
-      Number.isFinite(startedMs) &&
-      limitSince - startedMs <= RATE_LIMIT_EARLY_ONSET_MS &&
-      now - limitSince >= RATE_LIMIT_EARLY_CONFIRM_MS &&
-      // (c) DEMONSTRABLY zero commits — an unreadable count is not a zero
-      // (2026-08-04). `commitsAhead` is 0 both for an empty branch and for a
-      // branch git could not measure, and this condition's whole claim is "the
-      // worker never started working". Reading a failed measurement as proof of
-      // that is the same conflation the recovery path was fixed for; here it only
-      // accelerates a hold, so the direction is harmless — but the claim should
-      // still rest on evidence.
-      commitsAhead === 0 &&
-      !commitsUnknown &&
-      (!Number.isFinite(hbMs) || hbMs <= limitSince)
-
-    // RATE-LIMIT WAIT — waiting on a usage/quota/overload limit, NOT wedged.
-    // Enter can't lift a limit and reclaiming throws away committed work +
-    // re-dispatches into the same wall, so the engine does NEITHER: it HOLDS the
-    // worker (dropping any stall-nudge budget) and only requeues to 'todo' once
-    // STILL limited past RATE_LIMIT_GRACE_MS (slot recovery; the branch keeps
-    // its commits, a later attempt retries when the limit resets). `since` is
-    // stamped once and persists across passes. Entered by EITHER gate:
-    //  • the ordinary stall gate (silentMs ≥ STALL_SILENCE_MS) — silentMs is
-    //    computed on the CLAMPED output channel, so a limit screen that a toast
-    //    keeps "refreshing" still crosses it in real time; or
-    //  • the early at-spawn confirmation (earlyLimitConfirmed) — an instantly-
-    //    rejected worker is confirmed in ~1.5 min, not 10+.
-    // The false-kill contract holds: a productive worker that merely PRINTS
-    // limit-like text is streaming output ⇒ not silent, and (past the onset
-    // window / with commits or heartbeats) not early-confirmed ⇒ never enters;
-    // once its screen stops reading rate-limited the clamp dissolves with the
-    // clock, and the hold clears below the moment a sampled screen reads normal.
-    if (output === 'rate-limited' && (stall.silentMs >= STALL_SILENCE_MS || earlyLimitConfirmed)) {
-      engine.permissionWaits.delete(workerKey(w))
+    // QUOTA STOP (fail-fast, 2026-08-13 — replaces the PTY era's 20-minute
+    // in-place HOLD). The pool's own verdict said this worker is parked on a
+    // usage/quota wall; a parked SDK worker will not start a new turn by
+    // itself, so waiting in place buys nothing. One debounce window separates
+    // "parked on the wall" from "echoed wall-like text mid-work" (the verdict
+    // decays on the next real event — see QUOTA_STOP_DEBOUNCE_MS), and then:
+    // cool the LAUNCH TIER in the quota table (so dispatch drops a tier — or
+    // parks when every tier is dry — instead of re-spawning into the same
+    // wall), requeue the card to 'todo' (branch work preserved via the WIP
+    // commit in teardown; recoveryColumn's rate-limit arm never burns the
+    // retry budget), and free the worker. The retry pace is the cooling span:
+    // when the tier warms (parsed reset time / A5 / RATE_LIMIT_GRACE_MS), the
+    // card redispatches by itself — no human re-arm.
+    if (output === 'rate-limited' && cheapStall.silentMs >= QUOTA_STOP_DEBOUNCE_MS) {
       engine.nudges.delete(workerKey(w))
-      const rl = engine.rateLimited.get(workerKey(w))
-      if (!rl) {
-        // `since` — the CONFIRMED-hold stamp: drives the RATE_LIMIT_GRACE_MS
-        // requeue clock (unchanged).
-        // `holdSince` — when the limit notice ACTUALLY took the screen: the hold
-        // BEGAN there, and the execution-time credit must repay the whole wait,
-        // not just its confirmed tail (confirmation can take up to
-        // STALL_SILENCE_MS). Falls back to `now` when the screen clock is unset.
-        engine.rateLimited.set(workerKey(w), { since: now, holdSince: limitSince ?? now })
-        // QUOTA SENSOR (the one production write into swarmQuota's cooling
-        // table): attribute this sighting to the tier the worker launched on,
-        // so dispatch drops a tier — or parks when every tier is dry — instead
-        // of re-spawning into the same wall. Reset time resolves worker screen
-        // → A5 cache → RATE_LIMIT_GRACE_MS (resolveCoolingUntil). A worker
-        // with no recorded/on-ladder model is held exactly as before — it
-        // marks nothing (never cool a tier by guess).
-        const tier = MODEL_TIER_LADDER.find((t) => t === w.model)
-        let cooling = ''
-        if (tier) {
-          const until = markRateLimited(tier, {
-            ptyText: screen,
-            a5ResetsAt: a5CoolingHint(),
-            graceMs: RATE_LIMIT_GRACE_MS,
-            now,
-          })
-          cooling = ` · tier ${tier} cooling until ${new Date(until).toISOString()}`
-        }
-        logLine(
-          engine,
-          'warn',
-          `worker rate/usage-limited — holding (no nudge; requeue after ${Math.floor(RATE_LIMIT_GRACE_MS / 60_000)}m)${cooling}: ${w.branch} (${shorten(w.taskTitle)})`,
-        )
-      } else if (now - rl.since >= RATE_LIMIT_GRACE_MS && outQuietMs >= RATE_LIMIT_SCRAPE_QUIET_MS) {
-        // Requeue only while the RAW output channel is also quiet: a worker whose
-        // screen still shows the (scrolled-back) notice but is ACTIVELY streaming
-        // again is plainly working — never reclaim it on a stale sighting. The
-        // decorative-toast case stays covered: one repaint delays the requeue by
-        // at most one scrape-quiet window, it can't cancel it.
-        endRateLimitHold(engine, workerKey(w), now)
-        if (await recoverLost(w, card, { alive, commitsAhead, commitsUnknown, heartbeat }, 'rate-limit')) next.push(w)
-        continue
+      // QUOTA SENSOR (the one production write into swarmQuota's cooling
+      // table): attribute this sighting to the tier the worker launched on.
+      // Reset time resolves refusal text → A5 cache → RATE_LIMIT_GRACE_MS
+      // (resolveCoolingUntil). A worker with no recorded/on-ladder model marks
+      // nothing (never cool a tier by guess) — its card still requeues.
+      const tier = MODEL_TIER_LADDER.find((t) => t === w.model)
+      let cooling = ''
+      if (tier) {
+        const until = markRateLimited(tier, {
+          ptyText: screen,
+          a5ResetsAt: a5CoolingHint(),
+          graceMs: RATE_LIMIT_GRACE_MS,
+          now,
+        })
+        cooling = ` · tier ${tier} cooling until ${new Date(until).toISOString()}`
       }
-      next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
+      logLine(
+        engine,
+        'warn',
+        `worker quota-stopped — cooling the tier and requeueing the card (fail-fast; retry rides the cooling clock)${cooling}: ${w.branch} (${shorten(w.taskTitle)})`,
+      )
+      if (await recoverLost(w, card, { alive, commitsAhead, commitsUnknown, heartbeat }, 'rate-limit')) next.push(w)
       continue
     }
 
-    // Only an ALREADY-SILENT worker (the stall detector's own threshold) is judged
-    // for a permission / question WAIT. This is the false-kill fix: a productive
-    // worker that merely PRINTS prompt-like text (a plan, a diff, this very code)
-    // is still streaming output ⇒ silentMs < STALL_SILENCE_MS ⇒ not silent ⇒
-    // never classified, never Enter-nudged, never reclaimed. (`screen`/`output`
-    // were sampled above — a worker this silent always crossed the scrape-quiet
-    // lull, so the sample is never missing here.)
+    // Only an ALREADY-SILENT worker is judged for a question WAIT. This is the
+    // false-kill fix: a productive worker that merely PRINTS question-like text
+    // is still streaming output ⇒ not silent ⇒ never classified, never held.
     //
-    // Gated on `cheapStall`, NOT the background-task-aware `stall`: these two arms are
-    // about an INTERVENTION the worker needs (take the trust dialog's default / put the
-    // question in front of the owner), not about whether it is alive. A task running in
-    // the background answers the liveness question and nothing else — muting the owner's
-    // inbox behind it would be a new bug wearing this fix's clothes.
+    // Gated on `cheapStall`, NOT the background-task-aware `stall`: this arm is
+    // about an INTERVENTION the worker needs (put the question in front of the
+    // owner), not about whether it is alive. A task running in the background
+    // answers the liveness question and nothing else — muting the owner's
+    // inbox behind it would be a new bug wearing that fix's clothes.
     //
-    // THE SDK-QUESTION EXCEPTION (2026-08-03). The 10-minute threshold is the
-    // PTY's proof of idleness; an SDK worker whose output CLASSIFIED as
-    // 'question' has already proven it the strong way (the detector requires
-    // the pool's own turn-ended head), so it enters after only the short
-    // debounce. Question-shaped, sdk-shaped, and nothing else — a PTY worker,
-    // and every other SDK state, waits the full ten minutes exactly as before.
-    // Inside the block this admission can only reach the question arm: the
-    // permission arm tests `output === 'permission-wait'`, which the admission
-    // clause has already excluded.
-    if (
-      cheapStall.silentMs >= STALL_SILENCE_MS ||
-      (output === 'question' &&
-        workerRuntimeKind(w) === 'sdk' &&
-        cheapStall.silentMs >= SDK_QUESTION_SILENCE_MS)
-    ) {
-      // PERMISSION-WAIT — silent at a trust/permission prompt that slipped past
-      // bypass (--dangerously-skip-permissions should suppress every prompt; this
-      // is the backstop). AUTO-ACCEPT once (Enter takes the trust dialog's default
-      // 'Yes'); still prompting past PERMISSION_WAIT_GRACE_MS ⇒ bypass is genuinely
-      // broken → park in 'blocked' (NOT 'todo' — a retry hits the same broken bypass
-      // and loops). commitsAhead===0 gate: a worker that already produced integrable
-      // work is not stuck at a boot dialog, so it takes the ordinary stall path.
-      if (output === 'permission-wait' && commitsAhead === 0) {
-        endRateLimitHold(engine, workerKey(w), now) // hold (if any) ended — bank it
-        engine.nudges.delete(workerKey(w))
-        const pw = engine.permissionWaits.get(workerKey(w))
-        if (!pw) {
-          let sent = false
-          try {
-            sent = deps.nudge(w)
-          } catch {
-            sent = false
-          }
-          engine.permissionWaits.set(workerKey(w), { since: now, accepted: sent })
-          logLine(
-            engine,
-            'warn',
-            `worker permission/trust prompt — auto-accepted (Enter)${sent ? '' : ' · not delivered'}: ${w.branch} (${shorten(w.taskTitle)})`,
-          )
-        } else if (now - pw.since >= PERMISSION_WAIT_GRACE_MS) {
-          engine.permissionWaits.delete(workerKey(w))
-          if (await recoverLost(w, card, { alive, commitsAhead, commitsUnknown, heartbeat }, 'permission')) next.push(w)
-          continue
-        }
-        next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
-        continue
-      }
-
+    // The threshold is the SDK's short debounce (SDK_QUESTION_SILENCE_MS): a
+    // 'question' classification already required the pool's own turn-ended
+    // head, which is authoritative idleness — no 10-minute PTY-style proof
+    // needed. (Only the SDK question detector exists since 2026-08-13; a
+    // legacy PTY roster row can never classify 'question'. The PERMISSION-WAIT
+    // arm that lived here died outright — the trust dialog is a TUI frame an
+    // SDK session can never render.)
+    if (output === 'question' && cheapStall.silentMs >= SDK_QUESTION_SILENCE_MS) {
       // FREE-TEXT QUESTION (C3) — silent because claude ASKED THE OWNER
       // something and idles at an empty input box (the state the A1 sandbox
       // leaves once permission menus are gone). Never nudge — a bare Enter is
@@ -8237,9 +7955,7 @@ const monitorWorkers = async (
       // MF2: BOUND the hold (below) — held past QUESTION_GRACE_MS ⇒ PARK in
       // 'blocked'. An unanswered real question, or a courtesy/rhetorical "?"
       // false-positive, must not squat the slot until the 90-min runaway ceiling.
-      if (output === 'question') {
-        endRateLimitHold(engine, workerKey(w), now) // hold (if any) ended — bank it
-        engine.permissionWaits.delete(workerKey(w))
+      {
         engine.nudges.delete(workerKey(w))
         // Lazy backfill (beside ensureEngine's): a plain engine literal from an
         // older build / a test fixture must still get once-per-question raising.
@@ -8312,19 +8028,11 @@ const monitorWorkers = async (
       }
     }
 
-    // Reached here ⇒ NOT silent, OR silent with a 'normal' screen ⇒ neither a
-    // rate-limit nor a permission wait applies. Drop any stale waiting-state (the
-    // worker recovered, or was never in one) and take the ordinary STALL path: a
-    // silent worker is NUDGED (Enter) up to STALL_MAX_NUDGES then RECLAIMED
-    // (teardown + re-home) like a crash; a still-active one (action 'none') is
-    // simply kept. Unchanged from the pre-card stall self-healing (c9fe657).
-    // The worker's screen reads NORMAL (or it never stopped working) ⇒ any
-    // rate-limit hold it was in has ENDED. Bank that span into the execution-time
-    // credit ledger — THIS is the release path a worker takes when a quota wait
-    // lifts and it resumes, and the one whose span the runaway check must repay
-    // (2026-07-12: 20m of wait charged to a worker that then worked 84m).
-    endRateLimitHold(engine, workerKey(w), now)
-    engine.permissionWaits.delete(workerKey(w))
+    // Reached here ⇒ NOT silent, OR silent without a question ⇒ no wait arm
+    // applies. Drop any stale question-state (the worker recovered, or was
+    // never in one) and take the ordinary STALL path: a silent worker is NUDGED
+    // up to STALL_MAX_NUDGES then RECLAIMED (teardown + re-home) like a crash;
+    // a still-active one (action 'none') is simply kept.
     engine.questionRaised?.delete(workerKey(w))
     engine.questionWaits?.delete(workerKey(w))
     if (stall.action === 'reclaim') {
@@ -8349,7 +8057,7 @@ const monitorWorkers = async (
       logLine(
         engine,
         'warn',
-        `worker stalled ${Math.floor(stall.silentMs / 60_000)}m — nudge budget spent, escalating (ESC+continue)` +
+        `worker stalled ${Math.floor(stall.silentMs / 60_000)}m — nudge budget spent, escalating (say: continue-or-report)` +
           `${sent ? '' : ' · not delivered'}: ${w.branch} (${shorten(w.taskTitle)})`,
         'stall',
       )
@@ -8368,7 +8076,7 @@ const monitorWorkers = async (
       logLine(
         engine,
         'warn',
-        `worker stalled ${Math.floor(stall.silentMs / 60_000)}m — nudged (Enter ${count}/${STALL_MAX_NUDGES})` +
+        `worker stalled ${Math.floor(stall.silentMs / 60_000)}m — nudged (${count}/${STALL_MAX_NUDGES})` +
           `${sent ? '' : ' · not delivered'}: ${w.branch} (${shorten(w.taskTitle)})`,
         'stall',
       )
@@ -8408,17 +8116,6 @@ const monitorWorkers = async (
   for (const id of Array.from(engine.nudges.keys())) {
     if (!liveTerminalIds.has(id)) engine.nudges.delete(id)
   }
-  // A terminalId that left the live set is GONE (reclaimed / exited) — drop its
-  // hold state outright. Deleting rather than banking is correct here: there is no
-  // execution clock left to credit, and terminalIds are never reused.
-  for (const id of Array.from(engine.rateLimited.keys())) {
-    if (!liveTerminalIds.has(id)) engine.rateLimited.delete(id)
-  }
-  if (engine.rateLimitHeldMs) {
-    for (const id of Array.from(engine.rateLimitHeldMs.keys())) {
-      if (!liveTerminalIds.has(id)) engine.rateLimitHeldMs.delete(id)
-    }
-  }
   if (engine.integrationWaitSince) {
     for (const id of Array.from(engine.integrationWaitSince.keys())) {
       if (!liveTerminalIds.has(id)) engine.integrationWaitSince.delete(id)
@@ -8428,14 +8125,6 @@ const monitorWorkers = async (
     for (const id of Array.from(engine.integrationWaitMs.keys())) {
       if (!liveTerminalIds.has(id)) engine.integrationWaitMs.delete(id)
     }
-  }
-  if (engine.limitScreen) {
-    for (const id of Array.from(engine.limitScreen.keys())) {
-      if (!liveTerminalIds.has(id)) engine.limitScreen.delete(id)
-    }
-  }
-  for (const id of Array.from(engine.permissionWaits.keys())) {
-    if (!liveTerminalIds.has(id)) engine.permissionWaits.delete(id)
   }
   if (engine.questionRaised) {
     for (const id of Array.from(engine.questionRaised.keys())) {
@@ -8522,7 +8211,6 @@ const rosterEntryOf = (
 ): RosterEntry => {
   const spawnAtMs = Date.parse(w.startedAt)
   const known = Number.isFinite(spawnAtMs) && spawnAtMs > 0
-  const heldMs = Math.max(0, engine.rateLimitHeldMs?.get(workerKey(w)) ?? 0)
   const waitedMs = Math.max(0, engine.integrationWaitMs?.get(workerKey(w)) ?? 0)
   // The ceiling's origin, re-derived (monitorWorkers :5918-5924): a 差し戻し moves it,
   // and ONLY when delivery corroborates it (`readyAt` — the same anti-fail-open gate,
@@ -8531,10 +8219,10 @@ const rosterEntryOf = (
   const reworkFromMs = w.readyAt && w.reworkAt ? Date.parse(w.reworkAt) : Number.NaN
   const budgetFromMs = known && Number.isFinite(reworkFromMs) ? Math.max(spawnAtMs, reworkFromMs) : spawnAtMs
   // Credit only what the NEW origin does not already exclude — the ceiling's own
-  // split (:5931). The 統合待ち bank is closed BY the 差し戻し, so every banked minute
-  // is pre-rework: subtracting it again would forgive the same minutes twice and let
+  // split. The 統合待ち bank is closed BY the 差し戻し, so every banked minute is
+  // pre-rework: subtracting it again would forgive the same minutes twice and let
   // a re-work bank a ledger that runs to 2× its budget.
-  const idle = budgetFromMs === spawnAtMs ? heldMs + waitedMs : heldMs
+  const idle = budgetFromMs === spawnAtMs ? waitedMs : 0
   return {
     sessionId: w.sessionId ?? '',
     taskId: w.taskId,
@@ -8762,10 +8450,17 @@ export const runDispatchPass = async (
       'routine',
     )
   }
+  // SDK spawn-failure backoff (2026-08-13): while the hold is live, attempt NO
+  // new spawns this pass — retrying a broken SDK environment every 3s only burns
+  // worktree churn. Deliberately silent here (the hold was journalled + belled
+  // when it was set); monitor/promote/reclaim above are untouched. The first
+  // pass after `until` tries again; the first SUCCESS clears the hold.
+  const heldSlots =
+    engine.sdkSpawnHold && now < engine.sdkSpawnHold.until ? 0 : slots
   // Picking with cap `slots` is exactly the first `slots` of the MAX-capped run
   // (selectDispatch's greedy gate state is prefix-stable), so slice — one probe, no
   // redundant second pass.
-  const picks = dispatchable.slice(0, slots)
+  const picks = dispatchable.slice(0, heldSlots)
 
   // RESERVE EVERY pick BEFORE the FIRST spawn. Reserving inside the loop instead
   // (one card at a time) left picks[1..] unreserved for the whole of picks[0]'s
@@ -8873,15 +8568,27 @@ export const runDispatchPass = async (
           notes,
           hint: title,
           priorFailure,
-          liveWorkers: engine.workers,
           ...(reuse ? { worktree: reuse.worktree } : {}),
         })
       } catch (e) {
         logLine(engine, 'error', `dispatch failed: ${shorten(title)} — ${errMsg(e)}`, 'dispatch')
+        // SDK-only workers (2026-08-13): an environment that cannot start an SDK
+        // session will not heal in 3 seconds — back off + tell the owner, and
+        // stop burning worktree-rollback churn on every tick. Other spawn
+        // failures (a transient git hiccup) keep the fast retry they always had.
+        if (e instanceof SdkWorkerUnavailableError) {
+          await holdSdkSpawn(engine, errMsg(e), now)
+          break
+        }
         continue
       }
       if (priorFailure) engine.reworkReasons.delete(card.id) // consumed — injected into this /order
-      noteRuntimeFallback(engine, spawn, title)
+      // Dispatch works again — retire any spawn-failure hold (self-recovery: the
+      // owner fixed the cause, e.g. signed back in; nothing to re-arm by hand).
+      if (engine.sdkSpawnHold) {
+        engine.sdkSpawnHold = undefined
+        logLine(engine, 'info', 'SDK spawn recovered — dispatch resumed', 'routine')
+      }
 
       // Count it BEFORE the column move: the PTY is already live, so even if the
       // move fails the worker must stay counted (the dispatchedIds guard then
@@ -9677,7 +9384,10 @@ export const detectAnomalies = async (
     // stale' ("no heartbeat for N min", i.e. likely hung) would be misleading
     // noise. Skip it here; its dedicated log line already says why it is paused.
     // (Card 4880e9c6 — keep the anomaly view honest about WAIT vs HANG.)
-    if (engine.rateLimited.has(workerKey(w)) || engine.permissionWaits.has(workerKey(w))) continue
+    // (The pre-0813 skip for held workers — engine.rateLimited /
+    // engine.permissionWaits — is gone with the holds themselves: a
+    // quota-stopped worker is requeued within ~a minute, so there is no
+    // long-lived held state left to suppress anomalies for.)
     // Silence across BOTH channels (heartbeat + PTY output) — the same activity
     // notion the stall monitor uses, so a worker streaming output (alive to the
     // engine) is never falsely flagged stale here.
@@ -10313,6 +10023,12 @@ export const startOrchestrator = async (
     // back to disk by setSelfSupply and would round-trip to the same value).
     if (!engine.selfSupply.enabled && priorIntent.selfSupply) engine.selfSupply.enabled = true
     engine.running = true
+    // An explicit engine (re)start is the owner's hand on the machine: clear a
+    // standing SDK spawn hold so the first fill attempts immediately instead of
+    // sitting out the remainder of a rung (up to 15m) armed before the owner
+    // fixed the cause. Wrong at most once — a still-broken machine re-arms on
+    // that first attempt. (Adversarial review 2026-08-13.)
+    engine.sdkSpawnHold = undefined
     // Reset the integration throttle so the first pass after a (re)start refreshes
     // the readiness display immediately — without this, a stop→start within
     // INTEGRATE_TICK_MS would leave the "統合可" snapshot stale for up to 15s.
@@ -11171,15 +10887,55 @@ const adoptResumeCandidates = async (
         hint: title,
         worktree: entry.worktree,
         resumeSessionId: entry.sessionId,
-        liveWorkers: engine.workers,
       })
     } catch (e) {
-      // A refused/failed resume spawn (preflight, guard wiring, a gone worktree) is
-      // NOT fatal — the card falls to the existing crash reclaim, same as today.
-      logLine(engine, 'warn', `resume spawn failed → reclaim: ${shorten(title || entry.branch)} — ${errMsg(e)}`, 'dispatch')
+      // FAIL-FAST FOLLOW-THROUGH (2026-08-13, adversarial review). This catch
+      // used to say "the card falls to the existing crash reclaim" — which was
+      // false: a non-adopted candidate is never pushed to engine.workers, the
+      // orphan-doing anomaly SKIPS it (its worktree still exists), and the
+      // first syncRoster wipes its roster row. The card sat in 'doing' forever,
+      // silently. In the fallback era this catch was nearly unreachable (spawn
+      // degraded to a PTY instead of throwing); SDK-only made it the NORMAL
+      // outcome of the exact upgrade scenario this path exists for — an update
+      // restart on a machine whose CLI is signed out fails EVERY candidate.
+      //
+      // So the card goes back to 'todo': the ordinary dispatch path owns the
+      // retry, and that path carries the hold ladder + worker-spawn-failed
+      // bell + auto-recovery. The committed work stays on the branch (a resume
+      // worktree is never rolled back); the fresh dispatch will mint a new
+      // branch over the card — the same accepted trade as the quota requeue
+      // (recoveryColumn's KNOWN GAP note), and the commander can still adopt
+      // the old branch by hand.
+      logLine(engine, 'warn', `resume spawn failed → requeue to todo: ${shorten(title || entry.branch)} — ${errMsg(e)}`, 'dispatch')
+      try {
+        await deps.recoverCard(engine.path, entry.taskId, 'todo')
+      } catch {
+        /* board write refused — the move-stuck machinery is the surface for that */
+      }
+      if (e instanceof SdkWorkerUnavailableError) {
+        // Machine-level: every later candidate fails the same way. Arm the
+        // dispatch hold NOW (bell + backoff — the fill stage would otherwise
+        // only learn this on its first spawn attempt) and requeue the rest
+        // without burning a spawn per row.
+        await holdSdkSpawn(engine, errMsg(e), now)
+        for (const rest of candidates.slice(candidates.indexOf(entry) + 1)) {
+          if (!rest.sessionId) continue
+          logLine(
+            engine,
+            'warn',
+            `resume skipped (SDK unavailable) → requeue to todo: ${shorten(titleById.get(rest.taskId) || rest.branch)}`,
+            'dispatch',
+          )
+          try {
+            await deps.recoverCard(engine.path, rest.taskId, 'todo')
+          } catch {
+            /* same best-effort rule as above */
+          }
+        }
+        break
+      }
       continue
     }
-    noteRuntimeFallback(engine, spawn, title || entry.branch)
     engine.workers.push({
       terminalId: spawn.terminalId,
       branch: spawn.branch,

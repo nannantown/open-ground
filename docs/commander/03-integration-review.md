@@ -161,9 +161,12 @@ engine は `globalThis` 上のプロジェクト別シングルトンで、**全
 > つまり**設定を触っていない機体の司令官は SDK 卓**で、
 > 本節を「既定は PTY」の前提で読んではいけない。
 > **worker ダイヤルも同日に同極性へ揃った**(`store.getWorkerRuntimeDial` — 0801 の反転が
-> reader に届いておらず、0.11.47 は盤面 ON のまま PTY worker を立てていた。02 章 §2.4-0)。
-> **Swarm パネルが描く値は `GET /api/settings` の `runtimeDialsEffective`** = これらの
-> reader から算出したサーバの実効値で、パネル側の再導出は廃止した(0802)。
+> reader に届いておらず、0.11.47 は盤面 ON のまま PTY worker を立てていた。02 章 §2.4-0)
+> **— が、その worker ダイヤルは 2026-08-13 に削除された**(worker は SDK 専用・fail-fast。
+> 02 章 §2.4-0 改訂版)。残るダイヤルは本節の司令官1本。
+> **Swarm パネルが描く値は `GET /api/settings` の `runtimeDialsEffective`**(0813 から
+> `{manager}` のみ)= この reader から算出したサーバの実効値で、パネル側の再導出は
+> 廃止した(0802)。
 >
 > **⚠ ただし「書かれていない」と「読めない」は別物 —— ここが 2026-08-02 に反転した。**
 > **ファイル**が読めない(chmod 000・EACCES/EISDIR 等)/ parse できない / 全体が非オブジェクト
@@ -178,9 +181,10 @@ engine は `globalThis` 上のプロジェクト別シングルトンで、**全
 > `src/lib/server/runtimeDialFileHealth.test.ts`(chmod 000 / 壊れた JSON の両方を含み、
 > 修正前で赤を実測済み)。
 >
-> **⚠ 適用範囲は「ランタイムダイヤル2本」だけ —— 全部がそうなっていると読まないこと。**
-> `unreadable ⇒ キルスイッチ側`を適用したのは `getManagerRuntimeDial` /
-> `getWorkerRuntimeDial` と、**settings の書き手5経路**(`setSettings` /
+> **⚠ 適用範囲は「司令官ダイヤル1本」だけ —— 全部がそうなっていると読まないこと。**
+> (0813 まで worker ダイヤルにも同じ規則があったが、ダイヤルごと削除された。)
+> `unreadable ⇒ キルスイッチ側`を適用したのは `getManagerRuntimeDial`
+> と、**settings の書き手5経路**(`setSettings` /
 > `remember|forgetSwarmAutonomy` / `remember|forgetSwarmManualStop` — 読めないファイルへの
 > 書き戻しは `projects` を消すので reject する)のみ。同じ寛容リーダーに乗る
 > **`isLockdownEnabled`(`store.ts`・unreadable ⇒ OFF・`docs/SECURITY.md` に既知の限界として

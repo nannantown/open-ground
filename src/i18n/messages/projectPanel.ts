@@ -232,20 +232,12 @@ export const projectPanel = {
     // "all projects" is not a footnote: this section sits directly beneath the
     // Overseer switch, which is PER-PROJECT engine state. Two switches side by
     // side with different scopes and no label is a trap.
+    // (The worker switch that used to live here died 2026-08-13 with the worker
+    // dial — workers are SDK-only now, so there is no runtime to switch them to.)
     'projectPanel.swarm.runtime.heading': 'Runtime (experimental · all projects)',
-    'projectPanel.swarm.runtime.workerSummary': 'Applies from the next desk · up to {count} on SDK',
-    'projectPanel.swarm.runtime.worker': 'Workers on the Agent SDK',
-    // {count} is the SDK slot limit (Settings.swarmWorkerRuntime.sdkMaxWorkers,
-    // default 1). Stating it is not a detail: with the cap at 1, "run each worker
-    // on the SDK" would be a plain untruth — one runs on it and the rest keep
-    // using a terminal, which looks like the switch half-worked.
-    'projectPanel.swarm.runtime.workerHint':
-      'Run workers through the Agent SDK instead of a terminal: a readable transcript instead of a repainting screen, liveness that is a fact rather than an inference, and engine notices that never erase your half-typed input. Off = the shipped terminal behaviour. Applies to the NEXT worker that starts (the ones already running are untouched, so a mixed fleet is normal for a while), and to at most {count} at a time — beyond that, workers keep using a terminal.',
     'projectPanel.swarm.runtime.manager': 'Commander on the Agent SDK',
     'projectPanel.swarm.runtime.managerHint':
       'The same, for the commander desk. Applies the next time the commander desk starts.',
-    'projectPanel.swarm.runtime.fellBack':
-      'The commander started on a terminal, not the Agent SDK — {reason}. The switch is still on; this desk simply could not use it.',
     'projectPanel.swarm.runtime.managerWarning':
       '⚠ An SDK desk has no Remote Control — you can no longer reach the commander from your phone. The supply desk stays on a terminal and remains your window from outside: ask it for status, or have it relay an instruction to the commander.',
     'projectPanel.swarm.manager.on': 'On',
@@ -426,6 +418,7 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.anomalyManagerUnrevivable':
       'The commander desk will not come back · merging is stopped',
     'projectPanel.swarm.overseer.fatalGuardUnwired': 'Safety guard unverified · workers cannot start',
+    'projectPanel.swarm.overseer.fatalWorkerSpawnFailed': 'Workers cannot start · dispatch held, retrying on a backoff',
     'projectPanel.swarm.overseer.fatalManagerUnrevivable': 'Commander desk will not come back',
     'projectPanel.swarm.overseer.fatalEngineResumeSuppressed': 'Auto-resume held back after repeated restarts',
     'projectPanel.swarm.overseer.fatalDataIntegrity': 'App data damaged · backups available',
@@ -976,21 +969,14 @@ export const projectPanel = {
     // から適用され、動いている卓はそのまま。
     // 「全プロジェクト」は注釈ではない: このすぐ上の監督スイッチは**プロジェクトごと**の
     // エンジン状態で、範囲の違う2つが並んでいて何も書かないのは罠。
+    // （作業者スイッチは 2026-08-13 にダイヤルごと削除 — 作業者は SDK 専用に
+    // なったので、切り替える先の動かし方が存在しない。）
     'projectPanel.swarm.runtime.heading': '動かし方（お試し・全プロジェクト共通）',
     // ⚠ これらは素のテキストとして描画される（Markdown ではない）。強調に ** を
     // 書くと画面にそのまま星印が出る（2026-07-31 の隔離プレビューで実見）。
-    'projectPanel.swarm.runtime.workerSummary': '次に立つ卓から適用 · SDK は同時 {count} 人まで',
-    'projectPanel.swarm.runtime.worker': '作業者を SDK で動かす',
-    // {count} は SDK で同時に動かせる人数（既定 1）。これを書かないと「作業者を SDK で
-    // 動かす」が嘘になる — 1人だけ SDK で残りはターミナルのままなので、スイッチが
-    // 半分だけ効いたように見える。
-    'projectPanel.swarm.runtime.workerHint':
-      '作業者をターミナルではなく Agent SDK 経由で動かします。画面の描き直しではなく読みやすい記録になり、生きているかどうかが推測でなく分かり、エンジンの声かけが打ちかけの入力を消しません。オフ＝今までどおり。適用されるのは次に立つ作業者からで（動いている作業者はそのまま。しばらく混在するのが正常）、同時に SDK で動くのは最大 {count} 人です。それを超えた分はターミナルのままになります。',
     'projectPanel.swarm.runtime.manager': '司令官を SDK で動かす',
     'projectPanel.swarm.runtime.managerHint':
       '司令官の卓も同じように。適用されるのは、次に司令官の卓が立つときからです。',
-    'projectPanel.swarm.runtime.fellBack':
-      '司令官は SDK ではなくターミナルで立ち上がりました — {reason}。スイッチはオンのままです（この卓が SDK を使えなかっただけです）。',
     'projectPanel.swarm.runtime.managerWarning':
       '⚠ SDK の卓には遠隔窓口がありません — スマホから司令官に話しかけられなくなります。外からの窓口は補給官が引き継ぎます（ターミナルのまま）: 状況を聞く・司令官への指示を中継する、はそのまま使えます。',
     'projectPanel.swarm.manager.on': 'オン',
@@ -1164,6 +1150,7 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.anomalyAllWorkersDown': 'ワーカーが全部止まっています · 待っているカードがあります',
     'projectPanel.swarm.overseer.anomalyManagerUnrevivable': '司令官の卓が戻りません · 統合が止まっています',
     'projectPanel.swarm.overseer.fatalGuardUnwired': '安全装置を確認できず · ワーカーを起動できません',
+    'projectPanel.swarm.overseer.fatalWorkerSpawnFailed': 'ワーカーを起動できません · 配車を一時停止し、間隔を空けて自動再試行します',
     'projectPanel.swarm.overseer.fatalManagerUnrevivable': '司令官の卓が復帰しません',
     'projectPanel.swarm.overseer.fatalEngineResumeSuppressed': '再起動が続いたため自動再開を見合わせました',
     'projectPanel.swarm.overseer.fatalDataIntegrity': 'アプリのデータが壊れました · バックアップあり',

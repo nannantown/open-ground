@@ -148,6 +148,59 @@ the kind of "my changes disappeared" confusion described in the project history.
 
 If you find yourself about to run `git stash`, commit instead.
 
+## Language policy
+
+**New work defaults to English.** Code comments, commit messages, new docs,
+and new CLAUDE.md sections written from now on should be primarily in
+English (owner decision, 2026-08-13).
+
+**Exception — owner-facing text follows Settings.language, not this policy.**
+Anything a non-programmer owner reads directly (conversational replies,
+escalation questions / `plainQuestion`, UI copy — and notification `detail`
+strings, today hardcoded Japanese in `swarmOrchestrator.ts`,
+`swarmOverseer.ts`, `swarmEscalations.ts`, and `selfUpdateOnIntegrate.ts`;
+language switching is wired NOWHERE for these yet, so write new ones in
+Japanese to match until it is) keeps following `Settings.language` (unset ⇒
+English, per `src/lib/types.ts` and `src/lib/server/promptLang.ts`) — this
+policy neither overrides nor changes that resolution. See the worker rule
+("質問は平易文で") in `src/lib/server/swarmWorker.ts` and the `plainQuestion`
+contract comment in `src/lib/types.ts` for the plain-language obligation on
+these surfaces, and `docs/commander/06` §2.2 for the same.
+
+**This is forward-only — never retroactive**, with one exception: a card
+explicitly ordered to translate/rewrite existing Japanese docs (e.g. "rewrite
+these docs to English") is allowed to do that — the ban is on *incidental*
+cleanup while working on something else, not on explicitly commissioned
+rewrites. Outside of such a card, do not translate, rewrite, or "clean up"
+existing Japanese comments, docs, or commit history just to make them
+English. Touch existing Japanese content only when you are already editing
+that code/doc for an unrelated reason, and even then prefer leaving it as-is
+unless the edit is trivial. Mixed-language files are expected and fine
+during this transition.
+
+**Frozen — never "translate as trivial".** Code-matched string constants
+(regardless of language) are not text, they are protocol, and changing them
+silently breaks classification of anything already on disk or in journals:
+marker constants (e.g. `REWORK_LOG_MARKER = '差し戻し review→'` and
+`ESCALATION_ANSWER_MARKER` in `swarmOrchestrator.ts`, `SPECIALIST_SOURCED_MARKER`
+in `swarmSpecialistReview.ts`, and heartbeat field values) are frozen
+outright. The UI trigger vocabulary
+("状況" / "マージ" / "掃除") allows adding English aliases alongside the
+existing Japanese, but never removing the Japanese. These are out of scope
+for this policy's translate/rewrite ban entirely, including under the
+"trivial edit" allowance above.
+
+**Scope notes:**
+- Board card titles/notes are owner-facing (they surface in the Board UI and
+  escalations) — follow `Settings.language` like other owner-facing text
+  above.
+- A brand-new file, or a brand-new section added inside an existing
+  Japanese-language file, defaults to English. A few lines added into an
+  existing Japanese list/paragraph (not a new section) matches the
+  surrounding language instead.
+- Release notes keep their existing bilingual convention
+  (`docs/DISTRIBUTION.md` / `RELEASE_REPORT.md`) — unaffected by this policy.
+
 ## Swarm / 司令塔まわりの正典
 
 swarm エンジン(`src/lib/server/swarmOrchestrator.ts` / `swarmOverseer.ts` /

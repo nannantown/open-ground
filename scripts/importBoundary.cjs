@@ -59,7 +59,6 @@ const BOTH_POOLS_DEBT = [
   'src/lib/server/swarmEscalations.ts',
   'src/lib/server/swarmWorkerRegistry.ts',
   'src/lib/server/swarmWorker.ts',
-  'src/lib/server/swarmWorkerRuntimeDial.ts',
   'src/lib/server/sdkDeskLimit.ts',
 ]
 

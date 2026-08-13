@@ -25,7 +25,7 @@
 | **オーナー対話卓の上限監視**(worker ではない — 下の注記) | `src/lib/server/ownerDeskLimit.ts` | `runOwnerDeskLimitPass` / `startOwnerDeskLimitLoop`(2026-07-18 新規。**エンジン非依存の boot ループ**) |
 | worker 一覧 API の統合ロジック | `src/lib/server/swarmWorkerRegistry.ts` | `listSwarmWorkers`(:157) / `readHeartbeats`(:91) / `parseHeartbeat`(:67) |
 | エンジン(monitor / promote / 回収 / 差し戻し) | `src/lib/server/swarmOrchestrator.ts` | `monitorWorkers`(:5029) / `classifyWorker`(:1024) / `defaultReadHeartbeat`(:3085) / `defaultRecoverWorker`(:3300) / **`commitWipBeforeTeardown`(:3234 — 回収前の WIP 保全)** / `defaultCleanup`(:4884) / `stopOrchestratorWorker`(:7652)(2026-07-20 実測 — この節は継続的に大きくシフトする。関数名 grep で裏取りすること) |
-| 実行時間上限と 2 つの控除台帳 | `src/lib/server/swarmOrchestrator.ts` | `MAX_EXEC_MS`(:366) / `HOLD_CREDIT_CAP_MS`(:375) / `isRunaway`(:1351) / `executionCredit`(:2188) / rate-limit: `endRateLimitHold`(:2068) / `rateLimitHoldCredit`(:2085) / 統合待ち: `beginIntegrationWait`(:2138) / `endIntegrationWait`(:2152) / `integrationWaitCredit`(:2173) |
+| 実行時間上限と控除台帳(0813〜は統合待ちの1本) | `src/lib/server/swarmOrchestrator.ts` | `MAX_EXEC_MS` / `isRunaway` / `executionCredit` / 統合待ち: `beginIntegrationWait` / `endIntegrationWait` / `integrationWaitCredit`(rate-limit hold 系 `endRateLimitHold`/`rateLimitHoldCredit`/`HOLD_CREDIT_CAP_MS` は 0813 に削除 — §5.5(a)) |
 | 残骸掃除(branch / 心拍ファイル / terminal pool) | `src/lib/server/swarmJanitor.ts` | `sweepSwarmBranches`(:170) / `sweepSwarmHeartbeats`(:310) / `runSwarmJanitor`(:405) / `swarmRepoKey`(:280) |
 | clean worktree の一括掃除 | `src/lib/server/worktreeCleanup.ts` | `cleanProjectWorktrees`(:105) / `listProjectWorktrees`(:83) |
 | HTTP routes(spawn / remove / workers / stop) | `server/routes/swarm.ts` | `POST /api/swarm/worker`(:248) / `POST /api/swarm/worktree/remove`(:498) / `GET /api/swarm/workers`(:553) / `POST /api/swarm/orchestrator/worker/stop`(:643) |
@@ -91,7 +91,7 @@
 > 言っているか**)を AND 条件に加え、worker の自己申告だけでは配達済みにしない。
 | 共有型 | `src/lib/types.ts` | `OrchestratorWorker`(:1080-1138) / `SwarmWorkerRecord`(:1156-1181) |
 
-> **監視の守備範囲(2026-07-18 に明文化)**: 本章の機構 — 心拍・stall 検知・nudge・rate-limit hold・runaway・回収 — は **`monitorWorkers` が握っている worker にしか効かない**。オーナー自身が開いている対話卓(Terminal タブのペイン・Board 実行・**司令官/補給官の卓**)はどれも**この機構の対象外**で、止まっても心拍も出さないし誰も回収しない。
+> **監視の守備範囲(2026-07-18 に明文化)**: 本章の機構 — 心拍・stall 検知・nudge・quota 即時 requeue(0813〜)・runaway・回収 — は **`monitorWorkers` が握っている worker にしか効かない**。オーナー自身が開いている対話卓(Terminal タブのペイン・Board 実行・**司令官/補給官の卓**)はどれも**この機構の対象外**で、止まっても心拍も出さないし誰も回収しない。
 >
 > 2026-07-18 の Fable 5 枯渇でこの境界が実害になった: worker は 1分42秒で検知され holding+requeue+tier 繰り下げまで自動で走ったのに、**オーナーの卓は上限画面を出したまま黙って止まり**、本人が目視で気づいて `/model` を打つまで進まなかった。今はその1点だけを `ownerDeskLimit.ts` が埋める — **上限で止まったことをベル+OSトーストで1回知らせるだけ**(平易文)。**worker のような救済(nudge / 回収 / requeue / 自動モデル切替)は一切しない** — 卓はオーナーのものなので触らない。機構の詳細は 04 章 §3.7 が正典。
 >
@@ -158,34 +158,46 @@ worktree の `node_modules` は**本体 checkout の `node_modules` への symli
 - **キーチェーンを開けた代償は「claude のトークンが読める」ではなく「login keychain の item が全部読める」**(2026-07-19 敵対レビュー2巡目)。普通のマシンの login keychain には `Chrome Safe Storage` = **ブラウザ保存パスワードの保管庫マスター鍵**が入っている。鍵側は塞げない(塞ぐと起動不能に戻る)が、保管庫の**ファイル側**は塞げるので塞いである — Chromium 系(`Login Data`/`Cookies`/`Web Data`)・Firefox 系(`key4.db`/`logins.json`/`cookies.sqlite`)・Safari(`~/Library/Cookies`)を read-deny。**ブラウザのディレクトリごと deny してはいけない**(Chrome 拡張のソースは Application Support 配下にあり、claude が正当に触る) — negative control の probe 行がその退化を検出する。worker のトークン持ち出しを本当に閉じるのは `network:'loopback'` + egress proxy であって、ファイルルールではない
 - 削除時は symlink を先に unlink する(swarmWorker.ts:342-354 — `node_modules/` 形式の .gitignore は「ディレクトリのみ」マッチなので **symlink は untracked 扱い**になり、非 force 削除と定期 sweep を永久にブロックするため)
 
-### 2.4-0 【新設 2026-07-30】worker には**ランタイムが 2 種類**ある
+### 2.4-0 【改訂 2026-08-13】worker は **SDK 専用** — ランタイム2種の併存は終了
 
-`spawnSwarmWorker` は起動の直前に `chooseWorkerRuntime`(swarmWorkerRuntimeDial.ts)を
-呼び、その worker を **PTY** で動かすか **Agent SDK** で動かすかを決める。
-ダイヤルの既定は 2026-08-01 に SDK へ反転し、**2026-08-02 に dispatch まで届いた**。
-つまり**未設定の機体では worker は SDK で上がる**(枠は `sdkMaxWorkers`、既定 1 — 2体目以降は
-PTY へ降格し、理由が `fellBackBecause` に載る)。設計は `docs/SDK_WORKER_MIGRATION_PLAN.md`。
+**worker に PTY ランタイムは無い(2026-08-13 オーナー決定)。** `spawnSwarmWorker` は
+SDK セッションを確立できなければ**降格せず失敗する**(fail-fast):
+`sdkWorkerPreflight` が通らない / SDK セッションが起動即死 ⇒ `SdkWorkerUnavailableError`
+を投げ、作りかけの worktree + `swarm/*` ブランチはロールバック。エンジン側
+(`runDispatchPass`)はカードを **todo に残したまま** dispatch を階段(1m→5m→15m)で
+HOLD し、`worker-spawn-failed` の鐘を鳴らす(再通知は1時間スロットル)。最初に成功した
+spawn が HOLD を自動解除する — 人間の再武装は不要。番人:
+`swarmWorkerFailFast.test.ts`(spawn 側)/ `swarmSpawnFailFast.test.ts`(エンジン側)。
+
+削除されたもの: `swarmWorkerRuntimeDial.ts`(`chooseWorkerRuntime` / `sdkSlotLimit` /
+`liveSdkWorkerCount`)・`Settings.swarmWorkerRuntime`(ダイヤル + `sdkMaxWorkers` slot
+cap)・`store.getWorkerRuntimeDial`・`SpawnSwarmWorkerResponse.fellBackBecause`・盤面の
+worker スイッチ。**古い settings.json に残る `swarmWorkerRuntime` キーは不活性**(読まれない・
+エラーにもならない・POST しても黙って捨てられる)。fallback を消した理由: 実害を静かに
+吸収する装置になっていて移行が永遠に終わらない(実測: slot cap 既定 1 が2体目以降を全部
+PTY に流し、オーナーはバグと読んだ — 下の歴史 ⚠ 群も同型で、fallback が2版連続の全滅を
+「なんとなく PTY で動く」に見せていた)。
+
+歴史(ダイヤル併存期 2026-07-30〜08-13 の記録。当時の記述が古いメモに残っていたら
+この期間のもの):
 
 ⚠ **1日ズレていた期間がある(0.11.47 に出荷済み)**。規則は `chooseWorkerRuntime` に入った
 のに、本番の呼び出しは `store.getWorkerRuntimeDial()` を挟み、**その reader が不在を明示
 `'pty'` へ潰していた**。結果、盤面はスイッチ ON を描きながら PTY worker が立っていた
-(隔離 HOME で実測 0802)。**決めるのは reader** — 規則を `chooseWorkerRuntime` だけ直しても
-効かない。両者は同極性に揃えてある(明示 ⇒ そのランタイム / 不在 ⇒ sdk / それ以外 ⇒ pty)。
-古い司令塔メモに「未設定なら PTY」とあれば、それはこの期間の記述。
+(隔離 HOME で実測 0802)。教訓は生きている: **決めるのは reader、規則の置き場所を
+テストしても出荷経路の証拠にならない**。
 
-⚠ **ファイルが読めないときは PTY**(2026-08-02)。`settings.json` が読めない / parse できない /
-全体が非オブジェクト / 切れた symlink のとき、`store.getWorkerRuntimeDial()` はそれを
-**不在扱いにせず** `'pty'` を返す(`sdkMaxWorkers` も落とす)。**この規則は今や実挙動を変える**
-—— 不在の既定が `'sdk'` になったので、規則が無ければ「壊れた settings.json が実験ランタイムを
-有効にする」穴がそのまま開く(反転前は不在の既定がたまたま `'pty'` で一致していただけ)。
-番人は `src/lib/server/runtimeDialFileHealth.test.ts`。司令官ダイヤル側の同じ話は 03 章 §2.3 冒頭。
+⚠ **ファイルが読めないときは PTY**(2026-08-02)— この file-level fail-closed 規則は
+**司令官ダイヤルに現存**(worker reader は削除済み)。`settings.json` が読めない /
+parse できない / 非オブジェクト / 切れた symlink ⇒ `getManagerRuntimeDial` は `'pty'`。
+番人は `src/lib/server/runtimeDialFileHealth.test.ts`。03 章 §2.3 冒頭も同じ話。
 
 ⚠ **盤面(Swarm パネル)の値は導出ではなくサーバの実効値**(2026-08-02)。`GET /api/settings` が
-`runtimeDialsEffective:{worker,manager,workerCap}` を返し、パネルはそれを描くだけ。
-以前はパネルが生の設定キーからサーバ規則を再実装しており、**同じ日に表示ズレを2件**産んだ
-(不在 worker ダイヤル / 壊れたファイル)。**司令塔が「盤面はこう出ている」と報告するときは、
-その値がサーバの実効値であることを前提にしてよい** —— ただし前提が成り立つのは
-`swarmRuntimeDialParity.test.ts`(合成経路 ⇄ 配られる値を比較)が緑である限り。
+`runtimeDialsEffective:{manager}`(0813 に worker/workerCap を撤去)を返し、パネルはそれを
+描くだけ。以前はパネルが生の設定キーからサーバ規則を再実装しており、**同じ日に表示ズレを
+2件**産んだ。**司令塔が「盤面はこう出ている」と報告するときは、その値がサーバの実効値で
+あることを前提にしてよい** —— ただし前提が成り立つのは `swarmRuntimeDialParity.test.ts`
+(reader ⇄ 配られる値を比較)が緑である限り。
 
 司令塔が知っておくべきことは 4 つだけ:
 
@@ -215,17 +227,19 @@ PTY へ降格し、理由が `fellBackBecause` に載る)。設計は `docs/SDK_
    片付け中の卓が「もう居ない」と読まれ、**その worktree を削除してよい**という
    結論になる(= 走っている claude の足元を消す)。0801 の6周でこの型の欠陥が
    少なくとも9件出た。棚卸しと**数え方**は `docs/MAP.md` §5。
-4. **降格は正常**: ダイヤルが `'sdk'` でも、枠が埋まっている / preflight が
-   通らない場合は **PTY にフォールバックして dispatch は続行する**。
-   「SDK のはずが PTY で上がった」は障害ではない。
-   逆に **veto を検証できない SDK worker は絶対に上げない**(fail-closed)。
-   理由の読み方: **HTTP レスポンスの `fellBackBecause`**(`SpawnSwarmWorkerResponse` /
-   `SpawnSwarmManagerResponse` — Swarm タブが表示する)。**サーバログを当てにしない** —
-   配布アプリの Hono は Electron が fork した子プロセスなので、`console.warn` は
-   オーナーの届かない所に出る。開発中に `npm run dev` を眺めているときだけ見える。
+4. **降格は存在しない(0813 改訂)**: preflight が通らない / SDK が確立できない spawn は
+   **失敗する** — PTY へのフォールバックは削除された。
+   「SDK のはずが PTY で上がった」はもう起こり得ない形。
+   **veto を検証できない SDK worker は絶対に上げない**(fail-closed)は不変。
+   理由の読み方: **spawn の HTTP エラー本文**(route は 500 + `error`)と
+   **`worker-spawn-failed` の鐘**(`swarmNotifications` — Swarm タブ/通知に出る)。
+   **サーバログを当てにしない** — 配布アプリの Hono は Electron が fork した
+   子プロセスなので、`console.warn` はオーナーの届かない所に出る。
 
-**戻し方(kill switch)**: `settings.json` の `swarmWorkerRuntime.mode` を `'pty'` に
-戻すだけ。走行中の worker には触れず、次の dispatch から PTY に戻る。
+**戻し方(kill switch)は worker には無い(0813)**: `swarmWorkerRuntime` は削除済みで、
+書いても不活性。SDK が確立できない機体では worker は立たず(カードは todo に残り、鐘が
+鳴り、復旧後に自動再開)、それが意図された挙動。司令官卓の `swarmManagerRuntime` だけが
+残る手動スイッチ。
 
 以下 2.4〜2.6 は **PTY worker** の話。SDK worker の起動オプションは
 `swarmWorkerSdk.sdkWorkerLaunchPlan` が組み、対応関係は設計書 §4 の表にある。
@@ -239,8 +253,9 @@ A3/L4 veto は `sdkGuardHook.ts` が in-process で武装し直している(同�
 この hook は**設計上 fail-CLOSED** なので preflight が全部落ち、出荷版では SDK worker が
 1体も立たなかった。**dev(tsx/ESM)でも vitest(ESM)でも 100% 再現しない**形なので、
 「テストが緑」は配布版の証拠にならない。司令塔として覚えておくのはこれだけ:
-**SDK worker が全数 PTY に降格するなら、まず `fellBackBecause` の文面を読む**
-(preflight 落ちなのか枠なのかダイヤルなのかがそこに書いてある)。
+**worker が立たないなら、まず spawn エラーの文面と `worker-spawn-failed` の鐘を読む**
+(preflight 落ちなのか CLI 不在なのかがそこに書いてある。ダイヤル併存期は同じ情報が
+`fellBackBecause` に載って PTY で立ち続けた — 0813 以降は立たずに鳴る)。
 ⚠⚠ **同じ「配布版でだけ0体」を 2026-08-02 にもう一度踏んだ**(`e26d5efb`)。今度は
 `sdkSession.ts` の `require('@anthropic-ai/claude-agent-sdk')`。この SDK は **ESM 専用**
 (`"type":"module"` / `main: sdk.mjs`)で、ビルドでは `external` にしてあるので、Electron が
@@ -293,7 +308,21 @@ claude --session-id <uuid> --dangerously-skip-permissions \
 
 `/order` を**TUI に打ち込まず positional で渡す理由**(swarmWorker.ts:192-204 のコメント): 起動済み TUI にスラッシュコマンドを注入するとオートコンプリートが Enter を飲み込み**送信されない**(claude 2.1.185 で実測)。positional なら起動時に確実に実行され、tmux 時代の send-keys Enter-lag も構造ごと消える。ゴールは 1 行に平坦化される(:110 `flattenOneLine` — 制御バイト除去+空白折り畳み。ESC 注入も同時に防ぐ)。
 
-**注入されるテキストの構成**(swarmWorker.ts:181-190 `buildOrderInjection`): `/order ゴール: <title> — <notes>` + (差し戻し再投入なら)`【前回の差し戻し理由…】<priorFailure>` + **worker 規律**(:176 `WORKER_ORDER_RULES` — push 全形態禁止・commit+ready で停止・心拍必須(30 分無心拍は anomaly)。2e7beb2 事故 = worker が /order スキルの司令塔向け §4 を実行して main に push した、の再発防止として全 spawn に焼き込み)。
+**注入されるテキストの構成**(swarmWorker.ts:181-190 `buildOrderInjection`): `/order ゴール: <title> — <notes>` + (差し戻し再投入なら)`【前回の差し戻し理由…】<priorFailure>` + **worker 規律**(:176 `WORKER_ORDER_RULES` — push 全形態禁止・commit+ready で停止・心拍必須(30 分無心拍は anomaly)。2e7beb2 事故 = worker が /order スキルの司令塔向け §4 を実行して main に push した、の再発防止として全 spawn に焼き込み)+ (2026-08-13 追加、**必須**)**返答言語 directive**(`languageDirective` — `promptLang.ts`)。
+
+**返答言語(2026-08-13 追加・同日リワーク済み)**: `WORKER_ORDER_RULES`(および manager/supply の規律文)自体は**日本語のまま不変**(モデルへの指示文であり、翻訳対象ではない) — 変えたのは**モデルからの返答**(チャット・心拍 `blocker`/escalation の質問文・状況報告 — commit/PR 本文は対象外、CLAUDE.md「Language policy」に一任。2026-08-13 2周目レビューで修正)の言語。`buildOrderInjection` / `workerLaunchOpts`(swarmWorker.ts)・`managerLaunchOpts`(swarmManager.ts)・`supplyLaunchOpts`(swarmSupply.ts)・対応する SDK 経路(`sdkWorkerLaunchPlan` — worker専用 / `sdkManagerLaunchPlan` — manager専用。**supply に SDK 経路は無い**、PTY のみ)は `lang: 'en'|'ja'` を**必須引数**として受け、末尾に `languageDirective(lang)` を1行追記する。
+
+**`lang` は意図的に optional にしていない**(初版は optional だった — 敵対レビューの変異実験で、5 spawn 経路のうち worker SDK・worker PTY・manager SDK の3つは「production 側の呼び出しから `lang` を渡す1行を消しても」ユニット/integration スイート 951 件が全緑のままだと判明した。`spawnSwarmWorker`/`launchSdkDesk` は curl でしか実機検証されておらず、`swarmSessions.integration.test.ts` が実際に spawn してプロンプトを読むのは manager/supply の **PTY のみ**——worker(SDK/PTY 双方)と manager SDK は無防備だった)。CLAUDE.md「検証の掟」§4 の「存在検査(登録漏れ=沈黙)ではなく過大近似(そもそも名前が見えない=ビルドエラー)へ」に従い、`lang` を必須型にして**配線漏れが `tsc --noEmit` で赤になる**構造に倒した(`opts: {...} = {}` の既定値も同時に廃止 — 既定値があると `lang` 必須型でも呼び出し側が省略できてしまう)。実際の spawn(`spawnSwarmWorker` / `spawnSwarmManager` / `spawnSwarmSupply`)は `getPromptLang()`(`Settings.language`、未設定は英語既定)を一度だけ解決し、SDK/PTY 両経路(supply は PTY のみ)へ同じ値を通す。
+
+⚠ **この「`tsc --noEmit` で赤」は `scripts/*.mts` には効かない**(2026-08-13 2周目レビュー — 実測): `tsconfig.json` の型検査対象 `include` は `scripts/**/*.ts` のみで `.mts` を含まないため、`scripts/probe-sdk-manager-launch.mts` は `sdkManagerLaunchPlan({...})` を `lang` 無しで呼んでいても `tsc --noEmit` は緑のままだった(実行時は `PromptLang` 必須の型エラーではなく単に `undefined` が渡り、`languageDirective(undefined as any)` が `pick` の `=== 'ja'` 比較に落ちて黙って `en` 扱いになる——.mts はビルド経路の外なので過大近似の恩恵を受けない)。恒久修正は同スクリプトが `getPromptLang()` で実際に解決するよう修正済み(本番と同じ値を probe が報告するように)。**新たに `.mts` から同種の builder を呼ぶ probe/scriptを書くときは、`lang` を手で明示するか `getPromptLang()` を呼ぶこと** — `tsc` はそこを守ってくれない。
+
+**M2(2026-08-13 2周目レビュー、必須修正)——「型が必須」は「値が Settings.language の解決結果である」ことまでは保証しない**: `lang` を必須型にしても、`const lang: PromptLang = 'en'`(定数)を渡す実装だった場合でも `tsc`・既存ユニット/integration テストは全緑のままだった(実測: `swarmWorker.ts:931` / `swarmManager.ts:761` / `swarmSupply.ts:227` の `const lang = await getPromptLang()` を定数 `'en'` に潰すと、対象8ファイル 156 件が**全緑**)。つまり「ja ユーザーなのに全卓が英語で返す」——このカードが直そうとした機能不全そのものが、どのゲートにも引っかからなかった。`swarmSessions.integration.test.ts` は実 spawn のプロンプトを読んではいるが、期待値が隔離 HOME の既定言語(`languageDirective('en')`)固定だったため、この変異を検出できなかった。恒久修正: 同ファイルに `setSettings({ language: 'ja' })` してから spawn し、実 argv のプロンプトに `'【返答言語】'` が乗ることを見るテストを追加(manager/supply の PTY 経路)。上の定数化変異を実際に入れて赤を実測 → 復元して緑を確認済み(逆適用で復元、`git checkout`/`git restore` は不使用)。
+
+ピンは `promptLang.test.ts`(directive 本文)・各役の launch-contract テスト(`swarmWorker.test.ts` / `swarmManager.test.ts` / `swarmSupply.test.ts` / `swarmWorkerSdk.test.ts` / `swarmManagerSdk.test.ts` の `lang` describe、リテラルの `'[Reply language]'` / `'【返答言語】'` マーカー照合)・**そして実際に spawn 配線を押さえるのは `swarmSessions.integration.test.ts`(manager/supply の PTY のみ)** — worker(SDK/PTY)と manager SDK は自動テストでの直接検証が無く、`lang` の型必須化が唯一の防御線であることに注意(将来ここへ実 spawn 統合テストを足すなら歓迎)。⚠ この rework で **integration テストの厳密一致4箇所も書き換えている**(directive 込みの期待値へ)。
+
+**M2 解消(84764071 で対応済み・2026-08-13)**: `skills/supply/SKILL.md` の「読んで**平易な日本語で**答える」「**非プログラマにも分かる日本語**で要約する」という言語ハードコードは、カード「skills 3本の書き直し」(84764071)の terse English 書き直しで除去された(現行 `skills/supply/SKILL.md` は日本語をハードコードしておらず、`[Reply language]`/`【返答言語】` directive のみに従う)。以下は解消前の記録として残す。⚠(2026-08-13 訂正) 「worker/manager 側の skills には言語のハードコードが無く安全」は誤りだった: `skills/order/SKILL.md`(worker が実行)は末尾のガードレール節で「OPEN GROUND では新規の作業言語は英語メイン…(例外・詳細… は CLAUDE.md の「Language policy」節を正典とする)」と**CLAUDE.md を参照**しており、`skills/og-manage/SKILL.md` にハードコードは無いが worker 側は「独自の日本語命令」ではなく「CLAUDE.md への参照」を持つ——これは `languageDirective` と競合しない(参照先が変われば両者とも追随するため)。正しい要約: 直接ハードコード(スキル本文に「日本語で」と書いてある)を持つのは `skills/supply/SKILL.md` のみ、`skills/order/SKILL.md` は CLAUDE.md への参照(競合しない)、`skills/og-manage/SKILL.md` は言語に関する記述なし。根治は `skills/supply/SKILL.md` 本体を言語条件化する書き直しで、このカードのスコープ外。
+
+**`languageDirective` の対象範囲は commit/PR 本文を含まない(2026-08-13 訂正、2周目レビュー)**: 初版は en/ja 両分岐に「PR and commit descriptions」/「PR・コミットの説明」を含めていたが、同日 main に入った CLAUDE.md「## Language policy」(オーナー決定)が「**New work defaults to English. Code comments, commit messages, new docs, … should be primarily in English**」とし、例外リスト(conversational replies / escalation questions・plainQuestion / UI copy / notification detail)に commit・PR 説明を含めていない — つまり `ja` の directive が「コミットの説明は日本語で」と命じるのは、`settings.language='ja'` の機体で spawn される全ロールに対して CLAUDE.md と正面衝突する。`languageDirective` の対象は CLAUDE.md の例外4面(会話返答・escalation/blocker 質問文・UI 文言・通知 detail)と同じ範囲に絞り、commit/PR の言語は CLAUDE.md 側に一任するよう修正済み(`promptLang.ts`)。
 
 **トークン規律(2026-07-18 追加、`WORKER_ORDER_RULES` 内 【トークン規律・厳守】節)**: 実測(swarm-token-audit カード)でワーカー7体全員のツール束ね率が 1.00(独立作業を1手ずつ実行・1手ごとに最大33万トークンの会話文脈を読み直す)だったため、標準指示に (a) 独立ツール呼び出しは1応答へ束ねて並列実行 (b) ファイルは範囲指定 Read か grep で当たりを付けてから読む(全文読み禁止) (c) 同じファイルを読み直さない (d) 長い出力は tail/要約で受ける(テストは失敗時のみ詳細) (e) フルスイート(`npm test`)は完了ゲートとして最後に1回・触った範囲を先に回す (f) カードに当たり(対象ファイル)があれば探索せず直行、の6項目を焼き込んだ。**完了ゲート(`npx tsc --noEmit` / `npm test` / lint の3点)と ready 前セルフコミットの規約は不変** — 緩めているのは探索コスト・文脈量だけで、品質ゲートには一切手を付けていない。文言はピンテスト(swarmWorker.test.ts の `WORKER_ORDER_RULES token discipline`)で固定。効果判定(束ね率≥1.5・手数中央値≤120)は別カード(swarm-token-audit)が継続観測する。
 
@@ -466,14 +495,14 @@ promote && w.reworkAt のとき: hbAtMs > reworkAtMs(差し戻しより厳密に
 
 ### 5.4 回収(recoverLost / recoveryColumn)
 
-PTY 死亡・stall(心拍・PTY 出力・**sub-agent/transcript の mtime**・**実行中の背景タスク** の 4 チャネルすべてが 10 分沈黙 — `STALL_SILENCE_MS` :294。第3チャネルは §5.4a、**第4チャネル(背景タスク)は §5.4b** — 完了ゲートを背景で回して待っている worker を殺していた誤判定への対処。カバー範囲の限界も同節)・作業上限到達(**実作業**が 90 分 — `MAX_EXEC_MS` :366、env `OPENGROUND_SWARM_MAX_EXEC_MIN` で可変。控除項は §5.5、ラベルの二分は §5.6)・permission 詰まり・rate-limit 長期化のとき、`recoverLost`(:5051)が worktree+PTY を teardown し、カードの行き先を `recoveryColumn`(:1099)で決める:
+セッション死亡・stall(心拍・runtime 出力・**sub-agent/transcript の mtime**・**実行中の背景タスク** の 4 チャネルすべてが 10 分沈黙 — `STALL_SILENCE_MS`。第3チャネルは §5.4a、**第4チャネル(背景タスク)は §5.4b**)・作業上限到達(**実作業**が 90 分 — `MAX_EXEC_MS`、env `OPENGROUND_SWARM_MAX_EXEC_MIN` で可変。控除項は §5.5、ラベルの二分は §5.6)・**quota 停止**(0813 改訂: プールの `quotaBlocked` 判定 + `QUOTA_STOP_DEBOUNCE_MS`=60秒の沈黙で**即 requeue** — 20 分 hold は削除)のとき、`recoverLost` が worktree+セッションを teardown し、カードの行き先を `recoveryColumn` で決める(**permission 詰まりの腕は 0813 に削除** — trust ダイアログは PTY の TUI フレームで、SDK セッションには存在しない):
 
 | 状況 | カードの行き先 |
 |---|---|
 | rate-limit | todo(自動リトライ — 作業は branch に保存済み) |
 | **integration-wait**(ready 到達済みで作業上限に到達)**かつ心拍が blocked を宣言していない** | **review**(司令官の統合待ち列。**blocked へは落とさない** — §5.6) |
 | integration-wait **だが心拍が `blocked:true`**(再作業中に本物の詰まりに当たった) | **blocked**(worker 自身の「人手が要る」申告が優先 — 2026-07-19) |
-| runaway / permission / question | blocked(人手) |
+| runaway / question | blocked(人手)(~~permission~~ は 0813 に腕ごと削除) |
 | 心拍 ready なのに成果ゼロ | blocked(「完了宣言したのに統合物が無い」= 人が見る) |
 | 心拍 blocked | blocked |
 | **crash/stall で branch に commit 済み作業がある(`commitsAhead>0`)** | **blocked**(2026-07-23 twin 根治 — 下記) |
@@ -672,16 +701,21 @@ worker の生死は当初 `lastActivityMs`(:1158)= max(心拍, PTY 出力, 起�
 
 ```
 起点       = 差し戻されていれば reworkAt、無ければ dispatch(startedAt)
-実作業時間 = (now − 起点) − rate-limit hold 累計 − 統合待ち累計(起点が dispatch のときだけ)
+実作業時間 = (now − 起点) − 統合待ち累計(起点が dispatch のときだけ)
 ```
 
-**起点が動くのが 2026-07-20 の変更**((c))。控除項は 2 つで、どちらも「その worker が**このカードを** `doing` で進めてはいなかった時間」。`executionCredit`(:2188)が両者を足して返す。
+**起点が動くのが 2026-07-20 の変更**((c))。控除項は統合待ちの 1 つ(`executionCredit`)。
 
-**(a) rate-limit hold**(2026-07-12 根治)
+**(a) rate-limit hold — 【0813 に削除】**(2026-07-12 根治の後継)
 
-- **hold 台帳**: エンジンは worker(terminalId)ごとに rate-limit hold の**確定分**を `engine.rateLimitHeldMs` に積む(`endRateLimitHold` :2068 — `engine.rateLimited` を落とす唯一の seam)。hold の起点は「limit 通知が画面を掴んだ瞬間」(`holdSince` = `engine.limitScreen` の onset)であって、hold が**確定**した時刻(`since`)ではない — 確定ゲート(最大 `STALL_SILENCE_MS`=10 分)の分まで遡って返す
-- **進行中の hold も実時間で控除**される(`rateLimitHoldCredit` :2085 = 確定分 + in-flight)。今まさに limit で凍っている worker が「長く生きている」だけで暴走扱いされることはない
-- **控除には上限がある**: `HOLD_CREDIT_CAP_MS`(:375 = `MAX_EXEC_MS` と同値)。limit↔作業 を往復して runaway 判定を無限に先送りできないようにするため
+- 20 分 hold とその控除台帳(`engine.rateLimited` / `rateLimitHeldMs` /
+  `endRateLimitHold` / `rateLimitHoldCredit` / `HOLD_CREDIT_CAP_MS`)は
+  **PTY センサー層ごと削除**された。quota 停止した worker は
+  `QUOTA_STOP_DEBOUNCE_MS`(60秒)の沈黙確認後に**即 requeue**(tier は
+  cooling 表で冷却・カードは todo・作業は WIP コミットで branch に保全)。
+  hold が存在しないので控除も不要 — 2026-07-12 の「quota 待ちが予算を食って
+  90 分で強制回収」は、この形では構造的に起こらない(1 分以内に回収される)。
+  番人: `swarmQuotaStopFailFast.test.ts`(変異で赤を実測済み)
 
 **(b) 統合待ち(review 滞留)**(2026-07-18 根治)
 
@@ -694,7 +728,7 @@ worker の生死は当初 `lastActivityMs`(:1158)= max(心拍, PTY 出力, 起�
 - **こちらにも cap がある**(`WAIT_CREDIT_CAP_MS` :398 — 既定 8 時間・env `OPENGROUND_SWARM_WAIT_CREDIT_CAP_MIN`)。**2026-07-19 に方針を反転した**。旧版は「統合待ちは cap しない — cap すると夜通し review に置いたカードを翌朝差し戻した瞬間に上限超過し、事故が復活する」と書いていたが、その前提は §5.6 の修正で消えた: **暴走ラベルと blocked 退避を決めるのは今や `readyAt` であって控除ではない**。cap に当たって停まる ready 済み worker は `integration-wait` として停まり、カードは review へ行き、成果は commit 済みで残る — 有界で正直な結末である
 - **cap が要る理由(MF-3)**: review 列のカードは monitor を early-continue するので、**待っている間その worker は上限判定も stall 判定も心拍判定も一切受けない**。控除は「観測と観測の間の span」であって稼働の測定ではないから、エンジンは**その PTY が本当に遊んでいるのか、`/order` ループでトークンを焼いているのかを区別できない**。無制限だと後者が青天井に控除を稼ぐ: 司令官が手で review に上げた(あるいは古い ready 心拍で promote された)カードの下で PTY が 6 時間焼き、差し戻し後にさらに丸ごと `MAX_EXEC_MS` の猶予を得る。**測れないものは bound する**という判断
 - ⚠ **それでも「review 列の下の生きた PTY は無監視」であることは変わらない**。cap は消費の**総量**を有界にするだけで、待っている間その worker を見張る仕組みは無い(上限・stall・心拍のどれも走らない)。長時間 review に放置しないこと自体が運用側の責務
-- **worker の wall-clock 寿命の上限は、働いている限りは** `MAX_EXEC_MS + HOLD_CREDIT_CAP_MS`(既定 180 分)。**統合待ちを挟むとその分だけ伸びる**(実測: 60 分待ち×10 ラウンドの往復で 11.5 時間生存し、累積実作業が 90 分に達した時点で停止)。伸びている間カードは `doing` の外に居るので消費ではないが、**PTY が生きていれば dispatch slot は占め続ける** — 長期の review 滞留は slot を空けない
+- **worker の wall-clock 寿命の上限は、働いている限りは** `MAX_EXEC_MS`(既定 90 分。〜0813 は hold 控除込みで 180 分だった — hold 削除で上限はシンプルに戻った)。**統合待ちを挟むとその分だけ伸びる**(実測: 60 分待ち×10 ラウンドの往復で 11.5 時間生存し、累積実作業が 90 分に達した時点で停止)。伸びている間カードは `doing` の外に居るので消費ではないが、**PTY が生きていれば dispatch slot は占め続ける** — 長期の review 滞留は slot を空けない
 
 **(c) 差し戻しは“新しい担当”なので予算も新しい**(2026-07-20 根治)
 
@@ -702,12 +736,12 @@ worker の生死は当初 `lastActivityMs`(:1158)= max(心拍, PTY 出力, 起�
 - **免除ではなく予算**。再作業が `MAX_EXEC_MS` を超えれば従来どおり停止する(形状 `rework`)。差し戻し 1 回につき 1 回分の `MAX_EXEC_MS`、それ以上ではない
 - **fail-open しないよう納品を条件にする**。起点が動くのは **`readyAt` があるか、worker 自身の心拍が `ready`** のときだけ。何も出していないカードを review に往復させても予算は増えない(`commitsAhead` は witness にしない — §5.6 の囲みのとおり働いている worker の常態)
 - **心拍 witness は読んだら `readyAt` に焼く — ただし差し戻し中(`reworkAt` 立つ)worker に限る**(:5484 の `w.reworkAt &&` ガード)。心拍ファイルは差し戻し後に worker 自身が `ready:false` へ書き換えるので、読むだけで記録しないと **1 pass だけ予算が出て次の pass(3 秒後)で取り上げられる** — 直後に worktree が消える。これは §5.6 の「エンジン盲目区間の穴」を塞ぐ durable な witness でもある。**焼く先を差し戻し中に絞る理由(2026-07-21)**: 差し戻しも納品もしていない worker が早まった `ready:true` を打っただけで焼くと、それ自体が上の fail-open の入口になる — 空回り(0 コミット)worker が最初の上限で `integration-wait` → review に流れ、司令官が差し戻すと `readyAt`+`reworkAt` が揃って毎ラウンド無限に予算を得てしまう。差し戻しは「人が成果を見てもっと頼んだ」証拠なので、それが心拍の裏取りになる(pin テスト『does NOT fail open on a ready HEARTBEAT alone』— ガードを外すと赤)
-- **起点が動いたときは統合待ちを“控除”しない — そもそも時計に載せない**。二重に引くと再作業が予算の 2 倍走れてしまう。journal もそう書く(「計上対象外」であって「credited back」ではない)。rate-limit hold は差し戻しの前後どちらにも起こりうるので従来どおり控除する
+- **起点が動いたときは統合待ちを“控除”しない — そもそも時計に載せない**。二重に引くと再作業が予算の 2 倍走れてしまう。journal もそう書く(「計上対象外」であって「credited back」ではない)。(rate-limit hold 控除は 0813 に hold ごと削除)
 - **`WAIT_CREDIT_CAP_MS` の役割はこれで小さくなった**。差し戻し経路では待ち時間が時計に載らないので cap に当たること自体が無くなり、**形状 `capped-wait` は定常状態では到達不能**になった(§5.6 の表)。判定式は残してある — 台帳はエンジン状態なので self-update をまたいだ roster が `reworkAt` 無しで bank を抱えている可能性があるため
 
 **(d) 再起動を跨いだ resume の起点**(2026-07-24 根治・card 4)
 
-- 上の控除台帳(`rateLimitHeldMs` / `integrationWaitMs`)は **in-memory** なので**再起動で空になる**。したがって resume した worker(05 章 §10.5)の起点を**元の dispatch 時刻のまま**採用すると、**アプリが止まっていた時間がまるごと実作業時間として課金される**: 20 時に配車 → 20 分作業 → 夜アプリ終了 → 翌朝 8 時に resume、で「12 時間 20 分働いた」と判定され、**最初の monitor pass で暴走 → worktree 解体 → カード blocked**。main には無い破壊(main は resume しないので `doing` のカードと worktree は放置される)なので、`ENGINE_PERSISTENCE_PLAN.md` §5 の「最悪でも今日と同じ挙動」に反する。統合前の敵対レビューで実測再現された(2026-07-24)
+- 上の控除台帳(`integrationWaitMs` — 0813 以降はこの1本)は **in-memory** なので**再起動で空になる**。したがって resume した worker(05 章 §10.5)の起点を**元の dispatch 時刻のまま**採用すると、**アプリが止まっていた時間がまるごと実作業時間として課金される**: 20 時に配車 → 20 分作業 → 夜アプリ終了 → 翌朝 8 時に resume、で「12 時間 20 分働いた」と判定され、**最初の monitor pass で暴走 → worktree 解体 → カード blocked**。main には無い破壊(main は resume しないので `doing` のカードと worktree は放置される)なので、`ENGINE_PERSISTENCE_PLAN.md` §5 の「最悪でも今日と同じ挙動」に反する。統合前の敵対レビューで実測再現された(2026-07-24)
 - よって resume 時の起点は **`now − workedMs`**(`resumeStartedAtMs`)。`workedMs` は roster.json の台帳(card 3・`rosterEntryOf` が状態遷移点ごとに書く「wall-clock − 控除」のスナップショット)。**停止時間は課金されず、実作業ぶんは引き継がれる**ので「再起動のたびに予算がリセットされて無限に走れる」穴も開かない(両方向に回帰テストの歯がある)
 - 台帳が壊れている/巨大なときは **経過実時間(`now − spawnAt`)で clamp** されるので、起点は最悪でも元の dispatch 時刻 — それより古くはならない。台帳が無い古い roster 行は `now`(= その resume が肩代わりした crash reclaim と同じ、まっさらな予算)
 - ⚠ **台帳が数えているのは「今の担当ぶん」であって worker の生涯ではない**(2026-07-24・敵対レビュー must-fix #2)。`rosterEntryOf` の起点は上限判定とまったく同じ式 —— (c) の `reworkAt`(納品の裏取り `readyAt` 込み)があればそこ、無ければ dispatch —— で、控除も同じ分割(起点が動いたら統合待ちは**そもそも計上外**なので引かない。引くと台帳が予算の 2 倍を許す)。**生涯で書くと (c) が塞いだ事故が「再起動」をトリガに再演する**: resume した worker には `reworkAt` が残らない(あれはエンジンのメモリであって roster の状態ではない)ので、以後**誰も起点を動かし直せない**。「200 分前に配車・10 分前に納品・5 分前に差し戻し」の worker はアプリが動いている間は (c) に守られるのに、**再起動した瞬間に暴走判定 → worktree 解体 → カード blocked** になる。なお **`reworkAt` の絶対時刻を永続化する解は逆向きに壊れる**(停止時間が再び課金され、この節の欠陥そのものになる)ため、台帳は duration のままにしてある
@@ -716,7 +750,7 @@ worker の生死は当初 `lastActivityMs`(:1158)= max(心拍, PTY 出力, 起�
 
 **なぜ変えたか(実測・2026-07-20 / 2 件)**: ready のまま夜間キューに載っていた worker を朝に差し戻したところ、**差し戻しを観測した同じ pass**(150〜250ms 後)で上限に当たり、**再作業 0 分のまま worktree ごと撤去**された。07-18 の統合待ち控除は**ラベルとカードの行き先**しか変えておらず、**撤去そのものは両ラベル共通**だったため、控除が効いていても同じ結末になる。加えてこの 2 件を出したエンジンは**古いバイナリを実行していた**(§5.7)ので控除自体も走っていない。差し戻しが「作業を頼む」操作である以上、頼んだ瞬間に担当を殺す挙動は構造ごと直す必要があった。
 
-journal の文言も実作業ベース: `worker runaway — worked 91m ≥ 90m execution limit (alive 111m; 20m rate-limit hold + 0m 統合待ち credited back): …`。差し戻し後の停止では控除欄が `計上は差し戻し以降のみ(統合待ち …m は計上対象外)` に変わる。
+journal の文言も実作業ベース: `worker runaway — worked 91m ≥ 90m execution limit (alive 111m; 0m 統合待ち credited back): …`(0813〜。hold 時代は rate-limit 控除も並んだ)。差し戻し後の停止では控除欄が `計上は差し戻し以降のみ(統合待ち …m は計上対象外)` に変わる。
 
 **なぜ変えたか(実測・2026-07-12)**: 旧実装は「wall-clock で数える — band が広いから rate-limit 待ちを含めても足りる」と明言していた。その前提が破れた: **quota 待ち 20 分 + 実作業 84 分 = 通算 104 分** → 90 分上限で runaway 判定 → 実装完了済み・未コミットの **15 ファイル 47KB が worktree ごと消滅**した。quota 待ちは worker の落ち度ではないので、その時間を worker の予算から引いてはならない。
 

@@ -1,205 +1,166 @@
 ---
 name: order
 description: |
-  最強モード。ゴール（達成したら完了とみなす「観測可能な条件」）を、git worktree で隔離した
-  並列トラック × チーム規模の多エージェント（effort ultracode 相当の Workflow ファンアウト）
-  × 完了するまでループ、で徹底的にやり切るオーケストレーション・スキル。各並列トラックは
-  必ず専用の git worktree を持つので、ターミナルや別 claude を並列で走らせても作業ツリーが
-  絶対に被らない。goal-workflow の「全部入り・妥協なし」版。
-  使用タイミング: **明示呼び出しのみ**。`/order` と直接打たれたとき、または OPEN GROUND の
-  swarm が worker を spawn するとき（`/order ゴール: …` を positional prompt として渡す —
-  `swarmWorker.ts` の ORDER_PREFIX）。
-  ⚠ **言い回しからの自動発動はしない**（2026-07-22）。以前この欄には「最強で」「ガチでやって」
-  「終わるまで全部やって」等のトリガ文があり、swarm と無関係な場面でも発動しえた。swarm は
-  常に `/order` を明示コマンドとして渡すのでトリガ文に依存しておらず、残す利益より
-  「意図しないファンアウトで高コストな並列実行が始まる」害の方が大きいため撤去した。
-  注意: 多数のエージェント＋worktree を起こすため高コスト。呼ぶのは明示的に最大努力を
-  求めるときだけ（通常のタスクは goal-workflow か単一エージェントで足りる）。
+  Max-effort mode: pursue a goal (observable "done" condition) via
+  git-worktree-isolated parallel tracks x team-scale multi-agent fanout
+  (Workflow, ultracode-equivalent) x loop-until-done. One worktree per
+  track so concurrent terminals/claude/subagents never collide.
+  goal-workflow's no-compromise superset.
+  Trigger: **explicit only** - `/order` typed, or swarm spawning a worker
+  (`/order ゴール: ...`, ORDER_PREFIX). Not phrase-triggered (removed
+  2026-07-22, swarm always passes `/order` explicitly). Expensive -
+  explicit max-effort asks only; normal tasks fit goal-workflow/one agent.
 ---
-<!-- managed-by: openground — このファイルは OPEN GROUND がアプリ起動時に自動配備する。
-     手編集はアプリ起動時に上書きされる。正典は OPEN GROUND repo の skills/order/SKILL.md。
-     この managed-by マーカーを外したファイルは「ユーザー自作」と見なされ、自動更新されなくなる。 -->
+<!-- managed-by: openground - auto-deployed on launch, hand edits
+     overwritten. Canonical: skills/order/SKILL.md in the OPEN GROUND
+     repo. Remove marker -> treated as user-authored, stops updating. -->
 
-# order — worktree 隔離 × ultracode チーム × 完了までループ
+# order - worktree isolation x ultracode team x loop-until-done
 
-3つを1つに束ねた「最強コマンド」:
+Three pillars: (1) **non-colliding parallelism** - one git worktree per
+track; (2) **team fanout** - `/effort ultracode`-equivalent: Workflow
+staffs a team per phase (understand->design->implement->review),
+implementation worktree-isolated, review adversarial-majority-vote,
+integrate last - best beyond one context; (3) **loop to done** - `/goal`
+spirit, loop Audit->implement->verify->integrate until observable
+condition holds (tests green, checklist 100%). Superset of goal-workflow,
+no compromises; light tasks use goal-workflow or one agent.
 
-1. **被らない並列化** — 並列トラックごとに専用の **git worktree** を切る。だから複数の
-   ターミナル / 別 claude / サブエージェントが同時に走っても、作業ツリーが衝突しない。
-2. **チームで** — `/effort ultracode` 相当。**Workflow ツール**でチーム規模のエージェントを
-   ファンアウトし、実装・検証・裏取りを分担する。
-3. **完了まで徹底** — `/goal` の精神。観測可能な完了条件を満たすまで Audit→実装→検証→
-   統合 をループし続ける（テスト緑・チェックリスト 100% になって初めて終了）。
+Owner-facing text (chat, escalation/blocker questions, status reports)
+follows the launch prompt's `[Reply language]`/`【返答言語】` line (Settings.language),
+not this file's language. Commit/PR text follows CLAUDE.md instead.
 
-> これは **goal-workflow の上位互換（妥協なし版）**。軽いタスクは goal-workflow か単一
-> エージェントで十分。order はユーザーが明示的に「最強で / 徹底的に」と求めたとき専用。
+## Inputs (confirm if ambiguous)
+1. **Goal (required)** - observable, true/false-checkable, e.g. "Board
+   chat->reflect/frame/text/comment work; tests/tsc/lint/e2e green." Ban
+   infinite superlatives ("perfect") - use measurable proxies. **State
+   final placement** (project's Canvas/Board/file) separate from where
+   it's *verified* - "verified in test/dev" isn't placement. Unstated ->
+   ask, or default to target project. **Swarm-core edits need a
+   docs-followup condition**: touching SWARM_CODE_PATHS
+   (swarmOrchestrator/swarmWorker/swarmQuota/swarmAllowedModels/
+   swarmLaunch/swarmIntegrate/swarmOverseer*/swarmEscalations/
+   swarmNotifications/swarmWorkerRegistry/swarmJanitor/server/routes/
+   swarm/server/routes/project) -> add "update matching docs/commander/
+   chapter (or note none needed)" (docs/commander/TARGET-STATE.md §6).
+   Structural changes -> also add "update matching docs/MAP.md entry."
+2. **Parallel unit** - (a) independent subtasks (b) multiple approaches
+   (c) multiple targets; non-overlapping files per unit.
+3. **Branch/PR policy** - default: feature branch+PR per unit; protected
+   main -> no direct push, CI required; optional squash branch.
+4. **Scale/budget** - max agents/rounds/time-token cap.
 
----
+## Pipeline (every round)
+**0. Where to run** - local repo/worktree/app-run/visual check -> local
+only (cloud `/schedule` is headless, no local FS access); local triggers
+-> `/loop` (needs session+machine alive).
 
-## 入力（依頼者から集める。曖昧なら最初に確認）
+**1. Audit** - break goal into an observable checklist ("done when...");
+check current state (round 1); re-split items to be independent with
+non-overlapping files.
 
-1. **ゴール（必須）** — *観測可能な完了条件*で書く。true/false を判定できる事実に落とす。
-   例:「Board の chat→反映・frame・text・comment が動き、`npm test` 緑、`tsc`/`lint` 0 error、
-   e2e スモーク green」。**「完璧」「最高」など無限大の表現は禁止** — 計測可能な代理指標
-   （チェックリスト消化・テスト・特定の挙動）に必ず翻訳する。
-   **成果の最終配置先も必ず含める** — 成果物が最終的にどこに残るか（どのプロジェクトの
-   Canvas/Board/どのファイル）。**「test/dev で検証」は手段であって置き場所ではない**——検証先と
-   最終配置先を**分けて**書く。ゴールに最終配置先が無ければ確認するか、test/dev でなく対象
-   プロジェクト本体に配置する（2026-06-29 厨房図解が test 止まりで取りこぼした実例）。
-   **OPEN GROUND の swarm コアに触るゴールでは docs 追随も完了条件に含める** — SWARM_CODE_PATHS
-   相当（swarmOrchestrator / swarmWorker / swarmQuota / swarmAllowedModels / swarmLaunch /
-   swarmIntegrate / swarmOverseer* / swarmEscalations / swarmNotifications / swarmWorkerRegistry /
-   swarmJanitor / server/routes/swarm / server/routes/project）に触るときは、完了条件に
-   「docs/commander/ 該当章の更新（更新不要ならその判断を明記）」を必ず入れる
-   （docs/commander/TARGET-STATE.md §6）。
-   構造変更（ファイル追加/移動/責務変更）を含むゴールは `docs/MAP.md` の該当行の追随も完了条件に含める。
-2. **並列単位** — 何を並列化するか:（a）独立サブタスク（b）同一ゴールに複数アプローチ
-   （c）複数対象。**各単位が触るファイル群が重ならないように切る**（並列とレビューが楽）。
-3. **ブランチ/PR 方針** — 既定: 単位ごとに feature ブランチ＋PR。`main` 保護なら直 push 禁止・
-   CI 必須。最後に統合ブランチへまとめる選択肢も。
-4. **規模/予算** — 何エージェントまで・何ラウンドまで・時間/トークン上限（`+500k` 等）。
+**2. Fan out via worktrees** - one worktree + one parallel agent per
+unfinished independent item. Agent tool `Agent({ isolation: "worktree" })`
+(auto-cleaned if unchanged), or Workflow `agent(prompt, { isolation:
+'worktree' })` via `parallel()`/`pipeline()` (concurrency ~16, cap 1000).
+Isolate whenever concurrent writes are possible. Explicit file/dir scope
+per agent, no going outside it. **Don't fan out parallel implementers
+when the integration target is one file/component** (same-file writers
+collide) - one worktree, fanout limited to read-only audit/review.
+`order`'s value is the loop, not parallelism itself; N implementers on
+one target is a misuse.
 
----
+**3. Verify** - each worktree: `build`/`test`/`lint`(+`e2e`); fail ->
+revert/retry. Important findings get adversarial review (separate agent:
+"is this actually right? what breaks it?"); ultracode scale = multiple
+reviewers + majority vote per item.
 
-## パイプライン（毎ラウンド）
+**4. Integrate** - commit each worktree's result to a feature branch -> PR
+per unit; protected main: PR+CI, merge only once green. **Never `git
+merge` on the shared primary checkout** (dirty pre-commit WIP from others
+blocks it, PR or not). Instead: `git push origin <branch>:main` (one step
+if FF), or merge in a disposable worktree off `origin/main`. Merge
+sequence, exactly (git run inline by Opus/main loop, never delegate to
+Sonnet, [[git-ops-use-sonnet]]):
+1. `git fetch origin main` first - don't assume FF.
+2. Confirm tests green (tsc/test per goal criteria); red -> stop, no push.
+3. `git merge-base --is-ancestor origin/main HEAD` -> FF possible? ->
+   `git push origin <branch>:main`.
+4. No FF but no conflict (another track landed first, **routine, not an
+   error**) -> `git rebase origin/main` -> re-verify -> green -> FF push.
+   Check overlap via `git diff --name-only $(git merge-base origin/main
+   HEAD)..HEAD`. **Never treat not-FF->rebase->FF as an anomaly and stop.**
+5. Real conflict -> stop, report. **Never force-push**, never displace
+   another session's WIP via commit/stash/discard.
+Clean up merged branches, unneeded worktrees (`git worktree remove`).
 
-### 0. 実行場所の判定（重要）
-- **ローカル repo / worktree / アプリ実行 / 視覚確認が要る → ローカル実行一択。**
-  クラウド routine（`/schedule`）はヘッドレスでローカル FS・worktree を触れない。
-- ローカルの時間トリガーは `/loop`（このセッション維持・マシン起動が前提）。
+**5. Completion check -> loop or stop** - evaluate checklist+tests every
+round; not met -> repeat on remaining items. Stop: checklist 100%+tests
+green, OR budget/time guard hit, OR requester stops. On stop: clean up,
+report (severity counts, remaining issues, PR list).
 
-### 1. Audit（現状をチェックリストと突合）
-- ゴールを**観測可能なチェックリスト**へ分解（各項目「これが満たされたら ✓」）。
-- 既存の状態を確認（何が在る/欠けてる/壊れてる）。1回目は必ず実施。
-- 各項目が**独立に**実装できるよう、触るファイル群が重ならない単位に切り直す。
-
-### 2. Worktree を切ってファンアウト（被らない並列化の核）
-- **未消化の独立項目ごとに専用 worktree を割り当て、並列エージェントに実装させる。**
-- 手段は2通り（同じ「worktree 隔離」を指す）:
-  - **Agent ツール**: `Agent({ ..., isolation: "worktree" })` — 各サブエージェントが自分専用の
-    git worktree（リポジトリの隔離コピー）で作業。変更が無ければ自動で掃除される。
-  - **Workflow ツール（ultracode チーム）**: `agent(prompt, { isolation: 'worktree' })` を
-    `parallel()` / `pipeline()` でファンアウト。同時実行は ~16・総 1000 まで。
-- **同じファイルを同時に書き換える可能性があるなら必ず worktree 隔離**。これにより、
-  ユーザーが別ターミナルで `npm run dev` していても、別 claude が走っていても、作業ツリーが
-  競合しない（今回の「別ワークツリーの dev サーバーがポートを掴む」程度の干渉に留まる）。
-- 各エージェントには**触ってよいファイル/ディレクトリのスコープを明示**し、越境しないよう指示。
-- **統合先が1ファイル/1コンポーネントに集中する単一対象では、並列の隔離“実装”を出さない**
-  （同じファイルを並列で書くと自分のトラック同士で衝突する）。その場合は worktree を1本だけ
-  切って実装はそこに集約し、ファンアウトは read-only の監査/設計/レビューに留める。order の
-  価値は「並列隔離」より **Audit→実装→検証→敵対的レビュー→統合のループ**にある——単一対象では
-  そのループだけ回す（並列前提で読んで N 実装者を出すのは誤用）。
-
-### 3. 検証（各成果を独立に）
-- 各 worktree で `build` / `test` / `lint`（あれば `e2e`）を回す。壊れたら差し戻し/リトライ。
-- 重要な finding は**敵対的レビュー**（別エージェントに「これは本当に正しい？壊れるケースは？」
-  と反証させる）。ultracode 規模なら 1 項目につき複数レビュアーで多数決。
-
-### 4. 統合（worktree → コミット → PR）
-- 各 worktree の成果を feature ブランチにコミット → **単位ごとに PR**。保護 main は PR 経由・
-  CI 必須。CI 緑を確認してからマージ。
-- **統合は共有 main チェックアウトを触らずに行う**（並行セッション対策・重要）。PR を使わず
-  ローカルでマージする場合でも、primary checkout 上で `git merge` しない — そこは他セッション/
-  ユーザーが共有する唯一のツリーで、相手のコミット前 WIP で dirty だとマージが止まる（作業の
-  隔離はできても**統合先が共有物だと競合する**）。代わりに:
-  - `git push origin <branch>:main`（ref を直接 origin/main へ。FF のときはこれで完結）、または
-  - `origin/main` から切った**使い捨て worktree** でマージ→push。
-  どちらも primary checkout の状態に依存しないので、相手が dirty でも止まらない。
-- **マージは必ずこの順で（git は Opus / main ループが自分でやる・Sonnet 委任しない・[[git-ops-use-sonnet]]）:**
-  1. **先に `git fetch origin main`** で main の現在地を取り直す（FF 前提で投げない — 並列 swarm では
-     他トラックが先に main へ入っているのが常態）。
-  2. **テスト緑を確認**（`npx tsc --noEmit`/`npm test` 等そのゴール基準）。赤なら push せず停止。
-  3. `git merge-base --is-ancestor origin/main HEAD` で FF 可否。**FF 可** → `git push origin <branch>:main`。
-  4. **FF 不可だが衝突なし**（＝別トラックが先に main へ入っただけ。**これは異常ではなくルーチン**）→
-     隔離 worktree の自ブランチを **`git rebase origin/main` → 再検証(tsc/test) → 緑なら FF push**。
-     `git diff --name-only $(git merge-base origin/main HEAD)..HEAD` で重複を見て、重ならなければ
-     rebase はほぼ無衝突。**この「FF 不可→rebase→FF」を異常扱いして止めない**（2026-06-17 はここで
-     一拍混乱した）。
-  5. **実衝突**が出たら停止して報告。**force-push 厳禁**。他人の WIP を commit/stash/discard で退かさない。
-- マージ済みブランチ・**変更なし/不要になった worktree は掃除**（`git worktree remove`）。
-
-### 5. 完了判定 → ループ or 終了
-- ゴール条件（チェックリスト＋テスト緑）を**毎ラウンド評価**。
-- 未達なら次の未消化項目で**ラウンドを繰り返す**（Audit→fan-out→検証→統合）。
-- **停止条件**: チェックリスト 100% 消化 ＆ テスト緑、または予算/時間ガード、または依頼者の停止。
-  停止時はクリーンに片付けて報告（重大度別件数・残課題・PR 一覧）。
-
-### 6. Heartbeat（manager 連携・worker は必ず吐く）
-複数 worker を `manager`（左の司令塔セッション）が監視・統合できるよう、**各 worker は
-フェーズの境目で心拍を1コマンド更新する**（`worker` が初期心拍を書いてあるので、以後は上書き）:
-
+**6. Heartbeat (always emit)** - so `manager` (commander session) can
+monitor/integrate multiple workers, update at every phase boundary
+(`worker` writes the initial one, you overwrite thereafter):
 ```
-bash ~/.claude/swarm-beat.sh <phase> <ready:true|false> "<今やってる事の1行要約>" ["<blocker があれば>"]
+bash ~/.claude/swarm-beat.sh <phase> <ready:true|false> "<one-line status>" ["<blocker>"]
 ```
+When: Audit done / implementing (summary changed) / before a long step
+(build/test) / verifying / `done true "..."` once merge-ready / `blocked
+false "..." "reason"` if stuck. Recency=liveness (30+ min silent =
+stuck). `ready=true` = tests green, integrable; manager acts on it.
+**`[hold]` propagation - never drop it**: goal started with `[hold]` ->
+every heartbeat's summary also starts with `[hold]` (e.g. `done true
+"[hold] editor-select UI done, awaiting approval"`) so commander holds
+for approval instead of auto-merging (default=auto-merge, `[hold]` is
+the only opt-out). Strip it from goal text before implementing (it's a
+merge-policy flag, not a feature to build). **Dropping the prefix even
+once disarms the hold gate.** Always include it.
+File: `~/.openground/swarm/<repo-key>/<branch>.json`. **Never merge your
+own work or remove your own worktree** - commander's job (and it cleans
+the heartbeat with it).
 
-- **いつ**: Audit 完了時 / 実装中（要約が変わったら）/ **長い処理(build・test 等)に入る直前にも1回** /
-  検証中 / **完了してマージ可になったら `done true "…"`** / 詰まったら `blocked false "…" "理由"`。
-  心拍の新しさ＝生存シグナル（30分以上無音だと司令塔に「詰まりかも」と見なされるので、長丁場はこまめに）。
-- `ready=true` は「テスト緑・統合可」を意味する。これを見て manager が統合する。
-- **`[hold]`（手動マージ指定）の伝播 — 最重要・落とさない**: 渡されたゴールの先頭に `[hold]` があったら、
-  **以後の毎心拍で task 要約を `[hold]` で始める**（例: `done true "[hold] エディタ選択UI 完了・承認待ち"`）。
-  司令塔はこれを見て**自動マージせず承認待ち**にする（既定は全自動マージ。`[hold]` 指定だけ承認を待つ）。
-  **`[hold]` はマージ方針フラグなので、ゴール本文からは外して**実装する（"[hold]" を作るべき機能と誤解しない）。
-  途中の心拍で prefix を**1回でも落とすと承認ゲートが外れて自動マージされる**＝絶対に毎回付ける。
-- ファイルは `~/.openground/swarm/<repo-key>/<branch>.json`。**自分でマージはしない**（統合は司令塔の仕事）。
-  自分の worktree を消すのも司令塔に任せる（消すと心拍も司令塔が掃除する）。
+## Worktree / dev-server operational notes
+`.git/worktrees`-managed; each a full checkout (disk-heavy). Gitignore
+your worktree dir (e.g. `.claude/worktrees/`). **Never touch another
+session's worktree/dev server** - an unfamiliar change may be legitimate
+WIP. `git worktree remove <path>` when done (no-change isolated worktrees
+auto-clean). **Never `git stash`** - commit or discard.
 
----
+Worktrees isolate files, not ports (stale `npm run dev` can evict the
+standard pair, Web 5174/API 47776). Extra instances always `npm run
+dev:alt` (plain `npm run dev` fights over 5174/47776). Stop your own dev
+server on cleanup too (`git worktree remove` leaves it running). Never
+kill another session's dev server -
+distinguish via `ps -eo pid,lstart,command` path
+(`.../<repo>/node_modules`=main vs `.../.claude/worktrees/X/...`=other) +
+start time; kill only old main-owned, confirm unused first. Kill with
+literal PIDs (`kill 111 222 333` - `kill $VAR` silently no-ops in zsh,
+word-split with `${=VAR}`); verify after. Diagnose: `lsof -nP -iTCP
+-sTCP:LISTEN | grep -E ':(5174|47776)'` - nothing listening -> port lost,
+plain `npm run dev` reclaims it; green `tsc` rules out a code cause.
 
-## Worktree 運用メモ
-- worktree は `.git/worktrees` 管理。各 worktree はフルチェックアウト（ディスク大）。
-- `.gitignore` に作業用 worktree ディレクトリ（例 `.claude/worktrees/`）を入れておく。
-- **他セッション/他人の worktree や dev サーバーには触らない**（身に覚えのない worktree 変更は
-  別 claude の正当な WIP かも。勝手に discard/commit/kill しない）。
-- 終わったら `git worktree remove <path>`。変更なしの隔離 worktree は自動掃除される。
-- **`git stash` は使わない** — 作業は commit するか破棄する（消えた変更事故を防ぐ）。
+## Guardrails
+Never push directly to protected branches, PR+CI always. Stick to
+observable goals - vague criteria loop forever. Small batches, cut by
+checklist item. Local execution needs machine+session alive - say so. No
+destructive ops, prod-data writes, or undisclosed deploys; tests isolate
+HOME/prod stores. Respect project constraints (e.g. subscription-only, no
+API keys). **Within OPEN GROUND**: new work defaults English, no
+retroactive translation of existing Japanese (exceptions/owner-facing
+output/frozen markers: canon = CLAUDE.md "Language policy").
 
-## Dev サーバー / ポート運用メモ（並列で特に重要）
-並列トラックを立てると dev サーバーが増える。**worktree はファイルを隔離するが、dev サーバーの
-ポートは隔離しない** — ここが事故源になりやすい（2026-06-13 に実際に踏んだ）。古い `npm run dev`
-がメインのチェックアウトに溜まり、常用ペア（Web 5174 / API 47776）の担い手が落ちて未バインドに
-なり、日常使いの Chrome タブ（:5174 固定）が死んだ API を叩いて全画面が「読み込み中…」で固まった
-（＝コードのバグに見えるが環境問題）。教訓:
-- **追加インスタンスは必ず `npm run dev:alt`**（プロジェクトにあれば）。素の `npm run dev` を
-  2本目で打つと常用 5174/47776 を奪い合う。dev:alt は起動前に空きポートを確保するので奪わない。
-  worktree で UI 確認するなら dev:alt 一択。
-- **片付けは worktree 削除だけでなく「自分が起動した dev サーバーの停止」まで**。
-  `git worktree remove` しても dev サーバーは生き残る。トラック終了時に必ず止める。
-- **他セッションの dev サーバーは絶対に止めない**。停止候補は `ps -eo pid,lstart,command` の
-  パス（`…/<repo>/node_modules` ＝メイン vs `…/.claude/worktrees/X/…` ＝別セッション）と起動
-  時刻で判別し、**メイン由来の古いものだけ**。「本当に未使用か」を確認するまで決めつけない
-  （ユーザーは並行作業をしている前提で警戒する）。
-- **プロセス停止はリテラル PID で**: `kill 111 222 333`。zsh は `kill $VAR` を単語分割せず
-  全 PID を1引数として渡すため、無効 PID で**空振り**する（`${=VAR}` でも可）。kill 後は
-  対象が消えたか・残すべきもの（常用サーバー / worktree）が生きてるかを必ず再確認。
-- 診断: 画面が開けない時はまず `lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(5174|47776)'`
-  （ポート番号はプロジェクト規約に合わせる）。誰も居なければポート喪失。空いていれば素の
-  `npm run dev` 1本で奪還できる（kill 不要）。`tsc` 緑ならコード起因でない裏付け。
-
-## ultracode（チーム）の使いどころ
-- `/effort ultracode` が ON なら Workflow を既定で使い、フェーズごと（理解→設計→実装→レビュー）に
-  チームを編成。実装は worktree 隔離、レビューは敵対的多数決、最後に統合。
-- 1 コンテキストに収まらない規模（大規模移行・横断監査・多数の独立改修）でこそ効く。
-
-## ガードレール
-- **保護ブランチへ直 push しない** — 必ず PR＋CI（lint/typecheck/build/test）を通す。
-- **観測可能なゴールに固執** — 終了条件が曖昧だと永遠に回る。計測可能指標へ翻訳する。
-- **バッチは小さく** — 1 PR が巨大だとレビュー不能。チェックリスト単位で刻む。
-- **ローカル実行はマシン起動＋セッション維持が前提** — 落ちると止まる。依頼者に明示する。
-- **破壊的操作・本番データ書き込み・無断デプロイは禁止**。テストは HOME/本番ストアを隔離。
-- プロジェクト固有の制約（例: OPEN GROUND は subscription-only / API key 禁止）を尊重。
-
-## 頼み方テンプレ（コピペ用）
+## Request template
 ```
 /order
-ゴール（完了条件）: <観測可能な事実。例: Board の run が優先度順に動き tsc/test/lint/e2e 緑>
-チェックリスト: <独立項目を箇条書き。触るファイルが重ならないように>
-並列単位: <独立サブタスク / 複数アプローチ / 複数対象>
-隔離: worktree（既定・必ず1トラック1worktree）
-ブランチ・PR: <feature ブランチ名 / 単位ごと PR / main 保護=PR必須 / 最後に統合ブランチ>
-規模・予算: <エージェント数 / ラウンド上限 / 時間・トークン上限>
+Goal (completion condition): <observable fact, e.g. Board run executes in priority order, tsc/test/lint/e2e green>
+Checklist: <independent items, non-overlapping files>
+Parallel unit: <independent subtasks / multiple approaches / multiple targets>
+Isolation: worktree (default - 1 track = 1 worktree)
+Branch/PR: <branch name / PR per unit / protected main=PR required / final integration branch>
+Scale/budget: <agent count / round cap / time-token cap>
 ```
 
-## 関連
-- [[goal-workflow]] — 軽量版（スケジュール起動 × 並列 × 完了までループ）。日常はこちらで十分。
-- worktree 隔離が不要（同一ファイルを同時に触らない）なら共有ツリーのファンアウトでよい。
+## Related
+[[goal-workflow]] - lighter (scheduled trigger x parallel x loop), enough
+day-to-day. No concurrent-write risk -> shared-tree fanout, no isolation.

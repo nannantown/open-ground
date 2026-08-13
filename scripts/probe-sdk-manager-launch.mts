@@ -25,6 +25,7 @@ import {
   attachSdkListener,
   terminateSdkSession,
 } from '../src/lib/server/sdkSession'
+import { getPromptLang } from '../src/lib/server/promptLang'
 import { randomUUID } from 'crypto'
 
 const main = async () => {
@@ -38,10 +39,19 @@ const main = async () => {
     return
   }
 
+  // `lang` is REQUIRED on sdkManagerLaunchPlan (2026-08-13 rework) — resolved
+  // the same way the production spawn path does (getPromptLang → Settings.language)
+  // so this probe reports what a REAL commander actually gets, not a
+  // hand-picked default. `.mts` scripts sit outside tsconfig's type-checked
+  // `include` (docs/commander/02-worker-lifecycle.md), so passing `lang`
+  // literally here is the only thing that would have caught this at the time —
+  // resolving it for real is the more honest fix.
+  const lang = await getPromptLang()
   const plan = sdkManagerLaunchPlan({
     projectPath,
     agentSessionId: randomUUID(),
     claudeBin: pre.claudeBin,
+    lang,
   })
   for (const w of plan.warnings) console.log(`warning: ${w}`)
   const sp = plan.options.systemPrompt as { append?: string }

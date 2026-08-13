@@ -9,7 +9,11 @@ import { describe, it, expect } from 'vitest'
 import { sdkManagerLaunchPlan, sdkManagerPreflight } from './swarmManagerSdk'
 import { MANAGER_INJECTION, MANAGER_RESUME_INJECTION } from './swarmManager'
 import { SDK_WORKER_MIN_CLI_VERSION } from './swarmWorkerSdk'
+import { languageDirective } from './promptLang'
 
+// `lang` is a REQUIRED field on SdkManagerOptsInput (2026-08-13 rework) — the
+// default fixture fixes it to 'en' so tests unrelated to language don't have
+// to think about it; the dedicated describe block below exercises 'en'/'ja'.
 const plan = (over: Partial<Parameters<typeof sdkManagerLaunchPlan>[0]> = {}) =>
   sdkManagerLaunchPlan({
     projectPath: '/repo',
@@ -17,6 +21,7 @@ const plan = (over: Partial<Parameters<typeof sdkManagerLaunchPlan>[0]> = {}) =>
     claudeBin: '/usr/local/bin/claude',
     port: 47776,
     env: { PATH: '/bin', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDECODE: '1' },
+    lang: 'en',
     ...over,
   })
 
@@ -75,12 +80,19 @@ describe('sdkManagerLaunchPlan', () => {
     const fresh = plan()
     expect(fresh.options.sessionId).toBe('sess-1')
     expect(fresh.options.resume).toBeUndefined()
-    expect(fresh.initialPrompt).toBe(MANAGER_INJECTION)
+    expect(fresh.initialPrompt).toBe(MANAGER_INJECTION + languageDirective('en'))
 
     const cont = plan({ resume: true })
     expect(cont.options.resume).toBe('sess-1')
     expect(cont.options.sessionId).toBeUndefined()
-    expect(cont.initialPrompt).toBe(MANAGER_RESUME_INJECTION)
+    expect(cont.initialPrompt).toBe(MANAGER_RESUME_INJECTION + languageDirective('en'))
+  })
+
+  it('threads Settings.language into the SDK initial prompt (opts.lang, literal marker)', () => {
+    expect(plan({ lang: 'en' }).initialPrompt).toContain('[Reply language]')
+    expect(plan({ lang: 'en' }).initialPrompt).not.toContain('【返答言語】')
+    expect(plan({ resume: true, lang: 'ja' }).initialPrompt).toContain('【返答言語】')
+    expect(plan({ resume: true, lang: 'ja' }).initialPrompt).not.toContain('[Reply language]')
   })
 
   it('carries the mode-resolved model/effort', () => {

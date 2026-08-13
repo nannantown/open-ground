@@ -34,6 +34,7 @@ import {
 } from './swarmManager'
 import { spawnSwarmSupply, SUPPLY_INJECTION, SUPPLY_RESUME_INJECTION } from './swarmSupply'
 import { readSwarmSessions, recordSwarmSession } from './swarmSessions'
+import { languageDirective } from './promptLang'
 import { setSettings } from './store'
 import { defaultManagerPresence } from './swarmOrchestrator'
 
@@ -256,7 +257,9 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     const first = await nthLaunch(1)
     expect(first.flag).toBe('--session-id') // fresh session — the historical launch
     expect(first.sessionId).toBe(cold.agentSessionId)
-    expect(first.prompt).toBe(MANAGER_INJECTION) // a plain `/og-manage`
+    // a plain `/og-manage` + the reply-language directive (Settings.language
+    // resolves to English by default in this isolated test HOME).
+    expect(first.prompt).toBe(MANAGER_INJECTION + languageDirective('en'))
 
     // The id is now on disk, in the project's CENTRAL data dir.
     expect((await readSwarmSessions(proj)).manager?.sessionId).toBe(cold.agentSessionId)
@@ -276,7 +279,7 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
 
     // …and it is handed the re-read-the-Board order, not a bare skill: the conversation
     // survived the restart but the engine's roster did not, and the code may have moved.
-    expect(second.prompt).toBe(MANAGER_RESUME_INJECTION)
+    expect(second.prompt).toBe(MANAGER_RESUME_INJECTION + languageDirective('en'))
     expect(second.prompt).toContain('状況')
     expect(second.prompt).toContain('todo/doing/review')
     // The whole order must have arrived as ONE argv token (the slash-command contract) —
@@ -298,7 +301,7 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
 
     const third = await nthLaunch(3)
     expect(third.flag).toBe('--session-id')
-    expect(third.prompt).toBe(MANAGER_INJECTION)
+    expect(third.prompt).toBe(MANAGER_INJECTION + languageDirective('en'))
     // The new id replaces the dead one, so the NEXT restart resumes this one.
     expect((await readSwarmSessions(proj)).manager?.sessionId).toBe(healed.agentSessionId)
     await appRestart(healed.agentSessionId, healed.terminalId)
@@ -309,7 +312,7 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     expect(cold.resumed).toBe(false)
     const first = await nthLaunch(1)
     expect(first.flag).toBe('--session-id')
-    expect(first.prompt).toBe(SUPPLY_INJECTION)
+    expect(first.prompt).toBe(SUPPLY_INJECTION + languageDirective('en'))
 
     await appRestart(cold.agentSessionId, cold.terminalId)
 
@@ -321,7 +324,7 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     expect(second.flag).toBe('--resume')
     expect(second.sessionId).toBe(cold.agentSessionId)
     expect(second.argv).not.toContain('--session-id')
-    expect(second.prompt).toBe(SUPPLY_RESUME_INJECTION)
+    expect(second.prompt).toBe(SUPPLY_RESUME_INJECTION + languageDirective('en'))
     await appRestart(warm.agentSessionId, warm.terminalId, 2) // its 2nd launch — same uuid
   }, 90_000)
 
@@ -340,6 +343,31 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     expect(m2.agentSessionId).toBe(m1.agentSessionId)
     await appRestart(s2.agentSessionId, s2.terminalId, 2) // 2nd launch of the same uuid
     await appRestart(m2.agentSessionId, m2.terminalId, 2)
+  }, 90_000)
+
+  // M2 (2026-08-13, 2nd rework round): `lang` being a REQUIRED type parameter
+  // on every launch-prompt builder only proves every call site passes
+  // SOMETHING — it does not prove the value passed is the ACTUAL resolved
+  // Settings.language. A production regression that swapped `getPromptLang()`
+  // for a hardcoded `'en'` at any of the 3 spawn call sites would satisfy the
+  // type AND pass every other test in this suite (they all run under this
+  // isolated test HOME's DEFAULT language, 'en', so a stuck-at-'en' bug is
+  // invisible to them). This is the one test in the suite that actually flips
+  // Settings.language and reads the real spawned argv for the marker.
+  it('Settings.language=ja actually reaches the spawned prompt (manager + supply, real argv)', async () => {
+    await setSettings({ language: 'ja' })
+
+    const supply = await spawnSwarmSupply({ projectPath: proj })
+    const supplyLaunch = await nthLaunch(1)
+    expect(supplyLaunch.prompt).toContain('【返答言語】')
+    expect(supplyLaunch.prompt).not.toContain('[Reply language]')
+    await appRestart(supply.agentSessionId, supply.terminalId)
+
+    const manager = await spawnSwarmManager({ projectPath: proj })
+    const managerLaunch = await nthLaunch(2)
+    expect(managerLaunch.prompt).toContain('【返答言語】')
+    expect(managerLaunch.prompt).not.toContain('[Reply language]')
+    await appRestart(manager.agentSessionId, manager.terminalId)
   }, 90_000)
 
   it('`fresh:true` abandons the stored conversation and starts a new one (the escape hatch)', async () => {

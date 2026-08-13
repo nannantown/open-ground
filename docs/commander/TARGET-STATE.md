@@ -409,7 +409,7 @@ curl -s "http://127.0.0.1:47776/api/swarm/notifications" | jq '[.notifications[]
 - **【2026-08-01 に見つかった穴】`SWARM_CODE_PATHS` が SDK ランタイムの中核ファイルを1つも拾わない。**
   集合の第1要素は `^src/lib/server/swarm[^/]*\.ts$` = **ファイル名が `swarm` で始まるもの**なので、
   `swarmEscalations.ts` / `swarmOverseer.ts` / `swarmManagerRuntime.ts` /
-  `swarmWorkerRuntimeDial.ts` / `swarmWorkerRegistry.ts` は入る。しかし
+  `swarmWorkerRegistry.ts` は入る(0813 まで `swarmWorkerRuntimeDial.ts` も — 削除済み)。しかし
   **`sdkSession.ts` / `sdkEvents.ts` / `sdkGuardHook.ts` / `sdkDeskLimit.ts` /
   `workerRuntime.ts` / `liveDesks.ts` は1つも入らない**(UI 側も
   `^src/components/canvas/modules/Swarm[^/]*$` なので `SdkWorkerPane.tsx` は外)。
@@ -529,14 +529,15 @@ npx vitest run src/lib/server/swarmOrchestrator.integration.test.ts -t "docs-fre
 2. **parity 面を新設しない。** presence / questions / 証拠の尾 / 表示の実効値のように
    「PTY と SDK で取り方が違う」面(00-INDEX 症状表の SDK 行群)をこれ以上増やさない —
    新しい観測が要るときは SDK 側だけに実装する。
-3. **fallback 率が観測できる。** worker spawn が PTY に落ちた理由は spawn レスポンスの
-   `fellBackBecause` が一次情報(配布版でサーバ log は見えない — 00-INDEX 症状表)。
-   live の実効比率は workers API の `runtime` 内訳で読む(レコードの `runtime` 不在 ⇒ pty —
-   02 章 §2.4-0 の掟)。
-4. **削除条件(この節の終着)**: 実運用 4 週間、worker spawn の PTY fallback が 0
-   (または理由がすべて一時故障)なら、**PTY worker 専用センサー層を削除するカードを
-   起票する** — `swarmRateLimitText` の worker 画面経路・orchestrator の `limitScreen`
-   クランプ / onset 窓(`RATE_LIMIT_EARLY_ONSET_MS` 系)・PTY nudge。削除がゴールで、
+3. ~~**fallback 率が観測できる。**~~ **【0813 に役目を終えた】** fallback 自体が
+   削除された(worker は SDK 専用・fail-fast — 00-INDEX 0813 追記)。spawn 失敗の
+   一次情報は `worker-spawn-failed` 通知の detail と POST の 500 本文。
+4. **削除条件(この節の終着)**: ~~実運用 4 週間、worker spawn の PTY fallback が 0
+   なら削除カードを起票~~ **【0813 に前倒しで発動】** — 4 週を待たずオーナー決定で
+   削除に踏み切った(fallback は実害を静かに吸収する装置だった)。対象だった
+   **PTY worker 専用センサー層の削除は本カード群で実施中** — `swarmRateLimitText` の
+   worker 画面経路・orchestrator の `limitScreen` クランプ / onset 窓
+   (`RATE_LIMIT_EARLY_ONSET_MS` 系)・PTY nudge。削除がゴールで、
    保守はゴールではない。⚠ 削除対象は **worker 系統のみ** — 補給官の PTY(外部窓口・
    リモコン)と `ownerDeskLimit`(人間の卓の監視)は**残る**。人間が座る卓は SDK 化しない。
 
@@ -552,9 +553,9 @@ npx vitest run src/lib/server/swarmOrchestrator.integration.test.ts -t "docs-fre
 ### 到達判定コマンド
 
 ```bash
-# live worker の runtime 内訳(sdk 一色なら凍結が効いている)
+# live worker の runtime 内訳(0813 以降は構造的に sdk 一色 — pty が出たら旧レコードの残骸)
 curl -s "http://127.0.0.1:47776/api/swarm/workers?path=<PATH>" | jq '[.workers[] | (.runtime // "pty")] | group_by(.) | map({runtime: .[0], n: length})'
-# ダイヤルの実効値(サーバが実際に使う値 — パネルと同源。00-INDEX 0802 追記)
+# ダイヤルの実効値(サーバが実際に使う値 — パネルと同源。0813 から {manager} のみ)
 curl -s http://127.0.0.1:47776/api/settings | jq .runtimeDialsEffective
 # PTY 専用コードに「機能追加」が入っていないか(修理は可) — 直近の diff を目視
 git log --oneline -10 -- src/lib/server/swarmRateLimitText.ts src/lib/server/claudeScreen.ts

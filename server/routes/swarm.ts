@@ -329,8 +329,8 @@ export const swarmRoutes = new Hono()
       )
     }
 
-    const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
-    const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
+    // (cols/rows from old clients are ignored — PTY dimensions died with the
+    // PTY worker, 2026-08-13.)
     const hint = typeof body?.hint === 'string' ? body.hint : undefined
     // RESTART: an existing central worktree to relaunch in place. Validated to sit
     // under this project's central worktrees dir by spawnSwarmWorker
@@ -411,8 +411,6 @@ export const swarmRoutes = new Hono()
         notes,
         hint,
         worktree: reuse,
-        cols,
-        rows,
       })
     } catch (e: any) {
       // The claim outlived the spawn it was for — hand the card back to `todo`

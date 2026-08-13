@@ -308,6 +308,7 @@ describe('updateDialogText', () => {
     'downloading',
     'error',
     'downloaded',
+    'download-failed',
   ] as const
 
   it('every kind has non-empty copy in BOTH languages', () => {
@@ -320,7 +321,7 @@ describe('updateDialogText', () => {
     }
   })
 
-  it('only the "downloaded" prompt offers buttons, and "Later" is the default', () => {
+  it('only "downloaded" and "download-failed" offer buttons, with safe defaults', () => {
     for (const lang of ['en', 'ja'] as const) {
       const downloaded = updateDialogText(lang, 'downloaded', { version: '0.12.0' })
       expect(downloaded.buttons).toHaveLength(2)
@@ -328,7 +329,13 @@ describe('updateDialogText', () => {
       // cancel action are both "Later" — never restart out from under a running task.
       expect(downloaded.defaultId).toBe(1)
       expect(downloaded.cancelId).toBe(1)
-      for (const kind of KINDS.filter((k) => k !== 'downloaded')) {
+      // A failed download's affirmative IS the way out (open the release page) —
+      // index 0 and the default; main.js branches on response === 0.
+      const failed = updateDialogText(lang, 'download-failed', { error: 'ENOTFOUND' })
+      expect(failed.buttons).toHaveLength(2)
+      expect(failed.defaultId).toBe(0)
+      expect(failed.cancelId).toBe(1)
+      for (const kind of KINDS.filter((k) => k !== 'downloaded' && k !== 'download-failed')) {
         expect(updateDialogText(lang, kind).buttons, `${lang}/${kind}`).toBeUndefined()
       }
     }

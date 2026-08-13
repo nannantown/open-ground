@@ -2,13 +2,14 @@
 //
 // WHY THIS FILE EXISTS. The loader deliberately NEVER REJECTS — it catches and
 // records the reason so `spawnSdkSession` can re-throw it synchronously and the
-// callers can degrade to a PTY. The trap is that `sdkLoad ??= …` then memoises a
-// promise that RESOLVED, so a failure looks like a completed load and nothing
-// ever retries. One transient miss — EMFILE, an NFS blip, a dispatch racing an
-// install — would mean every worker on the machine runs as a PTY until the app
-// is restarted, and in a packaged app the server lives as long as the app does.
-// It would also be silent: the degrade only announces itself in
-// `fellBackBecause`, which nobody reads when workers are "just working".
+// callers can fail the spawn with it. The trap is that `sdkLoad ??= …` then
+// memoises a promise that RESOLVED, so a failure looks like a completed load
+// and nothing ever retries. One transient miss — EMFILE, an NFS blip, a
+// dispatch racing an install — would mean every worker spawn on the machine
+// FAILS until the app is restarted (in the fallback era: every worker silently
+// ran as a PTY, announced only in `fellBackBecause`, which nobody read while
+// workers were "just working"), and in a packaged app the server lives as long
+// as the app does.
 //
 // This repository has written this rule down twice already — paths.ts:203-209
 // ("EVICT ON REJECTION … `??=` alone caches a REJECTED promise forever") and
@@ -76,8 +77,8 @@ describe('the SDK module loader evicts a failed load', () => {
 
   it('reports the reason of the LATEST attempt, not the first', async () => {
     // `sdkLoadError` has to be cleared by a success and rewritten by a new
-    // failure, or the degrade quotes a stale sentence that no longer explains
-    // anything the owner can act on.
+    // failure, or the spawn failure quotes a stale sentence that no longer
+    // explains anything the owner can act on.
     const reasons = ['first failure', 'second failure']
     let attempts = 0
     __setSdkImporterForTests(() => Promise.reject(new Error(reasons[attempts++] ?? 'later')))

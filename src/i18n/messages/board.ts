@@ -44,6 +44,16 @@ export const board = {
     'board.card.integrationConflict': 'Needs manual merge',
     'board.card.integrationConflictTitle':
       'Auto-integration hit a rebase conflict on this branch — it was aborted (never force-merged). Integrate it by hand, then move the card.',
+    'board.card.managerLabel': 'Commander',
+    'board.card.managerMissing': 'Away',
+    'board.card.phaseAudit': 'auditing',
+    'board.card.phaseImplement': 'implementing',
+    'board.card.phaseVerify': 'verifying',
+    'board.card.phaseRework': 'reworking',
+    'board.card.phaseBlocked': 'stuck',
+    'board.card.phaseDone': 'wrapping up',
+    'board.review.managerWorkingTitle':
+      'The commander is on integration duty right now — no need to open the Swarm tab.',
     'board.card.untitledParen': '(Untitled)',
     'board.card.duplicate': 'Duplicate card',
     'board.card.duplicateTitle':
@@ -211,6 +221,16 @@ export const board = {
     'board.card.integrationConflict': '要手動統合',
     'board.card.integrationConflictTitle':
       '自動統合がこのブランチの rebase で衝突したため中止しました（強制マージはしません）。手動で統合してからカードを移動してください。',
+    'board.card.managerLabel': '司令官',
+    'board.card.managerMissing': '不在',
+    'board.card.phaseAudit': '調査中',
+    'board.card.phaseImplement': '実装中',
+    'board.card.phaseVerify': '検証中',
+    'board.card.phaseRework': '手直し中',
+    'board.card.phaseBlocked': '停滞中',
+    'board.card.phaseDone': '完了報告',
+    'board.review.managerWorkingTitle':
+      '司令官がいま統合作業中です（Swarmタブを開かなくてもここで分かります）。',
     'board.card.untitledParen': '（無題）',
     'board.card.duplicate': 'カードを複製',
     'board.card.duplicateTitle':

@@ -140,14 +140,14 @@ describe('owner-desk wiring — the commander and supply desks', () => {
   // one merged bell row say WHICH conversation stopped ("「OG」の司令官・補給官").
   // Dropping either field degrades a real message silently.
   it('managerLaunchOpts opens an owner desk named 司令官', () => {
-    expect(managerLaunchOpts('/tmp/p', 'sid')).toMatchObject({
+    expect(managerLaunchOpts('/tmp/p', 'sid', { lang: 'en' })).toMatchObject({
       ownerDesk: true,
       deskLabel: '司令官',
     })
   })
 
   it('supplyLaunchOpts opens an owner desk named 補給官', () => {
-    expect(supplyLaunchOpts('/tmp/p', 'sid')).toMatchObject({
+    expect(supplyLaunchOpts('/tmp/p', 'sid', { lang: 'en' })).toMatchObject({
       ownerDesk: true,
       deskLabel: '補給官',
     })

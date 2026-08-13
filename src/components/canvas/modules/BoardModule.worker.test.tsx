@@ -58,6 +58,8 @@ vi.mock('@/components/canvas/modules/SwarmWorkerPane', () => ({
 // gate, the orchestrator response's ok/status.
 const h = vi.hoisted(() => ({
   workers: [] as Array<Record<string, unknown>>,
+  reviews: [] as Array<Record<string, unknown>>,
+  managerPresence: undefined as string | undefined,
   orchOk: true,
   orchStatus: 200,
 }))
@@ -100,7 +102,8 @@ vi.mock('@/lib/api-client', () => ({
                   running: true,
                   maxWorkers: 6,
                   workers: h.workers,
-                  reviews: [],
+                  reviews: h.reviews,
+                  ...(h.managerPresence ? { managerPresence: h.managerPresence } : {}),
                   log: [],
                   anomalies: [],
                 }),
@@ -173,6 +176,8 @@ const repoll = async () => {
 beforeEach(() => {
   localStorage.clear()
   h.workers = []
+  h.reviews = []
+  h.managerPresence = undefined
   h.orchOk = true
   h.orchStatus = 200
   vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({}) })))
@@ -262,5 +267,86 @@ describe('BoardModule drawer — swarm worker live screen', () => {
     await repoll()
     const pane = getByTestId('worker-pane')
     expect(pane.getAttribute('data-terminalid')).toBe('pty-worker-2')
+  })
+})
+
+// ── Commander strip gates (差し戻し M2) ──────────────────────────────────────
+// The two load-bearing gates the per-card commander strip depends on, exercised
+// through the REAL resolve path (BoardModule's orchestrator poll →
+// resolveManagerForTask → BoardTab → BoardCard) — NOT a mocked managerForTask,
+// which is exactly why the BoardCard-level tests could not catch these:
+//  1. the NO-FABRICATION gate — a review card the engine does not list gets
+//     NOTHING (the mutation `reviewsByTask.get(id) ?? 'unknown'` must go red);
+//  2. the 403 owner-gate fallback — flipping to 403 must CLEAR shown linkage
+//     (deleting the 403-branch clears must go red). 完了条件C.
+describe('BoardModule board — commander strip gates (review column)', () => {
+  const reviewTask = () =>
+    makeTask({ id: 'r1', title: 'Review me', boardColumn: 'review', branch: 'swarm/r1' })
+  const renderBoard = (card: ProjectTask) =>
+    render(
+      <BoardModule
+        data={makeData(card)}
+        project={baseProject}
+        persist={vi.fn()}
+        detailId={null}
+        onOpenDetail={vi.fn()}
+        renderConversation={() => <div />}
+        hasTerminalSlot={() => false}
+        liveTerminalId={() => null}
+        onDeleteTask={vi.fn()}
+        onLaunchTask={vi.fn(async () => ({ ok: true }))}
+      />,
+    )
+
+  it('positive control: a review card IN the engine queue shows the strip', async () => {
+    h.reviews = [{ taskId: 'r1', branch: 'swarm/r1', taskTitle: 'Review me', status: 'ff' }]
+    h.managerPresence = 'working'
+    const { getByText } = renderBoard(reviewTask())
+    await settle()
+    expect(getByText('board.card.managerLabel')).toBeTruthy()
+    expect(getByText('· projectPanel.swarm.manager.reviewFf')).toBeTruthy()
+  })
+
+  it('NO-FABRICATION: a review card the engine does NOT list gets no strip', async () => {
+    // The queue lists a DIFFERENT card; presence is quiet so the header badge
+    // cannot blur the assertion. r1 (hand-made / someone else's branch) must
+    // show nothing — never a fabricated 「判定中」.
+    h.reviews = [{ taskId: 'other', branch: 'swarm/other', taskTitle: 'x', status: 'ff' }]
+    h.managerPresence = 'quiet'
+    const { queryByText } = renderBoard(reviewTask())
+    await settle()
+    expect(queryByText('board.card.managerLabel')).toBeNull()
+  })
+
+  it('owner gate: flipping to 403 clears an already-shown strip AND header badge', async () => {
+    h.reviews = [{ taskId: 'r1', branch: 'swarm/r1', taskTitle: 'Review me', status: 'ff' }]
+    h.managerPresence = 'working'
+    const { getByText, queryByText } = renderBoard(reviewTask())
+    await settle()
+    expect(getByText('board.card.managerLabel')).toBeTruthy()
+    // The poll turns non-owner: a STANDING auth state, not a blip — the linkage
+    // must clear, not linger.
+    h.orchOk = false
+    h.orchStatus = 403
+    await repoll()
+    expect(queryByText('board.card.managerLabel')).toBeNull()
+    expect(
+      queryByText('board.card.managerLabel projectPanel.swarm.manager.stageRunning'),
+    ).toBeNull()
+  })
+
+  it('B-3 header badge: commander working shows on the review lane even with an empty queue', async () => {
+    // Engine stopped → reviews: [] — the per-card strips have nothing to hang
+    // on, but the BOARD-LEVEL badge still tells the owner the commander is on
+    // duty (the honest altitude when no per-card fact exists).
+    h.reviews = []
+    h.managerPresence = 'working'
+    const { getByText, queryByText } = renderBoard(reviewTask())
+    await settle()
+    expect(
+      getByText('board.card.managerLabel projectPanel.swarm.manager.stageRunning'),
+    ).toBeTruthy()
+    // …and no per-card strip is fabricated for it.
+    expect(queryByText('board.card.managerLabel')).toBeNull()
   })
 })

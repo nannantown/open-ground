@@ -5,14 +5,13 @@ import {
   swarmWorktreeDirName,
   pickBaseRef,
   buildOrderInjection,
-  workerLaunchOpts,
   SWARM_BASE_REF_PREFERENCE,
   WORKER_ORDER_RULES,
   WORKER_RESUME_INJECTION,
 } from './swarmWorker'
-import { buildClaudeArgv } from './claudeTerminal'
 import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
 import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
+import { languageDirective } from './promptLang'
 
 // The git-touching parts (createSwarmWorktree / removeSwarmWorktree /
 // spawnSwarmWorker) need a registered project + a real repo + the `claude` CLI,
@@ -233,7 +232,7 @@ describe('WORKER_ORDER_RULES decision routing (2026-07-18 — WHO decides)', () 
   })
 
   it('reaches the actual injected prompt, not just the constant', () => {
-    expect(buildOrderInjection('カードの題名')).toContain(DECISION_ROUTING_RULES)
+    expect(buildOrderInjection('カードの題名', undefined, undefined, 'en')).toContain(DECISION_ROUTING_RULES)
   })
 })
 
@@ -249,7 +248,7 @@ describe('WORKER_ORDER_RULES specialist review (2026-07-19 — HOW it is decided
   })
 
   it('reaches the actual injected prompt, not just the constant', () => {
-    expect(buildOrderInjection('カードの題名')).toContain(SPECIALIST_REVIEW_RULES)
+    expect(buildOrderInjection('カードの題名', undefined, undefined, 'en')).toContain(SPECIALIST_REVIEW_RULES)
   })
 
   it('keeps the whole rule-set on ONE line even with both clauses appended', () => {
@@ -258,43 +257,53 @@ describe('WORKER_ORDER_RULES specialist review (2026-07-19 — HOW it is decided
 })
 
 describe('buildOrderInjection', () => {
+  // `lang` is a REQUIRED 4th argument (2026-08-13 rework — see the function's
+  // doc comment). Every fixture below fixes it to 'en' so these assertions
+  // (about title/notes/priorFailure composition) stay independent of the
+  // dedicated `lang` describe block further down.
   it('prefixes the slash command and the ゴール: label (worker rules appended)', () => {
-    expect(buildOrderInjection('Add a logout button')).toBe(
-      '/order ゴール: Add a logout button' + WORKER_ORDER_RULES,
+    expect(buildOrderInjection('Add a logout button', undefined, undefined, 'en')).toBe(
+      '/order ゴール: Add a logout button' + WORKER_ORDER_RULES + languageDirective('en'),
     )
   })
 
   it('joins title and notes with an em dash', () => {
-    expect(buildOrderInjection('Logout button', 'in the header, top-right')).toBe(
-      '/order ゴール: Logout button — in the header, top-right' + WORKER_ORDER_RULES,
+    expect(buildOrderInjection('Logout button', 'in the header, top-right', undefined, 'en')).toBe(
+      '/order ゴール: Logout button — in the header, top-right' + WORKER_ORDER_RULES + languageDirective('en'),
     )
   })
 
   it('flattens newlines/tabs to single spaces (single-line so /order is a command)', () => {
-    const out = buildOrderInjection('line one\nline two', 'a\tb\n\nc')
-    expect(out).toBe('/order ゴール: line one line two — a b c' + WORKER_ORDER_RULES)
+    const out = buildOrderInjection('line one\nline two', 'a\tb\n\nc', undefined, 'en')
+    expect(out).toBe('/order ゴール: line one line two — a b c' + WORKER_ORDER_RULES + languageDirective('en'))
     expect(out).not.toMatch(/[\n\r\t]/)
   })
 
   it('strips ESC / control bytes (no terminal-control injection from a card)', () => {
     // A title that embeds ESC[201~ (the bracketed-paste terminator) + a raw CR
     // must not survive — the same injection vector pastePrompt guards.
-    const out = buildOrderInjection('evil\x1b[201~\rtitle', 'x\x00y\x7fz')
+    const out = buildOrderInjection('evil\x1b[201~\rtitle', 'x\x00y\x7fz', undefined, 'en')
     expect(out).not.toMatch(/\x1b/)
     // eslint-disable-next-line no-control-regex
     expect(out).not.toMatch(/[\x00-\x1f\x7f]/)
     // Control bytes become spaces (neutralized — the ESC can no longer open a
     // control sequence), then whitespace collapses: 'evil␛[201~␍title' → 'evil [201~ title'.
-    expect(out).toBe('/order ゴール: evil [201~ title — x y z' + WORKER_ORDER_RULES)
+    expect(out).toBe('/order ゴール: evil [201~ title — x y z' + WORKER_ORDER_RULES + languageDirective('en'))
   })
 
   it('handles notes-only (empty title) without a dangling dash', () => {
-    expect(buildOrderInjection('', 'just notes')).toBe('/order ゴール: just notes' + WORKER_ORDER_RULES)
-    expect(buildOrderInjection('   ', 'just notes')).toBe('/order ゴール: just notes' + WORKER_ORDER_RULES)
+    expect(buildOrderInjection('', 'just notes', undefined, 'en')).toBe(
+      '/order ゴール: just notes' + WORKER_ORDER_RULES + languageDirective('en'),
+    )
+    expect(buildOrderInjection('   ', 'just notes', undefined, 'en')).toBe(
+      '/order ゴール: just notes' + WORKER_ORDER_RULES + languageDirective('en'),
+    )
   })
 
   it('handles an empty goal gracefully', () => {
-    expect(buildOrderInjection('', '')).toBe('/order ゴール: ' + WORKER_ORDER_RULES)
+    expect(buildOrderInjection('', '', undefined, 'en')).toBe(
+      '/order ゴール: ' + WORKER_ORDER_RULES + languageDirective('en'),
+    )
   })
 
   it('burns the worker discipline into EVERY order — push ban, §6 stop-at-ready, heartbeats (2e7beb2)', () => {
@@ -314,8 +323,13 @@ describe('buildOrderInjection', () => {
     expect(WORKER_ORDER_RULES).toContain('プログラムを書いたことがない人')
     expect(WORKER_ORDER_RULES).toContain('選択肢')
     // ...and it rides every spawn prompt, learning-loop dispatches included.
-    expect(buildOrderInjection('T', 'n').endsWith(WORKER_ORDER_RULES)).toBe(true)
-    expect(buildOrderInjection('T', 'n', 'prior fail').endsWith(WORKER_ORDER_RULES)).toBe(true)
+    // (ends with WORKER_ORDER_RULES + the reply-language directive, in that order.)
+    expect(
+      buildOrderInjection('T', 'n', undefined, 'en').endsWith(WORKER_ORDER_RULES + languageDirective('en')),
+    ).toBe(true)
+    expect(
+      buildOrderInjection('T', 'n', 'prior fail', 'en').endsWith(WORKER_ORDER_RULES + languageDirective('en')),
+    ).toBe(true)
   })
 
   it('orders the worker to COMMIT BEFORE the completion gate (the 2026-07-12 全損)', () => {
@@ -335,7 +349,7 @@ describe('buildOrderInjection', () => {
   })
 
   it('appends the LEARNING-LOOP clause when a prior 差し戻し reason is given (card fdf714ef)', () => {
-    const out = buildOrderInjection('Logout button', 'in the header', 'tsc: error TS2345 not assignable')
+    const out = buildOrderInjection('Logout button', 'in the header', 'tsc: error TS2345 not assignable', 'en')
     // The goal is preserved AND the prior-failure cause is appended, labelled.
     expect(out).toContain('/order ゴール: Logout button — in the header')
     expect(out).toContain('前回の差し戻し理由・同じ失敗を繰り返さないこと')
@@ -343,131 +357,47 @@ describe('buildOrderInjection', () => {
   })
 
   it('keeps the prior-failure clause SINGLE-LINE (multi-line tsc tail flattened, /order stays one arg)', () => {
-    const out = buildOrderInjection('T', undefined, 'line one\nerror TS1\n\nerror TS2\twith tab')
+    const out = buildOrderInjection('T', undefined, 'line one\nerror TS1\n\nerror TS2\twith tab', 'en')
     expect(out).not.toMatch(/[\n\r\t]/)
     expect(out).toContain('line one error TS1 error TS2 with tab')
   })
 
   it('omits the clause entirely for a first dispatch (no prior failure) — byte-for-byte unchanged', () => {
-    // Absent / empty / whitespace-only priorFailure ⇒ identical to the 2-arg form.
-    const plain = buildOrderInjection('T', 'n')
-    expect(buildOrderInjection('T', 'n', undefined)).toBe(plain)
-    expect(buildOrderInjection('T', 'n', '')).toBe(plain)
-    expect(buildOrderInjection('T', 'n', '   ')).toBe(plain)
+    // Absent / empty / whitespace-only priorFailure ⇒ identical output (lang fixed to 'en').
+    const plain = buildOrderInjection('T', 'n', undefined, 'en')
+    expect(buildOrderInjection('T', 'n', '', 'en')).toBe(plain)
+    expect(buildOrderInjection('T', 'n', '   ', 'en')).toBe(plain)
     expect(plain).not.toContain('前回の差し戻し理由')
   })
-})
 
-describe('workerLaunchOpts (worker launch contract)', () => {
-  const base = workerLaunchOpts('/wt', 'sid-1', { title: 'Add logout' })
-
-  it('runs UNATTENDED — bypass permissions, lean (no app-context card)', () => {
-    expect(base.permissionMode).toBe('bypass')
-    expect(base.appContext).toBe(false)
-    expect(base.cwd).toBe('/wt')
-    expect(base.agentSessionId).toBe('sid-1')
-  })
-
-  it('arms the A3/L4 deterministic veto (guard) AND blocks MCP inheritance (strictMcpConfig)', () => {
-    // The bypass worker gets the PreToolUse deny veto confined to its worktree...
-    expect(base.guard).toEqual({ writeRoots: ['/wt'] })
-    // ...and MUST NOT inherit the user's MCP servers — mcp__* tools sit outside
-    // the veto, so a filesystem/shell/data MCP would be an unguarded RCE path.
-    // --strict-mcp-config (loads only explicit MCP config = none) closes it.
-    // (Commander MUST-FIX 2.)
-    expect(base.strictMcpConfig).toBe(true)
-    for (const o of [
-      workerLaunchOpts('/wt2', 'sid-a', { title: 't' }),
-      workerLaunchOpts('/wt3', 'sid-b', { title: 't', notes: 'n', env: { SWARM_MANAGER: '1' } }),
-    ]) {
-      expect(o.strictMcpConfig).toBe(true)
-      expect(o.guard).toEqual({ writeRoots: [o.cwd] })
-    }
-  })
-
-  it('keeps bypass UNCONDITIONAL — set AFTER the swarmLaunchDefaults spread (Card 4880e9c6)', () => {
-    // "bypass徹底": an unattended worker must NEVER wedge on a permission/trust
-    // prompt. permissionMode is the last key written (after the defaults spread),
-    // so no field swarmLaunchDefaults might gain later can silently disable it.
-    // Asserted across every call shape, including one that threads an env through.
-    for (const o of [
-      base,
-      workerLaunchOpts('/wt', 'sid-x', { title: 't', env: { SWARM_MANAGER: '1' } }),
-      workerLaunchOpts('/wt', 'sid-y', { title: 't', notes: 'n', cols: 100, rows: 30 }),
-    ]) {
-      expect(o.permissionMode).toBe('bypass')
-    }
-  })
-
-  it('delivers the goal as a positional /order prompt (claude submits it itself)', () => {
-    expect(base.initialPrompt).toBe('/order ゴール: Add logout' + WORKER_ORDER_RULES)
-  })
-
-  it('runs at the shared top tier (SWARM_LAUNCH_MODEL) / max — parity with supply', () => {
-    // The shell worker (swarm-new.sh) runs `--model opus --effort max`; the
-    // in-app worker must match so a dispatched worker isn't silently the CLI
-    // default model. Sourced from swarmLaunch.ts so all 3 roles stay in lockstep.
-    expect(base.model).toBe(SWARM_LAUNCH_MODEL)
-    expect(base.effort).toBe('max')
-  })
-
-  it('starts with Remote Control ON — legacy fixed name when no remoteName resolved', () => {
-    // remoteName absent (legacy caller / resolution failed) ⇒ the historical
-    // fixed 'worker', so Remote Control is never silently OFF.
-    expect(base.remoteControl).toBe('worker')
-  })
-
-  it('threads the resolved IDENTIFIABLE Remote Control name through (opts.remoteName)', () => {
-    // spawnSwarmWorker resolves 「ワーカー <プロジェクト表示名>: <カードtitle要約>」/
-    // "Worker <project>: <task>" via resolveSwarmRemoteName so the claude.ai /
-    // mobile list reads WHICH project + WHAT card each worker is on — the fix for
-    // the wall of identical 'worker' rows (owner feedback 2026-07-18).
-    const named = workerLaunchOpts('/wt', 'sid-rc', {
-      title: 'goal',
-      remoteName: 'ワーカー 受注管理: 検品可視化',
+  describe('lang (Settings.language ⇒ the worker replies in that language, REQUIRED param)', () => {
+    // `lang` is required, not optional (2026-08-13 rework) — "omitted" no
+    // longer exists as a call shape, TS refuses to compile it (M1: a caller
+    // that forgets to pass `lang` now fails `tsc`, not a silent no-op). What
+    // is left to prove: 'en' and 'ja' each carry their OWN literal marker and
+    // never the other's — checked against literal substrings, not by
+    // re-deriving the expectation from `languageDirective` itself (a mutation
+    // that swapped in an empty string for one branch would still satisfy
+    // `toBe(X + languageDirective(lang))` if both sides call the same
+    // function under test).
+    it('en ⇒ appends the English reply-language directive (literal marker)', () => {
+      const out = buildOrderInjection('T', 'n', undefined, 'en')
+      expect(out.endsWith(languageDirective('en'))).toBe(true)
+      expect(out).toContain('[Reply language]')
+      expect(out).not.toContain('【返答言語】')
     })
-    expect(named.remoteControl).toBe('ワーカー 受注管理: 検品可視化')
-  })
-
-  it('passes NO env for a worker — the SWARM_MANAGER role TAG is commander/supply-only', () => {
-    // undefined env → buildLaunchCommand emits no extra env. The worker's veto
-    // is armed by the `guard` opt (OPENGROUND_GUARD=1), never by this port.
-    expect(base.env).toBeUndefined()
-  })
-
-  it('threads an explicit env through (the commander/supply SWARM_MANAGER port)', () => {
-    const mgr = workerLaunchOpts('/wt', 'sid-2', {
-      title: 'x',
-      env: { SWARM_MANAGER: '1' },
+    it('ja ⇒ appends the Japanese reply-language directive (literal marker)', () => {
+      const out = buildOrderInjection('T', 'n', undefined, 'ja')
+      expect(out.endsWith(languageDirective('ja'))).toBe(true)
+      expect(out).toContain('【返答言語】')
+      expect(out).not.toContain('[Reply language]')
     })
-    expect(mgr.env).toEqual({ SWARM_MANAGER: '1' })
-  })
-
-  it('forwards cols/rows and joins notes into the goal', () => {
-    const o = workerLaunchOpts('/wt', 'sid-3', {
-      title: 'Title',
-      notes: 'and notes',
-      cols: 120,
-      rows: 40,
+    it('stays single-line with lang appended (delivery contract)', () => {
+      expect(buildOrderInjection('T', 'n', 'err\nline', 'en')).not.toMatch(/[\n\r\t]/)
     })
-    expect(o.cols).toBe(120)
-    expect(o.rows).toBe(40)
-    expect(o.initialPrompt).toBe('/order ゴール: Title — and notes' + WORKER_ORDER_RULES)
-  })
-
-  it('threads a prior 差し戻し reason into the /order prompt (LEARNING LOOP, card fdf714ef)', () => {
-    const o = workerLaunchOpts('/wt', 'sid-4', {
-      title: 'Title',
-      notes: 'and notes',
-      priorFailure: 'tsc: error TS2345 not assignable',
-    })
-    expect(o.initialPrompt).toContain('/order ゴール: Title — and notes')
-    expect(o.initialPrompt).toContain('前回の差し戻し理由')
-    expect(o.initialPrompt).toContain('TS2345')
   })
 })
 
-// ── card 4: worker conversation resume (--resume) ────────────────────────────
 describe('WORKER_RESUME_INJECTION (card 4 — the resume prompt)', () => {
   it('is a SINGLE slash-command line (the buildOrderInjection delivery contract)', () => {
     // ONE line so the whole thing lands as one slash-command argument (no [Pasted
@@ -487,49 +417,3 @@ describe('WORKER_RESUME_INJECTION (card 4 — the resume prompt)', () => {
   })
 })
 
-describe('workerLaunchOpts — resume branch (card 4)', () => {
-  it('resume:true ⇒ --resume flag + WORKER_RESUME_INJECTION, reusing the persisted session id', () => {
-    const o = workerLaunchOpts('/wt', 'persisted-sid', { title: 'Add logout', resume: true })
-    // launchClaude/buildClaudeArgv emits --resume off exactly this bit
-    expect(o.resume).toBe(true)
-    // the persisted id is what claude re-attaches
-    expect(o.agentSessionId).toBe('persisted-sid')
-    // the resume prompt, NOT the /order goal (the goal is already in history)
-    expect(o.initialPrompt).toBe(WORKER_RESUME_INJECTION)
-  })
-
-  it('condition ③: a resume opens NO bypass — the L4 guard, MCP block, and bypass mode still ride', () => {
-    // The resume path must not strip the worker's containment (plan §5 "新しい抜け道
-    // を作らない"). Same launch guards as a fresh spawn. MUTATION: drop any of these
-    // from the resume branch of workerLaunchOpts and this goes RED.
-    const o = workerLaunchOpts('/wt', 'persisted-sid', { title: 't', resume: true })
-    expect(o.guard).toEqual({ writeRoots: ['/wt'] })
-    expect(o.strictMcpConfig).toBe(true)
-    expect(o.permissionMode).toBe('bypass')
-  })
-
-  it('a fresh (non-resume) launch is byte-for-byte unchanged — /order goal, no resume flag', () => {
-    const o = workerLaunchOpts('/wt', 'fresh-sid', { title: 'Add logout' })
-    expect(o.resume).toBeUndefined()
-    expect(o.initialPrompt).toBe('/order ゴール: Add logout' + WORKER_ORDER_RULES)
-  })
-
-  it('the resume launch opts actually produce a `--resume <id>` argv (via buildClaudeArgv)', () => {
-    // This is completion condition ①: a proven resume yields a `--resume` spawn.
-    // workerLaunchOpts → LaunchClaudeOpts → buildClaudeArgv is the whole arg path.
-    const o = workerLaunchOpts('/wt', 'persisted-sid', { title: 't', resume: true })
-    const argv = buildClaudeArgv(o, null)
-    const i = argv.indexOf('--resume')
-    expect(i).toBeGreaterThanOrEqual(0)
-    expect(argv[i + 1]).toBe('persisted-sid')
-    // and NOT the fresh-session flag
-    expect(argv).not.toContain('--session-id')
-  })
-
-  it('a fresh launch yields `--session-id`, never `--resume`', () => {
-    const o = workerLaunchOpts('/wt', 'fresh-sid', { title: 't' })
-    const argv = buildClaudeArgv(o, null)
-    expect(argv).toContain('--session-id')
-    expect(argv).not.toContain('--resume')
-  })
-})

@@ -2,6 +2,22 @@
 
 作成: 2026-07-30（設計フェーズ）/ **実装完了: 2026-07-30 同日（W0〜W8・直列実装）**
 
+> ## ⚠ 移行は 2026-08-13 に**完了**した — 本書の「併存」設計は歴史
+>
+> オーナー決定により **worker は SDK 専用**になった。本書の中核だった
+> 「ダイヤルで PTY と併存・SDK が確立できなければ PTY へ降格」は**削除済み**:
+> `swarmWorkerRuntimeDial.ts`（`chooseWorkerRuntime` / `sdkSlotLimit` /
+> `liveSdkWorkerCount`）・`Settings.swarmWorkerRuntime`（+ `sdkMaxWorkers`）・
+> `store.getWorkerRuntimeDial`・`SpawnSwarmWorkerResponse.fellBackBecause`・盤面の
+> worker スイッチは存在しない。SDK を確立できない spawn は **fail-fast**
+> （`SdkWorkerUnavailableError` + ロールバック、エンジンは todo 維持 + 階段 HOLD
+> 1m→5m→15m + `worker-spawn-failed` の鐘 + 自動再開）。理由: fallback は実害を
+> 静かに吸収して移行を終わらせない装置になっていた（slot cap 既定 1 が2体目以降を
+> 全部 PTY に流し、オーナーはバグと読んだ — 実測 0813）。司令官ダイヤル
+> （`swarmManagerRuntime`）と補給官 PTY は**残る**。現在の正典は
+> `docs/commander/02-worker-lifecycle.md` §2.4-0（改訂版）と 00-INDEX の 0813 追記。
+> 以下は併存期（0730〜0813）の設計と実測の記録として読むこと。
+
 > ## 実装状況（2026-07-30）
 >
 > | カード | 状態 | コミット |

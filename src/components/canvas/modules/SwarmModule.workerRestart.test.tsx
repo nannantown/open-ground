@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The worker tab's RESTART affordance, across the two runtimes.
+// The worker tab's RESTART affordance.
 //
 // Unlike SwarmModule.sdkTeardown.test.tsx (which had to inject the roster row
 // because the sanitizer truncated it), everything here goes through the REAL
@@ -9,28 +9,31 @@
 // sanitizeSwarmWorkers parses it. That is deliberate — the defect being pinned
 // was IN that parse, so a test that skips it proves nothing.
 //
-// Three failures are pinned:
+// Two failures are pinned:
 //   · `sanitizeSwarmWorkers` dropped `runtime` + `sdkSessionId`, so a live,
 //     working SDK worker was drawn as an ENDED PTY session with a Restart
 //     button over it;
-//   · a restart that comes up on the SDK runtime returns terminalId '' — the
+//   · a restart comes back with terminalId '' (an SDK identity) — the
 //     optimistic overlay carried only a terminalId, so an EMPTY one changed
 //     nothing and the dead tile (Restart button live) stayed on screen for a
 //     whole poll interval. A second click there spawns a twin `claude` into
-//     the worktree the fresh worker is already writing in;
-//   · the restart response's `fellBackBecause` was thrown away, so an SDK dial
-//     that silently degraded to a PTY looked like a broken switch.
+//     the worktree the fresh worker is already writing in.
 //
 // MUTATIONS that turn this red: drop `runtime`/`sdkSessionId` from the
 // sanitizer's field table; make the pendingRestarts overlay carry only
-// `terminalId` again; delete the `fellBackBecause` branch from restartWorker.
+// `terminalId` again.
+//
+// (Until 2026-08-13 this file also pinned the restart DEGRADE path — a spawn
+// answering with a PTY identity + `fellBackBecause`, and the banner that
+// surfaced it. That path died with the PTY worker runtime: a restart now
+// either returns an SDK identity or FAILS the request, and the failure case is
+// pinned below through the error line instead of a banner.)
 //
 // The second half of the file (added 2026-08-01) covers restarting a worker
 // whose desk lives in the SDK pool at all — see its own header. Until then the
-// only tile offering Restart was the PTY one, so `restartWorker`'s SDK stop, the
-// PTY arm of the overlay, and the reconcile that retires a pending restart were
-// all reachable by no test in the repo: each could be broken outright and this
-// suite stayed green (measured).
+// only tile offering Restart was the PTY one, so `restartWorker`'s SDK stop and
+// the reconcile that retires a pending restart were all reachable by no test in
+// the repo: each could be broken outright and this suite stayed green (measured).
 
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, cleanup, act } from '@testing-library/react'
@@ -199,12 +202,18 @@ type Req = { url: string; method: string }
  *  updated after a restart, because the up-to-5s window in which the server has
  *  not caught up yet is precisely the window the optimistic overlay exists for
  *  (and the window the twin-spawn happened in). */
-const harness = (opts: { roster: SwarmWorkerRecord[]; spawn?: Record<string, unknown> }) => {
+const harness = (opts: {
+  roster: SwarmWorkerRecord[]
+  spawn?: Record<string, unknown>
+  /** Set ⇒ POST /api/swarm/worker FAILS with this error (the fail-fast path:
+   *  the server throws SdkWorkerUnavailableError and the route answers 500). */
+  spawnError?: string
+}) => {
   const reqs: Req[] = []
   // `opts` is READ on every request, so a case can advance server truth
   // mid-test by reassigning `opts.roster` and calling repoll().
-  const json = (body: unknown) =>
-    Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response)
+  const json = (body: unknown, status = 200) =>
+    Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(body) } as Response)
 
   vi.stubGlobal('EventSource', FakeEventSource)
   vi.stubGlobal(
@@ -217,7 +226,9 @@ const harness = (opts: { roster: SwarmWorkerRecord[]; spawn?: Record<string, unk
       if (url.startsWith('/api/swarm/orchestrator')) return json(engineState())
       if (url.startsWith('/api/swarm/preflight')) return json({ issues: [] })
       if (url.startsWith('/api/swarm/escalations')) return json({ escalations: [] })
-      if (url === '/api/swarm/worker') return json(opts.spawn ?? {})
+      if (url === '/api/swarm/worker') {
+        return opts.spawnError ? json({ error: opts.spawnError }, 500) : json(opts.spawn ?? {})
+      }
       return json({})
     }),
   )
@@ -285,25 +296,27 @@ describe('restarting a dead worker that comes back on the SDK runtime', () => {
     expect(screen.queryByText('projectPanel.swarm.sessionEnded')).toBeNull()
   })
 
-  it('says so out loud when the SDK dial degraded this worker to a PTY', async () => {
+  it('a restart the server REFUSES surfaces the reason and keeps the Restart button', async () => {
+    // The fail-fast contract (2026-08-13), seen from this tab: a spawn that
+    // cannot establish the SDK runtime no longer degrades to a PTY — the POST
+    // fails, the reason rides back on the response body (the server is a forked
+    // child in a packaged app; a console.warn there reaches nobody), and the
+    // dead tile keeps offering Restart so the owner can retry once the machine
+    // is fixed.
     harness({
       roster: [deadWorker],
-      spawn: {
-        terminalId: 'pty-fresh',
-        agentSessionId: 'agent-1',
-        worktree: WORKTREE,
-        branch: 'swarm/card-3',
-        fellBackBecause: 'SDK worker slots are full (1/1) — this worker runs as a PTY',
-      },
+      spawnError: "the user's claude CLI could not be located",
     })
     await openWorkerTab()
 
     await userEvent.click(await screen.findByText('projectPanel.swarm.restart'))
 
-    // The reason rides back on the response precisely because the server is a
-    // forked child in a packaged app — a console.warn there reaches nobody.
-    const banner = await screen.findByText(/projectPanel\.swarm\.runtime\.fellBack/)
-    expect(banner.textContent).toContain('slots are full (1/1)')
+    const line = await screen.findByText(/projectPanel\.swarm\.restartFailed/)
+    expect(line.textContent).toContain('claude CLI could not be located')
+    // No worker came up, so nothing may be overlaid: the tile still shows the
+    // dead worker, Restart still offered — NOT a phantom fresh session.
+    expect(screen.queryByTitle('projectPanel.swarm.sdk.badgeHint')).toBeNull()
+    expect(screen.queryByText('projectPanel.swarm.restart')).toBeTruthy()
   })
 })
 
@@ -359,30 +372,6 @@ describe('restarting a worker whose desk is an SDK session', () => {
     // And nothing was asked of the PTY pool: this worker has no terminalId, so a
     // DELETE /api/terminal/ addresses nobody — or somebody else.
     expect(reqs.some((r) => r.url.startsWith('/api/terminal/') && r.method === 'DELETE')).toBe(false)
-  })
-
-  it('swaps the tile to the PTY one when the restart degrades to a PTY', async () => {
-    // The roster keeps reporting the OLD SDK worker (the ≤5 s window the overlay
-    // exists for). The overlay must replace the WHOLE runtime identity: leaving
-    // the record as-is keeps a dead SDK tile on screen, addressing a session that
-    // has been stopped, over a PTY worker that is already running.
-    harness({
-      roster: [liveSdkWorker],
-      spawn: {
-        terminalId: 'pty-fresh',
-        worktree: WORKTREE,
-        fellBackBecause: 'SDK worker slots are full (1/1) — this worker runs as a PTY',
-      },
-    })
-
-    await userEvent.click(await openFinishedSdkTile('sdk-3'))
-
-    await waitFor(() => expect(screen.queryByTitle('projectPanel.swarm.sdk.badgeHint')).toBeNull())
-    // …and it is pointed at the id the server actually returned.
-    expect(screen.getByTestId('pty-tile').getAttribute('data-terminal-id')).toBe('pty-fresh')
-    // The dead SDK tile's own Restart is gone with it — one more click there
-    // would spawn a second worker into the same worktree.
-    expect(screen.queryByText('projectPanel.swarm.restart')).toBeNull()
   })
 
   it('retires the optimistic overlay once the roster catches up, so a LATER relaunch shows', async () => {

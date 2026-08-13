@@ -1,17 +1,17 @@
 // @vitest-environment node
 //
-// A FAILED SPAWN MUST NOT LEAK A WORKTREE (2026-07-29).
+// A FAILED SPAWN MUST NOT LEAK A WORKTREE (2026-07-29; re-triggered 2026-08-13).
 //
-// spawnSwarmWorker declares — in two comments — that everything before the
-// worktree is created fails closed, so a rejected spawn leaves nothing behind.
-// `launchClaude` sat BELOW the worktree creation and was outside that invariant:
-// when it threw (claude missing from PATH, a PTY that will not open, a rejected
-// sandbox profile) the worktree AND its `swarm/*` branch were already on disk,
-// and nothing removed them. runDispatchPass has no backoff — it catches and
-// continues on a 3s tick — so ONE persistent failure minted a fresh worktree +
-// branch EVERY THREE SECONDS, and nothing collects them automatically
-// (cleanProjectWorktrees is a manual HTTP route). Overnight that is hundreds of
-// worktrees and branches on a repo nobody was even working in.
+// spawnSwarmWorker declares that everything before the worktree is created
+// fails closed, so a rejected spawn leaves nothing behind. The launch step sits
+// BELOW the worktree creation and was once outside that invariant: when it
+// threw, the worktree AND its `swarm/*` branch were already on disk, and
+// nothing removed them — one persistent failure minted a fresh pair every 3s
+// tick, hundreds overnight. The 2026-07-29 trigger was launchClaude throwing;
+// that path died with the PTY worker (2026-08-13), and today's equivalent is
+// `spawnSdkSession` THROWING synchronously (the SDK module blew up mid-spawn —
+// distinct from the status:'failed' birth that swarmWorkerFailFast.test.ts
+// pins). Same invariant, surviving trigger.
 //
 // TEETH: this drives the real git paths (real repo, real `git worktree add`) and
 // asserts on the DEBRIS, not on a return value. Remove the try/catch teardown in
@@ -28,11 +28,28 @@ const execFile = promisify(execFileCb)
 const git = (cwd: string, args: string[]) =>
   execFile('git', args, { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
 
-// The one failure under test: claude cannot be launched.
-const LAUNCH_ERROR = new Error('claude: command not found')
+// The one failure under test: the SDK spawn throws mid-flight. Preflight
+// passes (the machine LOOKS healthy) so the worktree is already on disk when
+// the throw lands — exactly the debris window.
+vi.mock('./swarmWorkerSdk', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./swarmWorkerSdk')>()),
+  sdkWorkerPreflight: () => ({
+    ok: true,
+    problems: [],
+    claudeBin: '/usr/local/bin/claude',
+    cliVersion: '2.1.220',
+  }),
+  sdkWorkerLaunchPlan: () => ({ options: {}, initialPrompt: '/order go', warnings: [] }),
+}))
+vi.mock('./sdkSession', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./sdkSession')>()),
+  spawnSdkSession: () => {
+    throw new Error('sdk query() blew up mid-spawn')
+  },
+}))
 vi.mock('./claudeTerminal', () => ({
   launchClaude: () => {
-    throw LAUNCH_ERROR
+    throw new Error('launchClaude must never be reached (PTY workers deleted 2026-08-13)')
   },
 }))
 // Preconditions that would otherwise need the real machine (hook wiring, model
@@ -78,7 +95,7 @@ afterEach(async () => {
   await rm(scratch, { recursive: true, force: true })
 })
 
-describe('spawnSwarmWorker — a launchClaude failure leaves NO debris', () => {
+describe('spawnSwarmWorker — a spawn-time SDK failure leaves NO debris', () => {
   it('removes the worktree it just created and deletes its branch', async () => {
     const before = (await git(project, ['worktree', 'list', '--porcelain'])).stdout
 
@@ -86,7 +103,7 @@ describe('spawnSwarmWorker — a launchClaude failure leaves NO debris', () => {
       spawnSwarmWorker({ projectPath: project, title: 'Leaky card', goal: 'do a thing' } as Parameters<
         typeof spawnSwarmWorker
       >[0]),
-    ).rejects.toThrow(/command not found/)
+    ).rejects.toThrow(/blew up mid-spawn/)
 
     // No worktree survived the failure…
     const after = (await git(project, ['worktree', 'list', '--porcelain'])).stdout

@@ -9,6 +9,7 @@ import {
   DESK_DOA_WINDOW_MS,
 } from './swarmManager'
 import { isTierCooling, __resetQuotaForTest } from './swarmQuota'
+import { languageDirective } from './promptLang'
 import type { TerminalInfo } from './terminal'
 
 // spawnSwarmManager spawns a real PTY (needs the `claude` CLI), so it is
@@ -21,7 +22,11 @@ import type { TerminalInfo } from './terminal'
 // same no-worktree, real-tree, tagged-bypass shape, different skill + role.
 
 describe('managerLaunchOpts (commander launch contract)', () => {
-  const base = managerLaunchOpts('/repo', 'sid-1')
+  // `lang` is a REQUIRED argument (2026-08-13 rework — see swarmWorker.ts
+  // buildOrderInjection's doc comment): every fixture below fixes it to 'en'
+  // so the OTHER assertions (bypass/tag/model/…) stay independent of the
+  // language describe block further down, which exercises 'en' vs 'ja' itself.
+  const base = managerLaunchOpts('/repo', 'sid-1', { lang: 'en' })
 
   it('runs in the project PRIMARY checkout (cwd), not a worktree', () => {
     expect(base.cwd).toBe('/repo')
@@ -71,7 +76,7 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     // <project>" via resolveSwarmRemoteName (language = Settings.language) so the
     // claude.ai / mobile session list reads WHICH project's commander this is —
     // the fix for the wall of identical 'manager' rows (owner feedback 2026-07-18).
-    const named = managerLaunchOpts('/proj', 'sid-rc', { remoteName: 'マネージャー 受注管理' })
+    const named = managerLaunchOpts('/proj', 'sid-rc', { remoteName: 'マネージャー 受注管理', lang: 'en' })
     expect(named.remoteControl).toBe('マネージャー 受注管理')
   })
 
@@ -81,12 +86,12 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     // inside the app's PTY. The in-app commander runs the app-native sibling,
     // which speaks the app's own HTTP API (POST /api/swarm/worker, GET
     // /api/swarm/workers, …) and never mentions tmux.
-    expect(base.initialPrompt).toBe('/og-manage')
+    expect(base.initialPrompt).toBe('/og-manage' + languageDirective('en'))
     expect(MANAGER_INJECTION).toBe('/og-manage')
   })
 
   it('forwards cols/rows when given', () => {
-    const o = managerLaunchOpts('/repo', 'sid-2', { cols: 100, rows: 30 })
+    const o = managerLaunchOpts('/repo', 'sid-2', { cols: 100, rows: 30, lang: 'en' })
     expect(o.cols).toBe(100)
     expect(o.rows).toBe(30)
   })
@@ -96,13 +101,41 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     expect(base.rows).toBeUndefined()
   })
 
+  describe('lang (Settings.language ⇒ the commander replies in that language)', () => {
+    // `lang` is REQUIRED (2026-08-13 rework), so "omitted" no longer exists as
+    // a call shape — TS refuses to compile it. What is left to prove is that
+    // 'en' and 'ja' each carry their OWN literal marker and never the other's
+    // (a mutation that swapped `languageDirective('en')` for a blank string on
+    // one branch would still satisfy `toBe(X + languageDirective(lang))` if
+    // the test derives its expectation from the same function under test —
+    // so these check LITERAL substrings instead, matching the worker test's
+    // pattern in swarmWorker.test.ts).
+    it('en ⇒ appends the English reply-language directive (literal marker)', () => {
+      const o = managerLaunchOpts('/repo', 'sid-lang-en', { lang: 'en' })
+      expect(o.initialPrompt!.startsWith(MANAGER_INJECTION)).toBe(true)
+      expect(o.initialPrompt).toContain('[Reply language]')
+      expect(o.initialPrompt).not.toContain('【返答言語】')
+    })
+    it('ja ⇒ appends the Japanese reply-language directive (literal marker)', () => {
+      const o = managerLaunchOpts('/repo', 'sid-lang-ja', { lang: 'ja' })
+      expect(o.initialPrompt!.startsWith(MANAGER_INJECTION)).toBe(true)
+      expect(o.initialPrompt).toContain('【返答言語】')
+      expect(o.initialPrompt).not.toContain('[Reply language]')
+    })
+    it('resume + lang ⇒ directive rides the resume prompt too (literal marker)', () => {
+      const o = managerLaunchOpts('/repo', 'sid-lang-resume', { resume: true, lang: 'ja' })
+      expect(o.initialPrompt!.startsWith(MANAGER_RESUME_INJECTION)).toBe(true)
+      expect(o.initialPrompt).toContain('【返答言語】')
+    })
+  })
+
   // ── RESUME (swarmSessions.ts): the commander survives an app restart ──────
   describe('resume', () => {
-    const resumed = managerLaunchOpts('/repo', 'sid-old', { resume: true })
+    const resumed = managerLaunchOpts('/repo', 'sid-old', { resume: true, lang: 'en' })
 
     it('a FRESH launch is byte-identical to the pre-resume contract (no `resume` flag)', () => {
       expect(base.resume).toBeUndefined()
-      expect(base.initialPrompt).toBe(MANAGER_INJECTION)
+      expect(base.initialPrompt).toBe(MANAGER_INJECTION + languageDirective('en'))
     })
 
     it('a RESUMED launch reaches `claude --resume <id>` — never `--session-id`', () => {
@@ -122,7 +155,7 @@ describe('managerLaunchOpts (commander launch contract)', () => {
       // a RELEASE, so the code moved too. A commander answering from memory describes a
       // world that no longer exists. It must run 「状況」 (the skill's own read-the-world
       // routine: workers + orchestrator + git + Board) and report from what it FINDS.
-      expect(resumed.initialPrompt).toBe(MANAGER_RESUME_INJECTION)
+      expect(resumed.initialPrompt).toBe(MANAGER_RESUME_INJECTION + languageDirective('en'))
       expect(MANAGER_RESUME_INJECTION).toMatch(/^\/og-manage /)
       expect(MANAGER_RESUME_INJECTION).toContain('状況')
       expect(MANAGER_RESUME_INJECTION).toContain('todo/doing/review')

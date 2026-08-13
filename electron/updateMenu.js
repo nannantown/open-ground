@@ -335,6 +335,34 @@ function updateDialogText(lang, kind, opts) {
             defaultId: 1,
             cancelId: 1,
           }
+    case 'download-failed':
+      // The gap this closes (2026-08-13, observed on a real update to 0.11.71):
+      // the "downloading in the background" dialog promised "you will be asked
+      // to restart once it is ready" — and when the download then FAILED, the
+      // error went only to a packaged app's stdout. The user sat in front of a
+      // promise that could no longer be kept, with no way to tell "still
+      // downloading" from "silently dead". A failed download must therefore
+      // end in a dialog, and the dialog must carry the way out (the release
+      // page, where the installer can be downloaded directly).
+      return ja
+        ? {
+            message: 'アップデートのダウンロードに失敗しました。',
+            detail:
+              `${err || '原因は分かりませんでした。'}\n\n` +
+              'ネットワークを確認してもう一度試すか、リリースページからインストーラを直接ダウンロードして上書きインストールしてください。',
+            buttons: ['リリースページを開く', '閉じる'],
+            defaultId: 0,
+            cancelId: 1,
+          }
+        : {
+            message: 'The update download failed.',
+            detail:
+              `${err || 'No reason was reported.'}\n\n` +
+              'Check your network and try again, or download the installer directly from the release page and install over the current app.',
+            buttons: ['Open release page', 'Close'],
+            defaultId: 0,
+            cancelId: 1,
+          }
     default:
       // Unreachable for the documented kinds — but a dialog is a UI surface, and
       // returning undefined here would crash the click handler on a typo. Degrade

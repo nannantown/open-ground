@@ -56,6 +56,7 @@ import {
 import { buildAppContextPrompt } from './claudeTerminal'
 import { MANAGER_INJECTION, MANAGER_RESUME_INJECTION } from './swarmManager'
 import { swarmLaunchDefaults } from './swarmLaunch'
+import { languageDirective, type PromptLang } from './promptLang'
 import type { ClaudeEffort } from '../types'
 
 /** Raised when an SDK commander was asked for but cannot be launched safely.
@@ -90,6 +91,13 @@ export interface SdkManagerOptsInput {
   port?: number
   env?: NodeJS.ProcessEnv
   home?: string
+  /** Settings.language, resolved by the caller. REQUIRED — not optional — so
+   *  a caller that forgets to thread it through fails `tsc` instead of
+   *  silently spawning an SDK commander whose replies ignore the setting
+   *  (2026-08-13 rework — this was exactly the un-caught gap: `lang` was
+   *  optional and `launchSdkDesk`'s call could have its `lang,` line deleted
+   *  with the full suite staying green). */
+  lang: PromptLang
 }
 
 export interface SdkManagerLaunchPlan {
@@ -143,7 +151,8 @@ export const sdkManagerLaunchPlan = (opts: SdkManagerOptsInput): SdkManagerLaunc
 
   return {
     options,
-    initialPrompt: opts.resume ? MANAGER_RESUME_INJECTION : MANAGER_INJECTION,
+    initialPrompt:
+      (opts.resume ? MANAGER_RESUME_INJECTION : MANAGER_INJECTION) + languageDirective(opts.lang),
     warnings,
   }
 }

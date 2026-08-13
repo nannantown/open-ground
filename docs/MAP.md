@@ -162,8 +162,10 @@
   `workerRuntime.ts`(WorkerRuntime seam・`workerKey`・pty/sdk 実装)/
   `sdkSession.ts`(プール・queryFn DI)/ `sdkEvents.ts`(メッセージ蒸留の一枚岩)/
   `sdkGuardHook.ts`(**A3/L4 veto の in-process 再武装・全失敗経路が deny**)/
-  `swarmWorkerSdk.ts`(launch plan + preflight)/ `swarmWorkerRuntimeDial.ts`(ダイヤル)/
+  `swarmWorkerSdk.ts`(launch plan + preflight)/
   route `server/routes/sdkSession.ts`(SSE・**二重ゲート**)/ UI `modules/SdkWorkerPane.tsx`。
+  (`swarmWorkerRuntimeDial.ts` は **2026-08-13 に削除** — worker は SDK 専用になり、
+  ダイヤルも slot cap も存在しない。下の「kill switch」段を参照。)
   ⚠ **SDK は filesystem settings を読まない → 素朴に spawn すると guard が黙って消える**。
   ⚠ **開発で100%動き、配布ビルドで100%動かない形を1回踏んだ**(0801 `dd311acc`)。
   `sdkGuardHook.loadGuardEvaluate` が `createRequire(import.meta.url)` を使っていた。
@@ -311,30 +313,33 @@
   **コンパイルエラー**にすること(手書きの逐次コピーは黙って落とす)。番人は
   `useSwarmEngine.workerWireContract.test.ts` — **本物のサーバ組み立て**と
   **本物のサニタイザ**を通して往復させ、落ちたら赤。
-  ⚠ **SDK worker の PTY 降格理由は HTTP レスポンスに乗る**(`SpawnSwarmWorkerResponse.fellBackBecause`
-  → `SwarmModule.tsx` が表示)。配布アプリのサーバは fork された子プロセスなので
-  **`console.warn` はオーナーに届かない** — 「スイッチを入れたのに PTY で上がる」の理由を
-  ログだけに置くと、枠が満杯なのか preflight 落ちなのかダイヤルが効いていないのか誰にも分からない。
-  ⚠ **`sdkMaxWorkers: 0` は「SDK worker を使わない」という意味のある値**。0 を falsy として
-  捨てると既定 1 に戻り、UI は 0 を表示したままサーバは1体立てる(`store.ts`)。
+  ⚠ **spawn 失敗の理由は HTTP レスポンス / 通知に乗せる**(0813 以降: worker は
+  fail-fast — 失敗は route の 500 本文 + `worker-spawn-failed` の鐘。fallback 時代は
+  `SpawnSwarmWorkerResponse.fellBackBecause` が同じ役目だった)。配布アプリのサーバは
+  fork された子プロセスなので **`console.warn` はオーナーに届かない** — 理由をログだけに
+  置くと、preflight 落ちなのか CLI 不在なのか誰にも分からない。
   ⚠ **セッション所有の判定はレジストリ UUID で**(`projectUUIDFromPath` を両辺に) — パス前方一致で
   書くと**全 SDK worker が 403**(worker の cwd は repo 外の central worktree。0731 に出荷2版が
   この形で、worktree を repo 内に作ったテストが偽緑で通していた)。
   終了セッションは 30 分 linger 後に sweep(`SDK_SESSION_LINGER_MS` — 放置すると ring buffer ごと
   永久残留・`removeSdkSession` は呼び手ゼロだった)。
-  kill switch = `Settings.swarmWorkerRuntime.mode` を `'pty'` に戻すだけ。
-  ダイヤル既定は 2026-08-01 に反転(不在⇒`sdk` / 明示 `'pty'`⇒pty / 壊れた値⇒pty /
-  **読めないファイル⇒pty**)。⚠ **反転が dispatch に届いたのは 0802** — 規則は
-  `chooseWorkerRuntime` に入ったが、唯一の本番呼び出し(`swarmWorker.ts`)は
-  `store.getWorkerRuntimeDial()` 経由で渡し、**その reader が不在を明示 `{mode:'pty'}` に潰して
-  いた**ので未設定の機体は PTY worker を立て続けた(隔離 HOME で実測 0802・0.11.47 出荷)。
-  盤面は不在を `'sdk'` と描いていたので**表示と実効が逆**。⚠ **決めるのは reader** — 規則を
-  `chooseWorkerRuntime` だけ直しても効かない。両者は同極性に揃えてある。
+  ⚠ **worker に kill switch は無い(2026-08-13 オーナー決定)** — worker は **SDK 専用**。
+  ダイヤル(`swarmWorkerRuntimeDial.ts`・`Settings.swarmWorkerRuntime`・`sdkMaxWorkers`
+  slot cap・`getWorkerRuntimeDial`)は PTY worker ランタイムごと削除した。fallback は
+  「実害を静かに吸収して移行を永遠に終わらせない」装置だったため(実測: slot cap 既定 1 が
+  余剰 worker を全部 PTY に流し、オーナーはバグと読んだ)。SDK を確立できない spawn は
+  **fail-fast**: `SdkWorkerUnavailableError` を投げ、カードは todo に残り、エンジンは
+  dispatch を階段(1m→5m→15m)で HOLD + `worker-spawn-failed` の鐘 + 復旧後は自動再開
+  (`swarmSpawnFailFast.test.ts` / `swarmWorkerFailFast.test.ts`)。古い settings.json の
+  `swarmWorkerRuntime` キーは**不活性**(読まれない・エラーにもならない)。
+  司令官ダイヤル(`swarmManagerRuntime`)だけが残る手動スイッチ。
   ⚠ **盤面はサーバの実効値を描く(0802)** — `GET /api/settings` の
-  `runtimeDialsEffective:{worker,manager,workerCap}`(readers から算出・読み取り専用・
-  `USER_SETTINGS_KEYS` に足さない)。パネル側の導出(`dialOf`)は**削除済み**・復活させないこと。
+  `runtimeDialsEffective:{manager}`(0813 に worker/workerCap を撤去・reader から算出・
+  読み取り専用・`USER_SETTINGS_KEYS` に足さない)。パネル側の導出(`dialOf`)は**削除済み**・
+  復活させないこと。
   設計と実測台帳: `docs/SDK_WORKER_MIGRATION_PLAN.md`
-  (0730 オーナー決定 — worker から段階導入・ダイヤル併存・PTY コードは消さない)。
+  (0730 オーナー決定 — worker から段階導入・ダイヤル併存・PTY コードは消さない。
+  **この併存方針は 0813 に「worker は SDK 専用」へ更新された** — 上の段を参照)。
   センサー対応表 §5 / ガード配線の非自明点 §4-G(**SDK は既定で settings をロードしない →
   素朴に spawn すると A3/L4 guard が黙って消える**・fail-closed 必須) / カード分割 §12。
   調査の正典は `SDK_CLIENT_INVESTIGATION.md`(実測台帳・「しない」だった旧結論の上書き経緯込み)
@@ -515,11 +520,13 @@
 - テスト: `server/__tests__/`(selfUpdate / autoUpdate / forkEnv / startup / electronLockdown …)
 - 罠: `electron/*.js` は純 CommonJS — 触ったら `node --check`。asar:false は node-pty の制約で
   意図的。ポート 5174/47776 は不可侵 — 2本目の dev は `npm run dev:alt`。
-- ランタイム切替(SDK 移行)の**スイッチは Swarm タブ → 司令官 → 右サイドバー
-  「動かし方(お試し)」**(`SwarmManagerPane.tsx` の `runtimeDials` / `SwarmModule.tsx` の
-  `toggleRuntime`)。**罠**: `POST /api/settings` は `USER_SETTINGS_KEYS` で body を絞るので、
+- ランタイム切替の**スイッチは Swarm タブ → 司令官 → 右サイドバー「動かし方(お試し)」**
+  (`SwarmManagerPane.tsx` の `runtimeDials` / `SwarmModule.tsx` の `toggleRuntime`)。
+  **残るのは司令官スイッチだけ** — worker スイッチは 0813 にダイヤルごと削除(worker は
+  SDK 専用)。**罠**: `POST /api/settings` は `USER_SETTINGS_KEYS` で body を絞るので、
   新しい設定キーを**その配列に足さないと書き込みが黙って捨てられる**(スイッチは動いて見えるのに
-  何も変わらない — 0731 に実際に踏みかけた)。往復テスト=`server/routes/__tests__/settingsRuntimeDials.test.ts`。
+  何も変わらない — 0731 に実際に踏みかけた)。往復テスト=`server/routes/__tests__/settingsRuntimeDials.test.ts`
+  (旧 `swarmWorkerRuntime` キーの POST が**黙って無視される**back-compat 契約もここ)。
   **表示側は逆**: トグルが描く値は `GET /api/settings` の `runtimeDialsEffective`(サーバ計算・
   読み取り専用)で、**書き込みキーではないので allowlist には足さない**。盤面で規則を再実装しない
   (`dialOf` は 0802 に削除)。表示⇄実挙動の番人=`src/lib/server/swarmRuntimeDialParity.test.ts`

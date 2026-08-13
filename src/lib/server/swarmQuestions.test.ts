@@ -7,7 +7,6 @@
 
 import { describe, it, expect } from 'vitest'
 import {
-  detectFreeTextQuestion,
   readInputBoxText,
   handleWorkerQuestion,
   type HandleWorkerQuestionDeps,
@@ -37,33 +36,6 @@ const QUESTION_IDLE = [
   '  ? for shortcuts · ← for agents',
 ].join('\n')
 
-/** Same question, but claude is GENERATING (submitted turn in flight). */
-const QUESTION_WORKING = [
-  '❯ これは検出テストです。',
-  '⏺ 質問がひとつあります。',
-  '  今日のレビューはどのファイルから始めますか？',
-  '❯ 回答: src/lib/server/terminal.ts から始めてください。',
-  '✶ Flummoxing…',
-  '  ⎿  Tip: Run /install-slack-app to use Claude in Slack',
-  RULE,
-  '❯ ',
-  RULE,
-  '  esc to interrupt · ← for agents',
-].join('\n')
-
-/** Idle with the stock placeholder and NO question above (fresh boot). */
-const IDLE_PLACEHOLDER = [
-  '╭──────────────────────────────────────╮',
-  '│ ✻ Welcome to Claude Code!            │',
-  '╰──────────────────────────────────────╯',
-  ' ⚠ 2 MCP servers need authentication · run /mcp',
-  '                        ◉ xhigh · /effort',
-  RULE,
-  '❯ Try "write a test for <filepath>"',
-  RULE,
-  '  ? for shortcuts · ← for agents',
-].join('\n')
-
 /** A paste sits UNSENT in the input box under the question (mid-injection). */
 const QUESTION_PASTE_PENDING = [
   '⏺ 質問がひとつあります。',
@@ -74,87 +46,10 @@ const QUESTION_PASTE_PENDING = [
   RULE,
 ].join('\n')
 
-/** A numbered interactive menu (the permission arm's turf) — its question line
- *  ends in '?' and an idle footer is present, so ONLY the detectMenu guard
- *  keeps this out of the question arm ("menu 誤検出ゼロ"). */
-const MENU_FRAME = [
-  'Do you want to proceed with this edit?',
-  '❯ 1. Yes',
-  '  2. Yes, allow all edits during this session (shift+tab)',
-  '  3. No, and tell Claude what to do differently (esc to cancel)',
-  RULE,
-  '❯ ',
-  RULE,
-  '  ? for shortcuts',
-].join('\n')
-
-/** Idle, but the last utterance is a STATEMENT — no question to answer. */
-const IDLE_STATEMENT = [
-  '⏺ 実装が完了しました。テストも緑です。',
-  RULE,
-  '❯ ',
-  RULE,
-  '  ? for shortcuts · ← for agents',
-].join('\n')
-
-describe('detectFreeTextQuestion — the fail-closed screen classifier', () => {
-  it('detects the live-captured question-idle frame and reassembles the block', () => {
-    const q = detectFreeTextQuestion(QUESTION_IDLE)
-    expect(q).not.toBeNull()
-    expect(q!.question).toContain('今日のレビューはどのファイルから始めますか？')
-    expect(q!.question).toContain('質問がひとつあります。')
-    // Chrome (usage meter / Brewed / footers) never leaks into the question.
-    expect(q!.question).not.toMatch(/Brewed|used 88%|shortcuts/)
-  })
-
-  it('never fires while claude is GENERATING (working footer)', () => {
-    expect(detectFreeTextQuestion(QUESTION_WORKING)).toBeNull()
-  })
-
-  it('never fires on a fresh idle box with no question (placeholder tolerated)', () => {
-    expect(detectFreeTextQuestion(IDLE_PLACEHOLDER)).toBeNull()
-  })
-
-  it('never fires while a pasted answer sits UNSENT in the input box', () => {
-    expect(detectFreeTextQuestion(QUESTION_PASTE_PENDING)).toBeNull()
-  })
-
-  it('never fires on a numbered MENU frame (menu 誤検出ゼロ — detectMenu guard)', () => {
-    expect(detectFreeTextQuestion(MENU_FRAME)).toBeNull()
-  })
-
-  it('never fires when the last utterance is a statement, not a question', () => {
-    expect(detectFreeTextQuestion(IDLE_STATEMENT)).toBeNull()
-  })
-
-  it('never fires on null / empty / structureless screens', () => {
-    expect(detectFreeTextQuestion(null)).toBeNull()
-    expect(detectFreeTextQuestion('')).toBeNull()
-    expect(detectFreeTextQuestion('just some plain logs\nwith lines?')).toBeNull()
-  })
-
-  it('never fires without the exact ❯ input-box glyph (unknown TUI ⇒ closed)', () => {
-    const noPrompt = QUESTION_IDLE.replace(/❯/g, '>')
-    expect(detectFreeTextQuestion(noPrompt)).toBeNull()
-  })
-
-  it('survives the question block being longer than the walk-up cap (returns null, not junk)', () => {
-    const longBlock = [
-      '⏺ 長い説明です。',
-      ...Array.from({ length: 12 }, (_, i) => `  続きの行 ${i} です。`),
-      '  それでどうしますか？',
-      RULE,
-      '❯ ',
-      RULE,
-      '  ? for shortcuts',
-    ].join('\n')
-    // Still detected (the block walk simply stops early), and stays bounded.
-    const q = detectFreeTextQuestion(longBlock)
-    expect(q).not.toBeNull()
-    expect(q!.question).toContain('それでどうしますか？')
-    expect(q!.question.length).toBeLessThan(1000)
-  })
-})
+// (describe('detectFreeTextQuestion — the fail-closed screen classifier') deleted
+// 2026-08-13 with the PTY worker sensor layer — the PTY TUI question detector is
+// gone; detectSdkFreeTextQuestion is the only worker question detector, pinned in
+// swarmSdkQuestions.test.ts.)
 
 describe('readInputBoxText — the last-❯-row reader', () => {
   it('reads an empty idle box as empty', () => {

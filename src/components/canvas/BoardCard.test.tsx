@@ -183,3 +183,123 @@ describe('BoardCard extraction smoke', () => {
     expect(getByText('Bravo')).toBeTruthy()
   })
 })
+
+// t() is mocked to echo the key, so these lookups assert WHICH vocabulary the
+// strip speaks (the shared Swarm-tab keys) as well as that it renders at all.
+const stripBase = () => ({
+  onPersist: vi.fn(),
+  onOpenTask: vi.fn(),
+  onCreateTask: vi.fn(() => 'new'),
+})
+
+describe('worker strip — always-on phase (doing column)', () => {
+  it('shows the heartbeat phase as visible text, not only a hover tooltip', () => {
+    const { getByText } = render(
+      <BoardTab
+        data={data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])}
+        {...stripBase()}
+        workerForTask={() => ({ branch: 'swarm/x', activity: 'working', phase: 'verify' })}
+      />,
+    )
+    // Before this feature the phase lived ONLY in the strip's title attribute —
+    // getByText never matches a title, so this is red without the always-on span.
+    // 'verify' is known swarm vocabulary → the owner-plain i18n key (t echoes keys).
+    expect(getByText('· board.card.phaseVerify')).toBeTruthy()
+    // The branch handle stays beside it.
+    expect(getByText('swarm/x')).toBeTruthy()
+  })
+
+  it('an unknown phase word renders verbatim — no invented meaning', () => {
+    const { getByText } = render(
+      <BoardTab
+        data={data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])}
+        {...stripBase()}
+        workerForTask={() => ({ branch: 'swarm/x', activity: 'working', phase: 'polishing' })}
+      />,
+    )
+    expect(getByText('· polishing')).toBeTruthy()
+  })
+
+  it('a phase-less worker (no heartbeat yet) renders the strip without a phase span', () => {
+    const { getByText, queryByText } = render(
+      <BoardTab
+        data={data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])}
+        {...stripBase()}
+        workerForTask={() => ({ branch: 'swarm/x', activity: 'waiting' })}
+      />,
+    )
+    expect(getByText('swarm/x')).toBeTruthy()
+    expect(queryByText(/^·/)).toBeNull()
+  })
+})
+
+describe('commander strip (review column)', () => {
+  const reviewCard = () =>
+    data([task({ id: 'c', title: 'Charlie', boardColumn: 'review', branch: 'swarm/c' })])
+
+  it('a review card in the engine queue shows 司令官 + presence + readiness', () => {
+    const { getByText } = render(
+      <BoardTab
+        data={reviewCard()}
+        {...stripBase()}
+        managerForTask={() => ({ presence: 'working', reviewStatus: 'ff' })}
+      />,
+    )
+    expect(getByText('board.card.managerLabel')).toBeTruthy()
+    // Same vocabulary as the Swarm tab — 稼働中 / 統合可, not a board-only island.
+    expect(getByText('projectPanel.swarm.manager.stageRunning')).toBeTruthy()
+    expect(getByText('· projectPanel.swarm.manager.reviewFf')).toBeTruthy()
+  })
+
+  it("presence 'unknown' (old server) renders NO presence word — never 'missing'", () => {
+    const { getByText, queryByText } = render(
+      <BoardTab
+        data={reviewCard()}
+        {...stripBase()}
+        managerForTask={() => ({ presence: 'unknown', reviewStatus: 'rebase' })}
+      />,
+    )
+    expect(getByText('board.card.managerLabel')).toBeTruthy()
+    expect(getByText('· projectPanel.swarm.manager.reviewRebase')).toBeTruthy()
+    expect(queryByText('board.card.managerMissing')).toBeNull()
+    expect(queryByText('projectPanel.swarm.manager.stageRunning')).toBeNull()
+    expect(queryByText('projectPanel.swarm.statusWaiting')).toBeNull()
+  })
+
+  it('a conflict wins the lamp (accent) and names itself', () => {
+    const { container, getByText } = render(
+      <BoardTab
+        data={reviewCard()}
+        {...stripBase()}
+        managerForTask={() => ({ presence: 'working', reviewStatus: 'conflict' })}
+      />,
+    )
+    expect(getByText('· projectPanel.swarm.manager.reviewConflict')).toBeTruthy()
+    expect(container.querySelector('.bg-accent')).toBeTruthy()
+  })
+
+  it('the strip is review-only — a doing card never asks for the commander', () => {
+    const managerForTask = vi.fn(
+      (): { presence: 'working'; reviewStatus: 'ff' } => ({
+        presence: 'working',
+        reviewStatus: 'ff',
+      }),
+    )
+    const { queryByText } = render(
+      <BoardTab
+        data={data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])}
+        {...stripBase()}
+        managerForTask={managerForTask}
+      />,
+    )
+    expect(managerForTask).not.toHaveBeenCalled()
+    expect(queryByText('board.card.managerLabel')).toBeNull()
+  })
+
+  it('a review card OUTSIDE the engine queue (managerForTask → null) shows nothing', () => {
+    const { queryByText } = render(
+      <BoardTab data={reviewCard()} {...stripBase()} managerForTask={() => null} />,
+    )
+    expect(queryByText('board.card.managerLabel')).toBeNull()
+  })
+})

@@ -3,7 +3,13 @@ import { Copy, GripVertical } from 'lucide-react'
 import type { BoardColumn, ClaudeBeaconStatus, ProjectTask } from '@/lib/types'
 import { formatDueShort, isOverdue } from '@/lib/boardDeps'
 import { PRIORITY_META } from '@/lib/boardPriority'
-import type { WorkerActivity } from '@/lib/boardWorker'
+import { deriveManagerTone } from '@/lib/boardWorker'
+import type {
+  ManagerPresence,
+  ManagerReviewStatus,
+  ManagerTone,
+  WorkerActivity,
+} from '@/lib/boardWorker'
 import { useT } from '@/i18n/I18nContext'
 import type { MessageKey } from '@/i18n/messages'
 
@@ -44,6 +50,57 @@ const WORKER_LABEL_KEY: Record<WorkerActivity, MessageKey> = {
   waiting: 'projectPanel.swarm.statusWaiting',
   starting: 'projectPanel.swarm.manager.stageStarting',
   done: 'projectPanel.swarm.manager.stageDone',
+}
+
+// ── Commander linkage vocabulary (review-column cards) ───────────────────────
+// Same three-colour rule as the worker strip: moss=working, ochre=waiting,
+// ink-faint=off. The ONE addition is accent for a conflict — the same red the
+// integrationConflict chip below already uses for "needs the owner's hands".
+const MANAGER_DOT: Record<ManagerTone, string> = {
+  working: 'bg-moss shadow-lamp-moss',
+  waiting: 'bg-ochre shadow-lamp-ochre',
+  alert: 'bg-accent',
+  off: 'bg-ink-faint',
+}
+// Presence word colour follows the PRESENCE (not the lamp tone), so a conflict
+// lamp never paints 稼働中 red — the status text carries the red instead.
+const MANAGER_PRESENCE_CLS: Record<Exclude<ManagerPresence, 'unknown'>, string> = {
+  working: 'text-moss-text',
+  quiet: 'text-[var(--beacon-waiting)]',
+  missing: 'text-ink-faint',
+}
+// Localized via the SAME keys the Swarm tab uses (稼働中/待機中 + the review
+// readiness labels), so the board never becomes a second vocabulary island.
+const MANAGER_PRESENCE_KEY: Record<Exclude<ManagerPresence, 'unknown'>, MessageKey> = {
+  working: 'projectPanel.swarm.manager.stageRunning',
+  quiet: 'projectPanel.swarm.statusWaiting',
+  missing: 'board.card.managerMissing',
+}
+const MANAGER_STATUS_KEY: Record<ManagerReviewStatus, MessageKey> = {
+  ff: 'projectPanel.swarm.manager.reviewFf',
+  rebase: 'projectPanel.swarm.manager.reviewRebase',
+  conflict: 'projectPanel.swarm.manager.reviewConflict',
+  unknown: 'projectPanel.swarm.manager.reviewUnknown',
+}
+const MANAGER_STATUS_HINT_KEY: Record<ManagerReviewStatus, MessageKey> = {
+  ff: 'projectPanel.swarm.manager.reviewFfHint',
+  rebase: 'projectPanel.swarm.manager.reviewRebaseHint',
+  conflict: 'projectPanel.swarm.manager.reviewConflictHint',
+  unknown: 'projectPanel.swarm.manager.reviewUnknownHint',
+}
+
+// ── Worker phase vocabulary (常設フェーズ表示) ───────────────────────────────
+// The heartbeat phase is free-form, but the swarm's own workers speak a small
+// known vocabulary (the order skill's phases) — map THOSE to owner-plain words
+// (平易文: a non-programmer reads this board). Anything unknown renders
+// verbatim — never invent a meaning for a word we don't know.
+const WORKER_PHASE_KEY: Record<string, MessageKey> = {
+  audit: 'board.card.phaseAudit',
+  implement: 'board.card.phaseImplement',
+  verify: 'board.card.phaseVerify',
+  rework: 'board.card.phaseRework',
+  blocked: 'board.card.phaseBlocked',
+  done: 'board.card.phaseDone',
 }
 
 // ─── BoardCard ───────────────────────────────────────────────────────────────
@@ -94,6 +151,14 @@ export interface BoardCardProps {
   workerBranch?: string
   workerPhase?: string
   workerNote?: string
+  /** Commander linkage for THIS (review) card — resolved by BoardTab from the
+   *  same orchestrator poll (the engine's review queue + the commander's
+   *  presence), as primitives for the memo. null presence = no linkage (not a
+   *  review card, not in the engine's queue, or not the owner). Deliberately no
+   *  commander phase/note props: that heartbeat text is board-wide, and riding
+   *  it on one card would claim the commander is on THIS card (差し戻し M1). */
+  managerPresence: ManagerPresence | null
+  managerReviewStatus?: ManagerReviewStatus
   /** Count of unresolved dependencies (the "⛓ n" chip) + the pre-joined titles
    *  for its tooltip — resolved by BoardTab over the shared id→task map. */
   depCount: number
@@ -131,6 +196,8 @@ const BoardCardInner = ({
   workerBranch,
   workerPhase,
   workerNote,
+  managerPresence,
+  managerReviewStatus,
   depCount,
   depTitlesText,
   inCycle,
@@ -153,6 +220,17 @@ const BoardCardInner = ({
   // the top edge AND the title stamp, suppressing the drawer claude band/stamp so
   // the two can never show conflicting states on one card.
   const hasWorker = workerActivity !== null
+  // Commander linkage on a review card — the presence/readiness pair arrives
+  // together from BoardTab (split into primitives only for the memo); lamp tone
+  // precomputed for the strip below.
+  const manager =
+    managerPresence !== null && managerReviewStatus !== undefined
+      ? {
+          presence: managerPresence,
+          reviewStatus: managerReviewStatus,
+          tone: deriveManagerTone(managerPresence, managerReviewStatus),
+        }
+      : null
   return (
     <article
       draggable={!isEditing}
@@ -365,6 +443,16 @@ const BoardCardInner = ({
               >
                 {t(WORKER_LABEL_KEY[workerActivity])}
               </span>
+              {/* Always-on phase — the worker's self-reported heartbeat phase
+                  (audit/implement/verify…), promoted out of the hover-only
+                  tooltip so "where is it in its run" reads at a glance. Free
+                  vocabulary → capped + truncated so it can never crowd the
+                  branch name out of the strip. */}
+              {workerPhase && (
+                <span className="max-w-[45%] truncate whitespace-nowrap font-mono text-meta text-ink-faint">
+                  · {WORKER_PHASE_KEY[workerPhase] ? t(WORKER_PHASE_KEY[workerPhase]) : workerPhase}
+                </span>
+              )}
               <span
                 className="min-w-0 flex-1 truncate font-mono text-meta text-ink-muted"
                 title={
@@ -376,6 +464,53 @@ const BoardCardInner = ({
                 }
               >
                 {workerBranch}
+              </span>
+            </div>
+          )}
+          {/* Commander strip (review-column cards) — WHO lands this card and
+              whether they are around right now. The doing column shows the
+              worker that BUILDS a card; review shows the COMMANDER that
+              INTEGRATES it: presence lamp + word (稼働中/待機中/不在 — omitted
+              when the server didn't say), then this card's integration
+              readiness from the engine's review queue. Same strip idiom as the
+              worker strip above; the tooltip carries ONLY this card's own
+              readiness hint — never the commander's phase/note, which is
+              board-wide and would falsely read as "about this card" on every
+              review card at once (差し戻し M1). Owner-only + engine-listed
+              only — gated where `managerForTask` resolves (BoardModule). */}
+          {!isEditing && manager && (
+            <div
+              className="mt-[9px] flex min-w-0 items-center gap-1.5"
+              title={t(MANAGER_STATUS_HINT_KEY[manager.reviewStatus])}
+            >
+              <span
+                aria-hidden
+                className={[
+                  'h-1.5 w-1.5 shrink-0 rounded-full',
+                  MANAGER_DOT[manager.tone],
+                  manager.tone === 'working' ? 'run-pulse' : '',
+                ].join(' ')}
+              />
+              <span className="shrink-0 whitespace-nowrap text-meta text-ink-muted">
+                {t('board.card.managerLabel')}
+              </span>
+              {manager.presence !== 'unknown' && (
+                <span
+                  className={[
+                    'shrink-0 whitespace-nowrap text-meta',
+                    MANAGER_PRESENCE_CLS[manager.presence],
+                  ].join(' ')}
+                >
+                  {t(MANAGER_PRESENCE_KEY[manager.presence])}
+                </span>
+              )}
+              <span
+                className={[
+                  'min-w-0 truncate text-meta',
+                  manager.reviewStatus === 'conflict' ? 'text-accent' : 'text-ink-muted',
+                ].join(' ')}
+              >
+                · {t(MANAGER_STATUS_KEY[manager.reviewStatus])}
               </span>
             </div>
           )}

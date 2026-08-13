@@ -14,7 +14,7 @@ import {
 } from '@/lib/types'
 import { newId } from '@/lib/ids'
 import { dependencyCycleIds, unresolvedDeps } from '@/lib/boardDeps'
-import type { BoardCardWorker } from '@/lib/boardWorker'
+import type { BoardCardManager, BoardCardWorker, ManagerPresence } from '@/lib/boardWorker'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
 import { CollabPresence, type PresenceChannel } from '@/components/canvas/CollabPresence'
 import { useT } from '@/i18n/I18nContext'
@@ -294,6 +294,16 @@ interface BoardTabProps {
    *  worker info strip + the "something is running here" band synced to the
    *  worker's live activity. Unset on plain hosts (no swarm surface). */
   workerForTask?: (taskId: string) => BoardCardWorker | null
+  /** Commander linkage for a review card (presence + this card's integration
+   *  readiness) — resolved by BoardModule from the SAME orchestrator poll.
+   *  Absent/null ⇒ show nothing (non-owner, engine off, or not in the engine's
+   *  review queue). */
+  managerForTask?: (taskId: string) => BoardCardManager | null
+  /** The commander's BOARD-WIDE presence, for the review lane's HEADER badge —
+   *  the honest altitude when no per-card fact exists (B-3): it stays visible
+   *  even while the engine is stopped and reviews[] is empty. Only 'working'
+   *  renders anything. */
+  reviewManagerPresence?: ManagerPresence
   /** Realtime presence channel for this project's board room (u15). The owner
    *  passes their board collab binding; null when collab is OFF / not a member.
    *  Drives the toolbar avatar strip — publishes self, shows the other peers. */
@@ -314,6 +324,8 @@ export const BoardTab = ({
   onOpenProjectSettings,
   sessionStatus,
   workerForTask,
+  managerForTask,
+  reviewManagerPresence,
   presence,
 }: BoardTabProps) => {
   const { t } = useT()
@@ -803,6 +815,9 @@ export const BoardTab = ({
             // column (a finished worker's card has already moved to review), and
             // ONLY for the owner (the orchestrator poll 403s otherwise → null).
             const worker = col.key === 'doing' ? workerForTask?.(task.id) ?? null : null
+            // The commander linkage — ONLY in the review column (integration is
+            // the commander's lane); owner-gated upstream like the worker map.
+            const manager = col.key === 'review' ? managerForTask?.(task.id) ?? null : null
             // O(N) total this render: one shared id→task map, no per-card rebuild.
             const blockedBy = unresolvedDeps(task, tasksById)
             return (
@@ -821,6 +836,8 @@ export const BoardTab = ({
                 workerBranch={worker?.branch}
                 workerPhase={worker?.phase}
                 workerNote={worker?.note}
+                managerPresence={manager?.presence ?? null}
+                managerReviewStatus={manager?.reviewStatus}
                 depCount={blockedBy.length}
                 depTitlesText={blockedBy
                   .map(d => d.title.trim() || t('board.card.untitledParen'))
@@ -899,6 +916,27 @@ export const BoardTab = ({
                     {cards.length}
                   </span>
                 </span>
+                {/* Commander duty badge — BOARD-LEVEL truth on the review lane's
+                    header: the commander is integrating right now. This is the
+                    honest altitude for the commander's presence (B-3): it never
+                    claims a specific card, and unlike the per-card strips (which
+                    need the engine's review queue) it stays visible while the
+                    engine is stopped and reviews[] is empty. Working only — no
+                    badge noise for quiet/missing/unknown. */}
+                {col.key === 'review' && reviewManagerPresence === 'working' && (
+                  <span
+                    title={t('board.review.managerWorkingTitle')}
+                    className="flex min-w-0 items-center gap-1 whitespace-nowrap text-meta text-moss-text"
+                  >
+                    <span
+                      aria-hidden
+                      className="run-pulse h-1.5 w-1.5 shrink-0 rounded-full bg-moss shadow-lamp-moss"
+                    />
+                    <span className="truncate">
+                      {t('board.card.managerLabel')} {t('projectPanel.swarm.manager.stageRunning')}
+                    </span>
+                  </span>
+                )}
                 {/* Text-diet: the todo mechanics note moved into a tooltip on the
                     column label; the blocked column's hint stays VISIBLE — it is a
                     decision cue (「あなたの判断待ち」), not mechanics. It is rendered

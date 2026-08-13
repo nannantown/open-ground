@@ -121,34 +121,16 @@ export interface Settings {
    *  for the week" stays told. At least one tier must stay ON — `setUserSettings`
    *  refuses an all-OFF patch (a swarm with no model can only park). User-settable. */
   swarmAllowedModels?: Partial<SwarmAllowedModels>
-  /** WHICH RUNTIME a newly dispatched swarm worker runs on.
-   *
-   *  This is the kill switch for the Agent SDK worker migration
-   *  (docs/SDK_WORKER_MIGRATION_PLAN.md). `mode:'pty'` ⇒ every worker is a PTY
-   *  worker, exactly as before — the state to return to if anything about the
-   *  SDK path misbehaves, and still honoured verbatim. ABSENT is where the
-   *  default moved on 2026-08-01: an untouched settings.json dispatches SDK
-   *  workers. (For one day it did not — the flip lived in `chooseWorkerRuntime`
-   *  while the dispatch path reached that decision through
-   *  `store.getWorkerRuntimeDial`, which turned absent back into 'pty'; 0.11.47
-   *  shipped drawing the switch ON over a PTY fleet. Both now resolve absent to
-   *  'sdk'.) An UNREADABLE settings.json is a separate rule and still falls to
-   *  'pty' — a file we cannot read is not consent. Flipping it
-   *  back does NOT disturb workers already running; it only decides what the
-   *  NEXT dispatch builds, and the roster records each worker's own runtime so
-   *  a mixed fleet stays coherent across a restart.
-   *
-   *  `sdkMaxWorkers` caps how many SDK workers may be live at once (default 1).
-   *  Deliberately small: the point of the first stage is to run ONE SDK worker
-   *  beside PTY ones, same engine, same day, and compare — not to convert the
-   *  fleet before there is evidence. */
-  swarmWorkerRuntime?: {
-    mode: 'pty' | 'sdk'
-    sdkMaxWorkers?: number
-  }
-  /** WHICH RUNTIME the COMMANDER desk (司令官) launches on — the stage-3 half of
-   *  the same migration, dialled separately because it spends something the
-   *  worker dial does not.
+  /* NOTE (2026-08-13): `swarmWorkerRuntime` — the worker runtime dial + its
+   * `sdkMaxWorkers` slot cap — was DELETED from this type. Workers are
+   * SDK-only: the PTY worker runtime is gone, so there is nothing for a dial
+   * to switch to and nothing for a cap to budget (a spawn that cannot
+   * establish the SDK runtime fails fast instead of degrading). A stale
+   * `swarmWorkerRuntime` key in an existing settings.json is IGNORED, never an
+   * error: settings.json has no schema validation, readJson is tolerant, and
+   * POST /api/settings silently drops the key (it left USER_SETTINGS_KEYS). */
+  /** WHICH RUNTIME the COMMANDER desk (司令官) launches on — dialled because it
+   *  spends something a worker never did: the owner's phone window.
    *
    *  `'pty'` (and any unrecognised value) ⇒ the commander is an interactive
    *  `claude` PTY, exactly as before, reachable from a phone through
@@ -269,27 +251,29 @@ export interface ExperimentsResponse {
   flags: ExperimentFlags
 }
 
-/** The runtime each swarm dial RESOLVES TO on this machine right now, computed
- *  by the server and served read-only on {@link SettingsResponse}.
+/** The runtime the commander dial RESOLVES TO on this machine right now,
+ *  computed by the server and served read-only on {@link SettingsResponse}.
  *
- *  ⚠ THE PANEL MUST DRAW THESE, NOT DERIVE ITS OWN. The Swarm tab used to read
- *  the raw `swarmWorkerRuntime` / `swarmManagerRuntime` keys off the same
- *  response and re-implement the server's rule client-side. That copy produced
- *  TWO display-vs-truth defects on 2026-08-02 alone — an absent worker dial drawn
- *  ON while dispatch ran PTY, and a broken settings.json drawn ON while the
- *  commander fell to the kill switch — because a raw key cannot distinguish
- *  "never written" from "the file is unreadable", and a copied rule does not move
- *  when the rule does. These fields come from the very readers dispatch and desk
- *  launch consult (`store.getWorkerRuntimeDial` / `getManagerRuntimeDial`), so
- *  the toggle and the server cannot disagree by construction.
+ *  ⚠ THE PANEL MUST DRAW THIS, NOT DERIVE ITS OWN. The Swarm tab used to read
+ *  the raw dial keys off the same response and re-implement the server's rule
+ *  client-side. That copy produced TWO display-vs-truth defects on 2026-08-02
+ *  alone — an absent dial drawn ON while dispatch ran PTY, and a broken
+ *  settings.json drawn ON while the commander fell to the kill switch —
+ *  because a raw key cannot distinguish "never written" from "the file is
+ *  unreadable", and a copied rule does not move when the rule does. This field
+ *  comes from the very reader desk launch consults
+ *  (`store.getManagerRuntimeDial`), so the toggle and the server cannot
+ *  disagree by construction.
  *
  *  NOT a settings key: it is computed per request and must never appear in
- *  `USER_SETTINGS_KEYS`. `workerCap` is the effective SDK slot limit
- *  (`sdkSlotLimit` of the resolved dial), shown beside the worker switch. */
+ *  `USER_SETTINGS_KEYS`.
+ *
+ *  (Until 2026-08-13 this also carried `worker` + `workerCap` for the worker
+ *  dial. Workers are SDK-only now — the worker dial and its slot cap were
+ *  deleted, so the shape narrowed to the one surviving switch. Client and
+ *  server ship as one Electron bundle, so the break lands in a single release.) */
 export type RuntimeDialsEffective = {
-  worker: 'pty' | 'sdk'
   manager: 'pty' | 'sdk'
-  workerCap: number
 }
 
 /** GET /api/settings response: the persisted {@link Settings} plus a
@@ -1097,16 +1081,21 @@ export interface CleanWorktreesResult {
  *  typed into the PTY asynchronously once its TUI is ready, so this returns
  *  before the goal lands — the heartbeat / session JSONL is the arrival proof. */
 export interface SpawnSwarmWorkerResponse {
+  /** Always `''` since 2026-08-13: a worker is an Agent SDK session, which has
+   *  no PTY. The field survives so every consumer of the identity invariant
+   *  (pty ⇔ terminalId / sdk ⇔ sdkSessionId — workerRuntime.ts) keeps reading
+   *  the same shape while legacy PTY roster ROWS still exist on disk. */
   terminalId: string
   agentSessionId: string
   worktree: string
   branch: string
-  /** HOW this worker was actually launched. ABSENT ⇒ `'pty'` — the RECORD-level
-   *  rule (every response predating the SDK runtime keeps its meaning), which is
-   *  untouched by where the dial's default sits. */
-  runtime?: 'pty' | 'sdk'
-  /** The Agent SDK session id, present ONLY for `runtime: 'sdk'`. The caller
-   *  records it on the roster; `terminalId` is empty for such a worker. */
+  /** HOW this worker was launched. SDK-ONLY since 2026-08-13 (owner decision —
+   *  the PTY worker and its fallback were deleted): a spawn either returns
+   *  `'sdk'` or THROWS (SdkWorkerUnavailableError → the engine's spawn-failure
+   *  backoff). Optional purely so pre-SDK fakes keep compiling; absence on a
+   *  persisted ROSTER row still reads as the legacy `'pty'` (workerRuntime.ts). */
+  runtime?: 'sdk'
+  /** The Agent SDK session id (the worker's one live handle). */
   sdkSessionId?: string
   /** The CLI `--model` alias this worker's `claude` was actually launched with
    *  (mode-resolved THROUGH the quota fallback — see resolveSwarmModelEffort).
@@ -1114,16 +1103,6 @@ export interface SpawnSwarmWorkerResponse {
    *  rate-limit sighting can mark the RIGHT tier cooling (swarmQuota). Optional:
    *  older callers/fakes without it simply leave the sighting unattributed. */
   model?: string
-  /** Set ONLY when the dial asked for `sdk` and this worker came up as a PTY
-   *  anyway — slots full, preflight refused, or the SDK session died at start.
-   *  The human-readable reason, mirroring
-   *  {@link SpawnSwarmManagerResponse.fellBackBecause}.
-   *
-   *  It is on the RESPONSE and not merely in a server log because in a packaged
-   *  app the server is a forked child: a console.warn there reaches nobody. The
-   *  whole slot-holding design was accepted on the premise that a degrade
-   *  ANNOUNCES itself; on the worker path that premise was not yet true. */
-  fellBackBecause?: string
 }
 
 /** POST /api/swarm/worktree/remove — whether the worktree was torn down, with
@@ -1195,17 +1174,11 @@ export interface SpawnSwarmManagerResponse {
   /** Present only for an SDK commander: its {@link SdkSessionInfo} id, the
    *  handle /api/sdk-session/* is addressed by. */
   sdkSessionId?: string
-  /** Set ONLY when the dial asked for `sdk` and this desk came back as a PTY
-   *  anyway (no usable claude, CLI too old, spawn failed) — the human-readable
-   *  reason.
-   *
-   *  It exists because the alternative is a silent degrade, which is the worst
-   *  shape this feature can take: the owner flips the switch, expects a
-   *  structured desk, gets a terminal, and the explanation is a console.warn
-   *  inside a forked server in a packaged app — i.e. nowhere. Degrading to a PTY
-   *  is still the RIGHT behaviour (a desk on the known-good runtime beats no
-   *  desk); it just must not be invisible. */
-  fellBackBecause?: string
+  /* NOTE (2026-08-13): `fellBackBecause` was DELETED from this response with
+   * the runtime auto-fallback. An SDK dial now either seats an SDK desk or the
+   * POST fails with the reason in the error body — a desk can no longer come
+   * back on a different runtime than the dial chose, so there is nothing to
+   * explain on the success path. */
   agentSessionId: string
   /** true ⇒ this is the project's PREVIOUS commander conversation, resumed
    *  (`claude --resume`) — see SpawnSwarmSupplyResponse.resumed. NOTE the asymmetry
@@ -2541,6 +2514,13 @@ export type SwarmFatalEvent =
   | 'review-panel-failed'
   | 'high-risk-hold'
   | 'manager-unrevivable'
+  // 'worker-spawn-failed' (2026-08-13, SDK-only workers): deps.spawnWorker threw
+  // SdkWorkerUnavailableError — the SDK runtime cannot start on this machine
+  // (signed-out / missing / too-old CLI, unarmed guard). The engine holds new
+  // dispatch on a backoff ladder and recovers by itself on the first successful
+  // spawn; this bell is the owner's ONE loud pointer at the cause (the old PTY
+  // fallback used to absorb exactly this, silently).
+  | 'worker-spawn-failed'
   // 'engine-resume-suppressed' (docs/ENGINE_PERSISTENCE_PLAN.md §4-2, card 2): the
   // boot-time crash-loop breaker tripped — this build restarted
   // BREAKER_THRESHOLD+ times inside the trailing window, so resumeEngines()

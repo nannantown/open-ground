@@ -1,17 +1,23 @@
 import { describe, it, expect } from 'vitest'
 import { app } from '../../app'
-import { getWorkerRuntimeDial, getManagerRuntimeDial, setSettings } from '@/lib/server/store'
+import { getSettings, getManagerRuntimeDial, setSettings } from '@/lib/server/store'
 
-// The Agent-SDK runtime dials, POSTed by the manager dashboard's switches.
+// The commander's Agent-SDK runtime dial, POSTed by the manager dashboard's
+// switch.
 //
-// WHY THIS FILE EXISTS. The switches were built, wired and type-checked before
-// anyone asked whether POST /api/settings would actually STORE what they sent —
-// and it would not have: the route narrows every body to USER_SETTINGS_KEYS, and
-// these two keys were not on it. The switch would have flipped, the UI would
-// have shown ON, the write would have been silently dropped, and every desk
+// WHY THIS FILE EXISTS. The switch was built, wired and type-checked before
+// anyone asked whether POST /api/settings would actually STORE what it sent —
+// and it would not have: the route narrows every body to USER_SETTINGS_KEYS,
+// and the dial key was not on it. The switch would have flipped, the UI would
+// have shown ON, the write would have been silently dropped, and the desk
 // would have kept launching on PTY. Nothing would have thrown. So the assertion
 // that matters here is not "the route returns ok" — it is the ROUND TRIP:
-// POST, then read through the same dial readers the spawn paths use.
+// POST, then read through the same dial reader the desk-launch path uses.
+//
+// (Until 2026-08-13 this file also round-tripped the WORKER dial and its
+// sdkMaxWorkers slot cap. Both died with the PTY worker runtime — workers are
+// SDK-only now — and the surviving contract for the old key is the OPPOSITE
+// one: a POSTed `swarmWorkerRuntime` must be silently IGNORED, pinned below.)
 //
 // HOME is redirected to a throwaway tmp dir by ./src/test/setup-home.ts, so every
 // write here lands in an isolated home — never the real ~/.openground.
@@ -31,39 +37,18 @@ const post = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 })
 
-describe('POST /api/settings — Agent SDK runtime dials round-trip', () => {
-  it('worker dial: the switch reaches the reader the spawn path consults', async () => {
-    const res = await app.request('/api/settings', post({ swarmWorkerRuntime: { mode: 'sdk' } }))
+describe('POST /api/settings — commander runtime dial round-trip', () => {
+  it('commander dial: the switch reaches the reader the desk launch consults', async () => {
+    const res = await app.request('/api/settings', post({ swarmManagerRuntime: { mode: 'sdk' } }))
     expect(res.status).toBe(200)
-    // THE assertion: the same function swarmWorker.ts calls before spawning.
-    expect((await getWorkerRuntimeDial()).mode).toBe('sdk')
-
-    await app.request('/api/settings', post({ swarmWorkerRuntime: { mode: 'pty' } }))
-    expect((await getWorkerRuntimeDial()).mode).toBe('pty')
-  })
-
-  it('commander dial: same round trip, independently of the worker dial', async () => {
-    // Seed the worker dial EXPLICITLY rather than inheriting whatever the case
-    // above left behind: since absent ⇒ sdk on both dials, "still pty" is only
-    // evidence of independence if pty was written on purpose.
-    await app.request('/api/settings', post({ swarmWorkerRuntime: { mode: 'pty' } }))
-    await app.request('/api/settings', post({ swarmManagerRuntime: { mode: 'sdk' } }))
+    // THE assertion: the same function swarmManager.ts calls before seating.
     expect((await getManagerRuntimeDial()).mode).toBe('sdk')
-    // The worker dial is untouched by a commander write (they are separate
-    // decisions — the recommended rollout turns workers on FIRST).
-    expect((await getWorkerRuntimeDial()).mode).toBe('pty')
 
     await app.request('/api/settings', post({ swarmManagerRuntime: { mode: 'pty' } }))
     expect((await getManagerRuntimeDial()).mode).toBe('pty')
   })
 
-  it('the worker dial keeps sdkMaxWorkers; the commander dial has no such field', async () => {
-    await app.request(
-      '/api/settings',
-      post({ swarmWorkerRuntime: { mode: 'sdk', sdkMaxWorkers: 3 } }),
-    )
-    expect(await getWorkerRuntimeDial()).toEqual({ mode: 'sdk', sdkMaxWorkers: 3 })
-
+  it('the commander dial has no cap field — a smuggled sdkMaxWorkers is dropped', async () => {
     await app.request(
       '/api/settings',
       // A cap on the commander is meaningless (there is exactly one desk) — it is
@@ -74,19 +59,21 @@ describe('POST /api/settings — Agent SDK runtime dials round-trip', () => {
   })
 
   it('a garbage patch is REFUSED — the previous dial survives, it never falls to a default', async () => {
-    await app.request('/api/settings', post({ swarmWorkerRuntime: { mode: 'sdk' } }))
+    await app.request('/api/settings', post({ swarmManagerRuntime: { mode: 'pty' } }))
     for (const junk of [
-      { mode: 'SDK' }, // wrong case is not a mode
+      { mode: 'PTY' }, // wrong case is not a mode
       { mode: 'turbo' },
       { mode: true },
       {},
-      'sdk',
-      ['sdk'],
+      'pty',
+      ['pty'],
       null,
       42,
     ]) {
-      await app.request('/api/settings', post({ swarmWorkerRuntime: junk }))
-      expect((await getWorkerRuntimeDial()).mode, JSON.stringify(junk)).toBe('sdk')
+      await app.request('/api/settings', post({ swarmManagerRuntime: junk }))
+      // pty seeded on purpose: absent ⇒ sdk, so only an explicit pty can prove
+      // the junk patch did not clobber the stored value.
+      expect((await getManagerRuntimeDial()).mode, JSON.stringify(junk)).toBe('pty')
     }
   })
 
@@ -94,30 +81,28 @@ describe('POST /api/settings — Agent SDK runtime dials round-trip', () => {
     // The fail direction that matters: a value we cannot READ must land on the
     // shipped behaviour. ABSENT is a different question and has the opposite
     // answer — nothing written yet is a fresh install, whose default flipped to
-    // sdk (worker 2026-08-01, commander 08-02). Written straight to the store to
-    // simulate a hand-edited file.
-    await setSettings({
-      swarmWorkerRuntime: undefined,
-      swarmManagerRuntime: { mode: 'nonsense' } as never,
-    })
-    // ⚠ THIS SAID 'pty' UNTIL 2026-08-02 and was one of the two places the stale
-    // default was pinned — the worker reader had not moved with the flip, so a
-    // fresh install dispatched PTY workers under a switch drawn ON (0.11.47).
-    expect((await getWorkerRuntimeDial()).mode).toBe('sdk')
+    // sdk on 2026-08-02. Written straight to the store to simulate a
+    // hand-edited file.
+    await setSettings({ swarmManagerRuntime: { mode: 'nonsense' } as never })
     expect((await getManagerRuntimeDial()).mode).toBe('pty')
+    await setSettings({ swarmManagerRuntime: undefined })
+    expect((await getManagerRuntimeDial()).mode).toBe('sdk')
   })
 
-  it('a negative / non-numeric sdkMaxWorkers is dropped, not stored', async () => {
-    // NOTE: `0` used to head this list, and that was the bug — "run no SDK
-    // workers" is a real setting, not junk, so dropping it made the panel show 0
-    // while the server kept seating one. Its round trip is pinned in
-    // src/lib/server/sdkDialAndFallback.test.ts.
-    for (const cap of [-3, Number.NaN, Number.POSITIVE_INFINITY, '4', null]) {
-      await app.request('/api/settings', post({ swarmWorkerRuntime: { mode: 'sdk', sdkMaxWorkers: cap } }))
-      expect(await getWorkerRuntimeDial(), String(cap)).toEqual({ mode: 'sdk' })
-    }
-    // A fractional cap floors rather than persisting a fraction into a count.
-    await app.request('/api/settings', post({ swarmWorkerRuntime: { mode: 'sdk', sdkMaxWorkers: 2.7 } }))
-    expect(await getWorkerRuntimeDial()).toEqual({ mode: 'sdk', sdkMaxWorkers: 2 })
+  it('a POSTed swarmWorkerRuntime is silently IGNORED — dropped, never stored, never an error', async () => {
+    // The back-compat contract of the 2026-08-13 worker-dial deletion: an old
+    // client (or a script from the dial era) that still POSTs the worker key
+    // must get a 200 and NO stored key — the allowlist narrowing drops it the
+    // same way it drops any non-user-preference field. Read back through the
+    // PRODUCTION reader (getSettings), not the response.
+    const res = await app.request(
+      '/api/settings',
+      post({ swarmWorkerRuntime: { mode: 'pty', sdkMaxWorkers: 3 }, displayName: 'ok' }),
+    )
+    expect(res.status).toBe(200)
+    const stored = await getSettings()
+    expect('swarmWorkerRuntime' in stored).toBe(false)
+    // The rest of the same body still lands — the drop is per-key, not per-request.
+    expect(stored.displayName).toBe('ok')
   })
 })

@@ -677,18 +677,18 @@ describe('the critical section holds on the SDK runtime too', () => {
   })
 
   it('a FAILED spawn releases the lock and does not poison the caller behind it', async () => {
-    // The first call cannot seat a desk (preflight refuses, so the SDK arm
-    // degrades). The second must still be able to proceed — a lock left held by
-    // a failure is a project that can never get a commander again.
+    // The first call cannot seat a desk (preflight refuses ⇒ the SDK arm
+    // THROWS — fail-fast since 2026-08-13, no PTY degrade). The second must
+    // still be able to proceed — a lock left held by a failure is a project
+    // that can never get a commander again.
     mocks.sdkManagerPreflight.mockReturnValueOnce({ ...okPreflight(), ok: false, problems: ['no claude'] })
-    const a = await spawnSwarmManager({ projectPath: PROJ })
-    // It degraded to the PTY commander rather than leaving the project deskless,
-    // and it SAYS why — an invisible degrade looks like a broken switch.
-    expect(a.runtime).not.toBe('sdk')
-    expect(a.fellBackBecause).toBeTruthy()
+    await expect(spawnSwarmManager({ projectPath: PROJ })).rejects.toThrow(/no claude/)
+    // No desk of ANY runtime was seated by the failure.
+    expect(deskCount()).toBe(0)
 
-    const b = await spawnSwarmManager({ projectPath: PROJ })
-    expect(b).toBeTruthy() // the lock was released
+    const b = await spawnSwarmManager({ projectPath: PROJ }) // preflight passes again
+    expect(b.runtime).toBe('sdk') // the lock was released and the desk seats
+    expect(deskCount()).toBe(1)
   })
 
   it('a desk ASKED TO STOP is not reused — the respawn seats a working one (2026-08-04)', async () => {

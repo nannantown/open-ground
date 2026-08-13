@@ -272,8 +272,6 @@ const fileNamed = (rel: string): SweptFile => {
 }
 
 const has = (code: string, word: string): boolean => new RegExp(`\\b${word}\\b`).test(code)
-const countOf = (code: string, word: string): number =>
-  (code.match(new RegExp(`\\b${word}\\b`, 'g')) ?? []).length
 const lineAt = (code: string, index: number): number => {
   let n = 1
   for (let i = 0; i < index; i++) if (code.charCodeAt(i) === 10) n++
@@ -716,13 +714,9 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     sdkCalls: ['isSdkSessionLive', 'listSdkSessions'],
     sdkHandleFloor: 9,
   },
-  'src/lib/server/swarmWorkerRuntimeDial.ts': {
-    tier: 'sdk-live-predicate',
-    why: 'The pty/sdk dial. Its liveness reads go through reaped, never status, because the dial decides whether a slot is free.',
-    ptyFns: [],
-    sdkCalls: ['listSdkSessions'],
-    sdkHandleFloor: 1,
-  },
+  // (swarmWorkerRuntimeDial.ts — the pty/sdk worker dial + SDK slot cap — was
+  // deleted 2026-08-13: workers are SDK-only and uncapped, so its roster entry
+  // left with it.)
 
   // ── the engine ──
   'src/lib/server/swarmOrchestrator.ts': {

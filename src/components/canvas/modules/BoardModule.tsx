@@ -23,9 +23,19 @@ import {
 } from '@/lib/types'
 import { PRIORITY_META } from '@/lib/boardPriority'
 import { useT } from '@/i18n/I18nContext'
-import { sanitizeEngineState, type EngineWorker } from '@/components/canvas/modules/useSwarmEngine'
+import {
+  commanderPresence,
+  sanitizeEngineState,
+  type CommanderPresence,
+  type EngineReviewStatus,
+  type EngineWorker,
+} from '@/components/canvas/modules/useSwarmEngine'
 import { SwarmWorkerPane, type WorkerStatus } from '@/components/canvas/modules/SwarmWorkerPane'
-import { deriveWorkerActivity, type BoardCardWorker } from '@/lib/boardWorker'
+import {
+  deriveWorkerActivity,
+  type BoardCardManager,
+  type BoardCardWorker,
+} from '@/lib/boardWorker'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { engineWorkerKey } from './useSwarmEngine'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
@@ -203,11 +213,26 @@ export const BoardModule = ({
   const [workersByTask, setWorkersByTask] = useState<ReadonlyMap<string, EngineWorker>>(
     new Map(),
   )
+  // Commander linkage — SAME poll, same display-only stance, same owner gate as
+  // workersByTask. The engine's review queue (reviews[]) is the ONLY per-card
+  // record of "this review card is the commander's to land", so a review card
+  // outside it shows nothing. Of the commander itself ONLY the presence is
+  // kept: its free-form heartbeat phase/note is board-wide, and riding it on
+  // individual cards would claim "the commander is on THIS card" — which the
+  // data cannot support (差し戻し M1). Dropping the text also means a heartbeat
+  // churn cannot re-render the review cards (presence is a primitive; React
+  // bails out on an unchanged set).
+  const [reviewsByTask, setReviewsByTask] = useState<ReadonlyMap<string, EngineReviewStatus>>(
+    new Map(),
+  )
+  const [managerPresence, setManagerPresence] = useState<CommanderPresence>('unknown')
   useEffect(() => {
     // Clear the prior project's workers immediately on a project switch (or when
     // the folder is gone) so a stale worker strip never lingers on the new board
     // before the first poll answers.
     setWorkersByTask(new Map())
+    setReviewsByTask(new Map())
+    setManagerPresence('unknown')
     if (!project.path || project.missing) return
     let cancelled = false
     const poll = async () => {
@@ -227,11 +252,16 @@ export const BoardModule = ({
         // the map identity every 5s. Other non-ok (404 old server / 5xx) is
         // transient → keep the last map rather than flashing the strips off.
         if (!res.ok) {
-          if (res.status === 403) setWorkersByTask(prev => (prev.size ? new Map() : prev))
+          if (res.status === 403) {
+            setWorkersByTask(prev => (prev.size ? new Map() : prev))
+            setReviewsByTask(prev => (prev.size ? new Map() : prev))
+            setManagerPresence('unknown')
+          }
           return
         }
-        const { workers } = sanitizeEngineState(await res.json())
+        const state = sanitizeEngineState(await res.json())
         if (cancelled) return
+        const { workers } = state
         const next = new Map<string, EngineWorker>()
         for (const w of workers) if (w.taskId) next.set(w.taskId, w)
         // Keep the previous Map identity when nothing the card shows changed, so
@@ -260,6 +290,20 @@ export const BoardModule = ({
             ? prev
             : next,
         )
+        // Review-card linkage + the commander's board-wide state — same
+        // identity etiquette (keep the previous value when nothing shown
+        // changed; heartbeat ageMs/updatedAt churn is invisible here).
+        const nextReviews = new Map<string, EngineReviewStatus>()
+        for (const r of state.reviews) nextReviews.set(r.taskId, r.status)
+        setReviewsByTask(prev =>
+          prev.size === nextReviews.size &&
+          Array.from(nextReviews).every(([id, st]) => prev.get(id) === st)
+            ? prev
+            : nextReviews,
+        )
+        // Presence is a primitive — React bails out on an unchanged value, so
+        // no identity dance is needed for it.
+        setManagerPresence(commanderPresence(state.manager, state.managerPresence))
       } catch {
         /* server restarting / offline / forbidden — keep the last known map */
       }
@@ -1543,6 +1587,20 @@ export const BoardModule = ({
     },
     [workersByTask, claudeStatusByPty],
   )
+  // The review-column counterpart: the engine's review queue is the only
+  // per-card record of "this card is the commander's to land" — a review card
+  // outside it resolves to null and shows nothing.
+  const resolveManagerForTask = useCallback(
+    (taskId: string): BoardCardManager | null => {
+      const reviewStatus = reviewsByTask.get(taskId)
+      // ⚠ THE NO-FABRICATION GATE (差し戻し M2): a review card the engine does
+      // NOT list (hand-made, someone else's branch) must resolve to null —
+      // never to a fabricated readiness like 'unknown'.
+      if (!reviewStatus) return null
+      return { presence: managerPresence, reviewStatus }
+    },
+    [reviewsByTask, managerPresence],
+  )
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -1577,6 +1635,8 @@ export const BoardModule = ({
             // stage/heartbeat) with the live PTY beacon (working/waiting) into the
             // card's render-ready worker view; null when no worker owns the card.
             workerForTask={resolveWorkerForTask}
+            managerForTask={resolveManagerForTask}
+            reviewManagerPresence={managerPresence}
             onOpenProjectSettings={onOpenProjectSettings}
           />
         </div>

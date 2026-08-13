@@ -155,20 +155,11 @@ interface SwarmManager {
 
 const managerKey = (projectId: string) => `openground.swarm.manager.${projectId}`
 
-/** The two Agent-SDK runtime dials, as the manager dashboard's switches read them.
- *  `workerCap` is how many workers may run on the SDK AT ONCE — carried because
- *  the switch's own copy has to state it (with the shipped default of 1, "run
- *  workers on the SDK" without the number reads as a promise the dial does not
- *  keep) and because writing the dial back must not silently drop a cap the user
- *  configured: settings merges at the top level, so a `{mode}` write REPLACES the
- *  whole object. */
-type RuntimeDials = { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk'; workerCap: number }
-/** Last-resort display fallback for the cap, used only if the server answered
- *  with a non-number — kept in lockstep with the server's
- *  DEFAULT_SDK_MAX_WORKERS (swarmWorkerRuntimeDial.ts). The real value arrives
- *  resolved in `runtimeDialsEffective.workerCap`; this module derives nothing
- *  about the dials itself (see the note at the settings read). */
-const DEFAULT_SDK_MAX_WORKERS = 1
+/** The commander's Agent-SDK runtime dial, as the manager dashboard's switch
+ *  reads it. (Until 2026-08-13 this also carried the worker dial + its SDK slot
+ *  cap; the worker dial died with the PTY worker runtime — workers are
+ *  SDK-only, so there is nothing for a worker switch to switch.) */
+type RuntimeDials = { manager: 'pty' | 'sdk' }
 
 /** Load + SANITISE the persisted commander session (localStorage is untrusted —
  *  a user/extension can forge any JSON, so coerce every field; a bad shape →
@@ -251,18 +242,18 @@ const stopWorkerDesk = async (worker: SwarmWorkerRecord, projectPath: string): P
 /** The runtime identity a just-restarted worker came up on, held until the next
  *  GET /api/swarm/workers poll confirms it.
  *
- *  It carries the RUNTIME and not merely a terminalId because a restart decides
- *  its runtime SERVER-side (the dial), so the fresh worker may live in the other
- *  pool than the one that died. Overlaying only the terminalId left the tile
- *  rendering the old, dead PTY — Restart button and all — for a whole poll
- *  interval after an SDK worker had already come up in that worktree; a second
- *  click there spawns a twin into a worktree that is being written to. */
+ *  It carries the WHOLE runtime identity and not merely an id because the
+ *  record being overlaid may be a legacy/dead one from the other pool (a
+ *  heartbeat-only PTY-era record). Overlaying only the terminalId once left
+ *  the tile rendering the old, dead PTY — Restart button and all — for a whole
+ *  poll interval after an SDK worker had already come up in that worktree; a
+ *  second click there spawns a twin into a worktree that is being written to. */
 interface PendingRestart {
-  runtime: 'pty' | 'sdk'
-  /** Set for `runtime: 'pty'` only. */
-  terminalId?: string
-  /** Set for `runtime: 'sdk'` only. */
-  sdkSessionId?: string
+  /** SDK-only (2026-08-13): a successful worker spawn is ALWAYS an SDK session
+   *  now — a spawn that cannot establish one throws server-side — so a pending
+   *  restart can only ever record an SDK identity. */
+  runtime: 'sdk'
+  sdkSessionId: string
 }
 
 const saveManager = (projectId: string, manager: SwarmManager | null) => {
@@ -540,20 +531,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         const eff = (s as Partial<SettingsResponse>).runtimeDialsEffective
         const dial = (v: unknown): 'pty' | 'sdk' | null =>
           v === 'pty' || v === 'sdk' ? v : null
-        const worker = dial(eff?.worker)
         const manager = dial(eff?.manager)
-        setRuntimeDials(
-          worker && manager
-            ? {
-                worker,
-                manager,
-                workerCap:
-                  typeof eff?.workerCap === 'number' && Number.isFinite(eff.workerCap)
-                    ? eff.workerCap
-                    : DEFAULT_SDK_MAX_WORKERS,
-              }
-            : null,
-        )
+        setRuntimeDials(manager ? { manager } : null)
         if (!userPickedRef.current) {
           setMainView(effectiveTabOrder<MainView>(saved, SWARM_PANE_IDS)[0])
         }
@@ -949,13 +928,10 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       }
       setManager(next)
       saveManager(project.id, next)
-      // The dial said 'sdk' and the server seated a PTY desk anyway. Degrading is
-      // the right behaviour (a desk beats no desk), but it must not be SILENT —
-      // otherwise the owner sees a terminal where they expected a structured desk
-      // and concludes the switch is broken.
-      if (spawn.fellBackBecause) {
-        setError(t('projectPanel.swarm.runtime.fellBack', { reason: spawn.fellBackBecause }))
-      }
+      // (The fellBackBecause banner that lived here died 2026-08-13 with the
+      // runtime auto-fallback: a desk can no longer come up on a different
+      // runtime than the dial chose — an SDK failure now fails the POST and
+      // lands in the catch below with the server's reason.)
     } catch (e) {
       setError(
         t('projectPanel.swarm.manager.launchFailed', {
@@ -1085,12 +1061,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       setManager(next)
       saveManager(project.id, next)
       forgetPty(old, next.terminalId)
-      // Same as launchManager: a degrade to PTY must not be silent. Restart is in
-      // fact the MORE likely place to meet one — it is what the owner reaches for
-      // right after flipping the switch.
-      if (spawn.fellBackBecause) {
-        setError(t('projectPanel.swarm.runtime.fellBack', { reason: spawn.fellBackBecause }))
-      }
+      // (fellBackBecause banner deleted 2026-08-13 with the auto-fallback — a
+      // failed SDK seat now fails the POST and lands in the catch below.)
     } catch (e) {
       setError(
         t('projectPanel.swarm.restartFailed', {
@@ -1162,25 +1134,18 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         // all, and stayed that way. When the answer is unaddressable we record
         // NOTHING and let the ≤5 s poll bring server truth — a tile that lags is
         // recoverable, a tile that lies is not.
+        // SDK-only (2026-08-13): a successful spawn is ALWAYS an SDK session —
+        // a spawn that cannot establish one THROWS (the catch below shows the
+        // reason), so the old PTY arm and the fell-back banner are gone. The
+        // no-address guard stays: `runtime:'sdk'` with no sdkSessionId records
+        // NOTHING and lets the ≤5s poll bring server truth (a tile that lags is
+        // recoverable, a tile that lies is not).
         const fresh: PendingRestart | null =
-          spawn.runtime === 'sdk'
-            ? spawn.sdkSessionId
-              ? { runtime: 'sdk', sdkSessionId: spawn.sdkSessionId }
-              : null
-            : spawn.terminalId
-              ? { runtime: 'pty', terminalId: spawn.terminalId }
-              : null
+          spawn.runtime === 'sdk' && spawn.sdkSessionId
+            ? { runtime: 'sdk', sdkSessionId: spawn.sdkSessionId }
+            : null
         if (fresh) setPendingRestarts((prev) => new Map(prev).set(worker.worktree, fresh))
         forgetPty(old, spawn.terminalId)
-        // Same rule as launchManager / restartManager: a degrade to PTY must not
-        // be SILENT. In a packaged app the server is a forked child, so the
-        // server-side console.warn reaches nobody — the owner would just see a
-        // terminal where they expected a structured SDK desk and conclude the
-        // switch is broken. The reason rides back on the response for exactly
-        // this, and until now this call site threw it away.
-        if (spawn.fellBackBecause) {
-          setError(t('projectPanel.swarm.runtime.fellBack', { reason: spawn.fellBackBecause }))
-        }
       } catch (e) {
         setError(
           t('projectPanel.swarm.restartFailed', {
@@ -1238,16 +1203,14 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     .map((w) => {
       const pending = pendingRestarts.get(w.worktree)
       if (!pending || engineWorkerKey(pending) === engineWorkerKey(w)) return w
-      // Replace the WHOLE runtime identity, never just the terminalId: a restart
-      // picks its runtime server-side, so the fresh worker can live in the other
-      // pool. Overlaying half of it left an SDK restart rendering the old, DEAD
-      // PTY tile (with its Restart button live) until the next poll — one more
-      // click there and a twin claude is running in a worktree the fresh worker
-      // is already writing to. Both id fields are rewritten together so the
-      // record can never carry one from each pool.
-      return pending.runtime === 'sdk'
-        ? { ...w, runtime: 'sdk' as const, sdkSessionId: pending.sdkSessionId, terminalId: undefined }
-        : { ...w, runtime: 'pty' as const, terminalId: pending.terminalId, sdkSessionId: undefined }
+      // Replace the WHOLE runtime identity, never just an id field: overlaying
+      // half of it once left a restart rendering the old, DEAD tile (with its
+      // Restart button live) until the next poll — one more click there and a
+      // twin claude is running in a worktree the fresh worker is already
+      // writing to. Both id fields are rewritten together so the record can
+      // never carry one from each pool. (The fresh worker is always an SDK
+      // session — the PTY arm died with the PTY worker runtime, 2026-08-13.)
+      return { ...w, runtime: 'sdk' as const, sdkSessionId: pending.sdkSessionId, terminalId: undefined }
     })
 
   // OFF / first-run: the swarm is FULLY idle — the engine isn't running, no
@@ -1316,15 +1279,18 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     },
     [order],
   )
-  // Flip one runtime dial and persist it. Optimistic so the switch answers the
-  // click immediately, but REVERTED on a failed write — unlike the pane order
-  // (cosmetic, self-heals on the next mount), a dial the user believes is ON
-  // while the server still reads OFF would send them hunting a phantom.
-  // The POST stays OUTSIDE the state updater on purpose: React runs updater
-  // functions twice under StrictMode, so a fetch in there would fire two writes
-  // per click. Read the current value from the closure and keep the updater pure.
+  // Flip the commander runtime dial and persist it. Optimistic so the switch
+  // answers the click immediately, but REVERTED on a failed write — unlike the
+  // pane order (cosmetic, self-heals on the next mount), a dial the user
+  // believes is ON while the server still reads OFF would send them hunting a
+  // phantom. The POST stays OUTSIDE the state updater on purpose: React runs
+  // updater functions twice under StrictMode, so a fetch in there would fire
+  // two writes per click. Read the current value from the closure and keep the
+  // updater pure. (`which` is only ever 'manager' since the 2026-08-13
+  // worker-dial deletion; the parameter survives so the pane's call shape stays
+  // explicit about WHICH dial it is flipping.)
   const toggleRuntime = useCallback(
-    (which: 'worker' | 'manager', next: boolean) => {
+    (which: 'manager', next: boolean) => {
       if (!runtimeDials) return
       const before = runtimeDials[which]
       const mode = next ? ('sdk' as const) : ('pty' as const)
@@ -1333,22 +1299,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       void fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          which === 'worker'
-            ? // Carry sdkMaxWorkers BACK: settings merges at the top level, so a
-              // bare `{mode}` replaces the whole object and would silently wipe a
-              // cap the user configured. Omitted when it is just the default, so
-              // toggling the switch does not materialise a field nobody set.
-              {
-                swarmWorkerRuntime: {
-                  mode,
-                  ...(runtimeDials.workerCap !== DEFAULT_SDK_MAX_WORKERS
-                    ? { sdkMaxWorkers: runtimeDials.workerCap }
-                    : {}),
-                },
-              }
-            : { swarmManagerRuntime: { mode } },
-        ),
+        body: JSON.stringify({ swarmManagerRuntime: { mode } }),
       })
         .then((r) => {
           if (!r.ok) throw new Error(String(r.status))

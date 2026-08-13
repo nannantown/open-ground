@@ -20,7 +20,6 @@ import { describe, it, expect } from 'vitest'
 import {
   detectSdkFreeTextQuestion,
   detectWorkerFreeTextQuestion,
-  detectFreeTextQuestion,
 } from './swarmQuestions'
 import { classifyOutput } from './swarmOrchestrator'
 import { renderSdkTail, sdkRecentOutputHead } from './workerRuntime'
@@ -121,11 +120,10 @@ describe('detectWorkerFreeTextQuestion — one seam, two runtimes', () => {
     expect(detectWorkerFreeTextQuestion('sdk', SDK_QUESTION)?.question).toBe('どちらにしますか?')
   })
 
-  it('the same sdk output through the PTY detector finds NOTHING — the exact pre-fix blindness', () => {
-    // No idle footer, no input box: the PTY detector cannot see this. This test
-    // documents WHY the seam exists; if it ever starts passing the PTY way, the
-    // TUI regexes have started matching non-TUI text and that is its own bug.
-    expect(detectFreeTextQuestion(SDK_QUESTION)).toBeNull()
+  it("a legacy 'pty' kind finds NOTHING — the PTY detector died with the PTY worker runtime", () => {
+    // 2026-08-13: detectFreeTextQuestion (the TUI screen reader) was deleted;
+    // the seam routes 'pty' straight to null. A legacy roster row's dead
+    // terminal has no screen to ask questions on.
     expect(detectWorkerFreeTextQuestion('pty', SDK_QUESTION)).toBeNull()
   })
 })
@@ -137,8 +135,8 @@ describe("classifyOutput — the 'question' arm is runtime-aware", () => {
     expect(classifyOutput(SDK_QUESTION, 'sdk')).toBe('question')
   })
 
-  it("the kind default ('pty') keeps the old meaning — same text reads 'normal'", () => {
-    expect(classifyOutput(SDK_QUESTION)).toBe('normal')
+  it("the same text under kind 'pty' reads 'normal' — the PTY question arm is gone", () => {
+    expect(classifyOutput(SDK_QUESTION, 'pty')).toBe('normal')
   })
 
   it("an sdk worker mid-turn stays 'normal' even with a trailing ?", () => {

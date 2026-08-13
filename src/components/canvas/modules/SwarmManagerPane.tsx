@@ -117,17 +117,18 @@ interface Props {
   /** The overseer was armed WITHOUT the sandbox experiment (L3) — show a reduced-
    *  containment note under the switch. */
   sandboxWarning: boolean
-  // ── Runtime dials (Agent SDK migration) ─────────────────────────────────────
-  /** THE SERVER'S OWN EFFECTIVE dials — `runtimeDialsEffective` off /api/settings,
+  // ── Runtime dial (commander) ────────────────────────────────────────────────
+  /** THE SERVER'S OWN EFFECTIVE dial — `runtimeDialsEffective` off /api/settings,
    *  passed through by SwarmModule without re-deriving anything. (It used to
    *  resolve the raw settings keys client-side; that copy drifted from the server
    *  twice on 2026-08-02 and the switches drew the opposite of what was running.)
    *  `null` while the read is in flight OR if the server did not answer — the
-   *  switches render disabled rather than claiming OFF, because "off" is a real
-   *  answer here and a wrong one is worse than a blank one. */
-  runtimeDials: { worker: 'pty' | 'sdk'; manager: 'pty' | 'sdk'; workerCap: number } | null
-  /** Persist one dial (POST /api/settings, merged server-side by SwarmModule). */
-  onToggleRuntime: (which: 'worker' | 'manager', next: boolean) => void
+   *  switch renders disabled rather than claiming OFF, because "off" is a real
+   *  answer here and a wrong one is worse than a blank one. (The worker switch
+   *  died 2026-08-13 with the worker dial — workers are SDK-only.) */
+  runtimeDials: { manager: 'pty' | 'sdk' } | null
+  /** Persist the commander dial (POST /api/settings, sent by SwarmModule). */
+  onToggleRuntime: (which: 'manager', next: boolean) => void
   /** The durable 「外向き着地/週」 KPI — GET /api/swarm/kpi/landed, fetched by
    *  SwarmModule's useLandedKpi and threaded down (this pane never fetches).
    *  Aggregated across ALL registered projects, not just this one. null while
@@ -701,18 +702,22 @@ export const SwarmManagerPane = ({
           {error && <p className="mt-2.5 text-meta leading-relaxed text-accent">{error}</p>}
         </div>
 
-        {/* ── Runtime dials (Agent SDK migration) ────────────────────────────
-            These used to live ONLY in settings.json, which meant the owner —
-            the one person the experiment is gated to — could not turn it on
-            without hand-editing JSON. That is not a feature switch, it is a
-            note to the developer. So they surface here, next to the other
-            engine switches, with their real costs stated rather than implied.
+        {/* ── Runtime dial (commander) ───────────────────────────────────────
+            Used to live ONLY in settings.json, which meant the owner — the one
+            person the experiment is gated to — could not turn it on without
+            hand-editing JSON. That is not a feature switch, it is a note to
+            the developer. So it surfaces here, next to the other engine
+            switches, with its real cost stated rather than implied.
+
+            The WORKER switch that used to sit above this one died 2026-08-13
+            with the worker dial: workers are SDK-only, there is no runtime to
+            switch a worker to.
 
             Deliberately NOT disabled while the engine runs: unlike the overseer
             (a stage of the running tick, which the server refuses to arm on a
             stopped engine), a runtime dial is read at the moment a desk SPAWNS.
             Flipping it mid-run is safe and simply lands on the next desk — the
-            hints say so, so the switch does not have to lie by being greyed. */}
+            hint says so, so the switch does not have to lie by being greyed. */}
         <div className="shrink-0 border-t border-line px-4 py-3">
           <div className="mb-3 flex items-center gap-2">
             <Cpu size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
@@ -722,29 +727,11 @@ export const SwarmManagerPane = ({
           </div>
           <div className="flex flex-col gap-2.5">
             <ControlRow
-              label={t('projectPanel.swarm.runtime.worker')}
-              // The cap is IN the copy: with the shipped default of 1, a hint that
-              // just said "run workers on the SDK" would promise something the dial
-              // does not do — one runs on it, the rest keep using a terminal, and
-              // the switch looks half-broken.
-              hint={t('projectPanel.swarm.runtime.workerHint', {
-                count: runtimeDials?.workerCap ?? 1,
-              })}
-              summary={t('projectPanel.swarm.runtime.workerSummary', {
-                count: runtimeDials?.workerCap ?? 1,
-              })}
-              value={runtimeDials?.worker === 'sdk'}
-              // null ⇒ the settings read has not answered. Disabled beats
-              // rendering a confident OFF we have not verified.
-              disabled={runtimeDials === null}
-              ariaLabel={t('projectPanel.swarm.runtime.worker')}
-              onToggle={(v) => onToggleRuntime('worker', v)}
-              t={t}
-            />
-            <ControlRow
               label={t('projectPanel.swarm.runtime.manager')}
               hint={t('projectPanel.swarm.runtime.managerHint')}
               value={runtimeDials?.manager === 'sdk'}
+              // null ⇒ the settings read has not answered. Disabled beats
+              // rendering a confident OFF we have not verified.
               disabled={runtimeDials === null}
               ariaLabel={t('projectPanel.swarm.runtime.manager')}
               onToggle={(v) => onToggleRuntime('manager', v)}
@@ -961,7 +948,6 @@ export const SwarmManagerPane = ({
 const ControlRow = ({
   label,
   hint,
-  summary,
   value,
   disabled,
   ariaLabel,
@@ -977,9 +963,6 @@ const ControlRow = ({
    *  the disclosure has a visible entrance, per the over-hiding anti-pattern);
    *  what the eye gets by default is the label plus at most ONE line. */
   hint: string
-  /** Optional single visible line (e.g. the SDK dial's 「次に立つ卓から適用」).
-   *  Keep it to a clause — anything longer belongs in `hint`. */
-  summary?: string
   value: boolean
   disabled: boolean
   ariaLabel: string
@@ -999,7 +982,6 @@ const ControlRow = ({
           ⓘ
         </span>
       </div>
-      {summary ? <div className="text-meta leading-snug text-ink-subtle">{summary}</div> : null}
     </div>
     <div
       role="group"

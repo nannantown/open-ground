@@ -108,6 +108,9 @@ import { setSettings } from './store'
 import type { SdkStreamFrame } from './sdkSession'
 import type { SdkEvent } from './sdkEvents'
 import { writeEngineIntent } from './swarmEnginePersistence'
+import { SdkWorkerUnavailableError } from './swarmWorkerSdk'
+import { listSwarmNotifications } from './swarmNotifications'
+import { swarmNotificationsFile } from './paths'
 import { canonicalize } from './canonicalize'
 import { forgetSwarmManualStop } from './store'
 import { settingsFile, engineBootsFile } from './paths'
@@ -573,7 +576,7 @@ describe('②-wiring: launchSdkDesk actually ARMS the death-on-arrival watch', (
 // LOG is the only sink. The dispatch path's call is covered elsewhere; the RESUME
 // path's was not (deleting it left the whole suite green — measured 2026-08-01).
 
-describe('③ boot resume announces a runtime degrade (SDK→PTY) in the engine log', () => {
+describe('③ boot resume under SDK-only fail-fast — no degrade notice, no stranded card', () => {
   const safeDeps = (
     over: Partial<OrchestratorDeps & IntegrationDeps & AnomalyDeps> = {},
   ): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
@@ -636,22 +639,7 @@ describe('③ boot resume announces a runtime degrade (SDK→PTY) in the engine 
     }
   }
 
-  it('a resumed worker that fell back SDK→PTY says WHY, in the engine log', async () => {
-    const { log } = await withResumedProject(async (o) => ({
-      terminalId: 't-resume',
-      agentSessionId: o.resumeSessionId ?? 'sid',
-      worktree: o.worktree ?? '/central/wt/x',
-      branch: ENTRY.branch,
-      model: 'fable',
-      fellBackBecause: 'SDK desk slots are full (3/3)',
-    }))
-    const line = log.find((l) => l.message.includes('runtime fallback (SDK→PTY)'))
-    expect(line, `no fallback notice in engine log: ${JSON.stringify(log)}`).toBeTruthy()
-    expect(line?.level).toBe('warn')
-    expect(line?.message).toContain('SDK desk slots are full (3/3)')
-  })
-
-  it('a resumed worker that did NOT degrade stays silent (the notice is an EVENT, not a property)', async () => {
+  it('a resume spawn produces NO runtime-fallback notice — the concept was deleted with the PTY worker (2026-08-13)', async () => {
     const { log } = await withResumedProject(async (o) => ({
       terminalId: 't-resume',
       agentSessionId: o.resumeSessionId ?? 'sid',
@@ -660,6 +648,66 @@ describe('③ boot resume announces a runtime degrade (SDK→PTY) in the engine 
       model: 'fable',
     }))
     expect(log.filter((l) => l.message.includes('runtime fallback'))).toEqual([])
+  })
+
+  it('a resume spawn REFUSED by the SDK requeues the card to todo, arms the hold, and bells — never a silent doing-strand', async () => {
+    // The adversarial-review finding this pins (2026-08-13): a non-adopted
+    // resume candidate is never pushed to engine.workers, the orphan-doing
+    // anomaly SKIPS it (its worktree still exists), and the first syncRoster
+    // wipes its roster row — so before the fix, the exact upgrade scenario the
+    // resume path exists for (restart on a signed-out machine) stranded every
+    // in-flight card in 'doing' forever, silently.
+    await rm(swarmNotificationsFile(), { force: true })
+    const recovered: [string, string][] = []
+    __resetOrchestratorForTests()
+    const proj = await mkdtemp(join(tmpdir(), 'og-sdk-blind-'))
+    const uuid = randomUUID()
+    await writeFile(
+      settingsFile(),
+      JSON.stringify({ projects: [{ id: uuid, path: proj, addedAt: '2026-01-01T00:00:00.000Z' }] }),
+    )
+    await rm(engineBootsFile(), { recursive: true, force: true })
+    try {
+      await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: false })
+      const deps = safeDeps({
+        spawnWorker: async () => {
+          throw new SdkWorkerUnavailableError(['CLI signed out after the update'])
+        },
+        recoverCard: async (_p, taskId, column) => {
+          recovered.push([taskId, column])
+          return true
+        },
+        fetchTasks: async () =>
+          [{ id: ENTRY.taskId, title: 'resume me', boardColumn: 'doing' }] as never,
+      })
+      await resumeEngines(deps, {
+        listProjectPaths: async () => [proj],
+        reconcileRoster: async () => ({
+          resumeCandidates: [ENTRY],
+          ready: [],
+          vanished: [],
+          cardGone: [],
+        }),
+        proveResumable: async () => true,
+      })
+      // The card went home to 'todo' — the ordinary dispatch path (which
+      // carries the hold ladder + auto-recovery) owns the retry now.
+      expect(recovered).toContainEqual([ENTRY.taskId, 'todo'])
+      const state = await getOrchestratorState(proj, safeDeps())
+      expect(state.log.some((l) => l.message.includes('resume spawn failed → requeue to todo'))).toBe(true)
+      // …and the owner heard about it — the hold was armed at boot, not left
+      // for the first fill attempt to discover. Read back through the
+      // PRODUCTION store reader.
+      const bells = await listSwarmNotifications()
+      expect(bells.filter((b) => b.swarmFatal?.event === 'worker-spawn-failed')).toHaveLength(1)
+    } finally {
+      __resetOrchestratorForTests()
+      await forgetSwarmManualStop(await canonicalize(proj)).catch(() => {})
+      await writeFile(settingsFile(), JSON.stringify({ projects: [] }))
+      await rm(engineBootsFile(), { recursive: true, force: true })
+      await rm(swarmNotificationsFile(), { force: true })
+      await rm(proj, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    }
   })
 })
 

@@ -1912,6 +1912,22 @@ let downloadedUpdate = null
 let downloadedUpdateAt = 0
 // Guard against two manual checks racing two dialogs.
 let manualCheckInFlight = false
+// True while a download the app ANNOUNCED (the manual check's "downloading in
+// the background" dialog) is in flight — the one case where a later 'error'
+// must surface as a dialog instead of dying in stdout (2026-08-13). Background
+// downloads never set this, so background failures stay silent by design.
+let announcedDownloadLive = false
+
+/** Dock-icon download progress (macOS/Windows taskbar). ratio 0..1, or -1 to
+ *  clear. Best-effort: a destroyed window must never throw in an updater
+ *  event handler. */
+function setUpdateDockProgress(ratio) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar(ratio)
+  } catch {
+    /* cosmetic only */
+  }
+}
 
 // ── Hands-free updates (settings.autoUpdate, electron/autoUpdatePolicy.js) ──
 // When the window last lost focus (epoch ms), or null while focused. Fed by the
@@ -2092,6 +2108,10 @@ async function checkForUpdatesInteractive() {
       MANUAL_CHECK_TIMEOUT_MS,
     )
     const outcome = manualCheckOutcome({ result, currentVersion: app.getVersion() })
+    // The dialog below PROMISES "you will be asked to restart once it is
+    // ready" — from here on, a download error must surface as a dialog too
+    // (the 'error' handler reads this flag), or the promise dies in stdout.
+    if (outcome.kind === 'downloading') announcedDownloadLive = true
     // autoDownload means a small update can finish DURING the check — in which case
     // 'update-downloaded' already put the restart prompt on screen. Don't stack a
     // second dialog behind it.
@@ -2173,13 +2193,40 @@ function initAutoUpdater() {
   autoUpdater.on('error', (err) => {
     // Non-fatal: a failed update check must never take the app down.
     console.error('[updater] error:', err && err.message ? err.message : err)
+    setUpdateDockProgress(-1)
+    // A download the app ANNOUNCED (the manual check's "downloading in the
+    // background… you will be asked to restart" dialog) must not die silently —
+    // the user is sitting in front of a promise that can no longer be kept
+    // (observed 2026-08-13 on a real 0.11.71 update: the failure went only to a
+    // packaged app's stdout and the app looked hung). Background checks stay
+    // silent by design — announcedDownloadLive is only ever set by the manual
+    // check path, so this dialog can never pop uninvited.
+    if (announcedDownloadLive) {
+      announcedDownloadLive = false
+      void showUpdateDialog('download-failed', {
+        error: err && err.message ? err.message : String(err),
+      })
+        .then((res) => {
+          if (res.response === 0) void shell.openExternal(RELEASE_NOTES_URL).catch(() => {})
+        })
+        .catch(() => {})
+    }
   })
   autoUpdater.on('download-progress', (p) => {
     console.log(`[updater] downloading ${Math.round(p.percent)}%`)
+    // Ambient, not modal: the dock icon carries the download so "is anything
+    // happening?" has an answer without a dialog (the 2026-08-13 stuck-looking
+    // update). percent is 0–100 from electron-updater; clamp defensively.
+    const ratio = Number.isFinite(p && p.percent) ? Math.min(1, Math.max(0, p.percent / 100)) : 0
+    setUpdateDockProgress(ratio)
   })
   autoUpdater.on('update-downloaded', (info) => {
     const version = (info && info.version) || ''
     console.log('[updater] update downloaded:', version || '(unknown version)')
+    // The announced download kept its promise — retire the failure watch and
+    // the dock progress bar.
+    announcedDownloadLive = false
+    setUpdateDockProgress(-1)
     // Remember it: if the user picks "Later", the menu's manual check must offer
     // THIS restart instead of asking GitHub again about an update already on disk.
     downloadedUpdate = { version }

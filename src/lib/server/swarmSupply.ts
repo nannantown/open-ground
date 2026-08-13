@@ -57,6 +57,7 @@ import {
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { resolveSwarmSession, recordSwarmSession } from './swarmSessions'
 import { getExecutionMode, getAllowedModelTiers } from './store'
+import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
 import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmSupplyResponse } from '../types'
 
@@ -122,7 +123,21 @@ export interface SpawnSwarmSupplyOpts {
 export const supplyLaunchOpts = (
   cwd: string,
   agentSessionId: string,
-  opts: { cols?: number; rows?: number; resume?: boolean; remoteName?: string } = {},
+  opts: {
+    cols?: number
+    rows?: number
+    resume?: boolean
+    remoteName?: string
+    // Settings.language, resolved by the caller. REQUIRED — not optional, no
+    // default `{}` on `opts` any more — so a caller that forgets to thread it
+    // through fails `tsc` instead of silently spawning a supply desk whose
+    // replies ignore the setting (2026-08-13 rework rationale — see
+    // buildOrderInjection's doc comment, swarmWorker.ts). NOTE (M2, same
+    // rework): the `/supply` skill body itself instructs 日本語 replies
+    // regardless of this directive — see skills/supply/SKILL.md and the
+    // rework commit for the open gap this does NOT close.
+    lang: PromptLang
+  },
   // Mode-resolved model/effort (omitted ⇒ opus/max, back-compat).
   me?: { model: string; effort?: ClaudeEffort },
 ): LaunchClaudeOpts => ({
@@ -146,7 +161,8 @@ export const supplyLaunchOpts = (
   cols: opts.cols,
   rows: opts.rows,
   ...(opts.resume ? { resume: true } : {}),
-  initialPrompt: opts.resume ? SUPPLY_RESUME_INJECTION : SUPPLY_INJECTION,
+  initialPrompt:
+    (opts.resume ? SUPPLY_RESUME_INJECTION : SUPPLY_INJECTION) + languageDirective(opts.lang),
 })
 
 /** Launch ONE interactive claude PTY in the project's primary checkout running
@@ -207,11 +223,13 @@ export const spawnSwarmSupply = async (
   // フォルダ名)。resolveSwarmRemoteName は never-throws — 解決に失敗しても旧固定名
   // 'supply' で spawn は通る。
   const remoteName = await resolveSwarmRemoteName('supply', opts.projectPath)
+  // Settings.language ⇒ the supply officer's user-facing replies follow it.
+  const lang = await getPromptLang()
   const ref = launchClaude(
     supplyLaunchOpts(
       opts.projectPath,
       session.agentSessionId,
-      { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName },
+      { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName, lang },
       me,
     ),
   )

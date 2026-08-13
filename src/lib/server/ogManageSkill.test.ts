@@ -189,7 +189,9 @@ describe('shipped skill source (skills/og-manage/SKILL.md)', () => {
       '/api/swarm/workers',
       '/api/swarm/orchestrator',
       '/api/swarm/worktree/remove',
-      '/api/terminal/',
+      // The worker conduit is the SDK session stream — /api/terminal/ left the
+      // commander's surface when PTY workers were deleted (2026-08-13).
+      '/api/sdk-session/',
     ]) {
       expect(text).toContain(api)
     }

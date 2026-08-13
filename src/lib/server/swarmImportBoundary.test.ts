@@ -22,7 +22,9 @@ import { SEAMS, PTY_BY_DESIGN, BOTH_POOLS_DEBT } from '../../../scripts/importBo
 const repoRoot = join(__dirname, '..', '..', '..')
 
 // THIS NUMBER MAY ONLY GO DOWN.
-const DEBT_BUDGET = 9
+// Lowered 9 → 8 on 2026-08-13: swarmWorkerRuntimeDial.ts was deleted with the
+// PTY worker runtime — debt paid down by removing the debtor.
+const DEBT_BUDGET = 8
 
 describe('the desk-pool import boundary', () => {
   it('every exempted path still exists — a stale entry silently un-bans nothing', () => {

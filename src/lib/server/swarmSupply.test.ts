@@ -2,6 +2,7 @@ import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
 import { describe, it, expect } from 'vitest'
 import { buildClaudeArgv } from './claudeTerminal'
 import { supplyLaunchOpts, SUPPLY_INJECTION, SUPPLY_RESUME_INJECTION } from './swarmSupply'
+import { languageDirective } from './promptLang'
 
 // spawnSwarmSupply spawns a real PTY (needs the `claude` CLI), so it is
 // curl-verified on the real machine. Here we pin the PURE launch contract —
@@ -11,7 +12,9 @@ import { supplyLaunchOpts, SUPPLY_INJECTION, SUPPLY_RESUME_INJECTION } from './s
 // police; the /supply skill as the positional prompt).
 
 describe('supplyLaunchOpts (supply launch contract)', () => {
-  const base = supplyLaunchOpts('/repo', 'sid-1')
+  // `lang` is a REQUIRED argument (2026-08-13 rework) — fixed to 'en' here so
+  // the OTHER assertions stay independent of the language describe block below.
+  const base = supplyLaunchOpts('/repo', 'sid-1', { lang: 'en' })
 
   it('runs in the project PRIMARY checkout (cwd), not a worktree', () => {
     expect(base.cwd).toBe('/repo')
@@ -58,17 +61,17 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
     // spawnSwarmSupply resolves 「タスク窓口 <プロジェクト表示名>」/ "Supply officer
     // <project>" via resolveSwarmRemoteName so the claude.ai / mobile list reads
     // WHICH project's supply desk this is (owner feedback 2026-07-18).
-    const named = supplyLaunchOpts('/proj', 'sid-rc', { remoteName: 'タスク窓口 受注管理' })
+    const named = supplyLaunchOpts('/proj', 'sid-rc', { remoteName: 'タスク窓口 受注管理', lang: 'en' })
     expect(named.remoteControl).toBe('タスク窓口 受注管理')
   })
 
   it('delivers /supply as the positional prompt (claude runs the skill on startup)', () => {
-    expect(base.initialPrompt).toBe('/supply')
+    expect(base.initialPrompt).toBe('/supply' + languageDirective('en'))
     expect(SUPPLY_INJECTION).toBe('/supply')
   })
 
   it('forwards cols/rows when given', () => {
-    const o = supplyLaunchOpts('/repo', 'sid-2', { cols: 100, rows: 30 })
+    const o = supplyLaunchOpts('/repo', 'sid-2', { cols: 100, rows: 30, lang: 'en' })
     expect(o.cols).toBe(100)
     expect(o.rows).toBe(30)
   })
@@ -78,15 +81,39 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
     expect(base.rows).toBeUndefined()
   })
 
+  describe('lang (Settings.language ⇒ the supply officer replies in that language)', () => {
+    // `lang` is REQUIRED (2026-08-13 rework) — "omitted" no longer compiles.
+    // Literal markers, not `toBe(X + languageDirective(lang))`, so a mutation
+    // that silently drops the directive on one branch still shows as red
+    // (see swarmWorker.test.ts for the same pattern).
+    it('en ⇒ appends the English reply-language directive (literal marker)', () => {
+      const o = supplyLaunchOpts('/repo', 'sid-lang-en', { lang: 'en' })
+      expect(o.initialPrompt!.startsWith(SUPPLY_INJECTION)).toBe(true)
+      expect(o.initialPrompt).toContain('[Reply language]')
+      expect(o.initialPrompt).not.toContain('【返答言語】')
+    })
+    it('ja ⇒ appends the Japanese reply-language directive (literal marker)', () => {
+      const o = supplyLaunchOpts('/repo', 'sid-lang-ja', { lang: 'ja' })
+      expect(o.initialPrompt!.startsWith(SUPPLY_INJECTION)).toBe(true)
+      expect(o.initialPrompt).toContain('【返答言語】')
+      expect(o.initialPrompt).not.toContain('[Reply language]')
+    })
+    it('resume + lang ⇒ directive rides the resume prompt too (literal marker)', () => {
+      const o = supplyLaunchOpts('/repo', 'sid-lang-resume', { resume: true, lang: 'ja' })
+      expect(o.initialPrompt!.startsWith(SUPPLY_RESUME_INJECTION)).toBe(true)
+      expect(o.initialPrompt).toContain('【返答言語】')
+    })
+  })
+
   // ── RESUME (swarmSessions.ts): the desk survives an app restart ───────────
   describe('resume', () => {
-    const resumed = supplyLaunchOpts('/repo', 'sid-old', { resume: true })
+    const resumed = supplyLaunchOpts('/repo', 'sid-old', { resume: true, lang: 'en' })
 
     it('a FRESH launch is byte-identical to the pre-resume contract (no `resume` flag)', () => {
       // The old behaviour must be untouched when there is nothing to resume — this is
       // the branch every first launch (and every fail-open fallback) still takes.
       expect(base.resume).toBeUndefined()
-      expect(base.initialPrompt).toBe(SUPPLY_INJECTION)
+      expect(base.initialPrompt).toBe(SUPPLY_INJECTION + languageDirective('en'))
     })
 
     it('a RESUMED launch reaches `claude --resume <id>` — never `--session-id`', () => {
@@ -104,7 +131,7 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
       // A supply officer resuming from a pre-restart memory files duplicates of cards
       // the commander already merged. The injection must order a re-read of the live
       // Board (the standing 積む前に必ず現状調査 rule), not just re-run the skill.
-      expect(resumed.initialPrompt).toBe(SUPPLY_RESUME_INJECTION)
+      expect(resumed.initialPrompt).toBe(SUPPLY_RESUME_INJECTION + languageDirective('en'))
       expect(SUPPLY_RESUME_INJECTION).toMatch(/^\/supply /)
       expect(SUPPLY_RESUME_INJECTION).toContain('Board')
       expect(SUPPLY_RESUME_INJECTION).toContain('todo/doing/review')

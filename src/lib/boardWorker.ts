@@ -57,3 +57,50 @@ export const deriveWorkerActivity = (
   if (liveStatus === 'waiting') return 'waiting'
   return stage === 'starting' ? 'starting' : 'waiting'
 }
+
+// ── Commander (manager) ↔ review card ────────────────────────────────────────
+// The review column's counterpart of the glue above: a review card's
+// integration is the COMMANDER's job, so the card shows the commander's
+// presence plus THIS card's integration readiness — both already carried by the
+// same GET /api/swarm/orchestrator poll. Pure and React-decoupled for the same
+// reason as the worker half.
+
+/** Commander presence as a review card shows it (mirrors CommanderPresence in
+ *  useSwarmEngine — kept local so this stays React-decoupled). 'unknown' means
+ *  the server did not say (older server): rendered WITHOUT a presence word,
+ *  never as 'missing'. */
+export type ManagerPresence = 'working' | 'quiet' | 'missing' | 'unknown'
+
+/** Integration readiness of one review card (mirrors EngineReviewStatus). */
+export type ManagerReviewStatus = 'ff' | 'rebase' | 'conflict' | 'unknown'
+
+/** The minimal, render-ready view of the commander linkage for ONE review card.
+ *  Built by BoardModule from the orchestrator poll (reviews[] + managerPresence),
+ *  consumed by BoardTab. Exists only for cards the engine lists in `reviews` —
+ *  a review card outside that queue shows nothing.
+ *
+ *  Deliberately NO phase/note: the commander is ONE per board, and its
+ *  free-form heartbeat text on an individual card would claim "the commander is
+ *  on THIS card" — which the data cannot support (差し戻し M1). Board-wide
+ *  presence + this card's own readiness are the only honest per-card facts. */
+export interface BoardCardManager {
+  presence: ManagerPresence
+  /** How this card's branch relates to the trunk right now. */
+  reviewStatus: ManagerReviewStatus
+}
+
+/** The lamp tone of a review card's commander strip. A conflict outranks
+ *  presence — the one state that needs the owner's hands wins the lamp;
+ *  otherwise the lamp tracks the commander (working=moss, quiet=ochre,
+ *  gone/unsaid=grey). */
+export type ManagerTone = 'working' | 'waiting' | 'alert' | 'off'
+
+export const deriveManagerTone = (
+  presence: ManagerPresence,
+  reviewStatus: ManagerReviewStatus,
+): ManagerTone => {
+  if (reviewStatus === 'conflict') return 'alert'
+  if (presence === 'working') return 'working'
+  if (presence === 'quiet') return 'waiting'
+  return 'off'
+}

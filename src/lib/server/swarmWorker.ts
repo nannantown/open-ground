@@ -6,12 +6,11 @@
 //      dir (~/.openground/projects/<uuid>/worktrees/ — already inside
 //      validateProjectPath's boundary, NEVER a repo sibling), on a fresh
 //      `swarm/*` branch off origin/main, with node_modules symlinked;
-//   2. launches ONE interactive `claude` PTY (subscription-only — launchClaude,
-//      never `claude -p`/SDK) in that worktree; and
-//   3. hands it the `/order ゴール: …` goal as claude's POSITIONAL prompt so
-//      claude runs the command on startup. (See the delivery NOTE below for why
-//      this beats typing it into the TUI — a TUI-injected slash command does not
-//      submit — and why it sidesteps the tmux send-keys Enter-lag entirely.)
+//   2. launches ONE Agent SDK `claude` session in that worktree (SDK-ONLY since
+//      2026-08-13 — the PTY worker and its fallback were deleted by owner
+//      decision; subscription-only still holds: the SDK drives the USER'S
+//      installed CLI via pathToClaudeCodeExecutable, never a bundled binary);
+//   3. hands it the `/order ゴール: …` goal as the session's first turn.
 //
 // Worktree REMOVAL (kill / completion) reuses the same central-only safety the
 // worktree cleaner enforces — this module never removes anything outside the
@@ -32,26 +31,19 @@ import { projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
 import { stopAllDesksInDirAndWait, liveDeskOccupies } from './liveDesks'
-import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { isExperimentEnabled } from './experiments'
-import {
-  swarmLaunchDefaults,
-  resolveSwarmModelEffortProbed,
-  resolveSwarmRemoteName,
-} from './swarmLaunch'
+import { resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { ensureGuardWiring } from './hooksInstall'
 import { createSwarmFatalNotification } from './swarmNotifications'
 import { snapshotWorktreeBranch, fireSelfUpdateIfIntegrated } from './selfUpdateOnIntegrate'
-import { getExecutionMode, getAllowedModelTiers, getWorkerRuntimeDial } from './store'
-import { chooseWorkerRuntime } from './swarmWorkerRuntimeDial'
-import { sdkWorkerLaunchPlan, SdkWorkerUnavailableError } from './swarmWorkerSdk'
+import { getExecutionMode, getAllowedModelTiers } from './store'
+import { sdkWorkerLaunchPlan, sdkWorkerPreflight, SdkWorkerUnavailableError } from './swarmWorkerSdk'
 import { spawnSdkSession, preloadSdk } from './sdkSession'
-import type { WorkerHandle } from './workerRuntime'
 import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
 import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
-import type { ClaudeEffort } from '../types'
+import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
 import type { RemoveSwarmWorktreeResponse, SpawnSwarmWorkerResponse } from '../types'
 
 const execFile = promisify(execFileCb)
@@ -243,7 +235,22 @@ export const WORKER_ORDER_RULES =
   DECISION_ROUTING_RULES +
   SPECIALIST_REVIEW_RULES
 
-export const buildOrderInjection = (title: string, notes?: string, priorFailure?: string): string => {
+/** `lang` is REQUIRED, deliberately — not defaulted, not optional. A caller
+ *  that forgets to thread the resolved Settings.language through fails
+ *  `tsc --noEmit`, not silently ships a worker whose replies ignore the
+ *  setting (2026-08-13 rework: an adversarial mutation pass found that with
+ *  `lang` merely optional, 3 of 5 spawn paths could have their `lang` wiring
+ *  deleted and every test stayed green — the parameter's mere existence let
+ *  the omission compile). `notes`/`priorFailure` stay positionally required
+ *  too (pass `undefined` explicitly) so `lang` can occupy the 4th slot
+ *  without TS's "required parameter after optional" rule forcing a reorder
+ *  that would break every existing call site's argument order. */
+export const buildOrderInjection = (
+  title: string,
+  notes: string | undefined,
+  priorFailure: string | undefined,
+  lang: PromptLang,
+): string => {
   const t = flattenOneLine(title || '')
   const n = flattenOneLine(notes || '')
   const goal = t && n ? `${t} — ${n}` : t || n
@@ -251,7 +258,7 @@ export const buildOrderInjection = (title: string, notes?: string, priorFailure?
   const learn = pf
     ? ` 【前回の差し戻し理由・同じ失敗を繰り返さないこと】${pf}`
     : ''
-  return ORDER_PREFIX + goal + learn + WORKER_ORDER_RULES
+  return ORDER_PREFIX + goal + learn + WORKER_ORDER_RULES + languageDirective(lang)
 }
 
 // NOTE on delivery: the /order goal is handed to claude as its POSITIONAL
@@ -601,25 +608,12 @@ export interface SpawnSwarmWorkerOpts {
   /** Board goal — typically a card's title (+ notes). Injected as the /order. */
   title: string
   notes?: string
-  /** The engine's CURRENT roster (docs/SDK_WORKER_MIGRATION_PLAN.md §8). It only
-   *  ever ADDS to the slot count: the cap is measured from the SDK POOL, which
-   *  sees every worker however it was started, and the roster is merged in for
-   *  two cases: the instant between "the engine recorded a worker" and "its
-   *  session appears in the pool", and a `runtime:'sdk'` record carrying no
-   *  `sdkSessionId` at all — a record WITHOUT the field counts as 'pty' and is
-   *  skipped (both in liveSdkWorkerCount). Absent ⇒ the roster contributes
-   *  nothing, which is correct for the curl-direct spawn path (no engine roster
-   *  exists there) and does not weaken the cap, because the pool is the authority.
-   *  The OLD justification — "harmless while the runtime dial ships OFF" — is no
-   *  longer a safe premise now that the dial's absent case has moved. */
-  liveWorkers?: readonly WorkerHandle[]
+  /* (liveWorkers / env / cols / rows were DELETED 2026-08-13 with the PTY
+   * worker: the roster-assisted SDK slot count died with the cap, the env role
+   * tag and the terminal dimensions were PTY launch inputs. An old client
+   * still sending cols/rows in the POST body is simply ignored.) */
   /** Optional branch-name decoration (uniqueness comes from the timestamp). */
   hint?: string
-  /** Extra env for the claude invocation — the commander/supply SWARM_MANAGER=1
-   *  role TAG rides this port; a worker passes none. Never an API body value. */
-  env?: Record<string, string>
-  cols?: number
-  rows?: number
   /** RESTART path: reuse this EXISTING central worktree instead of creating a
    *  fresh one, so a dead worker relaunches in place — same `swarm/*` branch +
    *  its in-progress work, no orphan tree / twin branch. Validated to sit under
@@ -644,104 +638,6 @@ export interface SpawnSwarmWorkerOpts {
    *  a first dispatch. See {@link buildOrderInjection}. */
   priorFailure?: string
 }
-
-/** Build the LaunchClaudeOpts for a worker — pure + exported so the worker's
- *  launch contract is unit-tested without spawning a PTY:
- *   - permissionMode:'bypass' — a worker runs UNATTENDED in a throwaway central
- *     worktree (contained — the manager merges its branch back), so it must not
- *     stall on the first tool-approval prompt with no human watching. Mirrors
- *     swarm-new.sh's `--dangerously-skip-permissions`.
- *   - appContext:false — lean; the /order skill is the worker's protocol, not
- *     the board-API usage card.
- *   - env passthrough — the port the commander/supply SWARM_MANAGER=1 role TAG
- *     rides; a worker's `opts.env` is undefined (no extra env emitted). The
- *     worker's policing is the `guard` opt below (OPENGROUND_GUARD=1), not env.
- *   - model/effort/remoteControl — opus/max + Remote Control ON via the shared
- *     swarm launch default (swarmLaunch.ts), so a worker runs at full capability
- *     and is controllable from claude.ai / mobile like the supply officer
- *     (mirrors swarm-new.sh). effort is CLAUDE_EFFORTS-guarded there, never a
- *     broken argv. The Remote Control session name is the IDENTIFIABLE one the
- *     spawn path resolved (resolveSwarmRemoteName: 「ワーカー <プロジェクト表示名>:
- *     <カードtitle要約>」/ "Worker <project>: <task>" per the app language,
- *     code-point truncated) — opts.remoteName; absent (legacy caller) it falls
- *     back to the historical fixed 'worker'.
- *   - initialPrompt — the goal as a positional `/order …` (claude submits it on
- *     startup; a TUI-injected slash command would not). */
-export const workerLaunchOpts = (
-  worktree: string,
-  agentSessionId: string,
-  opts: {
-    title: string
-    notes?: string
-    priorFailure?: string
-    env?: Record<string, string>
-    cols?: number
-    rows?: number
-    // Owner-only sandbox experiment (resolved server-side in spawnSwarmWorker).
-    // A worker is the prime case: it's ALREADY bypass (unattended), so the
-    // sandbox adds OS-enforced containment to that prompt-free run rather than
-    // changing prompting. sandboxWritePaths carries the repo's shared .git so the
-    // worktree's `git commit`/`push` (objects/refs live in the main checkout) can
-    // still land inside the otherwise cwd-confined writes.
-    sandbox?: boolean
-    sandboxWritePaths?: string[]
-    // Identifiable Remote Control session name, resolved by spawnSwarmWorker
-    // (resolveSwarmRemoteName — role + project display name + card title).
-    // Optional so the pure builder stays legacy-compatible: absent ⇒ 'worker'.
-    remoteName?: string
-    // CONVERSATION RESUME (card 4): true ⇒ launch with `--resume <agentSessionId>`
-    // (agentSessionId being the PERSISTED roster session id) and the
-    // WORKER_RESUME_INJECTION prompt instead of a fresh `--session-id` + /order
-    // goal. Mirrors launchManager/launchSupply's `opts.resume` shape.
-    resume?: boolean
-  },
-  // Mode-resolved model/effort (see resolveSwarmModelEffort). Omitted ⇒ swarmLaunchDefaults
-  // keeps the historical opus/max, so any non-mode-aware caller is unchanged.
-  me?: { model: string; effort?: ClaudeEffort },
-): LaunchClaudeOpts => ({
-  cwd: worktree,
-  agentSessionId,
-  appContext: false,
-  sandbox: opts.sandbox,
-  sandboxWritePaths: opts.sandboxWritePaths,
-  // A3/L4: arm the deterministic PreToolUse deny veto for EVERY worker,
-  // sandbox experiment on or off — the worker runs bypass (no permission
-  // prompts), so the exit-2 hook is the one deterministic veto left. Write
-  // confinement = the worktree; the shared .git is NOT a write root (git
-  // works through its own binary, which the guard's Bash rules govern —
-  // a root there would only legitimize raw redirects into .git).
-  guard: { writeRoots: [worktree] },
-  // A3/L4 completeness: a bypass worker must NOT inherit the user-scope MCP
-  // servers (~/.claude.json / project .mcp.json). The PreToolUse guard vetoes
-  // Bash + the file-write tools, but MCP tools (mcp__*) sit OUTSIDE that set —
-  // a filesystem/shell MCP, supabase execute_sql, or chrome javascript_tool
-  // would be an unguarded RCE path straight past the veto. `--strict-mcp-config`
-  // makes claude load ONLY explicitly-passed MCP config (none here), so those
-  // tools don't exist in a worker at all — closing the gap at the source rather
-  // than trying to enumerate every mcp__* into the hook matcher. Same rationale
-  // as OG's other auto-triggered/bypass utility sessions. (Commander MUST-FIX 2.)
-  strictMcpConfig: true,
-  ...swarmLaunchDefaults(opts.remoteName ?? 'worker', me),
-  // permissionMode LAST — AFTER the spread — so 'bypass' is UNCONDITIONAL: an
-  // unattended worker must never wedge on a tool-approval / trust prompt with no
-  // human watching (Card 4880e9c6's "塞ぐ権限待ち経路"). Positioned here so a
-  // future field added to swarmLaunchDefaults can never silently clobber it; the
-  // orchestrator's permission-wait detector is only the BACKSTOP for a prompt that
-  // somehow still appears. (swarmLaunchDefaults sets no permissionMode today, so
-  // this is purely defensive — no behavior change.)
-  permissionMode: 'bypass',
-  env: opts.env,
-  cols: opts.cols,
-  rows: opts.rows,
-  // RESUME (card 4): `--resume <agentSessionId>` + the resume injection so the same
-  // conversation continues; else a fresh `--session-id` + the /order goal. The
-  // `resume` flag rides launchClaude → buildClaudeArgv (claudeTerminal.ts) which
-  // emits `--resume` vs `--session-id` off exactly this bit.
-  ...(opts.resume ? { resume: true } : {}),
-  initialPrompt: opts.resume
-    ? WORKER_RESUME_INJECTION
-    : buildOrderInjection(opts.title, opts.notes, opts.priorFailure),
-})
 
 /** Thrown when the L4 guard wiring cannot be VERIFIED at spawn time (GAP-2).
  *  A worker runs bypass, so the PreToolUse deny veto is its only deterministic
@@ -806,12 +702,11 @@ const notifyGuardUnwired = async (
   }).catch(() => {})
 }
 
-/** Create the worktree and launch ONE interactive claude PTY in it, handing the
- *  `/order ゴール: …` goal to claude as its POSITIONAL prompt so it runs the
- *  command on startup (see the delivery note above — a TUI-injected slash
- *  command does not submit). Subscription-only: launchClaude drives the user's
- *  `claude` CLI, never `claude -p`/the SDK. Returns as soon as the PTY is up;
- *  claude boots and begins on the goal on its own. */
+/** Create the worktree and launch ONE Agent SDK claude session in it, handing
+ *  the `/order ゴール: …` goal as the first turn. SDK-ONLY (2026-08-13): a
+ *  failed SDK launch is a failed dispatch (typed SdkWorkerUnavailableError the
+ *  engine's backoff keys on) — never a PTY degrade. Subscription-only still
+ *  holds: the session drives the USER'S installed claude CLI. */
 export const spawnSwarmWorker = async (
   opts: SpawnSwarmWorkerOpts,
 ): Promise<SpawnSwarmWorkerResponse> => {
@@ -898,12 +793,10 @@ export const spawnSwarmWorker = async (
   // fully READ-only — NO carve-out (a writable node_modules would let a sandboxed
   // worker poison code, e.g. `.vite/deps`, the owner later runs UN-sandboxed).
   const sandbox = await isExperimentEnabled('sandbox')
-  // Remote Control 名の識別化: 「ワーカー <プロジェクト表示名>: <カードtitle要約>」/
-  // "Worker <project>: <task>"(言語は Settings.language、表示名は registry の
-  // displayName || フォルダ名、title は空白正規化+code point 切り詰め)。
-  // resolveSwarmRemoteName は never-throws — 解決に失敗しても旧固定名 'worker' で
-  // spawn は通る。
-  const remoteName = await resolveSwarmRemoteName('worker', opts.projectPath, opts.title)
+  // Settings.language ⇒ the worker's user-facing replies (chat, blocker
+  // questions, PR/commit text) follow it — resolved once here and threaded
+  // into the SDK launch plan below (languageDirective).
+  const lang = await getPromptLang()
   // SPAWN FAILURE MUST NOT LEAK THE WORKTREE (2026-07-29).
   //
   // Everything ABOVE the worktree creation fails closed, and two comments in this
@@ -920,190 +813,111 @@ export const spawnSwarmWorker = async (
   // holds the worker's real work — it is never ours to remove.
   const freshlyCreated = !opts.worktree
 
-  // ── RUNTIME CHOICE (docs/SDK_WORKER_MIGRATION_PLAN.md §8) ──────────────────
-  // Which way this worker's `claude` is driven. ⚠ NOTE WHAT IS PASSED: the dial
-  // arrives through store.getWorkerRuntimeDial(), so THAT reader — not
-  // chooseWorkerRuntime's own absent-rule — is what decides a machine with
-  // nothing written. For one day the two disagreed (the reader turned absent
-  // into an explicit {mode:'pty'} while chooseWorkerRuntime and the panel both
-  // said sdk), and 0.11.47 shipped dispatching PTY workers under a switch drawn
-  // ON. They now share one polarity — absent ⇒ sdk, unreadable file ⇒ pty — and
-  // swarmRuntimeDialParity.test.ts composes exactly this call rather than
-  // calling chooseWorkerRuntime directly, which is how the gap stayed green. Every
-  // reason to not use the SDK degrades to the PTY path rather than refusing the
-  // dispatch — a worker that would have run fine must never be blocked because
-  // an experimental runtime could not be established. The one thing that must
-  // not happen is the reverse (an SDK worker with an unverified veto), which is
-  // why the guard proof is part of chooseWorkerRuntime, not a later check.
-  // ⚠ THE PRELOAD GOES *BEFORE* chooseWorkerRuntime, NOT NEXT TO THE SPAWN.
-  // chooseWorkerRuntime COUNTS the live SDK sessions against `sdkMaxWorkers`
-  // (swarmWorkerRuntimeDial.ts), and the seat it grants is taken by the
-  // spawnSdkSession below — so everything between the count and the seat has to
-  // be synchronous, or the cap degenerates into check-then-act. It briefly did:
-  // preloading next to the spawn put an `await` inside that region (the first
-  // import measures ~178ms, and even a warm one yields a microtask), so two
-  // concurrent dispatches could both read live=0 and both sit down with a limit
-  // of 1. There is no spawn lock on the worker path to catch it.
+  // ── SDK-ONLY LAUNCH (2026-08-13 owner decision — the PTY worker is gone) ───
+  // Workers run on the Agent SDK runtime, full stop: no dial, no slot cap, no
+  // PTY fallback. Every reason the SDK cannot be established is a SPAWN FAILURE
+  // the engine answers with "card stays in todo + loud notification + retry
+  // with backoff" (fail-fast) — never a silent degrade. The old fallback
+  // absorbed real breakage, which is exactly why the migration could never
+  // finish behind it (measured 2026-08-13: DEFAULT_SDK_MAX_WORKERS=1 quietly
+  // sent every extra worker to a PTY and the owner read it as a bug). A
+  // fell-back worker no longer exists, so neither does fellBackBecause here.
   //
-  // THE COST, STATED IN THE UNIT THAT ACTUALLY MATTERS: a PTY-dialled machine
-  // also imports the SDK, and the price is MEMORY, not time — measured ~63ms and
-  // **~44MB RSS**, with no resident handles or process listeners, so nothing is
-  // kept alive and no dispatch is delayed. Paid once if it succeeds; on failure
-  // the loader evicts itself, so it is retried once per dispatch until it works.
-  // (If someone later reads "PTY everywhere, why is the SDK resident?" — this is
-  // why.)
-  //
-  // It is deliberate: the only way to skip it is to ask "will the dial say sdk?"
-  // HERE, which means a SECOND reader of the absent⇒sdk polarity — and two
-  // readers of exactly that rule is what shipped 0.11.47 dispatching PTY workers
-  // under a switch drawn ON (the note above). 44MB beats re-splitting that rule.
-  // Never rejects, so there is nothing to catch.
+  // The preload stays AHEAD of the preflight for the old reason: nothing may
+  // await between the guard-proof and the spawn. Never rejects.
   const sdkReady = await preloadSdk()
-  const choice = chooseWorkerRuntime({
-    settings: { swarmWorkerRuntime: await getWorkerRuntimeDial() },
-    workers: opts.liveWorkers ?? [],
-    worktree,
-  })
-  // WHY THIS RIDES BACK ON THE RESPONSE AND NOT ONLY INTO console.warn:
-  // in a packaged app the server is a forked child process, so a console.warn
-  // lands NOWHERE the owner can reach. They flip the switch, watch PTY workers
-  // come up, and have no way to learn whether the cap was full, the preflight
-  // failed, or the dial never took. The commander path already answers that
-  // question (`SpawnSwarmManagerResponse.fellBackBecause`, surfaced by the Swarm
-  // pane); the worker path did not, which quietly invalidated the reason the
-  // slot-holding design was accepted in the first place — "the cost of holding a
-  // slot is acceptable BECAUSE the reason is displayed". It is displayable now.
-  //
-  // `let`, because a fallback can also be decided BELOW (an SDK session that
-  // dies inside spawnSdkSession), and that reason must reach the caller too.
-  let fellBackBecause = choice.fellBackBecause
-  if (fellBackBecause) {
-    // Still said out loud: the log is what a developer tailing the server reads,
-    // the response is what the owner sees. A silent fallback is how a migration
-    // ends up "not working" with nobody able to explain why.
-    console.warn(`[swarm] ${fellBackBecause}`)
-  }
 
-  if (choice.runtime === 'sdk') {
-    const claudeBin = choice.preflight?.claudeBin
-    // Belt and braces: chooseWorkerRuntime only returns 'sdk' when the preflight
-    // resolved a binary, but an SDK worker without the USER'S claude would break
-    // the subscription-only rule silently, so it fails closed here too.
-    if (!claudeBin) throw new SdkWorkerUnavailableError(['no claude binary resolved for an SDK worker'])
-    const built = sdkWorkerLaunchPlan({
-      worktree,
-      agentSessionId,
-      title: opts.title,
-      notes: opts.notes,
-      priorFailure: opts.priorFailure,
-      resume: !!opts.resumeSessionId,
-      me,
-      claudeBin,
-    })
-    for (const w of built.warnings) console.warn(`[swarm] ${w}`)
-    // ⚠ NOTHING MAY `await` BETWEEN chooseWorkerRuntime AND THIS SPAWN — the slot
-    // count above and the seat below are one check-then-act pair. The SDK module
-    // was already imported before that count (see the note there); a load failure
-    // comes back from the spawn as a failed session and takes the
-    // `status === 'failed'` degrade below, which keeps the dispatch alive as a
-    // PTY worker. Guarded by swarmSdkSlotRace.test.ts.
-    let session: ReturnType<typeof spawnSdkSession>
-    try {
-      session = spawnSdkSession({
-        cwd: worktree,
-        role: 'worker',
-        agentSessionId,
-        options: built.options,
-        initialPrompt: built.initialPrompt,
-        // Carried down from before the slot count — the type demands it, which
-        // is what stops the next spawn site from forgetting to preload.
-        sdk: sdkReady,
-      })
-    } catch (e) {
-      if (freshlyCreated) {
-        await removeSwarmWorktree(opts.projectPath, worktree, { force: true }).catch(() => {})
-        await git(opts.projectPath, ['branch', '-D', branch])
-      }
-      throw e
-    }
-    // A session that died INSIDE spawnSdkSession reports 'failed' SYNCHRONOUSLY
-    // rather than throwing: the default queryFn does its `require` + `query()`
-    // inside the pool, which catches a synchronous throw and records the entry as
-    // failed. Returning it as a live worker is how a dead session becomes a roster
-    // entry the engine monitors forever. The commander's SDK path already checked
-    // this (swarmManager.launchSdkDesk); the worker path did not.
-    //
-    // DEGRADE, don't throw. `SdkWorkerUnavailableError` has no catcher anywhere,
-    // so throwing here would fail the whole dispatch — the card goes back to todo
-    // and the engine tries again into the same failure. Falling through to the
-    // PTY launch below keeps the house rule the commander path states outright:
-    // a worker on the known-good runtime beats no worker at all. The worktree and
-    // branch are REUSED (they were made for this card, and the PTY worker wants
-    // exactly them), so nothing is rolled back here.
-    if (session.status === 'failed') {
-      // This degrade is the one the owner is MOST likely to hit right after
-      // flipping the switch (a missing @anthropic-ai/claude-agent-sdk, a query()
-      // that throws on boot), and it is decided here rather than in
-      // chooseWorkerRuntime — so it has to be attached to the response by hand or
-      // it stays as invisible as the dial-level ones used to be.
-      fellBackBecause = `SDK worker died at start (${session.exitReason ?? 'unknown'}) — this worker runs as a PTY`
-      console.warn(`[swarm] ${fellBackBecause}`)
-    } else {
-      // terminalId is EMPTY for an SDK worker: the identity invariant is
-      // pty ⇔ terminalId / sdk ⇔ sdkSessionId (workerRuntime.ts), never both.
-      return {
-        terminalId: '',
-        runtime: 'sdk',
-        sdkSessionId: session.id,
-        agentSessionId,
-        worktree,
-        branch,
-        model: me.model,
-      }
-    }
-    // …falls through to the PTY launch below.
-  }
-
-  let ref: ReturnType<typeof launchClaude>
-  try {
-    ref = launchClaude(
-      workerLaunchOpts(
-        worktree,
-        agentSessionId,
-        {
-          ...opts,
-          remoteName,
-          sandbox,
-          sandboxWritePaths: sandbox ? [join(opts.projectPath, '.git')] : undefined,
-          // card 4 — a persisted session id means "resume this conversation"; the
-          // flag drives workerLaunchOpts to `--resume` + WORKER_RESUME_INJECTION.
-          resume: !!opts.resumeSessionId,
-        },
-        me,
-      ),
-    )
-  } catch (e) {
+  // Everything that must be true before an SDK worker may start (the USER'S own
+  // claude, new enough; the A3/L4 veto provably armed — sdkWorkerPreflight).
+  // Fail-CLOSED: with no PTY to degrade to, a failed preflight is a failed
+  // dispatch — roll back what THIS call created and throw the typed error the
+  // engine's spawn-failure backoff keys on.
+  const pre = sdkWorkerPreflight({ writeRoots: [worktree] })
+  if (!pre.ok || !pre.claudeBin) {
     if (freshlyCreated) {
-      // Best-effort teardown of what THIS call made. force:true because there is
-      // nothing to preserve — no session ever started, so the tree is exactly as
-      // `git worktree add` left it. Failures are swallowed: the spawn error is
-      // the one worth propagating.
       await removeSwarmWorktree(opts.projectPath, worktree, { force: true }).catch(() => {})
       await git(opts.projectPath, ['branch', '-D', branch])
     }
-    throw e
+    throw new SdkWorkerUnavailableError(
+      pre.problems.length ? pre.problems : ['no claude binary resolved for an SDK worker'],
+    )
   }
+
+  const built = sdkWorkerLaunchPlan({
+    worktree,
+    agentSessionId,
+    title: opts.title,
+    notes: opts.notes,
+    priorFailure: opts.priorFailure,
+    resume: !!opts.resumeSessionId,
+    me,
+    claudeBin: pre.claudeBin,
+    // The sandbox experiment is not supported on the SDK runtime; passing the
+    // flag through makes the plan SAY so (a warning) instead of silently
+    // dropping the containment the owner asked for.
+    sandbox,
+    lang,
+  })
+  for (const w of built.warnings) console.warn(`[swarm] ${w}`)
+  let session: ReturnType<typeof spawnSdkSession>
+  try {
+    session = spawnSdkSession({
+      cwd: worktree,
+      role: 'worker',
+      agentSessionId,
+      options: built.options,
+      initialPrompt: built.initialPrompt,
+      // Carried down from before the preflight — the type demands it, which is
+      // what stops the next spawn site from forgetting to preload.
+      sdk: sdkReady,
+    })
+  } catch (e) {
+    if (freshlyCreated) {
+      // Best-effort teardown of what THIS call made. force:true because there is
+      // nothing to preserve — no session ever started. Failures are swallowed:
+      // the spawn error is the one worth propagating.
+      await removeSwarmWorktree(opts.projectPath, worktree, { force: true }).catch(() => {})
+      await git(opts.projectPath, ['branch', '-D', branch])
+    }
+    // TYPED, so the engine's backoff gate catches it (adversarial review
+    // 2026-08-13): a raw rethrow here fell through `e instanceof
+    // SdkWorkerUnavailableError` in runDispatchPass to the fast-retry arm — a
+    // persistent SDK-module blow-up churned a worktree rollback every 3s tick
+    // with no hold and no bell, the exact shape the ladder exists to stop.
+    // (swarmManager.launchSdkDesk wraps the same throw for the same reason.)
+    if (e instanceof SdkWorkerUnavailableError) throw e
+    throw new SdkWorkerUnavailableError([
+      `SDK spawn failed (${String((e as Error)?.message ?? e).slice(0, 200)})`,
+    ])
+  }
+  // A session that died INSIDE spawnSdkSession reports 'failed' SYNCHRONOUSLY
+  // rather than throwing (the pool catches the sync throw and records the entry
+  // as failed). Returning it as a live worker is how a dead session becomes a
+  // roster entry the engine monitors forever — so it is a spawn FAILURE like
+  // any other: roll back the fresh worktree, throw, and let the engine's
+  // backoff + notification carry it. (A REUSED worktree — the resume path — is
+  // the worker's real work and is never ours to remove.)
+  if (session.status === 'failed') {
+    if (freshlyCreated) {
+      await removeSwarmWorktree(opts.projectPath, worktree, { force: true }).catch(() => {})
+      await git(opts.projectPath, ['branch', '-D', branch])
+    }
+    throw new SdkWorkerUnavailableError([
+      `SDK worker died at start (${session.exitReason ?? 'unknown'})`,
+    ])
+  }
+  // terminalId is EMPTY for an SDK worker: the identity invariant is
+  // pty ⇔ terminalId / sdk ⇔ sdkSessionId (workerRuntime.ts), never both.
   // `model` rides back so the orchestrator can attribute a later rate-limit
   // sighting on this worker to the RIGHT quota tier (swarmQuota cooling table).
-  // `fellBackBecause` is present ONLY when the dial asked for sdk and this worker
-  // came up as a PTY anyway — see the runtime-choice block above.
   return {
-    terminalId: ref.terminalId,
+    terminalId: '',
+    runtime: 'sdk',
+    sdkSessionId: session.id,
     agentSessionId,
     worktree,
     branch,
     model: me.model,
-    ...(fellBackBecause ? { fellBackBecause } : {}),
   }
 }
 
