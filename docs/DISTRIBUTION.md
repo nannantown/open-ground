@@ -84,15 +84,29 @@ git push openground vX.Y.Z                  # pushing the tag to OPEN-GROUND fir
 > breaking node-pty's native rebuild — windows-2022 (VS2022 C++) is the
 > known-good toolchain.
 
-electron-builder creates the Release as a **DRAFT** — nothing is public (and
-neither the landing download redirect nor electron-updater sees it) until you
-publish. Once both CI jobs are green, write the release notes (bilingual,
-`### English` + `### 日本語` sections — the in-app update banner and the
-landing footer's "Release notes" link both surface them) and publish:
+> **⚠ 2026-08-13 訂正(現物が正 — 00-INDEX §6-4 の規則で本段落を実態に合わせた)**:
+> 下の旧記述「electron-builder はドラフトを作り、人間が publish するまで何も公開されない」は
+> **タグ push 起動の release.yml では成立しない**。両ジョブは `--publish always` で回るため、
+> **タグ起動なら CI が緑になった時点でリリースは自動的に公開される**(実測: v0.11.67〜
+> v0.11.70 はすべて `github-actions[bot]` が published・draft:false)。含意: ①タグ経路で
+> 公開を止めたいなら**タグを打つ前**に止める — 打った後に効く弁は無い。②「publish 前に
+> dmg を検品」(下の §4 参照ブロック)は「publish 後すみやかに検品し、問題があれば
+> release を削除して差し替える」に読み替える。
+> **例外 = workflow_dispatch 起動**(同日実測・v0.11.71): タグが無いビルドは全アセットを
+> 上げた**未タグのドラフト**で止まる。その場合は **`publish-draft.yml` を dispatch**
+> (inputs: `tag` / `target_sha`=ビルドしたスナップショット sha / `notes_b64`)して公開する —
+> 公開時に GitHub が `target_sha` にタグを作るので、タグの木 = 出荷物の木が保たれる。
+> (タグ push ができない環境 — 2026-08-13 のクラウドセッションの git プロキシはブランチ
+> push は通しタグ push を黙って落とした — の正規の逃げ道でもある。)
+
+Once both CI jobs are green the release is already live. Write the release
+notes (bilingual, `### English` + `### 日本語` sections — the in-app update
+banner and the landing footer's "Release notes" link both surface them) and
+attach them:
 
 ```bash
 gh release edit vX.Y.Z --repo nannantown/open-ground \
-  --notes-file notes.md --draft=false --latest
+  --notes-file notes.md --latest
 ```
 
 > **Before that publish, verify the built dmg.** Download the draft Release's

@@ -1,0 +1,65 @@
+# publish-draft — publish an existing DRAFT release (workflow_dispatch only).
+#
+# WHY THIS EXISTS (2026-08-13). release.yml auto-publishes on TAG-push runs
+# (electron-builder `--publish always` on a tag build → the release goes live
+# with no human step — measured: v0.11.67–v0.11.70 were all published by
+# github-actions[bot]). But a release.yml run started via workflow_dispatch
+# builds + uploads everything and leaves an UNTAGGED DRAFT — there is no tag
+# for electron-builder to anchor a published release to. Some environments
+# can't push tags at all (2026-08-13: a cloud session's git proxy accepted
+# branch pushes but silently dropped tag pushes — `push` said up-to-date,
+# `ls-remote` showed nothing), so dispatch-mode releases need this second
+# dispatch to close the loop: it flips the draft public, and GitHub creates
+# the tag ref at --target as part of publishing.
+#
+# Inputs:
+#   tag        — the draft's tag name (e.g. v0.11.71). gh resolves drafts by
+#                their stored tag name even though no ref exists yet.
+#   target_sha — the commit the tag should point at when the publish creates
+#                it. Pass the snapshot sha the artifacts were BUILT from, so
+#                the tag's tree equals the shipped tree (the v0.11.7 "right
+#                source, wrong artifact" lesson, in reverse). Defaults to the
+#                sha this run started on.
+#   notes_b64  — optional base64 of the release-notes markdown (bilingual
+#                `### English` / `### 日本語` — the in-app update banner and
+#                the landing footer surface them).
+name: publish-draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Draft release tag to publish (e.g. v0.11.71)"
+        required: true
+        type: string
+      target_sha:
+        description: "Commit the created tag should point at (default: this run's sha)"
+        required: false
+        type: string
+      notes_b64:
+        description: "base64 of release-notes markdown (optional)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          TARGET: ${{ inputs.target_sha || github.sha }}
+          NOTES_B64: ${{ inputs.notes_b64 }}
+        run: |
+          set -euo pipefail
+          args=(release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest --target "$TARGET")
+          if [ -n "${NOTES_B64:-}" ]; then
+            printf '%s' "$NOTES_B64" | base64 -d > /tmp/notes.md
+            args+=(--notes-file /tmp/notes.md)
+          fi
+          gh "${args[@]}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName,url
