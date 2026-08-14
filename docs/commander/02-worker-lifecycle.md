@@ -243,6 +243,11 @@ parse できない / 非オブジェクト / 切れた symlink ⇒ `getManagerRu
 
 以下 2.4〜2.6 は **PTY worker** の話。SDK worker の起動オプションは
 `swarmWorkerSdk.sdkWorkerLaunchPlan` が組み、対応関係は設計書 §4 の表にある。
+**調査Cookie注入(2026-08-14)**: 設定→調査チャンネルで保存された X の Cookie
+(`researchAuth.researchWorkerEnv`)は spawn 時に worker の env
+(`TWITTER_AUTH_TOKEN`/`TWITTER_CT0`)へ合流する — 未設定なら env は従来と
+バイト同一。値はこの機体から出ない契約(researchAuth.ts ヘッダ)で、番人は
+`researchAuth.test.ts`(HTTP 面が値を返さないピン含む)。
 ⚠ 最重要の非自明点: **Agent SDK は filesystem settings をロードしないので、
 グローバル settings.json に入っている guard hook は発火しない**。SDK worker の
 A3/L4 veto は `sdkGuardHook.ts` が in-process で武装し直している(同じ

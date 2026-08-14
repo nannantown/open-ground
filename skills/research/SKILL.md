@@ -43,7 +43,10 @@ that hits `[miss]` uses the fallback ladder and notes the gap in the report.
 2. **Auth = the user's own cookies, LOCAL ONLY.** Never upload, share,
    commit, echo into reports/logs, or send cookies anywhere except the
    upstream tool's own local invocation. No QR/auto-login flows - manual
-   browser export only (e.g. Cookie-Editor), stored in env vars.
+   browser export only (e.g. Cookie-Editor). Supply: the app's Settings →
+   Research channels stores them on-machine and injects them into
+   OG-spawned workers' env automatically; a manual
+   `export TWITTER_AUTH_TOKEN=… TWITTER_CT0=…` works for standalone sessions.
 3. **No wrappers.** Call upstream CLIs directly via their public CLI/API
    surface; never hack their internals.
 4. **Fallback ladder, in order:** dedicated tool → Jina Reader
@@ -75,6 +78,15 @@ that hits `[miss]` uses the fallback ladder and notes the gap in the report.
 | Bilibili | yt-dlp | same as YouTube | none (datacenter IPs need a proxy) |
 | LinkedIn public pages | Jina Reader | `curl https://r.jina.ai/<URL>` | none |
 
+**Baselines — no dedicated tool? plain curl still covers these** (that is why
+the doctor reports them `[part]`, not `[miss]`):
+
+- GitHub: `curl -s 'https://api.github.com/repos/<owner>/<repo>/issues?state=all&per_page=50'`
+  (public REST, no auth; also `/repos/<o>/<r>`, `/search/repositories?q=…`)
+- Reddit: `curl -sA 'openground-research' 'https://www.reddit.com/search.json?q=<query>&limit=25'`
+  (public JSON; datacenter IPs may 403 — note it, do not fight it)
+- RSS/Atom: fetch the feed URL and read the XML directly.
+
 Combine channels per use case: competitor scan = GitHub Issues (raw
 bugs/requests) + Reddit (real-user sentiment); SNS monitoring = X search +
 Reddit search on product/industry terms; video digest = yt-dlp subtitles →
@@ -100,5 +112,10 @@ summarize (never "watch").
   claim.
 - **Unreachable source → stamp `【資料取得できず】`** (same protocol marker as
   the specialist-review rule) with what you tried; never bluff around a gap.
+- **Coverage note — the report's LAST line.** Name any channel that was
+  unavailable and would have widened coverage, and where to switch it on
+  ("Settings → Research channels"), in the reply language. This line is how
+  the owner learns what one unlock would buy them; omit it only when every
+  relevant channel was already available.
 - Swarm workers: the normal worker contract is unchanged - commit the
   report, heartbeat `done true`, no push, completion gate as ordered.

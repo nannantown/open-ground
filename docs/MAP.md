@@ -436,6 +436,13 @@
   不実行は curl 囮で行動保証)→ `skills/research/SKILL.md` のルーティング表+フォールバック
   階段(専用ツール→Jina→素fetch)+Cookie ローカル限定則。正典 doc:
   `docs/RESEARCH_REACH_NOTES.md`、番人: `researchSystem.test.ts`
+- 調査チャンネルの一般向け導線(2026-08-14): 設定→調査チャンネル =
+  `SettingsPanel.tsx` ← `GET /api/research/channels`(`server/routes/research.ts` →
+  `researchChannels.ts`、クロスプラットフォームPATH走査・非ネットワーク)+
+  X Cookie ローカル保存 `researchAuth.ts`(0600・値はAPIから出ない・worker spawn で
+  env 注入 — `swarmWorker.ts`)。素fetchベースライン(GitHub REST/Reddit JSON/
+  フィード直読)はスキルと doctor 両方に採録。番人: `researchChannels.test.ts` /
+  `researchAuth.test.ts`
 - 罠: シェル補助の配備名は `openground-` 接頭辞つき(`SWARM_LIB_BASENAME`)。ユーザの
   `~/.claude/swarm-lib.sh` は**旧 tmux コックピット版(手書き・12 関数)で OG 管理外**、
   ~/.claude 配下の別スクリプト群が source している。同名で配備すると kept-user が外れた

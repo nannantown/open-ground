@@ -20,6 +20,11 @@ import type {
   FeedbackItem,
   FeedbackListResponse,
   ReleaseNotesResponse,
+  ResearchAuthStatusResponse,
+  ResearchChannelState,
+  ResearchChannelsResponse,
+  ResearchChannelStatus,
+  SetResearchAuthRequest,
 } from '@/lib/types'
 import type { Health } from '@/lib/healthSchema'
 import { api } from '@/lib/api-client'
@@ -483,6 +488,12 @@ export const SettingsPanel = ({
             />
           </Section>
 
+          {/* Research channels — what a research run can reach from this
+              machine (GET /api/research/channels, local checks only), plus the
+              local-only X cookie store behind a disclosure. Mounted per open so
+              the checks re-run each time the drawer opens. */}
+          {open && <ResearchChannelsSection />}
+
           {/* Completion chime — ON/OFF + volume + test-play. The sound itself is
               played by the managed Stop hook (attended desks only); the server
               plays the test so the slider is auditable before saving a claude
@@ -722,6 +733,276 @@ const Section = ({
     {hint && <p className="mt-2 text-meta text-ink-subtle leading-relaxed">{hint}</p>}
   </div>
 )
+
+// Per-status chip tint for the research channel rows. `text-meta`, not
+// `text-plate`: the ja labels (「一部使える」…) are words, and the type scale
+// reserves 11px + tracking for Latin captions (tailwind.config.ts). Every
+// color is a palette token, so both themes hold.
+const RESEARCH_STATUS_CHIP: Record<ResearchChannelStatus, string> = {
+  ok: 'border-moss/50 bg-moss-soft/50 text-moss-text',
+  part: 'border-ochre/50 bg-ochre-soft/50 text-ochre',
+  miss: 'border-line bg-bg-inset/40 text-ink-subtle',
+}
+
+// Research channels — GET /api/research/channels rendered one row per channel
+// in server order (local checks only; Re-check refetches), plus the X cookie
+// form behind a collapsed disclosure. Privacy contract mirrored from
+// server/routes/research.ts: cookie values exist ONLY in the two controlled
+// inputs until Save, are never logged or echoed back (status is a boolean),
+// and the inputs are cleared the moment the write lands.
+const ResearchChannelsSection = () => {
+  const { t } = useT()
+  const [channels, setChannels] = useState<ResearchChannelState[] | null>(null)
+  const [channelsLoading, setChannelsLoading] = useState(false)
+  const [twitterConfigured, setTwitterConfigured] = useState(false)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [xOpen, setXOpen] = useState(false)
+  const [authToken, setAuthToken] = useState('')
+  const [ct0, setCt0] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveFailed, setSaveFailed] = useState(false)
+
+  const mounted = useRef(true)
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      if (copyTimer.current) clearTimeout(copyTimer.current)
+    }
+  }, [])
+
+  const loadChannels = useCallback(() => {
+    setChannelsLoading(true)
+    api.api.research.channels
+      .$get()
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json() as Promise<ResearchChannelsResponse>
+      })
+      .then((data) => {
+        if (mounted.current) setChannels(data.channels ?? [])
+      })
+      .catch(() => {
+        /* No error copy exists for this list — keep the last known rows
+           (nothing on first load); Re-check retries. */
+      })
+      .finally(() => {
+        if (mounted.current) setChannelsLoading(false)
+      })
+  }, [])
+
+  const loadAuth = useCallback(() => {
+    api.api.research.auth
+      .$get()
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json() as Promise<ResearchAuthStatusResponse>
+      })
+      .then((data) => {
+        if (mounted.current) setTwitterConfigured(data.twitterConfigured === true)
+      })
+      .catch(() => {
+        /* Status keeps its last known value. */
+      })
+  }, [])
+
+  useEffect(() => {
+    loadChannels()
+    loadAuth()
+  }, [loadChannels, loadAuth])
+
+  const copyCommand = (id: string, cmd: string) => {
+    try {
+      navigator.clipboard
+        .writeText(cmd)
+        .then(() => {
+          if (!mounted.current) return
+          setCopiedId(id)
+          if (copyTimer.current) clearTimeout(copyTimer.current)
+          copyTimer.current = setTimeout(() => {
+            if (mounted.current) setCopiedId(null)
+          }, 2000)
+        })
+        .catch(() => {
+          /* Clipboard unavailable — the command stays selectable by hand. */
+        })
+    } catch {
+      /* navigator.clipboard missing entirely — same manual fallback. */
+    }
+  }
+
+  // Save and Remove share one path: both fields non-empty ⇒ save, both empty
+  // ⇒ clear, anything else the server 400s (surfaced as x.error). Inputs are
+  // cleared on success so a cookie value never outlives the write; the saved
+  // state re-renders from the refreshed boolean, never from the values.
+  const submitAuth = (body: SetResearchAuthRequest) => {
+    setSaving(true)
+    setSaveFailed(false)
+    api.api.research.auth
+      .$post({ json: body })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        if (!mounted.current) return
+        setAuthToken('')
+        setCt0('')
+        loadChannels()
+        loadAuth()
+      })
+      .catch(() => {
+        if (mounted.current) setSaveFailed(true)
+      })
+      .finally(() => {
+        if (mounted.current) setSaving(false)
+      })
+  }
+
+  return (
+    <Section
+      heading={t('settings.research.heading')}
+      hint={t('settings.research.hint')}
+      action={
+        <button
+          onClick={loadChannels}
+          disabled={channelsLoading}
+          className="inline-flex items-center gap-1 label-cap text-ink-subtle hover:text-ink disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          <RefreshCw size={11} className={channelsLoading ? 'animate-spin' : ''} />
+          {t('settings.research.recheck')}
+        </button>
+      }
+    >
+      {!channels && channelsLoading && (
+        <span className="inline-flex items-center text-ink-subtle">
+          <Loader2 size={12} className="animate-spin" />
+        </span>
+      )}
+      {channels && channels.length > 0 && (
+        <ul className="space-y-3">
+          {channels.map((ch) => {
+            const cmd = ch.unlockCommand
+            return (
+              <li key={ch.id}>
+                <div className="flex items-center gap-2">
+                  <span className="text-ui text-ink">{t(`settings.research.${ch.id}.name`)}</span>
+                  <span
+                    className={
+                      'inline-flex shrink-0 items-center rounded-[2px] border px-1.5 text-meta ' +
+                      RESEARCH_STATUS_CHIP[ch.status]
+                    }
+                  >
+                    {t(`settings.research.status.${ch.status}`)}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-meta leading-snug text-ink-subtle">
+                  {t(`settings.research.${ch.id}.state.${ch.detail}`)}
+                </p>
+                {cmd && (
+                  <div className="mt-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="min-w-0 break-all rounded-[2px] border border-line bg-bg px-2 py-1 font-mono text-meta text-ink">
+                        {cmd}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => copyCommand(ch.id, cmd)}
+                        className="shrink-0 rounded-[3px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                      >
+                        {copiedId === ch.id
+                          ? t('settings.research.copied')
+                          : t('settings.research.copy')}
+                      </button>
+                    </div>
+                    <p className="mt-1 text-micro leading-relaxed text-ink-faint">
+                      {t('settings.research.copyHint')}
+                    </p>
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+
+      {/* X cookies — collapsed by default; the ToS caution and the local-only
+          promise sit above the inputs so they are read before pasting. */}
+      <div className="mt-4">
+        <button
+          onClick={() => setXOpen((v) => !v)}
+          className="inline-flex items-center gap-1.5 label-cap text-ink-muted hover:text-ink transition-colors"
+        >
+          <ChevronRight
+            size={13}
+            className={'transition-transform duration-150 ' + (xOpen ? 'rotate-90' : '')}
+          />
+          {t('settings.research.x.disclosure')}
+        </button>
+        {xOpen && (
+          <div className="mt-3 flex flex-col gap-2.5">
+            <p className="text-meta leading-relaxed text-ink-subtle">
+              {t('settings.research.x.tos')}
+            </p>
+            <p className="text-meta leading-relaxed text-ink-muted">
+              {t('settings.research.x.howto')}
+            </p>
+            <p className="text-meta leading-relaxed text-ink">{t('settings.research.x.promise')}</p>
+            {twitterConfigured && (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="inline-flex items-start gap-1 text-meta text-moss">
+                  <Check size={12} strokeWidth={2.5} className="mt-[3px] shrink-0" />
+                  <span>{t('settings.research.x.saved')}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => submitAuth({ twitterAuthToken: '', twitterCt0: '' })}
+                  disabled={saving}
+                  className="shrink-0 rounded-[3px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:text-accent disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                >
+                  {t('settings.research.x.clear')}
+                </button>
+              </div>
+            )}
+            <input
+              type="password"
+              value={authToken}
+              onChange={(e) => setAuthToken(e.target.value)}
+              placeholder="auth_token"
+              aria-label="auth_token"
+              autoComplete="off"
+              className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-ui text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
+            />
+            <input
+              type="password"
+              value={ct0}
+              onChange={(e) => setCt0(e.target.value)}
+              placeholder="ct0"
+              aria-label="ct0"
+              autoComplete="off"
+              className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 font-mono text-ui text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => submitAuth({ twitterAuthToken: authToken, twitterCt0: ct0 })}
+                disabled={saving}
+                className="shrink-0 inline-flex items-center gap-1.5 rounded-[2px] border border-line-strong bg-bg-elevated px-3 py-2 label-cap text-ink-muted hover:text-ink hover:bg-plane hover:border-ink-subtle disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                {saving && <Loader2 size={13} className="animate-spin" />}
+                {t('settings.research.x.save')}
+              </button>
+              {saveFailed && (
+                <span className="inline-flex items-start gap-1 text-meta text-accent">
+                  <AlertCircle size={12} className="mt-[2px] shrink-0" />
+                  <span>{t('settings.research.x.error')}</span>
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </Section>
+  )
+}
 
 // Collapsed-by-default disclosure listing every published release of the
 // distribution repo, newest first, with its bilingual notes filtered to the

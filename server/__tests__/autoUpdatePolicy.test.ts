@@ -5,6 +5,8 @@ import {
   AUTO_APPLY_UNFOCUSED_MIN_MS,
   AUTO_APPLY_POLL_MS,
   NUDGE_MIN_GAP_MS,
+  ASAP_WINDOW_MS,
+  asapWindowActive,
   autoUpdateFromSettingsRaw,
   decideAutoApply,
   decideDownloadedAction,
@@ -150,5 +152,59 @@ describe('shouldNudgeCheck', () => {
     // poll would start swallowing legitimate consecutive releases.
     expect(NUDGE_MIN_GAP_MS).toBeGreaterThanOrEqual(10_000)
     expect(NUDGE_MIN_GAP_MS).toBeLessThanOrEqual(AUTO_APPLY_POLL_MS)
+  })
+})
+
+// {apply:'asap'} — the user COMMANDED this update. The command waives exactly
+// one gate (the 30-min away-timer) and nothing else. The dangerous direction is
+// a command that silently overrides the safety probe or work mode: "update now"
+// must never become "destroy the claude that is mid-generation now".
+describe('decideAutoApply with asap', () => {
+  const focusedBase = {
+    enabled: true,
+    lockdown: false,
+    hasDownloaded: true,
+    unfocusedMs: 0, // window focused RIGHT NOW — the case the away-timer blocks
+    safety: { safe: true, generating: 0, userPtys: 0 },
+  }
+
+  it('waives the away-timer: focused window + asap applies', () => {
+    expect(decideAutoApply({ ...focusedBase }).apply).toBe(false) // without asap
+    const r = decideAutoApply({ ...focusedBase, asap: true })
+    expect(r.apply).toBe(true)
+    expect(r.reason).toContain('commanded')
+  })
+
+  it('waives NOTHING else — each remaining gate still blocks', () => {
+    expect(decideAutoApply({ ...focusedBase, asap: true, enabled: false }).apply).toBe(false)
+    expect(decideAutoApply({ ...focusedBase, asap: true, lockdown: true }).apply).toBe(false)
+    expect(decideAutoApply({ ...focusedBase, asap: true, hasDownloaded: false }).apply).toBe(false)
+    expect(decideAutoApply({ ...focusedBase, asap: true, safety: null }).apply).toBe(false)
+    expect(
+      decideAutoApply({
+        ...focusedBase,
+        asap: true,
+        safety: { safe: false, generating: 1, userPtys: 0 },
+      }).apply,
+    ).toBe(false)
+  })
+})
+
+describe('asapWindowActive — the command expires', () => {
+  it('never armed → inactive', () => {
+    expect(asapWindowActive({ armedAt: 0, now: 1_000_000_000 })).toBe(false)
+  })
+
+  it('fresh command → active; expired command → inactive', () => {
+    const now = 1_000_000_000
+    expect(asapWindowActive({ armedAt: now - 1000, now })).toBe(true)
+    expect(asapWindowActive({ armedAt: now - ASAP_WINDOW_MS - 1, now })).toBe(false)
+  })
+
+  it('the window outlives at least one apply-poll tick but not an evening', () => {
+    // Shorter than one poll and a slow download could outlive its own command;
+    // hours long and a noon bell surprise-restarts the app at night.
+    expect(ASAP_WINDOW_MS).toBeGreaterThanOrEqual(AUTO_APPLY_POLL_MS)
+    expect(ASAP_WINDOW_MS).toBeLessThanOrEqual(30 * 60 * 1000)
   })
 })

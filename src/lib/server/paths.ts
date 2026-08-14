@@ -81,6 +81,10 @@ export const integrityFile = () => join(openGroundHome(), 'integrity.json')
 // src/lib/server/authStore.ts. This is the APP's own login — NOT the Claude CLI
 // subscription token — and it gates nothing today (see docs/BILLING_PLAN.md).
 export const authFile = () => join(openGroundHome(), 'auth.json')
+// Research-channel cookies (X auth_token/ct0 — Settings → Research channels).
+// Written 0600 by src/lib/server/researchAuth.ts; values are LOCAL-ONLY by
+// promise (the status API exposes booleans, never the values).
+export const researchAuthFile = () => join(openGroundHome(), 'research-auth.json')
 // In-app notification READ-STATE (the Ground お知らせ bell). A tiny home-cache
 // file holding the ids the user has already seen, so unread state survives a
 // re-login (server-side, not localStorage). The notification CONTENT comes from

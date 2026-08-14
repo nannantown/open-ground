@@ -23,20 +23,29 @@ export const UPDATE_CHECK_MESSAGE = 'openground:update-check'
 export interface UpdateNudgeResult {
   queued: boolean
   reason: 'sent' | 'no-electron-parent' | 'send-failed'
+  /** Echoed back when the caller asked for an immediate apply. */
+  apply?: 'asap'
 }
 
 /**
  * Ask the Electron main process to check for updates now. Fail-safe: reports
  * `no-electron-parent` when there is no IPC channel — i.e. we are not the engine
  * forked by electron/main.js (dev/tsx/vitest/bare node).
+ *
+ * `{apply:'asap'}` marks this ring as a USER COMMAND: main waives the 30-minute
+ * away-timer for whatever this check downloads (10-minute window) and restarts
+ * as soon as the server safety probe agrees nothing running would be destroyed.
+ * The setting (`settings.autoUpdate`), work mode, and the safety probe itself
+ * are NOT waived — see autoUpdatePolicy.decideAutoApply.
  */
-export function requestUpdateCheck(): UpdateNudgeResult {
+export function requestUpdateCheck(opts?: { apply?: 'asap' }): UpdateNudgeResult {
+  const asap = opts?.apply === 'asap'
   const send = typeof process.send === 'function' ? process.send.bind(process) : null
-  if (!send) return { queued: false, reason: 'no-electron-parent' }
+  if (!send) return { queued: false, reason: 'no-electron-parent', ...(asap && { apply: 'asap' as const }) }
   try {
-    send({ type: UPDATE_CHECK_MESSAGE })
-    return { queued: true, reason: 'sent' }
+    send({ type: UPDATE_CHECK_MESSAGE, ...(asap && { apply: 'asap' }) })
+    return { queued: true, reason: 'sent', ...(asap && { apply: 'asap' as const }) }
   } catch {
-    return { queued: false, reason: 'send-failed' }
+    return { queued: false, reason: 'send-failed', ...(asap && { apply: 'asap' as const }) }
   }
 }

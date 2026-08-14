@@ -15,6 +15,19 @@ vi.mock('@/lib/api-client', () => ({
         $get: () => Promise.resolve({ ok: false }),
       },
       'pick-folder': { $post: () => Promise.resolve({ json: () => Promise.resolve({}) }) },
+      // The Research-channels section fetches both on mount (2026-08-14) — a
+      // mock without them crashes EVERY panel render, not just its own tests.
+      research: {
+        channels: {
+          $get: () => Promise.resolve({ ok: true, json: () => Promise.resolve({ channels: [] }) }),
+        },
+        auth: {
+          $get: () =>
+            Promise.resolve({ ok: true, json: () => Promise.resolve({ twitterConfigured: false }) }),
+          $post: () =>
+            Promise.resolve({ ok: true, json: () => Promise.resolve({ twitterConfigured: false }) }),
+        },
+      },
     },
   },
 }))

@@ -44,6 +44,7 @@ import { spawnSdkSession, preloadSdk } from './sdkSession'
 import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
 import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
 import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
+import { researchWorkerEnv } from './researchAuth'
 import type { RemoveSwarmWorktreeResponse, SpawnSwarmWorkerResponse } from '../types'
 
 const execFile = promisify(execFileCb)
@@ -797,6 +798,12 @@ export const spawnSwarmWorker = async (
   // questions, PR/commit text) follow it — resolved once here and threaded
   // into the SDK launch plan below (languageDirective).
   const lang = await getPromptLang()
+  // Research cookies (Settings → Research channels) ride into the worker's env
+  // so its LOCAL twitter-cli invocations are signed in — {} when unconfigured,
+  // leaving the spawn env byte-identical to before. Same exposure class as the
+  // PTY era's `zsh -l` desks (which inherited whatever the owner exported);
+  // the values still never leave the machine (researchAuth.ts contract).
+  const researchEnv = await researchWorkerEnv()
   // SPAWN FAILURE MUST NOT LEAK THE WORKTREE (2026-07-29).
   //
   // Everything ABOVE the worktree creation fails closed, and two comments in this
@@ -852,6 +859,7 @@ export const spawnSwarmWorker = async (
     resume: !!opts.resumeSessionId,
     me,
     claudeBin: pre.claudeBin,
+    env: { ...process.env, ...researchEnv },
     // The sandbox experiment is not supported on the SDK runtime; passing the
     // flag through makes the plan SAY so (a warning) instead of silently
     // dropping the containment the owner asked for.

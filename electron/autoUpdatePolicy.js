@@ -54,6 +54,7 @@ function autoUpdateFromSettingsRaw(raw) {
  *   lockdown: boolean,            // work mode suppresses ALL updater activity
  *   hasDownloaded: boolean,       // an update is on disk waiting
  *   unfocusedMs: number,          // ms since the window lost focus (0 = focused)
+ *   asap?: boolean,               // live user command (bell {apply:'asap'}) — waives ONLY the away-timer
  *   safety: { safe: boolean, generating?: number, userPtys?: number } | null, // server probe; null = unreachable
  * }} input
  * @returns {{ apply: boolean, reason: string }}
@@ -62,7 +63,12 @@ function decideAutoApply(input) {
   if (!input.enabled) return { apply: false, reason: 'autoUpdate off' }
   if (input.lockdown) return { apply: false, reason: 'work mode (lockdown) on' }
   if (!input.hasDownloaded) return { apply: false, reason: 'nothing downloaded' }
-  if (input.unfocusedMs < AUTO_APPLY_UNFOCUSED_MIN_MS)
+  // `asap` waives ONLY the away-timer: it means the user COMMANDED this update
+  // (bell rung with {apply:'asap'}), so "don't restart while they're using it"
+  // no longer applies — they're using it to ask for the restart. Every other
+  // gate stays: the setting, work mode, and above all the server safety probe —
+  // a command to update is not a command to destroy running work.
+  if (!input.asap && input.unfocusedMs < AUTO_APPLY_UNFOCUSED_MIN_MS)
     return { apply: false, reason: `window in use (unfocused ${Math.round(input.unfocusedMs / 60000)}min)` }
   if (!input.safety) return { apply: false, reason: 'safety probe unreachable (fail closed)' }
   if (!input.safety.safe)
@@ -70,7 +76,7 @@ function decideAutoApply(input) {
       apply: false,
       reason: `server reports busy (generating=${input.safety.generating ?? '?'} userPtys=${input.safety.userPtys ?? '?'})`,
     }
-  return { apply: true, reason: 'idle + server safe' }
+  return { apply: true, reason: input.asap ? 'commanded (asap) + server safe' : 'idle + server safe' }
 }
 
 /**
@@ -113,6 +119,20 @@ function decideDownloadedAction(input) {
 /** Two release-nudges inside this window collapse into one GitHub fetch. */
 const NUDGE_MIN_GAP_MS = 60 * 1000
 
+/** How long an {apply:'asap'} command stays live. Long enough for the check +
+ *  download it triggered to finish; short enough that a bell rung at noon can
+ *  never surprise-restart the app in the evening. */
+const ASAP_WINDOW_MS = 10 * 60 * 1000
+
+/**
+ * Pure decision: is a previously received {apply:'asap'} command still live?
+ * @param {{ armedAt: number, now: number }} input — armedAt 0 = never armed
+ * @returns {boolean}
+ */
+function asapWindowActive(input) {
+  return input.armedAt > 0 && input.now - input.armedAt <= ASAP_WINDOW_MS
+}
+
 /**
  * Pure decision: honour a server-sent "check for updates now" nudge?
  * The nudge endpoint (POST /api/update/check-now) is reachable by anything on
@@ -131,6 +151,8 @@ module.exports = {
   AUTO_APPLY_POLL_MS,
   SAFETY_FETCH_TIMEOUT_MS,
   NUDGE_MIN_GAP_MS,
+  ASAP_WINDOW_MS,
+  asapWindowActive,
   autoUpdateFromSettingsRaw,
   decideDownloadedAction,
   decideAutoApply,

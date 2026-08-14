@@ -53,6 +53,7 @@ const {
   decideAutoApply,
   decideDownloadedAction,
   shouldNudgeCheck,
+  asapWindowActive,
 } = require('./autoUpdatePolicy')
 const { isLockdownEnabled, isRendererUrlAllowedUnderLockdown, settingsFilePath } = require('./lockdown')
 const { decideCrashResponse } = require('./crashRespawn')
@@ -1680,6 +1681,13 @@ function onServerMessage(msg) {
   // initAutoUpdater has armed nudgeUpdateCheck (dev/unpackaged stay silent).
   if (msg.type === UPDATE_CHECK_MESSAGE) {
     const now = Date.now()
+    if (msg.apply === 'asap') {
+      // A user COMMAND — arm before (and regardless of) the check rate limit,
+      // so ringing twice quickly still upgrades the first ring's download. If
+      // something already sits downloaded, don't wait for the 5-min poll.
+      asapArmedAt = now
+      if (downloadedUpdate) void maybeAutoApplyUpdate()
+    }
     if (!nudgeUpdateCheck || !shouldNudgeCheck({ lastNudgeAt: lastUpdateNudgeAt, now })) return
     lastUpdateNudgeAt = now
     nudgeUpdateCheck()
@@ -1925,6 +1933,9 @@ let autoUpdaterHandle = null
 // nudge is meaningless) — the handler treats null as "nothing to ring".
 let nudgeUpdateCheck = null
 let lastUpdateNudgeAt = 0
+// When a bell carried {apply:'asap'} (user command): the away-timer is waived
+// for ASAP_WINDOW_MS. 0 = never armed. Read by maybeAutoApplyUpdate.
+let asapArmedAt = 0
 // Has initAutoUpdater run yet, and did it succeed? 'pending' is a REAL state the
 // user can reach: the menu is installed at the top of start() while
 // initAutoUpdater runs at the bottom, after a health poll that may take up to
@@ -2003,6 +2014,7 @@ async function maybeAutoApplyUpdate() {
     lockdown: isLockdownEnabled(),
     hasDownloaded: !!downloadedUpdate,
     unfocusedMs,
+    asap: asapWindowActive({ armedAt: asapArmedAt, now: Date.now() }),
     safety: downloadedUpdate ? await fetchRestartSafety() : null,
   })
   if (!decision.apply) {

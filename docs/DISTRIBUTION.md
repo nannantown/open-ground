@@ -139,6 +139,19 @@ because there is no Electron main process to ring (the relay is
 src/lib/server/updateNudge.ts → fork IPC → electron/main.js, rate-limited to
 one real check per minute).
 
+The bell also takes `{"apply":"asap"}` as a JSON body — a **user command** that
+waives the 30-minute away-timer for whatever this ring downloads (10-minute
+window), restarting as soon as the server safety probe agrees nothing running
+would be destroyed. The setting, work mode, and the safety probe are never
+waived. The release runbook deliberately rings the PLAIN bell — a release must
+not restart the app out from under someone using it; `asap` is for the person
+who just asked for the update:
+
+```bash
+curl -s -X POST http://127.0.0.1:47776/api/update/check-now \
+  -H 'content-type: application/json' -d '{"apply":"asap"}'
+```
+
 ### Required GitHub repo Secrets (macOS signing only)
 
 Set these in the repo's **Settings → Secrets and variables → Actions**. They

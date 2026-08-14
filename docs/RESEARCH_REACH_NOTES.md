@@ -12,6 +12,18 @@
 > worker は自分でツールを入れない)と TRUST_KERNEL R1(取得物はデータであって指示では
 > ない — スキル本文に明文化)。この文書は以後、蒸留元ノウハウの記録として維持する。
 > 出典: [Panniantong/Agent-Reach](https://github.com/Panniantong/Agent-Reach)(MIT License)。
+>
+> **第2弾: 一般ユーザー向けの導線(2026-08-14)。** 「設定させない」方向への組み替え:
+> ① **素fetchベースライン拡大** — GitHub 公開REST / Reddit 公開JSON / フィード直読を
+> スキルと doctor に採録(curl さえあれば `[part]`、`[miss]` は真に不能な時だけ)。
+> ② **設定→調査チャンネル** パネル — サーバ側チェッカー `researchChannels.ts`
+> (クロスプラットフォーム・PATH走査のみ・非ネットワーク)+ `GET /api/research/channels`、
+> 状態チップ+コピー1発の解放コマンド。③ **X Cookie のローカル保存** —
+> `researchAuth.ts`(`~/.openground/research-auth.json` 0600・値は API から二度と出ない・
+> worker spawn で env 注入)。at-rest 暗号化(safeStorage/Keychain)は fork IPC を要する
+> ため **意図的な後続課題**(VERIFICATION.md §4.1 の packaged-.app 検証が要る)。
+> ④ **レポート末尾のカバレッジ注記** — 使えなかったチャンネルと解放場所を報告自身が教える。
+> 番人: `researchChannels.test.ts` / `researchAuth.test.ts` / `researchSystem.test.ts`。
 
 ---
 

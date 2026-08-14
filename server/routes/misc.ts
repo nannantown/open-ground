@@ -445,7 +445,16 @@ export const miscRoutes = new Hono()
   // lockdown / hands-free policy — `queued` only means the request was
   // delivered. Honest no-op (`no-electron-parent`) under dev/tsx/vitest. No
   // path input → no validateProjectPath needed.
-  .post('/api/update/check-now', (c) => c.json(requestUpdateCheck()))
+  //
+  // Optional body `{"apply":"asap"}` = the user commanded this update: main
+  // waives the 30-minute away-timer (10-minute window) and restarts as soon as
+  // the safety probe agrees. Body is optional and anything else is ignored, so
+  // the bare release-runbook curl keeps its gentle default.
+  .post('/api/update/check-now', async (c) => {
+    const body = await c.req.json().catch(() => null)
+    const asap = !!body && typeof body === 'object' && body.apply === 'asap'
+    return c.json(requestUpdateCheck(asap ? { apply: 'asap' } : undefined))
+  })
   // --- POST /api/sound/test -------------------------------------------------
   // The Settings「試聴」button: play the completion chime ONCE at the given
   // volume so the slider is auditable before a claude turn ever ends. Local

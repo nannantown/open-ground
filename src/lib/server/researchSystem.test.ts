@@ -86,6 +86,19 @@ describe('shipped /research skill (skills/research/SKILL.md)', () => {
     expect(text).toContain('Every claim carries its source URL.')
   })
 
+  it('carries the plain-curl baselines (the zero-setup widening, 2026-08-14)', () => {
+    // GitHub REST / Reddit public JSON / direct feed reads — the reason the
+    // doctor may say [part] instead of [miss] for these channels.
+    expect(text).toContain('api.github.com')
+    expect(text).toContain('www.reddit.com/search.json')
+    expect(text).toContain('read the XML directly')
+  })
+
+  it('names the Settings panel as the cookie supply and demands the coverage note', () => {
+    expect(text).toContain('Settings →\n   Research channels')
+    expect(text).toContain('Coverage note')
+  })
+
   it('routes every platform of the distilled notes doc', () => {
     for (const probe of [
       'r.jina.ai', // web + LinkedIn
@@ -172,6 +185,21 @@ describe(`research doctor (scripts/${RESEARCH_DOCTOR_BASENAME})`, () => {
     expect(markOf(stdout, 'rss')).toBe('ok') // python3 stub imports "feedparser" fine
 
     await expect(stat(sentinel)).rejects.toThrow() // ← the local-only proof
+  })
+
+  it('curl alone unlocks the baselines: github/reddit/rss report [part], not [miss]', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'og-research-doctor-'))
+    const binDir = join(dir, 'bin')
+    await mkdir(binDir)
+    await stub(binDir, 'curl') // presence only — never executed (proven above)
+    const { stdout } = await runDoctor(binDir)
+    expect(markOf(stdout, 'web')).toBe('ok')
+    expect(markOf(stdout, 'github')).toBe('part')
+    expect(markOf(stdout, 'reddit')).toBe('part')
+    expect(markOf(stdout, 'rss')).toBe('part')
+    expect(markOf(stdout, 'websearch')).toBe('miss')
+    expect(markOf(stdout, 'twitter')).toBe('miss')
+    expect(markOf(stdout, 'youtube')).toBe('miss')
   })
 
   it('twitter with the binary but WITHOUT cookie env is [part] (single posts only)', async () => {

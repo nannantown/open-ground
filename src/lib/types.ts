@@ -3434,3 +3434,49 @@ export interface PersonaInterviewResponse {
    *  signal for the question. */
   corpusStale?: boolean
 }
+
+// ── Research channels (Settings → Research channels; docs/RESEARCH_REACH_NOTES.md) ──
+
+/** The seven research channels the checker knows. Fixed vocabulary — the UI
+ *  maps ids to localized names, so adding one means adding copy in BOTH
+ *  locales (src/i18n/messages/settings.ts). */
+export type ResearchChannelId =
+  | 'web'
+  | 'websearch'
+  | 'twitter'
+  | 'reddit'
+  | 'youtube'
+  | 'github'
+  | 'rss'
+
+/** ok = usable now / part = usable with limits (detail says which) / miss =
+ *  not usable until set up. */
+export type ResearchChannelStatus = 'ok' | 'part' | 'miss'
+
+/** One channel's verdict from GET /api/research/channels. `detail` is an
+ *  enumerable per-channel variant key (e.g. github: 'cli' | 'baseline' |
+ *  'unreachable') the i18n layer turns into copy; `unlockCommand` is the
+ *  copyable one-liner when a single honest install command exists. */
+export interface ResearchChannelState {
+  id: ResearchChannelId
+  status: ResearchChannelStatus
+  detail: string
+  unlockCommand?: string
+}
+
+export interface ResearchChannelsResponse {
+  channels: ResearchChannelState[]
+}
+
+/** GET /api/research/auth — booleans ONLY, never the stored values (the
+ *  local-only promise; see researchAuth.ts). */
+export interface ResearchAuthStatusResponse {
+  twitterConfigured: boolean
+}
+
+/** POST /api/research/auth. Both values non-empty ⇒ save; both empty strings
+ *  ⇒ clear; anything else is a 400 (one cookie without the other can't work). */
+export interface SetResearchAuthRequest {
+  twitterAuthToken: string
+  twitterCt0: string
+}
