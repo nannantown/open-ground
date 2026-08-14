@@ -12,13 +12,20 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import {
+  getPersonaCourseHistory,
+  getPersonaPortrait,
   listPersonaCourses,
   submitPersonaCourse,
   UnknownPersonaCourseError,
 } from '@/lib/server/personaCourses'
 import { PersonaScoringError } from '@/lib/persona/instruments'
 import { hostIsLocal, originIsLocal } from '../loopback'
-import type { PersonaCoursesResponse, SubmitPersonaCourseResponse } from '@/lib/types'
+import type {
+  PersonaCourseHistoryResponse,
+  PersonaCoursesResponse,
+  PersonaPortrait,
+  SubmitPersonaCourseResponse,
+} from '@/lib/types'
 
 // Same gate, same reasoning as server/routes/youCorpus.ts: a page that rebinds
 // its domain to 127.0.0.1 makes a SAME-ORIGIN request, which the SOP lets it
@@ -45,6 +52,31 @@ export const personaRoutes = new Hono()
   // readPersonaCoursesStore's fail-open note.
   .get('/api/persona/courses', async (c) =>
     blockNonLoopback(c) ?? c.json<PersonaCoursesResponse>(await listPersonaCourses()),
+  )
+  // --- GET /api/persona/courses/:id/history ----------------------------------
+  // Every stored take of one course, NEWEST FIRST (the current result is the
+  // first entry, the displaced ones follow newest → oldest). 404 for an id no
+  // instrument answers to; a course that exists but was never taken is a 200
+  // with `takes: []` — "you have not taken this", not "no such thing".
+  .get('/api/persona/courses/:id/history', async (c) => {
+    const blocked = blockNonLoopback(c)
+    if (blocked) return blocked
+    try {
+      const res = await getPersonaCourseHistory(c.req.param('id'))
+      return c.json<PersonaCourseHistoryResponse>(res)
+    } catch (e) {
+      if (e instanceof UnknownPersonaCourseError) return c.json({ error: 'not found' }, 404)
+      throw e
+    }
+  })
+  // --- GET /api/persona/portrait ---------------------------------------------
+  // The composed digest + the counts shown beside it. Every line comes from
+  // composePortrait (the pure composer) — this route adds no sentence of its
+  // own, and an EMPTY `lines` is the correct answer when nothing is evidenced
+  // yet. Never fails on an unreadable store or corpus, same reasoning as the
+  // catalogue above: a glance must not 500 the screen.
+  .get('/api/persona/portrait', async (c) =>
+    blockNonLoopback(c) ?? c.json<PersonaPortrait>(await getPersonaPortrait()),
   )
   // --- POST /api/persona/courses/:id/submit ---------------------------------
   // Score → persist → mint. 404 for an id no instrument answers to, 400 with the

@@ -76,6 +76,21 @@ export const persona = {
     'persona.meta.stale':
       'Saved — but the file your stand-in reads could not be rebuilt this time, so it will catch up on the next save that succeeds.',
 
+    // --- The portrait: "so what am I like?", answered at a glance -----------
+    // Composed from scored results, never generated — so with nothing evidenced
+    // the block ASKS instead of saying something that would fit anyone. Names
+    // the region for a screen reader (the block itself carries no heading: the
+    // lines are the point, and a caption over them would be furniture).
+    'persona.portrait.label': 'You, so far',
+    'persona.portrait.empty':
+      'Not enough yet to say what you are like. Take a course on the left, or answer the question in the corner.',
+    // The counts under the lines. Two sentences, not one with a "0 this week"
+    // in it: `recentCount` is optional on the wire, and a server that did not
+    // count is not a week in which nothing happened.
+    'persona.portrait.counts': 'Built from {nodes} things · {taken} of {total} courses taken',
+    'persona.portrait.countsRecent':
+      'Built from {nodes} things ({recent} in the last week) · {taken} of {total} courses taken',
+
     // --- The always-on question (the interview loop) ------------------------
     // One a day, built from something the owner actually did — never a
     // personality quiz. The copy has to make that obvious, or the question
@@ -108,7 +123,15 @@ export const persona = {
     'persona.course.railHeading': 'Courses',
     'persona.course.state.new': '{count} questions · grows {zone}',
     'persona.course.state.running': 'In progress — {index} / {total}',
-    'persona.course.state.done': 'Done {date} · take it again',
+    // A finished course reads its own result back — the row opens the last one.
+    // Re-taking is the button next to it, so neither offer hides the other.
+    'persona.course.state.done': 'Done {date} · see the result',
+    'persona.course.opening': 'Opening your result…',
+    'persona.course.retake': 'Again',
+    // Carries the course name: four rows of a bare "Again" tell a screen reader
+    // nothing about which one it would start.
+    'persona.course.retakeAria': 'Take {name} again',
+    'persona.course.historyFailed': 'Could not open that result just now. Try it again.',
     'persona.course.submitting': 'Scoring…',
     'persona.course.failed': 'Could not save the result. Your answers are still here.',
     'persona.course.retry': 'Send again',
@@ -120,6 +143,9 @@ export const persona = {
     // which published instrument the items follow and which trademarked one
     // they are NOT.
     'persona.result.source': 'Source: {source}',
+    // Heads the date strip a re-opened result carries when the same course has
+    // been taken more than once. Never drawn for a single take.
+    'persona.result.takes': 'Earlier takes',
     'persona.result.minted': 'What went into your persona',
     'persona.result.mintedPartial':
       'Some of these have not reached your stand-in yet — the next save that succeeds will carry them over.',
@@ -196,6 +222,13 @@ export const persona = {
     'persona.meta.stale':
       '保存しました。ただし分身が読むファイルは今回作り直せませんでした — 次に成功した保存で反映されます。',
 
+    'persona.portrait.label': 'いまのところのあなた',
+    'persona.portrait.empty':
+      'まだ「どういう人か」を言えるだけの材料がありません。左のコースを1つ受けるか、右下の問いに答えてください。',
+    'persona.portrait.counts': 'わかっていること {nodes}件 ・ コースは{total}本中{taken}本',
+    'persona.portrait.countsRecent':
+      'わかっていること {nodes}件（うち{recent}件はこの1週間）・ コースは{total}本中{taken}本',
+
     'persona.interview.heading': '今日の1問',
     'persona.interview.placeholder': 'あなたの言葉で。一文で十分です。',
     'persona.interview.answer': '答える',
@@ -218,7 +251,11 @@ export const persona = {
     'persona.course.railHeading': '診断コース',
     'persona.course.state.new': '{count}問 ・ {zone}が育つ',
     'persona.course.state.running': '{index} / {total} 進行中',
-    'persona.course.state.done': '済 {date} ・ もう一度',
+    'persona.course.state.done': '済 {date} ・ 結果を見る',
+    'persona.course.opening': '結果を開いています…',
+    'persona.course.retake': 'もう一度',
+    'persona.course.retakeAria': '{name}をもう一度受ける',
+    'persona.course.historyFailed': 'いま前の結果を開けませんでした。もう一度押してみてください。',
     'persona.course.submitting': '採点しています…',
     'persona.course.failed': '結果を保存できませんでした。答えは残っています。',
     'persona.course.retry': 'もう一度送る',
@@ -226,6 +263,7 @@ export const persona = {
     'persona.result.kicker': '結果',
     'persona.result.answered': '{count}問すべてに回答',
     'persona.result.source': '出典: {source}',
+    'persona.result.takes': 'これまでの回',
     'persona.result.minted': 'ペルソナに入ったもの',
     'persona.result.mintedPartial':
       'このうち、まだ分身に渡っていないものがあります — 次に成功した保存で反映されます。',

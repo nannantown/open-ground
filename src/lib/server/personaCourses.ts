@@ -37,13 +37,17 @@
 import { readFile, rename } from 'fs/promises'
 import { atomicWriteJson } from './atomicWrite'
 import { ensureOpenGroundHome, personaCoursesFile } from './paths'
-import { appendJudgment } from './youCorpus'
+import { appendJudgment, readManualJudgments } from './youCorpus'
 import { COURSES, courseById, scoreCourse } from '@/lib/persona/instruments'
 import type { PersonaCourse } from '@/lib/persona/instruments'
+import { composePortrait } from '@/lib/persona/portrait'
 import type {
+  ManualJudgment,
+  PersonaCourseHistoryResponse,
   PersonaCourseId,
   PersonaCourseRecord,
   PersonaCoursesResponse,
+  PersonaPortrait,
   SubmitPersonaCourseResponse,
 } from '@/lib/types'
 
@@ -188,6 +192,79 @@ export const listPersonaCourses = async (): Promise<PersonaCoursesResponse> => {
       }
     }),
   }
+}
+
+/** Every stored take of ONE course, NEWEST FIRST.
+ *
+ *  The store keeps the two halves in the shape the tab's hot path wants —
+ *  `records[id]` is the current take and `history[id]` runs oldest → newest — so
+ *  the wire order is `[current, ...history reversed]`. The reversal happens HERE,
+ *  once: "which end is new" has exactly one answer in this codebase, and a
+ *  history rendered backwards is not a visibly broken screen (it is a plausible
+ *  one that tells the owner their drift ran the other way).
+ *
+ *  Throws `UnknownPersonaCourseError` for an id no instrument answers to (route
+ *  ⇒ 404). A course that exists but was never taken is `takes: []` — the same
+ *  honest "never taken" the catalogue reports as nulls, not a 404. */
+export const getPersonaCourseHistory = async (
+  courseId: string,
+): Promise<PersonaCourseHistoryResponse> => {
+  const course = courseById(courseId)
+  if (!course) throw new UnknownPersonaCourseError(`unknown persona course: ${courseId}`)
+  const store = await readPersonaCoursesStore()
+  const current = store.records[course.id]
+  // parseStore only guarantees `history` is an object — a hand-mangled file can
+  // still hold a non-array under a course key, and spreading that would turn a
+  // corrupt file into a 500 on a read-only screen. Same fail-open trade as the
+  // reader above: show what is legible.
+  const displaced = store.history[course.id]
+  const older = Array.isArray(displaced) ? [...displaced].reverse() : []
+  return {
+    courseId: course.id,
+    takes: [...(current ? [current] : []), ...older],
+  }
+}
+
+/** The window `recentCount` counts — "how much of this arrived lately". */
+const PORTRAIT_RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+
+export interface PortraitDeps {
+  /** DI for tests: the clock. Fixes both the 7-day window and every line's age. */
+  now?: () => number
+}
+
+/** The "で、私はどういう人?" digest: scored courses + how much the stand-in holds.
+ *
+ *  This function JOINS and COUNTS; it never writes a line. Every sentence is
+ *  composed by the pure `composePortrait`, which is the only place allowed to
+ *  turn evidence into words — so an empty `lines` here means "nothing is
+ *  evidenced yet", and the screen shows its own empty state rather than being
+ *  handed a sentence nobody earned.
+ *
+ *  FAIL-OPEN, like the catalogue: the store reader already shrugs at a corrupt
+ *  file, and the corpus reader deliberately does NOT (it throws on EACCES/EIO so
+ *  an append can never overwrite judgments it merely failed to see —
+ *  readManualJudgments' own note). That fail-CLOSED rule is right for the writer
+ *  and wrong for a glance, so the throw is caught here and the counts fall back
+ *  to what is legible: an unreadable corpus costs the owner two numbers, not the
+ *  whole screen. */
+export const getPersonaPortrait = async (deps: PortraitDeps = {}): Promise<PersonaPortrait> => {
+  const now = deps.now?.() ?? Date.now()
+  const store = await readPersonaCoursesStore()
+  let judgments: ManualJudgment[] = []
+  try {
+    judgments = await readManualJudgments()
+  } catch (err) {
+    console.error('[openground:persona-courses] corpus unreadable — portrait counts 0 nodes', err)
+  }
+  let recentCount = 0
+  for (const j of judgments) {
+    const t = Date.parse(j.addedAt)
+    // Unparseable stamps are simply not recent (never counted as "today"); a
+    // stamp slightly in the future (clock skew) still reads as recent.
+    if (Number.isFinite(t) && now - t <= PORTRAIT_RECENT_WINDOW_MS) recentCount++
+  }
+  return composePortrait({ records: store.records, nodeCount: judgments.length, recentCount, now })
 }
 
 /** Local 'YYYY-MM-DD' for the provenance line. Local, not

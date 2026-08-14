@@ -5,13 +5,15 @@ import { join } from 'path'
 import {
   MAX_HISTORY,
   UnknownPersonaCourseError,
+  getPersonaCourseHistory,
+  getPersonaPortrait,
   listPersonaCourses,
   readPersonaCoursesStore,
   submitPersonaCourse,
 } from './personaCourses'
 import { readManualJudgments } from './youCorpus'
-import { personaCoursesFile } from './paths'
-import { PersonaScoringError } from '@/lib/persona/instruments'
+import { personaCoursesFile, youCorpusAdditionsFile } from './paths'
+import { BIG5_ITEMS, COURSES, PersonaScoringError } from '@/lib/persona/instruments'
 import type { AppendJudgmentInput } from './youCorpus'
 
 // The persona-course STORE + write path. Nothing here is mocked except where a
@@ -73,6 +75,32 @@ const exists = async (p: string): Promise<boolean> => {
   } catch {
     return false
   }
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/** A big5 vector that leans EVERY factor hard, so the portrait has something
+ *  decisive to say. Built FROM THE INSTRUMENT'S OWN KEY LIST (agreeing hardest
+ *  means 4 on a plain item and 0 on a reverse-keyed one) rather than hand-typed:
+ *  if an item is ever re-keyed this stays a 100% lean instead of silently
+ *  drifting into the 中くらい band the composer skips. */
+const big5Decisive = (): number[] => BIG5_ITEMS.map(([, reversed]) => (reversed ? 0 : 4))
+
+/** Judgments straight into the corpus's additions file WITH CHOSEN DATES —
+ *  appendJudgment stamps `new Date()`, so a dated fixture has to be written.
+ *  Everything is still read back through readManualJudgments (the production
+ *  reader GET /api/you-corpus/judgments serves). */
+const seedDatedJudgments = async (entries: { text: string; daysAgo: number }[], now = Date.now()) => {
+  await writeFile(
+    youCorpusAdditionsFile(),
+    JSON.stringify(
+      entries.map((e, i) => ({
+        id: `seed-${i}`,
+        text: e.text,
+        addedAt: new Date(now - e.daysAgo * DAY_MS).toISOString(),
+      })),
+    ),
+  )
 }
 
 /** The shape appendJudgment resolves with, for the injected-failure stand-in.
@@ -308,5 +336,160 @@ describe('a corrupt store fails OPEN', () => {
     const { readdir } = await import('fs/promises')
     const names = await readdir(home)
     expect(names.some((n) => n.startsWith('persona-courses.json.corrupt-'))).toBe(true)
+  })
+})
+
+describe('getPersonaCourseHistory — every take, newest first', () => {
+  it('returns BOTH takes newest-first, and the newest IS the current record', async () => {
+    const first = await submitPersonaCourse('big5', big5Answers(0), {
+      now: () => Date.UTC(2026, 0, 1, 12),
+    })
+    const second = await submitPersonaCourse('big5', big5Answers(2), {
+      now: () => Date.UTC(2026, 0, 8, 12),
+    })
+
+    const history = await getPersonaCourseHistory('big5')
+    expect(history.courseId).toBe('big5')
+    expect(history.takes.map((t) => t.takenAt)).toEqual([
+      second.record.takenAt,
+      first.record.takenAt,
+    ])
+    // The head is the take the tab shows — the SAME record, answers and all, not
+    // a re-derived look-alike.
+    const store = await readPersonaCoursesStore()
+    expect(history.takes[0]).toEqual(store.records.big5)
+    expect(history.takes[0].answers).toEqual(big5Answers(2))
+    expect(history.takes[1].answers).toEqual(big5Answers(0))
+  })
+
+  it('orders THREE takes newest → oldest, the opposite of how they are STORED', async () => {
+    const takenAts: string[] = []
+    for (let i = 0; i < 3; i++) {
+      const { record } = await submitPersonaCourse('big5', big5Answers(i), {
+        now: () => Date.UTC(2026, 0, 1 + i, 12),
+      })
+      takenAts.push(record.takenAt)
+    }
+    // On disk history runs oldest → newest (and excludes the current take)…
+    const store = await readPersonaCoursesStore()
+    expect(store.history.big5?.map((h) => h.takenAt)).toEqual([takenAts[0], takenAts[1]])
+    // …so the reader has to flip it. Three takes is the smallest number that can
+    // tell a real reversal from a no-op (reversing one element proves nothing).
+    const history = await getPersonaCourseHistory('big5')
+    expect(history.takes.map((t) => t.takenAt)).toEqual([takenAts[2], takenAts[1], takenAts[0]])
+  })
+
+  it('a course that EXISTS but was never taken is an empty list, not an error', async () => {
+    await submitPersonaCourse('big5', big5Answers())
+    expect(await getPersonaCourseHistory('values')).toEqual({ courseId: 'values', takes: [] })
+  })
+
+  it('an unknown course id is a typed error (route ⇒ 404)', async () => {
+    await expect(getPersonaCourseHistory('astrology')).rejects.toBeInstanceOf(
+      UnknownPersonaCourseError,
+    )
+  })
+
+  it('still answers over a corrupt store', async () => {
+    await writeFile(personaCoursesFile(), '{ not json')
+    expect(await getPersonaCourseHistory('big5')).toEqual({ courseId: 'big5', takes: [] })
+  })
+
+  it('still answers when a course key holds something that is not a list', async () => {
+    await writeFile(
+      personaCoursesFile(),
+      JSON.stringify({ version: 1, records: {}, history: { big5: 'mangled' } }),
+    )
+    expect(await getPersonaCourseHistory('big5')).toEqual({ courseId: 'big5', takes: [] })
+  })
+})
+
+describe('getPersonaPortrait — composed from evidence, or nothing', () => {
+  it('says NOTHING when nothing has been taken (no invented line)', async () => {
+    const portrait = await getPersonaPortrait()
+    expect(portrait.lines).toEqual([])
+    expect(portrait.takenCount).toBe(0)
+    expect(portrait.courseCount).toBe(COURSES.length)
+    expect(portrait.nodeCount).toBe(0)
+    expect(portrait.recentCount).toBe(0)
+  })
+
+  it('a REAL scored take produces lines, and every line names the course it came from', async () => {
+    // Scored by the real instrument (submitPersonaCourse runs scoreCourse), not
+    // by a hand-written result object.
+    await submitPersonaCourse('big5', big5Decisive())
+    await submitPersonaCourse('values', Array.from({ length: 20 }, (_, i) => (i % 5 === 0 ? 4 : 1)))
+
+    const portrait = await getPersonaPortrait()
+    expect(portrait.lines.length).toBeGreaterThan(0)
+    expect(portrait.takenCount).toBe(2)
+    for (const line of portrait.lines) {
+      const course = COURSES.find((c) => c.id === line.courseId)
+      expect(course, `line cites an unknown course: ${line.courseId}`).toBeTruthy()
+      // Provenance: a line that cannot be traced back to its instrument is a
+      // horoscope, whatever it says.
+      expect(line.detail, `line has no instrument in its detail: ${line.detail}`).toContain(
+        course?.name,
+      )
+      expect(line.text.length).toBeGreaterThan(0)
+      expect(Date.parse(line.takenAt)).not.toBeNaN()
+    }
+    expect(new Set(portrait.lines.map((l) => l.courseId))).toEqual(new Set(['big5', 'values']))
+  })
+
+  it('counts the corpus through the PRODUCTION reader, and only the last 7 days as recent', async () => {
+    await seedDatedJudgments([
+      { text: '30日前の判断', daysAgo: 30 },
+      { text: '8日前の判断', daysAgo: 8 },
+      { text: '2日前の判断', daysAgo: 2 },
+    ])
+    // Five more, minted for real by the submit path — stamped "now".
+    const { record } = await submitPersonaCourse('big5', big5Decisive())
+    expect(record.result.findings).toHaveLength(5)
+
+    // The count the portrait must agree with is whatever THIS reader returns.
+    const judgments = await readManualJudgments()
+    expect(judgments).toHaveLength(8)
+
+    const now = Date.now()
+    const portrait = await getPersonaPortrait({ now: () => now })
+    expect(portrait.nodeCount).toBe(judgments.length)
+    expect(portrait.recentCount).toBe(6) // the 2-day-old one + the 5 just minted
+
+    // …and the numbers MOVE with the corpus rather than being a constant.
+    await seedDatedJudgments([{ text: 'たった1件', daysAgo: 90 }])
+    const second = await getPersonaPortrait({ now: () => now })
+    expect(second.nodeCount).toBe(1)
+    expect(second.recentCount).toBe(0)
+  })
+
+  it('an UNREADABLE corpus costs the two counts, not the whole portrait', async () => {
+    await submitPersonaCourse('big5', big5Decisive())
+    // A directory where the additions file should be: readFile throws EISDIR,
+    // which the corpus reader deliberately does NOT swallow (an append must
+    // never overwrite judgments it merely failed to see).
+    await rm(youCorpusAdditionsFile(), { force: true })
+    await mkdir(youCorpusAdditionsFile())
+    await expect(readManualJudgments()).rejects.toThrow()
+
+    const portrait = await getPersonaPortrait()
+    expect(portrait.lines.length).toBeGreaterThan(0) // the courses half still speaks
+    expect(portrait.nodeCount).toBe(0)
+    expect(portrait.recentCount).toBe(0)
+  })
+
+  it('still answers over a corrupt store — with no lines, since nothing is legible', async () => {
+    await writeFile(personaCoursesFile(), '{ not json')
+    const portrait = await getPersonaPortrait()
+    expect(portrait.lines).toEqual([])
+    expect(portrait.takenCount).toBe(0)
+  })
+
+  it('ages every line from the injected clock, so a stale take reads as stale', async () => {
+    const taken = Date.UTC(2026, 0, 1, 12)
+    await submitPersonaCourse('big5', big5Decisive(), { now: () => taken })
+    const portrait = await getPersonaPortrait({ now: () => taken + 30 * DAY_MS })
+    expect(portrait.lines.length).toBeGreaterThan(0)
+    for (const line of portrait.lines) expect(line.ageDays).toBe(30)
   })
 })

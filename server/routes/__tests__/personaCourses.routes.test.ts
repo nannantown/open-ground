@@ -5,8 +5,14 @@ import { join } from 'path'
 import { app } from '../../app'
 import { listPersonaCourses, readPersonaCoursesStore } from '@/lib/server/personaCourses'
 import { readManualJudgments } from '@/lib/server/youCorpus'
-import { personaCoursesFile } from '@/lib/server/paths'
-import type { PersonaCoursesResponse, SubmitPersonaCourseResponse } from '@/lib/types'
+import { personaCoursesFile, youCorpusAdditionsFile } from '@/lib/server/paths'
+import { BIG5_ITEMS, COURSES } from '@/lib/persona/instruments'
+import type {
+  PersonaCourseHistoryResponse,
+  PersonaCoursesResponse,
+  PersonaPortrait,
+  SubmitPersonaCourseResponse,
+} from '@/lib/types'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Persona COURSE routes — the owner-side journey over HTTP: list → submit →
@@ -55,6 +61,31 @@ afterEach(async () => {
 })
 
 const big5Answers = (seed = 0): number[] => Array.from({ length: 25 }, (_, i) => (i + seed) % 5)
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/** A big5 vector that leans EVERY factor hard (4 on a plain item, 0 on a
+ *  reverse-keyed one, read off the instrument itself) so the portrait has
+ *  something decisive to say instead of the 中くらい band it skips. */
+const big5Decisive = (): number[] => BIG5_ITEMS.map(([, reversed]) => (reversed ? 0 : 4))
+
+/** Corpus nodes WITH CHOSEN DATES — appendJudgment stamps `new Date()`, so a
+ *  dated fixture is written straight into the additions file. The assertions
+ *  still read it back through readManualJudgments (what
+ *  GET /api/you-corpus/judgments serves). */
+const seedDatedJudgments = async (entries: { text: string; daysAgo: number }[]) => {
+  const now = Date.now()
+  await writeFile(
+    youCorpusAdditionsFile(),
+    JSON.stringify(
+      entries.map((e, i) => ({
+        id: `seed-${i}`,
+        text: e.text,
+        addedAt: new Date(now - e.daysAgo * DAY_MS).toISOString(),
+      })),
+    ),
+  )
+}
 
 const submit = (id: string, body: unknown) =>
   app.request(`/api/persona/courses/${id}/submit`, {
@@ -190,5 +221,135 @@ describe('POST /api/persona/courses/:id/submit', () => {
     })
     expect(res.status).toBe(403)
     expect(await exists(personaCoursesFile())).toBe(false)
+  })
+})
+
+describe('GET /api/persona/courses/:id/history', () => {
+  const history = async (id: string) => {
+    const res = await app.request(`/api/persona/courses/${id}/history`)
+    return { res, body: (await res.json()) as PersonaCourseHistoryResponse }
+  }
+
+  it('returns BOTH takes newest-first, and the newest is the CURRENT record', async () => {
+    const first = (await (await submit('big5', { answers: big5Answers(0) })).json()) as SubmitPersonaCourseResponse
+    const second = (await (await submit('big5', { answers: big5Answers(2) })).json()) as SubmitPersonaCourseResponse
+
+    const { res, body } = await history('big5')
+    expect(res.status).toBe(200)
+    expect(body.courseId).toBe('big5')
+    expect(body.takes.map((t) => t.takenAt)).toEqual([second.record.takenAt, first.record.takenAt])
+    // The head is the record the tab shows — read back through the production
+    // store reader, not compared against the response to itself.
+    const store = await readPersonaCoursesStore()
+    expect(body.takes[0]).toEqual(store.records.big5)
+    expect(body.takes[0].answers).toEqual(big5Answers(2))
+    expect(body.takes[1].answers).toEqual(big5Answers(0))
+  })
+
+  it('orders THREE takes newest → oldest over the wire (the store holds them the other way)', async () => {
+    const takenAts: string[] = []
+    for (const seed of [0, 1, 2]) {
+      const body = (await (await submit('big5', { answers: big5Answers(seed) })).json()) as SubmitPersonaCourseResponse
+      takenAts.push(body.record.takenAt)
+    }
+    const store = await readPersonaCoursesStore()
+    expect(store.history.big5?.map((h) => h.takenAt)).toEqual([takenAts[0], takenAts[1]])
+
+    const { body } = await history('big5')
+    // Three is the smallest count that can tell a real reversal from a no-op.
+    expect(body.takes.map((t) => t.takenAt)).toEqual([takenAts[2], takenAts[1], takenAts[0]])
+    // …and by CONTENT too, so the order still fails loudly if two takes happen to
+    // land in the same millisecond (the wire has no injectable clock).
+    expect(body.takes.map((t) => t.answers)).toEqual([
+      big5Answers(2),
+      big5Answers(1),
+      big5Answers(0),
+    ])
+  })
+
+  it('a course that exists but was never taken is a 200 with an EMPTY list', async () => {
+    await submit('big5', { answers: big5Answers() })
+    const { res, body } = await history('work')
+    expect(res.status).toBe(200)
+    expect(body).toEqual({ courseId: 'work', takes: [] })
+  })
+
+  it('an unknown course id is a 404', async () => {
+    const res = await app.request('/api/persona/courses/astrology/history')
+    expect(res.status).toBe(404)
+  })
+
+  it('still answers over a CORRUPT store (fail-open, not a 500)', async () => {
+    await writeFile(personaCoursesFile(), 'not json at all')
+    const { res, body } = await history('big5')
+    expect(res.status).toBe(200)
+    expect(body).toEqual({ courseId: 'big5', takes: [] })
+  })
+
+  it('rejects a non-loopback Host (DNS-rebinding gate)', async () => {
+    const res = await app.request('/api/persona/courses/big5/history', {
+      headers: { host: 'evil.example.com' },
+    })
+    expect(res.status).toBe(403)
+  })
+})
+
+describe('GET /api/persona/portrait', () => {
+  const portrait = async () => {
+    const res = await app.request('/api/persona/portrait')
+    return { res, body: (await res.json()) as PersonaPortrait }
+  }
+
+  it('answers with NO lines before anything is taken — and does not invent one', async () => {
+    const { res, body } = await portrait()
+    expect(res.status).toBe(200)
+    expect(body.lines).toEqual([])
+    expect(body.takenCount).toBe(0)
+    expect(body.courseCount).toBe(COURSES.length)
+    expect(body.nodeCount).toBe(0)
+  })
+
+  it('carries composed lines once a course is really scored, each naming its course', async () => {
+    expect((await submit('big5', { answers: big5Decisive() })).status).toBe(200)
+    const { res, body } = await portrait()
+    expect(res.status).toBe(200)
+    expect(body.lines.length).toBeGreaterThan(0)
+    expect(body.takenCount).toBe(1)
+    for (const line of body.lines) {
+      const course = COURSES.find((c) => c.id === line.courseId)
+      expect(course, `line cites an unknown course: ${line.courseId}`).toBeTruthy()
+      // Provenance survives the wire: instrument + the number it came from.
+      expect(line.detail, `no instrument in detail: ${line.detail}`).toContain(course?.name)
+      expect(line.text.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('reports the corpus counts the production reader sees, recent = last 7 days', async () => {
+    await seedDatedJudgments([
+      { text: '40日前の判断', daysAgo: 40 },
+      { text: '9日前の判断', daysAgo: 9 },
+      { text: '1日前の判断', daysAgo: 1 },
+    ])
+    await submit('big5', { answers: big5Decisive() }) // mints 5 more, stamped now
+
+    const judgments = await readManualJudgments()
+    expect(judgments).toHaveLength(8)
+
+    const { body } = await portrait()
+    expect(body.nodeCount).toBe(judgments.length)
+    expect(body.recentCount).toBe(6) // the 1-day-old one + the 5 just minted
+  })
+
+  it('still answers over a CORRUPT store (fail-open, not a 500)', async () => {
+    await writeFile(personaCoursesFile(), 'not json at all')
+    const { res, body } = await portrait()
+    expect(res.status).toBe(200)
+    expect(body.lines).toEqual([])
+    expect(body.takenCount).toBe(0)
+  })
+
+  it('rejects a non-loopback Host (DNS-rebinding gate)', async () => {
+    const res = await app.request('/api/persona/portrait', { headers: { host: 'evil.example.com' } })
+    expect(res.status).toBe(403)
   })
 })

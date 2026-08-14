@@ -9,6 +9,14 @@
 //
 // The sheet renders the SERVER's scored result (PersonaResult) as-is. It does no
 // arithmetic of its own, so what is on screen is what was stored.
+//
+// IT IS ALSO THE READER for a course already taken. The same sheet opens from
+// the rail's 済 entry over a STORED take (PersonaModule fetches
+// GET /api/persona/courses/:id/history), which is why `minted` is optional and
+// why the takes strip exists: re-reading a result must not mint anything, must
+// not re-state what landed in the corpus months ago, and must let the owner
+// walk back through earlier takes of the same instrument. Every date shown here
+// is localized BY THE CALLER — this component formats nothing.
 
 import type { ReactNode } from 'react'
 import { useT } from '@/i18n/I18nContext'
@@ -26,6 +34,14 @@ const Scrim = ({ children }: { children: ReactNode }) => (
   </div>
 )
 
+/** One entry of the takes strip. Both strings are already localized — `label`
+ *  is the compact day the strip prints, `title` the full stamp on hover. */
+export interface PersonaTakeStripEntry {
+  id: string
+  label: string
+  title: string
+}
+
 export interface PersonaResultSheetProps {
   result: PersonaResult
   /** The instrument's one-line subtitle, from the courses API. */
@@ -35,10 +51,22 @@ export interface PersonaResultSheetProps {
   /** How many findings actually reached the corpus (SubmitPersonaCourseResponse
    *  .minted). Fewer than the sheet lists ⇒ the list is a reading, not something
    *  the stand-in has — and the sheet has to say so rather than let the heading
-   *  「ペルソナに入ったもの」 make a claim the corpus cannot back. */
-  minted: number
+   *  「ペルソナに入ったもの」 make a claim the corpus cannot back.
+   *
+   *  UNDEFINED when the sheet is REREADING a stored take: minting happened once,
+   *  when the course was taken, and a later reading of it is in no position to
+   *  say what did or did not land then. Absent ⇒ the sheet says nothing about
+   *  it, rather than guessing in either direction. */
+  minted?: number
   onClose: () => void
   onRetake: () => void
+  /** Every stored take of this course, NEWEST FIRST. Fewer than two ⇒ NO strip
+   *  is drawn at all: a strip of one entry is furniture that says nothing and
+   *  implies there is somewhere else to go. */
+  takes?: PersonaTakeStripEntry[]
+  /** Index into `takes` of the result currently on screen. */
+  currentTake?: number
+  onPickTake?: (index: number) => void
 }
 
 export const PersonaResultSheet = ({
@@ -48,8 +76,12 @@ export const PersonaResultSheet = ({
   minted,
   onClose,
   onRetake,
+  takes,
+  currentTake = 0,
+  onPickTake,
 }: PersonaResultSheetProps) => {
   const { t } = useT()
+  const showStrip = !!takes && takes.length > 1 && !!onPickTake
 
   return (
     <Scrim>
@@ -68,6 +100,32 @@ export const PersonaResultSheet = ({
             {t('persona.result.source', { source: result.source })}
           </p>
         </header>
+
+        {/* Every take of this instrument, newest first. A result is only worth
+         *  anything against the last one — a person who took the same course in
+         *  spring and again now is looking for the DIFFERENCE, and hiding the
+         *  earlier sheets makes the newest one read as a fixed fact. */}
+        {showStrip && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="label-cap text-ink-faint">{t('persona.result.takes')}</span>
+            {takes!.map((take, i) => (
+              <button
+                key={`${i}-${take.id}`}
+                type="button"
+                title={take.title}
+                aria-current={i === currentTake ? 'true' : undefined}
+                onClick={() => onPickTake!(i)}
+                className={`rounded-[2px] border px-2 py-0.5 text-meta tabular-nums transition-colors ${
+                  i === currentTake
+                    ? 'border-accent bg-accent/10 text-ink'
+                    : 'border-line text-ink-muted hover:border-accent hover:text-ink'
+                }`}
+              >
+                {take.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         <p className="border-l-2 border-accent bg-accent/5 px-4 py-3 text-read leading-relaxed text-ink">
           {result.badge && (
@@ -135,7 +193,10 @@ export const PersonaResultSheet = ({
               </li>
             ))}
           </ul>
-          {minted < result.findings.length && (
+          {/* Only the sheet that JUST minted is entitled to talk about minting
+           *  (see `minted`) — an old take says nothing rather than a stale
+           *  warning about a write that finished months ago. */}
+          {minted !== undefined && minted < result.findings.length && (
             <p className="text-meta leading-relaxed text-ochre-deep">
               {t('persona.result.mintedPartial')}
             </p>

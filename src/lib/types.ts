@@ -3608,3 +3608,31 @@ export interface SubmitPersonaCourseResponse {
   record: PersonaCourseRecord
   minted: number
 }
+
+/** One composed line of the persona portrait — a glance-level statement that
+ *  always carries the instrument and number it came from. */
+export interface PersonaPortraitLine {
+  text: string
+  detail: string
+  courseId: PersonaCourseId
+  takenAt: string
+  /** Age of the evidence in days (absent when the stamp is unparseable). */
+  ageDays?: number
+}
+
+/** GET /api/persona/portrait — the "who am I, roughly" digest + the counts the
+ *  screen shows beside it. `lines` is EMPTY when nothing is evidenced yet. */
+export interface PersonaPortrait {
+  lines: PersonaPortraitLine[]
+  nodeCount: number
+  recentCount?: number
+  takenCount: number
+  courseCount: number
+}
+
+/** GET /api/persona/courses/:id/history — every stored take of one course,
+ *  NEWEST FIRST (the last result is the first entry). */
+export interface PersonaCourseHistoryResponse {
+  courseId: PersonaCourseId
+  takes: PersonaCourseRecord[]
+}

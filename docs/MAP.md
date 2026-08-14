@@ -591,8 +591,14 @@
   `instruments.test.ts` で変異赤済み)。保存と corpus への流し込みは
   `src/lib/server/personaCourses.ts`(`~/.openground/persona-courses.json` 0600・
   retake は history に10件まで退避)、口は `server/routes/persona.ts`
-  (`GET /api/persona/courses` / `POST /api/persona/courses/:id/submit`)。
+  (`GET /api/persona/courses` / `POST /api/persona/courses/:id/submit` /
+  `GET /api/persona/courses/:id/history` / `GET /api/persona/portrait`)。
   **所見は appendJudgment 経由でしか corpus に入らない**(第二の書き手を作らない)。
+  過去の受験は `getPersonaCourseHistory`(store は古→新、返すのは**新しい順** —
+  反転は1か所だけ)。人物像は `getPersonaPortrait` が corpus 件数(直近7日ぶんも)を
+  数えて純粋な `src/lib/persona/portrait.ts` の `composePortrait` に渡すだけで、
+  **サーバは1行も書かない**(証拠が無ければ `lines: []` が正解。store/corpus が
+  読めなくても 200 で返す fail-open)。
   ⚠ 名称は正典: MBTI® / CliftonStrengths® は商標かつ設問非公開なので**再現も名乗りもしない** —
   各コースの `source` 行(結果シートに逐語表示)がその約束で、番人が消えないよう固定している。
 - you-corpus: `server/routes/youCorpus.ts` + `src/lib/server/youCorpus.ts`

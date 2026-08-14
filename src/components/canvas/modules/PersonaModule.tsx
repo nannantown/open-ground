@@ -17,6 +17,16 @@
 //     the answer vector and renders what comes back.
 //   • correcting a note — click any lit point, then 直す.
 //
+// TWO READINGS SIT ON TOP OF THAT CORPUS, and neither one writes:
+//   • the PORTRAIT (top left, GET /api/persona/portrait) — the few composed
+//     lines that answer 「で、私はどういう人?」 without reading every node. It is
+//     composed from scored results server-side (src/lib/persona/portrait.ts),
+//     never generated, so an empty `lines` is shown as an INVITATION rather than
+//     padded with a sentence that would be true of anyone.
+//   • a course's PAST RESULT (rail 済 entry → GET /api/persona/courses/:id/
+//     history) — re-opened in the very same PersonaResultSheet, read-only, with
+//     a date strip when the instrument has been taken more than once.
+//
 // CORRECTION = APPEND. There is no edit and no delete: correcting an earlier
 // note writes a NEW note that carries the old one in its `context` (and its id
 // in `correctsId`). History is never destroyed, and the overseer — which reads
@@ -54,12 +64,16 @@ import {
 } from './PersonaFigure'
 import { PersonaResultSheet } from './PersonaResultSheet'
 import { courseById, itemAt, type PersonaCourse } from '@/lib/persona/instruments'
+import { portraitAgeLabel } from '@/lib/persona/portrait'
 import type {
   ManualJudgment,
+  PersonaCourseHistoryResponse,
+  PersonaCourseId,
+  PersonaCourseRecord,
   PersonaCoursesResponse,
   PersonaInterviewResponse,
+  PersonaPortrait,
   PersonaQuestion,
-  PersonaResult,
   SubmitPersonaCourseResponse,
   YouCorpusAppendResponse,
   YouCorpusJudgmentsResponse,
@@ -123,6 +137,24 @@ export const courseRailState = (
 interface CourseRun {
   course: PersonaCourse
   answers: number[]
+}
+
+/** What the result sheet is showing. ONE shape for both ways in, because they
+ *  are the same sheet: a course that just finished is a list of exactly one
+ *  take (so the date strip is absent by construction), and a 済 entry re-opened
+ *  from the rail is the stored list, newest first, starting at index 0 — the
+ *  LAST result, which is what 「結果を見る」 promises.
+ *
+ *  `minted` is the one thing the two do not share: only the take that was just
+ *  submitted knows how much of it reached the corpus. `null` = re-read. */
+interface SheetState {
+  courseId: PersonaCourseId
+  /** The instrument's subtitle, from the courses API. */
+  sub: string
+  /** NEWEST FIRST. */
+  takes: PersonaCourseRecord[]
+  index: number
+  minted: number | null
 }
 
 /** A control that sits directly on the dark stage rather than on a card, so it
@@ -194,15 +226,27 @@ export const PersonaModule = () => {
   const [run, setRun] = useState<CourseRun | null>(null)
   const [courseSending, setCourseSending] = useState(false)
   const [courseError, setCourseError] = useState(false)
-  const [sheet, setSheet] = useState<
-    { result: PersonaResult; sub: string; takenAt: string; minted: number } | null
-  >(null)
+  const [sheet, setSheet] = useState<SheetState | null>(null)
+  // Which 済 entry is fetching its history right now, and whether that fetch
+  // failed. Both are about ONE row, so they are keyed by course id / shown
+  // beside the rail rather than blanking the screen.
+  const [openingCourse, setOpeningCourse] = useState<string | null>(null)
+  const [historyError, setHistoryError] = useState(false)
+
+  // The portrait (top left). `null` means "not read", NOT "nothing to say" —
+  // the difference matters, because the empty portrait is an invitation and a
+  // failed read is in no position to invite anyone anywhere.
+  const [portrait, setPortrait] = useState<PersonaPortrait | null>(null)
 
   const [selected, setSelected] = useState<PersonaNode | null>(null)
   const [spark, setSpark] = useState<PersonaSpark | null>(null)
   const [askPulse, setAskPulse] = useState(false)
 
   const sparkSeq = useRef(0)
+  // Which history read is the CURRENT one. Two 済 rows clicked in quick
+  // succession are two reads in flight, and the slower one must not drop its
+  // course's result on top of the one the owner actually asked for last.
+  const historySeq = useRef(0)
   const textRef = useRef<HTMLTextAreaElement>(null)
   const alive = useRef(true)
 
@@ -265,15 +309,40 @@ export const PersonaModule = () => {
     }
   }, [])
 
+  // Its own loader, like the question and the courses: the portrait is one part
+  // of this screen, and a portrait endpoint that is not there yet (or fails)
+  // must cost the owner nothing else on it.
+  const loadPortrait = useCallback(async () => {
+    try {
+      const res = await fetch('/api/persona/portrait', { cache: 'no-store' })
+      if (!res.ok) throw new Error('portrait load failed')
+      const body = (await res.json()) as Partial<PersonaPortrait> | null
+      if (!alive.current) return
+      // SHAPE-CHECK BEFORE STORING. The render path treats `portrait` as read
+      // and reaches straight into `lines`, so a body without it is not a
+      // portrait — an older server, an error page, a proxy's JSON. Storing it
+      // anyway crashed the whole panel (measured 2026-08-14 via App.render's
+      // gate test, whose fetch mock answers a bare object). "Not a portrait"
+      // and "never read" are the same state, and this is where they merge.
+      if (!body || !Array.isArray(body.lines)) throw new Error('portrait shape')
+      setPortrait(body as PersonaPortrait)
+    } catch {
+      // Deliberately silent AND deliberately non-destructive: whatever was read
+      // last stays on screen. Blanking it on a refresh failure would delete a
+      // true reading because a later request timed out.
+    }
+  }, [])
+
   useEffect(() => {
     alive.current = true
     void load()
     void loadQuestion()
     void loadCourses()
+    void loadPortrait()
     return () => {
       alive.current = false
     }
-  }, [load, loadQuestion, loadCourses])
+  }, [load, loadQuestion, loadCourses, loadPortrait])
 
   const nodes = useMemo(() => buildPersonaNodes(judgments), [judgments])
   const zoneLabel = useCallback((zone: PersonaZone) => t(`persona.zone.${zone}`), [t])
@@ -359,7 +428,8 @@ export const PersonaModule = () => {
       // rule the figure seats it by — so the point that lights up is the note,
       // not a decoration next to it.
       if (body.judgment) fireSpark(zoneForJudgment(body.judgment), 1, 'node')
-      await load()
+      // The portrait counts what the stand-in knows, so a new note moves it too.
+      await Promise.all([load(), loadPortrait()])
     } catch {
       if (alive.current) setSubmitError(true)
     } finally {
@@ -398,7 +468,7 @@ export const PersonaModule = () => {
       if (asked && !body.corpusStale) fireSpark(asked, 1, 'node')
       // The answer just became a note — refresh so the owner sees where it
       // landed instead of having to take it on faith.
-      await load()
+      await Promise.all([load(), loadPortrait()])
     } catch {
       // KEEP the draft: a failed write must never cost the owner the words they
       // just typed.
@@ -445,10 +515,15 @@ export const PersonaModule = () => {
         const body = (await res.json()) as SubmitPersonaCourseResponse
         if (!alive.current) return
         setRun(null)
+        // A list of ONE: the sheet that opens on finishing is about the take
+        // that just happened, so it carries no date strip. The past takes are a
+        // deliberate click away (the rail's 済 entry), not a wall the owner has
+        // to read past to see the result they just earned.
         setSheet({
-          result: body.record.result,
+          courseId: course.id,
           sub: courses.find((c) => c.id === course.id)?.sub ?? course.sub,
-          takenAt: formatWhen(body.record.takenAt, lang) ?? body.record.takenAt,
+          takes: [body.record],
+          index: 0,
           minted: body.minted,
         })
         // CONSOLIDATION: the dim answer dots stop being dots (setRun(null)
@@ -457,7 +532,9 @@ export const PersonaModule = () => {
         // shows five findings while the corpus received none must not draw five
         // new points on the body.
         fireSpark(course.zone, body.minted, 'node')
-        await Promise.all([load(), loadCourses()])
+        // The portrait is composed FROM the results, so a finished course is
+        // exactly when it changes — re-read it in the same breath.
+        await Promise.all([load(), loadCourses(), loadPortrait()])
       } catch {
         // The answers are KEPT (the run is untouched), so the owner can send
         // the same vector again instead of retaking 25 questions.
@@ -466,7 +543,40 @@ export const PersonaModule = () => {
         if (alive.current) setCourseSending(false)
       }
     },
-    [courses, lang, load, loadCourses, fireSpark],
+    [courses, load, loadCourses, loadPortrait, fireSpark],
+  )
+
+  /** Re-open a finished course's LAST result, read-only, in the same sheet the
+   *  course itself ends on. The history is fetched HERE and only on demand —
+   *  the rail is on screen from the first paint, and pre-loading four courses'
+   *  every take to render four one-line entries would be the wrong trade. */
+  const openCourseResult = useCallback(
+    async (course: { id: PersonaCourseId; sub: string }) => {
+      const seq = ++historySeq.current
+      setOpeningCourse(course.id)
+      setHistoryError(false)
+      try {
+        const res = await fetch(`/api/persona/courses/${course.id}/history`, { cache: 'no-store' })
+        if (!res.ok) throw new Error('history load failed')
+        const body = (await res.json()) as PersonaCourseHistoryResponse
+        if (!alive.current || historySeq.current !== seq) return
+        const takes = body.takes ?? []
+        // The rail said 済, and the store has nothing. Opening an empty sheet
+        // would be the version that pretends; say it could not be opened.
+        if (takes.length === 0) {
+          setHistoryError(true)
+          return
+        }
+        setCourseError(false)
+        // index 0 = newest (the API's contract) = the LAST result.
+        setSheet({ courseId: course.id, sub: course.sub, takes, index: 0, minted: null })
+      } catch {
+        if (alive.current && historySeq.current === seq) setHistoryError(true)
+      } finally {
+        if (alive.current && historySeq.current === seq) setOpeningCourse(null)
+      }
+    },
+    [],
   )
 
   const startCourse = (id: string) => {
@@ -474,6 +584,7 @@ export const PersonaModule = () => {
     if (!course) return
     setSheet(null)
     setCourseError(false)
+    setHistoryError(false)
     setRun({ course, answers: [] })
   }
 
@@ -492,10 +603,14 @@ export const PersonaModule = () => {
     if (answers.length >= run.course.itemCount) void sendCourse(run.course, answers)
   }
 
+  // From the sheet — including a sheet opened over a PAST take. It starts the
+  // instrument at item 1 with an empty answer vector; nothing of the take being
+  // read is carried forward, because a re-take is a new observation.
   const retakeCourse = () => {
     if (!sheet) return
-    const course = courseById(sheet.result.courseId)
+    const course = courseById(sheet.courseId)
     setSheet(null)
+    setHistoryError(false)
     if (course) setRun({ course, answers: [] })
   }
 
@@ -513,6 +628,42 @@ export const PersonaModule = () => {
   const showEmptyInvite = !loading && !loadError && nodes.length === 0
 
   const item = run ? itemAt(run.course, run.answers.length) : null
+
+  // What the sheet is showing, and the strip it can walk. Dates are localized
+  // HERE — the sheet formats nothing (see its header comment).
+  const shownTake = sheet ? sheet.takes[sheet.index] : null
+  const takeStrip = sheet
+    ? sheet.takes.map((take) => ({
+        id: take.takenAt,
+        label: formatDay(take.takenAt, lang) ?? take.takenAt,
+        title: formatWhen(take.takenAt, lang) ?? take.takenAt,
+      }))
+    : []
+
+  // The portrait's counts, in the same plain voice as the rest of the screen.
+  // `recentCount` is optional on the wire, so the sentence itself changes rather
+  // than printing "0 this week" over a server that simply did not count.
+  const portraitCounts = portrait
+    ? portrait.recentCount === undefined
+      ? t('persona.portrait.counts', {
+          nodes: portrait.nodeCount,
+          taken: portrait.takenCount,
+          total: portrait.courseCount,
+        })
+      : t('persona.portrait.countsRecent', {
+          nodes: portrait.nodeCount,
+          recent: portrait.recentCount,
+          taken: portrait.takenCount,
+          total: portrait.courseCount,
+        })
+    : null
+  // Shown when the portrait was READ and has nothing evidenced to say — except
+  // on a first run, where the figure's own invitation is already saying it in
+  // the middle of the screen and a second copy in the corner is just noise.
+  const showPortraitInvite = !!portrait && portrait.lines.length === 0 && !showEmptyInvite
+  // A portrait that was never read renders NOTHING — no lines, no invitation,
+  // no counts. Same rule as the figure's empty state above.
+  const showPortrait = !!portrait && (portrait.lines.length > 0 || showPortraitInvite)
 
   if (loading) {
     return (
@@ -542,6 +693,54 @@ export const PersonaModule = () => {
           </span>
           <StageButton onClick={() => openComposer(null)}>{t('persona.add.open')}</StageButton>
         </div>
+
+        {/* ── the portrait: 「で、私はどういう人?」, answered at a glance ──
+         *  Quiet on purpose. It sits under the mark because it is the first
+         *  thing worth reading and the last thing that should shout: the figure
+         *  is the subject of this screen, and a five-line block in a heavy
+         *  weight would compete with it. Its width is capped by this column
+         *  (max-w-[min(360px,60%)] on the container), and it is hidden below
+         *  `sm` — the screen is full-bleed, and on a narrow window these lines
+         *  would sit on the figure's head rather than beside it. */}
+        {showPortrait && portrait && (
+          <section
+            aria-label={t('persona.portrait.label')}
+            className="hidden flex-col gap-1.5 sm:flex"
+          >
+            {showPortraitInvite ? (
+              // NEVER a composed sentence here: with no evidence there is
+              // nothing true to say about who the owner is, so this asks
+              // instead of guessing.
+              <p className="text-meta leading-relaxed text-ink-onDeep/60">
+                {t('persona.portrait.empty')}
+              </p>
+            ) : (
+              <ul className="flex flex-col gap-2">
+                {portrait.lines.map((line) => (
+                  <li key={`${line.courseId}|${line.text}`} className="flex flex-col gap-0.5">
+                    <span className="text-ui leading-relaxed text-ink-onDeep/85">{line.text}</span>
+                    {/* Provenance, always VISIBLE and always second: which
+                     *  instrument said it and how old that is. A hover-only
+                     *  version would be unreachable by touch and keyboard, and
+                     *  a line whose evidence you cannot see is a horoscope.
+                     *  The age wording comes from portraitAgeLabel — one
+                     *  vocabulary for staleness, never a second one here.
+                     *  `meta`, not `micro`: this line carries 和文 phrases, and
+                     *  13px is where the scale says 和文 stops being decoration
+                     *  (tailwind.config.ts). It recedes by opacity instead. */}
+                    <span className="text-meta leading-relaxed text-ink-onDeep/40">
+                      {[line.detail, portraitAgeLabel(line.ageDays)].filter(Boolean).join(' ・ ')}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {portraitCounts && (
+              <p className="text-meta leading-relaxed text-ink-onDeep/45">{portraitCounts}</p>
+            )}
+          </section>
+        )}
+
         {status && (
           <p className="text-meta leading-relaxed text-ink-onDeep/45">
             {`${t('persona.meta.memory')} ${countLabel('persona.meta.count', status.memoryCount)} ・ ${t('persona.meta.manual')} ${countLabel('persona.meta.count', status.manualCount)}`}
@@ -700,6 +899,62 @@ export const PersonaModule = () => {
           <div className="flex max-w-[62%] flex-wrap gap-2 sm:max-w-none sm:flex-col sm:items-start">
             {courses.map((c) => {
               const state = courseRailState(c, run?.course.id ?? null)
+              // `moss-text` is a card colour and flips with the theme, so the
+              // "already taken" state is carried by the BORDER and by
+              // brightness in the line — both readable on a stage that stays
+              // dark in either theme.
+              const metaLine =
+                state === 'running'
+                  ? t('persona.course.state.running', {
+                      index: (run?.answers.length ?? 0) + 1,
+                      total: c.itemCount,
+                    })
+                  : state === 'done'
+                    ? openingCourse === c.id
+                      ? t('persona.course.opening')
+                      : t('persona.course.state.done', {
+                          date: formatDay(c.lastTakenAt, lang) ?? '',
+                        })
+                    : t('persona.course.state.new', {
+                        count: c.itemCount,
+                        zone: zoneLabel(asZone(c.zone)),
+                      })
+
+              // A FINISHED course carries two different offers, and folding
+              // them into one row is what made the result unreachable: the row
+              // itself reads it back, and a narrow 「もう一度」 beside it starts
+              // a fresh take without going through the sheet first. Two real
+              // buttons rather than one button with a menu — the whole rail is
+              // four rows, and a person who wants to re-take should not have to
+              // read their old result to get there.
+              if (state === 'done') {
+                return (
+                  <div
+                    key={c.id}
+                    className="flex min-w-[210px] items-stretch overflow-hidden rounded-[3px] border border-moss/40"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => void openCourseResult(c)}
+                      className="flex-1 px-3 py-2 text-left transition-colors hover:bg-accent/10"
+                    >
+                      <span className="block text-ui text-ink-onDeep/80">{c.name}</span>
+                      <span className="mt-0.5 block text-meta text-ink-onDeep/65">{metaLine}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => startCourse(c.id)}
+                      // Named with the course, because four rows of a bare
+                      // 「もう一度」 tell a screen reader nothing about which.
+                      aria-label={t('persona.course.retakeAria', { name: c.name })}
+                      className="whitespace-nowrap border-l border-moss/40 px-2.5 text-meta text-ink-onDeep/60 transition-colors hover:bg-accent/10 hover:text-ink-onDeep"
+                    >
+                      {t('persona.course.retake')}
+                    </button>
+                  </div>
+                )
+              }
+
               return (
                 <button
                   key={c.id}
@@ -708,36 +963,19 @@ export const PersonaModule = () => {
                   className={`min-w-[210px] rounded-[3px] border px-3 py-2 text-left transition-colors ${
                     state === 'running'
                       ? 'border-accent bg-accent/10 text-ink-onDeep'
-                      : state === 'done'
-                        ? 'border-moss/40 text-ink-onDeep/80 hover:border-accent hover:text-ink-onDeep'
-                        : 'border-line text-ink-onDeep/80 hover:border-accent hover:text-ink-onDeep'
+                      : 'border-line text-ink-onDeep/80 hover:border-accent hover:text-ink-onDeep'
                   }`}
                 >
                   <span className="block text-ui">{c.name}</span>
-                  <span
-                    // `moss-text` is a card colour and flips with the theme, so
-                    // the "already taken" state is carried by the BORDER here
-                    // and by brightness in the line — both readable on a stage
-                    // that stays dark in either theme.
-                    className={`mt-0.5 block text-meta ${state === 'done' ? 'text-ink-onDeep/65' : 'text-ink-onDeep/50'}`}
-                  >
-                    {state === 'running'
-                      ? t('persona.course.state.running', {
-                          index: (run?.answers.length ?? 0) + 1,
-                          total: c.itemCount,
-                        })
-                      : state === 'done'
-                        ? t('persona.course.state.done', {
-                            date: formatDay(c.lastTakenAt, lang) ?? '',
-                          })
-                        : t('persona.course.state.new', {
-                            count: c.itemCount,
-                            zone: zoneLabel(asZone(c.zone)),
-                          })}
-                  </span>
+                  <span className="mt-0.5 block text-meta text-ink-onDeep/50">{metaLine}</span>
                 </button>
               )
             })}
+            {historyError && (
+              <p className="max-w-[210px] text-meta leading-relaxed text-ink-onDeep/70">
+                {t('persona.course.historyFailed')}
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -923,12 +1161,17 @@ export const PersonaModule = () => {
         )}
       </section>
 
-      {sheet && (
+      {sheet && shownTake && (
         <PersonaResultSheet
-          result={sheet.result}
+          result={shownTake.result}
           sub={sheet.sub}
-          takenAt={sheet.takenAt}
-          minted={sheet.minted}
+          takenAt={formatWhen(shownTake.takenAt, lang) ?? shownTake.takenAt}
+          // Absent on a re-read: only the take that was just submitted knows
+          // what reached the corpus (see the prop's doc comment).
+          {...(sheet.minted === null ? {} : { minted: sheet.minted })}
+          takes={takeStrip}
+          currentTake={sheet.index}
+          onPickTake={(index) => setSheet({ ...sheet, index })}
           onClose={() => setSheet(null)}
           onRetake={retakeCourse}
         />

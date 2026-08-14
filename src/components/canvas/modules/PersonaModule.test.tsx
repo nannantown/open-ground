@@ -19,8 +19,16 @@ import {
   courseById,
   scoreCourse,
 } from '@/lib/persona/instruments'
+import { portraitAgeLabel } from '@/lib/persona/portrait'
 import { messages } from '@/i18n/messages'
-import type { ManualJudgment, PersonaQuestion, YouCorpusStatus } from '@/lib/types'
+import type {
+  ManualJudgment,
+  PersonaCourseRecord,
+  PersonaPortrait,
+  PersonaPortraitLine,
+  PersonaQuestion,
+  YouCorpusStatus,
+} from '@/lib/types'
 
 // The Persona SCREEN — UI-side contract only: it reads the corpus status, the
 // hand-written notes (drawn as the figure) and the course catalogue, and writes
@@ -121,11 +129,49 @@ let questionPayload: PersonaQuestion | null
 let questionFails: boolean
 let resolveFails: boolean
 let answerCorpusStale: boolean
+/** One composed portrait line as the server sends it. Japanese, because the
+ *  COMPOSER writes Japanese (src/lib/persona/portrait.ts) — the screen frames
+ *  these lines, it does not write them. */
+const portraitLine = (over: Partial<PersonaPortraitLine> = {}): PersonaPortraitLine => ({
+  text: '正確さを、いちばん上に置く人。',
+  detail: '価値観の順位 ・ 1位「正確さ」',
+  courseId: 'values',
+  takenAt: '2026-08-01T09:00:00.000Z',
+  ageDays: 13,
+  ...over,
+})
+
+const portraitOf = (over: Partial<PersonaPortrait> = {}): PersonaPortrait => ({
+  lines: [portraitLine()],
+  nodeCount: 41,
+  takenCount: 2,
+  courseCount: 4,
+  ...over,
+})
+
+/** A stored take, scored by the REAL scorer so a headline is a headline the
+ *  product can actually produce. */
+const take = (id: string, answers: number[], takenAt: string): PersonaCourseRecord => ({
+  result: scoreCourse(courseById(id)!, answers),
+  takenAt,
+  answers,
+})
+
+/** The day a strip entry prints, formatted the way any en-US surface would —
+ *  NOT by importing the component's own formatter, which would agree with it by
+ *  construction. */
+const dayLabel = (iso: string) =>
+  new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+
 let courses: ReturnType<typeof coursesPayload>
 let coursesFail: boolean
 let submitFails: boolean
 /** null ⇒ "every finding landed"; a number pins a partial mint. */
 let mintedOverride: number | null
+/** null ⇒ the portrait endpoint fails (which is also "not built yet"). */
+let portraitPayload: PersonaPortrait | null
+let historyPayload: PersonaCourseRecord[]
+let historyFails: boolean
 
 beforeEach(() => {
   // jsdom ships no 2D canvas context. The figure already handles that (it draws
@@ -146,6 +192,12 @@ beforeEach(() => {
   coursesFail = false
   submitFails = false
   mintedOverride = null
+  // Default OFF for both new reads: the screen must survive a server that does
+  // not serve them yet, and every test above this line was written before they
+  // existed.
+  portraitPayload = null
+  historyPayload = []
+  historyFails = false
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -199,6 +251,20 @@ beforeEach(() => {
           { status: 200 },
         )
       }
+      if (url === '/api/persona/portrait') {
+        if (!portraitPayload) return new Response('{}', { status: 500 })
+        return new Response(JSON.stringify(portraitPayload), { status: 200 })
+      }
+      // ABOVE the submit branch: `/api/persona/courses/big5/history` starts with
+      // the same prefix, and being scored as an answer vector is not a failure
+      // mode worth discovering in the product.
+      if (url.startsWith('/api/persona/courses/') && url.endsWith('/history')) {
+        if (historyFails) return new Response('{}', { status: 500 })
+        return new Response(
+          JSON.stringify({ courseId: url.split('/')[4], takes: historyPayload }),
+          { status: 200 },
+        )
+      }
       if (url.startsWith('/api/persona/courses/')) {
         const id = url.split('/')[4]
         const body = JSON.parse(String(init?.body ?? '{}')) as { answers: number[] }
@@ -248,6 +314,21 @@ const typeNote = (text: string) => {
 }
 
 const rail = (name: string) => screen.getByRole('button', { name: new RegExp(name) })
+
+/** A course row in the rail, found by the course's own name. On a 済 row this
+ *  is the READ-IT-BACK button (the retake button beside it carries an
+ *  aria-label, not text). */
+const railRow = (name: string) => screen.getByText(name).closest('button') as HTMLButtonElement
+
+/** The 済 row's second button. Queried BY ITS ACCESSIBLE NAME, which is how the
+ *  test pins that the name carries the course — four rows of a bare 「もう一度」
+ *  are four identical buttons to a screen reader. */
+const retakeButton = (name: string) =>
+  screen.getByRole('button', { name: `persona.course.retakeAria:${JSON.stringify({ name })}` })
+
+/** The portrait block: a named region, so it is reachable as one thing both
+ *  here and by assistive tech. */
+const portraitBlock = () => screen.getByRole('region', { name: 'persona.portrait.label' })
 
 describe('PersonaModule — reading what the stand-in runs on', () => {
   it('says how much is in there: what it remembered and what you wrote', async () => {
@@ -786,6 +867,270 @@ describe('PersonaModule — the courses', () => {
 
     expect(screen.getByText(question().textEn)).toBeTruthy()
     expect(posts.filter((p) => String(p.url ?? '').includes('/submit'))).toHaveLength(0)
+  })
+})
+
+// ─── THE PORTRAIT ───────────────────────────────────────────────────────────
+//
+// 「で、私はどういう人?」 answered at a glance. The screen composes NOTHING: it
+// renders the lines the server composed from scored results, with the evidence
+// under each one. The failure this suite exists to catch is the one that would
+// make the whole feature a horoscope — a sentence on screen that no course
+// backs.
+describe('PersonaModule — the portrait', () => {
+  it('a 200 that is NOT a portrait renders nothing — and takes nothing else down', async () => {
+    // Measured 2026-08-14: the loader stored any 200 body, and the render path
+    // reaches straight into `lines`, so a bare `{}` (an older server, an error
+    // page, a proxy's JSON) threw inside render and blanked the whole panel —
+    // App.render's gate test caught it, three suites away from the cause.
+    // "Not a portrait" and "never read" have to be the same state.
+    portraitPayload = { nodeCount: 3, takenCount: 1, courseCount: 4 } as unknown as PersonaPortrait
+    render(<PersonaModule />)
+
+    // The rest of the screen is alive…
+    expect(await screen.findByText('persona.tabLabel')).toBeTruthy()
+    // …and the portrait says nothing at all — not even its invitation, which
+    // would be a claim that the portrait WAS read and is empty.
+    expect(screen.queryByText('persona.portrait.invite')).toBeNull()
+    expect(screen.queryByRole('region', { name: 'persona.portrait.heading' })).toBeNull()
+  })
+
+  it('renders the composed lines, each with the evidence under it', async () => {
+    const values = portraitLine()
+    const big5 = portraitLine({
+      text: '新しい考え方に向かう人。',
+      detail: '性格の5因子 ・ 開放性 78%(やや高め)',
+      courseId: 'big5',
+      ageDays: 0,
+    })
+    portraitPayload = portraitOf({ lines: [values, big5] })
+    render(<PersonaModule />)
+
+    expect(await screen.findByText(values.text)).toBeTruthy()
+    expect(screen.getByText(big5.text)).toBeTruthy()
+    // Provenance is VISIBLE, not a tooltip — and its age wording is
+    // portraitAgeLabel's, never a second vocabulary invented here.
+    expect(screen.getByText(`${values.detail} ・ ${portraitAgeLabel(13)}`)).toBeTruthy()
+    expect(screen.getByText(`${big5.detail} ・ ${portraitAgeLabel(0)}`)).toBeTruthy()
+  })
+
+  it('prints the counts the API sent, including the recent one when it has it', async () => {
+    portraitPayload = portraitOf({ nodeCount: 41, recentCount: 3, takenCount: 2, courseCount: 4 })
+    render(<PersonaModule />)
+
+    await screen.findByText(portraitLine().text)
+    expect(portraitBlock().textContent).toContain(
+      'persona.portrait.countsRecent:{"nodes":41,"recent":3,"taken":2,"total":4}',
+    )
+  })
+
+  // `recentCount` is optional on the wire. Printing "0 this week" over a server
+  // that simply did not count it is a different claim from the one it made.
+  it('drops the recent clause when the API did not send one', async () => {
+    portraitPayload = portraitOf({ nodeCount: 7, takenCount: 1, courseCount: 4 })
+    render(<PersonaModule />)
+
+    await screen.findByText(portraitLine().text)
+    expect(portraitBlock().textContent).toContain(
+      'persona.portrait.counts:{"nodes":7,"taken":1,"total":4}',
+    )
+    expect(portraitBlock().textContent).not.toContain('countsRecent')
+  })
+
+  // THE ONE THAT MATTERS. With no evidence there is nothing true to say about
+  // who the owner is, so the block asks — and says nothing else.
+  it('invites a course instead of composing a sentence when nothing is evidenced', async () => {
+    portraitPayload = portraitOf({ lines: [], nodeCount: 3, takenCount: 0, courseCount: 4 })
+    render(<PersonaModule />)
+
+    await screen.findByText('persona.portrait.empty')
+    // Exactly the invitation and the counts — no line, no headline, no
+    // "you are a balanced person" filler smuggled in beside them.
+    expect(portraitBlock().textContent).toBe(
+      'persona.portrait.empty' + 'persona.portrait.counts:{"nodes":3,"taken":0,"total":4}',
+    )
+    expect(portraitBlock().querySelectorAll('li')).toHaveLength(0)
+  })
+
+  // Same rule as the figure's empty state: "nothing to say yet" is a CLAIM, and
+  // a read that failed is in no position to make it — nor to invite anyone
+  // anywhere on the strength of it.
+  it('shows no portrait at all when the portrait could not be read', async () => {
+    portraitPayload = null
+    render(<PersonaModule />)
+
+    await screen.findByText('persona.course.railHeading')
+    expect(screen.queryByRole('region', { name: 'persona.portrait.label' })).toBeNull()
+    expect(screen.queryByText('persona.portrait.empty')).toBeNull()
+  })
+
+  it('re-reads the portrait when a course finishes, so it is never a version behind', async () => {
+    portraitPayload = portraitOf({ lines: [], nodeCount: 3, takenCount: 0, courseCount: 4 })
+    render(<PersonaModule />)
+    await screen.findByText('persona.portrait.empty')
+
+    // The course the owner is about to take is the evidence for the new line.
+    portraitPayload = portraitOf({
+      lines: [portraitLine({ text: '型は INFP — 内向、感情。', courseId: 'type' })],
+      nodeCount: 8,
+      takenCount: 1,
+      courseCount: 4,
+    })
+    const big5 = COURSES[0]
+    fireEvent.click(rail(big5.name))
+    for (let i = 0; i < big5.itemCount; i++) {
+      fireEvent.click(screen.getByRole('button', { name: LIKERT_AGREE[0] }))
+    }
+
+    expect(await screen.findByText('型は INFP — 内向、感情。')).toBeTruthy()
+    expect(screen.queryByText('persona.portrait.empty')).toBeNull()
+  })
+})
+
+// ─── RE-OPENING A FINISHED COURSE ───────────────────────────────────────────
+//
+// A result you can only see once is a result you did not get. The rail's 済
+// entry reads the last one back in the same sheet the course ends on, and the
+// re-read writes NOTHING — no submit, no mint, no re-score.
+describe('PersonaModule — re-opening a finished course', () => {
+  const NEWER = '2026-08-12T09:00:00.000Z'
+  const OLDER = '2026-06-02T09:00:00.000Z'
+
+  /** big5, taken twice with opposite answers ⇒ two genuinely different sheets. */
+  const twoTakes = () => {
+    const n = COURSES[0].itemCount
+    return [take('big5', Array(n).fill(4), NEWER), take('big5', Array(n).fill(0), OLDER)]
+  }
+
+  const doneRail = (lastTakenAt = NEWER) =>
+    coursesPayload({ big5: { lastTakenAt, headline: 'なにか' } })
+
+  it('opens the LAST result, and writes nothing to do it', async () => {
+    const takes = twoTakes()
+    courses = doneRail()
+    historyPayload = takes
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(railRow(COURSES[0].name))
+
+    expect(await screen.findByText('persona.result.kicker')).toBeTruthy()
+    // NEWEST FIRST is the API's contract, and the newest is what 「結果を見る」
+    // promises.
+    expect(screen.getByText(takes[0].result.headline)).toBeTruthy()
+    expect(screen.queryByText(takes[1].result.headline)).toBeNull()
+    // Read-only, and not "read-only-ish": the mock records every write path
+    // (append / answer / skip / submit), and reading a result uses none.
+    expect(posts).toEqual([])
+  })
+
+  it('walks the takes with a date strip, newest first, marking the one on screen', async () => {
+    const takes = twoTakes()
+    courses = doneRail()
+    historyPayload = takes
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(railRow(COURSES[0].name))
+    await screen.findByText('persona.result.takes')
+
+    const strip = screen.getAllByRole('button', { name: /^[A-Z][a-z]{2} \d+$/ })
+    expect(strip.map((b) => b.textContent)).toEqual([dayLabel(NEWER), dayLabel(OLDER)])
+    expect(screen.getByRole('button', { name: dayLabel(NEWER) }).getAttribute('aria-current')).toBe('true')
+    expect(screen.getByRole('button', { name: dayLabel(OLDER) }).getAttribute('aria-current')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: dayLabel(OLDER) }))
+
+    // The OTHER take is on screen now — headline and mark both moved.
+    expect(screen.getByText(takes[1].result.headline)).toBeTruthy()
+    expect(screen.queryByText(takes[0].result.headline)).toBeNull()
+    expect(screen.getByRole('button', { name: dayLabel(OLDER) }).getAttribute('aria-current')).toBe('true')
+    expect(screen.getByRole('button', { name: dayLabel(NEWER) }).getAttribute('aria-current')).toBeNull()
+    // Still a read: switching takes is not a re-score.
+    expect(posts).toEqual([])
+  })
+
+  it('draws no strip at all for a course taken once', async () => {
+    courses = doneRail()
+    historyPayload = [take('big5', Array(COURSES[0].itemCount).fill(4), NEWER)]
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(railRow(COURSES[0].name))
+    await screen.findByText('persona.result.kicker')
+
+    // A strip of one is furniture that implies there is somewhere else to go.
+    expect(screen.queryByText('persona.result.takes')).toBeNull()
+    expect(screen.queryAllByRole('button', { name: /^[A-Z][a-z]{2} \d+$/ })).toHaveLength(0)
+  })
+
+  it('「もう一度やる」 from the sheet starts the course at item 1', async () => {
+    courses = doneRail()
+    historyPayload = twoTakes()
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(railRow(COURSES[0].name))
+    await screen.findByText('persona.result.kicker')
+    fireEvent.click(screen.getByText('persona.result.again'))
+
+    expect(screen.queryByText('persona.result.kicker')).toBeNull()
+    expect(screen.getByText(BIG5_ITEMS[0][2])).toBeTruthy()
+    expect(screen.getByText(`1 / ${BIG5_ITEMS.length}`)).toBeTruthy()
+    // A re-take is a NEW observation: nothing of the take being read carries in.
+    expect(posts).toEqual([])
+  })
+
+  // The rail has to hold both offers, because they are different intentions.
+  // Making someone read their old result to get to the questions is the version
+  // that gets described as "it makes you click through a wall of text".
+  it('re-takes straight from the rail, without opening the result first', async () => {
+    courses = doneRail()
+    historyPayload = twoTakes()
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(retakeButton(COURSES[0].name))
+
+    expect(screen.queryByText('persona.result.kicker')).toBeNull()
+    expect(screen.getByText(BIG5_ITEMS[0][2])).toBeTruthy()
+    expect(screen.getByText(`1 / ${BIG5_ITEMS.length}`)).toBeTruthy()
+  })
+
+  it('says the past result could not be opened rather than opening an empty sheet', async () => {
+    courses = doneRail()
+    historyFails = true
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(railRow(COURSES[0].name))
+
+    expect(await screen.findByText('persona.course.historyFailed')).toBeTruthy()
+    expect(screen.queryByText('persona.result.kicker')).toBeNull()
+  })
+
+  // 済 on the rail with nothing stored is a disagreement between two server
+  // reads. The sheet is not the place to paper over it.
+  it('does not open a sheet when the history comes back empty', async () => {
+    courses = doneRail()
+    historyPayload = []
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(railRow(COURSES[0].name))
+
+    expect(await screen.findByText('persona.course.historyFailed')).toBeTruthy()
+    expect(screen.queryByText('persona.result.kicker')).toBeNull()
+  })
+
+  it('a never-taken course still starts the course when its row is clicked', async () => {
+    // The 済 row changed; the plain one must not have.
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(railRow(COURSES[0].name))
+    expect(screen.getByText(BIG5_ITEMS[0][2])).toBeTruthy()
+    expect(screen.queryByText('persona.result.kicker')).toBeNull()
   })
 })
 
