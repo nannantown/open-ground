@@ -4,8 +4,10 @@ import {
   enabledModules,
   nativeDescriptors,
   isModuleEnabled,
+  isModuleIdVisible,
   gateFromFlags,
   tabLabel,
+  type ModuleDef,
 } from '@/components/canvas/moduleRegistry'
 import type { ExperimentFlags } from '@/lib/types'
 
@@ -30,13 +32,26 @@ describe('moduleRegistry experiment gate', () => {
   it('registers swarm as an experiment-gated module', () => {
     const swarm = MODULES.find((m) => m.id === 'swarm')
     expect(swarm).toBeTruthy()
-    expect(swarm?.experiment).toBe('swarm')
+    expect(swarm?.experiments).toEqual(['swarm'])
   })
 
-  it('registers persona as an experiment-gated module', () => {
-    const persona = MODULES.find((m) => m.id === 'persona')
-    expect(persona).toBeTruthy()
-    expect(persona?.experiment).toBe('persona')
+  // Persona is NOT a module any more (2026-08-14): the surface describes the
+  // OWNER rather than a project, so it opens from the Ground toolbar
+  // (PersonaPanel + src/lib/persona/gate.ts). Registering it here again would
+  // put the owner's stand-in back behind a per-project address — and, worse,
+  // re-admit 'persona' to MODULE_IDS, which is what persistView validates a
+  // saved tab against. This is the guard that keeps it out of every tab surface
+  // even with BOTH flags open.
+  it('does NOT register persona as a module — it lives on Ground now', () => {
+    // Widened to `string` on purpose: `ModuleId` no longer contains 'persona',
+    // so the compiler rejects the comparison outright — re-adding the entry is
+    // a BUILD error before it is a test failure, and this case is the runtime
+    // half (the registry-derived surfaces below take plain strings).
+    expect(ids(MODULES).includes('persona')).toBe(false)
+    const bothOpen = gateFromFlags(flags({ persona: true, swarm: true }))
+    expect(ids(enabledModules(bothOpen))).not.toContain('persona')
+    expect(ids(nativeDescriptors(bothOpen))).not.toContain('persona')
+    expect(isModuleIdVisible('persona', bothOpen)).toBe(false)
   })
 
   it('hides gated modules by default (no gate) — the shipped/non-owner state', () => {
@@ -45,24 +60,28 @@ describe('moduleRegistry experiment gate', () => {
     expect(ids(nativeDescriptors())).toEqual(['board', 'canvas', 'terminal', 'research'])
   })
 
-  it('reveals a gated module only when its experiment is open', () => {
+  it('reveals a gated module only when one of its experiments is open', () => {
     const gate = gateFromFlags(flags({ swarm: true }))
     expect(ids(enabledModules(gate))).toContain('swarm')
     expect(ids(nativeDescriptors(gate))).toContain('swarm')
-    // Always-on defaults are unaffected by the gate; persona stays hidden
-    // because ITS flag is closed — one open experiment never opens another.
-    expect(ids(enabledModules(gate))).toEqual(['board', 'canvas', 'terminal', 'research', 'swarm'])
+    expect(ids(enabledModules(gate))).toEqual([
+      'board',
+      'canvas',
+      'terminal',
+      'research',
+      'swarm',
+    ])
   })
 
-  it('opens persona independently of swarm', () => {
+  it('an unrelated open flag reveals nothing', () => {
+    // The persona experiment still exists (it opens the GROUND entry), but it
+    // must not drag a tab back into the row on its way past.
     const gate = gateFromFlags(flags({ persona: true }))
-    expect(ids(enabledModules(gate))).toEqual(['board', 'canvas', 'terminal', 'research', 'persona'])
-    expect(ids(nativeDescriptors(gate))).toContain('persona')
+    expect(ids(enabledModules(gate))).toEqual(['board', 'canvas', 'terminal', 'research'])
   })
 
   it('a closed flag keeps the module hidden', () => {
     expect(ids(enabledModules(gateFromFlags(ALL_CLOSED)))).not.toContain('swarm')
-    expect(ids(enabledModules(gateFromFlags(ALL_CLOSED)))).not.toContain('persona')
   })
 
   it('the sandbox experiment gates NO tab module (it only changes how claude spawns)', () => {
@@ -79,14 +98,63 @@ describe('moduleRegistry experiment gate', () => {
   it('isModuleEnabled: always-on modules ignore the gate, gated ones require it', () => {
     const board = MODULES.find((m) => m.id === 'board')!
     const swarm = MODULES.find((m) => m.id === 'swarm')!
-    const persona = MODULES.find((m) => m.id === 'persona')!
     expect(isModuleEnabled(board)).toBe(true)
     expect(isModuleEnabled(swarm)).toBe(false) // default gate is closed
-    expect(isModuleEnabled(persona)).toBe(false)
     expect(isModuleEnabled(swarm, gateFromFlags(flags({ swarm: true })))).toBe(true)
-    expect(isModuleEnabled(persona, gateFromFlags(flags({ persona: true })))).toBe(true)
-    // Cross-check: persona's flag must not be satisfied by swarm's.
-    expect(isModuleEnabled(persona, gateFromFlags(flags({ swarm: true })))).toBe(false)
+    // A module only opens on an experiment it actually LISTS — an unrelated open
+    // flag is not a way in.
+    expect(isModuleEnabled(swarm, gateFromFlags(flags({ persona: true })))).toBe(false)
+  })
+
+  // `experiments` is an ARRAY with any-of semantics, and that is live machinery
+  // even though today's only gated module lists a single flag (Persona was the
+  // two-flag case; it now opens from the Ground toolbar instead — see
+  // src/lib/persona/gate.ts, which kept the same rule). Covered with a fixture
+  // rather than a second production module, so a `some()` → `every()` slip is
+  // caught here instead of by whichever module next needs two ways in.
+  it('isModuleEnabled: ANY of the listed experiments opens a module (not all of them)', () => {
+    const twoWaysIn: ModuleDef = {
+      ...MODULES.find((m) => m.id === 'swarm')!,
+      experiments: ['persona', 'swarm'],
+    }
+    expect(isModuleEnabled(twoWaysIn, gateFromFlags(ALL_CLOSED))).toBe(false)
+    expect(isModuleEnabled(twoWaysIn, gateFromFlags(flags({ persona: true })))).toBe(true)
+    expect(isModuleEnabled(twoWaysIn, gateFromFlags(flags({ swarm: true })))).toBe(true)
+  })
+
+  // ONE predicate, two call sites: the tab row filters with enabledModules, and
+  // ProjectPanel's render branch re-checks with isModuleIdVisible before it
+  // mounts an experimental surface. Asking the registry both times is what
+  // stops a hand-written `experiments?.swarm` in the panel from disagreeing
+  // with the tab row (which would show the tab and then mount nothing).
+  describe('isModuleIdVisible — what a render branch may mount', () => {
+    it('mirrors the tab row for every module, gate by gate', () => {
+      for (const gate of [
+        gateFromFlags(ALL_CLOSED),
+        gateFromFlags(flags({ swarm: true })),
+        gateFromFlags(flags({ persona: true })),
+        gateFromFlags(flags({ swarm: true, persona: true })),
+      ]) {
+        const shown = new Set(ids(enabledModules(gate)))
+        for (const m of MODULES) {
+          expect(isModuleIdVisible(m.id, gate)).toBe(shown.has(m.id))
+        }
+      }
+    })
+
+    it('fails closed: no gate hides the experiments, an unknown id is never visible', () => {
+      expect(isModuleIdVisible('swarm')).toBe(false)
+      expect(isModuleIdVisible('board')).toBe(true)
+      expect(isModuleIdVisible('nope', gateFromFlags(flags({ swarm: true, persona: true })))).toBe(
+        false,
+      )
+      // A RETIRED id is just an unknown one here — the registry is the only
+      // thing that decides what a render branch may mount, so 'persona' cannot
+      // come back as a tab body by way of a stale localStorage view.
+      expect(isModuleIdVisible('persona', gateFromFlags(flags({ swarm: true, persona: true })))).toBe(
+        false,
+      )
+    })
   })
 })
 
@@ -105,24 +173,22 @@ describe('tabLabel', () => {
   it('uses the translated string when the key resolves', () => {
     expect(
       tabLabel(
-        { label: 'Persona', labelKey: 'persona.tabLabel' },
-        translate({ 'persona.tabLabel': 'ペルソナ' }),
+        { label: 'Research', labelKey: 'research.tabLabel' },
+        translate({ 'research.tabLabel': '調査' }),
       ),
-    ).toBe('ペルソナ')
+    ).toBe('調査')
   })
 
   it('falls back to the built-in label when the key is missing entirely', () => {
-    expect(tabLabel({ label: 'Persona', labelKey: 'persona.tabLabel' }, echoKey)).toBe('Persona')
+    expect(tabLabel({ label: 'Research', labelKey: 'research.tabLabel' }, echoKey)).toBe('Research')
   })
 
-  it('the persona module carries a labelKey (its name is a one-key edit)', () => {
-    const persona = MODULES.find((m) => m.id === 'persona')!
-    expect(persona.labelKey).toBe('persona.tabLabel')
+  it('a labelKey-carrying module keeps its key into the "+" picker (one-key rename)', () => {
+    const research = MODULES.find((m) => m.id === 'research')!
+    expect(research.labelKey).toBe('research.tabLabel')
     // …and it survives into the "+" picker's descriptor, so both surfaces show
     // the SAME name.
-    const descriptor = nativeDescriptors(gateFromFlags(flags({ persona: true }))).find(
-      (d) => d.id === 'persona',
-    )!
-    expect(descriptor.labelKey).toBe('persona.tabLabel')
+    const descriptor = nativeDescriptors(gateFromFlags(flags())).find((d) => d.id === 'research')!
+    expect(descriptor.labelKey).toBe('research.tabLabel')
   })
 })

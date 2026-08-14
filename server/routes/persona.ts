@@ -1,0 +1,74 @@
+// server/routes/persona.ts — Hono sub-router for the Persona tab's COURSES
+// (the self-report instruments). Declares FULL /api/... paths (mount prefix in
+// app.ts is empty). Handlers are THIN ADAPTERS over
+// src/lib/server/personaCourses.ts; the instrument and its scoring live in the
+// pure src/lib/persona/instruments.ts and are never reimplemented here.
+//
+// Local, personal, single-user state — a result sheet and the corpus nodes it
+// mints are as private as the judgments beside them. The cross-origin/CSRF guard
+// in server/app.ts already covers the mutating route; the loopback gate below is
+// the DNS-rebinding half, mirroring server/routes/youCorpus.ts.
+
+import { Hono } from 'hono'
+import type { Context } from 'hono'
+import {
+  listPersonaCourses,
+  submitPersonaCourse,
+  UnknownPersonaCourseError,
+} from '@/lib/server/personaCourses'
+import { PersonaScoringError } from '@/lib/persona/instruments'
+import { hostIsLocal, originIsLocal } from '../loopback'
+import type { PersonaCoursesResponse, SubmitPersonaCourseResponse } from '@/lib/types'
+
+// Same gate, same reasoning as server/routes/youCorpus.ts: a page that rebinds
+// its domain to 127.0.0.1 makes a SAME-ORIGIN request, which the SOP lets it
+// READ — so a sensitive GET needs its own check even though the app-level CSRF
+// guard covers mutations. A browser always sends Host; local non-browser clients
+// (curl, the vitest app.request) send none → allowed. Returns a 403 Response to
+// short-circuit, or null to pass.
+const blockNonLoopback = (c: Context): Response | null => {
+  const host = c.req.header('host')
+  if (host !== undefined && !hostIsLocal(host)) {
+    return c.json({ error: 'invalid host' }, 403)
+  }
+  const origin = c.req.header('origin')
+  if (origin !== undefined && !originIsLocal(origin)) {
+    return c.json({ error: 'cross-origin request rejected' }, 403)
+  }
+  return null
+}
+
+export const personaRoutes = new Hono()
+  // --- GET /api/persona/courses ---------------------------------------------
+  // The catalogue + what the owner has already scored (lastTakenAt / headline,
+  // null when never taken). Never fails on a corrupt store — see
+  // readPersonaCoursesStore's fail-open note.
+  .get('/api/persona/courses', async (c) =>
+    blockNonLoopback(c) ?? c.json<PersonaCoursesResponse>(await listPersonaCourses()),
+  )
+  // --- POST /api/persona/courses/:id/submit ---------------------------------
+  // Score → persist → mint. 404 for an id no instrument answers to, 400 with the
+  // scoring error's own message for an answer vector that does not match the
+  // instrument (wrong length / out of range) — both BEFORE anything is written,
+  // so a half-answered course neither stores a sheet nor mints corpus nodes.
+  .post('/api/persona/courses/:id/submit', async (c) => {
+    const blocked = blockNonLoopback(c)
+    if (blocked) return blocked
+    const body = (await c.req.json().catch(() => ({}))) as { answers?: unknown }
+    if (!Array.isArray(body.answers)) {
+      return c.json({ error: 'answers must be an array of numbers' }, 400)
+    }
+    // Element types are NOT filtered here: scoreCourse checks every entry with
+    // Number.isInteger and reports which one is wrong. Coercing or dropping bad
+    // entries first would turn "you sent a string" into a silently shifted
+    // answer vector — the one thing a scored instrument must never do.
+    const answers = body.answers as number[]
+    try {
+      const res = await submitPersonaCourse(c.req.param('id'), answers)
+      return c.json<SubmitPersonaCourseResponse>(res)
+    } catch (e) {
+      if (e instanceof UnknownPersonaCourseError) return c.json({ error: 'not found' }, 404)
+      if (e instanceof PersonaScoringError) return c.json({ error: e.message }, 400)
+      throw e
+    }
+  })

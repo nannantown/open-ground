@@ -8,21 +8,26 @@ export type ModuleId =
   | 'canvas'
   | 'board'
   | 'research'
-  // Owner-only experiment modules (hidden by default; see `experiment` in
-  // moduleRegistry + ExperimentId in types). KNOWN native ids so persistence
-  // / tab-order code treats them like any other built-in — but the registry's
-  // gate keeps them out of every visible surface until their experiment is
-  // open. Listed here only so the type system knows they exist.
+  // Owner-only experiment module (hidden by default; see `experiments` in
+  // moduleRegistry + ExperimentId in types). A KNOWN native id so persistence
+  // / tab-order code treats it like any other built-in — but the registry's
+  // gate keeps it out of every visible surface until its experiment is open.
+  // Listed here only so the type system knows it exists.
   | 'swarm'
-  | 'persona'
 
+// RETIRED ids are simply absent from this list (e.g. 'persona', which left the
+// tab row on 2026-08-14 for the Ground toolbar — see
+// src/components/canvas/PersonaPanel.tsx). That absence is load-bearing rather
+// than tidy-up: persistView validates the saved panel tab against MODULE_IDS,
+// so a user whose last-open tab was a retired one has that value DROPPED on
+// read and lands on the project's default tab — never on a blank panel with no
+// matching row entry.
 export const MODULE_IDS: readonly ModuleId[] = [
   'terminal',
   'canvas',
   'board',
   'research',
   'swarm',
-  'persona',
 ]
 
 // ─── Custom tabs (user-built modules) ───────────────────────────────────────

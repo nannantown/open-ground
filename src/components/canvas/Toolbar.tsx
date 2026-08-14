@@ -10,6 +10,7 @@ import {
   HelpCircle,
   Blocks,
   DoorOpen,
+  Fingerprint,
   Moon,
   Sun,
 } from 'lucide-react'
@@ -31,6 +32,14 @@ interface Props {
   /** Opens the global skills panel (the user's own ~/.claude/skills — view +
    *  create). Always available. */
   onOpenSkills: () => void
+  /** Opens the Persona surface — what the owner's stand-in knows about how they
+   *  decide things. A GROUND-level entry because the surface describes the
+   *  OWNER, not a repo: its data lives in ~/.openground/ and is identical on
+   *  every project, so it belongs beside Settings / Manual / Skills rather than
+   *  in the per-project tab row where it used to sit. Provided ONLY when the
+   *  persona OR swarm experiment is open (src/lib/persona/gate.ts) — undefined
+   *  hides the entry, so a non-owner build never renders it. */
+  onOpenPersona?: () => void
   /** Opens the "Shared with me" join dialog (paste an invite code or link →
    *  join a collaborator's project). Provided ONLY when realtime collab is
    *  enabled — undefined hides the entry, so the default build shows nothing.
@@ -77,6 +86,7 @@ export const Toolbar = ({
   onOpenSettings,
   onOpenManual,
   onOpenSkills,
+  onOpenPersona,
   onOpenShared,
   onFeedback,
   onAccount,
@@ -175,6 +185,23 @@ export const Toolbar = ({
           <IconButton onClick={onOpenSkills} title={t('toolbar.skills')} label={t('toolbar.skills')}>
             <Blocks size={13} strokeWidth={1.75} />
           </IconButton>
+          {/* Persona — the owner's stand-in. Ground-level because it is about the
+              OWNER rather than any one project (its notes live in
+              ~/.openground/, identical on every card), which is exactly why it
+              left the per-project tab row. Shown only when the gate is open, via
+              the undefined-hides-it pattern above; the Fingerprint glyph is kept
+              from the tab so the entry reads as the same place. A fingerprint
+              alone does not say "Persona", so it carries a permanent label like
+              Add / Join shared / Skills do. */}
+          {onOpenPersona && (
+            <IconButton
+              onClick={onOpenPersona}
+              title={t('toolbar.personaTooltip')}
+              label={t('toolbar.persona')}
+            >
+              <Fingerprint size={13} strokeWidth={1.75} />
+            </IconButton>
+          )}
           <IconButton onClick={onOpenManual} title={t('toolbar.manual')}>
             <HelpCircle size={14} strokeWidth={1.75} />
           </IconButton>

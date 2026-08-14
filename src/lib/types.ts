@@ -3531,3 +3531,80 @@ export interface ResearchReportResponse {
   file: string
   content: string
 }
+
+// ─── Persona courses (Persona tab の診断コース) ──────────────────────────────
+// Items + scoring live in src/lib/persona/instruments.ts (pure); the store and
+// routes in src/lib/server/personaCourses.ts + server/routes/persona.ts.
+
+export type PersonaCourseId = 'big5' | 'type' | 'values' | 'work'
+
+/** One line of a result sheet. `bars` rows carry pct/note; `rank` rows carry
+ *  rank/score. Both shapes ride in one type so the sheet renders from one list. */
+export interface PersonaResultRow {
+  key: string
+  name: string
+  desc: string
+  /** bars only: 0..100 fill. For a BIPOLAR axis the fill is toward the second
+   *  pole, so 50 reads as "half and half" against the mid-line. */
+  pct?: number
+  /** bars only: 高め / ほぼ半々 … — the honest confidence word. */
+  note?: string
+  bipolar?: boolean
+  /** rank only. */
+  rank?: number
+  score?: string
+}
+
+/** What a finished course contributes to the corpus: one node each. */
+export interface PersonaFinding {
+  text: string
+  /** Provenance shown under the node — instrument + the number it came from. */
+  detail: string
+}
+
+export interface PersonaResult {
+  courseId: PersonaCourseId
+  courseName: string
+  /** Printed verbatim on the sheet (licensing/provenance promise). */
+  source: string
+  itemCount: number
+  kind: 'bars' | 'rank'
+  rows: PersonaResultRow[]
+  findings: PersonaFinding[]
+  headline: string
+  /** type course only: the four letters. */
+  badge?: string
+}
+
+/** A stored, dated result. */
+export interface PersonaCourseRecord {
+  result: PersonaResult
+  takenAt: string
+  /** Raw answers, kept so a re-scoring after an instrument fix is possible. */
+  answers: number[]
+}
+
+/** GET /api/persona/courses — every course's catalogue entry + last result. */
+export interface PersonaCoursesResponse {
+  courses: {
+    id: PersonaCourseId
+    name: string
+    sub: string
+    zone: string
+    itemCount: number
+    source: string
+    lastTakenAt: string | null
+    headline: string | null
+  }[]
+}
+
+/** POST /api/persona/courses/:id/submit — body: the full answer vector. */
+export interface SubmitPersonaCourseRequest {
+  answers: number[]
+}
+
+/** POST result: the scored sheet + how many corpus nodes it minted. */
+export interface SubmitPersonaCourseResponse {
+  record: PersonaCourseRecord
+  minted: number
+}

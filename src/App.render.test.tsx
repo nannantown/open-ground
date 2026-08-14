@@ -15,7 +15,7 @@
 // observes its viewport. No claude, no real network, HOME already isolated by
 // the suite-wide setup-home.ts.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, act, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react'
 import App from './App'
 import { I18nProvider } from '@/i18n/I18nContext'
 import { AuthProvider } from '@/lib/auth/AuthContext'
@@ -67,6 +67,9 @@ interface MockOpts {
   /** Non-2xx status for POST /api/settings, to exercise the save-failure path. */
   settingsPostStatus?: number
   settingsPostError?: string
+  /** GET /api/experiments — the owner-only gate, resolved SERVER-side. Omitted ⇒
+   *  the shipped/non-owner answer (nothing eligible, every flag closed). */
+  experiments?: { eligible: boolean; flags: Record<string, boolean> }
 }
 
 const methodOf = (input: unknown, init?: RequestInit): string =>
@@ -84,6 +87,14 @@ function installFetch(opts: MockOpts = {}) {
     if (url.includes('/api/settings')) return reply(200, { ...SETTINGS, suggestedDisplayName: null })
     if (url.includes('/api/projects'))
       return reply(200, { settings: SETTINGS, projects, canvas: EMPTY_CANVAS })
+    if (url.includes('/api/experiments'))
+      return reply(
+        200,
+        opts.experiments ?? {
+          eligible: false,
+          flags: { swarm: false, sandbox: false, persona: false },
+        },
+      )
     if (url.includes('/api/canvas/ai/active')) return reply(200, { jobs })
     if (url.includes('/api/terminal/active')) return reply(200, { cwds: [], claude: [] })
     if (url.includes('/api/auth/session')) return reply(503, {}) // signed-out (default build)
@@ -167,6 +178,95 @@ describe('App — whole-render integration', () => {
     // Wait for the mount to settle on a known anchor, then assert the beacon is absent.
     await screen.findByText('Begin your atlas.')
     expect(screen.queryByText('Generating with Claude…')).not.toBeInTheDocument()
+  })
+})
+
+// ─── The Ground Persona entry (2026-08-14) ──────────────────────────────────
+//
+// The Persona surface is about the OWNER, not a repo (its notes live in
+// ~/.openground/ and are identical on every project), so it left the per-project
+// tab row for the Ground toolbar beside Settings / Manual / Skills. It stays
+// owner-only and hidden: App passes `onOpenPersona` ONLY when the persona OR
+// swarm experiment is open, and an undefined handler is what makes the Toolbar
+// render nothing at all.
+//
+// Asserted through the WHOLE app rather than the Toolbar in isolation, because
+// what has to hold is the wiring: /api/experiments → useExperiments →
+// isPersonaOpen → the prop → a button that actually opens the panel. A Toolbar
+// unit test cannot tell a closed gate from a forgotten prop.
+const gateFlags = (open: Partial<Record<string, boolean>> = {}) => ({
+  eligible: true,
+  flags: { swarm: false, sandbox: false, persona: false, ...open },
+})
+
+describe('App — Ground Persona entry gate', () => {
+  it('draws NO persona entry on the default build (every experiment closed)', async () => {
+    installFetch({ projects: [] })
+    await act(async () => {
+      renderApp()
+    })
+    await screen.findByText('Begin your atlas.')
+    // Anchor on a control that IS always there, so "nothing found" cannot be a
+    // toolbar that failed to render at all.
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Persona' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
+  })
+
+  it('draws the entry when the persona experiment is open, and it opens the panel', async () => {
+    installFetch({ projects: [], experiments: gateFlags({ persona: true }) })
+    await act(async () => {
+      renderApp()
+    })
+    const entry = await screen.findByRole('button', { name: 'Persona' })
+    // Closed until asked for — the toolbar entry is a door, not a panel.
+    expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
+    await act(async () => {
+      fireEvent.click(entry)
+    })
+    const panel = await screen.findByTestId('persona-panel')
+    // Full-bleed, but it keeps a Ground panel's explicit way out.
+    expect(within(panel).getByRole('button', { name: 'Close' })).toBeInTheDocument()
+    await act(async () => {
+      fireEvent.click(within(panel).getByRole('button', { name: 'Close' }))
+    })
+    expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
+  })
+
+  it('Escape closes the panel — the other affordance every Ground panel has', async () => {
+    // Asserted on the DOM, not on the wiring: the surface is edge-to-edge with a
+    // canvas that takes its own pointer/keyboard gestures, so "the shared Overlay
+    // handles Esc" is exactly the kind of claim that is true right up until a
+    // child swallows the key.
+    installFetch({ projects: [], experiments: gateFlags({ persona: true }) })
+    await act(async () => {
+      renderApp()
+    })
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Persona' }))
+    })
+    await screen.findByTestId('persona-panel')
+    await act(async () => {
+      fireEvent.keyDown(window, { key: 'Escape' })
+    })
+    expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
+  })
+
+  it('draws the entry for a SWARM account too (the ride-along survives the move)', async () => {
+    installFetch({ projects: [], experiments: gateFlags({ swarm: true }) })
+    await act(async () => {
+      renderApp()
+    })
+    expect(await screen.findByRole('button', { name: 'Persona' })).toBeInTheDocument()
+  })
+
+  it('stays hidden when only an unrelated experiment is open', async () => {
+    installFetch({ projects: [], experiments: gateFlags({ sandbox: true }) })
+    await act(async () => {
+      renderApp()
+    })
+    await screen.findByText('Begin your atlas.')
+    expect(screen.queryByRole('button', { name: 'Persona' })).not.toBeInTheDocument()
   })
 })
 

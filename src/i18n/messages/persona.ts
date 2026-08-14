@@ -1,40 +1,74 @@
 // Owned by the Persona tab (owner-only experiment — src/components/canvas/
-// modules/PersonaModule.tsx). Add keys as 'persona.*'. English is the source of
-// truth.
+// modules/PersonaModule.tsx + PersonaFigure.tsx + PersonaResultSheet.tsx). Add
+// keys as 'persona.*'. English is the source of truth.
 //
 // COPY RULE for this namespace: the reader is the OWNER, not a programmer.
 // Every string says what it means in plain words — no "corpus", no "assemble",
 // no file paths in the body copy. The tab's whole point has to come across from
 // the copy alone: what you write here is the judgment your stand-in runs on.
 //
-// `persona.tabLabel` is the ONE key that names the tab everywhere (row + "+"
-// picker, via TabDef.labelKey) — renaming the tab is a two-line edit here.
+// The two locales are written SEPARATELY, not translated line by line: the
+// Japanese is the wording the owner designed the screen around, the English is
+// the same thing said the way it would be said in English.
+//
+// `persona.tabLabel` names the SCREEN — the mark in its top-left corner. It is
+// no longer a tab name (2026-08-14: the surface moved to the Ground toolbar,
+// see src/components/canvas/PersonaPanel.tsx), and the key kept its historical
+// spelling rather than churning the component and its tests. The toolbar entry
+// that opens it is named separately under `toolbar.persona` /
+// `toolbar.personaTooltip`.
 export const persona = {
   en: {
     'persona.tabLabel': 'Persona',
 
-    // --- Intro: why this tab exists ----------------------------------------
+    // --- First run: the figure is all dust, so say what this place is --------
     'persona.intro.title': 'Grow your stand-in',
     'persona.intro.body':
       'This is what OPEN GROUND has learned about how you decide things. Your stand-in reads all of it before it judges anything for you, so what you add here it will actually act on.',
     'persona.intro.correctionNote':
       'Correcting something wrong here is the single most useful thing you can add — nothing is ever deleted, a correction is written on top.',
 
+    // --- The figure ---------------------------------------------------------
+    // Every lit point is one note. The dark parts are not styling: they are the
+    // parts your stand-in would have to guess at.
+    'persona.figure.empty':
+      'Nothing is lit yet. Answer the question in the corner, or take one of the courses, and the first point appears.',
+    'persona.figure.reset': 'Back to the whole figure',
+    // Names the off-screen list that makes every lit point reachable without a
+    // mouse (a canvas has no keyboard).
+    'persona.figure.nodeList': 'Everything lit in the figure',
+    'persona.figure.hint':
+      'Scroll to move around · ⌘/Ctrl + scroll to zoom · hold Space and drag to pan',
+
+    // --- Hover labels on the figure -----------------------------------------
+    'persona.tip.raw': 'From an answer',
+    'persona.tip.rawSub': 'It settles into place when the course finishes.',
+    'persona.tip.gap': 'Something it does not know yet',
+    'persona.tip.gapSub': 'Answer the question in the corner and this lights up.',
+    'persona.tip.dust': 'Not formed yet',
+
+    // --- The five regions of the figure -------------------------------------
+    // Same five a course grows (PersonaCourse.zone), so a finished course
+    // visibly fills a part of you rather than a score.
+    'persona.zone.mind': 'How you think',
+    'persona.zone.values': 'What you hold to',
+    'persona.zone.craft': 'How you make things',
+    'persona.zone.core': 'Money and going public',
+    'persona.zone.ground': 'The ground you stand on',
+
+    // --- One note, opened from the figure ------------------------------------
+    'persona.node.close': 'Close',
+
     // --- Meta strip: what the stand-in reads right now ----------------------
-    'persona.meta.heading': 'What your stand-in reads right now',
     'persona.meta.updated': 'Last updated',
     'persona.meta.never': 'Not written yet',
-    'persona.meta.memory': 'Things I remembered about you',
-    'persona.meta.manual': 'Things you wrote yourself',
+    'persona.meta.memory': 'Remembered about you',
+    'persona.meta.manual': 'Written by you',
     // English inflects, Japanese does not — PersonaModule's countLabel() picks
     // the form. Both keys must exist in both languages (the JA pair is
     // identical on purpose).
     'persona.meta.count.one': '1 note',
     'persona.meta.count.other': '{count} notes',
-    'persona.meta.concept': 'What the product is for',
-    'persona.meta.vision': 'What the business is for',
-    'persona.meta.present': 'included',
-    'persona.meta.absent': 'not found',
     // Shown after a save that landed but could not be folded into the file the
     // stand-in reads — either because the sources were unreadable and the
     // previous version was kept, or because rebuilding it failed outright. Both
@@ -42,13 +76,11 @@ export const persona = {
     'persona.meta.stale':
       'Saved — but the file your stand-in reads could not be rebuilt this time, so it will catch up on the next save that succeeds.',
 
-    // --- Today's question (the interview loop) ------------------------------
+    // --- The always-on question (the interview loop) ------------------------
     // One a day, built from something the owner actually did — never a
     // personality quiz. The copy has to make that obvious, or the question
     // reads as a generic survey and gets ignored.
     'persona.interview.heading': "Today's question",
-    'persona.interview.intro':
-      'Drawn from your own week — one a day, never the same one twice. Answering teaches your stand-in something it could not have guessed.',
     'persona.interview.placeholder': 'In your own words. A sentence is plenty.',
     'persona.interview.answer': 'Answer',
     'persona.interview.answering': 'Saving…',
@@ -67,7 +99,37 @@ export const persona = {
     'persona.interview.none.body':
       'Questions come from what you actually did — cards you sent back, calls you sat on. There is nothing new to ask about yet, so nothing is being invented.',
 
-    // --- Add / correct form -------------------------------------------------
+    // --- The question card's own furniture ----------------------------------
+    'persona.ask.hint': 'Answering lights one point.',
+    'persona.ask.quit': 'Stop',
+    'persona.ask.idle': 'Pick a course on the left and the questions keep coming.',
+
+    // --- The courses (self-report instruments) ------------------------------
+    'persona.course.railHeading': 'Courses',
+    'persona.course.state.new': '{count} questions · grows {zone}',
+    'persona.course.state.running': 'In progress — {index} / {total}',
+    'persona.course.state.done': 'Done {date} · take it again',
+    'persona.course.submitting': 'Scoring…',
+    'persona.course.failed': 'Could not save the result. Your answers are still here.',
+    'persona.course.retry': 'Send again',
+
+    // --- The result sheet ---------------------------------------------------
+    'persona.result.kicker': 'Result',
+    'persona.result.answered': 'all {count} questions answered',
+    // Printed verbatim from the instrument, never paraphrased — it is what says
+    // which published instrument the items follow and which trademarked one
+    // they are NOT.
+    'persona.result.source': 'Source: {source}',
+    'persona.result.minted': 'What went into your persona',
+    'persona.result.mintedPartial':
+      'Some of these have not reached your stand-in yet — the next save that succeeds will carry them over.',
+    'persona.result.caveat':
+      'This is a self-report, not a verdict on who you are. Where it disagrees with the record of what you actually decided, the disagreement is the useful part — your persona keeps both and builds its next question out of the gap.',
+    'persona.result.back': 'Back to the persona',
+    'persona.result.again': 'Take it again',
+
+    // --- Writing into it: a new note, or a correction of one -----------------
+    'persona.add.open': 'Add a note',
     'persona.add.heading': 'Add to it',
     'persona.add.placeholder':
       'Something you decided, noticed, or want your stand-in to know.',
@@ -86,38 +148,13 @@ export const persona = {
     // original is never removed.
     'persona.correct.contextPrefix': 'Corrects an earlier note:',
 
-    // --- The notes themselves ----------------------------------------------
-    'persona.notes.heading': 'What you wrote yourself',
-    'persona.notes.count.one': '1 note',
-    'persona.notes.count.other': '{count} notes',
     'persona.notes.basis': 'Where this came from',
     // Same slot as `basis`, used when the note is a correction: what it
     // replaces, not what it came from.
     'persona.notes.corrects': 'This replaces',
-    'persona.notes.empty.title': 'Nothing here yet',
-    'persona.notes.empty.body':
-      'Your stand-in only knows what it has seen. Write the first thing you want it to decide like you would — a call you made, a line you will not cross, a preference it keeps getting wrong.',
-    'persona.notes.viewList': 'List',
-    'persona.notes.viewGraph': 'Map',
-
-    // --- The synapse map (read-only graph over the same notes) -------------
-    // Same purpose as the list, a different lens: how what you wrote connects.
-    // No AI reads anything to draw this — the lines are plain rules (shared
-    // words, close dates, a correction pointing at what it replaces), so
-    // looking at it never costs anything.
-    'persona.graph.heading': 'How your notes connect',
-    'persona.graph.hint': 'Drag to move around. Scroll to pan, ⌘/Ctrl + scroll to zoom. Click a note to read it.',
-    'persona.graph.resetView': 'Recenter',
-    'persona.graph.close': 'Close',
-    'persona.graph.legend.corrects': 'Correction',
-    'persona.graph.legend.tag': 'Shared tag',
-    'persona.graph.legend.date': 'Written close together',
-    'persona.graph.empty.title': 'Nothing to map yet',
-    'persona.graph.empty.body':
-      'The map draws lines between notes that share a tag, were written close together, or correct one another. Write a couple more and it starts connecting them.',
 
     'persona.loading': 'Loading…',
-    'persona.loadFailed': 'Could not load this. Retry.',
+    'persona.loadFailed': 'Could not load this.',
     'persona.retry': 'Retry',
   } as Record<string, string>,
   ja: {
@@ -129,23 +166,37 @@ export const persona = {
     'persona.intro.correctionNote':
       '違っているところを直すのが、いちばん効きます。消えるものは何もありません — 訂正は上に書き足す形で残ります。',
 
-    'persona.meta.heading': '分身がいま読んでいるもの',
+    'persona.figure.empty':
+      'まだ何も灯っていません。右下の問いに答えるか、左のコースを受けると、最初のひとつが灯ります。',
+    'persona.figure.reset': '全体に戻る',
+    'persona.figure.nodeList': '図に灯っているもの',
+    'persona.figure.hint':
+      'スクロールで移動、⌘/Ctrl+スクロールで拡大、スペースを押しながらドラッグで動かせます。',
+
+    'persona.tip.raw': '回答から',
+    'persona.tip.rawSub': 'コースが終わるとまとまります。',
+    'persona.tip.gap': 'まだ知らないこと',
+    'persona.tip.gapSub': '右下の問いに答えると灯ります。',
+    'persona.tip.dust': 'まだ形になっていない部分',
+
+    'persona.zone.mind': '考え方',
+    'persona.zone.values': '大事にすること',
+    'persona.zone.craft': '作り方',
+    'persona.zone.core': 'お金と公開',
+    'persona.zone.ground': '暮らしの土台',
+
+    'persona.node.close': '閉じる',
+
     'persona.meta.updated': '最終更新',
     'persona.meta.never': 'まだ作られていません',
-    'persona.meta.memory': 'あなたについて覚えたこと',
-    'persona.meta.manual': 'あなたが自分で書いたもの',
+    'persona.meta.memory': '覚えたこと',
+    'persona.meta.manual': '自分で書いたもの',
     'persona.meta.count.one': '1 件',
     'persona.meta.count.other': '{count} 件',
-    'persona.meta.concept': 'プロダクトの目的',
-    'persona.meta.vision': '事業の目的',
-    'persona.meta.present': '入っています',
-    'persona.meta.absent': '見つかりません',
     'persona.meta.stale':
       '保存しました。ただし分身が読むファイルは今回作り直せませんでした — 次に成功した保存で反映されます。',
 
     'persona.interview.heading': '今日の1問',
-    'persona.interview.intro':
-      'あなたのこの数日の動きから作った質問です。1日1問だけ、同じことは二度聞きません。答えると、分身が推測では届かないところを覚えます。',
     'persona.interview.placeholder': 'あなたの言葉で。一文で十分です。',
     'persona.interview.answer': '答える',
     'persona.interview.answering': '保存しています…',
@@ -160,6 +211,33 @@ export const persona = {
     'persona.interview.none.body':
       '質問は、あなたが実際にやったこと（やり直しを頼んだカード、しばらく決めずに置いた相談）から作ります。今は新しく聞くことがないので、無理に作っていません。',
 
+    'persona.ask.hint': '答えると1つ灯ります',
+    'persona.ask.quit': 'やめる',
+    'persona.ask.idle': '左のコースを選ぶと、ここに問いが続きます。',
+
+    'persona.course.railHeading': '診断コース',
+    'persona.course.state.new': '{count}問 ・ {zone}が育つ',
+    'persona.course.state.running': '{index} / {total} 進行中',
+    'persona.course.state.done': '済 {date} ・ もう一度',
+    'persona.course.submitting': '採点しています…',
+    'persona.course.failed': '結果を保存できませんでした。答えは残っています。',
+    'persona.course.retry': 'もう一度送る',
+
+    'persona.result.kicker': '結果',
+    'persona.result.answered': '{count}問すべてに回答',
+    'persona.result.source': '出典: {source}',
+    'persona.result.minted': 'ペルソナに入ったもの',
+    'persona.result.mintedPartial':
+      'このうち、まだ分身に渡っていないものがあります — 次に成功した保存で反映されます。',
+    // 一字一句 src/lib/persona/instruments.ts の PERSONA_RESULT_CAVEAT と同じ。
+    // 結果シートに必ず出る断り書きで、PersonaModule.test.tsx が両者の一致を固定
+    // している(片方だけ書き換えると赤になる)。
+    'persona.result.caveat':
+      'これは自己申告の観測で、性格を決めつけるものではありません。実際の判断の記録とズレたときは、ズレのほうが情報です — ペルソナは両方を持ったまま、次の問いをつくります。',
+    'persona.result.back': 'ペルソナに戻る',
+    'persona.result.again': 'もう一度やる',
+
+    'persona.add.open': '書き足す',
     'persona.add.heading': '書き足す',
     'persona.add.placeholder': '決めたこと、気づいたこと、分身に知っておいてほしいこと。',
     'persona.add.tagsLabel': 'タグ（任意）',
@@ -168,35 +246,15 @@ export const persona = {
     'persona.add.submitting': '追加しています…',
     'persona.add.failed': '保存できませんでした。もう一度お試しください。',
 
-    'persona.correct.start': 'これを訂正する',
+    'persona.correct.start': '直す',
     'persona.correct.heading': '前に書いたものを訂正する',
     'persona.correct.cancel': 'やめる',
     'persona.correct.placeholder': '本当はどうですか？',
     'persona.correct.submit': '訂正を保存',
     'persona.correct.contextPrefix': '前の記述の訂正:',
 
-    'persona.notes.heading': 'あなたが自分で書いたもの',
-    'persona.notes.count.one': '1 件',
-    'persona.notes.count.other': '{count} 件',
     'persona.notes.basis': 'これが出てきたところ',
     'persona.notes.corrects': 'これを置き換えます',
-    'persona.notes.empty.title': 'まだ何もありません',
-    'persona.notes.empty.body':
-      '分身は、見たことしか知りません。あなたと同じように判断してほしいことを、最初のひとつとして書いてください — 下した判断、絶対に越えない線、いつも取り違えられる好み。',
-    'persona.notes.viewList': 'リスト',
-    'persona.notes.viewGraph': 'マップ',
-
-    'persona.graph.heading': '書いたものどうしのつながり',
-    'persona.graph.hint':
-      'ドラッグで動かせます。スクロールでパン、⌘/Ctrl+スクロールでズーム。ノートをクリックすると本文が読めます。',
-    'persona.graph.resetView': '中央に戻す',
-    'persona.graph.close': '閉じる',
-    'persona.graph.legend.corrects': '訂正',
-    'persona.graph.legend.tag': '共通タグ',
-    'persona.graph.legend.date': '近い日に書いた',
-    'persona.graph.empty.title': 'まだ描けるものがありません',
-    'persona.graph.empty.body':
-      'このマップは、同じタグ・近い日付・訂正関係にある書き足しどうしを線でつなぎます。もう少し書き足すと、つながりが見えてきます。',
 
     'persona.loading': '読み込んでいます…',
     'persona.loadFailed': '読み込めませんでした。',

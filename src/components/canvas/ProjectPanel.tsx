@@ -85,13 +85,13 @@ import {
   enabledModules,
   gateFromFlags,
   isModuleIdEnabled,
+  isModuleIdVisible,
   nativeDescriptors,
   tabLabel,
   type ModuleGate,
   type TabDef,
 } from '@/components/canvas/moduleRegistry'
 import { SwarmModule } from '@/components/canvas/modules/SwarmModule'
-import { PersonaModule } from '@/components/canvas/modules/PersonaModule'
 import { ResearchModule } from '@/components/canvas/modules/ResearchModule'
 import { customTabId, customModuleIdFromTab, isCustomTabId, type ModuleId } from '@/lib/modules/ids'
 import { usePlayback } from '@/lib/playback/playbackStore'
@@ -2568,22 +2568,21 @@ const OwnedProjectBody = ({
         // registry-guarded). Fetches its own data, so it mounts ahead of the
         // loading/data checks like the other self-contained modules.
         <ResearchModule project={project} />
-      ) : view === 'swarm' && experiments?.swarm ? (
-        // Owner-only experiment. Re-checking `experiments.swarm` HERE — not just
-        // relying on the tab being hidden — means a forged `view: 'swarm'` (from
-        // a stale/hostile localStorage value) never renders the surface for a
-        // non-owner; the fallback effect then moves the view off it. Task C
-        // builds the real orchestration UI; this mounted placeholder is what the
-        // gate makes appear when the owner turns the experiment on.
+      ) : view === 'swarm' && isModuleIdVisible('swarm', moduleGate) ? (
+        // Owner-only experiment. Re-checking the gate HERE — not just relying on
+        // the tab being hidden — means a forged `view: 'swarm'` (from a
+        // stale/hostile localStorage value) never renders the surface for a
+        // non-owner; the fallback effect then moves the view off it.
+        //
+        // Asked through the REGISTRY's predicate rather than a raw flag so the
+        // tab row and the mounted surface cannot disagree about who may see a
+        // module: there is one rule, in one place, and a module that grows a
+        // second way in needs no edit here.
+        //
+        // (There is no `persona` branch: that surface describes the OWNER, not a
+        // project, so it moved to the Ground toolbar — see
+        // src/components/canvas/PersonaPanel.tsx.)
         <SwarmModule project={project} />
-      ) : view === 'persona' && experiments?.persona ? (
-        // Owner-only experiment, gated exactly like Swarm above: re-checking the
-        // flag HERE (not just relying on the hidden tab) means a forged
-        // `view: 'persona'` from a stale/hostile localStorage value never mounts
-        // the surface for a non-owner — and the fallback effect then moves the
-        // view off it. Load-bearing here specifically: this tab reads the
-        // owner's personal corpus.
-        <PersonaModule />
       ) : isCustomTabId(view) ? (
         // Custom tab: the module's component in a sandboxed iframe, plus the
         // owner's claude sidebar. Keyed by module id so switching between two

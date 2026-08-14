@@ -29,6 +29,7 @@ import { customModulesRoutes } from './routes/customModules'
 import { moduleSubmissionsRoutes } from './routes/moduleSubmissions'
 import { collabRoutes } from './routes/collab'
 import { youCorpusRoutes } from './routes/youCorpus'
+import { personaRoutes } from './routes/persona'
 import { researchRoutes } from './routes/research'
 import { originIsLocal, hostIsLocal } from './loopback'
 
@@ -122,6 +123,7 @@ export const createApp = () => {
     .route('/', moduleSubmissionsRoutes) // J — module submission review queue (env-gated; docs/CUSTOM_TABS_PLAN.md)
     .route('/', collabRoutes)    // K — realtime collab gating + per-project resolution (env-gated)
     .route('/', youCorpusRoutes) // L — proxy judgment corpus (you-corpus; local personal state)
+    .route('/', personaRoutes)   // L2 — persona courses: score + store + mint into the corpus
     .route('/', researchRoutes)  // M — research channels: checker + local-only cookie store
 
   // Any /api/* not matched above is a genuine API 404 — it must NOT fall

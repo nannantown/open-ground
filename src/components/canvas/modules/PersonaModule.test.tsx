@@ -1,14 +1,39 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, cleanup, fireEvent, waitFor, screen } from '@testing-library/react'
-import { PersonaModule, parseTags, quoteForCorrection } from './PersonaModule'
+import { PersonaModule, asZone, courseRailState, parseTags, quoteForCorrection } from './PersonaModule'
+import {
+  buildPersonaNodes,
+  courseIdFromJudgment,
+  personaHash,
+  zoneForJudgment,
+  zoneForQuestion,
+} from './PersonaFigure'
+import {
+  BIG5_ITEMS,
+  COURSES,
+  LIKERT_AGREE,
+  PERSONA_RESULT_CAVEAT,
+  WORK_ITEMS,
+  WORK_THEMES,
+  courseById,
+  scoreCourse,
+} from '@/lib/persona/instruments'
+import { messages } from '@/i18n/messages'
 import type { ManualJudgment, PersonaQuestion, YouCorpusStatus } from '@/lib/types'
 
-// The Persona tab — UI-side contract only: it reads the corpus status + the
-// hand-written notes, shows each note with its date/tags/basis, and writes new
-// ones (including corrections) through POST /api/you-corpus/append. The server
-// journey (assembly, the fail-safe, the loopback gate) is covered by
-// youCorpus.test.ts + the route tests; here the fetch layer is stubbed.
+// The Persona SCREEN — UI-side contract only: it reads the corpus status, the
+// hand-written notes (drawn as the figure) and the course catalogue, and writes
+// through POST /api/you-corpus/append, the interview routes, and
+// POST /api/persona/courses/:id/submit. The server journey (assembly, scoring,
+// the fail-safe, the loopback gate) is covered by youCorpus.test.ts /
+// personaCourses.test.ts + the route tests; here the fetch layer is stubbed.
+//
+// NOTHING HERE ASSERTS ON PIXELS. The figure is a <canvas> (jsdom has no 2D
+// context at all), so every lit point is ALSO a real button in an off-screen
+// list — which is how a keyboard-only owner reaches it, and how these tests
+// open a note. The geometry-free logic (which region a note belongs to, how a
+// judgment becomes a node) is exported and tested as plain functions below.
 //
 // `useT` is stubbed to echo keys, so the assertions pin WHICH string a surface
 // uses rather than its wording — the copy is owner-facing and gets reworded.
@@ -54,6 +79,38 @@ const question = (over: Partial<PersonaQuestion> = {}): PersonaQuestion => ({
   ...over,
 })
 
+/** Every question kind the interview can produce (PersonaQuestionKind). Listed
+ *  here rather than derived, so ADDING a kind makes these tests fail until its
+ *  region is decided — the point of the list. */
+const QUESTION_KINDS = [
+  'decision-speed-contrast',
+  'escalation-answer-rule',
+  'escalation-dismissed',
+  'escalation-long-open',
+  'corpus-gap',
+  'card-rework',
+  'card-approved',
+  'card-stale-blocked',
+  'todo-passed-over',
+] as const
+
+/** The course catalogue as the server sends it — built FROM the instruments so
+ *  a course renamed there is renamed here too. Any field can be overridden per
+ *  course, which is how the tests tell "the rail read the API" apart from "the
+ *  rail printed the local instrument list". */
+const coursesPayload = (over: Partial<Record<string, Record<string, unknown>>> = {}) =>
+  COURSES.map((c) => ({
+    id: c.id,
+    name: c.name,
+    sub: c.sub,
+    zone: c.zone,
+    itemCount: c.itemCount,
+    source: c.source,
+    lastTakenAt: null as string | null,
+    headline: null as string | null,
+    ...(over[c.id] ?? {}),
+  }))
+
 let statusPayload: YouCorpusStatus
 let judgmentsPayload: ManualJudgment[]
 let appendSkipped: boolean
@@ -64,8 +121,17 @@ let questionPayload: PersonaQuestion | null
 let questionFails: boolean
 let resolveFails: boolean
 let answerCorpusStale: boolean
+let courses: ReturnType<typeof coursesPayload>
+let coursesFail: boolean
+let submitFails: boolean
+/** null ⇒ "every finding landed"; a number pins a partial mint. */
+let mintedOverride: number | null
 
 beforeEach(() => {
+  // jsdom ships no 2D canvas context. The figure already handles that (it draws
+  // nothing and everything else on the screen still works — which is why the
+  // data lives outside it), so this only silences jsdom's not-implemented dump.
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)
   statusPayload = status()
   judgmentsPayload = [judgment()]
   appendSkipped = false
@@ -76,6 +142,10 @@ beforeEach(() => {
   questionFails = false
   resolveFails = false
   answerCorpusStale = false
+  courses = coursesPayload()
+  coursesFail = false
+  submitFails = false
+  mintedOverride = null
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -129,6 +199,27 @@ beforeEach(() => {
           { status: 200 },
         )
       }
+      if (url.startsWith('/api/persona/courses/')) {
+        const id = url.split('/')[4]
+        const body = JSON.parse(String(init?.body ?? '{}')) as { answers: number[] }
+        posts.push({ url, ...body })
+        if (submitFails) return new Response('{}', { status: 500 })
+        // Scored with the REAL scorer, exactly like the route does: an answer
+        // vector of the wrong length or with an out-of-range entry throws here
+        // instead of quietly producing a sheet.
+        const result = scoreCourse(courseById(id)!, body.answers)
+        return new Response(
+          JSON.stringify({
+            record: { result, takenAt: '2026-08-14T02:00:00.000Z', answers: body.answers },
+            minted: mintedOverride ?? result.findings.length,
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.startsWith('/api/persona/courses')) {
+        if (coursesFail) return new Response('{}', { status: 500 })
+        return new Response(JSON.stringify({ courses }), { status: 200 })
+      }
       if (url.startsWith('/api/you-corpus')) {
         if (statusFails) return new Response('{}', { status: 500 })
         return new Response(JSON.stringify(statusPayload), { status: 200 })
@@ -144,59 +235,68 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+/** Open a lit point by its note text. The figure's off-screen list is the
+ *  keyboard path to the same node the canvas click opens. */
+const openNode = (text: string) => fireEvent.click(screen.getByRole('button', { name: text }))
+
+const openComposer = () => fireEvent.click(screen.getByText('persona.add.open'))
+
 const typeNote = (text: string) => {
   const box = screen.getByPlaceholderText('persona.add.placeholder')
   fireEvent.change(box, { target: { value: text } })
   return box
 }
 
-describe('PersonaModule — reading what the stand-in runs on', () => {
-  it('shows the assembly meta: when it was last updated and how much fed it', async () => {
-    render(<PersonaModule />)
-    await screen.findByText('persona.meta.heading')
+const rail = (name: string) => screen.getByRole('button', { name: new RegExp(name) })
 
-    // Every fact is a label → value row, so both counts read the same way.
+describe('PersonaModule — reading what the stand-in runs on', () => {
+  it('says how much is in there: what it remembered and what you wrote', async () => {
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
     // The key carries the plural form: English says "1 note", not "1 notes".
-    expect(screen.getByText('persona.meta.memory')).toBeTruthy()
-    expect(screen.getByText('persona.meta.count.other:{"count":62}')).toBeTruthy()
-    expect(screen.getByText('persona.meta.manual')).toBeTruthy()
-    expect(screen.getByText('persona.meta.count.one:{"count":1}')).toBeTruthy()
-    // Both mechanical sources resolved → both read as present.
-    expect(screen.getAllByText('persona.meta.present')).toHaveLength(2)
+    await waitFor(() =>
+      expect(document.body.textContent).toContain('persona.meta.count.other:{"count":62}'),
+    )
+    expect(document.body.textContent).toContain('persona.meta.count.one:{"count":1}')
   })
 
   it('says so plainly when the corpus has never been assembled', async () => {
     statusPayload = status({ exists: false, assembledAt: null })
     render(<PersonaModule />)
-    expect(await screen.findByText('persona.meta.never')).toBeTruthy()
+    await waitFor(() => expect(document.body.textContent).toContain('persona.meta.never'))
   })
 
-  it('reports a missing source instead of implying it is there', async () => {
-    statusPayload = status({ conceptExists: false, businessVisionExists: false })
-    render(<PersonaModule />)
-    await screen.findByText('persona.meta.heading')
-    expect(screen.getAllByText('persona.meta.absent')).toHaveLength(2)
-  })
-
-  it('lists each hand-written note with its date, tags and basis', async () => {
+  it('opens one note with its provenance, tags and what it is based on', async () => {
     judgmentsPayload = [
-      judgment({ id: 'j-9', text: 'Ship before it is pretty.', tags: ['shipping'], context: 'Learned the hard way.' }),
+      judgment({
+        id: 'j-9',
+        text: 'Ship before it is pretty.',
+        tags: ['shipping'],
+        context: 'Learned the hard way.',
+      }),
     ]
     render(<PersonaModule />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Ship before it is pretty.' })).toBeTruthy())
 
-    expect(await screen.findByText('Ship before it is pretty.')).toBeTruthy()
+    openNode('Ship before it is pretty.')
     expect(screen.getByText('shipping')).toBeTruthy()
     expect(screen.getByText('Learned the hard way.')).toBeTruthy()
     expect(screen.getByText('persona.notes.basis')).toBeTruthy()
+    // The region it sits in is named, not left as a dot on a body.
+    expect(screen.getByText(/^persona\.zone\.\w+ ・ /)).toBeTruthy()
     // The raw ISO string is never shown to the owner.
     expect(screen.queryByText('2026-07-18T04:00:00.000Z')).toBeNull()
+
+    fireEvent.click(screen.getByText('persona.node.close'))
+    expect(screen.queryByText('persona.notes.basis')).toBeNull()
   })
 
-  it('invites the first note when there is nothing yet', async () => {
+  it('invites the first note when nothing is lit yet', async () => {
     judgmentsPayload = []
     render(<PersonaModule />)
-    expect(await screen.findByText('persona.notes.empty.title')).toBeTruthy()
-    expect(screen.getByText('persona.notes.empty.body')).toBeTruthy()
+    expect(await screen.findByText('persona.figure.empty')).toBeTruthy()
+    expect(screen.getByText('persona.intro.title')).toBeTruthy()
   })
 
   it('offers a retry when the read fails instead of an endless spinner', async () => {
@@ -207,130 +307,52 @@ describe('PersonaModule — reading what the stand-in runs on', () => {
     statusFails = false
     fireEvent.click(screen.getByText('persona.retry'))
     await waitFor(() => expect(screen.queryByText('persona.loadFailed')).toBeNull())
-    expect(screen.getByText('persona.meta.heading')).toBeTruthy()
+    expect(document.body.textContent).toContain('persona.meta.count.other:{"count":62}')
   })
 
-  // "Nothing here yet" is a CLAIM about the corpus, and a failed read is not in
-  // a position to make it. Rendered next to the error banner it says two
-  // contradictory things at once, and the friendlier one is the one the owner
-  // believes: that their corpus is empty. It is the wrong lie to tell on the
-  // one surface whose entire job is to be an honest mirror.
-  it('does NOT claim the corpus is empty when it simply could not be read', async () => {
+  // "Nothing is lit yet" is a CLAIM about the corpus, and a failed read is not
+  // in a position to make it. An empty figure over a failed read says "you have
+  // told me nothing" — the wrong lie to tell on the one surface whose entire job
+  // is to be an honest mirror.
+  it('does NOT claim the figure is empty when it simply could not be read', async () => {
     statusFails = true
     judgmentsPayload = []
     render(<PersonaModule />)
 
     expect(await screen.findByText('persona.loadFailed')).toBeTruthy()
-    expect(screen.queryByText('persona.notes.empty.title')).toBeNull()
-    expect(screen.queryByText('persona.notes.empty.body')).toBeNull()
-    // Nor the heading it would sit under — an empty section reads as an answer
-    // too.
-    expect(screen.queryByText('persona.notes.heading')).toBeNull()
+    expect(screen.queryByText('persona.figure.empty')).toBeNull()
+    expect(screen.queryByText('persona.intro.title')).toBeNull()
 
     // And once the read succeeds, the invitation is correct and comes back.
     statusFails = false
     fireEvent.click(screen.getByText('persona.retry'))
-    expect(await screen.findByText('persona.notes.empty.title')).toBeTruthy()
+    expect(await screen.findByText('persona.figure.empty')).toBeTruthy()
   })
 
   // A failed REFRESH is different from a failed first read: notes already on
-  // screen were read successfully once, so they stay. Only the "it is empty"
-  // claim is withheld — withholding the notes too would lose the owner the
-  // context they were reading.
-  it('keeps already-loaded notes on screen when a later refresh fails', async () => {
+  // screen were read successfully once, so they stay lit. Only the "it is empty"
+  // claim is withheld.
+  it('keeps already-lit notes when a later refresh fails', async () => {
     judgmentsPayload = [judgment({ text: 'Loaded before the failure.' })]
     render(<PersonaModule />)
-    await screen.findByText('Loaded before the failure.')
+    await screen.findByRole('button', { name: 'Loaded before the failure.' })
 
     // The append lands; the re-read that follows it does not.
     statusFails = true
+    openComposer()
     typeNote('A new note.')
     fireEvent.click(screen.getByText('persona.add.submit'))
 
     expect(await screen.findByText('persona.loadFailed')).toBeTruthy()
-    expect(screen.getByText('Loaded before the failure.')).toBeTruthy()
-  })
-})
-
-describe('PersonaModule — the synapse map (graph view)', () => {
-  it('defaults to the list — the map is an opt-in toggle, not a replacement', async () => {
-    judgmentsPayload = [judgment({ text: 'Ship before it is pretty.' })]
-    render(<PersonaModule />)
-    await screen.findByText('Ship before it is pretty.')
-    expect(screen.queryByRole('group', { name: 'persona.graph.heading' })).toBeNull()
-  })
-
-  it('switches to the graph and back without losing the notes', async () => {
-    judgmentsPayload = [judgment({ id: 'j-9', text: 'Ship before it is pretty.' })]
-    render(<PersonaModule />)
-    await screen.findByText('Ship before it is pretty.')
-
-    fireEvent.click(screen.getByText('persona.notes.viewGraph'))
-    expect(screen.getByRole('group', { name: 'persona.graph.heading' })).toBeTruthy()
-    // The list article is gone while the graph is showing…
-    expect(screen.queryByText('persona.correct.start')).toBeNull()
-
-    fireEvent.click(screen.getByText('persona.notes.viewList'))
-    // …and comes back untouched on switching back.
-    expect(await screen.findByText('Ship before it is pretty.')).toBeTruthy()
-  })
-
-  it('shows a plain empty-state instead of a blank graph when there is nothing to draw', async () => {
-    judgmentsPayload = []
-    render(<PersonaModule />)
-    await screen.findByText('persona.notes.empty.title')
-
-    fireEvent.click(screen.getByText('persona.notes.viewGraph'))
-    expect(screen.getByText('persona.graph.empty.title')).toBeTruthy()
-    expect(screen.getByText('persona.graph.empty.body')).toBeTruthy()
-  })
-
-  it('reading a note in the graph does not require touching the corpus (read-only)', async () => {
-    judgmentsPayload = [
-      judgment({ id: 'j-1', text: 'Price on value.', tags: ['pricing'] }),
-      judgment({ id: 'j-2', text: 'Never ship on Friday.', tags: ['pricing'] }),
-    ]
-    render(<PersonaModule />)
-    await screen.findByText('Price on value.')
-    posts.length = 0
-
-    fireEvent.click(screen.getByText('persona.notes.viewGraph'))
-    // Clicking a node opens its detail panel…
-    fireEvent.click(screen.getByText(/Price on value/))
-    expect(await screen.findByText('persona.graph.close')).toBeTruthy()
-    // …and never issues a write.
-    expect(posts).toEqual([])
-  })
-
-  // A keyboard-only owner must be able to reach and read a node: it needs a
-  // role, a tab stop, and an activation key — a bare SVG <g onClick> gives
-  // none of those.
-  it('is reachable and selectable from the keyboard, not only the mouse', async () => {
-    judgmentsPayload = [judgment({ id: 'j-1', text: 'Price on value.' })]
-    render(<PersonaModule />)
-    await screen.findByText('Price on value.')
-    fireEvent.click(screen.getByText('persona.notes.viewGraph'))
-
-    const node = screen.getByRole('button', { name: 'Price on value.' })
-    expect(node).toHaveAttribute('tabindex', '0')
-
-    fireEvent.keyDown(node, { key: 'Enter' })
-    expect(await screen.findByText('persona.graph.close')).toBeTruthy()
-
-    fireEvent.click(screen.getByText('persona.graph.close'))
-    expect(screen.queryByText('persona.graph.close')).toBeNull()
-
-    // The space key activates it too (the other conventional "press this
-    // button" key for a role="button" element).
-    fireEvent.keyDown(node, { key: ' ' })
-    expect(await screen.findByText('persona.graph.close')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Loaded before the failure.' })).toBeTruthy()
   })
 })
 
 describe('PersonaModule — adding to it', () => {
   it('will not submit an empty or whitespace-only note', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.add.heading')
+    await screen.findByText('persona.add.open')
+    openComposer()
 
     const submit = screen.getByText('persona.add.submit').closest('button')!
     expect(submit.disabled).toBe(true)
@@ -342,9 +364,10 @@ describe('PersonaModule — adding to it', () => {
     expect(submit.disabled).toBe(false)
   })
 
-  it('posts the note with its tags and shows it in the list', async () => {
+  it('posts the note with its tags and lights it on the figure', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.add.heading')
+    await screen.findByText('persona.add.open')
+    openComposer()
 
     typeNote('Say no to features that need a manual.')
     fireEvent.change(screen.getByPlaceholderText('persona.add.tagsPlaceholder'), {
@@ -360,14 +383,20 @@ describe('PersonaModule — adding to it', () => {
     // No `context` on a plain add — that field is the correction's pointer.
     expect(posts[0].context).toBeUndefined()
 
-    expect(await screen.findByText('Say no to features that need a manual.')).toBeTruthy()
-    // The form is emptied so the next note starts clean.
+    // It is on the body now, not in a list somewhere.
+    expect(
+      await screen.findByRole('button', { name: 'Say no to features that need a manual.' }),
+    ).toBeTruthy()
+    // The composer closes and empties, so the next note starts clean.
+    expect(screen.queryByPlaceholderText('persona.add.placeholder')).toBeNull()
+    openComposer()
     expect((screen.getByPlaceholderText('persona.add.placeholder') as HTMLTextAreaElement).value).toBe('')
   })
 
   it('omits tags entirely when none were typed', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.add.heading')
+    await screen.findByText('persona.add.open')
+    openComposer()
     typeNote('No tags here.')
     fireEvent.click(screen.getByText('persona.add.submit'))
 
@@ -378,7 +407,8 @@ describe('PersonaModule — adding to it', () => {
   it('surfaces a write failure rather than pretending it saved', async () => {
     appendFails = true
     render(<PersonaModule />)
-    await screen.findByText('persona.add.heading')
+    await screen.findByText('persona.add.open')
+    openComposer()
 
     typeNote('This will not land.')
     fireEvent.click(screen.getByText('persona.add.submit'))
@@ -393,7 +423,8 @@ describe('PersonaModule — adding to it', () => {
   it('warns when the note landed but the corpus could not be rebuilt', async () => {
     appendSkipped = true
     render(<PersonaModule />)
-    await screen.findByText('persona.add.heading')
+    await screen.findByText('persona.add.open')
+    openComposer()
 
     typeNote('Landed, but sources were unreadable.')
     fireEvent.click(screen.getByText('persona.add.submit'))
@@ -405,7 +436,8 @@ describe('PersonaModule — adding to it', () => {
   // Japanese conversion), so only the modified chord submits.
   it('submits on Cmd/Ctrl+Enter but never on a bare Enter', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.add.heading')
+    await screen.findByText('persona.add.open')
+    openComposer()
     const box = typeNote('IME safe?')
 
     fireEvent.keyDown(box, { key: 'Enter' })
@@ -422,10 +454,11 @@ describe('PersonaModule — correcting is appending', () => {
   it('writes a NEW note carrying the old one, and never deletes the original', async () => {
     judgmentsPayload = [judgment({ id: 'j-old', text: 'Always ship on Friday.' })]
     render(<PersonaModule />)
-    await screen.findByText('Always ship on Friday.')
+    await screen.findByRole('button', { name: 'Always ship on Friday.' })
 
+    openNode('Always ship on Friday.')
     fireEvent.click(screen.getByText('persona.correct.start'))
-    // The form switches to correction mode and quotes what is being corrected.
+    // The composer opens in correction mode and quotes what is being corrected.
     expect(screen.getByText('persona.correct.heading')).toBeTruthy()
 
     fireEvent.change(screen.getByPlaceholderText('persona.correct.placeholder'), {
@@ -443,10 +476,10 @@ describe('PersonaModule — correcting is appending', () => {
     // part that stays exact.
     expect(posts[0].correctsId).toBe('j-old')
 
-    // …and the original is still listed. Nothing is destroyed — the request was
-    // an append, never a delete or an edit.
-    expect(await screen.findByText('Never ship on Friday.')).toBeTruthy()
-    expect(screen.getByText('Always ship on Friday.')).toBeTruthy()
+    // …and the original is still lit. Nothing is destroyed — the request was an
+    // append, never a delete or an edit.
+    expect(await screen.findByRole('button', { name: 'Never ship on Friday.' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Always ship on Friday.' })).toBeTruthy()
     const calls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
     const methods = calls.map((c) => (c[1] as RequestInit | undefined)?.method ?? 'GET')
     expect(methods).not.toContain('DELETE')
@@ -455,26 +488,31 @@ describe('PersonaModule — correcting is appending', () => {
   })
 
   // One slot under a note holds two different things, and the label has to say
-  // which: a correction carries the note it REPLACES, a plain note carries
-  // where it came from. Calling a superseded note "where this came from" reads
-  // as if the owner had cited it approvingly — the opposite of what happened.
+  // which: a correction carries the note it REPLACES, a plain note carries where
+  // it came from. Calling a superseded note "where this came from" reads as if
+  // the owner had cited it approvingly — the opposite of what happened.
   it('labels a correction’s pointer as a replacement, not as a source', async () => {
     judgmentsPayload = [
       judgment({ id: 'j-fix', text: 'The corrected version.', context: 'the old wording', correctsId: 'j-old' }),
       judgment({ id: 'j-cited', text: 'A note that cites its origin.', context: 'from a call last week' }),
     ]
     render(<PersonaModule />)
-    await screen.findByText('The corrected version.')
+    await screen.findByRole('button', { name: 'The corrected version.' })
 
+    openNode('The corrected version.')
     expect(screen.getByText('persona.notes.corrects')).toBeTruthy()
+    fireEvent.click(screen.getByText('persona.node.close'))
+
+    openNode('A note that cites its origin.')
     expect(screen.getByText('persona.notes.basis')).toBeTruthy()
   })
 
   it('carries the corrected note’s tags forward as the starting point', async () => {
     judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.', tags: ['pricing', 'risk'] })]
     render(<PersonaModule />)
-    await screen.findByText('Old call.')
+    await screen.findByRole('button', { name: 'Old call.' })
 
+    openNode('Old call.')
     fireEvent.click(screen.getByText('persona.correct.start'))
     expect((screen.getByPlaceholderText('persona.add.tagsPlaceholder') as HTMLInputElement).value).toBe(
       'pricing, risk',
@@ -484,11 +522,14 @@ describe('PersonaModule — correcting is appending', () => {
   // Losing typed words is the one thing this surface must never do. A React
   // value reset is not undoable, so a draft cleared by an unrelated click is
   // gone for good.
-  it('KEEPS an in-progress note when the owner clicks correct on something else', async () => {
+  it('KEEPS an in-progress note when the owner starts correcting something else', async () => {
+    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
     render(<PersonaModule />)
-    await screen.findByText('persona.correct.start')
+    await screen.findByRole('button', { name: 'Old call.' })
 
+    openComposer()
     typeNote('half-written thought I am not done with')
+    openNode('Old call.')
     fireEvent.click(screen.getByText('persona.correct.start'))
 
     expect(
@@ -499,11 +540,13 @@ describe('PersonaModule — correcting is appending', () => {
   it('does not overwrite tags the owner is already typing', async () => {
     judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.', tags: ['pricing'] })]
     render(<PersonaModule />)
-    await screen.findByText('Old call.')
+    await screen.findByRole('button', { name: 'Old call.' })
 
+    openComposer()
     fireEvent.change(screen.getByPlaceholderText('persona.add.tagsPlaceholder'), {
       target: { value: 'mine' },
     })
+    openNode('Old call.')
     fireEvent.click(screen.getByText('persona.correct.start'))
 
     expect((screen.getByPlaceholderText('persona.add.tagsPlaceholder') as HTMLInputElement).value).toBe(
@@ -512,15 +555,18 @@ describe('PersonaModule — correcting is appending', () => {
   })
 
   it('cancelling drops the correction, not the words', async () => {
+    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
     render(<PersonaModule />)
-    await screen.findByText('persona.correct.start')
+    await screen.findByRole('button', { name: 'Old call.' })
 
+    openNode('Old call.')
     fireEvent.click(screen.getByText('persona.correct.start'))
     fireEvent.change(screen.getByPlaceholderText('persona.correct.placeholder'), {
       target: { value: 'words worth keeping' },
     })
     fireEvent.click(screen.getByText('persona.correct.cancel'))
 
+    openComposer()
     expect(screen.getByText('persona.add.heading')).toBeTruthy()
     expect((screen.getByPlaceholderText('persona.add.placeholder') as HTMLTextAreaElement).value).toBe(
       'words worth keeping',
@@ -530,20 +576,216 @@ describe('PersonaModule — correcting is appending', () => {
   it('cancelling really drops the correction — the next note carries no pointer', async () => {
     judgmentsPayload = [judgment({ id: 'j-old', text: 'The note being corrected.' })]
     render(<PersonaModule />)
-    await screen.findByText('The note being corrected.')
+    await screen.findByRole('button', { name: 'The note being corrected.' })
 
+    openNode('The note being corrected.')
     fireEvent.click(screen.getByText('persona.correct.start'))
     expect(screen.getByText('persona.correct.heading')).toBeTruthy()
 
     fireEvent.click(screen.getByText('persona.correct.cancel'))
-    expect(screen.getByText('persona.add.heading')).toBeTruthy()
 
     // The real contract: what gets written next is a PLAIN note, with no
     // `context` pointing at the note the owner decided not to correct.
+    openComposer()
     typeNote('An unrelated new thought.')
     fireEvent.click(screen.getByText('persona.add.submit'))
     await waitFor(() => expect(posts).toHaveLength(1))
     expect(posts[0]).toEqual({ text: 'An unrelated new thought.' })
+  })
+})
+
+describe('PersonaModule — the courses', () => {
+  it('renders every course the server offers, with what it costs and what it grows', async () => {
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    for (const c of COURSES) {
+      expect(screen.getByRole('button', { name: new RegExp(c.name) })).toBeTruthy()
+    }
+    // A never-taken course states its length and the region it fills — the
+    // owner decides whether to spend 25 questions BEFORE starting.
+    expect(document.body.textContent).toContain(
+      `persona.course.state.new:{"count":${COURSES[0].itemCount},"zone":"persona.zone.${COURSES[0].zone}"}`,
+    )
+  })
+
+  it('names each course the way the SERVER named it, not from a local copy', async () => {
+    // The rail is the catalogue the server sent (name / itemCount / zone), and
+    // only the ITEMS come from the local instrument file. Printing COURSES here
+    // would look identical on a matching build and drift silently on any other.
+    courses = coursesPayload({ big5: { name: 'Renamed on the server' } })
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+    expect(await screen.findByRole('button', { name: /Renamed on the server/ })).toBeTruthy()
+  })
+
+  it('shows the date instead of the price once a course has been taken', async () => {
+    courses = coursesPayload({ big5: { lastTakenAt: '2026-08-01T09:00:00.000Z', headline: 'done' } })
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+    await waitFor(() => expect(document.body.textContent).toContain('persona.course.state.done'))
+  })
+
+  it('says the courses could not be read rather than showing no courses at all', async () => {
+    coursesFail = true
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+    await waitFor(() => expect(screen.getByText('persona.loadFailed')).toBeTruthy())
+    expect(screen.queryByRole('button', { name: new RegExp(COURSES[0].name) })).toBeNull()
+  })
+
+  it('starting a course asks item 1 of N, in the same card the question lives in', async () => {
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(rail(COURSES[0].name))
+    expect(screen.getByText(BIG5_ITEMS[0][2])).toBeTruthy()
+    expect(screen.getByText(`1 / ${BIG5_ITEMS.length}`)).toBeTruthy()
+    // The five-point scale is offered as five real buttons, not a slider.
+    for (const label of LIKERT_AGREE) {
+      expect(screen.getByRole('button', { name: label })).toBeTruthy()
+    }
+  })
+
+  it('answering advances to the next item', async () => {
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(rail(COURSES[0].name))
+    fireEvent.click(screen.getByRole('button', { name: LIKERT_AGREE[0] }))
+
+    expect(screen.getByText(BIG5_ITEMS[1][2])).toBeTruthy()
+    expect(screen.getByText(`2 / ${BIG5_ITEMS.length}`)).toBeTruthy()
+    // Nothing is sent mid-course: a half-answered instrument must never be
+    // scored.
+    expect(posts.filter((p) => String(p.url ?? '').includes('/submit'))).toHaveLength(0)
+  })
+
+  it('a two-choice course offers both cards and records which one was picked', async () => {
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    const work = COURSES.find((c) => c.id === 'work')!
+    fireEvent.click(rail(work.name))
+    const [a, b] = WORK_ITEMS[0]
+    const second = `${WORK_THEMES[b].name} — ${WORK_THEMES[b].d}`
+    expect(screen.getByRole('button', { name: `${WORK_THEMES[a].name} — ${WORK_THEMES[a].d}` })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: second }))
+    // Answers are INDICES into the item's own choice pair — the server scores.
+    for (let i = 1; i < work.itemCount; i++) {
+      const item = WORK_ITEMS[i]
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: `${WORK_THEMES[item[0]].name} — ${WORK_THEMES[item[0]].d}`,
+        }),
+      )
+    }
+    await waitFor(() => expect(screen.getByText('persona.result.kicker')).toBeTruthy())
+    const submit = posts.find((p) => String(p.url ?? '').includes('/submit'))!
+    expect(submit.answers).toEqual([1, ...Array(work.itemCount - 1).fill(0)])
+  })
+
+  it('finishing posts the WHOLE answer vector and shows the sheet, sourced and hedged', async () => {
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    const big5 = COURSES[0]
+    fireEvent.click(rail(big5.name))
+    for (let i = 0; i < big5.itemCount; i++) {
+      fireEvent.click(screen.getByRole('button', { name: LIKERT_AGREE[0] }))
+    }
+
+    expect(await screen.findByText('persona.result.kicker')).toBeTruthy()
+    const submit = posts.find((p) => String(p.url ?? '').includes('/submit'))!
+    expect(submit.url).toBe('/api/persona/courses/big5/submit')
+    expect(submit.answers).toEqual(Array(big5.itemCount).fill(0))
+
+    // The sheet shows what was scored…
+    const scored = scoreCourse(courseById('big5')!, Array(big5.itemCount).fill(0))
+    expect(screen.getByText(scored.headline)).toBeTruthy()
+    // …WHERE THE ITEMS CAME FROM, verbatim (the licensing/provenance promise)…
+    expect(document.body.textContent).toContain(big5.source)
+    // …every finding with the number behind it…
+    expect(screen.getAllByText(new RegExp(`^${big5.name} ・ `))).toHaveLength(
+      scored.findings.length,
+    )
+    // …and the caveat that this is a self-report, never a verdict.
+    expect(screen.getByText('persona.result.caveat')).toBeTruthy()
+  })
+
+  // The caveat is not decoration: instruments.ts exports it so exactly one
+  // wording exists, and the sheet renders it through i18n. If the two drift, the
+  // shipped sheet stops matching the promise the instrument file makes.
+  it('the Japanese caveat is the instrument file’s, word for word', () => {
+    expect(messages.ja['persona.result.caveat']).toBe(PERSONA_RESULT_CAVEAT)
+    expect(messages.en['persona.result.caveat']).toBeTruthy()
+  })
+
+  it('keeps the answers when the result cannot be saved, and re-sends the same vector', async () => {
+    submitFails = true
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    const big5 = COURSES[0]
+    fireEvent.click(rail(big5.name))
+    for (let i = 0; i < big5.itemCount; i++) {
+      fireEvent.click(screen.getByRole('button', { name: LIKERT_AGREE[0] }))
+    }
+
+    expect(await screen.findByText('persona.course.failed')).toBeTruthy()
+    expect(screen.queryByText('persona.result.kicker')).toBeNull()
+
+    // Retaking 25 questions because a write failed would be the cruel version.
+    submitFails = false
+    fireEvent.click(screen.getByText('persona.course.retry'))
+    expect(await screen.findByText('persona.result.kicker')).toBeTruthy()
+    const sent = posts.filter((p) => String(p.url ?? '').includes('/submit'))
+    expect(sent).toHaveLength(2)
+    expect(sent[1].answers).toEqual(sent[0].answers)
+  })
+
+  // The sheet's list is headed 「ペルソナに入ったもの」. When the corpus write
+  // partly failed, that heading is a claim the corpus cannot back.
+  it('does not claim a finding entered the persona when the corpus refused it', async () => {
+    mintedOverride = 0
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    const big5 = COURSES[0]
+    fireEvent.click(rail(big5.name))
+    for (let i = 0; i < big5.itemCount; i++) {
+      fireEvent.click(screen.getByRole('button', { name: LIKERT_AGREE[0] }))
+    }
+
+    expect(await screen.findByText('persona.result.mintedPartial')).toBeTruthy()
+  })
+
+  it('a fully-minted result does NOT show the partial warning', async () => {
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    const big5 = COURSES[0]
+    fireEvent.click(rail(big5.name))
+    for (let i = 0; i < big5.itemCount; i++) {
+      fireEvent.click(screen.getByRole('button', { name: LIKERT_AGREE[0] }))
+    }
+
+    await screen.findByText('persona.result.kicker')
+    expect(screen.queryByText('persona.result.mintedPartial')).toBeNull()
+  })
+
+  it('quitting a course sends nothing and gives the day’s question back', async () => {
+    questionPayload = question()
+    render(<PersonaModule />)
+    await screen.findByText('persona.course.railHeading')
+
+    fireEvent.click(rail(COURSES[0].name))
+    fireEvent.click(screen.getByRole('button', { name: LIKERT_AGREE[0] }))
+    fireEvent.click(screen.getByText('persona.ask.quit'))
+
+    expect(screen.getByText(question().textEn)).toBeTruthy()
+    expect(posts.filter((p) => String(p.url ?? '').includes('/submit'))).toHaveLength(0)
   })
 })
 
@@ -564,9 +806,95 @@ describe('helpers', () => {
     expect(quoted.length).toBe(281) // 280 + the ellipsis
     expect(quoted.endsWith('…')).toBe(true)
   })
+
+  it('courseRailState separates never-taken / running / done', () => {
+    expect(courseRailState({ id: 'big5', lastTakenAt: null }, null)).toBe('new')
+    expect(courseRailState({ id: 'big5', lastTakenAt: null }, 'big5')).toBe('running')
+    expect(courseRailState({ id: 'big5', lastTakenAt: '2026-08-01' }, null)).toBe('done')
+    // Running wins over done: a retake in progress must not read as finished.
+    expect(courseRailState({ id: 'big5', lastTakenAt: '2026-08-01' }, 'big5')).toBe('running')
+  })
+
+  it('asZone refuses a region the figure does not have', () => {
+    expect(asZone('craft')).toBe('craft')
+    expect(asZone('elbow')).toBe('mind')
+  })
 })
 
-describe('PersonaModule — today’s question', () => {
+describe('where a note lands on the figure (pure)', () => {
+  it('puts a course finding in the region that course grows', () => {
+    for (const c of COURSES) {
+      const j = judgment({ id: `j-${c.id}`, tags: ['persona', c.id], context: `${c.name} ・ 1位` })
+      expect(courseIdFromJudgment(j)).toBe(c.id)
+      expect(zoneForJudgment(j)).toBe(c.zone)
+    }
+  })
+
+  it('reads the course out of a prefixed tag too (the server owns its prefix)', () => {
+    expect(courseIdFromJudgment({ tags: ['persona:big5'] })).toBe('big5')
+    expect(courseIdFromJudgment({ tags: ['course-work'] })).toBe('work')
+    // …and falls back to the course NAME carried in the provenance line.
+    expect(courseIdFromJudgment({ context: `${COURSES[1].name} ・ 外向 ↔ 内向` })).toBe(COURSES[1].id)
+    expect(courseIdFromJudgment({ tags: ['pricing'], context: 'from a call' })).toBeNull()
+  })
+
+  it('lands an interview answer in the patch its question was digging in', () => {
+    // personaInterview.ts writes the answer back tagged ['interview', kind], so
+    // the point that lights up is the one that was pulsing while it was asked.
+    //
+    // ONE id for all nine kinds, deliberately: if the kind tag were ignored,
+    // every answer below would fall into the same hashed region, and no single
+    // region can satisfy nine kinds that span five. (Measured — with the kind
+    // lookup removed, a single-kind version of this test still passed by hash
+    // coincidence. A guard that green-lights the bug it exists to catch is
+    // worse than none.)
+    for (const kind of QUESTION_KINDS) {
+      const answer = judgment({ id: 'j-int', tags: ['interview', kind] })
+      expect(zoneForJudgment(answer)).toBe(zoneForQuestion(question({ kind })))
+    }
+  })
+
+  it('spreads a free-form note deterministically — the same note never moves', () => {
+    const j = judgment({ id: 'j-free', tags: ['pricing'] })
+    const first = zoneForJudgment(j)
+    expect(zoneForJudgment(j)).toBe(first)
+    expect(zoneForJudgment({ ...j })).toBe(first)
+    // Different notes do not all pile into one region.
+    const zones = new Set(
+      Array.from({ length: 40 }, (_, i) => zoneForJudgment(judgment({ id: `j-${i}` }))),
+    )
+    expect(zones.size).toBeGreaterThan(1)
+  })
+
+  it('personaHash is stable and unsigned (a negative index would seat nothing)', () => {
+    expect(personaHash('abc')).toBe(personaHash('abc'))
+    expect(personaHash('abc')).not.toBe(personaHash('abd'))
+    for (const s of ['', 'a', '日本語', 'j-1']) {
+      expect(personaHash(s)).toBeGreaterThanOrEqual(0)
+      expect(Number.isInteger(personaHash(s))).toBe(true)
+    }
+  })
+
+  it('buildPersonaNodes carries the whole note, not just its text', () => {
+    const nodes = buildPersonaNodes([
+      judgment({ id: 'j-1', text: 'A.', tags: ['x'], context: 'ctx', correctsId: 'j-0' }),
+      judgment({ id: 'j-2', text: 'B.' }),
+    ])
+    expect(nodes.map((n) => n.id)).toEqual(['j-1', 'j-2'])
+    expect(nodes[0]).toMatchObject({ text: 'A.', tags: ['x'], context: 'ctx', correctsId: 'j-0' })
+    expect(nodes[1].tags).toEqual([])
+    expect(nodes[1].context).toBeUndefined()
+  })
+
+  it('every question kind has a region (a new kind must not fall off the body)', () => {
+    for (const kind of QUESTION_KINDS) {
+      expect(zoneForQuestion(question({ kind }))).toBeTruthy()
+    }
+    expect(zoneForQuestion(null)).toBeNull()
+  })
+})
+
+describe('PersonaModule — the always-on question', () => {
   const answerBox = () => screen.getByPlaceholderText('persona.interview.placeholder')
 
   it('shows the question drawn from the owner’s own week', async () => {
@@ -599,11 +927,14 @@ describe('PersonaModule — today’s question', () => {
   it('does NOT claim there is no question when the read simply failed', async () => {
     questionFails = true
     render(<PersonaModule />)
-    // The rest of the tab still loads, so this is a real assertion about the
-    // question section rather than about an unmounted component.
-    await waitFor(() => expect(screen.getByText('persona.meta.heading')).toBeInTheDocument())
+    // The rest of the screen still loads, so this is a real assertion about the
+    // question card rather than about an unmounted component.
+    await waitFor(() => expect(screen.getByText('persona.course.railHeading')).toBeInTheDocument())
     expect(screen.queryByText('persona.interview.none.title')).not.toBeInTheDocument()
-    expect(screen.queryByText('persona.interview.heading')).not.toBeInTheDocument()
+    expect(screen.queryByText('persona.interview.none.body')).not.toBeInTheDocument()
+    // The card is still there — it is never a modal and never disappears — it
+    // simply has nothing to claim.
+    expect(screen.getByText('persona.ask.idle')).toBeInTheDocument()
   })
 
   it('sends the answer with the question’s id and shows it landed', async () => {
@@ -685,7 +1016,7 @@ describe('PersonaModule — today’s question', () => {
   })
 })
 
-describe('PersonaModule — today’s question, honest about what actually landed', () => {
+describe('PersonaModule — the question, honest about what actually landed', () => {
   const answerBox = () => screen.getByPlaceholderText('persona.interview.placeholder')
 
   it('does NOT say the stand-in has the answer when the corpus was not rebuilt', async () => {
@@ -731,9 +1062,8 @@ describe('PersonaModule — today’s question, honest about what actually lande
     await waitFor(() => expect(answerBox()).toBeInTheDocument())
 
     // A note first — it stores, but the corpus is not rebuilt.
-    fireEvent.change(screen.getByPlaceholderText('persona.add.placeholder'), {
-      target: { value: 'メモ' },
-    })
+    openComposer()
+    typeNote('メモ')
     fireEvent.click(screen.getByText('persona.add.submit'))
     await waitFor(() => expect(screen.getByText('persona.meta.stale')).toBeInTheDocument())
 

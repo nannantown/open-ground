@@ -20,7 +20,15 @@ import { MODULE_IDS, isCustomTabId, type TabId } from '@/lib/modules/ids'
 /** The set of panel tabs we persist — the module registry's ids, plus
  *  `custom:<uuid>` custom-tab ids (docs/CUSTOM_TABS_PLAN.md). A custom id is
  *  only shape-validated here; whether the module still EXISTS is checked by
- *  ProjectPanel once the live list arrives (a vanished one falls back). */
+ *  ProjectPanel once the live list arrives (a vanished one falls back).
+ *
+ *  This list is also the RETIREMENT path for a built-in tab. A saved value that
+ *  is no longer a module id ('tasks', 'goals', 'overview' — and 'persona',
+ *  which moved to the Ground toolbar on 2026-08-14) fails the check below and
+ *  is dropped, so `panelTab` comes back undefined and ProjectPanel opens its
+ *  default tab. Keeping the id here "just in case" would be the harmful option:
+ *  the panel would restore a view with no row entry and no render branch — a
+ *  blank tab body. */
 export type PersistedPanelTab = TabId
 
 const PANEL_TABS: readonly string[] = MODULE_IDS

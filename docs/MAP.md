@@ -586,27 +586,53 @@
 - SSE 基盤: `server/routes/sse.ts` + `src/lib/sseReconnect.ts`
 - skills: `src/lib/server/projectSkills.ts`(per-project `.claude/skills/`)/ `generateSkill.ts`
   (グローバル生成)+ `src/components/canvas/` の `GlobalSkillsPanel` / `SkillsModal`
+- ペルソナの診断コース(2026-08-14): 設問+採点は `src/lib/persona/instruments.ts`
+  (純粋・89問4コース。**逆転項目/軸の僅差判定/未完了は採点しない**の3性質が
+  `instruments.test.ts` で変異赤済み)。保存と corpus への流し込みは
+  `src/lib/server/personaCourses.ts`(`~/.openground/persona-courses.json` 0600・
+  retake は history に10件まで退避)、口は `server/routes/persona.ts`
+  (`GET /api/persona/courses` / `POST /api/persona/courses/:id/submit`)。
+  **所見は appendJudgment 経由でしか corpus に入らない**(第二の書き手を作らない)。
+  ⚠ 名称は正典: MBTI® / CliftonStrengths® は商標かつ設問非公開なので**再現も名乗りもしない** —
+  各コースの `source` 行(結果シートに逐語表示)がその約束で、番人が消えないよう固定している。
 - you-corpus: `server/routes/youCorpus.ts` + `src/lib/server/youCorpus.ts`
   (`~/.openground/you-corpus.md` 0600・破損は .corrupt 退避)。UI は
-  `src/components/canvas/modules/PersonaModule.tsx`(ペルソナタブ・owner 限定
-  `experiments.persona`)— 手動追記のカード一覧は `GET /api/you-corpus/judgments`。
+  `src/components/canvas/modules/PersonaModule.tsx`(owner 限定)。
+  **住所は Ground(2026-08-14 にプロジェクトのタブ行から移設)** — 中身は repo ではなく
+  **オーナー自身**の話で `~/.openground/` にあり、どのプロジェクトで開いても同一だったので、
+  Settings / Manual / Skills と同じ Ground ツールバーの `Fingerprint` 入口から
+  `src/components/canvas/PersonaPanel.tsx`(全面オーバーレイ・Esc と ✕ で閉じる)で開く。
+  **ゲートは `experiments.persona` または `experiments.swarm` のどちらかが開けば可視**で、
+  判定は `src/lib/persona/gate.ts` の `isPersonaOpen` 一本(App がボタンを出す時と
+  パネルを mount する時の両方で同じ述語を呼ぶ)。moduleRegistry / `MODULE_IDS` には
+  もう persona は無く、旧タブを開いたまま更新した人の `panelTab:'persona'` は
+  persistView が落として既定タブに戻る。手動追記は `GET /api/you-corpus/judgments`
+  を読み、一覧ではなく人型の図の「灯った点」として出す(下記)。
   **訂正=追記**(編集も削除も経路が無い・元の記述は新しい記述の `context` に引用され、
   `correctsId` に元の id が入る)。**読めない≠無い**: additions の読みは ENOENT のみ
   空扱い、他の errno は throw(読み手を tolerant に戻すと `/judgments` が 200 `[]`・
-  status が manualCount 0 を返し、タブが満杯のコーパスに「まだ何もありません」を出す。
+  status が manualCount 0 を返し、画面が満杯のコーパスに「まだ何もありません」を出す。
   assemble に至っては判断を落とした本文で上書きする)。UI 側も読み込み失敗時は空状態を
   出さない
-- シナプス網(ペルソナタブ「マップ」): `src/lib/personaGraph.ts`(純関数・
-  エッジ規則=correctsId/共有タグ/72h以内の日付近接・優先順位はこの順で
-  弱い規則を上書きしない)+ `src/components/canvas/modules/PersonaGraphView.tsx`
-  (pan/zoom は InfiniteCanvas と同じ `{x,y,zoom}` viewport の型に倣った専用軽量実装・
-  重量級グラフライブラリは追加していない)。ノードは既存の
-  `GET /api/you-corpus/judgments` の `ManualJudgment[]` そのもの(取材ループの回答も
-  escalation の回答も、答えた時点で `appendJudgment` 経由でこのリストに載るので
-  別データソースは不要)。読み取り専用 v1(グラフからの編集経路は無い)。
-  `PersonaModule.tsx` 内の list/graph トグル(既定は list)で切替、既存の一覧表示は
-  変更していない。
-- 取材ループ(ペルソナタブ「今日の1問」): `src/lib/server/personaInterview.ts` +
+- 人型の図(ペルソナ画面の本体・2026-08-14 に一覧+シナプス網マップを置き換え):
+  `src/components/canvas/modules/PersonaFigure.tsx`。粒子1点=手書きメモ1件で、
+  灯り=知っていること/薄い点=進行中コースの未確定回答/脈打つ patch=いまの問いが
+  掘っている領域/塵=まだ形になっていない部分。ノードは `GET /api/you-corpus/judgments`
+  の `ManualJudgment[]` そのもの(別データソースを作らない)。**どの領域に座るかは純関数**
+  `zoneForJudgment`(①コースタグ→そのコースの zone ②取材ループの kind タグ→問いが
+  掘っていた zone ③それ以外は id ハッシュで決定的に散らす)で、`PersonaModule.test.tsx`
+  が変異赤済み。ジェスチャは InfiniteCanvas と同一契約(素の wheel=パン・⌘/Ctrl+wheel=
+  カーソル基点ズーム `zoom*(1+(-deltaY*0.01))`・Space ドラッグ=パン、加えてタッチの
+  ピンチ/1本指パン)。canvas はキーボードから触れないので、灯った点は同時に sr-only の
+  ボタンとしても出る(テストもこの経路でノードを開く)。⚠ 旧 `src/lib/personaGraph.ts` /
+  `PersonaGraphView.tsx` は削除済み(この図が置き換えたもの・復元は git 履歴から)。
+- 結果シート: `src/components/canvas/modules/PersonaResultSheet.tsx`。サーバが採点した
+  `PersonaResult` をそのまま描くだけで**クライアントは一切計算しない**。`source` 行は逐語、
+  所見は出所つき、断り書き(`persona.result.caveat` = instruments.ts の
+  `PERSONA_RESULT_CAVEAT` と一字一句一致・テストで固定)は必ず出る。corpus に入った数は
+  `SubmitPersonaCourseResponse.minted` が正で、findings より少なければ「まだ渡っていない」
+  と明示する(見出し「ペルソナに入ったもの」が嘘をつかないための番人)。
+- 取材ループ(ペルソナ画面「今日の1問」): `src/lib/server/personaInterview.ts` +
   `/api/you-corpus/interview`(POST=生成込み・GET=純読み)/`…/answer`/`…/skip`。
   状態は `~/.openground/persona-interview.json` 0600。**claude を起動しない** —
   生成はオーナーの実データに対する決定論的テンプレ穴埋め(`claude -p` 禁止の repo 規約

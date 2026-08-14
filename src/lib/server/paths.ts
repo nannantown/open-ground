@@ -146,6 +146,13 @@ export const youCorpusAdditionsFile = () => join(openGroundHome(), 'you-corpus-a
 // they go to the corpus through appendJudgment, which stays the single record.
 // See src/lib/server/personaInterview.ts.
 export const personaInterviewFile = () => join(openGroundHome(), 'persona-interview.json')
+// The PERSONA COURSES store (ペルソナタブの診断コース): the last result per course
+// plus the results a retake displaced (capped), written 0600. PERSONAL like the
+// corpus and the interview state — app home only, never a repo. The instrument
+// and its scoring stay pure in src/lib/persona/instruments.ts; only the outcome
+// is stored here, and each finding is ALSO minted into the corpus through
+// appendJudgment (one writer). See src/lib/server/personaCourses.ts.
+export const personaCoursesFile = () => join(openGroundHome(), 'persona-courses.json')
 export const runsDir = () => join(openGroundHome(), 'runs')
 export const runFile = (id: string) => join(runsDir(), `${id}.json`)
 // Dismissed runs are *moved* here rather than unlinked, so an accidental

@@ -58,6 +58,23 @@ describe('parsePersistedView — tolerant parsing', () => {
     expect(parsePersistedView('{"projectId":123,"panelTab":"bogus"}')).toEqual({})
   })
 
+  // A RETIRED tab id is the realistic version of "unknown": it is on the disk of
+  // every user who had that tab open when it went away. 'persona' left the tab
+  // row on 2026-08-14 (the surface moved to the Ground toolbar — see
+  // src/components/canvas/PersonaPanel.tsx), so an owner whose last-open tab was
+  // Persona has exactly this blob. Dropping the field is what makes ProjectPanel
+  // fall back to the project's default tab; KEEPING it would restore a view with
+  // no row entry and no render branch, i.e. a blank panel body.
+  it('drops a RETIRED panel tab, keeping the project (the reload still lands home)', () => {
+    expect(parsePersistedView('{"projectId":"abc","panelTab":"persona"}')).toEqual({
+      projectId: 'abc',
+    })
+    // The historical retirements behave the same way — this is one rule, not a
+    // per-id special case.
+    expect(parsePersistedView('{"panelTab":"tasks"}')).toEqual({})
+    expect(parsePersistedView('{"panelTab":"goals"}')).toEqual({})
+  })
+
   it('ignores unrelated extra keys', () => {
     expect(parsePersistedView('{"projectId":"abc","junk":true}')).toEqual({
       projectId: 'abc',

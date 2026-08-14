@@ -10,6 +10,8 @@ import { SettingsPanel } from '@/components/canvas/SettingsPanel'
 import { NewProjectModal } from '@/components/canvas/NewProjectModal'
 import { FeedbackModal } from '@/components/canvas/FeedbackModal'
 import { GlobalSkillsPanel } from '@/components/canvas/GlobalSkillsPanel'
+import { PersonaPanel } from '@/components/canvas/PersonaPanel'
+import { isPersonaOpen } from '@/lib/persona/gate'
 import { AccountModal } from '@/components/canvas/AccountModal'
 import { ProjectJumpPalette } from '@/components/canvas/ProjectJumpPalette'
 import { ProjectPanel } from '@/components/canvas/ProjectPanel'
@@ -202,6 +204,13 @@ export default function App() {
   // Full-screen in-app manual (the "?" toolbar entry + first-run link).
   const [manualOpen, setManualOpen] = useState(false)
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false)
+  // The Persona surface (the owner's stand-in), opened from the Ground toolbar.
+  // It lives HERE rather than in the per-project tab row because it describes the
+  // OWNER, not a repo — its notes live in ~/.openground/ and are identical on
+  // every project — so Ground, where the other app-wide surfaces (Settings,
+  // Manual, Skills) are addressed, is where it belongs. Both the entry and the
+  // mount are gated below by isPersonaOpen (persona OR swarm).
+  const [personaOpen, setPersonaOpen] = useState(false)
   // Realtime collab (member flow). `enabled` gates collab entirely — the default
   // build (no collab env) shows nothing. `sharedDialogOpen` is the join dialog,
   // opened EITHER by the Toolbar "Shared with me" entry (the member's path to the
@@ -1268,6 +1277,13 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenManual={() => setManualOpen(true)}
         onOpenSkills={() => setSkillsPanelOpen(true)}
+        // Owner-only, hidden by default: the Persona entry appears only when the
+        // persona OR swarm experiment is open. Passing `undefined` when the gate
+        // is closed is what hides it (the same undefined-hides-the-entry pattern
+        // as onOpenShared / onFeedback / onAccount above), so a non-owner build
+        // never renders the button at all — the feature's existence stays hidden
+        // rather than being drawn and then refused.
+        onOpenPersona={isPersonaOpen(experiments.flags) ? () => setPersonaOpen(true) : undefined}
         // Member entry to the join dialog — the INITIAL join needs it (a member
         // with an invite code/link has nowhere to paste it otherwise; already-
         // joined projects also show as Ground cards). Gated on collabEnabled, so
@@ -1484,6 +1500,16 @@ export default function App() {
       />
       <ManualPanel open={manualOpen} onClose={() => setManualOpen(false)} />
       <GlobalSkillsPanel open={skillsPanelOpen} onClose={() => setSkillsPanelOpen(false)} />
+      {/* Re-asking the gate HERE, not just when drawing the button, is what keeps
+          the door and the room from disagreeing: the flags are re-fetched on
+          window focus, so a gate that closes under a panel already on screen
+          (the experiment switched off in another window) takes the surface with
+          it instead of leaving the owner's corpus mounted behind a door that no
+          longer exists. */}
+      <PersonaPanel
+        open={personaOpen && isPersonaOpen(experiments.flags)}
+        onClose={() => setPersonaOpen(false)}
+      />
       <ProjectJumpPalette
         open={jumpOpen}
         projects={visibleProjects}

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Terminal, Palette, Columns3, Puzzle, Network, Fingerprint, BookOpenText } from 'lucide-react'
+import { Terminal, Palette, Columns3, Puzzle, Network, BookOpenText } from 'lucide-react'
 import { customTabId, type ModuleId } from '@/lib/modules/ids'
 import type { ModuleDescriptor } from '@/lib/modules/descriptor'
 import type { MessageKey } from '@/i18n/messages'
@@ -37,13 +37,20 @@ export interface ModuleDef extends TabDef {
    *  per project (ProjectData.disabledModules) but never uninstalled. */
   default: true
   /** Owner-only experiment gate. When set, the module is HIDDEN from EVERY
-   *  surface — tab row, "+" picker, Ctrl+Tab cycle, render branch — unless this
-   *  experiment's gate is OPEN for the current user (owner + the settings
-   *  toggle, resolved server-side; see {@link ModuleGate} and ExperimentId in
-   *  types). Absent ⇒ an always-on default module. A gated module never appears
-   *  in release notes or the in-app manual (both hand-written, never derived
-   *  from this registry). */
-  experiment?: ExperimentId
+   *  surface — tab row, "+" picker, Ctrl+Tab cycle, render branch — unless AT
+   *  LEAST ONE of these experiments is OPEN for the current user (owner + the
+   *  settings toggle, resolved server-side; see {@link ModuleGate} and
+   *  ExperimentId in types). Absent ⇒ an always-on default module. A gated
+   *  module never appears in release notes or the in-app manual (both
+   *  hand-written, never derived from this registry).
+   *
+   *  ANY-OF, not all-of: a module may ride along with a neighbouring experiment
+   *  while keeping its own flag as a second, independent way in. (The Persona
+   *  surface was the case that introduced this. It is no longer a tab — it
+   *  describes the OWNER rather than a project, so it now opens from the Ground
+   *  toolbar; its gate kept the same any-of rule and lives in
+   *  src/lib/persona/gate.ts.) */
+  experiments?: readonly ExperimentId[]
 }
 
 /** Which owner-only experiments are currently OPEN for this user. Built from the
@@ -111,29 +118,43 @@ export const MODULES: ModuleDef[] = [
   // renaming the tab in both languages is a one-key edit in
   // src/i18n/messages/research.ts.
   { id: 'research', label: 'Research', labelKey: 'research.tabLabel', icon: <BookOpenText size={10} strokeWidth={2.25} />, kind: 'native', default: true },
-  // Owner-only experiments (hidden by default). `experiment: <id>` keeps each
-  // out of every visible surface until that gate is open (owner + the settings
-  // toggle). Listed last so, when shown, they sit after the always-on defaults
-  // in registry order.
-  { id: 'swarm', label: 'Swarm', icon: <Network size={10} strokeWidth={2.25} />, kind: 'native', default: true, experiment: 'swarm' },
-  // Persona — where the owner reads and corrects the you-corpus the overseer
-  // runs on. Its name is owner-decided product copy rather than a fixed product
-  // noun, so it carries a `labelKey`: renaming the tab in both languages is a
-  // one-key edit in src/i18n/messages/persona.ts.
-  { id: 'persona', label: 'Persona', labelKey: 'persona.tabLabel', icon: <Fingerprint size={10} strokeWidth={2.25} />, kind: 'native', default: true, experiment: 'persona' },
+  // Owner-only experiments (hidden by default). `experiments: [<id>…]` keeps each
+  // out of every visible surface until one of those gates is open (owner + the
+  // settings toggle). Listed last so, when shown, they sit after the always-on
+  // defaults in registry order.
+  { id: 'swarm', label: 'Swarm', icon: <Network size={10} strokeWidth={2.25} />, kind: 'native', default: true, experiments: ['swarm'] },
+  // NOT HERE ON PURPOSE — Persona. It was a gated module until 2026-08-14, but
+  // the surface is about the OWNER, not a repo: its data lives in
+  // ~/.openground/ and was therefore identical on every project's tab. It now
+  // opens from the GROUND toolbar beside Settings / Manual / Skills
+  // (src/components/canvas/PersonaPanel.tsx, gated by src/lib/persona/gate.ts).
+  // Adding it back here would put the owner's stand-in behind a per-project
+  // address it has no per-project meaning for.
 ]
 
 // Whether a module is visible GLOBALLY for this user. A plain default module is
-// always enabled; an `experiment`-gated one is enabled ONLY when that experiment
-// is in the open set. The gate defaults to NO_EXPERIMENTS so callers that don't
-// pass one (and every pre-experiment call site / test) see only the always-on
-// defaults — experimental modules fail CLOSED. (Per-PROJECT hiding is a separate
-// concept — ProjectData.disabledModules — applied where the tab row is computed,
-// not here, so the global registry stays project-agnostic.)
+// always enabled; a gated one is enabled when ANY of its experiments is in the
+// open set. The gate defaults to NO_EXPERIMENTS so callers that don't pass one
+// (and every pre-experiment call site / test) see only the always-on defaults —
+// experimental modules fail CLOSED. (Per-PROJECT hiding is a separate concept —
+// ProjectData.disabledModules — applied where the tab row is computed, not here,
+// so the global registry stays project-agnostic.)
 export const isModuleEnabled = (
   m: ModuleDef,
   gate: ModuleGate = NO_EXPERIMENTS,
-): boolean => (m.experiment ? gate.openExperiments.has(m.experiment) : true)
+): boolean =>
+  !m.experiments || m.experiments.some((id) => gate.openExperiments.has(id))
+
+/** The SAME predicate, addressed by id — for the render branches in
+ *  ProjectPanel, which re-check the gate before mounting an experimental
+ *  surface (a forged `view` from a stale/hostile localStorage value must not
+ *  mount it). Asking here rather than reading a flag directly is what keeps the
+ *  tab row and the mounted surface from ever disagreeing about who may see a
+ *  module: there is one rule, in one place. An unknown id is not visible. */
+export const isModuleIdVisible = (id: string, gate: ModuleGate = NO_EXPERIMENTS): boolean => {
+  const m = MODULES.find((x) => x.id === id)
+  return m ? isModuleEnabled(m, gate) : false
+}
 
 export const enabledModules = (gate: ModuleGate = NO_EXPERIMENTS): ModuleDef[] =>
   MODULES.filter((m) => isModuleEnabled(m, gate))

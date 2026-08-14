@@ -26,7 +26,7 @@ export const settings = {
     'settings.experiments.sandbox': 'Sandbox Claude (macOS)',
     'settings.experiments.persona': 'Persona',
     'settings.experiments.personaHint':
-      'Reveals the Persona tab for you only — a place to read and correct what your stand-in knows about how you decide things. It only reads and writes your own notes on this machine; nothing is shared and nothing runs on its own.',
+      'Reveals the Persona entry in the top toolbar for you only — a place to read and correct what your stand-in knows about how you decide things. It only reads and writes your own notes on this machine; nothing is shared and nothing runs on its own. Turning Swarm on also reveals it, so the entry can be there with this switch off.',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
     // Completion chime (settings.soundOnDone / soundOnDoneVolume)
@@ -158,7 +158,7 @@ export const settings = {
     'settings.experiments.sandbox': 'Claude をサンドボックス化 (macOS)',
     'settings.experiments.persona': 'ペルソナ',
     'settings.experiments.personaHint':
-      'この端末でペルソナタブを可視化します。あなたの分身が持っている「あなたの決め方」を読み、違っていれば訂正できる場所です。この端末にあるあなた自身の記録を読み書きするだけで、外部には共有されず、それ自体では何も自動実行されません。',
+      'この端末で上部ツールバーに「ペルソナ」の入口を出します。あなたの分身が持っている「あなたの決め方」を読み、違っていれば訂正できる場所です。この端末にあるあなた自身の記録を読み書きするだけで、外部には共有されず、それ自体では何も自動実行されません。なお Swarm をオンにすると同じ入口が出るため、このスイッチがオフでも入口が見えていることがあります。',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
     'settings.sound.heading': '完了音',
