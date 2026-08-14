@@ -40,9 +40,9 @@ describe('moduleRegistry experiment gate', () => {
   })
 
   it('hides gated modules by default (no gate) — the shipped/non-owner state', () => {
-    expect(ids(enabledModules())).toEqual(['board', 'canvas', 'terminal'])
+    expect(ids(enabledModules())).toEqual(['board', 'canvas', 'terminal', 'research'])
     // The "+" picker draws from the same gated source — no leak there either.
-    expect(ids(nativeDescriptors())).toEqual(['board', 'canvas', 'terminal'])
+    expect(ids(nativeDescriptors())).toEqual(['board', 'canvas', 'terminal', 'research'])
   })
 
   it('reveals a gated module only when its experiment is open', () => {
@@ -51,12 +51,12 @@ describe('moduleRegistry experiment gate', () => {
     expect(ids(nativeDescriptors(gate))).toContain('swarm')
     // Always-on defaults are unaffected by the gate; persona stays hidden
     // because ITS flag is closed — one open experiment never opens another.
-    expect(ids(enabledModules(gate))).toEqual(['board', 'canvas', 'terminal', 'swarm'])
+    expect(ids(enabledModules(gate))).toEqual(['board', 'canvas', 'terminal', 'research', 'swarm'])
   })
 
   it('opens persona independently of swarm', () => {
     const gate = gateFromFlags(flags({ persona: true }))
-    expect(ids(enabledModules(gate))).toEqual(['board', 'canvas', 'terminal', 'persona'])
+    expect(ids(enabledModules(gate))).toEqual(['board', 'canvas', 'terminal', 'research', 'persona'])
     expect(ids(nativeDescriptors(gate))).toContain('persona')
   })
 
@@ -72,6 +72,7 @@ describe('moduleRegistry experiment gate', () => {
       'board',
       'canvas',
       'terminal',
+      'research',
     ])
   })
 

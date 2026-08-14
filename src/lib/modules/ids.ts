@@ -7,6 +7,7 @@ export type ModuleId =
   | 'terminal'
   | 'canvas'
   | 'board'
+  | 'research'
   // Owner-only experiment modules (hidden by default; see `experiment` in
   // moduleRegistry + ExperimentId in types). KNOWN native ids so persistence
   // / tab-order code treats them like any other built-in — but the registry's
@@ -19,6 +20,7 @@ export const MODULE_IDS: readonly ModuleId[] = [
   'terminal',
   'canvas',
   'board',
+  'research',
   'swarm',
   'persona',
 ]

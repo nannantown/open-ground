@@ -436,6 +436,12 @@
   不実行は curl 囮で行動保証)→ `skills/research/SKILL.md` のルーティング表+フォールバック
   階段(専用ツール→Jina→素fetch)+Cookie ローカル限定則。正典 doc:
   `docs/RESEARCH_REACH_NOTES.md`、番人: `researchSystem.test.ts`
+- Researchタブ(プロジェクトごとの調査ライブラリ、2026-08-14): `moduleRegistry` の常設
+  native module('research')。`ResearchModule.tsx` ← `GET /api/research/reports|report`
+  (`researchReports.ts` — docs/research/*.md 限定・文字種allowlist+realpath封じ込めの
+  2層、レジストリ検証は route 側 requireProjectPath)。Markdown描画は依存ゼロの
+  React node 直組み(innerHTML不使用・https限定リンク)。番人: `researchReports.test.ts`。
+  共有(commons)構想の正典: `docs/RESEARCH_COMMONS_PLAN.md`
 - 調査チャンネルの一般向け導線(2026-08-14): 設定→調査チャンネル =
   `SettingsPanel.tsx` ← `GET /api/research/channels`(`server/routes/research.ts` →
   `researchChannels.ts`、クロスプラットフォームPATH走査・非ネットワーク)+

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Terminal, Palette, Columns3, Puzzle, Network, Fingerprint } from 'lucide-react'
+import { Terminal, Palette, Columns3, Puzzle, Network, Fingerprint, BookOpenText } from 'lucide-react'
 import { customTabId, type ModuleId } from '@/lib/modules/ids'
 import type { ModuleDescriptor } from '@/lib/modules/descriptor'
 import type { MessageKey } from '@/i18n/messages'
@@ -105,6 +105,12 @@ export const MODULES: ModuleDef[] = [
   { id: 'board', label: 'Board', icon: <Columns3 size={10} strokeWidth={2.25} />, kind: 'native', default: true },
   { id: 'canvas', label: 'Canvas', icon: <Palette size={10} strokeWidth={2.25} />, kind: 'native', default: true },
   { id: 'terminal', label: 'Terminal', icon: <Terminal size={10} strokeWidth={2.25} />, kind: 'native', default: true },
+  // Research — the per-project research-report library (docs/research/*.md,
+  // read-only; server/routes/research.ts). Always-on default. Its name is
+  // product copy rather than a fixed product noun, so it carries a `labelKey`:
+  // renaming the tab in both languages is a one-key edit in
+  // src/i18n/messages/research.ts.
+  { id: 'research', label: 'Research', labelKey: 'research.tabLabel', icon: <BookOpenText size={10} strokeWidth={2.25} />, kind: 'native', default: true },
   // Owner-only experiments (hidden by default). `experiment: <id>` keeps each
   // out of every visible surface until that gate is open (owner + the settings
   // toggle). Listed last so, when shown, they sit after the always-on defaults

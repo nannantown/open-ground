@@ -13,9 +13,13 @@ import {
   researchAuthStatus,
   setResearchTwitterAuth,
 } from '@/lib/server/researchAuth'
+import { listResearchReports, readResearchReport } from '@/lib/server/researchReports'
+import { requireProjectPath } from '../middleware/projectPath'
 import type {
   ResearchAuthStatusResponse,
   ResearchChannelsResponse,
+  ResearchReportResponse,
+  ResearchReportsResponse,
   SetResearchAuthRequest,
 } from '@/lib/types'
 
@@ -29,6 +33,32 @@ export const researchRoutes = new Hono()
       channels: listResearchChannels({ storedTwitterAuth: twitterConfigured }),
     }
     return c.json(body)
+  })
+  // --- GET /api/research/reports?path=… --------------------------------------
+  // The per-project research library (docs/research/*.md, newest first). The
+  // project root passes validateProjectPath (CONTRACT §3.3 — requireProjectPath);
+  // researchReports.ts then confines every read to docs/research/ (charset +
+  // realpath containment).
+  .get('/api/research/reports', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    const body: ResearchReportsResponse = { reports: await listResearchReports(path) }
+    return c.json(body)
+  })
+  // --- GET /api/research/report?path=…&file=… --------------------------------
+  .get('/api/research/report', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    const file = c.req.query('file') ?? ''
+    try {
+      const body: ResearchReportResponse = {
+        file,
+        content: await readResearchReport(path, file),
+      }
+      return c.json(body)
+    } catch (e) {
+      return c.json({ error: String((e as Error)?.message ?? e) }, 404)
+    }
   })
   // --- GET /api/research/auth ------------------------------------------------
   .get('/api/research/auth', async (c) => {

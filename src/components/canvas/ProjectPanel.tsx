@@ -92,6 +92,7 @@ import {
 } from '@/components/canvas/moduleRegistry'
 import { SwarmModule } from '@/components/canvas/modules/SwarmModule'
 import { PersonaModule } from '@/components/canvas/modules/PersonaModule'
+import { ResearchModule } from '@/components/canvas/modules/ResearchModule'
 import { customTabId, customModuleIdFromTab, isCustomTabId, type ModuleId } from '@/lib/modules/ids'
 import { usePlayback } from '@/lib/playback/playbackStore'
 import { PlaybackEq } from '@/components/canvas/PlaybackEq'
@@ -2561,6 +2562,12 @@ const OwnedProjectBody = ({
             hint={t('projectPanel.canvasDockHint')}
           />
         </div>
+      ) : view === 'research' ? (
+        // The per-project research-report library — an always-on default module
+        // (no experiment gate; the server routes it reads are read-only and
+        // registry-guarded). Fetches its own data, so it mounts ahead of the
+        // loading/data checks like the other self-contained modules.
+        <ResearchModule project={project} />
       ) : view === 'swarm' && experiments?.swarm ? (
         // Owner-only experiment. Re-checking `experiments.swarm` HERE — not just
         // relying on the tab being hidden — means a forged `view: 'swarm'` (from

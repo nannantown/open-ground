@@ -3480,3 +3480,22 @@ export interface SetResearchAuthRequest {
   twitterAuthToken: string
   twitterCt0: string
 }
+
+/** One row of the per-project research library (GET /api/research/reports —
+ *  docs/research/*.md, newest first). */
+export interface ResearchReportMeta {
+  file: string
+  title: string
+  mtime: number
+  size: number
+}
+
+export interface ResearchReportsResponse {
+  reports: ResearchReportMeta[]
+}
+
+/** GET /api/research/report — one report's raw markdown. */
+export interface ResearchReportResponse {
+  file: string
+  content: string
+}
