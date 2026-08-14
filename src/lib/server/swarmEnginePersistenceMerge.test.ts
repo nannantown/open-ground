@@ -47,6 +47,8 @@ const SAMPLE: Record<string, unknown> = {
   supplyDesired: true,
   selfSupplyDayKey: '2026-08-03',
   selfSupplyDayCount: 7,
+  // The review-waiting clock (2026-08-14) — branch → first-seen epoch ms.
+  reviewWaitingSince: { 'swarm/a': 1_700_000_000_000, 'swarm/b': 1_700_000_060_000 },
 }
 
 describe('engine.json write regime — optional fields survive a write that omits them', () => {

@@ -114,8 +114,16 @@ const unlockCommand = (
       return 'npm i -g mcporter'
     case 'rss':
       return platform === 'win32' ? 'pip install feedparser' : 'pip3 install feedparser'
+    // The twitter CLI ships inside Agent-Reach itself, and rdt-cli is its
+    // pinned sibling — both verbatim from the upstream install doc
+    // (raw.githubusercontent.com/Panniantong/agent-reach/main/docs/install.md,
+    // fetched 2026-08-14). pipx works on every platform.
+    case 'twitter':
+      return 'pipx install https://github.com/Panniantong/agent-reach/archive/main.zip'
+    case 'reddit':
+      return "pipx install 'git+https://github.com/public-clis/rdt-cli.git'"
     default:
-      return undefined // twitter/reddit CLIs have no one-liner; web needs none
+      return undefined // web needs none (curl ships with macOS/Win10+)
   }
 }
 
@@ -129,6 +137,7 @@ const STATUS_BY_DETAIL: Record<string, ResearchChannelStatus> = {
   // twitter
   'twitter.full': 'ok',
   'twitter.bin-only': 'part',
+  'twitter.cookies-only': 'miss', // still unusable — but the copy must say the cookies took
   'twitter.missing': 'miss',
   // reddit — never better than 'part': login state is only knowable at run time
   'reddit.cli': 'part',
@@ -167,7 +176,11 @@ export const listResearchChannels = (opts: ChannelCheckOpts = {}): ResearchChann
       case 'websearch':
         return has('mcporter') ? 'ready' : 'missing'
       case 'twitter':
-        return has('twitter') ? (cookies ? 'full' : 'bin-only') : 'missing'
+        // 'cookies-only' exists so the panel can ACKNOWLEDGE saved cookies even
+        // while the binary is missing — the owner's first field report
+        // (2026-08-14) was exactly this state reading as "Not set up" with no
+        // hint that their input had registered at all.
+        return has('twitter') ? (cookies ? 'full' : 'bin-only') : cookies ? 'cookies-only' : 'missing'
       case 'reddit':
         return has('rdt') ? 'cli' : curl ? 'baseline' : 'unreachable'
       case 'youtube':
@@ -184,11 +197,24 @@ export const listResearchChannels = (opts: ChannelCheckOpts = {}): ResearchChann
     }
   }
 
+  // The command rides along only in the states it would actually change —
+  // e.g. reddit with rdt INSTALLED is 'part' (auth unknowable), and offering
+  // "install rdt" there would contradict the row's own text.
+  const COMMAND_HELPS: Record<ResearchChannelId, readonly string[]> = {
+    web: [],
+    websearch: ['missing'],
+    twitter: ['missing', 'cookies-only'],
+    reddit: ['baseline', 'unreachable'],
+    youtube: ['missing'],
+    github: ['baseline', 'unreachable'],
+    rss: ['no-feedparser'],
+  }
+
   const IDS: ResearchChannelId[] = ['web', 'websearch', 'twitter', 'reddit', 'youtube', 'github', 'rss']
   return IDS.map((id) => {
     const d = detail(id)
     const status = STATUS_BY_DETAIL[`${id}.${d}`]
-    const cmd = status === 'ok' ? undefined : unlockCommand(id, platform)
+    const cmd = COMMAND_HELPS[id].includes(d) ? unlockCommand(id, platform) : undefined
     return { id, status, detail: d, ...(cmd ? { unlockCommand: cmd } : {}) }
   })
 }

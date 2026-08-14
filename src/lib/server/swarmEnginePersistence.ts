@@ -49,8 +49,55 @@ export interface EngineIntent {
    *  budget rather than to an unbounded one. */
   selfSupplyDayKey?: string
   selfSupplyDayCount?: number
+  /** THE REVIEW-WAITING CLOCK — branch → epoch ms it was FIRST SEEN waiting in
+   *  review (the disk mirror of `ProjectEngine.reviewSeenAt`).
+   *
+   *  PERSISTED SINCE 2026-08-14, and the incident is why: that clock is the
+   *  dwell half of {@link MANAGER_INTEGRATION_STALL_MS} — "has the work waited
+   *  long enough that a working commander would have produced SOMETHING?" — and
+   *  it lived only in memory. Every app restart therefore re-stamped every
+   *  waiting branch as "arrived just now" and rewound the 40-minute timer from
+   *  zero. On a day with three releases it rewound three times, so a commander
+   *  that stopped integrating was never once judged stalled and the owner was
+   *  never told. The engine restarts on every self-update — i.e. exactly during
+   *  the stretch it is most likely to leave work waiting — so the clock that
+   *  measures the stall was being reset by the loop it is supposed to catch
+   *  (the same shape as `selfSupplyDayCount` above).
+   *
+   *  Absent / malformed ⇒ no clock, which is EXACTLY today's behaviour (the
+   *  first pass re-stamps everything) — the field can only ever make the engine
+   *  notice a stall sooner, never later. Deliberately NOT read by the owner's
+   *  explicit ON (startOrchestrator clears the in-memory clock on purpose: time
+   *  the engine was OFF must not count as 統合待ち); only the boot auto-resume
+   *  seeds from it, where the engine was meant to be running the whole time. */
+  reviewWaitingSince?: Record<string, number>
   /** epoch ms of the write — display/debug only, never read as a decision input. */
   updatedAt: number
+}
+
+/** Ceiling on persisted {@link EngineIntent.reviewWaitingSince} entries. The
+ *  review column is human-scale, so this never binds in practice — it exists
+ *  because the file is hand-editable on disk and an unbounded map read out of
+ *  it would be untrusted input with no ceiling. The OLDEST stamps are kept:
+ *  the only reader (`managerIntegrationStalled`'s dwell half) asks for the
+ *  oldest waiting instant, so dropping the newest loses nothing it uses. */
+const REVIEW_WAITING_CAP = 200
+
+/** Coerce an untrusted `reviewWaitingSince` blob into the map, or undefined.
+ *  Every entry must be a non-empty branch name and a finite positive epoch;
+ *  anything else is dropped silently (the same defensive discipline the rest of
+ *  this module's reads use — a torn file degrades to "no clock", never throws). */
+const sanitizeReviewWaiting = (raw: unknown): Record<string, number> | undefined => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const entries = Object.entries(raw as Record<string, unknown>)
+    .filter(
+      (e): e is [string, number] =>
+        e[0].length > 0 && typeof e[1] === 'number' && Number.isFinite(e[1]) && e[1] > 0,
+    )
+    // Oldest first, so the cap below drops the NEWEST arrivals (see the cap's doc).
+    .sort((a, b) => a[1] - b[1])
+    .slice(0, REVIEW_WAITING_CAP)
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined
 }
 
 const DEFAULT_INTENT: Omit<EngineIntent, 'updatedAt'> = {
@@ -78,6 +125,10 @@ export const readEngineIntent = async (projectPath: string): Promise<EngineInten
       ...(typeof parsed.selfSupplyDayCount === 'number' && parsed.selfSupplyDayCount >= 0
         ? { selfSupplyDayCount: parsed.selfSupplyDayCount }
         : {}),
+      ...(() => {
+        const w = sanitizeReviewWaiting(parsed.reviewWaitingSince)
+        return w ? { reviewWaitingSince: w } : {}
+      })(),
       updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
     }
   } catch {
@@ -109,6 +160,12 @@ export interface EngineIntentWrite {
   supplyDesired?: boolean | null
   selfSupplyDayKey?: string | null
   selfSupplyDayCount?: number | null
+  /** The review-waiting clock (see {@link EngineIntent.reviewWaitingSince}).
+   *  Omit ⇒ the disk value survives; `null` OR an EMPTY object ⇒ cleared. The
+   *  empty object clears rather than preserves because "no branch is waiting"
+   *  is a real state the writer must be able to record — the queue draining is
+   *  precisely when the clock has to stop. */
+  reviewWaitingSince?: Record<string, number> | null
 }
 
 /** Write-through the engine's current intent. FAIL-OPEN: returns `false` (never
@@ -133,6 +190,10 @@ export const writeEngineIntent = async (
     const dayKey = intent.selfSupplyDayKey === undefined ? current.selfSupplyDayKey : intent.selfSupplyDayKey
     const dayCount =
       intent.selfSupplyDayCount === undefined ? current.selfSupplyDayCount : intent.selfSupplyDayCount
+    const reviewWaiting =
+      intent.reviewWaitingSince === undefined
+        ? current.reviewWaitingSince
+        : sanitizeReviewWaiting(intent.reviewWaitingSince)
     // The central data dir (~/.openground/projects/<uuid>/) may not exist yet
     // for a project whose engine has never run before — atomicWriteJson's
     // sibling-temp-file rename needs the directory to already be there (same
@@ -145,6 +206,7 @@ export const writeEngineIntent = async (
       ...(supplyDesired === true ? { supplyDesired: true } : {}),
       ...(typeof dayKey === 'string' && dayKey ? { selfSupplyDayKey: dayKey } : {}),
       ...(typeof dayCount === 'number' && dayCount >= 0 ? { selfSupplyDayCount: dayCount } : {}),
+      ...(reviewWaiting ? { reviewWaitingSince: reviewWaiting } : {}),
       updatedAt: now,
     } satisfies EngineIntent)
     return true

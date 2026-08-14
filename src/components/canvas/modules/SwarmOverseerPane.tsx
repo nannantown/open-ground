@@ -103,6 +103,7 @@ export const FATAL_EVENT_LABEL: Record<string, MessageKey> = {
   'guard-unwired': 'projectPanel.swarm.overseer.fatalGuardUnwired',
   'worker-spawn-failed': 'projectPanel.swarm.overseer.fatalWorkerSpawnFailed',
   'manager-unrevivable': 'projectPanel.swarm.overseer.fatalManagerUnrevivable',
+  'manager-unresponsive': 'projectPanel.swarm.overseer.fatalManagerUnresponsive',
   'engine-resume-suppressed': 'projectPanel.swarm.overseer.fatalEngineResumeSuppressed',
   'data-integrity': 'projectPanel.swarm.overseer.fatalDataIntegrity',
 }

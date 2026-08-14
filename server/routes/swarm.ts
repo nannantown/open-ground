@@ -732,12 +732,17 @@ export const swarmRoutes = new Hono()
   // capability; a non-git project still gets supply/manager (they pass
   // requireGitRepo:false and are unaffected by a notAGitRepo answer here).
   // PURE READ-ONLY, owner-only + validated like the rest of /api/swarm/*.
+  // `?force=1` bypasses the 10s result cache — the client passes it right after
+  // it FIXES a prerequisite through the UI (the banner's one-click git set-up,
+  // POST /api/project/git-init): a cached "not a repo" answer measured before
+  // the fix would keep the banner up for seconds after the spawn routes (which
+  // always force) would already succeed. The 5s poll stays cache-friendly.
   .get('/api/swarm/preflight', async (c) => {
     if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     const path = c.req.query('path') ?? ''
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-    return c.json(await swarmEnvPreflight(path))
+    return c.json(await swarmEnvPreflight(path, { force: c.req.query('force') === '1' }))
   })
   // --- POST /api/swarm/orchestrator/drain-tick — the Swarm surface's tick -----
   // Body: { path }. A pure idempotent state read of the (possibly never-started)

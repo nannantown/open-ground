@@ -652,6 +652,10 @@ export type SwarmFatalEventKind =
   | 'canary-failed'
   | 'review-panel-failed'
   | 'high-risk-hold'
+  // The commander desk is up but not integrating and has ignored every nudge
+  // (2026-08-14). Named here so it keeps autocomplete + the exhaustive label
+  // check; the `string` arm below is what guarantees it renders regardless.
+  | 'manager-unresponsive'
   | (string & {})
 
 export interface SwarmFatalView {
@@ -989,6 +993,13 @@ export interface UseSwarmEngine {
    *  supply/manager spawn routes enforce). Empty when everything checks out or
    *  the route hasn't answered yet (never blocks rendering on this alone). */
   envIssues: SwarmEnvIssue[]
+  /** Re-read `envIssues` NOW, bypassing the server's 10s preflight cache
+   *  (`?force=1`) — for the moment right after the owner fixes a prerequisite
+   *  through the UI (the banner's one-click git set-up), when waiting up to a
+   *  poll lap + cache TTL would leave a solved problem on screen. Resolves once
+   *  the fresh answer (or a swallowed failure — the next poll reconciles) has
+   *  been applied. */
+  refreshEnvPreflight: () => Promise<void>
   /** Autonomy switch (Card①) — start/stop the drain+dispatch loop. */
   toggleAutonomy: (next: boolean) => void
   /** Dismiss the restart "autonomy was on — resume?" reminder without resuming:
@@ -1216,6 +1227,29 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
       window.removeEventListener('focus', onFocus)
     }
   }, [projectPath, busy])
+
+  // One-off env-preflight re-read with force=1 — the moment right after the
+  // owner fixes a prerequisite through the UI (SwarmModule's one-click git
+  // set-up): without force the server's 10s preflight cache would keep
+  // answering the pre-fix "not a repo", and the banner would linger up to a
+  // cache TTL + poll lap past the fix. Retires any in-flight poll lap FIRST
+  // (generation bump — the same mechanism the effect cleanup uses) so a lap
+  // that fetched the PRE-fix answer can't land after this and resurrect the
+  // banner; the lap's sibling reads are dropped too, which the next 5s lap
+  // repairs. A failed refresh keeps the current banner for the poll to
+  // reconcile — never a throw.
+  const refreshEnvPreflight = useCallback(async () => {
+    pollSeqRef.current++
+    pollInFlightRef.current = false
+    try {
+      const res = await fetch(
+        `/api/swarm/preflight?path=${encodeURIComponent(projectPath)}&force=1`,
+      )
+      if (res.ok) setEnvIssues(sanitizeEnvIssues(await res.json()))
+    } catch {
+      // Keep the current issues; the next poll lap reconciles.
+    }
+  }, [projectPath])
 
   // POST an engine action and adopt the authoritative state it returns. All
   // (start / stop / overseer) return the full SwarmOrchestratorState; an
@@ -1454,6 +1488,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     error,
     sandboxWarning,
     envIssues,
+    refreshEnvPreflight,
     toggleAutonomy: (next) => void toggleAutonomy(next),
     dismissAutonomyReminder: () => void dismissAutonomyReminder(),
     toggleOverseer: (next) => void toggleOverseer(next),

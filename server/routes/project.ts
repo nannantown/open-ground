@@ -45,6 +45,8 @@ import {
   isSafeRepoRelFile,
 } from '@/lib/server/branchChanges'
 import { listProjectBranches } from '@/lib/server/gitBranches'
+import { isGitRepoRoot } from '@/lib/server/gitRepoGuard'
+import { gitErrorTail, initGitRepo } from '@/lib/server/gitInit'
 import { listActiveBranches } from '@/lib/server/activeBranches'
 import { checkMergedBranches } from '@/lib/server/mergedBranches'
 import { fetchPrInfo } from '@/lib/server/prInfo'
@@ -68,6 +70,7 @@ import type {
   ProjectData,
   ProjectTask,
   CanvasFile,
+  GitInitResponse,
   ProjectSkillsResponse,
   CreateSkillResponse,
   OpenApp,
@@ -475,6 +478,32 @@ export const projectRoutes = new Hono()
       return c.json(await cleanProjectWorktrees(path))
     } catch (e: any) {
       return c.json({ error: e?.message ?? 'failed to clean worktrees' }, 500)
+    }
+  })
+  // ── /api/project/git-init ─────────────────────────────────────────────────
+  // POST { path } → set up git in a registered project that has none yet: `git
+  // init` + `git add -A` + an initial commit (--allow-empty so HEAD exists even
+  // in an empty folder — a swarm worktree needs a HEAD to branch from). The
+  // Swarm tab's env-preflight banner offers this as a one-click fix for its
+  // `notAGitRepo` issue. Registry allowlist via requireProjectPath, like every
+  // path-accepting route; an already-initialized repo answers 409 rather than
+  // reinitializing (isGitRepoRoot — .git dir or a linked-worktree .git file).
+  // Thin adapter: the git steps live in src/lib/server/gitInit.ts.
+  //   400 no path · 403 not registered · 409 already a repo · 500 {error: git
+  //   stderr tail} on any step failing.
+  .post('/api/project/git-init', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    if (isGitRepoRoot(path)) return c.json({ error: 'already a git repository' }, 409)
+    try {
+      const { fallbackIdentity } = await initGitRepo(path)
+      return c.json<GitInitResponse>({
+        ok: true,
+        committed: true,
+        ...(fallbackIdentity ? { fallbackIdentity: true } : {}),
+      })
+    } catch (e) {
+      return c.json({ error: gitErrorTail(e) }, 500)
     }
   })
   .post('/api/project/reveal', async (c) => {

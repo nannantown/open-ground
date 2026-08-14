@@ -415,6 +415,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     dismissOverseerReminder,
     sandboxWarning: engineSandboxWarning,
     envIssues,
+    refreshEnvPreflight,
   } = useSwarmEngine(project.path)
 
   // The durable 「外向き着地/週」 KPI (GET /api/swarm/kpi/landed) — cross-project
@@ -457,6 +458,47 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const envIssuesKey = envIssues.map((i) => i.id).sort().join(',')
   const showEnvBanner = envIssues.length > 0 && dismissedEnvIssuesKey !== envIssuesKey
 
+  // One-click fix for the banner's `notAGitRepo` issue: POST /api/project/git-init
+  // creates the repo AND an initial commit (--allow-empty), so workers have a
+  // HEAD to branch their worktrees from — the owner never types `git init`
+  // themselves (the banner copy promises exactly that). Offered ONLY for
+  // notAGitRepo: gitMissing means there is no git binary to run, and
+  // shellMissing is a different machine problem entirely. On success the
+  // preflight is re-read with force (bypassing its 10s server cache) so the
+  // banner clears now, not a poll interval later; the done note below the
+  // banner says what changed. The error renders INLINE under the button — the
+  // shared `error` strip is the worker/desk actions' channel.
+  const envHasNotAGitRepo = envIssues.some((i) => i.id === 'notAGitRepo')
+  const [gitInitBusy, setGitInitBusy] = useState(false)
+  const [gitInitDone, setGitInitDone] = useState(false)
+  const [gitInitError, setGitInitError] = useState<string | null>(null)
+  const runGitInit = useCallback(async () => {
+    if (gitInitBusy) return
+    setGitInitBusy(true)
+    setGitInitError(null)
+    try {
+      const res = await api.api.project['git-init'].$post({ json: { path: project.path } })
+      // 409 = already a repo (raced a by-hand `git init` / another window): the
+      // goal state is reached, so fall through to the refetch — which is what
+      // clears the banner — instead of showing a failure for a solved problem.
+      if (!res.ok && res.status !== 409) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        setGitInitError(
+          body?.error
+            ? `${t('projectPanel.swarm.preflight.gitInitError')} (${body.error})`
+            : t('projectPanel.swarm.preflight.gitInitError'),
+        )
+        return
+      }
+      await refreshEnvPreflight()
+      setGitInitDone(true)
+    } catch {
+      setGitInitError(t('projectPanel.swarm.preflight.gitInitError'))
+    } finally {
+      setGitInitBusy(false)
+    }
+  }, [gitInitBusy, project.path, refreshEnvPreflight, t])
+
   // PTY ids ever seen alive by the active poll. If an id was seen and then drops
   // out of the poll, the PTY died — used by statusOf so a missed SSE 'exit'
   // doesn't leave a dead worker stuck on 'starting'. A ref (not state) because it
@@ -486,6 +528,9 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setRemovedWorktrees(new Set())
     setEscCount(0)
     setDismissedEnvIssuesKey(null)
+    setGitInitBusy(false)
+    setGitInitDone(false)
+    setGitInitError(null)
     seenRef.current = new Set()
   }, [project.id])
 
@@ -1512,6 +1557,26 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                 </li>
               ))}
             </ul>
+            {/* One-click fix for notAGitRepo (and ONLY that issue — see
+                runGitInit above): sets up git + an initial commit server-side,
+                then force-refetches the preflight so the banner clears now.
+                Its failure renders inline right here, tied to the button that
+                caused it, not in the shared action-error strip below. */}
+            {envHasNotAGitRepo && (
+              <div className="mt-1.5">
+                <button
+                  type="button"
+                  onClick={() => void runGitInit()}
+                  disabled={gitInitBusy}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-[4px] border border-accent bg-accent px-2.5 py-1 text-meta font-medium text-bg-card transition-all duration-150 enabled:hover:border-accent-hover enabled:hover:bg-accent-hover enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                >
+                  {t('projectPanel.swarm.preflight.gitInit')}
+                </button>
+                {gitInitError && (
+                  <p className="mt-1 text-meta leading-relaxed text-accent">{gitInitError}</p>
+                )}
+              </div>
+            )}
             {(() => {
               const footnoteKey = envBannerFootnoteKey(envIssues)
               return footnoteKey ? (
@@ -1522,6 +1587,29 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           <button
             type="button"
             onClick={() => setDismissedEnvIssuesKey(envIssuesKey)}
+            aria-label={t('projectPanel.swarm.autonomyReminder.dismiss')}
+            title={t('projectPanel.swarm.autonomyReminder.dismiss')}
+            className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-ink-muted transition-colors duration-150 enabled:hover:text-accent enabled:active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <X size={12} strokeWidth={2} />
+          </button>
+        </div>
+      )}
+
+      {/* One-click git set-up landed (runGitInit): the env banner above is gone
+          precisely BECAUSE it worked, so without this line success would look
+          like the banner silently vanishing. Gated on the issue really being
+          gone — while `notAGitRepo` is still listed (another window un-did it,
+          a slow refetch), claiming "workers can run" would be a lie. Dismissed
+          locally (a notice, not a decision), same as the restored notice below. */}
+      {gitInitDone && !envHasNotAGitRepo && (
+        <div className="flex shrink-0 items-center gap-3 border-b border-line-soft bg-bg px-3 py-2">
+          <span className="min-w-0 flex-1 text-meta leading-relaxed text-ink-muted">
+            {t('projectPanel.swarm.preflight.gitInitDone')}
+          </span>
+          <button
+            type="button"
+            onClick={() => setGitInitDone(false)}
             aria-label={t('projectPanel.swarm.autonomyReminder.dismiss')}
             title={t('projectPanel.swarm.autonomyReminder.dismiss')}
             className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-ink-muted transition-colors duration-150 enabled:hover:text-accent enabled:active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"

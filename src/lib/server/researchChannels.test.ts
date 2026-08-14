@@ -73,6 +73,20 @@ describe('listResearchChannels — the scenario table', () => {
     expect(byId(cs, 'rss')).toMatchObject({ status: 'ok', detail: 'full' })
   })
 
+  it('twitter: cookies WITHOUT the binary is acknowledged (cookies-only), with the install command attached', () => {
+    // The owner's first field report (2026-08-14): cookies entered, binary
+    // absent — the row read as a bare "Not set up" as if the input vanished.
+    const c = byId(machine({ bins: [], storedTwitterAuth: true }), 'twitter')
+    expect(c).toMatchObject({ status: 'miss', detail: 'cookies-only' })
+    expect(c.unlockCommand).toContain('pipx install')
+  })
+
+  it('reddit with rdt INSTALLED gets no install command (it would contradict the row text)', () => {
+    expect(byId(machine({ bins: ['rdt'] }), 'reddit').unlockCommand).toBeUndefined()
+    // …while the not-installed states do offer it.
+    expect(byId(machine({ bins: ['curl'] }), 'reddit').unlockCommand).toContain('rdt-cli')
+  })
+
   it('twitter: binary without cookies is part; STORED cookies count the same as env', () => {
     expect(byId(machine({ bins: ['twitter'] }), 'twitter')).toMatchObject({
       status: 'part',

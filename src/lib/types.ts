@@ -1026,6 +1026,28 @@ export interface ActiveBranchesResponse {
   branches: ActiveBranch[]
 }
 
+/** POST /api/project/git-init request — one-click "set up git here" for a
+ *  registered project folder that has no repo yet (the Swarm tab's env-preflight
+ *  banner offers it on the `notAGitRepo` issue). */
+export interface GitInitRequest {
+  path: string
+}
+
+/** POST /api/project/git-init response. The route runs `git init` + `git add
+ *  -A` + an initial commit (`--allow-empty`, so HEAD exists even in an empty
+ *  folder — a swarm worktree needs a HEAD to branch from; creating that HEAD is
+ *  the whole point of committing here). Already-a-repo answers 409, any git
+ *  failure 500 `{ error }` — this shape is the success case only. */
+export interface GitInitResponse {
+  ok: true
+  /** Always true on success — the initial commit (HEAD) is the deliverable. */
+  committed: true
+  /** The commit fell back to the built-in identity ("OPEN GROUND"
+   *  <openground@localhost>) because git has no user.name/user.email
+   *  configured on this machine. Absent when the user's own identity worked. */
+  fallbackIdentity?: boolean
+}
+
 /** Which diff GET /api/project/file-diff returns: 'working' = uncommitted
  *  changes vs HEAD (untracked → full content), 'branch' = target...HEAD. */
 export type FileDiffScope = 'working' | 'branch'
@@ -2521,6 +2543,16 @@ export type SwarmFatalEvent =
   // spawn; this bell is the owner's ONE loud pointer at the cause (the old PTY
   // fallback used to absorb exactly this, silently).
   | 'worker-spawn-failed'
+  // 'manager-unresponsive' (2026-08-14): the commander desk EXISTS and is not
+  // integrating — presence reads 'idle', or 'active' with the queue provably
+  // stalled — the engine has spent its whole nudge budget (or could not address
+  // the desk at all, three pokes running), and the review work has been waiting
+  // past MANAGER_INTEGRATION_STALL_MS. Distinct from 'manager-unrevivable',
+  // which means "no desk can be RAISED": here a desk is up, so that event would
+  // be a lie (03章 §2.3 完了条件3). Both dead ends used to end in a single engine
+  // log line and permanent silence — the field bug of 2026-08-14 (two cards sat
+  // in review, the desk was alive and idle, and nobody was told).
+  | 'manager-unresponsive'
   // 'engine-resume-suppressed' (docs/ENGINE_PERSISTENCE_PLAN.md §4-2, card 2): the
   // boot-time crash-loop breaker tripped — this build restarted
   // BREAKER_THRESHOLD+ times inside the trailing window, so resumeEngines()

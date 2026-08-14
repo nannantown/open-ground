@@ -96,6 +96,15 @@ export const projectPanel = {
       'The task desk still works, so you can keep filing work for later. Workers and the commander need this fixed first.',
     'projectPanel.swarm.envPreflight.footnoteSupplyAndManager':
       'The task desk and the commander still work. Only starting new AI workers needs this fixed first.',
+    // One-click fix for the notAGitRepo issue above (POST /api/project/git-init):
+    // OPEN GROUND runs the set-up itself — the owner presses a button instead of
+    // asking someone technical. Done/Error keep the banner's plain, no-commands
+    // register; the error may carry a raw git detail in parens after it (for
+    // whoever technical does get asked).
+    'projectPanel.swarm.preflight.gitInit': 'Set up git here',
+    'projectPanel.swarm.preflight.gitInitDone':
+      'Done — git is ready. Workers can run here now.',
+    'projectPanel.swarm.preflight.gitInitError': "Couldn't set up git here.",
     // Execution mode (token budget) — one switch for every swarm launch (card 68d8e00f).
     'projectPanel.swarm.mode.label': 'Mode',
     'projectPanel.swarm.mode.max': 'Max',
@@ -420,6 +429,8 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.fatalGuardUnwired': 'Safety guard unverified · workers cannot start',
     'projectPanel.swarm.overseer.fatalWorkerSpawnFailed': 'Workers cannot start · dispatch held, retrying on a backoff',
     'projectPanel.swarm.overseer.fatalManagerUnrevivable': 'Commander desk will not come back',
+    'projectPanel.swarm.overseer.fatalManagerUnresponsive':
+      'Commander desk is up but stuck · review work is waiting',
     'projectPanel.swarm.overseer.fatalEngineResumeSuppressed': 'Auto-resume held back after repeated restarts',
     'projectPanel.swarm.overseer.fatalDataIntegrity': 'App data damaged · backups available',
     // Escalations inbox (C1) — questions the swarm raised to YOU, waiting for
@@ -842,6 +853,14 @@ export const projectPanel = {
       'タスク受付は引き続き使えるので、あとで対応する作業を登録しておけます。ワーカーと司令官はこの問題が直ってから使えます。',
     'projectPanel.swarm.envPreflight.footnoteSupplyAndManager':
       'タスク受付と司令官は引き続き使えます。新しく AI ワーカーを起動することだけが、この問題が直るまでできません。',
+    // 上の notAGitRepo をその場で直すワンクリック (POST /api/project/git-init)。
+    // 「詳しい方にお願いして」ではなく OPEN GROUND 自身が準備する。Done/Error は
+    // バナーと同じ平易文の調子(オーナーにコマンドは打たせない)。エラーには生の
+    // git の詳細が括弧書きで続くことがある(結局相談された詳しい方のため)。
+    'projectPanel.swarm.preflight.gitInit': 'このフォルダでgitを準備する',
+    'projectPanel.swarm.preflight.gitInitDone':
+      '完了 — gitの準備ができました。これでワーカーを走らせられます。',
+    'projectPanel.swarm.preflight.gitInitError': 'gitの準備に失敗しました。',
     // 実行モード（トークン節約）— swarm 起動全体に効く1スイッチ（card 68d8e00f）。
     'projectPanel.swarm.mode.label': 'モード',
     'projectPanel.swarm.mode.max': '最大出力',
@@ -1152,6 +1171,7 @@ export const projectPanel = {
     'projectPanel.swarm.overseer.fatalGuardUnwired': '安全装置を確認できず · ワーカーを起動できません',
     'projectPanel.swarm.overseer.fatalWorkerSpawnFailed': 'ワーカーを起動できません · 配車を一時停止し、間隔を空けて自動再試行します',
     'projectPanel.swarm.overseer.fatalManagerUnrevivable': '司令官の卓が復帰しません',
+    'projectPanel.swarm.overseer.fatalManagerUnresponsive': '司令官の卓は動いていますが統合が止まっています',
     'projectPanel.swarm.overseer.fatalEngineResumeSuppressed': '再起動が続いたため自動再開を見合わせました',
     'projectPanel.swarm.overseer.fatalDataIntegrity': 'アプリのデータが壊れました · バックアップあり',
     // エスカレーション受信箱（C1）— swarm があなたに上げた質問の回答待ち。

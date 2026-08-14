@@ -240,6 +240,7 @@ import {
   managerDeskForSession,
   sayToManagerDesk,
 } from './swarmManagerRuntime'
+import type { ManagerDeskHandle, ManagerRuntimeKind } from './swarmManagerRuntime'
 import { SUPPLY_DESK_LABEL, spawnSwarmSupply } from './swarmSupply'
 import { isGitRepoRoot, isUnderGitRepo } from './gitRepoGuard'
 import { readSwarmSessions } from './swarmSessions'
@@ -1882,10 +1883,26 @@ export interface ProjectEngine {
    *  verify memos), so a card actually being integrated or 差し戻し-ed removes its entry
    *  and the "oldest waiting" instant moves FORWARD by itself — progress resets the clock
    *  without any separate bookkeeping. A newly promoted card does NOT reset it: the oldest
-   *  one is still waiting, which is the thing being measured. In-memory only, like every
-   *  other reflex (a restart relaunches the engine OFF). Optional for older-build / test
-   *  literal backfill (absent ⇒ lazy-init). */
+   *  one is still waiting, which is the thing being measured. Optional for older-build /
+   *  test literal backfill (absent ⇒ lazy-init).
+   *
+   *  ⚠ NO LONGER IN-MEMORY-ONLY (2026-08-14). It is MIRRORED to `engine.json`
+   *  ({@link EngineIntent.reviewWaitingSince}) and SEEDED BACK by the boot auto-resume,
+   *  because "in-memory only, a restart relaunches the engine OFF" stopped being true
+   *  the day resumeEngines started honouring `desiredRunning` — and this clock is the
+   *  DWELL half of the stall check. A restart re-stamped every waiting branch as
+   *  "arrived just now", so each app restart rewound the 40-minute timer from zero (three
+   *  releases in one day rewound it three times, and a commander that had stopped
+   *  integrating was never once judged stalled). The engine restarts on every
+   *  self-update — exactly when work is most likely to be left waiting — so the clock
+   *  that measures the stall was being reset by the loop it exists to catch.
+   *  {@link startOrchestrator} still CLEARS it on an explicit owner ON, deliberately:
+   *  time the engine was OFF must not count as 統合待ち. */
   reviewSeenAt?: Map<string, number>
+  /** Signature of the `reviewSeenAt` set as last MIRRORED to disk — the cheap guard that
+   *  keeps the mirror a state-transition write rather than a per-pass one (the same rule
+   *  syncRoster follows). In-memory only; a stale/absent value costs one redundant write. */
+  reviewSeenPersisted?: string
   /** The PENDING "a worker is ready" NOTICE — the delivery channel (2026-07-27) that
    *  exists purely to TELL the commander, as against the nudge that exists to REVIVE it.
    *
@@ -1936,6 +1953,23 @@ export interface ProjectEngine {
     unaddressable?: number
     /** One-shot "we cannot reach the desk" log per episode. */
     unaddressableLogged?: boolean
+    /** Has the 'manager-unresponsive' BELL already rung this episode (2026-08-14)?
+     *
+     *  The two dead ends below it — the spent nudge budget and the three-times-
+     *  undeliverable poke — used to end in ONE engine log line and then permanent
+     *  silence, on the reasoning that a wedged desk is "a human matter". It is; the
+     *  gap was that no human was ever told (docs/commander/03 §7-9/§7-10 recorded
+     *  this as a regression in reachability, and the field bug of 2026-08-14 is what
+     *  it looks like: two cards in review, the desk alive and idle, no bell).
+     *  Episode-scoped like every other latch here — cleared when the review queue
+     *  DRAINS or the desk is seen genuinely working, never on a mere respawn (a new
+     *  desk inside the SAME waiting batch must not re-ring the bell). */
+    unresponsiveFatalFired?: boolean
+    /** Has the unresponsive SDK desk already been RECYCLED this episode (2026-08-14)?
+     *  Same episode scope as `unresponsiveFatalFired`, and for a stronger reason: it
+     *  is what stops a wedged desk being torn down and respawned in a loop. Never set
+     *  for a PTY desk — that one shares the owner's cwd (see the recycle site). */
+    deskRecycled?: boolean
     /** Wall-clock (ms) of the last NOTICE we typed into the desk (2026-07-27). Not a
      *  budget — the notice has none — but a SELF-WRITE instant, and it has to join
      *  `lastNudgeAt` / `lastWakeAt` in the echo cutoff the presence probe is handed.
@@ -3388,6 +3422,23 @@ export interface IntegrationDeps {
     projectPath: string,
     cards: readonly { branch: string; title: string }[],
   ) => Promise<boolean>
+  /** WHICH RUNTIME carries the commander desk right now — `'sdk'`, `'pty'`, or null when
+   *  there is no desk (or it cannot be identified). Read ONLY by the unresponsive-desk
+   *  escalation, and the reason the recycle below is not simply "tear it down": a PTY
+   *  commander is a terminal in the OWNER'S OWN cwd — the desk they may have started by
+   *  hand and may be reading right now — so killing it is not recovery, it is taking the
+   *  keyboard away. An SDK desk has no screen and no owner sitting at it; recycling one
+   *  costs a conversation resume and nothing else. Optional + MUST NOT throw: absent or
+   *  null ⇒ no recycle at all (fail-safe — a desk we cannot identify is never torn down;
+   *  the bell still rings). Default: {@link defaultManagerDeskRuntime}. */
+  managerDeskRuntime?: (projectPath: string) => Promise<ManagerRuntimeKind | null>
+  /** TEAR DOWN the SDK commander desk so the absent-arm above can seat a fresh one —
+   *  the recovery half of the unresponsive-desk escalation (2026-08-14). Returns true iff
+   *  a desk was actually terminated. Called at most ONCE per waiting episode
+   *  (`managerResume.deskRecycled`) and ONLY when {@link managerDeskRuntime} said `'sdk'`.
+   *  A throw is swallowed by the caller — the owner's bell must never depend on the
+   *  recycle succeeding. Optional. Default: {@link defaultRecycleManagerDesk}. */
+  recycleManagerDesk?: (projectPath: string) => Promise<boolean>
   /** Push a FATAL event to the human (bell + OS toast) — the SAME seam as
    *  {@link OrchestratorDeps.notify}, surfaced here so the integrate pass can escalate a
    *  commander that keeps dying ('manager-unrevivable', 完了条件5). OPTIONAL + best-effort
@@ -4452,6 +4503,48 @@ const defaultWakeManager = async (
     detail: `review に ${n} 件の統合待ち — マネージャーを起こしました。統合を判断してください (${list})`,
   }).catch(() => {})
   return true
+}
+
+/** The desk this project's commander is sitting at, across BOTH pools — the record's
+ *  desk when the session store still names one, else the pool's orphan. The SAME
+ *  resolution `defaultNudgeManager` uses, so "who do we recycle" can never disagree
+ *  with "who did we just fail to poke". Null ⇒ no desk we can name. Never throws. */
+const resolveManagerDeskHandle = async (projectPath: string): Promise<ManagerDeskHandle | null> => {
+  const rec = (await readSwarmSessions(projectPath)).manager
+  const named = rec ? managerDeskForSession(rec.sessionId, projectPath) : null
+  return named ?? listManagerDesks(projectPath)[0] ?? null
+}
+
+/** {@link IntegrationDeps.managerDeskRuntime} — which runtime carries the desk.
+ *  NEVER throws: an unreadable session store / torn pool ⇒ null ⇒ the caller does not
+ *  recycle anything (the conservative direction: doing nothing to a desk we cannot see). */
+const defaultManagerDeskRuntime = async (projectPath: string): Promise<ManagerRuntimeKind | null> => {
+  try {
+    return (await resolveManagerDeskHandle(projectPath))?.runtime ?? null
+  } catch {
+    return null
+  }
+}
+
+/** {@link IntegrationDeps.recycleManagerDesk} — close an unresponsive SDK commander desk.
+ *
+ *  ⚠ THE PTY REFUSAL IS RE-CHECKED HERE, not just at the call site. The caller already
+ *  gates on {@link defaultManagerDeskRuntime} saying `'sdk'`, and this repeats the test
+ *  against the handle it is about to terminate: the two reads are separated by an await,
+ *  the pools change underneath (a desk can die and the owner's own PTY commander can take
+ *  its place between them), and the cost of getting it wrong is asymmetric — killing an
+ *  SDK desk loses a resumable conversation, killing a PTY desk takes the terminal out from
+ *  under the owner in their own cwd. A gate whose only copy lives in the caller is a gate
+ *  one refactor away from being gone.
+ *
+ *  Returns true iff a live desk was actually asked to stop. `terminateSdkSession` is
+ *  synchronous-and-idempotent (it flips `closed`/`status` at once and lets the pump
+ *  unwind), so the absent-arm's next pass sees the desk go and seats a fresh one through
+ *  the ordinary wake path — no second spawn road. */
+const defaultRecycleManagerDesk = async (projectPath: string): Promise<boolean> => {
+  const desk = await resolveManagerDeskHandle(projectPath)
+  if (!desk || desk.runtime !== 'sdk') return false
+  return terminateSdkSession(desk.handleId)
 }
 
 // --- git + heartbeat probes (the monitor's read-only signals) ----------------
@@ -6782,6 +6875,11 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   // has already waited past MANAGER_INTEGRATION_STALL_MS, never on an ordinary tick.
   managerDeliveryAt: (p) => defaultManagerDeliveryAt(p),
   wakeManager: defaultWakeManager,
+  // The unresponsive-desk escalation (2026-08-14): identify the desk's runtime, and —
+  // for an SDK desk only — close it so the absent arm can seat a fresh one. Both are
+  // read/called at most once per waiting episode, behind the spent nudge budget.
+  managerDeskRuntime: defaultManagerDeskRuntime,
+  recycleManagerDesk: defaultRecycleManagerDesk,
   worktreeExists: defaultWorktreeExists,
   // Auto-start preflight (card cf545637): the same claude readiness gate the manual ON
   // path uses, so the unattended background sweep never flips an engine `running` into a
@@ -8652,6 +8750,174 @@ export const runDispatchPass = async (
   await syncRoster(engine, now, byId)
 }
 
+// ── The review-waiting clock's disk mirror (2026-08-14) ─────────────────────
+
+/** A stable signature of the review-waiting set — what makes the mirror below a
+ *  state-transition write. Sorted by branch so map insertion order (which follows the
+ *  board's, and therefore wobbles) can never look like a change. */
+const reviewWaitingSignature = (clock: ReadonlyMap<string, number>): string =>
+  Array.from(clock.entries())
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([b, at]) => `${b}@${at}`)
+    .join('|')
+
+/** Engines whose dwell-clock mirror has already reported a disk fault. The warn is
+ *  latched per engine because — unlike the owner-action intent writes, which happen once
+ *  per click — this mirror runs on every clock CHANGE, and a permanently-unwritable
+ *  project (an unregistered path, a torn home) would otherwise print the same line for
+ *  the life of the process. Said once is diagnosis; said forever is noise that buries the
+ *  next real line. WeakSet so a dropped engine is collected with it. */
+const reviewWaitingPersistWarned = new WeakSet<ProjectEngine>()
+
+/** Mirror `engine.reviewSeenAt` into `engine.json` so the NEXT boot resumes the dwell
+ *  clock instead of restarting it (see {@link ProjectEngine.reviewSeenAt}'s ⚠ note).
+ *
+ *  FAIL-OPEN in both directions and never throws: `patchEngineIntent` swallows its own
+ *  disk faults, and a `false` return is logged (once) and dropped. The in-memory clock is
+ *  this process's truth; the file is a best-effort head start for the next one, so a bad
+ *  disk must cost nothing but that head start. The signature is updated ONLY on a
+ *  successful write, so a transient fault is retried on the next pass that moves the
+ *  clock. */
+const persistReviewWaiting = async (
+  engine: ProjectEngine,
+  clock: ReadonlyMap<string, number>,
+): Promise<void> => {
+  const sig = reviewWaitingSignature(clock)
+  // `?? ''` — an engine that has never persisted and holds an EMPTY clock is already in
+  // agreement with disk, so a project with nothing in review never writes at all.
+  if ((engine.reviewSeenPersisted ?? '') === sig) return // nothing arrived, nothing left: no IO
+  const ok = await patchEngineIntent(engine.path, {
+    // An EMPTY object CLEARS the field (see EngineIntentWrite.reviewWaitingSince) — the
+    // queue draining is exactly when the clock must stop, or a boot months later would
+    // resume a dwell for branches that were integrated long ago.
+    reviewWaitingSince: Object.fromEntries(clock),
+  })
+  if (ok) engine.reviewSeenPersisted = sig
+  else if (!reviewWaitingPersistWarned.has(engine)) {
+    reviewWaitingPersistWarned.add(engine)
+    logLine(engine, 'warn', 'review dwell clock persist failed (disk) — in-memory clock unaffected')
+  }
+}
+
+// ── The commander is up, and stuck (2026-08-14) ─────────────────────────────
+
+/** Why the engine gave up on getting the commander's attention — the two dead ends
+ *  the wake reflex used to end in, both of them silent:
+ *    - `'ignored'`      — every poke landed in the desk and none was answered
+ *                         (the nudge BUDGET is spent).
+ *    - `'unaddressable'` — no poke could be WRITTEN at all, {@link MAX_MANAGER_NUDGES}
+ *                         times running: the desk is live but the session store no
+ *                         longer names it, so neither writer can address it. Not the
+ *                         same fact, and the owner is told which one it is. */
+type ManagerUnresponsiveCause = 'ignored' | 'unaddressable'
+
+/** What the owner READS when the commander desk is up and stuck. Pure, so the wording is
+ *  assertable without a pass — and owner-facing, so it is plain Japanese that names the
+ *  situation and the two things the owner can actually do (CLAUDE.md's owner-facing text
+ *  rule; the same voice as the other swarm notification `detail`s in this file). */
+export const managerUnresponsiveDetail = (input: {
+  cause: ManagerUnresponsiveCause
+  /** How long the OLDEST waiting card has been in review, ms. */
+  waitedMs: number
+  /** How many swarm cards are waiting to be integrated. */
+  waiting: number
+}): string =>
+  `司令官の卓は動いていますが、統合が ${Math.round(input.waitedMs / 60_000)} 分止まっています` +
+  `(統合待ち ${input.waiting} 件・` +
+  (input.cause === 'ignored'
+    ? `声かけ ${MAX_MANAGER_NUDGES} 回に応答なし`
+    : `${MAX_MANAGER_NUDGES} 回続けて声をかけられませんでした`) +
+  ')。司令官に「マージ」と声をかけるか、司令官を再起動してください'
+
+/** THE ESCALATION for a commander desk that is present but not integrating — the bell the
+ *  two dead ends above never rang, plus the one recovery attempt that is safe to make
+ *  unattended.
+ *
+ *  WHY IT EXISTS (docs/commander/03-integration-review.md §7-9/§7-10, landed 2026-08-14).
+ *  Both dead ends ended in a single engine log line and then silence forever: the spent
+ *  nudge budget (「N 回の声かけに応答しません」) and the un-addressable desk (「声をかけら
+ *  れません」). The reasoning was sound as far as it went — a wedged desk IS a human
+ *  matter, and 'manager-unrevivable' would be a lie here because a desk plainly exists
+ *  (03章 §2.3 完了条件3) — but "a human matter" was implemented as "tell no human". The
+ *  field bug: engine ON, two cards sat in review, the SDK desk alive and idle, the engine
+ *  gave up nudging and said nothing. §7-10 recorded this as a REGRESSION in reachability
+ *  (the pre-2026-07-18 code did reach the owner, under the wrong label) and deferred the
+ *  fix to a later card for want of a display surface. This is that card; the display
+ *  surface (union → sanitizer → FATAL_EVENT_LABEL → en/ja) is wired with it.
+ *
+ *  THREE GATES, and each one is load-bearing:
+ *    1. `waitedPastStall` — the work must have waited past
+ *       {@link MANAGER_INTEGRATION_STALL_MS}. The budget alone is not evidence of a
+ *       STALL: a desk can ignore three pokes inside half an hour while the queue is
+ *       perfectly fresh. Deliberately the raw DWELL, not the `stalled` verdict, which
+ *       also demands delivery evidence and reads false when no channel says anything —
+ *       fail-open is right for deciding whether to ESC a desk, and wrong for deciding
+ *       whether to tell the owner about work that is provably sitting still.
+ *    2. ONE BELL PER EPISODE — `unresponsiveFatalFired`, cleared only where the reflex
+ *       is disarmed (queue drained / desk seen working). A batch that never drains must
+ *       not turn into a notification every pass.
+ *    3. SDK-ONLY RECYCLE — see {@link IntegrationDeps.managerDeskRuntime}.
+ *
+ *  ORDER MATTERS: the recycle is attempted FIRST and its failure is swallowed, because
+ *  the notification must not depend on the recovery succeeding — a teardown that throws
+ *  is precisely the case where the owner most needs to hear about it. Never throws. */
+const escalateUnresponsiveManager = async (
+  engine: ProjectEngine,
+  deps: IntegrationDeps,
+  rs: NonNullable<ProjectEngine['managerResume']>,
+  ctx: {
+    cause: ManagerUnresponsiveCause
+    /** Has the oldest waiting card sat past {@link MANAGER_INTEGRATION_STALL_MS}? */
+    waitedPastStall: boolean
+    waitedMs: number
+    waiting: number
+    branch?: string
+    taskTitle?: string
+  },
+): Promise<void> => {
+  if (!ctx.waitedPastStall) return
+  if (rs.unresponsiveFatalFired) return
+  // Latch BEFORE the awaits below: passes cannot overlap (integrateInFlight), but a
+  // one-shot whose latch lands after an await is a one-shot only by luck.
+  rs.unresponsiveFatalFired = true
+
+  // RECYCLE (item 2) — an SDK desk that will not answer is worth restarting, because the
+  // engine's absent arm already knows how to seat a fresh one and `spawnSwarmManager`
+  // resumes the same conversation. A PTY desk is NOT: it is a terminal in the owner's own
+  // cwd, possibly one they started and are reading. Once per episode either way.
+  if (!rs.deskRecycled && deps.managerDeskRuntime && deps.recycleManagerDesk) {
+    try {
+      const runtime = await deps.managerDeskRuntime(engine.path)
+      if (runtime === 'sdk') {
+        rs.deskRecycled = true // charged on the ATTEMPT — a throwing teardown must not retry
+        const closed = await deps.recycleManagerDesk(engine.path)
+        logLine(
+          engine,
+          'warn',
+          closed
+            ? `司令官の卓(SDK)が応答しないため一度閉じました — 次のパスで新しい卓を起動します(統合待ち ${ctx.waiting} 件)`
+            : `司令官の卓(SDK)を閉じられませんでした — 手動で司令官を再起動してください(統合待ち ${ctx.waiting} 件)`,
+          'integrate',
+        )
+      }
+    } catch (e) {
+      // Swallowed on purpose (see the header): the bell below is the point.
+      logLine(engine, 'warn', `司令官の卓の再起動に失敗しました: ${errMsg(e)}`, 'integrate')
+    }
+  }
+
+  // THE BELL (item 1) — best-effort, never awaited, internal-catch: the same fatal-notify
+  // contract every other escalation in this file follows.
+  deps.notify?.({
+    event: 'manager-unresponsive',
+    projectPath: engine.path,
+    ...(ctx.branch ? { branch: ctx.branch } : {}),
+    ...(ctx.taskTitle ? { taskTitle: ctx.taskTitle } : {}),
+    detail: managerUnresponsiveDetail({ cause: ctx.cause, waitedMs: ctx.waitedMs, waiting: ctx.waiting }),
+    logHint: 'Swarm タブ → マネージャー / engine log の integrate 行',
+  })
+}
+
 // ── The integration pass (Card③ — review → done, the riskiest stage) ─────────
 
 /** ONE integration pass. Throttled to INTEGRATE_TICK_MS inside the loop. In
@@ -8750,6 +9016,13 @@ export const runIntegratePass = async (
       freshlyReady.push(c.branch)
     }
   }
+  // MIRROR THE CLOCK TO DISK (2026-08-14) — the prune and the stamp above are the only
+  // two events that change it, so this is the one place the mirror can be written from.
+  // A state-transition write, not a per-pass one: the signature guard makes an ordinary
+  // tick (nothing arrived, nothing left) touch no disk at all, the same rule syncRoster
+  // follows. Fail-open and non-fatal — `persistReviewWaiting` never throws, and a mirror
+  // that cannot be written costs only the NEXT boot's head start.
+  await persistReviewWaiting(engine, reviewSeenAt)
   // A notice can sit undelivered for a while (the desk may be mid-turn), so prune it on
   // the SAME `present` sweep as the clock above: a branch the commander has meanwhile
   // integrated must not still be announced as news. If nothing it names survives, the
@@ -8848,6 +9121,14 @@ export const runIntegratePass = async (
     // reset here — the `present` sweep above already emptied it.)
     rs.stallLogged = false
     rs.nudgeRearmed = false
+    // The 2026-08-14 pair belongs to the waiting batch too — the bell says 「統合待ちが N
+    // 件あるのに司令官が動いていない」, which is a claim about THIS batch. A drained queue
+    // ends the episode, so the next one may ring again (and may recycle a desk once).
+    // ⚠ Deliberately NOT reset by a respawn: a fresh desk INSIDE the same batch is still
+    // the same stuck integration, and re-arming there would let a wedged desk be torn
+    // down and re-belled on every budget cycle — the loop `deskRecycled` exists to stop.
+    rs.unresponsiveFatalFired = false
+    rs.deskRecycled = false
     // "Fully" has to include `lastWakeSpawned` too (card add3af4c, 2026-07-22 sibling
     // fix): it is the transient-vs-permanent bit the give-up ratchet reads (below), so
     // a stale `true` carried out of THIS episode into the next one would make a fresh
@@ -8974,8 +9255,18 @@ export const runIntegratePass = async (
   for (const at of Array.from(reviewSeenAt.values())) {
     if (waitingSince === null || at < waitingSince) waitingSince = at
   }
+  // The DWELL alone — how long the oldest waiting card has sat — separated out because
+  // two different rules read it. `stalled` (below) ANDs it with delivery evidence and
+  // fails OPEN when no channel says anything, which is right for deciding whether to ESC
+  // a desk. The unresponsive ESCALATION reads the raw dwell instead: by the time it is
+  // consulted the engine has already spent its whole poke budget on this desk, so the
+  // question is no longer "dare we interrupt it" but "has this work provably sat still
+  // long enough to be worth the owner's attention" — and a missing delivery channel must
+  // not answer that one with silence.
+  const waitedMs = waitingSince === null ? 0 : now - waitingSince
+  const waitedPastStall = waitingSince !== null && waitedMs >= MANAGER_INTEGRATION_STALL_MS
   let stalled = false
-  if (waitingSince !== null && now - waitingSince >= MANAGER_INTEGRATION_STALL_MS) {
+  if (waitedPastStall) {
     const deliveryAt = await (deps.managerDeliveryAt ?? defaultManagerDeliveryAt)(engine.path)
     if (!engine.running) return // owner stopped the engine during the read
     stalled = managerIntegrationStalled({ waitingSinceMs: waitingSince, deliveryAtMs: deliveryAt, now })
@@ -8994,6 +9285,12 @@ export const runIntegratePass = async (
     // voice back (explain-line + a fresh re-arm), exactly as it does for `nudges`.
     rs.stallLogged = false
     rs.nudgeRearmed = false
+    // …and the two 2026-08-14 latches, for the same reason and on the same rule: the
+    // episode is the WAITING BATCH, and a desk demonstrably back at work ends it. A
+    // later wedge gets its own bell and its own one recycle, rather than inheriting a
+    // spent one and going silent again.
+    rs.unresponsiveFatalFired = false
+    rs.deskRecycled = false
     return
   }
 
@@ -9091,11 +9388,19 @@ export const runIntegratePass = async (
       // processing input — say so ONCE, in the log the commander docs tell readers to
       // grep, then go quiet (poking a wedged TUI forever helps no one).
       //
-      // Deliberately NOT a fatal notification: 'manager-unrevivable' means "no desk can
-      // be raised", which is false here (完了条件3), and minting a new fatal event would
-      // pull in the client allowlist + label + i18n surface this card does not own.
-      // The residual gap is recorded in docs/commander/03-integration-review.md §7.
-      if (!rs.unresponsiveLogged && lastNudgeAt > 0 && now - lastNudgeAt >= MANAGER_NUDGE_INTERVAL_MS) {
+      // Still NOT 'manager-unrevivable': that event means "no desk can be raised", which
+      // is false here (完了条件3). It IS a bell now — its OWN event, 'manager-unresponsive'
+      // (2026-08-14). The 2026-07-18 note that stood here ("minting a new fatal event
+      // would pull in the client allowlist + label + i18n surface this card does not
+      // own") was an honest scoping decision that then sat unfinished for four weeks,
+      // and 03章 §7-10 recorded the cost: this exact state reaches the owner as NOTHING.
+      // The display surface is wired with this change.
+      //
+      // The bell waits on the SAME evidence as the log line — one full interval since the
+      // last poke, so nudge #3 gets its window to answer — plus the dwell gate inside
+      // escalateUnresponsiveManager.
+      const answered = lastNudgeAt > 0 && now - lastNudgeAt >= MANAGER_NUDGE_INTERVAL_MS
+      if (!rs.unresponsiveLogged && answered) {
         rs.unresponsiveLogged = true
         logLine(
           engine,
@@ -9104,6 +9409,16 @@ export const runIntegratePass = async (
             `Swarm タブ → マネージャーで手動確認を(統合待ち ${swarmCards.length} 件)`,
           'integrate',
         )
+      }
+      if (answered) {
+        await escalateUnresponsiveManager(engine, deps, rs, {
+          cause: 'ignored',
+          waitedPastStall,
+          waitedMs,
+          waiting: swarmCards.length,
+          ...(swarmCards[0]?.branch ? { branch: swarmCards[0].branch } : {}),
+          ...(swarmCards[0]?.title ? { taskTitle: swarmCards[0].title } : {}),
+        })
       }
       return
     }
@@ -9148,6 +9463,21 @@ export const runIntegratePass = async (
         `${poked ? '' : '・PTY への書き込みに失敗'})。統合待ち ${swarmCards.length} 件`,
       'integrate',
     )
+    // …and the SECOND dead end gets the same bell (2026-08-14). This arm never reaches
+    // the budget branch above — an un-sent poke deliberately costs no turn — so without
+    // its own escalation the un-addressable desk stays exactly as mute as it was: an
+    // 'error' log line and nothing else, forever. Same event, different `cause`, because
+    // 「宛先が分からない」 and 「応答しない」 send the owner to different places.
+    if (!poked && (rs.unaddressable ?? 0) >= MAX_MANAGER_NUDGES) {
+      await escalateUnresponsiveManager(engine, deps, rs, {
+        cause: 'unaddressable',
+        waitedPastStall,
+        waitedMs,
+        waiting: swarmCards.length,
+        ...(swarmCards[0]?.branch ? { branch: swarmCards[0].branch } : {}),
+        ...(swarmCards[0]?.title ? { taskTitle: swarmCards[0].title } : {}),
+      })
+    }
     return
   }
 
@@ -11166,6 +11496,28 @@ export const resumeEngines = async (
       if (intent.selfSupplyDayKey) engine.selfSupply.dayKey = intent.selfSupplyDayKey
       if (typeof intent.selfSupplyDayCount === 'number') {
         engine.selfSupply.dayCount = intent.selfSupplyDayCount
+      }
+      // SEED THE REVIEW DWELL CLOCK (2026-08-14) — the whole point of persisting it.
+      // Without this every restart re-stamped each waiting branch as "arrived just now",
+      // so the 40-minute stall window restarted from zero on every launch: three releases
+      // in one day rewound it three times and a commander that had stopped integrating
+      // was never once judged stalled (nor, therefore, was the owner told). Deliberately
+      // HERE and not in startOrchestrator: this path is "the engine was meant to be
+      // running the whole time, bring it back", so the wait genuinely continued across
+      // the restart; an explicit owner ON is the opposite claim and still clears the
+      // clock on purpose (time the engine was OFF is not 統合待ち).
+      //
+      // Fail-open by construction: readEngineIntent already degraded an absent/torn/
+      // hand-edited field to `undefined`, which lands here as "no clock" — i.e. exactly
+      // today's behaviour. This can only ever make the engine notice a stall SOONER.
+      // A stale entry for a branch that has since left review is pruned by the first
+      // pass's own `present` sweep, so a long-dead branch cannot hold the clock back.
+      if (intent.reviewWaitingSince) {
+        const seeded = new Map(Object.entries(intent.reviewWaitingSince))
+        engine.reviewSeenAt = seeded
+        // Record the mirror as already-current so the first pass writes only if the set
+        // actually changed (it usually has — the sweep prunes what drained while off).
+        engine.reviewSeenPersisted = reviewWaitingSignature(seeded)
       }
       engine.running = true
       // card 2b — mark this as a RESTORED engine (not an owner ON this session), so

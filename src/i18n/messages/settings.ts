@@ -98,7 +98,10 @@ export const settings = {
     'settings.research.twitter.state.full': 'Signed in — single posts and search both work.',
     'settings.research.twitter.state.bin-only':
       'Single posts work now; add your cookies below to unlock search and timelines.',
-    'settings.research.twitter.state.missing': 'Needs the twitter-cli tool (see the Agent-Reach guide).',
+    'settings.research.twitter.state.missing':
+      'Needs the twitter-cli tool — copy the command below to install it (cookies come after).',
+    'settings.research.twitter.state.cookies-only':
+      'Your cookies are saved. One step left: install twitter-cli with the command below, and posts and search both start working.',
     'settings.research.reddit.name': 'Reddit',
     'settings.research.reddit.state.cli': 'The rdt tool is installed; sign-in is confirmed the first time a search runs.',
     'settings.research.reddit.state.baseline': 'Public posts are readable as-is; the rdt tool adds signed-in features.',
@@ -210,7 +213,10 @@ export const settings = {
     'settings.research.twitter.state.full': 'ログイン済み — 投稿の取得も検索も使えます。',
     'settings.research.twitter.state.bin-only':
       '投稿の単体取得は使えます。検索とタイムラインは、下でCookieを設定すると使えるようになります。',
-    'settings.research.twitter.state.missing': 'twitter-cli が必要です（Agent-Reach のガイド参照）。',
+    'settings.research.twitter.state.missing':
+      'twitter-cli が必要です。下のコマンドをコピーして入れてください（Cookieはその後で）。',
+    'settings.research.twitter.state.cookies-only':
+      'Cookieは保存済みです。あと一歩 — 下のコマンドで twitter-cli を入れると、投稿の取得も検索も使えるようになります。',
     'settings.research.reddit.name': 'Reddit',
     'settings.research.reddit.state.cli': 'rdt 導入済み。ログイン状態は最初の検索時にわかります。',
     'settings.research.reddit.state.baseline': '公開投稿はこのまま読めます。rdt を入れるとログインが要る機能も使えます。',

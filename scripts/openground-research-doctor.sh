@@ -46,8 +46,10 @@ if has twitter; then
   else
     say "[part] twitter   - twitter-cli present; single posts work, search/timeline needs cookies (set them in Settings -> Research channels, or export TWITTER_AUTH_TOKEN + TWITTER_CT0; LOCAL ONLY either way)"
   fi
+elif [ -n "${TWITTER_AUTH_TOKEN:-}" ] && [ -n "${TWITTER_CT0:-}" ]; then
+  say "[miss] twitter   - cookies ARE set but twitter-cli is missing. pipx install https://github.com/Panniantong/agent-reach/archive/main.zip"
 else
-  say "[miss] twitter   - twitter-cli not found (install: see Panniantong/Agent-Reach README)"
+  say "[miss] twitter   - twitter-cli not found. pipx install https://github.com/Panniantong/agent-reach/archive/main.zip"
 fi
 
 # reddit - rdt when present (auth only knowable at run time); else the public
@@ -57,7 +59,7 @@ if has rdt; then
 elif has curl; then
   say "[part] reddit    - no rdt, but public posts are readable (curl -sA openground-research 'https://www.reddit.com/search.json?q=<query>'). rdt adds signed-in features"
 else
-  say "[miss] reddit    - neither rdt nor curl found (install: see Panniantong/Agent-Reach README)"
+  say "[miss] reddit    - neither rdt nor curl found. pipx install 'git+https://github.com/public-clis/rdt-cli.git'"
 fi
 
 # youtube (+ bilibili rides the same binary).

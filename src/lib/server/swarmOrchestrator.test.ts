@@ -66,6 +66,7 @@ import {
   defaultNotifyManagerReady,
   noticeDeliverable,
   managerNoticeText,
+  managerUnresponsiveDetail,
   MANAGER_INTEGRATION_STALL_MS,
   MANAGER_NUDGE_REARM_MS,
   managerIntegrationStalled,
@@ -110,6 +111,7 @@ import {
   type ReviewDecision,
   type ReviewerVerdict,
 } from './swarmOrchestrator'
+import type { ManagerRuntimeKind } from './swarmManagerRuntime'
 import { matchesRateLimit, normalizeScreen } from './swarmRateLimitText'
 import { renderSdkTail, sdkRecentOutputHead, workerKey } from './workerRuntime'
 import type { SdkEvent } from './sdkEvents'
@@ -5477,6 +5479,16 @@ const makeIntDeps = (init: {
   // "the desk was quiet and the line landed", the ordinary case; every pre-existing test
   // gains one recorded delivery it does not assert on.
   noticeDelivers?: boolean | (() => boolean)
+  // THE UNRESPONSIVE-DESK RECYCLE (2026-08-14). `deskRuntime` is what
+  // managerDeskRuntime answers — 'sdk' (recyclable: no screen, no owner sitting at
+  // it), 'pty' (NEVER: a terminal in the owner's own cwd) or null (no desk we can
+  // name). ABSENT ⇒ BOTH seams are left UNWIRED, so every pre-existing test keeps a
+  // deps object with no recycle path at all and its assertions mean what they meant.
+  // `recycleThrows` drives the fault path (the bell must not depend on the teardown);
+  // `recycleReturns:false` models a desk that could not be closed.
+  deskRuntime?: ManagerRuntimeKind | null
+  recycleThrows?: boolean
+  recycleReturns?: boolean
 }): IntegrationDeps & {
   integrated: string[]
   moved: string[]
@@ -5508,6 +5520,10 @@ const makeIntDeps = (init: {
   // Fatal escalations the RESUSCITATION reflex fired (完了条件5, event
   // 'manager-unrevivable') — captured via the `notify` seam.
   notifications: SwarmFatalNotification[]
+  /** Every runtime probe the unresponsive escalation made (2026-08-14). */
+  runtimeChecks: string[]
+  /** Every desk TEARDOWN it asked for — must stay empty for a PTY desk. */
+  recycled: string[]
 } => {
   const reviews = [...init.reviews]
   const outcomes = init.outcomes ?? {}
@@ -5536,6 +5552,8 @@ const makeIntDeps = (init: {
   /** The echo cutoff the pass handed each presence probe (0 = nothing to discount). */
   const echoUntils: number[] = []
   const notifications: SwarmFatalNotification[] = []
+  const runtimeChecks: string[] = []
+  const recycled: string[] = []
   let managerChecks = 0
   /** How many times the pass consulted the heartbeat (the DELIVERY channel). It must stay
    *  0 on an ordinary tick — the dwell clock is in-memory and gates this read. */
@@ -5581,6 +5599,24 @@ const makeIntDeps = (init: {
     noticeOffers,
     echoUntils,
     notifications,
+    runtimeChecks,
+    recycled,
+    // The recycle seams stay UNWIRED unless a test names a desk runtime — an absent
+    // pair is the production-safe default too (a desk we cannot identify is never
+    // torn down), so this models the real fail-safe rather than merely skipping.
+    ...(init.deskRuntime !== undefined
+      ? {
+          managerDeskRuntime: async (p: string) => {
+            runtimeChecks.push(p)
+            return init.deskRuntime ?? null
+          },
+          recycleManagerDesk: async (p: string) => {
+            recycled.push(p)
+            if (init.recycleThrows) throw new Error('desk teardown blew up')
+            return init.recycleReturns ?? true
+          },
+        }
+      : {}),
     get managerChecks() {
       return managerChecks
     },
@@ -6117,29 +6153,276 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     await passAt(engine, deps, T0 + 10 * MANAGER_NUDGE_INTERVAL_MS)
     expect(deps.nudged).toHaveLength(MAX_MANAGER_NUDGES)
     expect(deps.wakeCalls).toEqual([]) // and at no point did the budget spill into a spawn
-    expect(deps.notifications).toEqual([]) // nor into a fatal
+    // …nor into 'manager-unrevivable' — a desk that is UP falsifies "cannot be raised"
+    // (完了条件3). It DOES reach the owner, under its own name, once the queue has also
+    // sat past the stall window (2026-08-14 — see the dedicated block below).
+    expect(deps.notifications.map((n) => n.event)).not.toContain('manager-unrevivable')
   })
 
-  it('a desk that ignores EVERY nudge is reported ONCE in the log — a wedge is not silence (完了条件4)', async () => {
+  it('a desk that ignores EVERY nudge is reported ONCE in the log AND rung ONCE as a bell (完了条件4 / 2026-08-14)', async () => {
     const engine = newEngine()
     // The nudges are PROBES, not just reminders: a healthy claude answers a submitted
     // prompt with output, which would have read 'active'. Ignoring all of them across
     // the full interval is real evidence of a wedged desk — so it must not vanish.
+    //
+    // THE LOG LINE WAS NOT ENOUGH (the field bug of 2026-08-14, and the follow-up 03章
+    // §7-10 promised): engine ON, two cards in review, the desk alive and idle, the
+    // budget spent — and the owner was told NOTHING. The log line is the operator's
+    // grep; the bell is the only channel that reaches a person who is not reading logs.
     const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
     for (let i = 0; i < MAX_MANAGER_NUDGES; i++) await passAt(engine, deps, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
     const unresponsive = (): number =>
       engine.log.filter((l) => l.message.includes('声かけに応答しません')).length
+    const bells = (): SwarmFatalNotification[] =>
+      deps.notifications.filter((n) => n.event === 'manager-unresponsive')
     // Immediately after the last nudge: NOT yet — nudge #3 gets its full window to answer.
     await passAt(engine, deps, T0 + (MAX_MANAGER_NUDGES - 1) * MANAGER_NUDGE_INTERVAL_MS + 1)
     expect(unresponsive()).toBe(0)
+    expect(bells()).toEqual([])
     // A full interval later with still nothing → say it once…
     await passAt(engine, deps, T0 + MAX_MANAGER_NUDGES * MANAGER_NUDGE_INTERVAL_MS)
     expect(unresponsive()).toBe(1)
-    // …and only once, however long the wedge lasts.
+    // …but STILL no bell: the budget is spent, and the work has waited only 30 minutes.
+    // A spent budget is a verdict about the DESK; the bell also claims the WORK is
+    // sitting still, and that claim needs MANAGER_INTEGRATION_STALL_MS behind it.
+    expect(T0 + MAX_MANAGER_NUDGES * MANAGER_NUDGE_INTERVAL_MS).toBeLessThan(
+      T0 + MANAGER_INTEGRATION_STALL_MS,
+    )
+    expect(bells()).toEqual([])
+    // Past the stall window → the owner is told, ONCE, however long the wedge lasts.
     for (let i = 4; i < 12; i++) await passAt(engine, deps, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
     expect(unresponsive()).toBe(1)
-    expect(deps.notifications).toEqual([]) // still NOT a fatal — the desk is up (完了条件3)
+    expect(bells()).toHaveLength(1)
+    expect(bells()[0].detail).toContain('司令官に「マージ」と声をかけるか、司令官を再起動してください')
+    expect(bells()[0].projectPath).toBe(engine.path)
+    // …and never under the WRONG name: 'manager-unrevivable' means "no desk can be
+    // raised", which is a lie about a desk that is plainly up (完了条件3).
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unresponsive'])
     expect(deps.wakeCalls).toEqual([]) // and still never a duplicate desk
+  })
+
+  // ── THE SILENT DEAD ENDS (2026-08-14 — the field bug, and 03章 §7-9/§7-10's
+  //    follow-up). The wake reflex had two terminal states that told NOBODY: the
+  //    spent nudge budget, and the poke that could not be delivered at all. Both
+  //    now ring ONE bell per waiting episode, and an SDK desk is additionally
+  //    recycled once so the ordinary absent-arm can seat a fresh one. ──
+
+  /** Drive an idle desk to the far side of BOTH gates: the nudge budget spent AND
+   *  the queue sat past MANAGER_INTEGRATION_STALL_MS. Returns the pass clock used
+   *  for the last pass, so a caller can keep going from there. */
+  const driveToWedged = async (
+    engine: ProjectEngine,
+    deps: IntegrationDeps,
+    from: number = T0,
+  ): Promise<number> => {
+    let at = from
+    for (let i = 0; i < MAX_MANAGER_NUDGES; i++) {
+      at = from + i * MANAGER_NUDGE_INTERVAL_MS
+      await passAt(engine, deps, at)
+    }
+    at = from + MANAGER_INTEGRATION_STALL_MS
+    await passAt(engine, deps, at)
+    return at
+  }
+
+  it('the budget is spent and the work has SAT — the owner is belled exactly ONCE, not once per pass', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    const at = await driveToWedged(engine, deps)
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unresponsive'])
+    // The episode-once latch is the whole difference between an alert and a siren:
+    // this batch never drains, so every later pass satisfies the same conditions.
+    for (let i = 1; i <= 20; i++) await passAt(engine, deps, at + i * MANAGER_NUDGE_INTERVAL_MS)
+    expect(deps.notifications).toHaveLength(1)
+    expect(engine.managerResume?.unresponsiveFatalFired).toBe(true)
+  })
+
+  it('NEITHER gate alone rings it — a spent budget with fresh work, or waiting work with pokes left, stays quiet', async () => {
+    // (i) POKES LEFT. The queue has sat for hours, but the engine has not finished
+    // asking: the bell says "we have exhausted what a machine can do", and that is
+    // not true while a poke is still owed.
+    const patient = newEngine()
+    const stillAsking = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    await passAt(patient, stillAsking, T0) // poke #1
+    await passAt(patient, stillAsking, T0 + MANAGER_INTEGRATION_STALL_MS) // poke #2 — long past the dwell
+    expect(stillAsking.nudged.length).toBeLessThan(MAX_MANAGER_NUDGES)
+    expect(stillAsking.notifications).toEqual([])
+
+    // (ii) BUDGET SPENT, WORK FRESH. Three pokes fit inside 30 minutes, so a desk can
+    // burn the whole budget while the queue is younger than the stall window. Belling
+    // there would call a commander stuck for being quiet for half an hour.
+    const fresh = newEngine()
+    const quiet = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    for (let i = 0; i < MAX_MANAGER_NUDGES; i++) await passAt(fresh, quiet, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
+    await passAt(fresh, quiet, T0 + MANAGER_INTEGRATION_STALL_MS - 1) // budget spent, one ms short
+    expect(quiet.nudged).toHaveLength(MAX_MANAGER_NUDGES)
+    expect(fresh.managerResume?.unresponsiveLogged).toBe(true) // the LOG line did fire…
+    expect(quiet.notifications).toEqual([]) // …and the bell did not
+    // One millisecond later it does — the gate is the dwell, nothing else.
+    await passAt(fresh, quiet, T0 + MANAGER_INTEGRATION_STALL_MS)
+    expect(quiet.notifications.map((n) => n.event)).toEqual(['manager-unresponsive'])
+  })
+
+  it('a PTY commander desk is NEVER recycled — the bell rings, the owner keeps their terminal', async () => {
+    // A PTY commander is a terminal in the OWNER'S OWN cwd — quite possibly one they
+    // opened by hand and are reading right now. Killing it is not recovery, it is
+    // taking the keyboard away; the engine's whole safety story around the manager
+    // desk (only 'absent' may spawn, never tear down a hand-started desk) depends on
+    // this exemption. The escalation is the same either way.
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'idle',
+      deskRuntime: 'pty',
+    })
+    await driveToWedged(engine, deps)
+    expect(deps.runtimeChecks).toEqual([engine.path]) // it DID ask which runtime…
+    expect(deps.recycled).toEqual([]) // …and refused on the answer
+    expect(engine.managerResume?.deskRecycled).toBeFalsy()
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unresponsive']) // still told
+  })
+
+  it('an SDK desk is recycled ONCE per episode — a wedged desk cannot be torn down in a loop', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'idle',
+      deskRuntime: 'sdk',
+    })
+    const at = await driveToWedged(engine, deps)
+    expect(deps.recycled).toEqual([engine.path])
+    expect(engine.managerResume?.deskRecycled).toBe(true)
+    expect(engine.log.some((l) => l.message.includes('一度閉じました'))).toBe(true)
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unresponsive'])
+    // The batch never drains, so without the latch every later budget cycle would tear
+    // the desk down again — a slow spawn→wedge→kill loop over the owner's tokens.
+    for (let i = 1; i <= 20; i++) await passAt(engine, deps, at + i * MANAGER_NUDGE_INTERVAL_MS)
+    expect(deps.recycled).toEqual([engine.path])
+  })
+
+  it('a recycle that THROWS still rings the bell — the notification never depends on the recovery', async () => {
+    // The teardown blowing up is precisely the case where the owner most needs to
+    // hear about it, so the order is recycle-then-bell with the fault swallowed. A
+    // bell wired AFTER an unguarded await would go missing in exactly that case.
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'idle',
+      deskRuntime: 'sdk',
+      recycleThrows: true,
+    })
+    await driveToWedged(engine, deps)
+    expect(deps.recycled).toEqual([engine.path]) // attempted…
+    expect(engine.log.some((l) => l.message.includes('再起動に失敗'))).toBe(true) // …and it blew up
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unresponsive'])
+  })
+
+  it('a desk we cannot ADDRESS is belled too, and says the TRUE reason — not "it ignored us"', async () => {
+    // The second dead end (2026-08-04's un-sent poke, silent since). `nudgeManager`
+    // writes nothing when the session store no longer names the live desk, and an
+    // un-sent poke deliberately costs no budget — so this arm NEVER reaches the
+    // budget branch above and had no escalation of its own at all: one 'error' log
+    // line, then nothing, forever.
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'idle',
+      nudgeFails: true,
+    })
+    const at = await driveToWedged(engine, deps)
+    expect(engine.managerResume?.nudges ?? 0).toBe(0) // the budget was never charged…
+    expect((engine.managerResume?.unaddressable ?? 0) >= MAX_MANAGER_NUDGES).toBe(true) // …this was
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unresponsive'])
+    expect(deps.notifications[0].detail).toContain('続けて声をかけられませんでした')
+    expect(deps.notifications[0].detail).not.toContain('応答なし') // a different fact, said differently
+    for (let i = 1; i <= 10; i++) await passAt(engine, deps, at + i * MANAGER_NUDGE_INTERVAL_MS)
+    expect(deps.notifications).toHaveLength(1) // still once per episode
+  })
+
+  it('the episode ENDS when the queue drains — a later wedge is belled (and recycled) afresh', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'idle',
+      deskRuntime: 'sdk',
+    })
+    const at = await driveToWedged(engine, deps)
+    expect(deps.notifications).toHaveLength(1)
+    // The commander finally integrates and review empties → the reflex disarms fully.
+    const drained = makeIntDeps({ reviews: [], managerPresence: 'idle', deskRuntime: 'sdk' })
+    await passAt(engine, drained, at + MANAGER_NUDGE_INTERVAL_MS)
+    expect(engine.managerResume?.unresponsiveFatalFired).toBe(false)
+    expect(engine.managerResume?.deskRecycled).toBe(false)
+    // A LATER batch that wedges the same way must be told about, not silently absorbed
+    // into the previous episode's spent latch (that is how "once" becomes "never").
+    const next = T0 + 10 * MANAGER_INTEGRATION_STALL_MS
+    const again = makeIntDeps({
+      reviews: [reviewCard('b', 'swarm/b')],
+      managerPresence: 'idle',
+      deskRuntime: 'sdk',
+    })
+    await driveToWedged(engine, again, next)
+    expect(again.notifications.map((n) => n.event)).toEqual(['manager-unresponsive'])
+    expect(again.recycled).toEqual([engine.path])
+  })
+
+  it('a desk seen WORKING ends the episode too — the bell latch is not carried into the next silence', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    const at = await driveToWedged(engine, deps)
+    expect(deps.notifications).toHaveLength(1)
+    // It answers and gets back to work (fresh delivery evidence ⇒ not stalled).
+    const working = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'active',
+      managerDeliveryAt: (now) => now,
+    })
+    await passAt(engine, working, at + MANAGER_NUDGE_INTERVAL_MS)
+    expect(engine.managerResume?.unresponsiveFatalFired).toBe(false)
+    expect(engine.managerResume?.deskRecycled).toBe(false)
+  })
+
+  it('managerUnresponsiveDetail names what is stuck and what the OWNER can do (plain Japanese)', () => {
+    // Owner-facing text, so it follows the owner-facing rule rather than the
+    // English default: this string is read by a non-programmer in a bell.
+    const d = managerUnresponsiveDetail({ cause: 'ignored', waitedMs: 45 * 60_000, waiting: 2 })
+    expect(d).toContain('45 分')
+    expect(d).toContain('統合待ち 2 件')
+    expect(d).toContain('司令官に「マージ」と声をかけるか、司令官を再起動してください')
+  })
+
+  it('the REVIEW DWELL an engine STARTS with is honoured on its FIRST pass — a restart must not rewind the window', async () => {
+    // The in-memory half of the persistence fix (2026-08-14). `reviewSeenAt` is the
+    // dwell clock behind the stall check, and it used to be re-stamped from scratch
+    // whenever the engine came up — so every restart handed a stopped commander a
+    // fresh 40 minutes of silence. Three releases in one day rewound it three times.
+    //
+    // An engine that comes up ALREADY holding an old stamp (what resumeEngines now
+    // seeds from engine.json — see swarmReviewDwellPersistence.test.ts for the disk
+    // half) must judge the queue stalled on its very FIRST pass.
+    const resumed = newEngine({
+      reviewSeenAt: new Map([['swarm/a', T0 - MANAGER_INTEGRATION_STALL_MS - 60_000]]),
+    })
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'active', // painting, but not delivering
+      managerDeliveryAt: T0 - MANAGER_INTEGRATION_STALL_MS - 60_000,
+    })
+    await passAt(resumed, deps, T0)
+    expect(deps.nudged).toEqual([resumed.path]) // ← the first pass already knows it is stuck
+    expect(resumed.log.some((l) => l.message.includes('統合が進んでいません'))).toBe(true)
+
+    // THE CONTRAST, which is the bug: the SAME pass on an engine with no carried
+    // clock stamps `now`, reads the card as brand new, and says nothing at all.
+    const rewound = newEngine()
+    const same = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'active',
+      managerDeliveryAt: T0 - MANAGER_INTEGRATION_STALL_MS - 60_000,
+    })
+    await passAt(rewound, same, T0)
+    expect(same.nudged).toEqual([])
+    expect(same.deliveryReads).toBe(0) // it did not even look — the dwell gate closed first
   })
 
   it('(d) fatal is reserved for a desk that will not START — an idle desk never reaches it (完了条件3)', async () => {
@@ -6151,7 +6434,10 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     for (let i = 0; i <= MAX_MANAGER_RESUME_ATTEMPTS * 3; i++) {
       await passAt(engine, deps, T0 + i * MANAGER_NUDGE_INTERVAL_MS)
     }
-    expect(deps.notifications).toEqual([]) // ← the false fatal the owner actually received
+    // ← 'manager-unrevivable' is the false fatal the owner actually received in 2026-07-18.
+    // The bell this desk DOES earn (2026-08-14) is a different event with a different
+    // sentence; what must never come back is calling a live desk unrevivable.
+    expect(deps.notifications.map((n) => n.event)).not.toContain('manager-unrevivable')
     expect(deps.wakeCalls).toEqual([])
     expect(engine.managerResume?.fatalFired).toBe(false)
 
@@ -6241,7 +6527,11 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     // The contract the docs promise (03章 §7-10): at most MAX_MANAGER_NUDGES pokes, ever.
     expect(deps.nudged.length).toBeLessThanOrEqual(MAX_MANAGER_NUDGES)
     expect(deps.wakeCalls).toEqual([]) // and never a spawn — the desk was up throughout
-    expect(deps.notifications).toEqual([]) // nor a fatal (完了条件3)
+    // nor 'manager-unrevivable' (完了条件3). The wedge DOES ring its own bell once the
+    // queue has also sat past the stall window — and exactly once across 300 passes,
+    // which is the same one-shot discipline this test pins for the log line below.
+    expect(deps.notifications.map((n) => n.event)).not.toContain('manager-unrevivable')
+    expect(deps.notifications.filter((n) => n.event === 'manager-unresponsive')).toHaveLength(1)
     // The wedge must still be SAID once, rather than vanishing into an endless poke loop.
     expect(engine.log.filter((l) => l.message.includes('声かけに応答しません'))).toHaveLength(1)
   })
@@ -6427,7 +6717,11 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     }
     expect(deps.nudged).toHaveLength(2 * MAX_MANAGER_NUDGES)
     expect(deps.wakeCalls).toEqual([]) // and the re-arm never spilled into a spawn…
-    expect(deps.notifications).toEqual([]) // …nor into a fatal (the desk is up — 完了条件3)
+    // …nor into 'manager-unrevivable' (the desk is up — 完了条件3). The re-arm does NOT
+    // re-ring the bell either: one episode, one bell, however many rounds of poking it
+    // contains (this batch never drains, which is exactly the shape that would spam).
+    expect(deps.notifications.map((n) => n.event)).not.toContain('manager-unrevivable')
+    expect(deps.notifications.filter((n) => n.event === 'manager-unresponsive')).toHaveLength(1)
   })
 
   it('(6) a desk seen WORKING ends the stall episode — the next silence gets the full voice back', async () => {
