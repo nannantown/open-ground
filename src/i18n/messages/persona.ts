@@ -91,6 +91,47 @@ export const persona = {
     'persona.portrait.countsRecent':
       'Built from {nodes} things ({recent} in the last week) · {taken} of {total} courses taken',
 
+    // --- The decision ledger: what the stand-in actually DID ----------------
+    // The portrait above is SELF-REPORT; this is the record of the proxy acting
+    // against real work. It answers one question at a glance — "how often did it
+    // answer for me this week?" — so the block is counts and nothing else: no
+    // explanation, no encouragement, no sentence that the ledger cannot back.
+    // `label` names the region for a screen reader; `week` is the visible cap.
+    'persona.ledger.label': 'What your stand-in did',
+    'persona.ledger.week': 'This week',
+    // Read as "3 answered for you". The number is drawn separately (tabular),
+    // so these are the bare labels — lowercase, mid-sentence.
+    'persona.ledger.answered': 'answered for you',
+    'persona.ledger.asked': 'asked you',
+    // 'abstained' is a WIDE lane server-side (a thin corpus, a brain that never
+    // produced a usable verdict) — so the word says only what is certain: no
+    // answer came back. It never implies the stand-in chose to stay quiet.
+    'persona.ledger.abstained': 'could not answer',
+    // Shown ONLY when nothing has ever been recorded. An invitation, not an
+    // error, and never counts of zero dressed up as activity.
+    'persona.ledger.empty': 'Nothing yet — what it decides for you will show up here.',
+    // Printed under a week of zeros, so an idle week is not mistaken for a dead
+    // ledger. Absent whenever the week itself has something to show.
+    'persona.ledger.last': 'Last {date}',
+
+    // The list behind the block: one row per decision, newest first.
+    'persona.ledger.detail.heading': 'Recent decisions',
+    'persona.ledger.verdict.answered': 'Answered for you',
+    'persona.ledger.verdict.asked': 'Asked you',
+    'persona.ledger.verdict.abstained': 'Could not answer',
+    // The reason CLASS behind an 'asked' / 'could not answer' — the free-text
+    // reason is never stored, and the class is never shown as its raw slug.
+    'persona.ledger.why.irreversible': 'could not be undone',
+    'persona.ledger.why.insufficient-info': 'not enough to go on',
+    'persona.ledger.why.policy': 'yours to decide',
+    // How well what you have written grounded the answer it gave.
+    'persona.ledger.confidence.high': 'well grounded',
+    'persona.ledger.confidence.medium': 'some grounding',
+    'persona.ledger.confidence.low': 'thin grounding',
+    // THE ROW THAT MATTERS: it asked, and you decided. That pair is the only
+    // thing on this screen that can measure the stand-in against you.
+    'persona.ledger.ownerAnswered': 'You answered this · {date}',
+
     // --- The always-on question (the interview loop) ------------------------
     // One a day, built from something the owner actually did — never a
     // personality quiz. The copy has to make that obvious, or the question
@@ -228,6 +269,26 @@ export const persona = {
     'persona.portrait.counts': 'わかっていること {nodes}件 ・ コースは{total}本中{taken}本',
     'persona.portrait.countsRecent':
       'わかっていること {nodes}件（うち{recent}件はこの1週間）・ コースは{total}本中{taken}本',
+
+    'persona.ledger.label': '分身がしたこと',
+    'persona.ledger.week': '今週',
+    'persona.ledger.answered': '代わりに答えた',
+    'persona.ledger.asked': 'あなたに聞いた',
+    'persona.ledger.abstained': '答えられなかった',
+    'persona.ledger.empty': 'まだ何もありません — 代わりに決めたことが、ここに残ります。',
+    'persona.ledger.last': '最後は{date}',
+
+    'persona.ledger.detail.heading': '最近の判断',
+    'persona.ledger.verdict.answered': '代わりに答えた',
+    'persona.ledger.verdict.asked': 'あなたに聞いた',
+    'persona.ledger.verdict.abstained': '答えられなかった',
+    'persona.ledger.why.irreversible': '取り返しがつかないこと',
+    'persona.ledger.why.insufficient-info': '材料が足りなかった',
+    'persona.ledger.why.policy': 'あなたが決めること',
+    'persona.ledger.confidence.high': '根拠は厚い',
+    'persona.ledger.confidence.medium': '根拠はそこそこ',
+    'persona.ledger.confidence.low': '根拠は薄い',
+    'persona.ledger.ownerAnswered': 'これはあなたが答えました ・ {date}',
 
     'persona.interview.heading': '今日の1問',
     'persona.interview.placeholder': 'あなたの言葉で。一文で十分です。',

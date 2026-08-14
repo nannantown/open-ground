@@ -63,6 +63,11 @@ import {
   type PersonaZone,
 } from './PersonaFigure'
 import { PersonaResultSheet } from './PersonaResultSheet'
+import {
+  PersonaLedgerBlock,
+  PersonaLedgerDetail,
+  isPersonaLedger,
+} from './PersonaLedgerBlock'
 import { courseById, itemAt, type PersonaCourse } from '@/lib/persona/instruments'
 import { portraitAgeLabel } from '@/lib/persona/portrait'
 import type {
@@ -72,6 +77,7 @@ import type {
   PersonaCourseRecord,
   PersonaCoursesResponse,
   PersonaInterviewResponse,
+  PersonaLedgerResponse,
   PersonaPortrait,
   PersonaQuestion,
   SubmitPersonaCourseResponse,
@@ -238,6 +244,15 @@ export const PersonaModule = () => {
   // failed read is in no position to invite anyone anywhere.
   const [portrait, setPortrait] = useState<PersonaPortrait | null>(null)
 
+  // The decision ledger (top right) — what the stand-in DID, as opposed to what
+  // the owner said about themselves. Same rule as the portrait: `null` means
+  // "not read", NOT "it has done nothing", and only a successful read may put
+  // anything on screen.
+  const [ledger, setLedger] = useState<PersonaLedgerResponse | null>(null)
+  // Whether the detail list is open. It rides in the SAME reading column a note
+  // opens into, so the two are mutually exclusive rather than stacked.
+  const [ledgerOpen, setLedgerOpen] = useState(false)
+
   const [selected, setSelected] = useState<PersonaNode | null>(null)
   const [spark, setSpark] = useState<PersonaSpark | null>(null)
   const [askPulse, setAskPulse] = useState(false)
@@ -333,16 +348,40 @@ export const PersonaModule = () => {
     }
   }, [])
 
+  // Its own loader, like every other reading on this screen. The route is newer
+  // than the screen it sits on, so a server that 404s it must cost the owner
+  // NOTHING else here — and, on failure, must leave the block absent rather than
+  // showing an empty ledger, which would claim the stand-in has never acted.
+  const loadLedger = useCallback(async () => {
+    try {
+      const res = await fetch('/api/persona/ledger', { cache: 'no-store' })
+      if (!res.ok) throw new Error('ledger load failed')
+      const body = (await res.json()) as unknown
+      if (!alive.current) return
+      // SHAPE-CHECK BEFORE STORING — the render path reaches straight into
+      // `summary.week`, so a 200 that is not a ledger would throw inside render
+      // and blank the whole panel. Exactly the failure the portrait loader was
+      // fixed for on 2026-08-14; the same 200-with-a-bare-object arrives here
+      // from any older server and from App.render's own fetch stub.
+      if (!isPersonaLedger(body)) throw new Error('ledger shape')
+      setLedger(body)
+    } catch {
+      // Deliberately silent AND deliberately non-destructive: whatever was read
+      // last stays on screen, and a read that failed says nothing at all.
+    }
+  }, [])
+
   useEffect(() => {
     alive.current = true
     void load()
     void loadQuestion()
     void loadCourses()
     void loadPortrait()
+    void loadLedger()
     return () => {
       alive.current = false
     }
-  }, [load, loadQuestion, loadCourses, loadPortrait])
+  }, [load, loadQuestion, loadCourses, loadPortrait, loadLedger])
 
   const nodes = useMemo(() => buildPersonaNodes(judgments), [judgments])
   const zoneLabel = useCallback((zone: PersonaZone) => t(`persona.zone.${zone}`), [t])
@@ -665,6 +704,18 @@ export const PersonaModule = () => {
   // no counts. Same rule as the figure's empty state above.
   const showPortrait = !!portrait && (portrait.lines.length > 0 || showPortraitInvite)
 
+  // The ledger's rows. The block is only openable when there is something to
+  // open: a control that leads to an empty list is a broken promise, and an
+  // unread ledger has nothing to say in either direction.
+  const ledgerEntries = ledger?.recent ?? []
+  const showLedgerDetail = ledgerOpen && ledgerEntries.length > 0
+  const ledgerDay = useCallback((iso: string) => formatDay(iso, lang) ?? iso, [lang])
+  // The two reading cards are mutually exclusive — see the figure's onSelect.
+  const openLedgerDetail = () => {
+    setSelected(null)
+    setLedgerOpen(true)
+  }
+
   if (loading) {
     return (
       <div className="flex-1 px-8 py-6 text-ui text-ink-subtle">{t('persona.loading')}</div>
@@ -678,7 +729,13 @@ export const PersonaModule = () => {
         gapZone={gapZone}
         pendingZone={run ? run.course.zone : null}
         spark={spark}
-        onSelect={setSelected}
+        // Opening a note closes the ledger's list: both read into the SAME
+        // column, and two reading cards stacked there is how the column stops
+        // being one place where things are read.
+        onSelect={(node) => {
+          setLedgerOpen(false)
+          setSelected(node)
+        }}
         onTapEmpty={() => setSelected(null)}
         onTapGap={pulseAsk}
         zoneLabel={zoneLabel}
@@ -765,6 +822,21 @@ export const PersonaModule = () => {
         )}
       </div>
 
+      {/* ── what the stand-in DID, this week ──
+       *  Top right, under the panel's ✕ (PersonaPanel draws it at right-4 top-4)
+       *  and above the day's question: the right edge of the screen is the
+       *  stand-in's own column — what it asked, and what it did. Absent entirely
+       *  when the ledger could not be read (see loadLedger). */}
+      {ledger && (
+        <div className="absolute right-6 top-16 z-10 w-[min(280px,calc(100%-3rem))]">
+          <PersonaLedgerBlock
+            summary={ledger.summary}
+            lastLabel={formatDay(ledger.summary.lastAt, lang)}
+            {...(ledgerEntries.length > 0 ? { onOpen: openLedgerDetail } : {})}
+          />
+        </div>
+      )}
+
       {/* First run: the figure is all dust, so say what this place is and what
        *  lights it. Only ever shown over a SUCCESSFUL read (showEmptyInvite). */}
       {showEmptyInvite && !composing && (
@@ -786,6 +858,16 @@ export const PersonaModule = () => {
        *  write into. Stacked in ONE container so opening a note while a draft is
        *  in flight neither hides the draft nor lands on top of it. ── */}
       <div className="absolute left-1/2 top-[14%] z-20 flex w-[min(420px,calc(100%-3rem))] -translate-x-1/2 flex-col gap-3">
+        {/* The ledger's evidence, read in the same column and the same card a
+         *  note opens into — one reading place on this screen, not two. */}
+        {showLedgerDetail && (
+          <PersonaLedgerDetail
+            entries={ledgerEntries}
+            dayLabel={ledgerDay}
+            onClose={() => setLedgerOpen(false)}
+          />
+        )}
+
         {selected && (
           <article className="rounded-[3px] border border-line bg-bg-card px-5 py-4 shadow-card">
             <p className="whitespace-pre-wrap text-read font-semibold leading-relaxed text-ink">

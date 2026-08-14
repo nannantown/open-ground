@@ -12,6 +12,7 @@ import {
   submitPersonaCourse,
 } from './personaCourses'
 import { readManualJudgments } from './youCorpus'
+import { recordDecision } from './personaLedger'
 import { personaCoursesFile, youCorpusAdditionsFile } from './paths'
 import { BIG5_ITEMS, COURSES, PersonaScoringError } from '@/lib/persona/instruments'
 import type { AppendJudgmentInput } from './youCorpus'
@@ -491,5 +492,81 @@ describe('getPersonaPortrait — composed from evidence, or nothing', () => {
     const portrait = await getPersonaPortrait({ now: () => taken + 30 * DAY_MS })
     expect(portrait.lines.length).toBeGreaterThan(0)
     for (const line of portrait.lines) expect(line.ageDays).toBe(30)
+  })
+})
+
+// ─── The portrait's OTHER half: what the stand-in DID ────────────────────────
+//
+// The courses above are self-report. These pin the wiring that lets the portrait
+// speak from the DECISION LEDGER instead — written through the production
+// `recordDecision` and read back through the production `getPersonaPortrait`, so
+// a wiring that called the ledger but ignored its numbers would fail here.
+describe('getPersonaPortrait — the work line comes from the real ledger', () => {
+  const decide = async (
+    verdict: 'answered' | 'asked' | 'abstained',
+    n: number,
+    at?: string,
+  ): Promise<void> => {
+    for (let i = 0; i < n; i++) {
+      await recordDecision({
+        projectPath: '/tmp/proj',
+        question: `質問 ${verdict} ${i}`,
+        verdict,
+        ...(at ? { at } : {}),
+      })
+    }
+  }
+  const workLine = (p: Awaited<ReturnType<typeof getPersonaPortrait>>) =>
+    p.lines.find((l) => l.detail.startsWith('実際の判断'))
+
+  it('says NOTHING about the work until the stand-in has actually decided something', async () => {
+    await submitPersonaCourse('big5', big5Decisive())
+    const portrait = await getPersonaPortrait()
+    expect(portrait.lines.length).toBeGreaterThan(0) // the courses half still speaks
+    expect(workLine(portrait)).toBeUndefined()
+  })
+
+  it('reports the REAL tallies, and never flatters a stand-in that mostly asks', async () => {
+    await decide('answered', 1)
+    await decide('asked', 5)
+    await decide('abstained', 4)
+
+    const portrait = await getPersonaPortrait()
+    const line = workLine(portrait)
+    expect(line, 'the work line is missing entirely').toBeTruthy()
+    // The numbers are the ledger's, not a constant: 1/10 answered.
+    expect(line?.detail).toBe('実際の判断 10件 ・ 代わりに答えた1 / 聞いた5 / 棄権4')
+    // …and the WORDS match that ratio rather than being cheerful boilerplate.
+    expect(line?.text).toContain('まだ多くをあなたに聞いている')
+
+    // Move the ratio and the sentence must move with it.
+    await decide('answered', 20)
+    const after = workLine(await getPersonaPortrait())
+    expect(after?.detail).toBe('実際の判断 30件 ・ 代わりに答えた21 / 聞いた5 / 棄権4')
+    expect(after?.text).toContain('あなたを待たずに引き受けている')
+  })
+
+  it('counts the WHOLE ledger, not just this week — the portrait is not a weekly report', async () => {
+    const now = Date.UTC(2026, 5, 1, 12)
+    // Every decision is old enough to fall outside the 7-day window the SCREEN's
+    // own block uses. A portrait keyed on `week` would report zero and draw no
+    // line at all; the portrait is a statement about who the stand-in has become.
+    await decide('answered', 3, new Date(now - 40 * DAY_MS).toISOString())
+    await decide('asked', 1, new Date(now - 40 * DAY_MS).toISOString())
+
+    const line = workLine(await getPersonaPortrait({ now: () => now }))
+    expect(line?.detail).toBe('実際の判断 4件 ・ 代わりに答えた3 / 聞いた1 / 棄権0')
+  })
+
+  it('an UNREADABLE ledger costs the work line, not the whole portrait', async () => {
+    await submitPersonaCourse('big5', big5Decisive())
+    const portrait = await getPersonaPortrait({
+      readDecisions: async () => {
+        throw new Error('EIO')
+      },
+    })
+    expect(portrait.lines.length).toBeGreaterThan(0)
+    expect(workLine(portrait)).toBeUndefined()
+    expect(portrait.nodeCount).toBeGreaterThan(0)
   })
 })

@@ -64,6 +64,11 @@ import {
 } from './swarmOverseerBrain'
 import { buildUnclassifiedRoutingPlainQuestion } from './swarmDecisionRouting'
 import {
+  ledgerMatchKey,
+  recordDecision as realRecordDecision,
+  type PersonaLedgerInput,
+} from './personaLedger'
+import {
   openEscalation as realOpenEscalation,
   defaultReceiptKey,
   injectAnswerIntoWorker,
@@ -379,6 +384,72 @@ export interface OverseerDeps {
   runJanitor: (projectPath: string) => Promise<unknown>
 }
 
+/** WRAP a proxy-you decision function so every SETTLED OwnerAnswer lands in the
+ *  DECISION LEDGER (personaLedger.ts) — the record of what the owner's stand-in
+ *  actually did, as opposed to what the owner said about themselves in the Persona
+ *  courses. This is the ONE recording point on the production path: it is the only
+ *  place that sees the question, the project AND the settled answer together.
+ *
+ *  THE MAPPING (the thing worth testing — an OwnerAnswer shape → a verdict the
+ *  owner can read):
+ *    answer                               ⇒ 'answered' (+ its reported confidence)
+ *    escalate why='insufficient-info'     ⇒ 'abstained'
+ *    escalate why='irreversible'|'policy' ⇒ 'asked'
+ *  See personaLedger's header for why the 'abstained' lane deliberately absorbs the
+ *  brain-failure paths that report the same `why` (and how `why`, stored verbatim,
+ *  keeps the split recoverable).
+ *
+ *  ISOLATION — the ledger may NEVER affect the decision path. Three properties, all
+ *  load-bearing:
+ *   1. the answer is obtained FIRST and returned UNCHANGED; the ledger never sees a
+ *      chance to alter or withhold it;
+ *   2. the write is awaited, then swallowed. `recordDecision` already never throws;
+ *      the try/catch here is the second wall, and it is what keeps an INJECTED
+ *      failing writer (or a future recorder that forgets the contract) from turning
+ *      a settled proxy answer into a rejected promise. The overseer's fire-and-
+ *      forget chain would then route it as `answer: null` — i.e. a disk hiccup in a
+ *      statistics file would silently downgrade a real answer to an escalation;
+ *   3. a THROW FROM `inner` is not recorded and is not caught. That is a crash, not
+ *      a decision (answerAsOwner itself never throws; the wrapper below can, before
+ *      the brain is ever reached), and the caller's own .catch already handles it.
+ *  Awaited rather than detached so the record has LANDED before the answer is handed
+ *  back: the caller is already fire-and-forget, so this costs the tick nothing, and
+ *  it means no reader can observe an answer whose record does not exist yet. */
+// Console, not the engine journal: the wrapper is built once at dep-construction
+// time and has no `log` sink in scope, and a failed STATISTIC write is not engine
+// news. Named so the swallow below is greppable rather than an anonymous catch.
+const warnLedgerFailure = (e: unknown): void => {
+  console.warn(`[openground:overseer] decision ledger write failed — ${errMsg(e)}`)
+}
+
+export const withDecisionLedger = (
+  inner: (q: OwnerQuestion, signal?: AbortSignal) => Promise<OwnerAnswer>,
+  record: (entry: PersonaLedgerInput) => Promise<void> = realRecordDecision,
+): ((q: OwnerQuestion, signal?: AbortSignal) => Promise<OwnerAnswer>) => {
+  return async (q, signal) => {
+    const answer = await inner(q, signal)
+    try {
+      await record({
+        projectPath: q.projectPath,
+        question: q.question,
+        // The key is built from the FULL question (the store truncates what it
+        // displays), so it still matches when the owner answers the escalation this
+        // decision raised — see personaLedger.ledgerMatchKey.
+        key: ledgerMatchKey({ projectPath: q.projectPath, question: q.question }),
+        ...(answer.kind === 'answer'
+          ? { verdict: 'answered' as const, confidence: answer.confidence }
+          : {
+              verdict: answer.why === 'insufficient-info' ? ('abstained' as const) : ('asked' as const),
+              why: answer.why,
+            }),
+      })
+    } catch (e) {
+      warnLedgerFailure(e)
+    }
+    return answer
+  }
+}
+
 /** Build the REAL dependency set. `io` (readHeartbeat / isAlive) comes from the
  *  orchestrator's own deps; everything else is the shipped C1/C2/C4/usage/janitor
  *  wiring. The brain runner is built per-call at the mode-resolved overseer tier
@@ -390,7 +461,10 @@ export const defaultOverseerDeps = (io: {
   now: () => Date.now(),
   isAlive: io.isAlive,
   readHeartbeat: io.readHeartbeat,
-  answerAsOwner: async (q, signal) => {
+  // Every settled proxy-you decision is recorded (see withDecisionLedger) — the
+  // ledger wraps the REAL brain call rather than sitting inside it, so the C2
+  // primitive stays free of storage concerns and this stays the single write point.
+  answerAsOwner: withDecisionLedger(async (q, signal) => {
     const mode = await getSettings()
       .then((s) => s.executionMode ?? 'optimize')
       .catch(() => 'optimize' as const)
@@ -406,7 +480,7 @@ export const defaultOverseerDeps = (io: {
       runBrain: makeOverseerBrain({ model: me?.model, effort: me?.effort }),
       signal,
     })
-  },
+  }),
   openEscalation: realOpenEscalation,
   canInjectInto: (terminalId, projectPath) => defaultCanInjectInto(terminalId, projectPath),
   injectAnswer: (terminalId, text) => injectAnswerIntoWorker(terminalId, text),

@@ -126,6 +126,53 @@ describe('composePortrait — provenance and age', () => {
     expect(p.lines[0].courseId).toBe('values')
   })
 
+  // ── the work line: the only line built from what actually HAPPENED ────────
+  it('says nothing about work until the stand-in has actually decided something', () => {
+    // Rule 1 applied to the ledger: zero decisions is not "balanced", it is
+    // silence. A line here would be the exact horoscope sentence this composer
+    // exists to refuse.
+    const base = { records: { values: record('values', VALUES_A) }, nodeCount: 3, now: NOW }
+    expect(composePortrait(base).lines.some((l) => l.detail.includes('実際の判断'))).toBe(false)
+    expect(
+      composePortrait({ ...base, work: { answered: 0, asked: 0, abstained: 0 } })
+        .lines.some((l) => l.detail.includes('実際の判断')),
+    ).toBe(false)
+  })
+
+  it('describes the RATIO honestly — a stand-in that mostly asks is told so', () => {
+    const base = { records: { values: record('values', VALUES_A) }, nodeCount: 3, now: NOW }
+    const lineFor = (work: { answered: number; asked: number; abstained: number }) => {
+      const l = composePortrait({ ...base, work }).lines.at(-1)!
+      expect(l.detail).toContain('実際の判断')
+      return l
+    }
+    // never answered → says so, and does NOT claim it is carrying anything
+    expect(lineFor({ answered: 0, asked: 4, abstained: 1 }).text).toContain('まだ、あなたの代わりに答えられていない')
+    // mostly asking → the honest, unflattering reading
+    expect(lineFor({ answered: 1, asked: 8, abstained: 1 }).text).toContain('まだ多くをあなたに聞いている')
+    // carrying most of it → only then does it say so
+    expect(lineFor({ answered: 8, asked: 2, abstained: 0 }).text).toContain('あなたを待たずに引き受けている')
+    // the counts themselves are in the provenance, not the sentence
+    expect(lineFor({ answered: 3, asked: 2, abstained: 1 }).detail).toContain('代わりに答えた3 / 聞いた2 / 棄権1')
+  })
+
+  it('the work line survives the cap — a self-report is dropped before it is', () => {
+    // Five decisive self-report lines would fill PORTRAIT_MAX_LINES on their own.
+    const p = composePortrait({
+      records: {
+        values: record('values', VALUES_A),
+        big5: record('big5', BIG5_ITEMS.map(() => 4)),
+        type: record('type', TYPE_A),
+        work: record('work', WORK_A),
+      },
+      nodeCount: 12,
+      work: { answered: 5, asked: 1, abstained: 0 },
+      now: NOW,
+    })
+    expect(p.lines.length).toBeLessThanOrEqual(PORTRAIT_MAX_LINES)
+    expect(p.lines.at(-1)!.detail).toContain('実際の判断')
+  })
+
   it('portraitAgeLabel words the age the same everywhere', () => {
     expect(portraitAgeLabel(undefined)).toBeNull()
     expect(portraitAgeLabel(0)).toBe('今日')

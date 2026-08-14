@@ -153,6 +153,18 @@ export const personaInterviewFile = () => join(openGroundHome(), 'persona-interv
 // is stored here, and each finding is ALSO minted into the corpus through
 // appendJudgment (one writer). See src/lib/server/personaCourses.ts.
 export const personaCoursesFile = () => join(openGroundHome(), 'persona-courses.json')
+// The DECISION LEDGER (ペルソナタブの「実際にやったこと」): one record per proxy-you
+// decision — the stand-in answered on the owner's behalf, handed the question back
+// to them, or abstained — plus the owner's later answer when one of those questions
+// came back answered. The COMPLEMENT of persona-courses.json: that file is what the
+// owner SAYS about themselves (self-report), this one is what their stand-in DID
+// against real work, and the said-vs-did gap only exists because both are kept.
+// PERSONAL like the corpus and the courses beside it — app home only, never a repo,
+// 0600, and no route hands its free text to a non-loopback caller. CAPPED to the
+// newest N (unlike escalations.json, which must never lose an open question): a
+// dropped ledger row costs a statistic, not a decision. See
+// src/lib/server/personaLedger.ts.
+export const personaLedgerFile = () => join(openGroundHome(), 'persona-ledger.json')
 export const runsDir = () => join(openGroundHome(), 'runs')
 export const runFile = (id: string) => join(runsDir(), `${id}.json`)
 // Dismissed runs are *moved* here rather than unlinked, so an accidental

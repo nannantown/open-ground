@@ -18,11 +18,13 @@ import {
   submitPersonaCourse,
   UnknownPersonaCourseError,
 } from '@/lib/server/personaCourses'
+import { getPersonaLedger } from '@/lib/server/personaLedger'
 import { PersonaScoringError } from '@/lib/persona/instruments'
 import { hostIsLocal, originIsLocal } from '../loopback'
 import type {
   PersonaCourseHistoryResponse,
   PersonaCoursesResponse,
+  PersonaLedgerResponse,
   PersonaPortrait,
   SubmitPersonaCourseResponse,
 } from '@/lib/types'
@@ -77,6 +79,21 @@ export const personaRoutes = new Hono()
   // catalogue above: a glance must not 500 the screen.
   .get('/api/persona/portrait', async (c) =>
     blockNonLoopback(c) ?? c.json<PersonaPortrait>(await getPersonaPortrait()),
+  )
+  // --- GET /api/persona/ledger -----------------------------------------------
+  // The DECISION LEDGER: what the owner's stand-in actually DID (answered on their
+  // behalf / asked them / abstained), as counts + the newest entries.
+  //
+  // ⚠ LOOPBACK-ONLY, and the gate matters MORE here than on its siblings: `recent`
+  // carries free text from the owner's own local work (the questions their swarm
+  // was blocked on). The gate above is the DNS-rebinding half; nothing on this
+  // route may ever be relaxed to a non-loopback caller — see personaLedger.ts's
+  // privacy note.
+  //
+  // Never fails on an unreadable or corrupt ledger — readLedger fails open, so the
+  // worst case is zeros and an empty list, which is what a fresh machine shows.
+  .get('/api/persona/ledger', async (c) =>
+    blockNonLoopback(c) ?? c.json<PersonaLedgerResponse>(await getPersonaLedger()),
   )
   // --- POST /api/persona/courses/:id/submit ---------------------------------
   // Score → persist → mint. 404 for an id no instrument answers to, 400 with the

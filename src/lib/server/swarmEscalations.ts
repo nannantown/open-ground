@@ -49,6 +49,7 @@ import {
 } from './workerRuntime'
 import { bracketedPaste } from './pastePrompt'
 import { appendJudgment } from './youCorpus'
+import { ledgerMatchKey, markEscalationAnswered } from './personaLedger'
 import { createSwarmInfoNotification } from './swarmNotifications'
 import { isValidProjectPath, projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
@@ -1125,6 +1126,26 @@ export const answerEscalation = async (
     } catch {
       /* best-effort — reported via memoryWritten */
     }
+
+    // (3) DECISION LEDGER stamp — the other half of the same lesson. The corpus
+    // write above teaches the proxy WHAT the owner decided; this records THAT the
+    // owner had to decide at all, against the ledger row where the stand-in
+    // declined to speak for them (personaLedger.ts). The proxy asked, the human
+    // answered: the single highest-value pairing in the system, and the only way
+    // the Persona screen can ever show a said-vs-did gap.
+    //
+    // Matched on the ledger's own correlation key (project + normalized question
+    // prefix) because that is all this seam has: the ledger row is written when the
+    // brain settles, long before an escalation id exists. A MISS is the ordinary
+    // case — most escalations are template raises (S1/S2/S3/S5/S10) the proxy never
+    // saw — and costs nothing. Never throws (markEscalationAnswered swallows), and
+    // deliberately inside phase 1: it is a file read-modify-write on ITS OWN chain
+    // (no lock inversion with L1/L2), and it must not run for the re-delivery /
+    // already-injected early returns above, which are not fresh owner decisions.
+    await markEscalationAnswered(
+      { key: ledgerMatchKey({ projectPath: record.projectPath, question: record.question }) },
+      { at: record.answeredAt },
+    )
 
     return { done: false, record, memoryWritten }
   })

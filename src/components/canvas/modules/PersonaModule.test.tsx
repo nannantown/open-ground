@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, cleanup, fireEvent, waitFor, screen } from '@testing-library/react'
+import { render, cleanup, fireEvent, waitFor, screen, within } from '@testing-library/react'
 import { PersonaModule, asZone, courseRailState, parseTags, quoteForCorrection } from './PersonaModule'
 import {
   buildPersonaNodes,
@@ -24,6 +24,11 @@ import { messages } from '@/i18n/messages'
 import type {
   ManualJudgment,
   PersonaCourseRecord,
+  PersonaLedgerCounts,
+  PersonaLedgerEntry,
+  PersonaLedgerResponse,
+  PersonaLedgerSummary,
+  PersonaLedgerWhy,
   PersonaPortrait,
   PersonaPortraitLine,
   PersonaQuestion,
@@ -172,6 +177,35 @@ let mintedOverride: number | null
 let portraitPayload: PersonaPortrait | null
 let historyPayload: PersonaCourseRecord[]
 let historyFails: boolean
+/** The decision ledger. `null` ⇒ the endpoint fails (an older server, a read
+ *  that broke); anything else is served AS-IS with a 200 — which is how the
+ *  "a 200 that is not a ledger" case below is written without a second knob. */
+let ledgerPayload: unknown
+
+const counts = (answered: number, asked: number, abstained: number): PersonaLedgerCounts => ({
+  answered,
+  asked,
+  abstained,
+})
+
+const ledgerEntry = (over: Partial<PersonaLedgerEntry> = {}): PersonaLedgerEntry => ({
+  id: 'l-1',
+  at: '2026-08-12T09:00:00.000Z',
+  // An absolute path under the owner's home, exactly as the store holds it —
+  // the screen may only ever show the folder name out of it.
+  projectPath: '/Users/me/dev/billing-api',
+  verdict: 'answered',
+  question: 'Ship the price change tonight?',
+  ...over,
+})
+
+const ledgerOf = (
+  summary: Partial<PersonaLedgerSummary> = {},
+  recent: PersonaLedgerEntry[] = [],
+): PersonaLedgerResponse => ({
+  summary: { week: counts(0, 0, 0), total: counts(0, 0, 0), lastAt: null, ...summary },
+  recent,
+})
 
 beforeEach(() => {
   // jsdom ships no 2D canvas context. The figure already handles that (it draws
@@ -198,6 +232,7 @@ beforeEach(() => {
   portraitPayload = null
   historyPayload = []
   historyFails = false
+  ledgerPayload = null
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -254,6 +289,10 @@ beforeEach(() => {
       if (url === '/api/persona/portrait') {
         if (!portraitPayload) return new Response('{}', { status: 500 })
         return new Response(JSON.stringify(portraitPayload), { status: 200 })
+      }
+      if (url.startsWith('/api/persona/ledger')) {
+        if (ledgerPayload === null) return new Response('{}', { status: 500 })
+        return new Response(JSON.stringify(ledgerPayload), { status: 200 })
       }
       // ABOVE the submit branch: `/api/persona/courses/big5/history` starts with
       // the same prefix, and being scored as an answer vector is not a failure
@@ -984,6 +1023,233 @@ describe('PersonaModule — the portrait', () => {
 
     expect(await screen.findByText('型は INFP — 内向、感情。')).toBeTruthy()
     expect(screen.queryByText('persona.portrait.empty')).toBeNull()
+  })
+})
+
+// ─── THE DECISION LEDGER ────────────────────────────────────────────────────
+//
+// 「分身は今週、何回あなたの代わりに答えたか」. Everything above is SELF-REPORT;
+// this block is the record of the stand-in acting on real work. The failures
+// this suite exists to catch are the ones that would make it a flattering
+// dashboard instead of a record: lifetime totals printed under a cap that says
+// "this week", an empty ledger padded into activity, the owner's own correction
+// dropped from the row it belongs to, and a read that failed pretending the
+// stand-in has simply never acted.
+describe('PersonaModule — the decision ledger', () => {
+  const ledgerBlock = () => screen.getByRole('region', { name: 'persona.ledger.label' })
+  const ledgerDetail = () => screen.getByRole('region', { name: 'persona.ledger.detail.heading' })
+  const openLedger = () => fireEvent.click(within(ledgerBlock()).getByRole('button'))
+  const AT = '2026-08-12T09:00:00.000Z'
+
+  it('counts THIS WEEK, not everything the ledger holds', async () => {
+    // The block answers one question — how often did it speak for me this week.
+    // Printing the lifetime tallies under that cap inflates the only number on
+    // the screen that is supposed to be checkable.
+    ledgerPayload = ledgerOf(
+      { week: counts(3, 2, 1), total: counts(30, 20, 10), lastAt: AT },
+      [ledgerEntry()],
+    )
+    render(<PersonaModule />)
+
+    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    const text = ledgerBlock().textContent ?? ''
+    expect(text).toContain('3persona.ledger.answered')
+    expect(text).toContain('2persona.ledger.asked')
+    expect(text).toContain('1persona.ledger.abstained')
+    // …and the lifetime numbers are nowhere on it.
+    expect(text).not.toContain('30')
+    expect(text).not.toContain('20')
+    expect(text).not.toContain('10')
+  })
+
+  it('says plainly that nothing has been recorded — it never pads it into counts', async () => {
+    // An all-zero ledger is a first run. "0 · 0 · 0" reads as a dashboard that
+    // is measuring something; the honest version is one line that invites.
+    ledgerPayload = ledgerOf({ week: counts(0, 0, 0), total: counts(0, 0, 0), lastAt: null })
+    render(<PersonaModule />)
+
+    await screen.findByText('persona.ledger.empty')
+    const text = ledgerBlock().textContent ?? ''
+    expect(text).not.toContain('persona.ledger.answered')
+    expect(text).not.toContain('persona.ledger.asked')
+    expect(text).not.toContain('persona.ledger.abstained')
+    // Nothing to open, so nothing offers to open: a control that leads to an
+    // empty list is a broken promise.
+    expect(within(ledgerBlock()).queryByRole('button')).toBeNull()
+  })
+
+  it('an idle WEEK is zeros plus the day it last acted — not the empty-ledger line', async () => {
+    // "It has never done anything" and "it did nothing in the last seven days"
+    // are different claims, and only the first one may borrow the invitation.
+    ledgerPayload = ledgerOf(
+      { week: counts(0, 0, 0), total: counts(4, 2, 1), lastAt: '2026-08-02T09:00:00.000Z' },
+      [ledgerEntry()],
+    )
+    render(<PersonaModule />)
+
+    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    const text = ledgerBlock().textContent ?? ''
+    expect(text).toContain('0persona.ledger.answered')
+    expect(text).toContain(`persona.ledger.last:{"date":"${dayLabel('2026-08-02T09:00:00.000Z')}"}`)
+    expect(screen.queryByText('persona.ledger.empty')).toBeNull()
+  })
+
+  it('opens the decisions themselves: what it did, to what question, and why', async () => {
+    ledgerPayload = ledgerOf({ week: counts(1, 1, 0), total: counts(1, 1, 0), lastAt: AT }, [
+      ledgerEntry({
+        id: 'l-ask',
+        verdict: 'asked',
+        why: 'irreversible',
+        question: 'Delete the staging database?',
+      }),
+      ledgerEntry({
+        id: 'l-ans',
+        verdict: 'answered',
+        confidence: 'high',
+        question: 'Ship the price change tonight?',
+      }),
+    ])
+    render(<PersonaModule />)
+
+    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    openLedger()
+
+    const detail = ledgerDetail()
+    expect(within(detail).getByText('persona.ledger.verdict.asked')).toBeTruthy()
+    expect(within(detail).getByText('Delete the staging database?')).toBeTruthy()
+    expect(within(detail).getByText('persona.ledger.verdict.answered')).toBeTruthy()
+    expect(within(detail).getByText('Ship the price change tonight?')).toBeTruthy()
+    // The reason CLASS in plain words, the project by its folder name, and how
+    // well grounded the answer was — as ONE meta line per row, so this pins the
+    // wording of the whole line rather than the presence of a substring.
+    expect(
+      within(detail).getByText(`billing-api ・ ${dayLabel(AT)} ・ persona.ledger.why.irreversible`),
+    ).toBeTruthy()
+    expect(
+      within(detail).getByText(
+        `billing-api ・ ${dayLabel(AT)} ・ persona.ledger.confidence.high`,
+      ),
+    ).toBeTruthy()
+  })
+
+  // THE ROW THAT MATTERS. The proxy asked, and the human answered — the one pair
+  // on this screen that can measure the stand-in against the owner. Losing the
+  // stamp turns the highest-value row into an ordinary "it asked you" row.
+  it('marks the questions the OWNER answered afterwards', async () => {
+    ledgerPayload = ledgerOf({ week: counts(0, 1, 0), total: counts(0, 1, 0), lastAt: AT }, [
+      ledgerEntry({
+        id: 'l-owner',
+        verdict: 'asked',
+        why: 'policy',
+        question: 'Do we take the enterprise deal?',
+        answered: { at: '2026-08-13T02:00:00.000Z', byOwner: true },
+      }),
+      ledgerEntry({ id: 'l-plain', verdict: 'asked', why: 'policy', question: 'Still open.' }),
+    ])
+    render(<PersonaModule />)
+
+    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    openLedger()
+
+    expect(
+      within(ledgerDetail()).getByText(
+        `persona.ledger.ownerAnswered:{"date":"${dayLabel('2026-08-13T02:00:00.000Z')}"}`,
+      ),
+    ).toBeTruthy()
+    // Exactly ONE row carries it — the stamp is evidence, not decoration.
+    expect(
+      within(ledgerDetail()).getAllByText(/persona\.ledger\.ownerAnswered/),
+    ).toHaveLength(1)
+  })
+
+  it('shows the folder, never the home path — and never the correlation key', async () => {
+    // `projectPath` is absolute under the owner's home and `key` is an opaque
+    // join column. Neither is something the owner asked to see; one of them is
+    // their home directory.
+    ledgerPayload = ledgerOf({ week: counts(1, 0, 0), total: counts(1, 0, 0), lastAt: AT }, [
+      ledgerEntry({ projectPath: '/Users/me/dev/billing-api', key: 'op4qu3-hash-key' }),
+    ])
+    render(<PersonaModule />)
+
+    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    openLedger()
+
+    expect(within(ledgerDetail()).getByText(/billing-api/)).toBeTruthy()
+    expect(document.body.textContent).not.toContain('/Users/me')
+    expect(document.body.textContent).not.toContain('op4qu3-hash-key')
+  })
+
+  it('a reason class the build does not know is left unsaid, never printed as a slug', async () => {
+    ledgerPayload = ledgerOf({ week: counts(0, 0, 1), total: counts(0, 0, 1), lastAt: AT }, [
+      // The cast is the POINT, not a workaround. `why` is a union
+      // (PersonaLedgerWhy), so no build can produce this value — but a ledger
+      // written by a NEWER build can, and this screen reads that file. The type
+      // pins what we emit; this pins what we survive.
+      ledgerEntry({
+        id: 'l-unknown',
+        verdict: 'abstained',
+        why: 'quantum' as PersonaLedgerWhy,
+        question: 'Odd one.',
+      }),
+    ])
+    render(<PersonaModule />)
+
+    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    openLedger()
+
+    // The verdict already says what happened; a slug says nothing to anyone.
+    expect(within(ledgerDetail()).getByText('persona.ledger.verdict.abstained')).toBeTruthy()
+    expect(ledgerDetail().textContent).not.toContain('quantum')
+  })
+
+  // Measured on the portrait, 2026-08-14: the loader stored any 200 body and the
+  // render path reached straight into it, so a bare `{}` from an older server
+  // threw inside render and blanked the whole panel. This route is newer than
+  // the screen, so that body is what a not-yet-updated server actually sends.
+  it('a 200 that is NOT a ledger renders nothing — and takes nothing else down', async () => {
+    ledgerPayload = {}
+    render(<PersonaModule />)
+
+    expect(await screen.findByText('persona.tabLabel')).toBeTruthy()
+    expect(await screen.findByText('persona.course.railHeading')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'persona.ledger.label' })).toBeNull()
+    expect(screen.queryByText('persona.ledger.empty')).toBeNull()
+  })
+
+  it('a ledger that could not be read says NOTHING — not that nothing happened', async () => {
+    // Same rule as the portrait and the figure: "it has never spoken for you" is
+    // a claim, and a failed read is in no position to make it.
+    ledgerPayload = null
+    render(<PersonaModule />)
+
+    expect(await screen.findByText('persona.course.railHeading')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'persona.ledger.label' })).toBeNull()
+    expect(screen.queryByText('persona.ledger.empty')).toBeNull()
+    expect(screen.queryByText('persona.ledger.week')).toBeNull()
+  })
+
+  it('reads in the same one place a note does — never two cards at once', async () => {
+    judgmentsPayload = [judgment({ text: 'Price on value.' })]
+    ledgerPayload = ledgerOf({ week: counts(1, 0, 0), total: counts(1, 0, 0), lastAt: AT }, [
+      ledgerEntry({ question: 'Ship the price change tonight?' }),
+    ])
+    render(<PersonaModule />)
+
+    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    openLedger()
+    expect(screen.getByText('Ship the price change tonight?')).toBeTruthy()
+
+    // Opening a lit point takes the column back…
+    openNode('Price on value.')
+    expect(screen.queryByText('Ship the price change tonight?')).toBeNull()
+    // (the note card is the thing in the column now — it is the only surface
+    // that offers 直す)
+    expect(screen.getByText('persona.correct.start')).toBeTruthy()
+
+    // …and opening the ledger again takes it from the note.
+    openLedger()
+    expect(screen.getByText('Ship the price change tonight?')).toBeTruthy()
+    expect(screen.queryByText('persona.correct.start')).toBeNull()
   })
 })
 

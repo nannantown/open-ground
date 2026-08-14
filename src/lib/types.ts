@@ -3636,3 +3636,79 @@ export interface PersonaCourseHistoryResponse {
   courseId: PersonaCourseId
   takes: PersonaCourseRecord[]
 }
+
+// ─── Persona DECISION LEDGER (what the stand-in actually did) ────────────────
+//
+// The courses above are SELF-REPORT; this is the record of the proxy acting
+// against real work. Store + writer: src/lib/server/personaLedger.ts.
+
+/** What the stand-in did with one question.
+ *  - `answered`  — it answered AS the owner (the proxy spoke for them).
+ *  - `asked`     — it refused to speak and handed the question to the owner
+ *                  (irreversible, or an area the owner decides).
+ *  - `abstained` — it declared it could not faithfully answer (thin corpus, or a
+ *                  brain that never produced a usable verdict). */
+export type PersonaLedgerVerdict = 'answered' | 'asked' | 'abstained'
+
+/** WHY the stand-in declined to speak — the reason CLASS, never the free text.
+ *  Mirrors `OwnerAnswer`'s escalate `why` (swarmOverseerBrain.ts), which is where
+ *  every value comes from.
+ *
+ *  A UNION, not `string`, ON PURPOSE. The screen turns each member into words; a
+ *  member with no wording renders as nothing, which is a SILENT gap — the failure
+ *  mode this repo's canon says to convert into a loud one. As a union, adding a
+ *  fourth class upstream fails the build at the exhaustive `Record<PersonaLedgerWhy,
+ *  …>` in PersonaLedgerBlock instead of quietly dropping the reason on screen.
+ *  ⚠ Narrowing the TYPE is only honest because the READER narrows too: the ledger's
+ *  sanitizer drops a `why` it does not recognise (a hand-edited or newer-build file
+ *  can hold anything), so what the type promises is what reaches the wire. */
+export type PersonaLedgerWhy = 'irreversible' | 'insufficient-info' | 'policy'
+
+/** ONE proxy-you decision. Free text (`question`) is TRUNCATED at the store's
+ *  cap — this is a record of decisions, not a transcript. */
+export interface PersonaLedgerEntry {
+  id: string
+  /** ISO timestamp the decision SETTLED. */
+  at: string
+  projectPath: string
+  verdict: PersonaLedgerVerdict
+  /** The escalate `why` / abstain reason CLASS — never the free-text reason.
+   *  Absent on a plain answer. */
+  why?: PersonaLedgerWhy
+  /** The question the stand-in faced, truncated (see MAX_LEDGER_QUESTION). */
+  question: string
+  /** How well the corpus grounded the answer. Present only on `answered`. */
+  confidence?: 'high' | 'medium' | 'low'
+  /** Correlation key (project + normalized question prefix) used to stamp
+   *  `answered` when the owner later answers the escalation this entry raised.
+   *  Opaque — never rendered. */
+  key?: string
+  /** Stamped when the OWNER themselves answered the escalation this decision
+   *  raised: the proxy asked, the human decided. The highest-value signal here —
+   *  it is the correction the stand-in can be measured against. */
+  answered?: { at: string; byOwner: true }
+}
+
+/** Verdict tallies over one window. */
+export interface PersonaLedgerCounts {
+  answered: number
+  asked: number
+  abstained: number
+}
+
+/** The counts the Persona screen reads ("this week it answered 3 and asked you 2").
+ *  `week` is the trailing 7 days; `total` is everything the (capped) ledger holds. */
+export interface PersonaLedgerSummary {
+  week: PersonaLedgerCounts
+  total: PersonaLedgerCounts
+  /** ISO stamp of the most recent decision, or null when nothing is recorded. */
+  lastAt: string | null
+}
+
+/** GET /api/persona/ledger — the counts plus the newest entries. LOOPBACK-ONLY:
+ *  `recent` carries free text from the owner's own local work. */
+export interface PersonaLedgerResponse {
+  summary: PersonaLedgerSummary
+  /** Newest first, capped (see LEDGER_RECENT_LIMIT). */
+  recent: PersonaLedgerEntry[]
+}

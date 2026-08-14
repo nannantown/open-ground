@@ -38,6 +38,7 @@ import { readFile, rename } from 'fs/promises'
 import { atomicWriteJson } from './atomicWrite'
 import { ensureOpenGroundHome, personaCoursesFile } from './paths'
 import { appendJudgment, readManualJudgments } from './youCorpus'
+import { readLedger, summarizeLedger } from './personaLedger'
 import { COURSES, courseById, scoreCourse } from '@/lib/persona/instruments'
 import type { PersonaCourse } from '@/lib/persona/instruments'
 import { composePortrait } from '@/lib/persona/portrait'
@@ -47,6 +48,8 @@ import type {
   PersonaCourseId,
   PersonaCourseRecord,
   PersonaCoursesResponse,
+  PersonaLedgerCounts,
+  PersonaLedgerEntry,
   PersonaPortrait,
   SubmitPersonaCourseResponse,
 } from '@/lib/types'
@@ -231,6 +234,8 @@ const PORTRAIT_RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 export interface PortraitDeps {
   /** DI for tests: the clock. Fixes both the 7-day window and every line's age. */
   now?: () => number
+  /** DI for tests: the DECISION LEDGER read (default `readLedger`). */
+  readDecisions?: () => Promise<PersonaLedgerEntry[]>
 }
 
 /** The "で、私はどういう人?" digest: scored courses + how much the stand-in holds.
@@ -264,7 +269,31 @@ export const getPersonaPortrait = async (deps: PortraitDeps = {}): Promise<Perso
     // stamp slightly in the future (clock skew) still reads as recent.
     if (Number.isFinite(t) && now - t <= PORTRAIT_RECENT_WINDOW_MS) recentCount++
   }
-  return composePortrait({ records: store.records, nodeCount: judgments.length, recentCount, now })
+  // THE OTHER HALF OF THE EVIDENCE. Everything above is what the owner SAID about
+  // themselves; this is what their stand-in DID against real work. TOTAL, not the
+  // week: the portrait makes a statement about who the stand-in has become, and the
+  // screen's own block is where "this week" belongs — one window per surface, so
+  // the two can never disagree about which number they are showing.
+  //
+  // Fail-open like the corpus read above, and for a stronger reason: readLedger
+  // already shrugs at a corrupt file, so a throw here means something unforeseen —
+  // and a statistics file must never be able to take down the glance. Absent `work`
+  // simply drops the work line (composePortrait rule 1), which is honest: we do not
+  // know what the stand-in did, so we say nothing about it.
+  let work: PersonaLedgerCounts | undefined
+  try {
+    const decisions = await (deps.readDecisions ?? readLedger)()
+    work = summarizeLedger(decisions, now).total
+  } catch (err) {
+    console.error('[openground:persona-courses] ledger unreadable — portrait says nothing about the work', err)
+  }
+  return composePortrait({
+    records: store.records,
+    nodeCount: judgments.length,
+    recentCount,
+    ...(work ? { work } : {}),
+    now,
+  })
 }
 
 /** Local 'YYYY-MM-DD' for the provenance line. Local, not

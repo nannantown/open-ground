@@ -387,6 +387,14 @@ prune seen/watch                                      :617
    「skipped: budget」ログだけで **seen に積まない** → budget が空いた pass で再評価(`:738-742`)。
 2. **発火**: seen 記帳と budget 課金を**先に**行い(`:744-748`)、`answerAsOwner` を
    fire-and-forget(`:758-787`)。結果は `ov.brainResults`(mailbox)へ。
+   ⚠ ここで呼ばれる `answerAsOwner` は素の大脳ではなく `withDecisionLedger` で包まれた
+   もの(`swarmOverseer.ts` の `defaultOverseerDeps`)。**判断台帳への唯一の書き込み口**で、
+   確定した OwnerAnswer を `answered`/`asked`/`abstained` として
+   `~/.openground/persona-ledger.json` に落とす(ペルソナ画面の材料。docs/MAP.md「判断台帳」)。
+   包みは判断経路に一切影響してはならない — 答えは**先に確定させてそのまま返し**、台帳の
+   失敗は握り潰す。ここを素通しにすると統計ファイルのディスク不調がこの fire-and-forget の
+   `.catch` に届き、`answer: null` として routing され、**確定していた回答が黙って
+   escalation に格下げされる**。
 3. **大脳の中身**(`swarmOverseerBrain.ts:110-204` — answerAsOwner の 6 ステップ):
    ① 質問を C4 で事前ゲート(不可逆なら大脳を呼ばず escalate、`:116-121`)
    ② you-corpus をパス参照で読ませて one-off claude 実行(`:123-132`)
@@ -483,7 +491,15 @@ prune seen/watch                                      :617
   corpus 再組み立てはソース解決が cwd 非依存(レジストリ参照)で、機械ソースが 1 つも解決でき
   ないときは既存 corpus を上書きせず `skipped` を返す fail-safe 付き — 2026-07-17 のパッケージ版
   「answer だけで corpus がほぼ空に上書き」事故の対策(`youCorpus.ts`)。skip でも判断自体は
-  additions に永続化済みで、次の健全な rebuild で corpus に反映される)→ ③ 配送
+  additions に永続化済みで、次の健全な rebuild で corpus に反映される)→ ②' 判断台帳へ
+  「本人が答えた」印(`markEscalationAnswered`・best-effort)。②が **何を** 決めたかを proxy に
+  教えるのに対し、②' は **そもそも本人が決める羽目になった** ことを記録する
+  (`personaLedger.ts`。docs/MAP.md「判断台帳」)。照合は `ledgerMatchKey` = canonical パス+
+  正規化した設問の先頭 2000 字で、`MAX_ESCALATION_QUESTION`(4096)より短いので
+  クランプで壊れない。**空振りが通常**(S1/S2/S3/S5/S10 の定型 raise は proxy が見ていない)。
+  ⚠ 印が押せるのは分身が答えを控えた行(`asked`/`abstained`)だけ — 配達に失敗した proxy 回答は
+  同じ project+question で受信箱に上がるので、絞らないと「分身が答えた」行に
+  「人間が決めた」と刻まれ、意味が逆になる → ③ 配送
   (`deliverAnswer`、`:605-653`)。配送は (a) live worker PTY へ W16 注入(bracketed paste →
   200ms → CR → 着地確認+Enter 再送最大 3 回、`:551-583`)= `injected`、(b) worker 不在なら
   `recordEscalationAnswerForNextDispatch` で engine の `reworkReasons` スロットに積み、

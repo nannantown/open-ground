@@ -595,12 +595,29 @@
   `GET /api/persona/courses/:id/history` / `GET /api/persona/portrait`)。
   **所見は appendJudgment 経由でしか corpus に入らない**(第二の書き手を作らない)。
   過去の受験は `getPersonaCourseHistory`(store は古→新、返すのは**新しい順** —
-  反転は1か所だけ)。人物像は `getPersonaPortrait` が corpus 件数(直近7日ぶんも)を
-  数えて純粋な `src/lib/persona/portrait.ts` の `composePortrait` に渡すだけで、
-  **サーバは1行も書かない**(証拠が無ければ `lines: []` が正解。store/corpus が
-  読めなくても 200 で返す fail-open)。
+  反転は1か所だけ)。人物像は `getPersonaPortrait` が corpus 件数(直近7日ぶんも)と
+  判断台帳の通算値(下記)を数えて純粋な `src/lib/persona/portrait.ts` の
+  `composePortrait` に渡すだけで、
+  **サーバは1行も書かない**(証拠が無ければ `lines: []` が正解。store/corpus/台帳の
+  どれが読めなくても 200 で返す fail-open — 台帳が読めなければ仕事の行が消えるだけ)。
   ⚠ 名称は正典: MBTI® / CliftonStrengths® は商標かつ設問非公開なので**再現も名乗りもしない** —
   各コースの `source` 行(結果シートに逐語表示)がその約束で、番人が消えないよう固定している。
+- 判断台帳(分身が実際にやったこと・2026-08-14): 上のコースが**自己申告**なのに対し、
+  こちらは proxy-you が実務で下した判断の記録 —
+  `src/lib/server/personaLedger.ts`(`~/.openground/persona-ledger.json` 0600・
+  追記のみ・古い方から落とす上限つき)、口は `GET /api/persona/ledger`(loopback 限定
+  — `recent` にオーナー自身の実務の生文が乗る)。
+  **書き込み口は1つだけ**: `swarmOverseer.ts` の `withDecisionLedger` が本物の brain 呼び出しを
+  包む(`answer`⇒answered / `escalate why='insufficient-info'`⇒abstained / 他⇒asked)。
+  ⚠ 答えは**先に確定させてそのまま返し**、台帳の失敗は握り潰す — ここを素通しにすると
+  統計ファイルのディスク不調が overseer の `.catch` に届き、**確定していた proxy の回答が
+  黙って escalation に格下げされる**。
+  ⚠ 「オーナー本人が答えた」印(`answered`)は `swarmEscalations.answerEscalation` が
+  `ledgerMatchKey`(canonical パス+正規化した設問の先頭2000字 = エスカレーション側の
+  4096 クランプより**短い**ので照合が壊れない)で押す。**押せるのは分身が答えを控えた行
+  (`asked`/`abstained`)だけ** — 配達失敗した proxy 回答は同じ project+question で受信箱に
+  上がるので、絞らないと「分身が答えた」行に「人間が決めた」と刻まれ、意味が逆になる。
+  人物像への合流は通算値(`total`)で、週次は画面側のブロックが持つ(**窓は面ごとに1つ**)。
 - you-corpus: `server/routes/youCorpus.ts` + `src/lib/server/youCorpus.ts`
   (`~/.openground/you-corpus.md` 0600・破損は .corrupt 退避)。UI は
   `src/components/canvas/modules/PersonaModule.tsx`(owner 限定)。

@@ -43,6 +43,12 @@ export interface PortraitInput {
   nodeCount: number
   /** How many of those arrived in the last 7 days. */
   recentCount?: number
+  /** THE OTHER HALF OF THE EVIDENCE (2026-08-14). The courses above are what
+   *  the owner SAYS about themselves; this is what their stand-in DID against
+   *  real work — answered on their behalf, asked them instead, or abstained.
+   *  Absent (or all-zero) ⇒ no work line, by rule 1: a stand-in that has not
+   *  acted yet must not be described as if it had. */
+  work?: { answered: number; asked: number; abstained: number }
   /** Now, injected so the age of a record is testable. */
   now?: number
 }
@@ -107,6 +113,40 @@ export const composePortrait = (input: PortraitInput): PersonaPortrait => {
     // work
     const top = r.rows[0]
     if (top) push(`仕事では「${top.name}」— ${top.desc}。`, `${r.courseName} ・ 1位(${top.score})`)
+  }
+
+  // THE WORK LINE goes LAST and is never dropped by the cap — it is the only
+  // line built from what actually happened rather than what was self-reported,
+  // so if something has to go, a self-report goes first. It states the RATIO
+  // in plain words and never flatters: a stand-in that mostly asks is described
+  // as mostly asking, because that is the number that tells the owner whether
+  // any of this is working yet.
+  const w = input.work
+  const acted = w ? w.answered + w.asked + w.abstained : 0
+  if (w && acted > 0) {
+    const share = w.answered / acted
+    const text =
+      w.answered === 0
+        ? 'まだ、あなたの代わりに答えられていない。'
+        : share >= 0.6
+          ? '判断の多くを、あなたを待たずに引き受けている。'
+          : share >= 0.3
+            ? '半分ほどを引き受け、迷ったらあなたに聞いている。'
+            : 'まだ多くをあなたに聞いている — 分かっていない領域が残っている。'
+    const line: PersonaPortraitLine = {
+      text,
+      detail: `実際の判断 ${acted}件 ・ 代わりに答えた${w.answered} / 聞いた${w.asked} / 棄権${w.abstained}`,
+      courseId: 'work',
+      takenAt: new Date(now).toISOString(),
+      ageDays: 0,
+    }
+    return {
+      lines: [...lines.slice(0, PORTRAIT_MAX_LINES - 1), line],
+      nodeCount: input.nodeCount,
+      ...(input.recentCount === undefined ? {} : { recentCount: input.recentCount }),
+      takenCount: COURSE_ORDER.filter((id) => input.records[id]).length,
+      courseCount: COURSE_ORDER.length,
+    }
   }
 
   return {
