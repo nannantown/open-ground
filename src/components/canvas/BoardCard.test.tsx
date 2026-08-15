@@ -303,3 +303,168 @@ describe('commander strip (review column)', () => {
     expect(queryByText('board.card.managerLabel')).toBeNull()
   })
 })
+
+// ── Worker note line (the WHAT half of the card) ────────────────────────────
+// The strip above says WHO is on the card; this line says what they report they
+// are doing. It has three states and the third one is the load-bearing one:
+// when the note cannot be dated, the card says nothing rather than implying the
+// note is current.
+describe('worker note line (doing column)', () => {
+  const doingCard = () => data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])
+
+  it('a fresh note renders as visible text, not only a hover tooltip', () => {
+    const { getByText, queryByText } = render(
+      <BoardTab
+        data={doingCard()}
+        {...stripBase()}
+        workerForTask={() => ({
+          branch: 'swarm/x',
+          activity: 'working',
+          note: 'wiring the reducer',
+          noteFreshness: 'fresh',
+        })}
+      />,
+    )
+    // getByText never matches a title attribute, so this is red without the
+    // always-on line.
+    expect(getByText('wiring the reducer')).toBeTruthy()
+    // A current note carries NO "last report:" prefix — otherwise the stale
+    // mutation below could pass by always prefixing.
+    expect(queryByText('board.card.noteStale')).toBeNull()
+  })
+
+  it('a stale note is prefixed — it must not read as a statement about now', () => {
+    const { getByText } = render(
+      <BoardTab
+        data={doingCard()}
+        {...stripBase()}
+        workerForTask={() => ({
+          branch: 'swarm/x',
+          activity: 'waiting',
+          note: 'wiring the reducer',
+          noteFreshness: 'stale',
+        })}
+      />,
+    )
+    expect(getByText('board.card.noteStale')).toBeTruthy()
+    // The note itself still shows — a stale report is still a report.
+    expect(getByText('wiring the reducer')).toBeTruthy()
+  })
+
+  it('an UNDATABLE note renders no line at all — no placeholder, no bare claim', () => {
+    const { getByText, queryByText } = render(
+      <BoardTab
+        data={doingCard()}
+        {...stripBase()}
+        // Older engine: a note carried forward with no heartbeat time.
+        workerForTask={() => ({
+          branch: 'swarm/x',
+          activity: 'waiting',
+          note: 'wiring the reducer',
+        })}
+      />,
+    )
+    // Positive control — the worker strip IS on screen, so the absence below is
+    // about the note line and not about the card failing to render.
+    expect(getByText('swarm/x')).toBeTruthy()
+    expect(queryByText('wiring the reducer')).toBeNull()
+    expect(queryByText('board.card.noteStale')).toBeNull()
+  })
+
+  it('no worker on the card → no note line even if a note is somehow passed', () => {
+    const { queryByText } = render(
+      <BoardTab data={doingCard()} {...stripBase()} workerForTask={() => null} />,
+    )
+    expect(queryByText('board.card.noteStale')).toBeNull()
+  })
+})
+
+// ── Needs-you badge (ANY column) ────────────────────────────────────────────
+// The one per-card signal that is lane-independent: it is rooted in
+// escalation.taskId, which no column owns.
+describe('needs-you badge', () => {
+  const cardsInEveryLane = () =>
+    data([
+      task({ id: 'todo1', title: 'Todo one', boardColumn: 'todo' }),
+      task({ id: 'blk1', title: 'Blocked one', boardColumn: 'blocked' }),
+    ])
+
+  it('shows on a TODO and a BLOCKED card — not just the worker/review lanes', () => {
+    const { getAllByText } = render(
+      <BoardTab
+        data={cardsInEveryLane()}
+        {...stripBase()}
+        alertForTask={id =>
+          id === 'todo1' || id === 'blk1'
+            ? { reason: 'irreversible', hint: 'Delete the release tag?' }
+            : null
+        }
+      />,
+    )
+    // Both lanes carry it — the worker strip could never do this (it is
+    // resolved for `doing` only, by construction).
+    expect(getAllByText('board.card.needsYou')).toHaveLength(2)
+    expect(getAllByText('· board.card.needsYouIrreversible')).toHaveLength(2)
+  })
+
+  it('names the raiser’s own reason — each valve maps to its own word', () => {
+    for (const [reason, key] of [
+      ['irreversible', 'board.card.needsYouIrreversible'],
+      ['insufficient-info', 'board.card.needsYouInsufficientInfo'],
+      ['policy', 'board.card.needsYouPolicy'],
+    ] as const) {
+      const { getByText, unmount } = render(
+        <BoardTab
+          data={data([task({ id: 'a', title: 'Alpha', boardColumn: 'todo' })])}
+          {...stripBase()}
+          alertForTask={() => ({ reason })}
+        />,
+      )
+      expect(getByText(`· ${key}`)).toBeTruthy()
+      unmount()
+    }
+  })
+
+  it('a card with no open question shows nothing — and no "all clear" either', () => {
+    const { getByText, queryByText } = render(
+      <BoardTab
+        data={data([task({ id: 'a', title: 'Alpha', boardColumn: 'todo' })])}
+        {...stripBase()}
+        alertForTask={() => null}
+      />,
+    )
+    expect(getByText('Alpha')).toBeTruthy() // positive control
+    expect(queryByText('board.card.needsYou')).toBeNull()
+    // Absence is not a claim: nothing on the card says it is clear.
+    expect(queryByText(/allClear|判断待ちはありません/)).toBeNull()
+  })
+
+  it('the question text is a TOOLTIP, never card body text (166px columns)', () => {
+    const { container, queryByText } = render(
+      <BoardTab
+        data={data([task({ id: 'a', title: 'Alpha', boardColumn: 'todo' })])}
+        {...stripBase()}
+        alertForTask={() => ({ reason: 'policy', hint: 'A whole sentence the owner reads.' })}
+      />,
+    )
+    expect(queryByText('A whole sentence the owner reads.')).toBeNull()
+    expect(
+      container.querySelector('[title="A whole sentence the owner reads."]'),
+    ).toBeTruthy()
+  })
+
+  it('a needs-you card that ALSO has a worker shows both — they are two true facts', () => {
+    const { getByText } = render(
+      <BoardTab
+        data={data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])}
+        {...stripBase()}
+        alertForTask={() => ({ reason: 'insufficient-info' })}
+        workerForTask={() => ({ branch: 'swarm/x', activity: 'waiting' })}
+      />,
+    )
+    // "a worker asked you a question and is still sitting on the card" is not a
+    // contradiction, so neither line suppresses the other.
+    expect(getByText('board.card.needsYou')).toBeTruthy()
+    expect(getByText('swarm/x')).toBeTruthy()
+  })
+})

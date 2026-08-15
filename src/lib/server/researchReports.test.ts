@@ -59,18 +59,41 @@ describe('listResearchReports', () => {
     expect(reports.every((r) => r.size > 0)).toBe(true)
   })
 
-  it('skips subdirectories and non-.md files (traversal names cannot even exist as one entry)', async () => {
+  it('skips what is not a report, and DESCENDS one directory level', async () => {
     // `evil/../x.md` is not creatable as a single directory entry — the
     // filesystem itself forbids `/` in a name — so the traversal case for the
     // LIST is structural. What can exist and must be skipped:
     await writeReport('real.md', '# Real\n')
-    await mkdir(join(reportsDir, 'subdir'), { recursive: true }) // no .md suffix — fails the charset
     await mkdir(join(reportsDir, 'dir.md'), { recursive: true }) // name matches, but not a regular file
     await writeFile(join(reportsDir, 'notes.txt'), 'not markdown')
-    await writeFile(join(reportsDir, '.hidden.md'), '# Hidden\n') // leading dot fails the charset
-    await writeFile(join(reportsDir, 'subdir', 'nested.md'), '# Nested\n') // not a direct child
+    await writeFile(join(reportsDir, '.hidden.md'), '# Hidden\n') // leading dot is refused
+    // ONE level down IS indexed (2026-08-15): a worker filing under a topic dir
+    // was one of the two ways a finished report never reached the tab.
+    await mkdir(join(reportsDir, 'subdir'), { recursive: true })
+    await writeFile(join(reportsDir, 'subdir', 'nested.md'), '# Nested\n')
+    // …but TWO levels down is not — the walk is bounded by construction.
+    await mkdir(join(reportsDir, 'subdir', 'deeper'), { recursive: true })
+    await writeFile(join(reportsDir, 'subdir', 'deeper', 'far.md'), '# Far\n')
+
     const reports = await listResearchReports(proj)
-    expect(reports.map((r) => r.file)).toEqual(['real.md'])
+    expect(new Set(reports.map((r) => r.file))).toEqual(new Set(['real.md', 'subdir/nested.md']))
+  })
+
+  it('indexes a report named in JAPANESE — the bug that made a finished report invisible', async () => {
+    // The old rule was an ASCII allowlist, so this file existed on disk, was a
+    // perfectly good report, and the tab said 「まだ調査レポートはありません」.
+    // The owner reads and writes Japanese; so does the /research skill's slug.
+    await writeReport('20260814-AI業界の動向.md', '# AI業界の動向\n\n本文\n')
+    await writeReport('20260814-競合 調査 (草案).md', '# 競合調査\n')
+
+    const reports = await listResearchReports(proj)
+    expect(new Set(reports.map((r) => r.file))).toEqual(
+      new Set(['20260814-AI業界の動向.md', '20260814-競合 調査 (草案).md']),
+    )
+    // …and the title really comes from the file, so the row is not just a name.
+    expect(reports.find((r) => r.file.includes('動向'))?.title).toBe('AI業界の動向')
+    // …and it is READABLE through the production reader, not merely listed.
+    expect(await readResearchReport(proj, '20260814-AI業界の動向.md')).toContain('本文')
   })
 
   it('SYMLINK ESCAPE: a link out of docs/research is skipped by list and refused by read', async () => {
@@ -108,10 +131,33 @@ describe('readResearchReport', () => {
     await rm(proj, { recursive: true, force: true })
   })
 
-  it('rejects names failing the charset (traversal is unrepresentable)', async () => {
-    for (const bad of ['../x.md', '.hidden.md', 'a/b.md']) {
-      await expect(readResearchReport(proj, bad)).rejects.toThrow(/not a research report name/)
+  it('refuses every id that is not one report inside docs/research', async () => {
+    // Traversal, hidden files, absolute paths, too deep, and the empty segment.
+    // `a/b.md` is deliberately ABSENT from this list — one level is legal now
+    // (see the list test); everything that could ESCAPE still is not.
+    for (const bad of [
+      '../x.md',
+      'a/../../x.md',
+      '.hidden.md',
+      'sub/.hidden.md',
+      '.././x.md',
+      '/etc/passwd.md',
+      'a/b/c.md',
+      '',
+      'no-suffix',
+      'trailing/',
+    ]) {
+      await expect(
+        readResearchReport(proj, bad),
+        `accepted a bad id: ${JSON.stringify(bad)}`,
+      ).rejects.toThrow(/not a research report name/)
     }
+  })
+
+  it('reads a report one level down, by its `sub/name.md` id', async () => {
+    await mkdir(join(reportsDir, 'competitors'), { recursive: true })
+    await writeFile(join(reportsDir, 'competitors', 'acme.md'), '# Acme\nbody\n')
+    expect(await readResearchReport(proj, 'competitors/acme.md')).toContain('body')
   })
 
   it('rejects a report over the size cap (1MB + 1 byte)', async () => {

@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { Copy, GripVertical } from 'lucide-react'
-import type { BoardColumn, ClaudeBeaconStatus, ProjectTask } from '@/lib/types'
+import type { BoardColumn, ClaudeBeaconStatus, EscalationWhy, ProjectTask } from '@/lib/types'
 import { formatDueShort, isOverdue } from '@/lib/boardDeps'
 import { PRIORITY_META } from '@/lib/boardPriority'
 import { deriveManagerTone } from '@/lib/boardWorker'
@@ -103,6 +103,17 @@ const WORKER_PHASE_KEY: Record<string, MessageKey> = {
   done: 'board.card.phaseDone',
 }
 
+// ── Needs-you vocabulary (ANY column) ───────────────────────────────────────
+// An open escalation names this card: the swarm stopped and is waiting for the
+// owner's hands. The reason word is the raiser's own `whyEscalated` valve — we
+// never re-classify it, and there is no fourth value to fall through to (the
+// route rejects anything else at the door).
+const NEEDS_YOU_REASON_KEY: Record<EscalationWhy, MessageKey> = {
+  irreversible: 'board.card.needsYouIrreversible',
+  'insufficient-info': 'board.card.needsYouInsufficientInfo',
+  policy: 'board.card.needsYouPolicy',
+}
+
 // ─── BoardCard ───────────────────────────────────────────────────────────────
 // ONE kanban card, extracted out of BoardTab and wrapped in React.memo so a
 // single-card edit / move / status poll reconciles ONE <article> instead of all
@@ -151,6 +162,21 @@ export interface BoardCardProps {
   workerBranch?: string
   workerPhase?: string
   workerNote?: string
+  /** How old the worker's note is — 'fresh' = still a statement about now,
+   *  'stale' = it describes the past. UNDEFINED means the engine gave us no
+   *  beat time, so the note cannot be dated: the note LINE is then not rendered
+   *  at all rather than presented as current (the tooltip still carries it).
+   *  Absence of evidence is never rendered as evidence. */
+  workerNoteFreshness?: 'fresh' | 'stale'
+  /** An OPEN escalation names THIS card — the swarm stopped and the owner's
+   *  hands are required. Lane-independent (unlike the worker/commander strips):
+   *  it is rooted in `escalation.taskId`, which no column owns. false/absent ⇒
+   *  no badge, and NO "all clear" claim either — the board never says nothing
+   *  is waiting unless a `status=open` read actually succeeded. */
+  needsYou?: boolean
+  needsYouReason?: EscalationWhy
+  /** 平易文 (or the raw question) for the row's tooltip — never body text. */
+  needsYouHint?: string
   /** Commander linkage for THIS (review) card — resolved by BoardTab from the
    *  same orchestrator poll (the engine's review queue + the commander's
    *  presence), as primitives for the memo. null presence = no linkage (not a
@@ -196,6 +222,10 @@ const BoardCardInner = ({
   workerBranch,
   workerPhase,
   workerNote,
+  workerNoteFreshness,
+  needsYou,
+  needsYouReason,
+  needsYouHint,
   managerPresence,
   managerReviewStatus,
   depCount,
@@ -413,6 +443,37 @@ const BoardCardInner = ({
               {task.notes.trim()}
             </p>
           )}
+          {/* Needs-you line — an OPEN escalation is rooted in THIS card, so the
+              swarm has stopped and is waiting for the owner. Rendered in ANY
+              column (an escalation's taskId is lane-independent) and FIRST,
+              above the worker strip: "a decision is blocked here" outranks
+              "something is running here".
+              Accent (朱) with NO glow and NO pulse — deliberately: the three
+              status colours mean 稼働=苔 / 待ち=黄土 / 高=朱, and this is a
+              STOPPED thing. A breathing lamp would read as activity. It also
+              does NOT suppress the worker strip below: "a worker asked you a
+              question and is still sitting on the card" is two true facts, not
+              a contradiction, so the single-status precedence rule (hasWorker
+              suppressing the claude band/stamp) is untouched.
+              Read-only by design — answering declares a declineEffect (保留 vs
+              見送る are different acts), which must never ride on one tap on a
+              166px card. The full question lives in the tooltip. */}
+          {!isEditing && needsYou && (
+            <div
+              className="mt-[9px] flex min-w-0 items-center gap-1.5"
+              {...(needsYouHint ? { title: needsYouHint } : {})}
+            >
+              <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+              <span className="shrink-0 whitespace-nowrap text-meta text-accent">
+                {t('board.card.needsYou')}
+              </span>
+              {needsYouReason && (
+                <span className="min-w-0 truncate text-meta text-ink-muted">
+                  · {t(NEEDS_YOU_REASON_KEY[needsYouReason])}
+                </span>
+              )}
+            </div>
+          )}
           {/* Swarm worker strip (条件①②) — WHICH worker owns this doing card (its
               swarm/* branch) + whether it's running / waiting / booting, in the
               same beacon vocabulary as the band above and the Swarm pane.
@@ -466,6 +527,37 @@ const BoardCardInner = ({
                 {workerBranch}
               </span>
             </div>
+          )}
+          {/* Worker note — the worker's OWN one-line report of what it is doing,
+              promoted out of the strip's hover tooltip into visible text. This
+              is the "who is on it and what are they doing" half of the card:
+              WHO is the strip above, WHAT is this line.
+              Deliberately its own row, not a fourth item inside the strip —
+              phase is capped at 45% and branch is flex-1 truncate precisely
+              because 稼働中 + branch already exhausted a 260px card (2026-08-04).
+              Passthrough text: never parsed, never re-worded (the same rule the
+              unknown-phase branch above follows).
+              ⚠ THREE STATES, and only one of them is "print it plainly":
+                fresh   → the note as-is;
+                stale   → dimmed + a 「最後の報告:」 prefix, because a note whose
+                          heartbeat went quiet describes the PAST;
+                unknown → NO line at all. We cannot date it, so we cannot say
+                          when it was true — and a note rendered bare IS a claim
+                          that it is current. Never a placeholder like
+                          "working…" either: that is the same claim with fewer
+                          words. */}
+          {!isEditing && hasWorker && workerNote && workerNoteFreshness && (
+            <p
+              className={[
+                'mt-[5px] text-meta line-clamp-2 [overflow-wrap:anywhere]',
+                workerNoteFreshness === 'stale' ? 'text-ink-faint' : 'text-ink-muted',
+              ].join(' ')}
+            >
+              {workerNoteFreshness === 'stale' && (
+                <span className="mr-1">{t('board.card.noteStale')}</span>
+              )}
+              {workerNote}
+            </p>
           )}
           {/* Commander strip (review-column cards) — WHO lands this card and
               whether they are around right now. The doing column shows the

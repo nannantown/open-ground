@@ -13,6 +13,7 @@ import {
   type BoardColumn,
   type ClaudeBeaconStatus,
   type ClaudeEffort,
+  type EscalationsResponse,
   type PrInfoResponse,
   type ProjectData,
   type ProjectMeta,
@@ -32,10 +33,14 @@ import {
 } from '@/components/canvas/modules/useSwarmEngine'
 import { SwarmWorkerPane, type WorkerStatus } from '@/components/canvas/modules/SwarmWorkerPane'
 import {
+  deriveHeartbeatFreshness,
   deriveWorkerActivity,
   type BoardCardManager,
   type BoardCardWorker,
 } from '@/lib/boardWorker'
+import { indexEscalationsByTask, type BoardCardAlert } from '@/lib/boardEscalation'
+import { BoardSupplyDock } from './BoardSupplyDock'
+import type { LiveDeskHandle } from '@/lib/deskReconcile'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { engineWorkerKey } from './useSwarmEngine'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
@@ -119,6 +124,34 @@ export interface BoardModuleProps {
    *  run fails with claudeLoggedOut, so the user signs in ONCE instead of every
    *  run opening a fresh OAuth tab. */
   onClaudeLogin?: () => void
+  /** May THIS account see swarm surfaces at all? Fed from ProjectPanel as
+   *  `isModuleIdVisible('swarm', moduleGate)` — the SAME registry predicate that
+   *  decides whether the Swarm tab exists — so the Board's swarm surfaces and
+   *  the Swarm tab can never disagree about who may see them.
+   *
+   *  ⚠ DEFAULTS TO FALSE (fail-closed): a host that forgets to pass this prop
+   *  must land on "hidden", never on "shown".
+   *
+   *  ⚠ IT IS CHECKED TWICE, AND THE TWO CHECKS ARE NOT EQUALLY LOAD-BEARING —
+   *  read this before "simplifying" either away.
+   *   • At the POLLS: this is the tested one. Without it a non-swarm account
+   *     issues owner-only swarm requests (measured: the escalations route is
+   *     hit). It also clears the maps, which is why the render-site checks
+   *     below cannot be made to fail on their own.
+   *   • At every RENDER SITE (the three resolvers, the drawer's worker pane,
+   *     the honesty line, the commander duty badge): REDUNDANT TODAY, kept
+   *     deliberately, and honestly labelled rather than dressed up as guards.
+   *     Deleting the poll gate would make every one of them load-bearing at
+   *     once — which is exactly why they stay: a future change that drops the
+   *     poll gate then costs an extra request, not a reopened surface. They
+   *     also cover the one frame between a gate flip and the effect that
+   *     clears the maps. Mutating them INDIVIDUALLY does not go red; mutating
+   *     the gate as a whole does (six tests, all on rendered output).
+   *
+   *  It gates DISPLAY only. It does not stop a running swarm, and it does not
+   *  replace the server's owner gate — the orchestrator/escalations routes 403
+   *  for non-owners regardless. Two independent walls. */
+  swarmVisible?: boolean
 }
 
 export const BoardModule = ({
@@ -135,6 +168,7 @@ export const BoardModule = ({
   onOpenProjectSettings,
   claudeLoggedIn,
   onClaudeLogin,
+  swarmVisible = false,
 }: BoardModuleProps) => {
   const { t } = useT()
   // The user's display name (Settings.displayName) — feeds the drawer's "Me"
@@ -226,13 +260,55 @@ export const BoardModule = ({
     new Map(),
   )
   const [managerPresence, setManagerPresence] = useState<CommanderPresence>('unknown')
+  // Workers the engine is running that it CANNOT tie to a card (no taskId): a
+  // curl/API-direct spawn, a Swarm-tab restart, a dead worker with only a
+  // heartbeat on disk, a server restart before resumeEngines re-adopts, a
+  // boot-resumed worker whose roster row had no taskId. They are real work, and
+  // there is no card to put them on — so they are counted here and reported at
+  // BOARD altitude (the honesty line). Inventing a card for them would be the
+  // 差し戻し M2 fabrication in worker form.
+  const [unattributedWorkers, setUnattributedWorkers] = useState(0)
+  // ── The front desk's two extra facts, off the SAME poll ───────────────────
+  // The Board's supply seat needs (a) the live supply-desk handle to attach to,
+  // and (b) the WHOLE worker list — not the by-card map above, because the
+  // monitor must show the workers that have no card too (they are real work; a
+  // monitor that dropped them would under-report the fleet, which is the same
+  // 差し戻し M2 fabrication read backwards).
+  //
+  // ⚠ `undefined` IS A THIRD VALUE HERE, not a missing one: "the server has not
+  // said" (no lap has landed yet, or an older build has no such field). Only a
+  // definite `null` means "we looked and there is no desk". Collapsing the two
+  // makes the dock announce 「タスク窓口はいま閉じています」 on every board open
+  // for the half-second before the first poll, and permanently on an old server.
+  const [supplyDesk, setSupplyDesk] = useState<LiveDeskHandle | null | undefined>(undefined)
+  const [allWorkers, setAllWorkers] = useState<readonly EngineWorker[]>([])
+  /** Has an orchestrator lap ever LANDED? `undefined` = not yet (mount, a
+   *  restarting server, offline), `false` = 403 (not the owner), `true` = a 2xx
+   *  arrived. Three-valued for the same reason `supplyDesk` is: an empty
+   *  `allWorkers` at mount is NOT the fact "no workers are running", and a
+   *  monitor that says so while a worker is mid-task is lying. */
+  const [engineRead, setEngineRead] = useState<boolean | undefined>(undefined)
   useEffect(() => {
     // Clear the prior project's workers immediately on a project switch (or when
     // the folder is gone) so a stale worker strip never lingers on the new board
-    // before the first poll answers.
+    // before the first poll answers. These clears run BEFORE the swarm gate
+    // below, so flipping the gate off wipes what is already on screen rather
+    // than freezing it there.
     setWorkersByTask(new Map())
     setReviewsByTask(new Map())
     setManagerPresence('unknown')
+    setUnattributedWorkers(0)
+    setAllWorkers([])
+    setEngineRead(undefined)
+    // Back to "not told" — NOT to null. See the state declaration.
+    setSupplyDesk(undefined)
+    // ⚠ THE CLIENT-SIDE SWARM GATE. Not an optimization: an account without
+    // the swarm experiment must render NONE of this, and the server's owner
+    // gate does not cover it (an owner with the experiment OFF is answered 200
+    // here). Placed after the clears so flipping the gate off both stops the
+    // requests and wipes what is on screen. Re-checked at every render site —
+    // see swarmVisible's contract for which check does what.
+    if (!swarmVisible) return
     if (!project.path || project.missing) return
     let cancelled = false
     const poll = async () => {
@@ -256,14 +332,61 @@ export const BoardModule = ({
             setWorkersByTask(prev => (prev.size ? new Map() : prev))
             setReviewsByTask(prev => (prev.size ? new Map() : prev))
             setManagerPresence('unknown')
+            setUnattributedWorkers(0)
+            setAllWorkers([])
+            setEngineRead(false)
+            // May-not-read is not the same as no-desk: stay at "not told".
+            setSupplyDesk(undefined)
           }
           return
         }
         const state = sanitizeEngineState(await res.json())
         if (cancelled) return
+        setEngineRead(true)
         const { workers } = state
         const next = new Map<string, EngineWorker>()
         for (const w of workers) if (w.taskId) next.set(w.taskId, w)
+        // Counted EXPLICITLY over the list, never as workers.length - map.size:
+        // two workers can legitimately carry the same taskId, and that
+        // subtraction would report a phantom unattributed worker for each
+        // collision — a number nobody could reconcile against anything.
+        setUnattributedWorkers(workers.reduce((n, w) => (w.taskId ? n : n + 1), 0))
+        // Same identity etiquette as the maps below — a fresh array every 5s
+        // would re-render the dock's monitor for nothing. Compared on exactly
+        // the fields the monitor SHOWS (identity + branch + stage + phase +
+        // card link); note/heartbeat churn is invisible there, and including
+        // them would defeat the trick outright.
+        setAllWorkers(prev =>
+          prev.length === workers.length &&
+          workers.every((w, i) => {
+            const p = prev[i]
+            return (
+              !!p &&
+              p.terminalId === w.terminalId &&
+              p.sdkSessionId === w.sdkSessionId &&
+              p.branch === w.branch &&
+              p.stage === w.stage &&
+              p.phase === w.phase &&
+              p.taskId === w.taskId
+            )
+          })
+            ? prev
+            : workers,
+        )
+        // The desk handle: keep the previous OBJECT when it names the same desk,
+        // so a steady-state poll doesn't re-key the terminal pane every 5s.
+        // `undefined` and `null` are compared as the distinct values they are.
+        setSupplyDesk(prev =>
+          prev === state.supplyDesk ||
+          (!!prev &&
+            !!state.supplyDesk &&
+            prev.handleId === state.supplyDesk.handleId &&
+            prev.runtime === state.supplyDesk.runtime &&
+            prev.agentSessionId === state.supplyDesk.agentSessionId)
+            ? prev
+            : state.supplyDesk,
+        )
+        const nowMs = Date.now()
         // Keep the previous Map identity when nothing the card shows changed, so
         // the board doesn't re-render every 5s (heartbeatAt/startedAt churn is
         // ignored — neither is displayed). Same identity trick as the beacon poll.
@@ -284,7 +407,16 @@ export const BoardModule = ({
               p.branch === w.branch &&
               p.stage === w.stage &&
               p.phase === w.phase &&
-              p.note === w.note
+              p.note === w.note &&
+              // The note's FRESHNESS VERDICT, not the raw heartbeatAt. The raw
+              // timestamp churns on every beat and would defeat the identity
+              // trick outright (200 cards reconciling every 5s); dropping it
+              // entirely is worse and silent — the card would keep printing an
+              // hours-old note as if it were current, because the map identity
+              // never changed and the screen never re-resolved. Compare the one
+              // thing the card actually shows.
+              deriveHeartbeatFreshness(p.heartbeatAt, nowMs) ===
+                deriveHeartbeatFreshness(w.heartbeatAt, nowMs)
             )
           })
             ? prev
@@ -317,7 +449,119 @@ export const BoardModule = ({
       window.clearInterval(id)
       window.removeEventListener('focus', onFocus)
     }
-  }, [project.path, project.missing])
+  }, [project.path, project.missing, swarmVisible])
+
+  // ── Open escalations → the per-card "needs you" badge ─────────────────────
+  // The swarm stopped and is waiting for the OWNER on a specific card. This is
+  // the only per-card signal that is lane-independent: an escalation is rooted
+  // in `escalation.taskId`, which no column owns.
+  //
+  // READ-ONLY, and the badge is read-only too: answering declares a
+  // `declineEffect` (「保留」 and 「見送る」 are different acts — one parks a card,
+  // the other cancels an integration), which must not ride on one tap on a
+  // 166px card. Answering stays in the Swarm tab's escalation pane.
+  //
+  // 15s, not the 5s the two polls above use: this route expands `screenshotRef`
+  // with one readFile per returned record. The Swarm tab's own pane polls 10s
+  // while focused; the Board is a background surface, so it asks less often.
+  const [alertsByTask, setAlertsByTask] = useState<ReadonlyMap<string, BoardCardAlert>>(new Map())
+  const [unattributedQuestions, setUnattributedQuestions] = useState(0)
+  /** The companion flag THE FORBIDDEN SENTENCE below demands of anyone who
+   *  wants to say a number about escalations. `undefined` = no lap has
+   *  succeeded (including an older server 404ing this route), `false` = 403,
+   *  `true` = a 2xx landed. Any count derived from the map must be gated on
+   *  `=== true`; otherwise 0 means "we never looked" and reads as "you are
+   *  clear". */
+  const [alertsRead, setAlertsRead] = useState<boolean | undefined>(undefined)
+  // ⚠ THE FORBIDDEN SENTENCE. Nothing on this surface may ever say "nothing is
+  // waiting for you" / 「対応待ちはありません」. An empty map is indistinguishable
+  // from a read that failed, and turning one into a reassurance is the exact
+  // defect shape that bit this repo twice. So the Board reports questions that
+  // EXIST and is silent otherwise — silence is the honest empty state, and it
+  // needs no flag to be correct.
+  //   ⚠ IF YOU EVER ADD AN EMPTY-STATE STRING HERE, it needs a companion
+  //   `alertsAvailable: boolean | undefined` (undefined = no lap has succeeded,
+  //   including an older server that 404s this route; false = 403; true = a 2xx
+  //   landed) and the string must be gated on `=== true`. It is deliberately
+  //   NOT here today: unread state is not a safeguard, it is only something
+  //   that looks like one.
+  useEffect(() => {
+    setAlertsByTask(new Map())
+    setUnattributedQuestions(0)
+    setAlertsRead(undefined)
+    if (!swarmVisible) return
+    if (!project.path || project.missing) return
+    let cancelled = false
+    const poll = async () => {
+      if (document.hidden) return
+      try {
+        // Typed client, same idiom as the polls above: a renamed/removed route
+        // is a tsc error rather than a silent 404 that reads as "all clear".
+        const res = await api.api.swarm.escalations.$get({
+          query: { path: project.path, status: 'open' },
+        })
+        if (cancelled) return
+        if (!res.ok) {
+          // 403 = a STANDING auth state ("not the owner"), so drop what we show
+          // and record that we may not read. Anything else (404 on an older
+          // server, 5xx, a restart) is transient: keep the last map AND leave
+          // `alertsAvailable` alone — a blip must not be promoted into
+          // "we checked, there is nothing".
+          if (res.status === 403) {
+            setAlertsByTask(prev => (prev.size ? new Map() : prev))
+            setUnattributedQuestions(0)
+            setAlertsRead(false)
+          }
+          return
+        }
+        const payload = (await res.json()) as EscalationsResponse
+        if (cancelled) return
+        const { byTask, unattributed } = indexEscalationsByTask(payload.escalations)
+        // Same identity etiquette as the two polls above: keep the previous Map
+        // when nothing a card shows changed, so a 15s lap doesn't reconcile
+        // every card.
+        setAlertsByTask(prev =>
+          prev.size === byTask.size &&
+          Array.from(byTask).every(([id, a]) => {
+            const p = prev.get(id)
+            return !!p && p.reason === a.reason && p.hint === a.hint
+          })
+            ? prev
+            : byTask,
+        )
+        setUnattributedQuestions(unattributed)
+        setAlertsRead(true)
+      } catch {
+        /* server restarting / offline — keep the last map, and keep silent
+           about whether anything is waiting (see THE FORBIDDEN SENTENCE) */
+      }
+    }
+    void poll()
+    const id = window.setInterval(() => void poll(), 15_000)
+    const onFocus = () => void poll()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [project.path, project.missing, swarmVisible])
+
+  // A note's freshness is a function of TIME, but the resolvers below only
+  // re-run when their deps change — so without a clock a 「最後の報告:」 prefix
+  // would never appear on a worker that simply went quiet (no poll change to
+  // trigger it). One minute is the resolution: the stale window is 10 minutes,
+  // so a minute of lag is invisible, and a tick that changes no card's
+  // primitives re-renders BoardModule alone — BoardCard's memo absorbs it.
+  const [nowMinute, setNowMinute] = useState(() => Math.floor(Date.now() / 60_000))
+  useEffect(() => {
+    const id = window.setInterval(
+      () => setNowMinute(Math.floor(Date.now() / 60_000)),
+      60_000,
+    )
+    return () => window.clearInterval(id)
+  }, [])
+  const nowMs = nowMinute * 60_000
 
   // "+ Add" inline input for a brand-new assignee name; closed whenever the
   // drawer switches cards so a half-typed name never leaks across tasks.
@@ -1514,7 +1758,12 @@ export const BoardModule = ({
   // the worker's PTY exits, or the engine drops it from the poll, workerScreenId
   // falls to null and we revert to the normal drawer — a dead worker never
   // leaves a black screen.
-  const drawerWorker = detailTask ? workersByTask.get(detailTask.id) : undefined
+  // Gated like every other swarm render site: this one reads workersByTask
+  // DIRECTLY (no resolver in between), so leaving it out would make the drawer
+  // the one door in the wall — a non-swarm account would get a live swarm
+  // worker's claude screen in place of its Run button.
+  const drawerWorker =
+    swarmVisible && detailTask ? workersByTask.get(detailTask.id) : undefined
   // ⚠ ADDRESS BY THE RUNTIME-AGNOSTIC KEY. An SDK worker's terminalId is EMPTY,
   // so keying on it made `workerScreenId` null for one — and the drawer fell
   // through to the DRAFT branch, putting a Run button on a card an SDK worker was
@@ -1571,27 +1820,37 @@ export const BoardModule = ({
   )
   const resolveWorkerForTask = useCallback(
     (taskId: string): BoardCardWorker | null => {
+      // Render-site half of the gate — redundant while the poll gate holds the
+      // map empty (see swarmVisible's contract); kept so that removing the poll
+      // gate cannot silently reopen the surface.
+      if (!swarmVisible) return null
       const w = workersByTask.get(taskId)
       if (!w) return null
       // Keyed runtime-agnostically: the beacon (/api/terminal/active) now reports
       // SDK sessions under their own session id, so an SDK worker resolves here
       // instead of falling to `undefined` and painting as permanently "waiting".
       const live = claudeStatusByPty.get(engineWorkerKey(w))
+      // 'none' (no beat time we can read) stays ABSENT rather than folding to
+      // 'fresh' — the card then shows no note line at all instead of claiming a
+      // currency the record does not support.
+      const freshness = deriveHeartbeatFreshness(w.heartbeatAt, nowMs)
       const view: BoardCardWorker = {
         branch: w.branch,
         activity: deriveWorkerActivity(w.stage, live),
         ...(w.phase ? { phase: w.phase } : {}),
         ...(w.note ? { note: w.note } : {}),
+        ...(freshness === 'none' ? {} : { noteFreshness: freshness }),
       }
       return view
     },
-    [workersByTask, claudeStatusByPty],
+    [workersByTask, claudeStatusByPty, nowMs, swarmVisible],
   )
   // The review-column counterpart: the engine's review queue is the only
   // per-card record of "this card is the commander's to land" — a review card
   // outside it resolves to null and shows nothing.
   const resolveManagerForTask = useCallback(
     (taskId: string): BoardCardManager | null => {
+      if (!swarmVisible) return null
       const reviewStatus = reviewsByTask.get(taskId)
       // ⚠ THE NO-FABRICATION GATE (差し戻し M2): a review card the engine does
       // NOT list (hand-made, someone else's branch) must resolve to null —
@@ -1599,12 +1858,57 @@ export const BoardModule = ({
       if (!reviewStatus) return null
       return { presence: managerPresence, reviewStatus }
     },
-    [reviewsByTask, managerPresence],
+    [reviewsByTask, managerPresence, swarmVisible],
+  )
+  // The all-lanes counterpart: an OPEN question rooted in THIS card. Same
+  // no-fabrication stance as the two above — a card with no open question
+  // resolves to null and shows nothing, and a question with no taskId is never
+  // attached to a card at all (it is counted in the honesty line instead).
+  const resolveAlertForTask = useCallback(
+    (taskId: string): BoardCardAlert | null => {
+      if (!swarmVisible) return null
+      return alertsByTask.get(taskId) ?? null
+    },
+    [alertsByTask, swarmVisible],
+  )
+  // The front desk's monitor names the card a worker is on. It resolves against
+  // the board's OWN cards, and returns null when there is no such card — the
+  // row then says 「カード未特定」 rather than borrowing a nearby title. Same
+  // no-fabrication stance as the three resolvers above, one altitude down.
+  const taskTitleById = useCallback(
+    (taskId: string): string | null => {
+      if (!swarmVisible || !taskId) return null
+      return data.tasks.find(t => t.id === taskId)?.title?.trim() || null
+    },
+    [data.tasks, swarmVisible],
   )
 
   return (
     <div className="flex min-h-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Board-altitude honesty line — swarm activity the engine CANNOT tie to
+            a card: workers with no taskId, and open questions with no taskId
+            (S2 all-workers-down, S3/S10 edge fatals carry none by design).
+            There is no card to hang them on, and hanging them on one anyway —
+            or on all of them — is the 差し戻し M1/M2 defect. So they are stated
+            at the altitude where they are true: the board.
+            Absent entirely when both counts are zero: this line reports things
+            that exist, it never reassures. (An "all clear" would additionally
+            need alertsAvailable === true; nothing renders one.) */}
+        {swarmVisible && (unattributedWorkers > 0 || unattributedQuestions > 0) && (
+          <p className="shrink-0 px-5 pb-1 text-meta text-ink-muted">
+            {[
+              unattributedWorkers > 0
+                ? t('board.swarm.unattributedWorkers', { n: unattributedWorkers })
+                : '',
+              unattributedQuestions > 0
+                ? t('board.swarm.unattributedQuestions', { n: unattributedQuestions })
+                : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </p>
+        )}
         <div className="min-h-0 min-w-0 flex-1">
           <BoardTab
             data={data}
@@ -1636,10 +1940,38 @@ export const BoardModule = ({
             // card's render-ready worker view; null when no worker owns the card.
             workerForTask={resolveWorkerForTask}
             managerForTask={resolveManagerForTask}
-            reviewManagerPresence={managerPresence}
+            // The all-lanes signal: an open question rooted in a card.
+            alertForTask={resolveAlertForTask}
+            // Gated HERE as well as at the poll: this one is a raw value, not a
+            // resolver, so it is the only swarm fact on this surface without a
+            // gate of its own inside a callback.
+            reviewManagerPresence={swarmVisible ? managerPresence : undefined}
             onOpenProjectSettings={onOpenProjectSettings}
           />
         </div>
+        {/* ── The front desk (the supply officer's seat) ────────────────────
+            Gated HERE, at the render site, not only at the poll — a forged
+            persisted view or state must never be able to reveal this surface.
+            A BOTTOM dock on purpose: the Board's side terminal dock was removed
+            the same day, and five columns at min-w-[166px] leave no room for a
+            rail anyway. It never spawns on mount — it attaches to whatever the
+            shared useSupplyDesk hook resolved, so the Swarm tab and this seat
+            are always the SAME desk. */}
+        {swarmVisible && (
+          <BoardSupplyDock
+            projectId={project.id}
+            projectPath={project.path}
+            supplyDesk={supplyDesk}
+            workers={engineRead === true ? allWorkers : undefined}
+            taskTitle={taskTitleById}
+            reviewCount={engineRead === true ? reviewsByTask.size : undefined}
+            // Cards waiting on the owner PLUS the questions no card owns — the
+            // roll-up is a board-wide count, so dropping the unattributed ones
+            // would under-report exactly the questions easiest to lose.
+            waitingCount={alertsRead === true ? alertsByTask.size + unattributedQuestions : undefined}
+            claudeStatusByPty={claudeStatusByPty}
+          />
+        )}
       </div>
       {detailTask && (
         <aside

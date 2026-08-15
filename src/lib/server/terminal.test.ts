@@ -22,6 +22,7 @@ import {
   stopTerminalSweepLoop,
   TERMINAL_LINGER_SWEEP_MS,
   TERMINAL_SWEEP_INTERVAL_MS,
+  JUST_HANDED_BACK_MS,
   WORKING_SILENCE_MS,
   FLOW_HIGH_WATERMARK,
   FLOW_LOW_WATERMARK,
@@ -163,9 +164,31 @@ describe('claudeStatus', () => {
     expect(claudeStatus(info({ lastOutputAt: NOW - (WORKING_SILENCE_MS - 1) }), NOW)).toBe('working')
   })
 
-  it('silence past the threshold (or no output yet) → waiting', () => {
+  it('JUST stopped painting → waiting: the turn really did come back to you', () => {
     expect(claudeStatus(info({ lastOutputAt: NOW - WORKING_SILENCE_MS }), NOW)).toBe('waiting')
-    expect(claudeStatus(info({}), NOW)).toBe('waiting')
+    expect(claudeStatus(info({ lastOutputAt: NOW - (JUST_HANDED_BACK_MS - 1) }), NOW)).toBe(
+      'waiting',
+    )
+  })
+
+  it('LONG silence → idle, NOT waiting — a parked desk is not your turn', () => {
+    // THE BUG (owner, 2026-08-15): three Ground cards stamped WAITING with every
+    // task done. Each project held a commander/supply desk that had been sitting
+    // at its prompt for hours; the classifier had no third answer, so "not
+    // working" meant "sitting on the human". An amber stamp that is usually
+    // wrong teaches the reader to ignore the one that is right.
+    expect(claudeStatus(info({ lastOutputAt: NOW - JUST_HANDED_BACK_MS }), NOW)).toBe('idle')
+    expect(claudeStatus(info({ lastOutputAt: NOW - 6 * 60 * 60 * 1000 }), NOW)).toBe('idle')
+    // Never produced output at all — a desk that booted and has said nothing.
+    expect(claudeStatus(info({}), NOW)).toBe('idle')
+  })
+
+  it('a MENU still outranks everything — that one really is blocked on you', () => {
+    // The one case where age is irrelevant: a permission prompt open for six
+    // hours is still a prompt waiting for a human.
+    expect(
+      claudeStatus(info({ menuOpen: true, lastOutputAt: NOW - 6 * 60 * 60 * 1000 }), NOW),
+    ).toBe('waiting')
   })
 })
 
@@ -302,9 +325,10 @@ describe('listActiveTerminals', () => {
     state().sessions.set('w3', fakeSession('w3', '/tmp/proj-a', { tag: 'claude' }))
     const res = listActiveTerminals()
     expect(res.claude).toEqual([
-      { id: 'w1', cwd: '/tmp/proj-a', status: 'waiting' },
+      // w1/w3 never painted, so they are `idle` — live, but claiming nothing.
+      { id: 'w1', cwd: '/tmp/proj-a', status: 'idle' },
       { id: 'w2', cwd: '/tmp/proj-a', status: 'working' },
-      { id: 'w3', cwd: '/tmp/proj-a', status: 'waiting' },
+      { id: 'w3', cwd: '/tmp/proj-a', status: 'idle' },
     ])
     expect(res.cwds).toEqual(['/tmp/proj-a'])
   })

@@ -101,3 +101,33 @@ describe('aggregateClaudeBeacons', () => {
     expect(aggregateClaudeBeacons(PROJECTS, []).size).toBe(0)
   })
 })
+
+describe('idle is not waiting — the false "your turn" on a done project', () => {
+  // THE BUG (owner, 2026-08-15): a screenshot of three Ground cards, every one
+  // stamped WAITING, every task done. Each held a parked commander/supply desk.
+  const P = [{ id: 'p1', path: '/tmp/p1' }]
+
+  it('a parked desk produces NO waiting verdict', () => {
+    const out = aggregateClaudeBeacons(P, [
+      { id: 't1', cwd: '/tmp/p1', status: 'idle', projectId: 'p1' },
+    ])
+    expect(out.get('p1')).toBe('idle')
+    expect(out.get('p1')).not.toBe('waiting')
+  })
+
+  it('one genuinely blocked pane outranks any number of parked ones — IN EITHER ORDER', () => {
+    // Order matters because the pool lists panes in its own order; the old
+    // first-write-wins let whichever came first decide the whole card.
+    const blocked = { id: 'b', cwd: '/tmp/p1', status: 'waiting' as const, projectId: 'p1' }
+    const parked = { id: 'p', cwd: '/tmp/p1', status: 'idle' as const, projectId: 'p1' }
+    expect(aggregateClaudeBeacons(P, [parked, blocked]).get('p1')).toBe('waiting')
+    expect(aggregateClaudeBeacons(P, [blocked, parked]).get('p1')).toBe('waiting')
+  })
+
+  it('working still beats everything, in either order', () => {
+    const working = { id: 'w', cwd: '/tmp/p1', status: 'working' as const, projectId: 'p1' }
+    const blocked = { id: 'b', cwd: '/tmp/p1', status: 'waiting' as const, projectId: 'p1' }
+    expect(aggregateClaudeBeacons(P, [blocked, working]).get('p1')).toBe('working')
+    expect(aggregateClaudeBeacons(P, [working, blocked]).get('p1')).toBe('working')
+  })
+})

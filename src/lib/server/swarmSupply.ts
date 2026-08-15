@@ -47,8 +47,14 @@
 // `claude -p` / the SDK.
 
 import { randomUUID } from 'crypto'
+import { resolve } from 'path'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
-import { killTerminal, listLiveDesksIn } from './terminal'
+import { killTerminal, listLiveDesksIn, isTerminalProcessAlive } from './terminal'
+import {
+  acquireDeskSpawnLock,
+  deskSpawnLockKey,
+  DESK_SPAWN_LOCK_WAIT_MS,
+} from './deskSpawnLock'
 import {
   swarmLaunchDefaults,
   resolveSwarmModelEffortProbed,
@@ -194,7 +200,119 @@ export const stopSwarmSupplyDesks = (projectPath: string): string[] => {
   return desks.map((d) => d.id)
 }
 
+/** Every supply desk in `projectPath` that is REALLY there, newest first.
+ *
+ *  ⚠ THE `isTerminalProcessAlive` RE-CONFIRMATION IS THE POINT, and it is the
+ *  supply twin of the commander's `.filter(d => !d.stopping)` — same defect,
+ *  different pool. A desk asked to stop is not a desk to reuse: the pool stamps
+ *  `finishedAt` from an ASYNCHRONOUS onExit, so for a moment after a kill it
+ *  still lists a PTY the OS already reaped. Adopting one returns `reused:true`
+ *  for a desk that is gone, which is how the commander's Restart button (DELETE
+ *  then immediately POST) once handed back a dead pane instead of a new desk.
+ *  `getOrchestratorState` already asks this exact question of this exact list
+ *  before it PUBLISHES the supply handle; the spawn gate must ask the same one,
+ *  or the two doors disagree about whether a desk exists.
+ *
+ *  (Supply has no `stopping` flag to filter on — that notion belongs to the SDK
+ *  pool, and this desk is PTY-only by design, so one pool read is the whole
+ *  answer. The process table is what stands in for it.) */
+const listAliveSupplyDesks = (projectPath: string) =>
+  listLiveDesksIn(projectPath, SUPPLY_DESK_LABEL).filter((d) => isTerminalProcessAlive(d.id))
+
+/** A live supply desk to hand back INSTEAD of launching, or null.
+ *
+ *  PURE with respect to the invariant, exactly like swarmManager's adoptLiveDesk:
+ *  it reads the pool and writes the session record, and can therefore NEVER
+ *  create a second desk. That is why the lock-timeout path below may call it
+ *  without holding the lock. */
+const adoptLiveSupplyDesk = async (
+  projectPath: string,
+): Promise<SpawnSwarmSupplyResponse | null> => {
+  const alive = listAliveSupplyDesks(projectPath)
+  const existing = alive[0]
+  if (!existing) return null
+  if (alive.length > 1)
+    console.warn(
+      `[swarmSupply] ${alive.length} live supply desks in ${projectPath} — ` +
+        '本来1卓のみ。余分な卓は Terminal タブから閉じてください(自動 kill はしない)',
+    )
+  // Re-point the project's single session slot at the desk that ACTUALLY
+  // exists. Without this the store can keep naming a conversation nobody is
+  // sitting at, which is how the desk's memory gets orphaned rather than
+  // resumed. Best-effort: never turn an adoption into a failure.
+  if (existing.agentSessionId) {
+    await recordSwarmSession(projectPath, 'supply', existing.agentSessionId).catch(() => {})
+  }
+  return {
+    terminalId: existing.id,
+    agentSessionId: existing.agentSessionId ?? '',
+    // Nothing was RESUMED — no `claude --resume` ran. The desk was already up.
+    resumed: false,
+    reused: true,
+  }
+}
+
 export const spawnSwarmSupply = async (
+  opts: SpawnSwarmSupplyOpts,
+): Promise<SpawnSwarmSupplyResponse> => {
+  // ── ONE SUPPLY DESK PER PROJECT: the check-then-act is a CRITICAL SECTION ──
+  //
+  // This guard did not exist until 2026-08-15. Until then the ONLY thing between
+  // the owner and two 補給官 PTYs was a client-side `if (supply || supplyBusy)
+  // return` in the Swarm tab — which is not a guard, it is one window's opinion.
+  // The Board's front-desk seat is a SECOND door onto the same desk, and two
+  // doors is what turns a latent race into a routine one.
+  //
+  // What a second spawn actually costs (swarmSessions.ts states it outright):
+  // `resolveSwarmSession` refuses to resume a conversation it can see is still
+  // open, so the second call mints a FRESH session id and `recordSwarmSession`
+  // OVERWRITES the project's single stored slot with it. The first desk's
+  // days-long conversation is not skipped, it is FORGOTTEN — while its PTY keeps
+  // running, keeps holding Remote Control's identifiable name, and keeps filing
+  // Board cards that its twin cannot see it filing (the /supply dedupe rule is
+  // "re-read the Board before filing", which cannot see a sibling's UN-filed
+  // intent). That `stopSwarmSupplyDesks` above is written in the PLURAL is the
+  // tell that this has always been possible.
+  //
+  // Serialised, NOT coalesced (same stance as the commander): the second caller
+  // re-runs the pool check after the first releases, so its answer comes from
+  // the pool rather than being inherited from a call that may have failed.
+  //
+  // `fresh` does NOT bypass this. It means "do not resume the persisted
+  // conversation" — a question about WHICH conversation a new desk opens, never
+  // a licence to run two. An owner replacing a wedged desk stops it first
+  // (POST /api/swarm/supply/stop, which also clears supplyDesired).
+  const release = await acquireDeskSpawnLock(
+    deskSpawnLockKey('supply', resolve(opts.projectPath)),
+    DESK_SPAWN_LOCK_WAIT_MS,
+  )
+  if (!release) {
+    // Waited out a holder that never settled. Falling through to spawn anyway is
+    // the one thing we must not do — that is the twin this guard exists to
+    // prevent. If the wedged holder already got its PTY up, ADOPT it (a pool read
+    // + record write can never build a desk); otherwise refuse and let the caller
+    // surface it, rather than quietly seating a second front desk.
+    const adopted = await adoptLiveSupplyDesk(opts.projectPath)
+    if (adopted) return adopted
+    throw new Error(
+      `supply spawn already in flight for ${opts.projectPath} ` +
+        `(waited ${DESK_SPAWN_LOCK_WAIT_MS}ms) — refusing to open a second 補給官 desk`,
+    )
+  }
+  try {
+    const adopted = await adoptLiveSupplyDesk(opts.projectPath)
+    if (adopted) return adopted
+    return await launchNewSupplyDesk(opts)
+  } finally {
+    release()
+  }
+}
+
+/** The spawn half of {@link spawnSwarmSupply}, split out so the critical section
+ *  it must run inside is a single `try`/`finally` at the call site rather than a
+ *  release scattered down every exit path (the shape swarmManager settled on).
+ *  NEVER call this without holding the project's supply spawn lock. */
+const launchNewSupplyDesk = async (
   opts: SpawnSwarmSupplyOpts,
 ): Promise<SpawnSwarmSupplyResponse> => {
   // `fresh` skips the lookup entirely (and overwrites the record below) — the

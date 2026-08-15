@@ -68,6 +68,16 @@ npm run dist           # electron-builder → signed arm64 .dmg (dist-electron/)
   `docs/DISTRIBUTION.md` (Developer ID cert + `openground-notary` keychain
   profile already set up).
 
+**Installing a release on the owner's own Mac: standing permission (owner
+decision, 2026-08-14).** Once a release is published, go ahead and install it
+on the owner's machine and restart the app — every time, without asking first.
+This is a STANDING grant, not a per-release one; it was given precisely so the
+ask stops repeating. Written down here because sessions are ephemeral and a
+grant nobody can find is a grant that gets re-requested. Say what was installed
+afterwards; do not stop to confirm beforehand. Scope is exactly this: install a
+PUBLISHED OPEN GROUND release and restart the app. It authorizes nothing else on
+that machine — anything beyond installing and restarting is a separate ask.
+
 > **The legacy shell launcher is GONE (removed 2026-08-06).**
 > `scripts/openground-launch.sh`, `make-app.sh`, `openground-activate.sh`,
 > `sign-and-notarize.sh` and `entitlements.plist` built and signed a shell-script

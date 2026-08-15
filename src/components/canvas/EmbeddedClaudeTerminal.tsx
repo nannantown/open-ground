@@ -3,8 +3,9 @@ import { Play, TerminalSquare, X, Plus } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { useT } from '@/i18n/I18nContext'
 
-// A raw `claude` terminal embedded anywhere (a Board card, the Canvas/Doc dock,
-// a custom tab's module dock). PTY-based and subscription-only, so it bypasses
+// A raw `claude` terminal embedded anywhere (today: a custom tab's module
+// dock — the Canvas and Board side docks were removed 2026-08-15, see
+// ProjectPanel's sweptLegacyDocks). PTY-based and subscription-only, so it bypasses
 // the session JSONL that recent claude versions stopped writing for
 // --session-id sessions (which broke the run/observer and chat surfaces). One
 // PTY per `slot`, remembered in localStorage so reopening reattaches; a dead id
@@ -180,9 +181,11 @@ export const EmbeddedClaudeTerminal = ({
 
 // ── Collapsible, TABBED terminal dock ────────────────────────────────────────
 // A right-side dock with Chrome-style tabs, each tab a parallel `claude` PTY.
-// Used by Canvas and Doc (the assistant/marker pipeline they used is JSONL-
-// backed and hidden in terminal-only mode). A narrow dock can't usefully
-// horizontal-split, so tabs are how you run several claudes in parallel:
+// Used by user-installed CUSTOM TABS (CustomModuleView) — its sole mount today.
+// Canvas and Board carried one too until 2026-08-15; those mounts were removed
+// (the owner did not want a terminal glued to the side of those surfaces) and
+// the orphaned PTYs are swept client-side by ProjectPanel. A narrow dock can't
+// usefully horizontal-split, so tabs are how you run several claudes in parallel:
 // inactive tabs' PTYs keep running server-side and reattach when re-selected;
 // closing a tab kills its PTY.
 

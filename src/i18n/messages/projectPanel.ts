@@ -747,7 +747,7 @@ export const projectPanel = {
       'Complete sign-in in this terminal (your browser opens once). Then close this and run again.',
     'projectPanel.claudeLogin.starting': 'Opening a Claude terminal to sign in…',
     'projectPanel.claudeLogin.retry': 'Try again',
-    // Embedded claude terminal + terminal dock (Canvas / Board sidebar)
+    // Embedded claude terminal + terminal dock (custom tabs' module dock)
     'projectPanel.embTermHint':
       'Launch claude in this project — respond and approve permission prompts right in this terminal.',
     'projectPanel.dockTitle': 'Terminal',
@@ -755,10 +755,6 @@ export const projectPanel = {
     'projectPanel.dockCloseTab': 'Close this terminal',
     'projectPanel.dockAddTab': 'Add terminal',
     'projectPanel.dockClose': 'Close dock',
-    'projectPanel.canvasDockHint':
-      'Launch claude in this project to drive Canvas design work — edit and review files from this terminal.',
-    'projectPanel.boardDockHint':
-      'Launch claude in this project — edit and review files from this terminal.',
     // Notes
     // CompactTaskRow
     // NewTaskComposer
@@ -1474,7 +1470,7 @@ export const projectPanel = {
       'このターミナルでサインインを完了してください（ブラウザが 1 回開きます）。完了したら閉じて、もう一度実行してください。',
     'projectPanel.claudeLogin.starting': 'サインイン用の Claude ターミナルを開いています…',
     'projectPanel.claudeLogin.retry': 'もう一度試す',
-    // Embedded claude terminal + terminal dock (Canvas / Board sidebar)
+    // Embedded claude terminal + terminal dock (custom tabs' module dock)
     'projectPanel.embTermHint':
       'このプロジェクトで claude を起動します。応答や権限確認はこのターミナルで操作します。',
     'projectPanel.dockTitle': 'ターミナル',
@@ -1482,10 +1478,6 @@ export const projectPanel = {
     'projectPanel.dockCloseTab': 'このターミナルを閉じる',
     'projectPanel.dockAddTab': 'ターミナルを追加',
     'projectPanel.dockClose': 'ドックを閉じる',
-    'projectPanel.canvasDockHint':
-      'このプロジェクトで claude を起動して Canvas のデザイン作業を進めます（ファイル編集・確認はこのターミナルで操作）。',
-    'projectPanel.boardDockHint':
-      'このプロジェクトで claude を起動します（ファイル編集・確認はこのターミナルで操作）。',
     // Notes
     // CompactTaskRow
     // NewTaskComposer

@@ -32,6 +32,38 @@ export interface BoardCardWorker {
   phase?: string
   /** The worker's self-reported one-line summary — heartbeat. */
   note?: string
+  /** HOW OLD the note is, as a verdict — NOT a timestamp. Absent means the
+   *  engine gave us no heartbeat time for it, so we cannot date the note and
+   *  therefore must not present it as a current statement (see
+   *  {@link deriveHeartbeatFreshness}). */
+  noteFreshness?: 'fresh' | 'stale'
+}
+
+/** How long a heartbeat stays a statement about NOW. Matches the engine's own
+ *  stale-heartbeat window (STALE_HEARTBEAT_MS in swarmOrchestrator) so the board
+ *  and the engine do not disagree about when a worker went quiet. */
+export const WORKER_NOTE_STALE_MS = 10 * 60_000
+
+/** Is a worker's last note still a statement about the present?
+ *
+ *  'none'  — we have no beat time at all (older engine, or the engine kept the
+ *            worker's prior fields without a fresh probe). We CANNOT date the
+ *            note, so the caller must not render it as current — absence of
+ *            evidence, not evidence of currency.
+ *  'fresh' — beat within {@link WORKER_NOTE_STALE_MS}.
+ *  'stale' — older than that: the note describes the past.
+ *
+ *  A beat timestamped in the FUTURE (clock skew between the engine's clock and
+ *  the browser's) reads 'fresh': a negative age is not evidence of staleness. */
+export const deriveHeartbeatFreshness = (
+  heartbeatAt: string | undefined,
+  nowMs: number,
+): 'none' | 'fresh' | 'stale' => {
+  if (!heartbeatAt) return 'none'
+  const beatMs = Date.parse(heartbeatAt)
+  if (!Number.isFinite(beatMs)) return 'none'
+  const ageMs = nowMs - beatMs
+  return ageMs >= WORKER_NOTE_STALE_MS ? 'stale' : 'fresh'
 }
 
 /** Derive a doing card's worker activity from the engine's reported stage and

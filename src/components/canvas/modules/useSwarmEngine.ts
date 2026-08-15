@@ -759,6 +759,32 @@ export const KNOWN_ENV_ISSUE_IDS: ReadonlySet<string> = new Set([
   'gitMissing', 'notAGitRepo', 'shellMissing',
 ])
 
+// Moved here from SwarmModule.tsx (2026-08-15) when the Board's front-desk seat
+// grew a second caller: this is the ONE consumer of KNOWN_ENV_ISSUE_IDS above,
+// and a second copy beside a second spawn button is how one surface starts
+// showing the route's raw English while the other shows the localized copy.
+/** A failed worker/supply/manager spawn's 503 body carries `envIssues: string[]`
+ *  (see server/routes/swarm.ts — the git/shell env-preflight gate,
+ *  swarmEnvPreflight.ts). Map it to the SAME localized copy the poll-driven
+ *  banner uses (`projectPanel.swarm.envPreflight.<id>`), so a launch failure the
+ *  owner sees IMMEDIATELY after pressing a button reads in plain language too —
+ *  not the route's raw English `body.error` (2026-07-22 review round 2: that
+ *  literal string, including a `git init` instruction, was reaching the error
+ *  banner untranslated). Returns null when `envIssues` is absent/empty/unknown,
+ *  so the caller falls back to `body.error` for every OTHER kind of failure. */
+export const envIssuesErrorMessage = (
+  t: (key: string, vars?: Record<string, string | number>) => string,
+  envIssues: unknown,
+): string | null => {
+  if (!Array.isArray(envIssues)) return null
+  const known = envIssues.filter(
+    (id): id is SwarmEnvIssueId => typeof id === 'string' && KNOWN_ENV_ISSUE_IDS.has(id),
+  )
+  if (known.length === 0) return null
+  return known.map((id) => t(`projectPanel.swarm.envPreflight.${id}`)).join(' ')
+}
+
+
 // The route response is untrusted like every other one — keep only known ids
 // (an id the client has no copy for would render as an empty banner row).
 export const sanitizeEnvIssues = (raw: unknown): SwarmEnvIssue[] => {

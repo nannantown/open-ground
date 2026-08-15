@@ -52,7 +52,6 @@ import type {
   RemoveSwarmWorktreeResponse,
   SettingsResponse,
   SpawnSwarmManagerResponse,
-  SpawnSwarmSupplyResponse,
   SpawnSwarmWorkerResponse,
   SwarmPaneId,
   SwarmWorkerRecord,
@@ -62,6 +61,7 @@ import { effectiveTabOrder, moveTab } from '@/lib/modules/tabOrder'
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
+import { useSupplyDesk } from './useSupplyDesk'
 import { SwarmManagerPane } from './SwarmManagerPane'
 import { useLandedKpi } from './useLandedKpi'
 import { SwarmOverseerPane } from './SwarmOverseerPane'
@@ -73,9 +73,11 @@ import {
   useSwarmEngine,
   planSwarmPower,
   engineWorkerKey,
-  KNOWN_ENV_ISSUE_IDS,
+  envIssuesErrorMessage,
 } from './useSwarmEngine'
 import type { SwarmEnvIssueId } from './useSwarmEngine'
+import { workerBeaconStatus } from '@/lib/workerBeacon'
+import { SwarmErrorBanner } from '@/components/canvas/modules/SwarmErrorBanner'
 
 // Worker tiles lay out as a single horizontally-scrolling row. Each tile grows
 // to fill the area when there are few (1 worker → full width) but never shrinks
@@ -91,49 +93,6 @@ const MIN_TILE_WIDTH = 360
 // grid's per-row minimum (minmax(220px, 1fr)), so this restores the exact
 // short-window escape hatch the grid had — symmetric with the horizontal one.
 const MIN_TILE_HEIGHT = 220
-
-// The single supply (補給官) session, remembered client-side. Like a worker the
-// PTY (terminalId) lives server-side and survives this tab unmounting; we
-// persist the metadata so a tab switch / reload reattaches the same session.
-// Unlike a worker there is no branch/worktree — supply runs in the project's
-// primary checkout — so this is just the PTY id + minted session id + start time.
-interface SwarmSupply {
-  terminalId: string
-  agentSessionId: string
-  startedAt: string
-}
-
-const supplyKey = (projectId: string) => `openground.swarm.supply.${projectId}`
-
-/** Load + SANITISE the persisted supply session (localStorage is untrusted — a
- *  user/extension can forge any JSON, so coerce every field; a bad shape → null
- *  rather than crashing the render). */
-const loadSupply = (projectId: string): SwarmSupply | null => {
-  try {
-    const raw = localStorage.getItem(supplyKey(projectId))
-    if (!raw) return null
-    const o: unknown = JSON.parse(raw)
-    if (!o || typeof o !== 'object') return null
-    const r = o as Record<string, unknown>
-    if (typeof r.terminalId !== 'string') return null
-    return {
-      terminalId: String(r.terminalId),
-      agentSessionId: typeof r.agentSessionId === 'string' ? r.agentSessionId : '',
-      startedAt: typeof r.startedAt === 'string' ? r.startedAt : '',
-    }
-  } catch {
-    return null
-  }
-}
-
-const saveSupply = (projectId: string, supply: SwarmSupply | null) => {
-  try {
-    if (supply) localStorage.setItem(supplyKey(projectId), JSON.stringify(supply))
-    else localStorage.removeItem(supplyKey(projectId))
-  } catch {
-    /* quota / disabled storage — the in-memory state is still authoritative */
-  }
-}
 
 // The single commander (司令官) CONVERSATION session, remembered client-side —
 // the exact same shape + lifecycle as the supply session (no worktree; it runs
@@ -278,27 +237,6 @@ const saveManager = (projectId: string, manager: SwarmManager | null) => {
 // local alias keeps the many existing `MainView` references unchanged.
 type MainView = SwarmPaneId
 
-/** A failed worker/supply/manager spawn's 503 body carries `envIssues: string[]`
- *  (see server/routes/swarm.ts — the git/shell env-preflight gate,
- *  swarmEnvPreflight.ts). Map it to the SAME localized copy the poll-driven
- *  banner uses (`projectPanel.swarm.envPreflight.<id>`), so a launch failure the
- *  owner sees IMMEDIATELY after pressing a button reads in plain language too —
- *  not the route's raw English `body.error` (2026-07-22 review round 2: that
- *  literal string, including a `git init` instruction, was reaching the error
- *  banner untranslated). Returns null when `envIssues` is absent/empty/unknown,
- *  so the caller falls back to `body.error` for every OTHER kind of failure. */
-const envIssuesErrorMessage = (
-  t: (key: string, vars?: Record<string, string | number>) => string,
-  envIssues: unknown,
-): string | null => {
-  if (!Array.isArray(envIssues)) return null
-  const known = envIssues.filter(
-    (id): id is SwarmEnvIssueId => typeof id === 'string' && KNOWN_ENV_ISSUE_IDS.has(id),
-  )
-  if (known.length === 0) return null
-  return known.map((id) => t(`projectPanel.swarm.envPreflight.${id}`)).join(' ')
-}
-
 /** The env-preflight banner's i18n key for "what still works" (2026-07-22
  *  review, nit6): a non-git PROJECT (`notAGitRepo`) only blocks starting new
  *  workers — supply and the commander both run in the primary checkout and
@@ -346,12 +284,11 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const [removedWorktrees, setRemovedWorktrees] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
 
-  // The single supply (補給官) session + which face of the main area is shown.
-  // Supply is the conversational entry point, so the main area opens on it.
-  // supplyBusy = a launch/stop round-trip is in flight.
-  const [supply, setSupply] = useState<SwarmSupply | null>(() => loadSupply(project.id))
+  // Which face of the main area is shown. Supply is the conversational entry
+  // point, so the main area opens on it. (The supply desk's own state lives in
+  // useSupplyDesk below — shared with the Board's front-desk seat, which drives
+  // the SAME desk through the SAME stored record.)
   const [mainView, setMainView] = useState<MainView>(SWARM_PANE_IDS[0])
-  const [supplyBusy, setSupplyBusy] = useState(false)
 
   // ── Sub-tab order (条件1/2/3) ───────────────────────────────────────────────
   // The owner's saved left-to-right order of the four sub-tabs, loaded ONCE from
@@ -508,7 +445,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // Reset per-project view state when the panel is reused for another project
   // (ProjectPanel keeps one SwarmModule instance across project switches).
   useEffect(() => {
-    setSupply(loadSupply(project.id))
     setManager(loadManager(project.id))
     setManagerBusy(false)
     // Land on the FIRST sub-tab of the (global) saved order (条件3). Read the
@@ -519,7 +455,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setMainView(effectiveTabOrder<MainView>(paneOrderRef.current, SWARM_PANE_IDS)[0])
     setDragFrom(null)
     setDropAt(null)
-    setSupplyBusy(false)
     setExitedIds(new Set())
     setRetainedByWorktree(new Map())
     setError(null)
@@ -673,11 +608,14 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   //   else 'starting' (spawned, the 5s poll hasn't observed it yet).
   const statusOfPty = useCallback(
     (terminalId: string): WorkerStatus => {
-      if (exitedIds.has(terminalId)) return 'exited'
       const s = statusByPty.get(terminalId)
-      if (s === 'working' || s === 'waiting') return s
-      if (seenRef.current.has(terminalId)) return 'exited'
-      return 'starting'
+      // ONE decision site, exhaustive over the beacon union — see
+      // src/lib/workerBeacon.ts for why this is not three `===` checks.
+      return workerBeaconStatus({
+        status: s,
+        seen: seenRef.current.has(terminalId),
+        exited: exitedIds.has(terminalId),
+      })
     },
     [exitedIds, statusByPty],
   )
@@ -686,14 +624,17 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setExitedIds((prev) => (prev.has(terminalId) ? prev : new Set(prev).add(terminalId)))
   }, [])
 
-  // ── Desk reconcile (2026-08-03 — the post-restart dead-screen fix) ──────────
-  // Every engine poll now carries the LIVE desk handles (managerDesk/supplyDesk,
-  // both-pools reads). Follow them: ADOPT an engine-woken desk the stored record
-  // does not name (zero-click reconnect after an app restart), CLEAR a
-  // confirmed-dead record with no successor (honest launch CTA instead of the
-  // eternal 「セッションが終了しました」). The decision itself is pure and
-  // guarded (deskReconcile.ts — busy wins, old servers change nothing); this
-  // effect only applies the verdict to state + localStorage.
+  // ── COMMANDER desk reconcile (2026-08-03 — the post-restart dead-screen fix) ─
+  // Every engine poll carries the LIVE desk handle (managerDesk, a both-pools
+  // read). Follow it: ADOPT an engine-woken desk the stored record does not name
+  // (zero-click reconnect after an app restart), CLEAR a confirmed-dead record
+  // with no successor (honest launch CTA instead of the eternal
+  // 「セッションが終了しました」). The decision itself is pure and guarded
+  // (deskReconcile.ts — busy wins, old servers change nothing); this effect only
+  // applies the verdict to state + localStorage.
+  // ⚠ The SUPPLY half of this used to live here too. It now lives in
+  // useSupplyDesk, because the Board's front-desk seat drives the same desk and
+  // two copies of a reconcile would DISAGREE after a restart.
   useEffect(() => {
     // The stored records use OPTIONAL runtime ('pty' when absent — every old
     // record's shape); the reconcile input is the normalized strict form.
@@ -720,35 +661,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       setManager(null)
       saveManager(project.id, null)
     }
-    const sv = reconcileDesk(
-      supply
-        ? {
-            terminalId: supply.terminalId,
-            runtime: 'pty', // the supply desk is PTY-only by design
-            agentSessionId: supply.agentSessionId,
-            startedAt: supply.startedAt,
-          }
-        : null,
-      engine.supplyDesk,
-      {
-        busy: supplyBusy,
-        storedDead: !!supply && exitedIds.has(supply.terminalId),
-      },
-    )
-    if (sv.kind === 'adopt' && sv.record.runtime === 'pty') {
-      const rec: SwarmSupply = {
-        terminalId: sv.record.terminalId,
-        agentSessionId: sv.record.agentSessionId,
-        startedAt: sv.record.startedAt,
-      }
-      setSupply(rec)
-      saveSupply(project.id, rec)
-    } else if (sv.kind === 'clear') {
-      setSupply(null)
-      saveSupply(project.id, null)
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setters/savers are stable; keyed on the data
-  }, [engine.managerDesk, engine.supplyDesk, manager, supply, managerBusy, supplyBusy, exitedIds, project.id])
+  }, [engine.managerDesk, manager, managerBusy, exitedIds, project.id])
 
   // Terminate a worker: kill the PTY, then tear the worktree down. A soft
   // attempt keeps a dirty/locked tree (removed:false) so uncommitted work isn't
@@ -870,79 +784,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     [busyWorktrees, project.path, t],
   )
 
-  // Launch the single supply (補給官) session: POST /api/swarm/supply spawns a
-  // claude PTY in the project's PRIMARY checkout (NO worktree) running /supply.
-  // No card is read — supply IS the conversation desk; the user types requests
-  // into it and it files Board:todo cards. Raw fetch + typed cast, same as the
-  // worker spawn (the /api/swarm/* routes aren't on the typed RPC tree).
-  const launchSupply = useCallback(async () => {
-    if (supply || supplyBusy) return
-    setSupplyBusy(true)
-    setError(null)
-    try {
-      const res = await fetch('/api/swarm/supply', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path: project.path }),
-      })
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string; envIssues?: unknown }
-        throw new Error(envIssuesErrorMessage(t, body?.envIssues) ?? body?.error ?? `HTTP ${res.status}`)
-      }
-      const spawn = (await res.json()) as SpawnSwarmSupplyResponse
-      const next: SwarmSupply = {
-        terminalId: spawn.terminalId,
-        agentSessionId: spawn.agentSessionId,
-        startedAt: new Date().toISOString(),
-      }
-      setSupply(next)
-      saveSupply(project.id, next)
-    } catch (e) {
-      setError(
-        t('projectPanel.swarm.supply.launchFailed', {
-          error: e instanceof Error ? e.message : String(e),
-        }),
-      )
-    } finally {
-      setSupplyBusy(false)
-    }
-  }, [supply, supplyBusy, project.path, project.id, t])
-
-  // Stop the supply session: kill the PTY. There is NO worktree to tear down
-  // (supply runs in the primary checkout), so unlike a worker terminate this is
-  // a plain terminal kill — the session drops back to the launch CTA, and we
-  // clear its id from the exited/seen bookkeeping so a relaunch starts clean.
-  const stopSupply = useCallback(async () => {
-    if (!supply || supplyBusy) return
-    const term = supply.terminalId
-    setSupplyBusy(true)
-    setError(null)
-    try {
-      // The intent-clearing stop (2026-08-03): kills the desk server-side AND
-      // clears the persisted supplyDesired flag — without it, boot auto-resume
-      // would resurrect a desk the owner just closed, every restart, forever.
-      await fetch('/api/swarm/supply/stop', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: project.path }),
-      }).catch(() => {})
-      // Belt-and-braces: the raw terminal delete for the stored id (the route
-      // kills by desk label; a desk the pool lost the label for still dies here).
-      await api.api.terminal[':id'].$delete({ param: { id: term } }).catch(() => {})
-    } finally {
-      setSupply(null)
-      saveSupply(project.id, null)
-      setExitedIds((prev) => {
-        if (!prev.has(term)) return prev
-        const s = new Set(prev)
-        s.delete(term)
-        return s
-      })
-      seenRef.current.delete(term)
-      setSupplyBusy(false)
-    }
-  }, [supply, supplyBusy, project.id])
-
   // Launch the single commander (司令官) conversation: POST /api/swarm/manager
   // spawns a claude PTY in the project's PRIMARY checkout (NO worktree) running
   // /manage. The exact mirror of launchSupply — the commander IS a conversation
@@ -1035,44 +876,32 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // guard blocks a second click, so a restart can NEVER double-launch a live
   // session (条件: 二重起動しない). On failure we surface restartFailed and leave
   // the old (exited) id in place, so the overlay stays and the user can retry.
-  const restartSupply = useCallback(async () => {
-    if (supplyBusy) return
-    const old = supply?.terminalId
-    setSupplyBusy(true)
-    setError(null)
-    try {
-      // Best-effort kill the old PTY first. The overlay normally shows only on a
-      // dead PTY, but a transient mount-probe failure could surface it for a live
-      // one — killing first guarantees we never orphan a still-running session.
-      if (old) await api.api.terminal[':id'].$delete({ param: { id: old } }).catch(() => {})
-      const res = await fetch('/api/swarm/supply', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path: project.path }),
-      })
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string; envIssues?: unknown }
-        throw new Error(envIssuesErrorMessage(t, body?.envIssues) ?? body?.error ?? `HTTP ${res.status}`)
-      }
-      const spawn = (await res.json()) as SpawnSwarmSupplyResponse
-      const next: SwarmSupply = {
-        terminalId: spawn.terminalId,
-        agentSessionId: spawn.agentSessionId,
-        startedAt: new Date().toISOString(),
-      }
-      setSupply(next)
-      saveSupply(project.id, next)
-      forgetPty(old, next.terminalId)
-    } catch (e) {
-      setError(
-        t('projectPanel.swarm.restartFailed', {
-          error: e instanceof Error ? e.message : String(e),
-        }),
-      )
-    } finally {
-      setSupplyBusy(false)
-    }
-  }, [supply, supplyBusy, project.path, project.id, forgetPty, t])
+  // ── The supply desk (補給官 / タスク窓口) ──────────────────────────────────
+  // State + launch/stop/restart live in useSupplyDesk, NOT here, because the
+  // Board's front-desk seat drives the SAME desk through the SAME stored record
+  // (openground.swarm.supply.<projectId>) and the same server handle. Two
+  // hand-written copies would reconcile a post-restart record to two different
+  // verdicts, and whichever surface the owner opened last would win the write.
+  // Names are destructured back to the historical ones so every reference below
+  // — the pane, the CTA, the autopilot plan — reads exactly as it did.
+  // `enabled` is unconditionally true here: this component only mounts behind
+  // ProjectPanel's own `isModuleIdVisible('swarm', …)` check, which is the same
+  // predicate the Board seat passes through as `swarmVisible`.
+  const {
+    supply,
+    busy: supplyBusy,
+    error: supplyError,
+    launch: launchSupply,
+    stop: stopSupply,
+    restart: restartSupply,
+  } = useSupplyDesk({
+    projectId: project.id,
+    projectPath: project.path,
+    supplyDesk: engine.supplyDesk,
+    exitedIds,
+    forgetPty,
+    enabled: true,
+  })
 
   const restartManager = useCallback(async () => {
     if (managerBusy) return
@@ -1622,11 +1451,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       {/* A transient action error (worker terminate / restart, supply・commander
           launch). The old to-do rail hosted this; with the rail gone it banners
           across the top of the pane so a failure is never lost. */}
-      {error && (
-        <p className="shrink-0 border-b border-line-soft bg-bg px-3 py-2 text-meta leading-relaxed text-accent">
-          {error}
-        </p>
-      )}
+      <SwarmErrorBanner error={error} supplyError={supplyError} />
 
       {/* Restart notice (autonomyResumed, card 2b) — the OTHER half of the reminder
           below. Since card 2 a restart RESTORES the drain by itself, so the "resume?"

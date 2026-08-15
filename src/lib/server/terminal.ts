@@ -640,19 +640,36 @@ export const listLiveDesksIn = (cwd: string, deskLabel: string): OwnerDeskTermin
     .sort((a, b) => b.startedAtMs - a.startedAtMs)
 }
 
-/** Working/waiting judgement for a claude PTY. Pure — `now` is injected so
- *  tests don't need fake timers (house style).
+/** How long after a session stops painting it still counts as 「あなたの番」.
+ *
+ *  Inside this window the session has JUST handed the turn back, and saying so
+ *  is useful. Past it, the session is merely open — and a stamp that says
+ *  otherwise is the defect this constant exists to bound. Ten minutes is chosen
+ *  to cover "I stepped away from a reply that just landed" without covering
+ *  "this desk has been parked since yesterday". */
+export const JUST_HANDED_BACK_MS = 10 * 60 * 1000
+
+/** Working / waiting / idle judgement for a claude PTY. Pure — `now` is
+ *  injected so tests don't need fake timers (house style).
  *  - An open TUI menu (permission prompt etc.) means claude is blocked on the
  *    human, regardless of how recently it painted — `waiting`.
  *  - Otherwise recent output (< WORKING_SILENCE_MS) means its spinner is
  *    repainting — `working`.
- *  - Silence (or no output yet) — `waiting`. */
+ *  - Stopped within JUST_HANDED_BACK_MS — `waiting`: the turn is genuinely the
+ *    human's and they may not have seen it yet.
+ *  - Anything quieter, or a session that has NEVER produced output — `idle`.
+ *
+ *  ⚠ THE LAST CLAUSE IS THE FIX (2026-08-15). It used to return `waiting`, so a
+ *  session that had simply been left open claimed the human's turn; the owner
+ *  saw every Ground card stamped WAITING with nothing left to do. `idle` is not
+ *  a weaker `waiting` — it is a different fact, and the Ground card draws no
+ *  stamp for it. */
 export const claudeStatus = (info: TerminalInfo, now: number): ClaudeBeaconStatus => {
   if (info.menuOpen) return 'waiting'
-  if (info.lastOutputAt !== undefined && now - info.lastOutputAt < WORKING_SILENCE_MS) {
-    return 'working'
-  }
-  return 'waiting'
+  if (info.lastOutputAt === undefined) return 'idle'
+  const silent = now - info.lastOutputAt
+  if (silent < WORKING_SILENCE_MS) return 'working'
+  return silent < JUST_HANDED_BACK_MS ? 'waiting' : 'idle'
 }
 
 /** A live claude pane bound to a Board card, with everything the task-boundary

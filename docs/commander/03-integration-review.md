@@ -547,6 +547,28 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
 > 回帰は `swarmManager.spawn.test.ts`(10件・PTY なし)。**teeth 実測**: ロック取得を無効化する
 > 1行変異で **10件中6件が赤**、うち中核は「同時2呼び出し → `launchClaude` が **2回**」= 双子卓その
 > もの。変異を戻して `git status` 空で復元も証明済み。
+>
+> **⚠ 同じガードを補給官にも付けた — そして補給官には最初から無かった(2026-08-15)。**
+> 上の記述は司令官の話で、**補給官(`spawnSwarmSupply`)にはロックも adopt も存在しなかった**。
+> 唯一の防波堤は Swarm タブの `if (supply || supplyBusy) return` = **1つのウィンドウの意見**で、
+> 不変条件ではない。ボードに**タスク窓口の席**(2つ目の扉)が付くので、その前に閉じた。
+> **二卓目の実害は「無駄」ではなく「忘却」**: `resolveSwarmSession` は開いている会話を resume
+> しないので2回目の spawn は**新しい session id を作り**、`recordSwarmSession` がプロジェクト唯一の
+> スロットを**上書き**する。前の卓の会話は飛ばされるのではなく**忘れられ**、その PTY は走り続け、
+> リモコンの識別名を握ったまま、相方から見えないカードを起票し続ける
+> (`stopSwarmSupplyDesks` が複数形で書かれているのが元からの証拠)。
+> 実装: ロック本体を `src/lib/server/deskSpawnLock.ts` へ抽出(`acquireDeskSpawnLock` /
+> `deskSpawnLockKey`)。**司令官の挙動は不変** — globalThis のキーは歴史的な
+> `__openground_manager_spawn_locks` のまま(改名は dev リロード1回分だけ排他を外す)、
+> 司令官のロックキーも従来どおり `resolve(projectPath)` そのもの。補給官は
+> `supply:<resolve(path)>` と別名前空間なので、同一プロジェクトの2卓は互いに待たない。
+> 採用側の裏取りは司令官と**同じ問いを別プールに**: 司令官の `.stopping` 除外に当たるものが
+> 補給官には無い(`stopping` は SDK プールの概念で、この卓は PTY 専用)ので、
+> **`isTerminalProcessAlive` によるプロセステーブル裏取り**がその役目を負う —
+> `getOrchestratorState` が supplyDesk を**公表する**ときに既に掛けている確認と同一。
+> 回帰は `swarmSupplySingleton.test.ts`(7件)。**teeth 実測**: compare-and-set の間に
+> `await` を1つ挟む変異で「同時2呼び出し → 卓が**2つ**」が赤、adopt の早期 return を削ると2件赤、
+> プロセステーブル裏取りを外すと「死んだ卓を adopt して launch しない」が赤。
 
 - **心拍(完了条件1)**: 司令官は統合の各段(1本マージ毎・レビュー sub-agent を起こす直前など)で
   `POST /api/swarm/manager/beat`(owner+path gate)を打つ。その実体は `writeManagerHeartbeat` =

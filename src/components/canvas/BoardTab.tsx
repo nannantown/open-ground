@@ -15,6 +15,7 @@ import {
 import { newId } from '@/lib/ids'
 import { dependencyCycleIds, unresolvedDeps } from '@/lib/boardDeps'
 import type { BoardCardManager, BoardCardWorker, ManagerPresence } from '@/lib/boardWorker'
+import type { BoardCardAlert } from '@/lib/boardEscalation'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
 import { CollabPresence, type PresenceChannel } from '@/components/canvas/CollabPresence'
 import { useT } from '@/i18n/I18nContext'
@@ -299,6 +300,17 @@ interface BoardTabProps {
    *  Absent/null ⇒ show nothing (non-owner, engine off, or not in the engine's
    *  review queue). */
   managerForTask?: (taskId: string) => BoardCardManager | null
+  /** An OPEN escalation rooted in this card (the swarm stopped and is waiting
+   *  for the owner), or null when none is.
+   *
+   *  ⚠ Called for EVERY lane, unlike workerForTask (doing) and managerForTask
+   *  (review). Those two are lane-scoped because the engine's claim only means
+   *  something in that lane; an escalation is rooted in `escalation.taskId`,
+   *  which no column owns — a todo card and a blocked card can both be waiting
+   *  on you. Absent/null ⇒ show nothing, and (the harder half) never an
+   *  "all clear" anywhere — an empty inbox and an inbox we could not read look
+   *  identical from here, so silence is the only honest empty state. */
+  alertForTask?: (taskId: string) => BoardCardAlert | null
   /** The commander's BOARD-WIDE presence, for the review lane's HEADER badge —
    *  the honest altitude when no per-card fact exists (B-3): it stays visible
    *  even while the engine is stopped and reviews[] is empty. Only 'working'
@@ -325,6 +337,7 @@ export const BoardTab = ({
   sessionStatus,
   workerForTask,
   managerForTask,
+  alertForTask,
   reviewManagerPresence,
   presence,
 }: BoardTabProps) => {
@@ -818,6 +831,11 @@ export const BoardTab = ({
             // The commander linkage — ONLY in the review column (integration is
             // the commander's lane); owner-gated upstream like the worker map.
             const manager = col.key === 'review' ? managerForTask?.(task.id) ?? null : null
+            // An open question rooted in this card — asked for EVERY lane (see
+            // the prop's contract): escalation.taskId is lane-independent, so a
+            // todo or blocked card can be waiting on the owner just as much as
+            // a doing one. Owner-gated + swarm-gated upstream (null otherwise).
+            const alert = alertForTask?.(task.id) ?? null
             // O(N) total this render: one shared id→task map, no per-card rebuild.
             const blockedBy = unresolvedDeps(task, tasksById)
             return (
@@ -836,6 +854,10 @@ export const BoardTab = ({
                 workerBranch={worker?.branch}
                 workerPhase={worker?.phase}
                 workerNote={worker?.note}
+                workerNoteFreshness={worker?.noteFreshness}
+                needsYou={!!alert}
+                needsYouReason={alert?.reason}
+                needsYouHint={alert?.hint}
                 managerPresence={manager?.presence ?? null}
                 managerReviewStatus={manager?.reviewStatus}
                 depCount={blockedBy.length}

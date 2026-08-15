@@ -68,7 +68,6 @@ import {
 import { ContextGauge, type ContextAction } from '@/components/canvas/ContextGauge'
 import { slashOutcome, type ContextActionOutcome, type ContextLeftSource } from '@/lib/contextGauge'
 import { BoardTaskTerminal } from '@/components/canvas/TaskTerminal'
-import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { useClaudeConnection } from '@/lib/useClaudeConnection'
 import { ProjectCanvas } from '@/components/canvas/ProjectCanvas'
@@ -190,6 +189,24 @@ const saveSlots = (path: string, slots: TerminalSlot[]) => {
     localStorage.setItem(TERMINAL_SLOTS_KEY(path), JSON.stringify(slots))
   } catch {}
 }
+
+// One-shot migration (2026-08-15): the Canvas/Board side terminal docks are
+// gone. Their PTYs were never torn down on unmount BY DESIGN (inactive dock
+// tabs kept running and reattached), and nothing on the server reclaims them —
+// sweepTerminalPool keeps live sessions, and killing by cwd would nuke the
+// Terminal tab's shells and the Board drawer's task sessions, which share the
+// project path. So an orphan would keep the Ground "Terminal" beacon lit with
+// no pane anywhere to close it, keep ownerDeskLimit notifying about a desk that
+// has no window, and pin computeRestartSafety to safe:false (a dock PTY is
+// desk:false/hidden:false/engine:false and `claude` is not a login shell, so it
+// counts as a user PTY forever) — silently stopping hands-free auto-update
+// restarts. The only precise handle is the CLIENT binding, same shape as
+// loadSlots' sweep of the last removed pane type.
+//
+// The storage id must be the project PATH, not the id: both mounts passed no
+// `storageId`, so EmbeddedClaudeTerminal's `sid` fell back to projectPath.
+// Custom-tab docks are namespaced by customModuleStorageId(), so untouched.
+const sweptLegacyDocks = new Set<string>()
 
 // Board task terminals: taskId → claude PTY id. Board-scoped — a task's
 // session renders ONLY inside the Board drawer; the Terminal tab never sees
@@ -1422,6 +1439,15 @@ const OwnedProjectBody = ({
     if (!path || loadedForPathRef.current !== path) return
     saveTaskTerminals(path, taskTerminals)
   }, [project?.path, taskTerminals])
+  // Reclaim the removed Canvas/Board docks' PTYs — see sweptLegacyDocks above.
+  // Naturally idempotent (after the sweep there are no keys left); the Set only
+  // avoids re-scanning localStorage on every remount.
+  useEffect(() => {
+    const path = project?.path
+    if (!path || sweptLegacyDocks.has(path)) return
+    sweptLegacyDocks.add(path)
+    killEmbeddedTerminals(path)
+  }, [project?.path])
   // When focus moves to another pane, repaint the tab header from that pane's
   // last-known shell info immediately.
   useEffect(() => {
@@ -2547,19 +2573,12 @@ const OwnedProjectBody = ({
           </div>
         </div>
       ) : view === 'canvas' ? (
-        <div className="flex min-h-0 flex-1">
-          <div className="min-h-0 flex-1">
-            <ProjectCanvas
-              projectPath={project.path}
-            />
-          </div>
-          {/* Terminal-only mode: tabbed raw claude terminals to drive design
-           *  work. */}
-          <TerminalDock
-            key="dock-canvas"
+        // `min-h-0 flex-1` is load-bearing: ProjectCanvas's root is h-full
+        // w-full, so it needs a definite-height parent (the column above is
+        // `flex min-w-0 flex-1 flex-col`).
+        <div className="min-h-0 flex-1">
+          <ProjectCanvas
             projectPath={project.path}
-            context="canvas"
-            hint={t('projectPanel.canvasDockHint')}
           />
         </div>
       ) : view === 'research' ? (
@@ -2620,12 +2639,22 @@ const OwnedProjectBody = ({
       ) : loading || !data ? (
         <div className="flex-1 px-8 py-6 text-ui text-ink-subtle">{t('projectPanel.loading')}</div>
       ) : view === 'board' ? (
-        <div className="flex min-h-0 flex-1">
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        // `flex … flex-col` + `min-h-0` is load-bearing: BoardModule's own root
+        // is `flex min-h-0 flex-1` and its column scrolling depends on a
+        // bounded-height parent.
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <BoardModule
           data={data}
           project={project}
           persist={persist}
+          // The Board's swarm surfaces (worker strip, commander strip,
+          // needs-you badge, the board-wide honesty line) are the SAME
+          // owner-only experiment as the Swarm tab, so they ask the SAME
+          // registry predicate — one rule, in one place. Without it a
+          // non-swarm account would see swarm vocabulary on its cards.
+          // BoardModule re-checks this at every render site; the server's owner
+          // gate on /api/swarm/* is a separate, outer wall.
+          swarmVisible={isModuleIdVisible('swarm', moduleGate)}
           detailId={boardDetailId}
           onOpenDetail={setBoardDetailId}
           // Surface Project Settings right on the Board toolbar (the ⋯ menu
@@ -2678,17 +2707,6 @@ const OwnedProjectBody = ({
             )
           }}
         />
-          </div>
-          {/* Plain raw-claude terminal sidebar for the Board (same dock as
-           *  Canvas). No board context is injected — it's just `claude` in
-           *  the project dir, like opening a terminal here. Distinct key +
-           *  context so it never shares state with the canvas dock. */}
-          <TerminalDock
-            key="dock-board"
-            projectPath={project.path}
-            context="board"
-            hint={t('projectPanel.boardDockHint')}
-          />
         </div>
       ) : null}
       </div>

@@ -742,13 +742,31 @@ export const PersonaModule = () => {
         provenance={provenance}
       />
 
-      {/* ── the mark + what the stand-in is actually reading ── */}
-      <div className="pointer-events-none absolute left-6 top-5 z-10 flex max-w-[min(360px,60%)] flex-col gap-1.5">
-        <div className="pointer-events-auto flex items-center gap-3">
-          <span className="label-cap tracking-cartographic text-ink-onDeep/60">
-            {t('persona.tabLabel')}
-          </span>
-          <StageButton onClick={() => openComposer(null)}>{t('persona.add.open')}</StageButton>
+      {/* ── ONE COLUMN: what this place is → what it has learned → the courses ──
+       *  Everything the reader acts on lives here, in the order they need it.
+       *  (2026-08-15: the courses used to sit in the opposite corner from their
+       *  own results.) It is bounded by the stage and scrolls INSIDE itself, so
+       *  a long column never turns the stage into a page — the figure is the
+       *  screen, and it must not move. */}
+      <div className="pointer-events-none absolute bottom-6 left-6 top-5 z-10 flex max-w-[min(360px,60%)] flex-col gap-4 overflow-y-auto pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div className="flex flex-col gap-1.5">
+          <div className="pointer-events-auto flex items-center gap-3">
+            <span className="label-cap tracking-cartographic text-ink-onDeep/60">
+              {t('persona.tabLabel')}
+            </span>
+            <StageButton onClick={() => openComposer(null)}>{t('persona.add.open')}</StageButton>
+          </div>
+
+          {/* WHAT THIS SCREEN IS, in two lines, always (owner, 2026-08-15:
+           *  「何をするものなのかさっぱりわかりません」). It says the purpose and
+           *  the consequence of answering — the two things a first-time reader
+           *  needs and the figure alone cannot tell them. Kept to two lines
+           *  because a paragraph here would be a manual, and the owner has
+           *  asked repeatedly for less text on this stage, not more. */}
+          <p className="text-ui leading-relaxed text-ink-onDeep/75">{t('persona.intro.lead')}</p>
+          <p className="text-meta leading-relaxed text-ink-onDeep/45">
+            {t('persona.intro.leadSub')}
+          </p>
         </div>
 
         {/* ── the portrait: 「で、私はどういう人?」, answered at a glance ──
@@ -820,6 +838,102 @@ export const PersonaModule = () => {
             <StageButton onClick={() => void load()}>{t('persona.retry')}</StageButton>
           </div>
         )}
+        {/* ── the diagnostic courses, in the SAME column as their results ──
+         *  They used to sit alone in the bottom-left corner, a screen away from
+         *  the lines they produce (owner, 2026-08-15: 「UIがばらけていてわかりづらい」).
+         *  A course and what it said about you are one thought; splitting them
+         *  across two corners made the reader carry it. */}
+        <section aria-label={t('persona.course.railHeading')} className="flex flex-col gap-2">
+          <p className="label-cap text-ink-onDeep/45">{t('persona.course.railHeading')}</p>
+          {coursesError ? (
+            <div className="flex items-center gap-2 text-meta text-ink-onDeep/70">
+              <span>{t('persona.loadFailed')}</span>
+              <StageButton onClick={() => void loadCourses()}>{t('persona.retry')}</StageButton>
+            </div>
+          ) : (
+            <div className="flex flex-col items-start gap-2">
+              {courses.map((c) => {
+                const state = courseRailState(c, run?.course.id ?? null)
+                // `moss-text` is a card colour and flips with the theme, so the
+                // "already taken" state is carried by the BORDER and by
+                // brightness in the line — both readable on a stage that stays
+                // dark in either theme.
+                const metaLine =
+                  state === 'running'
+                    ? t('persona.course.state.running', {
+                        index: (run?.answers.length ?? 0) + 1,
+                        total: c.itemCount,
+                      })
+                    : state === 'done'
+                      ? openingCourse === c.id
+                        ? t('persona.course.opening')
+                        : t('persona.course.state.done', {
+                            date: formatDay(c.lastTakenAt, lang) ?? '',
+                          })
+                      : t('persona.course.state.new', {
+                          count: c.itemCount,
+                          zone: zoneLabel(asZone(c.zone)),
+                        })
+
+                // A FINISHED course carries two different offers, and folding
+                // them into one row is what made the result unreachable: the row
+                // itself reads it back, and a narrow 「もう一度」 beside it starts
+                // a fresh take without going through the sheet first. Two real
+                // buttons rather than one button with a menu — the whole rail is
+                // four rows, and a person who wants to re-take should not have to
+                // read their old result to get there.
+                if (state === 'done') {
+                  return (
+                    <div
+                      key={c.id}
+                      className="flex min-w-[210px] items-stretch overflow-hidden rounded-[3px] border border-moss/40"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => void openCourseResult(c)}
+                        className="flex-1 px-3 py-2 text-left transition-colors hover:bg-accent/10"
+                      >
+                        <span className="block text-ui text-ink-onDeep/80">{c.name}</span>
+                        <span className="mt-0.5 block text-meta text-ink-onDeep/65">{metaLine}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => startCourse(c.id)}
+                        // Named with the course, because four rows of a bare
+                        // 「もう一度」 tell a screen reader nothing about which.
+                        aria-label={t('persona.course.retakeAria', { name: c.name })}
+                        className="whitespace-nowrap border-l border-moss/40 px-2.5 text-meta text-ink-onDeep/60 transition-colors hover:bg-accent/10 hover:text-ink-onDeep"
+                      >
+                        {t('persona.course.retake')}
+                      </button>
+                    </div>
+                  )
+                }
+
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => (state === 'running' ? quitCourse() : startCourse(c.id))}
+                    className={`min-w-[210px] rounded-[3px] border px-3 py-2 text-left transition-colors ${
+                      state === 'running'
+                        ? 'border-accent bg-accent/10 text-ink-onDeep'
+                        : 'border-line text-ink-onDeep/80 hover:border-accent hover:text-ink-onDeep'
+                    }`}
+                  >
+                    <span className="block text-ui">{c.name}</span>
+                    <span className="mt-0.5 block text-meta text-ink-onDeep/50">{metaLine}</span>
+                  </button>
+                )
+              })}
+              {historyError && (
+                <p className="max-w-[210px] text-meta leading-relaxed text-ink-onDeep/70">
+                  {t('persona.course.historyFailed')}
+                </p>
+              )}
+            </div>
+          )}
+        </section>
       </div>
 
       {/* ── what the stand-in DID, this week ──
@@ -969,99 +1083,6 @@ export const PersonaModule = () => {
         )}
       </div>
 
-      {/* ── the course rail ── */}
-      <div className="absolute bottom-6 left-6 z-10 flex flex-col gap-2">
-        <p className="label-cap text-ink-onDeep/45">{t('persona.course.railHeading')}</p>
-        {coursesError ? (
-          <div className="flex items-center gap-2 text-meta text-ink-onDeep/70">
-            <span>{t('persona.loadFailed')}</span>
-            <StageButton onClick={() => void loadCourses()}>{t('persona.retry')}</StageButton>
-          </div>
-        ) : (
-          <div className="flex max-w-[62%] flex-wrap gap-2 sm:max-w-none sm:flex-col sm:items-start">
-            {courses.map((c) => {
-              const state = courseRailState(c, run?.course.id ?? null)
-              // `moss-text` is a card colour and flips with the theme, so the
-              // "already taken" state is carried by the BORDER and by
-              // brightness in the line — both readable on a stage that stays
-              // dark in either theme.
-              const metaLine =
-                state === 'running'
-                  ? t('persona.course.state.running', {
-                      index: (run?.answers.length ?? 0) + 1,
-                      total: c.itemCount,
-                    })
-                  : state === 'done'
-                    ? openingCourse === c.id
-                      ? t('persona.course.opening')
-                      : t('persona.course.state.done', {
-                          date: formatDay(c.lastTakenAt, lang) ?? '',
-                        })
-                    : t('persona.course.state.new', {
-                        count: c.itemCount,
-                        zone: zoneLabel(asZone(c.zone)),
-                      })
-
-              // A FINISHED course carries two different offers, and folding
-              // them into one row is what made the result unreachable: the row
-              // itself reads it back, and a narrow 「もう一度」 beside it starts
-              // a fresh take without going through the sheet first. Two real
-              // buttons rather than one button with a menu — the whole rail is
-              // four rows, and a person who wants to re-take should not have to
-              // read their old result to get there.
-              if (state === 'done') {
-                return (
-                  <div
-                    key={c.id}
-                    className="flex min-w-[210px] items-stretch overflow-hidden rounded-[3px] border border-moss/40"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => void openCourseResult(c)}
-                      className="flex-1 px-3 py-2 text-left transition-colors hover:bg-accent/10"
-                    >
-                      <span className="block text-ui text-ink-onDeep/80">{c.name}</span>
-                      <span className="mt-0.5 block text-meta text-ink-onDeep/65">{metaLine}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => startCourse(c.id)}
-                      // Named with the course, because four rows of a bare
-                      // 「もう一度」 tell a screen reader nothing about which.
-                      aria-label={t('persona.course.retakeAria', { name: c.name })}
-                      className="whitespace-nowrap border-l border-moss/40 px-2.5 text-meta text-ink-onDeep/60 transition-colors hover:bg-accent/10 hover:text-ink-onDeep"
-                    >
-                      {t('persona.course.retake')}
-                    </button>
-                  </div>
-                )
-              }
-
-              return (
-                <button
-                  key={c.id}
-                  type="button"
-                  onClick={() => (state === 'running' ? quitCourse() : startCourse(c.id))}
-                  className={`min-w-[210px] rounded-[3px] border px-3 py-2 text-left transition-colors ${
-                    state === 'running'
-                      ? 'border-accent bg-accent/10 text-ink-onDeep'
-                      : 'border-line text-ink-onDeep/80 hover:border-accent hover:text-ink-onDeep'
-                  }`}
-                >
-                  <span className="block text-ui">{c.name}</span>
-                  <span className="mt-0.5 block text-meta text-ink-onDeep/50">{metaLine}</span>
-                </button>
-              )
-            })}
-            {historyError && (
-              <p className="max-w-[210px] text-meta leading-relaxed text-ink-onDeep/70">
-                {t('persona.course.historyFailed')}
-              </p>
-            )}
-          </div>
-        )}
-      </div>
-
       {/* The figure is pannable and zoomable, and nothing about a field of dots
        *  says so. One quiet line, only where there is room for it. */}
       <p className="pointer-events-none absolute bottom-7 left-1/2 z-10 hidden -translate-x-1/2 text-meta text-ink-onDeep/35 xl:block">
@@ -1154,6 +1175,18 @@ export const PersonaModule = () => {
           </>
         ) : questionLoaded && question ? (
           <>
+            {/* THE SETTING FIRST (2026-08-15). The question quotes fragments of
+             *  something that happened days ago; read cold, those quotes are
+             *  noise. This line says when it was and what kind of moment it
+             *  was, so the question below has a world to sit in. Quieter and
+             *  above — it is what you read to understand the question, not the
+             *  thing being asked. Absent on questions written by an older
+             *  build, and simply omitted then. */}
+            {(lang === 'ja' ? question.contextJa : question.contextEn) && (
+              <p className="text-meta leading-relaxed text-ink-muted">
+                {lang === 'ja' ? question.contextJa : question.contextEn}
+              </p>
+            )}
             <p className="text-ui font-semibold leading-relaxed text-ink">
               {lang === 'ja' ? question.textJa : question.textEn}
             </p>

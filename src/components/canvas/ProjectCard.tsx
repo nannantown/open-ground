@@ -15,7 +15,11 @@ interface Props {
   active?: boolean
   /** Live claude session in this project: 'working' → moss "Running" edge
    *  bar + stamp, 'waiting' → amber "Waiting" (claude is sitting on you).
-   *  Undefined = no claude session (plain shells show nothing). */
+   *  'idle' → NOTHING: the session is live but parked at its prompt, which is
+   *  a fact about the machine and not a claim on your attention. (Before that
+   *  value existed, every parked desk drew the amber stamp — three cards read
+   *  WAITING with every task done. An alarm that is usually wrong is worse
+   *  than no alarm.) Undefined = no claude session at all. */
   claudeStatus?: ClaudeBeaconStatus
   /** Audio from this project is playing somewhere in the app (the Songs
    *  custom tab's embedded player) → a "Playing" EQ stamp on the bottom

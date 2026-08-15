@@ -62,6 +62,9 @@ const h = vi.hoisted(() => ({
   managerPresence: undefined as string | undefined,
   orchOk: true,
   orchStatus: 200,
+  escalations: [] as Array<Record<string, unknown>>,
+  escOk: true,
+  escStatus: 200,
 }))
 
 vi.mock('@/lib/api-client', () => ({
@@ -109,6 +112,18 @@ vi.mock('@/lib/api-client', () => ({
                 }),
             }),
         },
+        // Open-escalations poll → the per-card "needs you" badge. Present even
+        // in the suites that don't exercise it: without it the typed client
+        // lookup throws and every test in the file would go red for a reason
+        // that has nothing to do with what it asserts.
+        escalations: {
+          $get: () =>
+            Promise.resolve({
+              ok: h.escOk,
+              status: h.escStatus,
+              json: () => Promise.resolve({ escalations: h.escalations }),
+            }),
+        },
       },
     },
   },
@@ -144,6 +159,10 @@ const renderDrawer = () => {
       liveTerminalId={() => null}
       onDeleteTask={vi.fn()}
       onLaunchTask={vi.fn(async () => ({ ok: true }))}
+      // Every swarm surface on the Board is gated on the swarm experiment and
+      // the prop is fail-closed, so a suite about swarm surfaces must open it
+      // explicitly. The gate's own guards live in BoardModule.activity.test.tsx.
+      swarmVisible
     />,
   )
   return utils
@@ -180,6 +199,9 @@ beforeEach(() => {
   h.managerPresence = undefined
   h.orchOk = true
   h.orchStatus = 200
+  h.escalations = []
+  h.escOk = true
+  h.escStatus = 200
   vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({}) })))
 })
 afterEach(() => {
@@ -295,6 +317,7 @@ describe('BoardModule board — commander strip gates (review column)', () => {
         liveTerminalId={() => null}
         onDeleteTask={vi.fn()}
         onLaunchTask={vi.fn(async () => ({ ok: true }))}
+        swarmVisible
       />,
     )
 

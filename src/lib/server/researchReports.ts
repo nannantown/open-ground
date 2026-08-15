@@ -7,10 +7,12 @@
 //   - The ROUTE has already run validateProjectPath on the project root (the
 //     registry allowlist — CONTRACT §3.3).
 //   - THIS module then confines everything to <project>/docs/research/:
-//     filenames are a strict charset (no separators ⇒ no traversal by
+//     each path segment is checked (no separators ⇒ no traversal by
 //     construction), every candidate is realpath'd and must resolve UNDER the
 //     real reports dir (the symlink-escape guard), and only regular files are
 //     read (a FIFO would wedge the libuv pool — projectSkills' lesson).
+//     Directories are descended EXACTLY one level, so rendering a tab can
+//     never become an unbounded walk of a repo that nests.
 //   - Read-only. Nothing here writes, so the worst a hostile repo can do is
 //     show the user their own file.
 
@@ -20,10 +22,35 @@ import type { ResearchReportMeta } from '../types'
 
 const REPORTS_SUBDIR = ['docs', 'research'] as const
 
-/** Flat-name allowlist: letters/digits start, then a tame middle, `.md` end.
- *  No path separators can match, so traversal is impossible by construction —
- *  the realpath containment below is the second, independent layer. */
-const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,200}\.md$/
+/** ONE path segment that is safe to join. Rejects, by construction: path
+ *  separators, NUL and control characters, a leading dot (hidden files, and
+ *  `.`/`..` with them), and anything absurdly long.
+ *
+ *  ⚠ It does NOT restrict the alphabet, and that is the point (fixed
+ *  2026-08-15 after a real report never appeared in the tab). The old rule was
+ *  an ASCII allowlist, so a report named in Japanese — the overwhelmingly
+ *  likely case for this owner, and what the /research skill's `<slug>` becomes
+ *  when the card is Japanese — was silently skipped. The tab then said
+ *  「まだ調査レポートはありません」, which is indistinguishable from "no research
+ *  ran". A filter whose failure mode is a lie is worse than no filter.
+ *
+ *  The security claim is unchanged: no separator can match, so traversal is
+ *  impossible here, and the realpath containment below is the second,
+ *  independent layer that does not depend on this regex being right. */
+// eslint-disable-next-line no-control-regex -- excluding control chars is the point
+const SAFE_SEGMENT = /^[^.\/\\\u0000-\u001f\u007f][^\/\\\u0000-\u001f\u007f]{0,200}$/
+
+/** A report id as it crosses the wire: `name.md`, or `sub/name.md` ONE level
+ *  deep. Workers do file things to directories — a report filed under
+ *  `docs/research/<topic>/` was the other way this went silently missing. */
+const MD_SUFFIX = /\.md$/i
+
+const isSafeReportId = (id: string): boolean => {
+  const parts = id.split('/')
+  if (parts.length < 1 || parts.length > 2) return false
+  if (!parts.every((p) => SAFE_SEGMENT.test(p))) return false
+  return MD_SUFFIX.test(parts[parts.length - 1])
+}
 
 const MAX_REPORTS = 500
 const TITLE_READ_BYTES = 8 * 1024
@@ -57,39 +84,64 @@ export const listResearchReports = async (
   }
 
   const out: ResearchReportMeta[] = []
-  for (const e of entries) {
-    if (out.length >= MAX_REPORTS) break
-    if (!SAFE_NAME.test(e.name)) continue
-    const p = join(dir, e.name)
+
+  /** Index one candidate `id` (`name.md` or `sub/name.md`). Every skip here is
+   *  silent BY NECESSITY (a weird tree must not break the tab) — which is
+   *  exactly why the id rule above must not be narrower than reality. */
+  const consider = async (id: string): Promise<void> => {
+    if (out.length >= MAX_REPORTS) return
+    if (!isSafeReportId(id)) return
     // Symlink-escape guard: whatever the entry is, the file we read must
     // RESOLVE under the real reports dir.
     let real: string
     try {
-      real = await realpath(p)
+      real = await realpath(join(dir, id))
     } catch {
-      continue
+      return
     }
-    if (real !== realDir && !real.startsWith(realDir + sep)) continue
+    if (real !== realDir && !real.startsWith(realDir + sep)) return
     let st
     try {
       st = await stat(real)
     } catch {
-      continue
+      return
     }
-    if (!st.isFile()) continue
+    if (!st.isFile()) return
     let title: string | null = null
     try {
       const buf = await readFile(real)
       title = titleFrom(buf.subarray(0, TITLE_READ_BYTES).toString('utf8'))
     } catch {
-      continue
+      return
     }
     out.push({
-      file: e.name,
-      title: title ?? e.name.replace(/\.md$/, ''),
+      file: id,
+      title: title ?? id.split('/').pop()!.replace(MD_SUFFIX, ''),
       mtime: st.mtimeMs,
       size: st.size,
     })
+  }
+
+  for (const e of entries) {
+    if (out.length >= MAX_REPORTS) break
+    // A DIRECTORY is descended exactly one level — no deeper, so a repo that
+    // nests cannot turn a tab render into an unbounded walk.
+    if (e.isDirectory()) {
+      if (!SAFE_SEGMENT.test(e.name)) continue
+      let sub
+      try {
+        sub = await readdir(join(dir, e.name), { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const s of sub) {
+        if (out.length >= MAX_REPORTS) break
+        if (s.isDirectory()) continue
+        await consider(`${e.name}/${s.name}`)
+      }
+      continue
+    }
+    await consider(e.name)
   }
   out.sort((a, b) => b.mtime - a.mtime)
   return out
@@ -101,7 +153,7 @@ export const readResearchReport = async (
   projectPath: string,
   file: string,
 ): Promise<string> => {
-  if (!SAFE_NAME.test(file)) throw new Error('not a research report name')
+  if (!isSafeReportId(file)) throw new Error('not a research report name')
   const dir = researchReportsDir(projectPath)
   const realDir = await realpath(dir) // throws when the dir is absent
   const real = await realpath(join(dir, file))

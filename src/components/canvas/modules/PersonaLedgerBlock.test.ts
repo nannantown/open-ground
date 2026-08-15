@@ -165,7 +165,6 @@ describe('the ledger vocabulary vs the server contract', () => {
       'persona.ledger.confidence.low',
       'persona.ledger.label',
       'persona.ledger.week',
-      'persona.ledger.empty',
       'persona.ledger.last',
       'persona.ledger.detail.heading',
       'persona.ledger.ownerAnswered',

@@ -85,6 +85,8 @@ const question = (over: Partial<PersonaQuestion> = {}): PersonaQuestion => ({
   date: '2026-07-19',
   kind: 'card-rework',
   subjectKey: 'card-rework:card-1:2',
+  contextJa: 'Board のカードを、できあがりに納得がいかず差し戻したときの話です。',
+  contextEn: 'About a card on your board that you sent back rather than accepting.',
   textJa: '「課金フロー」を2回やり直してもらいました — 何が足りなかったのですか?',
   textEn: 'You sent "billing flow" back 2 times — what kept being missing?',
   createdAt: '2026-07-19T03:00:00.000Z',
@@ -895,6 +897,29 @@ describe('PersonaModule — the courses', () => {
     expect(screen.queryByText('persona.result.mintedPartial')).toBeNull()
   })
 
+  it('shows the SETTING above the question — the quotes never arrive naked', async () => {
+    // The complaint that produced this (owner, 2026-08-15): the question read
+    // as two quotes with no world around them. The server now sends a sentence
+    // that says when it was and what kind of moment it was; if the screen
+    // silently drops it, the owner is back to reading a fragment.
+    questionPayload = question()
+    render(<PersonaModule />)
+
+    const setting = await screen.findByText(question().contextEn!)
+    const asked = screen.getByText(question().textEn)
+    expect(setting).toBeTruthy()
+    // ABOVE, not beside or below: it is what you read to understand the ask.
+    expect(setting.compareDocumentPosition(asked) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('a question from an OLDER build, with no setting, still renders', async () => {
+    // `context*` is optional precisely so a question written before this
+    // existed stays answerable rather than blanking the corner.
+    questionPayload = question({ contextJa: undefined, contextEn: undefined })
+    render(<PersonaModule />)
+    expect(await screen.findByText(question().textEn)).toBeTruthy()
+  })
+
   it('quitting a course sends nothing and gives the day’s question back', async () => {
     questionPayload = question()
     render(<PersonaModule />)
@@ -1062,20 +1087,20 @@ describe('PersonaModule — the decision ledger', () => {
     expect(text).not.toContain('10')
   })
 
-  it('says plainly that nothing has been recorded — it never pads it into counts', async () => {
+  it('shows NOTHING at all when nothing has been recorded — no counts, no placeholder', async () => {
     // An all-zero ledger is a first run. "0 · 0 · 0" reads as a dashboard that
-    // is measuring something; the honest version is one line that invites.
+    // is measuring something; a line promising what will appear here one day
+    // explains a feature the reader has no way to want yet (owner, 2026-08-15).
+    // The corner stays empty until the stand-in has actually decided something.
     ledgerPayload = ledgerOf({ week: counts(0, 0, 0), total: counts(0, 0, 0), lastAt: null })
     render(<PersonaModule />)
 
-    await screen.findByText('persona.ledger.empty')
-    const text = ledgerBlock().textContent ?? ''
-    expect(text).not.toContain('persona.ledger.answered')
-    expect(text).not.toContain('persona.ledger.asked')
-    expect(text).not.toContain('persona.ledger.abstained')
-    // Nothing to open, so nothing offers to open: a control that leads to an
-    // empty list is a broken promise.
-    expect(within(ledgerBlock()).queryByRole('button')).toBeNull()
+    // The REST of the screen is up — so this asserts absence, not a slow load.
+    await screen.findByText('persona.intro.lead')
+    expect(screen.queryByLabelText('persona.ledger.label')).toBeNull()
+    const body = document.body.textContent ?? ''
+    expect(body).not.toContain('persona.ledger.answered')
+    expect(body).not.toContain('persona.ledger.week')
   })
 
   it('an idle WEEK is zeros plus the day it last acted — not the empty-ledger line', async () => {
@@ -1091,7 +1116,6 @@ describe('PersonaModule — the decision ledger', () => {
     const text = ledgerBlock().textContent ?? ''
     expect(text).toContain('0persona.ledger.answered')
     expect(text).toContain(`persona.ledger.last:{"date":"${dayLabel('2026-08-02T09:00:00.000Z')}"}`)
-    expect(screen.queryByText('persona.ledger.empty')).toBeNull()
   })
 
   it('opens the decisions themselves: what it did, to what question, and why', async () => {
@@ -1213,7 +1237,6 @@ describe('PersonaModule — the decision ledger', () => {
     expect(await screen.findByText('persona.tabLabel')).toBeTruthy()
     expect(await screen.findByText('persona.course.railHeading')).toBeTruthy()
     expect(screen.queryByRole('region', { name: 'persona.ledger.label' })).toBeNull()
-    expect(screen.queryByText('persona.ledger.empty')).toBeNull()
   })
 
   it('a ledger that could not be read says NOTHING — not that nothing happened', async () => {
@@ -1224,7 +1247,6 @@ describe('PersonaModule — the decision ledger', () => {
 
     expect(await screen.findByText('persona.course.railHeading')).toBeTruthy()
     expect(screen.queryByRole('region', { name: 'persona.ledger.label' })).toBeNull()
-    expect(screen.queryByText('persona.ledger.empty')).toBeNull()
     expect(screen.queryByText('persona.ledger.week')).toBeNull()
   })
 

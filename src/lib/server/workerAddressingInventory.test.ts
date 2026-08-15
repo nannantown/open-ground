@@ -427,6 +427,7 @@ const POOL_API: Record<string, 'pool' | 'pure'> = {
   unregisterFlowStream: 'pool',
   // ── pure ──
   WORKING_SILENCE_MS: 'pure',
+  JUST_HANDED_BACK_MS: 'pure',
   TERMINAL_LINGER_SWEEP_MS: 'pure',
   TERMINAL_SWEEP_INTERVAL_MS: 'pure',
   FLOW_HIGH_WATERMARK: 'pure',
@@ -796,7 +797,7 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   'src/lib/server/swarmSupply.ts': {
     tier: 'pty-only-by-design',
     why: 'The supply desk is deliberately kept on the PTY runtime (docs/commander/00-INDEX.md: it is the outside phone line that must survive the commander moving to SDK, where the remote control disappears). 0803: it also OWNS stopping its desks (stopSwarmSupplyDesks — kill by desk label), so the route layer never reaches the PTY pool directly.',
-    ptyFns: ['killTerminal', 'listLiveDesksIn'],
+    ptyFns: ['killTerminal', 'listLiveDesksIn', 'isTerminalProcessAlive'],
   },
 
   // ── one-off utility PTYs: each spawns its own claude, reads it, kills it ──
@@ -882,6 +883,16 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   'src/components/canvas/modules/BoardModule.tsx': {
     tier: 'runtime-dispatched',
     why: "The card drawer's 実行 launch records whichever handle came back, and pane matching compares handles rather than assuming a PTY.",
+    ptyFns: [],
+  },
+  'src/components/canvas/modules/useSupplyDesk.ts': {
+    tier: 'pty-only-by-design',
+    why: "The ONE supply desk's state + launch/stop/restart, shared by the Swarm tab and the Board's front-desk seat (two surfaces, one desk, one stored record). The supply desk is deliberately PTY-only — it is the outside phone line that must survive the commander moving to SDK, where remote control disappears — so terminalId IS its whole address here. It reaches no worker at all.",
+    ptyFns: [],
+  },
+  'src/components/canvas/modules/BoardSupplyDock.tsx': {
+    tier: 'pty-only-by-design',
+    why: "The Board's front-desk seat. The desk it attaches to is the SUPPLY desk, which is deliberately PTY-only (docs/commander/00-INDEX.md: it is the outside phone line that must survive the commander moving to SDK). Its WORKER monitor beside it never touches a handle directly — it addresses every worker through engineWorkerKey, which is total over both runtimes.",
     ptyFns: [],
   },
   'src/components/canvas/modules/SdkWorkerPane.tsx': {
@@ -1602,10 +1613,25 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
     count: 1,
     why: 'Builds the /api/terminal/:id/paste-custom-module URL for a custom tab, which is a PTY terminal pane by construction — there is no SDK equivalent of a custom module desk.',
   },
+  'src/components/canvas/modules/BoardSupplyDock.tsx::map-keyed': {
+    tier: 'pty-only-by-design',
+    count: 3,
+    why: "The dock's own exitedIds set and the live-beacon map, keyed by the SUPPLY desk's terminalId. That desk is PTY-only by design, so there is no SDK handle this could ever have to carry; the fleet monitor in the same file addresses WORKERS through engineWorkerKey instead, which is total over both runtimes.",
+  },
+  'src/components/canvas/modules/useSupplyDesk.ts::map-keyed': {
+    tier: 'pty-only-by-design',
+    count: 1,
+    why: "The desk-reconcile's storedDead probe — does the caller's exitedIds hold the STORED supply desk's id. Same reason as the dock above: the supply desk is PTY-only, so terminalId IS its whole address. (This is the supply half of what SwarmModule.tsx::map-keyed used to declare; it moved here with the hook, and SwarmModule's count dropped by one to match.)",
+  },
+  'src/components/canvas/modules/useSupplyDesk.ts::compared': {
+    tier: 'pty-only-by-design',
+    count: 2,
+    why: "Two PTY-scoped identity tests on the supply desk, which has no SDK form: the persisted record's shape check on rehydrate (`typeof r.terminalId !== 'string'` ⇒ reject), and the just-stopped guard that refuses to re-adopt the one handle the owner just asked to die (without it, 停止 loses to the next poll).",
+  },
   'src/components/canvas/modules/SwarmModule.tsx::map-keyed': {
     tier: 'pty-only-by-design',
-    count: 6,
-    why: "statusOfPty's own three maps (exitedIds / statusByPty / seenRef). The name says the scope: an SDK desk's status comes from the SDK pane's own stream, and feeding '' in here would read the PTY map's absent entry as 'starting' forever. 0803 (+2): the desk-reconcile effect asks exitedIds whether the STORED desk is confirmed dead before clearing it — the manager probe uses `terminalId || sdkSessionId` (both-runtime, the empty-string invariant makes the fallback correct) and the supply probe uses terminalId alone (that desk is PTY-only by design).",
+    count: 5,
+    why: "statusOfPty's own three maps (exitedIds / statusByPty / seenRef). The name says the scope: an SDK desk's status comes from the SDK pane's own stream, and feeding '' in here would read the PTY map's absent entry as 'starting' forever. 0803 (+2): the desk-reconcile effect asks exitedIds whether the STORED desk is confirmed dead before clearing it — the manager probe uses `terminalId || sdkSessionId` (both-runtime, the empty-string invariant makes the fallback correct). 0815 (6 → 5): the SUPPLY probe left with the desk itself — its state moved into useSupplyDesk so the Board's front-desk seat and this tab drive ONE record, and its declaration moved with it.",
   },
   'server/routes/swarm.ts::interpolated': {
     tier: 'runtime-dispatched',
@@ -1619,8 +1645,8 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
   },
   'src/components/canvas/modules/SwarmModule.tsx::compared': {
     tier: 'pty-only-by-design',
-    count: 2,
-    why: "The same shape check on a persisted record being rehydrated (`typeof r.terminalId !== 'string'` ⇒ reject). The SDK branch immediately below demands sdkSessionId for an 'sdk' record, which is the identity half.",
+    count: 1,
+    why: "The same shape check on a persisted record being rehydrated (`typeof r.terminalId !== 'string'` ⇒ reject). The SDK branch immediately below demands sdkSessionId for an 'sdk' record, which is the identity half. 0815 (2 → 1): the SUPPLY record's copy of that check moved to useSupplyDesk with the desk it belongs to.",
   },
 
   // ── asks the identity question correctly, over BOTH runtimes ──
@@ -1636,8 +1662,8 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
   },
   'src/components/canvas/modules/BoardModule.tsx::compared': {
     tier: 'runtime-dispatched',
-    count: 1,
-    why: "The board's re-render suppressor, comparing BOTH handles. With terminalId alone it answered `'' === ''` for every SDK worker, so a card whose worker was replaced by a new SDK session kept the stale record and the drawer addressed a dead id.",
+    count: 2,
+    why: "The board's re-render suppressor, comparing BOTH handles. With terminalId alone it answered `'' === ''` for every SDK worker, so a card whose worker was replaced by a new SDK session kept the stale record and the drawer addressed a dead id. 0815 (+1): the same suppressor for the published SUPPLY desk handle — that desk is PTY-only, and the comparison is on `handleId`, the runtime-neutral name the wire uses, with `runtime` compared beside it.",
   },
   'src/components/canvas/modules/BoardModule.tsx::map-keyed': {
     tier: 'display-only',

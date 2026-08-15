@@ -123,15 +123,20 @@ export const PersonaLedgerBlock = ({ summary, lastLabel, onOpen }: PersonaLedger
   // to answer.
   const week = summary.week
   const total = summary.total
-  // The ONLY state allowed to replace the counts: nothing has ever been
-  // recorded. A week of zeros over a ledger that HAS entries is a real answer to
-  // 「今週何回?」 and is printed as zeros.
-  const nothingYet = total.answered + total.asked + total.abstained === 0
   const weekTotal = week.answered + week.asked + week.abstained
 
-  const body = nothingYet ? (
-    <p className="text-meta leading-relaxed text-ink-onDeep/55">{t('persona.ledger.empty')}</p>
-  ) : (
+  // NOTHING RECORDED ⇒ NO BLOCK (2026-08-15, owner: 「意味不明。いらないなら消そう」).
+  // It used to print a placeholder line promising what would appear here one
+  // day. On a machine where the stand-in has never decided anything — which is
+  // every machine on day one — that line was the ONLY thing in the corner, and
+  // it explained a feature the reader had no way to want yet. A screen earns
+  // attention by showing what exists; a promise is not a thing that exists.
+  //
+  // A week of zeros over a ledger that HAS entries is different, and still
+  // renders: that is a real answer to 「今週何回?」.
+  if (total.answered + total.asked + total.abstained === 0) return null
+
+  const body = (
     <>
       <span className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
         <Stat n={week.answered} label={t('persona.ledger.answered')} />

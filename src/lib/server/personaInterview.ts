@@ -315,6 +315,19 @@ export const gatherMaterial = async (): Promise<InterviewMaterial> => {
 interface Candidate {
   kind: PersonaQuestionKind
   subjectKey: string
+  /** THE SETTING, one sentence, rendered ABOVE the question (2026-08-15).
+   *
+   *  Without it the question was a pair of quotes with no world around them —
+   *  「『Contents interrupted. どうしますか?』に『何が使えなかった?』と答えました」
+   *  is unreadable to the person being asked, and they are the only person it
+   *  is for. The preamble says WHEN it happened and WHAT KIND of moment it was,
+   *  so the quotes land in a scene instead of arriving naked.
+   *
+   *  ⚠ Never a project NAME — see BoardCard: this module carries ids, not
+   *  names, and re-introducing one here would set that trap for the next
+   *  detector. "When, and what kind of moment" is enough to place a memory. */
+  contextJa: string
+  contextEn: string
   textJa: string
   textEn: string
 }
@@ -327,6 +340,29 @@ interface Candidate {
  *  permanently while the runners-up sat unasked. Ten parked cards produced one
  *  question, ever. Ranked lists let the picker fall through to the next real
  *  observation instead. */
+/** 「いつの話か」 for a preamble, from an ISO stamp. Absent/unparseable ⇒ null,
+ *  and the caller drops the clause rather than inventing a day — a preamble
+ *  that misdates a memory is worse than one that does not date it. */
+const agoJa = (iso: string | undefined, nowMs: number): string | null => {
+  if (!iso) return null
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return null
+  const d = days(Math.max(0, nowMs - t))
+  return d <= 0 ? '今日' : d === 1 ? 'きのう' : d < 14 ? `${d}日前` : `${Math.floor(d / 7)}週間前`
+}
+
+const agoEn = (iso: string | undefined, nowMs: number): string | null => {
+  if (!iso) return null
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return null
+  const d = days(Math.max(0, nowMs - t))
+  return d <= 0 ? 'Today' : d === 1 ? 'Yesterday' : d < 14 ? `${d} days ago` : `${Math.floor(d / 7)} weeks ago`
+}
+
+/** Join a preamble's clauses, dropping any the record could not support. */
+const setting = (...parts: (string | null)[]): string => parts.filter(Boolean).join('、') + '。'
+const settingEn = (...parts: (string | null)[]): string => parts.filter(Boolean).join(', ') + '.'
+
 type Detector = (m: InterviewMaterial, nowMs: number) => Candidate[]
 
 const withinWindow = (iso: string | undefined, nowMs: number): boolean => {
@@ -358,6 +394,9 @@ const detectRework: Detector = (m) =>
       return {
         kind: 'card-rework' as const,
         subjectKey: `card-rework:${task.id}`,
+        // No date: nothing records WHEN a card was sent back (see the header).
+        contextJa: 'Board のカードを、できあがりに納得がいかず差し戻したときの話です。',
+        contextEn: 'About a card on your board that you sent back rather than accepting.',
         textJa:
           n === 1
             ? `「${title}」を一度やり直してもらいました — 何が足りなかったのですか?`
@@ -401,6 +440,14 @@ const detectDecisionSpeedContrast: Detector = (m, nowMs) => {
     out.push({
       kind: 'decision-speed-contrast',
       subjectKey: `decision-speed-contrast:${fast[i].e.id}:${slow[i].e.id}`,
+      contextJa: setting(
+        '作業が止まって分身があなたに判断を仰いだ相談のうち',
+        '決めるまでの早さが大きく違った2件です',
+      ),
+      contextEn: settingEn(
+        'Two moments when work stopped and your stand-in asked you to decide',
+        'one you settled at once and one you sat on',
+      ),
       textJa: `「${fastQ}」はすぐ決めて、「${slowQ}」は${heldDays}日置いてから決めました — この2つの違いは何でしたか?`,
       textEn: `You settled "${fastQ}" right away, but held "${slowQ}" for ${heldDays} day(s) — what was different about them?`,
     })
@@ -426,6 +473,8 @@ const detectStaleBlocked: Detector = (m, nowMs) =>
     .map(({ c, age }) => ({
       kind: 'card-stale-blocked' as const,
       subjectKey: `card-stale-blocked:${c.task.id}`,
+      contextJa: setting('Board で「保留」に置いたまま動いていないカードの話です'),
+      contextEn: settingEn('About a card sitting in the on-hold column of your board'),
       textJa: `${days(age)}日前に作った「${snip(c.task.title)}」が、いま保留のままです — 何を待っていますか? それとも、もう要りませんか?`,
       textEn: `"${snip(c.task.title)}", added ${days(age)} days ago, is on hold right now — what are you waiting for? Or is it no longer needed?`,
     }))
@@ -444,6 +493,16 @@ const detectLongOpen: Detector = (m, nowMs) =>
     .map(({ e, age }) => ({
       kind: 'escalation-long-open' as const,
       subjectKey: `escalation-long-open:${e.id}`,
+      contextJa: setting(
+        agoJa(e.createdAt, nowMs),
+        '作業が止まり、分身があなたに判断を仰ぎました',
+        'まだ答えていません',
+      ),
+      contextEn: settingEn(
+        agoEn(e.createdAt, nowMs),
+        'work stopped and your stand-in asked you to decide',
+        'it is still waiting',
+      ),
       textJa: `「${snip(e.plainQuestion || e.question)}」という相談に、${days(age)}日答えていません — 答えにくいのは何が引っかかっているからですか?`,
       textEn: `A question — "${snip(e.plainQuestion || e.question)}" — has gone ${days(age)} days without an answer. What is making it hard to call?`,
     }))
@@ -456,6 +515,14 @@ const detectDismissed: Detector = (m, nowMs) =>
     .map((e) => ({
       kind: 'escalation-dismissed' as const,
       subjectKey: `escalation-dismissed:${e.id}`,
+      contextJa: setting(
+        agoJa(e.dismissedAt, nowMs),
+        '分身があなたに判断を仰ぎ、あなたは答えずにその相談を閉じました',
+      ),
+      contextEn: settingEn(
+        agoEn(e.dismissedAt, nowMs),
+        'your stand-in asked you to decide and you closed the question instead',
+      ),
       textJa: `「${snip(e.plainQuestion || e.question)}」という相談を、答えずに閉じました — これは、あなたが決めることではなかったのですか?`,
       textEn: `You closed a question — "${snip(e.plainQuestion || e.question)}" — without answering it. Was it simply not yours to decide?`,
     }))
@@ -504,6 +571,10 @@ const detectPassedOver: Detector = (m, nowMs) => {
       out.push({
         kind: 'todo-passed-over',
         subjectKey: `todo-passed-over:${c.task.id}`,
+        contextJa: setting('同じ Board の未着手の列で、順番が入れ替わった2枚の話です'),
+        contextEn: settingEn(
+          'About two cards in the same board\u2019s to-do column, where the later one went first',
+        ),
         textJa: `${days(age)}日前に作った「${snip(c.task.title)}」はまだ順番待ちで、あとから作った「${snip(overtaker.o.task.title)}」が先に進みました — 順番を決めているものは何ですか?`,
         textEn: `"${snip(c.task.title)}", added ${days(age)} days ago, is still waiting while "${snip(overtaker.o.task.title)}", added later, moved ahead — what decides the order?`,
       })
@@ -526,6 +597,14 @@ const detectCorpusGap: Detector = (m, nowMs) =>
     .map((e) => ({
       kind: 'corpus-gap' as const,
       subjectKey: `corpus-gap:${e.id}`,
+      contextJa: setting(
+        agoJa(e.createdAt, nowMs),
+        '作業が止まったとき、分身は今わかっていることでは判断できないと言って、あなたに回しました',
+      ),
+      contextEn: settingEn(
+        agoEn(e.createdAt, nowMs),
+        'work stopped and your stand-in said what it knows was not enough to call it, so it passed the question to you',
+      ),
       textJa: `「${snip(e.plainQuestion || e.question)}」— ここは分身が「自分には決められない」と言った場所です。あなたなら、何を見て決めますか?`,
       textEn: `"${snip(e.plainQuestion || e.question)}" — your stand-in said it could not call this one. What would you look at to decide?`,
     }))
@@ -542,8 +621,16 @@ const detectAnswerRule: Detector = (m, nowMs) =>
     .map((e) => ({
       kind: 'escalation-answer-rule' as const,
       subjectKey: `escalation-answer-rule:${e.id}`,
-      textJa: `「${snip(e.plainQuestion || e.question)}」に「${snip((e.answer ?? '').trim())}」と答えました — 次も同じですか? それとも、このときだけの判断でしたか?`,
-      textEn: `You answered "${snip((e.answer ?? '').trim())}" to "${snip(e.plainQuestion || e.question)}" — is that the rule from here on, or was it just this once?`,
+      contextJa: setting(
+        agoJa(e.answeredAt, nowMs),
+        '作業が止まって分身があなたに判断を仰ぎ、あなたが答えました',
+      ),
+      contextEn: settingEn(
+        agoEn(e.answeredAt, nowMs),
+        'work stopped, your stand-in asked you to decide, and you answered',
+      ),
+      textJa: `聞かれたのは「${snip(e.plainQuestion || e.question)}」で、あなたの答えは「${snip((e.answer ?? '').trim())}」でした。これは次からも同じ判断になりますか? それとも、このときだけですか?`,
+      textEn: `The question was "${snip(e.plainQuestion || e.question)}", and you answered "${snip((e.answer ?? '').trim())}". Is that the rule from here on, or was it just this once?`,
     }))
 
 /** The owner let something through. `selfSupplyApproved` is set ONLY by the
@@ -557,6 +644,9 @@ const detectApproved: Detector = (m) =>
     .map(({ task }) => ({
       kind: 'card-approved' as const,
       subjectKey: `card-approved:${task.id}`,
+      // A durable FLAG, not an event: nothing records when it was set.
+      contextJa: 'Board に自動で積まれたカードを、あなたが「進めてよい」と通したときの話です。',
+      contextEn: 'About a card your swarm proposed on its own, which you let through.',
       textJa: `「${snip(task.title)}」を、進めてよいと承認しました — 通すか止めるかは、何を見て決めていますか?`,
       textEn: `You approved "${snip(task.title)}" to go ahead — what do you look at when deciding to let something through?`,
     }))
@@ -692,6 +782,8 @@ export const ensureTodayQuestion = async (
       date: today,
       kind: candidate.kind,
       subjectKey: candidate.subjectKey,
+      contextJa: candidate.contextJa,
+      contextEn: candidate.contextEn,
       textJa: candidate.textJa,
       textEn: candidate.textEn,
       createdAt: new Date(nowMs).toISOString(),
@@ -773,7 +865,7 @@ export const answerTodayQuestion = async (
       // write-back (swarmEscalations.ts), so the corpus reads as one voice and
       // the overseer needs no second parser. The DATE rides on the judgment's
       // own `addedAt`, which is what the corpus renders.
-      text: `Q: ${q.textJa}\n→ オーナーの回答: ${text}`,
+      text: `Q: ${[q.contextJa, q.textJa].filter(Boolean).join(' ')}\n→ オーナーの回答: ${text}`,
       tags: ['interview', q.kind],
       context: 'ペルソナタブ 今日の1問',
     })

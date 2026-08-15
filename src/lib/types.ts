@@ -1174,6 +1174,14 @@ export interface SpawnSwarmSupplyResponse {
    *  ⇒ a brand-new conversation — nothing persisted yet, the stored session was
    *  gone/corrupt/still open, or `fresh` was requested (swarmSessions.ts). */
   resumed: boolean
+  /** true ⇒ NOTHING was spawned: a supply desk was already live in this project,
+   *  so `terminalId` names THAT desk. The one-desk-per-project invariant
+   *  (swarmSupply.spawnSwarmSupply) — two 補給官 desks means the second spawn
+   *  mints a fresh session id and OVERWRITES the project's single stored slot,
+   *  so the first desk's days-long conversation is not skipped but FORGOTTEN
+   *  while its PTY keeps running. Absent/false ⇒ a desk was launched. An older
+   *  server never sends it; a client must read absent as false. */
+  reused?: boolean
 }
 
 /** POST /api/swarm/manager — a spawned in-app COMMANDER (司令官) CONVERSATION
@@ -2189,11 +2197,20 @@ export type PermissionMode = 'bypass' | 'plan'
 /** Activity of a `claude` PTY, derived server-side per session:
  *  - `working`: claude is actively emitting output (its TUI repaints
  *    continuously — a spinner — while it thinks/edits).
- *  - `waiting`: claude is sitting on a human — either its screen has gone
- *    silent past the working threshold (response finished, prompt idle) or a
- *    selection menu (permission prompt etc.) is detected on the settled
- *    screen. */
-export type ClaudeBeaconStatus = 'working' | 'waiting'
+ *  - `waiting`: claude is sitting on A HUMAN — a selection menu (permission
+ *    prompt etc.) is open on the settled screen, or it stopped working only
+ *    moments ago and has just handed the turn back.
+ *  - `idle`: LIVE but not working and not blocked on anyone — a session parked
+ *    at its prompt with nothing pending.
+ *
+ *  ⚠ `idle` exists because the two-value version LIED (fixed 2026-08-15). It
+ *  had no third answer, so "not working" collapsed into `waiting`, and every
+ *  long-parked desk — a commander between passes, a supply seat that has said
+ *  「積みたい要望をどうぞ」, a terminal someone left open — reported that it was
+ *  sitting on the human. The owner saw three Ground cards stamped WAITING with
+ *  every task done. An amber "your turn" that is usually wrong is worse than no
+ *  stamp: it trains the reader to ignore the one that is right. */
+export type ClaudeBeaconStatus = 'working' | 'waiting' | 'idle'
 
 /** One live claude-tagged PTY: its pool id, cwd and working/waiting verdict.
  *  NOT deduped — every live claude pane is listed, so per-task UIs (Board
@@ -3423,6 +3440,13 @@ export interface PersonaQuestion {
   /** Stable key for the OBSERVATION behind the question (not the wording), so
    *  the same situation is never asked about twice even across restarts. */
   subjectKey: string
+  /** THE SETTING, one sentence, shown ABOVE the question (2026-08-15). Says
+   *  when it happened and what kind of moment it was, so the quoted fragments
+   *  in `text*` land in a scene instead of arriving naked. Frozen at generation
+   *  for the same reason the question is. Optional ONLY so questions written by
+   *  an older build stay renderable — every new one carries it. */
+  contextJa?: string
+  contextEn?: string
   /** The question, frozen at generation. JA is what reaches the corpus — the
    *  corpus is the owner's own, and the escalation write-back is Japanese too. */
   textJa: string

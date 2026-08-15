@@ -70,6 +70,11 @@ import { installOgManageSkill } from './ogManageSkill'
 import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
 import { listManagerDesks } from './swarmManagerRuntime'
 import {
+  acquireDeskSpawnLock,
+  deskSpawnLockKey,
+  DESK_SPAWN_LOCK_WAIT_MS,
+} from './deskSpawnLock'
+import {
   sdkManagerPreflight,
   sdkManagerLaunchPlan,
   SdkManagerUnavailableError,
@@ -542,70 +547,19 @@ const adoptLiveDesk = async (projectPath: string): Promise<SpawnSwarmManagerResp
   }
 }
 
-/** How long a caller waits for an in-flight commander spawn in the SAME project
- *  before giving up on the lock.
+/** The desk spawn lock, shared with the SUPPLY desk (deskSpawnLock.ts).
  *
- *  Sized off the critical section's own worst case, not off a round number: the
- *  slow step is `resolveSwarmModelEffortProbed`, which may probe several tiers in
- *  turn and budgets `TIER_PROBE_LAUNCH_WAIT_MS`-scale seconds for each (8s per
- *  rung), on top of a session probe, a skill install and two settings reads. 120s
- *  clears a full ladder walk with room to spare while still being a BOUND — a
- *  holder that never settles must not wedge the commander button forever. */
-export const DESK_SPAWN_LOCK_WAIT_MS = 120_000
-
-/** key = resolve(projectPath) → a promise that settles when the holder releases.
+ *  It used to live here in full. It was extracted on 2026-08-15 when the Board
+ *  grew a second door onto the supply desk: the compare-and-set is the same
+ *  mechanism for both one-per-project desks, and a second hand-rolled copy of a
+ *  lock whose correctness depends on "no await between these two lines" is
+ *  exactly the drift this repo keeps paying for. Behaviour here is unchanged —
+ *  same wait, same globalThis map, and `deskSpawnLockKey('manager', …)` returns
+ *  the bare resolved path this file has always used as its key.
  *
- *  On globalThis so the critical section survives `tsx watch` reloads in dev —
- *  the same rule the PTY pool it guards follows (`globalThis.__openground_terminal`).
- *  A lock that reloaded while the pool did not would stop excluding anything at
- *  exactly the moment the pool still remembered the desk. */
-const lockGlobal = globalThis as typeof globalThis & {
-  __openground_manager_spawn_locks?: Map<string, Promise<void>>
-}
-const deskSpawnLocks: Map<string, Promise<void>> =
-  lockGlobal.__openground_manager_spawn_locks ??
-  (lockGlobal.__openground_manager_spawn_locks = new Map())
-
-/** true ⇒ `p` settled within `ms`; false ⇒ the wait expired. Leaves no live timer
- *  behind either way, and the timer never holds the process open. */
-const settledWithin = (p: Promise<void>, ms: number): Promise<boolean> =>
-  new Promise((res) => {
-    const timer = setTimeout(() => res(false), ms)
-    timer.unref?.()
-    const done = () => {
-      clearTimeout(timer)
-      res(true)
-    }
-    p.then(done, done)
-  })
-
-/** Take the project's spawn lock, waiting out any current holder. Returns the
- *  release fn (idempotent-safe: it only clears the map slot that is still OURS),
- *  or null when the wait expired. */
-const acquireDeskSpawnLock = async (
-  key: string,
-  waitMs: number,
-): Promise<(() => void) | null> => {
-  const deadline = Date.now() + waitMs
-  for (;;) {
-    const held = deskSpawnLocks.get(key)
-    if (!held) {
-      // COMPARE-AND-SET. There is deliberately NO `await` between this read and
-      // the write below, so on JS's single thread the pair is atomic — precisely
-      // the property the old read-pool-then-launch sequence lacked.
-      let release!: () => void
-      const mine = new Promise<void>((r) => (release = r))
-      deskSpawnLocks.set(key, mine)
-      return () => {
-        if (deskSpawnLocks.get(key) === mine) deskSpawnLocks.delete(key)
-        release()
-      }
-    }
-    if (!(await settledWithin(held, Math.max(0, deadline - Date.now())))) return null
-    // The holder released — loop and re-test. Several waiters wake together and
-    // only one wins the compare-and-set above; the losers simply wait again.
-  }
-}
+ *  Re-exported because {@link swarmManager.spawn.test} and any future caller
+ *  reads the budget from the module that spends it. */
+export { DESK_SPAWN_LOCK_WAIT_MS }
 
 /** Launch ONE interactive claude PTY in the project's primary checkout running
  *  the `/og-manage` skill (handed positionally so claude submits it on startup).
@@ -651,7 +605,10 @@ export const spawnSwarmManager = async (
   // Terminal tab first; the engine must never have that power (auto-killing a desk
   // in the repo's own cwd is the one thing 03 §2.3 rules out, because the owner's
   // own sessions live there too).
-  const release = await acquireDeskSpawnLock(resolve(opts.projectPath), DESK_SPAWN_LOCK_WAIT_MS)
+  const release = await acquireDeskSpawnLock(
+    deskSpawnLockKey('manager', resolve(opts.projectPath)),
+    DESK_SPAWN_LOCK_WAIT_MS,
+  )
   if (!release) {
     // Waited out a holder that never settled. Falling through to spawn anyway is
     // the one thing we must not do — that is the twin this guard exists to

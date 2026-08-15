@@ -12,8 +12,16 @@
 //     the project folder, so every working worker was silently dropped and the
 //     card reported the idle repo-root pane's `waiting`.
 //
-//  2. WORKING WINS. One busy pane makes the whole card busy, regardless of how
-//     many idle panes sit beside it or what order the server listed them in.
+//  2. WORKING WINS, and 'waiting' beats 'idle'. One busy pane makes the whole
+//     card busy, regardless of how many quiet panes sit beside it or what order
+//     the server listed them in — and one pane genuinely blocked on the human
+//     outranks any number of parked ones.
+//
+//  3. 'idle' IS NOT 'waiting' (2026-08-15). A live session parked at its prompt
+//     is a fact about the machine, not a claim on the reader's attention. It is
+//     kept in the map so a consumer can tell "a session is open" from "nothing
+//     is running", but the Ground card draws no stamp for it. Collapsing the two
+//     is what made every card read WAITING with every task done.
 
 import type { ClaudeActivity, ClaudeBeaconStatus } from '@/lib/types'
 
@@ -39,8 +47,13 @@ export const aggregateClaudeBeacons = (
         ? a.projectId
         : projects.find((p) => a.cwd === p.path || a.cwd.startsWith(p.path + '/'))?.id
     if (!projectId) continue
-    if (a.status === 'working') out.set(projectId, 'working')
-    else if (!out.has(projectId)) out.set(projectId, 'waiting')
+    // Rank, don't first-write-wins: the server lists panes in pool order, so a
+    // parked desk listed before a blocked one used to decide the card.
+    const prev = out.get(projectId)
+    if (prev === undefined || RANK[a.status] < RANK[prev]) out.set(projectId, a.status)
   }
   return out
 }
+
+/** Precedence when one project holds several panes. Lower wins. */
+const RANK: Record<ClaudeBeaconStatus, number> = { working: 0, waiting: 1, idle: 2 }

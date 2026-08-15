@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { deriveManagerTone, deriveWorkerActivity } from './boardWorker'
+import {
+  WORKER_NOTE_STALE_MS,
+  deriveHeartbeatFreshness,
+  deriveManagerTone,
+  deriveWorkerActivity,
+} from './boardWorker'
 
 describe('deriveWorkerActivity', () => {
   it('a live working PTY → working (the band scans)', () => {
@@ -53,5 +58,42 @@ describe('deriveManagerTone', () => {
     expect(deriveManagerTone('missing', 'rebase')).toBe('off')
     expect(deriveManagerTone('unknown', 'ff')).toBe('off')
     expect(deriveManagerTone('unknown', 'unknown')).toBe('off')
+  })
+})
+
+// A worker's note is the WHAT half of "who is on this card and what are they
+// doing". It is only true as of its heartbeat, so the card must be able to say
+// three different things — and the third one is the one that is easy to get
+// wrong: when we cannot date the note at all, we say nothing about it.
+describe('deriveHeartbeatFreshness', () => {
+  const now = Date.parse('2026-08-15T12:00:00.000Z')
+  const ago = (ms: number) => new Date(now - ms).toISOString()
+
+  it('a recent beat is fresh — the note describes NOW', () => {
+    expect(deriveHeartbeatFreshness(ago(0), now)).toBe('fresh')
+    expect(deriveHeartbeatFreshness(ago(5 * 60_000), now)).toBe('fresh')
+    // The instant before the window closes is still fresh (the boundary is
+    // inclusive on the stale side).
+    expect(deriveHeartbeatFreshness(ago(WORKER_NOTE_STALE_MS - 1), now)).toBe('fresh')
+  })
+
+  it('a beat past the window is stale — the note describes the PAST', () => {
+    expect(deriveHeartbeatFreshness(ago(WORKER_NOTE_STALE_MS), now)).toBe('stale')
+    expect(deriveHeartbeatFreshness(ago(30 * 60_000), now)).toBe('stale')
+  })
+
+  it('no beat time we can read → none: we cannot date it, so we claim nothing', () => {
+    // The honest third state. Folding either of these to 'fresh' would print an
+    // undatable note as a statement about now; folding them to 'stale' would
+    // claim we know it is old. We know neither.
+    expect(deriveHeartbeatFreshness(undefined, now)).toBe('none')
+    expect(deriveHeartbeatFreshness('', now)).toBe('none')
+    expect(deriveHeartbeatFreshness('not a timestamp', now)).toBe('none')
+  })
+
+  it('a beat from the future (clock skew) is fresh, never stale', () => {
+    // The engine clock and the browser clock are different clocks. A negative
+    // age is not evidence that a worker went quiet.
+    expect(deriveHeartbeatFreshness(new Date(now + 60_000).toISOString(), now)).toBe('fresh')
   })
 })

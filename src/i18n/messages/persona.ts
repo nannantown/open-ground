@@ -22,6 +22,13 @@ export const persona = {
     'persona.tabLabel': 'Persona',
 
     // --- First run: the figure is all dust, so say what this place is --------
+    // The two lines at the TOP of the screen, always visible: what this place
+    // is for, and what answering actually does. Written natively per locale —
+    // the JA is not a translation of the EN.
+    'persona.intro.lead': 'Teach your stand-in how you decide things.',
+    'persona.intro.leadSub':
+      'Answer the question in the corner, or take a course. Each answer lights one point in the figure, and your stand-in reads all of them before it decides anything for you.',
+
     'persona.intro.title': 'Grow your stand-in',
     'persona.intro.body':
       'This is what OPEN GROUND has learned about how you decide things. Your stand-in reads all of it before it judges anything for you, so what you add here it will actually act on.',
@@ -109,7 +116,6 @@ export const persona = {
     'persona.ledger.abstained': 'could not answer',
     // Shown ONLY when nothing has ever been recorded. An invitation, not an
     // error, and never counts of zero dressed up as activity.
-    'persona.ledger.empty': 'Nothing yet — what it decides for you will show up here.',
     // Printed under a week of zeros, so an idle week is not mistaken for a dead
     // ledger. Absent whenever the week itself has something to show.
     'persona.ledger.last': 'Last {date}',
@@ -227,6 +233,10 @@ export const persona = {
   ja: {
     'persona.tabLabel': 'ペルソナ',
 
+    'persona.intro.lead': 'あなたの決め方を、分身に覚えてもらう場所です。',
+    'persona.intro.leadSub':
+      '右下の質問に答えるか、コースを受けてください。答えるたびに人型の点が1つ灯り、分身はそれを全部読んでから、あなたの代わりに判断します。',
+
     'persona.intro.title': 'あなたの分身を育てる',
     'persona.intro.body':
       'OPEN GROUND がこれまでに掴んだ、あなたの決め方です。あなたの分身は、あなたの代わりに何かを判断する前に必ずこれを全部読みます。ここに足したことは、そのまま分身の動きになります。',
@@ -275,7 +285,6 @@ export const persona = {
     'persona.ledger.answered': '代わりに答えた',
     'persona.ledger.asked': 'あなたに聞いた',
     'persona.ledger.abstained': '答えられなかった',
-    'persona.ledger.empty': 'まだ何もありません — 代わりに決めたことが、ここに残ります。',
     'persona.ledger.last': '最後は{date}',
 
     'persona.ledger.detail.heading': '最近の判断',

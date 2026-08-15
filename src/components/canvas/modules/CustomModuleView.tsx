@@ -31,8 +31,9 @@ import {
 // runs ONLY while the tab is visible: a hidden keep-alive frame keeps its last
 // srcDoc untouched (a rebuild would reload the iframe and cut the audio).
 //
-// Editing lives in the SAME right-edge TerminalDock Canvas and Board use — the
-// collapsed rail expands into tabbed claude PTYs — except its sessions are
+// Editing lives in the right-edge TerminalDock — the collapsed rail expands
+// into tabbed claude PTYs. (Canvas and Board mounted the same dock until
+// 2026-08-15; this is now its only mount.) Its sessions are
 // cwd'd at the MODULE dir (server-resolved from the moduleId, so the
 // validateProjectPath boundary stays untouched) and they auto-spawn: the dock's
 // whole point here is "claude inside this tab". The header keeps only Publish

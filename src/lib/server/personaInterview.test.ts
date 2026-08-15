@@ -310,6 +310,27 @@ describe('the question is drawn from the owner’s record — never a personalit
     }
   })
 
+  it('EVERY hit of EVERY detector carries a readable setting, in both languages', () => {
+    // The type already forces a detector to SUPPLY one (Candidate requires it,
+    // so a new detector without a setting fails the build). This pins that what
+    // it supplies is worth reading: long enough to place a memory, not a
+    // restatement of the ask, and never a bare date with nothing around it.
+    for (const c of CASES) {
+      for (const d of DETECTORS) {
+        for (const hit of d.detect(c.m, DAY0)) {
+          const where = `${d.kind} / ${c.kind}`
+          expect(hit.contextJa.length, `${where}: JA setting too thin`).toBeGreaterThan(8)
+          expect(hit.contextEn.length, `${where}: EN setting too thin`).toBeGreaterThan(8)
+          // A setting describes the situation; the question does the asking.
+          expect(hit.contextJa, `${where}: JA setting asks instead of setting`).not.toContain('?')
+          expect(hit.contextEn, `${where}: EN setting asks instead of setting`).not.toContain('?')
+          // It must also not be a lone date fragment ("3日前。").
+          expect(hit.contextJa.replace(/[0-9]/g, '').length).toBeGreaterThan(8)
+        }
+      }
+    }
+  })
+
   it('produces NOTHING rather than inventing a question when there is no material', async () => {
     const q = await ensureTodayQuestion({ now: () => DAY0, gather: gatherOf(material()) })
     expect(q).toBeNull()
@@ -727,9 +748,29 @@ describe('answering feeds the corpus', () => {
     expect(answered.question.resolvedAt).toBeTruthy()
     expect(answered.corpusStale).toBe(false)
     const arg = appendMemory.mock.calls[0][0]
-    expect(arg.text).toBe(`Q: ${q!.textJa}\n→ オーナーの回答: 可逆だから即決した`)
+    // THE SETTING GOES IN TOO (2026-08-15). The question quotes a fragment of
+    // something that happened; stored without the sentence that places it, the
+    // corpus keeps a permanently unreadable Q — the exact defect the owner hit
+    // on screen, only durable. The stand-in reads this corpus to judge for
+    // them, so an unreadable entry is worse here than it was in the corner.
+    expect(arg.text).toBe(`Q: ${q!.contextJa} ${q!.textJa}\n→ オーナーの回答: 可逆だから即決した`)
+    expect(arg.text).toContain('差し戻した') // …and the setting is really in it
     expect(arg.tags).toEqual(['interview', 'card-rework'])
     expect(arg.context).toContain('今日の1問')
+  })
+
+  it('EVERY question carries a setting, in both languages — none arrives as a bare quote', async () => {
+    // The complaint that produced this (owner, 2026-08-15): a question read as
+    // 「『Contents interrupted. どうしますか?』に『何が使えなかった?』と答えました」
+    // — two quotes with no world around them. A detector added later must not
+    // be able to reintroduce that, so this walks the REGISTERED list rather
+    // than the questions this file happens to know about.
+    const q = await ensureTodayQuestion({ now: () => DAY0, gather: gatherOf(m) })
+    expect(q!.contextJa && q!.contextJa.length).toBeGreaterThan(8)
+    expect(q!.contextEn && q!.contextEn.length).toBeGreaterThan(8)
+    // A setting is a sentence about a situation, not a restatement of the ask.
+    expect(q!.contextJa).not.toContain('?')
+    expect(q!.contextEn).not.toContain('?')
   })
 
   it('an empty answer is refused — nothing reaches the corpus', async () => {
