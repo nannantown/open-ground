@@ -179,8 +179,11 @@ export interface PersonaCourse {
   id: PersonaCourseId
   name: string
   sub: string
-  /** Which region of the figure this course grows. */
-  zone: 'mind' | 'values' | 'craft' | 'core' | 'ground'
+  // Which region of the figure a course grows is NOT a field here: it lives in
+  // src/lib/persona/regions.ts COURSE_REGION, keyed by the course ID UNION.
+  // Re-declaring the region union on this interface let a course carry a region
+  // the figure did not have, and let a new course ship with no region at all —
+  // an existence check where an over-approximation was needed.
   itemCount: number
   /** Shown VERBATIM on the result sheet — the provenance promise. */
   source: string
@@ -189,13 +192,13 @@ export interface PersonaCourse {
 }
 
 export const COURSES: readonly PersonaCourse[] = [
-  { id: 'big5', name: '性格の5因子', sub: 'ビッグファイブ', zone: 'mind', itemCount: BIG5_ITEMS.length,
+  { id: 'big5', name: '性格の5因子', sub: 'ビッグファイブ', itemCount: BIG5_ITEMS.length,
     source: 'IPIP(公有ドメインの項目プール)に基づく25問・逆転項目を含む', scale: 'agree' },
-  { id: 'type', name: '16タイプ', sub: 'ユング的タイプ論・オープン版', zone: 'values', itemCount: TYPE_ITEMS.length,
+  { id: 'type', name: '16タイプ', sub: 'ユング的タイプ論・オープン版', itemCount: TYPE_ITEMS.length,
     source: 'OEJTS 系のオープン設問に基づく24問(MBTI® とは別の指標です)', scale: 'pick' },
-  { id: 'values', name: '価値観の順位', sub: 'シュワルツの価値観理論', zone: 'core', itemCount: VALUE_ITEMS.length,
+  { id: 'values', name: '価値観の順位', sub: 'シュワルツの価値観理論', itemCount: VALUE_ITEMS.length,
     source: 'Schwartz の10価値類型に基づく20問', scale: 'important' },
-  { id: 'work', name: '仕事の強み', sub: '二択カードソート', zone: 'craft', itemCount: WORK_ITEMS.length,
+  { id: 'work', name: '仕事の強み', sub: '二択カードソート', itemCount: WORK_ITEMS.length,
     source: 'OPEN GROUND 独自設計の20問(CliftonStrengths® とは別の指標です)', scale: 'pick' },
 ]
 

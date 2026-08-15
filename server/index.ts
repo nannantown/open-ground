@@ -11,7 +11,13 @@
 
 import { serve } from '@hono/node-server'
 import { app } from './app'
-import { pruneOldAttachments, pruneOldRunFiles, sweepCrossRepoResidue, RAW_RETENTION_DAYS } from '@/lib/server/retention'
+import {
+  pruneOldAttachments,
+  pruneOldRunFiles,
+  sweepCrossRepoResidue,
+  sweepPersonaScratch,
+  RAW_RETENTION_DAYS,
+} from '@/lib/server/retention'
 import { pruneResolvedEscalations, ESCALATION_RETENTION_DAYS } from '@/lib/server/swarmEscalations'
 import { installLockdownFetchGuard } from '@/lib/server/lockdown'
 import { getSettings } from '@/lib/server/store'
@@ -139,6 +145,17 @@ void (async () => {
       console.log(
         `[openground:hono] retention(${RAW_RETENTION_DAYS}d): pruned ${removedRuns} run files, ${removedFiles} attachments; ` +
           `escalations(${ESCALATION_RETENTION_DAYS}d): pruned ${removedEscalations} resolved`,
+      )
+    }
+    // Persona conversation scratch dirs + their ~/.claude.json trust entries.
+    // Nothing in production ends a conversation (there is no moment that means
+    // "the owner is finished talking"), so without this sweep every conversation
+    // ever held leaves a directory AND a line in the user's own claude config,
+    // forever. Boot is the honest lifecycle event.
+    const scratch = await sweepPersonaScratch().catch(() => null)
+    if (scratch?.removed) {
+      console.log(
+        `[openground:hono] persona scratch: removed ${scratch.removed} stale conversation dir(s) + trust entries`,
       )
     }
     // Cross-repo residue sweep — ghost heartbeats / orphan central worktrees /

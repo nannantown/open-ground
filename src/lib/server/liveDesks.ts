@@ -302,10 +302,14 @@ export const computeRestartSafety = (
     desk: boolean
     hidden: boolean
     engine: boolean
+    claudePane: boolean
     claudeWorking: boolean
     foreground: string | undefined
     lastOutputAt: number | undefined
     hasChildren: boolean | undefined
+    /** ⚠ REQUIRED for the same reason the others are (see the note above): an
+     *  optional key is a relaxation that silently never fires. */
+    menuOpen: boolean | undefined
   }[],
   sdkStatuses: readonly SdkSessionStatus[],
   now: number = Date.now(),
@@ -320,14 +324,55 @@ export const computeRestartSafety = (
   // Two would not do. (1) alone misses `npm test &` — measured: a backgrounded
   // job leaves `.process` reporting "zsh". (3) alone misses a foreground claude
   // thinking quietly. Together they describe an empty pane and nothing else.
-  const abandoned = (p: {
+  const silent = (p: { lastOutputAt?: number }): boolean =>
+    now - (p.lastOutputAt ?? 0) >= IDLE_PANE_MS
+
+  const abandonedShell = (p: {
     foreground?: string
     lastOutputAt?: number
     hasChildren?: boolean
   }): boolean =>
-    LOGIN_SHELLS.has(p.foreground ?? '') &&
-    p.hasChildren === false &&
-    now - (p.lastOutputAt ?? 0) >= IDLE_PANE_MS
+    LOGIN_SHELLS.has(p.foreground ?? '') && p.hasChildren === false && silent(p)
+
+  /** A PARKED CLAUDE PANE (2026-08-15). The rule above only ever released a
+   *  LOGIN SHELL, and this file's own comment said why claude was excluded:
+   *  「Anything else (claude, npm, a build) is real work, however quiet」.
+   *
+   *  That is true of npm and of a build. It is not true of claude sitting at
+   *  its prompt — and claude panes are precisely what this owner leaves open,
+   *  so `userPtys` never reached 0, the gate never opened, and hands-free
+   *  updates never applied ONCE despite being switched on. The failure was
+   *  already recorded here for shells and fixed for shells only; the pane the
+   *  owner actually keeps was left blocking.
+   *
+   *  Three signals, all required, every one defaulting to "busy" when absent:
+   *    1. claude is NOT generating (`claudeWorking === false`),
+   *    2. no TUI menu is open — a permission prompt is the human's turn, and no
+   *       amount of silence makes discarding it acceptable,
+   *    3. it has been silent for {@link IDLE_PANE_MS}.
+   *  `menuOpen === undefined` (a caller that did not look) fails closed. */
+  const parkedClaude = (p: {
+    claudePane?: boolean
+    claudeWorking?: boolean
+    menuOpen?: boolean
+    lastOutputAt?: number
+  }): boolean =>
+    // ⚠ `claudePane === true` FIRST, and it is the whole reason this is not
+    // just "not working". Without it the rule released ANY quiet pane —
+    // `npm test` sitting mid-run reports claudeWorking false, because it is not
+    // claude at all. Caught by five existing guards the moment it was written;
+    // they are the ones that say a user pane running something blocks however
+    // quiet it has been.
+    p.claudePane === true && p.claudeWorking === false && p.menuOpen === false && silent(p)
+
+  const abandoned = (p: {
+    foreground?: string
+    lastOutputAt?: number
+    hasChildren?: boolean
+    claudePane?: boolean
+    claudeWorking?: boolean
+    menuOpen?: boolean
+  }): boolean => abandonedShell(p) || parkedClaude(p)
   const userPtys = ptys.filter((p) => !p.desk && !p.hidden && !p.engine && !abandoned(p)).length
   return { safe: generating === 0 && userPtys === 0, generating, userPtys }
 }
@@ -342,6 +387,7 @@ export const updateRestartSafety = async (): Promise<UpdateRestartSafetyResponse
     listPtySafetyViews().map(async (v) => ({
       desk: v.desk,
       hidden: v.hidden,
+      claudePane: v.claudePane,
       claudeWorking: v.claudeWorking,
       foreground: v.foreground,
       lastOutputAt: v.lastOutputAt,
@@ -352,6 +398,7 @@ export const updateRestartSafety = async (): Promise<UpdateRestartSafetyResponse
         LOGIN_SHELLS.has(v.foreground) && Date.now() - v.lastOutputAt >= IDLE_PANE_MS
           ? await hasChildProcesses(v.pid)
           : true,
+      menuOpen: v.menuOpen,
       engine: (await canonicalize(v.cwd)).startsWith(centralRoot + sep),
     })),
   )

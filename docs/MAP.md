@@ -641,13 +641,43 @@
   `src/components/canvas/modules/PersonaFigure.tsx`。粒子1点=手書きメモ1件で、
   灯り=知っていること/薄い点=進行中コースの未確定回答/脈打つ patch=いまの問いが
   掘っている領域/塵=まだ形になっていない部分。ノードは `GET /api/you-corpus/judgments`
-  の `ManualJudgment[]` そのもの(別データソースを作らない)。**どの領域に座るかは純関数**
-  `zoneForJudgment`(①コースタグ→そのコースの zone ②取材ループの kind タグ→問いが
-  掘っていた zone ③それ以外は id ハッシュで決定的に散らす)で、`PersonaModule.test.tsx`
-  が変異赤済み。ジェスチャは InfiniteCanvas と同一契約(素の wheel=パン・⌘/Ctrl+wheel=
+  の `ManualJudgment[]` そのもの(別データソースを作らない)。**どの領域に座るかは純関数** —
+  2026-08-15 に `PersonaFigure.tsx` から `src/lib/persona/regions.ts` へ切り出し、
+  領域の語彙も zone(mind/values/craft/core/ground)から **region**
+  (head/chest/arms/legs/**people**=図の周りの halo)へ移行した。union は
+  `PersonaRegion`(`src/lib/types.ts` — 線を渡りタグにも乗るので契約側)、runtime の表
+  (`REGION_LABEL_KEY`/`COURSE_REGION`/`QUESTION_REGION`)はすべて exhaustive Record なので
+  **領域・コース・質問 kind の追加漏れはビルドエラー**(旧 `zone: string` + `asZone()` の
+  黙った既定値 `'mind'` は削除)。座席規則 `placeJudgment` は4段・先勝ち: ①`region:<id>`
+  タグ ②コースタグ ③取材ループの kind タグ ④それ以外は id ハッシュで **body の4領域だけに**
+  決定的に散らし `placed:false` を返す。⚠ **④は「読み」ではなく「散らし」** — halo に
+  入れると「これは他人の話だ」という主張になるので body 限定、かつ画面は領域名の代わりに
+  `persona.region.unplaced` を出す(region 以前の既存メモ〜159件がここに落ちる。
+  キーワードで後付けタグを書くと、追記のみのコーパスに誤ったラベルが恒久的に残る)。
+  番人は `src/lib/persona/regions.test.ts`(halo 不侵入・placed の意味)+
+  `PersonaModule.test.tsx`(unplaced が画面に出ること)で変異赤済み。
+  **座標も純関数** — 2026-08-15 に骨格へ作り直し、点の位置は
+  `src/lib/persona/armature.ts`(figure space = x は 0 中心・y は 0 冠→1 足裏。
+  `ARMATURE` の比率 + capsule/torso/ellipse サンプラ + `ARMATURE_SEED` の LCG)。
+  ⚠ **旧版は 2D canvas のアルファマスクを読み戻していたので jsdom では
+  `buildField` が丸ごと null**、つまり図の幾何は1行もテストされていなかった。
+  純化した目的の半分はこれ(`armature.test.ts` が field を sha256 で固定)。
+  ⚠ **halo(`people`)は体に入れない** — `buildArmaturePoints` の keep-clear
+  (`|x|<0.115 && 0.05<y<0.99` を `continue`)を外すと、胸を指しているのに
+  「人との関わり」が出る。当たり判定は `nearestPoint`(**箱ではなく最近傍**)で、
+  脚の間の空白は「何もない」と答える — 領域の外接矩形で判定すると空中で
+  「続けかた」が立つ。
+  ジェスチャは InfiniteCanvas と同一契約(素の wheel=パン・⌘/Ctrl+wheel=
   カーソル基点ズーム `zoom*(1+(-deltaY*0.01))`・Space ドラッグ=パン、加えてタッチの
-  ピンチ/1本指パン)。canvas はキーボードから触れないので、灯った点は同時に sr-only の
-  ボタンとしても出る(テストもこの経路でノードを開く)。⚠ 旧 `src/lib/personaGraph.ts` /
+  ピンチ/1本指パン)。canvas はキーボードから触れないので、**sr-only のリストは2本** —
+  灯った点1件=1ボタン(`persona.figure.nodeList`・テストもこの経路でノードを開く)と、
+  領域1つ=1ボタン(`persona.figure.regionList`)。後者が無いとホバー専用の
+  region probe にキーボードから一生届かない。probe の中身 `RegionSummary` は
+  **PersonaModule 側で組む**(図はコーパスを持たない)。`state:'unread'` は
+  数字を1つも出さず、`placed` と `unplaced` は**絶対に合算しない**
+  (合算は region 以前の〜159件に「読んだ」と主張させる)。番人は
+  `PersonaFigure.test.tsx`(getBoundingClientRect をスタブして本番のポインタ経路を
+  実走させる)。⚠ 旧 `src/lib/personaGraph.ts` /
   `PersonaGraphView.tsx` は削除済み(この図が置き換えたもの・復元は git 履歴から)。
 - 結果シート: `src/components/canvas/modules/PersonaResultSheet.tsx`。サーバが採点した
   `PersonaResult` をそのまま描くだけで**クライアントは一切計算しない**。`source` 行は逐語、
@@ -695,6 +725,77 @@
   出すだけでは「分身が覚えました」の嘘が消えないため(否定アサーションでピン)。文言方針(汎用診断質問の禁止)は **エクスポートした `DETECTORS` を列挙**
   してピン — 検出器を足して CASE を足さないとテストが落ちる(旧版は固定6問にしか
   BANNED を当てておらず、レビューで quiz 検出器を足しても92件全緑=歯が無かった)
+- 対話でコーパスが育つ経路(2026-08-15): `src/lib/server/personaChat.ts` +
+  口は `server/routes/personaChat.ts`(`GET|POST /api/persona/chat` /
+  `GET /api/persona/chat/turn/:id` / `POST /api/persona/chat/cancel` /
+  `POST /api/persona/import` / `GET /api/persona/import/:id`)。**コース系の
+  `server/routes/persona.ts` とは別ルータ**で、こちらは claude を起動しコーパスに
+  書くのでゲートが2枚(loopback + `experiments.persona`)+ 起動2経路は
+  `claudeRunPreflight`(未導入/未ログインは spawn 前に 503)。
+  ⚠ **不変条件は1つだけ: 学ぶのはオーナー自身の言葉だけ**。`parsePersonaTurn` は
+  `{ reply, kept }` を返し、書き手 `appendKeptLines` の**引数は `KeptLine[]` のみ**
+  (`reply` はスコープに無い) — 混ぜるには署名を書き換えるしかない、という構造で持つ。
+  番人 `personaChat.test.ts` は本番の `readManualJudgments` で読み戻して返答文の不在を見る。
+  1ターン = `--resume` した claude PTY 1本 + マーカー掻き取り(SDK でも `-p` でもない・
+  収容レシピは `makeOverseerBrain` と同じ = 空 scratch cwd・L4 guard 常時・darwin は
+  L3+loopback egress proxy・Bash/Task/WebFetch/WebSearch 拒否・strictMcp・hidden)。
+  差し替え口は `PersonaTurnRunner`(将来のストリーミング化はこの1ファイル。
+  ただし SDK へ寄せる判断は `docs/SDK_CLIENT_INVESTIGATION.md` §12 の規約が先)。
+  ⚠ **単発化は同期で claim する** — `startPersonaChatTurn` は**同期関数**で、
+  検査と書き込みの間に await が1つも無い(挟むと2つ目の POST が通り、
+  deskSpawnLock.ts の記録どおり「失敗もせず、前の会話を忘れる」)。会話は in-memory
+  (globalThis・再起動で消える。消えて困る半分は既にコーパスにある)。
+  マーカー抽出は `src/lib/server/ptyMarkers.ts` に**1実装だけ**
+  (`generateDescription.ts` が本番で払った ANSI 処理を切り出したもの。
+  `'<'` を含む候補を捨てるのがプロンプト自身のエコーを外す唯一の歯 —
+  対になるのは「答えに山括弧を書くな」というプロンプト側の半分)
+- claude.ai エクスポートの取り込み: `src/lib/server/personaImport.ts`。パーサは
+  純粋な `src/lib/claudeExport.ts`(**人間の発言だけ残す**・読めない行は数える)を
+  再実装しない。**全部は蒸留しない** — 直近 `IMPORT_MAX_MESSAGES`(400)/
+  `IMPORT_MAX_PROMPT_CHARS` の slice を1回の run で処理し、`notConsidered` を必ず返す
+  (「自分の取りこぼしを隠す数字」を出さないため)。材料は scratch の
+  `messages.txt` に書いて**パス渡し**(prompt は argv に載るので inline 不可)。
+  ⚠ **`ManualJudgment` に冪等キーは無い** → 同じファイルの二度取り込みは灯りごと倍増
+  するので、`~/.openground/persona-imports.json`(0600・ファイル bytes の sha)で拒否
+  + 正規化テキストの重複も skip して数える。sha は**完走時にだけ**記録する
+  (途中で落ちた回は再試行できる・二重書きはテキスト側が止める)。
+  zip は非対応(依存を足さない・クライアントが「中の conversations.json を出せ」と言う)
+- ペルソナ画面の**入口は会話**(2026-08-15・承認モック `persona-v2.html` が look と文言の
+  正典): `src/components/canvas/modules/PersonaConversation.tsx`(+ `PersonaPrivacyNote.tsx`)。
+  **fetch は1つも持たない** — 送信も polling も `PersonaModule` 側(図と同じ規約)。
+  ⚠ **「勝手に入る」は確認ダイアログが無いという意味であって、見えないところで書くという
+  意味ではない**。拾った1行は必ず**それが出た発言の下**に `PersonaKeptWrite.judgment` 込みで
+  出て、押すと既存の訂正コンポーザが開く(往復ゼロ)。拾わなかったターンは
+  `persona.chat.keptNone` と言う(チップが無い=見えない書き込み、を作らない)。
+  ⚠ **入力は Enter で送るので歯は `isComposing`**(和文の変換確定 Enter を盗むと
+  書きかけが飛ぶ)。⚠ **失敗しても言葉を失わない** — 入力は送信時に必ず空になるので、
+  オーナーの文字列は**送る前に turn へ入れて**おき、失敗した turn はそのまま画面に残して
+  retry を出す。`failTurn` を「turn を消す」に変えると `PersonaModule.test.tsx` が3本赤。
+  ⚠ **待ちは本物** — cold `claude` 起動は数十秒で、モックの 420ms は到達不能。
+  タイピング演出は置かず経過秒だけ出す(最初の poll 前と「今日の1問」の保存は
+  `persona.chat.sending`)。プレースホルダは18本を wander(`nextPromptIndex`・
+  `prefers-reduced-motion` では停止)で回す — この画面が**何をする所か**を言う唯一の場所。
+  ドロップは同じ入力欄で受け、sha-256(**ファイルの bytes**・`sha256Hex`)を付けて POST。
+  zip はクライアントで断る。プライバシー注記は**モック逐語で、やわらげ禁止**:
+  書くのは `~/.openground/` だけ / **ただし会話はオーナー自身の Claude を通って
+  Anthropic に行く** / 学習可否は claude.ai 側でしか変えられない。
+  `PersonaConversation.test.tsx` が3文を**辞書と一字一句照合**し、「会話もローカル」と
+  読める書き換えを正規表現で落とす(プライバシーの嘘はレビュー指摘ではなく赤で止める)
+- ペルソナ画面のレイアウト(2026-08-15 に mock へ寄せて全面改修・`PersonaModule.tsx`):
+  **ステージは絶対にスクロールしない**(会話の thread と結果シートだけが自分の中で
+  スクロールする)。四隅=①左上「ここが何か」2行 ②右上のカウント ③左下のコース1行1ボタン
+  ④下中央の会話、中央は図。読み物(人物像・判断台帳・meta strip)は**押して初めて出る**
+  1本の中央カラムで、`run ? … : correcting ? … : selected ? … : reading==='portrait' ? …`
+  の**if/else 連鎖**で描く(独立した boolean 3つだと2枚重なる状態が作れてしまう)。
+  上端は `top-16` — PersonaPanel の `BackLink` と図の recenter が `top-4` に居るため。
+  ⚠ **カウントは読めた面だけ出す**: `portrait===null`(失敗も「肖像でない 200」も同じ状態)
+  ならブロックごと不在、台帳は**通算ではなく今週**、そして一度も記録が無い台帳は行ごと
+  出さない(0 は「測ったが0」を意味してしまう)。「書き足す」ボタンは廃止 —
+  入るのは会話からで、コンポーザは**既存の1行の上でしか開かない**。
+  「今日の1問」は会話の**先頭ターン**(質問カードは廃止・`questionLoaded` が false の日は
+  何も言わない=次に打った文は会話へ行く)。swarm の自動返信の話は**この画面には無い**
+  (`SwarmManagerPane` の監督スイッチ横へ移動 —
+  `projectPanel.swarm.manager.overseerPersonaNote`)
 - sandbox 実験: `src/lib/server/sandbox.ts`(sandbox-exec 包囲・experiments.sandbox)—
   SBPL の落とし穴は `docs/SANDBOX_EXPERIMENT.md` 必読
 - lockdown: `src/lib/server/lockdown.ts` + `src/lib/lockdownClient.ts` + `electron/lockdown.js`

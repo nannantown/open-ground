@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BringToFront, Copy, Group, SendToBack, Trash2, Ungroup } from 'lucide-react'
+import type { GroundLamp } from '@/lib/groundLamp'
 import { ProjectCard } from './ProjectCard'
 import { ElementView } from './ElementView'
 import { FrameView } from './FrameView'
@@ -31,7 +32,6 @@ import { initialDrawnFrameFill } from '@/lib/canvasFillStyle'
 import type {
   CanvasElement,
   CanvasState,
-  ClaudeBeaconStatus,
   CollabProjectListItem,
   ProjectMeta,
   Tool,
@@ -89,10 +89,12 @@ export interface CanvasZoomApi {
 
 interface Props {
   projects: ProjectMeta[]
-  /** Ground-only: per-project claude beacon ('working'/'waiting'). A project
-   *  with no entry shows no beacon (plain shells don't count). The per-project
-   *  Canvas tab renders no project cards, so it leaves this undefined. */
-  claudeStatuses?: ReadonlyMap<string, ClaudeBeaconStatus>
+  /** Ground-only: per-project LAMP ('working'/'waiting'), decided from the
+   *  project's WORK rather than from live processes (src/lib/groundLamp.ts). A
+   *  project with no entry draws no lamp, which is itself an answer — a finished
+   *  project is meant to be silent. The per-project Canvas tab renders no
+   *  project cards, so it leaves this undefined. */
+  lamps?: ReadonlyMap<string, GroundLamp>
   /** Ground-only: projects whose audio is currently playing somewhere in the
    *  app (a custom tab's embedded player — the Songs tab). The matching card
    *  wears a "Playing" EQ stamp; the value carries the track title for its
@@ -434,7 +436,7 @@ interface FrameLeafCb {
 // frames, all freely positioned. The active tool decides what a press does.
 export const InfiniteCanvas = ({
   projects,
-  claudeStatuses,
+  lamps,
   playbackByProject,
   sharedProjects,
   onOpenShared,
@@ -3782,7 +3784,7 @@ export const InfiniteCanvas = ({
                 project={p}
                 onPointerDown={cardPointerDown(p.id)}
                 selected={selectedSet.has(p.id)}
-                claudeStatus={claudeStatuses?.get(p.id)}
+                lamp={lamps?.get(p.id)}
                 playback={playbackByProject?.get(p.id)}
               />
             </div>

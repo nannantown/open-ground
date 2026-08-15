@@ -53,6 +53,7 @@ import {
 import { claudeConnection } from '@/lib/server/claudeConnection'
 import { probeGhCli } from '@/lib/server/ghCli'
 import { installHooks, uninstallHooks } from '@/lib/server/hooksInstall'
+import { readGroundLamps } from '@/lib/server/groundLamps'
 import type {
   NotificationStateResponse,
   ProjectsResponse,
@@ -178,6 +179,15 @@ export const miscRoutes = new Hono()
     const w = await acknowledgeIntegrityReport()
     return c.json({ acknowledgedAt: w.acknowledgedAt ?? null, counts: w.counts ?? {} })
   })
+  // --- GET /api/ground/lamps ------------------------------------------------
+  // What each Ground card's lamp should say, as INPUTS — the verdict itself is
+  // the pure `groundLamp()` on the client (one rule, one file, testable without
+  // a server). Polled beside the terminal beacon.
+  //
+  // Never fails: readGroundLamps swallows a project whose board it cannot read
+  // and reports that as an ABSENT count rather than a zero, so one bad
+  // tasks.json cannot darken every other card on the canvas.
+  .get('/api/ground/lamps', async (c) => c.json(await readGroundLamps()))
   // --- GET /api/projects ----------------------------------------------------
   .get('/api/projects', async (c) => {
     // Runs the one-shot legacy migration (existing users' projectsRoot →

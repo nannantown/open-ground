@@ -154,7 +154,9 @@ describe('POST /api/persona/courses/:id/submit', () => {
     for (const finding of body.record.result.findings) {
       const hit = corpusBody.judgments.find((j) => j.text === finding.text)
       expect(hit, `no corpus node for "${finding.text}"`).toBeTruthy()
-      expect(hit?.tags).toEqual(['persona', 'big5'])
+      // The REGION tag rides along so the figure seats the finding from the
+      // node itself (regions.ts tier 1), not by re-deriving it from the course.
+      expect(hit?.tags).toEqual(['persona', 'big5', 'region:head'])
     }
   })
 

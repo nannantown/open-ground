@@ -20,7 +20,7 @@ import App from './App'
 import { I18nProvider } from '@/i18n/I18nContext'
 import { AuthProvider } from '@/lib/auth/AuthContext'
 import { RealtimeProvider } from '@/lib/collab/RealtimeContext'
-import type { ProjectMeta } from '@/lib/types'
+import type { GroundLampRow, ProjectMeta } from '@/lib/types'
 
 // InfiniteCanvas observes its viewport with a ResizeObserver — absent in jsdom.
 class ROStub {
@@ -70,6 +70,9 @@ interface MockOpts {
   /** GET /api/experiments — the owner-only gate, resolved SERVER-side. Omitted ⇒
    *  the shipped/non-owner answer (nothing eligible, every flag closed). */
   experiments?: { eligible: boolean; flags: Record<string, boolean> }
+  /** GET /api/ground/lamps — what each card's lamp is decided from. Omitted ⇒
+   *  no rows, i.e. every card dark, which is the resting state. */
+  lamps?: GroundLampRow[]
 }
 
 const methodOf = (input: unknown, init?: RequestInit): string =>
@@ -97,6 +100,7 @@ function installFetch(opts: MockOpts = {}) {
       )
     if (url.includes('/api/canvas/ai/active')) return reply(200, { jobs })
     if (url.includes('/api/terminal/active')) return reply(200, { cwds: [], claude: [] })
+    if (url.includes('/api/ground/lamps')) return reply(200, { lamps: opts.lamps ?? [] })
     if (url.includes('/api/auth/session')) return reply(503, {}) // signed-out (default build)
     if (url.includes('/api/collab/config')) return reply(200, { enabled: false })
     // Everything else (feedback/config, module-submissions, notifications,
@@ -158,6 +162,87 @@ describe('App — whole-render integration', () => {
     expect(screen.getByText('Cartographers Guild')).toBeInTheDocument()
     // The empty-state overlay must be gone once the Ground has owned cards.
     expect(screen.queryByText('Begin your atlas.')).not.toBeInTheDocument()
+  })
+
+  // ── the Ground card lamp ─────────────────────────────────────────────────
+  //
+  // THE BUG THIS REPLACED, twice reported: every card read WAITING with every
+  // task done, because the lamp was the collapsed list of live `claude` panes
+  // and every project running a swarm holds a commander and a supply desk at
+  // their prompts. The lamp is now about the WORK — /api/ground/lamps sends the
+  // facts, the pure groundLamp() decides — and these assert the two ends of that
+  // wire on the REAL card, not on the helper.
+  it('shows nothing at all on a project whose cards are all done', async () => {
+    // 「作業が終わってて何も出さない時にuserは見にいくんですよ」 — silence is the
+    // signal, and a live process must not be able to break it.
+    installFetch({
+      projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
+      lamps: [{ projectId: 'a', started: 0, openQuestions: 0, liveWork: true }],
+    })
+    await act(async () => {
+      renderApp()
+    })
+    await screen.findByText('Northwind Atlas')
+    await waitFor(() =>
+      expect((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0),
+    )
+    expect(screen.queryByText('Waiting')).not.toBeInTheDocument()
+    expect(screen.queryByText('Running')).not.toBeInTheDocument()
+    // …and it is SILENT, not "No data" — the board was read, and it said done.
+    expect(screen.queryByText('No data')).not.toBeInTheDocument()
+  })
+
+  it('says Running while a started card is actually being worked', async () => {
+    installFetch({
+      projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
+      lamps: [{ projectId: 'a', started: 1, openQuestions: 0, liveWork: true }],
+    })
+    await act(async () => {
+      renderApp()
+    })
+    expect(await screen.findByText('Running')).toBeInTheDocument()
+    expect(screen.queryByText('Waiting')).not.toBeInTheDocument()
+  })
+
+  it('says Waiting when work was started and nothing is moving it', async () => {
+    installFetch({
+      projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
+      lamps: [{ projectId: 'a', started: 1, openQuestions: 0, liveWork: false }],
+    })
+    await act(async () => {
+      renderApp()
+    })
+    expect(await screen.findByText('Waiting')).toBeInTheDocument()
+  })
+
+  it('says Waiting for an open question even while the swarm runs', async () => {
+    installFetch({
+      projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
+      lamps: [{ projectId: 'a', started: 2, openQuestions: 1, liveWork: true }],
+    })
+    await act(async () => {
+      renderApp()
+    })
+    expect(await screen.findByText('Waiting')).toBeInTheDocument()
+    expect(screen.queryByText('Running')).not.toBeInTheDocument()
+  })
+
+  it('says NO DATA — not silence — over a board it could not read', async () => {
+    // ⚠ THE SUBTLE ONE. `started` absent is not 0, and here the difference is
+    // not a number on screen: SILENCE IS THE FINISHED STATE on this card. So a
+    // corrupt tasks.json rendering as a blank card would tell the owner their
+    // project is done, using a file nobody managed to open. It has to say
+    // something, and what it says must be about the app, not about their work.
+    installFetch({
+      projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
+      lamps: [{ projectId: 'a', liveWork: true }],
+    })
+    await act(async () => {
+      renderApp()
+    })
+    expect(await screen.findByText('No data')).toBeInTheDocument()
+    expect(screen.queryByText('Running')).not.toBeInTheDocument()
+    expect(screen.queryByText('Waiting')).not.toBeInTheDocument()
   })
 
   it('surfaces the global "Claude is designing" beacon while a Canvas AI job is active', async () => {
@@ -225,10 +310,15 @@ describe('App — Ground Persona entry gate', () => {
       fireEvent.click(entry)
     })
     const panel = await screen.findByTestId('persona-panel')
-    // Full-bleed, but it keeps a Ground panel's explicit way out.
-    expect(within(panel).getByRole('button', { name: 'Close' })).toBeInTheDocument()
+    // Full-bleed, but it keeps a Ground panel's explicit way out — and since
+    // 2026-08-15 that way out is the SHARED one every other panel uses (owner:
+    // 「戻るボタンも他の画面と共通化して踏襲させて」), top-left, not a Close in
+    // the corner. Pinned by name so a silent revert to a bespoke control here
+    // fails rather than merely looking different.
+    const back = within(panel).getByRole('button', { name: 'Back to Ground' })
+    expect(back).toBeInTheDocument()
     await act(async () => {
-      fireEvent.click(within(panel).getByRole('button', { name: 'Close' }))
+      fireEvent.click(back)
     })
     expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
   })

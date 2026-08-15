@@ -41,7 +41,24 @@ const SAFETY_FETCH_TIMEOUT_MS = 3000
 function autoUpdateFromSettingsRaw(raw) {
   try {
     const parsed = JSON.parse(raw)
-    return !!parsed && typeof parsed === 'object' && parsed.autoUpdate === true
+    // Array.isArray FIRST: `[]` is typeof 'object' and truthy, so without this
+    // a settings.json holding an array reached the `undefined` branch below and
+    // was read as consent. (Caught by this change's own guard, not by review.)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false
+    // ABSENT ⇒ ON (2026-08-15, owner: 「こっちで命令するんじゃなくて」 — the second
+    // time they have asked for this; the first produced the feature, defaulted
+    // OFF, and it therefore never ran).
+    //
+    // The three cases are deliberately different:
+    //   • no opinion recorded  → the new default, ON
+    //   • an explicit `false`  → the user turned it off; that stands
+    //   • anything else        → OFF, same strict narrowing as before, so a
+    //     forged or corrupt value can never be read as consent
+    // An UNPARSEABLE settings.json still fails closed below: if we cannot read
+    // the file we also cannot read work-mode, and restarting blind is not a
+    // default anyone chose.
+    if (parsed.autoUpdate === undefined) return true
+    return parsed.autoUpdate === true
   } catch {
     return false
   }

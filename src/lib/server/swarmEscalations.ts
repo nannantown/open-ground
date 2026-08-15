@@ -282,6 +282,45 @@ const isSafeShotRef = (ref: string): boolean => {
 
 // ─── Read (the GET route) ─────────────────────────────────────────────────────
 
+/**
+ * How many OPEN questions each project is holding, keyed by canonical project
+ * path — or `null` when the inbox could not be read at all.
+ *
+ * ⚠ NULL IS NOT AN EMPTY MAP, and that distinction is the reason this exists
+ * rather than a `listEscalations().length`. `readTolerant` folds every failure
+ * (EACCES, EIO, corrupt JSON) into `[]`, which a counter cannot tell from "no
+ * questions" — and the Ground lamp turns that count into 「あなたの番」. Reporting
+ * 0 from a file nobody could open is this repo's FORBIDDEN SENTENCE with extra
+ * steps: it says nothing is waiting for you, from a source that was never read.
+ *
+ * Pure read — a corrupt file is left exactly where it is (the write path owns
+ * the `.corrupt` quarantine), and ENOENT is the ONE failure that honestly means
+ * empty, because the inbox is created on first use.
+ */
+export const countOpenEscalationsByProject = async (): Promise<Map<string, number> | null> => {
+  await ensureOpenGroundHome()
+  let raw: string
+  try {
+    raw = await readFile(escalationsFile(), 'utf8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return new Map()
+    return null
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    const items = (parsed as Partial<EscalationsState> | null)?.items
+    if (!Array.isArray(items)) return null
+    const out = new Map<string, number>()
+    for (const e of items.filter(isEscalation)) {
+      if (e.status !== 'open') continue
+      out.set(e.projectPath, (out.get(e.projectPath) ?? 0) + 1)
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
 /** The inbox, newest-first, optionally filtered to one project and/or one
  *  status (the SwarmModule panel polls ?status=open every 10s — without the
  *  filter it would re-download every resolved record plus its expanded PTY

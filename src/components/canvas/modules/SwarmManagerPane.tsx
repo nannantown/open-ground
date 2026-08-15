@@ -697,6 +697,16 @@ export const SwarmManagerPane = ({
                 {t('projectPanel.swarm.manager.overseerSandboxWarning')}
               </p>
             ) : null}
+            {/* THE PERSONA'S OTHER HALF, and it lives HERE rather than on the
+                Persona screen (2026-08-15, owner: 「swarmでの自動返信はサブ的な
+                ポジション」). That screen is for understanding yourself; the fact
+                that the same corpus can be SPENT answering a blocked worker is a
+                property of this switch, so it is stated next to the switch that
+                spends it. Always visible — it explains what arming this does,
+                which is exactly what a reader needs BEFORE they arm it. */}
+            <p className="text-micro leading-snug text-ink-faint" role="note">
+              {t('projectPanel.swarm.manager.overseerPersonaNote')}
+            </p>
           </div>
 
           {error && <p className="mt-2.5 text-meta leading-relaxed text-accent">{error}</p>}

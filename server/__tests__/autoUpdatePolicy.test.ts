@@ -28,11 +28,15 @@ const base = {
 }
 
 describe('autoUpdateFromSettingsRaw', () => {
-  it('only a literal true enables', () => {
+  it('only a literal boolean is an OPINION — everything else is not consent', () => {
+    // The `{}` case moved out on 2026-08-15: an unset value is now the DEFAULT
+    // (ON), not a refusal. See the default-is-ON block at the bottom of this
+    // file. The narrowing itself is unchanged — a forged value still never
+    // reads as consent.
     expect(autoUpdateFromSettingsRaw(JSON.stringify({ autoUpdate: true }))).toBe(true)
+    expect(autoUpdateFromSettingsRaw(JSON.stringify({ autoUpdate: false }))).toBe(false)
     expect(autoUpdateFromSettingsRaw(JSON.stringify({ autoUpdate: 'true' }))).toBe(false)
     expect(autoUpdateFromSettingsRaw(JSON.stringify({ autoUpdate: 1 }))).toBe(false)
-    expect(autoUpdateFromSettingsRaw(JSON.stringify({}))).toBe(false)
   })
   it('corrupt json reads as OFF (fail closed)', () => {
     expect(autoUpdateFromSettingsRaw('{not json')).toBe(false)
@@ -206,5 +210,36 @@ describe('asapWindowActive — the command expires', () => {
     // hours long and a noon bell surprise-restarts the app at night.
     expect(ASAP_WINDOW_MS).toBeGreaterThanOrEqual(AUTO_APPLY_POLL_MS)
     expect(ASAP_WINDOW_MS).toBeLessThanOrEqual(30 * 60 * 1000)
+  })
+})
+
+describe('the DEFAULT is ON — an unset setting means hands-free (2026-08-15)', () => {
+  // The owner asked twice. The first ask produced this feature defaulted OFF,
+  // so it never ran for them and they kept asking a human to install releases
+  // by hand. A default that makes the feature not happen is the same as not
+  // having built it.
+  it('no opinion recorded ⇒ ON', () => {
+    expect(autoUpdateFromSettingsRaw('{}')).toBe(true)
+    expect(autoUpdateFromSettingsRaw('{"language":"ja"}')).toBe(true)
+  })
+
+  it('an explicit false ⇒ OFF — the user turning it off still means something', () => {
+    expect(autoUpdateFromSettingsRaw('{"autoUpdate":false}')).toBe(false)
+  })
+
+  it('an explicit true ⇒ ON', () => {
+    expect(autoUpdateFromSettingsRaw('{"autoUpdate":true}')).toBe(true)
+  })
+
+  it('a FORGED or corrupt value is never read as consent', () => {
+    // Same strict narrowing as before: only a real boolean is an opinion.
+    for (const raw of ['{"autoUpdate":"yes"}', '{"autoUpdate":1}', '{"autoUpdate":null}']) {
+      expect(autoUpdateFromSettingsRaw(raw), raw).toBe(false)
+    }
+    // And an unreadable file fails CLOSED — if we cannot read settings we
+    // cannot read work-mode either, and restarting blind is nobody's default.
+    expect(autoUpdateFromSettingsRaw('{ not json')).toBe(false)
+    expect(autoUpdateFromSettingsRaw('[]')).toBe(false)
+    expect(autoUpdateFromSettingsRaw('null')).toBe(false)
   })
 })

@@ -45,6 +45,11 @@ export const board = {
     'board.card.integrationConflictTitle':
       'Auto-integration hit a rebase conflict on this branch — it was aborted (never force-merged). Integrate it by hand, then move the card.',
     'board.card.managerLabel': 'Commander',
+    // The figures on a card (SwarmSprite) convey state by how they MOVE, which
+    // a screen reader cannot see — so each one's accessible name is
+    // "<who> <what>", built from these two plus the existing state words. A
+    // figure that says something only in pixels says nothing to half the room.
+    'board.card.workerLabel': 'Worker',
     'board.card.managerMissing': 'Away',
     // Needs-you badge — an OPEN escalation names this card. Lane-independent:
     // a todo/blocked card can be waiting on you too. Read-only (answering
@@ -260,6 +265,7 @@ export const board = {
     'board.card.integrationConflictTitle':
       '自動統合がこのブランチの rebase で衝突したため中止しました（強制マージはしません）。手動で統合してからカードを移動してください。',
     'board.card.managerLabel': '司令官',
+    'board.card.workerLabel': '作業者',
     'board.card.managerMissing': '不在',
     // 判断待ちバッジ — このカードを名指しした未回答のエスカレーション。列を問わない
     // （未着手・判断待ちのカードでもあなたを待っていることがある）。読むだけ。

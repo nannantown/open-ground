@@ -10,7 +10,6 @@ import {
   HelpCircle,
   Blocks,
   DoorOpen,
-  Fingerprint,
   Moon,
   Sun,
 } from 'lucide-react'
@@ -20,6 +19,7 @@ import { useAuth } from '@/lib/auth/AuthContext'
 import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
 import { OpenGroundWordmark } from '@/components/canvas/OpenGroundWordmark'
 import { IconButton } from '@/components/canvas/IconButton'
+import { PersonaMark } from '@/components/canvas/PersonaMark'
 import { NotificationBell } from '@/components/canvas/NotificationBell'
 import type { AppNotification } from '@/lib/types'
 
@@ -185,22 +185,32 @@ export const Toolbar = ({
           <IconButton onClick={onOpenSkills} title={t('toolbar.skills')} label={t('toolbar.skills')}>
             <Blocks size={13} strokeWidth={1.75} />
           </IconButton>
-          {/* Persona — the owner's stand-in. Ground-level because it is about the
-              OWNER rather than any one project (its notes live in
-              ~/.openground/, identical on every card), which is exactly why it
-              left the per-project tab row. Shown only when the gate is open, via
-              the undefined-hides-it pattern above; the Fingerprint glyph is kept
-              from the tab so the entry reads as the same place. A fingerprint
-              alone does not say "Persona", so it carries a permanent label like
-              Add / Join shared / Skills do. */}
+          {/* PERSONA — deliberately NOT another 13px glyph in this row.
+              Ground-level because it is about the OWNER rather than any one
+              project (its notes live in ~/.openground/, identical on every
+              card), and it is the one entry here that opens a place the owner
+              BUILDS over time rather than a panel they consult. So it is set
+              apart: a hairline divider, its own accent-tinted chip, and a
+              figure-of-points mark at 18px instead of 13 (owner, 2026-08-15:
+              もっと目立たせる).
+
+              The mark is the screen it opens, in miniature — a person drawn by
+              the points known about them. The old Fingerprint said identity in
+              the passport sense: a fixed thing on file. This surface is the
+              opposite, something that accumulates. */}
           {onOpenPersona && (
-            <IconButton
-              onClick={onOpenPersona}
-              title={t('toolbar.personaTooltip')}
-              label={t('toolbar.persona')}
-            >
-              <Fingerprint size={13} strokeWidth={1.75} />
-            </IconButton>
+            <>
+              <span className="mx-1 h-4 w-px shrink-0 bg-line-soft" aria-hidden />
+              <button
+                type="button"
+                onClick={onOpenPersona}
+                title={t('toolbar.personaTooltip')}
+                className="flex shrink-0 items-center gap-1.5 rounded-[3px] border border-accent/35 bg-accent/10 px-2 py-1 text-accent transition-colors hover:border-accent/60 hover:bg-accent/[0.16] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                <PersonaMark size={18} />
+                <span className="label-cap whitespace-nowrap">{t('toolbar.persona')}</span>
+              </button>
+            </>
           )}
           <IconButton onClick={onOpenManual} title={t('toolbar.manual')}>
             <HelpCircle size={14} strokeWidth={1.75} />

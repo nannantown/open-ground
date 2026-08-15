@@ -664,6 +664,12 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     ptyFns: ['killTerminalsByCwdAndWait', 'listActiveTerminalCwds', 'listActiveTerminals', 'listPtySafetyViews'],
     sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'terminateSdkSessionsInDir'],
   },
+  'src/lib/server/groundLamps.ts': {
+    tier: 'both-pools',
+    why: 'GET /api/ground/lamps — whether a project is 作業中 or 途中でとまっている. A one-pool answer here is a LIE THE OWNER READS: swarm workers run on the SDK, so asking the PTY pool alone reports "nothing is moving" over a swarm working perfectly, and the card then says the project stalled. It goes through listAllActiveDesks (both pools) for the plain-pane arm, and through listSwarmWorkers — which itself reads both runtimes — for the worker arm.',
+    ptyFns: [],
+    sdkCalls: ['listAllActiveDesks'],
+  },
   'server/routes/misc.ts': {
     tier: 'both-pools',
     why: 'GET /api/update/restart-safety — the Electron shell asks "may I restart the app RIGHT NOW to apply a downloaded update?" and the answer must come from the liveDesks seam (both pools in one call): a one-pool answer here authorises an unattended restart on top of a live SDK worker — the same authorises-destruction shape as worktreeCleanup 0731.',
@@ -819,6 +825,11 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   'src/lib/server/generateSkill.ts': {
     tier: 'pty-only-by-design',
     why: 'A one-off claude PTY for skill generation, spawned and killed in the same function. Not a worker.',
+    ptyFns: ['killTerminal', 'subscribeTerminal'],
+  },
+  'src/lib/server/personaChat.ts': {
+    tier: 'pty-only-by-design',
+    why: 'One claude PTY per persona conversation turn (and per export distillation), spawned, marker-scraped and killed inside makePersonaTurn. It is the owner talking to their own stand-in — there is no worker record, no roster entry and no second runtime to dispatch to. The `--resume` continuity is carried by the SESSION id + the conversation scratch dir, never by a terminalId held across turns. NOTE for the next inventory: the two pool calls go through INJECTED ALIASES (`const kill = opts.kill ?? killTerminal`, the test seam), so the call-SITE scan below finds nothing here and this file-level entry is the only thing that records them.',
     ptyFns: ['killTerminal', 'subscribeTerminal'],
   },
   'src/lib/server/generateTaskTitle.ts': {

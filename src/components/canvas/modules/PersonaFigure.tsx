@@ -13,10 +13,19 @@
 // So the figure is not decoration. Its density IS the corpus size, and the dark
 // parts are the parts the stand-in would have to guess at.
 //
+// AN ARMATURE, NOT A MASK (2026-08-15). The body used to be a silhouette painted
+// into an offscreen canvas and read back as an alpha mask. It gave density but
+// no structure — the owner read it as four clouds — and, because jsdom has no 2D
+// context, the whole seating path was untested. The geometry now comes from
+// src/lib/persona/armature.ts as pure figure-space points, so the body has
+// shoulders, limbs and a taper, AND every point exists in a test.
+//
 // NO DATA OF ITS OWN. Everything it draws is a prop; every write lives in
-// PersonaModule. That keeps this file a renderer + a gesture surface, and keeps
-// the pure parts (which zone a note belongs to, how a judgment becomes a node)
-// exported and testable without touching a pixel.
+// PersonaModule, and so does every COUNT (see RegionSummary below — this file
+// never tallies anything it renders). That keeps this file a renderer + a
+// gesture surface, with the pure parts split between armature.ts (where a point
+// is) and regions.ts (which region a note belongs to). This file exports no rule
+// of its own; if you are about to add one, it belongs in one of those two.
 //
 // GESTURES ARE THE SAME CONTRACT AS InfiniteCanvas (src/components/canvas/
 // InfiniteCanvas.tsx) — the app already taught the owner one canvas language and
@@ -24,128 +33,20 @@
 // (deltaX, deltaY); ⌘/Ctrl + wheel zooms by `zoom * (1 + (-deltaY * 0.01))`
 // anchored at the cursor; holding Space turns a drag into a pan. Touch adds a
 // one-finger drag-pan and a two-finger pinch, which InfiniteCanvas has no
-// equivalent of only because it is not a touch surface.
+// equivalent of only because it is not a touch surface. The approved v2 mock is
+// a static demo and says nothing about gestures, so it does not get to delete
+// them — `persona.figure.hint` already ships describing this exact model.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useT } from '@/i18n/I18nContext'
-import { COURSES } from '@/lib/persona/instruments'
-import type { ManualJudgment, PersonaCourseId, PersonaQuestion, PersonaQuestionKind } from '@/lib/types'
-
-// ── zones ───────────────────────────────────────────────────────────────────
-
-/** The five regions of the figure. Same vocabulary the courses use
- *  (PersonaCourse.zone in instruments.ts), so a course visibly grows a REGION
- *  rather than an abstract score. */
-export type PersonaZone = 'mind' | 'values' | 'craft' | 'core' | 'ground'
-
-export const PERSONA_ZONES: readonly PersonaZone[] = ['mind', 'values', 'craft', 'core', 'ground']
-
-/** FNV-1a. Any hash would do; what matters is that it is DETERMINISTIC — a note
- *  must sit in the same place on every mount, on every machine. `Math.random()`
- *  here would make the figure reshuffle itself each time the tab is opened, and
- *  a body that rearranges itself is not a mirror of anything. */
-export const personaHash = (s: string): number => {
-  let h = 0x811c9dc5
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i)
-    h = Math.imul(h, 0x01000193) >>> 0
-  }
-  return h >>> 0
-}
-
-const COURSE_IDS = new Set<string>(COURSES.map((c) => c.id))
-
-/** Which course minted this note, if any. The server tags a course finding with
- *  the course id; the exact prefix it uses is its own business, so every
- *  separator-delimited token of every tag is checked ('big5', 'persona:big5',
- *  'course-big5' all read the same). The course NAME appearing in the note's
- *  `context` is accepted as a fallback because a finding's provenance line is
- *  `<course name> ・ <the number it came from>` — see PersonaFinding.detail. */
-export const courseIdFromJudgment = (j: {
-  tags?: string[]
-  context?: string
-}): PersonaCourseId | null => {
-  for (const tag of j.tags ?? []) {
-    for (const part of tag.toLowerCase().split(/[\s:/\-_.]+/)) {
-      if (COURSE_IDS.has(part)) return part as PersonaCourseId
-    }
-  }
-  const named = j.context ? COURSES.find((c) => j.context?.includes(c.name)) : undefined
-  return named ? named.id : null
-}
-
-/** Which region the day's question is digging in. Driven by the question's
- *  KIND (a durable, enumerable fact — see PersonaQuestionKind) rather than its
- *  wording, so the pulsing patch is stable for the life of the question. */
-const QUESTION_ZONE: Record<PersonaQuestionKind, PersonaZone> = {
-  'decision-speed-contrast': 'mind',
-  'escalation-answer-rule': 'values',
-  'escalation-dismissed': 'values',
-  'escalation-long-open': 'mind',
-  'corpus-gap': 'core',
-  'card-rework': 'craft',
-  'card-approved': 'craft',
-  'card-stale-blocked': 'ground',
-  'todo-passed-over': 'ground',
-}
-
-export const zoneForQuestion = (q: PersonaQuestion | null): PersonaZone | null =>
-  q ? QUESTION_ZONE[q.kind] ?? 'mind' : null
-
-/** Where a note sits on the figure, in priority order:
- *   1. a course finding lands in the region that course grows;
- *   2. an interview answer lands in the region its question was digging in —
- *      personaInterview.ts tags the write-back `['interview', q.kind]`, so the
- *      answer lights up the very patch that was pulsing while it was asked;
- *   3. everything else is spread deterministically by hash. That is the honest
- *      default: we do not know what a free-form note is "about", and guessing
- *      would put a wrong label on the owner's own words. */
-export const zoneForJudgment = (j: ManualJudgment): PersonaZone => {
-  const courseId = courseIdFromJudgment(j)
-  if (courseId) {
-    const course = COURSES.find((c) => c.id === courseId)
-    if (course) return course.zone
-  }
-  for (const tag of j.tags ?? []) {
-    const zone = QUESTION_ZONE[tag as PersonaQuestionKind]
-    if (zone) return zone
-  }
-  return PERSONA_ZONES[personaHash(`${j.id}|${(j.tags ?? []).join(',')}`) % PERSONA_ZONES.length]
-}
-
-// ── nodes ───────────────────────────────────────────────────────────────────
-
-/** One lit point: one note, its region, and enough of the note to show without
- *  going back to the list. */
-export interface PersonaNode {
-  id: string
-  zone: PersonaZone
-  text: string
-  addedAt: string
-  tags: string[]
-  context?: string
-  correctsId?: string
-  courseId: PersonaCourseId | null
-}
-
-export const buildPersonaNodes = (judgments: ManualJudgment[]): PersonaNode[] =>
-  judgments.map((j) => ({
-    id: j.id,
-    zone: zoneForJudgment(j),
-    text: j.text,
-    addedAt: j.addedAt,
-    tags: j.tags ?? [],
-    ...(j.context ? { context: j.context } : {}),
-    ...(j.correctsId ? { correctsId: j.correctsId } : {}),
-    courseId: courseIdFromJudgment(j),
-  }))
+import { capTrackingClass } from '@/lib/labelScript'
+import { PERSONA_REGIONS, personaHash, type PersonaNode } from '@/lib/persona/regions'
+import { buildArmaturePoints, nearestPoint, type ArmaturePoint } from '@/lib/persona/armature'
+import type { PersonaRegion } from '@/lib/types'
 
 // ── the particle field ──────────────────────────────────────────────────────
 
-interface Particle {
-  x: number
-  y: number
-  zone: PersonaZone
+interface Particle extends ArmaturePoint {
   seed: number
   /** Index into the seated node list, or -1. */
   node: number
@@ -158,24 +59,36 @@ interface Particle {
   reserved: boolean
   /** Part of the pulsing patch the current question comes from. */
   gap: boolean
+  /** 1 → 0 flare on arrival, so a new thing known announces itself once. */
+  fresh: number
 }
 
 interface Field {
+  /** Host size in CSS px. */
   w: number
   h: number
+  /** Figure height in px, and where its crown sits — figure space × this. */
+  s: number
+  ox: number
+  oy: number
   particles: Particle[]
 }
 
 // The stage is `bg-bg-deep`, which is dark in BOTH themes (the same token the
-// terminal frames sit on), so the figure's three tones are FIXED rather than
-// read from the live theme: the light theme's ink-faint is a dark brown that
-// would vanish here, and dust that disappears at noon is not a smaller bug than
-// a wrong hue. Values are the dark-theme channels from src/app/globals.css
-// (--og-accent / --og-ink-faint / --og-ochre), as bare "R G B" triplets for
-// `rgb(R G B / a)`.
-const TONE_LIT = '242 149 128'
-const TONE_DUST = '201 189 170'
-const TONE_GAP = '221 174 88'
+// terminal frames sit on), so the figure's tones are PAINTED rather than read
+// from the live theme: the light theme's ink-faint is a dark brown that would
+// vanish here, and dust that disappears at noon is not a smaller bug than a
+// wrong hue. These are the approved mock's values.
+/** A lit point ON the body. */
+const TONE_BODY_LIT = '#F29580'
+/** A lit point in the halo — cooler, so "around you" reads apart from "of you". */
+const TONE_HALO_LIT = '#C98F7E'
+/** Not formed yet. */
+const TONE_UNLIT = '#5F4C3C'
+/** The region under the pointer, and the pulsing gap patch — the same ochre. */
+const TONE_HOVER = '#DDAE58'
+/** Just arrived. */
+const TONE_FRESH = '#FFD9A8'
 
 interface Cam {
   x: number
@@ -191,14 +104,67 @@ interface Burst {
   raw: boolean
 }
 
-/** A request to fly sparks into a zone. `seq` is what makes it fire: bump it
- *  and the same zone sparks again (a value-equal prop would not). */
+/** A request to fly sparks into a region. `seq` is what makes it fire: bump it
+ *  and the same region sparks again (a value-equal prop would not). */
 export interface PersonaSpark {
   seq: number
-  zone: PersonaZone
+  region: PersonaRegion
   count: number
   /** 'raw' = one dim answer dot; 'node' = a finding taking its place. */
   kind: 'raw' | 'node'
+}
+
+/** One line of the region probe: a thing known, and where it came from. */
+export interface RegionSummaryLine {
+  text: string
+  sub: string
+}
+
+/** What the probe says about one region. COMPOSED BY THE MODULE, never by this
+ *  file — the figure has no corpus and must not appear to have counted one.
+ *
+ *  `state` is the honest-rendering seam. 'unread' is a FAILED read and prints
+ *  「ここは読めていません」 with no numbers at all; a zero over a failed read
+ *  would claim a measurement nobody took. 'read' with `placed: 0` prints
+ *  「ここはまだ何もありません」, which is a measurement.
+ *
+ *  `placed` and `unplaced` are NEVER summed. `unplaced` counts notes that were
+ *  spread across the body rather than read (regions.ts tier 4) — adding them to
+ *  `placed` would claim evidence for the ~159 entries that predate regions. */
+export interface RegionSummary {
+  region: PersonaRegion
+  state: 'read' | 'unread'
+  placed: number
+  unplaced: number
+  lines: RegionSummaryLine[]
+  /** What a screen reader announces for this region's button. */
+  ariaName: string
+}
+
+/** The ONE count line for a region, as an i18n key + vars.
+ *
+ *  ⚠ SHARED BY THE PROBE AND THE ARIA NAME ON PURPOSE. They said different
+ *  things: the visible probe printed 「ここはまだ何もありません」 and then, two
+ *  lines below, 「置き場所が決まっていない 40」 — a contradiction on one panel —
+ *  while the button a screen reader lands on announced only the first half, so a
+ *  blind reader was told a region was empty when 40 notes sat in it. One
+ *  function, so the two cannot drift again.
+ *
+ *  FOUR CASES, and the order is the meaning:
+ *    unread            — a failed read. NO number: a 0 is a measurement nobody took.
+ *    placed  > 0       — the count that was actually read.
+ *    unplaced > 0      — nothing read HERE, but notes are spread across the body.
+ *                        Not "nothing"; the honest word is "not placed yet".
+ *    otherwise         — genuinely nothing, which is a measurement. */
+export const regionCountLine = (s: {
+  state: 'read' | 'unread'
+  placed: number
+  unplaced: number
+}): { key: string; vars?: Record<string, number> } => {
+  if (s.state === 'unread') return { key: 'persona.region.unreadable' }
+  if (s.placed > 0) return { key: 'persona.figure.regionKnown', vars: { count: s.placed } }
+  if (s.unplaced > 0) return { key: 'persona.figure.regionUnplaced', vars: { count: s.unplaced } }
+  return { key: 'persona.region.none' }
 }
 
 const ZOOM_STEP = 0.01
@@ -207,141 +173,67 @@ const ZOOM_MAX = 2.6
 /** How far past the frame the camera may travel — the figure can be pushed to
  *  the edge, never off screen. */
 const PAN_MARGIN = 0.22
-const PICK_RADIUS = 20
+/** ONE radius, in screen px, for BOTH the node pick and the region probe. Two
+ *  radii would mean the thing you clicked and the thing the probe described
+ *  could disagree about what you were pointing at. */
+const PICK_RADIUS = 22
 const GAP_PATCH = 18
+/** Width of the probe panel in px — needed to keep it inside the stage. */
+const PROBE_W = 270
 
 const prefersReducedMotion = (): boolean =>
   typeof window !== 'undefined' &&
   typeof window.matchMedia === 'function' &&
   window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
-/** The silhouette, drawn once into an offscreen canvas and read back as an
- *  alpha mask — the particles are simply the pixels that came back opaque. A
- *  path (rather than an image) so it scales to any panel size and ships no
- *  asset. Returns null where 2D canvas is unavailable (jsdom in tests). */
-const silhouetteMask = (
-  w: number,
-  h: number,
-): { data: Uint8ClampedArray; unit: number; top: number; cx: number } | null => {
-  const off = document.createElement('canvas')
-  off.width = w
-  off.height = h
-  const g = off.getContext('2d')
-  if (!g) return null
-  g.fillStyle = '#fff'
-  g.strokeStyle = '#fff'
-  g.lineCap = 'round'
-  g.lineJoin = 'round'
-  const cx = w * 0.5
-  const top = h * 0.1
-  const u = h * 0.058
-  const line = (a: number, b: number, c: number, d: number) => {
-    g.beginPath()
-    g.moveTo(a, b)
-    g.lineTo(c, d)
-    g.stroke()
-  }
-  const path = (pts: [number, number][]) => {
-    g.beginPath()
-    g.moveTo(pts[0][0], pts[0][1])
-    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1])
-    g.stroke()
-  }
-  g.beginPath()
-  g.arc(cx, top + u, u, 0, Math.PI * 2)
-  g.fill()
-  g.lineWidth = u * 0.52
-  line(cx, top + u * 2.0, cx, top + u * 2.45)
-  g.lineWidth = u * 0.6
-  line(cx - u * 1.38, top + u * 2.85, cx + u * 1.38, top + u * 2.85)
-  g.lineWidth = u * 1.85
-  line(cx, top + u * 3.15, cx, top + u * 4.55)
-  g.lineWidth = u * 1.3
-  line(cx, top + u * 4.45, cx, top + u * 5.75)
-  g.lineWidth = u * 1.55
-  line(cx, top + u * 5.7, cx, top + u * 6.35)
-  g.lineWidth = u * 0.4
-  path([
-    [cx - u * 1.58, top + u * 3.0],
-    [cx - u * 1.8, top + u * 4.7],
-    [cx - u * 1.55, top + u * 6.45],
-  ])
-  path([
-    [cx + u * 1.58, top + u * 3.0],
-    [cx + u * 1.8, top + u * 4.7],
-    [cx + u * 1.55, top + u * 6.45],
-  ])
-  g.lineWidth = u * 0.52
-  path([
-    [cx - u * 0.52, top + u * 6.45],
-    [cx - u * 0.6, top + u * 9.2],
-    [cx - u * 0.66, top + u * 11.7],
-  ])
-  path([
-    [cx + u * 0.52, top + u * 6.45],
-    [cx + u * 0.6, top + u * 9.2],
-    [cx + u * 0.66, top + u * 11.7],
-  ])
-  g.lineWidth = u * 0.34
-  line(cx - u * 0.66, top + u * 11.9, cx - u * 1.05, top + u * 11.9)
-  line(cx + u * 0.66, top + u * 11.9, cx + u * 1.05, top + u * 11.9)
-  return { data: g.getImageData(0, 0, w, h).data, unit: u, top, cx }
+/** Where the figure sits inside the host: as tall as fits with air around it,
+ *  centred, nudged up so the feet are not flush with the bottom edge. */
+const framePlacement = (w: number, h: number) => {
+  const s = Math.min(h * 0.8, w * 0.62)
+  return { s, ox: w / 2, oy: (h - s) / 2 - h * 0.015 }
 }
 
-const buildField = (w: number, h: number): Field | null => {
-  const mask = silhouetteMask(w, h)
-  if (!mask) return null
-  const step = Math.max(6, Math.round(h / 96))
-  const particles: Particle[] = []
-  for (let y = 0; y < h; y += step) {
-    for (let x = 0; x < w; x += step) {
-      if (mask.data[(y * w + x) * 4 + 3] <= 128) continue
-      const zone: PersonaZone =
-        y < mask.top + mask.unit * 2.5
-          ? 'mind'
-          : Math.abs(x - mask.cx) > mask.unit * 1.15 && y < mask.top + mask.unit * 6.5
-            ? 'craft'
-            : y < mask.top + mask.unit * 4.6
-              ? 'values'
-              : y < mask.top + mask.unit * 6.5
-                ? 'core'
-                : 'ground'
-      particles.push({
-        x,
-        y,
-        zone,
-        // Seeded from the position, not Math.random: the twinkle is then the
-        // same on every mount, so a screenshot diff of this surface is stable.
-        seed: ((personaHash(`${x},${y}`) % 628) / 100),
-        node: -1,
-        raw: false,
-        mint: false,
-        reserved: false,
-        gap: false,
-      })
-    }
+const buildField = (w: number, h: number): Field => {
+  const { s, ox, oy } = framePlacement(w, h)
+  return {
+    w,
+    h,
+    s,
+    ox,
+    oy,
+    particles: buildArmaturePoints().map((p) => ({
+      ...p,
+      // Seeded from the position, not Math.random: the twinkle is then the same
+      // on every mount, so a screenshot diff of this surface is stable.
+      seed: (personaHash(`${p.x},${p.y}`) % 628) / 100,
+      node: -1,
+      raw: false,
+      mint: false,
+      reserved: false,
+      gap: false,
+      fresh: 0,
+    })),
   }
-  return { w, h, particles }
 }
 
-/** Seat every node on a particle of its own zone. Oldest note first so a NEW
+/** Seat every node on a particle of its own region. Oldest note first so a NEW
  *  note takes a free seat instead of displacing the ones already on screen. */
 const seatNodes = (field: Field, nodes: PersonaNode[]): void => {
   for (const p of field.particles) {
     p.node = -1
     p.mint = false
   }
-  const byZone = new Map<PersonaZone, Particle[]>()
+  const byRegion = new Map<PersonaRegion, Particle[]>()
   for (const p of field.particles) {
-    const list = byZone.get(p.zone)
+    const list = byRegion.get(p.region)
     if (list) list.push(p)
-    else byZone.set(p.zone, [p])
+    else byRegion.set(p.region, [p])
   }
   const order = nodes
     .map((n, i) => ({ n, i }))
     .sort((a, b) => (a.n.addedAt === b.n.addedAt ? a.n.id.localeCompare(b.n.id) : a.n.addedAt < b.n.addedAt ? -1 : 1))
   for (const { n, i } of order) {
-    const pool = byZone.get(n.zone)
+    const pool = byRegion.get(n.region)
     if (!pool || pool.length === 0) continue
     const start = personaHash(n.id) % pool.length
     for (let k = 0; k < pool.length; k++) {
@@ -354,21 +246,21 @@ const seatNodes = (field: Field, nodes: PersonaNode[]): void => {
   }
 }
 
-const seatGap = (field: Field, zone: PersonaZone | null): void => {
+const seatGap = (field: Field, region: PersonaRegion | null): void => {
   for (const p of field.particles) p.gap = false
-  if (!zone) return
-  let placed = 0
+  if (!region) return
+  let seated = 0
   for (const p of field.particles) {
-    if (placed >= GAP_PATCH) break
-    if (p.zone !== zone || p.node !== -1 || p.raw || p.reserved) continue
+    if (seated >= GAP_PATCH) break
+    if (p.region !== region || p.node !== -1 || p.raw || p.reserved) continue
     p.gap = true
-    placed++
+    seated++
   }
 }
 
-const freeParticle = (field: Field, zone: PersonaZone): Particle | null => {
+const freeParticle = (field: Field, region: PersonaRegion): Particle | null => {
   const pool = field.particles.filter(
-    (p) => p.zone === zone && p.node === -1 && !p.raw && !p.mint && !p.reserved,
+    (p) => p.region === region && p.node === -1 && !p.raw && !p.mint && !p.reserved,
   )
   if (pool.length === 0) return null
   // Middle-out rather than random: a spark lands somewhere plausible on the
@@ -385,33 +277,48 @@ interface TipState {
   sub: string
 }
 
+interface ProbeState {
+  region: PersonaRegion
+  /** Screen position, or null when the probe was opened from the keyboard and
+   *  there is no pointer to anchor it to. */
+  at: { x: number; y: number } | null
+}
+
 export interface PersonaFigureProps {
   nodes: PersonaNode[]
   /** The region the current question is digging in — its dust pulses. */
-  gapZone: PersonaZone | null
+  gapRegion: PersonaRegion | null
   /** Set while a course is running; cleared when its result lands, which is
    *  what turns the dim answer dots back into dust before the findings fly in. */
-  pendingZone: PersonaZone | null
+  pendingRegion: PersonaRegion | null
   spark: PersonaSpark | null
   onSelect: (node: PersonaNode) => void
   /** Tapping empty space / the pulsing patch — the module uses it to close the
    *  open note and to draw attention to the question card. */
   onTapEmpty: () => void
   onTapGap: () => void
-  zoneLabel: (zone: PersonaZone) => string
+  regionLabel: (region: PersonaRegion) => string
   provenance: (node: PersonaNode) => string
+  /** What the probe says about a region. Owned by the module (see
+   *  RegionSummary) — this file positions it and nothing else. */
+  regionSummary: (region: PersonaRegion) => RegionSummary
+  /** Which region is being probed, or null. Pointer and keyboard both land
+   *  here, so the module never has to know which one the owner used. */
+  onProbe: (region: PersonaRegion | null) => void
 }
 
 export const PersonaFigure = ({
   nodes,
-  gapZone,
-  pendingZone,
+  gapRegion,
+  pendingRegion,
   spark,
   onSelect,
   onTapEmpty,
   onTapGap,
-  zoneLabel,
+  regionLabel,
   provenance,
+  regionSummary,
+  onProbe,
 }: PersonaFigureProps) => {
   const { t } = useT()
   const hostRef = useRef<HTMLDivElement>(null)
@@ -432,16 +339,49 @@ export const PersonaFigure = ({
   const pinchRef = useRef<{ d: number; s0: number; wx: number; wy: number } | null>(null)
   const spaceRef = useRef(false)
   const hoverRef = useRef<Particle | null>(null)
+  /** The probed region, mirrored for the draw loop (which dims everything else)
+   *  so a hover does not re-run the animation effect. */
+  const probeRef = useRef<PersonaRegion | null>(null)
   const [tip, setTip] = useState<TipState | null>(null)
+  const [probe, setProbe] = useState<ProbeState | null>(null)
   const [zoomed, setZoomed] = useState(false)
 
   // Latest props for the native listeners, which are attached once: reading
   // them through a ref keeps a re-render from tearing down and re-adding the
   // whole gesture surface (which would drop an in-flight drag).
-  const live = useRef({ nodes, gapZone, onSelect, onTapEmpty, onTapGap, zoneLabel, provenance, t })
-  live.current = { nodes, gapZone, onSelect, onTapEmpty, onTapGap, zoneLabel, provenance, t }
+  const live = useRef({
+    nodes,
+    gapRegion,
+    onSelect,
+    onTapEmpty,
+    onTapGap,
+    regionLabel,
+    provenance,
+    onProbe,
+    t,
+  })
+  live.current = {
+    nodes,
+    gapRegion,
+    onSelect,
+    onTapEmpty,
+    onTapGap,
+    regionLabel,
+    provenance,
+    onProbe,
+    t,
+  }
 
   const reduced = useMemo(prefersReducedMotion, [])
+
+  /** One place that changes the probe, because three of them (pointer move,
+   *  pointer leave, keyboard) must agree on both the panel and the callback. */
+  const setProbed = useCallback((next: ProbeState | null) => {
+    const before = probeRef.current
+    probeRef.current = next?.region ?? null
+    setProbe(next)
+    if ((next?.region ?? null) !== before) live.current.onProbe(next?.region ?? null)
+  }, [])
 
   const clampCam = useCallback(() => {
     const f = fieldRef.current
@@ -474,9 +414,8 @@ export const PersonaFigure = ({
     const field = buildField(w, h)
     fieldRef.current = field
     burstRef.current = []
-    if (!field) return
     seatNodes(field, live.current.nodes)
-    seatGap(field, live.current.gapZone)
+    seatGap(field, live.current.gapRegion)
     camRef.current = { x: w / 2, y: h / 2, s: 1 }
     camToRef.current = { x: w / 2, y: h / 2, s: 1 }
     setZoomed(false)
@@ -505,24 +444,24 @@ export const PersonaFigure = ({
     const f = fieldRef.current
     if (!f) return
     seatNodes(f, nodes)
-    seatGap(f, gapZone)
-  }, [nodes, gapZone])
+    seatGap(f, gapRegion)
+  }, [nodes, gapRegion])
 
   // A course ended (or was abandoned): its un-consolidated answers stop being
   // dots. They were never findings, so they must not linger looking like one.
   useEffect(() => {
     const f = fieldRef.current
-    if (!f || pendingZone) return
+    if (!f || pendingRegion) return
     for (const p of f.particles) p.raw = false
-  }, [pendingZone])
+  }, [pendingRegion])
 
   // Sparks. Fired by `seq` changing, never by value equality — answering twice
-  // in the same zone must spark twice.
+  // in the same region must spark twice.
   useEffect(() => {
     const f = fieldRef.current
     if (!f || !spark) return
     for (let i = 0; i < spark.count; i++) {
-      const target = freeParticle(f, spark.zone)
+      const target = freeParticle(f, spark.region)
       if (!target) break
       // Claim the seat now, light it on ARRIVAL: a node that appears before its
       // spark gets there would make the flight decorative rather than the thing
@@ -547,8 +486,8 @@ export const PersonaFigure = ({
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     // jsdom (tests) has no 2D context. Everything else on this surface — the
-    // note list, the question card — still works, which is the point of keeping
-    // the data out of here.
+    // note list, the region list, the probe — still works, which is the point of
+    // keeping both the data and the geometry out of here.
     if (!ctx) return
     if (typeof requestAnimationFrame !== 'function') return
     let raf = 0
@@ -585,44 +524,54 @@ export const PersonaFigure = ({
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.clearRect(0, 0, f.w, f.h)
       const sq = Math.sqrt(cam.s)
+      const probed = probeRef.current
       for (const p of f.particles) {
-        const vx = (p.x - cam.x) * cam.s + f.w / 2
-        const vy = (p.y - cam.y) * cam.s + f.h / 2
+        // figure space → layout px → camera.
+        const lx = f.ox + p.x * f.s
+        const ly = f.oy + p.y * f.s
+        const vx = (lx - cam.x) * cam.s + f.w / 2
+        const vy = (ly - cam.y) * cam.s + f.h / 2
         if (vx < -30 || vx > f.w + 30 || vy < -30 || vy > f.h + 30) continue
+        const dim = probed !== null && p.region !== probed
+        const halo = p.region === 'people'
         if (p.node !== -1 || p.mint) {
-          const tw = 0.7 + 0.3 * Math.sin(clock * 2 + p.seed * 3)
-          const a = hoverRef.current === p ? 1 : 0.5 + 0.4 * tw
-          ctx.fillStyle = `rgb(${TONE_LIT} / ${a})`
+          if (p.fresh > 0) p.fresh = Math.max(0, p.fresh - (reduced ? 1 : 0.012))
+          const br = 0.72 + 0.28 * Math.sin(clock * 0.9 + p.seed)
+          ctx.globalAlpha = dim
+            ? 0.12
+            : Math.min(1, (halo ? 0.34 : 0.5) + 0.5 * br + p.fresh)
+          ctx.fillStyle =
+            p.fresh > 0
+              ? TONE_FRESH
+              : hoverRef.current === p || (probed !== null && p.region === probed)
+                ? TONE_HOVER
+                : halo
+                  ? TONE_HALO_LIT
+                  : TONE_BODY_LIT
           ctx.beginPath()
-          ctx.arc(vx, vy, (p.node !== -1 ? 2.3 : 1.9) * sq, 0, Math.PI * 2)
+          ctx.arc(vx, vy, ((dim ? 1.1 : halo ? 1.2 : 1.65) + p.fresh * 3.2) * sq, 0, Math.PI * 2)
           ctx.fill()
-          if (p.node !== -1 && cam.s > 1.5) {
-            ctx.strokeStyle = `rgb(${TONE_LIT} / 0.22)`
-            ctx.lineWidth = 1
-            ctx.beginPath()
-            ctx.arc(vx, vy, 6 * sq, 0, Math.PI * 2)
-            ctx.stroke()
-          }
         } else if (p.raw) {
-          ctx.fillStyle = `rgb(${TONE_LIT} / 0.34)`
+          ctx.globalAlpha = dim ? 0.12 : 0.34
+          ctx.fillStyle = TONE_BODY_LIT
           ctx.beginPath()
           ctx.arc(vx, vy, 1.3 * sq, 0, Math.PI * 2)
           ctx.fill()
-        } else {
-          const d = reduced ? 0 : 1
-          const ox = Math.sin(clock * 0.7 + p.seed) * 6 * d
-          const oy = Math.cos(clock * 0.6 + p.seed * 2) * 6 * d
-          const a = p.gap
-            ? reduced
-              ? 0.3
-              : 0.2 + 0.16 * Math.sin(clock * 1.6 + p.seed)
-            : 0.15
-          ctx.fillStyle = `rgb(${p.gap ? TONE_GAP : TONE_DUST} / ${a})`
+        } else if (p.gap) {
+          ctx.globalAlpha = reduced ? 0.3 : 0.2 + 0.16 * Math.sin(clock * 1.6 + p.seed)
+          ctx.fillStyle = TONE_HOVER
           ctx.beginPath()
-          ctx.arc(vx + ox, vy + oy, 1.1 * sq, 0, Math.PI * 2)
+          ctx.arc(vx, vy, 1.1 * sq, 0, Math.PI * 2)
+          ctx.fill()
+        } else {
+          ctx.globalAlpha = dim ? 0.045 : 0.12
+          ctx.fillStyle = TONE_UNLIT
+          ctx.beginPath()
+          ctx.arc(vx, vy, 0.95 * sq, 0, Math.PI * 2)
           ctx.fill()
         }
       }
+      ctx.globalAlpha = 1
 
       for (let i = burstRef.current.length - 1; i >= 0; i--) {
         const b = burstRef.current[i]
@@ -630,21 +579,28 @@ export const PersonaFigure = ({
         if (b.t >= 1) {
           b.target.reserved = false
           if (b.raw) b.target.raw = true
-          else b.target.mint = true
+          else {
+            b.target.mint = true
+            // The flare belongs to ARRIVAL, not to departure: the point lights
+            // when the thing actually landed on the body.
+            b.target.fresh = 1
+          }
           burstRef.current.splice(i, 1)
           continue
         }
         if (b.t < 0) continue
         const e = 1 - Math.pow(1 - b.t, 3)
-        const tx = (b.target.x - cam.x) * cam.s + f.w / 2
-        const ty = (b.target.y - cam.y) * cam.s + f.h / 2
+        const tx = (f.ox + b.target.x * f.s - cam.x) * cam.s + f.w / 2
+        const ty = (f.oy + b.target.y * f.s - cam.y) * cam.s + f.h / 2
         const x = b.x0 + (tx - b.x0) * e
         const y = b.y0 + (ty - b.y0) * e - Math.sin(e * Math.PI) * 42
-        ctx.fillStyle = `rgb(${TONE_LIT} / ${0.95 - b.t * 0.35})`
+        ctx.globalAlpha = 0.95 - b.t * 0.35
+        ctx.fillStyle = TONE_BODY_LIT
         ctx.beginPath()
         ctx.arc(x, y, b.raw ? 1.7 : 2.4, 0, Math.PI * 2)
         ctx.fill()
       }
+      ctx.globalAlpha = 1
     }
     raf = requestAnimationFrame(frame)
     return () => cancelAnimationFrame(raf)
@@ -665,22 +621,21 @@ export const PersonaFigure = ({
       return { x: (sx - f.w / 2) / cam.s + cam.x, y: (sy - f.h / 2) / cam.s + cam.y, sx, sy }
     }
 
+    /** THE hit test, and the only one. Screen px → layout px → figure space, then
+     *  `nearestPoint` — the silhouette is the shape, so a region box would name a
+     *  part of the body the owner is not pointing at (armature.ts). */
     const pick = (sx: number, sy: number): Particle | null => {
       const f = fieldRef.current
-      if (!f) return null
+      if (!f || f.s <= 0) return null
       const cam = camRef.current
-      let best: Particle | null = null
-      let bd = PICK_RADIUS * PICK_RADIUS
-      for (const p of f.particles) {
-        const dx = (p.x - cam.x) * cam.s + f.w / 2 - sx
-        const dy = (p.y - cam.y) * cam.s + f.h / 2 - sy
-        const d = dx * dx + dy * dy
-        if (d < bd) {
-          bd = d
-          best = p
-        }
-      }
-      return best
+      const lx = (sx - f.w / 2) / cam.s + cam.x
+      const ly = (sy - f.h / 2) / cam.s + cam.y
+      return nearestPoint(
+        f.particles,
+        (lx - f.ox) / f.s,
+        (ly - f.oy) / f.s,
+        PICK_RADIUS / (f.s * cam.s),
+      )
     }
 
     const onWheel = (e: WheelEvent) => {
@@ -688,6 +643,7 @@ export const PersonaFigure = ({
       if (!f) return
       e.preventDefault()
       setTip(null)
+      setProbed(null)
       const cam = camToRef.current
       if (e.ctrlKey || e.metaKey) {
         const w0 = worldAt(e.clientX, e.clientY)
@@ -750,6 +706,7 @@ export const PersonaFigure = ({
       }
       if (drag?.pan && f) {
         setTip(null)
+        setProbed(null)
         const cam = camToRef.current
         cam.x = drag.wx - (w0.sx - f.w / 2) / camRef.current.s
         cam.y = drag.wy - (w0.sy - f.h / 2) / camRef.current.s
@@ -765,19 +722,28 @@ export const PersonaFigure = ({
       hoverRef.current = p
       if (!p) {
         setTip(null)
+        setProbed(null)
         host.style.cursor = spaceRef.current ? 'grab' : 'default'
         return
       }
-      const { nodes: ns, zoneLabel: zl, provenance: prov, t: tr } = live.current
+      const { nodes: ns, provenance: prov, t: tr } = live.current
       const node = p.node !== -1 ? ns[p.node] : null
-      const tipState: TipState = node
-        ? { x: w0.sx, y: w0.sy, text: node.text, sub: prov(node) }
-        : p.raw
-          ? { x: w0.sx, y: w0.sy, text: tr('persona.tip.raw'), sub: tr('persona.tip.rawSub') }
-          : p.gap
-            ? { x: w0.sx, y: w0.sy, text: tr('persona.tip.gap'), sub: tr('persona.tip.gapSub') }
-            : { x: w0.sx, y: w0.sy, text: tr('persona.tip.dust'), sub: zl(p.zone) }
-      setTip(tipState)
+      // ONE panel at a time. Over a lit point the answer is THAT note — the most
+      // specific thing there is to say — and the region probe would be a second
+      // floating card over the same pixel. Everywhere else, the probe.
+      if (node) {
+        setProbed(null)
+        setTip({ x: w0.sx, y: w0.sy, text: node.text, sub: prov(node) })
+      } else if (p.raw) {
+        setProbed(null)
+        setTip({ x: w0.sx, y: w0.sy, text: tr('persona.tip.raw'), sub: tr('persona.tip.rawSub') })
+      } else if (p.gap) {
+        setProbed(null)
+        setTip({ x: w0.sx, y: w0.sy, text: tr('persona.tip.gap'), sub: tr('persona.tip.gapSub') })
+      } else {
+        setTip(null)
+        setProbed({ region: p.region, at: { x: w0.sx, y: w0.sy } })
+      }
       host.style.cursor = 'pointer'
     }
 
@@ -804,6 +770,12 @@ export const PersonaFigure = ({
     const onPointerCancel = () => {
       dragRef.current = null
       host.style.cursor = spaceRef.current ? 'grab' : 'default'
+    }
+
+    const onPointerLeave = () => {
+      hoverRef.current = null
+      setTip(null)
+      setProbed(null)
     }
 
     const onTouchStart = (e: TouchEvent) => {
@@ -845,6 +817,7 @@ export const PersonaFigure = ({
     host.addEventListener('pointermove', onPointerMove)
     host.addEventListener('pointerup', endDrag)
     host.addEventListener('pointercancel', onPointerCancel)
+    host.addEventListener('pointerleave', onPointerLeave)
     host.addEventListener('touchstart', onTouchStart, { passive: true })
     host.addEventListener('touchmove', onTouchMove, { passive: false })
     host.addEventListener('touchend', onTouchEnd)
@@ -856,13 +829,17 @@ export const PersonaFigure = ({
       host.removeEventListener('pointermove', onPointerMove)
       host.removeEventListener('pointerup', endDrag)
       host.removeEventListener('pointercancel', onPointerCancel)
+      host.removeEventListener('pointerleave', onPointerLeave)
       host.removeEventListener('touchstart', onTouchStart)
       host.removeEventListener('touchmove', onTouchMove)
       host.removeEventListener('touchend', onTouchEnd)
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [clampCam, recenter])
+  }, [clampCam, recenter, setProbed])
+
+  const probeSummary = probe ? regionSummary(probe.region) : null
+  const probeLabel = probe ? regionLabel(probe.region) : ''
 
   return (
     <div ref={hostRef} className="absolute inset-0 touch-none select-none">
@@ -881,6 +858,20 @@ export const PersonaFigure = ({
         ))}
       </ul>
 
+      {/* The SECOND non-mouse path, and it is not optional. The probe is a hover
+       *  affordance: shipping it alone would hand a keyboard owner a screen with
+       *  a region map they can be told about but never open. Pressing a region
+       *  here opens exactly the panel the pointer opens. */}
+      <ul className="sr-only" aria-label={t('persona.figure.regionList')}>
+        {PERSONA_REGIONS.map((r) => (
+          <li key={r}>
+            <button type="button" onClick={() => setProbed({ region: r, at: null })}>
+              {regionSummary(r).ariaName}
+            </button>
+          </li>
+        ))}
+      </ul>
+
       {tip && (
         <div
           className="pointer-events-none absolute z-10 max-w-[270px] rounded-[3px] border border-line bg-bg-card/95 px-3 py-2 text-meta leading-relaxed text-ink shadow-card"
@@ -888,6 +879,62 @@ export const PersonaFigure = ({
         >
           {tip.text}
           <span className="mt-0.5 block text-ink-faint">{tip.sub}</span>
+        </div>
+      )}
+
+      {/* ── the region probe: what this part of you knows, raised where you
+       *  point. It replaced a standing wall of text down the left of the stage —
+       *  the same facts, but only the ones asked for (owner: 「文字は極力少なく
+       *  したい」). It never counts anything itself; see RegionSummary. */}
+      {probeSummary && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none absolute z-40 w-[270px] rounded-[3px] border border-line bg-bg-card/95 px-3.5 py-3 shadow-card"
+          style={
+            probe?.at
+              ? {
+                  left: Math.max(
+                    18,
+                    Math.min(probe.at.x + 24, (fieldRef.current?.w ?? PROBE_W + 36) - PROBE_W - 18),
+                  ),
+                  top: Math.max(18, Math.min(probe.at.y - 40, (fieldRef.current?.h ?? 200) - 160)),
+                }
+              : { left: 18, top: 18 }
+          }
+        >
+          <h4 className={`label-cap ${capTrackingClass(probeLabel)} text-ochre`}>{probeLabel}</h4>
+          {/* THE EMPTIES ARE NOT THE SAME STATE — see regionCountLine, which is
+           *  also what the region button announces, so the panel and the screen
+           *  reader cannot say different things about the same region. */}
+          <p className="mt-1 text-plate text-ink-faint">
+            {(() => {
+              const line = regionCountLine(probeSummary)
+              return t(line.key, line.vars)
+            })()}
+          </p>
+          {/* NEVER summed with the count above: these are the notes that were
+           *  spread across the body rather than read (regions.ts tier 4). Only
+           *  when there IS a count above — otherwise regionCountLine has already
+           *  made the unplaced number the headline, and printing it twice is how
+           *  the old contradiction ("nothing here" + "40 not placed") read. */}
+          {probeSummary.state === 'read' &&
+            probeSummary.placed > 0 &&
+            probeSummary.unplaced > 0 && (
+              <p className="mt-0.5 text-plate text-ink-faint">
+                {t('persona.figure.regionUnplaced', { count: probeSummary.unplaced })}
+              </p>
+            )}
+          {probeSummary.lines.length > 0 && (
+            <ul className="mt-2.5 flex flex-col gap-1.5">
+              {probeSummary.lines.map((line) => (
+                <li key={line.text} className="text-meta leading-relaxed text-ink">
+                  {line.text}
+                  <span className="mt-0.5 block text-plate text-ink-faint">{line.sub}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

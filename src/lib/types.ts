@@ -187,9 +187,12 @@ export interface Settings {
   /** Chime volume, 0–100 (afplay -v). Unset ⇒ 100 (the legacy hook's loudness).
    *  Narrowed to a clamped integer by setUserSettings. */
   soundOnDoneVolume?: number
-  /** Hands-free updates (2026-08-03, owner request "毎回するのが面倒"). Default
-   *  OFF = the conservative shipped behaviour (auto-download + an explicit
-   *  restart dialog). `true` removes the dialog: the update downloads silently
+  /** Hands-free updates (2026-08-03, owner request "毎回するのが面倒"). DEFAULT ON
+   *  as of 2026-08-15 — unset means ON, and only an explicit `false` turns it
+   *  off. (The owner asked a second time: 「こっちで命令するんじゃなくて」. The
+   *  first ask produced this feature, defaulted OFF, and it consequently never
+   *  ran for them.) Off = the conservative flow: auto-download + an explicit
+   *  restart dialog. On removes the dialog: the update downloads silently
    *  and is APPLIED automatically, but only at a provably safe moment — the
    *  window has been unfocused ≥30min AND the server's restart-safety probe
    *  (GET /api/update/restart-safety) reports no claude generating and no open
@@ -2222,6 +2225,17 @@ export interface ClaudeActivity {
   id: string
   cwd: string
   status: ClaudeBeaconStatus
+  /** This PTY is a SWARM DESK (commander / supply), not a session the owner
+   *  opened. Set from `TerminalInfo.deskLabel`, which only a desk launcher
+   *  writes — a hand-started `claude` in the same repo never carries one.
+   *
+   *  ⚠ WHY THE GROUND BEACON NEEDS THIS (2026-08-15). A desk is machinery. It
+   *  sits at its prompt between passes, and it is never waiting on the OWNER —
+   *  when it does need them it raises an escalation, which has its own surface.
+   *  Counting desks as ordinary panes lit every project with a swarm amber
+   *  「あなたの番」 forever, with nothing left to do. Absent on a server
+   *  predating this field, which then behaves as before. */
+  desk?: boolean
   /** Registry UUID of the project that OWNS this cwd, resolved server-side.
    *  A swarm worker's cwd is its isolated worktree under
    *  ~/.openground/projects/<uuid>/worktrees/ — OUTSIDE the project folder — so
@@ -2255,6 +2269,34 @@ export interface ClaudeActivity {
 export interface ActiveTerminalsResponse {
   cwds: string[]
   claude: ClaudeActivity[]
+}
+
+/** One project's inputs for the Ground card lamp (GET /api/ground/lamps).
+ *
+ *  The lamp itself is decided by the pure `groundLamp()` in src/lib/groundLamp.ts
+ *  — the owner's four cases — and this is only what that function needs. TWO of
+ *  the three fields are OPTIONAL, and both for the same reason: an unreadable
+ *  source is not an empty one, and a 0 on this wire becomes a card that says
+ *  「もう何もありません」 about work nobody managed to look at. */
+export interface GroundLampRow {
+  /** Registry UUID. */
+  projectId: string
+  /** Cards in doing / review / blocked that are not done (see
+   *  `startedTaskCount`). ABSENT ⇒ the board could not be read. */
+  started?: number
+  /** Open escalations naming this project. ABSENT ⇒ the inbox could not be
+   *  read — which contributes nothing to the verdict, rather than "no
+   *  questions". */
+  openQuestions?: number
+  /** Is anything ACTUALLY running for this project — a swarm worker on either
+   *  runtime, or a `claude` pane mid-generation. Not optional: false here means
+   *  "we looked and found nothing moving", and a project with nothing started
+   *  is never asked in the first place. */
+  liveWork: boolean
+}
+
+export interface GroundLampsResponse {
+  lamps: GroundLampRow[]
 }
 
 /** Response of GET /api/update/restart-safety — the server's answer to "may the
@@ -3556,6 +3598,25 @@ export interface ResearchReportResponse {
   content: string
 }
 
+// ─── Persona regions (the five parts of the figure) ─────────────────────────
+// The figure is an armature: four BODY regions plus one halo around it. This
+// union lives here rather than beside the drawing code because it crosses the
+// wire (PersonaCoursesResponse below) and rides in corpus tags (`region:<id>`,
+// src/lib/persona/regions.ts REGION_TAG).
+//
+// It is deliberately a NARROW union rather than a string: every runtime record
+// keyed by it (labels, course seating, question seating) is an exhaustive
+// `Record<PersonaRegion, …>`, so adding or removing a region fails the BUILD
+// instead of quietly seating a note nowhere. The predecessor of this type was a
+// wire-level `zone: string` with a silent `asZone()` fallback to 'mind' — a
+// dropped region produced a wrong-but-plausible figure and never an error.
+//
+//   head   — how you think          chest  — what you hold to
+//   arms   — how you work           legs   — how you keep going
+//   people — the people around you (the HALO, off the body: see
+//            PERSONA_BODY_REGIONS for why nothing lands there without evidence)
+export type PersonaRegion = 'head' | 'chest' | 'arms' | 'legs' | 'people'
+
 // ─── Persona courses (Persona tab の診断コース) ──────────────────────────────
 // Items + scoring live in src/lib/persona/instruments.ts (pure); the store and
 // routes in src/lib/server/personaCourses.ts + server/routes/persona.ts.
@@ -3614,7 +3675,10 @@ export interface PersonaCoursesResponse {
     id: PersonaCourseId
     name: string
     sub: string
-    zone: string
+    /** Which region of the figure this course grows. NARROW on purpose — the
+     *  client seats the course's findings by it, and a plain string let an
+     *  unknown value fall through a silent default. */
+    region: PersonaRegion
     itemCount: number
     source: string
     lastTakenAt: string | null
@@ -3648,7 +3712,17 @@ export interface PersonaPortraitLine {
  *  screen shows beside it. `lines` is EMPTY when nothing is evidenced yet. */
 export interface PersonaPortrait {
   lines: PersonaPortraitLine[]
-  nodeCount: number
+  /** How much the stand-in holds. ⚠ OPTIONAL, and the option is the point:
+   *  `undefined` means THE CORPUS COULD NOT BE READ, which is not the same
+   *  claim as 0. The corpus reader fails CLOSED on EACCES/EIO (an append must
+   *  never overwrite judgments it merely failed to see), so a read failure is a
+   *  real and recurring state — and a screen that renders it as `0 known` tells
+   *  the owner their record is empty when it may be entirely intact. Same
+   *  three-valued rule the ledger and the escalation counts follow: absent is
+   *  not zero, and only a read that landed may print a number. */
+  nodeCount?: number
+  /** …and how many of those arrived in the last 7 days. Absent for the same
+   *  reason, plus one more: a server too old to count is not a quiet week. */
   recentCount?: number
   takenCount: number
   courseCount: number
@@ -3735,4 +3809,136 @@ export interface PersonaLedgerResponse {
   summary: PersonaLedgerSummary
   /** Newest first, capped (see LEDGER_RECENT_LIMIT). */
   recent: PersonaLedgerEntry[]
+}
+
+// ─── Persona conversation (話しかけると溜まる) ───────────────────────────────
+// Talking to the persona IS how the corpus grows: one turn = one `claude` run
+// that both REPLIES and distils what the owner said into kept lines. Engine:
+// src/lib/server/personaChat.ts (+ personaImport.ts for a claude.ai export);
+// routes: server/routes/personaChat.ts.
+//
+// TWO INVARIANTS RIDE IN THESE TYPES, so read them before changing a field:
+//  1. ONLY THE OWNER'S WORDS ARE EVER LEARNED. `reply` and `kept` are separate
+//     fields for a reason — the writer that appends to the corpus takes the kept
+//     lines and NOTHING else (personaChat.ts appendKeptLines). Merging them into
+//     one "turn text" would put the stand-in's own sentences into the axis it is
+//     supposed to be judged against.
+//  2. NOTHING IS WRITTEN INVISIBLY. Every write comes BACK as a full
+//     PersonaKeptWrite carrying the stored judgment, so the screen can show each
+//     kept line under the message it came from and open a correction on it with
+//     no second round-trip. An absent chip must never mean "we saved something
+//     you cannot see".
+
+/** One line the distiller decided to keep — AS IT WAS ACTUALLY WRITTEN.
+ *
+ *  The FULL `judgment` (not just its id) rides back so the chip under the reply
+ *  is pressable immediately: the correction composer needs the stored text, the
+ *  stamp and the id, and re-fetching /judgments to find a row we just wrote is a
+ *  race against the corpus reassembly. */
+export interface PersonaKeptWrite {
+  judgment: ManualJudgment
+  /** Where it was seated on the figure. Written as an explicit `region:<id>`
+   *  tag (regions.ts REGION_TAG) so the seating rule's tier 1 reads it back. */
+  region: PersonaRegion
+  /** The judgment WAS saved, but you-corpus.md could not be rebuilt — so the
+   *  file the stand-in actually reads is stale (YouCorpusMeta.skipped). Same
+   *  signal, same wording family as PersonaInterviewResponse.corpusStale. */
+  corpusStale?: true
+}
+
+export type PersonaChatTurnState = 'running' | 'done' | 'failed'
+
+/** One exchange. `text` is the owner's words EXACTLY as typed — a failed turn
+ *  keeps them so the screen can re-offer them rather than swallowing what they
+ *  wrote (a React value reset is not undoable). */
+export interface PersonaChatTurn {
+  id: string
+  askedAt: string
+  text: string
+  state: PersonaChatTurnState
+  /** Set on 'done'. The stand-in's answer — NEVER learned (invariant 1). */
+  reply?: string
+  /** Set on 'done'. What reached the corpus, in the order it was written. An
+   *  EMPTY array is a real answer ("nothing was kept this time") and must be
+   *  rendered as one; `undefined` only means the turn has not finished. */
+  kept?: PersonaKeptWrite[]
+  /** Kept lines the distiller emitted that could not be READ (no region token,
+   *  or one that is not a region we know). Dropped rather than guessed at — but
+   *  reported, because a count that hides its own losses is the failure this
+   *  screen keeps re-hitting. */
+  keptUnreadable?: number
+  /** Set on 'failed'. */
+  error?: string
+}
+
+/** GET /api/persona/chat — the thread so far, so re-opening the panel does not
+ *  lose it. IN-MEMORY on the server: a restart empties this (the kept lines
+ *  themselves are in the corpus and survive). `live` = a turn is in flight. */
+export interface PersonaChatStateResponse {
+  turns: PersonaChatTurn[]
+  live: boolean
+}
+
+/** POST /api/persona/chat → 202. The turn runs as a JOB, not on this
+ *  connection: closing the panel mid-turn must not orphan a `claude`. */
+export interface PersonaChatStartResponse {
+  turnId: string
+}
+
+/** GET /api/persona/chat/turn/:id — polled at ~500ms while `state` is running.
+ *  `elapsedMs` is REAL elapsed time: a turn is a whole cold `claude` start
+ *  (tens of seconds), and a fake typing animation over that is a lie. */
+export interface PersonaChatTurnResponse {
+  state: PersonaChatTurnState
+  elapsedMs: number
+  reply?: string
+  kept?: PersonaKeptWrite[]
+  keptUnreadable?: number
+  error?: string
+}
+
+export interface PersonaChatCancelResponse {
+  cancelled: boolean
+}
+
+/** What PARSING a claude.ai export found, before anything is distilled. Every
+ *  field is reported — including the ones that are losses — because the numbers
+ *  have to add up on screen: `ownerMessages = considered + notConsidered`, and
+ *  `droppedNonOwner` is the stand-in's half that rule 1 of claudeExport.ts drops. */
+export interface PersonaImportCounts {
+  conversations: number
+  ownerMessages: number
+  /** Rows that could not be read as a conversation or a message. */
+  unreadable: number
+  droppedNonOwner: number
+  /** How many of the owner's messages the distiller actually SAW (capped). */
+  considered: number
+  /** ownerMessages - considered. MANDATORY, even at 0. */
+  notConsidered: number
+}
+
+export interface PersonaImportResult extends PersonaImportCounts {
+  kept: PersonaKeptWrite[]
+  /** Kept lines that already existed word-for-word in the corpus and were NOT
+   *  written a second time. */
+  duplicatesSkipped: number
+  keptUnreadable: number
+}
+
+/** POST /api/persona/import → 202, or 409 when this exact file was imported
+ *  before (ManualJudgment has no idempotency key, so a second run of the same
+ *  bytes would double both the node count and the lit points). */
+export interface PersonaImportStartResponse {
+  importId: string
+}
+
+/** GET /api/persona/import/:id. `counts` lands as soon as PARSING finishes —
+ *  before the distillation does — so the screen can show what arrived while it
+ *  is still reading. `result` only exists on 'done'. */
+export interface PersonaImportJobResponse {
+  state: PersonaChatTurnState
+  elapsedMs: number
+  counts?: PersonaImportCounts
+  result?: PersonaImportResult
+  error?: string
 }

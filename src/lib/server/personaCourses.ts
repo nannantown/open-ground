@@ -41,6 +41,7 @@ import { appendJudgment, readManualJudgments } from './youCorpus'
 import { readLedger, summarizeLedger } from './personaLedger'
 import { COURSES, courseById, scoreCourse } from '@/lib/persona/instruments'
 import type { PersonaCourse } from '@/lib/persona/instruments'
+import { COURSE_REGION, REGION_TAG } from '@/lib/persona/regions'
 import { composePortrait } from '@/lib/persona/portrait'
 import type {
   ManualJudgment,
@@ -187,7 +188,7 @@ export const listPersonaCourses = async (): Promise<PersonaCoursesResponse> => {
         id: c.id,
         name: c.name,
         sub: c.sub,
-        zone: c.zone,
+        region: COURSE_REGION[c.id],
         itemCount: c.itemCount,
         source: c.source,
         lastTakenAt: rec?.takenAt ?? null,
@@ -250,24 +251,37 @@ export interface PortraitDeps {
  *  file, and the corpus reader deliberately does NOT (it throws on EACCES/EIO so
  *  an append can never overwrite judgments it merely failed to see —
  *  readManualJudgments' own note). That fail-CLOSED rule is right for the writer
- *  and wrong for a glance, so the throw is caught here and the counts fall back
- *  to what is legible: an unreadable corpus costs the owner two numbers, not the
- *  whole screen. */
+ *  and wrong for a glance, so the throw is caught here: an unreadable corpus
+ *  costs the owner two numbers, not the whole screen.
+ *
+ *  ⚠ AND THE TWO NUMBERS GO ABSENT, NOT TO ZERO. This read failing used to
+ *  produce `nodeCount: 0, recentCount: 0`, which the screen then printed as
+ *  「知っていること 0」 — telling the owner their record is empty at exactly the
+ *  moment it could not be looked at. It is the app's oldest bug shape (a count
+ *  from an unread source rendered as a measurement) and the fix is the one the
+ *  ledger read below already uses: omit the field, and let the screen say it
+ *  could not read rather than say zero. */
 export const getPersonaPortrait = async (deps: PortraitDeps = {}): Promise<PersonaPortrait> => {
   const now = deps.now?.() ?? Date.now()
   const store = await readPersonaCoursesStore()
-  let judgments: ManualJudgment[] = []
+  let judgments: ManualJudgment[] | undefined
   try {
     judgments = await readManualJudgments()
   } catch (err) {
-    console.error('[openground:persona-courses] corpus unreadable — portrait counts 0 nodes', err)
+    console.error(
+      '[openground:persona-courses] corpus unreadable — portrait says nothing about how much is known',
+      err,
+    )
   }
-  let recentCount = 0
-  for (const j of judgments) {
-    const t = Date.parse(j.addedAt)
-    // Unparseable stamps are simply not recent (never counted as "today"); a
-    // stamp slightly in the future (clock skew) still reads as recent.
-    if (Number.isFinite(t) && now - t <= PORTRAIT_RECENT_WINDOW_MS) recentCount++
+  let recentCount: number | undefined
+  if (judgments) {
+    recentCount = 0
+    for (const j of judgments) {
+      const t = Date.parse(j.addedAt)
+      // Unparseable stamps are simply not recent (never counted as "today"); a
+      // stamp slightly in the future (clock skew) still reads as recent.
+      if (Number.isFinite(t) && now - t <= PORTRAIT_RECENT_WINDOW_MS) recentCount++
+    }
   }
   // THE OTHER HALF OF THE EVIDENCE. Everything above is what the owner SAID about
   // themselves; this is what their stand-in DID against real work. TOTAL, not the
@@ -289,8 +303,7 @@ export const getPersonaPortrait = async (deps: PortraitDeps = {}): Promise<Perso
   }
   return composePortrait({
     records: store.records,
-    nodeCount: judgments.length,
-    recentCount,
+    ...(judgments ? { nodeCount: judgments.length, recentCount } : {}),
     ...(work ? { work } : {}),
     now,
   })
@@ -299,10 +312,12 @@ export const getPersonaPortrait = async (deps: PortraitDeps = {}): Promise<Perso
 /** Local 'YYYY-MM-DD' for the provenance line. Local, not
  *  `toISOString().slice(0,10)`: the date is shown to the owner under the node
  *  ("いつ測ったか"), and a UTC roll would date an evening-in-JST take to the
- *  previous day. Kept private rather than shared with personaInterview's twin —
+ *  previous day. Kept here rather than shared with personaInterview's twin —
  *  importing that module would drag the registry, board and escalation readers
- *  into this one for four lines of date formatting. */
-const localDay = (ms: number): string => {
+ *  into this one for four lines of date formatting. EXPORTED so the persona
+ *  conversation's kept lines carry the same stamp in the same shape (this
+ *  module has no such heavy neighbours, so importing it costs nothing). */
+export const localDay = (ms: number): string => {
   const d = new Date(ms)
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
@@ -376,7 +391,11 @@ export const submitPersonaCourse = async (
         // the node. A node whose provenance is unreadable is a node the owner
         // cannot argue with later.
         text: finding.text,
-        tags: ['persona', course.id],
+        // The REGION tag is written explicitly rather than left to be inferred
+        // from the course tag: the seating rule's tier 1 is the only tier that
+        // survives a course being re-seated later, and a finding that carries
+        // its own region needs no reader change when it is.
+        tags: ['persona', course.id, REGION_TAG(COURSE_REGION[course.id])],
         context: `${finding.detail} ・ ${day}`,
       })
       minted++

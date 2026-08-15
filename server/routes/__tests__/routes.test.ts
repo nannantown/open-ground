@@ -5,6 +5,7 @@ import { join } from 'path'
 import { app } from '../../app'
 import { centralWorktreesDir } from '@/lib/server/paths'
 import { registerTestProject } from '@/test/registerProject'
+import type { GroundLampsResponse } from '@/lib/types'
 import type { ActiveTerminalsResponse } from '@/lib/types'
 
 // Integration tests for the Hono backend. Hono apps can be invoked in-process
@@ -217,6 +218,25 @@ describe('Hono routes — dynamic params & 404 guard', () => {
     expect(body.cwds).toEqual([])
     expect(Array.isArray(body.claude)).toBe(true)
     expect(body.claude).toEqual([])
+  })
+
+  it('GET /api/ground/lamps answers one row per registered project', async () => {
+    // The Ground card lamp's server half. The VERDICT is the pure groundLamp()
+    // on the client and the gathering is guarded in groundLamps.test.ts — what
+    // this pins is that the route exists, is mounted before the /api/* 404
+    // guard, and hands back the row shape the canvas polls. A brand-new project
+    // has no board file yet, which is a legitimate EMPTY board (0 started), not
+    // an unreadable one.
+    const dir = await mkdtemp(join(tmpdir(), 'og-route-lamp-'))
+    const uuid = await registerTestProject(dir)
+
+    const res = await app.request('/api/ground/lamps')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as GroundLampsResponse
+    const row = body.lamps.find((l) => l.projectId === uuid)
+    expect(row, 'the registered project has no lamp row').toBeTruthy()
+    expect(row!.started).toBe(0)
+    expect(row!.liveWork).toBe(false)
   })
 
   it('GET /api/terminal/active stamps projectId on a worker PTY in a CENTRAL worktree', async () => {

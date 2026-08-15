@@ -39,6 +39,9 @@ const PTY_BY_DESIGN = [
   'src/lib/server/swarmEnvPreflight.ts', //   probes a throwaway PTY before launch
   'src/lib/server/swarmJanitor.ts', //        sweeps the PTY pool's own leftovers
   'src/lib/server/swarmOverseerBrain.ts', //  reads a PTY screen for the brain pass
+  'src/lib/server/personaChat.ts', //         one-off PTY per persona turn, marker-scraped
+  //                                          (it spawns the desk it reads; there is no
+  //                                          worker here to address on either runtime)
   'src/lib/server/swarmSupply.ts', //        the supply desk is PTY-ONLY BY DESIGN
   //                                          (Remote Control lives on the PTY runtime;
   //                                          stopSwarmSupplyDesks kills by desk label)

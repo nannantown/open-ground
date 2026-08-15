@@ -4,7 +4,8 @@ import {
   Users,
 } from 'lucide-react'
 import { memo } from 'react'
-import type { ClaudeBeaconStatus, ProjectMeta } from '@/lib/types'
+import type { ProjectMeta } from '@/lib/types'
+import type { GroundLamp } from '@/lib/groundLamp'
 import { useT } from '@/i18n/I18nContext'
 import { PlaybackEq } from '@/components/canvas/PlaybackEq'
 
@@ -13,14 +14,19 @@ interface Props {
   onPointerDown?: (e: React.PointerEvent) => void
   selected?: boolean
   active?: boolean
-  /** Live claude session in this project: 'working' → moss "Running" edge
-   *  bar + stamp, 'waiting' → amber "Waiting" (claude is sitting on you).
-   *  'idle' → NOTHING: the session is live but parked at its prompt, which is
-   *  a fact about the machine and not a claim on your attention. (Before that
-   *  value existed, every parked desk drew the amber stamp — three cards read
-   *  WAITING with every task done. An alarm that is usually wrong is worse
-   *  than no alarm.) Undefined = no claude session at all. */
-  claudeStatus?: ClaudeBeaconStatus
+  /** What this project's WORK is doing: 'working' → moss "Running" edge bar +
+   *  stamp, 'waiting' → amber "Waiting" (it needs you, or it stalled).
+   *  null/undefined → NOTHING AT ALL, which is the answer for a project whose
+   *  cards are all done or merely queued — 「作業が終わってて何も出さない時に user は
+   *  見にいくんですよ」.
+   *
+   *  ⚠ THE TYPE IS THE FIX, not just a rename. This used to be a
+   *  ClaudeBeaconStatus, which carries a third value ('idle' — a live session
+   *  parked at its prompt). The stamps below tested for 'working' and 'waiting'
+   *  explicitly and so ignored it, but the top EDGE BAR tested for truthiness
+   *  and painted 'idle' amber — an "it needs you" band over a project that
+   *  needed nothing. GroundLamp has no third value to get wrong. */
+  lamp?: GroundLamp
   /** Audio from this project is playing somewhere in the app (the Songs
    *  custom tab's embedded player) → a "Playing" EQ stamp on the bottom
    *  margin; `title` names the track in the tooltip. Undefined = silent. */
@@ -56,7 +62,7 @@ export const ProjectCard = memo(({
   onPointerDown,
   selected,
   active,
-  claudeStatus,
+  lamp,
   playback,
   shared,
 }: Props) => {
@@ -85,21 +91,24 @@ export const ProjectCard = memo(({
             ? 'border-accent shadow-card-active'
             : selected
               ? 'border-accent shadow-card-hover'
-              : claudeStatus
+              : lamp
                 ? 'border-line-strong shadow-card-hover'
                 : 'border-line shadow-card hover:shadow-card-hover hover:border-line-strong',
         project.missing ? 'opacity-50' : '',
       ].join(' ')}
     >
-      {/* claude-status edge — a surveyor's marking along the card's top */}
-      {claudeStatus && (
+      {/* lamp edge — a surveyor's marking along the card's top. Drawn ONLY for
+          the two states that are about the work; 'unknown' gets the stamp below
+          and no band, because a coloured band reads as an alarm and "we could
+          not read your board" is not one. */}
+      {(lamp === 'working' || lamp === 'waiting') && (
         <div
           className={[
             'absolute left-0 right-0 top-0 h-[3px] overflow-hidden rounded-t-[2px]',
-            claudeStatus === 'working' ? 'bg-moss' : 'bg-ochre',
+            lamp === 'working' ? 'bg-moss' : 'bg-ochre',
           ].join(' ')}
         >
-          {claudeStatus === 'working' && (
+          {lamp === 'working' && (
             <div className="run-scan h-full w-1/3 bg-gradient-to-r from-transparent via-bg-card/85 to-transparent" />
           )}
         </div>
@@ -118,14 +127,28 @@ export const ProjectCard = memo(({
       </div>
 
       {/* claude-status stamp, mirroring the coord label on the right margin */}
-      {claudeStatus === 'working' && (
+      {lamp === 'working' && (
         // claude is busy — moss, with the dot pulsing while live.
         <div className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap label-cap-latin text-moss-text">
           <span className="run-pulse h-[5px] w-[5px] rounded-full bg-moss" />
           <span>Running</span>
         </div>
       )}
-      {claudeStatus === 'waiting' && (
+      {lamp === 'unknown' && (
+        // ⚠ NOT A BLANK CARD. The board behind this project could not be read,
+        // and a blank card is how a FINISHED one looks — so staying silent here
+        // would tell the owner their work is done using a file nobody opened.
+        // Deliberately the quietest stamp on the card: it is a fact about this
+        // app, not about their project, and it must not compete with Waiting.
+        <div
+          title="This project's board could not be read"
+          className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap label-cap-latin text-ink-subtle"
+        >
+          <span className="h-[5px] w-[5px] rounded-full bg-ink-faint" />
+          <span>No data</span>
+        </div>
+      )}
+      {lamp === 'waiting' && (
         // claude is sitting on the human — "your turn". Amber for attention:
         // dot in the ochre token (3:1 graphics contrast is met), label in the
         // darkened amber var (≥4.5:1 on the card — raw ochre is only ~4:1 at

@@ -5,7 +5,15 @@ import { isAbsolute, join } from 'path'
 import { canonicalize } from './canonicalize'
 import { isGitRepoRoot } from './gitRepoGuard'
 import { isSweepableHeartbeat } from './swarmHeartbeatFiles'
-import { centralWorktreesDir, openGroundHome, projectsDataRootDir, runsDir } from './paths'
+import {
+  centralWorktreesDir,
+  openGroundHome,
+  personaScratchRootDir,
+  projectsDataRootDir,
+  runsDir,
+} from './paths'
+import { removeClaudeFolderTrust } from './claudeTrust'
+import { personaScratchInUse } from './personaChat'
 import { projectDataDir } from './projectDataPath'
 import { getSettings } from './store'
 
@@ -351,6 +359,83 @@ export const findOrphanCentralDataDirs = async (): Promise<string[]> => {
     )
   }
   return orphans
+}
+
+// ─── Persona conversation scratch dirs ───────────────────────────────────────
+//
+// A persona conversation gets ONE working dir under ~/.openground/persona-scratch/
+// (reused across its turns, because `--resume` resolves a session against the
+// directory it started in) and, as a side effect of launching claude there, a
+// `hasTrustDialogAccepted` entry for that path in ~/.claude.json.
+//
+// `endPersonaConversation()` cleans both — and NOTHING IN PRODUCTION CALLS IT.
+// There is no moment that means "the owner is finished talking": they close a
+// panel, or the app quits, or the machine sleeps. So every conversation the app
+// has ever held leaves a directory AND a line in claude's own config, forever.
+// This is the same shape as the ephemeral worktrees swept above, and it gets the
+// same answer: sweep at boot rather than invent a lifecycle event.
+//
+// ⚠ THE TRUST ENTRY IS THE HALF THAT MATTERS. A few empty directories are
+// untidy; an unbounded projects map in ~/.claude.json is the user's own claude
+// config growing without limit from a feature they cannot see. Removing the dir
+// without the entry would leave the worse leak and hide it.
+
+/** How long a scratch dir is left alone. It only has to outlast a conversation
+ *  that is mid-turn during a dev reload — PERSONA_HARD_CEILING_MS is 10 minutes,
+ *  so an hour is generous while still clearing within one restart. */
+export const PERSONA_SCRATCH_MAX_AGE_MS = 60 * 60 * 1000
+
+export interface PersonaScratchSweepReport {
+  removed: number
+  kept: number
+}
+
+/** Remove stale persona conversation scratch dirs and their ~/.claude.json trust
+ *  entries. Best-effort throughout: this is housekeeping, and a failure to tidy
+ *  must never be able to fail a boot. */
+export const sweepPersonaScratch = async (
+  opts: { now?: number; inUse?: () => string | null } = {},
+): Promise<PersonaScratchSweepReport> => {
+  const now = opts.now ?? Date.now()
+  const root = personaScratchRootDir()
+  let entries: string[]
+  try {
+    entries = await readdir(root)
+  } catch {
+    return { removed: 0, kept: 0 }
+  }
+  // Resolved through the same canonicalization the dir was created under, so a
+  // symlinked app home cannot make the live dir compare unequal and get swept.
+  const live = (opts.inUse ?? personaScratchInUse)()
+  const liveKey = live ? await canonicalize(live).catch(() => live) : null
+  let removed = 0
+  let kept = 0
+  for (const name of entries) {
+    const full = join(root, name)
+    try {
+      const st = await stat(full)
+      if (!st.isDirectory()) continue
+      const fullKey = await canonicalize(full).catch(() => full)
+      if (liveKey && fullKey === liveKey) {
+        kept++
+        continue
+      }
+      if (now - st.mtimeMs <= PERSONA_SCRATCH_MAX_AGE_MS) {
+        kept++
+        continue
+      }
+      // The trust entry FIRST: if the rm fails we have still un-registered a
+      // path claude would otherwise trust forever, and the next boot retries
+      // the directory. The other order can leave the entry with nothing left
+      // on disk to remind anyone it exists.
+      removeClaudeFolderTrust(full)
+      await rm(full, { recursive: true, force: true })
+      removed++
+    } catch {
+      /* skip — housekeeping never fails a boot */
+    }
+  }
+  return { removed, kept }
 }
 
 export interface CrossRepoResidueReport {

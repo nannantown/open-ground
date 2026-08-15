@@ -11,10 +11,18 @@ import {
   pruneOrphanCentralWorktrees,
   findOrphanCentralDataDirs,
   sweepCrossRepoResidue,
+  sweepPersonaScratch,
   GHOST_HEARTBEAT_HOURS,
   RAW_RETENTION_DAYS,
 } from './retention'
-import { runsDir, openGroundHome, projectsDataRootDir, centralWorktreesDir } from './paths'
+import { ensureClaudeFolderTrusted } from './claudeTrust'
+import {
+  runsDir,
+  openGroundHome,
+  personaScratchRootDir,
+  projectsDataRootDir,
+  centralWorktreesDir,
+} from './paths'
 import { projectDataDir } from './projectDataPath'
 import { registerTestProject } from '../../test/registerProject'
 
@@ -617,5 +625,103 @@ describe('cross-repo residue sweep', () => {
       expect(await exists(orphanData)).toBe(true)
       expect(JSON.parse(await readFile(tasks, 'utf8')).tasks).toHaveLength(1)
     })
+  })
+})
+
+// ─── persona conversation scratch ────────────────────────────────────────────
+//
+// A conversation leaves TWO things behind, and the second is the one that
+// matters: a working dir under ~/.openground/persona-scratch/, and a
+// `hasTrustDialogAccepted` entry for that path in the user's OWN ~/.claude.json.
+// Nothing in production ends a conversation, so without this sweep both grow
+// without bound — the directories are untidy, the trust entries are the user's
+// claude config filling up from a feature they cannot see.
+//
+// Every assertion here reads the RESULT (the dir is gone / the key is gone from
+// the file the production writer wrote), never "the function was called".
+describe('sweepPersonaScratch — the dirs AND the trust entries', () => {
+  const trustEntries = async (): Promise<string[]> => {
+    const p = process.env.CLAUDE_CONFIG_PATH
+    if (!p) throw new Error('CLAUDE_CONFIG_PATH must be pinned — see the fence in claudeTrust.ts')
+    try {
+      const j = JSON.parse(await readFile(p, 'utf8')) as { projects?: Record<string, unknown> }
+      return Object.keys(j.projects ?? {})
+    } catch {
+      return []
+    }
+  }
+
+  /** A conversation dir, trusted the way launchClaude trusts one. */
+  const seedScratch = async (name: string, age: Date): Promise<string> => {
+    const dir = join(personaScratchRootDir(), name)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'note.txt'), 'x')
+    ensureClaudeFolderTrusted(dir)
+    await setMtime(dir, age)
+    return dir
+  }
+
+  beforeEach(async () => {
+    process.env.CLAUDE_CONFIG_PATH = join(await realpath(tmpdir()), `og-trust-${Date.now()}-${Math.random()}.json`)
+    await rm(personaScratchRootDir(), { recursive: true, force: true })
+  })
+
+  afterEach(async () => {
+    if (process.env.CLAUDE_CONFIG_PATH) await rm(process.env.CLAUDE_CONFIG_PATH, { force: true })
+    delete process.env.CLAUDE_CONFIG_PATH
+    await rm(personaScratchRootDir(), { recursive: true, force: true })
+  })
+
+  it('removes a stale dir AND un-trusts it in claude own config', async () => {
+    const stale = await seedScratch('chat-stale', OLD())
+    expect(await trustEntries()).toContain(stale)
+
+    const report = await sweepPersonaScratch({ inUse: () => null })
+
+    expect(report.removed).toBe(1)
+    expect(await exists(stale)).toBe(false)
+    // ⚠ THE HALF THAT MATTERS. Deleting the directory while leaving the entry
+    // would remove the only evidence the leak exists.
+    expect(await trustEntries()).not.toContain(stale)
+  })
+
+  it('keeps a dir that is still in use, however old it looks', async () => {
+    // In dev `tsx watch` re-executes server/index.ts on every reload while the
+    // conversation state survives on globalThis, so the sweep genuinely runs
+    // beside a live conversation. Sweeping its cwd out from under a running
+    // claude is the failure.
+    const live = await seedScratch('chat-live', OLD())
+    const report = await sweepPersonaScratch({ inUse: () => live })
+    expect(report.removed).toBe(0)
+    expect(report.kept).toBe(1)
+    expect(await exists(live)).toBe(true)
+    expect(await trustEntries()).toContain(live)
+  })
+
+  it('keeps a dir younger than the window — a conversation may be mid-turn', async () => {
+    // 5 minutes, not RECENT()'s 1h: the scratch window IS 1h, and this file's
+    // own determinism rule says never park a case on the boundary.
+    const fresh = await seedScratch('chat-fresh', new Date(Date.now() - 5 * 60 * 1000))
+    const report = await sweepPersonaScratch({ inUse: () => null })
+    expect(report.removed).toBe(0)
+    expect(await exists(fresh)).toBe(true)
+  })
+
+  it('sweeps several and leaves the live one, in one pass', async () => {
+    const a = await seedScratch('chat-a', OLD())
+    const b = await seedScratch('chat-b', OLD())
+    const live = await seedScratch('chat-live', OLD())
+
+    const report = await sweepPersonaScratch({ inUse: () => live })
+
+    expect(report.removed).toBe(2)
+    expect(await exists(a)).toBe(false)
+    expect(await exists(b)).toBe(false)
+    expect(await exists(live)).toBe(true)
+    expect(await trustEntries()).toEqual([live])
+  })
+
+  it('is a no-op when no conversation has ever run', async () => {
+    expect(await sweepPersonaScratch({ inUse: () => null })).toEqual({ removed: 0, kept: 0 })
   })
 })

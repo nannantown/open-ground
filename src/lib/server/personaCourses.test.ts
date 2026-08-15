@@ -166,7 +166,10 @@ describe('submitPersonaCourse — score, persist, read back', () => {
     for (const finding of record.result.findings) {
       const hit = judgments.find((j) => j.text === finding.text)
       expect(hit, `no corpus node for finding "${finding.text}"`).toBeTruthy()
-      expect(hit?.tags).toEqual(['persona', 'big5'])
+      // The REGION tag rides along (regions.ts COURSE_REGION.big5 = 'head') so
+      // the figure seats the finding from the NODE, tier 1, rather than
+      // re-deriving the seat from the course tag on every read.
+      expect(hit?.tags).toEqual(['persona', 'big5', 'region:head'])
       // Provenance: the instrument + the number it came from, plus the date.
       expect(hit?.context).toContain(finding.detail)
       expect(hit?.context).toMatch(/\d{4}-\d{2}-\d{2}/)
@@ -464,7 +467,12 @@ describe('getPersonaPortrait — composed from evidence, or nothing', () => {
     expect(second.recentCount).toBe(0)
   })
 
-  it('an UNREADABLE corpus costs the two counts, not the whole portrait', async () => {
+  it('an UNREADABLE corpus makes the two counts ABSENT — never 0', async () => {
+    // ⚠ MUTATION GUARD. This used to answer `nodeCount: 0, recentCount: 0`,
+    // which the screen printed as 「わかっていること 0」 — telling the owner their
+    // record is empty at the one moment it could not be looked at. Absent and
+    // zero are different claims and the wire has to keep them apart; the screen
+    // renders the absence as "could not read" (PersonaModule.test.tsx).
     await submitPersonaCourse('big5', big5Decisive())
     // A directory where the additions file should be: readFile throws EISDIR,
     // which the corpus reader deliberately does NOT swallow (an append must
@@ -475,8 +483,13 @@ describe('getPersonaPortrait — composed from evidence, or nothing', () => {
 
     const portrait = await getPersonaPortrait()
     expect(portrait.lines.length).toBeGreaterThan(0) // the courses half still speaks
-    expect(portrait.nodeCount).toBe(0)
-    expect(portrait.recentCount).toBe(0)
+    expect(portrait.nodeCount).toBeUndefined()
+    expect(portrait.recentCount).toBeUndefined()
+    // …and the keys are genuinely ABSENT, not present-and-undefined: this
+    // crosses a JSON boundary, where `{nodeCount: undefined}` and a missing key
+    // are the same thing on the way out but not on the way in.
+    expect('nodeCount' in portrait).toBe(false)
+    expect('recentCount' in portrait).toBe(false)
   })
 
   it('still answers over a corrupt store — with no lines, since nothing is legible', async () => {

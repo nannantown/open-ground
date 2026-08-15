@@ -10,6 +10,8 @@ import type {
   ManagerTone,
   WorkerActivity,
 } from '@/lib/boardWorker'
+import { SwarmSprite } from './SwarmSprite'
+import { spriteStateFor, type SpriteState } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
 import type { MessageKey } from '@/i18n/messages'
 
@@ -62,6 +64,29 @@ const MANAGER_DOT: Record<ManagerTone, string> = {
   alert: 'bg-accent',
   off: 'bg-ink-faint',
 }
+
+/** The commander's figure, per lamp tone. EXHAUSTIVE, and `null` is a real
+ *  entry rather than a gap: with the commander absent there is nobody to draw,
+ *  and the dot stays. Drawing the owl anyway would need a state to draw it in,
+ *  and every state in the set is a claim that it is there. */
+const MANAGER_SPRITE: Record<ManagerTone, SpriteState | null> = {
+  working: 'working',
+  waiting: 'waiting',
+  // The same rank `spriteStateFor` gives an escalation: an integration conflict
+  // is the commander's hands-up, and it is the one tone that is about the owner.
+  alert: 'asking',
+  off: null,
+}
+/** What the owl's figure SAYS, in words, for a reader who cannot see it move.
+ *  Keyed off the same tone the figure is drawn from so the two cannot disagree;
+ *  `off` never reaches it (no figure is drawn — see MANAGER_SPRITE). */
+const MANAGER_SPRITE_LABEL_KEY: Record<ManagerTone, MessageKey> = {
+  working: 'projectPanel.swarm.manager.stageRunning',
+  waiting: 'projectPanel.swarm.statusWaiting',
+  alert: 'projectPanel.swarm.manager.reviewConflict',
+  off: 'board.card.managerMissing',
+}
+
 // Presence word colour follows the PRESENCE (not the lamp tone), so a conflict
 // lamp never paints 稼働中 red — the status text carries the red instead.
 const MANAGER_PRESENCE_CLS: Record<Exclude<ManagerPresence, 'unknown'>, string> = {
@@ -482,15 +507,23 @@ const BoardCardInner = ({
               glance without a second moving element competing with the band. */}
           {!isEditing && hasWorker && (
             <div className="mt-[9px] flex min-w-0 items-center gap-1.5">
-              <span
-                aria-hidden
-                className={[
-                  // 6px with a glow — the mock's instrument lamp. A dot without
-                  // the glow reads as a bullet, not a lamp.
-                  'h-1.5 w-1.5 shrink-0 rounded-full',
-                  WORKER_DOT[workerActivity],
-                  workerActivity === 'working' ? 'run-pulse' : '',
-                ].join(' ')}
+              {/* THE WORKER, as a figure rather than a lamp (owner, 2026-08-15).
+                  A 6px dot could say "something is on" and nothing else; the
+                  rabbit says WHO is on the card and WHAT it is doing, because
+                  each state moves differently — which at this size reads before
+                  colour does. `asking` outranks the activity: a worker whose
+                  question is unanswered is not "working" from where the owner
+                  sits, whatever its process is doing (spriteStateFor). */}
+              <SwarmSprite
+                role="worker"
+                state={spriteStateFor({
+                  activity: workerActivity,
+                  ...(needsYou ? { asking: true } : {}),
+                })}
+                label={`${t('board.card.workerLabel')} ${
+                  needsYou ? t('board.card.needsYou') : t(WORKER_LABEL_KEY[workerActivity])
+                }`}
+                className="shrink-0"
               />
               <span
                 className={[
@@ -575,14 +608,27 @@ const BoardCardInner = ({
               className="mt-[9px] flex min-w-0 items-center gap-1.5"
               title={t(MANAGER_STATUS_HINT_KEY[manager.reviewStatus])}
             >
-              <span
-                aria-hidden
-                className={[
-                  'h-1.5 w-1.5 shrink-0 rounded-full',
-                  MANAGER_DOT[manager.tone],
-                  manager.tone === 'working' ? 'run-pulse' : '',
-                ].join(' ')}
-              />
+              {/* THE COMMANDER. Same rule as the worker's rabbit above — and
+                  the one tone with no figure is `off`, where the dot stays:
+                  there is nobody to draw, and every state the owl has would
+                  claim it is there. */}
+              {MANAGER_SPRITE[manager.tone] ? (
+                <SwarmSprite
+                  role="commander"
+                  state={MANAGER_SPRITE[manager.tone]!}
+                  label={`${t('board.card.managerLabel')} ${t(
+                    MANAGER_SPRITE_LABEL_KEY[manager.tone],
+                  )}`}
+                  className="shrink-0"
+                />
+              ) : (
+                <span
+                  aria-hidden
+                  className={['h-1.5 w-1.5 shrink-0 rounded-full', MANAGER_DOT[manager.tone]].join(
+                    ' ',
+                  )}
+                />
+              )}
               <span className="shrink-0 whitespace-nowrap text-meta text-ink-muted">
                 {t('board.card.managerLabel')}
               </span>

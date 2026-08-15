@@ -27,7 +27,7 @@ import { EmptyState } from '@/components/canvas/EmptyState'
 import { GroundLoadError } from '@/components/canvas/GroundLoadError'
 import { UsageHud } from '@/components/canvas/UsageHud'
 import { ManualPanel } from '@/components/canvas/manual/ManualPanel'
-import { aggregateClaudeBeacons } from '@/lib/groundBeacon'
+import { groundLamp, type GroundLamp } from '@/lib/groundLamp'
 import { setClientLockdown } from '@/lib/lockdownClient'
 import { autoLayout, frameLabelFor } from '@/lib/layout'
 import { useCanvasHistory } from '@/lib/useCanvasHistory'
@@ -38,12 +38,11 @@ import { pickFolder } from '@/lib/pickFolder'
 import { useAuth } from '@/lib/auth/AuthContext'
 import { useT } from '@/i18n/I18nContext'
 import type {
-  ActiveTerminalsResponse,
   AppNotification,
   AppNotificationsResponse,
   CanvasAiActiveResponse,
   CanvasState,
-  ClaudeBeaconStatus,
+  GroundLampsResponse,
   CollabInviteForMe,
   CollabInvitesResponse,
   CollabProjectListItem,
@@ -261,15 +260,19 @@ export default function App() {
   // on collab); a non-owner gets 403 → stays empty, so the bell is unaffected.
   const [swarmNotifs, setSwarmNotifs] = useState<AppNotification[]>([])
   const [readNotifIds, setReadNotifIds] = useState<ReadonlySet<string>>(() => new Set())
-  // Per-project claude beacon: projectId → 'working' (claude is busy) |
-  // 'waiting' (claude sits on the human — its turn signal). Polled from
-  // /api/terminal/active; the only "something is happening here" signal on
-  // Ground cards. A project absent from the map shows no beacon (plain shells
-  // don't count). Several claude cwds on one project collapse with
-  // working > waiting.
-  const [claudeStatusById, setClaudeStatusById] = useState<
-    ReadonlyMap<string, ClaudeBeaconStatus>
-  >(() => new Map())
+  // Per-project GROUND LAMP: projectId → 'working' | 'waiting'. A project absent
+  // from the map draws nothing at all, which is a real answer — 「作業が終わってて
+  // 何も出さない時にuserは見にいくんですよ」.
+  //
+  // ⚠ THIS IS ABOUT THE WORK, NOT ABOUT PROCESSES (2026-08-15). It used to be
+  // the collapsed claude-PTY list, and every project running a swarm holds a
+  // commander and a supply desk at their prompts — so every such card read
+  // WAITING with every task done, twice reported. The verdict now comes from
+  // the board (started cards), the question inbox, and only then from whether
+  // anything is actually moving; the rule is the pure `groundLamp()` and the
+  // three facts are read server-side (/api/ground/lamps), because the SDK
+  // worker pool is invisible to the terminal list the old beacon polled.
+  const [lampById, setLampById] = useState<ReadonlyMap<string, GroundLamp>>(() => new Map())
   // Count of RUNNING Canvas AI jobs (generate / tweak) across all projects —
   // polled from /api/canvas/ai/active (same cadence as the terminal beacon) so a
   // run started on one canvas stays visible from anywhere (Ground / another
@@ -763,32 +766,45 @@ export default function App() {
     [moduleSubmissionSourceId],
   )
 
-  // Poll which projects have a live claude session (every 5s, skipped while
-  // the tab is hidden; an immediate re-poll on focus covers the return).
-  // Attribution + the working-wins collapse live in aggregateClaudeBeacons —
-  // a session belongs to the project the SERVER says owns its cwd, which is how
-  // a swarm worker running in a central worktree (outside the project folder)
-  // reaches its card. Best-effort: a failed poll keeps the last known state
-  // rather than flashing beacons off.
+  // Poll each project's lamp inputs (every 5s, skipped while the tab is hidden;
+  // an immediate re-poll on focus covers the return). The VERDICT is decided
+  // here by the pure `groundLamp()` — one rule in one file, testable without a
+  // server — over facts only the server can see: the board, the question inbox,
+  // and whether anything is actually running on either worker runtime.
+  //
+  // Best-effort: a failed poll keeps the last known lamps rather than flashing
+  // every card dark, which would read as "everything finished".
   useEffect(() => {
     let cancelled = false
     const poll = async () => {
       if (document.hidden) return
       try {
-        const res = await api.api.terminal.active.$get()
+        const res = await fetch('/api/ground/lamps', { cache: 'no-store' })
         if (!res.ok) return
-        const data = (await res.json()) as ActiveTerminalsResponse
+        const data = (await res.json()) as GroundLampsResponse
         if (cancelled) return
-        // A server predating the refined payload omits `claude` — treat that
-        // as "no claude sessions" so cards show no beacon.
-        const nextStatus = aggregateClaudeBeacons(projects, data.claude ?? [])
+        const known = new Set(projects.map((p) => p.id))
+        const next = new Map<string, GroundLamp>()
+        for (const row of data.lamps ?? []) {
+          if (!known.has(row.projectId)) continue
+          // Both optional fields are passed through ABSENT rather than defaulted:
+          // `started` missing means the board could not be read (⇒ 'unknown', a
+          // visible stamp, because drawing nothing is how a FINISHED project
+          // looks), and `openQuestions` missing means the inbox could not be
+          // read, which contributes nothing either way.
+          const lamp = groundLamp({
+            ...(row.started === undefined ? {} : { started: row.started }),
+            ...(row.openQuestions === undefined ? {} : { openQuestions: row.openQuestions }),
+            liveWork: row.liveWork,
+          })
+          if (lamp) next.set(row.projectId, lamp)
+        }
         // Keep the previous Map identity when nothing changed so the canvas
         // doesn't re-render every 5 seconds.
-        setClaudeStatusById((prev) =>
-          prev.size === nextStatus.size &&
-          Array.from(nextStatus).every(([id, st]) => prev.get(id) === st)
+        setLampById((prev) =>
+          prev.size === next.size && Array.from(next).every(([id, l]) => prev.get(id) === l)
             ? prev
-            : nextStatus,
+            : next,
         )
       } catch {
         /* server restarting / offline — keep the last known state */
@@ -1226,7 +1242,7 @@ export default function App() {
     <main className="h-screen w-screen overflow-hidden bg-bg relative">
       <InfiniteCanvas
         projects={visibleProjects}
-        claudeStatuses={claudeStatusById}
+        lamps={lampById}
         playbackByProject={playbackByProjectId}
         // Ground member flow: pass shared cards ONLY when collab is enabled, so
         // the default build renders zero shared cards (undefined → none).

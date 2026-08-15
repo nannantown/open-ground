@@ -18,19 +18,28 @@ const pty = (
     desk: boolean
     hidden: boolean
     engine: boolean
+    claudePane: boolean
     claudeWorking: boolean
     foreground: string
     lastOutputAt: number
     hasChildren: boolean
+    menuOpen: boolean
   }>,
 ) => ({
   desk: false,
   hidden: false,
   engine: false,
+  // Default: NOT a claude pane, so the parked-claude release never applies by
+  // accident — every pre-existing expectation in this file keeps its meaning.
+  claudePane: false,
   claudeWorking: false,
   foreground: 'claude',
   lastOutputAt: NOW,
   hasChildren: true,
+  // Default: a pane that painted JUST NOW with no prompt open. It is neither an
+  // abandoned shell nor a parked claude, so the default row still BLOCKS —
+  // every existing expectation in this file keeps its meaning.
+  menuOpen: false,
   ...p,
 })
 /** A pane with nothing in it — no foreground command, no background job, and
@@ -152,5 +161,76 @@ describe('computeRestartSafety', () => {
     )
     // pty#1: generating AND a user pane (both true — it is a user claude mid-turn)
     expect(r).toEqual({ safe: false, generating: 2, userPtys: 2 })
+  })
+})
+
+describe('A PARKED CLAUDE PANE no longer blocks the update (2026-08-15)', () => {
+  // THE BUG THIS FIXES. The owner had hands-free updates switched ON and the
+  // app never once applied one by itself. The gate demanded userPtys === 0, and
+  // the only pane it would ever release was a LOGIN SHELL — while this file's
+  // own comment said why: 「Anything else (claude, npm, a build) is real work,
+  // however quiet」. Claude panes are exactly what the owner leaves open, so the
+  // count never reached zero and the feature could not fire. A gate that never
+  // opens is not caution; it is a disabled feature with a reassuring name — the
+  // lesson this file already learned once, for shells only.
+  const parked = () =>
+    pty({ claudePane: true, claudeWorking: false, menuOpen: false, lastOutputAt: NOW - IDLE_PANE_MS - 1 })
+
+  it('a NON-claude pane that is merely quiet still blocks (npm test mid-run)', () => {
+    // The over-broad first draft released this, and five existing guards caught
+    // it immediately. Pinned here so the narrowing cannot be lost.
+    const r = computeRestartSafety(
+      [pty({ claudePane: false, claudeWorking: false, menuOpen: false, lastOutputAt: NOW - IDLE_PANE_MS - 1, foreground: 'npm' })],
+      [],
+      NOW,
+    )
+    expect(r.safe).toBe(false)
+  })
+
+  it('a claude pane idle past the window is releasable', () => {
+    const r = computeRestartSafety([parked()], [], NOW)
+    expect(r.userPtys).toBe(0)
+    expect(r.safe).toBe(true)
+  })
+
+  it('…but a GENERATING claude pane still blocks, however long the last paint was', () => {
+    const r = computeRestartSafety(
+      [pty({ claudePane: true, claudeWorking: true, menuOpen: false, lastOutputAt: NOW - IDLE_PANE_MS - 1 })],
+      [],
+      NOW,
+    )
+    expect(r.safe).toBe(false)
+    expect(r.generating).toBe(1)
+  })
+
+  it('…and an OPEN PERMISSION PROMPT blocks forever — silence never makes it safe', () => {
+    // The one thing an unattended restart must never throw away: the question
+    // the human was about to answer.
+    const r = computeRestartSafety(
+      [pty({ claudePane: true, claudeWorking: false, menuOpen: true, lastOutputAt: NOW - 6 * 60 * 60 * 1000 })],
+      [],
+      NOW,
+    )
+    expect(r.safe).toBe(false)
+    expect(r.userPtys).toBe(1)
+  })
+
+  it('…and a RECENTLY ACTIVE claude pane blocks (someone is sitting at it)', () => {
+    const r = computeRestartSafety(
+      [pty({ claudePane: true, claudeWorking: false, menuOpen: false, lastOutputAt: NOW - 1000 })],
+      [],
+      NOW,
+    )
+    expect(r.safe).toBe(false)
+  })
+
+  it('a caller that did not LOOK for a menu fails closed', () => {
+    // `menuOpen: undefined` means "we never checked", which is not "no prompt".
+    const r = computeRestartSafety(
+      [pty({ claudePane: true, claudeWorking: false, menuOpen: undefined, lastOutputAt: NOW - IDLE_PANE_MS - 1 })],
+      [],
+      NOW,
+    )
+    expect(r.safe).toBe(false)
   })
 })

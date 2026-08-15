@@ -39,9 +39,13 @@ const COURSE_ORDER: PersonaCourseId[] = ['values', 'big5', 'type', 'work']
 export interface PortraitInput {
   /** The LAST record per course; a course never taken is simply absent. */
   records: Partial<Record<PersonaCourseId, PersonaCourseRecord>>
-  /** How many things the stand-in knows overall (corpus notes + findings). */
-  nodeCount: number
-  /** How many of those arrived in the last 7 days. */
+  /** How many things the stand-in knows overall (corpus notes + findings).
+   *  ⚠ ABSENT ⇒ the corpus could not be read, which is NOT 0. Passing 0 for an
+   *  unreadable corpus is rule 1 in the other direction: it invents a
+   *  measurement instead of a line. Carried through verbatim below so the
+   *  screen can tell the two apart. */
+  nodeCount?: number
+  /** How many of those arrived in the last 7 days. Absent for the same reason. */
   recentCount?: number
   /** THE OTHER HALF OF THE EVIDENCE (2026-08-14). The courses above are what
    *  the owner SAYS about themselves; this is what their stand-in DID against
@@ -142,7 +146,7 @@ export const composePortrait = (input: PortraitInput): PersonaPortrait => {
     }
     return {
       lines: [...lines.slice(0, PORTRAIT_MAX_LINES - 1), line],
-      nodeCount: input.nodeCount,
+      ...(input.nodeCount === undefined ? {} : { nodeCount: input.nodeCount }),
       ...(input.recentCount === undefined ? {} : { recentCount: input.recentCount }),
       takenCount: COURSE_ORDER.filter((id) => input.records[id]).length,
       courseCount: COURSE_ORDER.length,
@@ -151,7 +155,7 @@ export const composePortrait = (input: PortraitInput): PersonaPortrait => {
 
   return {
     lines: lines.slice(0, PORTRAIT_MAX_LINES),
-    nodeCount: input.nodeCount,
+    ...(input.nodeCount === undefined ? {} : { nodeCount: input.nodeCount }),
     ...(input.recentCount === undefined ? {} : { recentCount: input.recentCount }),
     takenCount: COURSE_ORDER.filter((id) => input.records[id]).length,
     courseCount: COURSE_ORDER.length,

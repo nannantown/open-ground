@@ -153,7 +153,11 @@ export const SettingsPanel = ({
   // instant-feedback + persist-immediately pattern as the experiment toggles.
   const [lockdown, setLockdownState] = useState(settings.lockdownMode === true)
   // Hands-free updates (settings.autoUpdate) — same pattern again.
-  const [autoUpdateOn, setAutoUpdateState] = useState(settings.autoUpdate === true)
+  // Unset ⇒ ON: the switch must show what the app will actually DO, and the
+  // Electron policy now reads an absent value as on (autoUpdatePolicy.js).
+  // Reading `=== true` here would have shown OFF while updates applied
+  // themselves — a switch that lies about its own state.
+  const [autoUpdateOn, setAutoUpdateState] = useState(settings.autoUpdate !== false)
   // Completion chime — toggle + volume. Volume commits on release (onChange
   // updates the label live; persisting every drag tick would spam the API).
   const [soundOn, setSoundOnState] = useState(settings.soundOnDone === true)

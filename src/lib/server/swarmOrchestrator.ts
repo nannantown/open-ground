@@ -5398,6 +5398,12 @@ const SWARM_CODE_PATHS: readonly RegExp[] = [
   // destructive consumer of that answer; routes/terminal = the PTY desk surface.
   /^src\/lib\/server\/(workerRuntime|liveDesks|worktreeCleanup)[^/]*\.ts$/,
   /^server\/routes\/terminal\.ts$/,
+  // groundLamps.ts joined family (b) 2026-08-15: it asks the liveDesks seam
+  // whether anything is actually running for a project, and that answer becomes
+  // the Ground card's lamp. A change here that gets the both-pools question
+  // wrong does not crash — it tells the owner a working swarm has stalled, or a
+  // stalled one is fine. That is a desk-behaviour claim, so it pays like one.
+  /^src\/lib\/server\/groundLamps\.ts$/,
   // misc.ts joined family (b) 2026-08-03: GET /api/update/restart-safety calls
   // the liveDesks seam (the Electron shell's "may I restart the app on top of
   // whatever is running?" verdict), so changes here must pay for the

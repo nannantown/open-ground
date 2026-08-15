@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, cleanup, fireEvent, waitFor, screen, within } from '@testing-library/react'
-import { PersonaModule, asZone, courseRailState, parseTags, quoteForCorrection } from './PersonaModule'
+import { PersonaModule, courseRailState, parseTags, quoteForCorrection } from './PersonaModule'
+import { MAX_EXPORT_BYTES, megabytes } from '@/lib/claudeExport'
 import {
+  COURSE_REGION,
   buildPersonaNodes,
   courseIdFromJudgment,
   personaHash,
-  zoneForJudgment,
-  zoneForQuestion,
-} from './PersonaFigure'
+  placeJudgment,
+  regionForQuestion,
+} from '@/lib/persona/regions'
 import {
   BIG5_ITEMS,
   COURSES,
@@ -23,7 +25,10 @@ import { portraitAgeLabel } from '@/lib/persona/portrait'
 import { messages } from '@/i18n/messages'
 import type {
   ManualJudgment,
+  PersonaChatTurnResponse,
   PersonaCourseRecord,
+  PersonaImportJobResponse,
+  PersonaRegion,
   PersonaLedgerCounts,
   PersonaLedgerEntry,
   PersonaLedgerResponse,
@@ -118,7 +123,7 @@ const coursesPayload = (over: Partial<Record<string, Record<string, unknown>>> =
     id: c.id,
     name: c.name,
     sub: c.sub,
-    zone: c.zone,
+    region: COURSE_REGION[c.id],
     itemCount: c.itemCount,
     source: c.source,
     lastTakenAt: null as string | null,
@@ -184,6 +189,33 @@ let historyFails: boolean
  *  "a 200 that is not a ledger" case below is written without a second knob. */
 let ledgerPayload: unknown
 
+// ── the conversation (2026-08-15) ───────────────────────────────────────────
+// Talking is the main way into the corpus now, so the screen polls two job
+// endpoints. Both are stubbed the way the real ones behave: POST answers 202
+// with an id, and GET answers 'running' until the test says otherwise.
+/** Served AS-IS by GET /api/persona/chat. `null` ⇒ the read FAILS, which is a
+ *  different state from an empty thread and must render differently. */
+let chatStatePayload: unknown
+/** What GET /api/persona/chat/turn/:id answers. */
+let chatTurnPayload: Partial<PersonaChatTurnResponse>
+/** Non-null ⇒ POST /api/persona/chat rejects with this status + body. */
+let chatStartRejection: { status: number; body: Record<string, unknown> } | null
+let importJobPayload: Partial<PersonaImportJobResponse>
+let importStartRejection: { status: number; body: Record<string, unknown> } | null
+
+/** One kept line as the server hands it back: the FULL stored judgment, so the
+ *  chip is pressable with no round-trip. */
+const keptWrite = (over: Partial<ManualJudgment> = {}, region: PersonaRegion = 'legs') => ({
+  judgment: judgment({
+    id: 'k-1',
+    text: '決めたあとに手が止まる',
+    context: 'This conversation ・ Aug 15',
+    tags: ['chat', `region:${region}`],
+    ...over,
+  }),
+  region,
+})
+
 const counts = (answered: number, asked: number, abstained: number): PersonaLedgerCounts => ({
   answered,
   asked,
@@ -235,9 +267,46 @@ beforeEach(() => {
   historyPayload = []
   historyFails = false
   ledgerPayload = null
+  // Default: the thread reads clean and is EMPTY. Every test written before the
+  // conversation existed still gets a screen with no thread on it.
+  chatStatePayload = { turns: [], live: false }
+  chatTurnPayload = { state: 'running', elapsedMs: 0 }
+  chatStartRejection = null
+  importJobPayload = { state: 'running', elapsedMs: 0 }
+  importStartRejection = null
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
+      // ABOVE every other /api/persona/* branch: '/api/persona/chat' and
+      // '/api/persona/import' must never be scored as a course answer vector.
+      if (url.startsWith('/api/persona/chat/turn/')) {
+        return new Response(JSON.stringify(chatTurnPayload), { status: 200 })
+      }
+      if (url === '/api/persona/chat') {
+        if (init?.method === 'POST') {
+          const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          posts.push({ url, ...body })
+          if (chatStartRejection)
+            return new Response(JSON.stringify(chatStartRejection.body), {
+              status: chatStartRejection.status,
+            })
+          return new Response(JSON.stringify({ turnId: 't-1' }), { status: 202 })
+        }
+        if (chatStatePayload === null) return new Response('{}', { status: 500 })
+        return new Response(JSON.stringify(chatStatePayload), { status: 200 })
+      }
+      if (url.startsWith('/api/persona/import/')) {
+        return new Response(JSON.stringify(importJobPayload), { status: 200 })
+      }
+      if (url === '/api/persona/import') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        posts.push({ url, ...body })
+        if (importStartRejection)
+          return new Response(JSON.stringify(importStartRejection.body), {
+            status: importStartRejection.status,
+          })
+        return new Response(JSON.stringify({ importId: 'i-1' }), { status: 202 })
+      }
       // NOTE: every /api/you-corpus/* branch must sit ABOVE the bare
       // '/api/you-corpus' catch-all at the bottom — otherwise a new endpoint
       // silently receives a YouCorpusStatus payload instead of its own shape.
@@ -346,47 +415,149 @@ afterEach(() => {
  *  keyboard path to the same node the canvas click opens. */
 const openNode = (text: string) => fireEvent.click(screen.getByRole('button', { name: text }))
 
-const openComposer = () => fireEvent.click(screen.getByText('persona.add.open'))
+/** Start a correction from an open note — the ONLY way the composer opens now
+ *  (the add-note button went with the conversation, 2026-08-15). */
+const startCorrecting = (noteText: string) => {
+  openNode(noteText)
+  fireEvent.click(screen.getByText('persona.correct.start'))
+}
 
 const typeNote = (text: string) => {
-  const box = screen.getByPlaceholderText('persona.add.placeholder')
+  const box = screen.getByPlaceholderText('persona.correct.placeholder')
   fireEvent.change(box, { target: { value: text } })
   return box
 }
 
+/** The conversation's input. Found by its STABLE accessible name — the
+ *  placeholder rotates through 18 examples and cannot be queried on. */
+const talkInput = () => screen.getByLabelText('persona.chat.inputLabel') as HTMLInputElement
+
+const say = (text: string) => {
+  fireEvent.change(talkInput(), { target: { value: text } })
+  fireEvent.keyDown(talkInput(), { key: 'Enter' })
+}
+
 const rail = (name: string) => screen.getByRole('button', { name: new RegExp(name) })
 
-/** A course row in the rail, found by the course's own name. On a 済 row this
- *  is the READ-IT-BACK button (the retake button beside it carries an
- *  aria-label, not text). */
+/** A course row, found by the course's own name. ONE button per row now:
+ *  never-taken starts it, 済 reads the last result back, and re-taking lives
+ *  inside that sheet. */
 const railRow = (name: string) => screen.getByText(name).closest('button') as HTMLButtonElement
 
-/** The 済 row's second button. Queried BY ITS ACCESSIBLE NAME, which is how the
- *  test pins that the name carries the course — four rows of a bare 「もう一度」
- *  are four identical buttons to a screen reader. */
-const retakeButton = (name: string) =>
-  screen.getByRole('button', { name: `persona.course.retakeAria:${JSON.stringify({ name })}` })
+/** The course corner is a named region (its heading is not drawn — the corner
+ *  is a quiet list, not a titled rail), so wait for the rows themselves. */
+const awaitCourses = async () => {
+  await screen.findByRole('region', { name: 'persona.course.railHeading' })
+  return waitFor(() => expect(screen.getByText(COURSES[0].name)).toBeTruthy())
+}
 
-/** The portrait block: a named region, so it is reachable as one thing both
- *  here and by assistive tech. */
+/** The counts corner. The whole block is absent when the portrait could not be
+ *  read, which is why the tests query it as a named region. */
+const countsBlock = () => screen.getByRole('region', { name: 'persona.counts.label' })
+
+/** Raise the portrait into the reading column, the way the owner does: press
+ *  the 「わかっていること N」 count. */
+const openPortrait = () =>
+  fireEvent.click(
+    within(countsBlock()).getByRole('button', { name: /^persona\.counts\.known/ }),
+  )
+
+/** The portrait card, once raised. */
 const portraitBlock = () => screen.getByRole('region', { name: 'persona.portrait.label' })
 
 describe('PersonaModule — reading what the stand-in runs on', () => {
+  // The meta strip is DETAIL, so it lives inside the portrait card rather than
+  // standing on the stage (2026-08-15: 「文字は極力少なくしたい」). It is still
+  // reachable in one press, and it still says the same two numbers.
   it('says how much is in there: what it remembered and what you wrote', async () => {
+    portraitPayload = portraitOf()
     render(<PersonaModule />)
     await screen.findByText('persona.tabLabel')
+    await waitFor(() => expect(countsBlock()).toBeTruthy())
+    openPortrait()
 
     // The key carries the plural form: English says "1 note", not "1 notes".
     await waitFor(() =>
-      expect(document.body.textContent).toContain('persona.meta.count.other:{"count":62}'),
+      expect(portraitBlock().textContent).toContain('persona.meta.count.other:{"count":62}'),
     )
-    expect(document.body.textContent).toContain('persona.meta.count.one:{"count":1}')
+    expect(portraitBlock().textContent).toContain('persona.meta.count.one:{"count":1}')
   })
 
   it('says so plainly when the corpus has never been assembled', async () => {
+    portraitPayload = portraitOf()
     statusPayload = status({ exists: false, assembledAt: null })
     render(<PersonaModule />)
-    await waitFor(() => expect(document.body.textContent).toContain('persona.meta.never'))
+    await waitFor(() => expect(countsBlock()).toBeTruthy())
+    openPortrait()
+    await waitFor(() => expect(portraitBlock().textContent).toContain('persona.meta.never'))
+  })
+
+  // ── the counts corner ─────────────────────────────────────────────────────
+
+  it('prints the counts over a portrait it READ', async () => {
+    portraitPayload = portraitOf({ nodeCount: 159, recentCount: 16, takenCount: 4, courseCount: 4 })
+    render(<PersonaModule />)
+    await waitFor(() => expect(countsBlock()).toBeTruthy())
+    const text = countsBlock().textContent ?? ''
+    expect(text).toContain('159')
+    expect(text).toContain('16')
+    expect(text).toContain('4/4')
+  })
+
+  // MUTATION GUARD (R4 #2). `portrait?.nodeCount ?? 0` would print a 0 over a
+  // read that never happened — a measurement nobody took. The whole block is
+  // absent instead.
+  it('does NOT show a count when the portrait could not be read', async () => {
+    portraitPayload = null // ⇒ /api/persona/portrait 500s
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+    await waitFor(() => expect(screen.getByText('persona.intro.lead')).toBeTruthy())
+    expect(screen.queryByRole('region', { name: 'persona.counts.label' })).toBeNull()
+    expect(screen.queryByText('persona.counts.known')).toBeNull()
+  })
+
+  // `recentCount` is optional on the wire: a server that did not count is not a
+  // week in which nothing happened, so the line is absent rather than zero.
+  it('drops the week line when the server did not count one', async () => {
+    portraitPayload = portraitOf({ nodeCount: 7 })
+    delete (portraitPayload as { recentCount?: number }).recentCount
+    render(<PersonaModule />)
+    await waitFor(() => expect(countsBlock()).toBeTruthy())
+    expect(countsBlock().textContent).not.toContain('persona.counts.week')
+  })
+
+  // MUTATION GUARD. The portrait ITSELF was read — the courses half answered
+  // fine — but the corpus behind `nodeCount` could not be. That is the state a
+  // `?? 0` turns into 「わかっていること 0」 over a record that may be entirely
+  // intact. It must read as "could not read", and the number must not appear.
+  it('says COULD NOT READ, not 0, when the corpus behind the count was unreadable', async () => {
+    portraitPayload = portraitOf({ takenCount: 2, courseCount: 4 })
+    delete (portraitPayload as { nodeCount?: number }).nodeCount
+    delete (portraitPayload as { recentCount?: number }).recentCount
+    render(<PersonaModule />)
+    await waitFor(() => expect(countsBlock()).toBeTruthy())
+    const text = countsBlock().textContent ?? ''
+    // The line is still there — the owner is told the state, not left guessing.
+    expect(text).toContain('persona.counts.known')
+    expect(text).toContain('persona.counts.unread')
+    // …and no zero anywhere near it.
+    expect(text).not.toMatch(/persona\.counts\.known\s*0/)
+    expect(text).not.toContain('persona.counts.week')
+    // The course tally is a different read and still speaks.
+    expect(text).toContain('2/4')
+  })
+
+  it('the portrait sentence drops the count too, rather than saying 0 things', async () => {
+    portraitPayload = portraitOf({ takenCount: 2, courseCount: 4 })
+    delete (portraitPayload as { nodeCount?: number }).nodeCount
+    delete (portraitPayload as { recentCount?: number }).recentCount
+    render(<PersonaModule />)
+    await waitFor(() => expect(countsBlock()).toBeTruthy())
+    openPortrait()
+    await waitFor(() =>
+      expect(portraitBlock().textContent).toContain('persona.portrait.countsUnread'),
+    )
+    expect(portraitBlock().textContent).not.toContain('persona.portrait.counts:')
   })
 
   it('opens one note with its provenance, tags and what it is based on', async () => {
@@ -394,7 +565,10 @@ describe('PersonaModule — reading what the stand-in runs on', () => {
       judgment({
         id: 'j-9',
         text: 'Ship before it is pretty.',
-        tags: ['shipping'],
+        // `region:arms` is the EXPLICIT seat a writer leaves (regions.ts tier
+        // 1) — the tier the course minter, the chat distiller and the import
+        // all write. A note that carries one names its region on screen.
+        tags: ['shipping', 'region:arms'],
         context: 'Learned the hard way.',
       }),
     ]
@@ -406,12 +580,119 @@ describe('PersonaModule — reading what the stand-in runs on', () => {
     expect(screen.getByText('Learned the hard way.')).toBeTruthy()
     expect(screen.getByText('persona.notes.basis')).toBeTruthy()
     // The region it sits in is named, not left as a dot on a body.
-    expect(screen.getByText(/^persona\.zone\.\w+ ・ /)).toBeTruthy()
+    expect(screen.getByText(/^persona\.region\.arms ・ /)).toBeTruthy()
     // The raw ISO string is never shown to the owner.
     expect(screen.queryByText('2026-07-18T04:00:00.000Z')).toBeNull()
 
     fireEvent.click(screen.getByText('persona.node.close'))
     expect(screen.queryByText('persona.notes.basis')).toBeNull()
+  })
+
+  // MUTATION GUARD (R1 #2). ~159 notes on the owner's machine predate regions
+  // entirely: they carry no course tag, no interview kind and no `region:` tag,
+  // so the seating rule SPREADS them across the body rather than reading them.
+  // They still light a point — density is honest — but the line under the
+  // owner's own sentence must not name a region nobody chose. Flipping tier 4
+  // to `placed: true` reds this test and nothing else on the screen.
+  it('does NOT claim a region for a note it merely spread', async () => {
+    judgmentsPayload = [
+      judgment({ id: 'j-old', text: 'Written long before regions existed.', tags: [] }),
+    ]
+    render(<PersonaModule />)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Written long before regions existed.' })).toBeTruthy(),
+    )
+
+    openNode('Written long before regions existed.')
+    // The provenance line under the note: it says the seat is undecided…
+    const provenance = screen.getByText(/^persona\.region\.unplaced ・ /)
+    const note = provenance.closest('article')
+    expect(note).toBeTruthy()
+    // …and names NONE of the five regions anywhere in the opened note.
+    for (const region of ['head', 'chest', 'arms', 'legs', 'people']) {
+      expect(note?.textContent).not.toContain(`persona.region.${region}`)
+    }
+  })
+
+  // ── the region probe, from the module's side ─────────────────────────────
+  // PersonaFigure.test.tsx pins how the probe RENDERS a summary; these pin the
+  // summary the module composes, which is where the counting happens (the
+  // figure holds no corpus and must never appear to have counted one).
+
+  const openRegion = (region: string) =>
+    fireEvent.click(
+      within(screen.getByRole('list', { name: 'persona.figure.regionList' })).getByRole('button', {
+        name: new RegExp(`persona\\.region\\.${region}`),
+      }),
+    )
+
+  it('counts what it READ apart from what it merely spread', async () => {
+    // 40 notes with no tags at all — the shape of the ~159 that predate regions.
+    // They are seated on the body by hash and are NOT readings, so the probe
+    // must report them under their own line and never inside 分かっていること.
+    const spread = Array.from({ length: 40 }, (_, i) =>
+      judgment({ id: `old-${i}`, text: `Old note ${i}`, tags: [] }),
+    )
+    const spreadInLegs = spread.filter((j) => placeJudgment(j).region === 'legs').length
+    expect(spreadInLegs, 'the fixture actually spreads notes into legs').toBeGreaterThan(0)
+    judgmentsPayload = [
+      ...spread,
+      judgment({ id: 'read-1', text: 'Nights are when it moves.', tags: ['region:legs'] }),
+    ]
+    render(<PersonaModule />)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Nights are when it moves.' })).toBeTruthy(),
+    )
+
+    openRegion('legs')
+    const probe = screen.getByRole('status')
+    expect(probe.textContent).toContain('persona.figure.regionKnown:{"count":1}')
+    expect(probe.textContent).toContain(
+      `persona.figure.regionUnplaced:{"count":${spreadInLegs}}`,
+    )
+    // The one thing it DID read is quoted, with where it came from.
+    expect(probe.textContent).toContain('Nights are when it moves.')
+    // And the sum is never printed — that number would claim 1 + N readings.
+    expect(probe.textContent).not.toContain(`"count":${spreadInLegs + 1}`)
+  })
+
+  it('says a region is EMPTY only when it read one', async () => {
+    // The halo is reachable only from evidence (regions.ts): nothing spreads
+    // there, so with a corpus of untagged notes it is genuinely empty — and
+    // "empty" is a measurement, printed as such.
+    judgmentsPayload = [judgment({ id: 'j-a', text: 'Something.', tags: [] })]
+    render(<PersonaModule />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Something.' })).toBeTruthy())
+
+    openRegion('people')
+    const probe = screen.getByRole('status')
+    expect(probe.textContent).toContain('persona.region.none')
+    expect(probe.textContent).not.toContain('persona.figure.regionKnown')
+    expect(probe.textContent).not.toContain('persona.region.unreadable')
+  })
+
+  it('does NOT report a count for a region it could not read', async () => {
+    // Same law as the portrait and the ledger: a failed read says so, and says
+    // nothing else. A 0 here is a measurement nobody took.
+    statusFails = true
+    render(<PersonaModule />)
+    await screen.findByText('persona.loadFailed')
+
+    openRegion('head')
+    const probe = screen.getByRole('status')
+    expect(probe.textContent).toContain('persona.region.unreadable')
+    expect(probe.textContent).not.toMatch(/\d/)
+  })
+
+  it('the hint says what pressing does while a region is up', async () => {
+    judgmentsPayload = [judgment({ text: 'Something.' })]
+    render(<PersonaModule />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Something.' })).toBeTruthy())
+    expect(screen.getByText('persona.figure.hint')).toBeTruthy()
+
+    openRegion('chest')
+    expect(screen.getByText('persona.figure.probeHint')).toBeTruthy()
+    expect(screen.queryByText('persona.figure.hint')).toBeNull()
   })
 
   it('invites the first note when nothing is lit yet', async () => {
@@ -429,7 +710,7 @@ describe('PersonaModule — reading what the stand-in runs on', () => {
     statusFails = false
     fireEvent.click(screen.getByText('persona.retry'))
     await waitFor(() => expect(screen.queryByText('persona.loadFailed')).toBeNull())
-    expect(document.body.textContent).toContain('persona.meta.count.other:{"count":62}')
+    expect(screen.getByRole('button', { name: 'Price on value, never on cost.' })).toBeTruthy()
   })
 
   // "Nothing is lit yet" is a CLAIM about the corpus, and a failed read is not
@@ -451,6 +732,49 @@ describe('PersonaModule — reading what the stand-in runs on', () => {
     expect(await screen.findByText('persona.figure.empty')).toBeTruthy()
   })
 
+  // MUTATION GUARD. The retry above checks the two ENDS — failed, then read.
+  // The bug lived in the MIDDLE: `load()` cleared `loadError` at the START of
+  // the attempt, and by then `loading` is false and `judgments` is still empty
+  // from the failure, so for the whole duration of the retry the stage printed
+  // 「まだ何も光っていません」 over a corpus that may be perfectly intact. That is
+  // the forbidden sentence — "you have said nothing" — from a source nobody has
+  // read yet. The state is only allowed to change when a read LANDS.
+  it('does not flash "nothing is lit" while the retry is still in flight', async () => {
+    statusFails = true
+    judgmentsPayload = []
+    render(<PersonaModule />)
+    expect(await screen.findByText('persona.loadFailed')).toBeTruthy()
+
+    // Hold the corpus reads open so the in-flight window is observable at all.
+    const real = global.fetch as unknown as (u: string, i?: RequestInit) => Promise<Response>
+    let release: (() => void) | undefined
+    const opened = new Promise<void>((r) => {
+      release = r
+    })
+    statusFails = false
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (String(url).startsWith('/api/you-corpus')) await opened
+        return real(String(url), init)
+      }),
+    )
+
+    fireEvent.click(screen.getByText('persona.retry'))
+
+    // MID-FLIGHT: the last KNOWN state is "could not read", and it is still what
+    // the screen says. Nothing claims the figure is empty.
+    await waitFor(() => expect(screen.getByText('persona.loading')).toBeTruthy())
+    expect(screen.getByText('persona.loadFailed')).toBeTruthy()
+    expect(screen.queryByText('persona.figure.empty')).toBeNull()
+    expect(screen.queryByText('persona.intro.title')).toBeNull()
+
+    // …and once it lands, the invitation is a fact and appears.
+    release?.()
+    expect(await screen.findByText('persona.figure.empty')).toBeTruthy()
+    expect(screen.queryByText('persona.loadFailed')).toBeNull()
+  })
+
   // A failed REFRESH is different from a failed first read: notes already on
   // screen were read successfully once, so they stay lit. Only the "it is empty"
   // claim is withheld.
@@ -461,22 +785,36 @@ describe('PersonaModule — reading what the stand-in runs on', () => {
 
     // The append lands; the re-read that follows it does not.
     statusFails = true
-    openComposer()
+    startCorrecting('Loaded before the failure.')
     typeNote('A new note.')
-    fireEvent.click(screen.getByText('persona.add.submit'))
+    fireEvent.click(screen.getByText('persona.correct.submit'))
 
     expect(await screen.findByText('persona.loadFailed')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Loaded before the failure.' })).toBeTruthy()
   })
 })
 
-describe('PersonaModule — adding to it', () => {
-  it('will not submit an empty or whitespace-only note', async () => {
+// THE ADD-NOTE BUTTON IS GONE (2026-08-15). Talking is how things go in, so the
+// composer only ever opens over an existing line — but the WRITE underneath is
+// the same POST /api/you-corpus/append it always was, so these tests moved onto
+// the correction path rather than being deleted.
+describe('PersonaModule — writing into it', () => {
+  it('offers no add-note button at all — the way in is the conversation', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.add.open')
-    openComposer()
+    await screen.findByText('persona.tabLabel')
+    expect(screen.queryByText('persona.add.open')).toBeNull()
+    expect(screen.queryByText('persona.add.heading')).toBeNull()
+    // …and the conversation's input is there instead.
+    expect(talkInput()).toBeTruthy()
+  })
 
-    const submit = screen.getByText('persona.add.submit').closest('button')!
+  it('will not submit an empty or whitespace-only correction', async () => {
+    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
+    render(<PersonaModule />)
+    await screen.findByRole('button', { name: 'Old call.' })
+    startCorrecting('Old call.')
+
+    const submit = screen.getByText('persona.correct.submit').closest('button')!
     expect(submit.disabled).toBe(true)
 
     typeNote('   ')
@@ -486,70 +824,73 @@ describe('PersonaModule — adding to it', () => {
     expect(submit.disabled).toBe(false)
   })
 
-  it('posts the note with its tags and lights it on the figure', async () => {
+  it('posts the correction with its tags and lights it on the figure', async () => {
+    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
     render(<PersonaModule />)
-    await screen.findByText('persona.add.open')
-    openComposer()
+    await screen.findByRole('button', { name: 'Old call.' })
+    startCorrecting('Old call.')
 
     typeNote('Say no to features that need a manual.')
     fireEvent.change(screen.getByPlaceholderText('persona.add.tagsPlaceholder'), {
       target: { value: 'product, scope' },
     })
-    fireEvent.click(screen.getByText('persona.add.submit'))
+    fireEvent.click(screen.getByText('persona.correct.submit'))
 
     await waitFor(() => expect(posts).toHaveLength(1))
-    expect(posts[0]).toEqual({
-      text: 'Say no to features that need a manual.',
-      tags: ['product', 'scope'],
-    })
-    // No `context` on a plain add — that field is the correction's pointer.
-    expect(posts[0].context).toBeUndefined()
+    expect(posts[0].text).toBe('Say no to features that need a manual.')
+    expect(posts[0].tags).toEqual(['product', 'scope'])
+    expect(posts[0].correctsId).toBe('j-old')
 
     // It is on the body now, not in a list somewhere.
     expect(
       await screen.findByRole('button', { name: 'Say no to features that need a manual.' }),
     ).toBeTruthy()
-    // The composer closes and empties, so the next note starts clean.
-    expect(screen.queryByPlaceholderText('persona.add.placeholder')).toBeNull()
-    openComposer()
-    expect((screen.getByPlaceholderText('persona.add.placeholder') as HTMLTextAreaElement).value).toBe('')
+    // The composer closes and empties, so the next one starts clean.
+    expect(screen.queryByPlaceholderText('persona.correct.placeholder')).toBeNull()
+    startCorrecting('Old call.')
+    expect(
+      (screen.getByPlaceholderText('persona.correct.placeholder') as HTMLTextAreaElement).value,
+    ).toBe('')
   })
 
   it('omits tags entirely when none were typed', async () => {
+    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
     render(<PersonaModule />)
-    await screen.findByText('persona.add.open')
-    openComposer()
+    await screen.findByRole('button', { name: 'Old call.' })
+    startCorrecting('Old call.')
     typeNote('No tags here.')
-    fireEvent.click(screen.getByText('persona.add.submit'))
+    fireEvent.click(screen.getByText('persona.correct.submit'))
 
     await waitFor(() => expect(posts).toHaveLength(1))
-    expect(posts[0]).toEqual({ text: 'No tags here.' })
+    expect(posts[0].tags).toBeUndefined()
   })
 
   it('surfaces a write failure rather than pretending it saved', async () => {
     appendFails = true
+    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
     render(<PersonaModule />)
-    await screen.findByText('persona.add.open')
-    openComposer()
+    await screen.findByRole('button', { name: 'Old call.' })
+    startCorrecting('Old call.')
 
     typeNote('This will not land.')
-    fireEvent.click(screen.getByText('persona.add.submit'))
+    fireEvent.click(screen.getByText('persona.correct.submit'))
 
     expect(await screen.findByText('persona.add.failed')).toBeTruthy()
     // The text is KEPT so the owner does not lose what they wrote.
-    expect((screen.getByPlaceholderText('persona.add.placeholder') as HTMLTextAreaElement).value).toBe(
-      'This will not land.',
-    )
+    expect(
+      (screen.getByPlaceholderText('persona.correct.placeholder') as HTMLTextAreaElement).value,
+    ).toBe('This will not land.')
   })
 
   it('warns when the note landed but the corpus could not be rebuilt', async () => {
     appendSkipped = true
+    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
     render(<PersonaModule />)
-    await screen.findByText('persona.add.open')
-    openComposer()
+    await screen.findByRole('button', { name: 'Old call.' })
+    startCorrecting('Old call.')
 
     typeNote('Landed, but sources were unreadable.')
-    fireEvent.click(screen.getByText('persona.add.submit'))
+    fireEvent.click(screen.getByText('persona.correct.submit'))
 
     expect(await screen.findByText('persona.meta.stale')).toBeTruthy()
   })
@@ -557,9 +898,10 @@ describe('PersonaModule — adding to it', () => {
   // The IME contract: a bare Enter must reach the composition (it CONFIRMS a
   // Japanese conversion), so only the modified chord submits.
   it('submits on Cmd/Ctrl+Enter but never on a bare Enter', async () => {
+    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
     render(<PersonaModule />)
-    await screen.findByText('persona.add.open')
-    openComposer()
+    await screen.findByRole('button', { name: 'Old call.' })
+    startCorrecting('Old call.')
     const box = typeNote('IME safe?')
 
     fireEvent.keyDown(box, { key: 'Enter' })
@@ -569,6 +911,302 @@ describe('PersonaModule — adding to it', () => {
     fireEvent.keyDown(box, { key: 'Enter', metaKey: true })
     await waitFor(() => expect(posts).toHaveLength(1))
     expect(posts[0].text).toBe('IME safe?')
+  })
+})
+
+// ─── TALKING IS THE WAY IN ──────────────────────────────────────────────────
+//
+// PersonaConversation.test.tsx pins what the conversation RENDERS; these pin
+// the WIRING the module owns — which route a message goes to, that a turn is
+// polled as a job rather than held on one connection, and that what came back
+// is read back through the corpus rather than taken on faith.
+describe('PersonaModule — talking to it', () => {
+  it('posts what the owner said, then shows the reply and lights what was kept', async () => {
+    chatTurnPayload = {
+      state: 'done',
+      elapsedMs: 21_000,
+      reply: 'どのあたりが重いですか。',
+      kept: [keptWrite()],
+    }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
+    say('仕事で手が止まる')
+    await waitFor(() => expect(posts).toHaveLength(1))
+    expect(posts[0]).toEqual({ url: '/api/persona/chat', text: '仕事で手が止まる' })
+    // The owner's words are on screen BEFORE anything comes back.
+    expect(screen.getByText('仕事で手が止まる')).toBeTruthy()
+
+    // …and the turn is polled as a job, not held on the POST.
+    expect(await screen.findByText('どのあたりが重いですか。', undefined, { timeout: 4000 })).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: /決めたあとに手が止まる/ }),
+    ).toBeTruthy()
+  })
+
+  it('re-reads the corpus when a turn lands, so the figure is never a version behind', async () => {
+    chatTurnPayload = { state: 'done', elapsedMs: 1, reply: 'ふむ。', kept: [keptWrite()] }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
+    // The server has ALREADY written it; the screen must go and read it rather
+    // than drawing what it hoped happened.
+    judgmentsPayload = [judgment({ id: 'k-1', text: '決めたあとに手が止まる' }), ...judgmentsPayload]
+    say('仕事で手が止まる')
+
+    // The figure's own list is where a lit point is reachable — two buttons now
+    // carry that text: the kept chip and the node.
+    await waitFor(
+      () =>
+        expect(screen.getAllByRole('button', { name: /決めたあとに手が止まる/ }).length).toBe(2),
+      { timeout: 4000 },
+    )
+  })
+
+  it('a second message while one is running is refused, and the words survive', async () => {
+    chatStartRejection = { status: 409, body: { error: 'busy', busy: true } }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
+    say('二通目')
+    expect(await screen.findByText('persona.chat.busy')).toBeTruthy()
+    expect(screen.getByText('二通目')).toBeTruthy()
+    expect(screen.getByText('persona.chat.retry')).toBeTruthy()
+  })
+
+  // SUBSCRIPTION-ONLY: the server preflights the owner's own `claude` and
+  // answers 503 before anything spawns. The screen has to name which of the two
+  // it was, because the fixes are different.
+  it('says which way the CLI is unavailable, and never spends a turn on it', async () => {
+    chatStartRejection = { status: 503, body: { claudeLoggedOut: true } }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
+    say('話しかける')
+    expect(await screen.findByText('persona.chat.claudeLoggedOut')).toBeTruthy()
+    expect(screen.getByText('話しかける')).toBeTruthy()
+  })
+
+  it('a thread that could not be READ is never drawn as an empty one', async () => {
+    chatStatePayload = null // ⇒ GET /api/persona/chat 500s
+    render(<PersonaModule />)
+    expect(await screen.findByText('persona.chat.stateUnreadable')).toBeTruthy()
+  })
+
+  // Same 200-with-a-bare-object that took the portrait and the ledger down.
+  it('a 200 that is NOT a thread is treated as unread, not as empty', async () => {
+    chatStatePayload = {}
+    render(<PersonaModule />)
+    expect(await screen.findByText('persona.chat.stateUnreadable')).toBeTruthy()
+  })
+
+  // A TURN OUTLIVES THIS SCREEN. The run is a job, not the POST's connection,
+  // so closing the panel mid-turn leaves a `claude` going — and a reopened
+  // panel that does not re-attach the poll sits at 「送っています」 forever over
+  // a turn that finished minutes ago.
+  it('picks a turn that was still running back up when the panel reopens', async () => {
+    chatStatePayload = {
+      turns: [
+        {
+          id: 't-live',
+          askedAt: '2026-08-15T01:00:00.000Z',
+          text: 'まだ返事待ち',
+          state: 'running',
+        },
+      ],
+      live: true,
+    }
+    chatTurnPayload = {
+      state: 'done',
+      elapsedMs: 30_000,
+      reply: '待たせました。',
+      kept: [keptWrite()],
+    }
+    render(<PersonaModule />)
+    expect(await screen.findByText('まだ返事待ち')).toBeTruthy()
+
+    // …and it lands without the owner having to do anything.
+    expect(await screen.findByText('待たせました。', undefined, { timeout: 4000 })).toBeTruthy()
+  })
+
+  it('does NOT poll a thread the server says has nothing in flight', async () => {
+    chatStatePayload = {
+      turns: [
+        {
+          id: 't-stale',
+          askedAt: '2026-08-15T01:00:00.000Z',
+          text: '取り残された行',
+          state: 'running',
+        },
+      ],
+      live: false,
+    }
+    render(<PersonaModule />)
+    await screen.findByText('取り残された行')
+    await new Promise((r) => setTimeout(r, 900))
+    const calls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+    expect(calls.filter((c) => String(c[0]).includes('/api/persona/chat/turn/'))).toHaveLength(0)
+  })
+
+  it('re-opening the panel does not lose the conversation', async () => {
+    chatStatePayload = {
+      turns: [
+        {
+          id: 't-old',
+          askedAt: '2026-08-15T01:00:00.000Z',
+          text: '前に話したこと',
+          state: 'done',
+          reply: 'おぼえています。',
+          kept: [],
+        },
+      ],
+      live: false,
+    }
+    render(<PersonaModule />)
+    expect(await screen.findByText('前に話したこと')).toBeTruthy()
+    expect(screen.getByText('おぼえています。')).toBeTruthy()
+  })
+})
+
+describe('PersonaModule — taking in a claude.ai export', () => {
+  const drop = (name: string, body: string) => {
+    const file = new File([body], name, { type: 'application/json' })
+    fireEvent.drop(talkInput(), { dataTransfer: { files: [file] } })
+    return file
+  }
+
+  it('sends the parsed export with a sha of the FILE’S BYTES', async () => {
+    importJobPayload = {
+      state: 'done',
+      elapsedMs: 900,
+      result: {
+        conversations: 2,
+        ownerMessages: 5,
+        unreadable: 1,
+        droppedNonOwner: 4,
+        considered: 5,
+        notConsidered: 0,
+        kept: [keptWrite()],
+        duplicatesSkipped: 0,
+        keptUnreadable: 0,
+      },
+    }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
+    drop('conversations.json', '[{"name":"a"}]')
+    await waitFor(() => expect(posts).toHaveLength(1))
+    expect(posts[0].url).toBe('/api/persona/import')
+    expect(posts[0].json).toEqual([{ name: 'a' }])
+    // The server never sees the bytes, so the digest is the only thing that can
+    // tell "the same export again" from "a newer export" — and it must be the
+    // shape the server validates (64 hex).
+    expect(String(posts[0].fileSha)).toMatch(/^[0-9a-f]{64}$/)
+
+    expect(
+      await screen.findByText('persona.import.notConsidered:{"count":0}', undefined, {
+        timeout: 4000,
+      }),
+    ).toBeTruthy()
+  })
+
+  // A DELIBERATE deviation from the mock's placeholder copy: there is no zip
+  // reader in this app, so it says what to do instead of failing later.
+  it('refuses a zip with an instruction, and never posts it', async () => {
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
+    drop('data-export.zip', 'PK')
+    expect(await screen.findByText('persona.import.zipUnsupported')).toBeTruthy()
+    expect(posts).toHaveLength(0)
+  })
+
+  // MUTATION GUARD. Everything the drop handler does runs on the thread that
+  // draws the screen and holds several live copies of the file at once (buffer →
+  // hash → decoded string → parsed object → request body). A years-deep export
+  // is hundreds of MB, and dropping one froze the window with no message and no
+  // way back. The check has to happen BEFORE the first read — after it there is
+  // nothing left to check with.
+  it('refuses an export too big to open, before reading a single byte', async () => {
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
+    // A real 65MB string would make this test itself the thing that hangs, so
+    // the size is stubbed — the production check reads `file.size`, which is
+    // exactly what a browser reports without touching the contents.
+    const huge = new File(['[]'], 'conversations.json', { type: 'application/json' })
+    Object.defineProperty(huge, 'size', { value: MAX_EXPORT_BYTES + 1 })
+    let read = false
+    huge.arrayBuffer = () => {
+      read = true
+      return Promise.resolve(new ArrayBuffer(0))
+    }
+    fireEvent.drop(talkInput(), { dataTransfer: { files: [huge] } })
+
+    expect(
+      await screen.findByText(
+        `persona.import.tooLarge:{"size":${megabytes(MAX_EXPORT_BYTES + 1)},"max":${megabytes(MAX_EXPORT_BYTES)}}`,
+      ),
+    ).toBeTruthy()
+    // The observable claim, not "a function was called": nothing was read and
+    // nothing was posted.
+    expect(read).toBe(false)
+    expect(posts).toHaveLength(0)
+  })
+
+  it('a file one byte under the cap is opened normally', async () => {
+    // The other side of the boundary — a cap that refuses everything would pass
+    // the test above and break the feature.
+    importJobPayload = {
+      state: 'done',
+      elapsedMs: 10,
+      result: {
+        conversations: 1,
+        ownerMessages: 1,
+        unreadable: 0,
+        droppedNonOwner: 0,
+        considered: 1,
+        notConsidered: 0,
+        kept: [],
+        duplicatesSkipped: 0,
+        keptUnreadable: 0,
+      },
+    }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
+    const ok = new File(['[{"name":"a"}]'], 'conversations.json', { type: 'application/json' })
+    Object.defineProperty(ok, 'size', { value: MAX_EXPORT_BYTES })
+    fireEvent.drop(talkInput(), { dataTransfer: { files: [ok] } })
+
+    await waitFor(() => expect(posts).toHaveLength(1))
+    expect(screen.queryByText(/persona\.import\.tooLarge/)).toBeNull()
+  })
+
+  it('a file that is not JSON at all reports no counts', async () => {
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
+    drop('conversations.json', 'this is not json')
+    expect(await screen.findByText('persona.import.unreadableFile')).toBeTruthy()
+    expect(posts).toHaveLength(0)
+    expect(screen.queryByText(/persona\.import\.parsed/)).toBeNull()
+  })
+
+  it('the same export twice is refused with the day it landed', async () => {
+    importStartRejection = {
+      status: 409,
+      body: { alreadyImported: true, at: '2026-08-12T09:00:00.000Z' },
+    }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+
+    drop('conversations.json', '[]')
+    expect(
+      await screen.findByText(
+        `persona.import.already:{"date":"${dayLabel('2026-08-12T09:00:00.000Z')}"}`,
+      ),
+    ).toBeTruthy()
   })
 })
 
@@ -645,14 +1283,17 @@ describe('PersonaModule — correcting is appending', () => {
   // value reset is not undoable, so a draft cleared by an unrelated click is
   // gone for good.
   it('KEEPS an in-progress note when the owner starts correcting something else', async () => {
-    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
+    judgmentsPayload = [
+      judgment({ id: 'j-a', text: 'First call.' }),
+      judgment({ id: 'j-b', text: 'Second call.' }),
+    ]
     render(<PersonaModule />)
-    await screen.findByRole('button', { name: 'Old call.' })
+    await screen.findByRole('button', { name: 'First call.' })
 
-    openComposer()
+    startCorrecting('First call.')
     typeNote('half-written thought I am not done with')
-    openNode('Old call.')
-    fireEvent.click(screen.getByText('persona.correct.start'))
+    // …and now they change their mind about WHICH note they are correcting.
+    startCorrecting('Second call.')
 
     expect(
       (screen.getByPlaceholderText('persona.correct.placeholder') as HTMLTextAreaElement).value,
@@ -660,16 +1301,18 @@ describe('PersonaModule — correcting is appending', () => {
   })
 
   it('does not overwrite tags the owner is already typing', async () => {
-    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.', tags: ['pricing'] })]
+    judgmentsPayload = [
+      judgment({ id: 'j-a', text: 'First call.' }),
+      judgment({ id: 'j-b', text: 'Second call.', tags: ['pricing'] }),
+    ]
     render(<PersonaModule />)
-    await screen.findByRole('button', { name: 'Old call.' })
+    await screen.findByRole('button', { name: 'First call.' })
 
-    openComposer()
+    startCorrecting('First call.')
     fireEvent.change(screen.getByPlaceholderText('persona.add.tagsPlaceholder'), {
       target: { value: 'mine' },
     })
-    openNode('Old call.')
-    fireEvent.click(screen.getByText('persona.correct.start'))
+    startCorrecting('Second call.')
 
     expect((screen.getByPlaceholderText('persona.add.tagsPlaceholder') as HTMLInputElement).value).toBe(
       'mine',
@@ -677,49 +1320,54 @@ describe('PersonaModule — correcting is appending', () => {
   })
 
   it('cancelling drops the correction, not the words', async () => {
-    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
+    judgmentsPayload = [
+      judgment({ id: 'j-a', text: 'Old call.' }),
+      judgment({ id: 'j-b', text: 'Another one.' }),
+    ]
     render(<PersonaModule />)
     await screen.findByRole('button', { name: 'Old call.' })
 
-    openNode('Old call.')
-    fireEvent.click(screen.getByText('persona.correct.start'))
+    startCorrecting('Old call.')
     fireEvent.change(screen.getByPlaceholderText('persona.correct.placeholder'), {
       target: { value: 'words worth keeping' },
     })
     fireEvent.click(screen.getByText('persona.correct.cancel'))
 
-    openComposer()
-    expect(screen.getByText('persona.add.heading')).toBeTruthy()
-    expect((screen.getByPlaceholderText('persona.add.placeholder') as HTMLTextAreaElement).value).toBe(
-      'words worth keeping',
-    )
+    // Re-opening on ANOTHER note still carries the words: cancelling dropped
+    // the correction, not what the owner had written.
+    startCorrecting('Another one.')
+    expect(
+      (screen.getByPlaceholderText('persona.correct.placeholder') as HTMLTextAreaElement).value,
+    ).toBe('words worth keeping')
   })
 
-  it('cancelling really drops the correction — the next note carries no pointer', async () => {
-    judgmentsPayload = [judgment({ id: 'j-old', text: 'The note being corrected.' })]
+  it('cancelling really drops the correction — the next write points elsewhere', async () => {
+    judgmentsPayload = [
+      judgment({ id: 'j-old', text: 'The note being corrected.' }),
+      judgment({ id: 'j-other', text: 'A different note.' }),
+    ]
     render(<PersonaModule />)
     await screen.findByRole('button', { name: 'The note being corrected.' })
 
-    openNode('The note being corrected.')
-    fireEvent.click(screen.getByText('persona.correct.start'))
+    startCorrecting('The note being corrected.')
     expect(screen.getByText('persona.correct.heading')).toBeTruthy()
-
     fireEvent.click(screen.getByText('persona.correct.cancel'))
 
-    // The real contract: what gets written next is a PLAIN note, with no
-    // `context` pointing at the note the owner decided not to correct.
-    openComposer()
+    // The real contract: the next write points at the note it was actually
+    // opened on, never at the one the owner decided NOT to correct.
+    startCorrecting('A different note.')
     typeNote('An unrelated new thought.')
-    fireEvent.click(screen.getByText('persona.add.submit'))
+    fireEvent.click(screen.getByText('persona.correct.submit'))
     await waitFor(() => expect(posts).toHaveLength(1))
-    expect(posts[0]).toEqual({ text: 'An unrelated new thought.' })
+    expect(posts[0].correctsId).toBe('j-other')
+    expect(String(posts[0].context)).not.toContain('The note being corrected.')
   })
 })
 
 describe('PersonaModule — the courses', () => {
   it('renders every course the server offers, with what it costs and what it grows', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     for (const c of COURSES) {
       expect(screen.getByRole('button', { name: new RegExp(c.name) })).toBeTruthy()
@@ -727,38 +1375,38 @@ describe('PersonaModule — the courses', () => {
     // A never-taken course states its length and the region it fills — the
     // owner decides whether to spend 25 questions BEFORE starting.
     expect(document.body.textContent).toContain(
-      `persona.course.state.new:{"count":${COURSES[0].itemCount},"zone":"persona.zone.${COURSES[0].zone}"}`,
+      `persona.course.state.new:{"count":${COURSES[0].itemCount},"region":"persona.region.${COURSE_REGION[COURSES[0].id]}"}`,
     )
   })
 
   it('names each course the way the SERVER named it, not from a local copy', async () => {
-    // The rail is the catalogue the server sent (name / itemCount / zone), and
+    // The rail is the catalogue the server sent (name / itemCount / region), and
     // only the ITEMS come from the local instrument file. Printing COURSES here
     // would look identical on a matching build and drift silently on any other.
     courses = coursesPayload({ big5: { name: 'Renamed on the server' } })
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
     expect(await screen.findByRole('button', { name: /Renamed on the server/ })).toBeTruthy()
+    expect(screen.queryByText(COURSES[0].name)).toBeNull()
   })
 
   it('shows the date instead of the price once a course has been taken', async () => {
     courses = coursesPayload({ big5: { lastTakenAt: '2026-08-01T09:00:00.000Z', headline: 'done' } })
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
     await waitFor(() => expect(document.body.textContent).toContain('persona.course.state.done'))
   })
 
   it('says the courses could not be read rather than showing no courses at all', async () => {
     coursesFail = true
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await screen.findByRole('region', { name: 'persona.course.railHeading' })
     await waitFor(() => expect(screen.getByText('persona.loadFailed')).toBeTruthy())
     expect(screen.queryByRole('button', { name: new RegExp(COURSES[0].name) })).toBeNull()
   })
 
   it('starting a course asks item 1 of N, in the same card the question lives in', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     fireEvent.click(rail(COURSES[0].name))
     expect(screen.getByText(BIG5_ITEMS[0][2])).toBeTruthy()
@@ -771,7 +1419,7 @@ describe('PersonaModule — the courses', () => {
 
   it('answering advances to the next item', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     fireEvent.click(rail(COURSES[0].name))
     fireEvent.click(screen.getByRole('button', { name: LIKERT_AGREE[0] }))
@@ -785,7 +1433,7 @@ describe('PersonaModule — the courses', () => {
 
   it('a two-choice course offers both cards and records which one was picked', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     const work = COURSES.find((c) => c.id === 'work')!
     fireEvent.click(rail(work.name))
@@ -810,7 +1458,7 @@ describe('PersonaModule — the courses', () => {
 
   it('finishing posts the WHOLE answer vector and shows the sheet, sourced and hedged', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     const big5 = COURSES[0]
     fireEvent.click(rail(big5.name))
@@ -847,7 +1495,7 @@ describe('PersonaModule — the courses', () => {
   it('keeps the answers when the result cannot be saved, and re-sends the same vector', async () => {
     submitFails = true
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     const big5 = COURSES[0]
     fireEvent.click(rail(big5.name))
@@ -872,7 +1520,7 @@ describe('PersonaModule — the courses', () => {
   it('does not claim a finding entered the persona when the corpus refused it', async () => {
     mintedOverride = 0
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     const big5 = COURSES[0]
     fireEvent.click(rail(big5.name))
@@ -885,7 +1533,7 @@ describe('PersonaModule — the courses', () => {
 
   it('a fully-minted result does NOT show the partial warning', async () => {
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     const big5 = COURSES[0]
     fireEvent.click(rail(big5.name))
@@ -923,7 +1571,7 @@ describe('PersonaModule — the courses', () => {
   it('quitting a course sends nothing and gives the day’s question back', async () => {
     questionPayload = question()
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     fireEvent.click(rail(COURSES[0].name))
     fireEvent.click(screen.getByRole('button', { name: LIKERT_AGREE[0] }))
@@ -969,6 +1617,8 @@ describe('PersonaModule — the portrait', () => {
     })
     portraitPayload = portraitOf({ lines: [values, big5] })
     render(<PersonaModule />)
+    await waitFor(() => expect(countsBlock()).toBeTruthy())
+    openPortrait()
 
     expect(await screen.findByText(values.text)).toBeTruthy()
     expect(screen.getByText(big5.text)).toBeTruthy()
@@ -981,6 +1631,8 @@ describe('PersonaModule — the portrait', () => {
   it('prints the counts the API sent, including the recent one when it has it', async () => {
     portraitPayload = portraitOf({ nodeCount: 41, recentCount: 3, takenCount: 2, courseCount: 4 })
     render(<PersonaModule />)
+    await waitFor(() => expect(countsBlock()).toBeTruthy())
+    openPortrait()
 
     await screen.findByText(portraitLine().text)
     expect(portraitBlock().textContent).toContain(
@@ -992,7 +1644,10 @@ describe('PersonaModule — the portrait', () => {
   // that simply did not count it is a different claim from the one it made.
   it('drops the recent clause when the API did not send one', async () => {
     portraitPayload = portraitOf({ nodeCount: 7, takenCount: 1, courseCount: 4 })
+    delete (portraitPayload as { recentCount?: number }).recentCount
     render(<PersonaModule />)
+    await waitFor(() => expect(countsBlock()).toBeTruthy())
+    openPortrait()
 
     await screen.findByText(portraitLine().text)
     expect(portraitBlock().textContent).toContain(
@@ -1006,12 +1661,14 @@ describe('PersonaModule — the portrait', () => {
   it('invites a course instead of composing a sentence when nothing is evidenced', async () => {
     portraitPayload = portraitOf({ lines: [], nodeCount: 3, takenCount: 0, courseCount: 4 })
     render(<PersonaModule />)
+    await waitFor(() => expect(countsBlock()).toBeTruthy())
+    openPortrait()
 
     await screen.findByText('persona.portrait.empty')
-    // Exactly the invitation and the counts — no line, no headline, no
-    // "you are a balanced person" filler smuggled in beside them.
-    expect(portraitBlock().textContent).toBe(
-      'persona.portrait.empty' + 'persona.portrait.counts:{"nodes":3,"taken":0,"total":4}',
+    // The invitation and the counts — and NOT ONE composed line: no headline,
+    // no "you are a balanced person" filler smuggled in beside them.
+    expect(portraitBlock().textContent).toContain(
+      'persona.portrait.counts:{"nodes":3,"taken":0,"total":4}',
     )
     expect(portraitBlock().querySelectorAll('li')).toHaveLength(0)
   })
@@ -1023,14 +1680,19 @@ describe('PersonaModule — the portrait', () => {
     portraitPayload = null
     render(<PersonaModule />)
 
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
     expect(screen.queryByRole('region', { name: 'persona.portrait.label' })).toBeNull()
     expect(screen.queryByText('persona.portrait.empty')).toBeNull()
+    // …and there is no way IN to it either: the count that raises it is part of
+    // the same absent block.
+    expect(screen.queryByRole('region', { name: 'persona.counts.label' })).toBeNull()
   })
 
   it('re-reads the portrait when a course finishes, so it is never a version behind', async () => {
     portraitPayload = portraitOf({ lines: [], nodeCount: 3, takenCount: 0, courseCount: 4 })
     render(<PersonaModule />)
+    await awaitCourses()
+    openPortrait()
     await screen.findByText('persona.portrait.empty')
 
     // The course the owner is about to take is the evidence for the new line.
@@ -1061,35 +1723,36 @@ describe('PersonaModule — the portrait', () => {
 // dropped from the row it belongs to, and a read that failed pretending the
 // stand-in has simply never acted.
 describe('PersonaModule — the decision ledger', () => {
-  const ledgerBlock = () => screen.getByRole('region', { name: 'persona.ledger.label' })
+  // The ledger's own CARD is gone (2026-08-15): it is one line in the counts
+  // corner now, and pressing it opens the very list the card opened. Nothing
+  // about the feature was removed — the corner just stopped being a dashboard.
+  const ledgerLine = () =>
+    within(countsBlock()).getByRole('button', { name: 'persona.ledger.label' })
   const ledgerDetail = () => screen.getByRole('region', { name: 'persona.ledger.detail.heading' })
-  const openLedger = () => fireEvent.click(within(ledgerBlock()).getByRole('button'))
+  const openLedger = () => fireEvent.click(ledgerLine())
   const AT = '2026-08-12T09:00:00.000Z'
 
   it('counts THIS WEEK, not everything the ledger holds', async () => {
-    // The block answers one question — how often did it speak for me this week.
-    // Printing the lifetime tallies under that cap inflates the only number on
-    // the screen that is supposed to be checkable.
+    // The line answers one question — how often did it speak for me lately.
+    // Printing the lifetime tally under that question inflates the only number
+    // on the screen that is supposed to be checkable.
     ledgerPayload = ledgerOf(
       { week: counts(3, 2, 1), total: counts(30, 20, 10), lastAt: AT },
       [ledgerEntry()],
     )
     render(<PersonaModule />)
 
-    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
-    const text = ledgerBlock().textContent ?? ''
-    expect(text).toContain('3persona.ledger.answered')
-    expect(text).toContain('2persona.ledger.asked')
-    expect(text).toContain('1persona.ledger.abstained')
-    // …and the lifetime numbers are nowhere on it.
+    await waitFor(() => expect(ledgerLine()).toBeTruthy())
+    const text = ledgerLine().textContent ?? ''
+    expect(text).toContain('persona.counts.decided')
+    expect(text).toContain('3')
+    // …and the lifetime number is nowhere on it.
     expect(text).not.toContain('30')
-    expect(text).not.toContain('20')
-    expect(text).not.toContain('10')
   })
 
   it('shows NOTHING at all when nothing has been recorded — no counts, no placeholder', async () => {
-    // An all-zero ledger is a first run. "0 · 0 · 0" reads as a dashboard that
-    // is measuring something; a line promising what will appear here one day
+    // An all-zero ledger is a first run. A 0 there reads as a dashboard that is
+    // measuring something, and a line promising what will appear here one day
     // explains a feature the reader has no way to want yet (owner, 2026-08-15).
     // The corner stays empty until the stand-in has actually decided something.
     ledgerPayload = ledgerOf({ week: counts(0, 0, 0), total: counts(0, 0, 0), lastAt: null })
@@ -1099,23 +1762,24 @@ describe('PersonaModule — the decision ledger', () => {
     await screen.findByText('persona.intro.lead')
     expect(screen.queryByLabelText('persona.ledger.label')).toBeNull()
     const body = document.body.textContent ?? ''
-    expect(body).not.toContain('persona.ledger.answered')
-    expect(body).not.toContain('persona.ledger.week')
+    expect(body).not.toContain('persona.counts.decided')
   })
 
-  it('an idle WEEK is zeros plus the day it last acted — not the empty-ledger line', async () => {
+  it('an idle WEEK still shows its zero — that is a measurement, not an empty ledger', async () => {
     // "It has never done anything" and "it did nothing in the last seven days"
-    // are different claims, and only the first one may borrow the invitation.
+    // are different claims. The first draws no line; the second draws a 0.
     ledgerPayload = ledgerOf(
       { week: counts(0, 0, 0), total: counts(4, 2, 1), lastAt: '2026-08-02T09:00:00.000Z' },
       [ledgerEntry()],
     )
     render(<PersonaModule />)
 
-    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
-    const text = ledgerBlock().textContent ?? ''
-    expect(text).toContain('0persona.ledger.answered')
-    expect(text).toContain(`persona.ledger.last:{"date":"${dayLabel('2026-08-02T09:00:00.000Z')}"}`)
+    await waitFor(() => expect(ledgerLine()).toBeTruthy())
+    expect(ledgerLine().textContent).toContain('0')
+    // …and the row behind it is still reachable, which is where the day it last
+    // acted is actually readable.
+    openLedger()
+    expect(ledgerDetail()).toBeTruthy()
   })
 
   it('opens the decisions themselves: what it did, to what question, and why', async () => {
@@ -1135,7 +1799,7 @@ describe('PersonaModule — the decision ledger', () => {
     ])
     render(<PersonaModule />)
 
-    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    await waitFor(() => expect(ledgerLine()).toBeTruthy())
     openLedger()
 
     const detail = ledgerDetail()
@@ -1172,7 +1836,7 @@ describe('PersonaModule — the decision ledger', () => {
     ])
     render(<PersonaModule />)
 
-    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    await waitFor(() => expect(ledgerLine()).toBeTruthy())
     openLedger()
 
     expect(
@@ -1195,7 +1859,7 @@ describe('PersonaModule — the decision ledger', () => {
     ])
     render(<PersonaModule />)
 
-    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    await waitFor(() => expect(ledgerLine()).toBeTruthy())
     openLedger()
 
     expect(within(ledgerDetail()).getByText(/billing-api/)).toBeTruthy()
@@ -1218,7 +1882,7 @@ describe('PersonaModule — the decision ledger', () => {
     ])
     render(<PersonaModule />)
 
-    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    await waitFor(() => expect(ledgerLine()).toBeTruthy())
     openLedger()
 
     // The verdict already says what happened; a slug says nothing to anyone.
@@ -1235,7 +1899,7 @@ describe('PersonaModule — the decision ledger', () => {
     render(<PersonaModule />)
 
     expect(await screen.findByText('persona.tabLabel')).toBeTruthy()
-    expect(await screen.findByText('persona.course.railHeading')).toBeTruthy()
+    expect(await awaitCourses()).toBeTruthy()
     expect(screen.queryByRole('region', { name: 'persona.ledger.label' })).toBeNull()
   })
 
@@ -1245,7 +1909,7 @@ describe('PersonaModule — the decision ledger', () => {
     ledgerPayload = null
     render(<PersonaModule />)
 
-    expect(await screen.findByText('persona.course.railHeading')).toBeTruthy()
+    expect(await awaitCourses()).toBeTruthy()
     expect(screen.queryByRole('region', { name: 'persona.ledger.label' })).toBeNull()
     expect(screen.queryByText('persona.ledger.week')).toBeNull()
   })
@@ -1257,7 +1921,7 @@ describe('PersonaModule — the decision ledger', () => {
     ])
     render(<PersonaModule />)
 
-    await waitFor(() => expect(ledgerBlock()).toBeTruthy())
+    await waitFor(() => expect(ledgerLine()).toBeTruthy())
     openLedger()
     expect(screen.getByText('Ship the price change tonight?')).toBeTruthy()
 
@@ -1298,7 +1962,7 @@ describe('PersonaModule — re-opening a finished course', () => {
     courses = doneRail()
     historyPayload = takes
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     fireEvent.click(railRow(COURSES[0].name))
 
@@ -1317,7 +1981,7 @@ describe('PersonaModule — re-opening a finished course', () => {
     courses = doneRail()
     historyPayload = takes
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     fireEvent.click(railRow(COURSES[0].name))
     await screen.findByText('persona.result.takes')
@@ -1342,7 +2006,7 @@ describe('PersonaModule — re-opening a finished course', () => {
     courses = doneRail()
     historyPayload = [take('big5', Array(COURSES[0].itemCount).fill(4), NEWER)]
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     fireEvent.click(railRow(COURSES[0].name))
     await screen.findByText('persona.result.kicker')
@@ -1356,7 +2020,7 @@ describe('PersonaModule — re-opening a finished course', () => {
     courses = doneRail()
     historyPayload = twoTakes()
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     fireEvent.click(railRow(COURSES[0].name))
     await screen.findByText('persona.result.kicker')
@@ -1372,24 +2036,32 @@ describe('PersonaModule — re-opening a finished course', () => {
   // The rail has to hold both offers, because they are different intentions.
   // Making someone read their old result to get to the questions is the version
   // that gets described as "it makes you click through a wall of text".
-  it('re-takes straight from the rail, without opening the result first', async () => {
+  // ONE BUTTON PER ROW (2026-08-15). The 済 row used to carry a second
+  // 「もう一度」 control beside it; the corner is a quiet list now, and re-taking
+  // lives inside the sheet the row opens (`persona.result.again`, covered
+  // above). This pins that the second control really is gone — a row that still
+  // grew one would put the corner back where it was.
+  it('a finished row offers exactly ONE control — reading the result back', async () => {
     courses = doneRail()
     historyPayload = twoTakes()
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
-    fireEvent.click(retakeButton(COURSES[0].name))
+    expect(screen.queryByText('persona.course.retake')).toBeNull()
+    const row = railRow(COURSES[0].name)
+    expect(row.textContent).toContain('persona.course.state.done')
 
-    expect(screen.queryByText('persona.result.kicker')).toBeNull()
-    expect(screen.getByText(BIG5_ITEMS[0][2])).toBeTruthy()
-    expect(screen.getByText(`1 / ${BIG5_ITEMS.length}`)).toBeTruthy()
+    fireEvent.click(row)
+    // …and it reads, rather than starting a fresh take over the old result.
+    expect(await screen.findByText('persona.result.kicker')).toBeTruthy()
+    expect(screen.queryByText(BIG5_ITEMS[0][2])).toBeNull()
   })
 
   it('says the past result could not be opened rather than opening an empty sheet', async () => {
     courses = doneRail()
     historyFails = true
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     fireEvent.click(railRow(COURSES[0].name))
 
@@ -1403,7 +2075,7 @@ describe('PersonaModule — re-opening a finished course', () => {
     courses = doneRail()
     historyPayload = []
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     fireEvent.click(railRow(COURSES[0].name))
 
@@ -1414,7 +2086,7 @@ describe('PersonaModule — re-opening a finished course', () => {
   it('a never-taken course still starts the course when its row is clicked', async () => {
     // The 済 row changed; the plain one must not have.
     render(<PersonaModule />)
-    await screen.findByText('persona.course.railHeading')
+    await awaitCourses()
 
     fireEvent.click(railRow(COURSES[0].name))
     expect(screen.getByText(BIG5_ITEMS[0][2])).toBeTruthy()
@@ -1448,10 +2120,6 @@ describe('helpers', () => {
     expect(courseRailState({ id: 'big5', lastTakenAt: '2026-08-01' }, 'big5')).toBe('running')
   })
 
-  it('asZone refuses a region the figure does not have', () => {
-    expect(asZone('craft')).toBe('craft')
-    expect(asZone('elbow')).toBe('mind')
-  })
 })
 
 describe('where a note lands on the figure (pure)', () => {
@@ -1459,7 +2127,7 @@ describe('where a note lands on the figure (pure)', () => {
     for (const c of COURSES) {
       const j = judgment({ id: `j-${c.id}`, tags: ['persona', c.id], context: `${c.name} ・ 1位` })
       expect(courseIdFromJudgment(j)).toBe(c.id)
-      expect(zoneForJudgment(j)).toBe(c.zone)
+      expect(placeJudgment(j)).toEqual({ region: COURSE_REGION[c.id], placed: true })
     }
   })
 
@@ -1483,20 +2151,25 @@ describe('where a note lands on the figure (pure)', () => {
     // worse than none.)
     for (const kind of QUESTION_KINDS) {
       const answer = judgment({ id: 'j-int', tags: ['interview', kind] })
-      expect(zoneForJudgment(answer)).toBe(zoneForQuestion(question({ kind })))
+      expect(placeJudgment(answer)).toEqual({
+        region: regionForQuestion(question({ kind })),
+        placed: true,
+      })
     }
   })
 
   it('spreads a free-form note deterministically — the same note never moves', () => {
     const j = judgment({ id: 'j-free', tags: ['pricing'] })
-    const first = zoneForJudgment(j)
-    expect(zoneForJudgment(j)).toBe(first)
-    expect(zoneForJudgment({ ...j })).toBe(first)
-    // Different notes do not all pile into one region.
-    const zones = new Set(
-      Array.from({ length: 40 }, (_, i) => zoneForJudgment(judgment({ id: `j-${i}` }))),
+    const first = placeJudgment(j).region
+    expect(placeJudgment(j).region).toBe(first)
+    expect(placeJudgment({ ...j }).region).toBe(first)
+    // Different notes do not all pile into one region. (The STRONG version of
+    // this — the spread never reaches the halo — is in regions.test.ts; a
+    // `size > 1` check passes a five-region spread just as happily.)
+    const regions = new Set(
+      Array.from({ length: 40 }, (_, i) => placeJudgment(judgment({ id: `j-${i}` })).region),
     )
-    expect(zones.size).toBeGreaterThan(1)
+    expect(regions.size).toBeGreaterThan(1)
   })
 
   it('personaHash is stable and unsigned (a negative index would seat nothing)', () => {
@@ -1521,14 +2194,18 @@ describe('where a note lands on the figure (pure)', () => {
 
   it('every question kind has a region (a new kind must not fall off the body)', () => {
     for (const kind of QUESTION_KINDS) {
-      expect(zoneForQuestion(question({ kind }))).toBeTruthy()
+      expect(regionForQuestion(question({ kind }))).toBeTruthy()
     }
-    expect(zoneForQuestion(null)).toBeNull()
+    expect(regionForQuestion(null)).toBeNull()
   })
 })
 
+// THE DAY'S QUESTION IS THE CONVERSATION'S OPENING TURN (2026-08-15). It used
+// to be a fourth card in the bottom-right corner; the owner asked for less text
+// on this stage, and a question is a thing being said to you — so it is said in
+// the place things are said, and the next thing typed answers it.
 describe('PersonaModule — the always-on question', () => {
-  const answerBox = () => screen.getByPlaceholderText('persona.interview.placeholder')
+  const answerBox = () => talkInput()
 
   it('shows the question drawn from the owner’s own week', async () => {
     questionPayload = question()
@@ -1548,34 +2225,40 @@ describe('PersonaModule — the always-on question', () => {
     expect((interview?.[1] as RequestInit | undefined)?.method).toBe('POST')
   })
 
-  it('says plainly that there is nothing to ask today', async () => {
+  // A day with nothing to ask now says NOTHING — the four lines it used to
+  // spend announcing its own absence were text on a stage the owner asked to
+  // keep quiet, and the rotating placeholder already invites.
+  it('says nothing at all on a day with no question', async () => {
     questionPayload = null
     render(<PersonaModule />)
-    await waitFor(() =>
-      expect(screen.getByText('persona.interview.none.title')).toBeInTheDocument(),
-    )
-    expect(screen.getByText('persona.interview.none.body')).toBeInTheDocument()
+    await screen.findByText('persona.intro.lead')
+    expect(screen.queryByText('persona.interview.heading')).not.toBeInTheDocument()
+    // …and the way in is still there.
+    expect(talkInput()).toBeTruthy()
   })
 
+  // "No question today" is a CLAIM. A read that failed may not make it — and it
+  // may not silently swallow the next thing typed into the interview route
+  // either, which is why `questionLoaded` gates the question prop.
   it('does NOT claim there is no question when the read simply failed', async () => {
     questionFails = true
     render(<PersonaModule />)
     // The rest of the screen still loads, so this is a real assertion about the
-    // question card rather than about an unmounted component.
-    await waitFor(() => expect(screen.getByText('persona.course.railHeading')).toBeInTheDocument())
-    expect(screen.queryByText('persona.interview.none.title')).not.toBeInTheDocument()
-    expect(screen.queryByText('persona.interview.none.body')).not.toBeInTheDocument()
-    // The card is still there — it is never a modal and never disappears — it
-    // simply has nothing to claim.
-    expect(screen.getByText('persona.ask.idle')).toBeInTheDocument()
+    // question rather than about an unmounted component.
+    await awaitCourses()
+    expect(screen.queryByText('persona.interview.heading')).not.toBeInTheDocument()
+    // What the owner types goes to the CONVERSATION, never to an interview
+    // route for a question that was never read.
+    say('何か話す')
+    await waitFor(() => expect(posts).toHaveLength(1))
+    expect(posts[0].url).toBe('/api/persona/chat')
   })
 
   it('sends the answer with the question’s id and shows it landed', async () => {
     questionPayload = question()
     render(<PersonaModule />)
-    await waitFor(() => expect(answerBox()).toBeInTheDocument())
-    fireEvent.change(answerBox(), { target: { value: '可逆だから即決した' } })
-    fireEvent.click(screen.getByText('persona.interview.answer'))
+    await waitFor(() => expect(screen.getByText(question().textEn)).toBeInTheDocument())
+    say('可逆だから即決した')
 
     await waitFor(() =>
       expect(screen.getByText('persona.interview.answered')).toBeInTheDocument(),
@@ -1585,16 +2268,20 @@ describe('PersonaModule — the always-on question', () => {
       id: 'q-1',
       answer: '可逆だから即決した',
     })
-    // Answered ⇒ the form is gone; the day's question is spent.
-    expect(screen.queryByPlaceholderText('persona.interview.placeholder')).not.toBeInTheDocument()
+    // The words the owner typed are still on screen as their own bubble.
+    expect(screen.getByText('可逆だから即決した')).toBeInTheDocument()
+    // Answered ⇒ the question is spent, so the skip offer is gone…
+    expect(screen.queryByText('persona.interview.skip')).not.toBeInTheDocument()
+    // …and the NEXT thing typed goes to the stand-in, not to the answer route.
+    say('つぎの話')
+    await waitFor(() => expect(posts.some((p) => p.url === '/api/persona/chat')).toBe(true))
   })
 
   it('will not send an empty answer', async () => {
     questionPayload = question()
     render(<PersonaModule />)
-    await waitFor(() => expect(answerBox()).toBeInTheDocument())
-    fireEvent.change(answerBox(), { target: { value: '   ' } })
-    fireEvent.click(screen.getByText('persona.interview.answer'))
+    await waitFor(() => expect(screen.getByText(question().textEn)).toBeInTheDocument())
+    say('   ')
     expect(posts).toHaveLength(0)
   })
 
@@ -1602,20 +2289,37 @@ describe('PersonaModule — the always-on question', () => {
     questionPayload = question()
     resolveFails = true
     render(<PersonaModule />)
-    await waitFor(() => expect(answerBox()).toBeInTheDocument())
-    fireEvent.change(answerBox(), { target: { value: '失われてはいけない答え' } })
-    fireEvent.click(screen.getByText('persona.interview.answer'))
+    await waitFor(() => expect(screen.getByText(question().textEn)).toBeInTheDocument())
+    say('失われてはいけない答え')
 
-    await waitFor(() => expect(screen.getByText('persona.interview.failed')).toBeInTheDocument())
-    // The one thing this surface must never do is cost the owner their words.
-    expect((answerBox() as HTMLTextAreaElement).value).toBe('失われてはいけない答え')
+    await waitFor(() => expect(screen.getByText('persona.chat.turnFailed')).toBeInTheDocument())
+    // The one thing this surface must never do is cost the owner their words:
+    // they are still on screen, in their own bubble, with a retry under them.
+    expect(screen.getByText('失われてはいけない答え')).toBeInTheDocument()
+    expect(screen.getByText('persona.chat.retry')).toBeInTheDocument()
     expect(screen.queryByText('persona.interview.answered')).not.toBeInTheDocument()
+
+    // And retrying really re-sends the SAME words to the SAME route — the
+    // question never moved off 'open'.
+    // (the failed attempt never reached the server's recorder — it 500'd — so
+    //  the ONE post below is the retry, carrying the words back unchanged.)
+    resolveFails = false
+    fireEvent.click(screen.getByText('persona.chat.retry'))
+    await waitFor(() =>
+      expect(posts.filter((p) => p.url === '/api/you-corpus/interview/answer')).toHaveLength(1),
+    )
+    expect(posts[0]).toEqual({
+      url: '/api/you-corpus/interview/answer',
+      id: 'q-1',
+      answer: '失われてはいけない答え',
+    })
+    expect(await screen.findByText('persona.interview.answered')).toBeInTheDocument()
   })
 
   it('skipping records the pass and does not write to the corpus', async () => {
     questionPayload = question()
     render(<PersonaModule />)
-    await waitFor(() => expect(answerBox()).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(question().textEn)).toBeInTheDocument())
     fireEvent.click(screen.getByText('persona.interview.skip'))
 
     await waitFor(() => expect(screen.getByText('persona.interview.skipped')).toBeInTheDocument())
@@ -1623,35 +2327,33 @@ describe('PersonaModule — the always-on question', () => {
     expect(posts.some((p) => p.url === '/api/you-corpus/append')).toBe(false)
   })
 
-  it('an already-answered question comes back as answered, with no form', async () => {
+  it('an already-answered question comes back as answered, with no way to skip', async () => {
     questionPayload = question({ status: 'answered', resolvedAt: '2026-07-19T05:00:00.000Z' })
     render(<PersonaModule />)
     await waitFor(() =>
       expect(screen.getByText('persona.interview.answered')).toBeInTheDocument(),
     )
-    expect(screen.queryByPlaceholderText('persona.interview.placeholder')).not.toBeInTheDocument()
+    expect(screen.queryByText('persona.interview.skip')).not.toBeInTheDocument()
   })
 
-  it('submits on Cmd/Ctrl+Enter but never on a bare Enter (IME-safe)', async () => {
+  // THE IME CONTRACT, inverted from the old card on purpose: the conversation's
+  // input is one line and Enter sends it, so the guard is `isComposing` — the
+  // Enter that CONFIRMS a Japanese conversion must never post half a sentence.
+  it('sends on Enter but never on the Enter that confirms an IME conversion', async () => {
     questionPayload = question()
     render(<PersonaModule />)
-    await waitFor(() => expect(answerBox()).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(question().textEn)).toBeInTheDocument())
     fireEvent.change(answerBox(), { target: { value: '答え' } })
 
-    fireEvent.keyDown(answerBox(), { key: 'Enter' })
-    expect(posts).toHaveLength(0)
-    // The Enter that CONFIRMS a Japanese conversion must never be stolen.
-    fireEvent.keyDown(answerBox(), { key: 'Enter', metaKey: true, isComposing: true })
+    fireEvent.keyDown(answerBox(), { key: 'Enter', isComposing: true })
     expect(posts).toHaveLength(0)
 
-    fireEvent.keyDown(answerBox(), { key: 'Enter', metaKey: true })
+    fireEvent.keyDown(answerBox(), { key: 'Enter' })
     await waitFor(() => expect(posts).toHaveLength(1))
   })
 })
 
 describe('PersonaModule — the question, honest about what actually landed', () => {
-  const answerBox = () => screen.getByPlaceholderText('persona.interview.placeholder')
-
   it('does NOT say the stand-in has the answer when the corpus was not rebuilt', async () => {
     // appendJudgment stores the judgment but does not throw when the file the
     // stand-in reads cannot be rebuilt. Claiming "your stand-in has this now"
@@ -1659,9 +2361,8 @@ describe('PersonaModule — the question, honest about what actually landed', ()
     questionPayload = question()
     answerCorpusStale = true
     render(<PersonaModule />)
-    await waitFor(() => expect(answerBox()).toBeInTheDocument())
-    fireEvent.change(answerBox(), { target: { value: '答え' } })
-    fireEvent.click(screen.getByText('persona.interview.answer'))
+    await waitFor(() => expect(screen.getByText(question().textEn)).toBeInTheDocument())
+    say('答え')
 
     await waitFor(() => expect(screen.getByText('persona.meta.stale')).toBeInTheDocument())
     // THE ASSERTION THAT MATTERS. Warning-is-present alone is toothless: the
@@ -1677,9 +2378,8 @@ describe('PersonaModule — the question, honest about what actually landed', ()
     // unconditionally, the loop would deny every save that actually worked.
     questionPayload = question()
     render(<PersonaModule />)
-    await waitFor(() => expect(answerBox()).toBeInTheDocument())
-    fireEvent.change(answerBox(), { target: { value: '答え' } })
-    fireEvent.click(screen.getByText('persona.interview.answer'))
+    await waitFor(() => expect(screen.getByText(question().textEn)).toBeInTheDocument())
+    say('答え')
 
     await waitFor(() => expect(screen.getByText('persona.interview.answered')).toBeInTheDocument())
     expect(screen.queryByText('persona.interview.answeredStale')).not.toBeInTheDocument()
@@ -1691,18 +2391,18 @@ describe('PersonaModule — the question, honest about what actually landed', ()
     // of an answer that landed perfectly.
     appendSkipped = true
     questionPayload = question()
+    judgmentsPayload = [judgment({ id: 'j-old', text: 'Old call.' })]
     render(<PersonaModule />)
-    await waitFor(() => expect(answerBox()).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(question().textEn)).toBeInTheDocument())
 
-    // A note first — it stores, but the corpus is not rebuilt.
-    openComposer()
+    // A correction first — it stores, but the corpus is not rebuilt.
+    startCorrecting('Old call.')
     typeNote('メモ')
-    fireEvent.click(screen.getByText('persona.add.submit'))
+    fireEvent.click(screen.getByText('persona.correct.submit'))
     await waitFor(() => expect(screen.getByText('persona.meta.stale')).toBeInTheDocument())
 
     // Now the answer, which the server reports as fully landed.
-    fireEvent.change(answerBox(), { target: { value: '答え' } })
-    fireEvent.click(screen.getByText('persona.interview.answer'))
+    say('答え')
 
     await waitFor(() => expect(screen.getByText('persona.interview.answered')).toBeInTheDocument())
     expect(screen.queryByText('persona.interview.answeredStale')).not.toBeInTheDocument()
@@ -1714,10 +2414,13 @@ describe('PersonaModule — the question, honest about what actually landed', ()
     questionPayload = question()
     resolveFails = true
     render(<PersonaModule />)
-    await waitFor(() => expect(answerBox()).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(question().textEn)).toBeInTheDocument())
     fireEvent.click(screen.getByText('persona.interview.skip'))
 
     await waitFor(() => expect(screen.getByText('persona.interview.skipFailed')).toBeInTheDocument())
-    expect(screen.queryByText('persona.interview.failed')).not.toBeInTheDocument()
+    // No bubble, no retry: there were no words on the skip path, so the wording
+    // that promises they are still here would be nonsense.
+    expect(screen.queryByText('persona.chat.turnFailed')).not.toBeInTheDocument()
+    expect(screen.queryByText('persona.chat.retry')).not.toBeInTheDocument()
   })
 })

@@ -1323,6 +1323,23 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'read-only',
     why: 'the PreToolUse guard: COMPARES paths against ~/.claude containers to allow/deny. Plain JS run by Claude Code out of ~/.openground/guard/, structurally unable to import the fence — same limit as electron/lockdown.js in the sweep above',
   },
+  // ── read-only, PROSE (they name the path to the owner, and touch nothing) ──
+  // Not a loophole: the machine claim on this tier is "zero fs-mutation calls in
+  // the file", which is what makes it checkable, and these two satisfy it by a
+  // wide margin — one is a string catalogue, the other pins that catalogue.
+  // Declaring them is also the point of the sentence they carry: the persona
+  // privacy note has to SAY that a conversation records its working folder as
+  // trusted in ~/.claude.json, because it does, and a disclosure that quietly
+  // dropped the path to avoid tripping a guard would be the guard causing the
+  // lie it exists to prevent.
+  'src/i18n/messages/persona.ts': {
+    tier: 'read-only',
+    why: "owner-facing copy: the persona privacy note names ~/.claude.json as somewhere a conversation leaves a trusted-folder record. A string catalogue — no fs of any kind, read or write",
+  },
+  'src/components/canvas/modules/PersonaConversation.test.tsx': {
+    tier: 'read-only',
+    why: 'pins that privacy copy word-for-word (softening it has to be a red test, not a review finding), so it quotes the same path. Renders components in jsdom; touches no filesystem',
+  },
 
   // ── writes-elsewhere ──
   'src/testHomeEnvGuard.test.ts': {

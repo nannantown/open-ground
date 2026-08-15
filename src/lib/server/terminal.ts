@@ -731,7 +731,14 @@ export const listActiveTerminals = (): ActiveTerminalsResponse => {
     if (s.info.finishedAt || s.info.hidden) return
     cwds.add(s.info.cwd)
     if (s.info.tag === 'claude') {
-      claude.push({ id: s.info.id, cwd: s.info.cwd, status: claudeStatus(s.info, now) })
+      claude.push({
+        id: s.info.id,
+        cwd: s.info.cwd,
+        status: claudeStatus(s.info, now),
+        // Carried, not filtered: the Board's supply dock reads a DESK's status
+        // by PTY id for its own lamp. Only the Ground beacon discounts them.
+        ...(s.info.deskLabel ? { desk: true } : {}),
+      })
     }
   })
   return { cwds: Array.from(cwds), claude }
@@ -747,6 +754,12 @@ export interface PtySafetyView {
   hidden: boolean
   /** Launched as a named desk (補給官/司令官) — resumes by design. */
   desk: boolean
+  /** This pane IS a claude session (tag === 'claude'). Carried explicitly
+   *  rather than inferred from `foreground`, which may read 'claude' or 'node'
+   *  depending on how the CLI was launched — and a relaxation keyed on a
+   *  process NAME is one rename away from either never firing or firing on the
+   *  wrong pane. */
+  claudePane: boolean
   /** A claude session actively producing output right now. */
   claudeWorking: boolean
   /** node-pty's foreground process name (tcgetpgrp). `zsh` / `bash` / `sh` means
@@ -757,6 +770,11 @@ export interface PtySafetyView {
   lastOutputAt: number
   /** OS pid of the pty leader, for the child-process probe. 0 if unknown. */
   pid: number
+  /** A TUI menu (permission prompt etc.) is open on the settled screen — claude
+   *  is blocked on the HUMAN. Carried because an unattended restart would throw
+   *  away the prompt they were about to answer, which no amount of silence
+   *  makes acceptable. */
+  menuOpen: boolean
 }
 export const listPtySafetyViews = (): PtySafetyView[] => {
   const now = Date.now()
@@ -767,6 +785,7 @@ export const listPtySafetyViews = (): PtySafetyView[] => {
       cwd: s.info.cwd,
       hidden: !!s.info.hidden,
       desk: !!s.info.deskLabel,
+      claudePane: s.info.tag === 'claude',
       claudeWorking: s.info.tag === 'claude' && claudeStatus(s.info, now) === 'working',
       // `.process` can throw on a pty that died between the liveness check and
       // here; an unreadable foreground reads as "something is running" so the
@@ -779,6 +798,7 @@ export const listPtySafetyViews = (): PtySafetyView[] => {
         }
       })(),
       lastOutputAt: s.info.lastOutputAt ?? 0,
+      menuOpen: s.info.menuOpen === true,
       pid: (() => {
         try {
           return s.pty.pid || 0

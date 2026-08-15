@@ -30,6 +30,7 @@ import { moduleSubmissionsRoutes } from './routes/moduleSubmissions'
 import { collabRoutes } from './routes/collab'
 import { youCorpusRoutes } from './routes/youCorpus'
 import { personaRoutes } from './routes/persona'
+import { personaChatRoutes } from './routes/personaChat'
 import { researchRoutes } from './routes/research'
 import { originIsLocal, hostIsLocal } from './loopback'
 
@@ -124,6 +125,7 @@ export const createApp = () => {
     .route('/', collabRoutes)    // K — realtime collab gating + per-project resolution (env-gated)
     .route('/', youCorpusRoutes) // L — proxy judgment corpus (you-corpus; local personal state)
     .route('/', personaRoutes)   // L2 — persona courses: score + store + mint into the corpus
+    .route('/', personaChatRoutes) // L3 — persona conversation + claude.ai export import (spawns claude)
     .route('/', researchRoutes)  // M — research channels: checker + local-only cookie store
 
   // Any /api/* not matched above is a genuine API 404 — it must NOT fall

@@ -275,7 +275,15 @@ describe('commander strip (review column)', () => {
       />,
     )
     expect(getByText('· projectPanel.swarm.manager.reviewConflict')).toBeTruthy()
-    expect(container.querySelector('.bg-accent')).toBeTruthy()
+    // The lamp is a FIGURE now (the owl), not a coloured dot, so the assertion
+    // moved from a class to what the figure SAYS — which is also the only thing
+    // a reader who cannot see it gets. 'asking' is the loudest state in the set
+    // and the one reserved for a claim on the owner.
+    expect(
+      container.querySelector(
+        '[aria-label="board.card.managerLabel projectPanel.swarm.manager.reviewConflict"]',
+      ),
+    ).toBeTruthy()
   })
 
   it('the strip is review-only — a doing card never asks for the commander', () => {
@@ -466,5 +474,86 @@ describe('needs-you badge', () => {
     // contradiction, so neither line suppresses the other.
     expect(getByText('board.card.needsYou')).toBeTruthy()
     expect(getByText('swarm/x')).toBeTruthy()
+  })
+})
+
+// ─── the swarm figures on a card ─────────────────────────────────────────────
+//
+// The owner asked for the three roles as characters with per-state animation
+// (2026-08-15), so the card's status lamps became figures: a rabbit for the
+// worker, an owl for the commander. At 16px what a reader takes in first is HOW
+// it moves, and a screen reader takes in neither — so the only assertion worth
+// making here is on the accessible name, which is the one channel that carries
+// role AND state in words. A figure whose name says only "Worker" would be a
+// picture that means something to exactly half the room.
+describe('the swarm figures say who and what, in words', () => {
+  const nameOf = (c: HTMLElement, label: string) => c.querySelector(`[aria-label="${label}"]`)
+  const reviewCard = () =>
+    data([task({ id: 'c', title: 'Charlie', boardColumn: 'review', branch: 'swarm/c' })])
+
+  it('draws the WORKER as a figure that names its activity', () => {
+    const { container } = render(
+      <BoardTab
+        data={data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])}
+        {...stripBase()}
+        workerForTask={() => ({ branch: 'swarm/x', activity: 'working' })}
+      />,
+    )
+    expect(
+      nameOf(container, 'board.card.workerLabel projectPanel.swarm.manager.stageRunning'),
+    ).toBeTruthy()
+  })
+
+  it('ASKING outranks the activity — a worker waiting on YOU is not just "waiting"', () => {
+    // spriteStateFor's rule, at the surface that made it necessary: the worker's
+    // own activity is a fact about the process, and an unanswered question is a
+    // fact about the owner. The second one is what they need to see.
+    const { container } = render(
+      <BoardTab
+        data={data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])}
+        {...stripBase()}
+        alertForTask={() => ({ reason: 'insufficient-info' })}
+        workerForTask={() => ({ branch: 'swarm/x', activity: 'working' })}
+      />,
+    )
+    expect(nameOf(container, 'board.card.workerLabel board.card.needsYou')).toBeTruthy()
+    expect(
+      nameOf(container, 'board.card.workerLabel projectPanel.swarm.manager.stageRunning'),
+    ).toBeNull()
+  })
+
+  it('draws the COMMANDER as a figure on a review card', () => {
+    const { container } = render(
+      <BoardTab
+        data={reviewCard()}
+        {...stripBase()}
+        managerForTask={() => ({ presence: 'working', reviewStatus: 'ff' })}
+      />,
+    )
+    expect(
+      nameOf(container, 'board.card.managerLabel projectPanel.swarm.manager.stageRunning'),
+    ).toBeTruthy()
+  })
+
+  it('draws NO commander figure when there is no commander to draw', () => {
+    // `off` is the one tone with no figure: every state the owl has is a claim
+    // that it is there, so a missing commander keeps the plain dot.
+    const { container } = render(
+      <BoardTab
+        data={reviewCard()}
+        {...stripBase()}
+        managerForTask={() => ({ presence: 'missing', reviewStatus: 'unknown' })}
+      />,
+    )
+    expect(container.querySelector('[aria-label^="board.card.managerLabel"]')).toBeNull()
+    expect(container.querySelector('.bg-ink-faint')).toBeTruthy()
+  })
+
+  it('a card with no swarm on it draws no figure at all', () => {
+    const { container } = render(
+      <BoardTab data={data([task({ id: 'b', title: 'Bravo' })])} {...stripBase()} />,
+    )
+    expect(container.querySelector('[aria-label^="board.card.workerLabel"]')).toBeNull()
+    expect(container.querySelector('[aria-label^="board.card.managerLabel"]')).toBeNull()
   })
 })

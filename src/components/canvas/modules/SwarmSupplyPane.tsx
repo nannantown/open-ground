@@ -10,6 +10,8 @@
 
 import { Power, Inbox } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
+import { SwarmSprite } from '@/components/canvas/SwarmSprite'
+import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
 
@@ -55,7 +57,20 @@ export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRe
       {/* Header: status dot+label · supply identity · stop. Mirrors the worker
           pane header so the two surfaces read as siblings. */}
       <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-2.5 py-1.5">
-        <span className={`h-[6px] w-[6px] shrink-0 rounded-full ${DOT[status]}`} aria-hidden />
+        {/* The role's figure, at actual size. `exited` draws none (BEACON_SPRITE
+            maps it to null): every state in the set says somebody is there, and
+            a dimmed animal for a process that has gone is a picture of a worker
+            who does not exist. The dot still says "off" without pretending. */}
+        {BEACON_SPRITE[status] ? (
+          <SwarmSprite
+            role="supply"
+            state={BEACON_SPRITE[status]!}
+            label={statusLabel}
+            className="shrink-0"
+          />
+        ) : (
+          <span className={`h-[6px] w-[6px] shrink-0 rounded-full ${DOT[status]}`} aria-hidden />
+        )}
         <span
           className={`label-cap shrink-0 ${status === 'waiting' ? 'text-[var(--beacon-waiting)]' : 'text-ink-faint'}`}
         >

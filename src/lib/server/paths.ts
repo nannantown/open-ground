@@ -165,6 +165,23 @@ export const personaCoursesFile = () => join(openGroundHome(), 'persona-courses.
 // dropped ledger row costs a statistic, not a decision. See
 // src/lib/server/personaLedger.ts.
 export const personaLedgerFile = () => join(openGroundHome(), 'persona-ledger.json')
+// The IMPORT LEDGER for claude.ai data exports (dropping conversations.json onto
+// the persona conversation). One record per file that has ALREADY been distilled
+// into the corpus, keyed by the sha256 of the file's bytes, written 0600.
+// It exists for one reason: ManualJudgment has NO idempotency key, so importing
+// the same export twice would append every distilled line a second time —
+// doubling the node count and the lit points on the figure, with no way to tell
+// the copies apart afterwards in an append-only store. A known sha is REFUSED
+// with an explicit message rather than silently merged. PERSONAL like the corpus
+// beside it — app home only, never a repo. See src/lib/server/personaImport.ts.
+export const personaImportsFile = () => join(openGroundHome(), 'persona-imports.json')
+// Working dirs for persona conversation runs — ONE per conversation, reused
+// across its turns (`--resume` resolves a session against the dir it started
+// in). Under the app home rather than os.tmpdir() so retention can reach them
+// and so they stay off macOS's /var/folders realpath. Each dir also earns a
+// `hasTrustDialogAccepted` entry in ~/.claude.json, so a leftover here is TWO
+// leaks, not one — swept at boot by retention.ts's sweepPersonaScratch.
+export const personaScratchRootDir = () => join(openGroundHome(), 'persona-scratch')
 export const runsDir = () => join(openGroundHome(), 'runs')
 export const runFile = (id: string) => join(runsDir(), `${id}.json`)
 // Dismissed runs are *moved* here rather than unlinked, so an accidental

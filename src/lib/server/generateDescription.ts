@@ -31,6 +31,7 @@
 
 import { newId } from '@/lib/ids'
 import { launchClaude } from './claudeTerminal'
+import { extractMarkerSpan } from './ptyMarkers'
 import { killTerminal, subscribeTerminal } from './terminal'
 import { getPromptLang, type PromptLang } from './promptLang'
 import {
@@ -89,52 +90,22 @@ export const buildDescribePrompt = (): string =>
     '  shown on a single truncating UI line — front-load the essence.',
   ].join('\n')
 
-// Strip ANSI escapes / control chars from the raw PTY stream. The TUI doesn't
-// just style text — it POSITIONS it: word gaps frequently arrive as cursor
-// moves (CSI n C, CUP, …) instead of literal spaces, so deleting every CSI
-// fuses words ("ClaudeCodemissioncontrol", observed live). Split the strip:
-// SGR (style, CSI…m) deletes silently — it can sit mid-word — while every
-// OTHER CSI is a positioning/erase op and becomes a space (the later \s+
-// collapse de-dupes). OSC titles (]0;…BEL) are handled separately.
-// eslint-disable-next-line no-control-regex
-const SGR_RE = /\x1b\[[0-9;]*m/g
-// eslint-disable-next-line no-control-regex
-const CSI_OTHER_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
-// eslint-disable-next-line no-control-regex
-const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
-// eslint-disable-next-line no-control-regex
-const CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g
-
 /** The LAST `<marker> … ::OG_DESC_END::` pair in the raw PTY output, cleaned
  *  and capped, or null. Marker-pair-only — no prose fallback (a wrong
  *  description is worse than none), and any candidate containing '<' is
  *  rejected: that's the prompt's own echoed placeholder, not a model answer.
- *  The reject is blanket rather than a `^<…>$` shape test because the TUI may
- *  elide the echoed placeholder mid-string, leaving no closing '>' — the
- *  matching half of the contract is buildDescribePrompt forbidding angle
- *  brackets in the answer, so no real description trips this.
+ *  The matching half of that contract is buildDescribePrompt forbidding angle
+ *  brackets in the answer, so no real description trips it.
+ *
+ *  THE EXTRACTION ITSELF NOW LIVES IN ptyMarkers.ts — this is a two-line
+ *  adapter over it. The ANSI handling below it was learned against a real TUI
+ *  (cursor moves fusing words, repaints, echoed placeholders) and there are now
+ *  three consumers; a private copy per consumer is how the persona chat would
+ *  quietly stop rejecting echoes the day someone "simplified" one of them. The
+ *  tests in this file are the guard that moving it changed no behaviour.
  *  Exported for unit tests. */
-export const extractDescMarker = (raw: string, marker: string): string | null => {
-  const text = raw.replace(OSC_RE, '').replace(SGR_RE, '').replace(CSI_OTHER_RE, ' ')
-  let from = text.length
-  for (;;) {
-    const start = text.lastIndexOf(marker, from - 1)
-    if (start < 0) return null
-    const end = text.indexOf(DESC_END, start + marker.length)
-    if (end >= 0) {
-      const candidate = text
-        .slice(start + marker.length, end)
-        .replace(CTRL_RE, ' ')
-        // A PTY line wrap can split the sentence — collapse all whitespace
-        // runs (incl. the injected newline) back to one space.
-        .replace(/\s+/g, ' ')
-        .trim()
-      if (candidate && !candidate.includes('<')) return candidate.slice(0, MAX_DESC_LEN)
-    }
-    from = start
-    if (from <= 0) return null
-  }
-}
+export const extractDescMarker = (raw: string, marker: string): string | null =>
+  extractMarkerSpan(raw, marker, DESC_END, { maxLen: MAX_DESC_LEN })
 
 export interface GeneratedDescriptions {
   en: string | null
