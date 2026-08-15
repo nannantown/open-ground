@@ -54,6 +54,17 @@
   **別フィールド**で持つこと — 兼用したら窓が消えて再発した。
 - UI: `src/App.tsx`(Ground 本体)+ `src/components/canvas/` の `ProjectCard` / `ProjectCanvas` /
   `ProjectPanel`(カードを開いた中身・タブ切替)/ `Toolbar` / `NewProjectModal`
+- **カードのランプ**(2026-08-15 に「プロセスの生死」→「仕事の状態」へ移設): 判定は
+  `src/lib/groundLamp.ts`(pure・オーナー指定の4ケース)、材料は `src/lib/server/groundLamps.ts`
+  → `GET /api/ground/lamps`(started カード数・未回答の質問数・実際に動いているか)。
+  作業中=running / 入力待ちも途中停止も waiting / **全部doneまたはtodoのみは何も出さない**。
+  罠(**サーバで見るのは SDK プールがあるから**): swarm worker は Agent SDK で動くので
+  `/api/terminal/active`(PTY プール)には出ない。PTY プールだけで判定すると、完璧に動いて
+  いる swarm に対して「途中で止まっている」と表示する。liveness は `liveDesks`(両プール)
+  経由でしか取らないこと(eslint の no-restricted-imports が止める)。
+  罠(**沈黙もメッセージ**): ボードが読めなかったときに何も描かないのは「全部終わった」と
+  同じ見た目 = 静かな嘘。`started` は optional で、欠けていたら `'unknown'`(No data スタンプ)。
+  旧 `groundBeacon.ts`(active 一覧を1プロジェクト1判定に畳む集約)は**削除済み**。
 - テスト: `src/lib/server/` の `projectPathSecurity.prop.test.ts`(境界の property test)/
   `registry.test.ts` / `scan.test.ts` / `homeBackup.test.ts` / `homeIntegrity.test.ts`
   (後2者は 45→3 という**実事故の形**を fixture 化した回帰。赤/緑の両方向を固定)
@@ -79,7 +90,8 @@
   `--add-dir` 事前許可)/ `pastePrompt.ts`(bracketed paste・UNSENT 挿入)/ `cliResolve.ts`(claude 実体解決)
 - `claudeConnection.ts` / `claudePreflight.ts` / `swarmEnvPreflight.ts`(git/shell 前提 —
   git 不在・非 git repo・シェル不在を worker/supply/manager spawn 前にゲート、
-  `GET /api/swarm/preflight` で Swarm タブに1枚のバナー表示) / `terminalProjects.ts`(active 一覧→Ground beacon)/
+  `GET /api/swarm/preflight` で Swarm タブに1枚のバナー表示) / `terminalProjects.ts`(active 一覧に
+  projectId を刻む — worker の cwd は中央 worktree で project 配下にないため)/
   `src/lib/claudeMenu.ts`(client 側 — 権限メニュー検出→数字送信)
 - `src/lib/claudeScreen.ts` — **描画済み claude TUI 1画面のアナトミー**(どの行が CLI の
   furniture でどの行が会話か)を集約した pure leaf。`swarmQuestions`(質問検出)/
@@ -155,6 +167,15 @@
   (navigate しても完走・per-id OCC)。
 
 ## 5. Swarm — 並列 worker エンジン(詳細は docs/commander/)
+- **三役のキャラクター**(2026-08-15・オーナー承認): `src/lib/swarm/sprites.ts`(16×16 を
+  **テキストのドット絵**で持つ — カワウソ=補給係 / フクロウ=司令官 / ウサギ=作業者。
+  1枚の絵に状態ごとのパレットを塗る)+ `src/components/canvas/SwarmSprite.tsx`(canvas 描画・
+  状態ごとに**動き方が違う**・`prefers-reduced-motion` は静止1枚・rAF は unmount で cancel)。
+  出る場所: BoardCard の worker/commander 帯・`SwarmSupplyPane`・`SwarmWorkerPane`。
+  罠(**いない相手は描かない**): 状態はどれも「そこに居る」という主張なので、`exited` と
+  司令官の `off` は図を出さず点のまま(`BEACON_SPRITE` / `MANAGER_SPRITE` が `null` を返す)。
+  罠(**動きは読み上げに届かない**): aria-label は必ず「役 状態」。worker は未回答の質問が
+  あれば活動語ではなくそちらを言う(`spriteStateFor` の asking 優先と一致させる)。
 - **診断・改修の前に `docs/commander/00-INDEX.md`**(症状→章の直行表)。理想形 = `TARGET-STATE.md`。
   安全不変条件 = `docs/SWARM_SAFETY_INVARIANTS.md` + `src/lib/server/swarmSafety.test.ts`(触る前に緑確認)
 - **worker の SDK ランタイム(実装済み・ダイヤル既定は 0801 に SDK へ反転・reader まで届いたのは

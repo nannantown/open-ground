@@ -45,12 +45,66 @@ const defaultFeedparserProbe: FeedparserProbe = () => {
   return false
 }
 
+/** The newest CPython on this machine, as `[major, minor]`, or null when none
+ *  could be run. Injectable for tests. */
+export type PythonVersionProbe = () => [number, number] | null
+
+/** rdt-cli's own floor (pyproject `requires-python = ">=3.10"`). A pipx install
+ *  under an older default interpreter fails with a resolver error that says
+ *  nothing about Python — which is exactly what it did on the owner's machine
+ *  (3.9.9, 2026-08-15): the app handed over a command and the command lost. */
+export const RDT_MIN_PYTHON: [number, number] = [3, 10]
+
+/** Spellings worth trying, newest first, so `pipx --python` can be pointed at a
+ *  modern interpreter even when the DEFAULT python3 is too old — which is the
+ *  common shape (a system 3.9 plus a brew 3.12 nobody made default). */
+const PY_CANDIDATES = [
+  'python3.13',
+  'python3.12',
+  'python3.11',
+  'python3.10',
+  'python3',
+  'python',
+]
+
+const parsePyVersion = (out: string): [number, number] | null => {
+  const m = /(\d+)\.(\d+)/.exec(out.trim())
+  return m ? [Number(m[1]), Number(m[2])] : null
+}
+
+const atLeast = (v: [number, number], min: [number, number]): boolean =>
+  v[0] > min[0] || (v[0] === min[0] && v[1] >= min[1])
+
+/** Find an interpreter that clears the floor, newest spelling first. Returns the
+ *  SPELLING, not the version, because that is what the command needs. */
+export type PythonPickProbe = (min: [number, number]) => string | null
+
+const defaultPythonPick: PythonPickProbe = (min) => {
+  for (const py of PY_CANDIDATES) {
+    try {
+      const r = spawnSync(py, ['-c', 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")'], {
+        timeout: 3000,
+        encoding: 'utf8',
+      })
+      if (r.status !== 0) continue
+      const v = parsePyVersion(String(r.stdout ?? ''))
+      if (v && atLeast(v, min)) return py
+    } catch {
+      // try the next spelling
+    }
+  }
+  return null
+}
+
 export interface ChannelCheckOpts {
   env?: NodeJS.ProcessEnv
   platform?: NodeJS.Platform
   /** Is a file at this absolute path present (and a file)? Injectable for tests. */
   exists?: (p: string) => boolean
   probeFeedparser?: FeedparserProbe
+  /** Which python spelling clears a version floor, or null when none does.
+   *  Injectable for tests; the default runs a bounded local probe. */
+  pickPython?: PythonPickProbe
   /** Cookies saved through Settings (researchAuth.ts) — resolved by the caller
    *  so this module stays free of fs/store concerns. */
   storedTwitterAuth?: boolean
@@ -96,6 +150,7 @@ export const hasBinary = (
 const unlockCommand = (
   id: ResearchChannelId,
   platform: NodeJS.Platform,
+  pickPython: PythonPickProbe,
 ): string | undefined => {
   switch (id) {
     case 'youtube':
@@ -120,8 +175,24 @@ const unlockCommand = (
     // fetched 2026-08-14). pipx works on every platform.
     case 'twitter':
       return 'pipx install https://github.com/Panniantong/agent-reach/archive/main.zip'
-    case 'reddit':
-      return "pipx install 'git+https://github.com/public-clis/rdt-cli.git'"
+    case 'reddit': {
+      // ⚠ A COMMAND THAT FAILS IS WORSE THAN NO COMMAND. rdt-cli needs Python
+      // >= 3.10; pipx builds against the DEFAULT interpreter, so on a machine
+      // whose python3 is older this one-liner dies in the resolver with an error
+      // that never mentions Python. That happened to the owner (3.9.9,
+      // 2026-08-15) — the app told them to run something, they ran it, and it
+      // lost. So: find an interpreter that clears the floor and POINT pipx at
+      // it; if none exists, offer NO command at all and let the panel's guidance
+      // text say what is actually needed.
+      const py = pickPython(RDT_MIN_PYTHON)
+      if (!py) return undefined
+      const src = "'git+https://github.com/public-clis/rdt-cli.git'"
+      // No --python when the default already qualifies: the plain form is the
+      // upstream one, and an unnecessary flag is one more thing to get wrong.
+      return py === 'python3' || py === 'python'
+        ? `pipx install ${src}`
+        : `pipx install --python ${py} ${src}`
+    }
     default:
       return undefined // web needs none (curl ships with macOS/Win10+)
   }
@@ -214,7 +285,9 @@ export const listResearchChannels = (opts: ChannelCheckOpts = {}): ResearchChann
   return IDS.map((id) => {
     const d = detail(id)
     const status = STATUS_BY_DETAIL[`${id}.${d}`]
-    const cmd = COMMAND_HELPS[id].includes(d) ? unlockCommand(id, platform) : undefined
+    const cmd = COMMAND_HELPS[id].includes(d)
+      ? unlockCommand(id, platform, opts.pickPython ?? defaultPythonPick)
+      : undefined
     return { id, status, detail: d, ...(cmd ? { unlockCommand: cmd } : {}) }
   })
 }

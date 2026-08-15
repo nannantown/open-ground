@@ -92,7 +92,7 @@ import { PersonaResultSheet } from './PersonaResultSheet'
 //  in place rather than deleted; nothing about the ledger feature was removed.)
 import { PersonaLedgerDetail, isPersonaLedger } from './PersonaLedgerBlock'
 import { courseById, itemAt, type PersonaCourse } from '@/lib/persona/instruments'
-import { MAX_EXPORT_BYTES, megabytes } from '@/lib/claudeExport'
+import { MAX_EXPORT_UPLOAD_BYTES, megabytes } from '@/lib/claudeExport'
 import { portraitAgeLabel } from '@/lib/persona/portrait'
 import type {
   ManualJudgment,
@@ -965,40 +965,36 @@ export const PersonaModule = () => {
         setImportJob({ fileName: file.name, state: 'failed', errorKey, ...(errorVars ? { errorVars } : {}) })
       // There is no zip reader in this app, and there is not going to be one
       // for this: saying "drop the zip" and then failing is worse than saying
-      // the true thing (a deliberate deviation from the mock's placeholder).
-      if (/\.zip$/i.test(file.name)) {
-        fail('persona.import.zipUnsupported')
-        return
-      }
-      // ⚠ BEFORE THE FIRST READ. Everything below runs on the thread that draws
-      // the screen and holds several live copies of the file at once (buffer →
-      // hash → decoded string → parsed object → request body). A years-deep
-      // export is hundreds of MB, and dropping one used to freeze the window
-      // with no message. The refusal names the real size and the cap, because
-      // the only remedy is on the owner's side.
-      if (file.size > MAX_EXPORT_BYTES) {
+      // ⚠ THE ZIP IS THE NORMAL CASE, NOT AN ERROR (2026-08-15). claude.ai hands
+      // the export over AS a zip; the old path refused it and told the owner to
+      // open it and pull conversations.json out themselves — homework, at the
+      // exact moment the app is asking for their history. The server sniffs the
+      // content and takes either shape, so nothing is checked by file name here.
+      //
+      // ⚠ AND NOTHING IS READ ON THIS THREAD. The whole file used to be pulled
+      // into an ArrayBuffer, hashed, decoded, JSON.parsed and then re-serialised
+      // into a request body — five live copies on the thread that draws the
+      // screen. The owner's real export is 23 MB zipped / 98 MB raw, so the
+      // 64 MB cap that stopped the freeze would have refused the very file it
+      // was built to serve. `body: file` streams the bytes and stops; Node does
+      // the unzip, the parse and the digest (measured: ~1.6 s for all three).
+      //
+      // The size check that remains is the SERVER's ceiling, not a main-thread
+      // one, and it is checked here only to fail fast with a number the owner
+      // can act on rather than after a 256 MB upload.
+      if (file.size > MAX_EXPORT_UPLOAD_BYTES) {
         fail('persona.import.tooLarge', {
           size: megabytes(file.size),
-          max: megabytes(MAX_EXPORT_BYTES),
+          max: megabytes(MAX_EXPORT_UPLOAD_BYTES),
         })
         return
       }
       setImportJob({ fileName: file.name, state: 'running' })
-      let json: unknown
-      let fileSha = ''
       try {
-        const bytes = await file.arrayBuffer()
-        fileSha = await sha256Hex(bytes)
-        json = JSON.parse(new TextDecoder().decode(bytes))
-      } catch {
-        if (alive.current) fail('persona.import.unreadableFile')
-        return
-      }
-      try {
-        const res = await fetch('/api/persona/import', {
+        const res = await fetch('/api/persona/import/file', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ json, fileSha }),
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: file,
         })
         if (!alive.current) return
         if (!res.ok) {

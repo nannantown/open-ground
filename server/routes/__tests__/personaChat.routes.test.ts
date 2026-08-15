@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { deflateRawSync } from 'zlib'
 import { mkdtemp, mkdir, rm, writeFile, realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -358,6 +359,142 @@ describe('POST /api/persona/import', () => {
     const body = (await res.json()) as Record<string, unknown>
     expect(body.unreadableFile).toBe(true)
     expect(body.conversations).toBeUndefined()
+    expect(launches).toHaveLength(0)
+  })
+})
+
+// ─── POST /api/persona/import/file — the bytes route ─────────────────────────
+//
+// ⚠ WRITTEN AGAINST THE OWNER'S REAL EXPORT (2026-08-15). Their file is a 23 MB
+// zip holding a 98 MB conversations.json, and BOTH halves broke the old path:
+// zips were refused with copy telling them to extract it themselves, and 98 MB
+// was past every ceiling the renderer had — including the 64 MB cap added the
+// same day to stop a freeze, which would have refused the exact file it was
+// built to serve. The shapes below are that file's shapes, at test size.
+describe('POST /api/persona/import/file', () => {
+  const upload = (bytes: Buffer, init: RequestInit = {}) =>
+    app.request('/api/persona/import/file', {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream', ...(init.headers ?? {}) },
+      // Uint8Array, not Buffer: BodyInit does not include Node's Buffer type,
+      // and the view is the same memory either way.
+      body: new Uint8Array(bytes),
+      ...init,
+    })
+
+  /** A zip shaped like claude.ai's: several members, the one we want in the
+   *  middle, deflate-compressed. */
+  const exportZip = (json: string): Buffer => {
+    const entries = [
+      { name: 'users.json', body: Buffer.from('{}') },
+      { name: 'conversations.json', body: Buffer.from(json) },
+      { name: 'memories.json', body: Buffer.from('{}') },
+    ]
+    const locals: Buffer[] = []
+    const centrals: Buffer[] = []
+    let offset = 0
+    for (const e of entries) {
+      const name = Buffer.from(e.name, 'utf8')
+      const data = deflateRawSync(e.body)
+      const local = Buffer.alloc(30)
+      local.writeUInt32LE(0x04034b50, 0)
+      local.writeUInt16LE(8, 8)
+      local.writeUInt32LE(data.length, 18)
+      local.writeUInt32LE(e.body.length, 22)
+      local.writeUInt16LE(name.length, 26)
+      locals.push(local, name, data)
+      const central = Buffer.alloc(46)
+      central.writeUInt32LE(0x02014b50, 0)
+      central.writeUInt16LE(8, 10)
+      central.writeUInt32LE(data.length, 20)
+      central.writeUInt32LE(e.body.length, 24)
+      central.writeUInt16LE(name.length, 28)
+      central.writeUInt32LE(offset, 42)
+      centrals.push(central, name)
+      offset += 30 + name.length + data.length
+    }
+    const localBuf = Buffer.concat(locals)
+    const centralBuf = Buffer.concat(centrals)
+    const eocd = Buffer.alloc(22)
+    eocd.writeUInt32LE(0x06054b50, 0)
+    eocd.writeUInt16LE(entries.length, 8)
+    eocd.writeUInt16LE(entries.length, 10)
+    eocd.writeUInt32LE(centralBuf.length, 12)
+    eocd.writeUInt32LE(localBuf.length, 16)
+    return Buffer.concat([localBuf, centralBuf, eocd])
+  }
+
+  const EXPORT = JSON.stringify([
+    {
+      uuid: 'c-1',
+      name: 'a conversation',
+      chat_messages: [
+        { sender: 'human', text: '決めたあとに手が止まることが多い', created_at: '2026-08-01T00:00:00Z' },
+        { sender: 'assistant', text: 'この返事は絶対に学習されない' },
+      ],
+    },
+  ])
+
+  it('accepts the export ZIP exactly as claude.ai hands it over', async () => {
+    const res = await upload(exportZip(EXPORT))
+    expect(res.status).toBe(202)
+    expect(((await res.json()) as { importId: string }).importId).toBeTruthy()
+  })
+
+  it('accepts a bare conversations.json too — the owner is never asked which they have', async () => {
+    const res = await upload(Buffer.from(EXPORT))
+    expect(res.status).toBe(202)
+  })
+
+  it('never starts a SECOND import of the same bytes — and says which reason', async () => {
+    // The digest is computed server-side now, over what actually arrived rather
+    // than over a number the client says it computed. What must hold is that
+    // the same file twice is REFUSED, with a reason: a 202 here would mean two
+    // runs appending the same distilled lines to an append-only corpus, which
+    // cannot be un-written. Both refusals are honest — `busy` while the first
+    // is still running, `alreadyImported` once it has landed — so the assertion
+    // is on the refusal and on one of the two flags being set, never on a
+    // race-dependent choice between them.
+    const zip = exportZip(EXPORT)
+    expect((await upload(zip)).status).toBe(202)
+
+    const again = await upload(zip)
+    expect(again.status).toBe(409)
+    const body = (await again.json()) as { busy?: boolean; alreadyImported?: boolean }
+    expect(body.busy === true || body.alreadyImported === true).toBe(true)
+  })
+
+  it('400s a zip with no conversations.json, and NAMES what was inside', async () => {
+    // A fixable mistake (the wrong archive) must read as one.
+    const entries = Buffer.from('nope')
+    const res = await upload(Buffer.concat([Buffer.from('PK\x03\x04'), entries]))
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { unreadableFile?: boolean }
+    expect(body.unreadableFile).toBe(true)
+  })
+
+  it('400s an empty upload and a file that is not JSON — with no counts', async () => {
+    for (const bytes of [Buffer.alloc(0), Buffer.from('this is not json')]) {
+      const res = await upload(bytes)
+      expect(res.status).toBe(400)
+      const body = (await res.json()) as { unreadableFile?: boolean; conversations?: number }
+      expect(body.unreadableFile).toBe(true)
+      // A partial count over an unread file is the exact failure this avoids.
+      expect(body.conversations).toBeUndefined()
+    }
+    expect(launches).toHaveLength(0)
+  })
+
+  it('is behind the SAME gate as everything else on this router', async () => {
+    h.personaOpen = false
+    expect((await upload(Buffer.from(EXPORT))).status).toBe(403)
+    expect(launches).toHaveLength(0)
+  })
+
+  it('503s when the CLI is signed out — before anything spawns', async () => {
+    h.preflight = { ok: false, body: { error: 'not signed in', claudeLoggedOut: true } }
+    const res = await upload(exportZip(EXPORT))
+    expect(res.status).toBe(503)
     expect(launches).toHaveLength(0)
   })
 })

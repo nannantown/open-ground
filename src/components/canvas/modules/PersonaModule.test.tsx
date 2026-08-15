@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, cleanup, fireEvent, waitFor, screen, within } from '@testing-library/react'
 import { PersonaModule, courseRailState, parseTags, quoteForCorrection } from './PersonaModule'
-import { MAX_EXPORT_BYTES, megabytes } from '@/lib/claudeExport'
+import { MAX_EXPORT_UPLOAD_BYTES, megabytes } from '@/lib/claudeExport'
 import {
   COURSE_REGION,
   buildPersonaNodes,
@@ -295,17 +295,26 @@ beforeEach(() => {
         if (chatStatePayload === null) return new Response('{}', { status: 500 })
         return new Response(JSON.stringify(chatStatePayload), { status: 200 })
       }
-      if (url.startsWith('/api/persona/import/')) {
-        return new Response(JSON.stringify(importJobPayload), { status: 200 })
-      }
-      if (url === '/api/persona/import') {
-        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
-        posts.push({ url, ...body })
+      // The bytes route FIRST — '/api/persona/import/file' also matches the
+      // job-poll prefix below, and scoring an upload as a poll would make every
+      // import test silently green over a request that never happened.
+      if (url === '/api/persona/import/file') {
+        // What is recorded is the UPLOAD ITSELF: the body is the File, not JSON.
+        const f = init?.body as File
+        posts.push({
+          url,
+          uploadedName: f?.name,
+          uploadedSize: f?.size,
+          contentType: (init?.headers as Record<string, string>)?.['Content-Type'],
+        })
         if (importStartRejection)
           return new Response(JSON.stringify(importStartRejection.body), {
             status: importStartRejection.status,
           })
         return new Response(JSON.stringify({ importId: 'i-1' }), { status: 202 })
+      }
+      if (url.startsWith('/api/persona/import/')) {
+        return new Response(JSON.stringify(importJobPayload), { status: 200 })
       }
       // NOTE: every /api/you-corpus/* branch must sit ABOVE the bare
       // '/api/you-corpus' catch-all at the bottom — otherwise a new endpoint
@@ -1075,7 +1084,7 @@ describe('PersonaModule — taking in a claude.ai export', () => {
     return file
   }
 
-  it('sends the parsed export with a sha of the FILE’S BYTES', async () => {
+  it('UPLOADS THE FILE ITSELF — it parses nothing on this thread', async () => {
     importJobPayload = {
       state: 'done',
       elapsedMs: 900,
@@ -1096,12 +1105,16 @@ describe('PersonaModule — taking in a claude.ai export', () => {
 
     drop('conversations.json', '[{"name":"a"}]')
     await waitFor(() => expect(posts).toHaveLength(1))
-    expect(posts[0].url).toBe('/api/persona/import')
-    expect(posts[0].json).toEqual([{ name: 'a' }])
-    // The server never sees the bytes, so the digest is the only thing that can
-    // tell "the same export again" from "a newer export" — and it must be the
-    // shape the server validates (64 hex).
-    expect(String(posts[0].fileSha)).toMatch(/^[0-9a-f]{64}$/)
+    // ⚠ THE WHOLE POINT OF THE ROUTE. The owner's real export is 23 MB zipped /
+    // 98 MB raw; the old path read, hashed, decoded, parsed and re-serialised it
+    // on the thread that draws the screen. Now the File goes up as bytes and
+    // Node does all of it — including the digest, which is then a fact about
+    // what ARRIVED rather than a number the client claims it computed.
+    expect(posts[0].url).toBe('/api/persona/import/file')
+    expect(posts[0].contentType).toBe('application/octet-stream')
+    expect(posts[0].uploadedName).toBe('conversations.json')
+    expect(posts[0].json).toBeUndefined()
+    expect(posts[0].fileSha).toBeUndefined()
 
     expect(
       await screen.findByText('persona.import.notConsidered:{"count":0}', undefined, {
@@ -1110,15 +1123,20 @@ describe('PersonaModule — taking in a claude.ai export', () => {
     ).toBeTruthy()
   })
 
-  // A DELIBERATE deviation from the mock's placeholder copy: there is no zip
-  // reader in this app, so it says what to do instead of failing later.
-  it('refuses a zip with an instruction, and never posts it', async () => {
+  // ⚠ THE ZIP IS THE NORMAL CASE (2026-08-15). claude.ai hands the export over
+  // AS a zip. The app used to refuse it and tell the owner to open the archive
+  // and pull conversations.json out themselves — homework, at the one moment it
+  // is asking for their history. The server sniffs content, so nothing here is
+  // decided by file name.
+  it('UPLOADS a zip like any other file — it is what claude.ai actually gives you', async () => {
     render(<PersonaModule />)
     await screen.findByText('persona.tabLabel')
 
-    drop('data-export.zip', 'PK')
-    expect(await screen.findByText('persona.import.zipUnsupported')).toBeTruthy()
-    expect(posts).toHaveLength(0)
+    drop('data-2026-08-15.zip', 'PK-binary-bytes')
+    await waitFor(() => expect(posts).toHaveLength(1))
+    expect(posts[0].url).toBe('/api/persona/import/file')
+    expect(posts[0].uploadedName).toBe('data-2026-08-15.zip')
+    expect(screen.queryByText('persona.import.zipUnsupported')).toBeNull()
   })
 
   // MUTATION GUARD. Everything the drop handler does runs on the thread that
@@ -1135,7 +1153,7 @@ describe('PersonaModule — taking in a claude.ai export', () => {
     // the size is stubbed — the production check reads `file.size`, which is
     // exactly what a browser reports without touching the contents.
     const huge = new File(['[]'], 'conversations.json', { type: 'application/json' })
-    Object.defineProperty(huge, 'size', { value: MAX_EXPORT_BYTES + 1 })
+    Object.defineProperty(huge, 'size', { value: MAX_EXPORT_UPLOAD_BYTES + 1 })
     let read = false
     huge.arrayBuffer = () => {
       read = true
@@ -1145,7 +1163,7 @@ describe('PersonaModule — taking in a claude.ai export', () => {
 
     expect(
       await screen.findByText(
-        `persona.import.tooLarge:{"size":${megabytes(MAX_EXPORT_BYTES + 1)},"max":${megabytes(MAX_EXPORT_BYTES)}}`,
+        `persona.import.tooLarge:{"size":${megabytes(MAX_EXPORT_UPLOAD_BYTES + 1)},"max":${megabytes(MAX_EXPORT_UPLOAD_BYTES)}}`,
       ),
     ).toBeTruthy()
     // The observable claim, not "a function was called": nothing was read and
@@ -1176,21 +1194,27 @@ describe('PersonaModule — taking in a claude.ai export', () => {
     await screen.findByText('persona.tabLabel')
 
     const ok = new File(['[{"name":"a"}]'], 'conversations.json', { type: 'application/json' })
-    Object.defineProperty(ok, 'size', { value: MAX_EXPORT_BYTES })
+    Object.defineProperty(ok, 'size', { value: MAX_EXPORT_UPLOAD_BYTES })
     fireEvent.drop(talkInput(), { dataTransfer: { files: [ok] } })
 
     await waitFor(() => expect(posts).toHaveLength(1))
     expect(screen.queryByText(/persona\.import\.tooLarge/)).toBeNull()
   })
 
-  it('a file that is not JSON at all reports no counts', async () => {
+  it('a file that is not an export at all reports NO COUNTS, only the failure', async () => {
+    // The judgement moved to the server with the parsing, so the upload DOES
+    // happen now and the refusal comes back as a 400. What must not change is
+    // the part that matters: a partial count over a file nobody could read is
+    // the exact failure mode this screen exists to avoid, so nothing is
+    // reported at all.
+    importStartRejection = { status: 400, body: { unreadableFile: true } }
     render(<PersonaModule />)
     await screen.findByText('persona.tabLabel')
 
     drop('conversations.json', 'this is not json')
     expect(await screen.findByText('persona.import.unreadableFile')).toBeTruthy()
-    expect(posts).toHaveLength(0)
     expect(screen.queryByText(/persona\.import\.parsed/)).toBeNull()
+    expect(screen.queryByText(/persona\.import\.notConsidered/)).toBeNull()
   })
 
   it('the same export twice is refused with the day it landed', async () => {

@@ -7,7 +7,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { posix, win32 } from 'path'
-import { hasBinary, listResearchChannels } from './researchChannels'
+import { hasBinary, listResearchChannels, RDT_MIN_PYTHON } from './researchChannels'
 import type { ResearchChannelState } from '../types'
 
 /** A fake machine: which binaries exist on PATH, which env vars are set.
@@ -19,6 +19,9 @@ const machine = (opts: {
   platform?: NodeJS.Platform
   feedparser?: boolean
   storedTwitterAuth?: boolean
+  /** Which python spelling clears rdt-cli's floor. Defaults to the ordinary
+   *  case (a modern default python3); `null` = nothing on this machine does. */
+  python?: string | null
 }) => {
   const platform = opts.platform ?? 'darwin'
   const path = platform === 'win32' ? win32 : posix
@@ -31,6 +34,7 @@ const machine = (opts: {
     env: { PATH: binDir, ...(platform === 'win32' ? { PATHEXT: '.EXE' } : {}), ...opts.env },
     exists: (p) => files.has(p),
     probeFeedparser: () => opts.feedparser ?? false,
+    pickPython: () => (opts.python === undefined ? 'python3' : opts.python),
     storedTwitterAuth: opts.storedTwitterAuth ?? false,
   })
 }
@@ -121,5 +125,54 @@ describe('listResearchChannels — the scenario table', () => {
     expect(hasBinary('gh', { PATH: 'C:\\bin', PATHEXT: '.EXE' }, 'win32', exists)).toBe(true)
     expect(hasBinary('gh', { PATH: '/bin' }, 'darwin', exists)).toBe(true)
     expect(hasBinary('gh', { PATH: '/elsewhere' }, 'darwin', exists)).toBe(false)
+  })
+})
+
+// ─── the reddit unlock command must actually RUN ─────────────────────────────
+//
+// FIELD REPORT, 2026-08-15. The panel offered
+//   pipx install 'git+https://github.com/public-clis/rdt-cli.git'
+// the owner ran it, and it died in the resolver — rdt-cli requires Python >=
+// 3.10 and their default python3 was 3.9.9. The error never says "Python".
+//
+// A command that fails is worse than no command: it costs the person a try,
+// teaches them nothing, and reads as the app being broken. So the version is
+// probed BEFORE the command is offered.
+describe('reddit unlock — never hand over a command that will fail', () => {
+  const cmdFor = (python: string | null | undefined) =>
+    byId(machine({ bins: ['curl'], ...(python === undefined ? {} : { python }) }), 'reddit')
+      .unlockCommand
+
+  it('offers the plain upstream command when the DEFAULT python qualifies', () => {
+    // No --python flag: the plain form is the upstream one, and an unnecessary
+    // flag is one more thing to get wrong.
+    expect(cmdFor('python3')).toBe(
+      "pipx install 'git+https://github.com/public-clis/rdt-cli.git'",
+    )
+  })
+
+  it('POINTS pipx at a newer interpreter when one exists beside an old default', () => {
+    // The common shape: a system 3.9 plus a brew 3.12 nobody made default.
+    expect(cmdFor('python3.12')).toBe(
+      "pipx install --python python3.12 'git+https://github.com/public-clis/rdt-cli.git'",
+    )
+  })
+
+  it('offers NO COMMAND when nothing on the machine clears the floor', () => {
+    // ⚠ THE WHOLE POINT. Silence here is honest — the panel's guidance text
+    // still says what the channel needs — while a command is a promise that it
+    // will work.
+    expect(cmdFor(null)).toBeUndefined()
+  })
+
+  it('the floor is rdt-cli own requires-python', () => {
+    expect(RDT_MIN_PYTHON).toEqual([3, 10])
+  })
+
+  it('an INSTALLED rdt still gets no command, whatever python says', () => {
+    // Unchanged by this work: offering an install command beside "installed"
+    // contradicts the row's own text.
+    expect(byId(machine({ bins: ['rdt'], python: null }), 'reddit').unlockCommand).toBeUndefined()
+    expect(byId(machine({ bins: ['rdt'], python: 'python3' }), 'reddit').unlockCommand).toBeUndefined()
   })
 })

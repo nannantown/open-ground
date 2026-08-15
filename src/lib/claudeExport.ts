@@ -56,21 +56,25 @@ export const MAX_MESSAGE_CHARS = 4000
 /** Below this a message says nothing about anyone ("ok", "thanks", "続けて"). */
 export const MIN_MESSAGE_CHARS = 12
 
-/** Largest export file the app will open, in bytes.
+/** Largest export the app will take in, in bytes — zipped or not.
  *
- *  ⚠ THIS IS A MAIN-THREAD LIMIT, not a policy about how much history is
- *  welcome. The drop handler runs in the RENDERER: it reads the whole file into
- *  an ArrayBuffer, hashes it, decodes it to a string, JSON.parses that, and then
- *  JSON.stringifies the result into a request body — five live copies of the
- *  file, all on the thread that draws the screen. A years-deep claude.ai export
- *  is routinely hundreds of megabytes, and dropping one froze the window with no
- *  message and no way back.
+ *  ⚠ THIS IS A SERVER CEILING NOW, and the history is the point. The first
+ *  version was a MAIN-THREAD limit of 64 MB, because the drop handler used to
+ *  read the whole file in the renderer: ArrayBuffer → hash → decoded string →
+ *  JSON.parse → JSON.stringify into a request body, five live copies on the
+ *  thread that draws the screen. Dropping a big export froze the window.
  *
- *  Checked BEFORE the first read, because after it there is nothing left to
- *  check with. 64 MB comfortably holds a normal export while keeping the
- *  transient heap bounded — and the refusal says the real number and the cap
- *  rather than "failed", since the owner's only remedy is to trim the file. */
-export const MAX_EXPORT_BYTES = 64 * 1024 * 1024
+ *  Then the owner's own export arrived: 23 MB zipped, 98 MB raw. The cap would
+ *  have refused the exact file it was built to serve — the guard working
+ *  perfectly and stopping the feature. So the work moved to the server (the
+ *  client streams the file and touches none of it) and the number became what
+ *  one request may make the SERVER hold, which is a much larger and much less
+ *  interesting question.
+ *
+ *  Lives HERE rather than beside the unzip code because the drop handler needs
+ *  it to fail fast with a number the owner can act on, and a client must never
+ *  import a module that pulls in zlib. */
+export const MAX_EXPORT_UPLOAD_BYTES = 256 * 1024 * 1024
 
 /** Bytes as whole megabytes, for the copy that reports a too-large file. */
 export const megabytes = (bytes: number): number => Math.round(bytes / (1024 * 1024))

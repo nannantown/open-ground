@@ -19,6 +19,7 @@
 // answer 503 when it is missing or signed out. There is no API-key path here and
 // none may be added (claudeTerminal.ts "THE TWO RULES").
 
+import { createHash } from 'crypto'
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { claudeRunPreflight } from '@/lib/server/claudePreflight'
@@ -39,6 +40,10 @@ import {
 } from '@/lib/server/personaImport'
 import { hostIsLocal, originIsLocal } from '../loopback'
 import { PERSONA_EXPERIMENTS } from '@/lib/persona/gate'
+import {
+  MAX_EXPORT_UPLOAD_BYTES,
+  readClaudeExportBytes,
+} from '@/lib/server/claudeExportFile'
 import type {
   PersonaChatCancelResponse,
   PersonaChatStartResponse,
@@ -166,6 +171,67 @@ export const personaChatRoutes = new Hono()
       if (e instanceof PersonaImportBusyError) return c.json({ error: e.message, busy: true }, 409)
       if (e instanceof PersonaImportShaError) return c.json({ error: e.message }, 400)
       // parseClaudeExport's own throw: the file is not an export.
+      return c.json(
+        { error: e instanceof Error ? e.message : 'unreadable file', unreadableFile: true },
+        400,
+      )
+    }
+  })
+  // --- POST /api/persona/import/file ------------------------------------------
+  // The file's RAW BYTES — the export zip exactly as claude.ai hands it over, or
+  // a conversations.json someone already pulled out of one. Content-sniffed, so
+  // the owner is never asked which of the two they have.
+  //
+  // ⚠ THIS EXISTS BECAUSE THE JSON ROUTE ABOVE CANNOT TAKE A REAL EXPORT
+  // (measured 2026-08-15 against the owner's own): 23 MB zipped, 98 MB raw. On
+  // that path the browser had to unzip nothing (zips were refused outright),
+  // hold five copies of a 98 MB string on the thread that draws the screen, and
+  // then re-serialise the parsed object into a request body. The bytes route
+  // does none of it — the client uploads and stops, and Node does the work.
+  //
+  // The digest is computed HERE, over the bytes as received, which is also the
+  // stronger contract: the "already imported" check now keys on what actually
+  // arrived rather than on a number the client says it computed.
+  //   400 — empty, not a zip we can read, not JSON, or not an export
+  //   409 — this exact file already landed / an import is already running
+  //   413 — larger than MAX_EXPORT_UPLOAD_BYTES
+  //   503 — the CLI is missing or signed out
+  .post('/api/persona/import/file', async (c) => {
+    const blocked = await gate(c)
+    if (blocked) return blocked
+    let bytes: Buffer
+    try {
+      bytes = Buffer.from(await c.req.arrayBuffer())
+    } catch {
+      return c.json({ error: 'could not read the upload', unreadableFile: true }, 400)
+    }
+    if (bytes.length > MAX_EXPORT_UPLOAD_BYTES) {
+      return c.json({ error: 'the file is larger than this can take in', tooLarge: true }, 413)
+    }
+    let json: unknown
+    try {
+      json = readClaudeExportBytes(bytes)
+    } catch (e) {
+      return c.json(
+        {
+          error: e instanceof Error ? e.message : 'unreadable file',
+          unreadableFile: true,
+        },
+        400,
+      )
+    }
+    const fileSha = createHash('sha256').update(bytes).digest('hex')
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
+    try {
+      const importId = await startPersonaImport({ json, fileSha })
+      return c.json<PersonaImportStartResponse>({ importId }, 202)
+    } catch (e) {
+      if (e instanceof PersonaImportAlreadyError) {
+        return c.json({ error: e.message, alreadyImported: true, at: e.at }, 409)
+      }
+      if (e instanceof PersonaImportBusyError) return c.json({ error: e.message, busy: true }, 409)
+      if (e instanceof PersonaImportShaError) return c.json({ error: e.message }, 400)
       return c.json(
         { error: e instanceof Error ? e.message : 'unreadable file', unreadableFile: true },
         400,

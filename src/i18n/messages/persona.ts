@@ -326,7 +326,7 @@ export const persona = {
 
     // ── dropping a claude.ai export into the same slot ──────────────────────
     // Same act as talking — you are handing over things you already said.
-    'persona.import.dropHint': 'Drop it here — conversations.json',
+    'persona.import.dropHint': 'Drop it here — the export zip, or conversations.json',
     'persona.import.reading': 'Reading…',
     'persona.import.parsed': 'Read your own messages out of {conversations} conversations.',
     'persona.import.ownerOnly': 'The replies you were given are not included.',
@@ -339,16 +339,18 @@ export const persona = {
     'persona.import.keptCount': 'Learned {count}',
     'persona.import.duplicates': '{count} were already in here word for word, so they were not written again.',
     'persona.import.keptUnreadable': '{count} could not be read and were left out.',
-    // A DELIBERATE deviation from the mock's placeholder copy: there is no zip
-    // reader in this app, and saying "drop the zip" and then failing is worse
-    // than saying the true thing.
+    // ⚠ RETIRED 2026-08-15, kept only so an older running server's error key
+    // still renders something true. The app READS the zip now — it is what
+    // claude.ai actually hands over, and refusing it meant telling the owner to
+    // open the archive themselves at the one moment we were asking for their
+    // history. Do not wire this to anything new.
     'persona.import.zipUnsupported':
-      'A zip cannot be read as-is. Take conversations.json out of it and drop that.',
+      'That zip could not be opened. If it holds a conversations.json, dropping that file works too.',
     'persona.import.unreadableFile': 'That could not be read as a claude.ai export.',
-    // Refused BEFORE reading — see MAX_EXPORT_BYTES. Names the real size and the
-    // cap, because the only remedy is on the owner's side (split or trim it).
+    // Refused BEFORE the upload — see MAX_EXPORT_UPLOAD_BYTES. Names the real
+    // size and the cap, because the only remedy is on the owner's side.
     'persona.import.tooLarge':
-      'That file is {size} MB. The most this can open at once is {max} MB — a bigger one would freeze the window. Split it, or take out the conversations you want read.',
+      'That file is {size} MB. The most this can take in at once is {max} MB. Split it, or take out the conversations you want read.',
     'persona.import.already': 'This exact file was already taken in on {date}.',
     'persona.import.busy': 'Another import is already running.',
     'persona.import.failed': 'Could not take that in.',
@@ -566,7 +568,7 @@ export const persona = {
     'persona.chat.claudeLoggedOut': '`claude` がサインアウトしています。サインインしてからお試しください。',
 
     // ── claude.ai の書き出しを同じ場所に落とす ──────────────────────────
-    'persona.import.dropHint': 'ここに落とす — conversations.json',
+    'persona.import.dropHint': 'ここに落とす — 書き出しの zip でも conversations.json でも',
     'persona.import.reading': '読んでいます…',
     'persona.import.parsed': '{conversations}件の会話から、あなたの発言だけを読みました。',
     'persona.import.ownerOnly': '返ってきた側の発言は入れていません。',
@@ -578,10 +580,10 @@ export const persona = {
     'persona.import.duplicates': '同じ内容が既にあったもの{count}件は、書き足していません。',
     'persona.import.keptUnreadable': '読めなかった行{count}件は入れていません。',
     'persona.import.zipUnsupported':
-      'zip はそのままでは読めません。中の conversations.json を出して落としてください。',
+      'この zip は開けませんでした。中に conversations.json があるなら、それを落としても大丈夫です。',
     'persona.import.unreadableFile': 'これは claude.ai の書き出しとしては読めませんでした。',
     'persona.import.tooLarge':
-      'このファイルは {size}MB あります。一度に開けるのは {max}MB までです（これ以上だと画面が固まります）。分割するか、読ませたい会話だけ抜き出してください。',
+      'このファイルは {size}MB あります。一度に取り込めるのは {max}MB までです。分割するか、読ませたい会話だけ抜き出してください。',
     'persona.import.already': 'このファイルは{date}に取り込み済みです。',
     'persona.import.busy': 'いま別の取り込みが動いています。',
     'persona.import.failed': '取り込めませんでした。',
