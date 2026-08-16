@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtemp, mkdir, rm, writeFile, realpath, chmod } from 'fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, chmod } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { app } from '../../app'
@@ -154,9 +154,37 @@ describe('GET /api/you-corpus/judgments', () => {
     // a correction from a note that merely cites its source.
     expect(after.judgments[0].text).toBe('CORRECTED')
     expect(after.judgments[0].correctsId).toBe(originalId)
-    // Correcting never edits: the original is still listed, still unmarked.
-    expect(after.judgments[1].text).toBe('ORIGINAL')
-    expect(after.judgments[1].correctsId).toBeUndefined()
+
+    // ⚠ THIS TEST USED TO ASSERT THE ORIGINAL WAS STILL LISTED HERE, as its way
+    // of pinning "correcting never edits". That property is real and still
+    // holds — but the LISTING was the wrong place to read it, because this is
+    // what draws the figure and feeds 「わかっていること N」. A superseded line
+    // shown there is a lit dot the stand-in ignores, and a count of things it
+    // does not know (owner, 2026-08-16: 最新だけ読む). The never-edited half is
+    // pinned below against the file itself, which is where it actually lives.
+    expect(after.judgments).toHaveLength(1)
+    expect(after.judgments.map((j) => j.text)).not.toContain('ORIGINAL')
+  })
+
+  it('…and the corrected note is still on disk, unedited and unmarked', async () => {
+    await app.request('/api/you-corpus/append', json({ text: 'ORIGINAL' }))
+    const before = (await (
+      await app.request('/api/you-corpus/judgments')
+    ).json()) as YouCorpusJudgmentsResponse
+    const originalId = before.judgments[0].id
+    await app.request(
+      '/api/you-corpus/append',
+      json({ text: 'CORRECTED', correctsId: originalId }),
+    )
+
+    // Append-only is the SAFETY property and it is untouched: nothing the owner
+    // wrote is ever rewritten or removed, only stopped from speaking.
+    const onDisk = JSON.parse(
+      await readFile(join(home, 'you-corpus-additions.json'), 'utf8'),
+    ) as { id: string; text: string; correctsId?: string }[]
+    const kept = onDisk.find((j) => j.id === originalId)
+    expect(kept?.text).toBe('ORIGINAL')
+    expect(kept?.correctsId).toBeUndefined()
   })
 })
 

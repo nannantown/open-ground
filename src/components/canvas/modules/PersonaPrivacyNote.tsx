@@ -33,7 +33,12 @@ import { useT } from '@/i18n/I18nContext'
 export const PersonaPrivacyNote = () => {
   const { t } = useT()
   return (
-    <details className="mt-1.5 text-center">
+    /* `inline` and marginless: it sits INSIDE the footer row now (one line, two
+     *  facts, a middot between them) rather than as a third centred block of
+     *  its own. The open panel is still full width — `absolute` would have to
+     *  measure the stage, and a disclosure that clips is worse than one that
+     *  pushes the row down by its own height. */
+    <details className="text-center">
       <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-plate text-ink-onDeep/35 transition-colors marker:content-none hover:text-ink-onDeep/60 [&::-webkit-details-marker]:hidden">
         {/* The little padlock body from the mock, drawn in CSS rather than as an
          *  icon: two divs are cheaper than a dependency, and it inherits the

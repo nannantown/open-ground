@@ -37,7 +37,7 @@
 import { readFile, rename } from 'fs/promises'
 import { atomicWriteJson } from './atomicWrite'
 import { ensureOpenGroundHome, personaCoursesFile } from './paths'
-import { appendJudgment, readManualJudgments } from './youCorpus'
+import { TAKE_TAG, appendJudgment, readLiveJudgments } from './youCorpus'
 import { readLedger, summarizeLedger } from './personaLedger'
 import { COURSES, courseById, scoreCourse } from '@/lib/persona/instruments'
 import type { PersonaCourse } from '@/lib/persona/instruments'
@@ -266,7 +266,7 @@ export const getPersonaPortrait = async (deps: PortraitDeps = {}): Promise<Perso
   const store = await readPersonaCoursesStore()
   let judgments: ManualJudgment[] | undefined
   try {
-    judgments = await readManualJudgments()
+    judgments = await readLiveJudgments()
   } catch (err) {
     console.error(
       '[openground:persona-courses] corpus unreadable — portrait says nothing about how much is known',
@@ -395,7 +395,18 @@ export const submitPersonaCourse = async (
         // from the course tag: the seating rule's tier 1 is the only tier that
         // survives a course being re-seated later, and a finding that carries
         // its own region needs no reader change when it is.
-        tags: ['persona', course.id, REGION_TAG(COURSE_REGION[course.id])],
+        // ⚠ THE TAKE STAMP IS WHAT MAKES A RETAKE A REPLACEMENT. Without it
+        // every take piles up and the stand-in reads all of them at once —
+        // measured 2026-08-16 as five contradictory pairs after two opposite
+        // big5 takes. `liveJudgments` keeps only the greatest take tag per
+        // course, so this line is the entire mechanism: drop it and the corpus
+        // silently goes back to accumulating.
+        tags: [
+          'persona',
+          course.id,
+          REGION_TAG(COURSE_REGION[course.id]),
+          TAKE_TAG(record.takenAt),
+        ],
         context: `${finding.detail} ・ ${day}`,
       })
       minted++

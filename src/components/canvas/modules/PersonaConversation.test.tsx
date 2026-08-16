@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
+import { render, cleanup, fireEvent, screen, waitFor, act } from '@testing-library/react'
 import {
   PersonaConversation,
   PROMPT_KEYS,
+  PROMPT_ROTATE_MS,
   nextPromptIndex,
   type PersonaConversationProps,
   type PersonaImportView,
@@ -389,6 +390,66 @@ describe('PersonaConversation — the day’s question, as the opening turn', ()
   })
 })
 
+// FIELD REPORT, 2026-08-16: 「今日の一問もブロックに囲まれててフォームも囲まれている
+// から冗長に感じるのかも。質問はテキストだけでいい」/「左のサイドラインもやめよう
+// AIっぽい」.
+//
+// The fix for the previous report drew a card around the question and an ochre
+// rail down the left of both it and the input. That made the pair read as one
+// object — and also made TWO bordered things stack, only one of which can be
+// typed into. The border on the input MEANS something; the one around the
+// question meant nothing and competed with it.
+describe('the question is TEXT — the only box on the stage is the one you type in', () => {
+  // `text-ink` and friends flip with the theme. The stage does NOT (it is the
+  // same near-black in both), so on it they are each wrong in one theme —
+  // `text-ink` in light mode is literally the surface colour. Enforced globally
+  // by src/labelPlates.test.ts for lines that DECLARE bg-bg-deep; this file
+  // declares none, it is simply always rendered on one, which is the hole.
+  const FLIPPING = new Set([
+    'text-ink',
+    'text-ink-muted',
+    'text-ink-subtle',
+    'text-ink-faint',
+    'text-ink-inverse',
+  ])
+  const inks = (el: HTMLElement) =>
+    el.className
+      .split(/\s+/)
+      .map((c) => c.split('/')[0])
+      .filter((c) => FLIPPING.has(c))
+
+  it('draws no card around the question, and no rail beside it', () => {
+    draw({ question: question({ status: 'open' }) })
+    const text = screen.getByText('What kept being missing?')
+    const context = screen.getByText('About a card on your board.')
+    const block = text.closest('div') as HTMLElement
+
+    for (const el of [text, context, block]) {
+      expect(el.className).not.toMatch(/\bbg-bg-card\b/)
+      expect(el.className).not.toMatch(/\bborder(-l)?(-2)?\b/)
+      expect(el.className).not.toMatch(/ochre/)
+    }
+  })
+
+  it('…and the input keeps its own border, because that one is the instruction', () => {
+    draw({ question: question({ status: 'open' }) })
+    const box = input().closest('div') as HTMLElement
+    expect(box.className).toMatch(/\bborder\b/)
+    // …but nothing ochre bracketing it to the question above.
+    expect(box.className).not.toMatch(/ochre/)
+  })
+
+  it('uses the ink made for a surface that does not invert', () => {
+    // Off the card, the question inherited card ink. In light mode `text-ink` on
+    // `bg-deep` is the SAME COLOUR — the question would simply not be there, and
+    // only for owners not developing in dark.
+    draw({ question: question({ status: 'open' }) })
+    expect(inks(screen.getByText('What kept being missing?'))).toEqual([])
+    expect(inks(screen.getByText('About a card on your board.'))).toEqual([])
+    expect(screen.getByText('What kept being missing?').className).toMatch(/text-ink-onDeep/)
+  })
+})
+
 describe('PersonaConversation — dropping a claude.ai export', () => {
   const file = (name = 'conversations.json') =>
     new File(['[]'], name, { type: 'application/json' })
@@ -611,5 +672,73 @@ describe('PersonaConversation — stopping a turn in flight', () => {
     draw({ turns: [turn({ state: 'failed', reply: undefined, kept: undefined })] })
     expect(screen.getByText('persona.chat.turnFailed')).toBeTruthy()
     expect(screen.queryByText('persona.chat.stopped')).toBeNull()
+  })
+})
+
+// ─── one box, one job at a time ──────────────────────────────────────────────
+//
+// FIELD REPORT, 2026-08-15: 「このやりかただとどこに答えていいかわからない。なぜなら
+// 質問が出ている時も入力フォームにサンプルの質問文がきているから」.
+//
+// Today's question sat above the box while the box's own placeholder suggested a
+// DIFFERENT thing to talk about. Two prompts, one input, and nothing saying
+// which one the box belonged to. The placeholder is not decoration on this
+// surface — it is the only thing that says what the box is FOR.
+describe('while today’s question is open, the box belongs to it', () => {
+  const openQ = () => question({ status: 'open' })
+
+  it('says ANSWER IT HERE — never a competing suggestion', () => {
+    draw({ question: openQ() })
+    const box = input()
+    expect(box.placeholder).toBe('persona.chat.placeholderAnswer')
+    // …and specifically NOT the rotating one, whatever index it landed on.
+    expect(box.placeholder).not.toContain('persona.chat.placeholder:')
+  })
+
+  it('goes back to the rotating invitation once the question is answered', () => {
+    // `placeholderAnswer` is for an UNANSWERED question. After that the box is a
+    // plain chat box again, and the rotation is what tells a newcomer it can be
+    // used for anything at all.
+    draw({ question: question({ status: 'answered' }) })
+    expect(input().placeholder).toContain('persona.chat.placeholder:')
+  })
+
+  it('…and with no question at all', () => {
+    draw()
+    expect(input().placeholder).toContain('persona.chat.placeholder:')
+  })
+
+  it('a file over the box still wins — that is a different job again', () => {
+    draw({ question: openQ() })
+    fireEvent.dragOver(input().closest('div')!, { dataTransfer: { types: ['Files'] } })
+    expect(input().placeholder).toBe('persona.import.dropHint')
+  })
+
+  it('does not ROTATE BEHIND the question — the invitation is where they left it', () => {
+    // ⚠ MEASURED THROUGH THE ONLY THING THAT CAN SEE IT. Asserting the
+    // placeholder while the question is open proves nothing: it reads
+    // `placeholderAnswer` whether or not the timer is still turning underneath.
+    // The observable claim is what the box says AFTERWARDS — answer the
+    // question and the invitation must be the one that was there before it,
+    // not one that drifted for minutes behind a cover. (A first attempt at this
+    // test passed with the guard removed, which is exactly the shape this repo
+    // treats as no test at all.)
+    vi.useFakeTimers()
+    try {
+      const view = render(<PersonaConversation {...props()} />)
+      const before = input().placeholder
+      expect(before).toContain('persona.chat.placeholder:')
+
+      view.rerender(<PersonaConversation {...props({ question: openQ() })} />)
+      act(() => {
+        vi.advanceTimersByTime(PROMPT_ROTATE_MS * 6)
+      })
+      expect(input().placeholder).toBe('persona.chat.placeholderAnswer')
+
+      view.rerender(<PersonaConversation {...props({ question: question({ status: 'answered' }) })} />)
+      expect(input().placeholder).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

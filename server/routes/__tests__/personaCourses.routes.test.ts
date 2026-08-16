@@ -156,7 +156,15 @@ describe('POST /api/persona/courses/:id/submit', () => {
       expect(hit, `no corpus node for "${finding.text}"`).toBeTruthy()
       // The REGION tag rides along so the figure seats the finding from the
       // node itself (regions.ts tier 1), not by re-deriving it from the course.
-      expect(hit?.tags).toEqual(['persona', 'big5', 'region:head'])
+      // The TAKE stamp rides along too, and it is this take's `takenAt` — the
+      // one thing that makes a later retake replace these findings rather than
+      // stack on top of them (youCorpus.liveJudgments).
+      expect(hit?.tags).toEqual([
+        'persona',
+        'big5',
+        'region:head',
+        `take:${body.record.takenAt}`,
+      ])
     }
   })
 

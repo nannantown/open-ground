@@ -11,9 +11,9 @@ import {
   readPersonaCoursesStore,
   submitPersonaCourse,
 } from './personaCourses'
-import { readManualJudgments } from './youCorpus'
+import { assembleYouCorpus, readLiveJudgments, readManualJudgments } from './youCorpus'
 import { recordDecision } from './personaLedger'
-import { personaCoursesFile, youCorpusAdditionsFile } from './paths'
+import { personaCoursesFile, youCorpusAdditionsFile, youCorpusFile } from './paths'
 import { BIG5_ITEMS, COURSES, PersonaScoringError } from '@/lib/persona/instruments'
 import type { AppendJudgmentInput } from './youCorpus'
 
@@ -169,7 +169,10 @@ describe('submitPersonaCourse — score, persist, read back', () => {
       // The REGION tag rides along (regions.ts COURSE_REGION.big5 = 'head') so
       // the figure seats the finding from the NODE, tier 1, rather than
       // re-deriving the seat from the course tag on every read.
-      expect(hit?.tags).toEqual(['persona', 'big5', 'region:head'])
+      // The TAKE stamp rides along too, and it is the exact one on the record —
+      // pinned rather than pattern-matched, because a stamp that does not equal
+      // this take's `takenAt` silently stops retiring the previous take.
+      expect(hit?.tags).toEqual(['persona', 'big5', 'region:head', `take:${record.takenAt}`])
       // Provenance: the instrument + the number it came from, plus the date.
       expect(hit?.context).toContain(finding.detail)
       expect(hit?.context).toMatch(/\d{4}-\d{2}-\d{2}/)
@@ -236,6 +239,76 @@ describe('retaking', () => {
     expect(history[0].takenAt).toBe(takenAts[2])
     expect(history.map((h) => h.takenAt)).not.toContain(takenAts[0])
     expect(store.records.big5?.takenAt).toBe(takenAts[takenAts.length - 1])
+  })
+
+  // ─── A RETAKE REPLACES WHAT THE STAND-IN READS ────────────────────────────
+  //
+  // MEASURED BEFORE THE FIX (2026-08-16), through this same production path:
+  // two opposite big5 takes left the corpus holding ALL TEN findings — every one
+  // of the five factors present twice, in contradictory pairs, with nothing
+  // saying which take was current. The record and the portrait had always
+  // replaced cleanly; the corpus, the one file `claude` is actually handed,
+  // accumulated. The owner's model was 「再度うけたら前の質問内容を上書きする感じ」
+  // and it was true of everything except the part that matters.
+  //
+  // Read back out of the ASSEMBLED FILE, not out of the filter: what is being
+  // claimed is about what the stand-in reads, and only the file can say that.
+  it('a retake takes the OLD findings out of the corpus claude reads', async () => {
+    const opposite = BIG5_ITEMS.map(([, reversed]) => (reversed ? 4 : 0))
+    await submitPersonaCourse('big5', big5Decisive())
+    const afterFirst = await readManualJudgments()
+    expect(afterFirst.length).toBeGreaterThan(0)
+    const firstTexts = afterFirst.map((j) => j.text)
+
+    await submitPersonaCourse('big5', opposite)
+    await assembleYouCorpus()
+    const corpus = await readFile(youCorpusFile(), 'utf8')
+
+    // Not one sentence from the first take survives in the file.
+    for (const text of firstTexts) expect(corpus).not.toContain(text)
+    // …and the second take's findings ARE in it (a filter that dropped
+    // everything would satisfy the line above on its own).
+    const live = await readLiveJudgments()
+    expect(live.length).toBeGreaterThan(0)
+    for (const j of live) expect(corpus).toContain(j.text)
+    expect(live.map((j) => j.text).some((t) => firstTexts.includes(t))).toBe(false)
+  })
+
+  it('…and deletes NOTHING — the old findings are still on disk', async () => {
+    const opposite = BIG5_ITEMS.map(([, reversed]) => (reversed ? 4 : 0))
+    await submitPersonaCourse('big5', big5Decisive())
+    const first = (await readManualJudgments()).map((j) => j.text)
+    await submitPersonaCourse('big5', opposite)
+
+    const onDisk = (await readManualJudgments()).map((j) => j.text)
+    for (const text of first) expect(onDisk).toContain(text)
+    // Append-only is the safety property; the reading rule sits on top of it.
+    expect(onDisk.length).toBeGreaterThan((await readLiveJudgments()).length)
+  })
+
+  it('a retake of ONE course leaves another course’s findings speaking', async () => {
+    await submitPersonaCourse('big5', big5Decisive())
+    await submitPersonaCourse('type', Array.from({ length: COURSES[1].itemCount }, () => 0))
+    const typeTexts = (await readManualJudgments())
+      .filter((j) => j.tags?.includes('type'))
+      .map((j) => j.text)
+    expect(typeTexts.length).toBeGreaterThan(0)
+
+    await submitPersonaCourse('big5', BIG5_ITEMS.map(([, r]) => (r ? 4 : 0)))
+    const live = (await readLiveJudgments()).map((j) => j.text)
+    for (const text of typeTexts) expect(live).toContain(text)
+  })
+
+  it('the portrait counts what the stand-in reads, not what is on disk', async () => {
+    await submitPersonaCourse('big5', big5Decisive())
+    const onceCount = (await getPersonaPortrait()).nodeCount
+    await submitPersonaCourse('big5', BIG5_ITEMS.map(([, r]) => (r ? 4 : 0)))
+
+    // Two takes, one take's worth of knowledge — 「わかっていること」 must not
+    // double just because the same course was answered twice.
+    const portrait = await getPersonaPortrait()
+    expect(portrait.nodeCount).toBe(onceCount)
+    expect((await readManualJudgments()).length).toBeGreaterThan(portrait.nodeCount ?? 0)
   })
 
   it('a retake never sheds another course record', async () => {

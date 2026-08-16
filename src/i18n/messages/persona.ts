@@ -282,6 +282,13 @@ export const persona = {
     // invisible: every kept line is printed under the message it came from and
     // can be corrected, which is what `keptLead` / `correct.pressToFix` are for.
     'persona.chat.placeholder': 'Say something — “{prompt}”',
+    // ⚠ WHILE TODAY'S QUESTION IS OPEN, THE BOX IS THAT QUESTION'S ANSWER BOX.
+    // The rotating placeholder above suggests a DIFFERENT thing to talk about,
+    // and shown under an unanswered question it reads as a second, competing
+    // prompt — the owner could not tell where the answer was supposed to go
+    // (field report, 2026-08-15). One box, one job at a time: the rotation stops
+    // and the box says which question it belongs to.
+    'persona.chat.placeholderAnswer': 'Answer it here',
     // The input's STABLE accessible name: the placeholder rotates, and an input
     // named only by its placeholder is renamed every four seconds.
     'persona.chat.inputLabel': 'Say something',
@@ -547,6 +554,7 @@ export const persona = {
     // 承認モック(persona-v2.html)の逐語。「勝手に入る」は確認ダイアログが無い
     // という意味であって、見えないところで書くという意味ではない。
     'persona.chat.placeholder': '話しかける — 「{prompt}」',
+    'persona.chat.placeholderAnswer': 'ここに答える',
     'persona.chat.inputLabel': '話しかける',
     'persona.chat.send': '送る',
     'persona.chat.hint': '話した内容から、あなたについて分かったことを拾います。',

@@ -325,13 +325,12 @@ export const PersonaModule = () => {
   // course is running. The column renders exactly one thing via an if/else
   // chain (see the render), so two cards cannot stack there no matter what
   // these say.
-  const [reading, setReading] = useState<'portrait' | 'ledger' | null>(null)
+  const [reading, setReading] = useState<'portrait' | 'ledger' | 'courses' | null>(null)
 
   const [selected, setSelected] = useState<PersonaNode | null>(null)
   // Which region the owner is currently pointing at (or has opened from the
   // keyboard). The PANEL lives in the figure — this is only what the rest of the
   // screen needs to know about it, which today is one line of hint copy.
-  const [probing, setProbing] = useState<PersonaRegion | null>(null)
   const [spark, setSpark] = useState<PersonaSpark | null>(null)
   const [askPulse, setAskPulse] = useState(false)
 
@@ -1222,6 +1221,8 @@ export const PersonaModule = () => {
   // The ledger's rows. The count line is only pressable when there is something
   // to open: a control that leads to an empty list is a broken promise, and an
   // unread ledger has nothing to say in either direction.
+  const runningCourseId = run?.course.id ?? null
+  const runAnswered = run?.answers.length ?? 0
   const ledgerEntries = ledger?.recent ?? []
   const ledgerDay = useCallback((iso: string) => formatDay(iso, lang) ?? iso, [lang])
   // "It has never done anything" and "it did nothing in the last seven days"
@@ -1236,7 +1237,7 @@ export const PersonaModule = () => {
 
   /** Raise ONE reading in the centre column. Every entrance goes through here,
    *  so opening the ledger cannot leave a note open behind it. */
-  const openReading = (which: 'portrait' | 'ledger') => {
+  const openReading = (which: 'portrait' | 'ledger' | 'courses') => {
     setSelected(null)
     setCorrecting(null)
     setReading(which)
@@ -1286,181 +1287,164 @@ export const PersonaModule = () => {
         regionLabel={regionLabel}
         provenance={provenance}
         regionSummary={regionSummary}
-        onProbe={setProbing}
       />
 
-      {/* ── 2. what this place is: two lines, always, nothing more ──────────── */}
-      <div className="absolute left-6 top-16 z-10 flex max-w-[min(300px,34vw)] flex-col gap-3">
-        {/* The plate's tracking is decided by SCRIPT, not by the UI language:
-         *  「ペルソナ」 folds character-by-character under Latin tracking, and
-         *  "Persona" loses the engraved plate without it. A bare
-         *  `tracking-*` utility here would lose to `.label-cap` outright
-         *  (src/labelPlates.test.ts). */}
-        <span className={`label-cap ${capTrackingClass(t('persona.tabLabel'))} text-ink-onDeep/50`}>
-          {t('persona.tabLabel')}
-        </span>
-        <div className="flex flex-col gap-1.5">
-          <p className="text-meta leading-relaxed text-ink-onDeep/75">{t('persona.intro.lead')}</p>
-          <p className="text-micro leading-relaxed text-ink-onDeep/45">
-            {t('persona.intro.leadSub')}
-          </p>
-        </div>
-        {loadError && (
-          <div className="flex items-center gap-2 text-micro text-ink-onDeep/70">
-            <span>{t('persona.loadFailed')}</span>
-            {/* The error stays up until a read LANDS (see `load`), so the button
-             *  is the only thing that changes while one is in flight. */}
-            <StageButton onClick={() => void load()} disabled={reloading}>
-              {reloading ? t('persona.loading') : t('persona.retry')}
-            </StageButton>
+      {/* ── 2. THE RAIL — everything about YOU, in one column ────────────────
+       *
+       *  ⚠ THIS USED TO BE FIVE FLOATING ISLANDS (owner, 2026-08-15:
+       *  「全体的にバランスが悪い配置のバランス、情報のまとまりもない」): the name and
+       *  the two intro lines top-left, the counts top-RIGHT, the courses
+       *  bottom-left, a gesture hint floating at 52% down the middle, and the
+       *  conversation bottom-centre. Nothing tied any of them together, so the
+       *  screen read as debris around a picture rather than as an instrument.
+       *
+       *  They are one rail now, and the order is an argument: WHO this is →
+       *  WHAT IS IN IT (the numbers) → WHAT YOU CAN ADD (the courses) → how to
+       *  move the figure. That also finishes the merge the owner asked for
+       *  earlier — the results summary and the courses were the two halves that
+       *  were furthest apart on the screen, and they are now adjacent.
+       *
+       *  The right edge is left EMPTY on purpose. One rail against a centred
+       *  figure is a composition; a second rail balancing it is how the five
+       *  islands happened. Hairlines separate the groups, so grouping is carried
+       *  by the rule and the gap rather than by distance across the window. */}
+      <aside className="absolute left-6 top-16 z-10 flex w-[min(272px,32vw)] flex-col gap-4">
+        {/* WHO: the plate and the two lines that say what this place is. */}
+        <div className="flex flex-col gap-3">
+          <span className={`label-cap ${capTrackingClass(t('persona.tabLabel'))} text-ink-onDeep/50`}>
+            {t('persona.tabLabel')}
+          </span>
+          <div className="flex flex-col gap-1.5">
+            <p className="text-meta leading-relaxed text-ink-onDeep/75">{t('persona.intro.lead')}</p>
+            <p className="text-micro leading-relaxed text-ink-onDeep/45">
+              {t('persona.intro.leadSub')}
+            </p>
           </div>
-        )}
-      </div>
+          {loadError && (
+            <div className="flex items-center gap-2 text-micro text-ink-onDeep/70">
+              <span>{t('persona.loadFailed')}</span>
+              {/* The error stays up until a read LANDS (see `load`), so the button
+               *  is the only thing that changes while one is in flight. */}
+              <StageButton onClick={() => void load()} disabled={reloading}>
+                {reloading ? t('persona.loading') : t('persona.retry')}
+              </StageButton>
+            </div>
+          )}
+        </div>
 
-      {/* ── 3. the only numbers that survive ────────────────────────────────
-       *  Each line is gated on ITS OWN read. A portrait that could not be read
-       *  (`portrait` is null for both a failed read and a 200 that is not a
-       *  portrait) draws no count at all — a missing line is honest, a 0 is a
-       *  measurement nobody took — and it does not take the ledger's line down
-       *  with it. */}
-      {(portrait || showLedgerCount) && (
-        <section
-          aria-label={t('persona.counts.label')}
-          className="absolute right-6 top-16 z-10 flex flex-col items-end gap-1.5 text-right"
-        >
-          {portrait && (
-            <>
-              {/* Pressable: the composed portrait lines used to stand
-               *  permanently down the left of the stage. Same facts, raised
-               *  only when asked for — the rule the probe established. */}
+        {/* ⚠ `courses` IS PART OF THE GATE, not just of the contents. This block
+         *  used to open on `portrait || showLedgerCount`, and the courses line
+         *  below is now the ONLY way to reach the courses at all — so a failed
+         *  portrait read would have taken the whole feature off the screen with
+         *  it. Three independent reads feed this block; each one draws its own
+         *  line, and none of them can silence another. */}
+        {(portrait || showLedgerCount || courses.length > 0 || coursesError) && (
+          <section
+            aria-label={t('persona.counts.label')}
+            className="flex flex-col gap-1.5"
+          >
+            {portrait && (
+              <>
+                {/* Pressable: the composed portrait lines used to stand
+                 *  permanently down the left of the stage. Same facts, raised
+                 *  only when asked for — the rule the probe established. */}
+                <button
+                  type="button"
+                  onClick={() => openReading('portrait')}
+                  className="text-plate tracking-wide text-ink-onDeep/45 transition-colors hover:text-ink-onDeep"
+                >
+                  {t('persona.counts.known')}{' '}
+                  {/* ⚠ NOT `?? 0`. An absent count means the corpus could not be
+                   *  read, and printing a 0 there tells the owner their record is
+                   *  empty at exactly the moment nobody could look at it. The
+                   *  word goes where the number would be — same distinction the
+                   *  region probe draws between "could not read" and "nothing". */}
+                  {portrait.nodeCount === undefined ? (
+                    <b className="font-medium text-ink-onDeep/45">{t('persona.counts.unread')}</b>
+                  ) : (
+                    <b className="font-medium tabular-nums text-[#DDAE58]">{portrait.nodeCount}</b>
+                  )}
+                </button>
+                {/* `recentCount` is optional on the wire: a server that did not
+                 *  count is not a week in which nothing happened, so the line is
+                 *  absent rather than zero. */}
+                {portrait.recentCount !== undefined && (
+                  <span className="text-plate tracking-wide text-ink-onDeep/45">
+                    {t('persona.counts.week')}{' '}
+                    <b className="font-medium tabular-nums text-[#DDAE58]">{portrait.recentCount}</b>
+                  </span>
+                )}
+              </>
+            )}
+            {/* ⚠ THE COURSES USED TO BE A PERMANENT FOUR-ROW LIST at the foot of
+             *  the rail — four names, four dates, standing there from first
+             *  paint whether or not anyone was going to take one (owner,
+             *  2026-08-16: 「ここの表示もずっとしておかなくてもいいかも」/「なるべく画面に
+             *  表示する情報は少なくしよう」). It is one line now, and pressing it
+             *  raises the list in the reading column — the same rule the
+             *  portrait and the ledger already follow: the facts exist, they are
+             *  raised WHEN ASKED FOR rather than standing on the stage.
+             *
+             *  ⚠ COUNTED FROM `courses`, not from the portrait. The number and
+             *  the list this line opens are then the same array by construction,
+             *  so "4/4" can never label a panel that turns out to be empty. And
+             *  when the courses could not be read the word goes where the number
+             *  would be — the same three-valued rule as `nodeCount` above: a
+             *  count nobody could take is not a 0. */}
+            {(courses.length > 0 || coursesError) && (
               <button
                 type="button"
-                onClick={() => openReading('portrait')}
-                className="text-plate tracking-wide text-ink-onDeep/45 transition-colors hover:text-ink-onDeep"
+                onClick={() => openReading('courses')}
+                className="text-left text-plate tracking-wide text-ink-onDeep/45 transition-colors hover:text-ink-onDeep"
               >
-                {t('persona.counts.known')}{' '}
-                {/* ⚠ NOT `?? 0`. An absent count means the corpus could not be
-                 *  read, and printing a 0 there tells the owner their record is
-                 *  empty at exactly the moment nobody could look at it. The
-                 *  word goes where the number would be — same distinction the
-                 *  region probe draws between "could not read" and "nothing". */}
-                {portrait.nodeCount === undefined ? (
+                {t('persona.counts.courses')}{' '}
+                {coursesError ? (
                   <b className="font-medium text-ink-onDeep/45">{t('persona.counts.unread')}</b>
                 ) : (
-                  <b className="font-medium tabular-nums text-[#DDAE58]">{portrait.nodeCount}</b>
+                  <b className="font-medium tabular-nums text-[#DDAE58]">
+                    {`${courses.filter((c) => c.lastTakenAt).length}/${courses.length}`}
+                  </b>
                 )}
               </button>
-              {/* `recentCount` is optional on the wire: a server that did not
-               *  count is not a week in which nothing happened, so the line is
-               *  absent rather than zero. */}
-              {portrait.recentCount !== undefined && (
-                <span className="text-plate tracking-wide text-ink-onDeep/45">
-                  {t('persona.counts.week')}{' '}
-                  <b className="font-medium tabular-nums text-[#DDAE58]">{portrait.recentCount}</b>
-                </span>
-              )}
-              <span className="text-plate tracking-wide text-ink-onDeep/45">
-                {t('persona.counts.courses')}{' '}
-                <b className="font-medium tabular-nums text-[#DDAE58]">
-                  {`${portrait.takenCount}/${portrait.courseCount}`}
-                </b>
-              </span>
-            </>
-          )}
-          {/* The decision ledger, demoted from its own card to one line — and it
-           *  counts THIS WEEK, not the lifetime tally. The block answers one
-           *  question ("how often did it speak for me lately?") and a lifetime
-           *  number under that question is the flattering version. */}
-          {showLedgerCount && ledger && (
-            <button
-              type="button"
-              onClick={() => openReading('ledger')}
-              disabled={ledgerEntries.length === 0}
-              aria-label={t('persona.ledger.label')}
-              className="text-plate tracking-wide text-ink-onDeep/45 transition-colors hover:text-ink-onDeep disabled:hover:text-ink-onDeep/45"
-            >
-              {t('persona.counts.decided')}{' '}
-              <b className="font-medium tabular-nums text-[#DDAE58]">
-                {ledger.summary.week.answered}
-              </b>
-            </button>
-          )}
-        </section>
-      )}
-
-      {/* ── 4. the courses: a quiet list, not a rail of buttons ──────────────
-       *  ONE button per row. A finished row reads its own result back, and
-       *  re-taking lives inside that sheet (`persona.result.again`) — two
-       *  controls per row is what made this corner loud. */}
-      <section
-        aria-label={t('persona.course.railHeading')}
-        className="absolute bottom-6 left-6 z-10 flex flex-col gap-[7px]"
-      >
-        {coursesError ? (
-          <div className="flex items-center gap-2 text-micro text-ink-onDeep/70">
-            <span>{t('persona.loadFailed')}</span>
-            <StageButton onClick={() => void loadCourses()}>{t('persona.retry')}</StageButton>
-          </div>
-        ) : (
-          courses.map((c) => {
-            const state = courseRailState(c, run?.course.id ?? null)
-            const metaLine =
-              state === 'running'
-                ? t('persona.course.state.running', {
-                    index: (run?.answers.length ?? 0) + 1,
-                    total: c.itemCount,
-                  })
-                : state === 'done'
-                  ? openingCourse === c.id
-                    ? t('persona.course.opening')
-                    : t('persona.course.state.done', {
-                        date: formatDay(c.lastTakenAt, lang) ?? '',
-                      })
-                  : t('persona.course.state.new', {
-                      count: c.itemCount,
-                      region: regionLabel(c.region),
-                    })
-            return (
+            )}
+            {/* The decision ledger, demoted from its own card to one line — and it
+             *  counts THIS WEEK, not the lifetime tally. The block answers one
+             *  question ("how often did it speak for me lately?") and a lifetime
+             *  number under that question is the flattering version. */}
+            {showLedgerCount && ledger && (
               <button
-                key={c.id}
                 type="button"
-                onClick={() =>
-                  state === 'running'
-                    ? quitCourse()
-                    : state === 'done'
-                      ? void openCourseResult(c)
-                      : startCourse(c.id)
-                }
-                className="flex items-center gap-2.5 whitespace-nowrap text-left text-meta text-ink-onDeep/65 transition-colors hover:text-ink-onDeep"
+                onClick={() => openReading('ledger')}
+                disabled={ledgerEntries.length === 0}
+                aria-label={t('persona.ledger.label')}
+                className="text-plate tracking-wide text-ink-onDeep/45 transition-colors hover:text-ink-onDeep disabled:hover:text-ink-onDeep/45"
               >
-                {/* Painted, not tokenised: this dot sits bare on `bg-deep`,
-                 *  which does not invert, and `moss` does. */}
-                <span
-                  aria-hidden="true"
-                  className={`block h-[5px] w-[5px] flex-none rounded-full ${
-                    state === 'done'
-                      ? 'bg-[#9DB36B]'
-                      : state === 'running'
-                        ? 'bg-[#F29580]'
-                        : 'bg-[#5F4C3C]'
-                  }`}
-                />
-                <span>{c.name}</span>
-                <span className="text-plate tracking-wide text-ink-onDeep/35">{metaLine}</span>
+                {t('persona.counts.decided')}{' '}
+                <b className="font-medium tabular-nums text-[#DDAE58]">
+                  {ledger.summary.week.answered}
+                </b>
               </button>
-            )
-          })
+            )}
+          </section>
         )}
-        {historyError && (
-          <p className="max-w-[240px] text-micro leading-relaxed text-ink-onDeep/70">
-            {t('persona.course.historyFailed')}
-          </p>
-        )}
-      </section>
+
+        {/* ⚠ NO OPERATING INSTRUCTIONS ON THIS STAGE (owner, 2026-08-16:
+         *  「操作の仕方の説明はいりません。スクロールとかの」). A line reading
+         *  「スクロールで移動、⌘/Ctrl+スクロールで拡大…」 used to close the rail —
+         *  permanent chrome teaching gestures that the figure answers the moment
+         *  you try them. It is gone, and so is the probe's variant of it; the
+         *  probe already draws its own summary beside the cursor, and the lit
+         *  points look pressable because they are. Anything that has to be
+         *  explained in a footnote here should be fixed in the figure instead. */}
+      </aside>
 
       {/* ── 5. the one thing to DO ─────────────────────────────────────────── */}
       <div
-        className={`absolute bottom-6 left-1/2 z-20 w-[min(560px,calc(100%-220px))] -translate-x-1/2 rounded-[3px] transition-shadow ${
+        /* Centred on the FULL width, deliberately — it lines up with the
+         *  figure, and the two of them are what the screen is about. The rail
+         *  is the margin note, so the console does not re-centre itself into
+         *  the leftover space and drag the composition off the figure. */
+        className={`absolute bottom-6 left-1/2 z-20 w-[min(620px,calc(100%-680px))] min-w-[min(480px,calc(100%-3rem))] -translate-x-1/2 rounded-[3px] transition-shadow ${
           askPulse ? 'ring-2 ring-accent/40' : ''
         }`}
       >
@@ -1730,6 +1714,98 @@ export const PersonaModule = () => {
               </Btn>
             </div>
           </section>
+        ) : reading === 'courses' ? (
+          /* 「クリックしたら中身が表示されて受けることができるぐらいのやつ」 — the
+             courses, raised on demand. On the stage they were four bare names;
+             here each one can say WHAT IT IS (the instrument's own subtitle) and
+             how long it takes, because a panel you opened on purpose is allowed
+             to be a paragraph where a permanent rail is not. */
+          <section
+            aria-label={t('persona.course.railHeading')}
+            className="flex flex-col gap-2.5 rounded-[3px] border border-line bg-bg-card px-5 py-4 shadow-card"
+          >
+            {coursesError ? (
+              <div className="flex items-center gap-2 text-meta text-ink-muted">
+                <span>{t('persona.loadFailed')}</span>
+                <Btn variant="subtle" size="xs" onClick={() => void loadCourses()}>
+                  {t('persona.retry')}
+                </Btn>
+              </div>
+            ) : (
+              <ul className="flex flex-col gap-2.5">
+                {courses.map((c) => {
+                  const state = courseRailState(c, runningCourseId)
+                  const metaLine =
+                    state === 'running'
+                      ? t('persona.course.state.running', {
+                          index: runAnswered + 1,
+                          total: c.itemCount,
+                        })
+                      : state === 'done'
+                        ? openingCourse === c.id
+                          ? t('persona.course.opening')
+                          : t('persona.course.state.done', {
+                              date: formatDay(c.lastTakenAt, lang) ?? '',
+                            })
+                        : t('persona.course.state.new', {
+                            count: c.itemCount,
+                            region: regionLabel(c.region),
+                          })
+                  return (
+                    <li key={c.id}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          state === 'running'
+                            ? quitCourse()
+                            : state === 'done'
+                              ? void openCourseResult(c)
+                              : startCourse(c.id)
+                        }
+                        className="group flex w-full items-baseline gap-2.5 text-left"
+                      >
+                        {/* Tokenised here, unlike on the stage: this dot sits on
+                         *  `bg-bg-card`, which DOES invert with the theme, so a
+                         *  painted hex would be a dark smudge at noon. */}
+                        <span
+                          aria-hidden="true"
+                          className={`mt-[7px] block h-[5px] w-[5px] flex-none rounded-full ${
+                            state === 'done'
+                              ? 'bg-moss'
+                              : state === 'running'
+                                ? 'bg-accent'
+                                : 'bg-line-strong'
+                          }`}
+                        />
+                        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          <span className="text-ui leading-relaxed text-ink transition-colors group-hover:text-accent">
+                            {c.name}
+                          </span>
+                          {/* The instrument's own one-liner. It had nowhere to go
+                           *  while this was a rail of single lines, so the owner
+                           *  was choosing between four names with no idea what
+                           *  any of them asked. */}
+                          <span className="text-meta leading-relaxed text-ink-faint">
+                            {[c.sub, metaLine].filter(Boolean).join(' ・ ')}
+                          </span>
+                        </span>
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+            {historyError && (
+              <p className="text-meta leading-relaxed text-ink-muted">
+                {t('persona.course.historyFailed')}
+              </p>
+            )}
+            <div className="flex">
+              <Btn variant="subtle" size="xs" onClick={() => setReading(null)}>
+                {t('persona.node.close')}
+              </Btn>
+            </div>
+          </section>
         ) : reading === 'ledger' && ledgerEntries.length > 0 ? (
           <PersonaLedgerDetail
             entries={ledgerEntries}
@@ -1738,14 +1814,6 @@ export const PersonaModule = () => {
           />
         ) : null}
       </div>
-
-      {/* The figure is pannable and zoomable, and nothing about a field of dots
-       *  says so. One quiet line, only where there is room for it — and while a
-       *  region is being probed it says the thing that is useful AT THAT MOMENT
-       *  (what pressing does) instead of how to pan. */}
-      <p className="pointer-events-none absolute left-6 top-[52%] z-10 hidden max-w-[200px] text-micro leading-relaxed text-ink-onDeep/30 xl:block">
-        {t(probing ? 'persona.figure.probeHint' : 'persona.figure.hint')}
-      </p>
 
       {sheet && shownTake && (
         <PersonaResultSheet

@@ -453,11 +453,17 @@ const rail = (name: string) => screen.getByRole('button', { name: new RegExp(nam
  *  inside that sheet. */
 const railRow = (name: string) => screen.getByText(name).closest('button') as HTMLButtonElement
 
-/** The course corner is a named region (its heading is not drawn — the corner
- *  is a quiet list, not a titled rail), so wait for the rows themselves. */
+/** ⚠ THE COURSES ARE BEHIND A CLICK. The rail carries one line — 「コース n/N」 —
+ *  and pressing it raises the list in the reading column. Every course test
+ *  enters through here, so the entrance is exercised by all of them rather
+ *  than pinned once and assumed everywhere else.
+ *
+ *  The wait is on the COUNT LINE, not on a timer: it appears only once the
+ *  catalogue read has landed (or failed), and clicking before that would open
+ *  a panel that is empty for reasons having nothing to do with the test. */
 const awaitCourses = async () => {
-  await screen.findByRole('region', { name: 'persona.course.railHeading' })
-  return waitFor(() => expect(screen.getByText(COURSES[0].name)).toBeTruthy())
+  fireEvent.click(await screen.findByRole('button', { name: /persona\.counts\.courses/ }))
+  return screen.findByRole('region', { name: 'persona.course.railHeading' })
 }
 
 /** The counts corner. The whole block is absent when the portrait could not be
@@ -510,7 +516,6 @@ describe('PersonaModule — reading what the stand-in runs on', () => {
     const text = countsBlock().textContent ?? ''
     expect(text).toContain('159')
     expect(text).toContain('16')
-    expect(text).toContain('4/4')
   })
 
   // MUTATION GUARD (R4 #2). `portrait?.nodeCount ?? 0` would print a 0 over a
@@ -521,8 +526,12 @@ describe('PersonaModule — reading what the stand-in runs on', () => {
     render(<PersonaModule />)
     await screen.findByText('persona.tabLabel')
     await waitFor(() => expect(screen.getByText('persona.intro.lead')).toBeTruthy())
-    expect(screen.queryByRole('region', { name: 'persona.counts.label' })).toBeNull()
+    // ⚠ NOT "the block is absent" any more — the courses line sits in the same
+    // block and is fed by a different read, so demanding an empty block would
+    // be pinning the bug where one failed read blanks another's answer. What
+    // must not exist is a NODE count nobody took.
     expect(screen.queryByText('persona.counts.known')).toBeNull()
+    expect(screen.queryByText('persona.counts.week')).toBeNull()
   })
 
   // `recentCount` is optional on the wire: a server that did not count is not a
@@ -552,8 +561,9 @@ describe('PersonaModule — reading what the stand-in runs on', () => {
     // …and no zero anywhere near it.
     expect(text).not.toMatch(/persona\.counts\.known\s*0/)
     expect(text).not.toContain('persona.counts.week')
-    // The course tally is a different read and still speaks.
-    expect(text).toContain('2/4')
+    // The course tally is a different read and still speaks (it comes from the
+    // catalogue, not from this portrait — see the courses describe).
+    expect(text).toContain('persona.counts.courses')
   })
 
   it('the portrait sentence drops the count too, rather than saying 0 things', async () => {
@@ -693,15 +703,22 @@ describe('PersonaModule — reading what the stand-in runs on', () => {
     expect(probe.textContent).not.toMatch(/\d/)
   })
 
-  it('the hint says what pressing does while a region is up', async () => {
+  // ⚠ THIS TEST USED TO ASSERT THE OPPOSITE. It pinned a footnote in the rail
+  // teaching the pan/zoom gestures, and a variant of it during a probe. The
+  // owner cut both (2026-08-16: 「操作の仕方の説明はいりません。スクロールとかの」),
+  // so the pin is inverted: the stage carries no operating instructions, in
+  // either state. Kept rather than deleted because "explain the gesture in a
+  // corner" is the reflex this screen keeps having, and a deletion leaves
+  // nothing behind to notice it coming back.
+  it('teaches no gestures — not at rest, and not while a region is up', async () => {
     judgmentsPayload = [judgment({ text: 'Something.' })]
     render(<PersonaModule />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Something.' })).toBeTruthy())
-    expect(screen.getByText('persona.figure.hint')).toBeTruthy()
+    expect(screen.queryByText('persona.figure.hint')).toBeNull()
 
     openRegion('chest')
-    expect(screen.getByText('persona.figure.probeHint')).toBeTruthy()
     expect(screen.queryByText('persona.figure.hint')).toBeNull()
+    expect(screen.queryByText('persona.figure.probeHint')).toBeNull()
   })
 
   it('invites the first note when nothing is lit yet', async () => {
@@ -1389,6 +1406,64 @@ describe('PersonaModule — correcting is appending', () => {
 })
 
 describe('PersonaModule — the courses', () => {
+  // ── WHERE THE COURSES LIVE ────────────────────────────────────────────────
+  // They used to be four permanent rows at the foot of the rail. The owner cut
+  // that (2026-08-16: 「ここの表示もずっとしておかなくてもいいかも」/「クリックしたら
+  // 中身が表示されて受けることができるぐらいのやつでいい」), so the stage carries a
+  // count and the list is raised on demand. These four pin that arrangement —
+  // without them the cheapest way to make everything else below pass is to put
+  // the list back on the stage, which is the change being undone.
+
+  it('keeps the list OFF the stage until it is asked for', async () => {
+    render(<PersonaModule />)
+    // The entrance appears (the catalogue read landed) …
+    await screen.findByRole('button', { name: /persona\.counts\.courses/ })
+    // … and nothing of the list itself is drawn yet.
+    expect(screen.queryByRole('region', { name: 'persona.course.railHeading' })).toBeNull()
+    expect(screen.queryByText(COURSES[0].name)).toBeNull()
+
+    await awaitCourses()
+    expect(screen.getByText(COURSES[0].name)).toBeTruthy()
+  })
+
+  it('counts the SAME list the line opens, not the portrait\'s own tally', async () => {
+    // Both reads carry a course tally and in production they agree. When they
+    // do NOT, the number labelling a button has to describe what the button
+    // opens — otherwise the stage says 4/4 over a panel showing two.
+    portraitPayload = portraitOf({ nodeCount: 1, takenCount: 4, courseCount: 4 })
+    courses = coursesPayload({
+      [COURSES[0].id]: { lastTakenAt: '2026-08-01T09:00:00.000Z' },
+      [COURSES[1].id]: { lastTakenAt: '2026-08-02T09:00:00.000Z' },
+    })
+    render(<PersonaModule />)
+
+    const entry = await screen.findByRole('button', { name: /persona\.counts\.courses/ })
+    expect(entry.textContent).toContain('2/4')
+    expect(entry.textContent).not.toContain('4/4')
+  })
+
+  it('is still reachable when the PORTRAIT could not be read', async () => {
+    // The entrance sits in the counts block, which used to open only for a
+    // portrait. Feeding it one read while it is the only door to another is how
+    // a feature disappears for a reason that has nothing to do with it.
+    portraitPayload = null // ⇒ /api/persona/portrait 500s
+    render(<PersonaModule />)
+
+    await awaitCourses()
+    expect(screen.getByText(COURSES[0].name)).toBeTruthy()
+    // …and the portrait's own line is still absent, as it must be.
+    expect(screen.queryByText('persona.counts.known')).toBeNull()
+  })
+
+  it('says the tally could not be READ rather than printing a 0/0', async () => {
+    coursesFail = true
+    render(<PersonaModule />)
+
+    const entry = await screen.findByRole('button', { name: /persona\.counts\.courses/ })
+    expect(entry.textContent).toContain('persona.counts.unread')
+    expect(entry.textContent).not.toContain('0/0')
+  })
+
   it('renders every course the server offers, with what it costs and what it grows', async () => {
     render(<PersonaModule />)
     await awaitCourses()
@@ -1409,7 +1484,8 @@ describe('PersonaModule — the courses', () => {
     // would look identical on a matching build and drift silently on any other.
     courses = coursesPayload({ big5: { name: 'Renamed on the server' } })
     render(<PersonaModule />)
-    expect(await screen.findByRole('button', { name: /Renamed on the server/ })).toBeTruthy()
+    await awaitCourses()
+    expect(screen.getByRole('button', { name: /Renamed on the server/ })).toBeTruthy()
     expect(screen.queryByText(COURSES[0].name)).toBeNull()
   })
 
@@ -1423,7 +1499,7 @@ describe('PersonaModule — the courses', () => {
   it('says the courses could not be read rather than showing no courses at all', async () => {
     coursesFail = true
     render(<PersonaModule />)
-    await screen.findByRole('region', { name: 'persona.course.railHeading' })
+    await awaitCourses()
     await waitFor(() => expect(screen.getByText('persona.loadFailed')).toBeTruthy())
     expect(screen.queryByRole('button', { name: new RegExp(COURSES[0].name) })).toBeNull()
   })
@@ -1707,9 +1783,11 @@ describe('PersonaModule — the portrait', () => {
     await awaitCourses()
     expect(screen.queryByRole('region', { name: 'persona.portrait.label' })).toBeNull()
     expect(screen.queryByText('persona.portrait.empty')).toBeNull()
-    // …and there is no way IN to it either: the count that raises it is part of
-    // the same absent block.
-    expect(screen.queryByRole('region', { name: 'persona.counts.label' })).toBeNull()
+    // …and there is no way IN to it either. NOT "the counts block is absent" —
+    // that block also carries the courses line, which is a different read and
+    // has no business disappearing with this one. What must be absent is the
+    // portrait's OWN count, which is what raises the portrait.
+    expect(screen.queryByText('persona.counts.known')).toBeNull()
   })
 
   it('re-reads the portrait when a course finishes, so it is never a version behind', async () => {
@@ -1718,6 +1796,10 @@ describe('PersonaModule — the portrait', () => {
     await awaitCourses()
     openPortrait()
     await screen.findByText('persona.portrait.empty')
+    // The reading column holds exactly ONE thing, so raising the portrait put
+    // the course list away — it has to be asked for again.
+    expect(screen.queryByText(COURSES[0].name)).toBeNull()
+    await awaitCourses()
 
     // The course the owner is about to take is the evidence for the new line.
     portraitPayload = portraitOf({
@@ -1732,6 +1814,10 @@ describe('PersonaModule — the portrait', () => {
       fireEvent.click(screen.getByRole('button', { name: LIKERT_AGREE[0] }))
     }
 
+    // Raise the portrait again and read what is in it NOW. The re-read happens
+    // whether or not anyone is looking (see `sendCourse`); this asks for it
+    // afterwards, which is also how the owner would find out.
+    openPortrait()
     expect(await screen.findByText('型は INFP — 内向、感情。')).toBeTruthy()
     expect(screen.queryByText('persona.portrait.empty')).toBeNull()
   })

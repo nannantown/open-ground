@@ -54,19 +54,20 @@ export const PersonaPanel = ({ open, onClose }: Props): JSX.Element | null => {
       aria-label={t('toolbar.persona')}
       data-testid="persona-panel"
     >
-      {/* Top-LEFT, above the surface's own mark — the same place and the same
-          component every other full-screen surface uses.
+      {/* Top-LEFT, above the surface's own mark — the same place, the same
+          component and now the same SHAPE every other full-screen surface uses.
 
-          ⚠ It sits on a CARD rather than bare on the stage, and that is not
-          decoration: `bg-deep` is the one surface that does NOT invert with the
-          theme, so BackLink's `ink-muted` would fall to ~1.5:1 in light mode
-          (the measurement pinned in src/labelPlates.test.ts). The chip gives it
-          a surface that does invert, so the shared affordance stays shared
-          instead of being redrawn here with its own colours.
+          ⚠ IT USED TO WEAR A BORDERED CHIP. Not decoration: `bg-deep` does not
+          invert with the theme, so BackLink's `ink-muted` falls to ~1.5:1 in
+          light mode (src/labelPlates.test.ts), and a card gave it a surface that
+          does invert. The cost was that the way back looked like a button here
+          and like a link everywhere else — the exact inconsistency BackLink
+          exists to prevent, reintroduced by the fix for a colour problem. The
+          colour problem is now solved where it belongs, in the ink: `tone`.
           z-30 clears the surface's own layers (its furniture is z-10 / z-20 and
           the result sheet's scrim is z-overlay-local). */}
-      <div className="absolute left-4 top-4 z-30 rounded-[3px] border border-line bg-bg-card px-2.5 py-1.5 shadow-card">
-        <BackLink label={t('projectPanel.backToGround')} onClick={onClose} />
+      <div className="absolute left-4 top-4 z-30">
+        <BackLink tone="onDeep" label={t('projectPanel.backToGround')} onClick={onClose} />
       </div>
       <PersonaModule />
     </Overlay>

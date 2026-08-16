@@ -232,11 +232,18 @@ export const PersonaConversation = ({
   const [promptIndex, setPromptIndex] = useState(() =>
     Math.floor(Math.random() * PROMPT_KEYS.length),
   )
+  // `question` is read through the ref for the same reason `busy` is: the
+  // interval must be created ONCE, and re-creating it whenever the question
+  // object is re-fetched would reset the 4.2s clock on every poll.
+  const answeringRef = useRef(false)
+  answeringRef.current = question?.status === 'open'
   useEffect(() => {
     if (reduced) return undefined
     const id = window.setInterval(() => {
       // NEVER while they are using it: typing, or focused with an empty box.
       if (busyRef.current) return
+      // …and never while today's question is the box's job (see `placeholder`).
+      if (answeringRef.current) return
       setPromptIndex((i) => nextPromptIndex(i, Math.random()))
     }, PROMPT_ROTATE_MS)
     return () => window.clearInterval(id)
@@ -263,9 +270,19 @@ export const PersonaConversation = ({
   const questionText = question ? (lang === 'ja' ? question.textJa : question.textEn) : ''
   const questionContext = question ? (lang === 'ja' ? question.contextJa : question.contextEn) : ''
 
+  // ⚠ ONE BOX, ONE JOB AT A TIME (field report, 2026-08-15). While today's
+  // question is unanswered, this box IS that question's answer box — and the
+  // rotating placeholder suggests a DIFFERENT thing to talk about. Shown under
+  // an open question it reads as a second, competing prompt, and the owner
+  // could not tell which one the box belonged to. The rotation is not merely
+  // hidden: `awaitingAnswer` also stops the interval below, because a
+  // placeholder nobody can see has no business burning a timer.
+  const awaitingAnswer = question?.status === 'open'
   const placeholder = dragging
     ? t('persona.import.dropHint')
-    : t('persona.chat.placeholder', { prompt: t(PROMPT_KEYS[promptIndex]) })
+    : awaitingAnswer
+      ? t('persona.chat.placeholderAnswer')
+      : t('persona.chat.placeholder', { prompt: t(PROMPT_KEYS[promptIndex]) })
 
   const stop = (e: React.DragEvent) => {
     e.preventDefault()
@@ -322,32 +339,62 @@ export const PersonaConversation = ({
           {/* Today's 1問, as the conversation's opening turn. The next thing the
            *  owner types answers it (the module routes the send). */}
           {question && (
-            <div className="flex flex-col gap-1.5">
-              <span
-                className={`label-cap ${capTrackingClass(t('persona.interview.heading'))} text-ink-onDeep/40`}
-              >
-                {t('persona.interview.heading')}
-              </span>
+            /* ⚠ THE QUESTION IS TEXT. NOT A CARD, NOT A BRACKET.
+             *
+             *  It has now been through three arrangements, and the third is the
+             *  owner's own diagnosis (2026-08-16): 「今日の一問もブロックに囲まれてて
+             *  フォームも囲まれているから冗長に感じるのかも。質問はテキストだけでいい」
+             *  — a box above a box, and only one of them is a thing you can
+             *  operate. The input's border MEANS something (type here); a border
+             *  drawn around the question means nothing, so it was competing with
+             *  the one that does. With the card gone the box below is the only
+             *  bordered object on the stage, which says where to answer better
+             *  than any amount of drawing around the question did.
+             *
+             *  The ochre rail that ran down the left of both went with it, same
+             *  verdict — 「左のサイドラインもやめようAIっぽい」. The job it was doing
+             *  (tying the question to the box) is done by there being nothing
+             *  else between them.
+             *
+             *  ⚠ `ink-onDeep`, NOT `ink`. This text now sits bare on `bg-deep`,
+             *  the one surface in the palette that does NOT invert — `text-ink`
+             *  on it is the SAME COLOUR in light mode (1.00:1, invisible). The
+             *  card carried inverting tokens legitimately; on the stage they
+             *  would be a light-theme-only disappearance nobody developing in
+             *  dark would ever see. See src/labelPlates.test.ts. */
+            <div className="flex flex-col">
+              <div className="flex items-baseline justify-between gap-3">
+                <span
+                  className={`label-cap ${capTrackingClass(t('persona.interview.heading'))} ${
+                    question.status === 'open'
+                      ? 'text-[var(--beacon-waiting)]'
+                      : 'text-ink-onDeep/40'
+                  }`}
+                >
+                  {t('persona.interview.heading')}
+                </span>
+                {question.status === 'open' && (
+                  <button
+                    type="button"
+                    onClick={onSkipQuestion}
+                    disabled={answering}
+                    className="shrink-0 text-micro text-ink-onDeep/35 transition-colors hover:text-ink-onDeep disabled:opacity-50"
+                  >
+                    {t('persona.interview.skip')}
+                  </button>
+                )}
+              </div>
               {/* THE SETTING FIRST: the question quotes fragments of something
                *  that happened days ago, and read cold those quotes are noise.
                *  Absent on questions written by an older build. */}
               {questionContext && (
-                <p className="max-w-[88%] self-start text-micro leading-relaxed text-ink-onDeep/45">
+                <p className="mt-1.5 text-micro leading-relaxed text-ink-onDeep/40">
                   {questionContext}
                 </p>
               )}
-              <Bubble>{questionText}</Bubble>
-              {question.status === 'open' ? (
-                <button
-                  type="button"
-                  onClick={onSkipQuestion}
-                  disabled={answering}
-                  className="self-start text-micro text-ink-onDeep/45 underline-offset-2 hover:text-ink-onDeep hover:underline disabled:opacity-50"
-                >
-                  {t('persona.interview.skip')}
-                </button>
-              ) : (
-                <p className="self-start text-micro leading-relaxed text-ink-onDeep/55">
+              <p className="mt-1 text-meta leading-relaxed text-ink-onDeep/85">{questionText}</p>
+              {question.status !== 'open' && (
+                <p className="mt-1.5 text-micro leading-relaxed text-ink-onDeep/55">
                   {t(
                     question.status !== 'answered'
                       ? 'persona.interview.skipped'
@@ -360,7 +407,7 @@ export const PersonaConversation = ({
                 </p>
               )}
               {skipFailed && (
-                <p className={`self-start text-micro leading-relaxed ${STAGE_ALERT}`}>
+                <p className={`mt-1.5 text-micro leading-relaxed ${STAGE_ALERT}`}>
                   {t('persona.interview.skipFailed')}
                 </p>
               )}
@@ -567,13 +614,20 @@ export const PersonaConversation = ({
         </p>
       )}
 
-      {/* One line, and it changes once there is something to correct: at that
-       *  moment the useful sentence is what to do about a line that is wrong. */}
-      <p className="mt-2 text-center text-micro leading-relaxed text-ink-onDeep/40">
-        {t(anythingKept ? 'persona.chat.hintCorrect' : 'persona.chat.hint')}
-      </p>
-
-      <PersonaPrivacyNote />
+      {/* ── the footer, as ONE line ──────────────────────────────────────────
+       *  Two centred sentences stacked under the box (what this does · where it
+       *  goes) read as two unrelated afterthoughts, and they were the last of
+       *  the loose parts on this stage. They are one row now, separated by a
+       *  middot: the same two facts, occupying one line's worth of attention.
+       *  The hint changes once there is something to correct — at that moment
+       *  the useful sentence is what to do about a line that is wrong. */}
+      <div className="mt-2 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-micro leading-relaxed text-ink-onDeep/40">
+        <span>{t(anythingKept ? 'persona.chat.hintCorrect' : 'persona.chat.hint')}</span>
+        <span aria-hidden="true" className="text-ink-onDeep/20">
+          ·
+        </span>
+        <PersonaPrivacyNote />
+      </div>
     </div>
   )
 }

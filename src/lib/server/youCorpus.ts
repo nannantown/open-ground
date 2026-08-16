@@ -37,6 +37,7 @@ import { randomUUID } from 'crypto'
 import { ensureOpenGroundHome, youCorpusFile, youCorpusAdditionsFile } from './paths'
 import { atomicWriteText, atomicWriteJson } from './atomicWrite'
 import { getSettings } from './store'
+import { COURSES } from '@/lib/persona/instruments'
 import type { ManualJudgment, YouCorpusMeta, YouCorpusStatus } from '../types'
 
 const execFile = promisify(execFileCb)
@@ -322,6 +323,90 @@ export const readManualJudgments = async (): Promise<ManualJudgment[]> => {
   }
 }
 
+// ─── SUPERSESSION, RESOLVED AT READ TIME ────────────────────────────────────
+//
+// ⚠ THE APPEND-ONLY FILE IS THE SAFETY PROPERTY; "only the latest counts" IS A
+// READING RULE. Nothing here deletes: `additions.json` keeps every line the
+// owner ever wrote or answered, forever, and GET /api/you-corpus/raw still
+// serves the lot. What this decides is narrower and is the thing that actually
+// matters — WHICH LINES THE STAND-IN READS.
+//
+// TWO WAYS A LINE STOPS COUNTING, and neither existed as behaviour before
+// 2026-08-16 (both were written into the data and then read by nobody):
+//
+//   1. A LATER JUDGMENT CORRECTS IT (`correctsId`). The Persona tab has offered
+//      「これを直す」 since the beginning and the field was persisted correctly —
+//      but no reader honoured it, so the assembled corpus carried the wrong
+//      line and its correction side by side as two equal bullets. The chat
+//      prompt has been telling `claude` all along that "the corpus is
+//      append-only, so a wrong line can only ever be superseded, never removed",
+//      which was a promise the read path did not keep.
+//
+//   2. A COURSE WAS RETAKEN. Measured, 2026-08-16, by running two opposite big5
+//      takes through the production writer: the corpus went 5 findings → 10 and
+//      kept ALL FIVE FACTORS as contradictory pairs (「新しい考え方や表現に向かう」
+//      beside 「慣れた確かなやり方を守る」), with nothing marking which take was
+//      current. The course RECORD and the portrait had always replaced cleanly;
+//      only the corpus — the one file the stand-in actually reads — accumulated.
+//
+// HOW A TAKE IS IDENTIFIED: every finding carries `take:<takenAt ISO>` as a tag
+// (personaCourses.submitPersonaCourse). Per course, only the greatest take tag
+// survives. String comparison is chronological here because the stamps are
+// ISO-8601 UTC from `new Date().toISOString()` — same length, zero-padded, Z
+// suffix — so no date parsing is needed to order them.
+//
+// TWO DELIBERATE ABSTENTIONS, both "keep everything" rather than "guess":
+//   • Findings written before this field existed have a course tag and NO take
+//     tag. They stay until that course is retaken — an upgrade must not silently
+//     retire a corpus nobody has replaced yet.
+//   • A course whose takes are ALL unstamped keeps every one of them, because
+//     there is no evidence about which came last. Recency by `addedAt` would be
+//     a guess, and the whole point of this file is to not guess about the owner.
+
+/** A course take's stamp. Public so the writer and this reader cannot drift. */
+export const TAKE_TAG = (takenAtIso: string): string => `take:${takenAtIso}`
+
+const TAKE_PREFIX = 'take:'
+const COURSE_IDS: ReadonlySet<string> = new Set(COURSES.map((c) => c.id))
+
+const courseTagOf = (j: ManualJudgment): string | null =>
+  j.tags?.find((t) => COURSE_IDS.has(t)) ?? null
+const takeTagOf = (j: ManualJudgment): string | null =>
+  j.tags?.find((t) => t.startsWith(TAKE_PREFIX)) ?? null
+
+/** The judgments that still speak for the owner — everything except lines a
+ *  later one corrected, and course findings from a take that has been redone.
+ *  PURE: hand it the raw list, it hands back the subset, order preserved. */
+export const liveJudgments = (all: readonly ManualJudgment[]): ManualJudgment[] => {
+  const corrected = new Set<string>()
+  for (const j of all) if (j.correctsId) corrected.add(j.correctsId)
+
+  const newestTake = new Map<string, string>()
+  for (const j of all) {
+    const course = courseTagOf(j)
+    const take = takeTagOf(j)
+    if (!course || !take) continue
+    const seen = newestTake.get(course)
+    if (seen === undefined || take > seen) newestTake.set(course, take)
+  }
+
+  return all.filter((j) => {
+    if (j.id && corrected.has(j.id)) return false
+    const course = courseTagOf(j)
+    if (!course) return true
+    const newest = newestTake.get(course)
+    // No take is stamped for this course ⇒ nothing to compare against; keep.
+    if (newest === undefined) return true
+    return takeTagOf(j) === newest
+  })
+}
+
+/** readManualJudgments, minus what has been superseded. This is what every
+ *  READER should use — the assembled corpus, the counts, the figure. The raw
+ *  reader stays exported for the write path and for /raw. */
+export const readLiveJudgments = async (): Promise<ManualJudgment[]> =>
+  liveJudgments(await readManualJudgments())
+
 // The read for the APPEND path. Same ENOENT-only rule on read failures as the
 // reader above; it differs on CORRUPTION. The additions file is the feature's
 // one IRREPLACEABLE, accumulate-only source — so where a reader may shrug a
@@ -555,7 +640,9 @@ const assembleYouCorpusInner = async (opts: AssembleOptions): Promise<YouCorpusM
 
   const docs = await readMemoryDocs(memoryDir)
   const businessVision = docs.find(isBusinessVision) ?? null
-  const manual = await readManualJudgments()
+  // LIVE, not raw: a corrected line and a redone course's old findings must not
+  // reach the file `claude` is handed. Nothing is deleted — see liveJudgments.
+  const manual = await readLiveJudgments()
 
   const assembledAt = new Date().toISOString()
   const conceptIncluded = conceptBody != null && conceptBody.length > 0
@@ -750,7 +837,9 @@ export const getCorpusStatus = async (opts: AssembleOptions = {}): Promise<YouCo
       /* missing */
     }
   }
-  const manual = await readManualJudgments()
+  // Counts what the corpus WILL contain, so the status and the assembled file
+  // never disagree about how much the stand-in knows.
+  const manual = await readLiveJudgments()
 
   return {
     path: youCorpusFile(),

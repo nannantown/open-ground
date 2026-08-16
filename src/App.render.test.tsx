@@ -317,6 +317,19 @@ describe('App — Ground Persona entry gate', () => {
     // fails rather than merely looking different.
     const back = within(panel).getByRole('button', { name: 'Back to Ground' })
     expect(back).toBeInTheDocument()
+    // ⚠ AND IT LOOKS LIKE THE OTHER ONES. Sharing the component was not enough:
+    // it sat inside a bordered, shadowed chip here and bare everywhere else, so
+    // it still read as a different control (owner, 2026-08-16: 「groundに戻るの
+    // デザインも他のところと違うよね なぜ同じにしない?」). The chip existed to fix a
+    // real contrast problem — `ink-muted` is ~1.5:1 on the non-inverting stage —
+    // which is now fixed in the INK (`tone="onDeep"`) where it belongs. Both
+    // halves are pinned, because dropping the chip without the tone swap trades
+    // a visible inconsistency for an invisible one.
+    expect((back.parentElement as HTMLElement).className).not.toMatch(
+      /\bborder\b|\bbg-bg-card\b|\bshadow-card\b/,
+    )
+    expect(back.className).toMatch(/text-ink-onDeep/)
+    expect(back.className).not.toMatch(/text-ink-muted/)
     await act(async () => {
       fireEvent.click(back)
     })

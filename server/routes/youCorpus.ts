@@ -13,7 +13,7 @@ import {
   assembleYouCorpus,
   appendJudgment,
   readYouCorpus,
-  readManualJudgments,
+  readLiveJudgments,
   getCorpusStatus,
 } from '@/lib/server/youCorpus'
 import {
@@ -72,7 +72,11 @@ export const youCorpusRoutes = new Hono()
   .get('/api/you-corpus/judgments', async (c) => {
     const blocked = blockNonLoopback(c)
     if (blocked) return blocked
-    const judgments = await readManualJudgments()
+    // LIVE only: what is drawn on the figure and counted as 「わかっていること」
+    // has to be what the stand-in actually reads, or the number on the stage
+    // describes a corpus nobody uses. Superseded lines are never deleted —
+    // GET /api/you-corpus/raw still serves the whole file.
+    const judgments = await readLiveJudgments()
     return c.json<YouCorpusJudgmentsResponse>({ judgments: [...judgments].reverse() })
   })
   // --- POST /api/you-corpus/rebuild -----------------------------------------

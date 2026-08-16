@@ -8,8 +8,13 @@ import {
   appendJudgment,
   readYouCorpus,
   readManualJudgments,
+  readLiveJudgments,
+  liveJudgments,
   getCorpusStatus,
+  TAKE_TAG,
 } from './youCorpus'
+import { COURSES } from '@/lib/persona/instruments'
+import type { ManualJudgment } from '../types'
 import { youCorpusFile, youCorpusAdditionsFile } from './paths'
 
 // Partial os mock: the registry-resolution tests below need homedir() to point
@@ -250,6 +255,118 @@ describe('correction = append (never edit)', () => {
     const { judgment } = await appendJudgment({ text: 'JUST_A_NOTE' })
     expect(judgment.correctsId).toBeUndefined()
     expect('correctsId' in judgment).toBe(false)
+  })
+
+  // ⚠ THE HALF THAT WAS NEVER IMPLEMENTED (found 2026-08-16). `correctsId` has
+  // been written correctly since the correction UI shipped — and read by NOBODY.
+  // The assembled corpus carried the wrong line and its correction side by side
+  // as two equal bullets, while the persona prompt told `claude` that "a wrong
+  // line can only ever be superseded, never removed". This asserts the FILE, not
+  // the field: the field was always right.
+  it('the corrected line LEAVES the corpus claude is handed — and stays on disk', async () => {
+    const { judgment: original } = await appendJudgment({ text: 'I_ALWAYS_SHIP_ON_FRIDAY' })
+    await appendJudgment({ text: 'I_NEVER_SHIP_ON_FRIDAY', correctsId: original.id })
+
+    const corpus = await readFile(youCorpusFile(), 'utf8')
+    expect(corpus).toContain('I_NEVER_SHIP_ON_FRIDAY')
+    expect(corpus).not.toContain('I_ALWAYS_SHIP_ON_FRIDAY')
+
+    // NOTHING WAS DELETED. Append-only is the safety property; "only the latest
+    // counts" is a reading rule, and the two must both hold at once.
+    const onDisk = await readManualJudgments()
+    expect(onDisk.map((j) => j.text)).toContain('I_ALWAYS_SHIP_ON_FRIDAY')
+    expect((await readLiveJudgments()).map((j) => j.text)).not.toContain(
+      'I_ALWAYS_SHIP_ON_FRIDAY',
+    )
+  })
+})
+
+// ─── SUPERSESSION, AS A PURE FUNCTION ───────────────────────────────────────
+//
+// The end-to-end proof (two real takes through the real writer, read back out
+// of the assembled file) lives in personaCourses.test.ts. These pin the RULES,
+// including the two places the rule deliberately abstains.
+describe('liveJudgments — which lines still speak for the owner', () => {
+  const big5 = COURSES[0].id
+  const other = COURSES[1].id
+  const j = (over: Partial<ManualJudgment> & { id: string; text: string }): ManualJudgment => ({
+    addedAt: '2026-08-01T00:00:00.000Z',
+    ...over,
+  })
+  const finding = (id: string, course: string, take: string | null): ManualJudgment =>
+    j({ id, text: `${id}-text`, tags: ['persona', course, ...(take ? [TAKE_TAG(take)] : [])] })
+  const texts = (list: ManualJudgment[]) => list.map((x) => x.text)
+
+  it('keeps only the NEWEST take of a course', () => {
+    const live = liveJudgments([
+      finding('a1', big5, '2026-08-01T00:00:00.000Z'),
+      finding('a2', big5, '2026-08-01T00:00:00.000Z'),
+      finding('b1', big5, '2026-08-14T09:00:00.000Z'),
+    ])
+    expect(texts(live)).toEqual(['b1-text'])
+  })
+
+  it('orders takes by the STAMP, not by the order they sit in the file', () => {
+    // Appends are chronological in practice; a file hand-edited or restored out
+    // of order must still resolve to the take that was actually taken last.
+    const live = liveJudgments([
+      finding('newer', big5, '2026-08-14T09:00:00.000Z'),
+      finding('older', big5, '2026-08-01T00:00:00.000Z'),
+    ])
+    expect(texts(live)).toEqual(['newer-text'])
+  })
+
+  it('never lets one course retire another', () => {
+    const live = liveJudgments([
+      finding('big5-old', big5, '2026-08-01T00:00:00.000Z'),
+      finding('other-only', other, '2026-08-01T00:00:00.000Z'),
+      finding('big5-new', big5, '2026-08-14T09:00:00.000Z'),
+    ])
+    expect(texts(live).sort()).toEqual(['big5-new-text', 'other-only-text'])
+  })
+
+  // ⚠ ABSTENTION 1 — the upgrade path. Findings written before the stamp
+  // existed carry a course tag and no take. Retiring them on sight would delete
+  // the persona of anyone who upgrades without retaking anything.
+  it('keeps unstamped findings while that course has never been redone', () => {
+    const live = liveJudgments([
+      finding('legacy-1', big5, null),
+      finding('legacy-2', big5, null),
+      j({ id: 'plain', text: 'a note the owner typed' }),
+    ])
+    expect(texts(live).sort()).toEqual(['a note the owner typed', 'legacy-1-text', 'legacy-2-text'])
+  })
+
+  it('…and retires them the moment that course IS redone', () => {
+    const live = liveJudgments([
+      finding('legacy', big5, null),
+      finding('fresh', big5, '2026-08-14T09:00:00.000Z'),
+    ])
+    expect(texts(live)).toEqual(['fresh-text'])
+  })
+
+  // ⚠ ABSTENTION 2 — no guessing by clock. Two unstamped takes carry no
+  // evidence of which came last, and `addedAt` order is exactly the kind of
+  // inference this file exists to refuse to make about the owner.
+  it('keeps BOTH when nothing says which unstamped take came last', () => {
+    const live = liveJudgments([
+      j({ id: 'u1', text: 'u1', tags: ['persona', big5], addedAt: '2026-08-01T00:00:00.000Z' }),
+      j({ id: 'u2', text: 'u2', tags: ['persona', big5], addedAt: '2026-08-14T00:00:00.000Z' }),
+    ])
+    expect(texts(live).sort()).toEqual(['u1', 'u2'])
+  })
+
+  it('a correction retires its target wherever it sits', () => {
+    const live = liveJudgments([
+      j({ id: 'wrong', text: 'wrong' }),
+      j({ id: 'right', text: 'right', correctsId: 'wrong' }),
+    ])
+    expect(texts(live)).toEqual(['right'])
+  })
+
+  it('leaves an ordinary note alone — it has no course and nobody corrected it', () => {
+    const live = liveJudgments([j({ id: 'n', text: 'plain' })])
+    expect(texts(live)).toEqual(['plain'])
   })
 })
 

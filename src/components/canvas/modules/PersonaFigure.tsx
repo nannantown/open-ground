@@ -303,8 +303,14 @@ export interface PersonaFigureProps {
    *  RegionSummary) — this file positions it and nothing else. */
   regionSummary: (region: PersonaRegion) => RegionSummary
   /** Which region is being probed, or null. Pointer and keyboard both land
-   *  here, so the module never has to know which one the owner used. */
-  onProbe: (region: PersonaRegion | null) => void
+   *  here, so a consumer never has to know which one the owner used.
+   *
+   *  OPTIONAL, and today nobody subscribes: this file draws the probe's own
+   *  summary beside the cursor, and the one outside reader — a hint line in the
+   *  rail explaining what pressing does — was removed with the rest of the
+   *  stage's operating instructions. The seam stays because the probe is a real
+   *  event and the cost of keeping it is one `?.`. */
+  onProbe?: (region: PersonaRegion | null) => void
 }
 
 export const PersonaFigure = ({
@@ -380,7 +386,7 @@ export const PersonaFigure = ({
     const before = probeRef.current
     probeRef.current = next?.region ?? null
     setProbe(next)
-    if ((next?.region ?? null) !== before) live.current.onProbe(next?.region ?? null)
+    if ((next?.region ?? null) !== before) live.current.onProbe?.(next?.region ?? null)
   }, [])
 
   const clampCam = useCallback(() => {
