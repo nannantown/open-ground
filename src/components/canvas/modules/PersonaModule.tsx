@@ -115,6 +115,7 @@ import type {
   PersonaCourseId,
   PersonaCourseRecord,
   PersonaCoursesResponse,
+  PersonaImportCounts,
   PersonaImportJobResponse,
   PersonaImportStartResponse,
   PersonaInterviewResponse,
@@ -250,6 +251,36 @@ const StageButton = ({
 /** How often a running turn / import is asked about. The same 500ms every
  *  sibling job on this panel polls at; there is no SSE on this path. */
 const CHAT_POLL_MS = 500
+
+/** How many CONSECUTIVE poll misses an import survives before the receipt says
+ *  failed. The job runs server-side regardless of whether this poll lands, so
+ *  one dropped fetch (a dev-server reload, a sleeping laptop's first tick)
+ *  must not repaint minutes of real distillation as a failure. Eight ticks =
+ *  four seconds of silence — a dead server, not a blink. */
+export const IMPORT_POLL_GRACE = 8
+
+/** Whether the poll's running payload says NOTHING NEW — same file, still
+ *  running, byte-identical counts. Then setImportJob keeps the PREVIOUS object:
+ *  a fresh `{...}` every 500ms is a new dependency value for the thread's
+ *  scroll effect, and that re-pin twice a second is what made scrolling up
+ *  during a distillation physically impossible (2026-08-17, owner:
+ *  「スクロールも適当な感じ」). */
+export const unchangedRunningImport = (
+  prev: PersonaImportView | null,
+  fileName: string,
+  counts: PersonaImportCounts | undefined,
+): prev is PersonaImportView => {
+  if (!prev || prev.state !== 'running' || prev.fileName !== fileName) return false
+  if (!prev.counts || !counts) return !prev.counts && !counts
+  return (
+    prev.counts.conversations === counts.conversations &&
+    prev.counts.ownerMessages === counts.ownerMessages &&
+    prev.counts.unreadable === counts.unreadable &&
+    prev.counts.droppedNonOwner === counts.droppedNonOwner &&
+    prev.counts.considered === counts.considered &&
+    prev.counts.notConsidered === counts.notConsidered
+  )
+}
 
 /** The digest the import dedupe is keyed on — of the FILE'S BYTES, so the
  *  server and this side agree without the server having to hold the file
@@ -853,8 +884,10 @@ export const PersonaModule = () => {
       const asked = regionForQuestion(question)
       if (asked && !body.corpusStale) fireSpark(asked, 1, 'node')
       // The answer just became a note — refresh so the owner sees where it
-      // landed instead of having to take it on faith.
-      await Promise.all([load(), loadPortrait()])
+      // landed instead of having to take it on faith. OUTSIDE the catch's
+      // reach: the answer IS saved, and a failed re-read must not repaint it
+      // as a failed turn with a retry that would answer twice.
+      await Promise.all([load(), loadPortrait()]).catch(() => {})
     } catch {
       // The words stay on screen as the owner's own bubble, with a retry under
       // it — and the question is still OPEN (its status only moves on a
@@ -920,7 +953,10 @@ export const PersonaModule = () => {
           // lights them for real, and spark one point per line so the owner
           // sees where each landed.
           fireSparkWave(kept, 260)
-          await Promise.all([load(), loadPortrait()])
+          // OUTSIDE the catch's reach: the turn IS done and its bubble is
+          // already true — a refresh that fails must not repaint it as a
+          // failed turn. load() raises its own error surface.
+          await Promise.all([load(), loadPortrait()]).catch(() => {})
         } catch {
           if (alive.current) failTurn(turnId)
         }
@@ -937,6 +973,9 @@ export const PersonaModule = () => {
       if (chatBusy) return
       setChatBusy(true)
       setChatErrorKey(null)
+      // A FINISHED import receipt is a receipt, not a resident: the next real
+      // message supersedes it. A RUNNING one stays — it is still reporting.
+      setImportJob((j) => (j && j.state !== 'running' ? null : j))
       // ON SCREEN BEFORE THE REQUEST, and it stays there whatever comes back.
       const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       setTurns((prev) => [
@@ -1029,20 +1068,25 @@ export const PersonaModule = () => {
 
   const pollImport = useCallback(
     (importId: string, fileName: string) => {
+      let misses = 0
       const tick = async () => {
         try {
           const res = await fetch(`/api/persona/import/${importId}`, { cache: 'no-store' })
           if (!res.ok) throw new Error('import poll failed')
           const body = (await res.json()) as PersonaImportJobResponse
           if (!alive.current) return
+          misses = 0
           if (body.state === 'running') {
             // `counts` lands as soon as PARSING did — show what arrived while
-            // the distillation is still going.
-            setImportJob({
-              fileName,
-              state: 'running',
-              ...(body.counts ? { counts: body.counts } : {}),
-            })
+            // the distillation is still going. UNCHANGED KEEPS THE OLD OBJECT
+            // (see unchangedRunningImport): a fresh one per tick re-fired the
+            // thread's scroll pin twice a second for the whole distillation.
+            const counts = body.counts
+            setImportJob((prev) =>
+              unchangedRunningImport(prev, fileName, counts)
+                ? prev
+                : { fileName, state: 'running', ...(counts ? { counts } : {}) },
+            )
             later(() => void tick(), CHAT_POLL_MS)
             return
           }
@@ -1057,10 +1101,20 @@ export const PersonaModule = () => {
             result: body.result,
           })
           fireSparkWave(body.result.kept, 34)
-          await Promise.all([load(), loadPortrait()])
+          // OUTSIDE the catch's reach: the import IS done — a refresh that
+          // fails must not repaint a true receipt as a failed import. A stale
+          // figure raises its own banner through load()'s own error path.
+          await Promise.all([load(), loadPortrait()]).catch(() => {})
         } catch {
-          if (alive.current)
-            setImportJob({ fileName, state: 'failed', errorKey: 'persona.import.failed' })
+          if (!alive.current) return
+          // The job is server-side; this fetch missing is not the import
+          // failing. Keep asking through IMPORT_POLL_GRACE consecutive misses.
+          misses += 1
+          if (misses < IMPORT_POLL_GRACE) {
+            later(() => void tick(), CHAT_POLL_MS)
+            return
+          }
+          setImportJob({ fileName, state: 'failed', errorKey: 'persona.import.failed' })
         }
       }
       later(() => void tick(), CHAT_POLL_MS)

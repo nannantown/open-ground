@@ -26,7 +26,7 @@
 // today, so there is no typing animation here — there is an elapsed counter,
 // which is the true thing.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import { capTrackingClass } from '@/lib/labelScript'
 import { PersonaPrivacyNote } from './PersonaPrivacyNote'
@@ -74,6 +74,17 @@ export const PROMPT_ROTATE_MS = 4200
  *  a save whose corpus rebuild failed raises the module's own persistent
  *  warning instead of relying on this. */
 export const RESOLVED_NOTICE_MS = 8000
+
+/** "At the bottom" for the stick-to-bottom rule — within one short bubble of
+ *  the true foot. Tighter and an in-flight smooth scroll un-sticks the follow;
+ *  looser and reading the second-to-last message still counts as "away". */
+export const AT_BOTTOM_PX = 48
+
+/** Kept lines shown on an import receipt before the 「ほか{n}件」 disclosure.
+ *  An import can mint up to 40 (IMPORT_MAX_KEPT) — rendered flat, the chip
+ *  wall pushed the receipt's numbers hundreds of pixels above a hidden-
+ *  scrollbar fold, which is exactly what the owner photographed. */
+export const IMPORT_KEPT_PREVIEW = 5
 
 /** WANDER, DON'T CYCLE. A fixed +1 walk turns the list into a carousel the
  *  reader learns the order of; a jump of 1–3 keeps it feeling like the screen
@@ -164,7 +175,7 @@ const STAGE_WARN = 'text-[#DDAE58]'
  *  not invert. Swapping either pair puts dark ink on near-black at noon. */
 const Bubble = ({ me, children }: { me?: boolean; children: React.ReactNode }) => (
   <div
-    className={`max-w-[88%] whitespace-pre-wrap rounded-[3px] border px-3 py-2 text-meta leading-relaxed ${
+    className={`max-w-[88%] whitespace-pre-wrap break-words rounded-[3px] border px-3 py-2 text-meta leading-relaxed ${
       me
         ? 'self-end border-accent/40 bg-accent/15 text-ink-onDeep'
         : 'self-start border-line bg-bg-card text-ink'
@@ -235,6 +246,7 @@ export const PersonaConversation = ({
   const [draft, setDraft] = useState('')
   const [focused, setFocused] = useState(false)
   const [dragging, setDragging] = useState(false)
+  const dragDepthRef = useRef(0)
   const talkRef = useRef<HTMLDivElement>(null)
 
   // The rotation reads these through refs so the interval is created ONCE —
@@ -273,12 +285,6 @@ export const PersonaConversation = ({
     setDraft('')
     onSend(text)
   }, [draft, busy, onSend])
-
-  // Grow upward: the newest thing is at the bottom, next to the input.
-  useEffect(() => {
-    const el = talkRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [turns, importJob])
 
   const anythingKept = turns.some((turn) => (turn.kept?.length ?? 0) > 0)
   const questionText = question ? (lang === 'ja' ? question.textJa : question.textEn) : ''
@@ -327,6 +333,93 @@ export const PersonaConversation = ({
     return () => window.clearTimeout(id)
   }, [justResolved])
 
+  // ── STICK TO THE BOTTOM, DON'T YANK TO IT ─────────────────────────────────
+  //
+  // The first cut was one unconditional `scrollTop = scrollHeight` on
+  // [turns, importJob]. Measured on the running app (owner, 2026-08-17:
+  // 「スクロールも適当な感じ」), that one line was BOTH scroll defects at once:
+  //   · no "is the reader already at the bottom?" check, so reading history
+  //     got snapped to the foot on every reply/failure/cancel — and during a
+  //     ZIP import the poll re-minted its state every 500ms, which made
+  //     scrolling up PHYSICALLY IMPOSSIBLE for the whole distillation;
+  //   · deps of only [turns, importJob], so the skip receipt, the day's
+  //     question and the resolved notice appended real content with NO scroll
+  //     at all — invisible below the fold of a scrollbar-less container.
+  //
+  // The rule now: follow new content ONLY while the reader is at (or within a
+  // bubble's height of) the bottom. Scrolled up = reading — nothing moves the
+  // view; a 「↓ 最新へ」 pill appears instead, and pressing it (or scrolling
+  // back down) re-arms the follow. SdkWorkerPane:426 has carried this exact
+  // guard for its log pane all along; the chat simply never got it.
+  const stuckRef = useRef(true)
+  const [below, setBelow] = useState(false) // new content while scrolled up
+  const [scrolled, setScrolled] = useState(false) // history exists above the fold
+  const pinToBottom = useCallback(() => {
+    const el = talkRef.current
+    if (el) el.scrollTop = el.scrollHeight
+    stuckRef.current = true
+    setBelow(false)
+  }, [])
+  const onThreadScroll = useCallback(() => {
+    const el = talkRef.current
+    if (!el) return
+    stuckRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_PX
+    if (stuckRef.current) setBelow(false)
+    setScrolled(el.scrollTop > 4)
+  }, [])
+  // useLayoutEffect, not useEffect: the pin must land before paint, or every
+  // new message flashes the un-scrolled position for a frame first.
+  useLayoutEffect(() => {
+    if (stuckRef.current) {
+      const el = talkRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    } else {
+      setBelow(true)
+    }
+    // Every dep here APPENDS OR REMOVES content inside the container — the old
+    // list stopped at the first two, which is how the skip receipt and the
+    // question arrived off-screen.
+  }, [turns, importJob, question?.status, justResolved, skipFailed])
+  // The container is max-h-[46vh]: its height follows the window, so a resize
+  // while stuck must re-pin or the newest message slides below the fold.
+  useEffect(() => {
+    const onResize = () => {
+      if (!stuckRef.current) return
+      const el = talkRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  // ── IMPORT RECEIPT STATE ──────────────────────────────────────────────────
+  // The distillation is a whole cold `claude` run — minutes on a real export —
+  // and a static count block reads as a hang. The clock runs only while the
+  // distiller actually does (counts landed, job still running); the parse
+  // phase before that has its own 「読んでいます」 line and needs no timer.
+  const distilling = importJob?.state === 'running' && importJob.counts != null
+  const [importSeconds, setImportSeconds] = useState(0)
+  useEffect(() => {
+    if (!distilling) {
+      setImportSeconds(0)
+      return undefined
+    }
+    const started = Date.now()
+    const id = window.setInterval(
+      () => setImportSeconds(Math.floor((Date.now() - started) / 1000)),
+      1000,
+    )
+    return () => window.clearInterval(id)
+  }, [distilling])
+  // A real export kept ~40 lines and every one became a chip — a wall that
+  // buried the receipt's own numbers (2026-08-17 audit). The receipt previews
+  // IMPORT_KEPT_PREVIEW and folds the rest behind one button; a NEW file
+  // starts folded again.
+  const [showAllKept, setShowAllKept] = useState(false)
+  useEffect(() => {
+    setShowAllKept(false)
+  }, [importJob?.fileName])
+
   // ⚠ ONE BOX, ONE JOB AT A TIME (field report, 2026-08-15). While today's
   // question is unanswered, this box IS that question's answer box — and the
   // rotating placeholder suggests a DIFFERENT thing to talk about. Shown under
@@ -346,25 +439,39 @@ export const PersonaConversation = ({
     e.stopPropagation()
   }
 
-  const hasThread = !threadRead || question !== null || turns.length > 0 || importJob !== null
+  // `question?.status === 'open'`, not `question !== null`: a resolved question
+  // renders nothing (the block below gates on 'open'), so counting it here
+  // mounted an EMPTY scroll container whose only contribution was its margin.
+  // `justResolved` DOES count: on an empty day the resolved receipt is the only
+  // thing in the thread, and a receipt whose container is gone was never shown.
+  const hasThread =
+    !threadRead ||
+    question?.status === 'open' ||
+    turns.length > 0 ||
+    importJob !== null ||
+    justResolved !== null
 
   return (
     <div
       className="flex flex-col"
       onDragEnter={(e) => {
         stop(e)
+        // A DEPTH COUNTER, not a boolean. dragleave fires on this root every
+        // time the pointer crosses INTO a child (the thread, the input, every
+        // bubble), so a plain setDragging(false) made the ochre drop border
+        // flicker all the way across the console.
+        dragDepthRef.current += 1
         setDragging(true)
       }}
-      onDragOver={(e) => {
-        stop(e)
-        setDragging(true)
-      }}
+      onDragOver={stop}
       onDragLeave={(e) => {
         stop(e)
-        setDragging(false)
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+        if (dragDepthRef.current === 0) setDragging(false)
       }}
       onDrop={(e) => {
         stop(e)
+        dragDepthRef.current = 0
         setDragging(false)
         const file = e.dataTransfer?.files?.[0]
         if (file) onDropExport(file)
@@ -373,11 +480,34 @@ export const PersonaConversation = ({
       {/* THE ONLY THING ON THIS SCREEN THAT SCROLLS, besides the result sheet —
        *  and it scrolls INSIDE itself, so the stage never becomes a page (owner:
        *  「スクロールなしにしてほしい」). Absent entirely when there is nothing in
-       *  it: the rotating placeholder carries the whole invitation. */}
+       *  it: the rotating placeholder carries the whole invitation.
+       *
+       *  The scrollbar stays hidden (stage aesthetics), so the wrapper carries
+       *  the two affordances that replace it: a top fade the moment history
+       *  exists above the fold, and the 「↓ 最新へ」 pill when content arrived
+       *  while the reader was up in that history. */}
       {hasThread && (
+        <div className="relative mb-2.5">
+          {scrolled && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 top-0 z-10 h-7 bg-gradient-to-b from-bg-deep to-transparent"
+            />
+          )}
+          {below && (
+            <button
+              type="button"
+              onClick={pinToBottom}
+              className="absolute bottom-2 left-1/2 z-10 -translate-x-1/2 rounded-full border border-line-onDeep bg-bg-cardOnDeep px-3 py-1 text-micro text-ink-onDeep/75 shadow-card transition-colors hover:text-ink-onDeep"
+            >
+              {t('persona.chat.jumpLatest')}
+            </button>
+          )}
         <div
           ref={talkRef}
-          className="mb-2.5 flex max-h-[min(46vh,420px)] flex-col gap-3 overflow-y-auto pr-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          data-testid="chat-thread"
+          onScroll={onThreadScroll}
+          className="flex max-h-[min(46vh,420px)] flex-col gap-3 overflow-y-auto pr-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
           {/* A FAILED READ IS NOT AN EMPTY CONVERSATION. */}
           {!threadRead && (
@@ -390,69 +520,6 @@ export const PersonaConversation = ({
               >
                 {t('persona.retry')}
               </button>
-            </div>
-          )}
-
-          {/* Today's 1問, as the conversation's opening turn. The next thing the
-           *  owner types answers it (the module routes the send).
-           *
-           *  ⚠ WHILE IT IS OPEN, AND NOT A MINUTE LONGER — see the lifetime note
-           *  at `justResolved`. An answered question has nothing left to do and
-           *  standing there is the whole complaint. */}
-          {question?.status === 'open' && (
-            /* ⚠ THE QUESTION IS TEXT. NOT A CARD, NOT A BRACKET.
-             *
-             *  It has now been through three arrangements, and the third is the
-             *  owner's own diagnosis (2026-08-16): 「今日の一問もブロックに囲まれてて
-             *  フォームも囲まれているから冗長に感じるのかも。質問はテキストだけでいい」
-             *  — a box above a box, and only one of them is a thing you can
-             *  operate. The input's border MEANS something (type here); a border
-             *  drawn around the question means nothing, so it was competing with
-             *  the one that does. With the card gone the box below is the only
-             *  bordered object on the stage, which says where to answer better
-             *  than any amount of drawing around the question did.
-             *
-             *  The ochre rail that ran down the left of both went with it, same
-             *  verdict — 「左のサイドラインもやめようAIっぽい」. The job it was doing
-             *  (tying the question to the box) is done by there being nothing
-             *  else between them.
-             *
-             *  ⚠ `ink-onDeep`, NOT `ink`. This text now sits bare on `bg-deep`,
-             *  the one surface in the palette that does NOT invert — `text-ink`
-             *  on it is the SAME COLOUR in light mode (1.00:1, invisible). The
-             *  card carried inverting tokens legitimately; on the stage they
-             *  would be a light-theme-only disappearance nobody developing in
-             *  dark would ever see. See src/labelPlates.test.ts. */
-            <div className="flex flex-col">
-              <div className="flex items-baseline justify-between gap-3">
-                <span
-                  className={`label-cap ${capTrackingClass(t('persona.interview.heading'))} text-[var(--beacon-waiting)]`}
-                >
-                  {t('persona.interview.heading')}
-                </span>
-                <button
-                  type="button"
-                  onClick={onSkipQuestion}
-                  disabled={answering}
-                  className="shrink-0 text-micro text-ink-onDeep/35 transition-colors hover:text-ink-onDeep disabled:opacity-50"
-                >
-                  {t('persona.interview.skip')}
-                </button>
-              </div>
-              {/* THE SETTING FIRST: the question quotes fragments of something
-               *  that happened days ago, and read cold those quotes are noise.
-               *  Absent on questions written by an older build. */}
-              {questionContext && (
-                <p className="mt-1.5 text-micro leading-relaxed text-ink-onDeep/40">
-                  {questionContext}
-                </p>
-              )}
-              <p className="mt-1 text-meta leading-relaxed text-ink-onDeep/85">{questionText}</p>
-              {skipFailed && (
-                <p className={`mt-1.5 text-micro leading-relaxed ${STAGE_ALERT}`}>
-                  {t('persona.interview.skipFailed')}
-                </p>
-              )}
             </div>
           )}
 
@@ -548,7 +615,7 @@ export const PersonaConversation = ({
           {justResolved && (
             <p
               aria-live="polite"
-              className="text-micro leading-relaxed text-ink-onDeep/45"
+              className="self-start text-micro leading-relaxed text-ink-onDeep/45"
             >
               {t(
                 justResolved === 'skipped'
@@ -562,72 +629,227 @@ export const PersonaConversation = ({
             </p>
           )}
 
+          {/* ── THE IMPORT RECEIPT — A CARD, NOT A CHAT EXCHANGE ─────────────
+           *  It used to render as an owner bubble (the file name) answered by an
+           *  assistant bubble (the numbers) — the import WEARING the chat's
+           *  clothes. The owner then asked the stand-in about the zip and it
+           *  truthfully said it had never seen one (2026-08-17 screenshot):
+           *  both channels behaved, and the screen as a whole lied. The import
+           *  is a different process, so it gets a different body — one card in
+           *  the stage's own on-deep surface, named 「取り込み」, with the file
+           *  name in its head — and the card SAYS the conversation never saw
+           *  this file.
+           *
+           *  ⚠ ZEROS ARE NOT SAID. The receipt printed 「読めなかった行が0件あり、
+           *  飛ばしました」 and three more zero-lines on a clean import — the
+           *  exact clause-per-known-thing rule the Board roll-up follows,
+           *  broken wholesale here. A zero loss is silence; a NONZERO loss is
+           *  a sentence. (The failure line is still exclusive with ALL numbers:
+           *  a partial count over a file that could not be parsed is the exact
+           *  failure mode.) */}
           {importJob && (
-            <div className="flex flex-col gap-1.5">
-              <Bubble me>{importJob.fileName}</Bubble>
-              <Bubble>
-                {/* THE HEAD LINE, and it is exclusive with the counts below: a
-                 *  partial count over a file that could not be parsed is the
-                 *  exact failure mode, so a failure prints its own sentence and
-                 *  NO numbers at all. */}
-                {importJob.errorKey
-                  ? t(importJob.errorKey, importJob.errorVars)
-                  : importJob.counts
-                    ? null
-                    : t('persona.import.reading')}
-                {/* WHAT WAS READ, WHAT WAS UNREADABLE, WHAT WAS DROPPED — every
-                 *  field, including the zeros. A number that hides its own
-                 *  losses is the failure this app keeps hitting. Shown as soon
-                 *  as PARSING lands, before the distillation finishes. */}
-                {!importJob.errorKey && importJob.counts && (
-                  <span className="mt-1 block text-ink-muted">
-                    <span className="block">
-                      {t('persona.import.parsed', {
-                        conversations: importJob.counts.conversations,
-                      })}
-                    </span>
-                    <span className="block">{t('persona.import.ownerOnly')}</span>
-                    <span className="block">
-                      {t('persona.import.dropped', { count: importJob.counts.droppedNonOwner })}
-                    </span>
-                    <span className="block">
-                      {t('persona.import.unreadableRows', { count: importJob.counts.unreadable })}
-                    </span>
-                    <span className="block">
-                      {t('persona.import.considered', { count: importJob.counts.considered })}
-                    </span>
-                    <span className="block">
-                      {t('persona.import.notConsidered', {
-                        count: importJob.counts.notConsidered,
-                      })}
-                    </span>
-                  </span>
-                )}
-                {importJob.result && (
-                  <span className="mt-1 block text-ink-muted">
-                    <span className="block">
-                      {t('persona.import.duplicates', {
-                        count: importJob.result.duplicatesSkipped,
-                      })}
-                    </span>
-                    <span className="block">
-                      {t('persona.import.keptUnreadable', {
-                        count: importJob.result.keptUnreadable,
-                      })}
-                    </span>
-                  </span>
-                )}
-              </Bubble>
-              {importJob.result && (
-                <p className="self-end text-micro leading-relaxed text-ink-onDeep/55">
-                  {t('persona.import.keptCount', { count: importJob.result.kept.length })}
+            <div
+              data-testid="import-receipt"
+              className="flex flex-col gap-1.5 self-stretch rounded-[3px] border border-line-onDeep bg-bg-cardOnDeep px-3.5 py-2.5"
+            >
+              <div className="flex items-baseline justify-between gap-3">
+                <span className={`label-cap ${capTrackingClass(t('persona.import.heading'))} shrink-0 text-ink-onDeep/50`}>
+                  {t('persona.import.heading')}
+                </span>
+                <span className="min-w-0 truncate text-micro text-ink-onDeep/40" title={importJob.fileName}>
+                  {importJob.fileName}
+                </span>
+              </div>
+              {importJob.errorKey ? (
+                <p className={`text-meta leading-relaxed ${STAGE_ALERT}`}>
+                  {t(importJob.errorKey, importJob.errorVars)}
                 </p>
+              ) : (
+                <>
+                  {!importJob.counts && (
+                    <p className="text-meta leading-relaxed text-ink-onDeep/70">
+                      {t('persona.import.reading')}
+                    </p>
+                  )}
+                  {importJob.counts && (
+                    <div className="text-meta leading-relaxed text-ink-onDeep/70">
+                      <span className="block">
+                        {t('persona.import.parsed', {
+                          conversations: importJob.counts.conversations,
+                        })}
+                      </span>
+                      <span className="block">{t('persona.import.ownerOnly')}</span>
+                      {importJob.counts.droppedNonOwner > 0 && (
+                        <span className="block">
+                          {t('persona.import.dropped', {
+                            count: importJob.counts.droppedNonOwner,
+                          })}
+                        </span>
+                      )}
+                      {importJob.counts.unreadable > 0 && (
+                        <span className="block">
+                          {t('persona.import.unreadableRows', {
+                            count: importJob.counts.unreadable,
+                          })}
+                        </span>
+                      )}
+                      {/* The denominator, at last: 「このうち400件」 with nothing to
+                       *  anchor it was the owner's own screenshot. */}
+                      <span className="block">
+                        {t('persona.import.considered', {
+                          total: importJob.counts.considered + importJob.counts.notConsidered,
+                          count: importJob.counts.considered,
+                        })}
+                      </span>
+                      {importJob.counts.notConsidered > 0 && (
+                        <span className="block">
+                          {t('persona.import.notConsidered', {
+                            count: importJob.counts.notConsidered,
+                          })}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {/* The distillation is a whole cold claude run — minutes on a
+                   *  real export. A static count block reads as a hang; the
+                   *  elapsed counter is the same honesty the chat's own
+                   *  thinking line carries. */}
+                  {importJob.state === 'running' && importJob.counts && (
+                    <p className="text-micro leading-relaxed text-ink-onDeep/45">
+                      {t('persona.import.distilling', { seconds: importSeconds })}
+                    </p>
+                  )}
+                  {importJob.result && (
+                    <div className="text-meta leading-relaxed text-ink-onDeep/70">
+                      {importJob.result.duplicatesSkipped > 0 && (
+                        <span className="block">
+                          {t('persona.import.duplicates', {
+                            count: importJob.result.duplicatesSkipped,
+                          })}
+                        </span>
+                      )}
+                      {importJob.result.keptUnreadable > 0 && (
+                        <span className="block">
+                          {t('persona.import.keptUnreadable', {
+                            count: importJob.result.keptUnreadable,
+                          })}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {importJob.result &&
+                    (importJob.result.kept.length === 0 ? (
+                      <p className="text-micro leading-relaxed text-ink-onDeep/45">
+                        {t('persona.chat.keptNone')}
+                      </p>
+                    ) : (
+                      <p className="text-micro leading-relaxed text-ink-onDeep/55">
+                        {t('persona.import.keptCount', {
+                          count: importJob.result.kept.length,
+                        })}
+                      </p>
+                    ))}
+                  {(showAllKept
+                    ? importJob.result?.kept
+                    : importJob.result?.kept.slice(0, IMPORT_KEPT_PREVIEW)
+                  )?.map((kept) => (
+                    <KeptChip key={kept.judgment.id} kept={kept} onCorrect={onCorrect} />
+                  ))}
+                  {!showAllKept &&
+                    (importJob.result?.kept.length ?? 0) > IMPORT_KEPT_PREVIEW && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllKept(true)}
+                        className="self-end text-micro text-ink-onDeep/55 underline-offset-2 transition-colors hover:text-ink-onDeep hover:underline"
+                      >
+                        {t('persona.import.showMoreKept', {
+                          count: (importJob.result?.kept.length ?? 0) - IMPORT_KEPT_PREVIEW,
+                        })}
+                      </button>
+                    )}
+                  {/* The line the owner's screenshot was missing: the chat and
+                   *  the import are different channels, and only this card says
+                   *  so. Stated on the finished receipt, where the next thing
+                   *  the owner does is often to ASK the stand-in about it. */}
+                  {importJob.state === 'done' && (
+                    <p className="border-t border-line-onDeep pt-1.5 text-micro leading-relaxed text-ink-onDeep/40">
+                      {t('persona.import.notChat')}
+                    </p>
+                  )}
+                </>
               )}
-              {importJob.result?.kept.map((kept) => (
-                <KeptChip key={kept.judgment.id} kept={kept} onCorrect={onCorrect} />
-              ))}
             </div>
           )}
+
+          {/* Today's 1問 — AT THE FOOT of the thread, right above the box that
+           *  answers it. It opened the thread for its first two arrangements,
+           *  which read fine on an empty day and became invisible on a full
+           *  one: the thread pins to the bottom, the scrollbar is hidden, and a
+           *  question inserted at the TOP arrived with no scroll and no
+           *  affordance — while the input silently became its answer box
+           *  (2026-08-17 audit). The thing the next keypress answers belongs
+           *  next to the place the keypress happens.
+           *
+           *  ⚠ WHILE IT IS OPEN, AND NOT A MINUTE LONGER — see the lifetime note
+           *  at `justResolved`. An answered question has nothing left to do and
+           *  standing there is the whole complaint. */}
+          {question?.status === 'open' && (
+            /* ⚠ THE QUESTION IS TEXT. NOT A CARD, NOT A BRACKET.
+             *
+             *  It has now been through three arrangements, and the third is the
+             *  owner's own diagnosis (2026-08-16): 「今日の一問もブロックに囲まれてて
+             *  フォームも囲まれているから冗長に感じるのかも。質問はテキストだけでいい」
+             *  — a box above a box, and only one of them is a thing you can
+             *  operate. The input's border MEANS something (type here); a border
+             *  drawn around the question means nothing, so it was competing with
+             *  the one that does. With the card gone the box below is the only
+             *  bordered object on the stage, which says where to answer better
+             *  than any amount of drawing around the question did.
+             *
+             *  The ochre rail that ran down the left of both went with it, same
+             *  verdict — 「左のサイドラインもやめようAIっぽい」. The job it was doing
+             *  (tying the question to the box) is done by there being nothing
+             *  else between them.
+             *
+             *  ⚠ `ink-onDeep`, NOT `ink`. This text now sits bare on `bg-deep`,
+             *  the one surface in the palette that does NOT invert — `text-ink`
+             *  on it is the SAME COLOUR in light mode (1.00:1, invisible). The
+             *  card carried inverting tokens legitimately; on the stage they
+             *  would be a light-theme-only disappearance nobody developing in
+             *  dark would ever see. See src/labelPlates.test.ts. */
+            <div className="flex flex-col">
+              <div className="flex items-baseline justify-between gap-3">
+                <span
+                  className={`label-cap ${capTrackingClass(t('persona.interview.heading'))} text-[var(--beacon-waiting)]`}
+                >
+                  {t('persona.interview.heading')}
+                </span>
+                <button
+                  type="button"
+                  onClick={onSkipQuestion}
+                  disabled={answering}
+                  className="shrink-0 text-micro text-ink-onDeep/35 transition-colors hover:text-ink-onDeep disabled:opacity-50"
+                >
+                  {t('persona.interview.skip')}
+                </button>
+              </div>
+              {/* THE SETTING FIRST: the question quotes fragments of something
+               *  that happened days ago, and read cold those quotes are noise.
+               *  Absent on questions written by an older build. */}
+              {questionContext && (
+                <p className="mt-1.5 text-micro leading-relaxed text-ink-onDeep/40">
+                  {questionContext}
+                </p>
+              )}
+              <p className="mt-1 text-meta leading-relaxed text-ink-onDeep/85">{questionText}</p>
+              {skipFailed && (
+                <p className={`mt-1.5 text-micro leading-relaxed ${STAGE_ALERT}`}>
+                  {t('persona.interview.skipFailed')}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
         </div>
       )}
 

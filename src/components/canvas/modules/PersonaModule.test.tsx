@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, cleanup, fireEvent, waitFor, screen, within, act } from '@testing-library/react'
-import { PersonaModule, courseRailState, parseTags, quoteForCorrection } from './PersonaModule'
+import {
+  IMPORT_POLL_GRACE,
+  PersonaModule,
+  courseRailState,
+  parseTags,
+  quoteForCorrection,
+  unchangedRunningImport,
+} from './PersonaModule'
 import { RESOLVED_NOTICE_MS } from './PersonaConversation'
 import { MAX_EXPORT_UPLOAD_BYTES, megabytes } from '@/lib/claudeExport'
 import {
@@ -211,6 +218,13 @@ let chatTurnPayload: Partial<PersonaChatTurnResponse>
 let chatStartRejection: { status: number; body: Record<string, unknown> } | null
 let importJobPayload: Partial<PersonaImportJobResponse>
 let importStartRejection: { status: number; body: Record<string, unknown> } | null
+/** How many import-job polls 500 before the stub starts answering. The job is
+ *  server-side; a dropped poll is NOT a failed import, and this knob is how the
+ *  grace tests say "the network blinked N times". */
+let importPollFailures: number
+/** Import-job polls actually asked, so a test can wait for "N more ticks
+ *  passed" instead of sleeping and hoping. */
+let importPolls: number
 
 /** One kept line as the server hands it back: the FULL stored judgment, so the
  *  chip is pressable with no round-trip. */
@@ -290,6 +304,8 @@ beforeEach(() => {
   chatStartRejection = null
   importJobPayload = { state: 'running', elapsedMs: 0 }
   importStartRejection = null
+  importPollFailures = 0
+  importPolls = 0
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -330,6 +346,11 @@ beforeEach(() => {
         return new Response(JSON.stringify({ importId: 'i-1' }), { status: 202 })
       }
       if (url.startsWith('/api/persona/import/')) {
+        importPolls += 1
+        if (importPollFailures > 0) {
+          importPollFailures -= 1
+          return new Response('{}', { status: 500 })
+        }
         return new Response(JSON.stringify(importJobPayload), { status: 200 })
       }
       // NOTE: every /api/you-corpus/* branch must sit ABOVE the bare
@@ -1311,11 +1332,14 @@ describe('PersonaModule — taking in a claude.ai export', () => {
     expect(posts[0].json).toBeUndefined()
     expect(posts[0].fileSha).toBeUndefined()
 
+    // The read-count sentence carries its own denominator (5 of 5); the ZERO
+    // notConsidered line is silence, per the receipt's zero-gate.
     expect(
-      await screen.findByText('persona.import.notConsidered:{"count":0}', undefined, {
+      await screen.findByText('persona.import.considered:{"total":5,"count":5}', undefined, {
         timeout: 4000,
       }),
     ).toBeTruthy()
+    expect(screen.queryByText(/persona\.import\.notConsidered/)).toBeNull()
   })
 
   // ⚠ THE ZIP IS THE NORMAL CASE (2026-08-15). claude.ai hands the export over
@@ -3557,5 +3581,175 @@ describe('PersonaModule — the question, honest about what actually landed', ()
     // that promises they are still here would be nonsense.
     expect(screen.queryByText('persona.chat.turnFailed')).not.toBeInTheDocument()
     expect(screen.queryByText('persona.chat.retry')).not.toBeInTheDocument()
+  })
+})
+
+// ─── THE POLL MUST NOT WEAR THE SCREEN OUT ──────────────────────────────────
+//
+// Two module-side halves of the owner's 「スクロールも適当な感じ」 report
+// (2026-08-17). The component now follows only a reader who is at the bottom —
+// but the MODULE was re-minting the importJob object every 500ms tick, so the
+// thread's append-effect fired twice a second for the whole distillation:
+// scrolling was fought all the way up, and after the fix it would still have
+// raised the 「↓ 最新へ」 pill over content that never changed. And one dropped
+// POLL painted minutes of real server-side work as a failed import.
+describe('PersonaModule — the import poll is not the screen’s enemy', () => {
+  const doneResult = () => ({
+    conversations: 2,
+    ownerMessages: 5,
+    unreadable: 0,
+    droppedNonOwner: 4,
+    considered: 5,
+    notConsidered: 0,
+    kept: [keptWrite()],
+    duplicatesSkipped: 0,
+    keptUnreadable: 0,
+  })
+  const runningCounts = () => ({
+    conversations: 2,
+    ownerMessages: 5,
+    unreadable: 0,
+    droppedNonOwner: 4,
+    considered: 5,
+    notConsidered: 0,
+  })
+  const drop = (name = 'conversations.json') => {
+    const file = new File(['[{"name":"a"}]'], name, { type: 'application/json' })
+    fireEvent.drop(talkInput(), { dataTransfer: { files: [file] } })
+  }
+
+  it('an UNCHANGED running poll leaves a reader in history alone — no pill, no pull', async () => {
+    importJobPayload = { state: 'running', elapsedMs: 0, counts: runningCounts() }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+    drop()
+    await screen.findByText('persona.import.considered:{"total":5,"count":5}', undefined, {
+      timeout: 4000,
+    })
+
+    // Climb up into history, with stubbed geometry (jsdom lays nothing out).
+    const el = screen.getByTestId('chat-thread')
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, value: 1000 })
+    Object.defineProperty(el, 'clientHeight', { configurable: true, value: 300 })
+    Object.defineProperty(el, 'scrollTop', { configurable: true, writable: true, value: 100 })
+    fireEvent.scroll(el)
+
+    // Let at least three more identical polls land…
+    const seen = importPolls
+    await waitFor(() => expect(importPolls).toBeGreaterThanOrEqual(seen + 3), { timeout: 4000 })
+    // …and nothing moved and nothing was announced: identical state is not
+    // new content (unchangedRunningImport keeps the same object, so the
+    // thread's append-effect never fires).
+    expect(el.scrollTop).toBe(100)
+    expect(screen.queryByText('persona.chat.jumpLatest')).toBeNull()
+  })
+
+  it('a BLINKED poll keeps polling — the import is on the server, not on this fetch', async () => {
+    importPollFailures = 2
+    importJobPayload = { state: 'done', elapsedMs: 900, result: doneResult() }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+    drop()
+    // Two 500s, then the truth: the receipt lands DONE, and the blink was
+    // never spoken of.
+    await screen.findByText('persona.import.notChat', undefined, { timeout: 5000 })
+    expect(screen.queryByText('persona.import.failed')).toBeNull()
+  })
+
+  it(`${IMPORT_POLL_GRACE} consecutive misses IS a dead server — then, and only then, failed`, async () => {
+    importPollFailures = Number.MAX_SAFE_INTEGER
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+    drop()
+    await screen.findByText('persona.import.failed', undefined, { timeout: 10000 })
+    // The grace was actually consumed, not skipped.
+    expect(importPolls).toBeGreaterThanOrEqual(IMPORT_POLL_GRACE)
+  }, 15000)
+
+  it('the NEXT message clears a finished receipt — a receipt is not a resident', async () => {
+    importJobPayload = { state: 'done', elapsedMs: 900, result: doneResult() }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+    drop()
+    await screen.findByText('persona.import.notChat', undefined, { timeout: 4000 })
+
+    say('で、それはどういう意味?')
+    // Gone at once — the conversation moved on, and the numbers had been read.
+    expect(screen.queryByTestId('import-receipt')).toBeNull()
+  })
+
+  it('…but never a RUNNING one — it is still reporting', async () => {
+    importJobPayload = { state: 'running', elapsedMs: 0, counts: runningCounts() }
+    render(<PersonaModule />)
+    await screen.findByText('persona.tabLabel')
+    drop()
+    await screen.findByText('persona.import.considered:{"total":5,"count":5}', undefined, {
+      timeout: 4000,
+    })
+
+    say('とちゅうだけど聞きたい')
+    expect(screen.getByTestId('import-receipt')).toBeTruthy()
+  })
+})
+
+// ─── unchangedRunningImport — the comparator the poll leans on ──────────────
+describe('unchangedRunningImport', () => {
+  const countsOf = () => ({
+    conversations: 2,
+    ownerMessages: 5,
+    unreadable: 1,
+    droppedNonOwner: 4,
+    considered: 5,
+    notConsidered: 0,
+  })
+  const runningJob = () => ({
+    fileName: 'conversations.json',
+    state: 'running' as const,
+    counts: countsOf(),
+  })
+
+  it('says UNCHANGED for the same file, still running, byte-identical counts', () => {
+    expect(unchangedRunningImport(runningJob(), 'conversations.json', countsOf())).toBe(true)
+  })
+
+  it('says unchanged while BOTH sides are still count-less (parsing not landed)', () => {
+    expect(
+      unchangedRunningImport(
+        { fileName: 'conversations.json', state: 'running' },
+        'conversations.json',
+        undefined,
+      ),
+    ).toBe(true)
+  })
+
+  it('counts LANDING is a change — the parse line must be allowed on screen', () => {
+    expect(
+      unchangedRunningImport(
+        { fileName: 'conversations.json', state: 'running' },
+        'conversations.json',
+        countsOf(),
+      ),
+    ).toBe(false)
+  })
+
+  it('EVERY count field is compared — a drift in any one of them is a change', () => {
+    const keys = Object.keys(countsOf()) as Array<keyof ReturnType<typeof countsOf>>
+    expect(keys).toHaveLength(6)
+    for (const key of keys) {
+      const bumped = { ...countsOf(), [key]: countsOf()[key] + 1 }
+      expect(unchangedRunningImport(runningJob(), 'conversations.json', bumped)).toBe(false)
+    }
+  })
+
+  it('a different file, a finished state, or no previous job are all changes', () => {
+    expect(unchangedRunningImport(runningJob(), 'other.json', countsOf())).toBe(false)
+    expect(
+      unchangedRunningImport(
+        { ...runningJob(), state: 'done' as const },
+        'conversations.json',
+        countsOf(),
+      ),
+    ).toBe(false)
+    expect(unchangedRunningImport(null, 'conversations.json', countsOf())).toBe(false)
   })
 })

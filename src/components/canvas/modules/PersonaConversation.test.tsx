@@ -2,6 +2,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, cleanup, fireEvent, screen, waitFor, act } from '@testing-library/react'
 import {
+  AT_BOTTOM_PX,
+  IMPORT_KEPT_PREVIEW,
   PersonaConversation,
   PROMPT_KEYS,
   PROMPT_ROTATE_MS,
@@ -612,7 +614,9 @@ describe('PersonaConversation — dropping a claude.ai export', () => {
   it('takes a file on the same slot talking uses, and says so while it hovers', () => {
     draw()
     const box = input()
-    fireEvent.dragOver(box, { dataTransfer: { files: [] } })
+    // dragENTER, as a real drag does first — the root arms its depth counter
+    // there (dragover alone never fires without an enter before it).
+    fireEvent.dragEnter(box, { dataTransfer: { files: [] } })
     expect(input().placeholder).toBe('persona.import.dropHint')
 
     const f = file()
@@ -622,9 +626,26 @@ describe('PersonaConversation — dropping a claude.ai export', () => {
     expect(input().placeholder).toContain('persona.chat.placeholder')
   })
 
-  // EVERY FIELD, INCLUDING THE ZEROS. A number that hides its own losses is the
-  // failure this app keeps hitting, so `notConsidered` and `duplicatesSkipped`
-  // are rendered even when they are 0.
+  it('crossing INTO a child does not flicker the drop hint away', () => {
+    // dragleave fires on the root every time the pointer crosses into a child
+    // (the thread, a bubble, the input) — with a plain boolean the ochre border
+    // flickered all the way across the console. The depth counter only
+    // disarms when as many leaves as enters have fired.
+    draw({ turns: [turn()] })
+    const box = input()
+    fireEvent.dragEnter(box, { dataTransfer: { files: [] } })
+    fireEvent.dragEnter(screen.getByTestId('chat-thread'), { dataTransfer: { files: [] } })
+    fireEvent.dragLeave(box, { dataTransfer: { files: [] } })
+    expect(input().placeholder).toBe('persona.import.dropHint')
+    fireEvent.dragLeave(screen.getByTestId('chat-thread'), { dataTransfer: { files: [] } })
+    expect(input().placeholder).toContain('persona.chat.placeholder')
+  })
+
+  // A NONZERO LOSS IS A SENTENCE; A ZERO LOSS IS SILENCE — the Board roll-up's
+  // clause-per-known-thing rule. The receipt used to print five 「0件」 lines on
+  // a clean import (the owner's own screenshot); the losses that ARE nonzero
+  // here still each get their line, and the denominator sits in the
+  // `considered` sentence itself so 400-of-900 can never read as "read it all".
   it('reports what was read, what was dropped and what was NOT looked at', () => {
     const job: PersonaImportView = {
       fileName: 'conversations.json',
@@ -634,17 +655,61 @@ describe('PersonaConversation — dropping a claude.ai export', () => {
     }
     draw({ importJob: job })
 
+    // The receipt is a CARD named for what it is, carrying the file it is about.
+    const receipt = screen.getByTestId('import-receipt')
+    expect(receipt.textContent).toContain('persona.import.heading')
+    expect(receipt.textContent).toContain('conversations.json')
+
     expect(screen.getByText('persona.import.parsed:{"conversations":1284}')).toBeTruthy()
     expect(screen.getByText('persona.import.ownerOnly')).toBeTruthy()
     expect(screen.getByText('persona.import.dropped:{"count":900}')).toBeTruthy()
     expect(screen.getByText('persona.import.unreadableRows:{"count":8}')).toBeTruthy()
-    expect(screen.getByText('persona.import.considered:{"count":400}')).toBeTruthy()
+    // 400 read OF 900 said — the denominator the owner's screenshot lacked.
+    expect(
+      screen.getByText('persona.import.considered:{"total":900,"count":400}'),
+    ).toBeTruthy()
     expect(screen.getByText('persona.import.notConsidered:{"count":500}')).toBeTruthy()
-    expect(screen.getByText('persona.import.duplicates:{"count":0}')).toBeTruthy()
-    expect(screen.getByText('persona.import.keptUnreadable:{"count":0}')).toBeTruthy()
+    // The two zero losses in this fixture say NOTHING.
+    expect(screen.queryByText(/persona\.import\.duplicates/)).toBeNull()
+    expect(screen.queryByText(/persona\.import\.keptUnreadable/)).toBeNull()
     expect(screen.getByText('persona.import.keptCount:{"count":1}')).toBeTruthy()
     // …and every kept line is pressable, exactly like a turn's.
     expect(screen.getByRole('button', { name: /決めたあとに手が止まる/ })).toBeTruthy()
+    // A finished receipt says the conversation never saw this file — the line
+    // whose absence made the owner ask the stand-in about the zip.
+    expect(screen.getByText('persona.import.notChat')).toBeTruthy()
+  })
+
+  it('says each nonzero loss — duplicates and unplaceable lines get their line back', () => {
+    draw({
+      importJob: {
+        fileName: 'conversations.json',
+        state: 'done',
+        counts: importResult(),
+        result: importResult({ duplicatesSkipped: 3, keptUnreadable: 2 }),
+      },
+    })
+    expect(screen.getByText('persona.import.duplicates:{"count":3}')).toBeTruthy()
+    expect(screen.getByText('persona.import.keptUnreadable:{"count":2}')).toBeTruthy()
+  })
+
+  it('a clean sweep — zero dropped, zero unreadable — prints no loss lines at all', () => {
+    const clean = importResult({
+      droppedNonOwner: 0,
+      unreadable: 0,
+      notConsidered: 0,
+      considered: 900,
+    })
+    draw({
+      importJob: { fileName: 'conversations.json', state: 'done', counts: clean, result: clean },
+    })
+    expect(screen.queryByText(/persona\.import\.dropped:/)).toBeNull()
+    expect(screen.queryByText(/persona\.import\.unreadableRows/)).toBeNull()
+    expect(screen.queryByText(/persona\.import\.notConsidered/)).toBeNull()
+    // …while the one sentence that remains carries the whole account: 900 of 900.
+    expect(
+      screen.getByText('persona.import.considered:{"total":900,"count":900}'),
+    ).toBeTruthy()
   })
 
   it('shows the counts as soon as PARSING landed, before the reading finishes', () => {
@@ -865,7 +930,7 @@ describe('while today’s question is open, the box belongs to it', () => {
 
   it('a file over the box still wins — that is a different job again', () => {
     draw({ question: openQ() })
-    fireEvent.dragOver(input().closest('div')!, { dataTransfer: { types: ['Files'] } })
+    fireEvent.dragEnter(input().closest('div')!, { dataTransfer: { types: ['Files'] } })
     expect(input().placeholder).toBe('persona.import.dropHint')
   })
 
@@ -895,5 +960,154 @@ describe('while today’s question is open, the box belongs to it', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+// ─── THE SCROLL FOLLOWS THE READER, NOT THE OTHER WAY ROUND ─────────────────
+//
+// Owner, 2026-08-17, on the import receipt: 「スクロールも適当な感じ」. The first
+// cut was one unconditional `scrollTop = scrollHeight` — measured on the
+// running app it BOTH yanked a reader out of history on every append AND
+// (because the import poll re-minted its state every 500ms) made scrolling up
+// during a distillation physically impossible. These tests pin the replacement:
+// follow only while the reader is at the bottom; otherwise show the pill.
+//
+// jsdom lays nothing out, so the geometry is stubbed per element — scrollTop
+// writable so the component's own assignment is observable, the two heights
+// fixed. That makes these tests about the DECISION (pin or don't), which is
+// exactly the part that was wrong.
+describe('the thread sticks to the bottom without yanking the reader', () => {
+  const thread = () => screen.getByTestId('chat-thread')
+  const geometry = (
+    el: HTMLElement,
+    { scrollHeight = 1000, clientHeight = 300 }: { scrollHeight?: number; clientHeight?: number } = {},
+  ) => {
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, value: scrollHeight })
+    Object.defineProperty(el, 'clientHeight', { configurable: true, value: clientHeight })
+    Object.defineProperty(el, 'scrollTop', { configurable: true, writable: true, value: 0 })
+  }
+  const turns2 = [turn(), turn({ id: 't-2', text: '二つ目' })]
+  const turns3 = [...turns2, turn({ id: 't-3', text: '三つ目' })]
+
+  it('a reader AT the bottom is carried along when a message lands', () => {
+    const view = draw({ turns: turns2 })
+    const el = thread()
+    geometry(el)
+    // At the foot (within AT_BOTTOM_PX) — the follow stays armed.
+    el.scrollTop = 1000 - 300 - (AT_BOTTOM_PX - 1)
+    fireEvent.scroll(el)
+
+    view.rerender(<PersonaConversation {...props({ turns: turns3 })} />)
+    expect(el.scrollTop).toBe(el.scrollHeight)
+    // …and no pill: the reader is already looking at the newest thing.
+    expect(screen.queryByText('persona.chat.jumpLatest')).toBeNull()
+  })
+
+  it('a reader UP IN HISTORY is left exactly where they are — the pill appears instead', () => {
+    const view = draw({ turns: turns2 })
+    const el = thread()
+    geometry(el)
+    el.scrollTop = 100 // deep in history: 1000 - 100 - 300 = 600 > AT_BOTTOM_PX
+    fireEvent.scroll(el)
+
+    view.rerender(<PersonaConversation {...props({ turns: turns3 })} />)
+    expect(el.scrollTop).toBe(100)
+    expect(screen.getByText('persona.chat.jumpLatest')).toBeTruthy()
+  })
+
+  it('pressing the pill goes to the newest message and puts the pill away', () => {
+    const view = draw({ turns: turns2 })
+    const el = thread()
+    geometry(el)
+    el.scrollTop = 100
+    fireEvent.scroll(el)
+    view.rerender(<PersonaConversation {...props({ turns: turns3 })} />)
+
+    fireEvent.click(screen.getByText('persona.chat.jumpLatest'))
+    expect(el.scrollTop).toBe(el.scrollHeight)
+    expect(screen.queryByText('persona.chat.jumpLatest')).toBeNull()
+    // …and the follow is re-armed: the next message carries the reader again.
+    view.rerender(<PersonaConversation {...props({ turns: [...turns3, turn({ id: 't-4' })] })} />)
+    expect(el.scrollTop).toBe(el.scrollHeight)
+  })
+
+  it('scrolling back down by hand re-arms the follow the same way', () => {
+    const view = draw({ turns: turns2 })
+    const el = thread()
+    geometry(el)
+    el.scrollTop = 100
+    fireEvent.scroll(el)
+    el.scrollTop = 1000 - 300 // back at the foot
+    fireEvent.scroll(el)
+    expect(screen.queryByText('persona.chat.jumpLatest')).toBeNull()
+    view.rerender(<PersonaConversation {...props({ turns: turns3 })} />)
+    expect(el.scrollTop).toBe(el.scrollHeight)
+  })
+
+  it("the day's question appends too — it arrives ON SCREEN, not off the top", () => {
+    // The question used to OPEN the thread: inserted at the top of a
+    // bottom-pinned, scrollbar-less container, it arrived invisible
+    // (2026-08-17 audit). Now it is part of the same append-follows contract
+    // as every message: it sits at the FOOT, after the turns and the import
+    // receipt, next to the box that answers it.
+    draw({
+      turns: turns2,
+      question: question(),
+      importJob: {
+        fileName: 'conversations.json',
+        state: 'done',
+        counts: importResult(),
+        result: importResult(),
+      },
+    })
+    const bubble = screen.getByText('二つ目')
+    const receipt = screen.getByTestId('import-receipt')
+    const heading = screen.getByText('persona.interview.heading')
+    expect(bubble.compareDocumentPosition(receipt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(receipt.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('a question landing while stuck pins the thread to show it', () => {
+    const view = draw({ turns: turns2 })
+    const el = thread()
+    geometry(el)
+    el.scrollTop = 1000 - 300
+    fireEvent.scroll(el)
+    el.scrollTop = 0 // deliberately wrong, to observe the effect writing it back
+    view.rerender(<PersonaConversation {...props({ turns: turns2, question: question() })} />)
+    expect(el.scrollTop).toBe(el.scrollHeight)
+  })
+})
+
+// ─── THE KEPT CHIPS ARE A PREVIEW, NOT A FLOOD ──────────────────────────────
+describe('the import receipt previews its kept lines', () => {
+  const manyKept = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      kept({ judgment: judgment({ id: `j-${i}`, text: `分かったこと ${i}` }) }),
+    )
+
+  it(`shows ${IMPORT_KEPT_PREVIEW} and folds the rest behind one button`, () => {
+    // A real export kept ~40 lines; every one as a chip buried the receipt's
+    // own numbers and half the thread with them (2026-08-17 audit).
+    const result = importResult({ kept: manyKept(9) })
+    draw({
+      importJob: { fileName: 'conversations.json', state: 'done', counts: result, result },
+    })
+    expect(screen.getAllByText(/persona\.chat\.keptLead/)).toHaveLength(IMPORT_KEPT_PREVIEW)
+    const more = screen.getByText(
+      `persona.import.showMoreKept:{"count":${9 - IMPORT_KEPT_PREVIEW}}`,
+    )
+    fireEvent.click(more)
+    expect(screen.getAllByText(/persona\.chat\.keptLead/)).toHaveLength(9)
+    expect(screen.queryByText(/persona\.import\.showMoreKept/)).toBeNull()
+  })
+
+  it('a short list is simply shown — no button to press for nothing', () => {
+    const result = importResult({ kept: manyKept(IMPORT_KEPT_PREVIEW) })
+    draw({
+      importJob: { fileName: 'conversations.json', state: 'done', counts: result, result },
+    })
+    expect(screen.getAllByText(/persona\.chat\.keptLead/)).toHaveLength(IMPORT_KEPT_PREVIEW)
+    expect(screen.queryByText(/persona\.import\.showMoreKept/)).toBeNull()
   })
 })

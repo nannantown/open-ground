@@ -448,6 +448,7 @@ export const persona = {
     'persona.chat.stop': 'Stop',
     'persona.chat.stopped': 'You stopped this. What you wrote is still here.',
     'persona.chat.retry': 'Send it again',
+    'persona.chat.jumpLatest': 'Latest \u2193',
     // The thread could not be READ. Never rendered as an empty conversation —
     // "you have said nothing" is the one claim a failed read cannot make.
     'persona.chat.stateUnreadable': 'Could not read the conversation so far.',
@@ -474,11 +475,18 @@ export const persona = {
     'persona.import.ownerOnly': 'The replies you were given are not included.',
     'persona.import.unreadableRows': '{count} rows could not be read and were skipped.',
     'persona.import.dropped': '{count} messages were not yours, so they were dropped.',
-    'persona.import.considered': '{count} of them were actually read.',
+    // {total} = the owner's own statements found in the file — the denominator
+    // the old copy left out (「このうち400件」 floated with nothing to anchor it).
+    'persona.import.considered': 'Of your {total} statements, {count} were read this time.',
     // MANDATORY, even at 0. A number that hides its own losses is the failure
     // this screen keeps re-hitting.
     'persona.import.notConsidered': '{count} were not looked at this time.',
     'persona.import.keptCount': 'Learned {count}',
+    'persona.import.heading': 'Import',
+    'persona.import.distilling': 'Distilling what it learned\u2026 {seconds}s',
+    'persona.import.showMoreKept': 'Show {count} more',
+    'persona.import.notChat':
+      'An import never enters the conversation itself \u2014 ask your stand-in about this file and it will not know it; only the kept lines above went in.',
     'persona.import.duplicates': '{count} were already in here word for word, so they were not written again.',
     'persona.import.keptUnreadable': '{count} could not be read and were left out.',
     // ⚠ RETIRED 2026-08-15, kept only so an older running server's error key
@@ -789,6 +797,7 @@ export const persona = {
     'persona.chat.stop': 'やめる',
     'persona.chat.stopped': 'やめました。書いた言葉は残っています。',
     'persona.chat.retry': 'もう一度送る',
+    'persona.chat.jumpLatest': '↓ 最新へ',
     'persona.chat.stateUnreadable': 'これまでの会話が読めませんでした。',
     'persona.chat.keptLead': '分かったこと',
     'persona.chat.keptNone': '今回は何も拾いませんでした。',
@@ -806,9 +815,14 @@ export const persona = {
     'persona.import.ownerOnly': '返ってきた側の発言は入れていません。',
     'persona.import.unreadableRows': '読めなかった行が{count}件あり、飛ばしました。',
     'persona.import.dropped': 'あなた以外の発言{count}件は入れていません。',
-    'persona.import.considered': 'このうち{count}件を実際に読みました。',
+    'persona.import.considered': 'あなたの発言{total}件のうち、今回{count}件を読みました。',
     'persona.import.notConsidered': '残り{count}件は今回見ていません。',
     'persona.import.keptCount': '分かったこと {count}件',
+    'persona.import.heading': '取り込み',
+    'persona.import.distilling': '分かったことを抜き出しています… {seconds}秒',
+    'persona.import.showMoreKept': 'ほか{count}件を表示',
+    'persona.import.notChat':
+      'この取り込みは分身との会話には流れていません。分身にこのファイルのことを聞いても知りません — 上の「分かったこと」だけが入ります。',
     'persona.import.duplicates': '同じ内容が既にあったもの{count}件は、書き足していません。',
     'persona.import.keptUnreadable': '読めなかった行{count}件は入れていません。',
     'persona.import.zipUnsupported':
