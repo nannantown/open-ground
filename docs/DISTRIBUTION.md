@@ -98,6 +98,25 @@ git push openground vX.Y.Z                  # pushing the tag to OPEN-GROUND fir
 > 公開時に GitHub が `target_sha` にタグを作るので、タグの木 = 出荷物の木が保たれる。
 > (タグ push ができない環境 — 2026-08-13 のクラウドセッションの git プロキシはブランチ
 > push は通しタグ push を黙って落とした — の正規の逃げ道でもある。)
+>
+> **⚠ クラウドセッションでは「タグ push が通らない」が既定だと思ってよい**(2026-08-17・
+> v0.11.85 で再現、これで2回目)。落ち方は 2026-08-13 と違い**沈黙ではなく明示エラー**だった:
+> `git push openground v0.11.85` が `RPC failed; HTTP 403` +
+> `send-pack: unexpected disconnect` を4回とも返し、直後に `Everything up-to-date` と
+> 続けて出す。**この "Everything up-to-date" は成功ではない** — 同じコマンドの中で
+> `git ls-remote --tags openground vX.Y.Z` を必ず実行し、**行が返ることを確認するまで
+> タグは無いものとして扱う**こと(ブランチ push は同セッションで通るので、「push できた」
+> という感触は当てにならない)。
+>
+> したがってクラウドから切るときの手順は最初から dispatch 経路で組む:
+> ①スナップショットを `openground/main` に push(これは通る) →
+> ②`release.yml` を **workflow_dispatch**(ref=`main`)→ 未タグのドラフト →
+> ③`publish-draft.yml` を dispatch(`tag` / `target_sha`=スナップショット sha /
+> `notes_b64`)。v0.11.82〜v0.11.85 は実際すべて workflow_dispatch 起動である。
+>
+> なお **`curl https://api.github.com/...` もクラウドセッションからは使えない**
+> (`GitHub access is not enabled for this session` が返る)。CI の進行確認は GitHub MCP
+> の `actions_list` / `actions_get` で行う。`gh` CLI も無い。
 
 Once both CI jobs are green the release is already live. Write the release
 notes (bilingual, `### English` + `### 日本語` sections — the in-app update
