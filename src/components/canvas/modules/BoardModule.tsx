@@ -1884,7 +1884,10 @@ export const BoardModule = ({
   )
 
   return (
-    <div className="flex min-h-0 flex-1">
+    // `relative`: BoardSupplyDock's OPEN state is a full-height drawer anchored
+    // to this root's right edge (absolute inset-y-0 right-0) — without a
+    // positioned ancestor here it would anchor to the page instead.
+    <div className="relative flex min-h-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Board-altitude honesty line — swarm activity the engine CANNOT tie to
             a card: workers with no taskId, and open questions with no taskId
@@ -1952,9 +1955,11 @@ export const BoardModule = ({
         {/* ── The front desk (the supply officer's seat) ────────────────────
             Gated HERE, at the render site, not only at the poll — a forged
             persisted view or state must never be able to reveal this surface.
-            A BOTTOM dock on purpose: the Board's side terminal dock was removed
-            the same day, and five columns at min-w-[166px] leave no room for a
-            rail anyway. It never spawns on mount — it attaches to whatever the
+            A bottom SUMMARY STRIP that opens into a RIGHT drawer (owner,
+            2026-08-17 — see BoardSupplyDock's header for the history: it was
+            born a bottom dock because a permanent right rail squeezes the five
+            columns; the drawer is an overlay, so the columns still never
+            reflow). It never spawns on mount — it attaches to whatever the
             shared useSupplyDesk hook resolved, so the Swarm tab and this seat
             are always the SAME desk. */}
         {swarmVisible && (

@@ -295,7 +295,7 @@ export const board = {
     'board.supply.collapse': 'タスク窓口をとじる',
     'board.supply.stop': '窓口を閉じる',
     'board.supply.stopping': '閉じています…',
-    'board.supply.resize': 'ドラッグでタスク窓口の高さを変える',
+    'board.supply.resize': 'ドラッグでタスク窓口の幅を変える',
     'board.supply.workers': 'ワーカー',
     // どのカードの担当か分からない worker にはカード名を出さない（推測で結び付けない）。
     'board.supply.workerNoCard': 'カード未特定',

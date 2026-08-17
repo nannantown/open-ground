@@ -159,7 +159,7 @@ const settle = async () => {
 /** The dock remembers open/closed per project — seed it OPEN so the expanded
  *  body (the desk + the monitor) is on screen without a click. */
 const openDock = () =>
-  localStorage.setItem('openground.board.supplydock.p1', JSON.stringify({ open: true, h: 300 }))
+  localStorage.setItem('openground.board.supplydock.p1', JSON.stringify({ open: true, w: 430 }))
 
 const liveDesk = { runtime: 'pty', handleId: 'pty-9', agentSessionId: 'sid-9' }
 
@@ -230,7 +230,9 @@ describe('the swarm gate — a non-swarm account has no front desk', () => {
     await settle()
 
     expect(screen.queryByTestId('board-supply-dock')).toBeTruthy()
-    expect(screen.queryByText('board.supply.title')).toBeTruthy()
+    // The title appears TWICE while open — the bottom strip and the drawer's
+    // own head carry the same identity on purpose.
+    expect(screen.getAllByText('board.supply.title').length).toBeGreaterThan(0)
     expect(h.paneMounts).toContain('pty-9')
   })
 })
@@ -417,52 +419,87 @@ describe('the fleet monitor', () => {
 
     // One clause per thing we actually read, joined — NOT one template with
     // three slots, which is what let an unread inbox print 「判断待ち0」.
-    expect(screen.getByText(/board\.supply\.rollupWorking \{"n":1\}/)).toBeTruthy()
-    expect(screen.getByText(/board\.supply\.rollupReview \{"n":1\}/)).toBeTruthy()
-    expect(screen.getByText(/board\.supply\.rollupWaiting \{"n":2\}/)).toBeTruthy()
+    // getAll: while the drawer is open the roll-up shows twice (strip + head).
+    expect(screen.getAllByText(/board\.supply\.rollupWorking \{"n":1\}/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/board\.supply\.rollupReview \{"n":1\}/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/board\.supply\.rollupWaiting \{"n":2\}/).length).toBeGreaterThan(0)
   })
 })
 
-describe('the height drag detaches on EVERY way a gesture ends', () => {
-  // The defect: only `pointerup` detached. A cancelled gesture (trackpad scroll
-  // taking over, touch interrupted, pointer stolen) left the drag armed
-  // forever — every later mouse move, no button held, dragged the dock — and
-  // every new press stacked another listener pair on window.
-  const move = (clientY: number) => {
-    const e = new Event('pointermove') as PointerEvent & { clientY: number }
-    Object.defineProperty(e, 'clientY', { value: clientY })
+// ── The RIGHT drawer (owner, 2026-08-17: 「右から出るようにしよう。あとドラッグで
+// 拡大とかもできるように」). The open desk is a full-height drawer anchored to
+// the board's right edge, width-resizable by its left-edge grip. Class-level
+// geometry assertions for the usual reason — jsdom loads no stylesheet.
+describe('the open desk is a right drawer, resizable by width', () => {
+  const drawer = (container: HTMLElement) =>
+    container.querySelector('[data-testid="board-supply-drawer"]') as HTMLElement
+
+  const move = (clientX: number) => {
+    const e = new Event('pointermove') as PointerEvent & { clientX: number }
+    Object.defineProperty(e, 'clientX', { value: clientX })
     window.dispatchEvent(e)
   }
 
-  it('a CANCELLED drag stops following the pointer', async () => {
+  it('opens ANCHORED RIGHT and FULL HEIGHT, at the persisted width', async () => {
     openDock()
     const { container } = renderBoard([task({ id: 'doing1', title: 'Doing one' })], true)
     await settle()
-    const grip = container.querySelector('[role="separator"]')
-    expect(grip, 'no resize grip found — update the selector').toBeTruthy()
+    const d = drawer(container)
+    expect(d, 'no drawer found — update the selector').toBeTruthy()
+    // The three classes that ARE the owner's ask: right edge, full height, and
+    // an overlay (absolute) so the columns never reflow.
+    expect(d.className).toContain('right-0')
+    expect(d.className).toContain('inset-y-0')
+    expect(d.className).toContain('absolute')
+    expect(d.style.width).toBe('430px')
+    // The grip resizes WIDTH — a vertical separator on the left edge.
+    const grip = d.querySelector('[role="separator"]')
+    expect(grip?.getAttribute('aria-orientation')).toBe('vertical')
+  })
 
-    fireEvent.pointerDown(grip as Element, { clientY: 500 })
-    // The browser takes the gesture away instead of completing it.
+  it('a COMPLETED drag resizes — dragging LEFT grows the drawer', async () => {
+    openDock()
+    const { container } = renderBoard([task({ id: 'doing1', title: 'Doing one' })], true)
+    await settle()
+    const grip = drawer(container).querySelector('[role="separator"]')!
+    fireEvent.pointerDown(grip, { clientX: 800 })
+    await act(async () => move(700))
+    expect(drawer(container).style.width).toBe('530px')
+  })
+
+  it('a CANCELLED drag stops following the pointer', async () => {
+    // The historical defect (from the height-drag era, and the reason all three
+    // end-of-gesture paths detach): only `pointerup` detached, so a cancelled
+    // gesture left the drag armed forever and every later unpressed mouse move
+    // dragged the dock around.
+    openDock()
+    const { container } = renderBoard([task({ id: 'doing1', title: 'Doing one' })], true)
+    await settle()
+    const grip = drawer(container).querySelector('[role="separator"]')!
+    fireEvent.pointerDown(grip, { clientX: 800 })
     await act(async () => {
       window.dispatchEvent(new Event('pointercancel'))
     })
-    // …and an ordinary move afterwards must change nothing.
-    await act(async () => move(400))
-
-    const panel = container.querySelector('[data-testid="board-supply-dock"]') as HTMLElement
-    const body = panel.querySelector('[style*="height"]') as HTMLElement | null
-    expect(body?.style.height ?? '300px').toBe('300px')
+    await act(async () => move(600))
+    expect(drawer(container).style.width).toBe('430px')
   })
 
-  it('a COMPLETED drag still resizes — the fix did not disarm the feature', async () => {
+  it('the width is clamped — a drag past the minimum stops at the minimum', async () => {
     openDock()
     const { container } = renderBoard([task({ id: 'doing1', title: 'Doing one' })], true)
     await settle()
-    const grip = container.querySelector('[role="separator"]')!
-    fireEvent.pointerDown(grip, { clientY: 500 })
-    await act(async () => move(400)) // dragging UP grows the dock
-    const panel = container.querySelector('[data-testid="board-supply-dock"]') as HTMLElement
-    const body = panel.querySelector('[style*="height"]') as HTMLElement | null
-    expect(body?.style.height).toBe('400px')
+    const grip = drawer(container).querySelector('[role="separator"]')!
+    fireEvent.pointerDown(grip, { clientX: 800 })
+    await act(async () => move(1400)) // dragging far RIGHT shrinks it below MIN_W
+    expect(drawer(container).style.width).toBe('380px')
+  })
+
+  it('the drawer carries its own close — the strip chevron sits under it', async () => {
+    openDock()
+    const { container } = renderBoard([task({ id: 'doing1', title: 'Doing one' })], true)
+    await settle()
+    const close = within(drawer(container)).getByLabelText('board.supply.collapse')
+    fireEvent.click(close)
+    expect(drawer(container)).toBeNull()
   })
 })

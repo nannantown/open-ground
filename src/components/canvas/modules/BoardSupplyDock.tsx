@@ -5,12 +5,24 @@
 // (owner, 2026-08-15). Two halves, one dock: TALK to the desk (left), WATCH the
 // fleet (right).
 //
-// ── WHY A BOTTOM DOCK, NOT A RIGHT RAIL ────────────────────────────────────
-// The side terminal dock was removed from the Board hours before this shipped
-// (T1). Re-introducing a 460px right panel under a different name would be
-// ignoring that. It is also mechanical: five columns at min-w-[166px] plus gaps
-// already need ~900px, so a right rail forces the columns into horizontal
-// scroll. A terminal is line-oriented and reads fine wide-and-short.
+// ── A BOTTOM STRIP THAT OPENS INTO A RIGHT DRAWER ──────────────────────────
+// This shipped as a bottom dock, deliberately NOT a right rail: the Board's
+// side terminal dock had been removed the same day (T1), and five columns at
+// min-w-[166px] plus gaps already need ~900px, so a PERMANENT right rail
+// forces the columns into horizontal scroll.
+//
+// The owner then overrode the direction (2026-08-17: 「タブは下から出ますが右から
+// 出るようにしよう。あとドラッグで拡大とかもできるように」). The resolution keeps both
+// truths: the collapsed summary strip stays at the bottom (always visible, no
+// column cost), and OPENING it slides a full-height drawer in from the RIGHT —
+// an OVERLAY, not a flex rail, so the columns still never reflow; while the
+// drawer is up it covers the board's right edge, which is exactly the trade
+// the owner asked for. Width is drag-resizable (left-edge grip, same pattern
+// as BoardModule's card-detail drawer) and persisted per project.
+//
+// The drawer deliberately draws ABOVE the card-detail drawer (z): both live on
+// the right, and a summoned desk hiding under a card detail reads as broken.
+// Closing the desk hands the edge back.
 //
 // ── ONE DESK, TWO SURFACES (the invariant this file must not break) ────────
 // The Swarm tab has the same seat. They are the SAME desk: the same server-side
@@ -32,7 +44,7 @@
 // same rule for the record itself; this is that rule reaching the screen.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, ChevronUp, Inbox, Power } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Inbox, Power } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { useT } from '@/i18n/I18nContext'
 import type { MessageKey } from '@/i18n/messages'
@@ -63,29 +75,34 @@ const LAMP: Record<WorkerActivity, string> = {
   done: 'bg-ink-faint',
 }
 
-const MIN_H = 180
-const DEFAULT_H = 320
+const MIN_W = 380
+const DEFAULT_W = 520
+/** The drawer may never take more than this share of the window — the same cap
+ *  the card-detail drawer wears, so the two right-edge surfaces obey one rule. */
+const MAX_W_RATIO = 0.7
 
 const dockKey = (projectId: string) => `openground.board.supplydock.${projectId}`
 
-/** Load + SANITISE the persisted dock geometry. localStorage is untrusted, and a
- *  forged height must not be able to swallow the board — the clamp is applied
- *  again at render against the live container height. */
-const loadDock = (projectId: string): { open: boolean; h: number } => {
+/** Load + SANITISE the persisted dock geometry. localStorage is untrusted, and
+ *  a forged width must not be able to swallow the board — the ratio cap is
+ *  applied again at render (`maxWidth`) and at every drag step. Records from
+ *  the bottom-dock era carry `h` instead of `w`; they fall back to the default
+ *  width rather than reading a height as a width. */
+const loadDock = (projectId: string): { open: boolean; w: number } => {
   try {
     const raw = localStorage.getItem(dockKey(projectId))
-    if (!raw) return { open: false, h: DEFAULT_H }
+    if (!raw) return { open: false, w: DEFAULT_W }
     const o: unknown = JSON.parse(raw)
-    if (!o || typeof o !== 'object') return { open: false, h: DEFAULT_H }
+    if (!o || typeof o !== 'object') return { open: false, w: DEFAULT_W }
     const r = o as Record<string, unknown>
-    const h = typeof r.h === 'number' && Number.isFinite(r.h) ? Math.max(MIN_H, r.h) : DEFAULT_H
-    return { open: r.open === true, h }
+    const w = typeof r.w === 'number' && Number.isFinite(r.w) ? Math.max(MIN_W, r.w) : DEFAULT_W
+    return { open: r.open === true, w }
   } catch {
-    return { open: false, h: DEFAULT_H }
+    return { open: false, w: DEFAULT_W }
   }
 }
 
-const saveDock = (projectId: string, v: { open: boolean; h: number }) => {
+const saveDock = (projectId: string, v: { open: boolean; w: number }) => {
   try {
     localStorage.setItem(dockKey(projectId), JSON.stringify(v))
   } catch {
@@ -172,28 +189,27 @@ export const BoardSupplyDock = ({
     [projectId],
   )
 
-  // Height drag. Clamped to [MIN_H, 60% of the board] so the dock can never eat
-  // the columns it sits under.
+  // Width drag. Clamped to [MIN_W, 70% of the window] so the drawer can never
+  // eat the whole board.
   const rootRef = useRef<HTMLDivElement | null>(null)
-  const dragRef = useRef<{ startY: number; startH: number } | null>(null)
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null)
   /** Teardown for the drag currently in flight, or null. Held in a ref so BOTH
    *  the end-of-gesture handlers and the unmount effect below can call it. */
   const dragCleanupRef = useRef<(() => void) | null>(null)
-  const startHeightDrag = useCallback(
+  const startWidthDrag = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault()
       // A second press before the first gesture ended (possible only if the
       // first was cancelled) must not stack a second listener pair.
       dragCleanupRef.current?.()
-      dragRef.current = { startY: e.clientY, startH: dock.h }
-      const boardH = rootRef.current?.parentElement?.getBoundingClientRect().height ?? 0
-      const maxH = boardH > 0 ? Math.max(MIN_H, boardH * 0.6) : Number.POSITIVE_INFINITY
+      dragRef.current = { startX: e.clientX, startW: dock.w }
       const onMove = (ev: PointerEvent) => {
         const d = dragRef.current
         if (!d) return
-        // Dragging UP grows the dock — it is anchored to the bottom edge.
-        const raw = d.startH + (d.startY - ev.clientY)
-        setDock((prev) => ({ ...prev, h: Math.min(maxH, Math.max(MIN_H, raw)) }))
+        // Dragging LEFT grows the drawer — it is anchored to the right edge.
+        const raw = d.startW + (d.startX - ev.clientX)
+        const maxW = Math.max(MIN_W, window.innerWidth * MAX_W_RATIO)
+        setDock((prev) => ({ ...prev, w: Math.min(maxW, Math.max(MIN_W, raw)) }))
       }
       // ⚠ THREE WAYS A DRAG ENDS, and every one of them must detach.
       //  - pointerup: the ordinary finish.
@@ -224,9 +240,9 @@ export const BoardSupplyDock = ({
       window.addEventListener('pointerup', onEnd)
       window.addEventListener('pointercancel', onEnd)
     },
-    [dock.h, projectId],
+    [dock.w, projectId],
   )
-  // Unmounting mid-drag: detach WITHOUT persisting — the height on screen when
+  // Unmounting mid-drag: detach WITHOUT persisting — the width on screen when
   // the surface went away is not a size the owner chose.
   useEffect(() => () => dragCleanupRef.current?.(), [])
 
@@ -299,80 +315,113 @@ export const BoardSupplyDock = ({
           aria-expanded={dock.open}
           className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-ink-faint transition-colors hover:bg-accent/10 hover:text-accent"
         >
-          {dock.open ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+          {dock.open ? <ChevronRight size={13} /> : <ChevronLeft size={13} />}
         </button>
       </div>
 
       {dock.open && (
-        <>
-          {/* Top-edge height grip. */}
+        /* ── The drawer: full board height, anchored RIGHT, above everything on
+         *  this surface (including the card-detail drawer — a summoned desk
+         *  hiding under a card reads as broken). It positions against
+         *  BoardModule's `relative` root, so it spans the columns' height, not
+         *  the strip's. An overlay, not a flex rail: the columns never reflow. */
+        <div
+          data-testid="board-supply-drawer"
+          className="absolute inset-y-0 right-0 z-30 flex flex-col border-l border-line bg-bg shadow-card-hover"
+          style={{ width: dock.w, maxWidth: `${MAX_W_RATIO * 100}%` }}
+        >
+          {/* Left-edge width grip — the whole edge is the hit area. */}
           <div
-            onPointerDown={startHeightDrag}
+            onPointerDown={startWidthDrag}
             role="separator"
-            aria-orientation="horizontal"
+            aria-orientation="vertical"
             aria-label={t('board.supply.resize')}
-            className="h-1.5 cursor-row-resize transition-colors hover:bg-accent/40 active:bg-accent/50"
+            className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize transition-colors hover:bg-accent/40 active:bg-accent/50"
           />
-          <div className="flex min-h-0 border-t border-line-soft" style={{ height: dock.h }}>
-            {/* ── Left: the desk itself ─────────────────────────────────── */}
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-              {error && (
-                <p className="shrink-0 border-b border-line-soft px-3 py-1.5 text-meta leading-relaxed text-accent">
-                  {error}
-                </p>
-              )}
-              {supply ? (
-                <>
-                  <div className="flex shrink-0 items-center justify-end border-b border-line-soft px-2.5 py-1">
-                    <button
-                      type="button"
-                      onClick={() => void stop()}
-                      disabled={busy}
-                      title={t('board.supply.stop')}
-                      className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-                    >
-                      <Power size={10} strokeWidth={2.25} />
-                      {busy ? t('board.supply.stopping') : t('board.supply.stop')}
-                    </button>
-                  </div>
-                  <div className="min-h-0 flex-1">
-                    {/* chrome={false}: the strip above IS the chrome — the same
-                        arrangement SwarmSupplyPane uses for the same desk. */}
-                    <ClaudeTerminalPane
-                      terminalId={supply.terminalId}
-                      chrome={false}
-                      onExit={() =>
-                        setExitedIds((prev) =>
-                          prev.has(supply.terminalId)
-                            ? prev
-                            : new Set(prev).add(supply.terminalId),
-                        )
-                      }
-                      onRestart={() => void restart()}
-                    />
-                  </div>
-                </>
-              ) : deskUnknown ? (
-                // Nothing. See `deskUnknown` above: we have not been told, so we
-                // say neither "closed" nor "open here".
-                <div className="min-h-0 flex-1" />
-              ) : (
-                <div className="flex min-h-0 flex-1 flex-col items-start justify-center gap-2 px-5">
-                  <p className="text-meta text-ink-muted">{t('board.supply.closed')}</p>
-                  <button
-                    type="button"
-                    onClick={() => void launch()}
-                    disabled={busy}
-                    className="rounded-[3px] border border-line px-2 py-1 text-meta text-ink transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-                  >
-                    {busy ? t('board.supply.opening') : t('board.supply.open')}
-                  </button>
-                </div>
-              )}
-            </div>
+          {/* Drawer head — the same identity as the strip, plus the way back.
+           *  The strip's own chevron sits under this overlay while it is open,
+           *  so the drawer MUST carry its own close. */}
+          <div className="flex h-7 shrink-0 items-center gap-2 border-b border-line px-3.5">
+            <Inbox size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
+            <span className="label-cap shrink-0 text-ink-faint">{t('board.supply.title')}</span>
+            {deskActivity && (
+              <span
+                className={`h-[6px] w-[6px] shrink-0 rounded-full ${LAMP[deskActivity]}`}
+                aria-hidden
+              />
+            )}
+            <span className="min-w-0 flex-1 truncate text-meta text-ink-muted">
+              {rollup.length > 0 ? rollup.join(' · ') : t('board.supply.rollupUnknown')}
+            </span>
+            {supply && (
+              <button
+                type="button"
+                onClick={() => void stop()}
+                disabled={busy}
+                title={t('board.supply.stop')}
+                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+              >
+                <Power size={10} strokeWidth={2.25} />
+                {busy ? t('board.supply.stopping') : t('board.supply.stop')}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              title={t('board.supply.collapse')}
+              aria-label={t('board.supply.collapse')}
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-ink-faint transition-colors hover:bg-accent/10 hover:text-accent"
+            >
+              <ChevronRight size={13} />
+            </button>
+          </div>
 
-            {/* ── Right: the fleet monitor ──────────────────────────────── */}
-            <div className="flex w-[220px] shrink-0 flex-col border-l border-line-soft">
+          {/* ── The desk itself ──────────────────────────────────────────── */}
+          <div className="flex min-h-0 flex-1 flex-col">
+            {error && (
+              <p className="shrink-0 border-b border-line-soft px-3 py-1.5 text-meta leading-relaxed text-accent">
+                {error}
+              </p>
+            )}
+            {supply ? (
+              <div className="min-h-0 flex-1">
+                {/* chrome={false}: the head above IS the chrome — the same
+                    arrangement SwarmSupplyPane uses for the same desk. */}
+                <ClaudeTerminalPane
+                  terminalId={supply.terminalId}
+                  chrome={false}
+                  onExit={() =>
+                    setExitedIds((prev) =>
+                      prev.has(supply.terminalId)
+                        ? prev
+                        : new Set(prev).add(supply.terminalId),
+                    )
+                  }
+                  onRestart={() => void restart()}
+                />
+              </div>
+            ) : deskUnknown ? (
+              // Nothing. See `deskUnknown` above: we have not been told, so we
+              // say neither "closed" nor "open here".
+              <div className="min-h-0 flex-1" />
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col items-start justify-center gap-2 px-5">
+                <p className="text-meta text-ink-muted">{t('board.supply.closed')}</p>
+                <button
+                  type="button"
+                  onClick={() => void launch()}
+                  disabled={busy}
+                  className="rounded-[3px] border border-line px-2 py-1 text-meta text-ink transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                >
+                  {busy ? t('board.supply.opening') : t('board.supply.open')}
+                </button>
+              </div>
+            )}
+
+            {/* ── The fleet monitor, under the desk: the drawer is tall and
+             *  narrow, so the two halves stack instead of sitting side by
+             *  side. Capped so a long fleet never squeezes the terminal out. */}
+            <div className="flex max-h-[240px] shrink-0 flex-col border-t border-line-soft">
               <p className="label-cap shrink-0 border-b border-line-soft px-2.5 py-1 text-ink-faint">
                 {t('board.supply.workers')}
               </p>
@@ -434,7 +483,7 @@ export const BoardSupplyDock = ({
               </div>
             </div>
           </div>
-        </>
+        </div>
       )}
     </div>
   )
