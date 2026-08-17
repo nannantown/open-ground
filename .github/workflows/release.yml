@@ -33,7 +33,44 @@ permissions:
   contents: write
 
 jobs:
+  # Create the ONE draft release before the matrix fans out.
+  #
+  # WHY (measured 2026-08-17, v0.11.90): the two electron-builders each
+  # find-or-create the release for the version tag, and that is a race — the
+  # mac job's lookup missed the win job's minutes-old draft ("creating GitHub
+  # release — reason=release doesn't exist"), built a SECOND draft, and
+  # publish-draft then published the win-only one by tag. The mac assets
+  # (including latest-mac.yml, i.e. mac auto-update) sat in an orphan draft.
+  # With the draft created up front, both builders always find it and only
+  # ever upload. repair-release.yml exists to mend a release this race (or
+  # any upload failure) has already split.
+  #
+  # ⚠ This also changes TAG-PUSH behaviour: electron-builder uploads into the
+  # existing draft and leaves it a draft, so a tag push now needs the same
+  # publish-draft dispatch the workflow_dispatch flow uses. All releases since
+  # v0.11.71 have gone through that route anyway (cloud sessions cannot push
+  # tags), and it puts the PII-guarded human step in front of every publish.
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create the draft release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists — the builders will upload into it"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --title "$VERSION" --notes ""
+          fi
+
   build:
+    needs: draft
     strategy:
       fail-fast: false
       matrix:

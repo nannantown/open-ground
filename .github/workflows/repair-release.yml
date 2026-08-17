@@ -1,0 +1,66 @@
+# repair-release — mend a release the draft race (or a failed upload) split.
+#
+# WHY THIS EXISTS (2026-08-17, v0.11.90). Before release.yml grew its `draft`
+# job, the two matrix electron-builders raced find-or-create on the version
+# tag: the mac job missed the win job's just-created draft, built a second
+# one, and publish-draft published the win-only draft by tag. The published
+# release was missing every mac asset INCLUDING latest-mac.yml — mac
+# auto-update dead — while the signed builds sat in an orphan draft that no
+# tag can address (gh resolves a tag to the published release once one
+# exists).
+#
+# What it does, per dispatch:
+#   1. finds the PUBLISHED release for `tag` (fails loudly if there is none);
+#   2. for every DRAFT release stored under the same tag name, downloads each
+#      asset and re-uploads it to the published release (--clobber, so a
+#      half-moved asset re-runs cleanly), then deletes the drained draft;
+#   3. prints the published release's final asset list — READ IT and check
+#      the platform feed files (latest.yml / latest-mac.yml) are both there.
+name: repair-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release tag to repair (e.g. v0.11.90)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge orphan drafts into the published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          releases=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          target_id=$(echo "$releases" | jq -r --arg t "$TAG" \
+            '[.[] | select(.tag_name==$t and .draft==false)][0].id // empty')
+          if [ -z "$target_id" ]; then
+            echo "no PUBLISHED release for $TAG — publish the draft first (publish-draft.yml)" >&2
+            exit 1
+          fi
+          echo "published release: $target_id"
+          for draft_id in $(echo "$releases" | jq -r --arg t "$TAG" \
+              '.[] | select(.tag_name==$t and .draft==true) | .id'); do
+            echo "orphan draft: $draft_id"
+            echo "$releases" | jq -r --arg id "$draft_id" \
+              '.[] | select((.id|tostring)==$id) | .assets[] | "\(.id)\t\(.name)"' |
+            while IFS=$'\t' read -r asset_id name; do
+              echo "  moving $name"
+              gh api -H "Accept: application/octet-stream" \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$name"
+              gh release upload "$TAG" "$name" --clobber --repo "$GITHUB_REPOSITORY"
+              rm -f "$name"
+            done
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$draft_id"
+            echo "orphan draft $draft_id drained and deleted"
+          done
+          echo "final assets on $TAG:"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
