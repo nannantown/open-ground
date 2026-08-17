@@ -481,6 +481,9 @@ const SDK_API_SKIP = new Set([
   'statusAfter',
   'distillSdkMessage',
   'matchesQuotaRefusal',
+  // Pure predicate on a role string it is handed (is this session a commander /
+  // supply desk?) — classifies, never reaches a desk or enumerates a pool.
+  'isSdkDeskRole',
   '__resetSdkSessionsForTests',
   '__setQuotaPrefixesForTests',
 ])

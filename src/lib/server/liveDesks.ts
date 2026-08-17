@@ -408,6 +408,18 @@ export const updateRestartSafety = async (): Promise<UpdateRestartSafetyResponse
   return computeRestartSafety(ptys, sdkStatuses)
 }
 
+/** Is this SDK session a swarm ROLE DESK (commander / supply) rather than work?
+ *
+ *  The SDK pool's counterpart of `TerminalInfo.deskLabel` — only the desk
+ *  launchers set these roles. Pure and exported so the mapping below is
+ *  testable without a pool: the Ground lamp discounts desk housekeeping
+ *  (groundLamps.liveWorkForProject), and an SDK-runtime desk that lost this
+ *  marker would light RUNNING on every board-reading pass, which is the exact
+ *  lie the owner reported (2026-08-17, PTY side). A `worker` is NOT a desk:
+ *  its session is real project work wherever it runs. */
+export const isSdkDeskRole = (role: string | undefined): boolean =>
+  role === 'manager' || role === 'supply'
+
 export const listAllActiveDesks = (): ActiveTerminalsResponse => {
   const pty = listActiveTerminals()
   const cwds = new Set(pty.cwds)
@@ -416,7 +428,7 @@ export const listAllActiveDesks = (): ActiveTerminalsResponse => {
     const status = beaconStatusOfSdk(s)
     if (!status) continue
     cwds.add(s.cwd)
-    claude.push({ id: s.id, cwd: s.cwd, status })
+    claude.push({ id: s.id, cwd: s.cwd, status, ...(isSdkDeskRole(s.role) ? { desk: true } : {}) })
   }
   return { cwds: Array.from(cwds), claude }
 }

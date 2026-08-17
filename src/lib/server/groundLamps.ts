@@ -65,27 +65,53 @@ const defaultStartedFor = async (projectPath: string): Promise<number | undefine
  *
  *  A plain `claude` pane counts when it is WORKING — not merely open. A session
  *  parked at its prompt is a fact about the machine; treating it as live work is
- *  how the old beacon stamped finished projects amber forever. Desks (commander /
- *  supply) are ordinary panes for this purpose: a desk mid-pass genuinely is the
- *  project working, and a desk sitting at its prompt is not 'working' anyway.
+ *  how the old beacon stamped finished projects amber forever.
+ *
+ *  ⚠ DESKS DO NOT COUNT — owner decision, 2026-08-17: 「補給官の動きはrunning扱い
+ *  じゃなくてもいいかも」, on a card stamped RUNNING beside a strip saying 稼働0.
+ *  A desk (commander / supply) is machinery: it wakes every few minutes to read
+ *  the Board, and each of those passes lit the lamp for a project where not one
+ *  card was moving — the exact housekeeping-as-work lie this lamp was rebuilt to
+ *  remove, re-entering through the working/waiting split. The work a desk DRIVES
+ *  is visible on its own: dispatched workers hold live handles (counted above),
+ *  and a desk that needs the owner raises an escalation, which outranks
+ *  everything in groundLamp(). `ClaudeActivity.desk` is the marker (set from
+ *  TerminalInfo.deskLabel / the SDK session's role — only desk launchers write
+ *  those; a hand-started `claude` in the same repo never carries one), so the
+ *  owner's own pane mid-generation still counts as the project working.
  *
  *  ⚠ BOTH POOLS, VIA liveDesks. `listActiveTerminals` is the PTY pool alone and
  *  is lint-restricted for exactly the reason that bites here: an SDK session has
  *  no terminalId, so asking the PTY pool about one does not fail — it quietly
  *  answers "nothing is running". On this surface that renders as 「途中でとまって
  *  いる」 over a swarm working perfectly, which is the same shape of lie the lamp
- *  was rebuilt to remove. */
-const defaultLiveWorkFor = async (projectPath: string): Promise<boolean> => {
+ *  was rebuilt to remove.
+ *
+ *  Exported with injectable seams so the desk rule is testable without pools. */
+export const liveWorkForProject = async (
+  projectPath: string,
+  deps: {
+    listWorkers?: typeof listSwarmWorkers
+    listDesks?: typeof listAllActiveDesks
+    canon?: (p: string) => Promise<string>
+  } = {},
+): Promise<boolean> => {
+  const listWorkers = deps.listWorkers ?? listSwarmWorkers
+  const listDesks = deps.listDesks ?? listAllActiveDesks
+  const canon = deps.canon ?? canonicalize
   try {
-    const workers = await listSwarmWorkers(projectPath)
+    const workers = await listWorkers(projectPath)
     if (workers.some((w) => w.terminalId || w.sdkSessionId)) return true
   } catch {
     /* the registry is unreadable — fall through to the PTY list */
   }
   try {
-    const canon = await canonicalize(projectPath)
-    return listAllActiveDesks().claude.some(
-      (a) => a.status === 'working' && (a.cwd === canon || a.cwd.startsWith(canon + '/')),
+    const canonPath = await canon(projectPath)
+    return listDesks().claude.some(
+      (a) =>
+        !a.desk &&
+        a.status === 'working' &&
+        (a.cwd === canonPath || a.cwd.startsWith(canonPath + '/')),
     )
   } catch {
     return false
@@ -101,7 +127,7 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
       return (settings.projects ?? []).map((p) => ({ id: p.id, path: p.path }))
     })
   const startedFor = deps.startedFor ?? defaultStartedFor
-  const liveWorkFor = deps.liveWorkFor ?? defaultLiveWorkFor
+  const liveWorkFor = deps.liveWorkFor ?? liveWorkForProject
   const readQuestions = deps.openQuestions ?? countOpenEscalationsByProject
 
   let projects: Array<{ id: string; path: string }>

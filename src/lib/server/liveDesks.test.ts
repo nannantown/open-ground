@@ -135,6 +135,38 @@ describe('listAllActiveDesks — the Ground beacon', () => {
     ])
     terminateSdkSession(s.id)
   })
+
+  // Owner, 2026-08-17: 「補給官の動きはrunning扱いじゃなくてもいいかも」. The lamp
+  // discounts desk housekeeping via `ClaudeActivity.desk`; an SDK-runtime desk
+  // that loses the marker here lights RUNNING on every board-reading pass —
+  // the same lie, re-entering through the second pool.
+  it('a ROLE DESK on the SDK runtime carries the desk marker the lamp discounts', () => {
+    const supply = spawnSdkSession({
+      cwd: '/repo/main',
+      options: {},
+      role: 'supply',
+      queryFn: liveQuery,
+    })
+    const manager = spawnSdkSession({
+      cwd: '/repo/main',
+      options: {},
+      role: 'manager',
+      queryFn: liveQuery,
+    })
+    const rows = listAllActiveDesks().claude
+    expect(rows.find((c) => c.id === supply.id)?.desk).toBe(true)
+    expect(rows.find((c) => c.id === manager.id)?.desk).toBe(true)
+    terminateSdkSession(supply.id)
+    terminateSdkSession(manager.id)
+  })
+
+  it('an SDK WORKER never carries it — its session is real project work', () => {
+    const s = spawnSdkSession({ cwd: '/wt/w1', options: {}, role: 'worker', queryFn: liveQuery })
+    const row = listAllActiveDesks().claude.find((c) => c.id === s.id)
+    expect(row).toBeDefined()
+    expect(row?.desk).toBeUndefined()
+    terminateSdkSession(s.id)
+  })
 })
 
 describe('stopAllDesksInDirAndWait — the delete gate', () => {

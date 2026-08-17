@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { readGroundLamps } from './groundLamps'
+import { liveWorkForProject, readGroundLamps } from './groundLamps'
 import { groundLamp } from '@/lib/groundLamp'
-import type { GroundLampRow } from '@/lib/types'
+import type { ActiveTerminalsResponse, GroundLampRow, SwarmWorkerRecord } from '@/lib/types'
 
 // The Ground lamp's SERVER half: gather three facts per project without ever
 // throwing, and — the part that keeps being got wrong across this codebase —
@@ -195,5 +195,94 @@ describe('the rows drive the lamp the owner asked for', () => {
       liveWorkFor: async () => true,
     })
     expect(lampFor(lamps[0])).toBe('waiting')
+  })
+})
+
+// ─── liveWorkForProject — what counts as the project ACTUALLY moving ────────
+//
+// Owner, 2026-08-17, on a card stamped RUNNING beside a strip saying 稼働0:
+// 「補給官の動きはrunning扱いじゃなくてもいいかも」. The supply desk wakes every
+// few minutes to read the Board, its PTY paints for a few seconds, and the lamp
+// counted that housekeeping as the project working. These cases pin the rule
+// through the production arm's own seams: desks never count; workers and the
+// owner's own pane mid-generation still do.
+describe('liveWorkForProject — desks are machinery, not project work', () => {
+  const canon = async (p: string) => p
+  const worker = (over: Partial<SwarmWorkerRecord> = {}): SwarmWorkerRecord => ({
+    worktree: '/home/u/.openground/projects/uuid-a/worktrees/w1',
+    branch: 'swarm/card-1',
+    ...over,
+  })
+  const desks = (claude: ActiveTerminalsResponse['claude']): (() => ActiveTerminalsResponse) =>
+    () => ({ cwds: claude.map((c) => c.cwd), claude })
+
+  it('a swarm worker holding a live handle counts — either runtime', async () => {
+    expect(
+      await liveWorkForProject('/repo/a', {
+        listWorkers: async () => [worker({ sdkSessionId: 'sdk-1' })],
+        listDesks: desks([]),
+        canon,
+      }),
+    ).toBe(true)
+    expect(
+      await liveWorkForProject('/repo/a', {
+        listWorkers: async () => [worker({ terminalId: 't-1' })],
+        listDesks: desks([]),
+        canon,
+      }),
+    ).toBe(true)
+  })
+
+  it("the SUPPLY DESK mid-pass does NOT count — the owner's own report", async () => {
+    expect(
+      await liveWorkForProject('/repo/a', {
+        listWorkers: async () => [],
+        listDesks: desks([{ id: 'pty-supply', cwd: '/repo/a', status: 'working', desk: true }]),
+        canon,
+      }),
+    ).toBe(false)
+  })
+
+  it("…while the owner's OWN pane mid-generation still does", async () => {
+    expect(
+      await liveWorkForProject('/repo/a', {
+        listWorkers: async () => [],
+        listDesks: desks([{ id: 'pty-own', cwd: '/repo/a', status: 'working' }]),
+        canon,
+      }),
+    ).toBe(true)
+  })
+
+  it('a pane parked at its prompt never counts, desk or not', async () => {
+    expect(
+      await liveWorkForProject('/repo/a', {
+        listWorkers: async () => [],
+        listDesks: desks([
+          { id: 'p1', cwd: '/repo/a', status: 'waiting' },
+          { id: 'p2', cwd: '/repo/a', status: 'waiting', desk: true },
+        ]),
+        canon,
+      }),
+    ).toBe(false)
+  })
+
+  it("another project's working pane does not leak in", async () => {
+    expect(
+      await liveWorkForProject('/repo/a', {
+        listWorkers: async () => [],
+        listDesks: desks([{ id: 'p1', cwd: '/repo/b', status: 'working' }]),
+        canon,
+      }),
+    ).toBe(false)
+  })
+
+  it('a worker holding NO handle (dead, heartbeat only) does not count on its own', async () => {
+    expect(
+      await liveWorkForProject('/repo/a', {
+        listWorkers: async () => [worker()],
+        listDesks: desks([]),
+        canon,
+      }),
+    ).toBe(false)
   })
 })
