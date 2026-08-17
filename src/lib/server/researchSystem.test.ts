@@ -86,6 +86,24 @@ describe('shipped /research skill (skills/research/SKILL.md)', () => {
     expect(text).toContain('Every claim carries its source URL.')
   })
 
+  // ── the deliverable-file contract (2026-08-17) ─────────────────────────────
+  // A real project's reports landed in `reports/` and the 調査 tab honestly
+  // showed nothing — the owner read that as "the research never ran". The
+  // placement was one bullet at the BOTTOM of the skill; it is now a frozen
+  // section near the top, with a self-check the worker must run before done.
+  // These pins keep a future skill edit from quietly demoting it again.
+  it('⚠ placement is a frozen contract: exact path shape, own-directory ban, self-check', () => {
+    expect(text).toContain('docs/research/<YYYYMMDD>-<slug>.md')
+    // The ban names the observed failure mode, not just the rule.
+    expect(text).toContain('Never invent your own directory.')
+    expect(text).toContain('`reports/`')
+    // The pre-done check is an ACT (runnable, observable), not a reminder.
+    expect(text).toContain('ls docs/research/')
+    // And the escape hatch stays honest: a card-named path is allowed, but the
+    // reply must say the tab reads docs/research/ only.
+    expect(text).toContain('reads `docs/research/` only')
+  })
+
   it('carries the plain-curl baselines (the zero-setup widening, 2026-08-14)', () => {
     // GitHub REST / Reddit public JSON / direct feed reads — the reason the
     // doctor may say [part] instead of [miss] for these channels.

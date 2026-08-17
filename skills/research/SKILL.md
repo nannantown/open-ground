@@ -37,6 +37,32 @@ blocks the task.
 machine are the owner's action - the doctor's hints exist for THEM. A worker
 that hits `[miss]` uses the fallback ladder and notes the gap in the report.
 
+## The deliverable file - FROZEN CONTRACT
+
+The report is ONE Markdown file at, from the PROJECT ROOT:
+
+```
+docs/research/<YYYYMMDD>-<slug>.md
+```
+
+- **Never invent your own directory.** `reports/`, `research/`, `results/`,
+  `output/`, the repo root - all wrong. Measured failure (2026-08-17): a
+  real project's reports sat in `reports/`, OPEN GROUND's 調査 tab truthfully
+  showed nothing, and the owner read that as "the research never ran". The
+  tab indexes `docs/research/` only (plus one subdirectory level).
+- The ask may name a different path; only then use that path - and say in
+  your final reply that the 調査 tab reads `docs/research/` only, so a report
+  parked elsewhere will not appear in the app.
+- `<slug>` follows the ask's language (a Japanese ask makes a Japanese slug -
+  correct, not a problem). First line is a single `# Title`; the tab's list
+  shows that title.
+- Plain Markdown renders in-app: GFM pipe tables, **bold**, `code`, lists,
+  `>` quotes, `---` rules, `#`-`####` headings. Prefer pipe tables for
+  observed-value grids.
+- **Before declaring the task done, run `ls docs/research/` and confirm the
+  file is really there.** A research task with no file at the convention
+  path is not done; this check is part of the deliverable, not an option.
+
 ## Principles
 
 1. **No paid official APIs.** Every platform has a free OSS route; use it.
@@ -105,8 +131,8 @@ summarize (never "watch").
 
 ## Report conventions
 
-- **Placement:** what the card names; unstated → `docs/research/<YYYYMMDD>-<slug>.md`
-  in the worktree, committed like any deliverable.
+- **Placement:** the frozen contract above - `docs/research/<YYYYMMDD>-<slug>.md`
+  unless the ask names a path - committed like any deliverable.
 - **Every claim carries its source URL.** Separate OBSERVED (quotes, counts,
   dates - as fetched) from INTERPRETATION (your synthesis). No source, no
   claim.
