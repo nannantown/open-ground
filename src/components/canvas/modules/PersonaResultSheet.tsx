@@ -21,17 +21,35 @@
 import type { ReactNode } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import { Btn } from '@/components/ui/Btn'
+import { Overlay } from '@/components/ui/overlay'
 import type { PersonaResult } from '@/lib/types'
+import type { ResultDelta } from '@/lib/persona/resultDelta'
 
-// The scrim the sheet floats on, kept as its own component so no theme-flipping
+// The scrim the sheet floats on. Kept as its own component so no theme-flipping
 // ink token ever lands beside it: `bg-deep` is dark in BOTH themes, so only
 // `ink-on-deep` reads on it, and src/labelPlates.test.ts bans the alternatives
 // anywhere near this surface. Everything inside the sheet sits on `bg-bg-card`,
 // which does invert with the theme and takes the ordinary ink tokens.
-const Scrim = ({ children }: { children: ReactNode }) => (
-  <div className="absolute inset-0 z-overlay-local overflow-y-auto bg-bg-deep/90 px-5 py-[4vh]">
+//
+// ⚠ TAPPING THE SCRIM CLOSES THE SHEET (owner, 2026-08-17: 「モーダル系はモーダル外
+// をタップすると閉じる仕様にしてね。全部」). It is the one overlay on this surface that
+// was hand-rolled instead of using the shared shell, so it was also the only one
+// without the behaviour. It uses the shell now — which is why the rule cannot go
+// missing here again — with the same dark, non-inverting ground painted through
+// `className` rather than a backdrop token, because none of them is `bg-deep`.
+const Scrim = ({ children, onClose }: { children: ReactNode; onClose: () => void }) => (
+  <Overlay
+    position="absolute"
+    layer="local"
+    backdrop="none"
+    placement="scroll"
+    padded={false}
+    className="bg-bg-deep/90 px-5 py-[4vh]"
+    onClose={onClose}
+    aria-label="result"
+  >
     {children}
-  </div>
+  </Overlay>
 )
 
 /** One entry of the takes strip. Both strings are already localized — `label`
@@ -67,6 +85,14 @@ export interface PersonaResultSheetProps {
   /** Index into `takes` of the result currently on screen. */
   currentTake?: number
   onPickTake?: (index: number) => void
+  /** What moved since the take BEFORE the one on screen (src/lib/persona/
+   *  resultDelta.ts — computed there, because this component does no arithmetic
+   *  of its own). `null` ⇒ there is no earlier take to compare against, and the
+   *  section says exactly that rather than being absent: 「これしか無い」 is a
+   *  fact about the record, and an absent section is a question left hanging. */
+  delta?: ResultDelta | null
+  /** Localized date of the take being compared against. */
+  deltaSince?: string
 }
 
 export const PersonaResultSheet = ({
@@ -79,12 +105,14 @@ export const PersonaResultSheet = ({
   takes,
   currentTake = 0,
   onPickTake,
+  delta,
+  deltaSince,
 }: PersonaResultSheetProps) => {
   const { t } = useT()
   const showStrip = !!takes && takes.length > 1 && !!onPickTake
 
   return (
-    <Scrim>
+    <Scrim onClose={onClose}>
       <div className="mx-auto flex max-w-[560px] flex-col gap-4 rounded-[3px] border border-line bg-bg-card px-8 py-7 shadow-card">
         <header className="flex flex-col gap-1">
           <p className="label-cap text-accent">{t('persona.result.kicker')}</p>
@@ -174,6 +202,68 @@ export const PersonaResultSheet = ({
             ),
           )}
         </div>
+
+        {/* ── 前回から動いたところ ─────────────────────────────────────────
+         *  ⚠ TWO NUMBERS AND A DIFFERENCE, AND NOT ONE WORD ABOUT WHAT IT MEANS.
+         *  A five-item self-report wobbles by a whole step on a bad morning;
+         *  calling that wobble a finding is the exact story this feature exists
+         *  to not tell. The caveat says so once, and the reading is his. */}
+        <section className="flex flex-col gap-2 border-t border-line pt-4">
+          <h3 className="label-cap text-ink-faint">{t('persona.delta.heading')}</h3>
+          {!delta ? (
+            <p className="text-meta leading-relaxed text-ink-faint">{t('persona.delta.only')}</p>
+          ) : (
+            <>
+              {deltaSince && (
+                <p className="text-meta leading-relaxed text-ink-faint">
+                  {t('persona.delta.since', { date: deltaSince })}
+                </p>
+              )}
+              <ul className="flex flex-col gap-1">
+                {delta.rows.map((row) => (
+                  <li key={row.key} className="flex items-baseline gap-3 text-meta">
+                    <span className="min-w-[6.5rem] text-ink">{row.name}</span>
+                    <span className="tabular-nums text-ink-faint">
+                      {row.before === null || row.after === null
+                        ? t('persona.delta.noNumber')
+                        : delta.kind === 'bars'
+                          ? `${row.before}% → ${row.after}%`
+                          : t('persona.delta.rankPair', { before: row.before, after: row.after })}
+                    </span>
+                    <span
+                      className={`ml-auto tabular-nums ${
+                        row.moved ? 'text-accent' : 'text-ink-faint'
+                      }`}
+                    >
+                      {/* 0 is printed as 「動きなし」 rather than as +0: it is a
+                       *  measurement, and it should read as one. */}
+                      {row.moved === null
+                        ? ''
+                        : row.moved === 0
+                          ? t('persona.delta.same')
+                          : `${row.moved > 0 ? '+' : '−'}${Math.abs(row.moved)}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {/* An instrument that changed between two takes is the one thing
+               *  that would make this table quietly wrong. */}
+              {delta.onlyNow.length > 0 && (
+                <p className="text-meta leading-relaxed text-ink-faint">
+                  {t('persona.delta.onlyNow', { names: delta.onlyNow.join('、') })}
+                </p>
+              )}
+              {delta.onlyBefore.length > 0 && (
+                <p className="text-meta leading-relaxed text-ink-faint">
+                  {t('persona.delta.onlyBefore', { names: delta.onlyBefore.join('、') })}
+                </p>
+              )}
+              <p className="text-meta leading-relaxed text-ink-faint">
+                {t('persona.delta.caveat')}
+              </p>
+            </>
+          )}
+        </section>
 
         {/* What actually entered the corpus. The sheet is a reading; THIS is the
          *  part that changes what the stand-in does, so it is listed, not

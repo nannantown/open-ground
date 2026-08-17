@@ -23,6 +23,17 @@
   --og-bg-card: 248 244 232;     /* #F8F4E8 */
   --og-bg-inset: 230 222 198;    /* #E6DEC6 */
   --og-bg-deep: 42 31 26;        /* #2A1F1A */
+  /* ⚠ THE SURFACES THAT SIT ON bg-deep, AND THEREFORE DO NOT INVERT EITHER.
+     `ink-on-deep` has existed since 2026-08-04 because bg-deep is dark in BOTH
+     palettes and the flipping ink tokens are each wrong in one of them. The
+     companion SURFACE tokens were never written, so anything raised on that slab
+     — the persona console's input box is the one that matters — used `bg-card`
+     and flipped to cream-on-near-black at noon. Found by rendering the screen in
+     the light theme for the first time (2026-08-16); the owner runs dark and
+     could not have seen it. Values are the DARK palette's, verbatim, so dark
+     users see no change at all. */
+  --og-bg-card-on-deep: 54 42 34;  /* #362A22 — dark bg-card, in both themes */
+  --og-line-on-deep: 74 58 46;     /* #4A3A2E — dark line, in both themes */
   /* The card's hover face. The mock moves the SURFACE on hover (罫線なし・面の
      明度差のみ); a shadow alone is invisible at night. */
   --og-bg-card-hover: 240 235 219; /* #F0EBDB */
@@ -125,6 +136,11 @@ html[data-theme='dark'] {
   --og-bg-card: 54 42 34;        /* #362A22 raised cards */
   --og-bg-inset: 31 23 19;       /* #1F1713 wells (columns, troughs, gauges) */
   --og-bg-deep: 20 16 12;        /* #14100C deepest (terminal frames) */
+  /* Same values as the light block above — the surface they sit on is the same
+     in both palettes, so these must be too. Repeated rather than inherited so
+     the pair reads as one decision wherever it is looked up. */
+  --og-bg-card-on-deep: 54 42 34;  /* #362A22 */
+  --og-line-on-deep: 74 58 46;     /* #4A3A2E */
   --og-bg-card-hover: 61 48 40;  /* #3D3028 — the mock's .card:hover */
   --og-bg-glow: 50 37 30;        /* #32251E — the ground's radial lift */
   --og-plane: 65 54 49;          /* #413631 = cream 11% over the ground */

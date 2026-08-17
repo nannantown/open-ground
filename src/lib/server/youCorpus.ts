@@ -331,8 +331,8 @@ export const readManualJudgments = async (): Promise<ManualJudgment[]> => {
 // serves the lot. What this decides is narrower and is the thing that actually
 // matters — WHICH LINES THE STAND-IN READS.
 //
-// TWO WAYS A LINE STOPS COUNTING, and neither existed as behaviour before
-// 2026-08-16 (both were written into the data and then read by nobody):
+// THREE WAYS A LINE STOPS COUNTING. Two of them existed as DATA before
+// 2026-08-16 and were read by nobody; the third is the owner saying so outright:
 //
 //   1. A LATER JUDGMENT CORRECTS IT (`correctsId`). The Persona tab has offered
 //      「これを直す」 since the beginning and the field was persisted correctly —
@@ -362,6 +362,14 @@ export const readManualJudgments = async (): Promise<ManualJudgment[]> => {
 //   • A course whose takes are ALL unstamped keeps every one of them, because
 //     there is no evidence about which came last. Recency by `addedAt` would be
 //     a guess, and the whole point of this file is to not guess about the owner.
+//
+//   3. THE OWNER TOOK IT BACK (`retiredId` / `restoredId`). Correcting says
+//      「本当はこう」 and needs a replacement sentence; this says 「これは要らない」
+//      and needs none — the two are different acts, and before this there was
+//      only the first, so a line that was simply wrong to have could be argued
+//      with but never withdrawn. A tombstone is a RECORD, not an erasure: the
+//      retired line stays in the file verbatim, the list screen shows it in its
+//      own greyed group, and 「戻す」 appends the opposite marker.
 
 /** A course take's stamp. Public so the writer and this reader cannot drift. */
 export const TAKE_TAG = (takenAtIso: string): string => `take:${takenAtIso}`
@@ -377,9 +385,51 @@ const takeTagOf = (j: ManualJudgment): string | null =>
 /** The judgments that still speak for the owner — everything except lines a
  *  later one corrected, and course findings from a take that has been redone.
  *  PURE: hand it the raw list, it hands back the subset, order preserved. */
+/** True for a record whose only content is 「取り消した」/「戻した」 about another
+ *  one. It is bookkeeping: never a belief, never counted, never on the body. */
+export const isTombstone = (j: ManualJudgment): boolean => !!(j.retiredId || j.restoredId)
+
+/** The ids the owner has taken back, resolved by replaying the log IN ORDER.
+ *
+ *  ⚠ ORDER IS THE SEMANTICS. The file is append-only, so "the last thing he said
+ *  about this line wins" is exactly the order it is written in — no timestamps
+ *  are parsed and no recursion is needed. Retire and restore are separate
+ *  markers rather than one toggle, so a double-send is idempotent instead of
+ *  resurrecting a line he deliberately withdrew. */
+export const retiredIds = (all: readonly ManualJudgment[]): Set<string> => {
+  const out = new Set<string>()
+  for (const j of all) {
+    if (j.retiredId) out.add(j.retiredId)
+    if (j.restoredId) out.delete(j.restoredId)
+  }
+  return out
+}
+
+/** The lines the owner took back, each paired with WHEN — newest tombstone
+ *  wins, so a retire→restore→retire chain reports the latest retire.
+ *
+ *  ⚠ ONLY LINES THAT EXIST. A tombstone naming an id that is not in the file
+ *  (a hand-edited additions file, a half-restored backup) yields nothing rather
+ *  than a row with no sentence in it. */
+export const retiredJudgments = (
+  all: readonly ManualJudgment[],
+): { judgment: ManualJudgment; retiredAt: string }[] => {
+  const dead = retiredIds(all)
+  if (dead.size === 0) return []
+  const at = new Map<string, string>()
+  for (const j of all) if (j.retiredId && dead.has(j.retiredId)) at.set(j.retiredId, j.addedAt)
+  const out: { judgment: ManualJudgment; retiredAt: string }[] = []
+  for (const j of all) {
+    if (!j.id || !dead.has(j.id) || isTombstone(j)) continue
+    out.push({ judgment: j, retiredAt: at.get(j.id) ?? j.addedAt })
+  }
+  return out
+}
+
 export const liveJudgments = (all: readonly ManualJudgment[]): ManualJudgment[] => {
   const corrected = new Set<string>()
   for (const j of all) if (j.correctsId) corrected.add(j.correctsId)
+  const dead = retiredIds(all)
 
   const newestTake = new Map<string, string>()
   for (const j of all) {
@@ -391,7 +441,13 @@ export const liveJudgments = (all: readonly ManualJudgment[]): ManualJudgment[] 
   }
 
   return all.filter((j) => {
+    // The markers themselves are never content. A tombstone carries the retired
+    // line's own words (so the file reads), which is exactly why it must be
+    // dropped here — otherwise taking a line back would leave a copy of it
+    // standing in the corpus the stand-in reads.
+    if (isTombstone(j)) return false
     if (j.id && corrected.has(j.id)) return false
+    if (j.id && dead.has(j.id)) return false
     const course = courseTagOf(j)
     if (!course) return true
     const newest = newestTake.get(course)
@@ -448,6 +504,16 @@ const readManualJudgmentsForAppend = async (): Promise<ManualJudgment[]> => {
   }
 }
 
+/** How much of the owner's original words one line may carry.
+ *
+ *  ⚠ A CAP, AND A VISIBLE ONE. He pastes whole documents into that box; storing
+ *  every one of them beside every line distilled from it would grow the
+ *  irreplaceable file without bound. The ellipsis is part of the stored string
+ *  so that a truncated quote can never be read as the whole of what he said. */
+export const SOURCE_MAX = 1000
+const capSource = (s: string): string =>
+  s.length <= SOURCE_MAX ? s : `${s.slice(0, SOURCE_MAX).trimEnd()}…`
+
 // Serialise appends through a single-flight chain (like store.setSettings) so
 // two concurrent appends can't lose each other's record (read-modify-write).
 let additionsChain: Promise<unknown> = Promise.resolve()
@@ -458,6 +524,17 @@ export interface AppendJudgmentInput {
   context?: string
   /** id of the judgment this one corrects (see ManualJudgment.correctsId). */
   correctsId?: string
+  /** The owner's own words this line was distilled from (ManualJudgment.source).
+   *  Capped by the writer — see SOURCE_MAX. */
+  source?: string
+  /** id of the judgment this record TAKES BACK (see ManualJudgment.retiredId).
+   *  Written only by `retireJudgment` below — the /append route does not accept
+   *  it, because a marker is a different act from a belief and letting one
+   *  endpoint write both is how "add a note" silently gains the power to make
+   *  lines disappear. */
+  retiredId?: string
+  /** id of the judgment this record PUTS BACK (see ManualJudgment.restoredId). */
+  restoredId?: string
 }
 
 // Describe the corpus AS IT SITS ON DISK, without assembling. Used for the
@@ -501,8 +578,13 @@ export const appendJudgment = async (
     addedAt: new Date().toISOString(),
     ...(input.tags && input.tags.length ? { tags: input.tags } : {}),
     ...(input.context && input.context.trim() ? { context: input.context.trim() } : {}),
+    ...(input.source && input.source.trim() ? { source: capSource(input.source.trim()) } : {}),
     ...(input.correctsId && input.correctsId.trim()
       ? { correctsId: input.correctsId.trim() }
+      : {}),
+    ...(input.retiredId && input.retiredId.trim() ? { retiredId: input.retiredId.trim() } : {}),
+    ...(input.restoredId && input.restoredId.trim()
+      ? { restoredId: input.restoredId.trim() }
       : {}),
   }
   // Serialise the WHOLE read-modify-write AND the re-assemble through the chain:
@@ -539,6 +621,36 @@ export const appendJudgment = async (
   additionsChain = run.catch(() => {})
   const meta = await run
   return { judgment, meta }
+}
+
+/** 「取り消す」 — append a tombstone for one judgment.
+ *
+ *  ⚠ IT DELETES NOTHING, and the shape of this function is the proof: it is an
+ *  APPEND, on the same append-only file, through the same lock. What changes is
+ *  what the READERS do with the target (see liveJudgments).
+ *
+ *  The tombstone carries the retired line's own words. That costs one duplicated
+ *  sentence in the file and buys the thing that matters when this goes wrong at
+ *  3am: the raw additions file, read by a human with no code in front of them,
+ *  says WHICH line was taken back — not just an id.
+ *
+ *  Refuses an id that is not in the file: a marker pointing at nothing is a
+ *  record of an act that never happened, and it would sit there forever. */
+export const retireJudgment = async (
+  id: string,
+): Promise<{ judgment: ManualJudgment; meta: YouCorpusMeta }> => {
+  const target = (await readManualJudgments()).find((j) => j.id === id)
+  if (!target) throw new Error(`no such judgment: ${id}`)
+  return appendJudgment({ text: target.text, retiredId: id })
+}
+
+/** 「戻す」 — the opposite marker. Idempotent by construction (see retiredIds). */
+export const restoreJudgment = async (
+  id: string,
+): Promise<{ judgment: ManualJudgment; meta: YouCorpusMeta }> => {
+  const target = (await readManualJudgments()).find((j) => j.id === id)
+  if (!target) throw new Error(`no such judgment: ${id}`)
+  return appendJudgment({ text: target.text, restoredId: id })
 }
 
 // ─── Assembly ────────────────────────────────────────────────────────────────

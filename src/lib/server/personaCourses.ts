@@ -193,6 +193,10 @@ export const listPersonaCourses = async (): Promise<PersonaCoursesResponse> => {
         source: c.source,
         lastTakenAt: rec?.takenAt ?? null,
         headline: rec?.result.headline ?? null,
+        // Absent on the instruments whose result is a profile, not a label —
+        // `?? null` rather than `?? ''` so "this course has no badge" and "the
+        // badge is empty" cannot be confused by a reader.
+        badge: rec?.result.badge ?? null,
       }
     }),
   }

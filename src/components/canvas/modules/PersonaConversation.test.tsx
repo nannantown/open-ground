@@ -5,6 +5,7 @@ import {
   PersonaConversation,
   PROMPT_KEYS,
   PROMPT_ROTATE_MS,
+  RESOLVED_NOTICE_MS,
   nextPromptIndex,
   type PersonaConversationProps,
   type PersonaImportView,
@@ -99,6 +100,7 @@ let cancelled: string[]
 let corrected: ManualJudgment[]
 let dropped: File[]
 let skipped: number
+let askedAnother: number
 let retriedThread: number
 
 const props = (over: Partial<PersonaConversationProps> = {}): PersonaConversationProps => ({
@@ -126,6 +128,10 @@ const props = (over: Partial<PersonaConversationProps> = {}): PersonaConversatio
   onSkipQuestion: () => {
     skipped += 1
   },
+  moreState: 'idle',
+  onAskAnother: () => {
+    askedAnother += 1
+  },
   lang: 'en',
   onDropExport: (f) => {
     dropped.push(f)
@@ -147,6 +153,7 @@ beforeEach(() => {
   corrected = []
   dropped = []
   skipped = 0
+  askedAnother = 0
   retriedThread = 0
 })
 
@@ -368,25 +375,107 @@ describe('PersonaConversation — the day’s question, as the opening turn', ()
     expect(skipped).toBe(1)
   })
 
-  it('an answered question says so — and hedges when the corpus was not rebuilt', () => {
-    const { rerender } = draw({ question: question({ status: 'answered' }) })
-    expect(screen.getByText('persona.interview.answered')).toBeTruthy()
-    expect(screen.queryByText('persona.interview.skip')).toBeNull()
-
-    rerender(
-      <PersonaConversation
-        {...props({ question: question({ status: 'answered' }), answerStale: true })}
-      />,
-    )
-    expect(screen.getByText('persona.interview.answeredStale')).toBeTruthy()
-    expect(screen.queryByText('persona.interview.answered')).toBeNull()
-  })
-
   it('a failed SKIP never borrows the answer path’s reassurance', () => {
     draw({ question: question(), skipFailed: true })
     expect(screen.getByText('persona.interview.skipFailed')).toBeTruthy()
     // There were no words on the skip path, so nothing promises they are safe.
     expect(screen.queryByText('persona.chat.turnFailed')).toBeNull()
+  })
+})
+
+// FIELD REPORT, 2026-08-16: 「答えたらずっと表示する必要なくない? ちゃんとユーザーの
+// フローも考えて設計して」.
+//
+// The loop asks ONE question a day. A question answered at 09:01 kept its
+// heading, its setting, its text and a 「保存しました」 line above the input until
+// midnight — five lines whose job ended in the first minute, and, within the
+// same session, saying the same thing the owner's own answer bubble said.
+//
+// The phases, and what each is allowed to draw:
+//   ASKED    — the block. It is the point of the screen.
+//   RESOLVED — a receipt, then gone. An event, not a state.
+//   AFTER    — nothing at all.
+describe('the question is drawn for as long as it has a job, and no longer', () => {
+  const openQ = () => question({ status: 'open' })
+  const answeredQ = () => question({ status: 'answered' })
+
+  const resolve = (over: Partial<PersonaConversationProps> = {}) => {
+    const view = render(<PersonaConversation {...props({ question: openQ() })} />)
+    view.rerender(<PersonaConversation {...props({ question: answeredQ(), ...over })} />)
+    return view
+  }
+
+  it('ASKED: draws the question and the way past it', () => {
+    draw({ question: openQ() })
+    expect(screen.getByText('What kept being missing?')).toBeTruthy()
+    expect(screen.getByText('persona.interview.skip')).toBeTruthy()
+  })
+
+  it('RESOLVED: the question leaves immediately, and a receipt takes its place', () => {
+    resolve()
+    // The five lines are gone the moment the answer lands …
+    expect(screen.queryByText('What kept being missing?')).toBeNull()
+    expect(screen.queryByText('About a card on your board.')).toBeNull()
+    expect(screen.queryByText('persona.interview.heading')).toBeNull()
+    expect(screen.queryByText('persona.interview.skip')).toBeNull()
+    // … and one line says what happened.
+    expect(screen.getByText('persona.interview.answered')).toBeTruthy()
+  })
+
+  it('RESOLVED: the receipt goes too, rather than becoming the new standing line', () => {
+    vi.useFakeTimers()
+    try {
+      const view = render(<PersonaConversation {...props({ question: openQ() })} />)
+      view.rerender(<PersonaConversation {...props({ question: answeredQ() })} />)
+      expect(screen.getByText('persona.interview.answered')).toBeTruthy()
+      act(() => {
+        vi.advanceTimersByTime(RESOLVED_NOTICE_MS + 100)
+      })
+      expect(screen.queryByText('persona.interview.answered')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('RESOLVED: it hedges when the corpus behind the save was not rebuilt', () => {
+    resolve({ answerStale: true })
+    expect(screen.getByText('persona.interview.answeredStale')).toBeTruthy()
+    expect(screen.queryByText('persona.interview.answered')).toBeNull()
+  })
+
+  it('RESOLVED: a skip says it was skipped, not that anything was saved', () => {
+    const view = render(<PersonaConversation {...props({ question: openQ() })} />)
+    view.rerender(<PersonaConversation {...props({ question: question({ status: 'skipped' }) })} />)
+    expect(screen.getByText('persona.interview.skipped')).toBeTruthy()
+    expect(screen.queryByText('persona.interview.answered')).toBeNull()
+  })
+
+  it('AFTER: a reload later the same day says NOTHING about it', () => {
+    // ⚠ THE WHOLE POINT. Mounting straight onto an answered question is what a
+    // reload at 22:00 looks like, and the old build drew the full panel there.
+    // A receipt for an event nobody just witnessed is the standing panel again
+    // under a different name.
+    draw({ question: answeredQ() })
+    expect(screen.queryByText('What kept being missing?')).toBeNull()
+    expect(screen.queryByText('persona.interview.heading')).toBeNull()
+    expect(screen.queryByText('persona.interview.answered')).toBeNull()
+    expect(screen.queryByText('persona.interview.skipped')).toBeNull()
+  })
+
+  it('ONLY SUCCESS IS TRANSIENT: a failed skip keeps the question AND its error', () => {
+    // The skip did not go through, so the question is still open — there is
+    // still something to do, and nothing here is on a timer.
+    vi.useFakeTimers()
+    try {
+      render(<PersonaConversation {...props({ question: openQ(), skipFailed: true })} />)
+      act(() => {
+        vi.advanceTimersByTime(RESOLVED_NOTICE_MS * 3)
+      })
+      expect(screen.getByText('What kept being missing?')).toBeTruthy()
+      expect(screen.getByText('persona.interview.skipFailed')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -439,6 +528,25 @@ describe('the question is TEXT — the only box on the stage is the one you type
     expect(box.className).not.toMatch(/ochre/)
   })
 
+  it('is painted for a surface that does NOT invert, in both themes', () => {
+    // ⚠ FOUND BY RENDERING, NOT BY READING (2026-08-16). The box wore `bg-card`
+    // and `border-line` — both flip with the theme — while sitting on `bg-deep`,
+    // which does not. In the light theme that is a cream slab on near-black: the
+    // one bordered object on this stage, and the thing the last two rounds of
+    // work were about, looked like a different component at noon. The owner runs
+    // dark and could not have seen it.
+    draw()
+    const box = input().closest('div') as HTMLElement
+    const classes = box.className.split(/\s+/)
+    expect(classes).toContain('bg-bg-cardOnDeep')
+    expect(classes).toContain('border-line-onDeep')
+    expect(classes).not.toContain('bg-bg-card')
+    expect(classes).not.toContain('border-line')
+    // The text inside has to follow the surface it is on for the same reason.
+    expect(input().className).toMatch(/text-ink-onDeep/)
+    expect(input().className.split(/\s+/)).not.toContain('text-ink')
+  })
+
   it('uses the ink made for a surface that does not invert', () => {
     // Off the card, the question inherited card ink. In light mode `text-ink` on
     // `bg-deep` is the SAME COLOUR — the question would simply not be there, and
@@ -447,6 +555,53 @@ describe('the question is TEXT — the only box on the stage is the one you type
     expect(inks(screen.getByText('What kept being missing?'))).toEqual([])
     expect(inks(screen.getByText('About a card on your board.'))).toEqual([])
     expect(screen.getByText('What kept being missing?').className).toMatch(/text-ink-onDeep/)
+  })
+})
+
+// Owner, 2026-08-16: 「新しい質問を出すボタンがあってもいいかも。1日1答にする必要は
+// ない」. The daily sweep offers one unasked; this is the owner asking.
+describe('asking for another question', () => {
+  it('offers the control when nothing is on the table, and calls out', () => {
+    draw()
+    fireEvent.click(screen.getByText('persona.interview.more'))
+    expect(askedAnother).toBe(1)
+  })
+
+  it('…and after the last one was answered', () => {
+    draw({ question: question({ status: 'answered' }) })
+    expect(screen.getByText('persona.interview.more')).toBeTruthy()
+  })
+
+  it('HIDES it while a question is still open — it is not an escape hatch', () => {
+    // ⚠ The way past an open question is 「これは飛ばす」, which records that this
+    // observation was declined. A second door that quietly replaced it would
+    // destroy the open question's subject (already burned in askedSubjects) —
+    // a button that claims to ADD one silently deleting one.
+    draw({ question: question({ status: 'open' }) })
+    expect(screen.queryByText('persona.interview.more')).toBeNull()
+    expect(screen.getByText('persona.interview.skip')).toBeTruthy()
+  })
+
+  it('says LOOKING while it is in flight, and cannot be pressed twice', () => {
+    draw({ moreState: 'loading' })
+    const btn = screen.getByText('persona.interview.moreLoading').closest('button')
+    expect(btn).toBeTruthy()
+    expect((btn as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(btn as HTMLButtonElement)
+    expect(askedAnother).toBe(0)
+  })
+
+  it('SWEPT AND FOUND NOTHING and COULD NOT SWEEP are different sentences', () => {
+    // ⚠ The app's oldest lie shape: an emptiness asserted over a source nobody
+    // managed to read. 'none' is only ever reached through a 2xx (the route 500s
+    // on an incomplete sweep, which lands on 'failed').
+    const { rerender } = draw({ moreState: 'none' })
+    expect(screen.getByText('persona.interview.moreNone')).toBeTruthy()
+    expect(screen.queryByText('persona.interview.moreFailed')).toBeNull()
+
+    rerender(<PersonaConversation {...props({ moreState: 'failed' })} />)
+    expect(screen.getByText('persona.interview.moreFailed')).toBeTruthy()
+    expect(screen.queryByText('persona.interview.moreNone')).toBeNull()
   })
 })
 

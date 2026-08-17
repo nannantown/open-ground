@@ -146,6 +146,10 @@ export const youCorpusAdditionsFile = () => join(openGroundHome(), 'you-corpus-a
 // they go to the corpus through appendJudgment, which stays the single record.
 // See src/lib/server/personaInterview.ts.
 export const personaInterviewFile = () => join(openGroundHome(), 'persona-interview.json')
+/** 「どれが自分ではないか」 — the open check, and which lines were mistaken for a
+ *  stranger's. Separate from the interview state: it writes nothing to the
+ *  corpus and answers on a different clock (material, not days). */
+export const personaTellApartFile = () => join(openGroundHome(), 'persona-tell-apart.json')
 // The PERSONA COURSES store (ペルソナタブの診断コース): the last result per course
 // plus the results a retake displaced (capped), written 0600. PERSONAL like the
 // corpus and the interview state — app home only, never a repo. The instrument

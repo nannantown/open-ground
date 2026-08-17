@@ -3391,6 +3391,39 @@ export interface ManualJudgment {
    *  how the prose is worded. Absent on a plain note, and on every correction
    *  written before this field existed. */
   correctsId?: string
+  /** ⚠ THE OWNER'S OWN WORDS THIS LINE WAS DISTILLED FROM, verbatim.
+   *
+   *  Most lines in this file were not typed by him: a model read what he wrote
+   *  and produced a sentence ABOUT him. That sentence is the useful form and the
+   *  unfalsifiable one — 「説明が要る画面は、画面のほうが悪い」 is either a fair
+   *  reading of what he said or a small invention, and until now there was no
+   *  way to tell which. `source` is what makes it checkable.
+   *
+   *  ⚠ NOT `context`. That field says WHERE a line came from (「この会話 ・ 08月16
+   *  日」) — a label. This is the material itself.
+   *
+   *  Absent on everything written before this field existed, and on lines whose
+   *  origin genuinely was not recorded. Absent is NOT empty: the screen says
+   *  「元の言葉は残っていません」 rather than showing a blank quote. */
+  source?: string
+  /** ⚠ A TOMBSTONE, NOT A BELIEF. Set on a record whose only job is to say
+   *  「これは取り消した」 about another one: that judgment's `id`. The retired line
+   *  itself is NEVER touched — this file is append-only, and a record the owner
+   *  took back is still a record of what he once said. Readers drop both (the
+   *  target and this marker); the list screen shows the target in its own
+   *  greyed group, dated by this record's `addedAt`.
+   *
+   *  A record carrying this (or `restoredId`) is bookkeeping and must never be
+   *  rendered as something the owner believes. */
+  retiredId?: string
+  /** The opposite marker: 「やっぱり戻す」. Same target id, appended later.
+   *
+   *  ⚠ TWO FIELDS RATHER THAN ONE TOGGLE, and that is the whole design. A single
+   *  field flipped on each append would make a double-click (or two windows)
+   *  cancel itself out and RESURRECT a line the owner deliberately took back.
+   *  Two self-describing events are idempotent: retire twice is retired, restore
+   *  twice is live, and the log still reads in order. */
+  restoredId?: string
 }
 
 /** Lightweight result of assembling/appending (POST /api/you-corpus/rebuild and
@@ -3445,6 +3478,20 @@ export interface YouCorpusAppendResponse {
  *  Persona tab does not have to parse the rendered markdown back apart. */
 export interface YouCorpusJudgmentsResponse {
   judgments: ManualJudgment[]
+  /** ⚠ NEVER MERGED INTO `judgments`. These are the lines the owner TOOK BACK:
+   *  the stand-in does not read them, they are not counted as 「わかっていること」,
+   *  and they do not sit on the body. They are returned because a record you
+   *  cannot see is a record you cannot get back — the list screen shows them in
+   *  their own greyed group, and pressing one offers 「戻す」. */
+  retired: RetiredJudgment[]
+}
+
+/** One line the owner took back, paired with WHEN he took it back. The pair is
+ *  built server-side because only the reader can see the tombstone that carries
+ *  the date; the client is handed the fact, never the bookkeeping. */
+export interface RetiredJudgment {
+  judgment: ManualJudgment
+  retiredAt: string
 }
 
 // ─── The interview loop (ペルソナタブの「今日の1問」) ─────────────────────────
@@ -3499,6 +3546,39 @@ export interface PersonaQuestion {
    *  here — it goes to the corpus via appendJudgment, which stays its one home. */
   resolvedAt?: string
 }
+
+/** 「どれが自分ではないか」 — three lines, one of which is not his.
+ *
+ *  ⚠ THE ANSWER IS NOT IN THIS SHAPE, and that is deliberate: sending it to the
+ *  browser would put the answer in the page the question is asked on. This is a
+ *  tool for finding out something true about yourself, so the one reader who
+ *  must not be able to peek is the owner. */
+export interface PersonaTellApartCheck {
+  id: string
+  options: { id: string; text: string }[]
+}
+
+/** What answering it was. ⚠ NO SCORE, EVER. Getting one wrong does not make a
+ *  line false — it means the line reads like something anyone would say, which
+ *  is a fact about the sentence and fixable by rewriting or withdrawing it. */
+export interface PersonaTellApartResult {
+  correct: boolean
+  /** The line he mistook for a stranger's, when he did. */
+  mistookText?: string
+  /** The stranger's own words, so a wrong answer ends by showing what a
+   *  fits-anyone sentence looks like beside his own. */
+  strangerText: string
+}
+
+/** POST /api/you-corpus/tell-apart — the open check, or null when none is due.
+ *  Null is the ordinary answer: the check is offered once the record has grown
+ *  by ten lines, not on a schedule. */
+export interface PersonaTellApartResponse {
+  check: PersonaTellApartCheck | null
+}
+
+/** POST /api/you-corpus/tell-apart/answer. */
+export type PersonaTellApartAnswerResponse = PersonaTellApartResult
 
 /** ~/.openground/persona-interview.json — the persisted once-a-day state. */
 export interface PersonaInterviewState {
@@ -3683,6 +3763,13 @@ export interface PersonaCoursesResponse {
     source: string
     lastTakenAt: string | null
     headline: string | null
+    /** The result's short name, when the instrument produces one — the 16-type
+     *  course's four letters (ENTP). null for the courses whose result is a
+     *  profile rather than a label (big5 / values / work), and null for a course
+     *  never taken. On the LIST payload, not just the sheet, because the panel
+     *  shows a taken course's result inline (owner, 2026-08-16: 「NBTIだったら、
+     *  ENTPとかあるじゃん。そういうの」). */
+    badge: string | null
   }[]
 }
 

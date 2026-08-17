@@ -131,9 +131,18 @@ export const persona = {
     // WHOLE block is absent when the portrait could not be read — a 0 there
     // would be a measurement nobody took.
     'persona.counts.label': 'What is in here',
-    'persona.counts.known': 'Known about you',
-    'persona.counts.week': 'This week',
-    'persona.counts.courses': 'Courses',
+    // ⚠ EVERY ROW NAMES ITS SUBJECT AND ITS WINDOW (owner, 2026-08-16: the three
+    // labels were unreadable). The old set had no agent — "Known about you" by
+    // WHOM? — and "This week" was a bare adverbial with no noun at all, which
+    // only parses if the eye borrows the noun from the row above. It does not,
+    // across three rows of unlike things. `stand-in` / 分身 is this screen's
+    // established word, so naming the agent costs no new vocabulary.
+    'persona.counts.known': 'What your stand-in knows',
+    // Folded into row 1 as a faint suffix rather than standing as its own row:
+    // a flow belongs under the stock it came from, and the rail drops from four
+    // rows to three. ⚠ ABSENT recentCount ⇒ no suffix at all, never '+0'.
+    'persona.counts.weekDelta': '+{count} this week',
+    'persona.counts.courses': 'Courses taken',
     // Printed WHERE THE NUMBER WOULD GO when the corpus could not be read. The
     // same distinction the region probe makes between `unreadable` and `none`,
     // and for the same reason: "could not look" is a failure and "there is
@@ -143,16 +152,119 @@ export const persona = {
     // The decision ledger, demoted from its own card to one line. Pressing it
     // opens the same detail list the card used to.
     'persona.counts.decided': 'Answered for you (this week)',
-    // The counts under the lines. Two sentences, not one with a "0 this week"
-    // in it: `recentCount` is optional on the wire, and a server that did not
-    // count is not a week in which nothing happened.
-    'persona.portrait.counts': 'Built from {nodes} things · {taken} of {total} courses taken',
-    'persona.portrait.countsRecent':
-      'Built from {nodes} things ({recent} in the last week) · {taken} of {total} courses taken',
-    // …and the third case: the corpus itself could not be read, so the only
-    // number this sentence can honestly carry is the course tally.
-    'persona.portrait.countsUnread':
-      'How much is known could not be read · {taken} of {total} courses taken',
+
+    // --- 「分身が知っていること」: the corpus, read back -----------------------
+    // ⚠ THE GROUPS ARE SOURCES, and the words say so. Source is a fact already
+    // recorded in the tags; topic would have to be invented, and the body region
+    // is wrong as a primary axis (most legacy notes are unplaced, so the biggest
+    // group would say nothing about its contents). See knownGroups.ts.
+    'persona.known.portraitHeading': 'You, so far',
+    'persona.known.group.interview': 'Answers to a question',
+    'persona.known.group.chat': 'From talking',
+    'persona.known.group.import': 'From the imported history',
+    'persona.known.group.course': 'From a course',
+    'persona.known.group.corrected': 'Corrections you made',
+    // ⚠ NOT "Other". "Other" quietly claims we looked and found nothing; what is
+    // true is that the record of where this came from is missing.
+    'persona.known.group.unrecorded': 'No source recorded',
+    'persona.known.filterLabel': 'Filter by word',
+    // 「取り消す」. A second act beside 「直す」: correcting says "actually, this",
+    // and needs a replacement sentence; taking back says "I don't need this",
+    // and needs none.
+    'persona.retire.start': 'Take this back',
+    'persona.retire.undo': 'Put it back',
+    'persona.retire.working': 'Saving…',
+    'persona.retire.failed': 'Could not save that just now. Please try again.',
+    'persona.retire.at': 'Taken back',
+    // 材料 — what the stand-in is BUILT from, behind a disclosure because it is
+    // asked rarely and answered permanently. Every source is named, including
+    // the ones that did not resolve: a list of only what landed reads as "this
+    // is everything", and the missing one is what explains a thin stand-in.
+    'persona.material.heading': 'What it is built from',
+    'persona.material.concept': 'CONCEPT.md',
+    'persona.material.vision': 'The business notes',
+    'persona.material.included': 'in',
+    'persona.material.missing': 'not found',
+    'persona.material.rebuild': 'Rebuild it',
+    'persona.material.rebuilding': 'Rebuilding…',
+    'persona.material.rebuilt': 'Rebuilt.',
+    // ⚠ NOT "failed". The usual case is the assembler REFUSING to overwrite a
+    // real corpus from sources that did not resolve — a fail-safe doing its job,
+    // and the file on disk is the one that was already there.
+    'persona.material.rebuildFailed': 'Left as it was.',
+    // 元の言葉 — the owner's own words a line was distilled from. ⚠ ABSENT IS
+    // NOT EMPTY: a line written before this was recorded says so, rather than
+    // showing a blank quote that reads as "he said nothing".
+    'persona.source.heading': 'In his own words',
+    'persona.source.missing': 'The original wording was not kept for this one.',
+    // 前回から動いたところ — the only claim a self-report is entitled to make,
+    // because it is a difference between two of his OWN answers. ⚠ The copy says
+    // what moved and NOTHING about what it means: a five-item self-report wobbles
+    // by a whole step on a bad morning.
+    'persona.delta.heading': 'What moved since last time',
+    'persona.delta.since': 'Against the take on {date}',
+    'persona.delta.only': 'You have taken this once. There is nothing to compare it with yet.',
+    'persona.delta.same': 'no change',
+    'persona.delta.noNumber': 'not measured both times',
+    'persona.delta.rankPair': '#{before} → #{after}',
+    'persona.delta.onlyNow': 'New this time: {names}',
+    'persona.delta.onlyBefore': 'Not in this version: {names}',
+    'persona.delta.caveat':
+      'Answers wobble from day to day. A small movement is not a change in you.',
+    // 「どれが自分ではないか」 — the Barnum check. ⚠ NO SCORE ANYWHERE in this copy:
+    // a wrong answer is a fact about the SENTENCE (it reads like something anyone
+    // would say), not a mark against him.
+    'persona.tellApart.heading': 'Which one is not yours',
+    'persona.tellApart.lead': 'One of these three was not written from anything you said.',
+    'persona.tellApart.later': 'Later',
+    'persona.tellApart.right': 'Right — that one would fit almost anybody.',
+    'persona.tellApart.wrong': 'That one is yours.',
+    'persona.tellApart.stranger': 'The one that fits anybody was this:',
+    'persona.tellApart.wrongHint':
+      'So that line does not read as particularly yours. You can rewrite it or take it back from its own card below.',
+    'persona.tellApart.failed': 'Could not send that just now. Please try again.',
+    // 「言ったこと / やったこと」 — the two halves of every answered question, side
+    // by side. ⚠ NO VERDICT IN THIS COPY, and none is composed anywhere else
+    // either: a machine's ruling on whether a person lives up to their own
+    // account of themselves is the sentence this product must never write.
+    'persona.saidDid.heading': 'Your answers, and the situation behind them',
+    // ⚠ SAYS WHAT IT IS AND WHAT IT IS NOT YET. What sits under each line is the
+    // record AS IT WAS WHEN THE QUESTION WAS ASKED — not what happened after.
+    // Letting the screen's name imply the second one would be the exact kind of
+    // overstatement this surface exists to avoid.
+    'persona.saidDid.lead':
+      'Each line you wrote answering the question of the day, over the situation that question was drawn from. Nothing here is compared or scored.',
+    // ⚠ BOTH HALVES CARRY A LABEL, and both use the screen's own two words.
+    // Labelling only the record left the owner unable to tell the halves apart:
+    // they are both prose in the same voice, and size alone is a hierarchy, not
+    // a legend. The qualifier on the second one is load-bearing — 「やったこと」
+    // alone would imply the screen tracks what he did AFTER the declaration,
+    // which needs a field nobody is storing yet.
+    // ⚠ EVERY LABEL NAMES ITS SUBJECT. Without it the two halves are 「言ったこと」
+    // and 「やったこと」 with nobody attached — and the record half's sentences are
+    // question framing, so their own grammatical subject is usually the tool
+    // ("the swarm asked you…") or missing ("nothing has moved for 9 days").
+    // Naming the log answers what the sentence itself cannot.
+    'persona.saidDid.said': 'What you answered',
+    // ⚠ "What you DID" is wrong for what sits under it: these sentences describe
+    // states and absences as often as acts, and their grammatical subject is
+    // usually the tool. "About you" makes him the topic, which is what he is.
+    'persona.saidDid.did': 'The situation at the time',
+    'persona.saidDid.empty':
+      'Nothing here yet. Answering the question of the day puts the first pair here.',
+    // The way back OFF the list screen. Same word and same shape as every other
+    // full-screen panel's return link (BackLink) — the list is a screen now, so
+    // it leaves the way screens leave.
+    'persona.known.back': 'Back',
+    // ⚠ NOT "Delete". Nothing is deleted — the line stays in the file, shows up
+    // in its own group below, and comes back in one press. The word has to
+    // promise exactly that much and no more.
+    'persona.known.group.retired': 'Ones you took back',
+    // FOUR DIFFERENT SENTENCES for four different states — see the component.
+    'persona.known.loadFailed': 'Could not read this.',
+    'persona.known.empty':
+      'Nothing in here yet. Say one thing in the box below and the first line appears here.',
+    'persona.known.noMatch': 'Nothing here contains that word.',
 
     // --- The decision ledger: what the stand-in actually DID ----------------
     // The portrait above is SELF-REPORT; this is the record of the proxy acting
@@ -198,7 +310,10 @@ export const persona = {
     // One a day, built from something the owner actually did — never a
     // personality quiz. The copy has to make that obvious, or the question
     // reads as a generic survey and gets ignored.
-    'persona.interview.heading': "Today's question",
+    // ⚠ NOT "Today's question" any more. The owner can now ask for another one
+    // whenever they like (2026-08-16: 「1日1答にする必要はない」), so a heading that
+    // promises a daily ration contradicts the button underneath it.
+    'persona.interview.heading': 'A question for you',
     'persona.interview.skip': 'Not this one',
     // Separate from the above on purpose: there is no answer to reassure the
     // owner about on the skip path.
@@ -209,6 +324,14 @@ export const persona = {
     'persona.interview.answeredStale':
       'Your answer is saved — but it has not reached your stand-in yet. The next save that succeeds will carry it over.',
     'persona.interview.skipped': 'Skipped — this one will not come back.',
+    // The ask-for-another control, and the three things it can come back with.
+    'persona.interview.more': 'Ask me something',
+    'persona.interview.moreLoading': 'Looking…',
+    // SWEPT AND FOUND NOTHING — never said off a sweep that failed (the route
+    // 500s instead, and that lands on `moreFailed`).
+    'persona.interview.moreNone':
+      'Nothing new to ask about right now. Get some work done and press again.',
+    'persona.interview.moreFailed': 'Could not fetch one just now. Try again.',
 
     // --- The running course's own furniture ---------------------------------
     // (`persona.ask.hint` / `.idle` and `persona.interview.none.*` went with the
@@ -219,12 +342,24 @@ export const persona = {
 
     // --- The courses (self-report instruments) ------------------------------
     'persona.course.railHeading': 'Courses',
-    'persona.course.state.new': '{count} questions · grows {region}',
+    // ⚠ TWO FACTS PER ROW, NOT FOUR. "Not taken yet" is the ABSENCE of the ✓ in
+    // the row's leading slot, and "grows {region}" is the patch of the figure
+    // that lights when the course finishes — both are SHOWN, so neither is
+    // written. What is left is the one thing a row cannot show: how long it
+    // takes. The verbs (`action.*`) are still rendered, as the button's
+    // accessible name: a chevron is silent to a screen reader.
+    'persona.course.state.new': '{count} questions',
     'persona.course.state.running': 'In progress — {index} / {total}',
     // A finished course reads its own result back — the row opens the last one,
     // and re-taking is a button INSIDE that sheet (`persona.result.again`). One
     // button per row: the corner is a quiet list, not a rail of controls.
-    'persona.course.state.done': 'Done {date} · see the result',
+    // ⚠ THE STATE ONLY. The verb moved out to its own right-aligned column
+    // (`action.*`): buried at the end of a grey meta line it told nobody the row
+    // was pressable, which is exactly what the owner could not see.
+    'persona.course.state.done': '{date}',
+    'persona.course.action.take': 'Take it',
+    'persona.course.action.result': 'See the result',
+    'persona.course.action.quit': 'Stop',
     'persona.course.opening': 'Opening your result…',
     'persona.course.historyFailed': 'Could not open that result just now. Try it again.',
     'persona.course.submitting': 'Scoring…',
@@ -469,16 +604,97 @@ export const persona = {
       'まだ「どういう人か」を言えるだけの材料がありません。下で話しかけるか、コースを1つ受けてください。',
 
     'persona.counts.label': 'いま溜まっているもの',
-    'persona.counts.known': 'わかっていること',
-    'persona.counts.week': '今週',
-    'persona.counts.courses': 'コース',
+    'persona.counts.known': '分身が知っていること',
+    'persona.counts.weekDelta': '今週 +{count}',
+    'persona.counts.courses': '受けたコース',
     'persona.counts.unread': '読めませんでした',
-    'persona.counts.decided': '代わりに答えた（今週）',
-    'persona.portrait.counts': 'わかっていること {nodes}件 ・ コースは{total}本中{taken}本',
-    'persona.portrait.countsRecent':
-      'わかっていること {nodes}件（うち{recent}件はこの1週間）・ コースは{total}本中{taken}本',
-    'persona.portrait.countsUnread':
-      'わかっていることの件数は読めませんでした ・ コースは{total}本中{taken}本',
+    'persona.counts.decided': '分身が代わりに答えた（今週）',
+
+    'persona.known.portraitHeading': 'いまのところのあなた',
+    'persona.known.group.interview': '1問に答えたこと',
+    'persona.known.group.chat': '話したこと',
+    'persona.known.group.import': '取り込んだ会話',
+    'persona.known.group.course': 'コースの結果',
+    'persona.known.group.corrected': '自分で直したもの',
+    'persona.known.group.unrecorded': '出どころの記録がないもの',
+    'persona.known.filterLabel': '言葉でしぼる',
+    'persona.retire.start': '取り消す',
+    'persona.retire.undo': '戻す',
+    'persona.retire.working': '保存中…',
+    'persona.retire.failed': 'いま保存できませんでした。もう一度お試しください。',
+    'persona.retire.at': '取り消した',
+    'persona.material.heading': '何からできているか',
+    'persona.material.concept': 'CONCEPT.md',
+    'persona.material.vision': '事業のメモ',
+    'persona.material.included': '入っている',
+    'persona.material.missing': '見つかりません',
+    'persona.material.rebuild': '作り直す',
+    'persona.material.rebuilding': '作り直しています…',
+    'persona.material.rebuilt': '作り直しました。',
+    'persona.material.rebuildFailed': 'そのままにしました。',
+    'persona.source.heading': '元の言葉',
+    'persona.source.missing': 'この行は元の言葉が残っていません。',
+    'persona.delta.heading': '前回から動いたところ',
+    'persona.delta.since': '{date} に受けたときとの比較',
+    'persona.delta.only': 'まだ1回しか受けていません。比べる相手がまだありません。',
+    'persona.delta.same': '動きなし',
+    'persona.delta.noNumber': '両方では測れていません',
+    'persona.delta.rankPair': '{before}位 → {after}位',
+    'persona.delta.onlyNow': '今回から増えた項目: {names}',
+    'persona.delta.onlyBefore': '今回は無い項目: {names}',
+    'persona.delta.caveat': '答えは日によって揺れます。小さな動きは、あなたが変わったということではありません。',
+    'persona.tellApart.heading': 'どれが自分ではないか',
+    'persona.tellApart.lead': '3つのうち1つは、あなたが言ったことから作られた文ではありません。',
+    'persona.tellApart.later': 'あとで',
+    'persona.tellApart.right': '見分けがつきました。これは誰にでも当てはまる文です。',
+    'persona.tellApart.wrong': 'それは、あなた自身の言葉でした。',
+    'persona.tellApart.stranger': '誰にでも当てはまる文は、こちらでした。',
+    'persona.tellApart.wrongHint':
+      'つまりこの一文は、あなたのものだと見分けがつきにくいということです。下の一覧から、直すことも取り消すこともできます。',
+    'persona.tellApart.failed': 'いま送れませんでした。もう一度お試しください。',
+    // ⚠ THE NAME WAS THE LAST THING STILL OVERSTATING (owner, 2026-08-17:
+    // 「実際には僕の指示とその時の状況ですよね？」). It is. Nothing on this screen is
+    // 「やったこと」: the lower half is the SITUATION the question was drawn from —
+    // a state, not an act. And the upper half is his ANSWER to that question;
+    // most read as instructions, but not all («レビューで止まるのは、自分が読む
+    // 時間を取っていないだけ» is an observation), so 「指示」 would overshoot in the
+    // other direction.
+    //
+    // Named by PROVENANCE instead, which is the rule this feature already uses
+    // to group the corpus (knownGroups.ts): what it IS, not what it means. The
+    // name earns 「やったこと」 back when a declaration can be tracked against the
+    // record that came AFTER it — which needs a field nobody is storing yet.
+    'persona.saidDid.heading': '答えたことと、そのときの状況',
+    'persona.saidDid.lead':
+      '「今日の1問」にあなたが答えた一文と、その問いが引いてきた、そのときの状況。突き合わせも採点もしません。',
+    'persona.saidDid.said': 'あなたが答えたこと',
+    // ⚠ 「あなたが」 IS THE WRONG PARTICLE HERE, and 「やったこと」 the wrong noun.
+    // The sentences under this plate are question framing: their subject is
+    // usually the tool (「スウォームがあなたに聞いてきて…」), they often describe an
+    // ABSENCE rather than an act (「9日動いていません」), and they end 「〜ときの話
+    // です」. A heading that names an action BY HIM sits ungrammatically over all
+    // three (owner, 2026-08-17: 「やったことと、文章の組み合わせおかしくない？」).
+    // 「あなたについて」 marks him as the TOPIC rather than the agent, which is
+    // what he actually is in these records — and it reads over an act, a state
+    // and an absence alike. The top plate keeps 「あなたが」 because there he IS
+    // the agent; the two particles carry the difference.
+    //
+    // The log sits at the END, in brackets: mid-phrase the plate's uppercase
+    // turns it into 「BOARD」, and a shouted proper noun inside a 和文 phrase
+    // reads as a fault. At the end it reads as a citation.
+    // ⚠ NO SOURCE BRACKET (owner, 2026-08-17: 「スウォームの記録とかボードの記録
+    // とかの表記はいらない」). It was added to answer 「誰がやったのか」 while the
+    // plate still read 「あなたがやったこと」; once the plate said 「状況」 the actor
+    // question stopped being asked, and the bracket was machine bookkeeping on
+    // a screen that is meant to be read slowly. The kind→log map went with it —
+    // code with no reader does not stay.
+    'persona.saidDid.did': 'そのときの状況',
+    'persona.saidDid.empty': 'まだありません。今日の1問に答えると、ここに1組目が出ます。',
+    'persona.known.back': '戻る',
+    'persona.known.group.retired': '取り消したもの',
+    'persona.known.loadFailed': '読み込めませんでした。',
+    'persona.known.empty': 'まだ何も入っていません。下で何かひとつ話しかけると、ここに1行目が出ます。',
+    'persona.known.noMatch': 'その言葉を含むものはありません。',
 
     'persona.ledger.label': '分身がしたこと',
     'persona.ledger.week': '今週',
@@ -499,20 +715,28 @@ export const persona = {
     'persona.ledger.confidence.low': '根拠は薄い',
     'persona.ledger.ownerAnswered': 'これはあなたが答えました ・ {date}',
 
-    'persona.interview.heading': '今日の1問',
+    'persona.interview.heading': 'あなたへの1問',
     'persona.interview.skip': 'これは飛ばす',
     'persona.interview.skipFailed': 'いま飛ばせませんでした。もう一度お試しください。',
     'persona.interview.answered': '保存しました。分身がこれを覚えました。',
     'persona.interview.answeredStale':
       '答えは保存しました。ただし分身にはまだ渡っていません — 次に成功した保存で反映されます。',
     'persona.interview.skipped': '飛ばしました。この質問はもう出てきません。',
+    'persona.interview.more': 'もう1問もらう',
+    'persona.interview.moreLoading': '探しています…',
+    'persona.interview.moreNone':
+      'いまは新しく聞くことがありません。しばらく仕事を進めてから、もう一度どうぞ。',
+    'persona.interview.moreFailed': 'いま出せませんでした。もう一度お試しください。',
 
     'persona.ask.quit': 'やめる',
 
     'persona.course.railHeading': '診断コース',
-    'persona.course.state.new': '{count}問 ・ {region}が育つ',
+    'persona.course.state.new': '{count}問',
     'persona.course.state.running': '{index} / {total} 進行中',
-    'persona.course.state.done': '済 {date} ・ 結果を見る',
+    'persona.course.state.done': '{date}',
+    'persona.course.action.take': '受ける',
+    'persona.course.action.result': '結果を見る',
+    'persona.course.action.quit': 'やめる',
     'persona.course.opening': '結果を開いています…',
     'persona.course.historyFailed': 'いま前の結果を開けませんでした。もう一度押してみてください。',
     'persona.course.submitting': '採点しています…',

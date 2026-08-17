@@ -10,6 +10,9 @@ import {
   readManualJudgments,
   readLiveJudgments,
   liveJudgments,
+  retiredJudgments,
+  retireJudgment,
+  restoreJudgment,
   getCorpusStatus,
   TAKE_TAG,
 } from './youCorpus'
@@ -281,6 +284,49 @@ describe('correction = append (never edit)', () => {
   })
 })
 
+describe('「取り消す」 = append (never delete)', () => {
+  // ⚠ READ BACK WITH THE PRODUCTION READER, and out of the FILE claude is
+  // handed — not out of the return value. A writer that returned a plausible
+  // object and wrote nothing would satisfy any assertion about its own result.
+  it('takes a line out of the corpus while leaving it on disk', async () => {
+    const { judgment } = await appendJudgment({ text: 'I_ONLY_WORK_AT_NIGHT' })
+    await appendJudgment({ text: 'KEEP_THIS_ONE' })
+    await retireJudgment(judgment.id)
+
+    const corpus = await readFile(youCorpusFile(), 'utf8')
+    expect(corpus).toContain('KEEP_THIS_ONE')
+    expect(corpus).not.toContain('I_ONLY_WORK_AT_NIGHT')
+
+    // Nothing was deleted — the withdrawn line, and the marker that withdrew it,
+    // are both in the append-only file.
+    const onDisk = await readManualJudgments()
+    expect(onDisk.filter((j) => j.text === 'I_ONLY_WORK_AT_NIGHT')).toHaveLength(2)
+    expect(onDisk.some((j) => j.retiredId === judgment.id)).toBe(true)
+    // …and it is reported as withdrawn, with a date.
+    const retired = retiredJudgments(onDisk)
+    expect(retired.map((r) => r.judgment.id)).toEqual([judgment.id])
+    expect(retired[0].retiredAt).toMatch(/^\d{4}-/)
+  })
+
+  it('「戻す」 puts it back into the corpus claude reads', async () => {
+    const { judgment } = await appendJudgment({ text: 'ACTUALLY_I_DO_WORK_AT_NIGHT' })
+    await retireJudgment(judgment.id)
+    expect(await readFile(youCorpusFile(), 'utf8')).not.toContain('ACTUALLY_I_DO_WORK_AT_NIGHT')
+
+    await restoreJudgment(judgment.id)
+    expect(await readFile(youCorpusFile(), 'utf8')).toContain('ACTUALLY_I_DO_WORK_AT_NIGHT')
+    expect(retiredJudgments(await readManualJudgments())).toEqual([])
+  })
+
+  it('refuses an id that is not in the file rather than leaving a dangling marker', async () => {
+    await appendJudgment({ text: 'SOMETHING' })
+    await expect(retireJudgment('not-a-real-id')).rejects.toThrow()
+    await expect(restoreJudgment('not-a-real-id')).rejects.toThrow()
+    // …and nothing was written by the attempt.
+    expect((await readManualJudgments()).some((j) => j.retiredId || j.restoredId)).toBe(false)
+  })
+})
+
 // ─── SUPERSESSION, AS A PURE FUNCTION ───────────────────────────────────────
 //
 // The end-to-end proof (two real takes through the real writer, read back out
@@ -367,6 +413,90 @@ describe('liveJudgments — which lines still speak for the owner', () => {
   it('leaves an ordinary note alone — it has no course and nobody corrected it', () => {
     const live = liveJudgments([j({ id: 'n', text: 'plain' })])
     expect(texts(live)).toEqual(['plain'])
+  })
+
+  // ── 「取り消す」 — the third way a line stops counting ──────────────────────
+  const tomb = (target: string, text: string, at = '2026-08-16T00:00:00.000Z') =>
+    j({ id: `t-${target}`, text, retiredId: target, addedAt: at })
+  const back = (target: string, text: string, at = '2026-08-17T00:00:00.000Z') =>
+    j({ id: `r-${target}`, text, restoredId: target, addedAt: at })
+
+  it('a retired line stops speaking — and so does the marker that retired it', () => {
+    // ⚠ THE SECOND HALF IS THE ONE THAT BITES. The tombstone carries the retired
+    // line's own words (so the raw file is readable by a human), which means a
+    // reader that only dropped the TARGET would leave an identical sentence
+    // standing in the corpus — taking a line back would change nothing at all.
+    const live = liveJudgments([
+      j({ id: 'gone', text: 'これは要らない' }),
+      j({ id: 'kept', text: 'これは要る' }),
+      tomb('gone', 'これは要らない'),
+    ])
+    expect(texts(live)).toEqual(['これは要る'])
+  })
+
+  it('「戻す」 puts it back, and the log is read IN ORDER', () => {
+    const live = liveJudgments([
+      j({ id: 'x', text: 'ひとつ' }),
+      tomb('x', 'ひとつ'),
+      back('x', 'ひとつ'),
+    ])
+    expect(texts(live)).toEqual(['ひとつ'])
+    // …and taking it back AGAIN after that sticks.
+    const again = liveJudgments([
+      j({ id: 'x', text: 'ひとつ' }),
+      tomb('x', 'ひとつ'),
+      back('x', 'ひとつ'),
+      tomb('x', 'ひとつ', '2026-08-18T00:00:00.000Z'),
+    ])
+    expect(texts(again)).toEqual([])
+  })
+
+  it('⚠ IS IDEMPOTENT — a double-send never resurrects what was withdrawn', () => {
+    // A toggle would flip back here. Two windows open, or one impatient
+    // double-click, and the line the owner deliberately took back returns.
+    const live = liveJudgments([
+      j({ id: 'x', text: 'ひとつ' }),
+      tomb('x', 'ひとつ'),
+      tomb('x', 'ひとつ', '2026-08-16T00:00:01.000Z'),
+    ])
+    expect(texts(live)).toEqual([])
+    // …and the same on the restore side.
+    const restored = liveJudgments([
+      j({ id: 'y', text: 'ふたつ' }),
+      tomb('y', 'ふたつ'),
+      back('y', 'ふたつ'),
+      back('y', 'ふたつ', '2026-08-17T00:00:01.000Z'),
+    ])
+    expect(texts(restored)).toEqual(['ふたつ'])
+  })
+
+  it('retiredJudgments reports the withdrawn line and WHEN it was withdrawn', () => {
+    const all = [
+      j({ id: 'gone', text: 'これは要らない' }),
+      j({ id: 'kept', text: 'これは要る' }),
+      tomb('gone', 'これは要らない', '2026-08-16T09:30:00.000Z'),
+    ]
+    expect(retiredJudgments(all)).toEqual([
+      { judgment: all[0], retiredAt: '2026-08-16T09:30:00.000Z' },
+    ])
+    // A line that was put back is not in the list at all.
+    expect(retiredJudgments([...all, back('gone', 'これは要らない')])).toEqual([])
+  })
+
+  it('reports the LATEST withdrawal date, not the first', () => {
+    const all = [
+      j({ id: 'x', text: 'ひとつ' }),
+      tomb('x', 'ひとつ', '2026-08-16T00:00:00.000Z'),
+      back('x', 'ひとつ', '2026-08-17T00:00:00.000Z'),
+      tomb('x', 'ひとつ', '2026-08-18T00:00:00.000Z'),
+    ]
+    expect(retiredJudgments(all).map((r) => r.retiredAt)).toEqual(['2026-08-18T00:00:00.000Z'])
+  })
+
+  it('a tombstone pointing at nothing produces no row', () => {
+    // A hand-edited file, or a half-restored backup. A row with a date and no
+    // sentence in it is worse than no row.
+    expect(retiredJudgments([tomb('missing', 'どこにもない')])).toEqual([])
   })
 })
 

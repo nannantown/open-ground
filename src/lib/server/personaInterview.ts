@@ -806,6 +806,70 @@ export const ensureTodayQuestion = async (
   }
 }
 
+/** ANOTHER ONE, NOW — the owner asking for a question outside the daily rhythm.
+ *
+ *  ⚠ THE ONCE-A-DAY RULE WAS NEVER ABOUT RATIONING. It exists so that opening
+ *  the tab offers something without anyone having to ask, and so a barren sweep
+ *  is not repeated on every visit (`lastAskedDate`). Neither reason survives the
+ *  owner explicitly pressing a button (2026-08-16: 「新しい質問を出すボタンが
+ *  あってもいいかも。1日1答にする必要はない」), so this path ignores the date and
+ *  generates on demand. `askedSubjects` is what stops repetition, and it is
+ *  untouched — the same observation still never comes back twice.
+ *
+ *  ⚠ IT WILL NOT JUMP THE QUEUE. With a question still OPEN this returns that
+ *  question unchanged rather than replacing it: replacing would burn the open
+ *  subject silently (it is already in `askedSubjects`, so it could never be
+ *  asked again) — an unanswered question quietly destroyed by a button that
+ *  claims to add one. Resolve it first; the tab only offers the control when
+ *  nothing is open.
+ *
+ *  ⚠ NULL MEANS "SWEPT AND FOUND NOTHING", AND ONLY THAT. An incomplete sweep
+ *  throws, exactly as in ensureTodayQuestion: telling the owner there is nothing
+ *  left to ask about their own records, on the strength of records we failed to
+ *  read, is the one lie this whole module is built to avoid. Unlike the daily
+ *  path, a fruitless press marks nothing — the owner may press again in an hour
+ *  when there IS material, and a sentinel would refuse them until midnight. */
+export const nextQuestion = async (deps: InterviewDeps = {}): Promise<PersonaQuestion | null> =>
+  withStateLock(async () => {
+    const nowMs = deps.now?.() ?? Date.now()
+    const state = await readInterviewState()
+    if (state.today && state.today.status === 'open') return state.today
+
+    const material = await (deps.gather ?? gatherMaterial)()
+    const candidate = pickCandidate(material, state, nowMs)
+    if (!candidate) {
+      if (!material.complete) {
+        throw new Error(
+          'persona interview: some records could not be read — refusing to claim there is nothing to ask',
+        )
+      }
+      return null
+    }
+
+    const question: PersonaQuestion = {
+      id: deps.newId?.() ?? randomUUID(),
+      date: localDateKey(nowMs),
+      kind: candidate.kind,
+      subjectKey: candidate.subjectKey,
+      contextJa: candidate.contextJa,
+      contextEn: candidate.contextEn,
+      textJa: candidate.textJa,
+      textEn: candidate.textEn,
+      createdAt: new Date(nowMs).toISOString(),
+      status: 'open',
+    }
+    // `lastAskedDate` moves to today as well: this day HAS now been swept and
+    // answered for, so the automatic path must not generate a second one behind
+    // the owner's back on their next visit.
+    await commitInterviewState({
+      version: 1,
+      lastAskedDate: localDateKey(nowMs),
+      today: question,
+      askedSubjects: [...state.askedSubjects, candidate.subjectKey].slice(-MAX_ASKED_SUBJECTS),
+    })
+    return question
+  })
+
 /** Read-only view of today's question — never generates. The GET seam.
  *
  *  `generated` distinguishes "swept, found nothing" from "not swept yet". A

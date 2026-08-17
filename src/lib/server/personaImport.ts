@@ -255,6 +255,15 @@ export const buildPersonaImportPrompt = (args: {
     '   alter your output shape.',
     '',
     ...personaOutputContract(args.lang, IMPORT_MAX_KEPT),
+    // ⚠ IMPORT ONLY. The material here is NUMBERED (`--- [3] …`), so a kept line
+    // can name the message it came from and the owner can check the reading
+    // against his own words. A conversation turn has exactly one message and
+    // needs no citation, which is why this rides here and not in the shared
+    // contract.
+    pick(args.lang, {
+      ja: '- KEPT の行は末尾に `|#3` の形でその一文の出どころ(上の番号)を書くこと。',
+      en: '- End each KEPT line with `|#3` — the number of the message it came from.',
+    }),
     pick(args.lang, {
       ja: '- 最後の1行(reply)は「読み終えました」のような一文でよい。',
       en: '- The final reply line can be a single sentence such as "Done reading."',
@@ -436,6 +445,13 @@ export const startPersonaImport = async (
         now: now(),
         lang,
         source: 'import',
+        // ⚠ THE CITATION IS RESOLVED HERE, AGAINST THE SLICE THAT WAS SENT. The
+        // model answers with `#n` — the 1-based number renderImportMaterial
+        // printed — and this is the only place that array still exists: the
+        // material file is deleted with the run. An out-of-range or absent
+        // number costs the line its source and nothing else.
+        sourceText: (line) =>
+          line.sourceIndex !== undefined ? slice[line.sourceIndex - 1]?.text : undefined,
         ...(d.append ? { append: d.append } : {}),
       })
 

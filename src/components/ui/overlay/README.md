@@ -42,8 +42,8 @@ the `fixed` vs `absolute` rule, and the backdrop tones.
 ```
 
 `Overlay` defaults to `layer="modal"`, `position="fixed"`, `backdrop="scrim"`,
-`placement="center"`. Escape and a backdrop click both close it; the root carries
-`data-esc-overlay` automatically.
+`placement="center"`. Escape and a press on the backdrop both close it; the root
+carries `data-esc-overlay` automatically.
 
 ### Full-screen panel
 
@@ -71,7 +71,17 @@ the `fixed` vs `absolute` rule, and the backdrop tones.
 Use `backdrop="scrimStrong"` (heavier `bg-black/60`) to set it apart from a
 routine modal.
 
-## The two rules you must not break
+## The three rules you must not break
+
+0. **A press on the backdrop closes — on EVERY surface** (owner, 2026-08-17:
+   「モーダル系はモーダル外をタップすると閉じる仕様にしてね。全部」). `Overlay` does this
+   for you, and two details are load-bearing: it fires on **mousedown**, not
+   click (a click fires on the common ancestor of press and release, so a text
+   selection dragged out of a card would dismiss it mid-drag), and it fires only
+   when the press **landed on the root itself**, so no child has to stop
+   propagation and no placement is exempt. `Overlay.test.tsx` guards all three.
+   If a new surface needs to opt out, `closeOnBackdrop={false}` is the only way —
+   don't hand-roll a scrim.
 
 1. **`data-esc-overlay`.** App's global Escape handler (`src/App.tsx`) clears the
    Ground selection — which *is* how the project panel closes. So when ANY overlay

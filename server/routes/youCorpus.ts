@@ -13,18 +13,26 @@ import {
   assembleYouCorpus,
   appendJudgment,
   readYouCorpus,
-  readLiveJudgments,
+  readManualJudgments,
+  liveJudgments,
+  retiredJudgments,
+  retireJudgment,
+  restoreJudgment,
   getCorpusStatus,
 } from '@/lib/server/youCorpus'
+import { answerTellApart, nextTellApart, skipTellApart } from '@/lib/server/personaTellApart'
 import {
   answerTodayQuestion,
   ensureTodayQuestion,
+  nextQuestion,
   peekTodayQuestion,
   skipTodayQuestion,
 } from '@/lib/server/personaInterview'
 import { hostIsLocal, originIsLocal } from '../loopback'
 import type {
   PersonaInterviewResponse,
+  PersonaTellApartAnswerResponse,
+  PersonaTellApartResponse,
   YouCorpusAppendResponse,
   YouCorpusJudgmentsResponse,
 } from '@/lib/types'
@@ -76,8 +84,18 @@ export const youCorpusRoutes = new Hono()
     // has to be what the stand-in actually reads, or the number on the stage
     // describes a corpus nobody uses. Superseded lines are never deleted —
     // GET /api/you-corpus/raw still serves the whole file.
-    const judgments = await readLiveJudgments()
-    return c.json<YouCorpusJudgmentsResponse>({ judgments: [...judgments].reverse() })
+    //
+    // ⚠ ONE READ FOR BOTH HALVES. `retired` is derived from the SAME array as
+    // `judgments`, so the two cannot disagree about a line's state — two reads
+    // could land either side of a write and return a line as both live and
+    // taken back.
+    const all = await readManualJudgments()
+    const judgments = liveJudgments(all)
+    return c.json<YouCorpusJudgmentsResponse>({
+      judgments: [...judgments].reverse(),
+      // Newest first, like the live list — 「取り消したもの」 is read the same way.
+      retired: [...retiredJudgments(all)].reverse(),
+    })
   })
   // --- POST /api/you-corpus/rebuild -----------------------------------------
   // Re-assemble from the mechanical sources (auto-memory + CONCEPT.md +
@@ -104,6 +122,68 @@ export const youCorpusRoutes = new Hono()
     const correctsId = typeof body.correctsId === 'string' ? body.correctsId : undefined
     const result = await appendJudgment({ text, tags, context, correctsId })
     return c.json<YouCorpusAppendResponse>(result)
+  })
+  // --- POST /api/you-corpus/retire ------------------------------------------
+  // 「取り消す」. Appends a tombstone; deletes nothing (see retireJudgment).
+  //
+  // ⚠ ITS OWN ROUTE, NOT A FLAG ON /append. Adding a note and withdrawing one
+  // are different acts with different blast radii, and a single endpoint that
+  // could do both would mean any path able to write a note could also make
+  // lines disappear.
+  .post('/api/you-corpus/retire', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { id?: unknown }
+    const id = typeof body.id === 'string' ? body.id.trim() : ''
+    if (!id) return c.json({ error: 'id required' }, 400)
+    try {
+      return c.json<YouCorpusAppendResponse>(await retireJudgment(id))
+    } catch {
+      // The only expected failure is "no such judgment" — a 404 rather than a
+      // 500, because the client asking is a stale list, not a broken server.
+      return c.json({ error: 'no such judgment' }, 404)
+    }
+  })
+  // --- POST /api/you-corpus/restore -----------------------------------------
+  // 「戻す」. The opposite marker, so taking something back is not a one-way door.
+  .post('/api/you-corpus/restore', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { id?: unknown }
+    const id = typeof body.id === 'string' ? body.id.trim() : ''
+    if (!id) return c.json({ error: 'id required' }, 400)
+    try {
+      return c.json<YouCorpusAppendResponse>(await restoreJudgment(id))
+    } catch {
+      return c.json({ error: 'no such judgment' }, 404)
+    }
+  })
+  // --- POST /api/you-corpus/tell-apart --------------------------------------
+  // 「どれが自分ではないか」 — two of his own lines and one written to be true of
+  // anybody (src/lib/persona/tellApart.ts). A POST because it can WRITE: the
+  // three options are frozen on disk the moment they are drawn, so a reload
+  // re-reads the same question instead of dealing a new hand.
+  .post('/api/you-corpus/tell-apart', async (c) => {
+    const blocked = blockNonLoopback(c)
+    if (blocked) return blocked
+    return c.json<PersonaTellApartResponse>({ check: await nextTellApart() })
+  })
+  // --- POST /api/you-corpus/tell-apart/answer -------------------------------
+  // ⚠ THE ANSWER IS CHECKED HERE, never in the browser — the page that asks
+  // 「どれが自分ではないか」 must not be carrying the answer to it.
+  .post('/api/you-corpus/tell-apart/answer', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { id?: unknown; optionId?: unknown }
+    const id = typeof body.id === 'string' ? body.id : ''
+    const optionId = typeof body.optionId === 'string' ? body.optionId : ''
+    if (!id || !optionId) return c.json({ error: 'id and optionId required' }, 400)
+    const result = await answerTellApart(id, optionId)
+    // Null ⇒ a stale tab answering a check that is already gone. 409, not 500:
+    // nothing is wrong, the question simply moved on.
+    if (!result) return c.json({ error: 'no such check' }, 409)
+    return c.json<PersonaTellApartAnswerResponse>(result)
+  })
+  // --- POST /api/you-corpus/tell-apart/skip ---------------------------------
+  .post('/api/you-corpus/tell-apart/skip', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { id?: unknown }
+    const id = typeof body.id === 'string' ? body.id : ''
+    if (!id) return c.json({ error: 'id required' }, 400)
+    return c.json({ skipped: await skipTellApart(id) })
   })
   // --- GET /api/you-corpus/interview ----------------------------------------
   // READ-ONLY view of today's question. Never generates — a GET that mutates is
@@ -134,6 +214,21 @@ export const youCorpusRoutes = new Hono()
     const blocked = blockNonLoopback(c)
     if (blocked) return blocked
     const question = await ensureTodayQuestion()
+    return c.json<PersonaInterviewResponse>({
+      question,
+      ...(question ? {} : { reason: 'no-material' as const }),
+    })
+  })
+  // --- POST /api/you-corpus/interview/next ----------------------------------
+  // ANOTHER ONE, ON DEMAND. The daily path above offers a question without being
+  // asked; this is the owner asking. Same gate and same honesty rule: a null
+  // question here means the sweep SUCCEEDED and found nothing left, because an
+  // incomplete sweep throws through to onError (500) rather than reporting an
+  // emptiness nobody verified.
+  .post('/api/you-corpus/interview/next', async (c) => {
+    const blocked = blockNonLoopback(c)
+    if (blocked) return blocked
+    const question = await nextQuestion()
     return c.json<PersonaInterviewResponse>({
       question,
       ...(question ? {} : { reason: 'no-material' as const }),

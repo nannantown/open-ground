@@ -136,6 +136,11 @@ describe('submitPersonaCourse — score, persist, read back', () => {
     const big5 = listed.courses.find((c) => c.id === 'big5')
     expect(big5?.lastTakenAt).toBe(record.takenAt)
     expect(big5?.headline).toBe(record.result.headline)
+    // ⚠ AND THE BADGE, WHICH FOR THIS INSTRUMENT IS ABSENT. big5 scores a
+    // profile, not a label, so the wire must carry null — the panel draws a chip
+    // only when there is a real one, and a '' here would give it something to
+    // draw. The 16-type course's real badge is asserted below.
+    expect(big5?.badge).toBeNull()
     expect(big5?.headline).toContain('いちばんはっきり出たのは')
     // The catalogue still answers for every course, and an untaken one is null —
     // the honest "never taken", not a fabricated zero.
@@ -183,6 +188,19 @@ describe('submitPersonaCourse — score, persist, read back', () => {
     const corpus = await readFile(join(home, 'you-corpus.md'), 'utf8')
     expect(corpus).toContain(record.result.findings[0].text)
     expect(corpus).toContain('persona, big5')
+  })
+
+  it('the 16-type course puts its four letters on the LIST payload, not just the sheet', async () => {
+    // The panel shows a taken course's result inline (owner, 2026-08-16:
+    // 「NBTIだったら、ENTPとかあるじゃん」), and the list is what it reads. A badge
+    // that exists only on the sheet is a badge the panel cannot draw.
+    const { record } = await submitPersonaCourse(
+      'type',
+      Array.from({ length: 24 }, (_, i) => i % 2),
+    )
+    expect(record.result.badge).toMatch(/^[EI][SN][TF][JP]$/)
+    const listed = await listPersonaCourses()
+    expect(listed.courses.find((c) => c.id === 'type')?.badge).toBe(record.result.badge)
   })
 
   it('mints through the SAME writer for every course (type / values / work)', async () => {

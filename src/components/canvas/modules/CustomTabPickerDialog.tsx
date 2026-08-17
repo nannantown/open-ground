@@ -140,19 +140,15 @@ export const CustomTabPickerDialog = ({
       padded={false}
       className="overflow-y-auto px-6 py-8"
       onClose={onClose}
-      // Backdrop dismiss fires on MOUSEDOWN (not click), gated by the section's
-      // onMouseDown stopPropagation, so a press begun inside the card and
-      // released on the veil never dismisses (load-bearing — preserves the
-      // pre-shell behaviour). closeOnBackdrop disables Overlay's click path; Esc
-      // still closes via Overlay's default closeOnEsc.
-      closeOnBackdrop={false}
-      onMouseDown={onClose}
+      // Backdrop dismiss (press on the veil closes) and Esc both come from the
+      // shell now — the mousedown-not-click rule this file used to hand-roll is
+      // the shell's, so the root onMouseDown and the section's stopPropagation
+      // that gated it are both gone.
       aria-label={t('customTabs.pickerTitle')}
     >
       <section
         role="dialog"
         aria-label={t('customTabs.pickerTitle')}
-        onMouseDown={e => e.stopPropagation()}
         className="relative w-full max-w-[512px] overflow-hidden rounded-[8px] border border-line bg-bg-card shadow-card-hover"
       >
         {/* Header — kicker → Fraunces title → muted desc, with a faint corner

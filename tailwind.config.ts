@@ -74,6 +74,9 @@ const config: Config = {
           cardHover: 'rgb(var(--og-bg-card-hover) / <alpha-value>)',
           glow: 'rgb(var(--og-bg-glow) / <alpha-value>)',
           deep: 'rgb(var(--og-bg-deep) / <alpha-value>)',
+          /** A raised surface ON `bg-deep`. Identical in both themes, because
+           *  the slab under it is — the surface twin of `ink-onDeep`. */
+          cardOnDeep: 'rgb(var(--og-bg-card-on-deep) / <alpha-value>)',
         },
         ink: {
           DEFAULT: 'rgb(var(--og-ink) / <alpha-value>)',
@@ -95,6 +98,8 @@ const config: Config = {
           DEFAULT: 'rgb(var(--og-line) / <alpha-value>)',
           soft: 'rgb(var(--og-line-soft) / <alpha-value>)',
           strong: 'rgb(var(--og-line-strong) / <alpha-value>)',
+          /** The border twin of `bg-cardOnDeep` — same in both themes. */
+          onDeep: 'rgb(var(--og-line-on-deep) / <alpha-value>)',
         },
         accent: {
           DEFAULT: 'rgb(var(--og-accent) / <alpha-value>)',

@@ -67,6 +67,14 @@ export const PROMPT_KEYS: readonly string[] = [
 /** How long one example stays up. */
 export const PROMPT_ROTATE_MS = 4200
 
+/** How long the 「保存しました」 line stays after today's question is resolved.
+ *  Long enough to read a sentence without looking for it; short enough that it
+ *  is an acknowledgement rather than the standing panel it replaced. It is
+ *  never the ONLY evidence — the answer becomes a lit point on the figure, and
+ *  a save whose corpus rebuild failed raises the module's own persistent
+ *  warning instead of relying on this. */
+export const RESOLVED_NOTICE_MS = 8000
+
 /** WANDER, DON'T CYCLE. A fixed +1 walk turns the list into a carousel the
  *  reader learns the order of; a jump of 1–3 keeps it feeling like the screen
  *  is offering something rather than reciting. Never returns the index it was
@@ -129,6 +137,10 @@ export interface PersonaConversationProps {
    *  bubble, still on screen, with a retry under it. */
   skipFailed: boolean
   onSkipQuestion: () => void
+  /** 'none' = swept and found nothing; 'failed' = the sweep itself did not
+   *  land. Kept apart because only one of them is a claim about the owner. */
+  moreState: 'idle' | 'loading' | 'none' | 'failed'
+  onAskAnother: () => void
   lang: string
   /** A file dropped on the input. Parsing, hashing and posting are the
    *  module's; this only reports the drop. */
@@ -213,6 +225,8 @@ export const PersonaConversation = ({
   answerStale,
   skipFailed,
   onSkipQuestion,
+  moreState,
+  onAskAnother,
   lang,
   onDropExport,
   importJob,
@@ -269,6 +283,49 @@ export const PersonaConversation = ({
   const anythingKept = turns.some((turn) => (turn.kept?.length ?? 0) > 0)
   const questionText = question ? (lang === 'ja' ? question.textJa : question.textEn) : ''
   const questionContext = question ? (lang === 'ja' ? question.contextJa : question.contextEn) : ''
+
+  // ── THE QUESTION HAS A LIFETIME, AND THE SCREEN SHOULD TOO ────────────────
+  //
+  // Owner, 2026-08-16, on an answered question still standing hours later:
+  // 「答えたらずっと表示する必要なくない? ちゃんとユーザーのフローも考えて設計して」.
+  //
+  // The block used to render for every status, so a question asked at 09:00 and
+  // answered at 09:01 kept its heading, its setting, its text and a 「保存しました」
+  // line above the input until midnight — five lines whose entire job was
+  // finished in the first minute. Worse, within the same session the answer was
+  // ALSO in the thread as the owner's own bubble, so the screen said the same
+  // thing twice.
+  //
+  // The loop is once a day (personaInterview.ts), so the flow is:
+  //   ASKED    — the question is the point of the screen; the box is its answer
+  //              box (see `awaitingAnswer` below). This is the only phase with
+  //              anything to do, and the only one that draws the block.
+  //   RESOLVED — an EVENT, not a state. A short confirmation, then gone. The
+  //              durable record is not this line: the answer became a lit point
+  //              on the figure (the module sparks it) and a line in the corpus.
+  //   AFTER    — nothing. The box is a plain chat box again and the day's
+  //              question is simply over; tomorrow brings another.
+  //
+  // ⚠ ONLY SUCCESS IS TRANSIENT. A failed skip leaves the question OPEN, so the
+  // block — and its error — stay put. A save whose corpus rebuild failed raises
+  // the module's own persistent `persona.meta.stale` card, which is not on this
+  // timer. Nothing that needs acting on is allowed to fade.
+  const [justResolved, setJustResolved] = useState<'answered' | 'skipped' | null>(null)
+  const lastStatus = useRef<PersonaQuestion['status'] | null>(question?.status ?? null)
+  useEffect(() => {
+    const before = lastStatus.current
+    const now = question?.status ?? null
+    lastStatus.current = now
+    // Only a transition WATCHED BY THE OWNER counts. Mounting onto an
+    // already-answered question (a reload later the same day) must say nothing —
+    // that is the standing panel this replaces.
+    if (before === 'open' && (now === 'answered' || now === 'skipped')) setJustResolved(now)
+  }, [question?.status])
+  useEffect(() => {
+    if (!justResolved) return undefined
+    const id = window.setTimeout(() => setJustResolved(null), RESOLVED_NOTICE_MS)
+    return () => window.clearTimeout(id)
+  }, [justResolved])
 
   // ⚠ ONE BOX, ONE JOB AT A TIME (field report, 2026-08-15). While today's
   // question is unanswered, this box IS that question's answer box — and the
@@ -337,8 +394,12 @@ export const PersonaConversation = ({
           )}
 
           {/* Today's 1問, as the conversation's opening turn. The next thing the
-           *  owner types answers it (the module routes the send). */}
-          {question && (
+           *  owner types answers it (the module routes the send).
+           *
+           *  ⚠ WHILE IT IS OPEN, AND NOT A MINUTE LONGER — see the lifetime note
+           *  at `justResolved`. An answered question has nothing left to do and
+           *  standing there is the whole complaint. */}
+          {question?.status === 'open' && (
             /* ⚠ THE QUESTION IS TEXT. NOT A CARD, NOT A BRACKET.
              *
              *  It has now been through three arrangements, and the third is the
@@ -365,24 +426,18 @@ export const PersonaConversation = ({
             <div className="flex flex-col">
               <div className="flex items-baseline justify-between gap-3">
                 <span
-                  className={`label-cap ${capTrackingClass(t('persona.interview.heading'))} ${
-                    question.status === 'open'
-                      ? 'text-[var(--beacon-waiting)]'
-                      : 'text-ink-onDeep/40'
-                  }`}
+                  className={`label-cap ${capTrackingClass(t('persona.interview.heading'))} text-[var(--beacon-waiting)]`}
                 >
                   {t('persona.interview.heading')}
                 </span>
-                {question.status === 'open' && (
-                  <button
-                    type="button"
-                    onClick={onSkipQuestion}
-                    disabled={answering}
-                    className="shrink-0 text-micro text-ink-onDeep/35 transition-colors hover:text-ink-onDeep disabled:opacity-50"
-                  >
-                    {t('persona.interview.skip')}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={onSkipQuestion}
+                  disabled={answering}
+                  className="shrink-0 text-micro text-ink-onDeep/35 transition-colors hover:text-ink-onDeep disabled:opacity-50"
+                >
+                  {t('persona.interview.skip')}
+                </button>
               </div>
               {/* THE SETTING FIRST: the question quotes fragments of something
                *  that happened days ago, and read cold those quotes are noise.
@@ -393,19 +448,6 @@ export const PersonaConversation = ({
                 </p>
               )}
               <p className="mt-1 text-meta leading-relaxed text-ink-onDeep/85">{questionText}</p>
-              {question.status !== 'open' && (
-                <p className="mt-1.5 text-micro leading-relaxed text-ink-onDeep/55">
-                  {t(
-                    question.status !== 'answered'
-                      ? 'persona.interview.skipped'
-                      : // "Your stand-in has this now" is only true once the
-                        // file it reads has actually been rebuilt.
-                        answerStale
-                        ? 'persona.interview.answeredStale'
-                        : 'persona.interview.answered',
-                  )}
-                </p>
-              )}
               {skipFailed && (
                 <p className={`mt-1.5 text-micro leading-relaxed ${STAGE_ALERT}`}>
                   {t('persona.interview.skipFailed')}
@@ -498,6 +540,28 @@ export const PersonaConversation = ({
             </div>
           ))}
 
+          {/* ⚠ AT THE FOOT OF THE THREAD, NOT WHERE THE QUESTION WAS. It is a
+           *  receipt for what the owner just sent, so it belongs under their own
+           *  bubble — the place they are already looking — rather than in the
+           *  gap the question left, which reads as the panel refusing to go.
+           *  `aria-live` because it is announced once and then leaves. */}
+          {justResolved && (
+            <p
+              aria-live="polite"
+              className="text-micro leading-relaxed text-ink-onDeep/45"
+            >
+              {t(
+                justResolved === 'skipped'
+                  ? 'persona.interview.skipped'
+                  : // "Your stand-in has this now" is only true once the file it
+                    // reads has actually been rebuilt.
+                    answerStale
+                    ? 'persona.interview.answeredStale'
+                    : 'persona.interview.answered',
+              )}
+            </p>
+          )}
+
           {importJob && (
             <div className="flex flex-col gap-1.5">
               <Bubble me>{importJob.fileName}</Bubble>
@@ -567,11 +631,60 @@ export const PersonaConversation = ({
         </div>
       )}
 
+      {/* ── ASK FOR ANOTHER ──────────────────────────────────────────────────
+       *  Owner, 2026-08-16: 「新しい質問を出すボタンがあってもいいかも。1日1答に
+       *  する必要はない」. The daily sweep offers one without being asked; this is
+       *  the owner asking.
+       *
+       *  ⚠ OUTSIDE `talkRef`, not inside it. Everything in the thread scrolls
+       *  away as the conversation grows, and an ACTION that scrolls out of reach
+       *  is worse than no action. It sits directly above the box instead —
+       *  adjacent to where the answer gets typed.
+       *
+       *  ⚠ ONLY WHEN NOTHING IS OPEN. With a question on the table this would be
+       *  an invitation to abandon it, and the server refuses anyway
+       *  (nextQuestion returns the open one rather than burning its subject). */}
+      {question?.status !== 'open' && (
+        <div className="mb-2 flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+          <button
+            type="button"
+            onClick={onAskAnother}
+            disabled={moreState === 'loading'}
+            className="text-micro text-ink-onDeep/45 underline-offset-2 transition-colors hover:text-ink-onDeep hover:underline disabled:no-underline disabled:opacity-60"
+          >
+            {t(moreState === 'loading' ? 'persona.interview.moreLoading' : 'persona.interview.more')}
+          </button>
+          {/* The two outcomes that are not a question, kept apart: one is a
+           *  finding about the owner's records, the other is this app failing. */}
+          {moreState === 'none' && (
+            <span className="text-micro leading-relaxed text-ink-onDeep/40">
+              {t('persona.interview.moreNone')}
+            </span>
+          )}
+          {moreState === 'failed' && (
+            <span className={`text-micro leading-relaxed ${STAGE_ALERT}`}>
+              {t('persona.interview.moreFailed')}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* ── the input. Quiet until focused; ochre and dashed while a file is
-       *  over it, because dropping an export here is the same act as talking. */}
+       *  over it, because dropping an export here is the same act as talking.
+       *
+       *  ⚠ `cardOnDeep` / `line-onDeep`, NOT `bg-card` / `line`. This box is the
+       *  ONE bordered object on the stage — the last two rounds of this screen
+       *  were about exactly that — and it sat on `bg-deep`, which does not
+       *  invert, wearing surface tokens that do. Rendered in the LIGHT theme for
+       *  the first time (2026-08-16) it was a cream slab on near-black. The
+       *  owner runs dark and could not have seen it. The on-deep pair carries
+       *  the DARK values in both palettes, so dark is byte-identical to before
+       *  and light finally matches it. */}
       <div
         className={`flex items-center gap-2.5 rounded-[3px] border px-3.5 py-2.5 transition-colors ${
-          dragging ? 'border-dashed border-ochre bg-ochre/10' : 'border-line bg-bg-card'
+          dragging
+            ? 'border-dashed border-ochre bg-ochre/10'
+            : 'border-line-onDeep bg-bg-cardOnDeep'
         }`}
       >
         <input
@@ -595,7 +708,7 @@ export const PersonaConversation = ({
             send()
           }}
           placeholder={placeholder}
-          className="min-w-0 flex-1 bg-transparent text-ui text-ink placeholder:text-ink-faint focus:outline-none"
+          className="min-w-0 flex-1 bg-transparent text-ui text-ink-onDeep placeholder:text-ink-onDeep/40 focus:outline-none"
         />
         <button
           type="button"

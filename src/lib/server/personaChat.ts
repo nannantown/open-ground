@@ -262,6 +262,16 @@ export const personaOutputContract = outputContract
 export interface KeptLine {
   region: PersonaRegion
   text: string
+  /** WHICH of the messages it was given this line came from, 1-based, when the
+   *  model cited one (`region|text|#3`). Only the export distiller is handed
+   *  numbered material, so a conversation turn never carries this — there the
+   *  source is simply the message the owner just typed.
+   *
+   *  ⚠ OPTIONAL, AND SILENTLY SO. A model that omits or garbles the citation
+   *  costs the line its `source`, nothing more: the row then says 「元の言葉は
+   *  残っていません」, which is true. Dropping the whole line instead would trade
+   *  a real distillation for a bookkeeping miss. */
+  sourceIndex?: number
 }
 
 export interface PersonaTurnParse {
@@ -284,9 +294,24 @@ const parseKeptSpan = (span: string): KeptLine | 'none' | null => {
   const pipe = span.indexOf('|')
   if (pipe < 0) return null
   const region = span.slice(0, pipe).trim().toLowerCase()
-  const text = span.slice(pipe + 1).trim().slice(0, PERSONA_KEPT_TEXT_MAX)
+  let text = span.slice(pipe + 1).trim()
+  // ⚠ THE CITATION IS OPTIONAL AND STRIPPED FROM THE TEXT. `region|text|#3`
+  // names the message this came from; `region|text` is the older shape and the
+  // only one a conversation turn ever produces. Matched at the END so a pipe
+  // inside the owner's own sentence cannot be mistaken for the separator.
+  let sourceIndex: number | undefined
+  const cite = /\|\s*#(\d{1,4})\s*$/.exec(text)
+  if (cite) {
+    sourceIndex = Number(cite[1])
+    text = text.slice(0, cite.index).trim()
+  }
+  text = text.slice(0, PERSONA_KEPT_TEXT_MAX)
   if (!REGION_IDS.has(region) || !text) return null
-  return { region: region as PersonaRegion, text }
+  return {
+    region: region as PersonaRegion,
+    text,
+    ...(sourceIndex !== undefined && sourceIndex > 0 ? { sourceIndex } : {}),
+  }
 }
 
 /** Read one run's output. Shared by the conversation and the export distiller —
@@ -299,9 +324,9 @@ export const parsePersonaTurn = (
     maxLen: PERSONA_REPLY_MAX,
   })
   const spans = extractMarkerSpans(raw, PERSONA_KEPT_MARKER, PERSONA_END, {
-    // The pipe and the region token ride inside the span, so the raw cap is the
-    // text cap plus room for `people|`.
-    maxLen: PERSONA_KEPT_TEXT_MAX + 16,
+    // The pipe, the region token and the optional `|#123` citation ride inside
+    // the span, so the raw cap is the text cap plus room for `people|` + `|#…`.
+    maxLen: PERSONA_KEPT_TEXT_MAX + 24,
     maxCount: opts.maxKept,
   })
   const kept: KeptLine[] = []
@@ -347,6 +372,12 @@ export const appendKeptLines = async (
     now: number
     lang: PromptLang
     source: 'chat' | 'import'
+    /** THE OWNER'S OWN WORDS this line was distilled from, resolved per line.
+     *  The conversation hands back the message he just typed; the export
+     *  distiller looks up the message the model cited. `undefined` for a line
+     *  whose origin cannot be named — the row then says so, rather than showing
+     *  a quote nobody can vouch for. */
+    sourceText?: (line: KeptLine) => string | undefined
     append?: typeof appendJudgment
   },
 ): Promise<PersonaKeptWrite[]> => {
@@ -359,6 +390,7 @@ export const appendKeptLines = async (
   const out: PersonaKeptWrite[] = []
   for (const line of kept) {
     try {
+      const from = opts.sourceText?.(line)
       const { judgment, meta } = await append({
         text: line.text,
         // The REGION tag is written EXPLICITLY (tier 1 of the seating rule)
@@ -366,6 +398,11 @@ export const appendKeptLines = async (
         // later re-seating of courses or question kinds.
         tags: [opts.source, REGION_TAG(line.region)],
         context,
+        // ⚠ CAPTURED AT WRITE TIME OR NEVER. The material is a scratch file that
+        // is deleted with the run and a thread the server forgets on restart;
+        // this is the last moment the owner's own words and the sentence made
+        // from them are in the same place.
+        ...(from && from.trim() ? { source: from } : {}),
       })
       out.push({
         judgment,
@@ -745,6 +782,8 @@ export const startPersonaChatTurn = (
         now: d.now(),
         lang,
         source: 'chat',
+        // One message per turn, so every line distilled from it cites it.
+        sourceText: () => turn.text,
         append: d.append,
       })
       turn.reply = parsed.reply

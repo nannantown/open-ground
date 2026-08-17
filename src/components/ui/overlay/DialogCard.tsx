@@ -7,10 +7,15 @@ function cx(...cs: (string | false | null | undefined)[]) {
 /**
  * The centred-modal "card" that sits inside an `<Overlay placement="center|top">`.
  * Provides the shared card chrome (paper bg, hairline border, rounded corners,
- * hover-card shadow, clipped overflow, column flex) and — crucially — stops click
- * propagation so a click *inside* the card never bubbles to the backdrop and
- * closes it. Size + max-height are the caller's concern (pass via `className`,
- * e.g. `w-[560px] max-w-[94vw] max-h-[82vh]`).
+ * hover-card shadow, clipped overflow, column flex). Size + max-height are the
+ * caller's concern (pass via `className`, e.g. `w-[560px] max-w-[94vw]
+ * max-h-[82vh]`).
+ *
+ * The click stopPropagation is NOT what keeps the backdrop from closing — Overlay
+ * decides that by asking whether the press landed on the backdrop itself, so a
+ * card no longer has to cooperate. It stays because it also stops clicks reaching
+ * whatever the overlay is nested inside (a canvas that deselects on click, say),
+ * which is a different job and still a real one.
  */
 export function DialogCard({
   children,

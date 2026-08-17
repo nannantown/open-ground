@@ -9,6 +9,7 @@ import {
   ensureTodayQuestion,
   gatherMaterial,
   localDateKey,
+  nextQuestion,
   peekTodayQuestion,
   pickCandidate,
   readInterviewState,
@@ -17,6 +18,7 @@ import {
   type InterviewMaterial,
 } from './personaInterview'
 import { personaInterviewFile } from './paths'
+import { splitSaidDid } from '@/lib/persona/saidDid'
 import { registerTestProject } from '@/test/registerProject'
 import { mutateProjectData } from './projectData'
 import type { AppendJudgmentInput } from './youCorpus'
@@ -621,6 +623,124 @@ describe('one a day, across restarts', () => {
     expect(state.askedSubjects).toHaveLength(1)
   })
 
+  // ── ANOTHER ONE, ON DEMAND ────────────────────────────────────────────────
+  //
+  // Owner, 2026-08-16: 「新しい質問を出すボタンがあってもいいかも。1日1答にする必要は
+  // ない」. The once-a-day rule was never rationing — it exists so opening the tab
+  // offers something unasked, and so a barren sweep is not repeated all day.
+  // Neither reason survives an explicit press.
+
+  it('gives a SECOND question the same day, once the first is resolved', async () => {
+    const first = await ensureTodayQuestion({ now: () => DAY0, gather: gatherOf(m) })
+    expect(first).not.toBeNull()
+    await skipTodayQuestion(first!.id, { now: () => DAY0 + HOUR })
+
+    const m2 = material({
+      cards: [{ task: task({ title: 'カードB', reworkCount: 3 }), projectId: 'p' }],
+    })
+    const second = await nextQuestion({ now: () => DAY0 + 2 * HOUR, gather: gatherOf(m2) })
+    expect(second).not.toBeNull()
+    expect(second?.id).not.toBe(first?.id)
+    expect(second?.status).toBe('open')
+    // It is the live one now — the tab's own read has to find it.
+    const { question } = await peekTodayQuestion({ now: () => DAY0 + 2 * HOUR })
+    expect(question?.id).toBe(second?.id)
+  })
+
+  it('never asks the SAME observation twice, however many times it is pressed', async () => {
+    // ⚠ THE BURN HAS TO BE THE ON-DEMAND PATH'S OWN. A first version of this
+    // test let the DAILY path burn the subject and then asked nextQuestion to
+    // find nothing — true whether or not nextQuestion records anything, and it
+    // stayed green with the append deleted. So: press, get a question, resolve
+    // it, press again on the SAME material. Only the on-demand write can make
+    // the second press come back empty.
+    const first = await ensureTodayQuestion({ now: () => DAY0, gather: gatherOf(m) })
+    await skipTodayQuestion(first!.id, { now: () => DAY0 + HOUR })
+
+    const m2 = material({
+      cards: [{ task: task({ title: 'カードB', reworkCount: 3 }), projectId: 'p' }],
+    })
+    const second = await nextQuestion({ now: () => DAY0 + 2 * HOUR, gather: gatherOf(m2) })
+    expect(second).not.toBeNull()
+    await skipTodayQuestion(second!.id, { now: () => DAY0 + 3 * HOUR })
+
+    // Same material as the press that produced `second` — its only candidate is
+    // now spent, and it is nextQuestion that had to record that.
+    expect(await nextQuestion({ now: () => DAY0 + 4 * HOUR, gather: gatherOf(m2) })).toBeNull()
+    const state = await readInterviewState()
+    expect(state.askedSubjects).toHaveLength(2)
+  })
+
+  it('WILL NOT JUMP THE QUEUE — an open question is returned, not replaced', async () => {
+    // ⚠ Replacing it would destroy it: its subject is already burned in
+    // askedSubjects, so it could never be asked again. A button that claims to
+    // ADD a question must never silently delete one.
+    const open = await ensureTodayQuestion({ now: () => DAY0, gather: gatherOf(m) })
+    const m2 = material({
+      cards: [{ task: task({ title: 'カードB', reworkCount: 3 }), projectId: 'p' }],
+    })
+    const again = await nextQuestion({ now: () => DAY0 + HOUR, gather: gatherOf(m2) })
+    expect(again?.id).toBe(open?.id)
+    const state = await readInterviewState()
+    expect(state.today?.id).toBe(open?.id)
+    expect(state.askedSubjects).toHaveLength(1)
+  })
+
+  it('refuses to claim emptiness after a PARTIAL sweep — it throws instead', async () => {
+    // Same rule as the daily path: "there is nothing left to ask about your
+    // records" may not be said on the strength of records we failed to read.
+    const first = await ensureTodayQuestion({ now: () => DAY0, gather: gatherOf(m) })
+    await skipTodayQuestion(first!.id, { now: () => DAY0 + HOUR })
+    await expect(
+      nextQuestion({ now: () => DAY0 + 2 * HOUR, gather: gatherOf(material({ complete: false })) }),
+    ).rejects.toThrow(/refusing to claim/)
+  })
+
+  it('a fruitless press CHANGES NOTHING — it still sweeps, and destroys no state', async () => {
+    // ⚠ MEASURED ON THE STATE, not on the sweep count. A first version counted
+    // gather() calls, which stayed green under a mutation that wrote a day
+    // sentinel — nextQuestion never reads one, so the count could not see it.
+    // What a stray commit here really costs is `today`: nulling it makes the
+    // resolved question unfindable, and answer/skip both look it up by id.
+    const first = await ensureTodayQuestion({ now: () => DAY0, gather: gatherOf(m) })
+    await skipTodayQuestion(first!.id, { now: () => DAY0 + HOUR })
+    const before = await readInterviewState()
+
+    const gather = vi.fn(async () => material())
+    expect(await nextQuestion({ now: () => DAY0 + 2 * HOUR, gather })).toBeNull()
+    expect(await readInterviewState()).toEqual(before)
+
+    // …and it is still willing to look the next time it is pressed.
+    expect(await nextQuestion({ now: () => DAY0 + 3 * HOUR, gather })).toBeNull()
+    expect(gather).toHaveBeenCalledTimes(2)
+  })
+
+  it('an on-demand question stops the automatic path asking a second one', async () => {
+    // ⚠ ACROSS MIDNIGHT ON PURPOSE. Within one day `lastAskedDate` is already
+    // today, so the assignment in nextQuestion is a no-op and a test staged
+    // inside one day cannot see it at all. The real case is the tab left open
+    // past midnight (or the button being the day's first action): press, and the
+    // next mount's automatic sweep must find the day already answered for —
+    // otherwise it generates a second question straight over the one just
+    // handed out, destroying it and burning its subject.
+    const first = await ensureTodayQuestion({ now: () => DAY0, gather: gatherOf(m) })
+    await skipTodayQuestion(first!.id, { now: () => DAY0 + HOUR })
+
+    const m2 = material({
+      cards: [{ task: task({ title: 'カードB', reworkCount: 3 }), projectId: 'p' }],
+    })
+    const asked = await nextQuestion({ now: () => DAY0 + DAY, gather: gatherOf(m2) })
+    expect(asked).not.toBeNull()
+
+    const m3 = material({
+      cards: [{ task: task({ title: 'カードC', reworkCount: 3 }), projectId: 'p' }],
+    })
+    const auto = await ensureTodayQuestion({ now: () => DAY0 + DAY + HOUR, gather: gatherOf(m3) })
+    expect(auto?.id).toBe(asked?.id)
+    const state = await readInterviewState()
+    expect(state.askedSubjects).toHaveLength(2)
+  })
+
   it('a state file that cannot be parsed starts fresh instead of wedging the tab', async () => {
     await writeFile(personaInterviewFile(), 'not json at all')
     _resetPersonaInterviewForTest()
@@ -757,6 +877,20 @@ describe('answering feeds the corpus', () => {
     expect(arg.text).toContain('差し戻した') // …and the setting is really in it
     expect(arg.tags).toEqual(['interview', 'card-rework'])
     expect(arg.context).toContain('今日の1問')
+
+    // ⚠ THE CROSS-CHECK FOR 「言ったこと / やったこと」. That screen splits this
+    // exact string back into two columns using two code-matched markers
+    // (src/lib/persona/saidDid.ts). Pinning the bytes above is not enough: the
+    // parser is a SECOND copy of them, and the only thing that catches a drift
+    // in either direction is running the real writer through the real parser.
+    const pair = splitSaidDid({
+      id: 'x',
+      text: arg.text,
+      tags: arg.tags,
+      addedAt: '2026-08-01T00:00:00.000Z',
+    })
+    expect(pair?.said).toBe('可逆だから即決した')
+    expect(pair?.did).toBe(`${q!.contextJa} ${q!.textJa}`)
   })
 
   it('EVERY question carries a setting, in both languages — none arrives as a bare quote', async () => {

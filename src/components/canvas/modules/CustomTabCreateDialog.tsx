@@ -85,7 +85,6 @@ export const CustomTabCreateDialog = ({
       padded={false}
       className="overflow-y-auto px-6 py-8"
       onClose={onClose}
-      closeOnBackdrop={false}
       closeOnEsc={false}
       aria-label={t('customTabs.createTitle')}
       onKeyDown={e => {

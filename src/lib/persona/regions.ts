@@ -202,6 +202,11 @@ export interface PersonaNode {
   addedAt: string
   tags: string[]
   context?: string
+  /** The owner's own words this line was distilled from, when they were kept
+   *  (ManualJudgment.source). Carried through so the note card can show them —
+   *  a distilled sentence nobody can check against its material is the one kind
+   *  of line this surface must not present as his. */
+  source?: string
   correctsId?: string
   courseId: PersonaCourseId | null
 }
@@ -217,6 +222,7 @@ export const buildPersonaNodes = (judgments: ManualJudgment[]): PersonaNode[] =>
       addedAt: j.addedAt,
       tags: j.tags ?? [],
       ...(j.context ? { context: j.context } : {}),
+      ...(j.source ? { source: j.source } : {}),
       ...(j.correctsId ? { correctsId: j.correctsId } : {}),
       courseId: courseIdFromJudgment(j),
     }

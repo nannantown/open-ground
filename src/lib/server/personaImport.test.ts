@@ -281,6 +281,36 @@ describe('what an import writes', () => {
     expect(getPersonaImportJob(id)?.result?.kept).toHaveLength(2)
   })
 
+  // ── 元の言葉 (plan step 6) ───────────────────────────────────────────────
+  it('keeps the MESSAGE a line was distilled from, by the number the model cited', async () => {
+    // The material is numbered `--- [1] …`; a kept line ending `|#2` names the
+    // second one. This is the only place that array still exists — the material
+    // file is deleted with the run — so the resolution has to happen here.
+    const { run } = fakeRunner(keptOutput(['head', '迷ったら一晩おく|#2']))
+    await settle(
+      await startPersonaImport(
+        { json: exportWith(5, { prefix: 'MSG' }), fileSha: sha('cited') },
+        { runTurn: run },
+      ),
+    )
+    const stored = await readManualJudgments()
+    expect(stored[0].text).toBe('迷ったら一晩おく')
+    // 1-based, and against the SLICE that was actually sent (oldest → newest).
+    expect(stored[0].source).toBe('MSG number 1 — long enough to survive')
+  })
+
+  it('⚠ AN OUT-OF-RANGE CITATION COSTS THE SOURCE, NEVER THE LINE', async () => {
+    // A model that miscounts must not be able to delete a real distillation of
+    // the owner's words. The row then says 「元の言葉は残っていません」, which is true.
+    const { run } = fakeRunner(keptOutput(['head', '迷ったら一晩おく|#99']))
+    await settle(
+      await startPersonaImport({ json: exportWith(3), fileSha: sha('oob') }, { runTurn: run }),
+    )
+    const stored = await readManualJudgments()
+    expect(stored.map((j) => j.text)).toEqual(['迷ったら一晩おく'])
+    expect(stored[0].source).toBeUndefined()
+  })
+
   it('never learns the assistant\'s half — it is dropped before anything sees it', async () => {
     const { run, calls } = fakeRunner(keptOutput(['head', 'ok']))
     const id = await startPersonaImport(

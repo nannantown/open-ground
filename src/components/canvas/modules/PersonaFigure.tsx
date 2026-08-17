@@ -42,6 +42,7 @@ import { useT } from '@/i18n/I18nContext'
 import { capTrackingClass } from '@/lib/labelScript'
 import { PERSONA_REGIONS, personaHash, type PersonaNode } from '@/lib/persona/regions'
 import { buildArmaturePoints, nearestPoint, type ArmaturePoint } from '@/lib/persona/armature'
+import { cameraForPoint } from '@/lib/persona/focus'
 import type { PersonaRegion } from '@/lib/types'
 
 // ── the particle field ──────────────────────────────────────────────────────
@@ -305,12 +306,18 @@ export interface PersonaFigureProps {
   /** Which region is being probed, or null. Pointer and keyboard both land
    *  here, so a consumer never has to know which one the owner used.
    *
-   *  OPTIONAL, and today nobody subscribes: this file draws the probe's own
-   *  summary beside the cursor, and the one outside reader — a hint line in the
-   *  rail explaining what pressing does — was removed with the rest of the
-   *  stage's operating instructions. The seam stays because the probe is a real
-   *  event and the cost of keeping it is one `?.`. */
+   *  The list screen subscribes: probing a region marks the rows that sit there
+   *  and scrolls to the first one, so pointing at a part of the body and reading
+   *  what is in it are the same gesture from either side. */
   onProbe?: (region: PersonaRegion | null) => void
+  /** ⚠ THE OTHER HALF OF THAT BINDING: one note id, lit brighter than the rest
+   *  and ringed, because a row in the list is being pointed at.
+   *
+   *  The camera moves ONLY if that point is off screen (src/lib/persona/
+   *  focus.ts) — at the default view the whole figure is in frame, so running
+   *  down a list of two hundred rows lights two hundred points and swings the
+   *  body not once. */
+  highlightId?: string | null
 }
 
 export const PersonaFigure = ({
@@ -325,6 +332,7 @@ export const PersonaFigure = ({
   provenance,
   regionSummary,
   onProbe,
+  highlightId = null,
 }: PersonaFigureProps) => {
   const { t } = useT()
   const hostRef = useRef<HTMLDivElement>(null)
@@ -348,6 +356,11 @@ export const PersonaFigure = ({
   /** The probed region, mirrored for the draw loop (which dims everything else)
    *  so a hover does not re-run the animation effect. */
   const probeRef = useRef<PersonaRegion | null>(null)
+  /** Index into `nodes` of the point the list is pointing at, or -1. AN INDEX,
+   *  not the particle: the field is thrown away and re-seated on every resize,
+   *  so a held particle would be a stale object that silently matches nothing.
+   *  The index survives re-seating, and the draw loop's comparison is O(1). */
+  const hlRef = useRef(-1)
   const [tip, setTip] = useState<TipState | null>(null)
   const [probe, setProbe] = useState<ProbeState | null>(null)
   const [zoomed, setZoomed] = useState(false)
@@ -453,6 +466,32 @@ export const PersonaFigure = ({
     seatGap(f, gapRegion)
   }, [nodes, gapRegion])
 
+  // The list is pointing at a line. Light its point, and travel to it ONLY if
+  // it is off screen — see focus.ts for why that condition is the whole rule.
+  // Declared AFTER the seating effect so a highlight arriving in the same
+  // render as a new note reads the seat that note was just given.
+  useEffect(() => {
+    const idx = highlightId ? nodes.findIndex((n) => n.id === highlightId) : -1
+    hlRef.current = idx
+    if (idx === -1) return
+    const f = fieldRef.current
+    if (!f) return
+    const p = f.particles.find((q) => q.node === idx)
+    if (!p) return
+    const next = cameraForPoint(
+      { x: f.ox + p.x * f.s, y: f.oy + p.y * f.s },
+      camToRef.current,
+      { w: f.w, h: f.h },
+    )
+    if (!next) return
+    camToRef.current = next
+    velRef.current = { x: 0, y: 0 }
+    clampCam()
+    // The camera left home, so the way back has to be on screen — the same chip
+    // a pan or a zoom raises. (`zoomed` is "the camera moved", not "s > 1".)
+    setZoomed(true)
+  }, [highlightId, nodes, clampCam])
+
   // A course ended (or was abandoned): its un-consolidated answers stop being
   // dots. They were never findings, so they must not linger looking like one.
   useEffect(() => {
@@ -531,6 +570,10 @@ export const PersonaFigure = ({
       ctx.clearRect(0, 0, f.w, f.h)
       const sq = Math.sqrt(cam.s)
       const probed = probeRef.current
+      const hl = hlRef.current
+      /** Where the pointed-at point landed, so its ring can be drawn on top of
+       *  every other particle instead of under the ones seated after it. */
+      let hlAt: { x: number; y: number } | null = null
       for (const p of f.particles) {
         // figure space → layout px → camera.
         const lx = f.ox + p.x * f.s
@@ -538,24 +581,38 @@ export const PersonaFigure = ({
         const vx = (lx - cam.x) * cam.s + f.w / 2
         const vy = (ly - cam.y) * cam.s + f.h / 2
         if (vx < -30 || vx > f.w + 30 || vy < -30 || vy > f.h + 30) continue
-        const dim = probed !== null && p.region !== probed
+        // ⚠ THE POINTED-AT POINT IS NEVER DIMMED. A probe dims every region but
+        // one; if the list points at a line seated outside that region, the
+        // thing the owner is actually pointing at would be the faintest dot on
+        // the screen — the exact inverse of what both gestures mean.
+        const hot = hl !== -1 && p.node === hl
+        const dim = !hot && probed !== null && p.region !== probed
         const halo = p.region === 'people'
         if (p.node !== -1 || p.mint) {
           if (p.fresh > 0) p.fresh = Math.max(0, p.fresh - (reduced ? 1 : 0.012))
           const br = 0.72 + 0.28 * Math.sin(clock * 0.9 + p.seed)
+          if (hot) hlAt = { x: vx, y: vy }
           ctx.globalAlpha = dim
             ? 0.12
-            : Math.min(1, (halo ? 0.34 : 0.5) + 0.5 * br + p.fresh)
+            : hot
+              ? 1
+              : Math.min(1, (halo ? 0.34 : 0.5) + 0.5 * br + p.fresh)
           ctx.fillStyle =
             p.fresh > 0
               ? TONE_FRESH
-              : hoverRef.current === p || (probed !== null && p.region === probed)
+              : hot || hoverRef.current === p || (probed !== null && p.region === probed)
                 ? TONE_HOVER
                 : halo
                   ? TONE_HALO_LIT
                   : TONE_BODY_LIT
           ctx.beginPath()
-          ctx.arc(vx, vy, ((dim ? 1.1 : halo ? 1.2 : 1.65) + p.fresh * 3.2) * sq, 0, Math.PI * 2)
+          ctx.arc(
+            vx,
+            vy,
+            ((dim ? 1.1 : hot ? 2.5 : halo ? 1.2 : 1.65) + p.fresh * 3.2) * sq,
+            0,
+            Math.PI * 2,
+          )
           ctx.fill()
         } else if (p.raw) {
           ctx.globalAlpha = dim ? 0.12 : 0.34
@@ -578,6 +635,19 @@ export const PersonaFigure = ({
         }
       }
       ctx.globalAlpha = 1
+
+      // The ring around the pointed-at point. A brighter dot alone is not
+      // findable on a body of ~1,800 points that all twinkle; the ring is what
+      // makes "this line is HERE in you" a single glance instead of a search.
+      if (hlAt) {
+        ctx.globalAlpha = 0.85
+        ctx.strokeStyle = TONE_HOVER
+        ctx.lineWidth = 1.1
+        ctx.beginPath()
+        ctx.arc(hlAt.x, hlAt.y, (reduced ? 9 : 9 + Math.sin(clock * 3.2) * 1.6) * sq, 0, Math.PI * 2)
+        ctx.stroke()
+        ctx.globalAlpha = 1
+      }
 
       for (let i = burstRef.current.length - 1; i >= 0; i--) {
         const b = burstRef.current[i]
@@ -857,7 +927,16 @@ export const PersonaFigure = ({
       <ul className="sr-only" aria-label={t('persona.figure.nodeList')}>
         {nodes.map((n) => (
           <li key={n.id}>
-            <button type="button" onClick={() => onSelect(n)}>
+            {/* ⚠ `aria-current` IS THE HIGHLIGHT'S ONLY NON-PIXEL FORM. The ring
+             *  is painted on a canvas, which a screen reader cannot see and a
+             *  test cannot read; the state it draws is real either way, so it is
+             *  announced here too. That also makes the wiring from the list
+             *  observable — the ring itself is verified on the running app. */}
+            <button
+              type="button"
+              aria-current={n.id === highlightId ? 'true' : undefined}
+              onClick={() => onSelect(n)}
+            >
               {n.text}
             </button>
           </li>

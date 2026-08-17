@@ -116,18 +116,16 @@ export const MarketplaceDialog = ({
       className="overflow-y-auto px-6 py-8"
       onClose={onClose}
       closeOnEsc={false}
-      // Backdrop dismiss fires on MOUSEDOWN (not click), gated by the section's
-      // onMouseDown stopPropagation, so a press begun inside the card and
-      // released on the veil never dismisses (load-bearing — preserves the
-      // pre-shell behaviour). closeOnBackdrop disables Overlay's click path.
-      closeOnBackdrop={false}
-      onMouseDown={onClose}
+      // Backdrop dismiss (press on the veil closes) now comes from the shell —
+      // it fires on MOUSEDOWN and only when the press LANDS on the veil, which
+      // is the behaviour this file used to hand-roll with a root onMouseDown +
+      // a stopPropagation on the section below. Both are gone: the shell's
+      // target check does the same job without the card having to cooperate.
       aria-label={t('customTabs.marketTitle')}
     >
       <section
         role="dialog"
         aria-label={t('customTabs.marketTitle')}
-        onMouseDown={e => e.stopPropagation()}
         className="relative w-full max-w-[520px] overflow-hidden rounded-[8px] border border-line bg-bg-card shadow-card-hover"
       >
         <header className="relative px-[30px] pb-[18px] pt-[26px]">

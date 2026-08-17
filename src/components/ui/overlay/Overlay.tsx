@@ -53,7 +53,7 @@ export interface OverlayProps {
    * nav, or a surface that intentionally does NOT close on Esc).
    */
   closeOnEsc?: boolean
-  /** center/top: a click on the backdrop closes. Default `true` when `onClose` is given. */
+  /** A press on the backdrop closes. Default `true` when `onClose` is given. */
   closeOnBackdrop?: boolean
   className?: string
   role?: string
@@ -134,7 +134,28 @@ export function Overlay({
     return () => window.removeEventListener('keydown', handler)
   }, [wantEsc, onClose])
 
-  const backdropClose = (closeOnBackdrop ?? true) && !!onClose && placement !== 'fill' && placement !== 'scroll'
+  // ⚠ EVERY OVERLAY CLOSES WHEN THE PRESS LANDS ON THE BACKDROP (owner,
+  // 2026-08-17: 「モーダル系はモーダル外をタップすると閉じる仕様にしてね。全部」).
+  //
+  // Two decisions, and both of them are the reason the rule can now be stated
+  // without exceptions:
+  //
+  // 1. MOUSEDOWN, not click. A `click` fires on the nearest common ancestor of
+  //    press and release, so selecting text inside a card and releasing on the
+  //    veil delivers a click whose target IS this root — and the surface would
+  //    vanish mid-drag, losing whatever was typed. Marketplace and the tab
+  //    picker had already found this the hard way and hand-rolled a mousedown
+  //    dismiss, calling it load-bearing; this is that behaviour, moved into the
+  //    shell so it holds everywhere instead of in the two files that remembered.
+  // 2. TARGET, not bubbling. The old handler fired on anything that bubbled up,
+  //    so it needed every child to stop propagation — `DialogCard` does, and
+  //    everything not built on it had to be excluded by placement instead
+  //    (`fill` and `scroll` were opted out for that reason alone). Comparing
+  //    target to currentTarget asks the question directly — "was the pointer on
+  //    empty backdrop?" — so no child has to cooperate and the exclusions go
+  //    with it: a `fill` overlay's child covers the root, so it simply never
+  //    fires there. Geometry decides, not a list of placements.
+  const backdropClose = (closeOnBackdrop ?? true) && !!onClose
 
   return (
     <div
@@ -148,9 +169,15 @@ export function Overlay({
         padded ? PLACEMENT_PADDING[placement] : '',
         className,
       )}
-      onClick={backdropClose ? onClose : undefined}
       onKeyDown={onKeyDown}
-      onMouseDown={onMouseDown}
+      onMouseDown={
+        backdropClose
+          ? e => {
+              onMouseDown?.(e)
+              if (e.target === e.currentTarget) onClose?.()
+            }
+          : onMouseDown
+      }
       onDragEnter={onDragEnter}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}

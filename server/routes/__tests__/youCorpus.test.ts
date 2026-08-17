@@ -109,12 +109,83 @@ describe('DNS-rebinding / loopback guard on the sensitive GETs', () => {
 
 // The read the Persona tab lists its cards from. Structured records, so the UI
 // never has to parse the rendered markdown back apart.
+describe('POST /api/you-corpus/retire ・ restore', () => {
+  const idOf = async (text: string): Promise<string> => {
+    const body = (await (
+      await app.request('/api/you-corpus/judgments')
+    ).json()) as YouCorpusJudgmentsResponse
+    const found = body.judgments.find((j) => j.text === text)
+    if (!found) throw new Error(`no judgment ${text}`)
+    return found.id
+  }
+
+  it('moves a line out of the live list and into `retired`, with a date', async () => {
+    await app.request('/api/you-corpus/append', json({ text: 'TAKE_THIS_BACK' }))
+    await app.request('/api/you-corpus/append', json({ text: 'LEAVE_THIS' }))
+    const id = await idOf('TAKE_THIS_BACK')
+
+    const res = await app.request('/api/you-corpus/retire', json({ id }))
+    expect(res.status).toBe(200)
+
+    const after = (await (
+      await app.request('/api/you-corpus/judgments')
+    ).json()) as YouCorpusJudgmentsResponse
+    // ⚠ THE MARKER MUST NOT SHOW UP AS A BELIEF. It carries the retired line's
+    // own words, so a reader that dropped only the target would leave an
+    // identical sentence standing here.
+    expect(after.judgments.map((j) => j.text)).toEqual(['LEAVE_THIS'])
+    expect(after.retired.map((r) => r.judgment.text)).toEqual(['TAKE_THIS_BACK'])
+    expect(Number.isNaN(Date.parse(after.retired[0].retiredAt))).toBe(false)
+  })
+
+  it('「戻す」 brings it back', async () => {
+    await app.request('/api/you-corpus/append', json({ text: 'ON_SECOND_THOUGHTS' }))
+    const id = await idOf('ON_SECOND_THOUGHTS')
+    await app.request('/api/you-corpus/retire', json({ id }))
+    expect(
+      ((await (await app.request('/api/you-corpus/judgments')).json()) as YouCorpusJudgmentsResponse)
+        .judgments,
+    ).toEqual([])
+
+    expect((await app.request('/api/you-corpus/restore', json({ id }))).status).toBe(200)
+    const back = (await (
+      await app.request('/api/you-corpus/judgments')
+    ).json()) as YouCorpusJudgmentsResponse
+    expect(back.judgments.map((j) => j.text)).toEqual(['ON_SECOND_THOUGHTS'])
+    expect(back.retired).toEqual([])
+  })
+
+  it('400s without an id, and 404s for one that is not there', async () => {
+    expect((await app.request('/api/you-corpus/retire', json({}))).status).toBe(400)
+    expect((await app.request('/api/you-corpus/retire', json({ id: 'nope' }))).status).toBe(404)
+    expect((await app.request('/api/you-corpus/restore', json({ id: 'nope' }))).status).toBe(404)
+  })
+
+  // ⚠ THE POWER STAYS ON ITS OWN ENDPOINT. Adding a note and withdrawing one
+  // are different acts; if /append accepted the marker, every path able to write
+  // a note could also make lines disappear.
+  it('/append cannot retire anything, whatever it is handed', async () => {
+    await app.request('/api/you-corpus/append', json({ text: 'STILL_TRUE' }))
+    const id = await idOf('STILL_TRUE')
+    await app.request('/api/you-corpus/append', json({ text: 'SNEAKY', retiredId: id }))
+
+    const after = (await (
+      await app.request('/api/you-corpus/judgments')
+    ).json()) as YouCorpusJudgmentsResponse
+    expect(after.judgments.map((j) => j.text).sort()).toEqual(['SNEAKY', 'STILL_TRUE'])
+    expect(after.retired).toEqual([])
+  })
+})
+
 describe('GET /api/you-corpus/judgments', () => {
   it('is empty before anything is appended', async () => {
     const res = await app.request('/api/you-corpus/judgments')
     expect(res.status).toBe(200)
     const body = (await res.json()) as YouCorpusJudgmentsResponse
     expect(body.judgments).toEqual([])
+    // ⚠ AN EMPTY ARRAY, NOT AN ABSENT FIELD. The file was read and held no
+    // tombstones — that is a measurement, and the client may rely on it.
+    expect(body.retired).toEqual([])
   })
 
   it('returns judgments NEWEST FIRST with their tags, context and date', async () => {

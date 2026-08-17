@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtemp, mkdir, rm, writeFile, realpath } from 'fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -22,7 +22,8 @@ import {
   type PersonaTurnArgs,
   type PersonaTurnRunner,
 } from './personaChat'
-import { readManualJudgments } from './youCorpus'
+import { readManualJudgments, SOURCE_MAX } from './youCorpus'
+import { youCorpusFile } from './paths'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The persona CONVERSATION: one claude run per turn that both replies and
@@ -137,6 +138,46 @@ describe('parsePersonaTurn', () => {
       { region: 'legs', text: '仕事の悩みは「決めたあと」に出る' },
       { region: 'people', text: '重い話ほど、近い人に経緯から話したい' },
     ])
+    expect(parsed.keptUnreadable).toBe(0)
+  })
+
+  // ── the optional citation (plan step 6) ───────────────────────────────────
+  it('reads `|#3` as WHICH message the line came from, and keeps it out of the text', () => {
+    const parsed = parsePersonaTurn(
+      asPtyOutput(kept('legs', '決めたあとに手が止まる|#3'), reply('はい。')),
+      { maxKept: PERSONA_KEPT_PER_TURN },
+    )
+    expect(parsed.kept).toEqual([
+      { region: 'legs', text: '決めたあとに手が止まる', sourceIndex: 3 },
+    ])
+  })
+
+  it('⚠ STILL READS THE OLD TWO-FIELD SHAPE — a conversation turn never cites', () => {
+    // Only the export distiller is handed numbered material. A turn that emits
+    // `region|text` must keep working exactly as before.
+    const parsed = parsePersonaTurn(asPtyOutput(kept('legs', '一文'), reply('はい。')), {
+      maxKept: PERSONA_KEPT_PER_TURN,
+    })
+    expect(parsed.kept).toEqual([{ region: 'legs', text: '一文' }])
+  })
+
+  it('does not mistake a pipe INSIDE the owner’s sentence for the citation', () => {
+    const parsed = parsePersonaTurn(
+      asPtyOutput(kept('chest', '価格は「A|B」で決める'), reply('はい。')),
+      { maxKept: PERSONA_KEPT_PER_TURN },
+    )
+    expect(parsed.kept).toEqual([{ region: 'chest', text: '価格は「A|B」で決める' }])
+  })
+
+  it('a garbled citation costs the line its source, never the line', () => {
+    // ⚠ THE DIRECTION MATTERS. Dropping the whole line would trade a real
+    // distillation of the owner's words for a bookkeeping miss.
+    const parsed = parsePersonaTurn(
+      asPtyOutput(kept('legs', '一文|#いち'), reply('はい。')),
+      { maxKept: PERSONA_KEPT_PER_TURN },
+    )
+    expect(parsed.kept).toHaveLength(1)
+    expect(parsed.kept[0].sourceIndex).toBeUndefined()
     expect(parsed.keptUnreadable).toBe(0)
   })
 
@@ -323,9 +364,29 @@ describe('a persona turn', () => {
     const stored = await readManualJudgments()
     expect(stored.map((j) => j.text)).toEqual(['決めたあとに手が止まる'])
     expect(JSON.stringify(stored)).not.toContain(REPLY)
-    // Nor is the owner's own message swallowed whole into the corpus — only the
-    // distilled line is.
-    expect(JSON.stringify(stored)).not.toContain('最近、仕事で消耗してる')
+    // ⚠ NOR IS THE OWNER'S OWN MESSAGE SWALLOWED WHOLE AS A BELIEF. It IS kept
+    // now — as `source`, the material the line was distilled from, which is what
+    // makes the distillation checkable — but it is not a line the stand-in
+    // reads: no stored judgment's TEXT is his raw message…
+    expect(stored.map((j) => j.text)).not.toContain('最近、仕事で消耗してる')
+    // …and the file claude is actually handed does not contain it at all.
+    expect(await readFile(youCorpusFile(), 'utf8')).not.toContain('最近、仕事で消耗してる')
+    // The material itself, beside the sentence made from it.
+    expect(stored[0].source).toBe('最近、仕事で消耗してる')
+  })
+
+  // ── 元の言葉 (plan step 6) ───────────────────────────────────────────────
+  it('caps a very long message rather than storing a document per line', async () => {
+    // ⚠ AND THE ELLIPSIS IS PART OF THE STORED STRING, so a truncated quote can
+    // never be read as the whole of what he said. He pastes documents into that
+    // box; one per distilled line would grow the irreplaceable file without end.
+    const LONG = 'あ'.repeat(SOURCE_MAX + 500)
+    const { run } = fakeRunner(asPtyOutput(kept('legs', '一文'), reply('はい。')))
+    await settle(startPersonaChatTurn({ text: LONG }, { runTurn: run }))
+
+    const stored = await readManualJudgments()
+    expect(stored[0].source?.length).toBe(SOURCE_MAX + 1)
+    expect(stored[0].source?.endsWith('…')).toBe(true)
   })
 
   it('reports each write with the stored judgment, so the chip is pressable', async () => {
