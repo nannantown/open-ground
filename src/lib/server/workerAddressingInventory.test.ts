@@ -840,6 +840,11 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     why: 'A one-off claude PTY for task-title generation, spawned and killed in the same function. Not a worker.',
     ptyFns: ['killTerminal', 'subscribeTerminal'],
   },
+  'src/lib/server/researchKnowledge.ts': {
+    tier: 'pty-only-by-design',
+    why: 'One hidden claude PTY per research digest/ask job (runMarkerSession), spawned, marker-scraped and killed around the terminalId it just created — the personaChat/generateDescription shape. There is no worker to address on either runtime.',
+    ptyFns: ['killTerminal', 'subscribeTerminal'],
+  },
 
   // ── the PTY REST/SSE surface ──
   'server/routes/terminal.ts': {
@@ -1063,6 +1068,16 @@ const SITES: Record<string, Decl & { count: number }> = {
     tier: 'pty-only-by-design',
     count: 1,
     why: 'Tears down the one-off skill-generation PTY this module just spawned.',
+  },
+  'src/lib/server/researchKnowledge.ts::killTerminal': {
+    tier: 'pty-only-by-design',
+    count: 1,
+    why: 'Tears down the one-off research digest/ask PTY this module just spawned (finally path).',
+  },
+  'src/lib/server/researchKnowledge.ts::subscribeTerminal': {
+    tier: 'pty-only-by-design',
+    count: 1,
+    why: 'Reads the output of the one-off research digest/ask PTY this module just spawned.',
   },
   'src/lib/server/generateSkill.ts::subscribeTerminal': {
     tier: 'pty-only-by-design',

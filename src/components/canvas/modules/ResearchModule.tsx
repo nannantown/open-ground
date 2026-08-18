@@ -20,12 +20,23 @@
 // repaint the Doc every time a report needs one more construct.)
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { BookOpenText, RotateCw } from 'lucide-react'
+import {
+  BookOpenText,
+  MessagesSquare,
+  RotateCw,
+  Send,
+  Sparkles,
+  Square,
+  Volume2,
+} from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { useT } from '@/i18n/I18nContext'
 import { Btn } from '@/components/ui/Btn'
 import type {
   ProjectMeta,
+  ResearchJobStartResponse,
+  ResearchJobStateResponse,
+  ResearchKnowledgeResponse,
   ResearchReportMeta,
   ResearchReportResponse,
   ResearchReportsResponse,
@@ -361,6 +372,19 @@ export interface ResearchModuleProps {
   project: ProjectMeta
 }
 
+/** A running knowledge job as the CLIENT tracks it: which report it belongs to
+ *  (a stale poll result must never paint another report's card) and when it
+ *  started (the working line shows honest elapsed seconds). */
+interface KnowledgeJob {
+  id: string
+  file: string
+  startedAt: number
+}
+
+/** Why the last digest/ask attempt failed — the two claude preflight states get
+ *  their own copy (install / sign in), everything else the generic line. */
+type KnowledgeFail = 'error' | 'claudeMissing' | 'claudeLoggedOut'
+
 export const ResearchModule = ({ project }: ResearchModuleProps) => {
   const { t, lang } = useT()
   const [reports, setReports] = useState<ResearchReportMeta[]>([])
@@ -372,6 +396,17 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
   const [content, setContent] = useState<string | null>(null)
   const [readError, setReadError] = useState(false)
   const [copied, setCopied] = useState(false)
+  // ── Knowledge layer (digest + Q&A + read-aloud) — per selected report ──
+  // `knowledge === null` means "no successful read yet": the card then CLAIMS
+  // nothing (no 「質問はまだありません」 over a failed read — pitch rule).
+  const [knowledge, setKnowledge] = useState<ResearchKnowledgeResponse | null>(null)
+  const [digestJob, setDigestJob] = useState<KnowledgeJob | null>(null)
+  const [digestFail, setDigestFail] = useState<KnowledgeFail | null>(null)
+  const [askJob, setAskJob] = useState<KnowledgeJob | null>(null)
+  const [askFail, setAskFail] = useState<KnowledgeFail | null>(null)
+  const [question, setQuestion] = useState('')
+  const [speaking, setSpeaking] = useState(false)
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
   const alive = useRef(true)
   // The file the reader is CURRENTLY meant to show — guards a slow response
@@ -383,6 +418,12 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
     return () => {
       alive.current = false
       if (copyTimer.current) clearTimeout(copyTimer.current)
+      // Never keep talking after the tab is gone.
+      try {
+        window.speechSynthesis?.cancel()
+      } catch {
+        /* no speech engine here — nothing was speaking */
+      }
     }
   }, [])
 
@@ -403,6 +444,34 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
     void loadReports()
   }, [loadReports])
 
+  const stopSpeech = useCallback(() => {
+    try {
+      window.speechSynthesis?.cancel()
+    } catch {
+      /* no speech engine — nothing to stop */
+    }
+    setSpeaking(false)
+  }, [])
+
+  // The report's knowledge sidecar (digest + Q&A + staleness). A failed read
+  // leaves `knowledge` as-is (null on a fresh report) so the UI never claims
+  // "no questions yet" about a file it could not read.
+  const loadKnowledge = useCallback(
+    async (file: string) => {
+      try {
+        const res = await api.api.research.knowledge.$get({
+          query: { path: project.path, file },
+        })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = (await res.json()) as ResearchKnowledgeResponse
+        if (alive.current && selectedRef.current === file) setKnowledge(data)
+      } catch {
+        /* keep the current state — the card simply doesn't claim anything */
+      }
+    },
+    [project.path],
+  )
+
   const openReport = useCallback(
     async (file: string) => {
       selectedRef.current = file
@@ -410,6 +479,18 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
       setContent(null)
       setReadError(false)
       setCopied(false)
+      // Knowledge is per-report: reset the card and stop any read-aloud. A job
+      // started on the previous report keeps running SERVER-side only — the
+      // single-flight registry re-attaches if its button is pressed again.
+      setKnowledge(null)
+      setDigestJob(null)
+      setDigestFail(null)
+      setAskJob(null)
+      setAskFail(null)
+      setQuestion('')
+      stopSpeech()
+      // Read only — opening a report NEVER starts a claude run (pitch non-goal).
+      void loadKnowledge(file)
       try {
         const res = await api.api.research.report.$get({
           query: { path: project.path, file },
@@ -422,8 +503,67 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
         if (alive.current && selectedRef.current === file) setReadError(true)
       }
     },
-    [project.path],
+    [project.path, loadKnowledge, stopSpeech],
   )
+
+  // EXPLICIT distill button. 503 carries the claude preflight discriminant so
+  // the copy can say "install" vs "sign in" instead of a generic failure.
+  const startDigest = useCallback(async () => {
+    if (selected === null || digestJob !== null) return
+    const file = selected
+    setDigestFail(null)
+    try {
+      const res = await api.api.research.digest.$post({
+        json: { path: project.path, file },
+      })
+      if (!alive.current || selectedRef.current !== file) return
+      if (res.status === 503) {
+        const body = (await res.json().catch(() => ({}))) as {
+          claudeMissing?: boolean
+          claudeLoggedOut?: boolean
+        }
+        setDigestFail(
+          body.claudeMissing ? 'claudeMissing' : body.claudeLoggedOut ? 'claudeLoggedOut' : 'error',
+        )
+        return
+      }
+      if (res.status !== 202) throw new Error(`HTTP ${res.status}`)
+      const data = (await res.json()) as ResearchJobStartResponse
+      setDigestJob({ id: data.jobId, file, startedAt: Date.now() })
+    } catch {
+      if (alive.current && selectedRef.current === file) setDigestFail('error')
+    }
+  }, [selected, digestJob, project.path])
+
+  // The question stays in the input until the answer lands — a failed ask must
+  // be retryable without retyping (research.qa.retry).
+  const submitAsk = useCallback(async () => {
+    const q = question.trim()
+    if (selected === null || askJob !== null || q === '') return
+    const file = selected
+    setAskFail(null)
+    try {
+      const res = await api.api.research.ask.$post({
+        json: { path: project.path, file, question: q },
+      })
+      if (!alive.current || selectedRef.current !== file) return
+      if (res.status === 503) {
+        const body = (await res.json().catch(() => ({}))) as {
+          claudeMissing?: boolean
+          claudeLoggedOut?: boolean
+        }
+        setAskFail(
+          body.claudeMissing ? 'claudeMissing' : body.claudeLoggedOut ? 'claudeLoggedOut' : 'error',
+        )
+        return
+      }
+      if (res.status !== 202) throw new Error(`HTTP ${res.status}`)
+      const data = (await res.json()) as ResearchJobStartResponse
+      setAskJob({ id: data.jobId, file, startedAt: Date.now() })
+    } catch {
+      if (alive.current && selectedRef.current === file) setAskFail('error')
+    }
+  }, [selected, askJob, question, project.path])
 
   const copyMarkdown = useCallback(() => {
     if (content === null) return
@@ -445,6 +585,141 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
       /* navigator.clipboard missing entirely — same silent no-op. */
     }
   }, [content])
+
+  // Poll one knowledge job (1.5s cadence, same as the describe poll). On any
+  // terminal state the result is ALREADY persisted server-side, so the settle
+  // path re-reads the sidecar. 404 = swept/unknown (dev server reloaded):
+  // whatever finished is in the sidecar — re-read and stop, claiming nothing.
+  const pollKnowledgeJob = useCallback(
+    async (jobId: string, settle: (outcome: 'done' | 'error' | 'gone') => void): Promise<void> => {
+      try {
+        const res = await fetch(`/api/research/job/${encodeURIComponent(jobId)}`)
+        if (res.status === 404) {
+          settle('gone')
+          return
+        }
+        if (!res.ok) return
+        const state = (await res.json()) as ResearchJobStateResponse
+        if (state.status === 'running') return
+        settle(state.status === 'done' ? 'done' : 'error')
+      } catch {
+        /* transient (server reloading) — keep polling */
+      }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    const job = digestJob
+    if (job === null) return
+    let cancelled = false
+    let inFlight = false
+    let settled = false
+    const settle = (outcome: 'done' | 'error' | 'gone') => {
+      if (cancelled || settled) return
+      settled = true
+      setDigestJob((prev) => (prev?.id === job.id ? null : prev))
+      if (outcome === 'error') {
+        if (selectedRef.current === job.file) setDigestFail('error')
+      } else {
+        void loadKnowledge(job.file)
+      }
+    }
+    const tick = async () => {
+      if (inFlight || cancelled || settled) return
+      inFlight = true
+      try {
+        await pollKnowledgeJob(job.id, settle)
+      } finally {
+        inFlight = false
+      }
+    }
+    void tick()
+    const intervalId = window.setInterval(() => void tick(), 1500)
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+    // Keyed on the id: (id, file, startedAt) are set together and immutable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [digestJob?.id])
+
+  useEffect(() => {
+    const job = askJob
+    if (job === null) return
+    let cancelled = false
+    let inFlight = false
+    let settled = false
+    const settle = (outcome: 'done' | 'error' | 'gone') => {
+      if (cancelled || settled) return
+      settled = true
+      setAskJob((prev) => (prev?.id === job.id ? null : prev))
+      if (outcome === 'error') {
+        if (selectedRef.current === job.file) setAskFail('error')
+      } else {
+        // Clear the input only on an explicit 'done' — a swept job's outcome is
+        // unknown, so the question stays retryable.
+        if (outcome === 'done') setQuestion('')
+        void loadKnowledge(job.file)
+      }
+    }
+    const tick = async () => {
+      if (inFlight || cancelled || settled) return
+      inFlight = true
+      try {
+        await pollKnowledgeJob(job.id, settle)
+      } finally {
+        inFlight = false
+      }
+    }
+    void tick()
+    const intervalId = window.setInterval(() => void tick(), 1500)
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [askJob?.id])
+
+  // One shared 1s ticker drives the 「… {seconds}秒」 working lines.
+  useEffect(() => {
+    if (digestJob === null && askJob === null) return
+    setNowMs(Date.now())
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(intervalId)
+  }, [digestJob, askJob])
+  const elapsedSec = (startedAt: number) => Math.max(0, Math.floor((nowMs - startedAt) / 1000))
+
+  // Read the digest aloud with the OS speech engine — the pitch's deliberate
+  // NotebookLM-not: no generated audio show, no network, just the essence
+  // spoken. Pressing again stops.
+  const speakDigest = useCallback(() => {
+    const digest = knowledge?.digest
+    const synth = window.speechSynthesis
+    if (!digest || !synth || typeof window.SpeechSynthesisUtterance !== 'function') return
+    if (speaking) {
+      stopSpeech()
+      return
+    }
+    const u = new window.SpeechSynthesisUtterance([digest.tldr, ...digest.points].join('\n'))
+    u.lang = digest.lang === 'ja' ? 'ja-JP' : 'en-US'
+    u.onend = () => {
+      if (alive.current) setSpeaking(false)
+    }
+    u.onerror = () => {
+      if (alive.current) setSpeaking(false)
+    }
+    synth.cancel() // never queue behind a leftover utterance
+    synth.speak(u)
+    setSpeaking(true)
+  }, [knowledge, speaking, stopSpeech])
+
+  const failText = (f: KnowledgeFail, generic: string): string =>
+    f === 'claudeMissing'
+      ? t('research.knowledge.claudeMissing')
+      : f === 'claudeLoggedOut'
+        ? t('research.knowledge.claudeLoggedOut')
+        : generic
 
   const dateOf = (mtime: number) =>
     new Date(mtime).toLocaleDateString(lang === 'ja' ? 'ja-JP' : 'en-US')
@@ -514,13 +789,153 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
         ) : readError ? (
           <div className="px-8 py-6 text-ui text-ink-subtle">{t('research.loadError')}</div>
         ) : content === null ? null : (
-          <div className="mx-auto flex max-w-[720px] flex-col gap-2.5 px-8 py-6">
-            <div className="flex items-center justify-end">
+          <div className="mx-auto flex max-w-[720px] flex-col gap-3 px-8 py-6">
+            {/* ── The knowledge card: 30 seconds of essence BEFORE the wall of
+                 text (owner, 2026-08-18: 「文字が多くて読む気が失せる」). ── */}
+            <section className="flex flex-col gap-2 rounded-[3px] border border-line bg-plane px-4 py-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="label-cap flex items-center gap-1.5 text-ink-faint">
+                  <Sparkles size={12} strokeWidth={2} />
+                  {t('research.digest.heading')}
+                </h3>
+                {knowledge?.digest && digestJob === null && (
+                  <div className="flex items-center gap-1">
+                    <Btn variant="subtle" size="xs" onClick={speakDigest}>
+                      {speaking ? (
+                        <Square size={11} strokeWidth={2.25} />
+                      ) : (
+                        <Volume2 size={11} strokeWidth={2.25} />
+                      )}
+                      {t(speaking ? 'research.digest.speakStop' : 'research.digest.speak')}
+                    </Btn>
+                    <Btn variant="subtle" size="xs" onClick={() => void startDigest()}>
+                      <RotateCw size={11} strokeWidth={2.25} />
+                      {t('research.digest.remake')}
+                    </Btn>
+                  </div>
+                )}
+              </div>
+              {knowledge?.digest && (
+                <>
+                  <p className="text-ui font-medium leading-relaxed text-ink">
+                    {knowledge.digest.tldr}
+                  </p>
+                  <ul className="flex list-disc flex-col gap-1 pl-5">
+                    {knowledge.digest.points.map((point, i) => (
+                      <li key={i} className="text-ui leading-relaxed text-ink">
+                        {point}
+                      </li>
+                    ))}
+                  </ul>
+                  {knowledge.digestStale && (
+                    <p role="note" className="text-meta leading-snug text-amber-500/90">
+                      {t('research.digest.stale')}
+                    </p>
+                  )}
+                  <p className="text-meta leading-snug text-ink-faint">
+                    {t('research.digest.note')}
+                  </p>
+                </>
+              )}
+              {digestJob !== null ? (
+                <p className="text-ui text-ink-subtle">
+                  {t('research.digest.working', { seconds: elapsedSec(digestJob.startedAt) })}
+                </p>
+              ) : (
+                <>
+                  {digestFail !== null && (
+                    <p className="text-ui text-error">
+                      {failText(digestFail, t('research.digest.failed'))}
+                    </p>
+                  )}
+                  {!knowledge?.digest && (
+                    <div>
+                      <Btn variant="ghost" size="sm" onClick={() => void startDigest()}>
+                        <Sparkles size={11} strokeWidth={2.25} />
+                        {t(digestFail === 'error' ? 'research.digest.retry' : 'research.digest.make')}
+                      </Btn>
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+            {/* ── Q&A: interrogate THIS report. Answers come from the report
+                 alone and persist as a per-report notebook (newest first). ── */}
+            <section className="flex flex-col gap-2 rounded-[3px] border border-line bg-plane px-4 py-3">
+              <h3 className="label-cap flex items-center gap-1.5 text-ink-faint">
+                <MessagesSquare size={12} strokeWidth={2} />
+                {t('research.qa.heading')}
+              </h3>
+              <form
+                className="flex items-center gap-1.5"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  void submitAsk()
+                }}
+              >
+                <input
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  placeholder={t('research.qa.placeholder')}
+                  maxLength={500}
+                  disabled={askJob !== null}
+                  className="min-w-0 flex-1 rounded-[2px] border border-line bg-bg px-2.5 py-1.5 text-ui text-ink outline-none placeholder:text-ink-faint focus:border-line-strong"
+                />
+                <Btn
+                  type="submit"
+                  variant="subtle"
+                  size="sm"
+                  disabled={askJob !== null || question.trim() === ''}
+                  aria-label={t('research.qa.placeholder')}
+                >
+                  <Send size={12} strokeWidth={2.25} />
+                </Btn>
+              </form>
+              {askJob !== null && (
+                <p className="text-ui text-ink-subtle">
+                  {t('research.qa.working', { seconds: elapsedSec(askJob.startedAt) })}
+                </p>
+              )}
+              {askJob === null && askFail !== null && (
+                <div className="flex items-center gap-2">
+                  <p className="text-ui text-error">{failText(askFail, t('research.qa.failed'))}</p>
+                  {askFail === 'error' && (
+                    <Btn variant="subtle" size="xs" onClick={() => void submitAsk()}>
+                      {t('research.qa.retry')}
+                    </Btn>
+                  )}
+                </div>
+              )}
+              {knowledge !== null &&
+                knowledge.qa.length === 0 &&
+                askJob === null &&
+                askFail === null && (
+                  <p className="text-ui text-ink-subtle">{t('research.qa.empty')}</p>
+                )}
+              {knowledge !== null && knowledge.qa.length > 0 && (
+                <div className="flex flex-col">
+                  {[...knowledge.qa].reverse().map((entry, i) => (
+                    <div
+                      key={`${entry.at}-${i}`}
+                      className="flex flex-col gap-1 border-t border-line-soft py-2 first:border-t-0 first:pt-0 last:pb-0"
+                    >
+                      <p className="text-ui font-medium leading-relaxed text-ink">{entry.q}</p>
+                      <p className="whitespace-pre-wrap text-ui leading-relaxed text-ink-muted">
+                        {entry.a}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+            {/* ── The full report — untouched, below the essence. ── */}
+            <div className="mt-1 flex items-center justify-between gap-2 border-b border-line pb-1.5">
+              <h3 className="label-cap text-ink-faint">{t('research.fulltext')}</h3>
               <Btn variant="ghost" size="xs" onClick={copyMarkdown}>
                 {t(copied ? 'research.copied' : 'research.copy')}
               </Btn>
             </div>
-            {renderMarkdown(content)}
+            <div className="flex flex-col gap-2.5">{renderMarkdown(content)}</div>
           </div>
         )}
       </section>

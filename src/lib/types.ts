@@ -3678,6 +3678,70 @@ export interface ResearchReportResponse {
   content: string
 }
 
+// ─── Research knowledge (docs/RESEARCH_KNOWLEDGE_PITCH.md) ──────────────────
+// The knowledge layer over ONE report: a distilled digest + a Q&A history,
+// produced by the owner's own `claude` (explicit button, never automatic) and
+// stored CENTRALLY (~/.openground/projects/<uuid>/research-knowledge/) — the
+// repo itself is never written.
+
+/** The distilled essence of one report, in ONE language (the prompt language
+ *  at generation time — regenerating is the language switch, and any stored
+ *  text always beats a blank; see descriptionForLang's lesson). */
+export interface ResearchDigest {
+  /** One sentence naming what the report found. */
+  tldr: string
+  /** 3..6 one-sentence key points, in the model's order. */
+  points: string[]
+  lang: 'en' | 'ja'
+  /** sha1 of the report text this digest was distilled from — the UI compares
+   *  it against the live file to say 「前の版から作られました」 instead of
+   *  silently serving stale essence. */
+  contentSha: string
+  generatedAt: string
+}
+
+/** One question asked of one report, with its answer. Append-only history. */
+export interface ResearchQaEntry {
+  q: string
+  a: string
+  at: string
+}
+
+/** The sidecar file, as stored. `digest` absent = never generated. */
+export interface ResearchKnowledgeFile {
+  file: string
+  digest?: ResearchDigest
+  qa: ResearchQaEntry[]
+}
+
+/** GET /api/research/knowledge — the sidecar plus the ONE derived fact the
+ *  client cannot compute (whether the live report still matches the digest). */
+export interface ResearchKnowledgeResponse {
+  file: string
+  digest?: ResearchDigest
+  qa: ResearchQaEntry[]
+  /** true = the report's current text differs from digest.contentSha. Absent
+   *  when there is no digest to be stale. */
+  digestStale?: boolean
+}
+
+/** POST /api/research/digest | /api/research/ask → 202 with the job to poll.
+ *  503 carries claudeMissing | claudeLoggedOut (the shared preflight). */
+export interface ResearchJobStartResponse {
+  jobId: string
+}
+
+/** GET /api/research/job/:id — poll shape. On 'done' the result is already
+ *  PERSISTED server-side; the client re-reads /api/research/knowledge. */
+export interface ResearchJobStateResponse {
+  id: string
+  kind: 'digest' | 'ask'
+  file: string
+  status: 'running' | 'done' | 'error'
+  startedAt: string
+  error?: string
+}
+
 // ─── Persona regions (the five parts of the figure) ─────────────────────────
 // The figure is an armature: four BODY regions plus one halo around it. This
 // union lives here rather than beside the drawing code because it crosses the

@@ -178,4 +178,19 @@ describe('removeClaudeFolderTrust', () => {
     writeFileSync(cfg, JSON.stringify({ projects: {} }))
     expect(() => removeClaudeFolderTrust('/never/seen')).not.toThrow()
   })
+
+  it('NEVER throws, even when resolution itself refuses (the CI red of 2026-08-18)', () => {
+    // The shape that ran CI red on every push: an import job's teardown
+    // OUTLIVED its test, the test's HOME/CLAUDE_CONFIG_PATH pins were already
+    // restored, and the testHomeGuard fence threw through this call — inside a
+    // detached async with no catch above it, i.e. an unhandled rejection.
+    // A non-temp anchor reproduces the fence throw synchronously here; the
+    // remove must contain it (cleanup is best-effort by contract). The ADD
+    // side deliberately still propagates — a fence hit while adding trust is
+    // a live isolation bug, not an after-the-fact race.
+    // 'tester' is a HOME_SEG_ALLOW placeholder (repoPiiGuard) — what matters
+    // here is only that the path sits outside every OS temp root.
+    process.env.CLAUDE_CONFIG_PATH = '/home/tester/.claude.json'
+    expect(() => removeClaudeFolderTrust('/work/wt')).not.toThrow()
+  })
 })

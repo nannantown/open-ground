@@ -165,16 +165,36 @@ export const ensureClaudeFolderTrusted = (cwd: string): void => {
 }
 
 /** Drop the trust entry for `cwd` (call when an ephemeral worktree is removed)
- *  so ~/.claude.json doesn't accumulate dead worktree paths over time. */
+ *  so ~/.claude.json doesn't accumulate dead worktree paths over time.
+ *
+ *  ⚠ NEVER THROWS — best-effort hygiene by contract. Every one of its seven
+ *  call sites is teardown (a scratch dir, a removed worktree), several of them
+ *  inside DETACHED async jobs with no catch above them, so a throw here becomes
+ *  an unhandled rejection — which is exactly how CI ran red on every push
+ *  (2026-08-18): an import job's teardown outlived its test, the test's HOME
+ *  pin was already restored, and the testHomeGuard fence threw through this
+ *  call. The fence still does its real job either way (the throw lands before
+ *  any file I/O, and it console.errors loudly); a failed CLEANUP must cost a
+ *  warn line, never the process. `ensureClaudeFolderTrusted` (the add side)
+ *  deliberately stays loud: a fence hit while ADDING trust is a live isolation
+ *  bug in the calling test, not an after-the-fact race. */
 export const removeClaudeFolderTrust = (cwd: string): void => {
-  updateProjects((projects) => {
-    let changed = false
-    for (const key of pathKeys(cwd)) {
-      if (key in projects) {
-        delete projects[key]
-        changed = true
+  try {
+    updateProjects((projects) => {
+      let changed = false
+      for (const key of pathKeys(cwd)) {
+        if (key in projects) {
+          delete projects[key]
+          changed = true
+        }
       }
-    }
-    return changed
-  })
+      return changed
+    })
+  } catch (err) {
+    console.warn(
+      `[openground:claude-trust] trust entry for ${cwd} not removed — a stale path may remain in ~/.claude.json: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+  }
 }

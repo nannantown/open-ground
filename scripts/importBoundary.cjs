@@ -42,6 +42,9 @@ const PTY_BY_DESIGN = [
   'src/lib/server/personaChat.ts', //         one-off PTY per persona turn, marker-scraped
   //                                          (it spawns the desk it reads; there is no
   //                                          worker here to address on either runtime)
+  'src/lib/server/researchKnowledge.ts', //   one-off PTY per digest/ask, marker-scraped
+  //                                          (same shape as personaChat: it subscribes to
+  //                                          and kills ONLY the terminal it just launched)
   'src/lib/server/swarmSupply.ts', //        the supply desk is PTY-ONLY BY DESIGN
   //                                          (Remote Control lives on the PTY runtime;
   //                                          stopSwarmSupplyDesks kills by desk label)

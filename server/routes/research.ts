@@ -14,10 +14,21 @@ import {
   setResearchTwitterAuth,
 } from '@/lib/server/researchAuth'
 import { listResearchReports, readResearchReport } from '@/lib/server/researchReports'
+import {
+  MAX_QUESTION_LEN,
+  contentShaOf,
+  getResearchJobState,
+  readResearchKnowledge,
+  startResearchAskJob,
+  startResearchDigestJob,
+} from '@/lib/server/researchKnowledge'
+import { claudeRunPreflight } from '@/lib/server/claudePreflight'
 import { requireProjectPath } from '../middleware/projectPath'
 import type {
   ResearchAuthStatusResponse,
   ResearchChannelsResponse,
+  ResearchJobStartResponse,
+  ResearchKnowledgeResponse,
   ResearchReportResponse,
   ResearchReportsResponse,
   SetResearchAuthRequest,
@@ -59,6 +70,79 @@ export const researchRoutes = new Hono()
     } catch (e) {
       return c.json({ error: String((e as Error)?.message ?? e) }, 404)
     }
+  })
+  // --- GET /api/research/knowledge?path=…&file=… ------------------------------
+  // The report's knowledge sidecar (digest + Q&A) plus the one derived fact the
+  // client cannot compute: whether the live report text still matches the
+  // digest's contentSha. A missing sidecar is a valid empty knowledge, not 404;
+  // a missing REPORT is 404 (nothing to be knowledgeable about).
+  .get('/api/research/knowledge', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    const file = c.req.query('file') ?? ''
+    try {
+      const content = await readResearchReport(path, file)
+      const k = await readResearchKnowledge(path, file)
+      const body: ResearchKnowledgeResponse = {
+        file,
+        ...(k.digest ? { digest: k.digest, digestStale: k.digest.contentSha !== contentShaOf(content) } : {}),
+        qa: k.qa,
+      }
+      return c.json(body)
+    } catch (e) {
+      return c.json({ error: String((e as Error)?.message ?? e) }, 404)
+    }
+  })
+  // --- POST /api/research/digest {path,file} ----------------------------------
+  // Start (or re-attach to) the digest job. EXPLICIT button only — nothing in
+  // the app calls this automatically (the pitch's non-goal: never burn the
+  // owner's subscription on an open). 503 = the shared claude preflight.
+  .post('/api/research/digest', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    const raw = (await c.req.json().catch(() => ({}))) as { file?: string }
+    const file = typeof raw.file === 'string' ? raw.file : ''
+    try {
+      await readResearchReport(path, file) // 404 before any spawn
+    } catch (e) {
+      return c.json({ error: String((e as Error)?.message ?? e) }, 404)
+    }
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
+    const body: ResearchJobStartResponse = { jobId: startResearchDigestJob({ projectPath: path, file }) }
+    return c.json(body, 202)
+  })
+  // --- POST /api/research/ask {path,file,question} ----------------------------
+  .post('/api/research/ask', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    const raw = (await c.req.json().catch(() => ({}))) as { file?: string; question?: string }
+    const file = typeof raw.file === 'string' ? raw.file : ''
+    const question = typeof raw.question === 'string' ? raw.question.trim() : ''
+    if (!question) return c.json({ error: 'a question is required' }, 400)
+    if (question.length > MAX_QUESTION_LEN) {
+      return c.json({ error: `question is too long (max ${MAX_QUESTION_LEN} chars)` }, 400)
+    }
+    try {
+      await readResearchReport(path, file)
+    } catch (e) {
+      return c.json({ error: String((e as Error)?.message ?? e) }, 404)
+    }
+    const pre = await claudeRunPreflight()
+    if (!pre.ok) return c.json(pre.body, 503)
+    const body: ResearchJobStartResponse = {
+      jobId: startResearchAskJob({ projectPath: path, file, question }),
+    }
+    return c.json(body, 202)
+  })
+  // --- GET /api/research/job/:id ----------------------------------------------
+  // Poll a digest/ask job. On 'done' the result is already persisted — the
+  // client re-reads /api/research/knowledge. 404 = unknown or already swept
+  // (either way: nothing running; whatever finished is in the sidecar).
+  .get('/api/research/job/:id', (c) => {
+    const state = getResearchJobState(c.req.param('id'))
+    if (!state) return c.json({ error: 'unknown job' }, 404)
+    return c.json(state)
   })
   // --- GET /api/research/auth ------------------------------------------------
   .get('/api/research/auth', async (c) => {
