@@ -23,6 +23,13 @@
 #   notes_b64  — optional base64 of the release-notes markdown (bilingual
 #                `### English` / `### 日本語` — the in-app update banner and
 #                the landing footer surface them).
+#   notes_file — optional repo-relative path of the notes markdown, read from
+#                the checkout at `ref`. PREFER THIS over notes_b64: the b64
+#                travels as a ~5KB hand-copied dispatch input, and one flipped
+#                segment (v0.11.91, 2026-08-18) published mojibake into the
+#                release body. A committed file cannot be miscopied, and the
+#                notes get versioned with the tree. Wins over notes_b64 when
+#                both are set.
 name: publish-draft
 
 on:
@@ -37,7 +44,11 @@ on:
         required: false
         type: string
       notes_b64:
-        description: "base64 of release-notes markdown (optional)"
+        description: "base64 of release-notes markdown (optional; notes_file wins)"
+        required: false
+        type: string
+      notes_file:
+        description: "repo-relative path of release-notes markdown (optional, preferred)"
         required: false
         type: string
 
@@ -48,16 +59,22 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Publish the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
           TARGET: ${{ inputs.target_sha || github.sha }}
           NOTES_B64: ${{ inputs.notes_b64 }}
+          NOTES_FILE: ${{ inputs.notes_file }}
         run: |
           set -euo pipefail
           args=(release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest --target "$TARGET")
-          if [ -n "${NOTES_B64:-}" ]; then
+          if [ -n "${NOTES_FILE:-}" ]; then
+            args+=(--notes-file "$NOTES_FILE")
+          elif [ -n "${NOTES_B64:-}" ]; then
             printf '%s' "$NOTES_B64" | base64 -d > /tmp/notes.md
             args+=(--notes-file /tmp/notes.md)
           fi
