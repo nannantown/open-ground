@@ -2,11 +2,13 @@ import { describe, it, expect } from 'vitest'
 import { groundLamp, startedTaskCount } from './groundLamp'
 import type { ProjectTask } from '@/lib/types'
 
-// The owner's spec, verbatim (2026-08-15), one guard per line:
+// The owner's spec — 2026-08-15 verbatim, amended 2026-08-18 — one guard per line:
 //   作業中なら running
 //   何かこちらで入力しないといけないなら waiting
-//   途中でとまっててもwaiting
 //   全部doneなら何もなし
+// The old fourth line (「途中でとまっててもwaiting」) was retired by the owner:
+// 「waitingは僕が何かをしないといけない時にだけ出しましょう」. Amber = a question
+// in the inbox, and nothing else.
 
 const task = (over: Partial<ProjectTask> = {}): ProjectTask =>
   ({ id: 't1', title: 'card', done: false, boardColumn: 'todo', ...over }) as ProjectTask
@@ -33,10 +35,23 @@ describe('groundLamp — the four cases the owner specified', () => {
     )
   })
 
-  it('途中でとまってても waiting — started, but nothing is moving it', () => {
+  it('started-but-idle work shows NO lamp — waiting is only ever a question (2026-08-18)', () => {
+    // The owner's amendment, measured on their own board: three long-parked
+    // Needs-decision cards held the card amber for weeks. Parked or stalled
+    // work is the machine's problem first (the engine reclaims dead workers);
+    // when it truly needs a human it raises an escalation, which lights
+    // WAITING through the inbox branch — the only branch allowed to.
     for (const col of ['doing', 'review', 'blocked'] as const) {
-      expect(lamp([task({ boardColumn: col })], { liveWork: false }), col).toBe('waiting')
+      expect(lamp([task({ boardColumn: col })], { liveWork: false }), col).toBeNull()
     }
+  })
+
+  it('…and a question over that same idle board DOES light waiting', () => {
+    // The pair that keeps the retirement honest: the same three parked cards
+    // plus one unanswered question is amber — the question, not the cards.
+    expect(lamp([task({ boardColumn: 'blocked' })], { openQuestions: 1, liveWork: false })).toBe(
+      'waiting',
+    )
   })
 
   it('全部done なら何もなし', () => {

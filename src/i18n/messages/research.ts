@@ -25,7 +25,11 @@ export const research = {
     'research.loadError': "Couldn't load this report.",
   } as Record<string, string>,
   ja: {
-    'research.tabLabel': '調査',
+    // Deliberately ENGLISH in the ja locale too — the tab strip is a row of
+    // English wordmarks (BOARD / SWARM / CANVAS / TERMINAL), and 「調査」 sat in
+    // it as the one Japanese label (owner, 2026-08-18: 「他のタブは日本語設定でも
+    // 英語なので英語にしよう」). Everything INSIDE the tab stays Japanese.
+    'research.tabLabel': 'Research',
 
     'research.empty.title': 'まだ調査レポートはありません',
     'research.empty.how':

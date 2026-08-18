@@ -90,8 +90,20 @@ const readCentralProjectData = async (projectPath: string): Promise<ProjectData>
   console.warn(
     `[projectData] tasks.json failed schema validation at ${projectPath} — recovering with field-level fallbacks. issues: ${validated.error.issues.map(i => i.path.join('.')).slice(0, 5).join(', ')}`,
   )
-  // Field-level recovery: keep only entries that individually pass their
-  // schema, drop the rest. Anything not even an array becomes [].
+  // Field-level recovery: salvage EVERY field the schema knows, one field at a
+  // time through the schema's own shape — keep what individually validates,
+  // default what doesn't. Tasks recover per-item.
+  //
+  // ⚠ SHAPE-DRIVEN, NOT A REMEMBERED LIST (owner report 2026-08-18: 「気がつい
+  // たら生成した説明が消えている」, measured on the prod build). This branch used
+  // to rebuild a hand-typed subset — description / tasks / tabOrder /
+  // customTabs / notes — so ONE type flaw anywhere in the file made the read
+  // drop descriptionJa/descriptionEn (and config / launch / disabledModules),
+  // and the next ordinary save erased them from disk for good. The quarantine
+  // kept the original, but the live file silently lost the generated pair.
+  // Iterating the schema shape is the over-approximation this repo prefers: a
+  // field added to ProjectDataSchema is salvaged here automatically, and can
+  // never be forgotten by a list nobody re-reads.
   const obj = (parsed && typeof parsed === 'object') ? parsed as Record<string, unknown> : {}
   const filterValid = <T>(
     arr: unknown,
@@ -105,17 +117,19 @@ const readCentralProjectData = async (projectPath: string): Promise<ProjectData>
     }
     return out
   }
+  const salvaged: Record<string, unknown> = {}
+  for (const [key, fieldSchema] of Object.entries(ProjectDataSchema.shape)) {
+    if (key === 'tasks') continue // per-item recovery below
+    const r = (fieldSchema as { safeParse: (v: unknown) => { success: boolean; data?: unknown } })
+      .safeParse(obj[key])
+    if (r.success && r.data !== undefined) salvaged[key] = r.data
+  }
   return {
-    description: typeof obj.description === 'string' ? obj.description : '',
+    ...empty(),
+    ...(salvaged as Partial<ProjectData>),
     tasks: filterValid(obj.tasks, ProjectTaskSchema) as ProjectData['tasks'],
-    tabOrder: Array.isArray(obj.tabOrder)
-      ? obj.tabOrder.filter((x): x is string => typeof x === 'string')
-      : undefined,
-    customTabs: Array.isArray(obj.customTabs)
-      ? obj.customTabs.filter((x): x is string => typeof x === 'string')
-      : undefined,
-    notes: typeof obj.notes === 'string' ? obj.notes : '',
-    updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : new Date().toISOString(),
+    updatedAt:
+      typeof obj.updatedAt === 'string' ? obj.updatedAt : new Date().toISOString(),
   }
 }
 

@@ -34,11 +34,23 @@ describe('descriptionForLang', () => {
     )
   })
 
-  it('HIDES a legacy description whose language mismatches the UI', () => {
-    // The user reads it as a glitch ("English UI, Japanese blurb?") — render
-    // as no-description-yet so the generate button shows instead.
-    expect(descriptionForLang({ description: '日本語だけの旧データ' }, 'en')).toBe('')
-    expect(descriptionForLang({ description: 'English-only legacy' }, 'ja')).toBe('')
+  it('shows surviving text even across a language mismatch — never blank over something', () => {
+    // Owner, 2026-08-18: 「気がついたら生成した説明が消えている」. The first cut
+    // blanked a mismatched legacy string — and every real pair-loss (the
+    // 2026-06〜08 schema-strip window, the recovery-read drop) then rendered
+    // as VANISHED data instead of wrong-language data. A wrong-language line
+    // reads odd; a disappeared one reads as loss. Show what survives.
+    expect(descriptionForLang({ description: '日本語だけの旧データ' }, 'en')).toBe(
+      '日本語だけの旧データ',
+    )
+    expect(descriptionForLang({ description: 'English-only legacy' }, 'ja')).toBe(
+      'English-only legacy',
+    )
+    // …and a one-sided PAIR shows its surviving side under the other UI too.
+    expect(descriptionForLang({ description: '', descriptionEn: 'EN only' }, 'ja')).toBe('EN only')
+    expect(descriptionForLang({ description: '', descriptionJa: '日本語のみ' }, 'en')).toBe(
+      '日本語のみ',
+    )
   })
 
   it('falls back per-side (one language of the pair missing)', () => {

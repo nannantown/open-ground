@@ -102,3 +102,81 @@ describe('readProjectData — legacy kind/chat/assistant tasks are dropped', () 
     expect(tasks[0].milestoneId).toBeUndefined()
   })
 })
+
+// ─── FIELD-LEVEL RECOVERY MUST NOT EAT THE DESCRIPTION PAIR ─────────────────
+//
+// Owner, 2026-08-18: 「気がついたら生成した説明が消えている」 — measured on the
+// prod build: ONE type flaw anywhere in tasks.json (notes: 123) pushed the read
+// into field-level recovery, the recovery rebuilt a hand-typed subset that
+// forgot descriptionJa/descriptionEn (and config/launch), and the next
+// ordinary save erased the generated pair from disk for good. Recovery now
+// iterates ProjectDataSchema.shape, so what individually validates SURVIVES —
+// including any field added to the schema later.
+describe('readProjectData — field-level recovery salvages every schema field', () => {
+  let dir: string
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'og-pd-rec-'))
+    await registerTestProject(dir)
+  })
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  const damaged = () => ({
+    description: 'A research sandbox',
+    descriptionJa: '調査用サンドボックス',
+    descriptionEn: 'A research sandbox',
+    config: { targetBranch: 'main' },
+    launch: { model: 'sonnet' },
+    disabledModules: ['research'],
+    tasks: [
+      { id: 'ok', title: 'fine card', kind: 'board', done: false, createdAt: 'x', boardColumn: 'doing' },
+    ],
+    notes: 123, // ← the one flaw that fails the whole-file schema
+    updatedAt: '2026-08-18T00:00:00.000Z',
+  })
+
+  it('one type flaw does not cost the description pair (the vanish the owner reported)', async () => {
+    await seedTasksJson(dir, damaged())
+    const data = await readProjectData(dir)
+    expect(data.descriptionJa).toBe('調査用サンドボックス')
+    expect(data.descriptionEn).toBe('A research sandbox')
+    expect(data.description).toBe('A research sandbox')
+    // …nor the other salvageable sections the old list forgot:
+    expect(data.config?.targetBranch).toBe('main')
+    expect(data.launch?.model).toBe('sonnet')
+    expect(data.disabledModules).toEqual(['research'])
+    // The flawed field itself falls to its default rather than poisoning the rest.
+    expect(data.notes).toBe('')
+    expect(data.tasks.map((t) => t.id)).toEqual(['ok'])
+  })
+
+  it('…and the pair still stands on disk after the next ordinary save', async () => {
+    // The full loss chain the owner hit: damaged read → normal write. The write
+    // must carry the salvaged pair back down, not persist the amputation.
+    await seedTasksJson(dir, damaged())
+    const data = await readProjectData(dir)
+    await writeProjectData(dir, { ...data, notes: 'edited after damage' })
+    const onDisk = JSON.parse(
+      await readFile(join(await projectDataDir(dir), 'tasks.json'), 'utf8'),
+    ) as Record<string, unknown>
+    expect(onDisk.descriptionJa).toBe('調査用サンドボックス')
+    expect(onDisk.descriptionEn).toBe('A research sandbox')
+    expect(onDisk.notes).toBe('edited after damage')
+  })
+
+  it('a task that individually fails its schema is dropped without dragging fields down', async () => {
+    await seedTasksJson(dir, {
+      ...damaged(),
+      notes: 'fine this time',
+      tasks: [
+        { id: 'ok', title: 'fine card', kind: 'board', done: false, createdAt: 'x', boardColumn: 'doing' },
+        { id: 'bad', title: 42, kind: 'board', done: 'nope', createdAt: 'x', boardColumn: 'doing' },
+      ],
+    })
+    const data = await readProjectData(dir)
+    expect(data.tasks.map((t) => t.id)).toEqual(['ok'])
+    expect(data.descriptionJa).toBe('調査用サンドボックス')
+    expect(data.notes).toBe('fine this time')
+  })
+})

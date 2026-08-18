@@ -204,7 +204,10 @@ describe('App — whole-render integration', () => {
     expect(screen.queryByText('Waiting')).not.toBeInTheDocument()
   })
 
-  it('says Waiting when work was started and nothing is moving it', async () => {
+  it('stays SILENT on started-but-idle work — waiting is only ever a question (2026-08-18)', async () => {
+    // The owner's amendment: 「waitingは僕が何かをしないといけない時にだけ出しま
+    // しょう」. Parked/stalled cards are the machine's problem; the card goes
+    // amber only for an unanswered question (the case below).
     installFetch({
       projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
       lamps: [{ projectId: 'a', started: 1, openQuestions: 0, liveWork: false }],
@@ -212,7 +215,9 @@ describe('App — whole-render integration', () => {
     await act(async () => {
       renderApp()
     })
-    expect(await screen.findByText('Waiting')).toBeInTheDocument()
+    await screen.findByText('Northwind Atlas')
+    expect(screen.queryByText('Waiting')).not.toBeInTheDocument()
+    expect(screen.queryByText('Running')).not.toBeInTheDocument()
   })
 
   it('says Waiting for an open question even while the swarm runs', async () => {

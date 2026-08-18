@@ -1,11 +1,20 @@
 // groundLamp — what the lamp on a Ground card means, decided from the PROJECT'S
 // WORK rather than from how many `claude` processes happen to be alive.
 //
-// THE OWNER'S SPEC, verbatim (2026-08-15), and the whole contract:
+// THE OWNER'S SPEC — 2026-08-15 verbatim, AMENDED 2026-08-18:
 //   作業中なら running
 //   何かこちらで入力しないといけないなら waiting
-//   途中でとまっててもwaiting
 //   全部doneなら何もなし
+//
+// The 2026-08-15 spec had a fourth line — 「途中でとまっててもwaiting」 — and it
+// was RETIRED by the owner on 2026-08-18: 「waitingは僕が何かをしないといけない
+// 時にだけ出しましょう」, said over a board whose only open cards were three
+// long-parked Needs-decision items lighting the card amber for weeks. Stalled
+// or parked work is the MACHINE's problem first: the engine reclaims dead
+// workers on its own, and the moment it genuinely needs the owner it raises an
+// escalation — which lands in the question inbox and lights WAITING through
+// the one branch that survives. So amber now means exactly one thing: there is
+// a question only you can answer.
 //
 // WHY IT MOVED OFF PROCESS LIVENESS. The old lamp asked "is a `claude` alive in
 // this project?", and every project running a swarm has a commander and a
@@ -17,7 +26,9 @@
 // NOTHING IS ALSO AN ANSWER. The owner, on why a resting project must show no
 // lamp at all: 「作業が終わってて何も出さない時にuserは見にいくんですよ」 — silence is
 // the signal that it is yours to look at whenever you like. A lamp that is
-// always on destroys that, which is exactly what the old one did.
+// always on destroys that, which is exactly what the old one did — and what
+// the retired stalled-work branch was quietly doing again through the
+// Needs-decision column.
 
 import type { ProjectTask } from '@/lib/types'
 
@@ -79,11 +90,17 @@ export const groundLamp = ({ started, openQuestions, liveWork }: GroundLampInput
   //     on this surface: it is what a finished project looks like.
   if (started === undefined) return 'unknown'
 
-  // 4. 全部done(または積んだだけ)⇒ 何もなし。 Checked before the activity split so
+  // 3. 全部done(または積んだだけ)⇒ 何もなし。 Checked before the activity split so
   //    a stray desk process can never light a finished project.
   if (started === 0) return null
 
   // 2. 作業中 — something was started AND something is actually running.
-  // 3. 途中でとまってても waiting — started, but nothing is moving it.
-  return liveWork ? 'working' : 'waiting'
+  //
+  // …and otherwise NOTHING. This used to be the 「途中でとまってても waiting」
+  // branch (see the header): started-but-idle now shows no lamp, because idle
+  // work is not a demand on the owner — parked Needs-decision cards sit in
+  // their own column saying so, a stalled worker is reclaimed by the engine,
+  // and anything that truly needs a human arrives as a question and takes the
+  // WAITING branch above. Amber only ever means "answer me".
+  return liveWork ? 'working' : null
 }

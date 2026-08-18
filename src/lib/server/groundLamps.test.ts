@@ -177,14 +177,16 @@ describe('the rows drive the lamp the owner asked for', () => {
     expect(lampFor(lamps[0])).toBe('working')
   })
 
-  it('a card in doing with nothing moving it ⇒ waiting (途中でとまってても)', async () => {
+  it('a card in doing with nothing moving it ⇒ NO lamp (owner amendment, 2026-08-18)', async () => {
+    // 「waitingは僕が何かをしないといけない時にだけ出しましょう」 — idle work is
+    // the machine's problem; only a question in the inbox is the owner's.
     const { lamps } = await readGroundLamps({
       projects: async () => [P[0]],
       startedFor: async () => 1,
       openQuestions: async () => new Map(),
       liveWorkFor: async () => false,
     })
-    expect(lampFor(lamps[0])).toBe('waiting')
+    expect(lampFor(lamps[0])).toBeNull()
   })
 
   it('an open question ⇒ waiting, even while the swarm runs', async () => {
