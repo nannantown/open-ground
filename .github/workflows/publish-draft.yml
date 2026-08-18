@@ -71,7 +71,16 @@ jobs:
           NOTES_FILE: ${{ inputs.notes_file }}
         run: |
           set -euo pipefail
-          args=(release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest --target "$TARGET")
+          # Re-runnable: on an ALREADY-PUBLISHED release (fixing notes after the
+          # fact) edit the body alone — re-sending --target/--latest/--draft on
+          # a published release came back 403 from the Actions token (measured
+          # v0.11.91, 2026-08-18) while the body-only edit is permitted.
+          already=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+          if [ "$already" = "false" ]; then
+            args=(release edit "$TAG" --repo "$GITHUB_REPOSITORY")
+          else
+            args=(release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest --target "$TARGET")
+          fi
           if [ -n "${NOTES_FILE:-}" ]; then
             args+=(--notes-file "$NOTES_FILE")
           elif [ -n "${NOTES_B64:-}" ]; then
