@@ -22,6 +22,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   BookOpenText,
+  ChevronDown,
+  ChevronUp,
   MessagesSquare,
   RotateCw,
   Send,
@@ -407,6 +409,17 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
   const [question, setQuestion] = useState('')
   const [speaking, setSpeaking] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  // The Q&A dock sticks to the reader's bottom edge; the owner can fold it
+  // away, and it opens by default (owner, 2026-08-18: 「質問はボトムにstickして。
+  // あと縮小もできるように。デフォルトは表示」). The choice survives switching
+  // reports within one panel session — only the DEFAULT is "open".
+  const [qaOpen, setQaOpen] = useState(true)
+  // Reports whose digest auto-distill already fired this mount — one attempt
+  // per report, so a failure never becomes a silent retry loop.
+  const autoDigestTried = useRef<Set<string>>(new Set())
+  // The dock's notebook scroller — kept pinned to the newest entry (the list
+  // is chronological, chat-style, with the composer right under it).
+  const qaListRef = useRef<HTMLDivElement | null>(null)
 
   const alive = useRef(true)
   // The file the reader is CURRENTLY meant to show — guards a slow response
@@ -690,6 +703,28 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
   }, [digestJob, askJob])
   const elapsedSec = (startedAt: number) => Math.max(0, Math.floor((nowMs - startedAt) / 1000))
 
+  // Auto-distill on open (owner, 2026-08-18: 「要点はデフォルトでだしておこう」 —
+  // amends the pitch's explicit-button-only non-goal). Fires ONLY when the open
+  // report's knowledge read SUCCEEDED and holds no digest — so a stale digest is
+  // never regenerated without the owner pressing 作り直す, an unreadable sidecar
+  // never triggers a run, and one attempt per report per mount means a failure
+  // (claude missing / signed out / error) never becomes a retry loop.
+  useEffect(() => {
+    if (selected === null || content === null || knowledge === null) return
+    if (knowledge.file !== selected || knowledge.digest || digestJob !== null) return
+    if (autoDigestTried.current.has(selected)) return
+    autoDigestTried.current.add(selected)
+    void startDigest()
+  }, [selected, content, knowledge, digestJob, startDigest])
+
+  // Keep the notebook pinned to its newest entry whenever one lands (or the
+  // dock re-opens) — the list scrolls internally, the composer stays put.
+  const qaCount = knowledge?.qa.length ?? 0
+  useEffect(() => {
+    const el = qaListRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [qaCount, qaOpen, selected])
+
   // Read the digest aloud with the OS speech engine — the pitch's deliberate
   // NotebookLM-not: no generated audio show, no network, just the essence
   // spoken. Pressing again stops.
@@ -783,160 +818,202 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
         </div>
       </aside>
       {/* Right: the reader. */}
-      <section className="min-h-0 flex-1 overflow-y-auto">
-        {selected === null ? (
-          <div className="px-8 py-6 text-ui text-ink-subtle">{t('research.select')}</div>
-        ) : readError ? (
-          <div className="px-8 py-6 text-ui text-ink-subtle">{t('research.loadError')}</div>
-        ) : content === null ? null : (
-          <div className="mx-auto flex max-w-[720px] flex-col gap-3 px-8 py-6">
-            {/* ── The knowledge card: 30 seconds of essence BEFORE the wall of
-                 text (owner, 2026-08-18: 「文字が多くて読む気が失せる」). ── */}
-            <section className="flex flex-col gap-2 rounded-[3px] border border-line bg-plane px-4 py-3">
-              <div className="flex items-center justify-between gap-2">
-                <h3 className="label-cap flex items-center gap-1.5 text-ink-faint">
-                  <Sparkles size={12} strokeWidth={2} />
-                  {t('research.digest.heading')}
-                </h3>
-                {knowledge?.digest && digestJob === null && (
-                  <div className="flex items-center gap-1">
-                    <Btn variant="subtle" size="xs" onClick={speakDigest}>
-                      {speaking ? (
-                        <Square size={11} strokeWidth={2.25} />
-                      ) : (
-                        <Volume2 size={11} strokeWidth={2.25} />
-                      )}
-                      {t(speaking ? 'research.digest.speakStop' : 'research.digest.speak')}
-                    </Btn>
-                    <Btn variant="subtle" size="xs" onClick={() => void startDigest()}>
-                      <RotateCw size={11} strokeWidth={2.25} />
-                      {t('research.digest.remake')}
-                    </Btn>
-                  </div>
-                )}
-              </div>
-              {knowledge?.digest && (
-                <>
-                  <p className="text-ui font-medium leading-relaxed text-ink">
-                    {knowledge.digest.tldr}
-                  </p>
-                  <ul className="flex list-disc flex-col gap-1 pl-5">
-                    {knowledge.digest.points.map((point, i) => (
-                      <li key={i} className="text-ui leading-relaxed text-ink">
-                        {point}
-                      </li>
-                    ))}
-                  </ul>
-                  {knowledge.digestStale && (
-                    <p role="note" className="text-meta leading-snug text-amber-500/90">
-                      {t('research.digest.stale')}
-                    </p>
-                  )}
-                  <p className="text-meta leading-snug text-ink-faint">
-                    {t('research.digest.note')}
-                  </p>
-                </>
-              )}
-              {digestJob !== null ? (
-                <p className="text-ui text-ink-subtle">
-                  {t('research.digest.working', { seconds: elapsedSec(digestJob.startedAt) })}
-                </p>
-              ) : (
-                <>
-                  {digestFail !== null && (
-                    <p className="text-ui text-error">
-                      {failText(digestFail, t('research.digest.failed'))}
-                    </p>
-                  )}
-                  {!knowledge?.digest && (
-                    <div>
-                      <Btn variant="ghost" size="sm" onClick={() => void startDigest()}>
-                        <Sparkles size={11} strokeWidth={2.25} />
-                        {t(digestFail === 'error' ? 'research.digest.retry' : 'research.digest.make')}
+      <section className="flex min-h-0 flex-1 flex-col">
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {selected === null ? (
+            <div className="px-8 py-6 text-ui text-ink-subtle">{t('research.select')}</div>
+          ) : readError ? (
+            <div className="px-8 py-6 text-ui text-ink-subtle">{t('research.loadError')}</div>
+          ) : content === null ? null : (
+            <div className="mx-auto flex max-w-[720px] flex-col gap-3 px-8 py-6">
+              {/* ── The knowledge card: 30 seconds of essence BEFORE the wall of
+                   text (owner, 2026-08-18: 「文字が多くて読む気が失せる」). The
+                   distill starts on its own for a report that has none yet. ── */}
+              <section className="flex flex-col gap-2 rounded-[4px] border border-line bg-plane px-4 py-3 shadow-card">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="label-cap flex items-center gap-1.5 text-ink-faint">
+                    <Sparkles size={12} strokeWidth={2} className="text-accent" />
+                    {t('research.digest.heading')}
+                  </h3>
+                  {knowledge?.digest && digestJob === null && (
+                    <div className="flex items-center gap-1">
+                      <Btn variant="subtle" size="xs" onClick={speakDigest}>
+                        {speaking ? (
+                          <Square size={11} strokeWidth={2.25} />
+                        ) : (
+                          <Volume2 size={11} strokeWidth={2.25} />
+                        )}
+                        {t(speaking ? 'research.digest.speakStop' : 'research.digest.speak')}
+                      </Btn>
+                      <Btn variant="subtle" size="xs" onClick={() => void startDigest()}>
+                        <RotateCw size={11} strokeWidth={2.25} />
+                        {t('research.digest.remake')}
                       </Btn>
                     </div>
                   )}
-                </>
-              )}
-            </section>
-            {/* ── Q&A: interrogate THIS report. Answers come from the report
-                 alone and persist as a per-report notebook (newest first). ── */}
-            <section className="flex flex-col gap-2 rounded-[3px] border border-line bg-plane px-4 py-3">
-              <h3 className="label-cap flex items-center gap-1.5 text-ink-faint">
-                <MessagesSquare size={12} strokeWidth={2} />
-                {t('research.qa.heading')}
-              </h3>
-              <form
-                className="flex items-center gap-1.5"
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  void submitAsk()
-                }}
-              >
-                <input
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  placeholder={t('research.qa.placeholder')}
-                  maxLength={500}
-                  disabled={askJob !== null}
-                  className="min-w-0 flex-1 rounded-[2px] border border-line bg-bg px-2.5 py-1.5 text-ui text-ink outline-none placeholder:text-ink-faint focus:border-line-strong"
-                />
-                <Btn
-                  type="submit"
-                  variant="subtle"
-                  size="sm"
-                  disabled={askJob !== null || question.trim() === ''}
-                  aria-label={t('research.qa.placeholder')}
-                >
-                  <Send size={12} strokeWidth={2.25} />
-                </Btn>
-              </form>
-              {askJob !== null && (
-                <p className="text-ui text-ink-subtle">
-                  {t('research.qa.working', { seconds: elapsedSec(askJob.startedAt) })}
-                </p>
-              )}
-              {askJob === null && askFail !== null && (
-                <div className="flex items-center gap-2">
-                  <p className="text-ui text-error">{failText(askFail, t('research.qa.failed'))}</p>
-                  {askFail === 'error' && (
-                    <Btn variant="subtle" size="xs" onClick={() => void submitAsk()}>
-                      {t('research.qa.retry')}
-                    </Btn>
-                  )}
                 </div>
-              )}
-              {knowledge !== null &&
-                knowledge.qa.length === 0 &&
-                askJob === null &&
-                askFail === null && (
-                  <p className="text-ui text-ink-subtle">{t('research.qa.empty')}</p>
-                )}
-              {knowledge !== null && knowledge.qa.length > 0 && (
-                <div className="flex flex-col">
-                  {[...knowledge.qa].reverse().map((entry, i) => (
-                    <div
-                      key={`${entry.at}-${i}`}
-                      className="flex flex-col gap-1 border-t border-line-soft py-2 first:border-t-0 first:pt-0 last:pb-0"
-                    >
-                      <p className="text-ui font-medium leading-relaxed text-ink">{entry.q}</p>
-                      <p className="whitespace-pre-wrap text-ui leading-relaxed text-ink-muted">
-                        {entry.a}
+                {knowledge?.digest && (
+                  <>
+                    {/* The one sentence gets the house display face — it is the
+                        card's reason to exist, so it reads like a headline. */}
+                    <p className="font-display text-[1.0625rem] font-medium leading-relaxed text-ink">
+                      {knowledge.digest.tldr}
+                    </p>
+                    <ul className="flex list-disc flex-col gap-1 pl-5 marker:text-ink-faint">
+                      {knowledge.digest.points.map((point, i) => (
+                        <li key={i} className="text-ui leading-relaxed text-ink">
+                          {point}
+                        </li>
+                      ))}
+                    </ul>
+                    {knowledge.digestStale && (
+                      <p role="note" className="text-meta leading-snug text-amber-500/90">
+                        {t('research.digest.stale')}
                       </p>
+                    )}
+                    <p className="text-meta leading-snug text-ink-faint">
+                      {t('research.digest.note')}
+                    </p>
+                  </>
+                )}
+                {digestJob !== null ? (
+                  <p className="flex items-center gap-1.5 text-ui text-ink-subtle">
+                    <Sparkles size={12} strokeWidth={2} className="animate-pulse text-accent" />
+                    {t('research.digest.working', { seconds: elapsedSec(digestJob.startedAt) })}
+                  </p>
+                ) : (
+                  <>
+                    {digestFail !== null && (
+                      <p className="text-ui text-error">
+                        {failText(digestFail, t('research.digest.failed'))}
+                      </p>
+                    )}
+                    {!knowledge?.digest && (
+                      <div>
+                        <Btn variant="ghost" size="sm" onClick={() => void startDigest()}>
+                          <Sparkles size={11} strokeWidth={2.25} />
+                          {t(
+                            digestFail === 'error' ? 'research.digest.retry' : 'research.digest.make',
+                          )}
+                        </Btn>
+                      </div>
+                    )}
+                  </>
+                )}
+              </section>
+              {/* ── The full report — untouched, below the essence. ── */}
+              <div className="mt-1 flex items-center justify-between gap-2 border-b border-line pb-1.5">
+                <h3 className="label-cap text-ink-faint">{t('research.fulltext')}</h3>
+                <Btn variant="ghost" size="xs" onClick={copyMarkdown}>
+                  {t(copied ? 'research.copied' : 'research.copy')}
+                </Btn>
+              </div>
+              <div className="flex flex-col gap-2.5">{renderMarkdown(content)}</div>
+            </div>
+          )}
+        </div>
+        {/* ── Q&A dock — pinned to the reader's bottom edge, foldable, open by
+             default (owner, 2026-08-18). The notebook scrolls inside it,
+             chat-style: chronological entries, composer underneath. ── */}
+        {selected !== null && !readError && content !== null && (
+          <section className="shrink-0 border-t border-line bg-plane">
+            <div className="mx-auto w-full max-w-[720px] px-8 py-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="label-cap flex items-center gap-1.5 text-ink-faint">
+                  <MessagesSquare size={12} strokeWidth={2} />
+                  {t('research.qa.heading')}
+                  {knowledge !== null && knowledge.qa.length > 0 && (
+                    <span className="rounded-full bg-bg-inset px-1.5 py-px text-micro tabular-nums text-ink-faint">
+                      {knowledge.qa.length}
+                    </span>
+                  )}
+                </h3>
+                <Btn
+                  variant="icon"
+                  size="xs"
+                  onClick={() => setQaOpen((v) => !v)}
+                  aria-label={t(qaOpen ? 'research.qa.collapse' : 'research.qa.expand')}
+                >
+                  {qaOpen ? (
+                    <ChevronDown size={13} strokeWidth={2.25} />
+                  ) : (
+                    <ChevronUp size={13} strokeWidth={2.25} />
+                  )}
+                </Btn>
+              </div>
+              {qaOpen && (
+                <div className="flex flex-col gap-2 pt-2">
+                  {knowledge !== null && knowledge.qa.length > 0 && (
+                    <div ref={qaListRef} className="flex max-h-[38vh] flex-col overflow-y-auto">
+                      {knowledge.qa.map((entry, i) => (
+                        <div
+                          key={`${entry.at}-${i}`}
+                          className="flex flex-col gap-1 border-t border-line-soft py-2 first:border-t-0 first:pt-0 last:pb-0"
+                        >
+                          <p className="text-ui font-medium leading-relaxed text-ink">{entry.q}</p>
+                          <p className="whitespace-pre-wrap text-ui leading-relaxed text-ink-muted">
+                            {entry.a}
+                          </p>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
+                  {knowledge !== null &&
+                    knowledge.qa.length === 0 &&
+                    askJob === null &&
+                    askFail === null && (
+                      <p className="text-meta text-ink-subtle">{t('research.qa.empty')}</p>
+                    )}
+                  {askJob !== null && (
+                    <p className="flex items-center gap-1.5 text-ui text-ink-subtle">
+                      <MessagesSquare
+                        size={12}
+                        strokeWidth={2}
+                        className="animate-pulse text-accent"
+                      />
+                      {t('research.qa.working', { seconds: elapsedSec(askJob.startedAt) })}
+                    </p>
+                  )}
+                  {askJob === null && askFail !== null && (
+                    <div className="flex items-center gap-2">
+                      <p className="text-ui text-error">
+                        {failText(askFail, t('research.qa.failed'))}
+                      </p>
+                      {askFail === 'error' && (
+                        <Btn variant="subtle" size="xs" onClick={() => void submitAsk()}>
+                          {t('research.qa.retry')}
+                        </Btn>
+                      )}
+                    </div>
+                  )}
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      void submitAsk()
+                    }}
+                    className="flex items-center gap-1.5 rounded-[8px] border border-line bg-bg-inset py-1.5 pl-3 pr-1.5 transition-[border-color,box-shadow] focus-within:border-accent focus-within:shadow-card-active"
+                  >
+                    <input
+                      value={question}
+                      onChange={(e) => setQuestion(e.target.value)}
+                      placeholder={t('research.qa.placeholder')}
+                      maxLength={500}
+                      disabled={askJob !== null}
+                      className="min-w-0 flex-1 bg-transparent text-ui text-ink outline-none placeholder:text-ink-faint disabled:opacity-60"
+                    />
+                    <button
+                      type="submit"
+                      disabled={askJob !== null || question.trim() === ''}
+                      aria-label={t('research.qa.placeholder')}
+                      className="grid h-7 w-7 shrink-0 place-items-center rounded-[6px] bg-accent text-bg-card shadow-card transition-colors hover:bg-accent-hover active:bg-accent-deeper disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <Send size={13} strokeWidth={2.25} />
+                    </button>
+                  </form>
                 </div>
               )}
-            </section>
-            {/* ── The full report — untouched, below the essence. ── */}
-            <div className="mt-1 flex items-center justify-between gap-2 border-b border-line pb-1.5">
-              <h3 className="label-cap text-ink-faint">{t('research.fulltext')}</h3>
-              <Btn variant="ghost" size="xs" onClick={copyMarkdown}>
-                {t(copied ? 'research.copied' : 'research.copy')}
-              </Btn>
             </div>
-            <div className="flex flex-col gap-2.5">{renderMarkdown(content)}</div>
-          </div>
+          </section>
         )}
       </section>
     </div>

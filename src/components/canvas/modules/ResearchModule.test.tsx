@@ -135,8 +135,11 @@ describe('renderMarkdown — blocks', () => {
 })
 
 // ─── The knowledge layer (digest + Q&A + read-aloud) ────────────────────────
-// Component-level, against a scripted fetch. What these pin, per the pitch:
-//   • opening a report READS knowledge but NEVER starts a claude run,
+// Component-level, against a scripted fetch. What these pin, per the pitch
+// (as amended by the owner on 2026-08-18: 「要点はデフォルトでだしておこう」):
+//   • opening a report with NO digest auto-starts ONE distill — and only one:
+//     never for a report that has a digest (stale included), never when the
+//     knowledge read failed, and never twice in a mount (no retry loops),
 //   • the digest card sits ABOVE the full text (the whole point),
 //   • 「質問はまだありません」 is claimed only on a SUCCESSFUL empty read,
 //   • the question survives a failure (retry without retyping), clears on done,
@@ -241,17 +244,67 @@ describe('ResearchModule — knowledge card', () => {
     expect(text.indexOf('TLDR-SENTENCE')).toBeLessThan(text.indexOf('UNIQUE-BODY-LINE'))
   })
 
-  it('⚠ opening a report NEVER starts a claude run — knowledge is read, digest/ask are not posted', async () => {
+  it('⚠ a report with NO digest auto-starts exactly ONE distill on open', async () => {
+    let releaseJob!: (r: { status: number; body: unknown }) => void
+    const jobGate = new Promise<{ status: number; body: unknown }>((r) => {
+      releaseJob = r
+    })
     vi.stubGlobal(
       'fetch',
-      makeFetch({ knowledge: () => ({ status: 200, body: { file: 'r.md', qa: [] } }) }),
+      makeFetch({
+        knowledge: () => ({ status: 200, body: { file: 'r.md', qa: [] } }),
+        digestPost: () => ({ status: 202, body: { jobId: 'j1' } }),
+        job: () => jobGate,
+      }),
     )
     await openReport()
-    expect(calls).toContain('GET /api/research/knowledge')
+    await screen.findByText('research.digest.working')
+    expect(calls.filter((c) => c === 'POST /api/research/digest')).toHaveLength(1)
+    expect(calls).not.toContain('POST /api/research/ask')
+    releaseJob(jobDone('digest'))
+  })
+
+  it('⚠ a report that HAS a digest (even a stale one) starts NOTHING on open', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetch({
+        knowledge: () => ({ status: 200, body: { file: 'r.md', digest: DIGEST, qa: [], digestStale: true } }),
+      }),
+    )
+    await openReport()
+    await screen.findByText('research.digest.stale')
     expect(calls.some((c) => c.startsWith('POST'))).toBe(false)
   })
 
-  it('要点を作る: posts the job, shows the working line, then swaps in the persisted digest', async () => {
+  it('⚠ a FAILED knowledge read never auto-starts (absence was not observed)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetch({ knowledge: () => ({ status: 500, body: { error: 'boom' } }) }),
+    )
+    await openReport()
+    expect(calls.some((c) => c.startsWith('POST'))).toBe(false)
+    // The manual button remains the way in.
+    expect(screen.getByRole('button', { name: 'research.digest.make' })).toBeTruthy()
+  })
+
+  it('⚠ the auto-distill fires once per report per mount — a failure is not a retry loop', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetch({
+        knowledge: () => ({ status: 200, body: { file: 'r.md', qa: [] } }),
+        digestPost: () => ({ status: 503, body: { error: 'signed out', claudeLoggedOut: true } }),
+      }),
+    )
+    await openReport()
+    await screen.findByText('research.knowledge.claudeLoggedOut')
+    // Re-open the same report: knowledge still empty, but no second attempt.
+    // (getByTitle: the aside row — the rendered markdown h1 says 'Report R' too.)
+    fireEvent.click(screen.getByTitle('Report R'))
+    await screen.findByText('UNIQUE-BODY-LINE alpha beta')
+    expect(calls.filter((c) => c === 'POST /api/research/digest')).toHaveLength(1)
+  })
+
+  it('auto-distill end to end: working line on open, then the persisted digest swaps in', async () => {
     let knowledgeNow: Record<string, unknown> = { file: 'r.md', qa: [] }
     let releaseJob!: (r: { status: number; body: unknown }) => void
     const jobGate = new Promise<{ status: number; body: unknown }>((r) => {
@@ -266,7 +319,6 @@ describe('ResearchModule — knowledge card', () => {
       }),
     )
     await openReport()
-    fireEvent.click(screen.getByRole('button', { name: 'research.digest.make' }))
     await screen.findByText('research.digest.working')
     // The result lands server-side; the poll's 'done' triggers the re-read.
     knowledgeNow = { file: 'r.md', digest: DIGEST, qa: [], digestStale: false }
@@ -295,7 +347,6 @@ describe('ResearchModule — knowledge card', () => {
       }),
     )
     await openReport()
-    fireEvent.click(screen.getByRole('button', { name: 'research.digest.make' }))
     await screen.findByText('research.knowledge.claudeMissing')
     expect(screen.queryByText('research.digest.working')).toBeNull()
   })
@@ -312,7 +363,7 @@ describe('ResearchModule — Q&A', () => {
   })
 
   it('ask → working → answer persists into the notebook and the input clears', async () => {
-    let knowledgeNow: Record<string, unknown> = { file: 'r.md', qa: [] }
+    let knowledgeNow: Record<string, unknown> = { file: 'r.md', digest: DIGEST, qa: [] }
     let releaseJob!: (r: { status: number; body: unknown }) => void
     const jobGate = new Promise<{ status: number; body: unknown }>((r) => {
       releaseJob = r
@@ -332,6 +383,7 @@ describe('ResearchModule — Q&A', () => {
     await screen.findByText('research.qa.working')
     knowledgeNow = {
       file: 'r.md',
+      digest: DIGEST,
       qa: [{ q: 'my question', a: 'ANSWER-LINE-1\nANSWER-LINE-2', at: '2026-08-18T01:00:00.000Z' }],
     }
     releaseJob(jobDone('ask'))
@@ -347,7 +399,7 @@ describe('ResearchModule — Q&A', () => {
     vi.stubGlobal(
       'fetch',
       makeFetch({
-        knowledge: () => ({ status: 200, body: { file: 'r.md', qa: [] } }),
+        knowledge: () => ({ status: 200, body: { file: 'r.md', digest: DIGEST, qa: [] } }),
         askPost: () => ({ status: 202, body: { jobId: 'a1' } }),
         job: () => ({ status: 200, body: { id: 'a1', kind: 'ask', file: 'r.md', status: 'error', startedAt: 'x', error: 'boom' } }),
       }),
@@ -365,7 +417,7 @@ describe('ResearchModule — Q&A', () => {
     vi.stubGlobal(
       'fetch',
       makeFetch({
-        knowledge: () => ({ status: 200, body: { file: 'r.md', qa: [] } }),
+        knowledge: () => ({ status: 200, body: { file: 'r.md', digest: DIGEST, qa: [] } }),
         askPost: () => ({ status: 503, body: { error: 'signed out', claudeLoggedOut: true } }),
       }),
     )
@@ -380,7 +432,7 @@ describe('ResearchModule — Q&A', () => {
   it('⚠ 「質問はまだありません」 is a CLAIM — made on a successful empty read…', async () => {
     vi.stubGlobal(
       'fetch',
-      makeFetch({ knowledge: () => ({ status: 200, body: { file: 'r.md', qa: [] } }) }),
+      makeFetch({ knowledge: () => ({ status: 200, body: { file: 'r.md', digest: DIGEST, qa: [] } }) }),
     )
     await openReport()
     await screen.findByText('research.qa.empty')
@@ -394,6 +446,50 @@ describe('ResearchModule — Q&A', () => {
     await openReport()
     // The full text is on screen; the Q&A section stays silent about emptiness.
     expect(screen.queryByText('research.qa.empty')).toBeNull()
+  })
+})
+
+describe('ResearchModule — Q&A dock', () => {
+  beforeEach(() => {
+    calls = []
+    postBodies = []
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('the composer is OPEN by default; folding hides it; expanding brings it back', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetch({ knowledge: () => ({ status: 200, body: { file: 'r.md', digest: DIGEST, qa: [] } }) }),
+    )
+    await openReport()
+    // Default: shown (owner: 「デフォルトは表示」).
+    expect(screen.getByPlaceholderText('research.qa.placeholder')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'research.qa.collapse' }))
+    expect(screen.queryByPlaceholderText('research.qa.placeholder')).toBeNull()
+    // The dock header (heading) survives folding — it is how you get it back.
+    expect(screen.getByText('research.qa.heading')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'research.qa.expand' }))
+    expect(screen.getByPlaceholderText('research.qa.placeholder')).toBeTruthy()
+  })
+
+  it('the dock sits OUTSIDE the reader scroller, after it (bottom-pinned by layout)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetch({ knowledge: () => ({ status: 200, body: { file: 'r.md', digest: DIGEST, qa: [] } }) }),
+    )
+    await openReport()
+    const input = screen.getByPlaceholderText('research.qa.placeholder')
+    const scroller = screen.getByText('UNIQUE-BODY-LINE alpha beta').closest('.overflow-y-auto')
+    expect(scroller).toBeTruthy()
+    // The composer must NOT live inside the scrolling report column…
+    expect(scroller!.contains(input)).toBe(false)
+    // …and the scroller must come BEFORE the dock in document order.
+    expect(
+      scroller!.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
   })
 })
 
