@@ -58,6 +58,11 @@ interface Props {
    *  server-side from the og_roles owner role. Non-owners get false, so the
    *  toggles — and the very existence of the experiments — stay hidden. */
   experimentsEligible?: boolean
+  /** Public swarm opt-in (all users). `available` (macOS) reveals the toggle
+   *  for everyone; `enabled` is the current choice. Distinct from the owner-only
+   *  experiments section above. */
+  swarmOptInAvailable?: boolean
+  swarmOptInEnabled?: boolean
 }
 
 // Settings drawer. Deliberately minimal: only real preferences are visible
@@ -140,6 +145,8 @@ export const SettingsPanel = ({
   moduleReviewCanReview = false,
   onModuleSubmissionSeen,
   experimentsEligible = false,
+  swarmOptInAvailable = false,
+  swarmOptInEnabled = false,
 }: Props) => {
   const { t, lang, setLang } = useT()
   const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
@@ -149,6 +156,9 @@ export const SettingsPanel = ({
   const [swarmExp, setSwarmExp] = useState(settings.experiments?.swarm === true)
   const [sandboxExp, setSandboxExp] = useState(settings.experiments?.sandbox === true)
   const [personaExp, setPersonaExp] = useState(settings.experiments?.persona === true)
+  // Public swarm opt-in (all users). Seeded from the resolved server state
+  // (swarmOptInEnabled prop), persisted immediately like the toggles above.
+  const [swarmOptIn, setSwarmOptInState] = useState(swarmOptInEnabled)
   // Work mode (lockdown) — the non-Anthropic egress kill switch. Same
   // instant-feedback + persist-immediately pattern as the experiment toggles.
   const [lockdown, setLockdownState] = useState(settings.lockdownMode === true)
@@ -223,6 +233,7 @@ export const SettingsPanel = ({
     setSwarmExp(settings.experiments?.swarm === true)
     setSandboxExp(settings.experiments?.sandbox === true)
     setPersonaExp(settings.experiments?.persona === true)
+    setSwarmOptInState(settings.swarmOptIn === true)
     setLockdownState(settings.lockdownMode === true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
@@ -265,6 +276,21 @@ export const SettingsPanel = ({
       defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
       displayName: latest.current.displayName.trim(),
       experiments: { ...s.experiments, persona: next },
+    })
+  }
+
+  // Flip the PUBLIC swarm opt-in and persist immediately. The server re-resolves
+  // the gate on the settings save (App.saveSettings → experiments.refresh), so
+  // the Swarm tab appears/disappears right away. macOS-gated server-side.
+  const setSwarmOptIn = (next: boolean) => {
+    if (next === swarmOptIn) return
+    setSwarmOptInState(next)
+    const s = settingsRef.current
+    onSaveRef.current({
+      ...s,
+      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
+      displayName: latest.current.displayName.trim(),
+      swarmOptIn: next,
     })
   }
 
@@ -666,6 +692,35 @@ export const SettingsPanel = ({
                     onLabel={t('settings.experiments.on')}
                   />
                 </Section>
+
+                {/* Public swarm opt-in — ALL users, macOS only (the guard is
+                    unmeasured on Windows, so swarmOptInAvailable is false there).
+                    "Still being tuned": the note discloses the real properties
+                    (subscription cost, permission-bypass claude, Japanese
+                    notifications) so opting in is an informed choice. Distinct
+                    from the owner-only Experiments section below. */}
+                {swarmOptInAvailable && (
+                  <Section
+                    heading={t('settings.swarmOptIn.heading')}
+                    hint={t('settings.swarmOptIn.hint')}
+                  >
+                    <div className="flex flex-col gap-2.5">
+                      <ExperimentToggle
+                        label={t('settings.swarmOptIn.label')}
+                        value={swarmOptIn}
+                        onChange={setSwarmOptIn}
+                        offLabel={t('settings.experiments.off')}
+                        onLabel={t('settings.experiments.on')}
+                      />
+                      <p
+                        role="note"
+                        className="rounded-[3px] border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-meta leading-relaxed text-amber-600/90"
+                      >
+                        {t('settings.swarmOptIn.warning')}
+                      </p>
+                    </div>
+                  </Section>
+                )}
 
                 {/* Experiments — owner only (experimentsEligible from the
                     server's og_roles owner check). Hidden for everyone else, so

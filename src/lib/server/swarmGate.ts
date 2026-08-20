@@ -35,8 +35,25 @@ export const isSwarmLocalOwnerUnlocked = async (): Promise<boolean> => {
   return (await getSettings()).swarmLocalOwner === true
 }
 
-/** May this caller drive the swarm control plane? Local unlock first (cheap,
- *  disk-only); otherwise the signed-in owner role (roles.ts — may consult
- *  Supabase). Every /api/swarm route gates on this. */
+/** macOS-gated. The deterministic PreToolUse guard (scripts/openground-guard.js)
+ *  is unmeasured on Windows and there is no OS sandbox layer there, so a
+ *  non-macOS opt-in never opens the gate — Windows users stay owner-only until
+ *  the guard has a real-Windows verification pass. Injectable platform for tests. */
+export const isSwarmOptInAvailable = (platform: NodeJS.Platform = process.platform): boolean =>
+  platform === 'darwin'
+
+/** The PUBLIC user opt-in (Settings.swarmOptIn), resolved: the machine must be
+ *  eligible (macOS) AND the user turned it on. This is what opens the swarm gate
+ *  for a non-owner. Unlike swarmLocalOwner it IS request-settable via
+ *  POST /api/settings, which is acceptable because the gate is feature-
+ *  visibility, not a security boundary (header above). */
+export const isSwarmOptInEnabled = async (): Promise<boolean> =>
+  isSwarmOptInAvailable() && (await getSettings()).swarmOptIn === true
+
+/** May this caller drive the swarm control plane? Local unlock or the public
+ *  macOS opt-in first (cheap, disk-only); otherwise the signed-in owner role
+ *  (roles.ts — may consult Supabase). Every /api/swarm route gates on this. */
 export const hasSwarmOwnerAccess = async (): Promise<boolean> =>
-  (await isSwarmLocalOwnerUnlocked()) || (await getCustomTabRole()) === 'owner'
+  (await isSwarmLocalOwnerUnlocked()) ||
+  (await isSwarmOptInEnabled()) ||
+  (await getCustomTabRole()) === 'owner'

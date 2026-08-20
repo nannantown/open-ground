@@ -2,9 +2,26 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtemp, rm, realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { isSwarmLocalOwnerUnlocked, hasSwarmOwnerAccess } from './swarmGate'
+import {
+  isSwarmLocalOwnerUnlocked,
+  isSwarmOptInAvailable,
+  isSwarmOptInEnabled,
+  hasSwarmOwnerAccess,
+} from './swarmGate'
 import { setSettings } from './store'
 import { writeSession, clearSession } from './authStore'
+
+// Simulate the host platform for the macOS-only opt-in gate. process.platform
+// is a read-only getter, so redefine + restore it around each assertion.
+const withPlatform = async (platform: NodeJS.Platform, fn: () => Promise<void>) => {
+  const orig = Object.getOwnPropertyDescriptor(process, 'platform')
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true })
+  try {
+    await fn()
+  } finally {
+    if (orig) Object.defineProperty(process, 'platform', orig)
+  }
+}
 
 // The swarm gate seam: owner app-login OR the server-local unlock (env /
 // hand-edited settings.json). The unlock must resolve from server-local state
@@ -67,10 +84,61 @@ describe('isSwarmLocalOwnerUnlocked', () => {
   })
 })
 
+// The PUBLIC macOS opt-in (Settings.swarmOptIn) — the all-users switch. macOS
+// only: the deterministic guard is unmeasured on Windows, so a non-macOS opt-in
+// never opens the gate.
+describe('isSwarmOptInAvailable', () => {
+  it('macOS → available; win32 / linux → not available', () => {
+    expect(isSwarmOptInAvailable('darwin')).toBe(true)
+    expect(isSwarmOptInAvailable('win32')).toBe(false)
+    expect(isSwarmOptInAvailable('linux')).toBe(false)
+  })
+})
+
+describe('isSwarmOptInEnabled', () => {
+  it('macOS + setting true → enabled', async () => {
+    await setSettings({ swarmOptIn: true })
+    await withPlatform('darwin', async () => {
+      expect(await isSwarmOptInEnabled()).toBe(true)
+    })
+  })
+
+  it('⚠ non-macOS + setting true → STILL disabled (the guard is unmeasured there)', async () => {
+    await setSettings({ swarmOptIn: true })
+    await withPlatform('win32', async () => {
+      expect(await isSwarmOptInEnabled()).toBe(false)
+    })
+  })
+
+  it('macOS + setting absent/false → disabled (the locked default)', async () => {
+    await withPlatform('darwin', async () => {
+      expect(await isSwarmOptInEnabled()).toBe(false)
+      await setSettings({ swarmOptIn: false })
+      expect(await isSwarmOptInEnabled()).toBe(false)
+    })
+  })
+})
+
 describe('hasSwarmOwnerAccess', () => {
   it('signed out + no unlock → no access (existing behaviour)', async () => {
     await clearSession()
     expect(await hasSwarmOwnerAccess()).toBe(false)
+  })
+
+  it('signed out + macOS opt-in → access (the all-users path)', async () => {
+    await clearSession()
+    await setSettings({ swarmOptIn: true })
+    await withPlatform('darwin', async () => {
+      expect(await hasSwarmOwnerAccess()).toBe(true)
+    })
+  })
+
+  it('⚠ signed out + opt-in but on Windows → NO access (macOS-gated)', async () => {
+    await clearSession()
+    await setSettings({ swarmOptIn: true })
+    await withPlatform('win32', async () => {
+      expect(await hasSwarmOwnerAccess()).toBe(false)
+    })
   })
 
   it('signed out + local unlock → access (the login-free path)', async () => {

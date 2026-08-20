@@ -257,8 +257,13 @@ and spawns `claude` as a child process, so it must run locally.
   (free workspace).
 - **Layer 2 — per-project tabs**: **Terminal / Canvas / Board** (see
   `src/components/canvas/moduleRegistry.tsx` — the single source of truth
-  for the tab set), plus an **owner-only, hidden-by-default `Swarm` tab**
-  (gated by `experiment: 'swarm'` — see the Swarm section) and any
+  for the tab set), plus a **hidden-by-default `Swarm` tab** (gated by
+  `experiment: 'swarm'` — owner via `experiments.swarm`, OR the login-free
+  `swarmLocalOwner` unlock, OR since 0.11.94 a PUBLIC macOS opt-in
+  `Settings.swarmOptIn` any user can turn on in Settings behind a "still
+  being tuned" warning; Windows stays owner-only until the guard has a
+  real-Windows pass — `isSwarmOptInEnabled`/`isSwarmOptInAvailable` in
+  swarmGate.ts. See the Swarm section) and any
   **user-installed custom tabs** (`server/routes/customModules.ts`,
   `~/.openground/custom-modules/`). Terminal is tiled `claude` PTY panes;
   Board is a kanban. Opening a card NO LONGER auto-launches anything (the drawer

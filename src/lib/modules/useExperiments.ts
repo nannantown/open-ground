@@ -18,11 +18,17 @@ import type { ExperimentFlags, ExperimentsResponse } from '@/lib/types'
 // signed-out / non-owner state until the first fetch resolves.
 const NO_FLAGS: ExperimentFlags = { swarm: false, sandbox: false, persona: false }
 
+/** The PUBLIC swarm opt-in state (all users). Fail-closed until first fetch. */
+const NO_OPT_IN = { available: false, enabled: false }
+
 export interface ExperimentsState {
   /** The user may toggle experiments at all (owner). Gates the settings toggle. */
   eligible: boolean
   /** Resolved per-experiment open state (owner && the settings toggle). */
   flags: ExperimentFlags
+  /** The public swarm opt-in: `available` (this machine — macOS) gates the
+   *  Settings toggle's visibility for ALL users; `enabled` reflects the choice. */
+  swarmOptIn: { available: boolean; enabled: boolean }
   /** True once a fetch has succeeded at least once. */
   loaded: boolean
   refresh: () => Promise<void>
@@ -31,6 +37,7 @@ export interface ExperimentsState {
 export function useExperiments(): ExperimentsState {
   const [eligible, setEligible] = useState(false)
   const [flags, setFlags] = useState<ExperimentFlags>(NO_FLAGS)
+  const [swarmOptIn, setSwarmOptIn] = useState(NO_OPT_IN)
   const [loaded, setLoaded] = useState(false)
   // Guards setState-after-unmount from a slow in-flight fetch.
   const aliveRef = useRef(true)
@@ -70,6 +77,10 @@ export function useExperiments(): ExperimentsState {
         (k) => prev[k] === next[k],
       )
       if (!unchanged) setFlags(next)
+      setSwarmOptIn({
+        available: body.swarmOptIn?.available === true,
+        enabled: body.swarmOptIn?.enabled === true,
+      })
       setLoaded(true)
     } catch {
       // Offline / server restarting — keep the last-known gate quietly.
@@ -96,5 +107,5 @@ export function useExperiments(): ExperimentsState {
     return () => window.removeEventListener('focus', onFocus)
   }, [refresh])
 
-  return { eligible, flags, loaded, refresh }
+  return { eligible, flags, swarmOptIn, loaded, refresh }
 }

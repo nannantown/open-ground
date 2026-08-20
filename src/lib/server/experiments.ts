@@ -25,7 +25,7 @@
 // the owner).
 
 import { getCustomTabRole } from './roles'
-import { isSwarmLocalOwnerUnlocked } from './swarmGate'
+import { isSwarmLocalOwnerUnlocked, isSwarmOptInAvailable, isSwarmOptInEnabled } from './swarmGate'
 import { getSettings } from './store'
 import type {
   CustomTabRole,
@@ -42,7 +42,15 @@ import type {
 export const computeExperiments = (
   role: CustomTabRole,
   settings: Pick<Settings, 'experiments'>,
-  opts?: { swarmLocalOwner?: boolean },
+  opts?: {
+    swarmLocalOwner?: boolean
+    /** The resolved PUBLIC opt-in (macOS && Settings.swarmOptIn) — opens swarm
+     *  for a non-owner. See swarmGate.isSwarmOptInEnabled. */
+    swarmOptInEnabled?: boolean
+    /** Whether this machine can offer the opt-in at all (macOS) — drives the
+     *  Settings toggle's visibility, NOT the gate. */
+    swarmOptInAvailable?: boolean
+  },
 ): ExperimentsResponse => {
   const eligible = role === 'owner'
   return {
@@ -50,21 +58,31 @@ export const computeExperiments = (
     flags: {
       swarm:
         (eligible && settings.experiments?.swarm === true) ||
-        opts?.swarmLocalOwner === true,
+        opts?.swarmLocalOwner === true ||
+        opts?.swarmOptInEnabled === true,
       sandbox: eligible && settings.experiments?.sandbox === true,
       // The Persona tab reads the owner's PERSONAL corpus, so it takes the
-      // strict gate only — the swarm local unlock (a control-plane convenience
-      // for login-disabled machines) deliberately does NOT reach it.
+      // strict gate only — neither the swarm local unlock nor the public opt-in
+      // (both swarm-only conveniences) reaches it.
       persona: eligible && settings.experiments?.persona === true,
+    },
+    // The public opt-in is reported separately from `flags` so a non-owner can
+    // see + drive the Settings toggle without `eligible` (which stays owner-only
+    // and would reveal sandbox/persona). `enabled` mirrors the resolved gate.
+    swarmOptIn: {
+      available: opts?.swarmOptInAvailable === true,
+      enabled: opts?.swarmOptInEnabled === true,
     },
   }
 }
 
 // Resolve the caller's experiment gate from the live session role + settings
-// (+ the server-local swarm unlock).
+// (+ the server-local swarm unlock + the public macOS opt-in).
 export const resolveExperiments = async (): Promise<ExperimentsResponse> =>
   computeExperiments(await getCustomTabRole(), await getSettings(), {
     swarmLocalOwner: await isSwarmLocalOwnerUnlocked(),
+    swarmOptInEnabled: await isSwarmOptInEnabled(),
+    swarmOptInAvailable: isSwarmOptInAvailable(),
   })
 
 // Is ONE experiment open for the caller? Same gate as resolveExperiments (owner
@@ -76,9 +94,11 @@ export const resolveExperiments = async (): Promise<ExperimentsResponse> =>
 // server-authoritative: a non-owner with a forged toggle fails the role check.
 export const isExperimentEnabled = async (id: ExperimentId): Promise<boolean> => {
   // Keep the swarm flag consistent with resolveExperiments: the local unlock
-  // (swarmGate.ts) opens it without a login or the toggle — otherwise a future
-  // caller here would see the flag closed while the UI shows the tab.
-  if (id === 'swarm' && (await isSwarmLocalOwnerUnlocked())) return true
+  // AND the public macOS opt-in (swarmGate.ts) open it without a login or the
+  // owner toggle — otherwise a hot launch path would see the flag closed while
+  // the UI shows the tab.
+  if (id === 'swarm' && ((await isSwarmLocalOwnerUnlocked()) || (await isSwarmOptInEnabled())))
+    return true
   const settings = await getSettings()
   if (settings.experiments?.[id] !== true) return false
   return (await getCustomTabRole()) === 'owner'

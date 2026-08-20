@@ -323,6 +323,11 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   // an existing settings.json is simply never read (readJson is tolerant).
   'swarmManagerRuntime',
   'lockdownMode',
+  // The PUBLIC swarm opt-in (all users). Request-settable BY DESIGN — the swarm
+  // gate is feature-visibility, not a security boundary (swarmGate.ts). Narrowed
+  // to a literal boolean below; resolved to macOS-only at read time
+  // (isSwarmOptInEnabled). NOT the same as `swarmLocalOwner` (hand-edit-only).
+  'swarmOptIn',
 ]
 
 /** Narrow an untrusted runtime dial to `{ mode }`. Anything else returns
@@ -428,6 +433,12 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   // on (a forged truthy string must not), everything else persists `false`.
   if (Object.prototype.hasOwnProperty.call(safe, 'lockdownMode')) {
     safe.lockdownMode = safe.lockdownMode === true
+  }
+  // Public swarm opt-in: a REAL boolean like lockdownMode — only a literal
+  // `true` opts in (a forged truthy string must not). macOS-gating happens at
+  // read time (isSwarmOptInEnabled), not here, so the stored value stays honest.
+  if (Object.prototype.hasOwnProperty.call(safe, 'swarmOptIn')) {
+    safe.swarmOptIn = safe.swarmOptIn === true
   }
   // Theme: only the two literals are stored; anything else drops the key so the
   // previous value survives (same refuse-a-meaningless-patch stance as above).

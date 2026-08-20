@@ -145,3 +145,54 @@ summarize (never "watch").
   relevant channel was already available.
 - Swarm workers: the normal worker contract is unchanged - commit the
   report, heartbeat `done true`, no push, completion gate as ordered.
+
+## Report style — the readable-report format
+
+Distilled from the owner-commissioned 2026-08-20 trilogy in the OPEN GROUND
+repo's docs/research/ (①UI/UX principles ②Japanese readability ③choosing
+the medium) — each rule below carries its evidence there. Apply to EVERY
+report; the goal is a report whose first screen answers the question and
+whose structure survives skim-reading.
+
+**Section skeleton, in this order:**
+
+1. `# タイトル` — a claim-shaped title beats a topic label.
+2. One `>` block: series (if any), 調査日, and the METHOD actually used
+   (fetched pages vs. search-result corroboration — say which, honestly).
+3. `## この調査の問い` — WHY the owner asked: the pain and the question,
+   recovered from the originating card (name it). A report is not a topic
+   summary; it exists to answer THIS. If the card cannot be found, mark
+   the question as reconstructed — never silently invent one.
+4. `## 30秒の答え` — the answer TO THAT QUESTION, first (inverted
+   pyramid + Minto's SCQA). Its FORM follows the question's type:
+   comparison → table, procedure → numbered steps, decision → a
+   recommendation with its basis. At most ~3 short sentences of prose;
+   enumerations become a LIST or TABLE, never a comma-chain. Any part of
+   the question the findings do NOT answer is said outright (「この調査では
+   分かっていない」) — an unanswered part is a finding, not a gap to paper
+   over. A reader who stops here must leave with the right answer.
+5. `## 観測` — one subsection per source: facts, quotes, counts, dates,
+   each with its URL. Value grids become pipe tables.
+6. `## 解釈` — the synthesis, opened with a line marking it as
+   interpretation. Facts and opinion NEVER share a paragraph (木下's rule;
+   the 観測/解釈 split is the cheapest implementation).
+7. Optional: a practical checklist, and an "apply to this product" section.
+8. `## 出典一覧` — every URL again, flat, so the list survives copy/paste.
+9. `【資料取得できず】` note when sources could not be fetched directly.
+10. The coverage line — the LAST line (see Report conventions above).
+
+**Sentence and paragraph discipline (ja):** one idea per sentence, ~60
+chars as the alarm threshold; a paragraph's first sentence summarizes the
+paragraph; no double negatives; long modifiers come first (本多's order).
+
+**Medium discipline:** enumerations and comparisons become TABLES, not
+prose. Each 30秒の答え point and each digest-able key point is ONE
+assertive full sentence (assertion-evidence style) — never a bare topic
+label. Structure (hierarchies, flows, overlaps) is described with the
+matching 図解 type by NAME (tree/flow/matrix/venn) even while reports are
+text-only, so a later renderer can draw it.
+
+**Honest numbers only:** a figure whose primary source cannot be located
+is NOT used — name it and say why it was dropped. (Measured precedent: a
+viral "67% retention" stat surfaced in search results on 2026-08-20 and
+was rejected in report ③ for having no traceable primary source.)

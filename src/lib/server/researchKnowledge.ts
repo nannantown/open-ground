@@ -71,6 +71,26 @@ const DEFAULT_TIMEOUT_MS = 180_000
 // reads itself (the same deliberate pin as generateDescription's haiku).
 const KNOWLEDGE_MODEL = 'haiku'
 
+// STRUCTURAL read-only enforcement (not prose). A research report is distilled
+// from UNTRUSTED web/SNS content, and this session runs with permissions
+// bypassed (--dangerously-skip-permissions) in the user's real repo — so a
+// prompt injection in the report could otherwise make it run a command, write a
+// file, or exfiltrate over the network. `--disallowed-tools` survives the
+// bypass (claudeTerminal.buildClaudeArgv), so we DENY every mutating / shelling
+// / network / delegation tool and leave only read tools (Read/Glob/Grep) for
+// the one job: read docs/research/<file> and print marker lines.
+// (Audit 2026-08-20: the read-only rules used to be prompt PROSE only.)
+export const KNOWLEDGE_DENY_TOOLS = [
+  'Bash',
+  'Write',
+  'Edit',
+  'MultiEdit',
+  'NotebookEdit',
+  'WebFetch',
+  'WebSearch',
+  'Task',
+]
+
 // ── Sidecar store ───────────────────────────────────────────────────────────
 
 export const contentShaOf = (content: string): string =>
@@ -225,6 +245,30 @@ const scheduleSweep = (id: string): void => {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+/** The launchClaude options for a knowledge marker session — a PURE function so
+ *  the security-relevant shape (bypass permissions + the read-only deny-list) is
+ *  unit-testable without spawning a PTY. `id` is injected so it stays pure. */
+export const researchMarkerLaunchOpts = (
+  cwd: string,
+  initialPrompt: string,
+  id: string,
+): Parameters<typeof launchClaude>[0] => ({
+  cwd,
+  agentSessionId: id,
+  initialPrompt,
+  permissionMode: 'bypass',
+  model: KNOWLEDGE_MODEL,
+  name: 'research-knowledge',
+  // Marker-scraped utility session (same stance as the describe run): a
+  // pristine system prompt, no user-scope MCP servers, no visible pane.
+  appContext: false,
+  strictMcpConfig: true,
+  hidden: true,
+  // Structural read-only: deny every mutating/shelling/network/delegation tool
+  // so a prompt injection in the untrusted report cannot act, even under bypass.
+  disallowedTools: KNOWLEDGE_DENY_TOOLS,
+})
+
 /** One claude run whose ONLY output is marker lines; resolves with the raw
  *  buffer once `isComplete` says the contract landed (or on exit/timeout with
  *  whatever accumulated). Injectable for tests. */
@@ -234,19 +278,7 @@ const runMarkerSession = async (
   isComplete: (buffer: string) => boolean,
   timeoutMs: number,
 ): Promise<string> => {
-  const ref = launchClaude({
-    cwd: projectPath,
-    agentSessionId: newId(),
-    initialPrompt: prompt,
-    permissionMode: 'bypass',
-    model: KNOWLEDGE_MODEL,
-    name: 'research-knowledge',
-    // Marker-scraped utility session (same stance as the describe run): a
-    // pristine system prompt, no user-scope MCP servers, no visible pane.
-    appContext: false,
-    strictMcpConfig: true,
-    hidden: true,
-  })
+  const ref = launchClaude(researchMarkerLaunchOpts(projectPath, prompt, newId()))
   let buffer = ''
   let exited = false
   const sub = subscribeTerminal(

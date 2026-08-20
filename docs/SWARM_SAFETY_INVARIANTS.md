@@ -103,16 +103,23 @@ it.
 *Code:* `server/routes/swarm.ts` (the `hasSwarmOwnerAccess()` gate atop every
 handler — `src/lib/server/swarmGate.ts`: the signed-in owner role OR the
 explicit server-local unlock for login-disabled machines, env
-`OPENGROUND_LOCAL_OWNER=1` / hand-edited `settings.swarmLocalOwner`; see
-`docs/SECURITY.md` for why that unlock is not a boundary change).
+`OPENGROUND_LOCAL_OWNER=1` / hand-edited `settings.swarmLocalOwner`, OR — since
+0.11.94 — the PUBLIC macOS opt-in `Settings.swarmOptIn` (`isSwarmOptInEnabled`,
+macOS only, user-settable behind a "still being tuned" warning). All three are
+feature-visibility openers, not boundary changes; see `docs/SECURITY.md` for why
+(the loopback-only API already runs arbitrary shells via `POST /api/terminal`).
 *Mirrors:* `test-swarm-safety.sh` §13 (the PreToolUse gate is owner-scoped).
 *Negative control:* a hand-built **un-gated** swarm route returns non-403 when
 signed out — exactly what the sweep forbids.
-*Unlock caveat:* the sweep above runs with the unlock ABSENT (its env var is
-cleared in `beforeEach`), pinning the locked shipped default. The unlocked
-side — both sources open every route signed-out, the unlock is swarm-scoped
-(marketplace stays 403), and `POST /api/settings` can never set the key — is
-pinned by `server/routes/__tests__/swarmLocalOwner.routes.test.ts`.
+*Unlock caveat:* the sweep above runs with every opener ABSENT (the local-unlock
+env var is cleared in `beforeEach`, and the opt-in setting is unset + the test
+host is non-macOS), pinning the locked shipped default. The unlocked side — both
+local-unlock sources open every route signed-out, the unlock is swarm-scoped
+(marketplace stays 403), and `POST /api/settings` can never set the `swarmLocalOwner`
+key — is pinned by `server/routes/__tests__/swarmLocalOwner.routes.test.ts`. The
+public opt-in opener (macOS-only, swarm-scoped, opens the gate but NEVER
+sandbox/persona) is pinned by `src/lib/server/swarmGate.test.ts` +
+`experiments.test.ts` + `swarmOptInSetting.test.ts`.
 
 ### D — A merge conflict aborts; integration never continues through it
 `swarmIntegrate.integrateBranch` rebases the worker branch onto the trunk in a

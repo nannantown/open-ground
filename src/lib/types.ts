@@ -216,6 +216,19 @@ export interface Settings {
    *  boundary (POST /api/terminal is already ungated locally — swarmGate.ts).
    *  Scope: swarm only — marketplace/custom-tab roles ignore it. */
   swarmLocalOwner?: boolean
+  /** User opt-in for the SWARM control plane, for ALL users (not just the
+   *  owner) — the public "turn it on if you want it" switch (default off).
+   *  Distinct from `swarmLocalOwner` (hand-edit-only, login-free) and from the
+   *  owner `experiments.swarm` toggle: this one is user-settable via
+   *  POST /api/settings and resolves the swarm gate for anyone. RESOLVED
+   *  server-side to macOS ONLY (isSwarmOptInEnabled — swarmGate.ts): the
+   *  deterministic PreToolUse guard is unmeasured on Windows and there is no OS
+   *  sandbox layer there, so a non-macOS opt-in stays closed. Narrowed to a
+   *  literal boolean on save (store.ts). Safe to expose because the swarm gate
+   *  is a feature-visibility flag, not a security boundary (POST /api/terminal
+   *  is already ungated locally — swarmGate.ts / docs/SECURITY.md); the
+   *  in-app warning discloses subscription cost + permission-bypass claude. */
+  swarmOptIn?: boolean
   /** Work mode (lockdown) — the one-toggle kill switch for every NON-Anthropic
    *  external egress, for running OPEN GROUND on a confidential work machine.
    *  ON ⇒ auto-update checks, the in-app release check, feedback, marketplace,
@@ -252,6 +265,12 @@ export type ExperimentFlags = Record<ExperimentId, boolean>
 export interface ExperimentsResponse {
   eligible: boolean
   flags: ExperimentFlags
+  /** The PUBLIC swarm opt-in (all users, not just the owner — Settings.swarmOptIn).
+   *  `available` = this machine can opt in at all (macOS only; the guard is
+   *  unmeasured on Windows). `enabled` = the user has opted in AND it is
+   *  effective. When `available` is false the Settings toggle is hidden; the
+   *  owner path (eligible + experiments.swarm) is unaffected. */
+  swarmOptIn: { available: boolean; enabled: boolean }
 }
 
 /** The runtime the commander dial RESOLVES TO on this machine right now,

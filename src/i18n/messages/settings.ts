@@ -29,6 +29,12 @@ export const settings = {
       'Reveals the Persona entry in the top toolbar for you only — a place to read and correct what your stand-in knows about how you decide things. It only reads and writes your own notes on this machine; nothing is shared and nothing runs on its own. Turning Swarm on also reveals it, so the entry can be there with this switch off.',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
+    // Public swarm opt-in (all users, macOS only) — "still being tuned"
+    'settings.swarmOptIn.heading': 'Swarm (experimental)',
+    'settings.swarmOptIn.hint': 'Still being tuned. Off by default — turn it on only if you want it.',
+    'settings.swarmOptIn.label': 'Enable the Swarm tab',
+    'settings.swarmOptIn.warning':
+      'Swarm runs autonomous Claude workers for you. Before turning it on, know: it uses your own Claude subscription and can run several sessions at once, so it may consume your quota heavily; workers run Claude with tool-permission prompts skipped, inside isolated copies of your project; and its notifications are currently in Japanese only. It is still being tuned and is not covered by support.',
     // Completion chime (settings.soundOnDone / soundOnDoneVolume)
     'settings.sound.heading': 'Completion sound',
     'settings.sound.label': 'Play a sound when Claude finishes',
@@ -161,6 +167,11 @@ export const settings = {
       'この端末で上部ツールバーに「ペルソナ」の入口を出します。あなたの分身が持っている「あなたの決め方」を読み、違っていれば訂正できる場所です。この端末にあるあなた自身の記録を読み書きするだけで、外部には共有されず、それ自体では何も自動実行されません。なお Swarm をオンにすると同じ入口が出るため、このスイッチがオフでも入口が見えていることがあります。',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
+    'settings.swarmOptIn.heading': 'Swarm(試験運用)',
+    'settings.swarmOptIn.hint': 'まだ調整中です。既定はオフ — 使いたい場合だけオンにしてください。',
+    'settings.swarmOptIn.label': 'Swarm タブを有効にする',
+    'settings.swarmOptIn.warning':
+      'Swarm はあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。通知は当面日本語のみです。まだ調整中で、サポート対象外です。',
     'settings.sound.heading': '完了音',
     'settings.sound.label': 'Claude の命令が終わったら音を鳴らす',
     'settings.sound.hint':

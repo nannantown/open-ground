@@ -31,7 +31,10 @@ import {
   rschPointMarker,
   startResearchAskJob,
   startResearchDigestJob,
+  KNOWLEDGE_DENY_TOOLS,
+  researchMarkerLaunchOpts,
 } from './researchKnowledge'
+import { buildClaudeArgv } from './claudeTerminal'
 import { projectDataDir } from './projectDataPath'
 import { researchRoutes } from '../../../server/routes/research'
 import { registerTestProject } from '../../test/registerProject'
@@ -431,5 +434,41 @@ describe('research knowledge routes', () => {
         )
       ).status,
     ).toBe(403)
+  })
+})
+
+
+// ─── Read-only hardening of the bypass session (audit 2026-08-20) ────────────
+// The digest/ask session runs `claude --dangerously-skip-permissions` over
+// UNTRUSTED report content. These pin that the read-only enforcement is
+// STRUCTURAL (a CLI deny-list that survives bypass), not just prompt prose.
+
+describe('research knowledge session is structurally read-only', () => {
+  it('the launch opts carry permission bypass AND the deny-list', () => {
+    const opts = researchMarkerLaunchOpts('/proj', 'prompt', 'id-1')
+    expect(opts.permissionMode).toBe('bypass')
+    expect(opts.disallowedTools).toEqual(KNOWLEDGE_DENY_TOOLS)
+    expect(opts.hidden).toBe(true)
+  })
+
+  it('⚠ the deny-list denies every mutating/shelling/network/delegation tool — but NOT Read', () => {
+    for (const denied of ['Bash', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'Task']) {
+      expect(KNOWLEDGE_DENY_TOOLS).toContain(denied)
+    }
+    // Read/Glob/Grep must stay allowed — the session's one job is to READ the report.
+    for (const allowed of ['Read', 'Glob', 'Grep']) {
+      expect(KNOWLEDGE_DENY_TOOLS).not.toContain(allowed)
+    }
+  })
+
+  it('⚠ the deny-list reaches the real claude CLI as --disallowed-tools', () => {
+    // buildClaudeArgv is what the PTY actually runs: prove the deny-list becomes
+    // the CLI flag (an observable effect), not a dropped field.
+    const argv = buildClaudeArgv(researchMarkerLaunchOpts('/proj', 'p', 'id-2'), null)
+    const i = argv.indexOf('--disallowed-tools')
+    expect(i).toBeGreaterThanOrEqual(0)
+    const value = argv[i + 1] ?? ''
+    for (const denied of ['Bash', 'WebFetch', 'Task']) expect(value).toContain(denied)
+    expect(value).not.toContain('Read')
   })
 })

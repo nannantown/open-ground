@@ -116,6 +116,10 @@ describe('swarm local owner unlock — env OPENGROUND_LOCAL_OWNER=1', () => {
     expect(body).toEqual({
       eligible: false,
       flags: { swarm: true, sandbox: false, persona: false },
+      // The public opt-in block: unavailable on this (non-macOS) test host and
+      // off — the LOCAL unlock is a separate path and must not report itself as
+      // the user opt-in.
+      swarmOptIn: { available: false, enabled: false },
     })
   })
 

@@ -1466,6 +1466,10 @@ export default function App() {
         // Owner-only: reveals the experiment toggles. Non-owners never see them
         // (eligible:false), so the feature's existence stays hidden.
         experimentsEligible={experiments.eligible}
+        // Public swarm opt-in (all users, macOS only). available gates the
+        // toggle's visibility; enabled reflects the current choice.
+        swarmOptInAvailable={experiments.swarmOptIn.available}
+        swarmOptInEnabled={experiments.swarmOptIn.enabled}
         feedbackCanRead={feedbackCanRead}
         onFeedbackSeen={markFeedbackSeen}
         moduleReviewCanReview={moduleReviewCanReview}
