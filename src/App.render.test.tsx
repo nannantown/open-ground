@@ -276,9 +276,10 @@ describe('App — whole-render integration', () => {
 // The Persona surface is about the OWNER, not a repo (its notes live in
 // ~/.openground/ and are identical on every project), so it left the per-project
 // tab row for the Ground toolbar beside Settings / Manual / Skills. It stays
-// owner-only and hidden: App passes `onOpenPersona` ONLY when the persona OR
-// swarm experiment is open, and an undefined handler is what makes the Toolbar
-// render nothing at all.
+// owner-only and hidden: App passes `onOpenPersona` ONLY when the persona
+// experiment (its own flag) is open, and an undefined handler is what makes the
+// Toolbar render nothing at all. (Until 2026-08-20 a swarm flag also opened it;
+// persona is now its own beta and that coupling was dropped — see gate.ts.)
 //
 // Asserted through the WHOLE app rather than the Toolbar in isolation, because
 // what has to hold is the wiring: /api/experiments → useExperiments →
@@ -360,12 +361,19 @@ describe('App — Ground Persona entry gate', () => {
     expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
   })
 
-  it('draws the entry for a SWARM account too (the ride-along survives the move)', async () => {
+  it('⚠ does NOT draw the entry for a swarm-only account (the 0.11.94 leak, fixed)', async () => {
+    // Persona was promoted to its own beta (2026-08-20): the swarm↔persona
+    // any-of gate was dropped, so a `flags.swarm` account no longer sees the
+    // personal-corpus screen. The owner's own "swarm on ⇒ persona visible"
+    // coupling now lives server-side in flags.persona, so it never reaches the
+    // client as a bare swarm flag.
     installFetch({ projects: [], experiments: gateFlags({ swarm: true }) })
     await act(async () => {
       renderApp()
     })
-    expect(await screen.findByRole('button', { name: 'Persona' })).toBeInTheDocument()
+    await screen.findByText('Begin your atlas.')
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Persona' })).not.toBeInTheDocument()
   })
 
   it('stays hidden when only an unrelated experiment is open', async () => {

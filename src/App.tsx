@@ -1470,6 +1470,8 @@ export default function App() {
         // toggle's visibility; enabled reflects the current choice.
         swarmOptInAvailable={experiments.swarmOptIn.available}
         swarmOptInEnabled={experiments.swarmOptIn.enabled}
+        personaOptInAvailable={experiments.personaOptIn.available}
+        personaOptInEnabled={experiments.personaOptIn.enabled}
         feedbackCanRead={feedbackCanRead}
         onFeedbackSeen={markFeedbackSeen}
         moduleReviewCanReview={moduleReviewCanReview}

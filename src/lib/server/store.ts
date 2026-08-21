@@ -328,6 +328,11 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   // to a literal boolean below; resolved to macOS-only at read time
   // (isSwarmOptInEnabled). NOT the same as `swarmLocalOwner` (hand-edit-only).
   'swarmOptIn',
+  // The PUBLIC persona opt-in (all users, all platforms). Same design as
+  // swarmOptIn — request-settable because the persona gate is feature-
+  // visibility over the caller's OWN loopback-local corpus (personaGate.ts).
+  // Narrowed to a literal boolean below.
+  'personaOptIn',
 ]
 
 /** Narrow an untrusted runtime dial to `{ mode }`. Anything else returns
@@ -439,6 +444,9 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   // read time (isSwarmOptInEnabled), not here, so the stored value stays honest.
   if (Object.prototype.hasOwnProperty.call(safe, 'swarmOptIn')) {
     safe.swarmOptIn = safe.swarmOptIn === true
+  }
+  if (Object.prototype.hasOwnProperty.call(safe, 'personaOptIn')) {
+    safe.personaOptIn = safe.personaOptIn === true
   }
   // Theme: only the two literals are stored; anything else drops the key so the
   // previous value survives (same refuse-a-meaningless-patch stance as above).

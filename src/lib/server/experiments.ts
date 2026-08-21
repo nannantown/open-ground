@@ -15,17 +15,22 @@
 // surfaces condition 1 alone so the client can show the owner the toggle
 // (without it, the toggle itself would betray the feature's existence).
 //
-// ONE exception, scoped to `swarm` alone: the server-local owner unlock
-// (swarmGate.ts — env OPENGROUND_LOCAL_OWNER=1 / a hand-edited
-// settings.swarmLocalOwner, for login-disabled machines) opens the swarm flag
-// DIRECTLY, with no login and no experiments toggle — it is the same unlock
-// the /api/swarm routes honour, mirrored here so the Swarm tab actually
-// appears. It never touches `eligible` (the experiments toggle UI stays
-// owner-only) nor any other experiment (`sandbox` / `persona` keep requiring
-// the owner).
+// TWO public opt-ins bypass the owner-AND, each scoped to ONE experiment and
+// reported separately from `flags` so they never touch `eligible` (which stays
+// owner-only, so the toggle UI for the still-owner-only `sandbox` is not
+// revealed):
+//   • `swarm` — the server-local owner unlock (swarmGate.ts — env
+//     OPENGROUND_LOCAL_OWNER=1 / a hand-edited settings.swarmLocalOwner, for
+//     login-disabled machines) AND the public macOS opt-in (Settings.swarmOptIn).
+//   • `persona` — the public all-platforms opt-in (Settings.personaOptIn —
+//     personaGate.ts), added 2026-08-20 when persona was promoted to a beta.
+// `sandbox` keeps requiring the owner. Persona is DECOUPLED from swarm here: a
+// swarm opt-in no longer opens the persona surface (the old any-of UI gate did,
+// which contradicted this resolver — see the persona flag below).
 
 import { getCustomTabRole } from './roles'
 import { isSwarmLocalOwnerUnlocked, isSwarmOptInAvailable, isSwarmOptInEnabled } from './swarmGate'
+import { isPersonaOptInAvailable, isPersonaOptInEnabled } from './personaGate'
 import { getSettings } from './store'
 import type {
   CustomTabRole,
@@ -50,6 +55,12 @@ export const computeExperiments = (
     /** Whether this machine can offer the opt-in at all (macOS) — drives the
      *  Settings toggle's visibility, NOT the gate. */
     swarmOptInAvailable?: boolean
+    /** The resolved PUBLIC persona opt-in (Settings.personaOptIn, all
+     *  platforms) — opens the Persona surface for a non-owner. */
+    personaOptInEnabled?: boolean
+    /** Whether this machine can offer the persona opt-in — always true (all
+     *  platforms); kept for symmetry with swarmOptInAvailable. */
+    personaOptInAvailable?: boolean
   },
 ): ExperimentsResponse => {
   const eligible = role === 'owner'
@@ -61,17 +72,25 @@ export const computeExperiments = (
         opts?.swarmLocalOwner === true ||
         opts?.swarmOptInEnabled === true,
       sandbox: eligible && settings.experiments?.sandbox === true,
-      // The Persona tab reads the owner's PERSONAL corpus, so it takes the
-      // strict gate only — neither the swarm local unlock nor the public opt-in
-      // (both swarm-only conveniences) reaches it.
-      persona: eligible && settings.experiments?.persona === true,
+      // Persona is its OWN gate now (2026-08-20 — promoted to a public beta):
+      // the owner's `experiments.persona` toggle, OR the public persona opt-in.
+      // Deliberately DECOUPLED from swarm — a swarm opt-in no longer reveals the
+      // personal corpus (it did via the old any-of gate, contradicting this
+      // resolver's own intent), and the swarm local unlock never reaches it.
+      persona:
+        (eligible && settings.experiments?.persona === true) ||
+        opts?.personaOptInEnabled === true,
     },
-    // The public opt-in is reported separately from `flags` so a non-owner can
-    // see + drive the Settings toggle without `eligible` (which stays owner-only
-    // and would reveal sandbox/persona). `enabled` mirrors the resolved gate.
+    // The public opt-ins are reported separately from `flags` so a non-owner can
+    // see + drive the Settings toggles without `eligible` (which stays owner-only
+    // and would reveal sandbox). `enabled` mirrors the resolved gate.
     swarmOptIn: {
       available: opts?.swarmOptInAvailable === true,
       enabled: opts?.swarmOptInEnabled === true,
+    },
+    personaOptIn: {
+      available: opts?.personaOptInAvailable === true,
+      enabled: opts?.personaOptInEnabled === true,
     },
   }
 }
@@ -83,6 +102,8 @@ export const resolveExperiments = async (): Promise<ExperimentsResponse> =>
     swarmLocalOwner: await isSwarmLocalOwnerUnlocked(),
     swarmOptInEnabled: await isSwarmOptInEnabled(),
     swarmOptInAvailable: isSwarmOptInAvailable(),
+    personaOptInEnabled: await isPersonaOptInEnabled(),
+    personaOptInAvailable: isPersonaOptInAvailable(),
   })
 
 // Is ONE experiment open for the caller? Same gate as resolveExperiments (owner
@@ -99,6 +120,8 @@ export const isExperimentEnabled = async (id: ExperimentId): Promise<boolean> =>
   // the UI shows the tab.
   if (id === 'swarm' && ((await isSwarmLocalOwnerUnlocked()) || (await isSwarmOptInEnabled())))
     return true
+  // Persona has its own public opt-in (all platforms) — same consistency rule.
+  if (id === 'persona' && (await isPersonaOptInEnabled())) return true
   const settings = await getSettings()
   if (settings.experiments?.[id] !== true) return false
   return (await getCustomTabRole()) === 'owner'

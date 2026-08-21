@@ -120,6 +120,9 @@ describe('swarm local owner unlock — env OPENGROUND_LOCAL_OWNER=1', () => {
       // off — the LOCAL unlock is a separate path and must not report itself as
       // the user opt-in.
       swarmOptIn: { available: false, enabled: false },
+      // Persona is its own beta (2026-08-20): the swarm unlock never touches it,
+      // and its opt-in — available on every platform — is off here.
+      personaOptIn: { available: true, enabled: false },
     })
   })
 

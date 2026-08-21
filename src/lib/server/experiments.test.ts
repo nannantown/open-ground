@@ -17,13 +17,18 @@ import type { ExperimentFlags, ExperimentsResponse } from '@/lib/types'
 const ALL_CLOSED: ExperimentFlags = { swarm: false, sandbox: false, persona: false }
 const open = (o: Partial<ExperimentFlags> = {}): ExperimentFlags => ({ ...ALL_CLOSED, ...o })
 
-// Full expected response builder — includes the swarmOptIn block (default all
-// false) so `.toEqual` stays an exact-shape assertion after the field was added.
+// Full expected response builder — includes the swarmOptIn + personaOptIn blocks
+// (default all false) so `.toEqual` stays an exact-shape assertion after the
+// fields were added. `persona` opt-in is all-platforms, so its `available`
+// defaults true when we assert a persona case; callers pass it explicitly.
+type OptIn = { available: boolean; enabled: boolean }
+const OFF: OptIn = { available: false, enabled: false }
 const res = (
   eligible: boolean,
   flags: ExperimentFlags,
-  swarmOptIn: { available: boolean; enabled: boolean } = { available: false, enabled: false },
-): ExperimentsResponse => ({ eligible, flags, swarmOptIn })
+  swarmOptIn: OptIn = OFF,
+  personaOptIn: OptIn = OFF,
+): ExperimentsResponse => ({ eligible, flags, swarmOptIn, personaOptIn })
 
 describe('computeExperiments', () => {
   it('owner + all toggles on → eligible, all flags open', () => {
@@ -151,5 +156,55 @@ describe('computeExperiments — public swarm opt-in', () => {
         { swarmOptInEnabled: true, swarmOptInAvailable: true },
       ),
     ).toEqual(res(true, open({ swarm: true }), { available: true, enabled: true }))
+  })
+
+  // ⚠ THE 0.11.94 LEAK, fixed structurally: a swarm opt-in must NOT open the
+  // persona surface. computeExperiments never set flags.persona from the swarm
+  // path (only the UI any-of gate did — gate.ts, now dropped to ['persona']).
+  // This pins the server side: swarm opt-in leaves persona false AND its own
+  // personaOptIn block all-false.
+  it('⚠ a swarm opt-in leaves persona shut, and the persona opt-in block stays off', () => {
+    expect(
+      computeExperiments('none', {}, { swarmOptInEnabled: true, swarmOptInAvailable: true }),
+    ).toEqual(res(false, open({ swarm: true }), { available: true, enabled: true }, OFF))
+  })
+})
+
+// The PUBLIC persona opt-in (Settings.personaOptIn, ALL users, ALL platforms —
+// persona has no unattended-worker guard). Resolved upstream
+// (isPersonaOptInEnabled) and passed as `personaOptInEnabled`; availability is
+// always true. Opens ONLY persona, never `eligible`, swarm, or sandbox — the
+// mirror of the swarm opt-in, and the fix that makes persona its own beta.
+describe('computeExperiments — public persona opt-in', () => {
+  it('non-owner + opt-in enabled → persona opens; eligible + swarm + sandbox stay closed', () => {
+    expect(
+      computeExperiments('none', {}, { personaOptInEnabled: true, personaOptInAvailable: true }),
+    ).toEqual(res(false, open({ persona: true }), OFF, { available: true, enabled: true }))
+  })
+
+  it('⚠ persona opt-in NEVER leaks to swarm or sandbox — even with forged toggles', () => {
+    expect(
+      computeExperiments(
+        'none',
+        { experiments: { swarm: true, sandbox: true } },
+        { personaOptInEnabled: true, personaOptInAvailable: true },
+      ),
+    ).toEqual(res(false, open({ persona: true }), OFF, { available: true, enabled: true }))
+  })
+
+  it('available but not enabled → persona closed; the toggle is merely offered', () => {
+    expect(
+      computeExperiments('none', {}, { personaOptInEnabled: false, personaOptInAvailable: true }),
+    ).toEqual(res(false, ALL_CLOSED, OFF, { available: true, enabled: false }))
+  })
+
+  it('owner keeps their own path — opt-in is additive, both resolve persona open', () => {
+    expect(
+      computeExperiments(
+        'owner',
+        { experiments: { persona: true } },
+        { personaOptInEnabled: true, personaOptInAvailable: true },
+      ),
+    ).toEqual(res(true, open({ persona: true }), OFF, { available: true, enabled: true }))
   })
 })

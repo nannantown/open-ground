@@ -63,6 +63,8 @@ interface Props {
    *  experiments section above. */
   swarmOptInAvailable?: boolean
   swarmOptInEnabled?: boolean
+  personaOptInAvailable?: boolean
+  personaOptInEnabled?: boolean
 }
 
 // Settings drawer. Deliberately minimal: only real preferences are visible
@@ -147,6 +149,8 @@ export const SettingsPanel = ({
   experimentsEligible = false,
   swarmOptInAvailable = false,
   swarmOptInEnabled = false,
+  personaOptInAvailable = false,
+  personaOptInEnabled = false,
 }: Props) => {
   const { t, lang, setLang } = useT()
   const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
@@ -159,6 +163,7 @@ export const SettingsPanel = ({
   // Public swarm opt-in (all users). Seeded from the resolved server state
   // (swarmOptInEnabled prop), persisted immediately like the toggles above.
   const [swarmOptIn, setSwarmOptInState] = useState(swarmOptInEnabled)
+  const [personaOptIn, setPersonaOptInState] = useState(personaOptInEnabled)
   // Work mode (lockdown) — the non-Anthropic egress kill switch. Same
   // instant-feedback + persist-immediately pattern as the experiment toggles.
   const [lockdown, setLockdownState] = useState(settings.lockdownMode === true)
@@ -234,6 +239,7 @@ export const SettingsPanel = ({
     setSandboxExp(settings.experiments?.sandbox === true)
     setPersonaExp(settings.experiments?.persona === true)
     setSwarmOptInState(settings.swarmOptIn === true)
+    setPersonaOptInState(settings.personaOptIn === true)
     setLockdownState(settings.lockdownMode === true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
@@ -291,6 +297,20 @@ export const SettingsPanel = ({
       defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
       displayName: latest.current.displayName.trim(),
       swarmOptIn: next,
+    })
+  }
+
+  // The PUBLIC persona opt-in — same shape as the swarm one, but offered on
+  // every platform (personaOptInAvailable is always true server-side).
+  const setPersonaOptIn = (next: boolean) => {
+    if (next === personaOptIn) return
+    setPersonaOptInState(next)
+    const s = settingsRef.current
+    onSaveRef.current({
+      ...s,
+      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
+      displayName: latest.current.displayName.trim(),
+      personaOptIn: next,
     })
   }
 
@@ -717,6 +737,33 @@ export const SettingsPanel = ({
                         className="rounded-[3px] border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-meta leading-relaxed text-amber-600/90"
                       >
                         {t('settings.swarmOptIn.warning')}
+                      </p>
+                    </div>
+                  </Section>
+                )}
+
+                {/* PUBLIC persona opt-in — all platforms (personaOptInAvailable
+                    is always true). Same "still tuning" posture as swarm; the
+                    warning discloses subscription cost + permission-bypass
+                    claude over the user's own local corpus. */}
+                {personaOptInAvailable && (
+                  <Section
+                    heading={t('settings.personaOptIn.heading')}
+                    hint={t('settings.personaOptIn.hint')}
+                  >
+                    <div className="flex flex-col gap-2.5">
+                      <ExperimentToggle
+                        label={t('settings.personaOptIn.label')}
+                        value={personaOptIn}
+                        onChange={setPersonaOptIn}
+                        offLabel={t('settings.experiments.off')}
+                        onLabel={t('settings.experiments.on')}
+                      />
+                      <p
+                        role="note"
+                        className="rounded-[3px] border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-meta leading-relaxed text-amber-600/90"
+                      >
+                        {t('settings.personaOptIn.warning')}
                       </p>
                     </div>
                   </Section>

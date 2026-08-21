@@ -4,8 +4,11 @@ import type { ExperimentFlags } from '@/lib/types'
 
 // The Persona surface moved out of the per-project tab row and onto Ground
 // (docs/MAP.md §11 / src/components/canvas/PersonaPanel.tsx), so its visibility
-// is no longer decided by moduleRegistry's module gate. This is the whole rule
-// now, and it must keep the tab's ANY-OF semantics: persona OR swarm.
+// is no longer decided by moduleRegistry's module gate. The rule (2026-08-20,
+// persona promoted to a public beta): it opens on the `persona` flag ALONE. The
+// old any-of with `swarm` was dropped — swarm no longer rides into the personal
+// corpus screen (the coupling now lives owner-scoped inside the server flag,
+// experiments.ts). See gate.ts's header.
 
 const ALL_CLOSED: ExperimentFlags = { swarm: false, sandbox: false, persona: false }
 const flags = (open: Partial<ExperimentFlags> = {}): ExperimentFlags => ({
@@ -29,10 +32,11 @@ describe('isPersonaOpen — the Ground entry gate', () => {
     expect(isPersonaOpen(flags({ persona: true }))).toBe(true)
   })
 
-  it('opens on swarm too — the ride-along the tab had', () => {
-    // The people running a swarm are the people whose stand-in judges for them;
-    // this is the case that must not be lost in the move to Ground.
-    expect(isPersonaOpen(flags({ swarm: true }))).toBe(true)
+  it('⚠ does NOT open on swarm — the decoupling that fixed the 0.11.94 leak', () => {
+    // A swarm opt-in user's flags.swarm is true; before the fix the any-of gate
+    // opened the personal corpus screen for them. The gate now reads persona
+    // alone, so a swarm flag never reaches this surface.
+    expect(isPersonaOpen(flags({ swarm: true }))).toBe(false)
   })
 
   it('is not opened by an unrelated experiment', () => {
@@ -44,7 +48,7 @@ describe('isPersonaOpen — the Ground entry gate', () => {
     expect(isPersonaOpen({ ...ALL_CLOSED, persona: 1 as unknown as boolean })).toBe(false)
   })
 
-  it('lists both ways in', () => {
-    expect([...PERSONA_EXPERIMENTS].sort()).toEqual(['persona', 'swarm'])
+  it('lists exactly one way in — persona alone', () => {
+    expect([...PERSONA_EXPERIMENTS]).toEqual(['persona'])
   })
 })

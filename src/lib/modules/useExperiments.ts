@@ -29,6 +29,9 @@ export interface ExperimentsState {
   /** The public swarm opt-in: `available` (this machine — macOS) gates the
    *  Settings toggle's visibility for ALL users; `enabled` reflects the choice. */
   swarmOptIn: { available: boolean; enabled: boolean }
+  /** The public persona opt-in: `available` is true on every platform;
+   *  `enabled` reflects the choice. */
+  personaOptIn: { available: boolean; enabled: boolean }
   /** True once a fetch has succeeded at least once. */
   loaded: boolean
   refresh: () => Promise<void>
@@ -38,6 +41,7 @@ export function useExperiments(): ExperimentsState {
   const [eligible, setEligible] = useState(false)
   const [flags, setFlags] = useState<ExperimentFlags>(NO_FLAGS)
   const [swarmOptIn, setSwarmOptIn] = useState(NO_OPT_IN)
+  const [personaOptIn, setPersonaOptIn] = useState(NO_OPT_IN)
   const [loaded, setLoaded] = useState(false)
   // Guards setState-after-unmount from a slow in-flight fetch.
   const aliveRef = useRef(true)
@@ -81,6 +85,10 @@ export function useExperiments(): ExperimentsState {
         available: body.swarmOptIn?.available === true,
         enabled: body.swarmOptIn?.enabled === true,
       })
+      setPersonaOptIn({
+        available: body.personaOptIn?.available === true,
+        enabled: body.personaOptIn?.enabled === true,
+      })
       setLoaded(true)
     } catch {
       // Offline / server restarting — keep the last-known gate quietly.
@@ -107,5 +115,5 @@ export function useExperiments(): ExperimentsState {
     return () => window.removeEventListener('focus', onFocus)
   }, [refresh])
 
-  return { eligible, flags, swarmOptIn, loaded, refresh }
+  return { eligible, flags, swarmOptIn, personaOptIn, loaded, refresh }
 }

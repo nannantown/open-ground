@@ -10,14 +10,18 @@
 // rule moved out of moduleRegistry — which knows only about per-project tabs —
 // into this file.
 //
-// THE RULE IS UNCHANGED from the tab's `experiments: ['persona', 'swarm']`
-// any-of gate: the surface opens when EITHER experiment is open. The people
-// running a swarm are exactly the people whose stand-in judges on their behalf,
-// so hiding the persona from them hides the thing the swarm reads; the
-// `persona` flag is a second, independent way in. Both closed keeps it
-// invisible — which is the shipped, signed-out and non-owner state, because the
-// flags are owner-ANDed server-side (src/lib/server/experiments.ts) and a
-// forged settings.json never opens them.
+// THE RULE (changed 2026-08-20, persona promoted to a public beta): the surface
+// opens on the `persona` flag ALONE. It used to be an any-of over
+// `['persona', 'swarm']` — the idea being that a swarm operator should see the
+// corpus their stand-in reads. But the overseer reads that corpus SERVER-SIDE
+// regardless of this UI gate, so the coupling bought nothing except a real
+// leak: once swarm became a public opt-in (0.11.94), every swarm opt-in user's
+// `flags.swarm` was true, so the any-of opened the PERSONAL corpus screen for
+// them too. The coupling now lives INSIDE the server flag (experiments.ts:
+// persona = owner's persona toggle OR the public persona opt-in — swarm no
+// longer reaches it), so this gate reads one flag and the door and the room
+// cannot disagree. Closed keeps it invisible: the flags are owner-ANDed /
+// opt-in-gated server-side and a forged settings.json never opens them.
 //
 // ONE predicate, so the door and the room cannot disagree about who may see
 // this: App passes `onOpenPersona` to the Toolbar only when this returns true
@@ -26,8 +30,10 @@
 
 import type { ExperimentFlags, ExperimentId } from '../types'
 
-/** The experiments that open the Persona surface — ANY of them is enough. */
-export const PERSONA_EXPERIMENTS: readonly ExperimentId[] = ['persona', 'swarm']
+/** The experiment that opens the Persona surface. Just `persona` now — the
+ *  owner/opt-in coupling with swarm was moved server-side into the flag itself
+ *  (experiments.ts), so swarm no longer reaches this surface. See the header. */
+export const PERSONA_EXPERIMENTS: readonly ExperimentId[] = ['persona']
 
 /**
  * Whether the Persona surface is open for this user. Fails CLOSED: absent flags

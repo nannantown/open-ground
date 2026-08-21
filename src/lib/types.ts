@@ -229,6 +229,17 @@ export interface Settings {
    *  is already ungated locally — swarmGate.ts / docs/SECURITY.md); the
    *  in-app warning discloses subscription cost + permission-bypass claude. */
   swarmOptIn?: boolean
+  /** The PUBLIC persona opt-in (all users, not just the owner). Like
+   *  {@link swarmOptIn} but for the Persona surface — user-settable via
+   *  POST /api/settings, narrowed to a literal boolean on save (store.ts).
+   *  ALL PLATFORMS (unlike swarmOptIn's macOS gate): a persona turn is a
+   *  single marker-scraped `claude` run with a deny-list (no Bash/Task/writes
+   *  outside a scratch dir — personaChat.ts), NOT an unattended worker, so it
+   *  carries no PreToolUse-guard / OS-sandbox dependency. Safe to expose:
+   *  loopback-only routes over the user's OWN corpus in ~/.openground/ (no
+   *  cross-user data); the in-app warning discloses subscription cost +
+   *  that a persona turn runs claude with permission prompts skipped. */
+  personaOptIn?: boolean
   /** Work mode (lockdown) — the one-toggle kill switch for every NON-Anthropic
    *  external egress, for running OPEN GROUND on a confidential work machine.
    *  ON ⇒ auto-update checks, the in-app release check, feedback, marketplace,
@@ -271,6 +282,11 @@ export interface ExperimentsResponse {
    *  effective. When `available` is false the Settings toggle is hidden; the
    *  owner path (eligible + experiments.swarm) is unaffected. */
   swarmOptIn: { available: boolean; enabled: boolean }
+  /** The PUBLIC persona opt-in (all users — Settings.personaOptIn). `available`
+   *  is true on every platform (persona has no unattended-worker guard, unlike
+   *  swarm); `enabled` = the user opted in. The owner path (eligible +
+   *  experiments.persona) is unaffected. */
+  personaOptIn: { available: boolean; enabled: boolean }
 }
 
 /** The runtime the commander dial RESOLVES TO on this machine right now,
