@@ -156,6 +156,23 @@ export const board = {
       'Launch a claude session and start this task right away (the prompt is sent for you)',
     'board.run.needsContent': 'Write what to do to run this task.',
     'board.run.hint': 'Run opens the terminal and starts this task automatically.',
+    // Swarm ON: 実行 hands the card to a worker instead of opening a terminal.
+    // 完了 drawer — a record, not a launcher.
+    'board.done.heading': 'Result',
+    'board.done.branch': 'Branch',
+    'board.done.pr': 'Pull request',
+    'board.done.reviewedBy': 'Reviewed by',
+    'board.done.rework': 'Sent back',
+    'board.done.reworkValue': '{count}×',
+    'board.done.conflict': 'Hit a conflict on integration',
+    'board.done.abandoned': 'Dropped without finishing',
+    'board.done.created': 'Created',
+    'board.done.none': 'Nothing was recorded for this card beyond its content.',
+    'board.done.reopenHint': 'Drag it back to another column to pick it up again.',
+    'board.run.hintWorker':
+      'Run hands this card to a worker: its own isolated worktree, then 判断待ち for the commander to integrate.',
+    'board.run.workerSettings':
+      'The supply officer picks the model from the card, and the commander integrates the result — this card has no per-card run settings while the swarm is on.',
     'board.run.missingFolder':
       'The project folder is missing — claude can’t start until it’s relocated.',
     'board.run.failed':
@@ -369,6 +386,21 @@ export const board = {
       'claude セッションを起動して、このタスクをすぐに開始します（プロンプトは自動送信されます）',
     'board.run.needsContent': '内容を書くと実行できます。',
     'board.run.hint': '実行するとターミナルが開き、このタスクが自動で始まります。',
+    'board.done.heading': '結果',
+    'board.done.branch': 'ブランチ',
+    'board.done.pr': 'プルリクエスト',
+    'board.done.reviewedBy': '見た人',
+    'board.done.rework': '差し戻し',
+    'board.done.reworkValue': '{count}回',
+    'board.done.conflict': '統合のときに衝突しました',
+    'board.done.abandoned': '途中で取り下げました',
+    'board.done.created': '作成',
+    'board.done.none': 'このカードには、内容のほかに残っている記録はありません。',
+    'board.done.reopenHint': 'もう一度やるときは、別の列にドラッグして戻してください。',
+    'board.run.hintWorker':
+      '実行するとこのカードを worker に渡します。専用の作業フォルダで進み、終わると判断待ちに入って司令官が統合します。',
+    'board.run.workerSettings':
+      'モデルは補給官がカードの内容から選び、結果は司令官が統合します。swarm がオンの間、このカード個別の実行設定はありません。',
     'board.run.missingFolder':
       'プロジェクトフォルダが見つかりません。場所を再設定するまで claude は起動できません。',
     'board.run.failed':

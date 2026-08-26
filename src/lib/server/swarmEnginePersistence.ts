@@ -35,6 +35,33 @@ export interface EngineIntent {
    *  request: 「補給官も毎回再起動からはじまるのでめんどくさい」. Strict-true
    *  read like every other flag here; absent on old files ⇒ no auto-relaunch. */
   supplyDesired?: boolean
+  /** The owner had the COMMANDER desk (司令官) up when the app last ran — the
+   *  exact twin of {@link supplyDesired}, set on spawn and cleared only by the
+   *  explicit stop route.
+   *
+   *  ⚠ THE GAP THIS CLOSES, measured 2026-08-26. The commander is a `claude`
+   *  desk the server owns, so an app RESTART kills it — and a restart is
+   *  usually an UPDATE, i.e. exactly the moment work is in flight. Everything
+   *  else came back: the engine (`desiredRunning`), the worker roster
+   *  (reconcileRoster), the supply desk (`supplyDesired`). The commander was
+   *  the only one with nothing to come back FOR, so `managerPresence` stayed
+   *  'missing' while workers kept running and finishing — and finished work
+   *  with no commander is work nobody integrates. The owner saw live workers
+   *  and read it as healthy (startedAt 09:07:58Z > manager.updatedAt 08:58:27Z).
+   *
+   *  INDEPENDENT of `desiredRunning` like supply's flag, and for the same
+   *  reason: a commander can be up with autonomy OFF (the owner talking to it),
+   *  and the engine can be on with no desk yet. Strict-true read; absent on old
+   *  files ⇒ no auto-relaunch.
+   *
+   *  OWNER INTENT ONLY — written by POST /api/swarm/manager (the button) and
+   *  cleared by POST /api/swarm/manager/stop, and deliberately NOT by the
+   *  engine's resuscitation reflex, which spawns its own desks. A reflex-spawned
+   *  desk needs no flag: if work is still waiting after a restart the reflex
+   *  simply fires again, and marking it "desired" would leave the owner holding
+   *  a permanent intent they never stated and can only clear by pressing 停止 on
+   *  a desk they never started. */
+  managerDesired?: boolean
   /** The UTC day (`YYYY-MM-DD`) `selfSupplyDayCount` is counting, and the count
    *  itself — self-supply's DAILY CAP, the guard that bounds how many cards the
    *  engine may propose to itself in a day.
@@ -121,6 +148,7 @@ export const readEngineIntent = async (projectPath: string): Promise<EngineInten
       selfSupply: parsed.selfSupply === true,
       overseer: parsed.overseer === true,
       ...(parsed.supplyDesired === true ? { supplyDesired: true } : {}),
+      ...(parsed.managerDesired === true ? { managerDesired: true } : {}),
       ...(typeof parsed.selfSupplyDayKey === 'string' ? { selfSupplyDayKey: parsed.selfSupplyDayKey } : {}),
       ...(typeof parsed.selfSupplyDayCount === 'number' && parsed.selfSupplyDayCount >= 0
         ? { selfSupplyDayCount: parsed.selfSupplyDayCount }
@@ -158,6 +186,7 @@ export interface EngineIntentWrite {
   selfSupply: boolean
   overseer: boolean
   supplyDesired?: boolean | null
+  managerDesired?: boolean | null
   selfSupplyDayKey?: string | null
   selfSupplyDayCount?: number | null
   /** The review-waiting clock (see {@link EngineIntent.reviewWaitingSince}).
@@ -187,6 +216,8 @@ export const writeEngineIntent = async (
     // state" — the same answer the caller would have written anyway.
     const current = await readEngineIntent(projectPath)
     const supplyDesired = intent.supplyDesired === undefined ? current.supplyDesired : intent.supplyDesired
+    const managerDesired =
+      intent.managerDesired === undefined ? current.managerDesired : intent.managerDesired
     const dayKey = intent.selfSupplyDayKey === undefined ? current.selfSupplyDayKey : intent.selfSupplyDayKey
     const dayCount =
       intent.selfSupplyDayCount === undefined ? current.selfSupplyDayCount : intent.selfSupplyDayCount
@@ -204,6 +235,7 @@ export const writeEngineIntent = async (
       selfSupply: intent.selfSupply,
       overseer: intent.overseer,
       ...(supplyDesired === true ? { supplyDesired: true } : {}),
+      ...(managerDesired === true ? { managerDesired: true } : {}),
       ...(typeof dayKey === 'string' && dayKey ? { selfSupplyDayKey: dayKey } : {}),
       ...(typeof dayCount === 'number' && dayCount >= 0 ? { selfSupplyDayCount: dayCount } : {}),
       ...(reviewWaiting ? { reviewWaitingSince: reviewWaiting } : {}),

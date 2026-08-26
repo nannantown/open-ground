@@ -237,13 +237,21 @@ describe('BoardModule drawer — Draft mode', () => {
     expect(saved.tasks[0].run).toEqual({ effort: 'max' })
   })
 
-  it('done-column card: the run footer still renders (running again is explicit)', async () => {
-    const { onLaunchTask, getByText } = renderDrawer(
+  // ⚠ THIS TEST CHANGED SIDES (2026-08-26). It used to read "done-column card:
+  // the run footer still renders (running again is explicit)" and pinned a live
+  // 実行 button on a finished card as intended. The owner's call reversed it:
+  // 「doneになってたらサマリーとかだけでよくない？」 — 完了 is a RECORD, and a
+  // launcher on a record is an offer nobody wanted. What the card left behind
+  // (branch / PR / reviewer / 差し戻し) takes the footer's place; the fuller
+  // observation lives in BoardModule.runRouting.test.tsx.
+  it('done-column card: the run footer is REPLACED by the result summary', async () => {
+    const { onLaunchTask, getByText, queryByText } = renderDrawer(
       makeData(makeTask({ boardColumn: 'done', done: true })),
     )
     await flush()
     expect(onLaunchTask).not.toHaveBeenCalled()
-    expect((getByText('board.run.button') as HTMLButtonElement).disabled).toBe(false)
+    expect(queryByText('board.run.button')).toBeNull()
+    expect(getByText('board.done.heading')).toBeTruthy()
   })
 
   it('missing project: no run button, the missing note explains why', async () => {

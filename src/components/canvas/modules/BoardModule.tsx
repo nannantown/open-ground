@@ -854,6 +854,24 @@ export const BoardModule = ({
             .catch(() => {})
       }
     }
+    // SWARM ON ⇒ 実行 HANDS THE CARD TO A WORKER (owner, 2026-08-26).
+    //
+    // The two paths were the same intent with different machinery, and the
+    // difference was not a runtime detail. A worker gets a REAL isolated
+    // worktree the server cuts, runs on the SDK runtime (the PTY worker pool is
+    // gone — see types.ts's swarmWorkerRuntime note), lands in 判断待ち for the
+    // commander to integrate, and shows up in the Swarm tab with the model the
+    // supply officer picked. The terminal path only ASKS claude, in prose, to
+    // cut a task/ branch and merge itself back — the isolation is a request,
+    // not a fact. With the swarm on, running the card any other way meant a
+    // second execution protocol nobody was maintaining.
+    //
+    // The terminal path stays for swarm-OFF: without a commander to integrate,
+    // "merge it back yourself" is the only flow that finishes.
+    if (swarmVisible) {
+      void dispatchAsWorker(task, runTitle, content)
+      return
+    }
     void launchDetail(task, {
       run: {
         title: runTitle,
@@ -868,6 +886,46 @@ export const BoardModule = ({
         setLaunchFailed(prev => new Map(prev).set(task.id, res?.reason ?? 'other'))
       }
     })
+  }
+
+  // POST /api/swarm/worker — the swarm-ON arm of 実行 above.
+  //
+  // ⚠ THE LIVE FIELDS RIDE THE REQUEST, and that is not belt-and-braces. The
+  // route reads the card from tasks.json, and drawer edits are DEBOUNCED before
+  // they land there — so a card written and run in the same breath would
+  // dispatch a worker after a stale goal, or after nothing at all. The server
+  // prefers these when they are non-empty (the same contract composeTaskPrompt
+  // has always had for the terminal path); `taskId` still carries the identity,
+  // so the todo→doing claim and the twin-dispatch refusal are untouched.
+  //
+  // 409 = the autonomous engine already owns this card. That is a REFUSAL, not a
+  // failure — a second worker on one card is the exact hazard the claim exists to
+  // prevent — so it clears the retry footer instead of raising it: the card is
+  // already being worked on, which is what the owner wanted.
+  const dispatchAsWorker = async (task: ProjectTask, title: string, notes: string) => {
+    setLaunching(true)
+    try {
+      const res = await fetch('/api/swarm/worker', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path, taskId: task.id, title, notes }),
+      })
+      if (res.ok || res.status === 409) return
+      const body = (await res.json().catch(() => ({}))) as {
+        claudeMissing?: boolean
+        claudeLoggedOut?: boolean
+      }
+      setLaunchFailed(prev =>
+        new Map(prev).set(
+          task.id,
+          body.claudeMissing ? 'claudeMissing' : body.claudeLoggedOut ? 'claudeLoggedOut' : 'other',
+        ),
+      )
+    } catch {
+      setLaunchFailed(prev => new Map(prev).set(task.id, 'other'))
+    } finally {
+      setLaunching(false)
+    }
   }
 
   // Restart a DEAD task session (F081): the slot still exists
@@ -1196,6 +1254,72 @@ export const BoardModule = ({
     if (!next.model) delete next.model
     if (!next.effort) delete next.effort
     patchTask(task, { run: Object.keys(next).length ? next : undefined })
+  }
+
+  // 完了 is a RECORD, so its drawer reads like one (owner, 2026-08-26:
+  // 「doneになってたらサマリーとかだけでよくない？」). The run footer — settings,
+  // hint, retry, 実行 — is replaced by what the card actually left behind.
+  //
+  // ⚠ ONLY WHAT WAS WRITTEN DOWN. Every row here is a field that exists on the
+  // card; a card with none of them says so in one line rather than filling the
+  // space with inferred prose. There is no completion time to show — a task
+  // carries `createdAt` and nothing else — so the date is labelled 作成, not 完了.
+  const doneSummary = (task: ProjectTask) => {
+    const rows: { label: string; value: ReactNode }[] = []
+    if (task.branch)
+      rows.push({
+        label: t('board.done.branch'),
+        value: <span className="font-mono text-meta">{task.branch}</span>,
+      })
+    if (task.prUrl)
+      rows.push({
+        label: t('board.done.pr'),
+        value: (
+          <a
+            href={task.prUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="truncate text-accent underline-offset-2 hover:underline"
+          >
+            {task.prUrl}
+          </a>
+        ),
+      })
+    if (task.reviewedBy) rows.push({ label: t('board.done.reviewedBy'), value: task.reviewedBy })
+    if (task.reworkCount)
+      rows.push({
+        label: t('board.done.rework'),
+        value: t('board.done.reworkValue', { count: task.reworkCount }),
+      })
+    if (task.createdAt)
+      rows.push({
+        label: t('board.done.created'),
+        value: new Date(task.createdAt).toLocaleString(),
+      })
+    return (
+      <div className="space-y-2">
+        <p className="label-cap text-ink-faint">{t('board.done.heading')}</p>
+        {rows.length === 0 ? (
+          <p className="text-meta leading-relaxed text-ink-faint">{t('board.done.none')}</p>
+        ) : (
+          <dl className="space-y-1.5">
+            {rows.map(r => (
+              <div key={r.label} className="flex items-baseline gap-3">
+                <dt className="w-20 shrink-0 label-cap text-ink-faint">{r.label}</dt>
+                <dd className="min-w-0 flex-1 truncate text-meta text-ink-muted">{r.value}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+        {task.integrationConflict && (
+          <p className="text-meta leading-relaxed text-accent">{t('board.done.conflict')}</p>
+        )}
+        {task.abandoned && (
+          <p className="text-meta leading-relaxed text-accent">{t('board.done.abandoned')}</p>
+        )}
+        <p className="text-meta leading-relaxed text-ink-faint">{t('board.done.reopenHint')}</p>
+      </div>
+    )
   }
 
   // The per-card run settings row (PR/merge · model · effort) + the 実行
@@ -2099,6 +2223,8 @@ export const BoardModule = ({
                   <p className="text-meta leading-relaxed text-ink-faint">
                     {t('board.run.missingFolder')}
                   </p>
+                ) : columnOf(detailTask) === 'done' ? (
+                  doneSummary(detailTask)
                 ) : (
                   <>
                     {/* Run settings — collapsed by default: the board's global
@@ -2106,33 +2232,55 @@ export const BoardModule = ({
                         so a card surfaces them only when it must diverge. Even
                         folded, the hint line below still spells out the resolved
                         flow + launch profile, so "what will happen" stays visible. */}
-                    <button
-                      type="button"
-                      onClick={() => setRunSettingsOpen(o => !o)}
-                      aria-expanded={runSettingsOpen}
-                      className="-mx-1 flex items-center gap-1.5 rounded-sm px-1 py-1 text-left transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
-                    >
-                      <ChevronRight
-                        size={12}
-                        className={`shrink-0 text-ink-faint transition-transform ${runSettingsOpen ? 'rotate-90' : ''}`}
-                      />
-                      <span className="label-cap text-ink-faint">
-                        {t('board.run.settingsLabel')}
-                      </span>
-                    </button>
-                    {runSettingsOpen && (
-                      <div className="pb-1 pt-0.5">{runSettingsRow(detailTask)}</div>
+                    {/* ⚠ THE THREE PICKERS ARE HIDDEN UNDER SWARM, not disabled
+                        and not left lying. With the swarm on, 実行 dispatches a
+                        WORKER, and a worker answers to none of them: the flow is
+                        always 判断待ち→commander (never a self-merge or a PR the
+                        card opens), and the model + effort come from the supply
+                        officer's card-weight policy (swarmLaunch.desiredModelEffort),
+                        which is the policy the owner asked for in 0.11.97 — a
+                        per-card override fighting it is the confusing half. The
+                        card still SHOWS the model it actually got (opus/high on
+                        the tile), so nothing is hidden, only un-lied-about. */}
+                    {!swarmVisible && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setRunSettingsOpen(o => !o)}
+                          aria-expanded={runSettingsOpen}
+                          className="-mx-1 flex items-center gap-1.5 rounded-sm px-1 py-1 text-left transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                        >
+                          <ChevronRight
+                            size={12}
+                            className={`shrink-0 text-ink-faint transition-transform ${runSettingsOpen ? 'rotate-90' : ''}`}
+                          />
+                          <span className="label-cap text-ink-faint">
+                            {t('board.run.settingsLabel')}
+                          </span>
+                        </button>
+                        {runSettingsOpen && (
+                          <div className="pb-1 pt-0.5">{runSettingsRow(detailTask)}</div>
+                        )}
+                      </>
                     )}
                     <p className="text-meta leading-relaxed text-ink-faint">
                       {!(detailTask.notes ?? '').trim()
                         ? t('board.run.needsContent')
-                        : t('board.run.hint')}
-                      {isolationText ? ` · ${isolationText}` : ''}
-                      {flowTextFor(detailTask) ? ` · ${flowTextFor(detailTask)}` : ''}
-                      <span className="text-ink-faint" title={t('board.detail.profileTitle')}>
-                        {' · '}
-                        {profileTextFor(detailTask)}
-                      </span>
+                        : swarmVisible
+                          ? t('board.run.hintWorker')
+                          : t('board.run.hint')}
+                      {swarmVisible ? (
+                        ` · ${t('board.run.workerSettings')}`
+                      ) : (
+                        <>
+                          {isolationText ? ` · ${isolationText}` : ''}
+                          {flowTextFor(detailTask) ? ` · ${flowTextFor(detailTask)}` : ''}
+                          <span className="text-ink-faint" title={t('board.detail.profileTitle')}>
+                            {' · '}
+                            {profileTextFor(detailTask)}
+                          </span>
+                        </>
+                      )}
                     </p>
                     {launchFailed.has(detailTask.id) &&
                       (launchFailed.get(detailTask.id) === 'claudeLoggedOut' ? (

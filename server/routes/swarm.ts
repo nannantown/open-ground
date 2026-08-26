@@ -66,7 +66,7 @@ import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
 import { spawnSwarmSupply, stopSwarmSupplyDesks } from '@/lib/server/swarmSupply'
 import { patchEngineIntent } from '@/lib/server/swarmEnginePersistence'
 import { spawnSwarmManager } from '@/lib/server/swarmManager'
-import { listManagerDesks, sayToManagerDesk } from '@/lib/server/swarmManagerRuntime'
+import { listManagerDesks, sayToManagerDesk, stopManagerDesks } from '@/lib/server/swarmManagerRuntime'
 
 /** Cap on one relayed message to the commander. Sized like the escalation answer
  *  cap: this is a sentence the owner dictated from a phone, not a payload. */
@@ -290,12 +290,23 @@ export const swarmRoutes = new Hono()
     const taskId = typeof body?.taskId === 'string' ? body.taskId : ''
     if (taskId) {
       // The path passed validateProjectPath, so this read cannot escape the
-      // registry. Live card title/notes are the goal source of truth.
+      // registry.
       const projectData = await readProjectData(path)
       const card = projectData.tasks.find((t) => t.id === taskId)
       if (!card) return c.json({ error: 'task not found' }, 404)
       title = card.title ?? ''
       notes = typeof card.notes === 'string' ? card.notes : undefined
+      // ⚠ THE CLIENT'S LIVE FIELDS WIN OVER THE DISK COPY (2026-08-26), the same
+      // contract composeTaskPrompt has always had for the terminal path
+      // ({@link LiveTaskFields}). The Board drawer DEBOUNCES its edits (~350ms)
+      // before they reach tasks.json, so a card dispatched right after typing —
+      // the ordinary case, since the owner writes the card and presses 実行 —
+      // would send a worker after a goal that is one edit stale, or after an
+      // EMPTY one for a card created in the same breath. The two dispatch paths
+      // had different answers to the same question; now they have one.
+      // Bounded by MAX_GOAL below like every other goal, and owner-gated above.
+      if (typeof body?.title === 'string' && body.title.trim()) title = body.title
+      if (typeof body?.notes === 'string' && body.notes.trim()) notes = body.notes
     } else if (typeof body?.title === 'string' && body.title.trim()) {
       title = body.title
       notes = typeof body?.notes === 'string' ? body.notes : undefined
@@ -580,10 +591,45 @@ export const swarmRoutes = new Hono()
       // engine's in-memory roster did not. `fresh:true` forces a new conversation.
       const fresh = body?.fresh === true
       const res = await spawnSwarmManager({ projectPath: path, cols, rows, fresh })
+      // The owner wants this desk UP — remember it across restarts (engine.json),
+      // the exact twin of the supply spawn's write above. WITHOUT this the
+      // commander was the ONE desk with nothing to come back for: an update
+      // restart killed it while the engine, the worker roster and the supply
+      // desk all returned, leaving live workers finishing work that nobody
+      // would ever integrate (measured 2026-08-26). AWAITED but swallow-on-fail
+      // for the same reason supply's is: a failed mirror write must not fail a
+      // spawn that already succeeded, and fire-and-forget here races test
+      // teardown.
+      await patchEngineIntent(path, { managerDesired: true }).catch(() => {})
       return c.json(res)
     } catch (e: any) {
       return c.json({ error: `failed to spawn manager: ${e?.message ?? e}` }, 500)
     }
+  })
+  // --- POST /api/swarm/manager/stop — the owner closes the commander desk ----
+  // Body: { path }. Kills every live commander desk in the project (BOTH pools)
+  // and clears the persisted managerDesired flag — the counterpart of the spawn
+  // route's set, and the twin of /api/swarm/supply/stop.
+  //
+  // The UI used to close the desk by DELETEing its raw handle, which stops the
+  // desk but can never speak to INTENT. With boot auto-resume in play that is
+  // not a small gap: a stop that forgets to clear the flag resurrects a desk
+  // the owner just closed, every restart, forever. Owner-gated + validated like
+  // every /api/swarm/* write.
+  .post('/api/swarm/manager/stop', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    const stopped = stopManagerDesks(path)
+    await patchEngineIntent(path, { managerDesired: false }).catch(() => {})
+    return c.json({ ok: true, stopped })
   })
   // --- POST /api/swarm/manager/say — relay ONE message to the commander -------
   // Body: { path, text }. The RUNTIME-AGNOSTIC way to speak to the commander

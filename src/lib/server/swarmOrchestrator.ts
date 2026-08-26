@@ -11378,6 +11378,9 @@ export const resumeEngines = async (
      *  Injectable so the resume test proves the supplyDesired flag actually
      *  spawns — and that its ABSENCE spawns nothing — without a real claude. */
     spawnSupply?: (o: { projectPath: string }) => Promise<unknown>
+    /** DI for tests: the COMMANDER-desk boot resume (default spawnSwarmManager).
+     *  Same shape and same reason as {@link spawnSupply}. */
+    spawnManager?: (o: { projectPath: string }) => Promise<unknown>
   },
 ): Promise<{ resumed: string[]; suppressed: boolean }> => {
   const now = opts?.now ?? Date.now()
@@ -11466,6 +11469,63 @@ export const resumeEngines = async (
           if (pre.ok) await (opts?.spawnSupply ?? spawnSwarmSupply)({ projectPath })
         } catch {
           /* resume is best-effort; the owner can relaunch from the tab */
+        }
+      }
+      // COMMANDER DESK RESUME (2026-08-26) — the twin of the supply block above,
+      // and the fix for the orphaned-commander incident.
+      //
+      // THE INCIDENT. An OPEN GROUND update restarted the app while a worker was
+      // running. Everything came back except the commander: the engine resumed
+      // (`desiredRunning`), the worker roster reconciled, the supply desk
+      // relaunched — but the commander is a `claude` desk this server owns, so
+      // the restart killed it and NOTHING brought it back. `managerPresence`
+      // stayed 'missing' with `manager.updatedAt` frozen at 08:58:27Z against a
+      // boot at 09:07:58Z, while the orphaned worker ran on and FINISHED. Nobody
+      // integrates finished work without a commander, so the board looked like it
+      // was moving while the trunk stood still — the worst kind of stop, the kind
+      // that looks like progress. A restart is usually an UPDATE, i.e. exactly the
+      // moment work is most likely to be in flight.
+      //
+      // INDEPENDENT of `desiredRunning` (hence: before the continue below), for
+      // the same reason supply's is — a commander can be up with autonomy OFF,
+      // which is the owner talking to it. It is NOT gated on the manual-stop
+      // record either: that record is the ENGINE's pause, and pausing autonomy has
+      // never meant closing the desk. The flag's own stop route is the only thing
+      // that clears it.
+      //
+      // CANNOT DUPLICATE A DESK: spawnSwarmManager's singleton guard adopts any
+      // live commander in the project instead of launching a second one, so a
+      // resume that races anything (a fast owner, a double boot) returns the desk
+      // that already exists.
+      //
+      // ⚠ NOT SILENT when it cannot come back — the deliberate difference from
+      // supply, and the 2026-08-04 lesson from the branch below applied here: a
+      // supply desk that fails to relaunch is a window the owner will notice is
+      // missing, while a commander that fails to relaunch is INVISIBLE and leaves
+      // exactly the stall this whole block exists to end. Same event as the three
+      // engine-resume branches, once per project per boot.
+      if (intent.managerDesired) {
+        try {
+          const pre = await claudeRunPreflight()
+          if (pre.ok) {
+            await (opts?.spawnManager ?? spawnSwarmManager)({ projectPath })
+          } else {
+            await createSwarmFatalNotification({
+              event: 'engine-resume-suppressed',
+              projectPath,
+              detail:
+                'claude をすぐに使えなかったため、司令官の卓を復帰できませんでした' +
+                `(${pre.body?.error ?? '理由不明'})。worker が動いていても、完了分を統合する司令官がいない状態です — Swarm タブから司令官を立て直してください。`,
+            }).catch(() => {})
+          }
+        } catch (e) {
+          await createSwarmFatalNotification({
+            event: 'engine-resume-suppressed',
+            projectPath,
+            detail:
+              `司令官の卓を復帰できませんでした(${e instanceof Error ? e.message : String(e)})。` +
+              'worker が動いていても、完了分を統合する司令官がいない状態です — Swarm タブから司令官を立て直してください。',
+          }).catch(() => {})
         }
       }
       if (!intent.desiredRunning) continue

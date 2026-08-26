@@ -38,12 +38,14 @@ import {
   getTerminalScreen,
   claudeSessionActivity,
   writeInput,
+  killTerminal,
 } from './terminal'
 import {
   listSdkSessionsIn,
   isSdkSessionLive,
   getSdkSession,
   pushSdkInput,
+  terminateSdkSession,
 } from './sdkSession'
 import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
 
@@ -255,3 +257,28 @@ export const managerDeskSummary = (
  *  PTY desk (its equivalent is `claudeStatus` over the screen). */
 export const sdkManagerDeskStatus = (h: ManagerDeskHandle) =>
   h.runtime === 'sdk' ? (getSdkSession(h.handleId)?.status ?? null) : null
+
+/** Tear down EVERY commander desk in `projectPath`, whichever pool carries it,
+ *  and report the handle ids that were asked to stop.
+ *
+ *  The server-side twin of {@link stopSwarmSupplyDesks}, and it exists for the
+ *  same reason that one does: with a boot auto-resume in play
+ *  (`EngineIntent.managerDesired`), "stop" has to be a statement of INTENT, not
+ *  just a kill. The UI used to close the desk by DELETEing its raw handle —
+ *  which stops the desk but can never say the owner MEANT it — so a stop that
+ *  did not clear the flag would resurrect the desk on every restart, forever.
+ *  The clearing lives in the route; the killing lives here.
+ *
+ *  Branches on `runtime`, never on "whichever id is non-empty" — the two pools
+ *  take different ids and handing one to the other would at best no-op and at
+ *  worst kill an unrelated pane (the same identity invariant this whole file
+ *  keeps). Best-effort per desk: a handle already reaped is not an error. */
+export const stopManagerDesks = (projectPath: string, deps: ManagerDeskDeps = {}): string[] => {
+  const stopped: string[] = []
+  for (const d of listManagerDesks(projectPath, deps)) {
+    if (d.runtime === 'sdk') terminateSdkSession(d.handleId)
+    else killTerminal(d.handleId)
+    stopped.push(d.handleId)
+  }
+  return stopped
+}

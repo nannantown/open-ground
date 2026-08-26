@@ -45,6 +45,9 @@ const optionalIntentKeys = (): string[] => {
  *  of the new field is the person who knows what a live value looks like. */
 const SAMPLE: Record<string, unknown> = {
   supplyDesired: true,
+  // The commander desk's boot auto-resume (2026-08-26) — the twin of
+  // supplyDesired, added after an update restart orphaned a running swarm.
+  managerDesired: true,
   selfSupplyDayKey: '2026-08-03',
   selfSupplyDayCount: 7,
   // The review-waiting clock (2026-08-14) — branch → first-seen epoch ms.
@@ -116,6 +119,10 @@ describe('engine.json write regime — optional fields survive a write that omit
     // The supply STOP route's shape.
     await patchEngineIntent(projectPath, { supplyDesired: false })
     expect((await readEngineIntent(projectPath)).supplyDesired).toBeUndefined()
+    // …and the commander STOP route's, which has the same obligation: a desk the
+    // owner just closed must not be resurrected by the next boot's auto-resume.
+    await patchEngineIntent(projectPath, { managerDesired: false })
+    expect((await readEngineIntent(projectPath)).managerDesired).toBeUndefined()
     // A new UTC day resets the counter through the same door.
     await patchEngineIntent(projectPath, { selfSupplyDayCount: 0 })
     expect((await readEngineIntent(projectPath)).selfSupplyDayCount).toBe(0)

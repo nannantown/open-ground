@@ -422,6 +422,157 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
 // `--resume`-respawned into the SAME worktree and adopted into engine.workers
 // BEFORE the first pass. These drive that wiring with injected reconcile + proof +
 // spawnWorker fakes (no real ~/.claude JSONL, no real PTY).
+// ─── 司令官の卓が再起動をまたぐ (2026-08-26) ──────────────────────────────────
+//
+// THE INCIDENT, in one line: an update restarted the app mid-swarm and the
+// commander was the ONE thing that did not come back.
+//
+// Everything else did. The engine resumed from `desiredRunning`. The worker
+// roster reconciled and its conversations resumed. The supply desk relaunched
+// from `supplyDesired`. But the commander is a `claude` desk this server owns,
+// so the restart killed it, and no flag existed to bring it back:
+// `managerPresence` stayed 'missing' with `manager.updatedAt` frozen at
+// 08:58:27Z against a boot at 09:07:58Z, while the orphaned worker ran on and
+// FINISHED — and finished work with no commander is work nobody integrates.
+// The owner saw live workers and read the board as healthy. A restart is
+// usually an UPDATE, i.e. exactly when work is most likely to be in flight.
+//
+// ⚠ WHY THESE ARE NOT ONE TEST. Three of the four ways to get this wrong pass
+// the happy-path check: putting the block after `if (!intent.desiredRunning)
+// continue` (loses every autonomy-off desk), putting it after the manual-stop
+// guard (loses every paused-engine desk), and copying supply's silent catch
+// (turns a failed resume back into the invisible stall this whole card exists
+// to end). Each gets its own observation.
+describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
+  it('managerDesired:true brings the commander desk back at boot', async () => {
+    const spawned: string[] = []
+    await writeEngineIntent(projA, {
+      desiredRunning: true,
+      selfSupply: false,
+      overseer: false,
+      managerDesired: true,
+    })
+    await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA],
+      spawnManager: async ({ projectPath }) => {
+        spawned.push(projectPath)
+        return {}
+      },
+    })
+    expect(spawned, 'the desk the owner had up must be relaunched').toEqual([projA])
+  })
+
+  it('no managerDesired ⇒ NOTHING is spawned (a desk the owner never opened stays closed)', async () => {
+    const spawned: string[] = []
+    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA],
+      spawnManager: async ({ projectPath }) => {
+        spawned.push(projectPath)
+        return {}
+      },
+    })
+    expect(spawned).toEqual([])
+  })
+
+  it('INDEPENDENT of autonomy: a commander comes back even with desiredRunning:false', async () => {
+    // The failure mode this pins: the block placed one line too late, after
+    // `if (!intent.desiredRunning) continue`. A commander can be up with
+    // autonomy OFF — that is the owner TALKING to it, the most common way the
+    // desk is used — so gating the desk on the engine loses exactly that case,
+    // and every happy-path test above would still be green.
+    const spawned: string[] = []
+    await writeEngineIntent(projA, {
+      desiredRunning: false,
+      selfSupply: false,
+      overseer: false,
+      managerDesired: true,
+    })
+    await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA],
+      spawnManager: async ({ projectPath }) => {
+        spawned.push(projectPath)
+        return {}
+      },
+    })
+    expect(spawned).toEqual([projA])
+    // …and the ENGINE genuinely stayed off — the desk did not drag autonomy back on.
+    const state = await getOrchestratorState(projA, safeDeps())
+    expect(state.running).toBe(false)
+  })
+
+  it('a persisted manual-stop pauses the ENGINE but never closes the commander desk', async () => {
+    // Sibling of the test above, one guard further down. `manualStop` is the
+    // owner pausing AUTONOMY; it has never meant "close the desk I am talking
+    // to", and only the desk's own stop route clears its flag.
+    const spawned: string[] = []
+    await rememberSwarmManualStop(await canonicalize(projA))
+    await writeEngineIntent(projA, {
+      desiredRunning: true,
+      selfSupply: false,
+      overseer: false,
+      managerDesired: true,
+    })
+    const result = await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA],
+      spawnManager: async ({ projectPath }) => {
+        spawned.push(projectPath)
+        return {}
+      },
+    })
+    expect(result.resumed).toHaveLength(0) // supremacy — autonomy stays paused
+    expect(spawned).toEqual([projA]) // …the desk still comes back
+  })
+
+  it('NOT SILENT: a preflight failure that blocks the commander TELLS THE OWNER', async () => {
+    // The deliberate difference from the supply desk, whose resume swallows.
+    // A missing supply window is VISIBLE — the owner opens the tab and sees an
+    // empty pane. A missing commander is not: workers keep running, cards keep
+    // moving, and the only symptom is that nothing ever lands. Silence here
+    // recreates the exact stall this card removes.
+    preflightMock.ok = false
+    await writeEngineIntent(projA, {
+      desiredRunning: false,
+      selfSupply: false,
+      overseer: false,
+      managerDesired: true,
+    })
+    await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
+    const fatal = (await readNotificationsFresh()).find(
+      (n) => n.kind === 'swarm-fatal' && n.swarmFatal?.event === 'engine-resume-suppressed',
+    )
+    expect(fatal, 'a commander that cannot come back must say so').toBeTruthy()
+    expect(fatal?.swarmFatal?.projectPath).toBe(projA)
+    expect(fatal?.swarmFatal?.detail).toContain('司令官')
+  })
+
+  it('NOT SILENT: a spawn that THROWS is reported, and the boot carries on', async () => {
+    await writeEngineIntent(projA, {
+      desiredRunning: false,
+      selfSupply: false,
+      overseer: false,
+      managerDesired: true,
+    })
+    await writeEngineIntent(projB, { desiredRunning: true, selfSupply: false, overseer: false })
+    const result = await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA, projB],
+      spawnManager: async () => {
+        throw new Error('claude refused')
+      },
+    })
+    const fatal = (await readNotificationsFresh()).find(
+      (n) =>
+        n.kind === 'swarm-fatal' &&
+        n.swarmFatal?.event === 'engine-resume-suppressed' &&
+        n.swarmFatal?.projectPath === projA,
+    )
+    expect(fatal, 'a failed commander spawn must not be swallowed').toBeTruthy()
+    expect(fatal?.swarmFatal?.detail).toContain('司令官')
+    // A desk that could not come back must not take the rest of the boot with it.
+    expect(result.resumed).toContain(await canonicalize(projB))
+  })
+})
+
 describe('resumeEngines — worker conversation resume (card 4)', () => {
   const ENTRY = {
     sessionId: 'sess-1111-2222-3333-4444',

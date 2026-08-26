@@ -298,6 +298,58 @@ worktree を掃除すると生きた作業を殺す(02 章 §6 の削除経路�
 
 (旧 `autoMerge` フィールドも overseer と同じ揮発モデルだったが 2026-07-16 にフィールドごと撤去 — 司令官起こしは `running` に常時同乗。overseer はさらに、明示 stop が disarm し(:5863-5866)、running 中しか arm できない(:6393-6396)。)
 
+### 7.4b 司令官の卓も再起動をまたぐ(2026-08-26 追加 — 孤児化の是正)
+
+**旧知識: 再起動で司令官は消え、engine の蘇生反射が起こし直すまで戻らない。撤回。**
+
+再起動をまたいで戻るものの表に、**司令官(commander)の卓**が加わった。根拠は
+`engine.json` の新フィールド **`managerDesired`** — 補給官の `supplyDesired`
+(2026-08-03)と完全に対称で、boot の `resumeEngines()` が読んで
+`spawnSwarmManager` を呼ぶ。
+
+**なぜ増やしたか(実測の事故, 2026-08-26)**: アップデートが swarm 稼働中にアプリを
+再起動した。engine は `desiredRunning` で戻り、worker roster は reconcile で戻り、
+補給官は `supplyDesired` で戻った。**司令官だけが戻らなかった** — 卓はこのサーバが
+抱える `claude` なので再起動で死ぬのに、戻すための根拠がどこにも無かった。
+`managerPresence` は `missing` のまま(`manager.updatedAt` 08:58:27Z / boot
+09:07:58Z)、孤児化した worker はそのまま走り続けて**完了した**。司令官のいない完了は
+誰も統合しない。owner の目には worker が生きているので「動いている」に見える — いちばん
+気づきにくい停止。再起動はたいていリリースなので、**作業が飛んでいる最中に起きる**。
+
+司令官の卓に効く順序と条件、他フィールドとの違い:
+
+| | 根拠 | `desiredRunning` に従属するか | 手動停止記録に負けるか |
+|---|---|---|---|
+| engine の `running` | `desiredRunning` | — | **負ける**(§7.4 の supremacy) |
+| 補給官の卓 | `supplyDesired` | しない | 負けない |
+| **司令官の卓** | **`managerDesired`** | **しない** | **負けない** |
+| overseer | 覚えるが起こさない | — | — |
+
+- **`desiredRunning` に従属しない** — 自動運転 OFF のまま司令官が立っているのは普通の
+  状態(owner が卓と話している)。engine のゲートの後ろに置くとその全部を落とす。
+- **`manualStop` にも負けない** — あれは**自動運転の一時停止**であって、「今話している卓を
+  閉じろ」という意味を持ったことは一度もない。卓を閉じるのは卓自身の停止経路だけ。
+- **owner の意図だけを書く** — `POST /api/swarm/manager` が立て、
+  **`POST /api/swarm/manager/stop`(新設)**が消す。engine の蘇生反射が立てた卓は
+  フラグを書かない(統合待ちが残っていれば反射がもう一度立てるので不要だし、owner が
+  立てた覚えのない意図を永続させてしまう)。
+- **閉じるボタンは必ずこの stop 経路を通る** — 以前の UI は生ハンドルを DELETE していた
+  (kill であって意図の表明ではない)。boot 自動復帰が入った今それをやると、**owner が
+  閉じた卓が毎回の再起動で蘇る**。補給官側で `/api/swarm/supply/stop` が塞いだのと同型の罠。
+- **戻れなかったときは黙らない** — 補給官の resume は失敗を握り潰すが、司令官は
+  `engine-resume-suppressed` の fatal 通知を上げる。補給官の不在は画面で見えるが、
+  **司令官の不在は見えない**(worker は動き、カードは進み、ただ何も着地しない)。
+
+⚠ §7.3 の dev ゲートはここにも同じくかかる — `process.send` が無い `tsx watch` では
+resume そのものが走らないので、司令官の卓も戻らない。実機確認は `electron:prod` か
+パッケージ済み `.app` で。
+
+歯(mutation で赤を実測済み): `swarmOrchestrator.resumeEngines.test.ts` の
+「the COMMANDER desk comes back」ブロック(ブロック削除 / `desiredRunning` ゲートの後ろへ移動 /
+手動停止ゲートの後ろへ移動 / 失敗を握り潰す、の4通り)、
+`server/routes/__tests__/swarmManagerDesired.test.ts`(spawn が書かない / stop が消さない /
+owner ゲート欠落)、`SwarmModule.commanderStop.test.tsx`(生ハンドル DELETE への差し戻し / path 欠落)。
+
 ### 7.5 passInFlight / pendingDispatch は外から見えない
 
 `stateOf`(:1836-1873)は `passInFlight` / `pendingDispatch` / `lock` / `generation` / rework 予算 Map を**返さない**。「dispatch が二重に走っていないか」を API で確認する手段はなく、機械封鎖(§4.4 + `isCardDispatchInFlight`)を信頼するのが正。手動 dispatch(POST `/api/swarm/worker`)がエンジン予約と衝突すると 409 が返る(02 章 §2.1 の twin-dispatch ガード)。

@@ -700,15 +700,22 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   },
   'src/lib/server/swarmManagerRuntime.ts': {
     tier: 'both-pools',
-    why: 'The commander desk window: listManagerDesks concatenates the PTY and SDK desks so the singleton guard and the presence probe can never disagree, and isManagerDeskAlive branches per runtime.',
+    why: 'The commander desk window: listManagerDesks concatenates the PTY and SDK desks so the singleton guard and the presence probe can never disagree, and isManagerDeskAlive branches per runtime. stopManagerDesks (2026-08-26) TEARS DOWN over the same list, branching on the handle\'s own runtime — the boot auto-resume made "close the desk" a durable statement, so a stop that reached only one pool would leave a desk alive under a cleared intent.',
     ptyFns: [
       'claudeSessionActivity',
       'getTerminalScreen',
       'isTerminalProcessAlive',
+      'killTerminal',
       'listLiveDesksIn',
       'writeInput',
     ],
-    sdkCalls: ['getSdkSession', 'isSdkSessionLive', 'listSdkSessionsIn', 'pushSdkInput'],
+    sdkCalls: [
+      'getSdkSession',
+      'isSdkSessionLive',
+      'listSdkSessionsIn',
+      'pushSdkInput',
+      'terminateSdkSession',
+    ],
     sdkHandleFloor: 2,
   },
   'src/lib/server/swarmSessions.ts': {

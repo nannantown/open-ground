@@ -148,23 +148,28 @@ const loadManager = (projectId: string): SwarmManager | null => {
   }
 }
 
-/** Tear down whichever runtime carries the commander desk.
+/** Tear down the commander desk — through the ROUTE that also records the intent.
  *
- *  Best-effort on purpose (both branches swallow): the UI drops its record
- *  either way, and a stop that 404s because the desk is already gone must not
- *  leave the owner staring at a session they cannot close. Branches on
- *  `runtime`, never on "which id happens to be non-empty" — the two pools take
- *  different ids and mixing them up would silently kill someone else's pane. */
-const stopCommanderDesk = async (manager: SwarmManager, projectPath: string): Promise<void> => {
-  if (manager.runtime === 'sdk' && manager.sdkSessionId) {
-    await fetch(
-      `/api/sdk-session/${encodeURIComponent(manager.sdkSessionId)}?path=${encodeURIComponent(projectPath)}`,
-      { method: 'DELETE' },
-    ).catch(() => {})
-    return
-  }
-  if (!manager.terminalId) return
-  await api.api.terminal[':id'].$delete({ param: { id: manager.terminalId } }).catch(() => {})
+ *  ⚠ IT IS NOT A RAW KILL ANY MORE (2026-08-26), and the distinction is the whole
+ *  point. This used to DELETE the desk's handle directly, which stops the desk
+ *  but can never say the owner MEANT it. Now that a commander comes back at boot
+ *  (`EngineIntent.managerDesired`, added the same day to end the orphaned-commander
+ *  stall), a stop that does not clear that flag resurrects a desk the owner just
+ *  closed, on every restart, forever — the exact trap /api/swarm/supply/stop was
+ *  built to avoid on its side. POST /api/swarm/manager/stop does both halves, and
+ *  it kills across BOTH pools server-side, so this no longer has to branch on
+ *  runtime at all: the identity invariant (pty ⇔ terminalId, sdk ⇔ sdkSessionId)
+ *  is kept by `listManagerDesks`, which cannot hand one pool's id to the other.
+ *
+ *  Best-effort on purpose (swallows): the UI drops its record either way, and a
+ *  stop that fails because the desk is already gone must not leave the owner
+ *  staring at a session they cannot close. */
+const stopCommanderDesk = async (_manager: SwarmManager, projectPath: string): Promise<void> => {
+  await fetch('/api/swarm/manager/stop', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path: projectPath }),
+  }).catch(() => {})
 }
 
 /** Tear down whichever runtime carries THIS WORKER's desk — the worker-side
