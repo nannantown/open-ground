@@ -79,10 +79,21 @@ const kept = (region: string, text: string): string =>
   `${PERSONA_KEPT_MARKER} ${region}|${text} ${PERSONA_END}`
 const reply = (text: string): string => `${PERSONA_REPLY_MARKER} ${text} ${PERSONA_END}`
 
+// A CHAT turn's markers carry that turn's token (personaChat.ts personaMarker),
+// so a resumed turn can tell its own answer from the conversation replayed above
+// it. IMPORT is one-shot and states no token, hence the two fixture pairs — and
+// the runner below stamps `{nonce}` only when the prompt it was handed asks for
+// one, so this single fake stays faithful to both contracts.
+const keptT = (region: string, text: string): string =>
+  `${PERSONA_KEPT_MARKER}{nonce}: ${region}|${text} ${PERSONA_END}`
+const replyT = (text: string): string =>
+  `${PERSONA_REPLY_MARKER}{nonce}: ${text} ${PERSONA_END}`
+
 const useFakeRunner = (raw: string): void => {
   const runTurn = async (args: PersonaTurnArgs) => {
     launches.push(args)
-    return { raw }
+    const m = new RegExp(`${PERSONA_REPLY_MARKER}([0-9a-f]{8}):`).exec(args.prompt)
+    return { raw: m ? raw.replaceAll('{nonce}', m[1]) : raw }
   }
   _setPersonaChatDepsForTest({ runTurn })
   _setPersonaImportDepsForTest({ runTurn })
@@ -108,7 +119,7 @@ beforeEach(async () => {
   launches = []
   _resetPersonaChatForTest()
   _resetPersonaImportForTest()
-  useFakeRunner(output(kept('legs', '決めたあとに止まる'), reply('どのあたりが重いですか。')))
+  useFakeRunner(output(keptT('legs', '決めたあとに止まる'), replyT('どのあたりが重いですか。')))
 })
 
 afterEach(async () => {

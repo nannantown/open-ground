@@ -192,8 +192,57 @@ const stripBase = () => ({
   onCreateTask: vi.fn(() => 'new'),
 })
 
-describe('worker strip — always-on phase (doing column)', () => {
-  it('shows the heartbeat phase as visible text, not only a hover tooltip', () => {
+// ── Card body preview ───────────────────────────────────────────────────────
+// The first two lines of a card's own notes. A DISPATCHED card's notes open with
+// the brief the worker was given (【背景】…), which at two lines of a ~260px card
+// is always cut mid-path and tells the owner nothing — so the preview is not
+// drawn once a worker owns the card (owner, 2026-08-23). An undispatched card's
+// notes are usually short and readable, so there it stays.
+//
+// The two cases below have to move in OPPOSITE directions, which is the point:
+// a mutation that simply always-hides or always-shows the preview fails one of
+// them.
+describe('card body preview', () => {
+  const BRIEF = '【背景】 既存レポート docs/research/20260815-fde.md を踏まえ'
+  const doingWithNotes = () =>
+    data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing', notes: BRIEF })])
+
+  it('a worker-owned card does NOT preview its notes — they only ever truncate', () => {
+    const { getByText, queryByText } = render(
+      <BoardTab
+        data={doingWithNotes()}
+        {...stripBase()}
+        workerForTask={() => ({ branch: 'swarm/x', activity: 'working' })}
+      />,
+    )
+    // Positive control — the card IS rendered (title + strip), so the absence
+    // below is about the preview, not a card that failed to draw.
+    expect(getByText('Bravo')).toBeTruthy()
+    expect(getByText('projectPanel.swarm.manager.stageRunning')).toBeTruthy()
+    expect(queryByText(BRIEF)).toBeNull()
+  })
+
+  it('the SAME card with no worker DOES preview its notes', () => {
+    const { getByText } = render(
+      <BoardTab data={doingWithNotes()} {...stripBase()} workerForTask={() => null} />,
+    )
+    expect(getByText(BRIEF)).toBeTruthy()
+  })
+})
+
+// ── Worker strip (doing column) ─────────────────────────────────────────────
+// ONE row, and the tests below exist to keep it one row. The strip used to end
+// with the branch handle, and a separate row under it carried the worker's own
+// report; on a ~260px card both were always cut ("swarm/f…", a half sentence),
+// so they told the owner nothing while costing two of the card's rows. The
+// owner asked for the card to carry only what can actually be read
+// (2026-08-23): title, who is on it, and where they are in the run.
+//
+// What moved did NOT vanish — branch and report are in the strip's tooltip, and
+// in full in the Swarm tab. So each test below pins BOTH halves: gone from the
+// body, still reachable.
+describe('worker strip (doing column)', () => {
+  it('shows the heartbeat phase as visible text — the one "what is it doing" that fits', () => {
     const { getByText } = render(
       <BoardTab
         data={data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])}
@@ -201,12 +250,8 @@ describe('worker strip — always-on phase (doing column)', () => {
         workerForTask={() => ({ branch: 'swarm/x', activity: 'working', phase: 'verify' })}
       />,
     )
-    // Before this feature the phase lived ONLY in the strip's title attribute —
-    // getByText never matches a title, so this is red without the always-on span.
     // 'verify' is known swarm vocabulary → the owner-plain i18n key (t echoes keys).
     expect(getByText('· board.card.phaseVerify')).toBeTruthy()
-    // The branch handle stays beside it.
-    expect(getByText('swarm/x')).toBeTruthy()
   })
 
   it('an unknown phase word renders verbatim — no invented meaning', () => {
@@ -228,8 +273,27 @@ describe('worker strip — always-on phase (doing column)', () => {
         workerForTask={() => ({ branch: 'swarm/x', activity: 'waiting' })}
       />,
     )
-    expect(getByText('swarm/x')).toBeTruthy()
+    // Positive control — the strip IS on screen (its activity word), so the
+    // absence below is about the phase span and not a card that failed to render.
+    expect(getByText('projectPanel.swarm.statusWaiting')).toBeTruthy()
     expect(queryByText(/^·/)).toBeNull()
+  })
+
+  it('⚠ the BRANCH is not card body text — it only ever truncated to noise', () => {
+    const { getByText, queryByText } = render(
+      <BoardTab
+        data={data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])}
+        {...stripBase()}
+        workerForTask={() => ({ branch: 'swarm/x', activity: 'working', phase: 'verify' })}
+      />,
+    )
+    // getByText never matches a title attribute, so re-adding the branch span
+    // turns this red.
+    expect(queryByText('swarm/x')).toBeNull()
+    // …and it is not LOST: the tooltip still names which worker owns the card.
+    expect(getByText('· board.card.phaseVerify').closest('div')?.getAttribute('title')).toBe(
+      'swarm/x',
+    )
   })
 })
 
@@ -317,10 +381,27 @@ describe('commander strip (review column)', () => {
 // are doing. It has three states and the third one is the load-bearing one:
 // when the note cannot be dated, the card says nothing rather than implying the
 // note is current.
-describe('worker note line (doing column)', () => {
+// ── Worker note (doing column) ──────────────────────────────────────────────
+// The worker's own report of what it is doing. It was its own visible row until
+// 2026-08-23; at two lines of ~260px it only ever showed a cut half-sentence, so
+// the owner had it removed from the card. It now rides in the strip's tooltip.
+//
+// ⚠ THE FRESHNESS RULE SURVIVED THE MOVE, and these tests are what hold it
+// there: a note rendered bare IS a claim that it is true NOW, and that is just
+// as true inside a tooltip as it was in a row. So — fresh prints as-is, stale
+// carries 「最後の報告:」, and an UNDATABLE note appears nowhere at all (we
+// cannot say when it was true, and a placeholder would be the same claim with
+// fewer words).
+describe('worker note — tooltip only, freshness rule intact (doing column)', () => {
   const doingCard = () => data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])
 
-  it('a fresh note renders as visible text, not only a hover tooltip', () => {
+  // The strip's OWN title — reached from its activity word, whose parent IS the
+  // strip div. (A bare querySelector('[title]') picks up the column header
+  // instead and would pass against the wrong element.)
+  const stripTitle = (activityLabel: HTMLElement): string | null =>
+    activityLabel.parentElement?.getAttribute('title') ?? null
+
+  it('a fresh note rides in the tooltip, unprefixed — and never as card body text', () => {
     const { getByText, queryByText } = render(
       <BoardTab
         data={doingCard()}
@@ -333,15 +414,16 @@ describe('worker note line (doing column)', () => {
         })}
       />,
     )
-    // getByText never matches a title attribute, so this is red without the
-    // always-on line.
-    expect(getByText('wiring the reducer')).toBeTruthy()
-    // A current note carries NO "last report:" prefix — otherwise the stale
-    // mutation below could pass by always prefixing.
-    expect(queryByText('board.card.noteStale')).toBeNull()
+    // Body text: gone. Re-adding the note row turns this red.
+    expect(queryByText('wiring the reducer')).toBeNull()
+    // Tooltip: present, and carrying NO "last report:" prefix — otherwise the
+    // stale case below could pass by always prefixing.
+    expect(stripTitle(getByText('projectPanel.swarm.manager.stageRunning'))).toBe(
+      'swarm/x — wiring the reducer',
+    )
   })
 
-  it('a stale note is prefixed — it must not read as a statement about now', () => {
+  it('a stale note is STILL prefixed — it must not read as a statement about now', () => {
     const { getByText } = render(
       <BoardTab
         data={doingCard()}
@@ -354,12 +436,12 @@ describe('worker note line (doing column)', () => {
         })}
       />,
     )
-    expect(getByText('board.card.noteStale')).toBeTruthy()
-    // The note itself still shows — a stale report is still a report.
-    expect(getByText('wiring the reducer')).toBeTruthy()
+    expect(stripTitle(getByText('projectPanel.swarm.statusWaiting'))).toBe(
+      'swarm/x — board.card.noteStale wiring the reducer',
+    )
   })
 
-  it('an UNDATABLE note renders no line at all — no placeholder, no bare claim', () => {
+  it('an UNDATABLE note appears NOWHERE — not in the body, not in the tooltip', () => {
     const { getByText, queryByText } = render(
       <BoardTab
         data={doingCard()}
@@ -372,14 +454,13 @@ describe('worker note line (doing column)', () => {
         })}
       />,
     )
-    // Positive control — the worker strip IS on screen, so the absence below is
-    // about the note line and not about the card failing to render.
-    expect(getByText('swarm/x')).toBeTruthy()
+    // The tooltip still names the worker, so the absence is about the note.
+    expect(stripTitle(getByText('projectPanel.swarm.statusWaiting'))).toBe('swarm/x')
     expect(queryByText('wiring the reducer')).toBeNull()
     expect(queryByText('board.card.noteStale')).toBeNull()
   })
 
-  it('no worker on the card → no note line even if a note is somehow passed', () => {
+  it('no worker on the card → no note anywhere even if a note is somehow passed', () => {
     const { queryByText } = render(
       <BoardTab data={doingCard()} {...stripBase()} workerForTask={() => null} />,
     )
@@ -471,9 +552,10 @@ describe('needs-you badge', () => {
       />,
     )
     // "a worker asked you a question and is still sitting on the card" is not a
-    // contradiction, so neither line suppresses the other.
+    // contradiction, so neither line suppresses the other. (The strip is read by
+    // its activity word now — the branch handle left the card body in 2026-08-23.)
     expect(getByText('board.card.needsYou')).toBeTruthy()
-    expect(getByText('swarm/x')).toBeTruthy()
+    expect(getByText('projectPanel.swarm.statusWaiting')).toBeTruthy()
   })
 })
 

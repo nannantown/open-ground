@@ -342,9 +342,18 @@ port (47776). `@/*` maps to `src/*`.
   `src/lib/collab/*` (`ydoc.ts`, `provider.ts` / `yProvider.ts`,
   `boardDoc.ts`, `canvasDoc.ts`, `assetSync.ts`, `RealtimeContext.tsx`); UI
   entries are `CollabSharedDialog.tsx` / `SharedProjectBody.tsx`. The whole
-  path is **feature-gated and OFF by default** — inert unless enabled. Full
-  design: `docs/COLLAB_CF_DO_PLAN.md` (+ `COLLAB_PLAN.md`,
-  `COLLAB_MEMBER_CLIENT_PLAN.md`).
+  path is **feature-gated and OFF by default** — inert unless enabled, and
+  since 2026-08-23 that holds for RELEASES too: `release.yml` passes
+  `OPENGROUND_REALTIME` / `OPENGROUND_COLLAB_WS_URL` through from repo
+  Variables with **no fallback**, so a shipped build has collab off unless both
+  are set deliberately (owner decision — the old `|| '1'` default meant a
+  signed-in user merely opening a Board/Canvas tab uploaded that project to the
+  operator's Durable Object, with no share action and no delete path). The
+  guard that keeps the default off is in `server/__tests__/runtimeConfig.test.ts`.
+  **Read `docs/COLLAB_STATUS.md` before touching collab** — it is the current
+  canon (spec + what is actually verified + the open gaps); the six
+  `docs/COLLAB_*.md` plan docs are all stale in different ways and its §5 says
+  how.
 
 ### Project discovery (registry model)
 

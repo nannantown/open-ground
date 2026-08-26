@@ -275,6 +275,25 @@ const BoardCardInner = ({
   // the top edge AND the title stamp, suppressing the drawer claude band/stamp so
   // the two can never show conflicting states on one card.
   const hasWorker = workerActivity !== null
+  // What the strip STOPPED showing but must not lose (owner, 2026-08-23): the
+  // branch handle and the worker's own last report. Both were visible rows and
+  // both were always truncated on a ~260px card — the branch to `swarm/f…`, the
+  // report to a cut half-sentence — so they informed nobody while costing two
+  // rows. They move here, and live in full in the Swarm tab, which has the room.
+  // The freshness rule survives the move UNCHANGED: an undatable note is still
+  // omitted entirely (we cannot say when it was true), and a stale one still
+  // carries its 「最後の報告:」 prefix, because a bare note IS a claim about now
+  // whether it sits in a row or in a tooltip.
+  const workerHint = hasWorker
+    ? [
+        workerBranch,
+        workerNote && workerNoteFreshness
+          ? `${workerNoteFreshness === 'stale' ? `${t('board.card.noteStale')} ` : ''}${workerNote}`
+          : '',
+      ]
+        .filter(Boolean)
+        .join(' — ')
+    : ''
   // Commander linkage on a review card — the presence/readiness pair arrives
   // together from BoardTab (split into primitives only for the memo); lamp tone
   // precomputed for the strip below.
@@ -463,7 +482,14 @@ const BoardCardInner = ({
               {task.title || t('board.card.untitledParen')}
             </p>
           )}
-          {!isEditing && task.notes?.trim() && (
+          {/* Body preview — the first two lines of the card's own notes. NOT
+              shown once a swarm worker owns the card (owner, 2026-08-23): a
+              dispatched card's notes open with the brief (【背景】…), which at
+              two lines of a ~260px card is always cut mid-path and says
+              nothing. The title already names the task; the body is one tap
+              away in the drawer. On an undispatched card the notes are usually
+              short and the preview earns its place, so it stays. */}
+          {!isEditing && !hasWorker && task.notes?.trim() && (
             <p className="mt-[7px] text-ui leading-[1.6] line-clamp-2 text-ink-muted [overflow-wrap:anywhere]">
               {task.notes.trim()}
             </p>
@@ -499,14 +525,20 @@ const BoardCardInner = ({
               )}
             </div>
           )}
-          {/* Swarm worker strip (条件①②) — WHICH worker owns this doing card (its
-              swarm/* branch) + whether it's running / waiting / booting, in the
-              same beacon vocabulary as the band above and the Swarm pane.
+          {/* Swarm worker strip (条件①②) — that a worker is on this doing card and
+              whether it's running / waiting / booting, in the same beacon
+              vocabulary as the band above and the Swarm pane. ONE row, and it
+              must stay one row: this card is ~260px and everything that shared
+              the strip with 稼働中 got truncated away (2026-08-23). The branch
+              handle it used to end with now lives in the tooltip.
               Owner-only + doing-only (gated where `worker` is resolved); the dot
               breathes only while working so "your worker is busy" reads at a
               glance without a second moving element competing with the band. */}
           {!isEditing && hasWorker && (
-            <div className="mt-[9px] flex min-w-0 items-center gap-1.5">
+            <div
+              className="mt-[9px] flex min-w-0 items-center gap-1.5"
+              {...(workerHint ? { title: workerHint } : {})}
+            >
               {/* THE WORKER, as a figure rather than a lamp (owner, 2026-08-15).
                   A 6px dot could say "something is on" and nothing else; the
                   rabbit says WHO is on the card and WHAT it is doing, because
@@ -537,60 +569,19 @@ const BoardCardInner = ({
               >
                 {t(WORKER_LABEL_KEY[workerActivity])}
               </span>
-              {/* Always-on phase — the worker's self-reported heartbeat phase
-                  (audit/implement/verify…), promoted out of the hover-only
-                  tooltip so "where is it in its run" reads at a glance. Free
-                  vocabulary → capped + truncated so it can never crowd the
-                  branch name out of the strip. */}
+              {/* Phase — the worker's self-reported heartbeat phase
+                  (audit/implement/verify…). The ONE piece of "what is it doing"
+                  that fits on this card: a single short word from a small
+                  vocabulary, so 稼働中 · verify lands whole where a branch or a
+                  sentence could not. Free vocabulary, so still truncate-guarded
+                  — an engine that one day reports a phrase must not reflow the
+                  strip into two rows. */}
               {workerPhase && (
-                <span className="max-w-[45%] truncate whitespace-nowrap font-mono text-meta text-ink-faint">
+                <span className="min-w-0 truncate whitespace-nowrap font-mono text-meta text-ink-faint">
                   · {WORKER_PHASE_KEY[workerPhase] ? t(WORKER_PHASE_KEY[workerPhase]) : workerPhase}
                 </span>
               )}
-              <span
-                className="min-w-0 flex-1 truncate font-mono text-meta text-ink-muted"
-                title={
-                  workerNote
-                    ? `${workerBranch} — ${workerNote}`
-                    : workerPhase
-                      ? `${workerBranch} · ${workerPhase}`
-                      : workerBranch
-                }
-              >
-                {workerBranch}
-              </span>
             </div>
-          )}
-          {/* Worker note — the worker's OWN one-line report of what it is doing,
-              promoted out of the strip's hover tooltip into visible text. This
-              is the "who is on it and what are they doing" half of the card:
-              WHO is the strip above, WHAT is this line.
-              Deliberately its own row, not a fourth item inside the strip —
-              phase is capped at 45% and branch is flex-1 truncate precisely
-              because 稼働中 + branch already exhausted a 260px card (2026-08-04).
-              Passthrough text: never parsed, never re-worded (the same rule the
-              unknown-phase branch above follows).
-              ⚠ THREE STATES, and only one of them is "print it plainly":
-                fresh   → the note as-is;
-                stale   → dimmed + a 「最後の報告:」 prefix, because a note whose
-                          heartbeat went quiet describes the PAST;
-                unknown → NO line at all. We cannot date it, so we cannot say
-                          when it was true — and a note rendered bare IS a claim
-                          that it is current. Never a placeholder like
-                          "working…" either: that is the same claim with fewer
-                          words. */}
-          {!isEditing && hasWorker && workerNote && workerNoteFreshness && (
-            <p
-              className={[
-                'mt-[5px] text-meta line-clamp-2 [overflow-wrap:anywhere]',
-                workerNoteFreshness === 'stale' ? 'text-ink-faint' : 'text-ink-muted',
-              ].join(' ')}
-            >
-              {workerNoteFreshness === 'stale' && (
-                <span className="mr-1">{t('board.card.noteStale')}</span>
-              )}
-              {workerNote}
-            </p>
           )}
           {/* Commander strip (review-column cards) — WHO lands this card and
               whether they are around right now. The doing column shows the

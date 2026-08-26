@@ -135,24 +135,35 @@ jobs:
         #   Row Level Security is the real boundary (docs/AUTH_SETUP.md §6 +
         #   REPORT.md). NEVER add SUPABASE_SERVICE_ROLE_KEY here.
         #
-        #   Realtime collab (OPENGROUND_REALTIME + OPENGROUND_COLLAB_WS_URL): so
-        #   collab auto-enables for logged-in users in the shipped app. Both are
-        #   PUBLIC values (a feature flag and the public Worker WS endpoint the
-        #   browser dials) — NOT credentials. The collab HMAC ticket secret lives
-        #   ONLY on the Worker and is NEVER baked here. These read from repo
-        #   Variables (Settings → Secrets and variables → Actions → Variables),
-        #   with the public constant as a fallback so a release never silently
-        #   ships with collab off if the Var is unset. The WS endpoint is treated
-        #   as a fixed baked constant at runtime (main.js locks it against local
-        #   env tampering — see its token-relay destination lock).
+        #   Realtime collab (OPENGROUND_REALTIME + OPENGROUND_COLLAB_WS_URL):
+        #   NO DEFAULT — collab ships OFF unless BOTH repo Variables are set
+        #   explicitly (owner decision, 2026-08-23). These used to carry
+        #   `|| '1'` / `|| 'wss://og-collab…'` fallbacks so a release "never
+        #   silently ships with collab off". That inverted the real risk: with
+        #   collab baked on, merely SIGNING IN and opening a project's Board or
+        #   Canvas tab uploaded that project's whole contents to the operator's
+        #   Cloudflare Durable Object — no share action, no consent on that path
+        #   (the consent dialog gates only the invite flow), and no delete path
+        #   for the cloud copy. See docs/COLLAB_STATUS.md §3 P0 and
+        #   docs/SECURITY.md §8-1. Unset ⇒ write-runtime-config.js omits both
+        #   keys ⇒ collabEnabled() is false ⇒ the SPA never even loads the
+        #   yjs/y-partyserver chunk. Both are PUBLIC values (a feature flag and
+        #   the public Worker WS endpoint the browser dials) — NOT credentials;
+        #   the collab HMAC ticket secret lives ONLY on the Worker and is NEVER
+        #   baked here. When collab is re-enabled for a release, set both repo
+        #   Variables (Settings → Secrets and variables → Actions → Variables);
+        #   the WS endpoint is then a fixed baked constant at runtime (main.js
+        #   locks it against local env tampering — see its token-relay
+        #   destination lock). The guard test that keeps this default OFF lives
+        #   in server/__tests__/runtimeConfig.test.ts.
         #
         # If SUPABASE_* are absent, the script writes {} for them and login stays
         # disabled (graceful degrade); collab is independent.
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-          OPENGROUND_REALTIME: ${{ vars.OPENGROUND_REALTIME || '1' }}
-          OPENGROUND_COLLAB_WS_URL: ${{ vars.OPENGROUND_COLLAB_WS_URL || 'wss://og-collab.mindbrew.workers.dev' }}
+          OPENGROUND_REALTIME: ${{ vars.OPENGROUND_REALTIME }}
+          OPENGROUND_COLLAB_WS_URL: ${{ vars.OPENGROUND_COLLAB_WS_URL }}
 
       - name: Build & publish (macOS, signed + notarized)
         if: matrix.platform == 'mac'

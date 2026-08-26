@@ -178,12 +178,14 @@ describe('runtimeConfig — end-to-end with /api/auth/config', () => {
   })
 })
 
-// The whole COLLAB chain, mirroring the auth chain above. A CI-injected build
-// (baked OPENGROUND_REALTIME + OPENGROUND_COLLAB_WS_URL) + a signed-in session
-// flips /api/collab/config to enabled:true — collab auto-enables in the shipped
-// app for logged-in users (the goal). An env-less build keeps it false even when
-// signed in (the public/dev build ships collab off). The config route reads only
-// env + session (no network), so no fetch mock is needed.
+// The whole COLLAB chain, mirroring the auth chain above. A build WITH the collab
+// vars injected + a signed-in session flips /api/collab/config to enabled:true;
+// an env-less build keeps it false even when signed in. Since 2026-08-23 the
+// env-less case is what RELEASES ship (release.yml passes the repo Variables
+// through with NO fallback — see the guard describe at the bottom of this file),
+// so the second case below is the shipped default and the first is what a
+// deliberate collab release would look like. The config route reads only env +
+// session (no network), so no fetch mock is needed.
 //
 // MANUAL E2E (against a real packaged build, equivalent to this in-process test):
 //   1. Build with the collab vars present (what release.yml does):
@@ -235,5 +237,66 @@ describe('runtimeConfig — end-to-end with /api/collab/config', () => {
     const res = await app.request('/api/collab/config')
     expect(res.status).toBe(200)
     expect((await res.json()).enabled).toBe(false)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GUARD — the shipped default must stay OFF (owner decision, 2026-08-23).
+//
+// release.yml used to read `${{ vars.OPENGROUND_REALTIME || '1' }}` and
+// `${{ vars.OPENGROUND_COLLAB_WS_URL || 'wss://og-collab…' }}`, so EVERY signed-in
+// user of a release had collab live: opening a project's Board or Canvas tab
+// uploaded that project's whole contents to the operator's Durable Object with no
+// share action, no consent on that path, and no way to delete the cloud copy
+// (docs/COLLAB_STATUS.md §3 P0, docs/SECURITY.md §8-1).
+//
+// The bake seam itself is proven above; what a unit test CANNOT see is CI handing
+// it a value the repo never configured. So this reads the workflow as text. It is
+// the whole point of the guard that it fails on the literal `||` fallback: that is
+// the exact edit that would silently ship collab on again.
+//
+// This does NOT forbid ever shipping collab — setting the repo Variables turns it
+// on deliberately, and this guard stays green because it only bans the DEFAULT.
+describe('GUARD — release.yml never ships collab on by default', () => {
+  const releaseYml = readFileSync(
+    new URL('../../.github/workflows/release.yml', import.meta.url),
+    'utf8',
+  )
+
+  // The `env:` line for each collab key, whatever it currently expands to.
+  const envLine = (key: string): string => {
+    const m = new RegExp(`^\\s*${key}:\\s*(.+)$`, 'm').exec(releaseYml)
+    expect(m, `${key} is not passed to the build step at all`).toBeTruthy()
+    return m![1].trim()
+  }
+
+  it.each(['OPENGROUND_REALTIME', 'OPENGROUND_COLLAB_WS_URL'])(
+    '%s comes from the repo Variable with NO fallback default',
+    (key) => {
+      const line = envLine(key)
+      // A `||` in the expression is a default — the thing that made collab ship on.
+      expect(line, `${key} must not carry a fallback default`).not.toContain('||')
+      // …and it must still be wired to the Variable, so a deliberate collab
+      // release stays possible (deleting the line would be a different bug).
+      expect(line).toContain(`vars.${key}`)
+    },
+  )
+
+  it('no hardcoded operator Worker endpoint is baked anywhere in the workflow', () => {
+    // Belt and braces: a fallback could also be re-added as a plain literal
+    // rather than through `||`. The endpoint must only ever arrive as a repo
+    // Variable. (Mentions inside `#` comments are fine — they explain the rule.)
+    const codeLines = releaseYml
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n')
+    expect(codeLines).not.toMatch(/wss:\/\/[^\s'"}]+/)
+  })
+
+  it('app login is UNAFFECTED — SUPABASE_* still ship from secrets', () => {
+    // Turning collab off must not turn Sign in off with it: they are independent
+    // (collabEnabled() needs a session, but auth never needed collab).
+    expect(envLine('SUPABASE_URL')).toContain('secrets.SUPABASE_URL')
+    expect(envLine('SUPABASE_ANON_KEY')).toContain('secrets.SUPABASE_ANON_KEY')
   })
 })

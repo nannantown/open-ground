@@ -760,6 +760,19 @@
   1ターン = `--resume` した claude PTY 1本 + マーカー掻き取り(SDK でも `-p` でもない・
   収容レシピは `makeOverseerBrain` と同じ = 空 scratch cwd・L4 guard 常時・darwin は
   L3+loopback egress proxy・Bash/Task/WebFetch/WebSearch 拒否・strictMcp・hidden)。
+  ⚠ **落とし穴(2026-08-26 に実際に踏んだ): `--resume` は会話を画面に再表示する。**
+  そこには前ターンのマーカー行がそのまま含まれるので、素のマーカーだと**再開ターンの
+  最初のポーリングで完了判定が成立し、新しい答えを待たずに前回の返事と KEPT 文を
+  そのまま返す**(=2ターン目以降が1ターン目の丸写しになる。オーナー報告の
+  「会話になってない」がこれ)。対策は**ターンごとの nonce をマーカーに束縛**
+  (`personaTurnNonce` / `personaMarker`) — 前回の span は完了判定にもパーサにも
+  見えない。掻き取り方式で `--resume` を使う経路を新設するなら同じ手当てが要る。
+  ⚠ 継続性は `--resume` に**依存させない**: 直近 `PERSONA_HISTORY_TURNS` 往復を
+  `buildPersonaTurnPrompt` が prompt に明記する。`claude` は CI でもコンテナでも
+  動かないので「resume で会話が繋がる」は測れない仮定であり、測れるのは
+  プロンプトに書いた文だけ。番人は `personaChat.test.ts` の
+  「a resumed turn ignores the conversation replayed above it」と
+  結線側2本(`isComplete` が nonce 束縛か / 再開ターンが replay で成功しないか)。
   差し替え口は `PersonaTurnRunner`(将来のストリーミング化はこの1ファイル。
   ただし SDK へ寄せる判断は `docs/SDK_CLIENT_INVESTIGATION.md` §12 の規約が先)。
   ⚠ **単発化は同期で claim する** — `startPersonaChatTurn` は**同期関数**で、

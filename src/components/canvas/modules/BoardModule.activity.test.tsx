@@ -173,6 +173,14 @@ const escRec = (over: Record<string, unknown> = {}) => ({
 })
 
 // A board carrying one card in each lane the surfaces care about.
+// The worker strip's tooltip — where the branch handle and the worker's own
+// report live since 2026-08-23 (both were card body rows until the owner had
+// them removed: at ~260px they only ever rendered truncated). Asserting on the
+// title is how these tests keep watching the SAME facts they always watched.
+// Null when no strip is on screen at all, which is what the gate test needs.
+const stripHint = (c: HTMLElement): string | null =>
+  c.querySelector('[title^="swarm/w1"]')?.getAttribute('title') ?? null
+
 const everyLane = () => [
   task({ id: 'doing1', title: 'Doing one', boardColumn: 'doing' }),
   task({ id: 'rev1', title: 'Review one', boardColumn: 'review', branch: 'swarm/r1' }),
@@ -215,8 +223,8 @@ describe('swarm gate — a non-swarm account renders NO swarm surface on the Boa
     // 稼働中 twice: the doing card's worker strip and the review card's
     // commander presence word — the shared Swarm-tab vocabulary, on purpose.
     expect(getAllByText('projectPanel.swarm.manager.stageRunning')).toHaveLength(2)
-    expect(getByText('swarm/w1')).toBeTruthy() // worker branch
-    expect(getByText('wiring the reducer')).toBeTruthy() // worker note line
+    // Branch + note are in the strip's tooltip now, not card body text.
+    expect(stripHint(container)).toBe('swarm/w1 — wiring the reducer')
     expect(getByText('board.card.managerLabel')).toBeTruthy() // commander strip
     expect(getByText('board.card.needsYou')).toBeTruthy() // needs-you badge
     expect(container.textContent).toContain('board.card.phaseImplement')
@@ -236,6 +244,10 @@ describe('swarm gate — a non-swarm account renders NO swarm surface on the Boa
     expect(getByText('Todo one')).toBeTruthy()
     // …and every swarm surface is gone.
     expect(queryByText('projectPanel.swarm.manager.stageRunning')).toBeNull()
+    // ⚠ Branch and note left the card BODY in 2026-08-23, so queryByText for
+    // them now passes with the gate wide open — it would be a tautology here.
+    // The strip's tooltip is the live assertion: no strip, no hint.
+    expect(stripHint(container)).toBeNull()
     expect(queryByText('swarm/w1')).toBeNull()
     expect(queryByText('wiring the reducer')).toBeNull()
     expect(queryByText('board.card.managerLabel')).toBeNull()
@@ -401,8 +413,7 @@ describe('honesty — activity the engine cannot tie to a card', () => {
     expect(container.textContent).not.toMatch(/allClear|判断待ちはありません/)
     // The other poll is unaffected — a dead escalations route must not blank
     // the worker strips.
-    expect(getByText('swarm/w1')).toBeTruthy()
-    expect(getByText('wiring the reducer')).toBeTruthy()
+    expect(stripHint(container)).toBe('swarm/w1 — wiring the reducer')
   })
 
   it('the roll-up NEVER prints a waiting count it did not read (「判断待ち0」)', async () => {
@@ -482,10 +493,10 @@ describe('worker note freshness survives the map-identity optimisation', () => {
   it('a heartbeat that goes quiet turns the note stale ON SCREEN, across polls', async () => {
     // Lap 1: a fresh beat — the note is a statement about now.
     h.workers = [workerRec({ heartbeatAt: new Date().toISOString() })]
-    const { getByText, queryByText } = renderBoard(everyLane(), true)
+    const { container } = renderBoard(everyLane(), true)
     await settle()
-    expect(getByText('wiring the reducer')).toBeTruthy()
-    expect(queryByText('board.card.noteStale')).toBeNull()
+    // A current note prints bare — no 「最後の報告:」 prefix.
+    expect(stripHint(container)).toBe('swarm/w1 — wiring the reducer')
     // Lap 2: the SAME worker, same branch/stage/phase/note — only the beat is
     // older. Every other field in the identity test is byte-identical, so if
     // the freshness verdict is not part of that test the map keeps its identity
@@ -493,15 +504,16 @@ describe('worker note freshness survives the map-identity optimisation', () => {
     // note as if it were current. Silent, and permanent.
     h.workers = [workerRec({ heartbeatAt: new Date(Date.now() - 30 * 60_000).toISOString() })]
     await repoll()
-    expect(getByText('board.card.noteStale')).toBeTruthy()
-    expect(getByText('wiring the reducer')).toBeTruthy()
+    expect(stripHint(container)).toBe('swarm/w1 — board.card.noteStale wiring the reducer')
   })
 
   it('a worker the engine reports with NO beat time shows no note line', async () => {
     h.workers = [workerRec({ heartbeatAt: undefined })]
-    const { getByText, queryByText } = renderBoard(everyLane(), true)
+    const { container, queryByText } = renderBoard(everyLane(), true)
     await settle()
-    expect(getByText('swarm/w1')).toBeTruthy() // positive control: strip is up
+    // Positive control: the strip IS up (its hint names the branch) — so the
+    // absence below is about the note, not a board that failed to render.
+    expect(stripHint(container)).toBe('swarm/w1')
     expect(queryByText('wiring the reducer')).toBeNull()
     expect(queryByText('board.card.noteStale')).toBeNull()
   })
