@@ -1840,6 +1840,9 @@ export const BoardModule = ({
         ...(w.phase ? { phase: w.phase } : {}),
         ...(w.note ? { note: w.note } : {}),
         ...(freshness === 'none' ? {} : { noteFreshness: freshness }),
+        // Carried through verbatim — the card names the actual run.
+        ...(w.model ? { model: w.model } : {}),
+        ...(w.effort ? { effort: w.effort } : {}),
       }
       return view
     },

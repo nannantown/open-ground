@@ -8714,6 +8714,7 @@ export const runDispatchPass = async (
         // Launch tier, for the monitor's rate-limit sighting → cooling-table
         // attribution (absent from older fakes/callers — then nothing is marked).
         ...(spawn.model ? { model: spawn.model } : {}),
+        ...(spawn.effort ? { effort: spawn.effort } : {}),
         // card 3 — capture the session UUID (for card 4's --resume) + carry the
         // card's current 差し戻し count into the roster. Both are persisted by the
         // end-of-pass syncRoster (this spawn changes the roster signature).
@@ -11286,6 +11287,7 @@ const adoptResumeCandidates = async (
       ...(spawn.runtime === 'sdk' ? { runtime: 'sdk' as const } : {}),
       ...(spawn.sdkSessionId ? { sdkSessionId: spawn.sdkSessionId } : {}),
       ...(spawn.model ? { model: spawn.model } : {}),
+      ...(spawn.effort ? { effort: spawn.effort } : {}),
       ...(spawn.agentSessionId ? { sessionId: spawn.agentSessionId } : {}),
       reworkCount: entry.reworkCount,
     })

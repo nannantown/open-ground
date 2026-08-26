@@ -19,7 +19,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
-import type { SwarmManagerPresence, SwarmWorkerRecord } from '@/lib/types'
+import type { ClaudeEffort, SwarmManagerPresence, SwarmWorkerRecord } from '@/lib/types'
+import { CLAUDE_EFFORTS } from '@/lib/types'
 
 // ── Engine contract (mirrors the server's SwarmOrchestratorState) ─────────────
 // Kept as a LOCAL mirror (not imported from src/lib/types.ts) on purpose: the
@@ -97,6 +98,10 @@ export interface EngineWorker {
   phase?: string
   note?: string
   heartbeatAt?: string
+  /** What this worker is running on (engine-tracked dispatches only) — the
+   *  Board card prints the pair verbatim as `opus/high`. */
+  model?: string
+  effort?: ClaudeEffort
 }
 
 /** Read-only integration readiness of one review card (Card③ "統合可" display). */
@@ -494,6 +499,10 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
           taskId: typeof w.taskId === 'string' ? w.taskId : '',
           taskTitle: typeof w.taskTitle === 'string' ? w.taskTitle : '',
           startedAt: typeof w.startedAt === 'string' ? w.startedAt : '',
+          // Already narrowed by sanitizeSwarmWorkers (model free-form, effort to
+          // the shipped union), so carry them straight through.
+          ...(typeof w.model === 'string' && w.model ? { model: w.model } : {}),
+          ...(w.effort ? { effort: w.effort as ClaudeEffort } : {}),
           stage:
             w.stage === 'starting' || w.stage === 'running' || w.stage === 'done'
               ? w.stage
@@ -862,6 +871,15 @@ const SWARM_WORKER_FIELDS: SwarmWorkerFieldCoercers = {
   ready: wireTrue,
   blocked: wireTrue,
   blockers: wireString,
+  // What the worker is actually running on. `model` is a free alias (a newer
+  // server may launch a tier this client has never heard of, and the Board just
+  // prints it), but `effort` is narrowed to the shipped union: an unknown value
+  // folds to absent rather than rendering a word this build cannot mean.
+  model: wireString,
+  effort: (v) =>
+    typeof v === 'string' && (CLAUDE_EFFORTS as readonly string[]).includes(v)
+      ? (v as SwarmWorkerRecord['effort'])
+      : undefined,
 }
 
 /** Every field this sanitizer carries — i.e. every field of `SwarmWorkerRecord`,

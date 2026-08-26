@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { Copy, GripVertical } from 'lucide-react'
-import type { BoardColumn, ClaudeBeaconStatus, EscalationWhy, ProjectTask } from '@/lib/types'
+import type { BoardColumn, ClaudeBeaconStatus, ClaudeEffort, EscalationWhy, ProjectTask } from '@/lib/types'
 import { formatDueShort, isOverdue } from '@/lib/boardDeps'
 import { PRIORITY_META } from '@/lib/boardPriority'
 import { deriveManagerTone } from '@/lib/boardWorker'
@@ -193,6 +193,17 @@ export interface BoardCardProps {
    *  at all rather than presented as current (the tooltip still carries it).
    *  Absence of evidence is never rendered as evidence. */
   workerNoteFreshness?: 'fresh' | 'stale'
+  /** WHAT this worker is running on, printed verbatim as `opus/high`.
+   *
+   *  ⚠ The owner asked for the model and the effort BY NAME, not for the
+   *  internal weight bucket ("重い/軽い") that picks them — the bucket is a
+   *  routing detail decided by a keyword match on the card's own text, and the
+   *  thing worth checking at a glance is whether THIS card got the tier it
+   *  deserved. Both are short fixed tokens (fable/opus/sonnet × low/medium/
+   *  max…), so unlike the branch handle and the report that left this card on
+   *  2026-08-23, the pair lands whole in the width a collapsed lane hands back. */
+  workerModel?: string
+  workerEffort?: ClaudeEffort
   /** An OPEN escalation names THIS card — the swarm stopped and the owner's
    *  hands are required. Lane-independent (unlike the worker/commander strips):
    *  it is rooted in `escalation.taskId`, which no column owns. false/absent ⇒
@@ -248,6 +259,8 @@ const BoardCardInner = ({
   workerPhase,
   workerNote,
   workerNoteFreshness,
+  workerModel,
+  workerEffort,
   needsYou,
   needsYouReason,
   needsYouHint,
@@ -579,6 +592,16 @@ const BoardCardInner = ({
               {workerPhase && (
                 <span className="min-w-0 truncate whitespace-nowrap font-mono text-meta text-ink-faint">
                   · {WORKER_PHASE_KEY[workerPhase] ? t(WORKER_PHASE_KEY[workerPhase]) : workerPhase}
+                </span>
+              )}
+              {/* The run itself. `shrink-0` on purpose: if this strip ever runs
+                  out of room the PHASE above gives way first — a truncated
+                  `opu…` names no tier at all, while a missing phase still leaves
+                  a card that says what it is running on. Absent for a worker the
+                  engine never dispatched (nothing truthful to print). */}
+              {workerModel && (
+                <span className="ml-auto shrink-0 whitespace-nowrap font-mono text-meta text-ink-faint">
+                  {workerEffort ? `${workerModel}/${workerEffort}` : workerModel}
                 </span>
               )}
             </div>

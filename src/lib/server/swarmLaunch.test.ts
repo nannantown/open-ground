@@ -267,13 +267,32 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     expect(resolveSwarmModelEffort('optimize', 'overseer')).toEqual({ model: 'fable', effort: 'high' })
   })
 
-  it('optimize routes WORKERS by card weight — heavy gets the top tier, chores drop to sonnet', () => {
+  it('optimize routes WORKERS across THREE tiers — fable / opus / sonnet by card weight', () => {
     const heavy = { title: 'sandbox guard for auth token deletion', notes: 'security-critical' }
     const light = { title: '[follow-up] fix a typo in a comment', notes: 'nit' }
     expect(resolveSwarmModelEffort('optimize', 'worker', heavy)).toEqual({ model: 'fable', effort: 'max' })
     expect(resolveSwarmModelEffort('optimize', 'worker', light)).toEqual({ model: 'sonnet', effort: 'low' })
-    // Unknown / no card ⇒ the SAFE middle (sonnet/medium), never a silent under-power.
-    expect(resolveSwarmModelEffort('optimize', 'worker')).toEqual({ model: 'sonnet', effort: 'medium' })
+    // ⚠ THE BASE IS OPUS (owner, 2026-08-26). This bucket is not just "a card with
+    // no signal" — it is where every ordinary card lands, and it used to run on
+    // sonnet, the cheapest tier the swarm has. `opus` was in the ladder but was
+    // only ever reached by a cooling fable falling to it; nothing ever CHOSE it.
+    expect(resolveSwarmModelEffort('optimize', 'worker', { title: 'add a feature' }))
+      .toEqual({ model: 'opus', effort: 'medium' })
+    // Unknown / no card ⇒ the same base, never a silent under-power.
+    expect(resolveSwarmModelEffort('optimize', 'worker')).toEqual({ model: 'opus', effort: 'medium' })
+  })
+
+  it('⚠ all three tiers are actually REACHABLE by choice — opus is not a fallback-only rung', () => {
+    // The guard against sliding back to a two-way pick: a mutation that sends the
+    // base to sonnet (or to fable) collapses this set from three to two.
+    const models = new Set(
+      [
+        { title: 'sandbox auth deletion' }, // heavy
+        { title: 'add a feature' }, // base
+        { title: '[minor] typo' }, // light
+      ].map((c) => resolveSwarmModelEffort('optimize', 'worker', c)!.model),
+    )
+    expect(Array.from(models).sort()).toEqual(['fable', 'opus', 'sonnet'])
   })
 
   it('classifyCardWeight reads static signals (EN + JA), safe-middle by default', () => {
@@ -704,8 +723,18 @@ describe('hard mask — a switched-OFF tier is never launched on', () => {
     const heavy = { title: 'sandbox guard for auth', notes: 'security-critical' }
     expect(resolveSwarmModelEffort('optimize', 'worker', heavy, NOW, off('fable'))!.model).toBe('opus')
     // sonnet OFF ⇒ the chore steps DOWN to haiku (never up onto the top tier by accident).
-    expect(resolveSwarmModelEffort('optimize', 'worker', undefined, NOW, off('sonnet'))!.model).toBe(
+    // ⚠ An ACTUAL chore card, not `undefined`: since 2026-08-26 a card with no
+    // signal is the opus BASE, so passing undefined here would exercise the base
+    // and never touch sonnet at all — the assertion would pass while testing
+    // nothing about a disabled sonnet.
+    const chore = { title: '[minor] fix a typo' }
+    expect(resolveSwarmModelEffort('optimize', 'worker', chore, NOW, off('sonnet'))!.model).toBe(
       'haiku',
+    )
+    // …and the BASE is independent of sonnet entirely: turning sonnet off does
+    // not move an ordinary card, because it was never seated there.
+    expect(resolveSwarmModelEffort('optimize', 'worker', undefined, NOW, off('sonnet'))!.model).toBe(
+      'opus',
     )
   })
 

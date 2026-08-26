@@ -1163,6 +1163,10 @@ export interface SpawnSwarmWorkerResponse {
    *  rate-limit sighting can mark the RIGHT tier cooling (swarmQuota). Optional:
    *  older callers/fakes without it simply leave the sighting unattributed. */
   model?: string
+  /** The `--effort` the worker launched at, beside {@link model}. Display-only
+   *  (the cooling table keys off the model alone) — it exists so the Board can
+   *  say `opus/high` instead of a private weight word (owner, 2026-08-26). */
+  effort?: ClaudeEffort
 }
 
 /** POST /api/swarm/worktree/remove — whether the worktree was torn down, with
@@ -1309,6 +1313,9 @@ export interface OrchestratorWorker {
    *  on workers spawned before this was recorded; such a sighting still HOLDS
    *  the worker, it just can't mark a tier. */
   model?: string
+  /** The `--effort` this worker launched at — carried beside {@link model} so
+   *  the Board card can name the actual run, not a weight bucket. */
+  effort?: ClaudeEffort
   /** Coarse lifecycle stage, recomputed every monitor pass — see
    *  {@link OrchestratorWorkerStage}. The state API surfaces it; the Swarm
    *  commander pane renders a per-worker dot from it. */
@@ -1412,6 +1419,13 @@ export interface SwarmWorkerRecord {
   blocked?: boolean
   /** The raw blockers text, when non-empty. */
   blockers?: string
+  /** The `--model` alias this worker is actually running on, when the engine
+   *  tracked the dispatch. ABSENT for a worker outside engine ownership (a
+   *  curl-direct spawn) and for pre-2026-08-26 roster rows — the Board simply
+   *  says nothing rather than guessing a tier. */
+  model?: string
+  /** The `--effort` beside {@link model}, same provenance and same absence rule. */
+  effort?: ClaudeEffort
 }
 
 export interface SwarmWorkersResponse {

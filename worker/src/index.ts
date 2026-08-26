@@ -2,6 +2,7 @@ import { routePartykitRequest, type Lobby } from 'partyserver'
 import { verifyTicket } from './ticket'
 import { handleAssetRequest } from './assets'
 import { handleTicketRequest } from './issueTicket'
+import { handleAdminRequest } from './admin'
 import { OgCollabDoc } from './OgCollabDoc'
 
 // OPEN GROUND realtime collab Worker — entry point.
@@ -28,8 +29,10 @@ import { OgCollabDoc } from './OgCollabDoc'
 
 export interface Env {
   // Binding name === DO class name (see wrangler.jsonc). partyserver resolves
-  // the namespace for party "og-collab-doc" from this.
-  OgCollabDoc: DurableObjectNamespace
+  // the namespace for party "og-collab-doc" from this. Parameterised by the
+  // class so the operator purge route can call `stub.purgeStorage()` over RPC
+  // with types (partyserver's own routing does not need the parameter).
+  OgCollabDoc: DurableObjectNamespace<OgCollabDoc>
   // Shared HMAC secret — set via `wrangler secret put OPENGROUND_COLLAB_TICKET_SECRET`.
   // Must equal the value the Hono ticket minter signs with.
   OPENGROUND_COLLAB_TICKET_SECRET: string
@@ -47,6 +50,13 @@ export interface Env {
   //   the browser. e.g. SUPABASE_URL=https://<ref>.supabase.co
   SUPABASE_URL?: string
   SUPABASE_ANON_KEY?: string
+  // OPERATOR-ONLY erase secret for POST /admin/rooms/purge (src/admin.ts). This
+  // is NOT the ticket secret and NOT a member credential — erasure must work for
+  // rooms whose membership rows are already gone. Optional on purpose: while it
+  // is unset the admin route is inert (503), so a deploy that forgets it cannot
+  // ship an open erase button.
+  //   wrangler secret put OPENGROUND_COLLAB_ADMIN_SECRET
+  OPENGROUND_COLLAB_ADMIN_SECRET?: string
 }
 
 // Re-export the DO class so the runtime can instantiate the durable_objects
@@ -86,6 +96,12 @@ export default {
     // null when the path isn't /ticket, so we fall through to assets/health/404.
     const ticket = await handleTicketRequest(req, env, url)
     if (ticket) return ticket
+
+    // Operator-only room erasure (POST /admin/rooms/purge) — gated by a separate
+    // admin secret, NOT the member ticket, and inert (503) while that secret is
+    // unset. Returns null when the path isn't /admin/..., so we fall through.
+    const admin = await handleAdminRequest(req, env, url)
+    if (admin) return admin
 
     // R2-backed canvas image assets (u14b) — ticket-gated, owner-write. Returns
     // null when the path isn't /assets/..., so we fall through to health/404.

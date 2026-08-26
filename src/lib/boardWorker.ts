@@ -3,7 +3,7 @@
 // so the activity derivation is unit-testable on its own. The engine logic is
 // untouched; this only READS its reported worker stage + the live PTY beacon.
 
-import type { ClaudeBeaconStatus } from '@/lib/types'
+import type { ClaudeBeaconStatus, ClaudeEffort } from '@/lib/types'
 
 /** The coarse lifecycle the engine reports for a worker (mirrors
  *  ManagerWorkerStage in useSwarmEngine — kept local so this stays
@@ -37,6 +37,13 @@ export interface BoardCardWorker {
    *  therefore must not present it as a current statement (see
    *  {@link deriveHeartbeatFreshness}). */
   noteFreshness?: 'fresh' | 'stale'
+  /** The `--model` alias this worker is running on, when the engine tracked the
+   *  dispatch. The card prints it VERBATIM — never a weight word like 「重い」
+   *  (owner, 2026-08-26): the weight bucket is an internal routing detail, and
+   *  what the owner is checking is whether THIS card got the tier it deserved. */
+  model?: string
+  /** The `--effort` beside {@link model}. Same provenance, same absence rule. */
+  effort?: ClaudeEffort
 }
 
 /** How long a heartbeat stays a statement about NOW. Matches the engine's own

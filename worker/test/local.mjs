@@ -31,6 +31,7 @@ import YProvider from 'y-partyserver/provider'
 
 // ── config ──────────────────────────────────────────────────────────────────
 const SECRET = 'test-secret-do-not-use-in-prod'
+const ADMIN_SECRET = 'test-admin-secret-do-not-use-in-prod'
 const PARTY = 'og-collab-doc'
 const PID = 'proj-test-123'
 const SCOPE = 'board'
@@ -240,6 +241,10 @@ async function main() {
       OPENGROUND_COLLAB_TICKET_SECRET: SECRET,
       SUPABASE_URL,
       SUPABASE_ANON_KEY: ANON_KEY,
+      // Operator erase secret (mirrors `wrangler secret put
+      // OPENGROUND_COLLAB_ADMIN_SECRET`). TEST 7 additionally boots a SECOND
+      // worker WITHOUT this var to prove the route is inert when unprovisioned.
+      OPENGROUND_COLLAB_ADMIN_SECRET: ADMIN_SECRET,
     },
     experimental: { disableExperimentalWarning: true },
   })
@@ -572,6 +577,255 @@ async function main() {
     providers.push(provZ)
     await waitFor(() => provZ.synced, CONVERGE_TIMEOUT_MS, 'zero-config client synced')
     check(provZ.synced === true, 'worker-minted ticket is accepted by onBeforeConnect (end-to-end)')
+
+    // ── TEST 7: operator room ERASURE (POST /admin/rooms/purge) ───────────────
+    // The property under test is ERASURE, so every check below looks at whether
+    // the DOCUMENT IS GONE — never at a status code alone. A route that returned
+    // 200 and deleted nothing would pass a status-only test and fail these.
+    console.log('\n[7] operator purge erases a room; unauthorized callers cannot')
+
+    // PRECONDITION: tear down every provider still connected from TESTs 1/2/6.
+    // This is not tidiness — it is the scenario under test. A client that is
+    // still connected holds the whole document in ITS memory, and partysocket
+    // reconnects automatically, so it re-uploads that document the instant the
+    // server drops it. Erasure is only meaningful once nothing can reconnect,
+    // which in production is guaranteed by revoking membership FIRST (no
+    // membership ⇒ no ticket ⇒ onBeforeConnect refuses the upgrade). TEST 7z
+    // below measures that resurrection directly, so the contract is not just an
+    // assertion in a comment.
+    for (const p of providers.splice(0, providers.length)) {
+      try { p.disconnect() } catch { /* ignore */ }
+      try { p.destroy() } catch { /* ignore */ }
+    }
+    await sleep(2_000)
+
+    const purge = (bodyObj, token = ADMIN_SECRET, method = 'POST') =>
+      worker.fetch('/admin/rooms/purge', {
+        method,
+        headers: {
+          'content-type': 'application/json',
+          ...(token === null ? {} : { authorization: `Bearer ${token}` }),
+        },
+        ...(method === 'POST' ? { body: JSON.stringify(bodyObj ?? {}) } : {}),
+      })
+
+    /** Connect a fresh client to ROOM and report what it sees at 'og'/'m:probe'. */
+    const readRoom = async (label) => {
+      const doc = new Y.Doc()
+      const prov = makeProvider(host, ROOM, doc, async () => ({
+        token: mintTicket({ pid: PID, scope: SCOPE }),
+      }))
+      providers.push(prov)
+      await waitFor(() => prov.synced, CONVERGE_TIMEOUT_MS, `${label} synced`)
+      // Give sync step 2 a beat to deliver any server-held state.
+      await sleep(1_000)
+      const seen = doc.getMap('og').get('m:probe')
+      try { prov.disconnect() } catch { /* ignore */ }
+      try { prov.destroy() } catch { /* ignore */ }
+      providers.splice(providers.indexOf(prov), 1)
+      return seen
+    }
+
+    // 7a) PRECONDITION — the room still holds the value from TEST 1/2. Without
+    //     this, a later "it's gone" check would be vacuous (nothing to erase).
+    check(
+      (await readRoom('pre-purge reader')) === VALUE,
+      `room still holds the document before any purge (${VALUE})`,
+    )
+
+    // 7b) NO credential → 401 AND the document must survive.
+    const res7b = await purge({ rooms: [ROOM] }, null)
+    check(res7b.status === 401, `purge with no Authorization is rejected (status=${res7b.status})`)
+    check(
+      (await readRoom('after-unauth reader')) === VALUE,
+      'document SURVIVES an unauthenticated purge attempt (401 actually withheld the erase)',
+    )
+
+    // 7c) WRONG credential → 401 AND the document must survive.
+    const res7c = await purge({ rooms: [ROOM] }, 'not-the-admin-secret')
+    check(res7c.status === 401, `purge with a wrong secret is rejected (status=${res7c.status})`)
+    check(
+      (await readRoom('after-wrong-secret reader')) === VALUE,
+      'document SURVIVES a wrong-secret purge attempt',
+    )
+
+    // 7d) Malformed targets are refused without touching anything.
+    const res7d = await purge({ rooms: ['../../etc/passwd'] })
+    const body7d = await res7d.json()
+    check(res7d.status === 200, `malformed room is reported, not thrown (status=${res7d.status})`)
+    check(
+      body7d.purged === 0 && body7d.results?.[0]?.error === 'invalid room',
+      'malformed room name is rejected as a per-target failure (purged=0)',
+    )
+    const res7e = await purge({})
+    check(res7e.status === 400, `an empty target list is a 400 (status=${res7e.status})`)
+    const res7f = await purge(null, ADMIN_SECRET, 'GET')
+    check(res7f.status === 405, `GET /admin/rooms/purge is method-not-allowed (status=${res7f.status})`)
+
+    // 7g) VALID credential → the document is actually GONE.
+    const res7g = await purge({ rooms: [ROOM] })
+    const body7g = await res7g.json()
+    check(res7g.status === 200, `authorized purge returns 200 (status=${res7g.status})`)
+    check(body7g.purged === 1 && body7g.failed === 0, `purge reports 1 erased (${JSON.stringify(body7g.results)})`)
+    check(
+      body7g.results?.[0]?.hadDoc === true,
+      'purge reports the room DID hold a document (so the erase was not a no-op on an empty room)',
+    )
+    check(
+      (await readRoom('post-purge reader')) === undefined,
+      'a fresh client now sees NOTHING — the document is erased, not merely hidden',
+    )
+
+    // 7h) Purging an already-empty room is safe and honestly reports hadDoc:false.
+    const res7h = await purge({ rooms: [ROOM] })
+    const body7h = await res7h.json()
+    check(
+      body7h.purged === 1 && body7h.results?.[0]?.hadDoc === false,
+      'a second purge is idempotent and reports hadDoc:false',
+    )
+
+    // 7i) The `ids` form — the form the 2026-08-26 production cleanup used,
+    //     because it is the only one that can address a room whose NAME is
+    //     unknown or outside ROOM_RE. Prove it ERASES, not just that it parses.
+    //
+    //     Getting a real id without a debug route: purge the canvas room BY NAME
+    //     once (it is empty, so this destroys nothing) and keep the resolved id
+    //     the response reports. Then write a value into that same room and purge
+    //     it AGAIN — this time by that id — and confirm the value is gone.
+    const canvasWrite = async (value) => {
+      const doc = new Y.Doc()
+      const prov = makeProvider(host, CANVAS_ROOM, doc, async () => ({
+        token: mintTicket({ pid: PID, scope: CANVAS_SCOPE }),
+      }))
+      providers.push(prov)
+      await waitFor(() => prov.synced, CONVERGE_TIMEOUT_MS, 'canvas writer synced')
+      doc.getMap('og').set('m:probe', value)
+      await sleep(3_000) // past y-partyserver's 2s onSave debounce
+      try { prov.disconnect() } catch { /* ignore */ }
+      try { prov.destroy() } catch { /* ignore */ }
+      providers.splice(providers.indexOf(prov), 1)
+      await sleep(1_000)
+    }
+    const canvasRead = async (label) => {
+      const doc = new Y.Doc()
+      const prov = makeProvider(host, CANVAS_ROOM, doc, async () => ({
+        token: mintTicket({ pid: PID, scope: CANVAS_SCOPE }),
+      }))
+      providers.push(prov)
+      await waitFor(() => prov.synced, CONVERGE_TIMEOUT_MS, `${label} synced`)
+      await sleep(1_000)
+      const seen = doc.getMap('og').get('m:probe')
+      try { prov.disconnect() } catch { /* ignore */ }
+      try { prov.destroy() } catch { /* ignore */ }
+      providers.splice(providers.indexOf(prov), 1)
+      return seen
+    }
+
+    const idProbe = await (await purge({ rooms: [CANVAS_ROOM] })).json()
+    const canvasId = idProbe.results?.[0]?.id
+    check(
+      typeof canvasId === 'string' && /^[0-9a-f]{64}$/.test(canvasId),
+      `purge reports the resolved DO id (${canvasId}) so it can be reconciled against Cloudflare's namespace listing`,
+    )
+
+    const CANVAS_VALUE = `canvas-${Date.now()}`
+    await canvasWrite(CANVAS_VALUE)
+    check(
+      (await canvasRead('canvas pre-purge reader')) === CANVAS_VALUE,
+      `canvas room holds a document before the id-form purge (${CANVAS_VALUE})`,
+    )
+
+    const res7i = await purge({ ids: [canvasId] })
+    const body7i = await res7i.json()
+    check(
+      body7i.purged === 1 && body7i.results?.[0]?.kind === 'id' && body7i.results?.[0]?.hadDoc === true,
+      `id-form purge erased the canvas room (${JSON.stringify(body7i.results)})`,
+    )
+    check(
+      (await canvasRead('canvas post-purge reader')) === undefined,
+      'id-form purge ACTUALLY erased the canvas document (fresh client sees nothing)',
+    )
+
+    // A syntactically valid but foreign hex id must fail loudly, not silently 200.
+    const res7j = await purge({ ids: ['0'.repeat(64)] })
+    const body7j = await res7j.json()
+    check(
+      body7j.purged === 0 && body7j.failed === 1,
+      `a foreign DO id fails loudly rather than silently no-op'ing (${JSON.stringify(body7j.results)})`,
+    )
+    const res7k = await purge({ ids: ['nope'] })
+    check((await res7k.json()).results?.[0]?.error === 'invalid id', 'a malformed id is rejected')
+
+    // 7z) THE ORDERING CONTRACT, MEASURED. A client that is STILL CONNECTED and
+    //     can still obtain a ticket re-uploads the document after an erase. This
+    //     is why admin.ts requires membership to be revoked before the purge —
+    //     the guarantee comes from "nothing can reconnect", not from the erase
+    //     alone. If this check ever flips to "erased", the contract has become
+    //     unnecessary and the comments saying otherwise must be corrected.
+    console.log('\n[7z] a still-connected client resurrects the room (ordering contract)')
+    const docR = new Y.Doc()
+    const provR = makeProvider(host, ROOM, docR, async () => ({
+      token: mintTicket({ pid: PID, scope: SCOPE }),
+    }))
+    providers.push(provR)
+    await waitFor(() => provR.synced, CONVERGE_TIMEOUT_MS, 'resurrect client synced')
+    const R_VALUE = `resurrect-${Date.now()}`
+    docR.getMap('og').set('m:probe', R_VALUE)
+    await sleep(3_000)
+
+    const res7z = await purge({ rooms: [ROOM] })
+    check((await res7z.json()).purged === 1, 'purge ran against a room with a live client')
+    // Give partysocket time to notice the close and reconnect + re-sync.
+    await sleep(5_000)
+    const afterResurrect = await readRoom('post-resurrect reader')
+    check(
+      afterResurrect === R_VALUE,
+      'a still-connected client DID re-upload the document — erasure alone is not enough, membership must be revoked first',
+    )
+    // Clean up: drop the resurrecting client, then erase for real.
+    for (const p of providers.splice(0, providers.length)) {
+      try { p.disconnect() } catch { /* ignore */ }
+      try { p.destroy() } catch { /* ignore */ }
+    }
+    await sleep(2_000)
+    await purge({ rooms: [ROOM] })
+    check(
+      (await readRoom('final reader')) === undefined,
+      'with nothing able to reconnect, the same purge erases the room for good',
+    )
+
+    // ── TEST 8: FAIL-CLOSED — no admin secret ⇒ the route is inert ─────────────
+    // The dangerous failure is a deploy that forgets `wrangler secret put
+    // OPENGROUND_COLLAB_ADMIN_SECRET` and ships an OPEN erase button. Booting a
+    // second worker WITHOUT the var is the only way to observe that state.
+    console.log('\n[8] with no admin secret the purge route is inert (fail-closed)')
+    const bare = await unstable_dev('src/index.ts', {
+      config: 'wrangler.jsonc',
+      local: true,
+      vars: { OPENGROUND_COLLAB_TICKET_SECRET: SECRET },
+      experimental: { disableExperimentalWarning: true },
+    })
+    try {
+      const res8a = await bare.fetch('/admin/rooms/purge', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ rooms: [ROOM] }),
+      })
+      check(res8a.status === 503, `unprovisioned purge route answers 503, not 200 (status=${res8a.status})`)
+      // An empty-string secret must be treated as unset, not as a valid secret
+      // that an empty Bearer token would match.
+      const res8b = await bare.fetch('/admin/rooms/purge', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' },
+        body: JSON.stringify({ rooms: [ROOM] }),
+      })
+      check(res8b.status === 503, `an empty Bearer cannot match an unset secret (status=${res8b.status})`)
+      // The rest of the worker still works without the admin secret.
+      const res8c = await bare.fetch('/health')
+      check(res8c.status === 200, 'the worker is otherwise healthy without the admin secret')
+    } finally {
+      try { await bare.stop() } catch { /* ignore */ }
+    }
   } finally {
     for (const p of providers) {
       try {

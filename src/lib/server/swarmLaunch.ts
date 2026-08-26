@@ -272,12 +272,21 @@ const desiredModelEffort = (
   if (role === 'manager' || role === 'overseer') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('high') }
   // The supply officer only translates intent into cards — sonnet is plenty.
   if (role === 'supply') return { model: 'sonnet', effort: guardEffort('medium') }
-  // Workers route by card weight: heavy/safety work gets the top-tier model,
-  // chores drop to sonnet.
+  // Workers route by card weight across THREE tiers (owner, 2026-08-26):
+  // heavy design work keeps the top tier, the BASE is opus, and only genuinely
+  // trivial cards drop to sonnet.
+  //
+  // ⚠ What changed and why. This used to be a two-way pick — fable or sonnet —
+  // so `opus` existed in the ladder only as the rung a cooling fable fell to. It
+  // was never CHOSEN, which meant the ordinary card (the `medium` bucket, and
+  // the safe default whenever the static signals say nothing) ran on the cheapest
+  // reasoning tier the swarm has. The owner's call is that ordinary work deserves
+  // the middle tier, not the floor. Effort is deliberately untouched here: the
+  // instruction was about which MODEL each bucket gets.
   const w = card ? classifyCardWeight(card) : 'medium'
   if (w === 'heavy') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('max') }
   if (w === 'light') return { model: 'sonnet', effort: guardEffort('low') }
-  return { model: 'sonnet', effort: guardEffort('medium') }
+  return { model: 'opus', effort: guardEffort('medium') }
 }
 
 /** Map a DESIRED model tier to the one a worker should ACTUALLY launch on, given

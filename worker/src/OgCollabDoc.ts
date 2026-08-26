@@ -69,6 +69,84 @@ export class OgCollabDoc extends YServer {
   }
 
   /**
+   * ERASE this room: drop every live socket, then empty durable storage.
+   * Called over RPC by the operator-only purge route (src/admin.ts) — never by
+   * a member, and never by the ticket-gated paths.
+   *
+   * ORDER MATTERS:
+   *
+   *  1. Close the sockets first. NOT load-bearing — this is a courtesy, and the
+   *     comment says so because it was MEASURED: deleting this loop entirely
+   *     leaves all 62 worker checks green, since resetInstance() below tears the
+   *     instance (and therefore every socket) down regardless. It is kept only
+   *     so peers see a normal 1000 closure instead of an abrupt teardown, which
+   *     is gentler on partysocket's reconnect backoff. Do not rely on it for
+   *     correctness, and do not let a future reader believe erasure depends on
+   *     it.
+   *  2. THEN deleteAll(). Per Cloudflare's storage docs, dropping individual
+   *     keys or tables is NOT sufficient — internal metadata survives and the
+   *     object keeps existing (and billing). `deleteAll()` is the only complete
+   *     erase, and an object whose storage is empty when it shuts down ceases to
+   *     exist entirely.
+   *
+   * Emptying storage is NOT on its own enough, and this was MEASURED rather than
+   * reasoned about: with only steps 1+2, the purge reported hadDoc:true, storage
+   * really was empty — and a fresh client connecting a second later STILL
+   * received the whole document. The instance was still resident, so YServer
+   * served `this.document` straight out of memory and would have re-persisted it
+   * on the next edit. Relying on the ~10s hibernation window to drop that memory
+   * is not erasure, it is a race. `resetInstance()` below closes it; the caller
+   * must invoke it immediately after this method.
+   *
+   * deleteAlarm() is explicit because this Worker's compatibility_date
+   * (2024-11-01) predates the 2026-02-24 change that folded alarm deletion into
+   * deleteAll(). y-partyserver does not currently set one — its persistence is a
+   * debounced `document.on('update')` callback, not an alarm — but an alarm left
+   * behind would keep the object alive and billable, and the call is a harmless
+   * no-op when there is none.
+   *
+   * Returns whether a persisted document was actually present, so the caller can
+   * MEASURE the erase rather than infer it from a 200.
+   */
+  async purgeStorage(): Promise<{ hadDoc: boolean }> {
+    const existing = await this.ctx.storage.get<Uint8Array | ArrayBuffer>(STORAGE_KEY)
+    const hadDoc = existing != null
+
+    for (const conn of this.getConnections()) {
+      try {
+        conn.close(1000, 'room erased')
+      } catch {
+        // A socket already gone is exactly the state we want it in.
+      }
+    }
+
+    await this.ctx.storage.deleteAlarm()
+    await this.ctx.storage.deleteAll()
+    return { hadDoc }
+  }
+
+  /**
+   * Tear this instance down so the in-memory Y.Doc is discarded. Pairs with
+   * purgeStorage() — call it IMMEDIATELY after, never on its own (on a live room
+   * it would just drop everyone for no reason).
+   *
+   * WHY IT IS A SEPARATE RPC: `ctx.abort()` resets the object synchronously,
+   * which kills the very request that called it. Folding it into purgeStorage()
+   * would destroy that method's return value, so the caller could no longer
+   * learn whether a document had actually been there — the one fact that makes
+   * the erase measurable. Splitting the two keeps the result deliverable, at the
+   * cost of this call always appearing to fail. admin.ts therefore expects the
+   * rejection and ignores it.
+   *
+   * The storage deletes are already awaited (and therefore committed) before
+   * this runs, so the reset cannot roll them back: the reconstructed instance
+   * reads empty storage and the room comes back as nothing.
+   */
+  resetInstance(): void {
+    this.ctx.abort('room erased')
+  }
+
+  /**
    * Every connection here already cleared the ticket gate (a verified project
    * member), so none are read-only. Returning false keeps the door open for a
    * future per-role split (e.g. viewer tickets) without changing the gate.

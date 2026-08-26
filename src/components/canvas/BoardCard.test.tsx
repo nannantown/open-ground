@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, cleanup, fireEvent } from '@testing-library/react'
 import { useCallback, useState } from 'react'
-import type { ProjectData, ProjectTask } from '@/lib/types'
+import type { BoardColumn, ProjectData, ProjectTask } from '@/lib/types'
 
 // Each BoardCard render calls t('board.card.ariaLabel', {title,...}) exactly
 // once → recording those titles is a precise per-card render counter that proves
@@ -28,7 +28,7 @@ vi.mock('@/components/canvas/CollabPresence', () => ({
   CollabPresence: () => null,
 }))
 
-import { BoardTab } from './BoardTab'
+import { BoardTab, parseCollapsed, toggleCollapsed } from './BoardTab'
 
 const task = (over: Partial<ProjectTask>): ProjectTask => ({
   id: 't',
@@ -190,6 +190,73 @@ const stripBase = () => ({
   onPersist: vi.fn(),
   onOpenTask: vi.fn(),
   onCreateTask: vi.fn(() => 'new'),
+})
+
+// ── Collapsed columns (owner, 2026-08-26) ───────────────────────────────────
+// A collapsed lane gives its `flex-1` width back to the lanes still open — that
+// is the point, and it is what buys a card room to carry the model it runs on.
+// What it must NOT do is take the lane's STATE with it. 判断待ち is the lane
+// where not noticing stops everything: nothing on the board moves until the
+// owner answers. So a rail keeps the lamp and the count.
+describe('collapsed column rail', () => {
+  const laneCards = () =>
+    data([
+      task({ id: 'b1', title: 'Blocked one', boardColumn: 'blocked' }),
+      task({ id: 'b2', title: 'Blocked two', boardColumn: 'blocked' }),
+      task({ id: 'd1', title: 'Doing one', boardColumn: 'doing' }),
+    ])
+
+  // The i18n mock renders a parameterised key as `key:{json}` (see its vi.mock
+  // above), so titles are matched through the same shape rather than hand-typed.
+  const titleFor = (key: string, name: string): string =>
+    `${key}:${JSON.stringify({ name })}`
+  const collapse = (name: string, view: ReturnType<typeof render>): void => {
+    fireEvent.click(view.getByTitle(titleFor('board.col.collapse', name)))
+  }
+
+  it('collapsing hides the lane’s CARDS but never its count', () => {
+    const view = render(<BoardTab data={laneCards()} {...stripBase()} />)
+    expect(view.getByText('Blocked one')).toBeTruthy()
+    collapse('board.col.blocked', view)
+    // The cards are gone from the board…
+    expect(view.queryByText('Blocked one')).toBeNull()
+    expect(view.queryByText('Blocked two')).toBeNull()
+    // …and the rail still says how many are waiting on you. A mutation that
+    // drops the count (or renders `display:none`) turns this red.
+    const rail = view.getByTitle(titleFor('board.col.expand', 'board.col.blocked'))
+    expect(rail.textContent).toContain('2')
+  })
+
+  it('the other lanes keep rendering — collapsing one is not collapsing the board', () => {
+    const view = render(<BoardTab data={laneCards()} {...stripBase()} />)
+    collapse('board.col.blocked', view)
+    expect(view.getByText('Doing one')).toBeTruthy()
+  })
+
+  it('the rail toggles back open', () => {
+    const view = render(<BoardTab data={laneCards()} {...stripBase()} />)
+    collapse('board.col.blocked', view)
+    fireEvent.click(view.getByTitle(titleFor('board.col.expand', 'board.col.blocked')))
+    expect(view.getByText('Blocked one')).toBeTruthy()
+  })
+})
+
+// ── The collapsed set, as pure logic ────────────────────────────────────────
+describe('toggleCollapsed / parseCollapsed', () => {
+  it('toggles membership without mutating the input', () => {
+    const start: BoardColumn[] = ['done']
+    expect(toggleCollapsed(start, 'blocked')).toEqual(['done', 'blocked'])
+    expect(toggleCollapsed(['done', 'blocked'], 'done')).toEqual(['blocked'])
+    expect(start).toEqual(['done']) // untouched
+  })
+
+  it('a stale or hand-edited stored value degrades per entry, never throws', () => {
+    expect(parseCollapsed(null)).toEqual([])
+    expect(parseCollapsed('')).toEqual([])
+    // 'archived' is not a column any more; 'done' beside it still survives.
+    expect(parseCollapsed('done, archived , blocked')).toEqual(['done', 'blocked'])
+    expect(parseCollapsed('garbage')).toEqual([])
+  })
 })
 
 // ── Card body preview ───────────────────────────────────────────────────────
@@ -381,6 +448,63 @@ describe('commander strip (review column)', () => {
 // are doing. It has three states and the third one is the load-bearing one:
 // when the note cannot be dated, the card says nothing rather than implying the
 // note is current.
+// ── What the worker is running on (owner, 2026-08-26) ───────────────────────
+// The owner asked for the MODEL and the EFFORT by name. The alternative on the
+// table was a weight badge (「重」/「軽」) — rejected as too abstract: the weight
+// bucket is an internal routing detail (a keyword match on the card's own text),
+// and what is worth checking at a glance is whether THIS card got the tier it
+// deserved. Both are short fixed tokens, so the pair fits where the branch and
+// the report did not.
+describe('worker run tier on the card', () => {
+  const doing = () => data([task({ id: 'b', title: 'Bravo', boardColumn: 'doing' })])
+
+  it('prints model/effort verbatim — not a weight word', () => {
+    const { getByText, queryByText } = render(
+      <BoardTab
+        data={doing()}
+        {...stripBase()}
+        workerForTask={() => ({
+          branch: 'swarm/x',
+          activity: 'working',
+          phase: 'implement',
+          model: 'opus',
+          effort: 'high',
+        })}
+      />,
+    )
+    expect(getByText('opus/high')).toBeTruthy()
+    // The rejected alternative must not creep back in.
+    expect(queryByText('重')).toBeNull()
+    expect(queryByText('軽')).toBeNull()
+  })
+
+  it('model alone still prints when the effort is unknown — half a truth, not none', () => {
+    const { getByText } = render(
+      <BoardTab
+        data={doing()}
+        {...stripBase()}
+        workerForTask={() => ({ branch: 'swarm/x', activity: 'working', model: 'fable' })}
+      />,
+    )
+    expect(getByText('fable')).toBeTruthy()
+  })
+
+  it('⚠ a worker the engine never dispatched prints NOTHING — no guessed tier', () => {
+    const { getByText, queryByText } = render(
+      <BoardTab
+        data={doing()}
+        {...stripBase()}
+        // A curl-direct spawn: the engine tracked no model for it.
+        workerForTask={() => ({ branch: 'swarm/x', activity: 'working', phase: 'implement' })}
+      />,
+    )
+    // Positive control — the strip IS up, so the absence is about the tier.
+    expect(getByText('· board.card.phaseImplement')).toBeTruthy()
+    expect(queryByText(/\/(high|medium|low|max)$/)).toBeNull()
+    expect(queryByText('opus')).toBeNull()
+  })
+})
+
 // ── Worker note (doing column) ──────────────────────────────────────────────
 // The worker's own report of what it is doing. It was its own visible row until
 // 2026-08-23; at two lines of ~260px it only ever showed a cut half-sentence, so

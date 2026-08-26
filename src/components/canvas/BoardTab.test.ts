@@ -4,6 +4,8 @@ import {
   boardColumnKeys,
   columnOf,
   byColumnOrder,
+  byDoneOrder,
+  columnSorter,
   withDoneCleared,
   withCardDuplicated,
   withCardMoved,
@@ -328,12 +330,74 @@ describe('byColumnOrder (priority within a column)', () => {
     expect([a, b, c].sort(byColumnOrder).map(t => t.id)).toEqual(['b', 'c', 'a'])
   })
 
-  it('places ordered cards before un-ordered ones, the rest oldest-first', () => {
+  it('places ordered cards before un-ordered ones, the rest NEWEST-first', () => {
+    // The tiebreak flipped 2026-08-26 (owner: 新しいものが一番上に). The drag
+    // order still wins — these four lanes are queues, and in todo the
+    // arrangement is the owner's priority statement.
     const ordered = task({ id: 'o', boardOrder: 5 })
     const oldNoOrder = task({ id: 'old', createdAt: '2026-01-01T00:00:00Z' })
     const newNoOrder = task({ id: 'new', createdAt: '2026-02-01T00:00:00Z' })
     expect(
-      [newNoOrder, ordered, oldNoOrder].sort(byColumnOrder).map(t => t.id),
-    ).toEqual(['o', 'old', 'new'])
+      [oldNoOrder, ordered, newNoOrder].sort(byColumnOrder).map(t => t.id),
+    ).toEqual(['o', 'new', 'old'])
+  })
+})
+
+describe('byDoneOrder / columnSorter — 完了 is a record, not a queue', () => {
+  it('完了 sorts NEWEST first and ignores boardOrder entirely', () => {
+    // ⚠ The case that made the owner ask. A card lands in 完了 by being moved
+    // there, which APPENDS it (boardOrder = n) — so honouring boardOrder buried
+    // each new completion at the bottom of the lane. Flipping only the tiebreak
+    // would not have helped: every one of these cards HAS a boardOrder.
+    const first = task({ id: 'first', boardOrder: 0, createdAt: '2026-01-01T00:00:00Z' })
+    const middle = task({ id: 'middle', boardOrder: 1, createdAt: '2026-02-01T00:00:00Z' })
+    const newest = task({ id: 'newest', boardOrder: 2, createdAt: '2026-03-01T00:00:00Z' })
+    expect([first, middle, newest].sort(byDoneOrder).map(t => t.id)).toEqual([
+      'newest',
+      'middle',
+      'first',
+    ])
+  })
+
+  it('columnSorter routes 完了 to the record order and every other lane to the queue order', () => {
+    const ordered = task({ id: 'o', boardOrder: 5, createdAt: '2026-01-01T00:00:00Z' })
+    const newNoOrder = task({ id: 'new', createdAt: '2026-02-01T00:00:00Z' })
+    // A queue lane keeps the hand-placed card on top…
+    expect([newNoOrder, ordered].sort(columnSorter('todo')).map(t => t.id)).toEqual(['o', 'new'])
+    // …while 完了 answers by date alone.
+    expect([newNoOrder, ordered].sort(columnSorter('done')).map(t => t.id)).toEqual(['new', 'o'])
+  })
+
+  it('every lane agrees on ONE rule: the newest thing you have not placed is on top', () => {
+    const older = task({ id: 'older', createdAt: '2026-01-01T00:00:00Z' })
+    const newer = task({ id: 'newer', createdAt: '2026-02-01T00:00:00Z' })
+    for (const col of boardColumnKeys()) {
+      expect([older, newer].sort(columnSorter(col)).map(t => t.id)).toEqual(['newer', 'older'])
+    }
+  })
+
+  it('same-timestamp cards keep their order instead of being REVERSED', () => {
+    // ⚠ The bug this file caught on 2026-08-26. A date comparator written as
+    // `a < b ? 1 : -1` answers -1 for BOTH (a,b) and (b,a) when the dates are
+    // equal — not an order, and V8 hands back a shuffled/reversed run rather
+    // than leaving it alone (five equal cards came out 4,3,2,0,1, which broke
+    // the drop-slot renumbering in withCardMoved). Same second = same string,
+    // and swarm creates several cards per second, so this is the common case.
+    const same = ['a', 'b', 'c', 'd', 'e'].map(id =>
+      task({ id, createdAt: '2026-01-01T00:00:00Z' }),
+    )
+    for (const col of boardColumnKeys()) {
+      expect([...same].sort(columnSorter(col)).map(t => t.id)).toEqual([
+        'a',
+        'b',
+        'c',
+        'd',
+        'e',
+      ])
+    }
+    // and the comparator itself is symmetric on a tie
+    expect(byDoneOrder(same[0], same[1])).toBe(0)
+    expect(byDoneOrder(same[1], same[0])).toBe(0)
+    expect(byColumnOrder(same[0], same[1])).toBe(0)
   })
 })

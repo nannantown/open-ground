@@ -18,6 +18,8 @@ export const board = {
     'board.toolbar.mineOnlyNeedsName': 'Set your display name in Settings to filter by assignee',
     'board.toolbar.projectSettings': 'Settings',
     'board.toolbar.clearDone': 'Clear',
+    'board.col.collapse': 'Collapse {name} — gives its width to the other lanes',
+    'board.col.expand': 'Open {name}',
     'board.toolbar.clearDoneTitle': 'Delete every card in Done',
     'board.toolbar.clearDoneConfirm':
       'Delete {count} cards in Done. On a shared board the deletion applies to everyone.',
@@ -240,6 +242,8 @@ export const board = {
     'board.toolbar.mineOnlyNeedsName': '設定で表示名を設定すると、担当者で絞り込めます',
     'board.toolbar.projectSettings': '設定',
     'board.toolbar.clearDone': 'クリア',
+    'board.col.collapse': '{name} を畳む — 空いた幅は他の列に回ります',
+    'board.col.expand': '{name} を開く',
     'board.toolbar.clearDoneTitle': '完了列のカードをすべて削除',
     'board.toolbar.clearDoneConfirm':
       'Done のカード {count} 枚を削除します。共有ボードではボード全員に反映されます。',

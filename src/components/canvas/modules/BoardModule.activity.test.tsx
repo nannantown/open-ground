@@ -489,6 +489,35 @@ describe('honesty — activity the engine cannot tie to a card', () => {
 })
 
 // ── 3. NO SILENT STALENESS ──────────────────────────────────────────────────
+// ── The run tier reaches the CARD (owner, 2026-08-26) ───────────────────────
+// BoardCard's own specs feed `workerForTask` by hand, so they prove the card
+// RENDERS a tier — they cannot see whether the server's value ever gets there.
+// This one drives the real BoardModule over a real /api/swarm/workers payload,
+// which is where the chain actually breaks. The mutation run found exactly that
+// hole: deleting the passthrough in resolveWorkerForTask left every other spec
+// in both files green, and the owner would have got a blank card.
+describe('the model/effort the server reports reaches the card', () => {
+  it('a worker launched on opus/high says so on its card', async () => {
+    fullSwarmState()
+    h.workers = [workerRec({ model: 'opus', effort: 'high' })]
+    const { getByText } = renderBoard(everyLane(), true)
+    await settle()
+    expect(getByText('opus/high')).toBeTruthy()
+  })
+
+  it('a worker the engine reports WITHOUT a tier shows none — nothing is invented', async () => {
+    fullSwarmState()
+    h.workers = [workerRec()]
+    const { getAllByText, queryByText } = renderBoard(everyLane(), true)
+    await settle()
+    // Positive control: the strip IS up, so the absence is about the tier. (Two
+    // matches on purpose — the doing card's worker and the review lane's
+    // commander share the vocabulary; see the gate spec above.)
+    expect(getAllByText('projectPanel.swarm.manager.stageRunning')).toHaveLength(2)
+    expect(queryByText(/^(fable|opus|sonnet|haiku)(\/|$)/)).toBeNull()
+  })
+})
+
 describe('worker note freshness survives the map-identity optimisation', () => {
   it('a heartbeat that goes quiet turns the note stale ON SCREEN, across polls', async () => {
     // Lap 1: a fresh beat — the note is a statement about now.

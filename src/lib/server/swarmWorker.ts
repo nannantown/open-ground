@@ -926,6 +926,7 @@ export const spawnSwarmWorker = async (
     worktree,
     branch,
     model: me.model,
+    ...(me.effort ? { effort: me.effort } : {}),
   }
 }
 

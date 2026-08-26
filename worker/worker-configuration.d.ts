@@ -12,7 +12,11 @@
 declare namespace Cloudflare {
   interface Env {
     // DO namespace — binding name === class name (see wrangler.jsonc).
-    OgCollabDoc: DurableObjectNamespace
+    // Parameterised by the class so RPC calls (stub.purgeStorage()) typecheck.
+    // Inline `import(...)` type syntax is deliberate: a top-level `import`
+    // would turn this ambient file into a module and the `declare namespace
+    // Cloudflare` block would stop being ambient.
+    OgCollabDoc: DurableObjectNamespace<import('./src/OgCollabDoc').OgCollabDoc>
     // Shared HMAC secret (wrangler secret put OPENGROUND_COLLAB_TICKET_SECRET).
     OPENGROUND_COLLAB_TICKET_SECRET: string
     // R2 bucket for shared canvas image bytes (u14b). Optional — absent until
@@ -23,6 +27,9 @@ declare namespace Cloudflare {
     // the service-role key. Keep in sync with the Env interface in src/index.ts.
     SUPABASE_URL?: string
     SUPABASE_ANON_KEY?: string
+    // Operator-only erase secret for POST /admin/rooms/purge. Optional — while
+    // unset the admin route is inert (503).
+    OPENGROUND_COLLAB_ADMIN_SECRET?: string
   }
 }
 

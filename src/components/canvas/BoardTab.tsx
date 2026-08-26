@@ -123,7 +123,7 @@ export const withCardDuplicated = (data: ProjectData, taskId: string): ProjectDa
   }
   // Renumber the column: existing cards in display priority order, the copy
   // spliced in right after the source.
-  const colCards = data.tasks.filter(t => columnOf(t) === col).sort(byColumnOrder)
+  const colCards = data.tasks.filter(t => columnOf(t) === col).sort(columnSorter(col))
   const ordered = [...colCards]
   ordered.splice(colCards.findIndex(t => t.id === taskId) + 1, 0, dup)
   const orderById = new Map(ordered.map((t, i) => [t.id, i]))
@@ -190,16 +190,112 @@ const saveDefaultsOpen = (projectId: string | undefined, on: boolean) => {
   } catch {}
 }
 
-// Sort within a column: boardOrder ascending; tasks without one fall after
-// ordered cards, oldest-first (stable, back-compat for pre-board tasks).
+// Collapsed columns — per project, same shape as the two toggles above.
+//
+// WHY A RAIL AND NOT `display:none` (owner, 2026-08-26): the columns are
+// `flex-1`, so a column that stops taking width GIVES that width to the others —
+// which is the whole point (a card can then carry the model it is running on
+// without going back to the truncation this board just came out of). But a lane
+// that vanishes takes its COUNT with it, and 判断待ち is the one lane where not
+// noticing is the failure: nothing on the board moves until the owner answers.
+// So a collapsed column keeps a narrow rail that still carries its lamp and its
+// count — hidden width, not hidden state.
+const COLLAPSED_COLS_KEY = (projectId: string) => `openground.board.collapsedCols.${projectId}`
+
+/** Pure: flip one column's membership in the collapsed set. Exported for the
+ *  tests — the storage wrapper around it is trivial, the set logic is not. */
+export const toggleCollapsed = (
+  set: readonly BoardColumn[],
+  key: BoardColumn,
+): BoardColumn[] =>
+  set.includes(key) ? set.filter((k) => k !== key) : [...set, key]
+
+/** Narrow whatever is in localStorage to real column keys. A hand-edited or
+ *  stale value degrades to "nothing collapsed" per entry rather than throwing —
+ *  the board must always render. */
+export const parseCollapsed = (raw: string | null): BoardColumn[] => {
+  if (!raw) return []
+  const known = new Set<string>(boardColumnKeys())
+  return raw
+    .split(',')
+    .map((x) => x.trim())
+    .filter((x): x is BoardColumn => known.has(x))
+}
+
+const loadCollapsed = (projectId: string | undefined): BoardColumn[] => {
+  if (!projectId || typeof window === 'undefined') return []
+  try {
+    return parseCollapsed(localStorage.getItem(COLLAPSED_COLS_KEY(projectId)))
+  } catch {
+    return []
+  }
+}
+
+const saveCollapsed = (projectId: string | undefined, cols: readonly BoardColumn[]) => {
+  if (!projectId || typeof window === 'undefined') return
+  try {
+    localStorage.setItem(COLLAPSED_COLS_KEY(projectId), cols.join(','))
+  } catch {}
+}
+
+// ⚠ Ties MUST return 0. `Array.prototype.sort` is stable, so 0 keeps the input
+// order — but a comparator that answers -1 to BOTH (a,b) and (b,a) is not an
+// order at all, and the sort silently REVERSES equal runs instead of leaving
+// them alone (measured 2026-08-26: five same-timestamp cards came back
+// 4,3,2,0,1). Every same-createdAt fixture and every card created inside the
+// same second hits this path.
+const byCreatedDesc = (a: ProjectTask, b: ProjectTask): number => {
+  const ac = a.createdAt || ''
+  const bc = b.createdAt || ''
+  if (ac === bc) return 0
+  return ac < bc ? 1 : -1
+}
+
+// Sort within a WORKING column (todo / doing / review / blocked): the owner's
+// explicit drag order first, then NEWEST first for anything never dragged
+// (owner, 2026-08-26 — "新しいものが一番上に").
+//
+// The drag order has to keep winning here: these four lanes are queues, and in
+// todo the arrangement IS the owner's priority statement (the column's own hint
+// says 上から優先度順). So only the tiebreak flipped — a card nobody has placed
+// by hand now sorts newest-first instead of oldest-first.
+//
+// ⚠ Display only. The swarm dispatcher does NOT read this: it picks the next
+// card with `sortTodos` (priority + aging, swarmOrchestrator), so reversing what
+// the owner SEES cannot change which card a worker takes next.
 export const byColumnOrder = (a: ProjectTask, b: ProjectTask): number => {
   const ao = a.boardOrder
   const bo = b.boardOrder
   if (ao != null && bo != null) return ao - bo
   if (ao != null) return -1
   if (bo != null) return 1
-  return (a.createdAt || '') < (b.createdAt || '') ? -1 : 1
+  return byCreatedDesc(a, b)
 }
+
+/** Sort within 完了: newest first, and NOTHING else.
+ *
+ *  ⚠ Deliberately ignores `boardOrder`, unlike every other lane. Done is a
+ *  RECORD, not a queue — there is no meaningful hand arrangement of finished
+ *  work, and honouring boardOrder here is exactly what put the oldest card on
+ *  top: a card lands in 完了 by being moved there, which appends it (boardOrder
+ *  = n), so the newest completion sank to the bottom of a 14-card lane. Flipping
+ *  only the tiebreak would not have fixed it — those cards all HAVE a
+ *  boardOrder. The consequence to accept: dragging to reorder WITHIN 完了 does
+ *  nothing. Dropping a card INTO 完了 still works and still marks it done.
+ *
+ *  ⚠ "Newest" is newest-CREATED, not newest-finished: a task carries `createdAt`
+ *  and no completion stamp. For swarm cards, which are created and finished in
+ *  the same stretch, the two agree; a card created long ago and finished today
+ *  will sit lower than its finish deserves. Fixing that means storing a
+ *  completion time — a new persisted field, so it is its own decision. */
+export const byDoneOrder = (a: ProjectTask, b: ProjectTask): number =>
+  byCreatedDesc(a, b)
+
+/** The comparator a given lane renders with. One place, so the three call sites
+ *  (render grouping, the move renumber, the duplicate insert) can never disagree
+ *  about what order a column is in. */
+export const columnSorter = (col: BoardColumn): ((a: ProjectTask, b: ProjectTask) => number) =>
+  col === 'done' ? byDoneOrder : byColumnOrder
 
 // Move `id` into `col`, inserting before `beforeId` (or at the end). Reassigns
 // boardOrder = 0..n across the target column's FULL card list (columnOf
@@ -222,7 +318,7 @@ export const withCardMoved = (
   if (!moving) return data
   const target = data.tasks
     .filter(t => t.id !== id && columnOf(t) === col)
-    .sort(byColumnOrder)
+    .sort(columnSorter(col))
   const idx = beforeId ? target.findIndex(t => t.id === beforeId) : -1
   const ordered = [...target]
   ordered.splice(idx < 0 ? ordered.length : idx, 0, moving)
@@ -411,6 +507,19 @@ export const BoardTab = ({
     })
   }
 
+  // Collapsed columns — the same per-project pattern as the two toggles above.
+  const [collapsedCols, setCollapsedCols] = useState<BoardColumn[]>(() => loadCollapsed(projectId))
+  useEffect(() => {
+    setCollapsedCols(loadCollapsed(projectId))
+  }, [projectId])
+  const toggleColumn = (key: BoardColumn) => {
+    setCollapsedCols(prev => {
+      const next = toggleCollapsed(prev, key)
+      saveCollapsed(projectId, next)
+      return next
+    })
+  }
+
   // Merged-branch detection (B018 / F065): while the review column holds
   // branch-carrying cards, ask the server (mount + every 60s) which of those
   // branches already landed in the target branch. Same power etiquette as the
@@ -482,7 +591,7 @@ export const BoardTab = ({
       blocked: [],
     }
     for (const t of visibleTasks) groups[columnOf(t)].push(t)
-    for (const k of Object.keys(groups) as BoardColumn[]) groups[k].sort(byColumnOrder)
+    for (const k of Object.keys(groups) as BoardColumn[]) groups[k].sort(columnSorter(k))
     return groups
   }, [visibleTasks])
   byColumnRef.current = byColumn
@@ -855,6 +964,8 @@ export const BoardTab = ({
                 workerPhase={worker?.phase}
                 workerNote={worker?.note}
                 workerNoteFreshness={worker?.noteFreshness}
+                workerModel={worker?.model}
+                workerEffort={worker?.effort}
                 needsYou={!!alert}
                 needsYouReason={alert?.reason}
                 needsYouHint={alert?.hint}
@@ -877,6 +988,61 @@ export const BoardTab = ({
                 onSetReviewedBy={handleSetReviewedBy}
                 onMoveToDone={handleMoveToDone}
               />
+            )
+          }
+          // ── Collapsed: a rail, not a hidden column ──────────────────────
+          // Takes ~34px instead of a `flex-1` share, and the columns are
+          // `flex-1`, so the width goes to the lanes still open. What it must
+          // NOT do is take the lane's state with it: the lamp and the count stay
+          // (see COLLAPSED_COLS_KEY) — 判断待ち collapsed to a rail still says
+          // "there are 2 waiting on you", because that is the one lane where not
+          // noticing stops the whole board. Drop targets stay live too, so a card
+          // can still be dragged into a collapsed 完了.
+          if (collapsedCols.includes(col.key)) {
+            return (
+              <button
+                key={col.key}
+                type="button"
+                onClick={() => toggleColumn(col.key)}
+                onDragOver={e => {
+                  e.preventDefault()
+                  setDrop(col.key, othersCount)
+                }}
+                onDrop={e => {
+                  e.preventDefault()
+                  commitDrop()
+                }}
+                title={t('board.col.expand', { name: col.label })}
+                aria-expanded={false}
+                className={[
+                  'flex w-[34px] shrink-0 flex-col items-center gap-2 rounded-xl px-1 pb-2.5 pt-3 transition-colors',
+                  isDropTarget ? 'bg-accent/5 ring-1 ring-accent' : 'bg-bg-inset hover:bg-plane',
+                ].join(' ')}
+              >
+                {(col.key === 'doing' || col.key === 'review' || col.key === 'blocked') && (
+                  <span
+                    aria-hidden
+                    className={[
+                      'inline-block h-1.5 w-1.5 shrink-0 rounded-full',
+                      cards.length === 0
+                        ? 'bg-ink/[0.18]'
+                        : col.key === 'doing'
+                          ? 'bg-moss shadow-lamp-moss'
+                          : 'bg-ochre shadow-lamp-ochre',
+                    ].join(' ')}
+                  />
+                )}
+                <span className="font-mono text-meta text-ink-muted">{cards.length}</span>
+                {/* The name reads bottom-to-top so a 4-character 和文 label fits
+                    a 34px rail without breaking between characters — the same
+                    failure the header comment below records. */}
+                <span
+                  className="whitespace-nowrap text-meta font-semibold text-ink-faint"
+                  style={{ writingMode: 'vertical-rl' }}
+                >
+                  {col.label}
+                </span>
+              </button>
             )
           }
           return (
@@ -971,6 +1137,18 @@ export const BoardTab = ({
                 {/* Bulk-clear (F073) — small text button, shown only while the
                     Done column holds any card (counted over ALL tasks, not the
                     filtered view: clearing always empties the whole column). */}
+                {/* Collapse — hands this lane's width back to the others. Last
+                    in the header so it never competes with the lane's own
+                    signals for the squeeze. */}
+                <button
+                  type="button"
+                  onClick={() => toggleColumn(col.key)}
+                  title={t('board.col.collapse', { name: col.label })}
+                  aria-expanded
+                  className="ml-auto shrink-0 rounded px-1 text-meta text-ink-faint transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                >
+                  ⟨
+                </button>
                 {col.key === 'done' && doneTotal > 0 && (
                   <button
                     type="button"

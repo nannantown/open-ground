@@ -71,6 +71,12 @@ const sdkEngineWorker: OrchestratorWorker = {
   // the fresh one) — so they belong here, on the roster entry.
   phase: 'verify',
   note: 'running the suite',
+  // What it is RUNNING ON. Added 2026-08-26 when the Board card started naming
+  // the tier — and the fixture ratchet in this file is what caught the omission:
+  // adding the fields to the sanitizer grew SWARM_WORKER_KEYS, which turned this
+  // spec red until a real server-built record actually carried them through.
+  model: 'opus',
+  effort: 'high',
 }
 
 const ptyEngineWorker: OrchestratorWorker = {
@@ -83,6 +89,8 @@ const ptyEngineWorker: OrchestratorWorker = {
   stage: 'starting',
   phase: 'blocked',
   note: 'stuck',
+  model: 'sonnet',
+  effort: 'low',
 }
 
 const activeTerminals = (claude: ActiveTerminalsResponse['claude']): ActiveTerminalsResponse => ({

@@ -1,0 +1,107 @@
+-- Collab write FREEZE — stop any client, of ANY app version, from creating new
+-- collab rows. Applied 2026-08-26 alongside the cloud-data cleanup.
+--
+-- WHY THIS EXISTS
+-- Shipped builds up to and including v0.11.95 had collab baked ON (release.yml
+-- fallback, removed 2026-08-23 — see docs/COLLAB_STATUS.md §7). A signed-in user
+-- merely OPENING a project's Board or Canvas tab caused findOrCreateOwnProject()
+-- to INSERT an og_projects row + their own og_project_members row, and then
+-- uploaded that project's Board/Canvas contents to the operator's Durable Object.
+-- No share action, no consent. 21 projects / 23 member rows accumulated this way;
+-- 20 of the 21 were never deliberately shared.
+--
+-- v0.11.96 ships collab OFF, so NEW installs cannot do this. But an EXISTING
+-- install still on <= 0.11.95 has the old baked-in config, and deleting the rows
+-- does not stop that install from re-creating them the next time its owner signs
+-- in and opens a Board tab. The app-side fix cannot reach those machines. The DB
+-- is the only chokepoint that works regardless of client version — so the freeze
+-- lives here.
+--
+-- WHAT IT DOES — removes every path by which a CLIENT can create collab rows:
+--   1. og_projects  INSERT policy  → dropped (RLS default-deny takes over)
+--   2. og_project_members INSERT policy → dropped (same)
+--   3. join_with_invite / approve_join_request / accept_invite → EXECUTE revoked
+--      from `authenticated`. These are SECURITY DEFINER and BYPASS RLS, so
+--      dropping the policies above is NOT enough on its own — 1+2 without 3
+--      would leave the invite-link and approval join paths wide open.
+--
+-- WHAT IT DELIBERATELY LEAVES ALONE:
+--   * SELECT policies — reads stay intact, so nothing errors in a confusing way
+--     and a future audit can still count what is there.
+--   * DELETE policies — an owner must remain able to remove their own data.
+--     Freezing creation must never freeze erasure; that is the whole point of
+--     the deletion path this cleanup exists to build (COLLAB_STATUS.md P1-(5)).
+--   * og_projects UPDATE (label edits) — harmless, creates nothing.
+--   * anon — already holds no write privilege here (0006 / 0011 / 0012).
+--
+-- THIS IS REVERSIBLE AND IS EXPECTED TO BE REVERSED. When collab is relaunched
+-- as an explicit opt-in (COLLAB_STATUS.md P0-(1) item 4, Phase 7), apply the UNDO
+-- block at the bottom of this file as migration 0016. Until then, collab is
+-- read/delete-only at the database.
+--
+-- Apply via Supabase MCP, then get_advisors(security) — expect ZERO new findings
+-- (this migration only removes privileges; it grants nothing).
+--
+-- VERIFY IT ACTUALLY BITES (do not trust "it applied" — see docs/VERIFICATION.md
+-- rule 2, "look at whether it WORKS, not whether it RUNS"). Run as `authenticated`
+-- with a real owner's uid and confirm the INSERT is REJECTED, inside a rollback:
+--
+--   begin;
+--     set local role authenticated;
+--     set local request.jwt.claims = '{"sub":"<an owner uuid>","role":"authenticated"}';
+--     insert into public.og_projects (name, owner_id) values ('freeze-probe', '<same uuid>');
+--   rollback;
+--
+--   Expected: ERROR 42501 "new row violates row-level security policy".
+--   If that INSERT SUCCEEDS, this migration did not take and the cleanup will
+--   silently refill.
+
+-- ── 1) Client-side project creation ──────────────────────────────────────────
+-- "og projects owner insert" (from 0005) was: with_check ((select auth.uid()) = owner_id).
+-- Dropping it leaves og_projects with NO INSERT policy, and RLS is enabled, so
+-- every client INSERT is denied. service_role / the SQL editor are unaffected
+-- (they bypass RLS), which is what keeps this cleanup and any future admin
+-- repair possible.
+drop policy if exists "og projects owner insert" on public.og_projects;
+
+-- ── 2) Client-side roster writes ─────────────────────────────────────────────
+-- "og members owner insert" (from 0005) was: with_check (caller owns the project).
+-- This is the row that carried the member's EMAIL ADDRESS — the PII half of the
+-- incident. Same default-deny reasoning as above.
+drop policy if exists "og members owner insert" on public.og_project_members;
+
+-- ── 3) The RLS bypasses ──────────────────────────────────────────────────────
+-- These three are SECURITY DEFINER: they run as their owner and do NOT consult
+-- the policies above. join_with_invite and approve_join_request INSERT into
+-- og_project_members directly; accept_invite flips a pending row to accepted.
+-- Revoking EXECUTE from `authenticated` is what actually closes them. REVOKE on a
+-- privilege that is not held is a no-op, so this is idempotent.
+--
+-- private.og_is_member is INTENTIONALLY NOT revoked: it is read-only (returns a
+-- boolean about the caller's own membership), it is what the SELECT policies call
+-- to avoid recursion, and revoking it would break reads.
+revoke execute on function public.join_with_invite(text) from authenticated;
+revoke execute on function public.approve_join_request(uuid) from authenticated;
+revoke execute on function public.accept_invite(uuid) from authenticated;
+
+-- ── UNDO (for Phase 7 relaunch — do NOT run as part of this migration) ───────
+-- Copy into a new 0016_*.sql when collab comes back behind an explicit opt-in.
+-- Recreated verbatim from 0005 so the restored policies match the originals
+-- exactly (one permissive policy per (role, action); (select auth.uid()) form
+-- for auth_rls_initplan).
+--
+--   create policy "og projects owner insert" on public.og_projects
+--     for insert to authenticated
+--     with check ((select auth.uid()) = owner_id);
+--
+--   create policy "og members owner insert" on public.og_project_members
+--     for insert to authenticated
+--     with check (exists (
+--       select 1 from public.og_projects p
+--       where p.id = og_project_members.project_id
+--         and p.owner_id = (select auth.uid())
+--     ));
+--
+--   grant execute on function public.join_with_invite(text) to authenticated;
+--   grant execute on function public.approve_join_request(uuid) to authenticated;
+--   grant execute on function public.accept_invite(uuid) to authenticated;

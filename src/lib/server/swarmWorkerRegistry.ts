@@ -241,6 +241,11 @@ export const listSwarmWorkers = async (
       stage: w.stage,
       ...(w.phase ? { phase: w.phase } : {}),
       ...(w.note ? { note: w.note } : {}),
+      // What this worker is ACTUALLY running on. Engine-tracked only: the two
+      // fallback branches below build records for workers the engine never
+      // dispatched, and there is nothing truthful to put here for them.
+      ...(w.model ? { model: w.model } : {}),
+      ...(w.effort ? { effort: w.effort } : {}),
       ...(heartbeatAt ? { heartbeatAt } : {}),
       ...(hb?.readyToMerge ? { ready: true } : {}),
       ...(hb && !hb.readyToMerge && (hb.phase === 'blocked' || !!hb.blockers)
