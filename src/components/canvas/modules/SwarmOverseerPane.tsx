@@ -64,6 +64,7 @@ interface Props {
 // manager pane doesn't render anomalies) so they live in the overseer namespace.
 export const ANOMALY_LABEL: Record<string, MessageKey> = {
   'orphan-doing': 'projectPanel.swarm.manager.anomalyOrphanDoing',
+  'unowned-doing': 'projectPanel.swarm.overseer.anomalyUnownedDoing',
   'worktree-missing': 'projectPanel.swarm.manager.anomalyWorktreeMissing',
   'worker-stale': 'projectPanel.swarm.manager.anomalyWorkerStale',
   'no-heartbeat': 'projectPanel.swarm.overseer.anomalyNoHeartbeat',

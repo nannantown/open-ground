@@ -764,6 +764,11 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       'deliverAnswerToWorker',
       'getSdkSession',
       'isSdkSessionReaped',
+      // 0827: the 'unowned-doing' anomaly asks BOTH pools whether anything is
+      // live in a branch's worktree before it calls the card abandoned — a
+      // manual worker is never in engine.workers, so "no counted worker" alone
+      // describes a healthy one just as well as a stranded one.
+      'liveDeskOccupies',
       'stopAllDesksInDirAndWait',
       'terminateSdkSession',
       'waitForSdkSessionGone',

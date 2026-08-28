@@ -171,6 +171,7 @@ export const commanderPresence = (
  *  can't self-heal is noticed (条件2). */
 export type EngineAnomalyKind =
   | 'orphan-doing'
+  | 'unowned-doing'
   | 'worktree-missing'
   | 'worker-stale'
   | 'no-heartbeat'

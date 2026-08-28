@@ -296,6 +296,8 @@ export const projectPanel = {
     // Anomalies (条件2) — state inconsistencies the engine detected.
     'projectPanel.swarm.manager.anomaliesHeading': 'Inconsistencies',
     'projectPanel.swarm.manager.anomalyOrphanDoing': 'Card stuck in Doing — its worker is gone',
+    'projectPanel.swarm.overseer.anomalyUnownedDoing':
+      'Card stuck in Doing — nobody is driving it, but its worktree is still there',
     'projectPanel.swarm.manager.anomalyWorktreeMissing': "Worker's worktree is missing",
     'projectPanel.swarm.manager.anomalyWorkerStale': 'Worker silent — possibly stuck',
     'projectPanel.swarm.manager.anomalyStaleFor': 'no heartbeat for {min} min',
@@ -1043,6 +1045,8 @@ export const projectPanel = {
     // 不整合（条件2）— エンジンが検出した状態の食い違い。
     'projectPanel.swarm.manager.anomaliesHeading': '不整合',
     'projectPanel.swarm.manager.anomalyOrphanDoing': 'doing のまま放置 — 担当 worker が消失',
+    'projectPanel.swarm.overseer.anomalyUnownedDoing':
+      'doing のまま放置 — 動かしている worker が居ません(作業フォルダは残っています)',
     'projectPanel.swarm.manager.anomalyWorktreeMissing': 'worker の worktree が消失',
     'projectPanel.swarm.manager.anomalyWorkerStale': 'worker が無応答 — 停滞の可能性',
     'projectPanel.swarm.manager.anomalyStaleFor': '{min}分 心拍なし',

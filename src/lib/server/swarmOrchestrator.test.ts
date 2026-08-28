@@ -8408,6 +8408,148 @@ describe('runEnginePass ⇄ stopOrchestratorWorker — the blocked park survives
 
 // ── detectAnomalies (条件2 — state inconsistency detection) ────────────────────
 
+// ── 誰も動かしていない doing カードの回収 (2026-08-27) ───────────────────────
+//
+// THE STALL, from the owner's report. Workers dispatched BEFORE an app restart
+// finished AFTER it. Boot adoption declined them, so they were in neither
+// `engine.workers` nor the review column — and every link in the chain that
+// wakes the commander reads one of those two:
+//
+//   monitorWorkers (walks engine.workers) → promote doing→review
+//     → runIntegratePass reads the REVIEW column
+//       → a branch seen there for the first time is `freshlyReady`
+//         → managerNotice → the desk is woken
+//
+// So the cards sat in `doing` with live worktrees, `readyToMerge` heartbeats and
+// commits on their branches, and nothing moved them. `GET /api/swarm/workers`
+// (roster ∪ heartbeat ∪ live desks) reported them ready:true the whole time
+// while `GET /api/swarm/orchestrator` reported `workers:[]`. The only thing that
+// ever restarted the machine was the owner POSTing manager/say by hand — which
+// woke the commander, which ran 「状況」 and moved the cards ITSELF, and only
+// then did the engine's notice fire ("統合待ち 3 件・0秒で到達" — 0 seconds,
+// because the notice machinery was never the broken part).
+//
+// The same hole swallows every MANUAL worker (POST /api/swarm/worker never
+// pushes to engine.workers), which matters more since 0.11.98 routed the Board's
+// 実行 button through exactly that path.
+//
+// This is deliberately a CARD-ROOTED invariant, not a fourth patch on
+// adoptResumeCandidates' three exits: it holds however the card was orphaned.
+describe('promoteUnownedDelivered — a delivered card nobody owns still reaches the commander', () => {
+  const NOW = Date.parse('2026-08-27T12:00:00Z')
+  const beat = (over: Partial<HeartbeatSign> = {}): HeartbeatSign => ({
+    ready: true,
+    blocked: false,
+    at: new Date(NOW).toISOString(),
+    ...over,
+  })
+
+  it('moves it doing→review, so the review column (and the wake reflex) can see it', async () => {
+    const c = card('u', { boardColumn: 'doing', branch: 'swarm/u' })
+    const deps = makeDeps({
+      cards: [c],
+      heartbeats: new Map([['u', beat()]]),
+      commits: new Map([['u', 3]]),
+    })
+    const engine = newEngine({ running: true, workers: [] })
+    await runDispatchPass(engine, deps, NOW)
+    expect(deps.reviews).toEqual([{ taskId: 'u', branch: 'swarm/u' }])
+    expect(deps.board.get('u')?.boardColumn).toBe('review')
+  })
+
+  it('leaves a card a COUNTED worker owns alone — that worker does its own promote', async () => {
+    // ⚠ THE FIXTURE HAS TO MAKE THE GUARD THE ONLY THING STOPPING IT (measured:
+    // an earlier version of this test gave the worker no heartbeat, so the
+    // hand-over check blocked the sweep anyway and deleting the counted-worker
+    // guard left the test GREEN — a guard that observes nothing). A ready beat
+    // plus commits means the sweep would fire on this card if it were allowed
+    // to, so what is pinned here is the guard itself.
+    //
+    // The monitor DOES promote it — that is its job, and this card is exactly
+    // what it is for. The observable is therefore that the promote happened
+    // ONCE, by the monitor, and that the sweep did not also reach for it: two
+    // promotes on one card is two owners, which is the whole hazard.
+    const c = card('k', { boardColumn: 'doing', branch: 'swarm/k' })
+    const deps = makeDeps({
+      cards: [c],
+      heartbeats: new Map([['k', beat()]]),
+      commits: new Map([['k', 2]]),
+    })
+    const engine = newEngine({
+      running: true,
+      workers: [
+        worker({ terminalId: 'pty-k-1', branch: 'swarm/k', taskId: 'k', taskTitle: 'task k', worktree: '/wt/k' }),
+      ],
+    })
+    await runDispatchPass(engine, deps, NOW)
+    expect(deps.reviews).toHaveLength(1)
+    expect(engine.log.some((l) => l.message.startsWith('promoted to review:'))).toBe(true)
+    expect(engine.log.some((l) => l.message.startsWith('worker 不在のまま完了していた'))).toBe(false)
+  })
+
+  it('will not move one with NO hand-over sign — a worker mid-task keeps its card', async () => {
+    const c = card('w', { boardColumn: 'doing', branch: 'swarm/w' })
+    const deps = makeDeps({
+      cards: [c],
+      heartbeats: new Map([['w', beat({ ready: false })]]),
+      commits: new Map([['w', 5]]),
+    })
+    await runDispatchPass(newEngine({ running: true, workers: [] }), deps, NOW)
+    expect(deps.reviews).toEqual([])
+  })
+
+  it('will not move one with NO commits — a ready beat over an empty branch is nothing to integrate', async () => {
+    const c = card('e', { boardColumn: 'doing', branch: 'swarm/e' })
+    const deps = makeDeps({
+      cards: [c],
+      heartbeats: new Map([['e', beat()]]),
+      commits: new Map([['e', 0]]),
+    })
+    await runDispatchPass(newEngine({ running: true, workers: [] }), deps, NOW)
+    expect(deps.reviews).toEqual([])
+  })
+
+  it('will not move one that has been SENT BACK — the ready beat is sticky and lies there', async () => {
+    // ⚠ THE ONE CASE A READY HEARTBEAT MEANS NOTHING. swarm-beat.sh writes
+    // readyToMerge once and never unsets it, so a card returned review→doing by
+    // a 差し戻し still reports ready while its worker re-works. The live monitor
+    // compares the beat against `reworkAt` — in-memory, and therefore gone across
+    // exactly the restart this sweep exists for — so the persisted COUNT is the
+    // discriminator here: a card that has never been sent back cannot be in that
+    // state at all.
+    const c = card('r', { boardColumn: 'doing', branch: 'swarm/r', reworkCount: 1 })
+    const deps = makeDeps({
+      cards: [c],
+      heartbeats: new Map([['r', beat()]]),
+      commits: new Map([['r', 4]]),
+    })
+    await runDispatchPass(newEngine({ running: true, workers: [] }), deps, NOW)
+    expect(deps.reviews).toEqual([])
+  })
+
+  it('will not move an ABANDONED card — 見送る means 見送る', async () => {
+    const c = card('a', { boardColumn: 'doing', branch: 'swarm/a', abandoned: true })
+    const deps = makeDeps({
+      cards: [c],
+      heartbeats: new Map([['a', beat()]]),
+      commits: new Map([['a', 2]]),
+    })
+    await runDispatchPass(newEngine({ running: true, workers: [] }), deps, NOW)
+    expect(deps.reviews).toEqual([])
+  })
+
+  it('ignores a non-swarm branch — the ownership line holds here too', async () => {
+    const c = card('t', { boardColumn: 'doing', branch: 'task/hand-written' })
+    const deps = makeDeps({
+      cards: [c],
+      heartbeats: new Map([['t', beat()]]),
+      commits: new Map([['t', 2]]),
+    })
+    await runDispatchPass(newEngine({ running: true, workers: [] }), deps, NOW)
+    expect(deps.reviews).toEqual([])
+  })
+})
+
 describe('detectAnomalies — state inconsistency detection', () => {
   // detectAnomalies only ever calls deps.isAlive + deps.worktreeExists; build the
   // minimal surface off makeDeps (which supplies the full OrchestratorDeps) and
@@ -8416,10 +8558,16 @@ describe('detectAnomalies — state inconsistency detection', () => {
   const depsWith = (
     treesPresent: Set<string>,
     alive?: Set<string>,
+    /** Branches whose worktree has NO live desk in it. Absent ⇒ every tree is
+     *  occupied, which is the answer that keeps 'unowned-doing' silent — the
+     *  right default for the pre-2026-08-27 cases below, all of which are about
+     *  a card a manual worker may legitimately own. */
+    unoccupied?: Set<string>,
   ): OrchestratorDeps & AnomalyDeps => ({
     ...makeDeps({ cards: [] }),
     isAlive: (w) => (alive ? alive.has(w.terminalId!) : true),
     worktreeExists: async (_p, branch) => treesPresent.has(branch),
+    deskOccupies: async (_p, branch) => !(unoccupied?.has(branch) ?? false),
   })
 
   const NOW = Date.parse('2026-06-24T12:00:00Z')
@@ -8465,9 +8613,60 @@ describe('detectAnomalies — state inconsistency detection', () => {
   it('does NOT flag a doing card whose worktree still exists (an uncounted manual worker owns it)', async () => {
     const engine = newEngine({ workers: [] })
     const tasks = [card('m', { boardColumn: 'doing', branch: 'swarm/m' })]
-    // worktree present → a manual worker (the engine never counts) still owns it:
-    // never a false orphan. This is the key guard against flagging manual workers.
+    // worktree present AND a live desk in it → a manual worker (the engine never
+    // counts one — only its own dispatch pushes to engine.workers) is genuinely
+    // working here. This is the key guard against flagging manual workers, and
+    // the 'unowned-doing' row added 2026-08-27 has to keep clearing it.
     expect(await detectAnomalies(engine, tasks, depsWith(new Set(['swarm/m'])), NOW)).toEqual([])
+  })
+
+  it("flags a doing card whose worktree is there but EMPTY — the silent case (unowned-doing)", async () => {
+    // ⚠ THE HOLE, measured 2026-08-27 (QRmenu). Workers dispatched before an app
+    // restart finished afterwards; boot adoption had declined them, so they were
+    // in neither engine.workers nor the review column. orphan-doing only fires
+    // when the WORKTREE IS GONE, so this state — card in doing, no counted
+    // worker, tree still on disk, nobody in it — matched no row at all.
+    // `GET /api/swarm/workers` listed the workers ready:true while
+    // `GET /api/swarm/orchestrator` showed workers:[], for hours, saying nothing.
+    const engine = newEngine({ workers: [] })
+    const tasks = [card('u', { boardColumn: 'doing', branch: 'swarm/u' })]
+    const out = await detectAnomalies(
+      engine,
+      tasks,
+      depsWith(new Set(['swarm/u']), undefined, new Set(['swarm/u'])),
+      NOW,
+    )
+    expect(out).toEqual([
+      { kind: 'unowned-doing', ref: 'u', branch: 'swarm/u', taskTitle: tasks[0].title },
+    ])
+  })
+
+  it('withholds the row when the liveness probe cannot answer — silence beats crying wolf', async () => {
+    // Fail-quiet-to-OCCUPIED (see AnomalyDeps.deskOccupies): under-reporting a
+    // stall is recoverable — the DELIVERED ones are collected automatically and
+    // the card is still visibly stuck in doing — while a feed that fires on
+    // healthy manual workers is a feed the owner learns to skip.
+    const engine = newEngine({ workers: [] })
+    const tasks = [card('u', { boardColumn: 'doing', branch: 'swarm/u' })]
+    const deps = {
+      ...depsWith(new Set(['swarm/u'])),
+      deskOccupies: async () => {
+        throw new Error('probe fault')
+      },
+    }
+    expect(await detectAnomalies(engine, tasks, deps, NOW)).toEqual([])
+  })
+
+  it('still prefers orphan-doing when the worktree is GONE (the two are siblings, not rivals)', async () => {
+    const engine = newEngine({ workers: [] })
+    const tasks = [card('g', { boardColumn: 'doing', branch: 'swarm/g' })]
+    const out = await detectAnomalies(
+      engine,
+      tasks,
+      depsWith(new Set(), undefined, new Set(['swarm/g'])),
+      NOW,
+    )
+    expect(out.map((a) => a.kind)).toEqual(['orphan-doing'])
   })
 
   // ── the two LEVEL-TRIGGERED failures, mirrored as anomalies (2026-08-04) ──

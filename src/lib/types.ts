@@ -1513,6 +1513,19 @@ export interface OrchestratorReview {
  *                         counted worker drains it AND its worktree is gone: the
  *                         worker that owned it vanished, but the card never left
  *                         'doing' (it will never advance on its own).
+ *   - 'unowned-doing'   — the SIBLING of the above, and the one that used to be
+ *                         silent: same card, same missing worker, but its
+ *                         worktree is STILL ON DISK. Measured 2026-08-27 —
+ *                         workers dispatched before an app restart finished
+ *                         afterwards, boot adoption had declined them, and
+ *                         nothing owned the cards: `GET /api/swarm/workers`
+ *                         listed them ready while `GET /api/swarm/orchestrator`
+ *                         showed `workers:[]`, for hours, with no row anywhere.
+ *                         The DELIVERED ones are now recovered automatically
+ *                         (promoted to review, which wakes the commander), so
+ *                         this row is the ambiguous remainder — no hand-over
+ *                         sign, or a card already sent back once — which needs a
+ *                         human.
  *   - 'worktree-missing'— a worker the engine still counts has lost its isolated
  *                         worktree directory (deleted out from under it): its PTY
  *                         may run but its work tree is gone.
@@ -1558,6 +1571,7 @@ export interface OrchestratorReview {
  *                         carries the matched paths. */
 export type OrchestratorAnomalyKind =
   | 'orphan-doing'
+  | 'unowned-doing'
   | 'worktree-missing'
   | 'worker-stale'
   | 'no-heartbeat'

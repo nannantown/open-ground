@@ -350,6 +350,73 @@ resume そのものが走らないので、司令官の卓も戻らない。実�
 `server/routes/__tests__/swarmManagerDesired.test.ts`(spawn が書かない / stop が消さない /
 owner ゲート欠落)、`SwarmModule.commanderStop.test.tsx`(生ハンドル DELETE への差し戻し / path 欠落)。
 
+### 7.4c 「誰も動かしていない doing カード」は engine が回収する(2026-08-27 実測の停止)
+
+**旧知識: worker が done になれば司令官が起こされる。条件付きで撤回。**
+
+司令官を起こす鎖は、全部の輪が `engine.workers` か review 列を読んでいる:
+
+```
+monitorWorkers(engine.workers を歩く) → doing→review へ昇格
+  → runIntegratePass が review 列を読む
+    → 初めて見た branch = freshlyReady
+      → managerNotice → 卓を起こす
+```
+
+**`engine.workers` に居ない worker は、この鎖のどこにも入れない。** 入れない
+worker は2種類ある:
+
+1. **再起動をまたいだ worker** — boot の `adoptResumeCandidates` が採用を見送った
+   もの(session id 無し / transcript 未証明 / spawn 失敗)。
+2. **手動 worker** — `POST /api/swarm/worker`(Board の 実行 ボタン)は
+   `engine.workers` に **push しない**。engine 自身の dispatch だけが数える。
+   0.11.98 で 実行 が worker 経路になったので、こちらは日常的に発生する。
+
+実測(2026-08-27, QRmenu): 再起動前に出た worker 3体が再起動後に完了。カードは
+`doing` のまま、worktree は生きていて、心拍は `readyToMerge`、branch には commit
+があるのに、**誰も review へ動かさなかった**。`GET /api/swarm/workers`
+(roster ∪ 心拍 ∪ 生きた卓)は ready:true を返し、`GET /api/swarm/orchestrator` は
+`workers:[]` を返し、**その食い違いは何時間も無言だった**。動いたのは補給官が手で
+`POST /api/swarm/manager/say` を送ったときだけ — 起きた司令官が「状況」を実行して
+**自分でカードを動かし**、そこで初めて engine の通知が出た(「統合待ち 3 件・
+**0秒**で到達」— 0秒なのは、通知の仕組み自体は壊れていなかったから)。
+
+**追加された2つ**(どちらもカード起点。`adoptResumeCandidates` の3つの出口に
+4枚目の当て板を貼るのではなく、**どう孤立しようと成り立つ不変条件**にしてある):
+
+- **`promoteUnownedDelivered`**(`runDispatchPass` の 2b、monitor の直後)—
+  「誰も数えていない doing カードで、心拍が ready かつ branch に commit がある」
+  ものを review へ回収する。以後は既存の鎖がそのまま動く(通知 → 司令官)。
+  **生きた worker のカードを奪えない**理由が3つ揃っている:
+  ①数えられた worker のカードは対象外(そのカードは monitor が持つ)
+  ②`readyToMerge` + commit(引き渡しの合図と実体の両方)
+  ③`reworkCount` が 0 のものだけ — 心拍の ready は **粘る**(`swarm-beat.sh` は
+  一度書いたら消さない)ので、差し戻されたカードは再作業中でも ready を返し続ける。
+  live monitor はこれを `reworkAt` の時刻で見分けるが、**それは in-memory なので
+  再起動で消える** — つまりこの掃除が必要な場面ではまさに使えない。だから
+  「一度も差し戻されていない」という**永続する回数**を判別に使っている。
+- **`unowned-doing` 異常**(`orphan-doing` の兄弟)— 同じ「誰も居ない doing」で、
+  **worktree が残っている**側。届いていない残りがここに出る。
+  ⚠ `AnomalyDeps.deskOccupies`(両プールに生きた卓が居るか)で必ず絞ること。
+  これが無いと**健全な手動 worker 全部に火を噴く** — 読み飛ばされる通知欄は
+  無い通知欄より悪い。プローブが答えられないときは **「居る」側に倒して黙る**。
+
+**声かけ 1/3 で止まる件は、この停止の下流**であって別のバグではない。review が
+空なら Part B は丸ごと武装解除される(`swarmCards.length === 0` → `rs.nudges = 0`)。
+カードが `doing` に取り残されている間 review は空なので、engine は言うことが無い。
+加えて `manager/say` を送ると卓が `active` に見えるので、そこでも予算は正当に
+リセットされる。回収が入れば review にカードが載り、10分間隔の 1/3 → 2/3 → 3/3 が
+そのまま回る。
+
+歯(mutation で赤を実測済み): `swarmOrchestrator.test.ts` の
+「promoteUnownedDelivered」ブロック(掃除を消す / 数えた worker のガードを外す /
+差し戻しガードを外す / 引き渡しの合図なしで昇格 / 空 branch で昇格)と
+「detectAnomalies」の `unowned-doing` 3本(生存プローブを無視 / プローブ障害を
+発火側に倒す / worktree が消えたら orphan-doing のまま)。
+⚠ 「数えた worker のガード」の歯は**最初 緑のままだった** — 心拍を与えていない
+fixture だったので、ガードを外しても引き渡し検査が止めていた。何も観測していない
+歯だったので、ready な心拍 + commit を与えて**ガードだけが理由になる**形に直した。
+
 ### 7.5 passInFlight / pendingDispatch は外から見えない
 
 `stateOf`(:1836-1873)は `passInFlight` / `pendingDispatch` / `lock` / `generation` / rework 予算 Map を**返さない**。「dispatch が二重に走っていないか」を API で確認する手段はなく、機械封鎖(§4.4 + `isCardDispatchInFlight`)を信頼するのが正。手動 dispatch(POST `/api/swarm/worker`)がエンジン予約と衝突すると 409 が返る(02 章 §2.1 の twin-dispatch ガード)。

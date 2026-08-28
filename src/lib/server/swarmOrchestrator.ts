@@ -183,6 +183,7 @@ import {
 } from './swarmWorker'
 import { SdkWorkerUnavailableError } from './swarmWorkerSdk'
 import { centralWorktreesDir } from './paths'
+import { liveDeskOccupies } from './liveDesks'
 import { projectUUIDFromPath } from './projectDataPath'
 import { appendEngineJournalLine } from './engineJournal'
 import {
@@ -3183,6 +3184,22 @@ export interface AnomalyDeps {
    *  (treated as missing — conservative: the anomaly check only WARNS, never
    *  mutates, so a transient stat error at worst shows one extra warning). */
   worktreeExists: (projectPath: string, branch: string) => Promise<boolean>
+  /** Is a LIVE desk (either pool) sitting in this branch's worktree right now?
+   *
+   *  ⚠ THE MANUAL WORKER IS THE REASON. A worker spawned from the Board's 実行
+   *  button (POST /api/swarm/worker) is never pushed to `engine.workers` — only
+   *  the engine's own dispatch counts one — so "a doing card with no counted
+   *  worker" describes a perfectly healthy manual worker just as well as an
+   *  abandoned one. Without this probe the 'unowned-doing' row would fire on
+   *  every manual worker in flight, which is worse than not reporting at all: a
+   *  feed that cries on healthy state is a feed the owner learns to skip.
+   *
+   *  OPTIONAL + fail-quiet-to-OCCUPIED: absent, or a probe that throws, means
+   *  "cannot prove nobody is there" and the row is withheld. Under-reporting a
+   *  stall is recoverable (the delivered ones are collected automatically, and a
+   *  human still sees the card in `doing`); crying wolf on a live worker is not.
+   *  Default (defaultDeps): liveDeskOccupies over the branch's worktree. */
+  deskOccupies?: (projectPath: string, branch: string) => Promise<boolean>
   /** Push a FATAL event to the human (the escalation safety valve): persist an
    *  in-app notification (the Ground bell) AND raise an OS toast. Called by
    *  fireFatalNotifications for the cases the unmanned loop can't self-heal
@@ -4722,6 +4739,21 @@ const defaultReadHeartbeat = async (
  *  swarmWorktreeDirName) — so detectAnomalies can spot a tree deleted out from
  *  under a still-counted worker. false on any error (missing uuid, stat fail) —
  *  conservative, since the anomaly check only WARNS, never mutates. */
+/** {@link AnomalyDeps.deskOccupies} — resolve the branch's worktree the same way
+ *  {@link defaultWorktreeExists} does, then ask BOTH desk pools whether anything
+ *  is live in it. Any failure answers TRUE (occupied): see the dep's doc for why
+ *  the unknown direction is "somebody is there". */
+const defaultDeskOccupies = async (projectPath: string, branch: string): Promise<boolean> => {
+  if (!branch) return true
+  try {
+    const uuid = await projectUUIDFromPath(projectPath)
+    const dir = join(centralWorktreesDir(uuid), swarmWorktreeDirName(branch))
+    return await liveDeskOccupies(dir)
+  } catch {
+    return true
+  }
+}
+
 const defaultWorktreeExists = async (projectPath: string, branch: string): Promise<boolean> => {
   if (!branch) return false
   // Resolve the worktree dir from the branch (same mint as createSwarmWorktree).
@@ -6887,6 +6919,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   managerDeskRuntime: defaultManagerDeskRuntime,
   recycleManagerDesk: defaultRecycleManagerDesk,
   worktreeExists: defaultWorktreeExists,
+  deskOccupies: defaultDeskOccupies,
   // Auto-start preflight (card cf545637): the same claude readiness gate the manual ON
   // path uses, so the unattended background sweep never flips an engine `running` into a
   // spawn it knows will fail (no retry storm when claude is missing / logged out).
@@ -8415,6 +8448,97 @@ const syncRoster = async (
 
 // ── The drain pass (the heart — exported for the unit test) ──────────────────
 
+/** A `doing` swarm card that NO counted worker owns, whose branch nevertheless
+ *  holds delivered work → promote it to `review` so the commander is woken.
+ *
+ *  ⚠ THE HOLE THIS CLOSES, measured on a real stall (2026-08-27, QRmenu).
+ *  Workers dispatched before an app restart finished afterwards, and the engine
+ *  never noticed. The chain that wakes the commander is
+ *      monitorWorkers (walks `engine.workers`) → promote doing→review
+ *      → runIntegratePass reads the REVIEW column → a branch seen there for the
+ *        first time is `freshlyReady` → managerNotice → the desk is woken
+ *  — every link reads the review column or `engine.workers`, and a worker that
+ *  failed boot ADOPTION is in neither. So the card sat in `doing` with a live
+ *  worktree, a `readyToMerge` heartbeat, commits on its branch, and NOBODY to
+ *  move it. `GET /api/swarm/workers` (roster ∪ heartbeat ∪ live desks) showed it
+ *  ready:true while `GET /api/swarm/orchestrator` showed `workers:[]`.
+ *
+ *  It was ALREADY KNOWN and half-fixed: adoptResumeCandidates' 2026-08-13 catch
+ *  says in so many words that a non-adopted candidate "is never pushed to
+ *  engine.workers, the orphan-doing anomaly SKIPS it (its worktree still
+ *  exists) … The card sat in 'doing' forever, silently" — and that fix was
+ *  applied to the THROW path only. The two `continue` exits (no sessionId, an
+ *  unproven transcript) still lead here, and so does any future one. This sweep
+ *  is deliberately NOT a fourth patch on those exits: it is a card-rooted
+ *  invariant that holds however the card was orphaned.
+ *
+ *  ⚠ WHY IT CANNOT STEAL A LIVE WORKER'S CARD. Three conditions, all required:
+ *   · NO counted worker — a worker the engine is monitoring owns its own promote
+ *     (and its own 差し戻し re-promote suppression); this only ever looks at
+ *     cards nobody is driving.
+ *   · `readyToMerge` on the heartbeat AND commits ahead — the worker's own
+ *     hand-over sign plus real work on the branch. A worker mid-task has written
+ *     neither.
+ *   · `reworkCount` falsy — the ONE case where a ready heartbeat lies. The beat
+ *     is STICKY (swarm-beat.sh never unsets readyToMerge), so a card sent back
+ *     review→doing still reports ready while its worker re-works. A card that has
+ *     never been sent back cannot be in that state, so restricting to
+ *     reworkCount 0 excludes the ambiguity entirely rather than guessing at it.
+ *     (`reworkAt`, the timestamp the live monitor compares against, is in-memory
+ *     only — it does not survive the restart this sweep exists for, which is why
+ *     the count is the discriminator here and not the clock.)
+ *
+ *  Read-then-write per card, never throws: a card that cannot be moved is left
+ *  for the next pass (and the anomaly feed already names it). */
+const promoteUnownedDelivered = async (
+  engine: ProjectEngine,
+  deps: OrchestratorDeps,
+  tasks: readonly ProjectTask[],
+): Promise<void> => {
+  const countedIds = new Set(engine.workers.map((w) => w.taskId))
+  for (const t of tasks) {
+    if (columnOf(t) !== 'doing') continue
+    if (countedIds.has(t.id)) continue
+    if (t.abandoned === true) continue // 見送る means見送る — never re-offer it
+    if (t.reworkCount) continue // sticky-ready ambiguity — see the header
+    const branch = typeof t.branch === 'string' ? t.branch : ''
+    if (!branch || !isSwarmBranch(branch)) continue
+    let hb: HeartbeatSign | null = null
+    try {
+      hb = await deps.readHeartbeat(engine.path, branch)
+    } catch {
+      continue // no sign, no claim
+    }
+    if (!hb?.ready) continue
+    let ahead = 0
+    try {
+      const counted = await deps.countCommitsAhead(engine.path, branch)
+      // `null` = git could not answer. UNLIKE the roster's read (where unknown
+      // must not retire an entry that may hold the only copy), unknown here must
+      // not MOVE a card on a guess — the safe direction flips with the action.
+      if (counted === null) continue
+      ahead = counted
+    } catch {
+      continue
+    }
+    if (ahead <= 0) continue
+    let moved = false
+    try {
+      moved = await deps.moveToReview(engine.path, t.id, branch)
+    } catch {
+      moved = false
+    }
+    if (moved) {
+      logLine(
+        engine,
+        'warn',
+        `worker 不在のまま完了していたカードを review へ回収しました(司令官に通知されます): ${shorten(t.title ?? '')} → ${branch}`,
+        'promote',
+      )
+    }
+  }
+}
+
 /** ONE pass. Idempotent-ish and side-effect-bounded:
  *   1. read the board (full card list),
  *   2. MONITOR (Card②): advance each dispatched worker's stage and, when one is
@@ -8459,6 +8583,14 @@ export const runDispatchPass = async (
   //    workers (freeing their slots).
   await monitorWorkers(engine, deps, byId, now)
   if (!engine.running) return // a stop during the (awaiting) monitor halts promptly
+
+  // 2b. Collect the cards NO worker owns but whose branch already holds delivered
+  //     work — the restart-orphan case monitorWorkers structurally cannot see
+  //     (it walks engine.workers; these are in neither that list nor the review
+  //     column). AFTER the monitor, so its prune has already settled which
+  //     workers are still counted. See promoteUnownedDelivered's header.
+  await promoteUnownedDelivered(engine, deps, tasks)
+  if (!engine.running) return
 
   // 3. Reconcile: a counted worker whose card is STILL in todo means an earlier
   //    todo→doing move didn't land. Retry it so "起動した分だけ todo→doing へ移る"
@@ -9816,6 +9948,22 @@ export const detectAnomalies = async (
     }
     if (!treeExists) {
       out.push({ kind: 'orphan-doing', ref: t.id, branch, taskTitle: t.title ?? '' })
+    } else if (!(await (deps.deskOccupies ?? (async () => true))(engine.path, branch).catch(() => true))) {
+      // …and the SIBLING case, which was the silent one (2026-08-27). A card in
+      // 'doing' that no counted worker drains, whose worktree is STILL THERE, is
+      // a worker the engine has lost track of — boot adoption declined it, or a
+      // desk died where the tree survived. It advances on its own exactly as
+      // little as an orphan-doing does, but it fell through this `if` and was
+      // reported nowhere: `GET /api/swarm/workers` (roster ∪ heartbeat ∪ live
+      // desks) still listed it while `GET /api/swarm/orchestrator` showed
+      // `workers:[]`, and the two views disagreed in silence for hours.
+      //
+      // The DELIVERED half of this population is recovered automatically now
+      // (promoteUnownedDelivered moves it to review, which wakes the commander),
+      // so what reaches this row is the genuinely ambiguous remainder: no
+      // hand-over sign, or a card that has been sent back before, or a branch git
+      // could not read. Those need a human — which is what an anomaly is for.
+      out.push({ kind: 'unowned-doing', ref: t.id, branch, taskTitle: t.title ?? '' })
     }
   }
 
