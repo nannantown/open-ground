@@ -18,6 +18,13 @@ export const research = {
 
     // --- Report list + reader -----------------------------------------------
     'research.list.heading': 'Reports',
+    'research.blog.send': 'Send to blog',
+    'research.blog.sending': 'Sending…',
+    'research.blog.sendTitle': 'Create a DRAFT of this report on your WordPress site (publishing stays on the WP side)',
+    'research.blog.openDraft': 'Open the blog draft',
+    'research.blog.notConfigured': 'Connect WordPress in Settings first',
+    'research.blog.lockdown': 'Unavailable in work mode',
+    'research.blog.sendFailed': 'Could not send — try again',
     'research.blog.draft': 'Draft on blog',
     'research.blog.editedOnWp': 'Edited on WordPress — auto-update stopped',
     'research.blog.deletedOnWp': 'Deleted on WordPress — not re-posted',
@@ -66,6 +73,13 @@ export const research = {
       '調査がどこまで見に行けるかは「設定 → 調査チャンネル」で確認できます。',
 
     'research.list.heading': 'レポート',
+    'research.blog.send': 'ブログへ',
+    'research.blog.sending': '送信中…',
+    'research.blog.sendTitle': 'このレポートを WordPress に下書きとして送ります（公開は WordPress 側で押します）',
+    'research.blog.openDraft': 'ブログの下書きを開く',
+    'research.blog.notConfigured': '先に設定で WordPress を接続してください',
+    'research.blog.lockdown': '業務モード中は使えません',
+    'research.blog.sendFailed': '送信できませんでした — もう一度お試しください',
     'research.blog.draft': 'ブログ下書きあり',
     'research.blog.editedOnWp': 'WordPress側で編集済み（自動更新停止）',
     'research.blog.deletedOnWp': 'WordPress側で削除済み（再投稿しません）',

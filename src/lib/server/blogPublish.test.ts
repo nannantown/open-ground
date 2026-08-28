@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtemp, mkdir, rm, writeFile } from 'fs/promises'
+import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   blogPublishTick,
   draftPayload,
+  markResearchForBlog,
   sweepProjectBlogPublish,
   MAX_PUSHES_PER_SWEEP,
   readBlogInfo,
@@ -12,12 +13,13 @@ import {
 import { addImportedProjectEntry, __resetMigrationCacheForTests } from './registry'
 import { getSettings, setSettings, setUserSettings, normalizeWordPressSettings } from './store'
 import { setLockdownCache } from './lockdown'
+import { projectDataFile } from './projectDataPath'
 import type { WordPressSettings } from '../types'
 
-// blogPublish — research reports → WordPress DRAFTS. The whole feature stands
-// on four promises (docs/BLOG_PUBLISH_PITCH.md): drafts only / one report =
-// one post / the owner's WP-side hand always wins / a WP-side delete stands
-// unless the report itself is redone. Each is pinned here against a fake WP
+// blogPublish — research reports → WordPress DRAFTS. The feature stands on five
+// promises (docs/BLOG_PUBLISH_PITCH.md): drafts only / one report = one post /
+// the owner's WP-side hand always wins / a WP-side delete stands unless the
+// report is redone / ONLY CHOSEN REPORTS GO. Each is pinned against a fake WP
 // that records every request — the observable is the WIRE (what was sent
 // where), not "the function returned".
 
@@ -72,16 +74,47 @@ beforeEach(async () => {
   await addImportedProjectEntry(proj)
 })
 afterEach(async () => {
+  await setSettings({ wordpress: undefined })
   await rm(proj, { recursive: true, force: true })
 })
 
 const report = (name: string, md: string) => writeFile(join(proj, 'docs', 'research', name), md)
 
-describe('sweepProjectBlogPublish — the four promises, on the wire', () => {
-  it('a new report becomes a DRAFT, authenticated, with the heading as the title', async () => {
-    await report('a.md', '# 調査A\n\n本文です。\n')
+/** Press the 「ブログへ」 button on each file — the real entry point, with the
+ *  given fake WP behind it (marks wanted + pushes that one report). */
+const press = async (fetchImpl: typeof fetch, ...files: string[]) => {
+  await setSettings({ wordpress: WP })
+  try {
+    for (const f of files) await markResearchForBlog(proj, f, { fetchImpl })
+  } finally {
+    await setSettings({ wordpress: undefined })
+  }
+}
+
+describe('sweepProjectBlogPublish — the five promises, on the wire', () => {
+  it('contract #5: a report NOBODY chose is never pushed — by the sweep or the tick', async () => {
+    // ⚠ The reversal that makes this feature shippable to every user. The
+    // research library holds internal ops reports next to publishable ones;
+    // the first build pushed EVERYTHING once WP was configured, which would
+    // have flooded the blog's drafts with both. Selection is the contract now.
+    await report('internal-ops.md', '# 内部作業ログ\n\nnot blog material\n')
     const wp = fakeWp()
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
+    expect(wp.reqs).toHaveLength(0)
+    await setSettings({ wordpress: WP })
+    try {
+      await blogPublishTick({ fetchImpl: wp.fetchImpl })
+    } finally {
+      await setSettings({ wordpress: undefined })
+    }
+    expect(wp.reqs).toHaveLength(0)
+    expect(await readBlogInfo(proj)).toEqual({})
+  })
+
+  it('the button creates a DRAFT, authenticated, with the heading as the title', async () => {
+    await report('a.md', '# 調査A\n\n本文です。\n')
+    const wp = fakeWp()
+    await press(wp.fetchImpl, 'a.md')
 
     expect(wp.reqs).toHaveLength(1)
     const r = wp.reqs[0]
@@ -100,10 +133,10 @@ describe('sweepProjectBlogPublish — the four promises, on the wire', () => {
     expect(info['a.md']?.link).toContain('post.php?post=100')
   })
 
-  it('an unchanged report costs ZERO requests on the next sweep', async () => {
+  it('an unchanged chosen report costs ZERO requests on the next sweep', async () => {
     await report('a.md', '# A\n\nbody\n')
     const wp = fakeWp()
-    await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
+    await press(wp.fetchImpl, 'a.md')
     const after = wp.reqs.length
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
     expect(wp.reqs.length).toBe(after)
@@ -112,7 +145,7 @@ describe('sweepProjectBlogPublish — the four promises, on the wire', () => {
   it('a rewritten report UPDATES its post — never a sibling draft (promise #2)', async () => {
     await report('a.md', '# A\n\nv1\n')
     const wp = fakeWp()
-    await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
+    await press(wp.fetchImpl, 'a.md')
     await report('a.md', '# A\n\nv2 — redone\n')
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
 
@@ -127,10 +160,29 @@ describe('sweepProjectBlogPublish — the four promises, on the wire', () => {
     expect(String(update?.body?.content)).toContain('v2')
   })
 
+  it('a report pushed BEFORE selection existed keeps syncing without a mark (back-compat)', async () => {
+    // A 0.11.100 ledger holds entries but no `wanted` map. Anything that
+    // already HAS a draft must keep tracking its report — a draft that silently
+    // went stale would be worse than the extra sync.
+    await report('a.md', '# A\n\nv1\n')
+    const wp = fakeWp()
+    await press(wp.fetchImpl, 'a.md')
+    // Strip the mark, leaving only the entry — the pre-selection shape.
+    const ledgerPath = await projectDataFile(proj, 'blog-publish.json')
+    const ledger = JSON.parse(await readFile(ledgerPath, 'utf8')) as Record<string, unknown>
+    delete ledger.wanted
+    await writeFile(ledgerPath, JSON.stringify(ledger))
+
+    await report('a.md', '# A\n\nv2\n')
+    await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
+    const update = wp.reqs.find((r) => r.method === 'POST' && /posts\/100/.test(r.url))
+    expect(update, 'an existing draft must keep tracking its report').toBeTruthy()
+  })
+
   it("the owner's WP-side edit STOPS all future updates (promise #3 — the trust one)", async () => {
     await report('a.md', '# A\n\nv1\n')
     const wp = fakeWp()
-    await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
+    await press(wp.fetchImpl, 'a.md')
     wp.touch(100) // the owner edits the draft on WordPress
     await report('a.md', '# A\n\nv2\n')
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
@@ -148,7 +200,7 @@ describe('sweepProjectBlogPublish — the four promises, on the wire', () => {
   it('a post the owner PUBLISHED is likewise hands-off, even if timestamps did not move', async () => {
     await report('a.md', '# A\n\nv1\n')
     const wp = fakeWp()
-    await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
+    await press(wp.fetchImpl, 'a.md')
     wp.posts.get(100)!.status = 'publish' // status flipped without a timestamp drift
     await report('a.md', '# A\n\nv2\n')
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
@@ -159,7 +211,7 @@ describe('sweepProjectBlogPublish — the four promises, on the wire', () => {
   it('a WP-side DELETE stands — until the report is REDONE, which earns a fresh draft (promise #4)', async () => {
     await report('a.md', '# A\n\nv1\n')
     const wp = fakeWp()
-    await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
+    await press(wp.fetchImpl, 'a.md')
     wp.posts.delete(100) // the owner deletes the draft
 
     // Rewrite → this sweep discovers the deletion and records it…
@@ -182,25 +234,97 @@ describe('sweepProjectBlogPublish — the four promises, on the wire', () => {
   it('a failure is recorded scrubbed — the app password appears NOWHERE — and retried', async () => {
     await report('a.md', '# A\n\nv1\n')
     const failing = (async () => ({ ok: false, status: 500, json: async () => ({}) }) as Response) as typeof fetch
-    await sweepProjectBlogPublish(proj, WP, { fetchImpl: failing })
+    await press(failing, 'a.md')
     const info = await readBlogInfo(proj)
     expect(info['a.md']?.state).toBe('failed')
     expect(info['a.md']?.error).toContain('500')
     expect(JSON.stringify(info)).not.toContain(WP.appPassword)
 
-    // The retry happens even though the file has not changed.
+    // The retry happens on the SWEEP even though the file has not changed —
+    // the choice already persisted, so no second button press is needed.
     const wp = fakeWp()
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
     expect((await readBlogInfo(proj))['a.md']?.state).toBe('draft')
   })
 
-  it(`a first-enable backlog drains ${MAX_PUSHES_PER_SWEEP} per sweep, not all at once`, async () => {
-    for (let i = 0; i < MAX_PUSHES_PER_SWEEP + 2; i++) await report(`r${i}.md`, `# R${i}\n\nbody\n`)
+  it(`a chosen backlog drains ${MAX_PUSHES_PER_SWEEP} per sweep, not all at once`, async () => {
+    const files: string[] = []
+    for (let i = 0; i < MAX_PUSHES_PER_SWEEP + 2; i++) {
+      await report(`r${i}.md`, `# R${i}\n\nbody\n`)
+      files.push(`r${i}.md`)
+    }
+    // Choose them all while WP is down — the marks persist, the pushes fail.
+    const failing = (async () => ({ ok: false, status: 599, json: async () => ({}) }) as Response) as typeof fetch
+    await press(failing, ...files)
     const wp = fakeWp()
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
     expect(wp.reqs).toHaveLength(MAX_PUSHES_PER_SWEEP)
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
     expect(wp.reqs).toHaveLength(MAX_PUSHES_PER_SWEEP + 2)
+  })
+})
+
+describe('markResearchForBlog — the button itself', () => {
+  it('pushes THE PRESSED report, not whatever the cap reaches first', async () => {
+    // ⚠ Why the button scopes its push to one file. The sweep walks newest-first
+    // under a per-sweep cap, so a press on an OLD report while newer chosen ones
+    // are still pending would spend the whole cap on the newer ones and leave
+    // the report the owner is LOOKING AT unpushed — a button that visibly does
+    // nothing. The `only` filter is what makes the press about this report.
+    await report('pressed.md', '# 押した記事\n\nbody\n')
+    const failing = (async () => ({ ok: false, status: 599, json: async () => ({}) }) as Response) as typeof fetch
+    const newer: string[] = []
+    for (let i = 0; i < MAX_PUSHES_PER_SWEEP + 1; i++) {
+      const f = `newer${i}.md`
+      await report(f, `# N${i}\n\nbody\n`)
+      // Force distinct, NEWER mtimes so pressed.md sorts LAST (newest-first list).
+      const t = new Date(Date.now() + (i + 1) * 10_000)
+      await utimes(join(proj, 'docs', 'research', f), t, t)
+      newer.push(f)
+    }
+    await press(failing, ...newer) // chosen, pending — the queue ahead of us
+    const wp = fakeWp()
+    await setSettings({ wordpress: WP })
+    try {
+      const res = await markResearchForBlog(proj, 'pressed.md', { fetchImpl: wp.fetchImpl })
+      expect(res.ok && res.blog?.state).toBe('draft')
+    } finally {
+      await setSettings({ wordpress: undefined })
+    }
+    expect((await readBlogInfo(proj))['pressed.md']?.state).toBe('draft')
+  })
+
+  it('answers not-configured (and records nothing) without Settings.wordpress', async () => {
+    await report('a.md', '# A\n\nbody\n')
+    const res = await markResearchForBlog(proj, 'a.md')
+    expect(res).toEqual({ ok: false, error: 'not-configured' })
+    expect(await readBlogInfo(proj)).toEqual({})
+  })
+
+  it('answers lockdown while lockdown is on', async () => {
+    await report('a.md', '# A\n\nbody\n')
+    await setSettings({ wordpress: WP })
+    setLockdownCache(true)
+    try {
+      expect(await markResearchForBlog(proj, 'a.md')).toEqual({ ok: false, error: 'lockdown' })
+    } finally {
+      setLockdownCache(false)
+      await setSettings({ wordpress: undefined })
+    }
+  })
+
+  it('returns the fresh draft info the UI flips its chip from', async () => {
+    await report('a.md', '# A\n\nbody\n')
+    const wp = fakeWp()
+    await setSettings({ wordpress: WP })
+    try {
+      const res = await markResearchForBlog(proj, 'a.md', { fetchImpl: wp.fetchImpl })
+      expect(res.ok).toBe(true)
+      expect(res.ok && res.blog?.state).toBe('draft')
+      expect(res.ok && res.blog?.link).toContain('post.php?post=100')
+    } finally {
+      await setSettings({ wordpress: undefined })
+    }
   })
 })
 
@@ -213,8 +337,10 @@ describe('blogPublishTick — the gates', () => {
     expect(wp.reqs).toHaveLength(0)
   })
 
-  it('does nothing in lockdown, even fully configured', async () => {
+  it('does nothing in lockdown, even fully configured with chosen reports', async () => {
     await report('a.md', '# A\n\nbody\n')
+    const failing = (async () => ({ ok: false, status: 599, json: async () => ({}) }) as Response) as typeof fetch
+    await press(failing, 'a.md') // chosen, push pending
     const wp = fakeWp()
     await setSettings({ wordpress: WP })
     setLockdownCache(true)
@@ -227,8 +353,10 @@ describe('blogPublishTick — the gates', () => {
     }
   })
 
-  it('configured ⇒ the registered project sweeps through the tick', async () => {
+  it('configured ⇒ a CHOSEN report sweeps through the tick', async () => {
     await report('a.md', '# A\n\nbody\n')
+    const failing = (async () => ({ ok: false, status: 599, json: async () => ({}) }) as Response) as typeof fetch
+    await press(failing, 'a.md')
     const wp = fakeWp()
     await setSettings({ wordpress: WP })
     try {

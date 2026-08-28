@@ -14,7 +14,7 @@ import {
   setResearchTwitterAuth,
 } from '@/lib/server/researchAuth'
 import { listResearchReports, readResearchReport } from '@/lib/server/researchReports'
-import { readBlogInfo } from '@/lib/server/blogPublish'
+import { markResearchForBlog, readBlogInfo } from '@/lib/server/blogPublish'
 import {
   MAX_QUESTION_LEN,
   contentShaOf,
@@ -31,6 +31,7 @@ import type {
   ResearchJobStartResponse,
   ResearchKnowledgeResponse,
   ResearchReportResponse,
+  ResearchBlogPublishResponse,
   ResearchReportsResponse,
   SetResearchAuthRequest,
 } from '@/lib/types'
@@ -119,6 +120,28 @@ export const researchRoutes = new Hono()
     if (!pre.ok) return c.json(pre.body, 503)
     const body: ResearchJobStartResponse = { jobId: startResearchDigestJob({ projectPath: path, file }) }
     return c.json(body, 202)
+  })
+  // --- POST /api/research/blog-publish {path,file} ----------------------------
+  // The reader's 「ブログへ」 button: record the choice (blogPublish contract
+  // #5) and push that one report as a WP draft NOW, so the result is visible
+  // before the spinner stops. 409 carries a machine-readable reason the UI
+  // maps to copy (not configured / lockdown). Errors during the push itself
+  // land on the ledger ('failed', retried by the sweep) — this route still
+  // answers 200 with that state, because the CHOICE succeeded.
+  .post('/api/research/blog-publish', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    const raw = (await c.req.json().catch(() => ({}))) as { file?: string }
+    const file = typeof raw.file === 'string' ? raw.file : ''
+    try {
+      await readResearchReport(path, file) // 404 on a report that is not there
+    } catch (e) {
+      return c.json({ error: String((e as Error)?.message ?? e) }, 404)
+    }
+    const res = await markResearchForBlog(path, file)
+    if (!res.ok) return c.json({ error: res.error }, 409)
+    const body: ResearchBlogPublishResponse = { file, ...(res.blog ? { blog: res.blog } : {}) }
+    return c.json(body)
   })
   // --- POST /api/research/ask {path,file,question} ----------------------------
   .post('/api/research/ask', async (c) => {

@@ -3777,6 +3777,13 @@ export interface ResearchReportsResponse {
   reports: ResearchReportMeta[]
 }
 
+/** POST /api/research/blog-publish — the reader's 「ブログへ」 button. */
+export interface ResearchBlogPublishResponse {
+  file: string
+  /** Absent when the push could not run at all (the mark still persisted). */
+  blog?: ResearchReportBlogInfo
+}
+
 /** GET /api/research/report — one report's raw markdown. */
 export interface ResearchReportResponse {
   file: string

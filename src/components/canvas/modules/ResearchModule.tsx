@@ -40,6 +40,7 @@ import type {
   ResearchJobStartResponse,
   ResearchJobStateResponse,
   ResearchKnowledgeResponse,
+  ResearchBlogPublishResponse,
   ResearchReportMeta,
   ResearchReportResponse,
   ResearchReportsResponse,
@@ -587,6 +588,41 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
     }
   }, [selected, askJob, question, project.path])
 
+  // 「ブログへ」 (blogPublish contract #5) — record the choice and push this one
+  // report as a WP draft immediately. The button reflects the ledger through
+  // the report list's `blog` info; while in flight it disables itself.
+  const [blogBusy, setBlogBusy] = useState(false)
+  const [blogError, setBlogError] = useState<string | null>(null)
+  const sendToBlog = useCallback(async (file: string) => {
+    setBlogBusy(true)
+    setBlogError(null)
+    try {
+      const res = await fetch('/api/research/blog-publish', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path, file }),
+      })
+      if (res.status === 409) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        setBlogError(body.error === 'lockdown' ? 'research.blog.lockdown' : 'research.blog.notConfigured')
+        return
+      }
+      if (!res.ok) {
+        setBlogError('research.blog.sendFailed')
+        return
+      }
+      const body = (await res.json()) as ResearchBlogPublishResponse
+      // Fold the fresh state into the list so the chip + button flip at once.
+      setReports((prev) =>
+        prev.map((r) => (r.file === file ? { ...r, ...(body.blog ? { blog: body.blog } : {}) } : r)),
+      )
+    } catch {
+      setBlogError('research.blog.sendFailed')
+    } finally {
+      setBlogBusy(false)
+    }
+  }, [project.path])
+
   const copyMarkdown = useCallback(() => {
     if (content === null) return
     try {
@@ -926,9 +962,44 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
               {/* ── The full report — untouched, below the essence. ── */}
               <div className="mt-1 flex items-center justify-between gap-2 border-b border-line pb-1.5">
                 <h3 className="label-cap text-ink-faint">{t('research.fulltext')}</h3>
-                <Btn variant="ghost" size="xs" onClick={copyMarkdown}>
-                  {t(copied ? 'research.copied' : 'research.copy')}
-                </Btn>
+                <div className="flex items-center gap-1.5">
+                  {blogError && (
+                    <span className="text-meta text-accent">{t(blogError as MessageKey)}</span>
+                  )}
+                  {(() => {
+                    const blog = reports.find((r) => r.file === selected)?.blog
+                    // Already on the blog (any recorded state) → the chip in the
+                    // list says which; here offer the draft link when we hold one.
+                    if (blog) {
+                      return blog.link ? (
+                        <a
+                          href={blog.link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-meta text-accent underline-offset-2 hover:underline"
+                        >
+                          {t('research.blog.openDraft')}
+                        </a>
+                      ) : (
+                        <span className="text-meta text-ink-faint">{t(BLOG_STATE_LABEL[blog.state])}</span>
+                      )
+                    }
+                    return (
+                      <Btn
+                        variant="ghost"
+                        size="xs"
+                        disabled={blogBusy}
+                        onClick={() => selected && void sendToBlog(selected)}
+                        title={t('research.blog.sendTitle')}
+                      >
+                        {t(blogBusy ? 'research.blog.sending' : 'research.blog.send')}
+                      </Btn>
+                    )
+                  })()}
+                  <Btn variant="ghost" size="xs" onClick={copyMarkdown}>
+                    {t(copied ? 'research.copied' : 'research.copy')}
+                  </Btn>
+                </div>
               </div>
               <div className="flex flex-col gap-2.5">{renderMarkdown(content)}</div>
             </div>

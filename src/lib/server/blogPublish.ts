@@ -24,6 +24,15 @@
 //      unless the REPORT ITSELF is rewritten afterwards, which is the redo
 //      loop (「チェックしてダメなら編集やり直し」): a redone report earns a
 //      fresh draft.
+//   5. ONLY CHOSEN REPORTS GO (owner, 2026-08-28: 「どのリサーチを送るとか
+//      ボタンつけれる？」). The research library holds internal ops reports
+//      alongside publishable ones, so "everything, automatically" — the first
+//      shipped shape — would have flooded the blog's drafts with both. A
+//      report is pushed only once the owner pressed its 「ブログへ」 button
+//      (the `wanted` half of the ledger); from then on the sync IS automatic
+//      (rewrites keep updating the same draft under promises 1–4). A report
+//      that already HAS a draft keeps syncing even without a mark — the
+//      back-compat read for anything pushed before selection existed.
 //
 // Failure posture: per-report, recorded on the ledger ('failed' + a scrubbed
 // reason — the app password never appears in any error, log line, or ledger),
@@ -60,6 +69,9 @@ export interface BlogLedgerEntry {
 
 interface BlogLedger {
   entries: Record<string, BlogLedgerEntry>
+  /** Report files the owner chose to publish (contract #5). Marked by the
+   *  Research tab's button, never by the sweep. */
+  wanted?: Record<string, true>
 }
 
 const LEDGER_FILE = 'blog-publish.json'
@@ -69,7 +81,11 @@ const readLedger = async (projectPath: string): Promise<BlogLedger> => {
     const raw = await readFile(await projectDataFile(projectPath, LEDGER_FILE), 'utf8')
     const parsed = JSON.parse(raw) as Partial<BlogLedger>
     if (parsed && typeof parsed === 'object' && parsed.entries && typeof parsed.entries === 'object') {
-      return { entries: parsed.entries }
+      const wanted =
+        parsed.wanted && typeof parsed.wanted === 'object' && !Array.isArray(parsed.wanted)
+          ? parsed.wanted
+          : undefined
+      return { entries: parsed.entries, ...(wanted ? { wanted } : {}) }
     }
   } catch {
     /* absent / torn ⇒ empty — worst case a report is re-pushed as a new draft */
@@ -198,6 +214,11 @@ export const sweepProjectBlogPublish = async (
   projectPath: string,
   wp: WordPressSettings,
   deps: BlogPublishDeps = {},
+  opts: {
+    /** Push just this one report NOW (the button's immediate path) — it must
+     *  already be marked wanted, or hold an entry; the gate below still runs. */
+    only?: string
+  } = {},
 ): Promise<void> => {
   const fetchImpl = deps.fetchImpl ?? fetch
   const nowIso = () => new Date((deps.now ?? Date.now)()).toISOString()
@@ -207,6 +228,7 @@ export const sweepProjectBlogPublish = async (
   } catch {
     return
   }
+  if (opts.only) reports = reports.filter((r) => r.file === opts.only)
   if (!reports.length) return
   const ledger = await readLedger(projectPath)
   let dirty = false
@@ -214,6 +236,11 @@ export const sweepProjectBlogPublish = async (
 
   for (const meta of reports) {
     if (pushes >= MAX_PUSHES_PER_SWEEP) break
+    // CONTRACT #5 — only what the owner chose. An existing ENTRY also passes:
+    // it means this report already has a draft (chosen before, or pushed by the
+    // pre-selection build), and a draft that silently stopped tracking its
+    // report would violate promise #2's spirit worse than the extra sync.
+    if (!ledger.wanted?.[meta.file] && !ledger.entries[meta.file]) continue
     let md: string
     try {
       md = await readResearchReport(projectPath, meta.file)
@@ -305,6 +332,38 @@ export const sweepProjectBlogPublish = async (
     }
   }
   if (dirty) await writeLedger(projectPath, ledger)
+}
+
+/** The Research tab's 「ブログへ」 button: record the owner's choice, then push
+ *  that one report immediately so the draft exists before the button's spinner
+ *  stops (the 5-minute sweep would read as broken). Returns the report's fresh
+ *  blog info, or an `error` the UI can show verbatim:
+ *   - 'not-configured' — Settings.wordpress is absent; the UI points at 設定.
+ *   - 'lockdown'       — lockdown mode is on; egress is off by policy.
+ *  The MARK persists either way once configured — a push that fails here is
+ *  retried by every later sweep (the ledger's 'failed' path). */
+export const markResearchForBlog = async (
+  projectPath: string,
+  file: string,
+  deps: BlogPublishDeps = {},
+): Promise<{ ok: true; blog?: ResearchReportBlogInfo } | { ok: false; error: 'not-configured' | 'lockdown' }> => {
+  if (isLockdownEnabledSync()) return { ok: false, error: 'lockdown' }
+  let settings: Settings
+  try {
+    settings = await getSettings()
+  } catch {
+    return { ok: false, error: 'not-configured' }
+  }
+  const wp = settings.wordpress
+  if (!wp?.baseUrl || !wp.username || !wp.appPassword) return { ok: false, error: 'not-configured' }
+  const ledger = await readLedger(projectPath)
+  if (!ledger.wanted?.[file]) {
+    ledger.wanted = { ...ledger.wanted, [file]: true }
+    await writeLedger(projectPath, ledger)
+  }
+  await sweepProjectBlogPublish(projectPath, wp, deps, { only: file })
+  const info = await readBlogInfo(projectPath)
+  return { ok: true, ...(info[file] ? { blog: info[file] } : {}) }
 }
 
 /** One pass over every registered project. Inert without Settings.wordpress;
