@@ -31,6 +31,7 @@ import { api } from '@/lib/api-client'
 import { pickFolder } from '@/lib/pickFolder'
 import { feedbackImageDataUrl } from '@/lib/feedbackImages'
 import { useClaudeConnection } from '@/lib/useClaudeConnection'
+import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 import type { Lang } from '@/i18n/messages'
 
@@ -518,6 +519,7 @@ export const SettingsPanel = ({
               }}
               onBlur={flush}
               placeholder={suggestedName ?? ''}
+              aria-label={t('settings.displayName.heading')}
               className="w-full rounded-[2px] border border-line bg-bg px-3 py-2 text-ui text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
             />
           </Section>
@@ -543,6 +545,14 @@ export const SettingsPanel = ({
               local-only X cookie store behind a disclosure. Mounted per open so
               the checks re-run each time the drawer opens. */}
           {open && <ResearchChannelsSection />}
+
+          {/* Blog publishing — research reports → WordPress DRAFTS. Configuring
+              this IS the opt-in (blogPublish.ts is inert without it); the
+              server narrows the shape and enforces https at the door
+              (normalizeWordPressSettings). Explicit save button, not the
+              debounced text flow: a half-typed password must never be
+              persisted by a blur. */}
+          {open && <WordPressSection settings={settings} onSave={onSave} />}
 
           {/* Completion chime — ON/OFF + volume + test-play. The sound itself is
               played by the managed Stop hook (attended desks only); the server
@@ -856,6 +866,112 @@ const RESEARCH_STATUS_CHIP: Record<ResearchChannelStatus, string> = {
 // server/routes/research.ts: cookie values exist ONLY in the two controlled
 // inputs until Save, are never logged or echoed back (status is a boolean),
 // and the inputs are cleared the moment the write lands.
+const WordPressSection = ({
+  settings,
+  onSave,
+}: {
+  settings: Settings
+  onSave: (s: Settings) => void | Promise<void>
+}) => {
+  const { t } = useT()
+  const wp = settings.wordpress ?? null
+  const [baseUrl, setBaseUrl] = useState(wp?.baseUrl ?? '')
+  const [username, setUsername] = useState(wp?.username ?? '')
+  const [appPassword, setAppPassword] = useState(wp?.appPassword ?? '')
+  // Mirror the server's normalizeWordPressSettings gate so the button state
+  // tells the truth: https (loopback http passes for local testing), all three
+  // fields non-empty.
+  const valid = (() => {
+    if (!baseUrl.trim() || !username.trim() || !appPassword.trim()) return false
+    try {
+      const u = new URL(baseUrl.trim())
+      const loopback =
+        u.hostname === '127.0.0.1' || u.hostname === 'localhost' || u.hostname === '::1'
+      return u.protocol === 'https:' || (u.protocol === 'http:' && loopback)
+    } catch {
+      return false
+    }
+  })()
+  const dirty =
+    baseUrl.trim().replace(/\/+$/, '') !== (wp?.baseUrl ?? '') ||
+    username.trim() !== (wp?.username ?? '') ||
+    appPassword.trim() !== (wp?.appPassword ?? '')
+  const inputCls =
+    'w-full rounded-[3px] border border-line bg-bg-card px-2.5 py-1.5 text-ui text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none'
+  const save = () => {
+    void onSave({
+      ...settings,
+      wordpress: {
+        baseUrl: baseUrl.trim().replace(/\/+$/, ''),
+        username: username.trim(),
+        appPassword: appPassword.trim(),
+      },
+    })
+  }
+  const clear = () => {
+    setBaseUrl('')
+    setUsername('')
+    setAppPassword('')
+    // Explicit null on the wire = clear (setUserSettings drops the key).
+    void onSave({ ...settings, wordpress: null })
+  }
+  return (
+    <Section heading={t('settings.wordpress.heading')} hint={t('settings.wordpress.hint')}>
+      <div className="flex flex-col gap-2.5">
+        <label className="flex flex-col gap-1">
+          <span className="label-cap text-ink-faint">{t('settings.wordpress.baseUrl')}</span>
+          <input
+            type="url"
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            placeholder="https://example.com"
+            className={inputCls}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="label-cap text-ink-faint">{t('settings.wordpress.username')}</span>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="off"
+            className={inputCls}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="label-cap text-ink-faint">{t('settings.wordpress.appPassword')}</span>
+          <input
+            type="password"
+            value={appPassword}
+            onChange={(e) => setAppPassword(e.target.value)}
+            autoComplete="off"
+            className={inputCls}
+          />
+          <span className="text-meta leading-relaxed text-ink-faint">
+            {t('settings.wordpress.appPasswordHint')}
+          </span>
+        </label>
+        {!valid && (baseUrl || username || appPassword) ? (
+          <p className="text-meta text-accent">{t('settings.wordpress.invalid')}</p>
+        ) : null}
+        <div className="flex items-center gap-2">
+          <Btn variant="primary" size="sm" disabled={!valid || !dirty} onClick={save}>
+            {t('settings.wordpress.save')}
+          </Btn>
+          {wp && (
+            <Btn variant="subtle" size="sm" onClick={clear}>
+              {t('settings.wordpress.clear')}
+            </Btn>
+          )}
+          {wp && !dirty && (
+            <span className="text-meta text-ink-faint">{t('settings.wordpress.saved')}</span>
+          )}
+        </div>
+      </div>
+    </Section>
+  )
+}
+
 const ResearchChannelsSection = () => {
   const { t } = useT()
   const [channels, setChannels] = useState<ResearchChannelState[] | null>(null)

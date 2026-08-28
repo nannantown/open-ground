@@ -14,6 +14,7 @@ import {
   setResearchTwitterAuth,
 } from '@/lib/server/researchAuth'
 import { listResearchReports, readResearchReport } from '@/lib/server/researchReports'
+import { readBlogInfo } from '@/lib/server/blogPublish'
 import {
   MAX_QUESTION_LEN,
   contentShaOf,
@@ -53,7 +54,14 @@ export const researchRoutes = new Hono()
   .get('/api/research/reports', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
-    const body: ResearchReportsResponse = { reports: await listResearchReports(path) }
+    const reports = await listResearchReports(path)
+    // Join the blog-publish ledger (blogPublish.ts) so the tab can say where
+    // each report stands on the owner's blog. One cheap JSON read; additive —
+    // reports without an entry carry no `blog` key and old clients ignore it.
+    const blog = await readBlogInfo(path).catch(() => ({}) as Record<string, never>)
+    const body: ResearchReportsResponse = {
+      reports: reports.map((r) => (blog[r.file] ? { ...r, blog: blog[r.file] } : r)),
+    }
     return c.json(body)
   })
   // --- GET /api/research/report?path=…&file=… --------------------------------

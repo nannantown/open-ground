@@ -406,7 +406,8 @@ describe('App — saveSettings failure handling (audit 856daefb)', () => {
 
     const gear = screen.getByRole('button', { name: 'Settings' })
     fireEvent.click(gear)
-    const nameInput = await screen.findByRole('textbox')
+    // Multiple textboxes exist now (the WordPress section) — name this one.
+    const nameInput = await screen.findByRole('textbox', { name: 'Display name' })
     fireEvent.change(nameInput, { target: { value: 'New Name' } })
     fireEvent.blur(nameInput) // triggers the panel's immediate flush() → onSave
 

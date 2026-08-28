@@ -9,7 +9,7 @@ import {
   setAllowedModelTiersCache,
 } from './swarmAllowedModels'
 import { setLockdownCache } from './lockdown'
-import type { Settings, CanvasState, ExecutionMode, SwarmAllowedModels, SwarmPaneId } from '../types'
+import type { Settings, CanvasState, ExecutionMode, SwarmAllowedModels, SwarmPaneId, WordPressSettings } from '../types'
 import { SWARM_PANE_IDS } from '../types'
 
 const DEFAULT_SETTINGS: Settings = {
@@ -328,6 +328,11 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   // to a literal boolean below; resolved to macOS-only at read time
   // (isSwarmOptInEnabled). NOT the same as `swarmLocalOwner` (hand-edit-only).
   'swarmOptIn',
+  // The WordPress publishing target (research → blog drafts). Request-settable
+  // by design: it selects an OUTBOUND destination the owner configures, and can
+  // never widen the validateProjectPath allowlist. Narrowed below to the exact
+  // three-string shape (https enforced); `null` clears it.
+  'wordpress',
   // The PUBLIC persona opt-in (all users, all platforms). Same design as
   // swarmOptIn — request-settable because the persona gate is feature-
   // visibility over the caller's OWN loopback-local corpus (personaGate.ts).
@@ -390,6 +395,28 @@ const normalizeSwarmPaneOrder = (v: unknown): SwarmPaneId[] | undefined => {
 // Persist a settings patch that ORIGINATES FROM AN UNTRUSTED HTTP CLIENT
 // (POST /api/settings). Unlike setSettings — a general internal merge that
 // trusted callers (registry.ts, the migration, project create) use to write ANY
+/** Narrow an untrusted WordPress target to the exact shape blogPublish.ts
+ *  consumes, or null to refuse. Three non-empty strings; baseUrl must parse as a
+ *  URL and be https (loopback http allowed — local testing); trailing slashes
+ *  are stripped so path joins are uniform. */
+export const normalizeWordPressSettings = (raw: unknown): WordPressSettings | null => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const r = raw as Record<string, unknown>
+  const baseUrl = typeof r.baseUrl === 'string' ? r.baseUrl.trim().replace(/\/+$/, '') : ''
+  const username = typeof r.username === 'string' ? r.username.trim() : ''
+  const appPassword = typeof r.appPassword === 'string' ? r.appPassword.trim() : ''
+  if (!baseUrl || !username || !appPassword) return null
+  let u: URL
+  try {
+    u = new URL(baseUrl)
+  } catch {
+    return null
+  }
+  const loopback = u.hostname === '127.0.0.1' || u.hostname === 'localhost' || u.hostname === '::1'
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && loopback)) return null
+  return { baseUrl, username, appPassword }
+}
+
 // field — this first narrows the body to USER_SETTINGS_KEYS, so the route can
 // never widen the validateProjectPath allowlist or rewrite migration sentinels.
 // A non-object body (string / array / null) writes nothing. Returns the keys
@@ -447,6 +474,22 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   }
   if (Object.prototype.hasOwnProperty.call(safe, 'personaOptIn')) {
     safe.personaOptIn = safe.personaOptIn === true
+  }
+  // WordPress target: `null` CLEARS (merged spread drops an undefined key on
+  // write), a valid {baseUrl, username, appPassword} is stored trimmed with the
+  // baseUrl's trailing slash removed, anything else is REFUSED (key dropped, the
+  // previous value survives — the refuse-a-meaningless-patch stance above).
+  // https is enforced HERE, at the door: Basic auth rides every request this
+  // config causes, and a plaintext-http target would hand the app password to
+  // the network. Loopback http stays allowed for local testing.
+  if (Object.prototype.hasOwnProperty.call(safe, 'wordpress')) {
+    if (safe.wordpress === null || safe.wordpress === undefined) {
+      safe.wordpress = undefined // merged {...current, ...patch} then drops it
+    } else {
+      const clean = normalizeWordPressSettings(safe.wordpress)
+      if (clean) safe.wordpress = clean
+      else delete safe.wordpress
+    }
   }
   // Theme: only the two literals are stored; anything else drops the key so the
   // previous value survives (same refuse-a-meaningless-patch stance as above).

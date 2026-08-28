@@ -30,6 +30,7 @@ import { ensureCoolingTableLoaded } from '@/lib/server/swarmQuota'
 import { warmTierProbeAtBoot } from '@/lib/server/swarmTierProbe'
 import { startTerminalSweepLoop } from '@/lib/server/terminal'
 import { startDailyFuelReportLoop } from '@/lib/server/dailyFuelReport'
+import { startBlogPublishLoop } from '@/lib/server/blogPublish'
 import { startOwnerDeskLimitLoop } from '@/lib/server/ownerDeskLimit'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
@@ -387,6 +388,13 @@ if (process.env.OPENGROUND_TERMINAL_SWEEP !== '0') {
 // above: real-server entry only, unref'd, reload-safe, kill-switch env.
 if (process.env.OPENGROUND_FUEL_REPORT !== '0') {
   startDailyFuelReportLoop()
+  // BLOG PUBLISH sweep — research reports → WordPress DRAFTS (blogPublish.ts).
+  // Inert unless Settings.wordpress is configured (configuring it is the
+  // opt-in); an unchanged report costs zero requests, so the idle tick is a
+  // per-project readdir. Drafts only — publishing stays a human act on the WP
+  // side. UI-independent like the loops above: the whole point is that reports
+  // arrive on the blog without the Research tab ever being opened.
+  startBlogPublishLoop()
 }
 
 // OWNER-DESK MODEL-LIMIT watch — tells the owner when one of THEIR OWN claude

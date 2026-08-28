@@ -41,6 +41,18 @@ export const settings = {
     'settings.personaOptIn.warning':
       'Persona builds a private picture of you from your own conversations, to help you understand yourself. Before turning it on, know: everything stays on this machine (your own corpus, never shared); each turn spends your own Claude subscription; and a turn runs Claude with tool-permission prompts skipped, inside a locked-down scratch session. It is still being tuned and is not covered by support.',
     // Completion chime (settings.soundOnDone / soundOnDoneVolume)
+    'settings.wordpress.heading': 'Blog publishing (WordPress)',
+    'settings.wordpress.hint':
+      'Research reports are mirrored to your own WordPress site as DRAFTS — publishing stays a button you press on the WP side. Filling this in turns the sync on; Disconnect turns it off. A draft you edit or delete on WordPress is never overwritten or re-posted. Self-hosted WordPress only (a site whose admin lives at your-domain/wp-admin) — wordpress.com-hosted sites are not supported.',
+    'settings.wordpress.baseUrl': 'Site URL',
+    'settings.wordpress.username': 'Username',
+    'settings.wordpress.appPassword': 'Application password',
+    'settings.wordpress.appPasswordHint':
+      'WP admin → Users → Profile → Application Passwords. Not your login password — revocable there at any time.',
+    'settings.wordpress.save': 'Save',
+    'settings.wordpress.saved': 'Connected',
+    'settings.wordpress.clear': 'Disconnect',
+    'settings.wordpress.invalid': 'Fill in all three fields; the URL must start with https://',
     'settings.sound.heading': 'Completion sound',
     'settings.sound.label': 'Play a sound when Claude finishes',
     'settings.sound.hint':
@@ -182,6 +194,18 @@ export const settings = {
     'settings.personaOptIn.label': 'ペルソナ画面を有効にする',
     'settings.personaOptIn.warning':
       'ペルソナは、あなた自身の会話からあなた像を組み立て、自己理解を助けます。オンにする前に確認してください: すべてこのパソコンの中だけに保存されます(あなた自身のコーパスで、外には出ません)。1ターンごとにあなた自身の Claude サブスクを使います。1ターンはツールの許可確認をスキップした Claude を、隔離されたスクラッチセッションの中で実行します。まだ調整中で、サポート対象外です。',
+    'settings.wordpress.heading': 'ブログ投稿 (WordPress)',
+    'settings.wordpress.hint':
+      '調査レポートを自分の WordPress サイトへ下書きとして自動で送ります。公開は WordPress 側であなたが押します。この欄を埋める＝オン、解除＝オフ。WordPress 側で編集・削除した下書きには二度と触りません。対象は自分でインストールした WordPress のみ（管理画面が 自分のドメイン/wp-admin にあるタイプ）。wordpress.com のサイトは対象外です。',
+    'settings.wordpress.baseUrl': 'サイトURL',
+    'settings.wordpress.username': 'ユーザー名',
+    'settings.wordpress.appPassword': 'アプリケーションパスワード',
+    'settings.wordpress.appPasswordHint':
+      'WordPress 管理画面 → ユーザー → プロフィール → アプリケーションパスワードで発行。ログインパスワードではありません（いつでも無効化できます）。',
+    'settings.wordpress.save': '保存',
+    'settings.wordpress.saved': '設定済み',
+    'settings.wordpress.clear': '解除',
+    'settings.wordpress.invalid': '3つとも入力してください。URL は https:// で始まる必要があります',
     'settings.sound.heading': '完了音',
     'settings.sound.label': 'Claude の命令が終わったら音を鳴らす',
     'settings.sound.hint':

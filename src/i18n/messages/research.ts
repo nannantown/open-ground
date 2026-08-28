@@ -18,6 +18,10 @@ export const research = {
 
     // --- Report list + reader -----------------------------------------------
     'research.list.heading': 'Reports',
+    'research.blog.draft': 'Draft on blog',
+    'research.blog.editedOnWp': 'Edited on WordPress — auto-update stopped',
+    'research.blog.deletedOnWp': 'Deleted on WordPress — not re-posted',
+    'research.blog.failed': 'Blog post failed',
     'research.reload': 'Reload',
     'research.copy': 'Copy markdown',
     'research.copied': 'Copied',
@@ -62,6 +66,10 @@ export const research = {
       '調査がどこまで見に行けるかは「設定 → 調査チャンネル」で確認できます。',
 
     'research.list.heading': 'レポート',
+    'research.blog.draft': 'ブログ下書きあり',
+    'research.blog.editedOnWp': 'WordPress側で編集済み（自動更新停止）',
+    'research.blog.deletedOnWp': 'WordPress側で削除済み（再投稿しません）',
+    'research.blog.failed': 'ブログ投稿に失敗',
     'research.reload': '再読み込み',
     'research.copy': 'Markdownをコピー',
     'research.copied': 'コピーしました',

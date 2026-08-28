@@ -72,7 +72,8 @@ describe('SettingsPanel autosave', () => {
   it('debounces keystrokes into one save with normalized values', () => {
     const onSave = vi.fn()
     renderPanel(onSave)
-    const input = screen.getByRole('textbox') // display name (Advanced collapsed: the only textbox)
+    // The panel now holds more textboxes (the WordPress section) — name it.
+    const input = screen.getByRole('textbox', { name: 'settings.displayName.heading' })
     fireEvent.change(input, { target: { value: 'A' } })
     fireEvent.change(input, { target: { value: 'Al' } })
     fireEvent.change(input, { target: { value: '  Alice  ' } })
@@ -90,7 +91,7 @@ describe('SettingsPanel autosave', () => {
   it('flushes on blur without waiting for the debounce', () => {
     const onSave = vi.fn()
     renderPanel(onSave)
-    const input = screen.getByRole('textbox')
+    const input = screen.getByRole('textbox', { name: 'settings.displayName.heading' })
     fireEvent.change(input, { target: { value: 'Bob' } })
     fireEvent.blur(input)
     expect(onSave).toHaveBeenCalledTimes(1)
@@ -106,7 +107,7 @@ describe('SettingsPanel autosave', () => {
   it('flushes a pending edit when the panel closes', () => {
     const onSave = vi.fn()
     const { rerender } = renderPanel(onSave)
-    const input = screen.getByRole('textbox')
+    const input = screen.getByRole('textbox', { name: 'settings.displayName.heading' })
     fireEvent.change(input, { target: { value: 'Carol' } })
     expect(onSave).not.toHaveBeenCalled()
 
@@ -120,7 +121,7 @@ describe('SettingsPanel autosave', () => {
   it('flushes a pending edit on unmount', () => {
     const onSave = vi.fn()
     const { unmount } = renderPanel(onSave)
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Dave' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'settings.displayName.heading' }), { target: { value: 'Dave' } })
     unmount()
     expect(onSave).toHaveBeenCalledTimes(1)
     expect(onSave.mock.calls[0][0]).toMatchObject({ displayName: 'Dave' })

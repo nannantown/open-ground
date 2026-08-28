@@ -58,8 +58,10 @@ const TITLE_READ_BYTES = 8 * 1024
 export const MAX_REPORT_BYTES = 1024 * 1024
 
 /** First `# ` heading in the head of the file, else null (caller falls back to
- *  the filename). */
-const titleFrom = (head: string): string | null => {
+ *  the filename). Exported for blogPublish.ts, which must derive the SAME title
+ *  the Research tab shows — a draft named differently from the row the owner
+ *  clicked would read as a different document. */
+export const titleFrom = (head: string): string | null => {
   const m = /^#[ \t]+(.+?)[ \t]*$/m.exec(head)
   return m ? m[1].slice(0, 200) : null
 }

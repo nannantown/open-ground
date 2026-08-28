@@ -239,6 +239,19 @@ export interface Settings {
    *  loopback-only routes over the user's OWN corpus in ~/.openground/ (no
    *  cross-user data); the in-app warning discloses subscription cost +
    *  that a persona turn runs claude with permission prompts skipped. */
+  /** WordPress publishing target for research reports (blogPublish.ts) — the
+   *  owner's own self-hosted WP site. Configuring it IS the opt-in: absent ⇒
+   *  the publish sweep does nothing. `appPassword` is a WordPress APPLICATION
+   *  password (Users → Profile → Application Passwords), never the login
+   *  password — revocable on the WP side at any time. Stored plaintext in
+   *  settings.json: same trust model as the rest of ~/.openground on this
+   *  local single-user machine.
+   *
+   *  `null` exists ONLY on the wire: POSTing `wordpress: null` clears the
+   *  target (setUserSettings turns it into a dropped key), and the persisted
+   *  file never holds null — readers therefore see an object or undefined,
+   *  and `settings.wordpress?.baseUrl` handles the whole union. */
+  wordpress?: WordPressSettings | null
   personaOptIn?: boolean
   /** Work mode (lockdown) — the one-toggle kill switch for every NON-Anthropic
    *  external egress, for running OPEN GROUND on a confidential work machine.
@@ -3724,11 +3737,40 @@ export interface SetResearchAuthRequest {
 
 /** One row of the per-project research library (GET /api/research/reports —
  *  docs/research/*.md, newest first). */
+export interface WordPressSettings {
+  /** Site root, e.g. https://eigotrip.com — https required (Basic auth rides
+   *  every request; loopback http is allowed for local testing only). */
+  baseUrl: string
+  username: string
+  appPassword: string
+}
+
+/** Where a research report stands on the owner's blog (the publish ledger's
+ *  public face — blogPublish.ts).
+ *   - 'draft'         — a WP draft exists and mirrors the report.
+ *   - 'edited-on-wp'  — the owner touched the draft on the WP side (edited or
+ *                       published); the sweep will never overwrite it again.
+ *   - 'deleted-on-wp' — the owner deleted the draft; not re-created unless the
+ *                       REPORT itself is rewritten (a redo earns a new draft).
+ *   - 'failed'        — the last attempt failed; `error` says why (scrubbed). */
+export type ResearchBlogState = 'draft' | 'edited-on-wp' | 'deleted-on-wp' | 'failed'
+
+export interface ResearchReportBlogInfo {
+  state: ResearchBlogState
+  /** WP edit-screen URL for the post, when known (display-only). */
+  link?: string
+  /** For 'failed': the scrubbed reason (never contains credentials). */
+  error?: string
+}
+
 export interface ResearchReportMeta {
   file: string
   title: string
   mtime: number
   size: number
+  /** Present when a WordPress target is configured and this report has a
+   *  publish-ledger entry (additive — old clients ignore it). */
+  blog?: ResearchReportBlogInfo
 }
 
 export interface ResearchReportsResponse {

@@ -33,6 +33,7 @@ import {
 } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { useT } from '@/i18n/I18nContext'
+import type { MessageKey } from '@/i18n/messages'
 import { Btn } from '@/components/ui/Btn'
 import type {
   ProjectMeta,
@@ -171,6 +172,14 @@ const ALIGN_CLS: Record<CellAlign, string> = {
 /** Line-based block pass — string in, React nodes out, pure. Blocks: #–######
  *  headings, -/* bullets, `1.` numbered lists, ``` fences, GFM pipe tables,
  *  > quotes, --- rules; anything else is a whitespace-pre-wrap paragraph line. */
+/** Blog-publish state → research-namespace label key (ResearchReportBlogInfo). */
+const BLOG_STATE_LABEL: Record<NonNullable<ResearchReportMeta['blog']>['state'], MessageKey> = {
+  draft: 'research.blog.draft',
+  'edited-on-wp': 'research.blog.editedOnWp',
+  'deleted-on-wp': 'research.blog.deletedOnWp',
+  failed: 'research.blog.failed',
+}
+
 export const renderMarkdown = (md: string): ReactNode[] => {
   const out: ReactNode[] = []
   let code: string[] | null = null // non-null ⇔ inside a ``` fence
@@ -812,7 +821,20 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
               <span className="w-full truncate text-ui" title={r.title}>
                 {r.title}
               </span>
-              <span className="text-meta text-ink-faint">{dateOf(r.mtime)}</span>
+              <span className="flex w-full items-center gap-1.5 text-meta text-ink-faint">
+                {dateOf(r.mtime)}
+                {/* Blog-publish ledger state (blogPublish.ts). Only what the
+                    ledger actually recorded: a draft link, a hands-off notice,
+                    or a failure — never an inferred "will publish soon". */}
+                {r.blog && (
+                  <span
+                    className={`truncate ${r.blog.state === 'failed' ? 'text-accent' : ''}`}
+                    title={r.blog.state === 'failed' && r.blog.error ? r.blog.error : undefined}
+                  >
+                    · {t(BLOG_STATE_LABEL[r.blog.state])}
+                  </span>
+                )}
+              </span>
             </button>
           ))}
         </div>
