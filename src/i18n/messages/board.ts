@@ -171,6 +171,9 @@ export const board = {
     'board.done.reopenHint': 'Drag it back to another column to pick it up again.',
     'board.run.hintWorker':
       'Run hands this card to a worker: its own isolated worktree, then 判断待ち for the commander to integrate.',
+    'board.run.interrupted':
+      'This card’s worker was interrupted (an app restart or a usage limit). While autopilot is on it returns to To do by itself and resumes from its branch — you can also drag it back yourself.',
+    'board.run.checkingWorker': 'Checking for a live worker…',
     'board.run.workerSettings':
       'The supply officer picks the model from the card, and the commander integrates the result — this card has no per-card run settings while the swarm is on.',
     'board.run.missingFolder':
@@ -399,6 +402,9 @@ export const board = {
     'board.done.reopenHint': 'もう一度やるときは、別の列にドラッグして戻してください。',
     'board.run.hintWorker':
       '実行するとこのカードを worker に渡します。専用の作業フォルダで進み、終わると判断待ちに入って司令官が統合します。',
+    'board.run.interrupted':
+      'この worker は中断しています(アプリ再起動や利用上限など)。自動運転中は自動で未着手に戻り、ブランチの続きから再開されます — 手動で未着手へドラッグしてもかまいません。',
+    'board.run.checkingWorker': 'worker の生存を確認しています…',
     'board.run.workerSettings':
       'モデルは補給官がカードの内容から選び、結果は司令官が統合します。swarm がオンの間、このカード個別の実行設定はありません。',
     'board.run.missingFolder':

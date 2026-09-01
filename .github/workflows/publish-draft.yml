@@ -12,6 +12,14 @@
 # dispatch to close the loop: it flips the draft public, and GitHub creates
 # the tag ref at --target as part of publishing.
 #
+# 2026-08-28: release.yml now runs this same publish step IN-RUN (its
+# `publish` job) once both builders succeed and the asset roll-call passes,
+# so a normal release needs no second dispatch anymore. THIS workflow stays
+# as the recovery path: publishing a draft that a failed/split run left
+# behind (after repair-release.yml), fixing the notes of an already-published
+# release (the body-only edit below), or publishing a build-only run that was
+# dispatched with publish=false.
+#
 # Inputs:
 #   tag        — the draft's tag name (e.g. v0.11.71). gh resolves drafts by
 #                their stored tag name even though no ref exists yet.

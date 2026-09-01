@@ -96,6 +96,10 @@ git push openground vX.Y.Z                  # pushing the tag to OPEN-GROUND fir
 > 上げた**未タグのドラフト**で止まる。その場合は **`publish-draft.yml` を dispatch**
 > (inputs: `tag` / `target_sha`=ビルドしたスナップショット sha / `notes_b64`)して公開する —
 > 公開時に GitHub が `target_sha` にタグを作るので、タグの木 = 出荷物の木が保たれる。
+> **(2026-08-28 更新: この二段目は自動化された。** release.yml 内の `publish` ジョブが
+> 同じ処理を run 内で実行する — 両ビルド緑 + 資産7点の点呼合格 → タグ作成 + 公開、
+> notes は `docs/release-notes/vX.Y.Z.md` から。ドラフトで止まるのは `publish=false`
+> 指定時か、点呼失敗などの異常時のみで、そのときの復旧路として publish-draft.yml は存続。)
 > (タグ push ができない環境 — 2026-08-13 のクラウドセッションの git プロキシはブランチ
 > push は通しタグ push を黙って落とした — の正規の逃げ道でもある。)
 >
@@ -108,20 +112,27 @@ git push openground vX.Y.Z                  # pushing the tag to OPEN-GROUND fir
 > タグは無いものとして扱う**こと(ブランチ push は同セッションで通るので、「push できた」
 > という感触は当てにならない)。
 >
-> したがってクラウドから切るときの手順は最初から dispatch 経路で組む:
-> ①スナップショットを `openground/main` に push(これは通る) →
-> ②`release.yml` を **workflow_dispatch**(ref=`main`)→ 未タグのドラフト →
-> ③`publish-draft.yml` を dispatch(`tag` / `target_sha`=スナップショット sha /
-> `notes_b64`)。v0.11.82〜v0.11.85 は実際すべて workflow_dispatch 起動である。
+> したがってクラウドから切るときの手順は最初から dispatch 経路で組む
+> (2026-08-28 に一段化。v0.11.82〜v0.11.101 は旧・二段 dispatch だった):
+> ①リリースノートを `docs/release-notes/vX.Y.Z.md` にコミットしてから、スナップショットを
+> `openground/main` に push(これは通る) →
+> ②`release.yml` を **workflow_dispatch**(ref=`main`)→ **以降は無人**: 両ビルド成功後、
+> 同 run 内の `publish` ジョブが資産の点呼 → タグ作成 → 公開(notes 添付)まで行う →
+> ③待つ側は固定 sleep ではなく **`actions_get` を約30秒間隔でポーリング**し、run 完了 =
+> 公開完了(実測 v0.11.101: 固定 sleep + 二段目 dispatch で毎回1〜2分の純調整コストが
+> 出ていた)。run が失敗したらドラフトのまま残るので、従来どおり repair-release.yml /
+> publish-draft.yml で復旧する。
 >
 > なお **`curl https://api.github.com/...` もクラウドセッションからは使えない**
 > (`GitHub access is not enabled for this session` が返る)。CI の進行確認は GitHub MCP
 > の `actions_list` / `actions_get` で行う。`gh` CLI も無い。
 
-Once both CI jobs are green the release is already live. Write the release
-notes (bilingual, `### English` + `### 日本語` sections — the in-app update
-banner and the landing footer's "Release notes" link both surface them) and
-attach them:
+Once the run is green the release is already live, **with the body taken from
+the committed `docs/release-notes/vX.Y.Z.md`** (the `publish` job attaches it —
+commit the bilingual notes, `### English` + `### 日本語` sections, BEFORE
+dispatching; the in-app update banner and the landing footer's "Release notes"
+link both surface them). The command below remains for fixing notes after the
+fact:
 
 ```bash
 gh release edit vX.Y.Z --repo nannantown/open-ground \

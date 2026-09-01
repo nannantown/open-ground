@@ -8550,6 +8550,123 @@ describe('promoteUnownedDelivered — a delivered card nobody owns still reaches
   })
 })
 
+describe('collectUnownedDoing — 実行中で取り残されたカードは未着手へ帰る (2026-09-01)', () => {
+  const NOW = Date.parse('2026-09-01T09:00:00Z')
+  const AFTER_GRACE = NOW + 31_000 // UNOWNED_DOING_GRACE_MS is 30s
+  type DeskState =
+    | { kind: 'live' }
+    | { kind: 'parked'; worktree: string; sdkSessionId: string }
+    | { kind: 'none'; worktree: string }
+  const withDesk = (deps: ReturnType<typeof makeDeps>, state: DeskState) =>
+    Object.assign(deps, { unownedDeskState: async () => state })
+
+  it('a deskless doing card is requeued to todo AFTER the grace — never on first sight', async () => {
+    const c = card('u', { boardColumn: 'doing', branch: 'swarm/u', title: 'stuck one' })
+    const deps = withDesk(makeDeps({ cards: [c] }), { kind: 'none', worktree: '/wt/u' })
+    const engine = newEngine({ running: true, workers: [] })
+    // First sight (and a pass still inside the grace): untouched — this window is
+    // what lets a just-claimed manual dispatch register its session in peace.
+    await runDispatchPass(engine, deps, NOW)
+    await runDispatchPass(engine, deps, NOW + 29_000)
+    expect(deps.recovered).toEqual([])
+    expect(deps.tornDown).toEqual([])
+    // Past the grace: salvage ('crash' teardown) + requeue, and the journal says so.
+    await runDispatchPass(engine, deps, AFTER_GRACE)
+    expect(deps.tornDown).toEqual([{ terminalId: '', worktree: '/wt/u' }])
+    expect(deps.teardownOpts[0]?.reason).toBe('crash')
+    expect(deps.recovered).toEqual([{ taskId: 'u', column: 'todo' }])
+    expect(deps.board.get('u')?.boardColumn).toBe('todo')
+    expect(engine.log.some((l) => l.message.includes('worker 不在の実行中カードを回収'))).toBe(true)
+  })
+
+  it('a quota-parked unowned desk is stopped and its card requeued — the one live shape that cannot heal itself', async () => {
+    const c = card('q', { boardColumn: 'doing', branch: 'swarm/q', title: 'parked one' })
+    const base = makeDeps({ cards: [c] })
+    const teardowns: { worktree: string; sdkSessionId?: string; reason?: string }[] = []
+    const realRecover = base.recoverWorker
+    base.recoverWorker = async (opts) => {
+      teardowns.push({ worktree: opts.worktree, sdkSessionId: opts.sdkSessionId, reason: opts.reason })
+      return realRecover(opts)
+    }
+    const deps = withDesk(base, { kind: 'parked', worktree: '/wt/q', sdkSessionId: 'sdk-q-9' })
+    const engine = newEngine({ running: true, workers: [] })
+    await runDispatchPass(engine, deps, NOW)
+    await runDispatchPass(engine, deps, AFTER_GRACE)
+    // The SESSION ID travels into the teardown (an SDK desk with no id is a kill
+    // that stops nothing — the defaultRecoverWorker contract), and the reason is
+    // the same 'rate-limit' the owned quota path uses.
+    expect(teardowns).toEqual([{ worktree: '/wt/q', sdkSessionId: 'sdk-q-9', reason: 'rate-limit' }])
+    expect(deps.recovered).toEqual([{ taskId: 'q', column: 'todo' }])
+    expect(engine.log.some((l) => l.message.includes('上限停止のまま取り残されていた'))).toBe(true)
+  })
+
+  it('a LIVE desk is never touched — a manual worker in flight looks exactly like this', async () => {
+    const c = card('m', { boardColumn: 'doing', branch: 'swarm/m' })
+    const deps = withDesk(makeDeps({ cards: [c] }), { kind: 'live' })
+    const engine = newEngine({ running: true, workers: [] })
+    await runDispatchPass(engine, deps, NOW)
+    await runDispatchPass(engine, deps, AFTER_GRACE)
+    await runDispatchPass(engine, deps, AFTER_GRACE + 60_000)
+    expect(deps.recovered).toEqual([])
+    expect(deps.tornDown).toEqual([])
+  })
+
+  it("a card a COUNTED worker owns is the monitor's business, not the sweep's", async () => {
+    const c = card('k', { boardColumn: 'doing', branch: 'swarm/k' })
+    const deps = withDesk(makeDeps({ cards: [c] }), { kind: 'none', worktree: '/wt/k' })
+    const engine = newEngine({
+      running: true,
+      workers: [worker({ terminalId: 'pty-k-1', branch: 'swarm/k', taskId: 'k', worktree: '/wt/k', startedAt: new Date(NOW).toISOString() })],
+    })
+    await runDispatchPass(engine, deps, NOW)
+    await runDispatchPass(engine, deps, AFTER_GRACE)
+    expect(deps.recovered).toEqual([])
+  })
+
+  it('a DELIVERED card whose review move keeps being refused stays with promote — never requeued as if the work did not exist', async () => {
+    const c = card('d', { boardColumn: 'doing', branch: 'swarm/d' })
+    const deps = withDesk(
+      makeDeps({
+        cards: [c],
+        heartbeats: new Map([['d', { ready: true, blocked: false, at: new Date(NOW).toISOString() }]]),
+        commits: new Map([['d', 3]]),
+        reviewAlwaysFails: new Set(['d']),
+      }),
+      { kind: 'none', worktree: '/wt/d' },
+    )
+    const engine = newEngine({ running: true, workers: [] })
+    await runDispatchPass(engine, deps, NOW)
+    await runDispatchPass(engine, deps, AFTER_GRACE)
+    // The move was attempted (and kept) both passes; the card must still be in
+    // 'doing' for promote's next retry — not spirited off to 'todo'.
+    expect(deps.recovered).toEqual([])
+    expect(deps.board.get('d')?.boardColumn).toBe('doing')
+  })
+
+  it('an ABANDONED card and a non-swarm branch are out of scope, deskless or not', async () => {
+    const a = card('a', { boardColumn: 'doing', branch: 'swarm/a', abandoned: true })
+    const h = card('h', { boardColumn: 'doing', branch: 'task/hand' })
+    const deps = withDesk(makeDeps({ cards: [a, h] }), { kind: 'none', worktree: '/wt/x' })
+    const engine = newEngine({ running: true, workers: [] })
+    await runDispatchPass(engine, deps, NOW)
+    await runDispatchPass(engine, deps, AFTER_GRACE)
+    expect(deps.recovered).toEqual([])
+    expect(deps.tornDown).toEqual([])
+  })
+
+  it('a teardown refused as STILL OCCUPIED leaves the card in doing for the next look', async () => {
+    const c = card('o', { boardColumn: 'doing', branch: 'swarm/o' })
+    const base = makeDeps({ cards: [c] })
+    base.recoverWorker = async () => ({ removed: false, stillOccupied: true, reason: 'live desk' })
+    const deps = withDesk(base, { kind: 'none', worktree: '/wt/o' })
+    const engine = newEngine({ running: true, workers: [] })
+    await runDispatchPass(engine, deps, NOW)
+    await runDispatchPass(engine, deps, AFTER_GRACE)
+    expect(deps.recovered).toEqual([])
+    expect(deps.board.get('o')?.boardColumn).toBe('doing')
+  })
+})
+
 describe('detectAnomalies — state inconsistency detection', () => {
   // detectAnomalies only ever calls deps.isAlive + deps.worktreeExists; build the
   // minimal surface off makeDeps (which supplies the full OrchestratorDeps) and

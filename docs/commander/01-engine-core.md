@@ -417,6 +417,57 @@ worker は2種類ある:
 fixture だったので、ガードを外しても引き渡し検査が止めていた。何も観測していない
 歯だったので、ready な心拍 + commit を与えて**ガードだけが理由になる**形に直した。
 
+### 7.4d 作業途中で取り残された doing カードも engine が回収する(2026-09-01 実測の停止)
+
+§7.4c は**届いた**half(ready + commit)だけを回収する。残った孤児クラスが
+**作業途中**の unowned worker で、週次上限で実測した(AIResearch):
+
+- 手動 worker(実行 ボタン経由 = `engine.workers` の外)が週次の利用上限に当たり
+  `quota-parked`(上限待ち)で停止。
+- engine の quota 経路(monitor が park を見て requeue → 冷却テーブル → 上限明けに
+  再 dispatch)は **`engine.workers` を歩く**ので、この worker には届かない。
+  park 自身の出口(実作業イベント / turn 境界2回)も、入力の来ない idle セッション
+  では**永遠に発火しない**。
+- 次のアプリ再起動でセッションは死に、カードは `doing` に残る。dispatch は todo
+  列しか見ないので、**上限が明けても(使用量 0%)誰も再着手しない**。画面は
+  「実行中 1」なのに下のバーは「稼働 0」— この食い違いがこの停止の顔。
+
+**追加(`collectUnownedDoing` — `runDispatchPass` の 2c、2b の直後)**: 誰も数えて
+いない doing カードで、promote が請求しなかった(=届いていない)swarm branch 持ちの
+ものを、卓の実態で振り分ける:
+
+| 卓の状態 | 処置 | 理由 |
+|---|---|---|
+| 生きて作業中(手動 worker 含む) | **触らない** | 健全。届けば §7.4c が回収する |
+| `quota-parked` だけが居る | セッション停止 + WIP salvage + **カードを todo へ** | unowned な park は誰にも解けない。owned と同じ requeue-not-hold(2026-08-13)に合流させる |
+| 誰も居ない | (worktree があれば salvage して) **カードを todo へ** | 再起動の残骸。branch は残るので次の dispatch が続きから入る |
+
+**盗まないための造り**: ①数えたカード対象外 ②`promoteUnownedDelivered` が請求した
+id(移動が kept で失敗した分も含む)は除外 — 届いたカードを「無かったこと」にして
+todo へ流すのが最悪の誤動作 ③30秒の猶予(`UNOWNED_DOING_GRACE_MS` — 手動 dispatch は
+カード claim → セッション登録の順なので、その隙間で刈らない。'live' を見たら時計を
+リセットし**連続した無人時間**だけを数える) ④卓プローブは失敗時 'live' 側に倒す
+(証明できないものは奪わない) ⑤teardown が stillOccupied を返したら退く。
+冷却テーブルには**書かない** — unowned 卓の tier は不明で、「推測で tier を冷やさない」
+(§7.4 の quota センサーの規約)が勝つ。上限が続いていれば、再 dispatch された
+engine-owned worker が壁に当たり、そのセンサーが正しく冷やす(1周だけ余分に回る。
+有界で自己修正)。
+
+ドロワー側の同じ穴: Board のカード詳細は worker 画面の判定を
+`GET /api/swarm/orchestrator`(= engine 所有分)だけで引いていたので、手動 worker の
+カードは**実行中なのに下書き+実行ボタンの顔**をしていた(実行は 409 で拒否される
+ボタン)。`BoardModule` が **branch を持つ**(= dispatch の領収書がある)doing カードで
+engine 非所有のとき `GET /api/swarm/workers`(union)を引き、生きた行があれば worker
+画面、居なければ中断の説明文(実行ボタンは出さない)を出す。**branch の無い doing
+カード**(手で 実行中 へドラッグした札・claim→spawn の隙間)は worker の物語が無いので
+従来どおり下書き+実行のまま — server 側 sweep が branch 無しを対象外にするのと同じ線。
+
+歯(mutation で赤を実測済み): `swarmOrchestrator.test.ts` の「collectUnownedDoing」
+7本(請求済み除外を外す / 猶予を外す / 'live' スキップを外す / todo→blocked に
+すり替え / parked の reason を crash にすり替え — 各1〜2本が赤)と、
+`BoardModule.drawerWorker.test.tsx` 4本(生存 id 条件を外す=残骸に画面が出る /
+中断分岐を外す=実行ボタンが戻る — 各赤)。
+
 ### 7.5 passInFlight / pendingDispatch は外から見えない
 
 `stateOf`(:1836-1873)は `passInFlight` / `pendingDispatch` / `lock` / `generation` / rework 予算 Map を**返さない**。「dispatch が二重に走っていないか」を API で確認する手段はなく、機械封鎖(§4.4 + `isCardDispatchInFlight`)を信頼するのが正。手動 dispatch(POST `/api/swarm/worker`)がエンジン予約と衝突すると 409 が返る(02 章 §2.1 の twin-dispatch ガード)。

@@ -19,6 +19,7 @@ import {
   type ProjectMeta,
   type ProjectTask,
   type Settings,
+  type SwarmWorkerRecord,
   type TaskAttachment,
   type TaskRunSettings,
 } from '@/lib/types'
@@ -282,6 +283,15 @@ export const BoardModule = ({
   // for the half-second before the first poll, and permanently on an old server.
   const [supplyDesk, setSupplyDesk] = useState<LiveDeskHandle | null | undefined>(undefined)
   const [allWorkers, setAllWorkers] = useState<readonly EngineWorker[]>([])
+  /** The union-list row (GET /api/swarm/workers — live desks ∪ roster ∪
+   *  heartbeats, the same source the Swarm tab renders) backing the drawer for
+   *  a doing card the ENGINE does not own: a manual 実行 worker never enters
+   *  engine.workers, and a restart can orphan an engine one — both must still
+   *  show their live screen instead of a draft that invites a second dispatch.
+   *  `undefined` = not probed / not applicable; `null` = probed, nobody live. */
+  const [drawerUnionRow, setDrawerUnionRow] = useState<SwarmWorkerRecord | null | undefined>(
+    undefined,
+  )
   /** Has an orchestrator lap ever LANDED? `undefined` = not yet (mount, a
    *  restarting server, offline), `false` = 403 (not the owner), `true` = a 2xx
    *  arrived. Three-valued for the same reason `supplyDesk` is: an empty
@@ -1888,13 +1898,77 @@ export const BoardModule = ({
   // worker's claude screen in place of its Run button.
   const drawerWorker =
     swarmVisible && detailTask ? workersByTask.get(detailTask.id) : undefined
+  // A doing card the engine does NOT own can still have a live desk behind it —
+  // the Board 実行 button's manual worker never enters engine.workers, and a
+  // restart orphans an engine one (2026-09-01, the same hole the server-side
+  // collectUnownedDoing sweep closes). Probe the SERVER-TRUTH union list so the
+  // drawer shows that worker's screen too, and an honest 中断 notice when
+  // nobody is live (the sweep requeues such a card within ~30s while autopilot
+  // runs; the notice covers the remainder — engine off, or the grace window).
+  const detailIsDoing = !!detailTask && columnOf(detailTask) === 'doing'
+  const detailTaskId = detailTask?.id ?? ''
+  const detailBranch =
+    detailTask && typeof detailTask.branch === 'string' ? detailTask.branch : ''
+  const engineOwnsDetail = !!drawerWorker
+  useEffect(() => {
+    setDrawerUnionRow(undefined)
+    // `detailBranch` is the DISPATCH EVIDENCE gate: a branch lands on the card
+    // only when a worker was actually spawned for it (recordBranch / engine
+    // dispatch). A doing card WITHOUT one — hand-dragged to 実行中, or inside
+    // the claim→spawn window — has no worker story to probe or to call 中断,
+    // and keeps the ordinary draft + Run (the server sweep skips it the same
+    // way).
+    if (!swarmVisible || !detailIsDoing || !detailBranch || engineOwnsDetail || !detailTaskId)
+      return
+    if (!project.path || project.missing) return
+    let cancelled = false
+    const probe = async () => {
+      if (document.hidden) return
+      try {
+        const res = await api.api.swarm.workers.$get({ query: { path: project.path } })
+        if (cancelled || !res.ok) return
+        const body = (await res.json()) as { workers?: SwarmWorkerRecord[] }
+        // Live = it carries a session id (either pool); the union also lists
+        // DEAD workers (heartbeat/roster remains) and those must not render a
+        // screen. Match by card first, then by the card's own branch.
+        const live = (body.workers ?? []).find(
+          r =>
+            (r.taskId === detailTaskId || (!!detailBranch && r.branch === detailBranch)) &&
+            !!(r.sdkSessionId || r.terminalId),
+        )
+        if (!cancelled) setDrawerUnionRow(live ?? null)
+      } catch {
+        /* offline / restarting — stay `undefined`: the drawer keeps its neutral face */
+      }
+    }
+    void probe()
+    const id = window.setInterval(() => void probe(), 5_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [
+    swarmVisible,
+    detailIsDoing,
+    engineOwnsDetail,
+    detailTaskId,
+    detailBranch,
+    project.path,
+    project.missing,
+  ])
   // ⚠ ADDRESS BY THE RUNTIME-AGNOSTIC KEY. An SDK worker's terminalId is EMPTY,
   // so keying on it made `workerScreenId` null for one — and the drawer fell
   // through to the DRAFT branch, putting a Run button on a card an SDK worker was
   // actively working. Pressing it starts a SECOND claude on the same card.
-  const drawerWorkerKey = drawerWorker ? engineWorkerKey(drawerWorker) : ''
+  // The engine's record wins (richest fields); a live union row is the same
+  // screen from the other registry.
+  const unionScreenRow = !drawerWorker && detailIsDoing ? (drawerUnionRow ?? undefined) : undefined
+  const screenWorker = drawerWorker ?? unionScreenRow
+  const drawerWorkerKey = drawerWorker
+    ? engineWorkerKey(drawerWorker)
+    : (unionScreenRow?.sdkSessionId ?? unionScreenRow?.terminalId ?? '')
   const workerScreenId =
-    drawerWorker && drawerWorkerKey && !exitedWorkerScreens.has(drawerWorkerKey)
+    screenWorker && drawerWorkerKey && !exitedWorkerScreens.has(drawerWorkerKey)
       ? drawerWorkerKey
       : null
   // Map the worker's live beacon (+ coarse stage) to SwarmWorkerPane's status
@@ -1904,7 +1978,7 @@ export const BoardModule = ({
     const live = drawerWorkerKey ? claudeStatusByPty.get(drawerWorkerKey) : undefined
     if (live === 'working') return 'working'
     if (live === 'waiting') return 'waiting'
-    return drawerWorker?.stage === 'starting' ? 'starting' : 'waiting'
+    return screenWorker?.stage === 'starting' ? 'starting' : 'waiting'
   })()
 
   // ── Stable callbacks handed to BoardTab (and through it to the memoized
@@ -2148,12 +2222,14 @@ export const BoardModule = ({
               <X size={15} />
             </button>
           </div>
-          {workerScreenId && drawerWorker ? (
-            /* ── WORKER — a swarm worker (engine-dispatched) owns this card:
-                  show its live `claude` screen instead of the Run button. No
+          {workerScreenId && screenWorker ? (
+            /* ── WORKER — a swarm worker owns this card (engine-dispatched, or
+                  a live desk from the union list: a manual 実行 worker /
+                  restart survivor): show its live `claude` screen instead of
+                  the Run button — the Swarm tab's view, in the drawer. No
                   session controls (restart / insert-task) — those act on the
                   user's OWN slot, which a worker task has none of; the worker is
-                  the orchestrator's, surfaced read-only via SwarmWorkerPane
+                  the swarm's, surfaced read-only via SwarmWorkerPane
                   (source='engine'). On its PTY exit we mark the id and fall back
                   to the draft drawer below — never a dead black screen. */
             <>
@@ -2164,24 +2240,24 @@ export const BoardModule = ({
                 >
                   {detailTask.title.trim() || t('board.card.untitled')}
                 </div>
-                {drawerWorker.note && (
+                {screenWorker.note && (
                   <div
                     className="mt-0.5 truncate text-meta text-ink-faint"
-                    title={drawerWorker.note}
+                    title={screenWorker.note}
                   >
-                    {drawerWorker.note}
+                    {screenWorker.note}
                   </div>
                 )}
               </div>
               <div className="flex min-h-0 flex-1 flex-col">
-                {drawerWorker.runtime === 'sdk' && drawerWorker.sdkSessionId ? (
+                {screenWorker.runtime === 'sdk' && screenWorker.sdkSessionId ? (
                   // An SDK worker has no terminal to render — its distilled
                   // transcript is the screen. Same read-only stance as the PTY
-                  // arm (source='engine'): the orchestrator owns this worker.
+                  // arm (source='engine'): the swarm owns this worker.
                   <SdkWorkerPane
-                    sdkSessionId={drawerWorker.sdkSessionId}
+                    sdkSessionId={screenWorker.sdkSessionId}
                     projectPath={project.path}
-                    branch={drawerWorker.branch}
+                    branch={screenWorker.branch}
                     taskTitle={detailTask.title}
                     source="engine"
                     onExit={() => markWorkerScreenExited(workerScreenId)}
@@ -2189,7 +2265,7 @@ export const BoardModule = ({
                 ) : (
                   <SwarmWorkerPane
                     terminalId={workerScreenId}
-                    branch={drawerWorker.branch}
+                    branch={screenWorker.branch}
                     taskTitle={detailTask.title}
                     status={workerScreenStatus}
                     source="engine"
@@ -2225,6 +2301,22 @@ export const BoardModule = ({
                   </p>
                 ) : columnOf(detailTask) === 'done' ? (
                   doneSummary(detailTask)
+                ) : swarmVisible && detailIsDoing && detailBranch ? (
+                  /* ── A doing card WITH DISPATCH EVIDENCE (its swarm branch)
+                        reaching the DRAFT branch means its worker is NOT live
+                        (a live one renders the screen above). Offering 実行
+                        here is offering a second dispatch on a claimed card —
+                        the server refuses it (409), so the button's only
+                        outcome would be an error. Say what is true instead;
+                        the engine's sweep returns the card to 未着手 by itself
+                        while autopilot runs. (A BRANCHLESS doing card — hand-
+                        dragged — keeps the ordinary Run: no worker ever
+                        existed for it.) */
+                  <p className="text-meta leading-relaxed text-ink-faint">
+                    {drawerUnionRow === null
+                      ? t('board.run.interrupted')
+                      : t('board.run.checkingWorker')}
+                  </p>
                 ) : (
                   <>
                     {/* Run settings — collapsed by default: the board's global

@@ -97,7 +97,12 @@ import {
 // workerRuntime's adapters everywhere else; these two are needed directly because
 // defaultRecoverWorker is handed ids, not a WorkerHandle, and must stop whichever
 // runtime the id belongs to before it touches the worktree.
-import { terminateSdkSession, isSdkSessionReaped, getSdkSession } from './sdkSession'
+import {
+  terminateSdkSession,
+  isSdkSessionReaped,
+  getSdkSession,
+  listSdkSessionsIn,
+} from './sdkSession'
 import { stopAllDesksInDirAndWait } from './liveDesks'
 import { claudeRunPreflight } from './claudePreflight'
 // card 2 (docs/ENGINE_PERSISTENCE_PLAN.md) — engine intent write-through +
@@ -2117,6 +2122,14 @@ export interface ProjectEngine {
    *  reads normal or the worker leaves the live set. Optional (older-build
    *  backfill). In-memory only. */
   questionWaits?: Map<string, { since: number }>
+  /** Per-CARD (taskId) first-seen clock of the unowned-doing sweep
+   *  ({@link collectUnownedDoing}): epoch ms the card was first observed in
+   *  'doing' with no counted worker. Drives the grace that separates a dispatch
+   *  race from real abandonment; entries clear when the card is collected,
+   *  leaves 'doing', or gains an owner/live desk. Optional (older-build
+   *  backfill). In-memory only — a restart restarts the grace, which is the
+   *  safe direction. */
+  unownedDoingSeen?: Map<string, number>
   /** Drain/dispatch/integrate journal (ring buffer, oldest-first). */
   log: OrchestratorLogLine[]
   /** State inconsistencies detected on the latest pass (read-only — see
@@ -2229,6 +2242,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       integrationWaitMs: new Map(),
       questionRaised: new Map(),
       questionWaits: new Map(),
+      unownedDoingSeen: new Map(),
       log: [],
       anomalies: [],
       selfSupply: initSelfSupplyRuntime(),
@@ -3108,6 +3122,15 @@ export interface OrchestratorDeps {
    *  WorkerRuntime.quotaBlocked. Injected in tests; production resolves it per
    *  worker through runtimeOf(w). */
   quotaBlocked?: (w: WorkerHandle) => boolean
+  /** What is at an UNOWNED doing-card's worktree right now — the probe behind
+   *  {@link collectUnownedDoing}. 'live' = a desk is working there (a manual
+   *  worker, or one boot adoption declined) — never touched; 'parked' = the only
+   *  live desk(s) there sit on a quota wall (nobody will ever un-park an unowned
+   *  desk, so the sweep may reclaim it); 'none' = nothing lives there. The
+   *  worktree path rides along so derivation (branch → central worktree dir)
+   *  lives in ONE place. OPTIONAL: absent ⇒ defaultUnownedDeskState; any failure
+   *  inside must answer 'live' (cannot prove nobody is there ⇒ never steal). */
+  unownedDeskState?: (projectPath: string, branch: string) => Promise<UnownedDeskState>
   /** Newest mtime across a worker's OWN transcript + its sub-agent transcripts
    *  (its worktree cwd + agentSessionId), or null. The stall path's THIRD liveness
    *  channel, resolved ONLY for a worker the cheap channels (heartbeat + PTY output)
@@ -8489,12 +8512,19 @@ const syncRoster = async (
  *     the count is the discriminator here and not the clock.)
  *
  *  Read-then-write per card, never throws: a card that cannot be moved is left
- *  for the next pass (and the anomaly feed already names it). */
+ *  for the next pass (and the anomaly feed already names it).
+ *
+ *  RETURNS the ids it CLAIMED — every card that passed all its gates (delivered
+ *  work exists on the branch), whether or not the review move landed. The
+ *  mid-task sweep ({@link collectUnownedDoing}) excludes these: a delivered
+ *  card whose move was merely KEPT must be retried here next pass, never
+ *  requeued to 'todo' as if the work did not exist. */
 const promoteUnownedDelivered = async (
   engine: ProjectEngine,
   deps: OrchestratorDeps,
   tasks: readonly ProjectTask[],
-): Promise<void> => {
+): Promise<Set<string>> => {
+  const claimed = new Set<string>()
   const countedIds = new Set(engine.workers.map((w) => w.taskId))
   for (const t of tasks) {
     if (columnOf(t) !== 'doing') continue
@@ -8522,6 +8552,7 @@ const promoteUnownedDelivered = async (
       continue
     }
     if (ahead <= 0) continue
+    claimed.add(t.id)
     let moved = false
     try {
       moved = await deps.moveToReview(engine.path, t.id, branch)
@@ -8537,6 +8568,154 @@ const promoteUnownedDelivered = async (
       )
     }
   }
+  return claimed
+}
+
+/** What lives at an unowned doing-card's worktree — see the dep's doc. */
+export type UnownedDeskState =
+  | { kind: 'live' }
+  | { kind: 'parked'; worktree: string; sdkSessionId: string }
+  | { kind: 'none'; worktree: string }
+
+/** How long a doing card must stay CONTINUOUSLY unowned-and-deskless (or
+ *  unowned-and-parked) before the sweep touches it. Covers every dispatch race —
+ *  the manual route claims the card BEFORE its SDK session registers, and the
+ *  engine's own todo→doing move can land a beat after the spawn — with two full
+ *  passes to spare, while staying instant at human scale. */
+const UNOWNED_DOING_GRACE_MS = 30_000
+
+/** {@link OrchestratorDeps.unownedDeskState} — same branch→dir mint as
+ *  defaultDeskOccupies, then classify: any live non-parked SDK worker (or any
+ *  other live desk — an owner's PTY, an unwinding session) answers 'live';
+ *  only-parked SDK workers answer 'parked' (with the session to stop); an empty
+ *  worktree answers 'none'. Every failure answers 'live' — the sweep must never
+ *  reclaim what it cannot prove abandoned. */
+const defaultUnownedDeskState = async (
+  projectPath: string,
+  branch: string,
+): Promise<UnownedDeskState> => {
+  try {
+    const uuid = await projectUUIDFromPath(projectPath)
+    const dir = join(centralWorktreesDir(uuid), swarmWorktreeDirName(branch))
+    // Non-reaped worker sessions in the worktree (equality on resolved cwd — an
+    // SDK session never chdirs, so its recorded cwd IS the worktree root).
+    const sdks = listSdkSessionsIn(dir, 'worker')
+    if (sdks.some((s) => s.status !== 'quota-parked')) return { kind: 'live' }
+    const parked = sdks.find((s) => s.status === 'quota-parked')
+    if (parked) return { kind: 'parked', worktree: dir, sdkSessionId: parked.id }
+    // No worker session at all — but a desk of ANY shape (an owner terminal, a
+    // non-worker session that cd'd in) still means "somebody is there".
+    return (await liveDeskOccupies(dir)) ? { kind: 'live' } : { kind: 'none', worktree: dir }
+  } catch {
+    return { kind: 'live' }
+  }
+}
+
+/** The MID-TASK half of the restart-orphan recovery (the sibling of
+ *  {@link promoteUnownedDelivered}, which handles the DELIVERED half).
+ *
+ *  ⚠ THE HOLE THIS CLOSES, measured 2026-09-01 (AIResearch). A worker hit the
+ *  WEEKLY usage limit and parked ('quota-parked', 上限待ち). Its card's revival
+ *  path — monitor sees the park → requeue to todo → cooling table → redispatch
+ *  after the reset — runs entirely over `engine.workers`, and this worker was
+ *  not in it (dispatched from the Board 実行 button, which never enters the
+ *  engine's list; a restart-orphaned engine worker lands in the same state).
+ *  Nothing requeued it; the park's own exits (real work / two turn boundaries)
+ *  never fire on an idle session; the app's next restart killed the session and
+ *  left the card in 'doing' — where dispatch (todo-only) can never reach it.
+ *  The limit reset (usage back to 0%) and the card sat 実行中 with 稼働0,
+ *  forever.
+ *
+ *  The invariant, card-rooted so it holds however the worker was lost: a
+ *  `doing` swarm card that NO counted worker drains, that promote did not claim
+ *  (no delivered work), whose worktree holds NO working desk — for longer than
+ *  the grace — is returned to 'todo'. Its branch survives (WIP is salvaged by
+ *  the teardown), so the next dispatch re-enters the same branch and continues;
+ *  WHEN it re-runs is the cooling table's and the spawn park's business, which
+ *  is exactly how an engine-owned quota stop already behaves (requeue-not-hold,
+ *  2026-08-13).
+ *
+ *  Decision table per card (after the shared guards):
+ *    · desk 'live'   → untouched (a healthy manual/unadopted worker; its
+ *                      delivery is collected by promoteUnownedDelivered).
+ *    · desk 'parked' → the one live shape that can never heal itself unowned:
+ *                      stop it + salvage + requeue ('rate-limit' teardown; no
+ *                      cooling mark — an unowned desk's tier is unknown, and we
+ *                      never cool a tier by guess; if the wall still stands, the
+ *                      NEXT engine-owned worker's sensor marks it properly).
+ *    · desk 'none'   → salvage what the tree holds (if it still exists) +
+ *                      requeue ('crash' teardown).
+ *  A teardown that reports stillOccupied, or a kept card write, leaves the card
+ *  for the next pass. Never throws. */
+const collectUnownedDoing = async (
+  engine: ProjectEngine,
+  deps: OrchestratorDeps,
+  tasks: readonly ProjectTask[],
+  claimed: ReadonlySet<string>,
+  now: number,
+): Promise<void> => {
+  const seen = (engine.unownedDoingSeen ??= new Map())
+  const countedIds = new Set(engine.workers.map((w) => w.taskId))
+  const present = new Set<string>()
+  for (const t of tasks) {
+    if (columnOf(t) !== 'doing') continue
+    if (countedIds.has(t.id)) continue
+    if (t.abandoned === true) continue // 見送る means 見送る — same rule as promote
+    if (claimed.has(t.id)) continue // delivered — promote owns it (incl. kept-move retries)
+    const branch = typeof t.branch === 'string' ? t.branch : ''
+    if (!branch || !isSwarmBranch(branch)) continue
+    present.add(t.id)
+    const first = seen.get(t.id) ?? now
+    if (!seen.has(t.id)) seen.set(t.id, now)
+    if (now - first < UNOWNED_DOING_GRACE_MS) continue
+    let desk: UnownedDeskState
+    try {
+      desk = await (deps.unownedDeskState ?? defaultUnownedDeskState)(engine.path, branch)
+    } catch {
+      continue // unprovable ⇒ untouched, same direction as the default's catch
+    }
+    if (desk.kind === 'live') {
+      // Somebody is working: restart the clock so the grace measures
+      // CONTINUOUS abandonment, not time since the card was first noticed.
+      seen.set(t.id, now)
+      continue
+    }
+    try {
+      const td = await deps.recoverWorker({
+        projectPath: engine.path,
+        worktree: desk.worktree,
+        terminalId: '',
+        reason: desk.kind === 'parked' ? 'rate-limit' : 'crash',
+        ...(desk.kind === 'parked' ? { sdkSessionId: desk.sdkSessionId } : {}),
+      })
+      if (td.stillOccupied) {
+        seen.set(t.id, now)
+        continue
+      }
+    } catch {
+      continue // teardown refused — retry next pass rather than strand the tree
+    }
+    let moved = false
+    try {
+      moved = await deps.recoverCard(engine.path, t.id, 'todo')
+    } catch {
+      moved = false
+    }
+    if (moved) {
+      seen.delete(t.id)
+      logLine(
+        engine,
+        'warn',
+        desk.kind === 'parked'
+          ? `上限停止のまま取り残されていた無所属 worker を回収 — カードを未着手へ戻しました(上限明けに自動で続きから再開): ${shorten(t.title ?? '')} → ${branch}`
+          : `worker 不在の実行中カードを回収 — 未着手へ戻しました(枠が空き次第つづきから再開): ${shorten(t.title ?? '')} → ${branch}`,
+        'dispatch',
+      )
+    }
+  }
+  // Cards that left 'doing' (or got owned) stop being tracked — a later relapse
+  // starts a fresh grace window.
+  for (const id of Array.from(seen.keys())) if (!present.has(id)) seen.delete(id)
 }
 
 /** ONE pass. Idempotent-ish and side-effect-bounded:
@@ -8589,7 +8768,14 @@ export const runDispatchPass = async (
   //     (it walks engine.workers; these are in neither that list nor the review
   //     column). AFTER the monitor, so its prune has already settled which
   //     workers are still counted. See promoteUnownedDelivered's header.
-  await promoteUnownedDelivered(engine, deps, tasks)
+  const claimedDelivered = await promoteUnownedDelivered(engine, deps, tasks)
+  if (!engine.running) return
+
+  // 2c. …and the MID-TASK half of the same orphan class: an unowned doing card
+  //     with no working desk behind it (quota-parked included) goes back to
+  //     'todo', branch preserved, so the cooling clock — not a human — decides
+  //     when it re-runs. See collectUnownedDoing's header (2026-09-01).
+  await collectUnownedDoing(engine, deps, tasks, claimedDelivered, now)
   if (!engine.running) return
 
   // 3. Reconcile: a counted worker whose card is STILL in todo means an earlier
@@ -9958,11 +10144,13 @@ export const detectAnomalies = async (
       // desks) still listed it while `GET /api/swarm/orchestrator` showed
       // `workers:[]`, and the two views disagreed in silence for hours.
       //
-      // The DELIVERED half of this population is recovered automatically now
-      // (promoteUnownedDelivered moves it to review, which wakes the commander),
-      // so what reaches this row is the genuinely ambiguous remainder: no
-      // hand-over sign, or a card that has been sent back before, or a branch git
-      // could not read. Those need a human — which is what an anomaly is for.
+      // BOTH halves of this population are recovered automatically now: the
+      // DELIVERED one by promoteUnownedDelivered (doing→review, wakes the
+      // commander) and the MID-TASK one by collectUnownedDoing (doing→todo,
+      // 2026-09-01 — quota-parked desks included). What still reaches this row
+      // is the transient remainder: a card inside the sweep's grace window, or
+      // one whose teardown / board write keeps being refused. Those need a
+      // human — which is what an anomaly is for.
       out.push({ kind: 'unowned-doing', ref: t.id, branch, taskTitle: t.title ?? '' })
     }
   }

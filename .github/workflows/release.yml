@@ -4,6 +4,9 @@
 # Two platforms build in parallel and publish to the SAME GitHub Release:
 #   - macOS (macos-14, arm64): .dmg, code-signed + notarized
 #   - Windows (windows-2022): .exe (NSIS), UNSIGNED (no Windows code-signing cert)
+# A third job (`publish`) then flips the draft release public in the SAME run
+# once both legs succeeded and every expected asset is present — no second
+# dispatch needed (2026-08-28; publish-draft.yml remains the recovery path).
 #
 # Required repo Secrets (Settings → Secrets and variables → Actions):
 #   CSC_LINK                      base64 of the Developer ID .p12 certificate
@@ -28,6 +31,11 @@ on:
     tags:
       - "v*.*.*"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish when both builds succeed (false = stop at the untagged draft)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -45,11 +53,16 @@ jobs:
   # ever upload. repair-release.yml exists to mend a release this race (or
   # any upload failure) has already split.
   #
-  # ⚠ This also changes TAG-PUSH behaviour: electron-builder uploads into the
-  # existing draft and leaves it a draft, so a tag push now needs the same
-  # publish-draft dispatch the workflow_dispatch flow uses. All releases since
-  # v0.11.71 have gone through that route anyway (cloud sessions cannot push
-  # tags), and it puts the PII-guarded human step in front of every publish.
+  # ⚠ electron-builder uploads into the existing draft and leaves it a draft.
+  # Until 2026-08-28 closing the loop took a SECOND dispatch (publish-draft.yml);
+  # now the `publish` job below does it IN-RUN for both trigger modes, once
+  # every build leg is green and the asset roll-call passes. Measured on
+  # v0.11.101: the second dispatch + its coordination wait cost 1–2 min per
+  # release, while the two things the extra step actually checked (all legs
+  # green; all assets in ONE draft — the split-race above) are exactly what
+  # `needs: build` + the roll-call now enforce by machine. The PII guard still
+  # fronts every build job, so nothing reaches publish unguarded.
+  # publish-draft.yml remains as the recovery/notes-fix path.
   draft:
     runs-on: ubuntu-latest
     steps:
@@ -181,3 +194,67 @@ jobs:
         run: npx electron-builder --win --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Flip the draft public in the SAME run (added 2026-08-28 — release latency).
+  # `needs: build` only fires when EVERY matrix leg succeeded; the roll-call
+  # below then refuses a split or half-uploaded draft (the v0.11.90 race class,
+  # checked by machine instead of by eye). Any failure here leaves the ordinary
+  # draft behind, mended and published by hand via repair-release.yml /
+  # publish-draft.yml exactly as before. Dispatch with publish=false for a
+  # build-only run that stops at the draft (the pre-2026-08-28 behaviour).
+  publish:
+    needs: build
+    # Tag-push runs get the same in-run publish (auto-publish was their
+    # behaviour before the draft job existed anyway).
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          NOTES_FILE="docs/release-notes/v$VERSION.md"
+          # No committed notes ⇒ stay a draft. The in-app update banner and the
+          # landing footer surface the release body, so publishing with an empty
+          # body is worse than waiting for publish-draft.yml with a real file.
+          if [ ! -f "$NOTES_FILE" ]; then
+            echo "::error::$NOTES_FILE is not in the tree — leaving $TAG a draft"
+            exit 1
+          fi
+          # Roll-call: exact, version-anchored names (asset list measured on
+          # v0.11.101). Blockmaps excluded — delta-update extras with unstable
+          # naming, not the install set. A missing name fails the job and the
+          # draft stays private.
+          assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          for want in \
+            "latest-mac.yml" \
+            "latest.yml" \
+            "OPEN-GROUND-$VERSION-arm64.dmg" \
+            "OPEN-GROUND-$VERSION-x64.dmg" \
+            "OPEN-GROUND-$VERSION-arm64.zip" \
+            "OPEN-GROUND-$VERSION-x64.zip" \
+            "OPEN-GROUND-Setup-$VERSION.exe"; do
+            if ! grep -qxF "$want" <<<"$assets"; then
+              echo "::error::draft $TAG is missing asset '$want' — leaving it a draft"
+              printf 'present assets:\n%s\n' "$assets"
+              exit 1
+            fi
+          done
+          # Re-runnable: on an ALREADY-PUBLISHED release edit the body alone —
+          # re-sending --target/--latest/--draft on a published release comes
+          # back 403 from the Actions token (measured v0.11.91, 2026-08-18, in
+          # publish-draft.yml — same logic kept verbatim).
+          already=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+          if [ "$already" = "false" ]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$NOTES_FILE"
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest --target "$TARGET" --notes-file "$NOTES_FILE"
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName,url

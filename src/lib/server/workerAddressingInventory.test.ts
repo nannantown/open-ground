@@ -769,6 +769,11 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       // manual worker is never in engine.workers, so "no counted worker" alone
       // describes a healthy one just as well as a stranded one.
       'liveDeskOccupies',
+      // 0901: collectUnownedDoing's default desk probe classifies what lives at
+      // an unowned doing-card's worktree — a quota-parked SDK worker is the one
+      // live shape the sweep may reclaim, and telling it apart from a working
+      // one needs the pool's own session list (status), not just occupancy.
+      'listSdkSessionsIn',
       'stopAllDesksInDirAndWait',
       'terminateSdkSession',
       'waitForSdkSessionGone',
