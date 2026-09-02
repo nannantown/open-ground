@@ -5,6 +5,7 @@ import { join } from 'path'
 import {
   CONTEXT_WINDOW_TOKENS,
   collectClaudeUsage,
+  collectUsageBreakdown,
   resetJsonlWalkMemo,
   sessionContextTokens,
 } from './claudeUsage'
@@ -253,5 +254,73 @@ describe('sessionContextTokens — one session’s current context fill', () => 
       ].join('\n'),
     )
     expect(await sessionContextTokens('sess-live', dir)).toBe(4_200)
+  })
+})
+
+// ── Who is burning the weekly budget (2026-09-02) ───────────────────────────
+// The owner's question the HUD could not answer: half a weekly Fable budget
+// gone with no heavy card running. Attribution is by the ONE thing the file
+// path can prove — the cwd the session ran in — and the 'project' bucket is
+// deliberately coarse (a desk and the owner's own claude both sit in the repo
+// root, and nothing in the transcript separates them).
+//
+// MUTATIONS that turn this red: bill cache_read too (it is heavily discounted
+// and would drown the real signal); drop the dedupe (resume/subagent copies
+// inflate the same turn); widen the window past `days`; classify a worktree
+// session as 'project'.
+describe('collectUsageBreakdown — model × source over a multi-day window', () => {
+  const DAY = 24 * HOUR
+  it('splits swarm workers, the project (desks + own work) and everything else', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-breakdown-'))
+    const wt = join(dir, '-Users-k--openground-projects-abc-worktrees-swarm-300-x')
+    const proj = join(dir, '-Users-k-dev-QRmenu')
+    const other = join(dir, '-Users-k-dev-somewhere-else')
+    for (const d of [wt, proj, other]) mkdirSync(d, { recursive: true })
+    // A worker turn, a desk/own turn in the registered project, and an unrelated one.
+    writeFileSync(join(wt, 'a.jsonl'), rec(now, 'm1', 60, { input_tokens: 100, output_tokens: 10 }, 'claude-fable-5-1') + '\n')
+    writeFileSync(join(proj, 'b.jsonl'), rec(now, 'm2', 60, { input_tokens: 40, cache_creation_input_tokens: 5 }, 'claude-fable-5-1') + '\n')
+    writeFileSync(join(other, 'c.jsonl'), rec(now, 'm3', 60, { input_tokens: 7 }, 'claude-opus-5') + '\n')
+    resetJsonlWalkMemo()
+    const b = await collectUsageBreakdown({
+      projectsDir: dir,
+      days: 7,
+      now,
+      projectDirs: ['-Users-k-dev-QRmenu'],
+    })
+    expect(b.days).toBe(7)
+    expect(b.rows).toEqual([
+      { model: 'claude-fable-5-1', source: 'swarm-worker', tokens: 110 },
+      { model: 'claude-fable-5-1', source: 'project', tokens: 45 },
+      { model: 'claude-opus-5', source: 'other', tokens: 7 },
+    ])
+    expect(b.total).toBe(162)
+  })
+
+  it('ignores cache READS, dedupes a resumed turn, and stops at the window edge', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-breakdown-'))
+    const d1 = join(dir, '-Users-k-dev-QRmenu')
+    mkdirSync(d1, { recursive: true })
+    // The SAME turn written twice (resume/subagent fan-out) must count once…
+    const turn = rec(now, 'dup', 30, { input_tokens: 20, output_tokens: 2, cache_read_input_tokens: 9_000 }, 'claude-fable-5-1')
+    writeFileSync(join(d1, 'x.jsonl'), turn + '\n')
+    writeFileSync(join(d1, 'y.jsonl'), turn + '\n')
+    // …and a turn OUTSIDE the window must not count at all (fresh file mtime, old line).
+    writeFileSync(
+      join(d1, 'z.jsonl'),
+      rec(now, 'old', 3 * 24 * 60, { input_tokens: 500 }, 'claude-fable-5-1') + '\n',
+    )
+    resetJsonlWalkMemo()
+    const b = await collectUsageBreakdown({ projectsDir: dir, days: 1, now, projectDirs: ['-Users-k-dev-QRmenu'] })
+    // 20 + 2, with the 9,000 cache READ excluded — billing matches the headline metric.
+    expect(b.rows).toEqual([{ model: 'claude-fable-5-1', source: 'project', tokens: 22 }])
+  })
+
+  it('is empty (never throws) when the projects dir does not exist', async () => {
+    resetJsonlWalkMemo()
+    const b = await collectUsageBreakdown({ projectsDir: join(tmpdir(), 'og-nope-' + Date.now()), days: 7 })
+    expect(b.rows).toEqual([])
+    expect(b.total).toBe(0)
   })
 })

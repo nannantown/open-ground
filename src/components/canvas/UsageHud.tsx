@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { RotateCcw, RefreshCw } from 'lucide-react'
-import type { ClaudeUsage } from '@/lib/types'
+import type { ClaudeUsage, UsageBreakdown, UsageSourceKind } from '@/lib/types'
+import type { MessageKey } from '@/i18n/messages'
 import { usageLevel, type UsageLevel } from '@/lib/usageThresholds'
 import { useT } from '@/i18n/I18nContext'
 
@@ -37,6 +38,10 @@ export const UsageHud = () => {
   const [usage, setUsage] = useState<ClaudeUsage | null>(null)
   const [open, setOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  /** The 7-day model × source breakdown — the answer to "why is it draining".
+   *  `undefined` = not asked yet (the scan is a week-wide walk, so it is paid
+   *  for only when the popover opens); `null` = asked and the read failed. */
+  const [breakdown, setBreakdown] = useState<UsageBreakdown | null | undefined>(undefined)
   const aborter = useRef<AbortController | null>(null)
   const ref = useRef<HTMLDivElement>(null)
   // Re-render every 30s so the relative "resets in" / "updated" labels tick.
@@ -70,6 +75,26 @@ export const UsageHud = () => {
       aborter.current?.abort()
     }
   }, [fetchUsage])
+
+  // Load the breakdown the first time the popover opens. Deliberately NOT part
+  // of the 5s poll: it walks a week of transcripts, and nothing in it changes
+  // fast enough to be worth that.
+  useEffect(() => {
+    if (!open || breakdown !== undefined) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/usage/breakdown?days=7', { cache: 'no-store' })
+        const body = (await res.json()) as UsageBreakdown
+        if (!cancelled) setBreakdown(res.ok && Array.isArray(body?.rows) ? body : null)
+      } catch {
+        if (!cancelled) setBreakdown(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [open, breakdown])
 
   // Close the popover on outside-click / Escape.
   useEffect(() => {
@@ -255,6 +280,35 @@ export const UsageHud = () => {
             </div>
           )}
 
+          <div className="mt-3 border-t border-line-soft pt-2.5">
+            <p className="label-cap mb-1.5 text-ink-muted">{t('misc.usage.breakdown.heading')}</p>
+            {breakdown === undefined ? (
+              <p className="text-meta text-ink-faint">{t('misc.usage.breakdown.loading')}</p>
+            ) : breakdown === null || breakdown.rows.length === 0 ? (
+              <p className="text-meta text-ink-faint">{t('misc.usage.breakdown.empty')}</p>
+            ) : (
+              <>
+                <ul className="space-y-1">
+                  {breakdown.rows.slice(0, 5).map((r) => {
+                    const share = breakdown.total > 0 ? Math.round((r.tokens / breakdown.total) * 100) : 0
+                    return (
+                      <li key={`${r.model}/${r.source}`} className="flex items-baseline justify-between gap-2">
+                        <span className="min-w-0 truncate text-meta text-ink-muted">
+                          {shortModel(r.model)}
+                          <span className="text-ink-faint"> · {t(SOURCE_KEY[r.source])}</span>
+                        </span>
+                        <span className="shrink-0 text-meta tabular-nums text-ink">{share}%</span>
+                      </li>
+                    )
+                  })}
+                </ul>
+                <p className="mt-2 text-micro leading-relaxed text-ink-faint">
+                  {t('misc.usage.breakdown.note')}
+                </p>
+              </>
+            )}
+          </div>
+
           <div className="mt-3 flex items-center justify-between gap-2 border-t border-line-soft pt-2.5">
             <span className="min-w-0 truncate text-micro text-ink-faint">
               {ago ? t('misc.usage.updated', { ago }) : ''}
@@ -326,6 +380,15 @@ const parseCliReset = (label: string): string | null => {
 
 // "1.2M" / "845k" / "320" — compact absolute token count for the local-estimate
 // fallback shown when the cap-relative % is unavailable.
+/** The breakdown's source buckets → owner-facing words. `project` is coarse on
+ *  purpose (desks and the owner's own sessions share a cwd) and the note under
+ *  the list says so — see collectUsageBreakdown. */
+const SOURCE_KEY: Record<UsageSourceKind, MessageKey> = {
+  'swarm-worker': 'misc.usage.breakdown.worker',
+  project: 'misc.usage.breakdown.project',
+  other: 'misc.usage.breakdown.other',
+}
+
 const compactTokens = (n: number): string => {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`

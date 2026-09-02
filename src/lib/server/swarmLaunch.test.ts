@@ -258,13 +258,23 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     expect(resolveSwarmModelEffort('economy', 'overseer')).toEqual({ model: 'sonnet', effort: 'medium' })
   })
 
-  it('optimize keeps top-tier CAPABILITY for the commander (quality-critical), sonnet for supply', () => {
-    // The manager's integration/safety-review DECISION stays opus even in optimize —
-    // savings there come from fewer review bodies, not a weaker model.
-    expect(resolveSwarmModelEffort('optimize', 'manager')!.model).toBe('fable')
+  it('optimize runs the always-on DESKS on opus/high — top tier is for heavy cards, not for sitting', () => {
+    // ⚠ OWNER DECISION 2026-09-02. The desks are always-on: a commander re-reads
+    // its context on every poke for the whole session, so on the top tier it
+    // drained the weekly Fable budget with no heavy card in flight. They keep
+    // HIGH effort on the middle rung; capability is preserved where it is
+    // actually spent (the heavy-card worker below stays fable/max).
+    expect(resolveSwarmModelEffort('optimize', 'manager')).toEqual({ model: 'opus', effort: 'high' })
+    expect(resolveSwarmModelEffort('optimize', 'overseer')).toEqual({ model: 'opus', effort: 'high' })
     expect(resolveSwarmModelEffort('optimize', 'supply')!.model).toBe('sonnet')
-    // The overseer's answer-as-owner is a judgment席 on par with the manager (D4).
-    expect(resolveSwarmModelEffort('optimize', 'overseer')).toEqual({ model: 'fable', effort: 'high' })
+    // …and the thing that must NOT have moved with them: a heavy card is still
+    // top tier. A mutation that sends heavy work to opus too turns this red.
+    expect(
+      resolveSwarmModelEffort('optimize', 'worker', {
+        title: 'sandbox guard for auth token deletion',
+        notes: 'security-critical',
+      }),
+    ).toEqual({ model: 'fable', effort: 'max' })
   })
 
   it('optimize routes WORKERS across THREE tiers — fable / opus / sonnet by card weight', () => {

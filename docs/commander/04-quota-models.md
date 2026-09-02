@@ -783,6 +783,46 @@ r to retry
 
 ---
 
+## 5.9 希望 tier の方針 — 常駐する席は opus、重いカードだけ fable(2026-09-02)
+
+層A〜Eは「枯れた tier を避ける」機構で、**何を希望するか**はこの前段
+(`desiredModelEffort`、swarmLaunch.ts)が決める。optimize(既定)の現行方針:
+
+| 席 | model / effort | 理由 |
+|---|---|---|
+| worker(重いカード) | **fable / max** | 能力が結果を分けるのはここ。**変更していない** |
+| worker(通常) | opus / medium | 0.11.97 のオーナー決定(基準は opus) |
+| worker(軽い) | sonnet / low | |
+| **司令官・監督の卓** | **opus / high**(旧: fable / high) | ⚠ 2026-09-02 変更 |
+| 補給官 | sonnet / medium | 意図をカードに翻訳するだけ |
+
+**卓の tier を下げた理由(実測)**: 卓は**常駐する**。司令官はセッション中ずっと
+プロジェクトに座り、声をかけられるたびに文脈を読み直すので、統合が起きていなくても
+トップ tier を燃やし続ける — worker がカードの実行中だけ課金されるのとは性質が違う。
+2026-09-01/02 にオーナーの週次 Fable が、重いカードが1枚も走っていない状態で半分
+消えた。判断の質を落とす変更ではない: opus は**同じ梯子の中段**(0.11.97 以降、通常
+カードの worker が既に走っている段)で、effort は high のまま。
+
+これは**希望値**であって quota フォールバックではない — opus 自体が冷えていれば
+`resolveAvailableTier` が従来どおりさらに下へ歩く。
+
+**歯**: `swarmLaunch.test.ts`「optimize runs the always-on DESKS on opus/high」
+(卓を fable に戻す変異で赤を実測)。同じテストが**重いカードは fable/max のまま**も
+固定しているので、卓と一緒に worker を下げる変異も赤になる。
+
+### 5.9.1 何が使ったのかを見る(GET /api/usage/breakdown)
+
+「残りいくつ」は HUD が出していたが、「**なぜ減っているのか**」は出せず、上の実測は
+手作業(`npm run swarm:audit`)でしか分からなかった。直近 N 日(既定7)の課金トークンを
+**モデル × 走った場所**で束ねる読み取り専用エンドポイントを足した
+(`collectUsageBreakdown`、claudeUsage.ts / 5分キャッシュ / HUD のポップオーバーを
+開いたときだけ走る)。
+
+場所は**パスから証明できるものだけ**: `swarm-worker`(worktree)/ `project`(登録
+プロジェクトの cwd)/ `other`。⚠ `project` は**卓とオーナー自身の claude の合算**で、
+transcript では区別できない(両方リポジトリ直下で走る)。UI はそう書いてある —
+分けられないものを分けたふりをしない。
+
 ## 6. 状態機械 / データフロー(1周)
 
 ```

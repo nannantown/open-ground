@@ -44,7 +44,8 @@ import {
   removeProjectEntry,
 } from '@/lib/server/registry'
 import { ensureShareEvacuated, evacuateImportedProject } from '@/lib/server/shareEvac'
-import { collectClaudeUsage } from '@/lib/server/claudeUsage'
+import { collectClaudeUsage, collectUsageBreakdown } from '@/lib/server/claudeUsage'
+import { encodeClaudeProjectKey } from '@/lib/server/youCorpus'
 import {
   fetchClaudeUsageCli,
   invalidateUsageCache,
@@ -150,6 +151,12 @@ const suggestedDisplayName = (): Promise<string | null> => {
     .catch(() => null)
   return suggestedDisplayNameOnce
 }
+
+/** The usage-breakdown scan is a week-wide walk over ~/.claude/projects — far
+ *  heavier than the 5-hour gauge — so one result is reused for a few minutes.
+ *  Keyed by the window so switching 7d/30d re-scans rather than lying. */
+const USAGE_BREAKDOWN_TTL_MS = 5 * 60_000
+let usageBreakdownCache: { days: number; at: number; body: unknown } | null = null
 
 export const miscRoutes = new Hono()
   // --- GET /api/home-integrity ----------------------------------------------
@@ -519,6 +526,38 @@ export const miscRoutes = new Hono()
         { error: err instanceof Error ? err.message : 'usage scan failed' },
         200,
       )
+    }
+  })
+  // --- GET /api/usage/breakdown ---------------------------------------------
+  // "WHY is the weekly budget draining" — the question the gauge could not
+  // answer (2026-09-02: half a weekly Fable budget gone with no heavy card in
+  // flight; it was the always-on desks). Groups the last `days` of billed
+  // tokens by model × where the session ran. READ-ONLY, and NOT part of
+  // /api/usage: this walk is much wider (a week, not 5 hours), so it is only
+  // paid for when the owner opens the panel. Cached briefly so re-opening the
+  // popover does not re-scan.
+  //
+  // The 'project' bucket is deliberately coarse — a commander desk and the
+  // owner's own `claude` both run in the repo root and the transcript does not
+  // separate them. The UI says that; it never guesses.
+  .get('/api/usage/breakdown', async (c) => {
+    const raw = Number(c.req.query('days'))
+    const days = Number.isFinite(raw) && raw > 0 && raw <= 30 ? Math.floor(raw) : 7
+    const now = Date.now()
+    const cached = usageBreakdownCache
+    if (cached && cached.days === days && now - cached.at < USAGE_BREAKDOWN_TTL_MS) {
+      return c.json(cached.body)
+    }
+    try {
+      const settings = await getSettings()
+      const projectDirs = (settings.projects ?? []).map((p) => encodeClaudeProjectKey(p.path))
+      const body = await collectUsageBreakdown({ days, now, projectDirs })
+      usageBreakdownCache = { days, at: now, body }
+      return c.json(body)
+    } catch (err) {
+      // Never 500 a read-only panel: an unreadable ~/.claude is "nothing to
+      // show", which the client renders as the empty state.
+      return c.json({ days, rows: [], total: 0, scannedAt: new Date(now).toISOString(), error: String(err) })
     }
   })
   // --- GET /api/gh-status ------------------------------------------------

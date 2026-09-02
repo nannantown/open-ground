@@ -23,6 +23,14 @@ export const misc = {
     'misc.usage.reason.notInstalled': "Claude CLI not found — can't read /usage.",
     'misc.usage.reason.scrapeFailed': "Couldn't read claude /usage right now.",
     'misc.usage.localEstimate': 'Local: ≈{tokens} tokens · {hours}h window',
+    'misc.usage.breakdown.heading': 'What used it (7 days)',
+    'misc.usage.breakdown.loading': 'Reading the last 7 days…',
+    'misc.usage.breakdown.empty': 'No recorded usage in the last 7 days.',
+    'misc.usage.breakdown.worker': 'swarm workers',
+    'misc.usage.breakdown.project': 'your projects',
+    'misc.usage.breakdown.other': 'elsewhere',
+    'misc.usage.breakdown.note':
+      '“your projects” covers both the swarm desks and your own claude sessions in those repos — the transcript does not separate them.',
     // EmptyState (Ground, no projects yet)
     'misc.empty.eyebrow': 'New survey',
     'misc.empty.title': 'Begin your atlas.',
@@ -74,6 +82,14 @@ export const misc = {
     'misc.usage.reason.notInstalled': 'claude CLI が見つかりません（/usage を取得できません）。',
     'misc.usage.reason.scrapeFailed': 'claude /usage を取得できませんでした。',
     'misc.usage.localEstimate': 'ローカル: 約{tokens} トークン · 直近{hours}時間',
+    'misc.usage.breakdown.heading': '何が使ったか(7日)',
+    'misc.usage.breakdown.loading': '直近7日を集計しています…',
+    'misc.usage.breakdown.empty': '直近7日に記録された使用量はありません。',
+    'misc.usage.breakdown.worker': 'swarm のワーカー',
+    'misc.usage.breakdown.project': '自分のプロジェクト',
+    'misc.usage.breakdown.other': 'その他',
+    'misc.usage.breakdown.note':
+      '「自分のプロジェクト」には swarm の卓と、そのリポジトリでのあなた自身の claude の両方が入ります(記録からは区別できません)。',
     // EmptyState (Ground, no projects yet)
     'misc.empty.eyebrow': '新しい測量',
     'misc.empty.title': 'ここから地図を広げる。',

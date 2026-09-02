@@ -268,8 +268,22 @@ const desiredModelEffort = (
   // so it stays on the top-tier model (savings there come from fewer review bodies,
   // not a weaker model).
   // The commander AND the proxy-you overseer both make quality-critical judgment
-  // calls — keep them on the top-tier model at high effort (manager と同格・D4).
-  if (role === 'manager' || role === 'overseer') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('high') }
+  // calls — they keep HIGH EFFORT, but the MODEL is `opus`, not the top tier
+  // (owner, 2026-09-02).
+  //
+  // WHY THE TIER MOVED. The desks are ALWAYS-ON: a commander sits in the project
+  // for the whole session and re-reads its context on every poke, so it bills the
+  // top tier continuously whether or not anything is being integrated — while a
+  // worker bills only while its card runs. Measured over 2026-09-01/02 the owner's
+  // weekly Fable budget was half spent with no heavy card in flight. The judgment
+  // itself is not being cheapened: `opus` is the middle rung of the same ladder
+  // (the base every ordinary worker card already runs on since 0.11.97) at HIGH
+  // effort, and the one thing that must stay top-tier — a HEAVY card's worker —
+  // is untouched below.
+  //
+  // Not a quota fallback: this is the DESIRED tier. resolveAvailableTier still
+  // walks DOWN from here when opus itself is cooling, exactly as before.
+  if (role === 'manager' || role === 'overseer') return { model: 'opus', effort: guardEffort('high') }
   // The supply officer only translates intent into cards — sonnet is plenty.
   if (role === 'supply') return { model: 'sonnet', effort: guardEffort('medium') }
   // Workers route by card weight across THREE tiers (owner, 2026-08-26):

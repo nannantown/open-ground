@@ -69,7 +69,11 @@ describe('UsageHud — request cancellation', () => {
     expect(signals).toHaveLength(2)
     expect(signals[0].aborted).toBe(true)
     expect(signals[1].aborted).toBe(false)
-    // The manual refresh bypasses the server cache (?refresh=1).
-    expect(calls[1]).toContain('refresh=1')
+    // The manual refresh bypasses the server cache (?refresh=1). Selected by
+    // ENDPOINT, not by position: opening the popover also fires the one-shot
+    // 7-day breakdown scan (/api/usage/breakdown, 2026-09-02), so an index into
+    // the raw call list would pin the wrong request.
+    const gaugeCalls = calls.filter((u) => !u.includes('/api/usage/breakdown'))
+    expect(gaugeCalls[1]).toContain('refresh=1')
   })
 })

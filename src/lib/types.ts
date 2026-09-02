@@ -3761,6 +3761,32 @@ export interface WordPressSettings {
  *   - 'failed'        — the last attempt failed; `error` says why (scrubbed). */
 export type ResearchBlogState = 'draft' | 'edited-on-wp' | 'deleted-on-wp' | 'failed'
 
+/** GET /api/usage/breakdown — "what used the budget" over a multi-day window
+ *  (2026-09-02). Billed tokens grouped by model × where the session ran. The
+ *  'project' bucket is COARSE by construction: a swarm desk and the owner's own
+ *  `claude` in that repo share a cwd and the transcript does not separate them,
+ *  so the UI labels it as both rather than guessing. */
+export type UsageSourceKind = 'swarm-worker' | 'project' | 'other'
+
+export interface UsageBreakdownRow {
+  /** Raw model id as the transcript recorded it (e.g. 'claude-fable-5-1'). */
+  model: string
+  source: UsageSourceKind
+  /** input + output + cache_creation — the same metric as the headline total
+   *  (cache READS are heavily discounted and would drown the real signal). */
+  tokens: number
+}
+
+export interface UsageBreakdown {
+  /** Window actually covered, in days. */
+  days: number
+  /** Non-zero rows, biggest first. */
+  rows: UsageBreakdownRow[]
+  /** Sum of every row — the denominator for a share. */
+  total: number
+  scannedAt: string
+}
+
 export interface ResearchReportBlogInfo {
   state: ResearchBlogState
   /** WP edit-screen URL for the post, when known (display-only). */

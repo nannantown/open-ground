@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from 'fs/promises'
 import { homedir } from 'os'
 import { basename, join } from 'path'
-import type { ClaudeUsage } from '../types'
+import type { ClaudeUsage, UsageBreakdown, UsageBreakdownRow, UsageSourceKind } from '../types'
 
 /** Claude Code's max context window, in tokens. The auto-compact denominator for
  *  the per-session gauge: `% used = contextTokens ÷ this`. Pinned at 200k by the
@@ -17,6 +17,26 @@ const WINDOW_MS = WINDOW_HOURS * 60 * 60 * 1000
 const FILE_MTIME_SLACK_MS = 60 * 60 * 1000
 
 const claudeProjectsDir = () => join(homedir(), '.claude', 'projects')
+
+/** The ONE de-duplication rule, shared by every consumer of this walk.
+ *
+ *  Claude Code writes the same assistant turn into MULTIPLE jsonl files when
+ *  sessions resume, branch, or spawn subagents — counting every line inflates
+ *  totals wildly (the symptom: the gauge pinned past 100% while real usage was
+ *  ~10%). Keyed by message id, with requestId as the tiebreaker for entries that
+ *  carry one (a retried request is a genuinely separate charge).
+ *
+ *  Written as a helper because there are now TWO walkers over the same files
+ *  ({@link collectClaudeUsage} and {@link collectUsageBreakdown}) and a second
+ *  copy of this rule is how the two would silently drift into disagreeing about
+ *  the same week. Returns false when the line has already been counted. */
+const countOnce = (seen: Set<string>, parsed: UsageLine): boolean => {
+  if (!parsed.messageId) return true // no id to dedupe on — count it
+  const key = parsed.requestId ? `${parsed.messageId}|${parsed.requestId}` : parsed.messageId
+  if (seen.has(key)) return false
+  seen.add(key)
+  return true
+}
 
 interface UsageLine {
   timestamp: string
@@ -169,13 +189,7 @@ export const collectClaudeUsage = async (
       const ts = Date.parse(parsed.timestamp)
       if (!Number.isFinite(ts) || ts < cutoffMs) continue
 
-      if (parsed.messageId) {
-        const dedupKey = parsed.requestId
-          ? `${parsed.messageId}|${parsed.requestId}`
-          : parsed.messageId
-        if (seen.has(dedupKey)) continue
-        seen.add(dedupKey)
-      }
+      if (!countOnce(seen, parsed)) continue
 
       const u = parsed.usage
       const ti = u.input_tokens ?? 0
@@ -268,4 +282,100 @@ export const sessionContextTokens = async (
     )
   }
   return null
+}
+
+// ─── Who is burning the weekly budget (2026-09-02) ───────────────────────────
+// The HUD answers "how much is left"; it could not answer "why is it draining",
+// which is the question the owner actually acted on (measured: half a weekly
+// Fable budget gone with no heavy card in flight — the always-on desks). This
+// walks the SAME jsonl files over a longer window and groups the billed tokens
+// by model × source.
+//
+// SOURCES are what the file path can PROVE, and no more:
+//   • 'swarm-worker' — the session ran in a swarm worktree (isSwarmWorktreeSessionDir).
+//   • 'project'      — its cwd is one of the owner's registered projects. That is
+//                      the commander/supply desks AND the owner's own `claude`
+//                      in that repo: both sit in the repo root, and nothing in
+//                      the transcript separates them. The UI says so rather than
+//                      guessing.
+//   • 'other'        — every other cwd (other repos, one-off sessions).
+
+// The wire types live in src/lib/types.ts (the shared client/server contract).
+
+const isSwarmWorktreeDirName = (dirName: string): boolean =>
+  dirName.includes('-openground-projects-') && dirName.includes('-worktrees-')
+
+/** Group the last `days` of billed tokens by model × source. READ-ONLY; a
+ *  missing/unreadable file is skipped, never thrown. `projectDirs` are the
+ *  ENCODED ~/.claude/projects entry names of the owner's registered projects
+ *  (encodeClaudeProjectKey) — absent ⇒ nothing is attributable to 'project'. */
+export const collectUsageBreakdown = async (opts: {
+  projectsDir?: string
+  days?: number
+  now?: number
+  projectDirs?: readonly string[]
+} = {}): Promise<UsageBreakdown> => {
+  const root = opts.projectsDir ?? claudeProjectsDir()
+  const days = opts.days && opts.days > 0 ? opts.days : 7
+  const now = opts.now ?? Date.now()
+  const cutoffMs = now - days * 24 * 60 * 60 * 1000
+  const fileCutoffMs = cutoffMs - FILE_MTIME_SLACK_MS
+  const projectDirs = new Set(opts.projectDirs ?? [])
+
+  let files: string[] = []
+  try {
+    files = await walkJsonl(root)
+  } catch {
+    // no ~/.claude/projects — nothing to attribute
+  }
+
+  const seen = new Set<string>()
+  const sums = new Map<string, number>() // `${model}\u0000${source}` → tokens
+  for (const file of files) {
+    let st
+    try {
+      st = await stat(file)
+    } catch {
+      continue
+    }
+    if (st.mtimeMs < fileCutoffMs) continue
+    let raw: string
+    try {
+      raw = await readFile(file, 'utf8')
+    } catch {
+      continue
+    }
+    const dirName = basename(join(file, '..'))
+    const source: UsageSourceKind = isSwarmWorktreeDirName(dirName)
+      ? 'swarm-worker'
+      : projectDirs.has(dirName)
+        ? 'project'
+        : 'other'
+    for (const line of raw.split('\n')) {
+      const parsed = parseLine(line)
+      if (!parsed) continue
+      const ts = Date.parse(parsed.timestamp)
+      if (!Number.isFinite(ts) || ts < cutoffMs) continue
+      if (!countOnce(seen, parsed)) continue
+      if (!parsed.model) continue
+      const u = parsed.usage
+      const billed = (u.input_tokens ?? 0) + (u.output_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+      if (billed <= 0) continue
+      const key = `${parsed.model}\u0000${source}`
+      sums.set(key, (sums.get(key) ?? 0) + billed)
+    }
+  }
+
+  const rows: UsageBreakdownRow[] = Array.from(sums.entries())
+    .map(([key, tokens]) => {
+      const [model, source] = key.split('\u0000')
+      return { model, source: source as UsageSourceKind, tokens }
+    })
+    .sort((a, b) => b.tokens - a.tokens)
+  return {
+    days,
+    rows,
+    total: rows.reduce((n, r) => n + r.tokens, 0),
+    scannedAt: new Date(now).toISOString(),
+  }
 }
