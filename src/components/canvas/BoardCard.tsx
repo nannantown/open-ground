@@ -221,6 +221,8 @@ export interface BoardCardProps {
    *  it on one card would claim the commander is on THIS card (差し戻し M1). */
   managerPresence: ManagerPresence | null
   managerReviewStatus?: ManagerReviewStatus
+  /** The engine's OFFLINE HOLD (2026-09-02) — see BoardCardManager.offlineHold. */
+  managerOfflineHold?: boolean
   /** Count of unresolved dependencies (the "⛓ n" chip) + the pre-joined titles
    *  for its tooltip — resolved by BoardTab over the shared id→task map. */
   depCount: number
@@ -266,6 +268,7 @@ const BoardCardInner = ({
   needsYouHint,
   managerPresence,
   managerReviewStatus,
+  managerOfflineHold,
   depCount,
   depTitlesText,
   inCycle,
@@ -316,6 +319,7 @@ const BoardCardInner = ({
           presence: managerPresence,
           reviewStatus: managerReviewStatus,
           tone: deriveManagerTone(managerPresence, managerReviewStatus),
+          ...(managerOfflineHold ? { offlineHold: true } : {}),
         }
       : null
   return (
@@ -646,15 +650,25 @@ const BoardCardInner = ({
               <span className="shrink-0 whitespace-nowrap text-meta text-ink-muted">
                 {t('board.card.managerLabel')}
               </span>
-              {manager.presence !== 'unknown' && (
-                <span
-                  className={[
-                    'shrink-0 whitespace-nowrap text-meta',
-                    MANAGER_PRESENCE_CLS[manager.presence],
-                  ].join(' ')}
-                >
-                  {t(MANAGER_PRESENCE_KEY[manager.presence])}
+              {manager.offlineHold ? (
+                // The OFFLINE HOLD (2026-09-02): the engine is not poking the
+                // desk because the machine cannot reach the API. Say THAT — a
+                // bare 待機中 here reads as a stalled commander, which is the
+                // misreading that sent the owner to the Swarm tab by hand.
+                <span className="shrink-0 whitespace-nowrap text-meta text-[var(--beacon-waiting)]">
+                  {t('projectPanel.swarm.statusOfflineHold')}
                 </span>
+              ) : (
+                manager.presence !== 'unknown' && (
+                  <span
+                    className={[
+                      'shrink-0 whitespace-nowrap text-meta',
+                      MANAGER_PRESENCE_CLS[manager.presence],
+                    ].join(' ')}
+                  >
+                    {t(MANAGER_PRESENCE_KEY[manager.presence])}
+                  </span>
+                )
               )}
               <span
                 className={[

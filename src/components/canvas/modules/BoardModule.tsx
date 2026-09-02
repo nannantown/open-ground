@@ -261,6 +261,10 @@ export const BoardModule = ({
     new Map(),
   )
   const [managerPresence, setManagerPresence] = useState<CommanderPresence>('unknown')
+  /** The engine's OFFLINE HOLD (2026-09-02) — true while it is deliberately not
+   *  poking the commander because the API host is unreachable. Rendered on the
+   *  review card's commander strip as 「オフライン待ち」. */
+  const [managerOfflineHold, setManagerOfflineHold] = useState(false)
   // Workers the engine is running that it CANNOT tie to a card (no taskId): a
   // curl/API-direct spawn, a Swarm-tab restart, a dead worker with only a
   // heartbeat on disk, a server restart before resumeEngines re-adopts, a
@@ -446,6 +450,7 @@ export const BoardModule = ({
         // Presence is a primitive — React bails out on an unchanged value, so
         // no identity dance is needed for it.
         setManagerPresence(commanderPresence(state.manager, state.managerPresence))
+        setManagerOfflineHold(state.managerOfflineHold === true)
       } catch {
         /* server restarting / offline / forbidden — keep the last known map */
       }
@@ -2057,9 +2062,13 @@ export const BoardModule = ({
       // NOT list (hand-made, someone else's branch) must resolve to null —
       // never to a fabricated readiness like 'unknown'.
       if (!reviewStatus) return null
-      return { presence: managerPresence, reviewStatus }
+      return {
+        presence: managerPresence,
+        reviewStatus,
+        ...(managerOfflineHold ? { offlineHold: true } : {}),
+      }
     },
-    [reviewsByTask, managerPresence, swarmVisible],
+    [reviewsByTask, managerPresence, managerOfflineHold, swarmVisible],
   )
   // The all-lanes counterpart: an OPEN question rooted in THIS card. Same
   // no-fabrication stance as the two above — a card with no open question

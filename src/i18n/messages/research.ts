@@ -29,6 +29,18 @@ export const research = {
     'research.blog.editedOnWp': 'Edited on WordPress — auto-update stopped',
     'research.blog.deletedOnWp': 'Deleted on WordPress — not re-posted',
     'research.blog.failed': 'Blog post failed',
+    'research.blog.reason.auth':
+      'WordPress rejected the login (401). Check the username and the application password — and on shared hosting the Authorization header is often stripped by the server; ask your host, or add the .htaccess rule for application passwords.',
+    'research.blog.reason.forbidden':
+      'WordPress refused the request (403). A security plugin or the host may be blocking the REST API, or the user cannot create posts.',
+    'research.blog.reason.notFound':
+      'The posts endpoint was not found (404). Check the site URL: opening <site>/wp-json/wp/v2/posts in a browser should show JSON. If WordPress lives in a subfolder (e.g. /wp), include it.',
+    'research.blog.reason.network':
+      'Could not reach the site. Check the URL, your connection, and that the site is up (https required).',
+    'research.blog.reason.server':
+      'The site answered with an error (5xx) — a broken plugin or PHP error on the WordPress side. Open the WordPress admin to check.',
+    'research.blog.reason.other': 'The blog post failed. Detail:',
+    'research.blog.reason.detail': 'Detail',
     'research.reload': 'Reload',
     'research.copy': 'Copy markdown',
     'research.copied': 'Copied',
@@ -84,6 +96,18 @@ export const research = {
     'research.blog.editedOnWp': 'WordPress側で編集済み（自動更新停止）',
     'research.blog.deletedOnWp': 'WordPress側で削除済み（再投稿しません）',
     'research.blog.failed': 'ブログ投稿に失敗',
+    'research.blog.reason.auth':
+      'WordPress にログインを拒否されました(401)。ユーザー名とアプリケーションパスワードを確認してください。共有サーバーでは認証ヘッダーがサーバー側で削られることがよくあります(ホスティング会社に確認するか、アプリケーションパスワード用の .htaccess 設定を追加)。',
+    'research.blog.reason.forbidden':
+      'WordPress に拒否されました(403)。セキュリティプラグインやサーバーが REST API を止めているか、このユーザーに投稿権限がありません。',
+    'research.blog.reason.notFound':
+      '投稿先が見つかりません(404)。サイトURLを確認してください: ブラウザで <サイト>/wp-json/wp/v2/posts を開くと JSON が出るはずです。WordPress がサブフォルダ(例 /wp)にある場合はそこまで含めます。',
+    'research.blog.reason.network':
+      'サイトに接続できませんでした。URL・ネット接続・サイトが起動しているか(https 必須)を確認してください。',
+    'research.blog.reason.server':
+      'サイト側がエラーを返しました(5xx)。WordPress 側のプラグイン不具合や PHP エラーです。WordPress の管理画面を開いて確認してください。',
+    'research.blog.reason.other': 'ブログ投稿に失敗しました。詳細:',
+    'research.blog.reason.detail': '詳細',
     'research.reload': '再読み込み',
     'research.copy': 'Markdownをコピー',
     'research.copied': 'コピーしました',

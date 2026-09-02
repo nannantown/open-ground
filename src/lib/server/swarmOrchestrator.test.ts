@@ -5465,6 +5465,10 @@ const makeIntDeps = (init: {
   wakeFails?: boolean
   /** nudgeManager returns false — the live desk's PTY vanished mid-poke. */
   nudgeFails?: boolean
+  /** The OFFLINE HOLD sensor (2026-09-02). A function of nothing so a test can
+   *  flip the route between passes (down → up); absent ⇒ online, which keeps
+   *  every pre-existing wake/nudge assertion meaning what it always meant. */
+  online?: () => boolean
   // The DELIVERY evidence (2026-07-22): when the commander last demonstrably PRODUCED
   // work — the newest of heartbeat / session transcript / sub-agent transcripts (see
   // defaultManagerDeliveryAt). A number, or a function of the pass clock for a desk that
@@ -5713,6 +5717,7 @@ const makeIntDeps = (init: {
       nudged.push(p)
       return !init.nudgeFails
     },
+    isOnline: async () => (init.online ? init.online() : true),
     // The NOTICE channel (2026-07-27). Records EVERY offer — the retry of an
     // undelivered notice is as much a contract as the delivery itself — and reports
     // whether the line landed.
@@ -10151,5 +10156,87 @@ describe('runDispatchPass — consumption journal line on promote', () => {
     await runDispatchPass(engine, deps)
     expect(consumptionLines(engine)).toHaveLength(0)
     expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+  })
+})
+
+describe('OFFLINE HOLD — the manager reflex holds its voice offline and spends it on reconnect (2026-09-02)', () => {
+  const T0 = Date.parse('2026-09-02T08:00:00Z')
+  const INT = MANAGER_NUDGE_INTERVAL_MS
+  // Same shape as the resurrection suite's passAt: bypass the 15s tick throttle so
+  // only the reflex's own clocks (nudge throttle / budget) govern.
+  const passAt = (engine: ProjectEngine, deps: IntegrationDeps, now: number): Promise<void> => {
+    engine.lastIntegrateAt = 0
+    return runIntegratePass(engine, deps, now)
+  }
+  const holdLines = (engine: ProjectEngine) =>
+    engine.log.filter((l) => l.message.includes('オフライン — 司令官への声かけを保留')).length
+
+  it('offline: a quiet desk is NOT poked, the budget is NOT charged, and the hold is said ONCE', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'idle',
+      online: () => false,
+    })
+    await passAt(engine, deps, T0)
+    await passAt(engine, deps, T0 + INT + 1) // a second interval passes, still offline
+    expect(deps.nudged).toEqual([]) // nothing typed at a desk that cannot answer
+    expect(engine.managerResume?.nudges ?? 0).toBe(0) // …and nothing charged for it
+    expect(engine.managerResume?.offlineHold).toBe(true)
+    expect(holdLines(engine)).toBe(1) // one journal line per episode, not per tick
+    expect(deps.notifications).toEqual([]) // no bell for a route that is merely down
+  })
+
+  it('the offline→online EDGE pokes IMMEDIATELY — inside any throttle, no timer to wait out', async () => {
+    let online = false
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'idle',
+      online: () => online,
+    })
+    await passAt(engine, deps, T0)
+    expect(deps.nudged).toEqual([])
+    online = true
+    await passAt(engine, deps, T0 + 1_000) // one second later, the route is back
+    expect(deps.nudged).toEqual([engine.path]) // the owner reconnecting IS the event
+    expect(engine.managerResume?.offlineHold).toBe(false)
+    expect(engine.log.some((l) => l.message.includes('ネット復帰を検知'))).toBe(true)
+  })
+
+  it('a SPENT budget is restored by the edge — the café case: pokes burnt, then the route returns', async () => {
+    let online = true
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'idle',
+      online: () => online,
+    })
+    // Three online pokes spend the budget exactly as before.
+    await passAt(engine, deps, T0)
+    await passAt(engine, deps, T0 + INT + 1)
+    await passAt(engine, deps, T0 + 2 * INT + 2)
+    expect(deps.nudged).toHaveLength(MAX_MANAGER_NUDGES)
+    // The route drops: the spent budget would have meant permanent silence…
+    online = false
+    await passAt(engine, deps, T0 + 3 * INT + 3)
+    expect(engine.managerResume?.offlineHold).toBe(true)
+    expect(deps.nudged).toHaveLength(MAX_MANAGER_NUDGES)
+    // …but the route returning gives the full voice back, at once.
+    online = true
+    await passAt(engine, deps, T0 + 3 * INT + 4)
+    expect(deps.nudged).toHaveLength(MAX_MANAGER_NUDGES + 1)
+    expect(engine.managerResume?.nudges).toBe(1)
+  })
+
+  it('a probe that THROWS is read as online — the hold can never mute a healthy machine', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresence: 'idle' })
+    deps.isOnline = async () => {
+      throw new Error('probe exploded')
+    }
+    await passAt(engine, deps, T0)
+    expect(deps.nudged).toEqual([engine.path])
+    expect(engine.managerResume?.offlineHold ?? false).toBe(false)
   })
 })

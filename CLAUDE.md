@@ -170,6 +170,25 @@ the kind of "my changes disappeared" confusion described in the project history.
 
 If you find yourself about to run `git stash`, commit instead.
 
+## Owner-facing proposals: outcomes first (owner decision, 2026-09-02)
+
+When proposing or reporting a change to the owner (a non-programmer), lead
+with what it means for them, then the details. The owner asked for exactly
+this shape after a proposal buried the outcome under the mechanism:
+
+1. **「実装すると実現されること」** — a short bullet list of the observable
+   outcomes from the owner's side of the screen (what they will no longer
+   have to do, what they will see). No mechanisms here, no file names.
+2. **「内容」** — what will be built, what will NOT be done (non-goals), the
+   appetite (半日 / 2日 …), and which release it lands in.
+3. The one-line ask (「やりますか？」) when a go/no-go is needed.
+
+Same rule for completion reports: outcome first, verification second. Plain
+language throughout (see 「質問は平易文で」 in `swarmWorker.ts`); technical
+detail goes at the end, in parentheses. This complements the feature-pitch
+skill (`~/.claude/skills/feature-pitch`), which covers the planning page —
+this section covers the *message* to the owner.
+
 ## Language policy
 
 **New work defaults to English.** Code comments, commit messages, new docs,

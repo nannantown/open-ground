@@ -157,6 +157,7 @@ export const projectPanel = {
     'projectPanel.swarm.workersEmpty': 'No workers yet — Start the swarm (or ask the manager) to dispatch one.',
     'projectPanel.swarm.statusWorking': 'Working',
     'projectPanel.swarm.statusWaiting': 'Waiting',
+    'projectPanel.swarm.statusOfflineHold': 'Waiting for network',
     'projectPanel.swarm.statusStarting': 'Starting…',
     'projectPanel.swarm.statusExited': 'Exited',
     // Exit overlay (ClaudeTerminalPane) — a dead PTY shows "session ended ·
@@ -915,6 +916,7 @@ export const projectPanel = {
     'projectPanel.swarm.workersEmpty': 'worker はまだいません — 開始（またはマネージャーに依頼）で配車されます。',
     'projectPanel.swarm.statusWorking': '稼働中',
     'projectPanel.swarm.statusWaiting': '待機中',
+    'projectPanel.swarm.statusOfflineHold': 'オフライン待ち',
     'projectPanel.swarm.statusStarting': '起動中…',
     'projectPanel.swarm.statusExited': '終了',
     // 終了オーバーレイ（ClaudeTerminalPane）— 落ちた PTY は黒画面＋生エラーでなく

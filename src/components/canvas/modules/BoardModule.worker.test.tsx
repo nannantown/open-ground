@@ -60,6 +60,7 @@ const h = vi.hoisted(() => ({
   workers: [] as Array<Record<string, unknown>>,
   reviews: [] as Array<Record<string, unknown>>,
   managerPresence: undefined as string | undefined,
+  managerOfflineHold: false,
   orchOk: true,
   orchStatus: 200,
   escalations: [] as Array<Record<string, unknown>>,
@@ -107,6 +108,7 @@ vi.mock('@/lib/api-client', () => ({
                   workers: h.workers,
                   reviews: h.reviews,
                   ...(h.managerPresence ? { managerPresence: h.managerPresence } : {}),
+                  managerOfflineHold: h.managerOfflineHold,
                   log: [],
                   anomalies: [],
                 }),
@@ -197,6 +199,7 @@ beforeEach(() => {
   h.workers = []
   h.reviews = []
   h.managerPresence = undefined
+  h.managerOfflineHold = false
   h.orchOk = true
   h.orchStatus = 200
   h.escalations = []
@@ -328,6 +331,22 @@ describe('BoardModule board — commander strip gates (review column)', () => {
     await settle()
     expect(getByText('board.card.managerLabel')).toBeTruthy()
     expect(getByText('· projectPanel.swarm.manager.reviewFf')).toBeTruthy()
+  })
+
+  it('OFFLINE HOLD (2026-09-02): the strip says 「オフライン待ち」 instead of the presence word', async () => {
+    // The engine is up, the desk is quiet, and the machine cannot reach the
+    // API — the engine is deliberately NOT poking. A bare 待機中 here is the
+    // misreading that sent the owner to the Swarm tab by hand; the strip must
+    // name the real reason. Mutation that turns this red: drop the
+    // `manager.offlineHold` branch in BoardCard, or stop carrying the flag
+    // through resolveManagerForTask.
+    h.reviews = [{ taskId: 'r1', branch: 'swarm/r1', taskTitle: 'Review me', status: 'ff' }]
+    h.managerPresence = 'quiet'
+    h.managerOfflineHold = true
+    const { getByText, queryByText } = renderBoard(reviewTask())
+    await settle()
+    expect(getByText('projectPanel.swarm.statusOfflineHold')).toBeTruthy()
+    expect(queryByText('projectPanel.swarm.statusWaiting')).toBeNull()
   })
 
   it('NO-FABRICATION: a review card the engine does NOT list gets no strip', async () => {

@@ -971,6 +971,7 @@ export const BoardTab = ({
                 needsYouHint={alert?.hint}
                 managerPresence={manager?.presence ?? null}
                 managerReviewStatus={manager?.reviewStatus}
+                managerOfflineHold={manager?.offlineHold}
                 depCount={blockedBy.length}
                 depTitlesText={blockedBy
                   .map(d => d.title.trim() || t('board.card.untitledParen'))

@@ -322,7 +322,13 @@ export const sweepProjectBlogPublish = async (
     } catch (e) {
       // Scrubbed by construction (wpRequest writes its own messages), but belt
       // and braces: never let the password through even if a dep changes.
-      const msg = (e instanceof Error ? e.message : String(e)).split(wp.appPassword).join('***')
+      // A Node fetch failure says only "fetch failed" — the code that tells
+      // DNS from a refused connection from a bad certificate rides on `cause`.
+      // Append it so the owner's reason line can name the real obstacle.
+      const causeCode = (e as { cause?: { code?: unknown } } | null)?.cause?.code
+      const raw = e instanceof Error ? e.message : String(e)
+      const withCause = typeof causeCode === 'string' && causeCode ? `${raw} (${causeCode})` : raw
+      const msg = withCause.split(wp.appPassword).join('***')
       ledger.entries[meta.file] = {
         ...(entry ?? { postId: 0, contentHash: '', pushedAt: '' }),
         state: 'failed',

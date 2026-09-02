@@ -546,3 +546,54 @@ describe('ResearchModule — read-aloud', () => {
     expect(cancel.mock.calls.length).toBeGreaterThan(cancelsBeforeUnmount)
   })
 })
+
+// ── Blog publish failure — the reason is ON SCREEN, not in a tooltip (2026-09-02) ──
+// Owner report: WordPress settings entered, 「ブログへ」 pressed, and the only
+// thing on screen was 「ブログ投稿に失敗」. The cause lived in the chip's hover
+// title — a place a non-programmer never looks. The reader now shows the
+// plain-language cause (from classifyBlogError), the raw detail, and keeps the
+// send button as the retry. Mutations that turn this red: classify every reason
+// as 'other'; drop the reason panel; keep the dead label for a failed state.
+describe('ResearchModule — a failed blog post says why', () => {
+  beforeEach(() => {
+    calls = []
+    postBodies = []
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('shows the cause line, the raw detail, and the send button (retry) for a 401', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: FetchInput, init?: RequestInit): Promise<Response> => {
+        const url = urlOf(input)
+        calls.push(`${methodOf(input, init)} ${url.split('?')[0]}`)
+        if (url.startsWith('/api/research/reports')) {
+          return reply(200, {
+            reports: [
+              {
+                file: 'r.md',
+                title: 'Report R',
+                mtime: 1755400000000,
+                size: 42,
+                blog: { state: 'failed', error: 'POST /posts: HTTP 401' },
+              },
+            ],
+          })
+        }
+        if (url.startsWith('/api/research/report')) return reply(200, { file: 'r.md', content: REPORT_MD })
+        if (url.startsWith('/api/research/knowledge')) {
+          return reply(200, { file: 'r.md', digest: DIGEST, qa: [], digestStale: false })
+        }
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+    await openReport()
+    const panel = await screen.findByTestId('blog-failure-reason')
+    expect(panel.textContent).toContain('research.blog.reason.auth') // the cause, in words
+    expect(panel.textContent).toContain('POST /posts: HTTP 401') // the raw detail, kept
+    expect(screen.getByText('research.blog.send')).toBeTruthy() // pressing again is the retry
+  })
+})

@@ -1805,6 +1805,12 @@ export interface SwarmOrchestratorState {
    *  Additive + optional: an old server omits it, and the client must read the
    *  absence as UNKNOWN — never as 'missing'. */
   managerPresence?: SwarmManagerPresence
+  /** True while the engine is HOLDING its voice because the API host is
+   *  unreachable (the offline hold, 2026-09-02): review work is waiting, the
+   *  commander desk is up, and the next poke fires the moment the route is
+   *  back — no budget is spent meanwhile. The Board's commander strip renders
+   *  「オフライン待ち」 on it. Additive + optional (old server ⇒ absent ⇒ false). */
+  managerOfflineHold?: boolean
   /** Same, for the supply desk (PTY-only by design — Remote Control lives there). */
   supplyDesk?: { runtime: 'pty'; handleId: string; agentSessionId: string | null } | null
   /** True while the owner has EXPLICITLY paused the engine (Autonomy OFF) and

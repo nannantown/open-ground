@@ -189,6 +189,7 @@ import {
 import { SdkWorkerUnavailableError } from './swarmWorkerSdk'
 import { centralWorktreesDir } from './paths'
 import { liveDeskOccupies } from './liveDesks'
+import { probeOnline } from './swarmConnectivity'
 import { projectUUIDFromPath } from './projectDataPath'
 import { appendEngineJournalLine } from './engineJournal'
 import {
@@ -1992,6 +1993,14 @@ export interface ProjectEngine {
      *  batch — without it a batch that never drains (a card parked awaiting the owner)
      *  would be poked every hour forever. */
     nudgeRearmed?: boolean
+    /** The machine is OFFLINE and the engine is HOLDING its voice (2026-09-02):
+     *  no poke is typed and no budget is charged while the API host is
+     *  unreachable — a poke that cannot leave the machine measures the Wi-Fi,
+     *  not the desk. Cleared on the offline→online edge (which restores the
+     *  full voice and pokes at once), on a drained queue, and on a desk seen
+     *  working. Doubles as the one-shot latch for the 「オフライン」 journal
+     *  line. Surfaced to the Board as `managerOfflineHold`. */
+    offlineHold?: boolean
     /** Has the desk we last SPAWNED ever been seen genuinely working ('active')?
      *
      *  Cleared on every spawn, set the first time presence reads 'active'. It is what
@@ -3428,6 +3437,13 @@ export interface IntegrationDeps {
    *  reason that state never spawns anything (完了条件2+5). Best-effort: false when the
    *  PTY is gone. MUST NOT throw. Default: {@link defaultNudgeManager}. */
   nudgeManager: (projectPath: string) => Promise<boolean>
+  /** Can a desk reach the API right now? The OFFLINE HOLD's sensor
+   *  (2026-09-02): false ⇒ the manager reflex types nothing and charges
+   *  nothing; the offline→online edge restores the voice and pokes at once.
+   *  OPTIONAL — absent ⇒ {@link probeOnline} (cached, never throws). Tests
+   *  inject it; the fake deps answer online so every existing wake test keeps
+   *  its meaning. */
+  isOnline?: () => Promise<boolean>
   /** TELL the live commander a worker just finished — the NOTICE channel (2026-07-27),
    *  the thing this product did not have and whose absence cost 38 minutes.
    *
@@ -6931,6 +6947,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   // nothing); wakeManager spawns, nudgeManager pokes a live one (2026-07-18).
   managerPresence: (p, now, echoUntil) => defaultManagerPresence(p, now, { echoUntil }),
   nudgeManager: defaultNudgeManager,
+  isOnline: () => probeOnline(),
   notifyManagerReady: (p, notice) => defaultNotifyManagerReady(p, notice),
   // The DELIVERY evidence behind the stall check (2026-07-22) — read only once the queue
   // has already waited past MANAGER_INTEGRATION_STALL_MS, never on an ordinary tick.
@@ -9446,6 +9463,7 @@ export const runIntegratePass = async (
     // reset here — the `present` sweep above already emptied it.)
     rs.stallLogged = false
     rs.nudgeRearmed = false
+    rs.offlineHold = false
     // The 2026-08-14 pair belongs to the waiting batch too — the bell says 「統合待ちが N
     // 件あるのに司令官が動いていない」, which is a claim about THIS batch. A drained queue
     // ends the episode, so the next one may ring again (and may recycle a desk once).
@@ -9610,6 +9628,7 @@ export const runIntegratePass = async (
     // voice back (explain-line + a fresh re-arm), exactly as it does for `nudges`.
     rs.stallLogged = false
     rs.nudgeRearmed = false
+    rs.offlineHold = false
     // …and the two 2026-08-14 latches, for the same reason and on the same rule: the
     // episode is the WAITING BATCH, and a desk demonstrably back at work ends it. A
     // later wedge gets its own bell and its own one recycle, rather than inheriting a
@@ -9684,6 +9703,46 @@ export const runIntegratePass = async (
     if (rs.provenSinceWake !== false) {
       rs.attempts = 0
       rs.fatalFired = false
+    }
+    // OFFLINE HOLD (2026-09-02). Measured at a café: the owner reconnected and
+    // the commander stayed 待機中 with a review card waiting. The notice, three
+    // 10-minute pokes and the one re-arm had ALL been typed into a desk whose API
+    // call could not leave the machine, and every one was charged as "ignored" —
+    // so by the time the route was back the budget was spent and the engine had
+    // gone deliberately mute (correct for an ignoring desk, wrong for a dropped
+    // Wi-Fi; the engine could not tell them apart). Now: while offline, HOLD —
+    // type nothing, charge nothing, say so once. On the offline→online edge,
+    // restore the FULL voice (budget, throttle, the one-shot latches) and fall
+    // through to poke NOW: the owner reconnecting is the event, not a timer.
+    // A probe that cannot run answers online (fail-open toward the existing
+    // behaviour) — the hold must never become a way to mute a healthy machine.
+    const online = await (deps.isOnline ?? (() => probeOnline()))().catch(() => true)
+    if (!online) {
+      if (!rs.offlineHold) {
+        rs.offlineHold = true
+        logLine(
+          engine,
+          'warn',
+          `オフライン — 司令官への声かけを保留します(ネット復帰を検知したら即座に声をかけます)。統合待ち ${swarmCards.length} 件`,
+          'integrate',
+        )
+      }
+      return
+    }
+    if (rs.offlineHold) {
+      rs.offlineHold = false
+      rs.nudges = 0
+      rs.lastNudgeAt = 0
+      rs.nudgeRearmed = false
+      rs.unresponsiveLogged = false
+      rs.unaddressable = 0
+      rs.unaddressableLogged = false
+      logLine(
+        engine,
+        'info',
+        `ネット復帰を検知 — 司令官に声かけし直します。統合待ち ${swarmCards.length} 件`,
+        'integrate',
+      )
     }
     let nudges = rs.nudges ?? 0
     const lastNudgeAt = rs.lastNudgeAt ?? 0
@@ -11385,6 +11444,7 @@ export const getOrchestratorState = async (
       managerDesk,
       managerPresence,
       supplyDesk,
+      managerOfflineHold: false,
     }
   }
   // Read the Board cards for the lead-time KPI (read-only — never mutates). A
@@ -11402,6 +11462,9 @@ export const getOrchestratorState = async (
     managerDesk,
     managerPresence,
     supplyDesk,
+    // The OFFLINE HOLD (2026-09-02): the Board's commander strip says
+    // 「オフライン待ち」 instead of 待機中 while the engine holds its voice.
+    managerOfflineHold: engine.managerResume?.offlineHold === true,
   }
 }
 

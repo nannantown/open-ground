@@ -34,6 +34,7 @@ import {
 import { api } from '@/lib/api-client'
 import { useT } from '@/i18n/I18nContext'
 import type { MessageKey } from '@/i18n/messages'
+import { classifyBlogError, type BlogErrorKind } from '@/lib/blogError'
 import { Btn } from '@/components/ui/Btn'
 import type {
   ProjectMeta,
@@ -179,6 +180,16 @@ const BLOG_STATE_LABEL: Record<NonNullable<ResearchReportMeta['blog']>['state'],
   'edited-on-wp': 'research.blog.editedOnWp',
   'deleted-on-wp': 'research.blog.deletedOnWp',
   failed: 'research.blog.failed',
+}
+/** The plain-language line above a failed blog post's raw reason — keyed by
+ *  classifyBlogError so the list chip's tooltip and the reader panel agree. */
+const BLOG_REASON_KEY: Record<BlogErrorKind, MessageKey> = {
+  auth: 'research.blog.reason.auth',
+  forbidden: 'research.blog.reason.forbidden',
+  notFound: 'research.blog.reason.notFound',
+  network: 'research.blog.reason.network',
+  server: 'research.blog.reason.server',
+  other: 'research.blog.reason.other',
 }
 
 export const renderMarkdown = (md: string): ReactNode[] => {
@@ -970,7 +981,10 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
                     const blog = reports.find((r) => r.file === selected)?.blog
                     // Already on the blog (any recorded state) → the chip in the
                     // list says which; here offer the draft link when we hold one.
-                    if (blog) {
+                    // A FAILED push falls through to the button: pressing it again
+                    // is the retry (markResearchForBlog is idempotent and pushes at
+                    // once), and the reason panel below the row says what to fix.
+                    if (blog && blog.state !== 'failed') {
                       return blog.link ? (
                         <a
                           href={blog.link}
@@ -1001,6 +1015,28 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
                   </Btn>
                 </div>
               </div>
+              {(() => {
+                const blog = reports.find((r) => r.file === selected)?.blog
+                if (!blog || blog.state !== 'failed') return null
+                // WHY THIS IS A PANEL AND NOT A TOOLTIP (2026-09-02): the reason
+                // used to live only in the chip's `title`. The owner pressed
+                // 「ブログへ」, saw 「ブログ投稿に失敗」 and nothing else — a hover
+                // is not a place a non-programmer looks. Say the cause and the
+                // next check in words; keep the raw line underneath as detail.
+                return (
+                  <div
+                    data-testid="blog-failure-reason"
+                    className="rounded-sm border border-accent/40 bg-accent/5 px-3 py-2 text-meta leading-relaxed"
+                  >
+                    <div className="text-ink">{t(BLOG_REASON_KEY[classifyBlogError(blog.error)])}</div>
+                    {blog.error && (
+                      <div className="mt-1 font-mono text-ink-faint">
+                        {t('research.blog.reason.detail')}: {blog.error}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
               <div className="flex flex-col gap-2.5">{renderMarkdown(content)}</div>
             </div>
           )}

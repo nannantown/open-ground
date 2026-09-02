@@ -124,6 +124,11 @@ export type ManagerReviewStatus = 'ff' | 'rebase' | 'conflict' | 'unknown'
  *  presence + this card's own readiness are the only honest per-card facts. */
 export interface BoardCardManager {
   presence: ManagerPresence
+  /** The engine is holding its voice because the machine is offline (the
+   *  offline hold, 2026-09-02): the strip says 「オフライン待ち」 instead of
+   *  the presence word, so a stalled-looking commander is explained, not
+   *  merely reported. Absent ⇒ not holding. */
+  offlineHold?: boolean
   /** How this card's branch relates to the trunk right now. */
   reviewStatus: ManagerReviewStatus
 }

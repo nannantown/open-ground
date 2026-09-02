@@ -306,6 +306,10 @@ export interface SwarmEngineState {
    *  Absent ⇒ the server did not say; the pane must read that as "unknown", never
    *  as "no desk". See commanderPresence. */
   managerPresence?: SwarmManagerPresence
+  /** The engine's OFFLINE HOLD (2026-09-02): true while it deliberately types
+   *  nothing at the commander because the API host is unreachable. Strict
+   *  boolean — absent / forged folds to false (no spurious hold badge). */
+  managerOfflineHold: boolean
   /** The LIVE commander desk handle from the server's both-pools read, or null
    *  (none live) / undefined (old server — field absent). What the tab's
    *  reconcile (deskReconcile.ts) adopts so an engine-woken desk attaches
@@ -334,6 +338,7 @@ export const EMPTY_CONSUMPTION: EngineConsumption = {
 export const DEFAULT_ENGINE: SwarmEngineState = {
   running: false,
   manualStop: false,
+  managerOfflineHold: false,
   overseer: false,
   workers: [],
   reviews: [],
@@ -616,6 +621,7 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
 
   return {
     ...(managerPresence !== undefined ? { managerPresence } : {}),
+    managerOfflineHold: o.managerOfflineHold === true,
     running: o.running === true,
     // Strict boolean like `running`: a forged / absent value folds to FALSE — the
     // fail-safe direction (no spurious "stopped by hand" badge).
