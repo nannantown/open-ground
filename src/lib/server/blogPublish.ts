@@ -69,6 +69,22 @@ export interface BlogLedgerEntry {
 
 interface BlogLedger {
   entries: Record<string, BlogLedgerEntry>
+  /** WHERE THIS SITE'S wp-admin ACTUALLY LIVES — WordPress's own `siteurl`,
+   *  read once from `/wp/v2/settings` and remembered (2026-09-02).
+   *
+   *  ⚠ THE BUG THIS FIXES, measured on the owner's blog. The edit link was
+   *  built as `${baseUrl}/wp-admin/…`, i.e. from the address the REST API is
+   *  reached at. Those are the SAME string only in the default install. On a
+   *  "WordPress in its own directory" site (home `https://example.com`, core in
+   *  `/wp`) the REST root really is `https://example.com/wp-json/…` — every
+   *  push succeeded — while wp-admin is at `https://example.com/wp/wp-admin/…`.
+   *  So the draft was created correctly and 「ブログの下書きを開く」 opened a URL
+   *  that does not exist, which WordPress answered with the THEME'S 404 page:
+   *  a working feature that looked broken.
+   *
+   *  Absent (an old ledger, or a site that would not answer) ⇒ the caller falls
+   *  back to `baseUrl`, which is exactly the old behaviour. */
+  adminBase?: string
   /** Report files the owner chose to publish (contract #5). Marked by the
    *  Research tab's button, never by the sweep. */
   wanted?: Record<string, true>
@@ -85,7 +101,13 @@ const readLedger = async (projectPath: string): Promise<BlogLedger> => {
         parsed.wanted && typeof parsed.wanted === 'object' && !Array.isArray(parsed.wanted)
           ? parsed.wanted
           : undefined
-      return { entries: parsed.entries, ...(wanted ? { wanted } : {}) }
+      const adminBase =
+        typeof parsed.adminBase === 'string' && parsed.adminBase ? parsed.adminBase : undefined
+      return {
+        entries: parsed.entries,
+        ...(wanted ? { wanted } : {}),
+        ...(adminBase ? { adminBase } : {}),
+      }
     }
   } catch {
     /* absent / torn ⇒ empty — worst case a report is re-pushed as a new draft */
@@ -143,13 +165,13 @@ const REQUEST_TIMEOUT_MS = 30_000
 /** One WP REST call. Throws a SCRUBBED error on any non-2xx — the message
  *  carries method, path and status only. The Authorization header value (and
  *  therefore the app password) exists only inside this function. */
-const wpRequest = async (
+const wpFetchJson = async (
   wp: WordPressSettings,
   method: 'GET' | 'POST',
   path: string,
   body: unknown,
   fetchImpl: typeof fetch,
-): Promise<WpPostLite> => {
+): Promise<unknown> => {
   const url = `${wp.baseUrl}/wp-json/wp/v2${path}`
   const auth = Buffer.from(`${wp.username}:${wp.appPassword}`).toString('base64')
   const ctl = new AbortController()
@@ -174,9 +196,43 @@ const wpRequest = async (
   }
   if (res.status === 404) throw new WpGoneError(`${method} ${path}: 404`)
   if (!res.ok) throw new Error(`${method} ${path}: HTTP ${res.status}`)
-  const json = (await res.json().catch(() => null)) as WpPostLite | null
+  return await res.json().catch(() => null)
+}
+
+/** {@link wpFetchJson} narrowed to the post shape the sweep works with. */
+const wpRequest = async (
+  wp: WordPressSettings,
+  method: 'GET' | 'POST',
+  path: string,
+  body: unknown,
+  fetchImpl: typeof fetch,
+): Promise<WpPostLite> => {
+  const json = (await wpFetchJson(wp, method, path, body, fetchImpl)) as WpPostLite | null
   if (!json || typeof json.id !== 'number') throw new Error(`${method} ${path}: malformed response`)
   return json
+}
+
+/** WordPress's own `siteurl` — the directory core is installed in, which is
+ *  where wp-admin lives. `/wp/v2/settings` exposes it as `url` (an
+ *  authenticated read; we already hold the credentials). null on any failure:
+ *  the caller keeps the previous value, or falls back to `baseUrl`. Never
+ *  throws — a link is cosmetic and must not fail a push. */
+const fetchAdminBase = async (
+  wp: WordPressSettings,
+  fetchImpl: typeof fetch,
+): Promise<string | null> => {
+  try {
+    const json = (await wpFetchJson(wp, 'GET', '/settings', undefined, fetchImpl)) as
+      | { url?: unknown }
+      | null
+    const url = typeof json?.url === 'string' ? json.url.trim().replace(/\/+$/, '') : ''
+    if (!url) return null
+    // Only accept an http(s) URL — a filtered/odd value must not become a link.
+    const parsed = new URL(url)
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? url : null
+  } catch {
+    return null
+  }
 }
 
 /** 404 from WP — for a post we created, that means the owner deleted it (a
@@ -205,8 +261,8 @@ export const draftPayload = (file: string, md: string): { title: string; html: s
  *  time keeps one sweep bounded while the backlog drains in a few cycles. */
 export const MAX_PUSHES_PER_SWEEP = 5
 
-const editLink = (wp: WordPressSettings, postId: number): string =>
-  `${wp.baseUrl}/wp-admin/post.php?post=${postId}&action=edit`
+const editLink = (adminBase: string, postId: number): string =>
+  `${adminBase}/wp-admin/post.php?post=${postId}&action=edit`
 
 /** Sweep ONE project's reports against the ledger. Exported for tests; the
  *  loop below drives it across every registered project. Never throws. */
@@ -233,6 +289,37 @@ export const sweepProjectBlogPublish = async (
   const ledger = await readLedger(projectPath)
   let dirty = false
   let pushes = 0
+
+  // WHERE wp-admin LIVES. Resolved from WordPress itself, ONCE per site, then
+  // remembered on the ledger — so a quiet sweep (nothing changed) still costs
+  // zero requests, which is this module's standing contract.
+  //
+  // The one exception is a ledger that predates this field but already holds
+  // drafts: those links were built from `baseUrl` and are wrong on any
+  // subdirectory install, so we spend a single GET to repair them rather than
+  // leave the owner with a link that opens a 404 until the next redo.
+  let adminBase = ledger.adminBase ?? wp.baseUrl
+  const learnAdminBase = async (): Promise<void> => {
+    if (ledger.adminBase) return
+    const found = await fetchAdminBase(wp, fetchImpl)
+    if (!found) return
+    ledger.adminBase = found
+    adminBase = found
+    dirty = true
+  }
+  if (!ledger.adminBase && Object.keys(ledger.entries).length > 0) await learnAdminBase()
+  // Repair every stored link against the resolved base (pure, no requests): a
+  // link is display-only, so recomputing it from the post id can never lose
+  // anything, and it is the only way an ALREADY-pushed report gets its fixed
+  // link without the owner pressing the button again.
+  for (const [file, e] of Object.entries(ledger.entries)) {
+    if (!e.postId) continue
+    const want = editLink(adminBase, e.postId)
+    if (e.link !== want) {
+      ledger.entries[file] = { ...e, link: want }
+      dirty = true
+    }
+  }
 
   for (const meta of reports) {
     if (pushes >= MAX_PUSHES_PER_SWEEP) break
@@ -275,9 +362,12 @@ export const sweepProjectBlogPublish = async (
       if (!entry || entry.state === 'deleted-on-wp' || !entry.postId) {
         // CREATE — always a draft (contract #1).
         const post = await wpRequest(wp, 'POST', '/posts', { title, content: html, status: 'draft' }, fetchImpl)
+        // First draft for this site: learn where wp-admin is before the link is
+        // built (a fresh ledger had nothing to repair above).
+        await learnAdminBase()
         ledger.entries[meta.file] = {
           postId: post.id,
-          link: editLink(wp, post.id),
+          link: editLink(adminBase, post.id),
           contentHash: hash,
           pushedAt: nowIso(),
           ...(post.modified_gmt ? { wpModifiedAt: post.modified_gmt } : {}),

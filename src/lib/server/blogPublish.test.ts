@@ -43,6 +43,11 @@ const fakeWp = () => {
     reqs.push({ method, url, body, auth: headers.authorization })
     const json = (status: number, payload: unknown) =>
       ({ ok: status >= 200 && status < 300, status, json: async () => payload }) as Response
+    // WordPress's own settings — `url` is `siteurl`, i.e. where wp-admin lives.
+    // The fixture uses the OWNER'S SHAPE (2026-09-02): core in a subdirectory
+    // (`/wp`) while the REST API answers at the site root. A fake that returned
+    // the same string as baseUrl could not tell the fixed link from the old one.
+    if (/\/wp-json\/wp\/v2\/settings\b/.test(url)) return json(200, { url: `${WP.baseUrl}/wp` })
     const m = /\/wp-json\/wp\/v2\/posts(?:\/(\d+))?/.exec(url)
     if (!m) return json(404, {})
     const id = m[1] ? Number(m[1]) : null
@@ -63,6 +68,11 @@ const fakeWp = () => {
   }) as typeof fetch
   return { posts, reqs, fetchImpl, touch: (id: number) => { clock++; posts.get(id)!.modified_gmt = `owner-edit-${clock}` } }
 }
+
+/** Requests that touch POSTS — the "zero requests" contract is about pushes and
+ *  their read-backs, not the one-time `/settings` read that locates wp-admin. */
+const postReqs = <T extends { url: string }>(reqs: T[]): T[] =>
+  reqs.filter((r) => r.url.includes('/wp/v2/posts'))
 
 let proj = ''
 
@@ -116,8 +126,9 @@ describe('sweepProjectBlogPublish — the five promises, on the wire', () => {
     const wp = fakeWp()
     await press(wp.fetchImpl, 'a.md')
 
-    expect(wp.reqs).toHaveLength(1)
-    const r = wp.reqs[0]
+    const posts = postReqs(wp.reqs)
+    expect(posts).toHaveLength(1)
+    const r = posts[0]
     expect(r.method).toBe('POST')
     expect(r.url).toBe('https://blog.example/wp-json/wp/v2/posts')
     // Promise #1 — drafts only. 'draft' is stated on the wire, not assumed.
@@ -130,16 +141,58 @@ describe('sweepProjectBlogPublish — the five promises, on the wire', () => {
 
     const info = await readBlogInfo(proj)
     expect(info['a.md']?.state).toBe('draft')
-    expect(info['a.md']?.link).toContain('post.php?post=100')
+    // ⚠ THE LINK COMES FROM WordPress's OWN `siteurl`, not from the address the
+    // REST API answers at (2026-09-02, measured on the owner's blog: core in
+    // `/wp`, home at the root). Every push worked while 「ブログの下書きを開く」
+    // opened a URL that does not exist, and WordPress answered with the THEME'S
+    // 404 page — a working feature that looked broken. The fake site has that
+    // shape, so a link built from baseUrl fails this line.
+    expect(info['a.md']?.link).toBe('https://blog.example/wp/wp-admin/post.php?post=100&action=edit')
+  })
+
+  it('REPAIRS an already-pushed report\'s stale link — the owner must not have to press again', async () => {
+    // The shape the owner was left in: a draft pushed by an older build, whose
+    // link was built from baseUrl and therefore 404s. The report has NOT
+    // changed, so no push will ever happen again — if the repair needed one,
+    // the link would stay broken forever. One `/settings` read fixes it, and
+    // the entry keeps its post id (the draft itself is untouched).
+    await report('a.md', '# A\n\nbody\n')
+    const wp = fakeWp()
+    await press(wp.fetchImpl, 'a.md')
+    // Rewrite the ledger the way the old build wrote it.
+    const ledgerPath = await projectDataFile(proj, 'blog-publish.json')
+    const before = JSON.parse(await readFile(ledgerPath, 'utf8')) as {
+      entries: Record<string, { postId: number; link?: string }>
+      adminBase?: string
+    }
+    delete before.adminBase
+    before.entries['a.md'].link = 'https://blog.example/wp-admin/post.php?post=100&action=edit'
+    await writeFile(ledgerPath, JSON.stringify(before))
+
+    const pushesBefore = postReqs(wp.reqs).length
+    await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
+
+    const info = await readBlogInfo(proj)
+    expect(info['a.md']?.link).toBe('https://blog.example/wp/wp-admin/post.php?post=100&action=edit')
+    // …and it healed WITHOUT touching the draft (no new push).
+    expect(postReqs(wp.reqs).length).toBe(pushesBefore)
   })
 
   it('an unchanged chosen report costs ZERO requests on the next sweep', async () => {
     await report('a.md', '# A\n\nbody\n')
     const wp = fakeWp()
     await press(wp.fetchImpl, 'a.md')
-    const after = wp.reqs.length
+    const after = postReqs(wp.reqs).length
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
-    expect(wp.reqs.length).toBe(after)
+    // ⚠ Counted over POST-endpoint requests: locating wp-admin costs ONE
+    // `/settings` read per site, once, and is then remembered on the ledger —
+    // the contract this pins is that an unchanged report is never re-pushed.
+    expect(postReqs(wp.reqs).length).toBe(after)
+    // …and the one-time read really is one-time: nothing new at all on a THIRD
+    // sweep (the mutation "re-fetch the base every sweep" turns this red).
+    const all = wp.reqs.length
+    await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
+    expect(wp.reqs.length).toBe(all)
   })
 
   it('a rewritten report UPDATES its post — never a sibling draft (promise #2)', async () => {
@@ -258,9 +311,9 @@ describe('sweepProjectBlogPublish — the five promises, on the wire', () => {
     await press(failing, ...files)
     const wp = fakeWp()
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
-    expect(wp.reqs).toHaveLength(MAX_PUSHES_PER_SWEEP)
+    expect(postReqs(wp.reqs)).toHaveLength(MAX_PUSHES_PER_SWEEP)
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
-    expect(wp.reqs).toHaveLength(MAX_PUSHES_PER_SWEEP + 2)
+    expect(postReqs(wp.reqs)).toHaveLength(MAX_PUSHES_PER_SWEEP + 2)
   })
 })
 
