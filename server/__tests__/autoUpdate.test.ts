@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { hasLiveForkedChildren, applyDownloadedUpdate } from '../../electron/autoUpdate'
+import { readFileSync } from 'fs'
+import { dirname, join, resolve } from 'path'
+import { fileURLToPath } from 'url'
+import {
+  INSTALL_WATCHDOG_MS,
+  eagerSquirrelHandoff,
+  hasLiveForkedChildren,
+  applyDownloadedUpdate,
+} from '../../electron/autoUpdate'
 
 // Regression guard for the electron-updater "Restart now" no-op bug (observed
 // 2026-06-25, fixed in 0.11.8 / commit cc529d9; see electron/autoUpdate.js for the
@@ -153,6 +161,174 @@ describe('applyDownloadedUpdate ("Restart now" sequence)', () => {
       // The crux: by quitAndInstall time the gate is clear, so before-quit's
       // `if (!hasChildren) return` fires and does NOT preventDefault the quit.
       expect(gateAtInstall, teardownStyle).toBe(false)
+    }
+  })
+})
+
+// ── The 2026-09-11 sighting of the SAME failure type: "Restart now" did nothing ──
+// The owner restarted repeatedly and kept getting the same "0.11.106 has been
+// downloaded" dialog. Cause: main.js drove electron-updater's
+// `autoInstallOnAppQuit` from the user's hands-free setting, but on macOS that
+// flag is not policy — it decides whether the downloaded zip is handed to
+// Squirrel.Mac AT ALL. With it false, MacUpdater.quitAndInstall() registers a
+// listener and RETURNS WITHOUT QUITTING (electron-updater 6.8.3,
+// out/MacUpdater.js), so the app tore its server down and then just sat there.
+describe('eagerSquirrelHandoff (autoInstallOnAppQuit is plumbing on macOS)', () => {
+  it('macOS is ALWAYS eager — the user setting cannot switch it off', () => {
+    // The regression itself: `false` here is what broke "Restart now".
+    expect(eagerSquirrelHandoff('darwin', false)).toBe(true)
+    expect(eagerSquirrelHandoff('darwin', true)).toBe(true)
+  })
+
+  it('Windows/Linux keep the flag as documented POLICY — it follows the setting', () => {
+    // There the flag really does mean "install on quit" (electron-updater's
+    // BaseUpdater adds the quit handler), so a user who turned hands-free
+    // updates off must not get an install on every quit.
+    expect(eagerSquirrelHandoff('win32', false)).toBe(false)
+    expect(eagerSquirrelHandoff('win32', true)).toBe(true)
+    expect(eagerSquirrelHandoff('linux', false)).toBe(false)
+    expect(eagerSquirrelHandoff('linux', true)).toBe(true)
+  })
+
+  it('a non-boolean setting never reads as consent (off-platform)', () => {
+    // Same strict narrowing as autoUpdateFromSettingsRaw: only a literal true.
+    expect(eagerSquirrelHandoff('win32', 'yes' as unknown as boolean)).toBe(false)
+    expect(eagerSquirrelHandoff('win32', 1 as unknown as boolean)).toBe(false)
+    // …but macOS stays true regardless, because it is not a consent question.
+    expect(eagerSquirrelHandoff('darwin', undefined as unknown as boolean)).toBe(true)
+  })
+})
+
+describe('applyDownloadedUpdate — the stuck-install watchdog', () => {
+  it('arms the watchdog BEFORE quitAndInstall, and fires it when the app is still alive', async () => {
+    const calls: string[] = []
+    let fire: (() => void) | null = null
+
+    await applyDownloadedUpdate({
+      setQuitting: () => {},
+      shutdownServerChild: async () => calls.push('teardown') as unknown as void,
+      // Model the macOS defect exactly: the install call returns and the process
+      // survives it.
+      quitAndInstall: () => calls.push('quitAndInstall'),
+      onStuck: () => calls.push('onStuck'),
+      timers: {
+        setTimeout: (fn: () => void) => {
+          calls.push('armed')
+          fire = fn
+          return { unref: () => calls.push('unref') }
+        },
+        watchdogMs: 1,
+      },
+    })
+
+    // Armed first: on the happy path quitAndInstall never returns, so a watchdog
+    // armed after it would not exist.
+    expect(calls).toEqual(['teardown', 'armed', 'unref', 'quitAndInstall'])
+    expect(fire).toBeTypeOf('function')
+    fire!()
+    expect(calls).toContain('onStuck')
+  })
+
+  it('reports a quitAndInstall that THROWS, instead of swallowing it', async () => {
+    const calls: string[] = []
+    let fire: (() => void) | null = null
+
+    await applyDownloadedUpdate({
+      setQuitting: () => {},
+      shutdownServerChild: async () => {},
+      quitAndInstall: () => {
+        throw new Error('Squirrel refused the staged update')
+      },
+      onStuck: () => calls.push('onStuck'),
+      timers: {
+        setTimeout: (fn: () => void) => {
+          fire = fn
+          return null
+        },
+        watchdogMs: 1,
+      },
+    }).catch(() => calls.push('caught'))
+
+    // The throw still propagates (caller's .catch), but the watchdog was already
+    // armed, so the user is told rather than left with a dead window.
+    expect(calls).toEqual(['caught'])
+    fire!()
+    expect(calls).toEqual(['caught', 'onStuck'])
+  })
+
+  it('no onStuck ⇒ no timer at all (the pre-existing callers stay unchanged)', async () => {
+    const calls: string[] = []
+    await applyDownloadedUpdate({
+      setQuitting: () => {},
+      shutdownServerChild: async () => {},
+      quitAndInstall: () => calls.push('quitAndInstall'),
+      timers: {
+        setTimeout: () => {
+          calls.push('armed')
+          return null
+        },
+        watchdogMs: 1,
+      },
+    })
+    expect(calls).toEqual(['quitAndInstall'])
+  })
+
+  it('the default watchdog delay is generous enough for a real Squirrel unpack', () => {
+    // Not a magic-number echo: the point is that it must exceed the slowest
+    // legitimate install (Squirrel.Mac unpacking a ~180 MB asar-less bundle),
+    // and must still be short enough that a user is not left guessing for long.
+    expect(INSTALL_WATCHDOG_MS).toBeGreaterThanOrEqual(30_000)
+    expect(INSTALL_WATCHDOG_MS).toBeLessThanOrEqual(5 * 60_000)
+  })
+})
+
+// ── WIRING GUARD (structure, not review) ──────────────────────────────────────
+// The pure decisions above cannot catch the defect that actually shipped: the
+// helper was right, the CALL SITE was wrong. main.js is not unit-testable (it
+// imports Electron), so the wiring is pinned by reading the source — the same
+// idiom gateEnvParity.test.ts uses for the self-update steps table. Both
+// failures this module documents (2026-06-25, 2026-09-11) were wiring, so this
+// is where the guard has to live.
+describe('electron/main.js wiring — autoInstallOnAppQuit and the watchdog', () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+  const main = readFileSync(join(repoRoot, 'electron/main.js'), 'utf8')
+  // Strip comment lines first: this file talks ABOUT the old spellings at
+  // length, and prose must never satisfy (or break) a source pin.
+  const code = main
+    .split('\n')
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+    .join('\n')
+
+  it('every autoInstallOnAppQuit assignment goes through eagerSquirrelHandoff (or a literal true)', () => {
+    const assignments = Array.from(code.matchAll(/autoInstallOnAppQuit\s*=\s*([^\n]+)/g)).map((m) =>
+      m[1].trim(),
+    )
+    expect(assignments.length, 'no assignment found — update this guard, not the app').toBeGreaterThan(0)
+    for (const rhs of assignments) {
+      expect(
+        /^eagerSquirrelHandoff\(/.test(rhs) || /^true\b/.test(rhs),
+        `autoInstallOnAppQuit = ${rhs} — on macOS this flag is plumbing, not policy: ` +
+          'false there makes "Restart now" return without quitting. Use eagerSquirrelHandoff().',
+      ).toBe(true)
+    }
+    // The specific regression: driving it straight off the user setting.
+    expect(code).not.toMatch(/autoInstallOnAppQuit\s*=\s*autoUpdateEnabled\(\)/)
+  })
+
+  it('the platform really is consulted — eagerSquirrelHandoff is passed process.platform', () => {
+    const calls = Array.from(code.matchAll(/eagerSquirrelHandoff\(([^)]*)\)/g)).map((m) => m[1])
+    expect(calls.length).toBeGreaterThan(0)
+    for (const args of calls) expect(args).toContain('process.platform')
+  })
+
+  it('both "apply the update" call sites carry the stuck-install watchdog', () => {
+    // A silent no-op is the failure mode; onStuck is the only thing that speaks.
+    const applyCalls = code.split('applyDownloadedUpdate({').slice(1)
+    expect(applyCalls.length, 'expected the dialog path and the hands-free path').toBe(2)
+    for (const call of applyCalls) {
+      // Look only as far as the call's own closing brace-paren.
+      const body = call.slice(0, call.indexOf('})'))
+      expect(body).toContain('onStuck:')
     }
   })
 })

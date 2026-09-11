@@ -25,6 +25,15 @@ export interface ForkedChildHandles {
  *  preventDefault — the state "Restart now" must reach before quitAndInstall. */
 export function hasLiveForkedChildren(handles: ForkedChildHandles): boolean
 
+/** How long after quitAndInstall() a still-running app counts as a failed install. */
+export const INSTALL_WATCHDOG_MS: number
+
+/** Must electron-updater hand the downloaded update to the OS installer EAGERLY
+ *  (at download time) rather than lazily (at quitAndInstall)? Always true on
+ *  macOS, where `autoInstallOnAppQuit` is plumbing rather than policy — see the
+ *  module comment for the 2026-09-11 "Restart now does nothing" defect. */
+export function eagerSquirrelHandoff(platform: string, settingEnabled: boolean): boolean
+
 /** Injectable side effects of the "Restart now" sequence. */
 export interface ApplyDownloadedUpdateDeps {
   /** Flip the module-level isQuitting flag (so health waits bail / 'exit' is treated
@@ -34,6 +43,11 @@ export interface ApplyDownloadedUpdateDeps {
   shutdownServerChild: () => Promise<unknown>
   /** electron-updater's apply step. Called ONLY after teardown settles. */
   quitAndInstall: () => void
+  /** Watchdog: called when the app is STILL RUNNING this long after the install
+   *  step, i.e. the install silently failed to quit. Armed before quitAndInstall. */
+  onStuck?: () => void
+  /** Injection seam for the watchdog's clock (tests pass a fake + short delay). */
+  timers?: { setTimeout?: (fn: () => void, ms: number) => unknown; watchdogMs?: number }
 }
 
 /** Run the ordered "Restart now" sequence: setQuitting(true) → shutdownServerChild()

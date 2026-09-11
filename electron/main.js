@@ -45,7 +45,11 @@ const {
   gracefulGroupKill,
   runRegressionSteps,
 } = require('./selfUpdate')
-const { hasLiveForkedChildren, applyDownloadedUpdate } = require('./autoUpdate')
+const {
+  eagerSquirrelHandoff,
+  hasLiveForkedChildren,
+  applyDownloadedUpdate,
+} = require('./autoUpdate')
 const {
   AUTO_APPLY_POLL_MS,
   SAFETY_FETCH_TIMEOUT_MS,
@@ -1907,8 +1911,18 @@ async function start() {
 // EXCEPTION (2026-08-03, settings.autoUpdate — default OFF): with the
 // hands-free toggle on, the dialog is skipped and the update applies ITSELF,
 // but only when the user is away (unfocused ≥30min) AND the forked server's
-// restart-safety probe proves nothing unrecoverable is running — plus on any
-// normal quit (autoInstallOnAppQuit). Policy: electron/autoUpdatePolicy.js.
+// restart-safety probe proves nothing unrecoverable is running — plus, on
+// WINDOWS/LINUX only, on any normal quit (autoInstallOnAppQuit).
+// Policy: electron/autoUpdatePolicy.js.
+//
+// ⚠ autoInstallOnAppQuit IS NOT A POLICY KNOB ON macOS (2026-09-11). There it
+// is plumbing: install-on-quit lives in electron-updater's BaseUpdater
+// (Windows/Linux), while MacUpdater extends AppUpdater and has no quit handler
+// — the flag's only macOS effect is whether the downloaded zip is handed to
+// Squirrel.Mac at DOWNLOAD time or not at all. Driving it from the user's
+// setting made "Restart now" a no-op for every user with hands-free off. It is
+// now decided by eagerSquirrelHandoff() (electron/autoUpdate.js), which is
+// where that whole story is written down.
 //
 // The user-INITIATED counterpart is the menu's "Check for Updates…"
 // (checkForUpdatesInteractive below, decisions in electron/updateMenu.js). Every
@@ -2033,6 +2047,7 @@ async function maybeAutoApplyUpdate() {
     shutdownServerChild,
     quitAndInstall: () =>
       autoUpdaterHandle ? autoUpdaterHandle.quitAndInstall() : app.quit(),
+    onStuck: () => reportInstallStuck(downloadedUpdate && downloadedUpdate.version),
   }).catch(() => {})
 }
 
@@ -2071,6 +2086,25 @@ function showUpdateDialog(kind, opts) {
 }
 
 /**
+ * The watchdog's voice: the app asked to restart-and-install and is STILL HERE.
+ *
+ * Reached only in the world where quitAndInstall() failed to quit (see
+ * electron/autoUpdate.js — INSTALL_WATCHDOG_MS). By this point the forked server
+ * has already been torn down, so the window is not usable: saying nothing is the
+ * exact 2026-09-11 defect, where the user force-quit and the update was lost
+ * silently on every single launch. Native dialog on purpose — it does not need
+ * the dead back-end.
+ */
+function reportInstallStuck(version) {
+  console.error('[updater] quitAndInstall did not quit — the update was NOT applied')
+  showUpdateDialog('install-stuck', { version })
+    .then((res) => {
+      if (res.response === 0) void shell.openExternal(RELEASE_NOTES_URL).catch(() => {})
+    })
+    .catch(() => {})
+}
+
+/**
  * Offer the restart that applies a downloaded update. Reached two ways — the
  * 'update-downloaded' event (the app telling the user) and the menu's manual
  * check when an update is already waiting (the user asking) — so it lives in one
@@ -2098,6 +2132,7 @@ function promptRestartForUpdate(version) {
         // leave the user staring at a live window backed by a dead server.
         quitAndInstall: () =>
           autoUpdaterHandle ? autoUpdaterHandle.quitAndInstall() : app.quit(),
+        onStuck: () => reportInstallStuck(version),
       }).catch(() => {})
     })
     .catch(() => {})
@@ -2219,7 +2254,9 @@ function initAutoUpdater() {
   // built-in auto-install-on-quit — otherwise a downloaded update would also
   // get applied on the next normal Cmd+Q, mid-run-queue.
   autoUpdater.autoDownload = true
-  autoUpdater.autoInstallOnAppQuit = false
+  // macOS: ALWAYS eager (see eagerSquirrelHandoff — false there makes
+  // quitAndInstall() return without quitting). Elsewhere it follows the setting.
+  autoUpdater.autoInstallOnAppQuit = eagerSquirrelHandoff(process.platform, autoUpdateEnabled())
 
   autoUpdater.on('checking-for-update', () => {
     console.log('[updater] checking for update…')
@@ -2320,11 +2357,14 @@ function initAutoUpdater() {
       console.log(`[updater] ${label} check skipped — work mode (lockdown) is on`)
       return
     }
-    // Keep the quit-time backstop in step with the LIVE setting: hands-free on
-    // ⇒ a downloaded update also applies on any normal quit; toggled off ⇒ back
-    // to explicit-restart-only. Refreshed per tick so the Settings toggle needs
-    // no app restart (same liveness contract as the lockdown read above).
-    autoUpdater.autoInstallOnAppQuit = autoUpdateEnabled()
+    // Keep the flag in step with the LIVE setting, platform-aware: on
+    // Windows/Linux hands-free on ⇒ a downloaded update also applies on any
+    // normal quit, toggled off ⇒ explicit-restart-only. On macOS it is pinned
+    // true regardless (eagerSquirrelHandoff — the flag means "hand the zip to
+    // Squirrel now" there, and false breaks "Restart now" outright). Refreshed
+    // per tick so the Settings toggle needs no app restart (same liveness
+    // contract as the lockdown read above).
+    autoUpdater.autoInstallOnAppQuit = eagerSquirrelHandoff(process.platform, autoUpdateEnabled())
     autoUpdater.checkForUpdatesAndNotify().catch((err) => {
       console.error(`[updater] ${label} check failed:`, err && err.message)
     })

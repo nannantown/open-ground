@@ -396,9 +396,10 @@ every 4h), the Electron main process calls
 then **notifies** the user (`update-downloaded`) with a "Restart now /
 Later" dialog. It deliberately does **not** auto-restart: `quitAndInstall`
 mid-run would kill an in-flight `claude` child / run queue, so applying the
-update is an explicit user action. `autoInstallOnAppQuit` is disabled for the
-same reason. This whole path is gated on `app.isPackaged`, so a dev run never
-contacts GitHub or logs updater errors.
+update is an explicit user action. This whole path is gated on
+`app.isPackaged`, so a dev run never contacts GitHub or logs updater errors.
+(`autoInstallOnAppQuit` used to be described as "disabled for the same reason".
+On macOS that was both wrong and load-bearing — see the next box.)
 
 > **Restart-now ordering invariant (regression-guarded).** "Restart now" must
 > tear the forked Hono server child down **before** calling `quitAndInstall()`.
@@ -414,6 +415,44 @@ contacts GitHub or logs updater errors.
 > (`applyDownloadedUpdate` / `hasLiveForkedChildren`), and
 > **`server/__tests__/autoUpdate.test.ts`** locks both — reorder the teardown or
 > drop the `killed` arm of the predicate and the suite goes red.
+
+> **`autoInstallOnAppQuit` is NOT a policy knob on macOS (observed 2026-09-11,
+> fixed in 0.11.107).** The owner restarted repeatedly and kept getting the same
+> "0.11.106 has been downloaded" dialog: the update downloaded every time and
+> was never applied. Cause: `main.js` set the flag from `settings.autoUpdate`,
+> reading it as "install when the app quits". That meaning belongs to
+> electron-updater's `BaseUpdater` (Windows NSIS / Linux). **`MacUpdater extends
+> AppUpdater`, which has no quit handler at all** — on macOS the flag's only two
+> readers are inside `MacUpdater` (v6.8.3, `out/MacUpdater.js`):
+>
+> - `updateDownloaded()` — `if (autoInstallOnAppQuit) nativeUpdater.checkForUpdates()`.
+>   This is the hand-off that makes **Squirrel.Mac actually fetch + stage** the
+>   downloaded zip. `else resolve([])`: Squirrel is told nothing.
+> - `quitAndInstall()` — takes the quit path only `if (squirrelDownloadedUpdate)`.
+>   Otherwise it registers a listener, kicks off `checkForUpdates()` and
+>   **returns without quitting.**
+>
+> So with the flag false, "Restart now" does not restart. It starts a fetch +
+> unpack that lands tens of seconds later — by which time the ordering invariant
+> above has already torn the forked server down, leaving a window whose back-end
+> is dead and which refuses to quit. Force-quit it and the staged update dies
+> with the process; every launch repeats the loop. On macOS the flag must be
+> **true, always** (`eagerSquirrelHandoff` in `electron/autoUpdate.js`); elsewhere
+> it keeps its documented meaning and follows the user's setting.
+>
+> Two guards lock it, both measured red: the pure decision, and a **source pin**
+> on `electron/main.js` asserting every `autoInstallOnAppQuit` assignment goes
+> through `eagerSquirrelHandoff()` — the helper was never the part that broke,
+> the call site was.
+
+> **Never let an install fail silently.** Both sightings of this defect
+> (2026-06-25, 2026-09-11) presented identically to the user: a button that did
+> nothing. `applyDownloadedUpdate` therefore arms a **watchdog before** calling
+> the install step (anything after it is unreachable on the happy path, where the
+> process is already gone). If the app is still alive `INSTALL_WATCHDOG_MS` later,
+> it says so and offers the release page — the `install-stuck` dialog in
+> `electron/updateMenu.js`. Whatever the next cause turns out to be, it cannot be
+> invisible.
 
 ---
 

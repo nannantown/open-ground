@@ -309,6 +309,7 @@ describe('updateDialogText', () => {
     'error',
     'downloaded',
     'download-failed',
+    'install-stuck',
   ] as const
 
   it('every kind has non-empty copy in BOTH languages', () => {
@@ -321,7 +322,7 @@ describe('updateDialogText', () => {
     }
   })
 
-  it('only "downloaded" and "download-failed" offer buttons, with safe defaults', () => {
+  it('only "downloaded", "download-failed" and "install-stuck" offer buttons, with safe defaults', () => {
     for (const lang of ['en', 'ja'] as const) {
       const downloaded = updateDialogText(lang, 'downloaded', { version: '0.12.0' })
       expect(downloaded.buttons).toHaveLength(2)
@@ -335,7 +336,15 @@ describe('updateDialogText', () => {
       expect(failed.buttons).toHaveLength(2)
       expect(failed.defaultId).toBe(0)
       expect(failed.cancelId).toBe(1)
-      for (const kind of KINDS.filter((k) => k !== 'downloaded' && k !== 'download-failed')) {
+      // A stuck install's affirmative is the manual way out, same shape as a
+      // failed download: index 0, and the default (there is nothing else to do).
+      const stuck = updateDialogText(lang, 'install-stuck', { version: '0.12.0' })
+      expect(stuck.buttons).toHaveLength(2)
+      expect(stuck.defaultId).toBe(0)
+      expect(stuck.cancelId).toBe(1)
+      for (const kind of KINDS.filter(
+        (k) => k !== 'downloaded' && k !== 'download-failed' && k !== 'install-stuck',
+      )) {
         expect(updateDialogText(lang, kind).buttons, `${lang}/${kind}`).toBeUndefined()
       }
     }
@@ -348,6 +357,23 @@ describe('updateDialogText', () => {
     expect(updateDialogText('en', 'downloaded', {}).message).not.toMatch(/OPEN GROUND\s{2,}/)
     expect(updateDialogText('en', 'downloaded', {}).message).toContain('A new version')
     expect(updateDialogText('ja', 'downloaded', {}).message).toContain('新しいバージョン')
+  })
+
+  it('"install-stuck" states the update was NOT applied and names the way out', () => {
+    // The whole point of this kind (2026-09-11): the previous behaviour was
+    // silence after a restart that never happened. The copy must not hedge —
+    // it must say the update is not installed, and how to install it by hand.
+    const en = updateDialogText('en', 'install-stuck', { version: '0.11.106' })
+    expect(en.message).toMatch(/could not be applied/i)
+    expect(en.detail).toMatch(/not installed/i)
+    expect(en.detail).toMatch(/release page/i)
+    const ja = updateDialogText('ja', 'install-stuck', { version: '0.11.106' })
+    expect(ja.message).toContain('適用できませんでした')
+    expect(ja.detail).toContain('適用されていません')
+    expect(ja.detail).toContain('リリースページ')
+    // And it must never imply data loss — the user's work is untouched.
+    expect(en.detail).toMatch(/untouched|left/i)
+    expect(ja.detail).toContain('残ります')
   })
 
   it('surfaces the real error text, and still says what to do when there is none', () => {

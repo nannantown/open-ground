@@ -84,6 +84,56 @@ function hasLiveForkedChildren(handles) {
   )
 }
 
+/** How long after `quitAndInstall()` a still-running app counts as a FAILED
+ *  install. Generous on purpose: on the happy path the process is gone in well
+ *  under a second, and the slowest legitimate case (Squirrel.Mac unpacking a
+ *  ~180 MB, asar-less bundle straight after the click) is tens of seconds. */
+const INSTALL_WATCHDOG_MS = 90 * 1000
+
+/**
+ * Pure decision: must electron-updater hand the downloaded update to the OS
+ * installer EAGERLY (at download time) rather than lazily (at quitAndInstall)?
+ *
+ * ⚠ THE BUG THIS EXISTS FOR (owner report, 2026-09-11; the second sighting of
+ * the SAME failure type as the 0.11.8 one above — "Restart now does nothing").
+ * The owner restarted repeatedly and kept getting the same "0.11.106 has been
+ * downloaded" dialog: the update downloaded fine and was never applied.
+ *
+ * The cause is a MISREADING of electron-updater's `autoInstallOnAppQuit` on
+ * macOS, which main.js was setting from the user's hands-free-update setting.
+ * On macOS that flag does NOT mean "install when the app quits" — install-on-
+ * quit lives in `BaseUpdater` (Windows NSIS / Linux), and `MacUpdater extends
+ * AppUpdater`, which has NO quit handler at all. Its only two readers are both
+ * inside MacUpdater (electron-updater 6.8.3, out/MacUpdater.js):
+ *
+ *   • updateDownloaded(): `if (autoInstallOnAppQuit) nativeUpdater.checkForUpdates()`
+ *     — the hand-off that makes Squirrel.Mac actually FETCH + STAGE the zip;
+ *     `else resolve([])`, i.e. Squirrel is told nothing.
+ *   • quitAndInstall(): takes the fast path ONLY `if (squirrelDownloadedUpdate)`.
+ *     Otherwise it registers a listener and (because the flag is false) kicks
+ *     off `checkForUpdates()` — and RETURNS WITHOUT QUITTING.
+ *
+ * So with the flag false on macOS, pressing "Restart now" does not restart. It
+ * starts a fetch + unpack that finishes tens of seconds later, by which time
+ * this app has already torn its forked server down (that ordering is required,
+ * see applyDownloadedUpdate) — so the user faces a window whose back-end is
+ * dead and which refuses to quit, force-quits it, and the staged update dies
+ * with the process. Every launch then repeats the whole loop.
+ *
+ * The flag is therefore not a policy knob on macOS, it is plumbing: it must be
+ * TRUE there, always. On Windows/Linux it keeps its documented meaning and so
+ * keeps following the user's setting — a user who turned hands-free updates off
+ * has not asked for an install on every quit.
+ *
+ * @param {string} platform — process.platform
+ * @param {boolean} settingEnabled — settings.autoUpdate, already narrowed
+ * @returns {boolean}
+ */
+function eagerSquirrelHandoff(platform, settingEnabled) {
+  if (platform === 'darwin') return true
+  return settingEnabled === true
+}
+
 /**
  * The "Restart now" sequence for a downloaded update, as a pure, ordered
  * orchestration with every side effect injected.
@@ -100,22 +150,53 @@ function hasLiveForkedChildren(handles) {
  *
  * Returns the teardown promise so callers (and the test) can await the ordering.
  *
+ * 4. `onStuck` (optional) is the WATCHDOG. `quitAndInstall()` is allowed to be
+ *    asynchronous — on macOS it returns immediately and quits only once
+ *    Squirrel has staged the update (see eagerSquirrelHandoff) — and it is
+ *    allowed to never quit at all. Silence in that case is the whole 2026-09-11
+ *    defect: the app sat there with a dead back-end and the user had no way to
+ *    tell "applying" from "broken". So the watchdog is armed BEFORE the install
+ *    call (anything after it is unreachable on the happy path, where the process
+ *    is already gone) and fires only in the world where the app is still alive.
+ *
  * @param {{
  *   setQuitting: (v: boolean) => void,
  *   shutdownServerChild: () => Promise<unknown>,
  *   quitAndInstall: () => void,
+ *   onStuck?: () => void,
+ *   timers?: { setTimeout?: Function, watchdogMs?: number },
  * }} deps
  * @returns {Promise<void>}
  */
 function applyDownloadedUpdate(deps) {
-  const { setQuitting, shutdownServerChild, quitAndInstall } = deps
+  const { setQuitting, shutdownServerChild, quitAndInstall, onStuck, timers } = deps
   setQuitting(true)
   // Byte-for-byte the field-tested 0.11.8 fix: setQuitting → shutdownServerChild()
   // → (via .finally) quitAndInstall(). .finally runs the install even if teardown
   // rejects, and the returned promise still rejects so the caller's .catch sees it.
   return shutdownServerChild().finally(() => {
+    // ARM FIRST, INSTALL SECOND. quitAndInstall() may end the process from inside
+    // the call, so a watchdog armed after it would never exist; and a
+    // quitAndInstall() that THROWS must also be reported, not swallowed by the
+    // caller's .catch. Both are covered by arming here.
+    if (typeof onStuck === 'function') {
+      const set = (timers && timers.setTimeout) || setTimeout
+      const ms =
+        timers && Number.isFinite(timers.watchdogMs) ? timers.watchdogMs : INSTALL_WATCHDOG_MS
+      const handle = set(() => {
+        onStuck()
+      }, ms)
+      // Never be the reason the process stays alive: Electron's own event loop
+      // keeps main running, so an unref'd timer still fires while the app does.
+      if (handle && typeof handle.unref === 'function') handle.unref()
+    }
     quitAndInstall()
   })
 }
 
-module.exports = { hasLiveForkedChildren, applyDownloadedUpdate }
+module.exports = {
+  INSTALL_WATCHDOG_MS,
+  eagerSquirrelHandoff,
+  hasLiveForkedChildren,
+  applyDownloadedUpdate,
+}

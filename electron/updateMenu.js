@@ -230,7 +230,7 @@ function manualCheckOutcome(args) {
  * true right now" and every detail answers "so what do I do".
  *
  * @param {'en' | 'ja'} lang
- * @param {'dev' | 'lockdown' | 'busy' | 'starting' | 'unavailable' | 'up-to-date' | 'downloading' | 'error' | 'downloaded'} kind
+ * @param {'dev' | 'lockdown' | 'busy' | 'starting' | 'unavailable' | 'up-to-date' | 'downloading' | 'error' | 'downloaded' | 'download-failed' | 'install-stuck'} kind
  * @param {{ version?: string | null, error?: string | null }} [opts]
  * @returns {{ message: string, detail: string, buttons?: string[], defaultId?: number, cancelId?: number }}
  */
@@ -333,6 +333,34 @@ function updateDialogText(lang, kind, opts) {
               'Restart to apply the update. If something is running, choose "Later" and restart once it finishes.',
             buttons: ['Restart now', 'Later'],
             defaultId: 1,
+            cancelId: 1,
+          }
+    case 'install-stuck':
+      // THE SILENCE THIS BREAKS (2026-09-11). "Restart now" handed the update to
+      // electron-updater and the app then did not quit — on macOS quitAndInstall
+      // can return without quitting (electron/autoUpdate.js, eagerSquirrelHandoff).
+      // The app had already torn its back-end down, so the user was left with a
+      // window that did not work and did not close, and no statement about either.
+      // Whatever the cause, the app must say so and hand over the manual way out.
+      return ja
+        ? {
+            message: 'アップデートを適用できませんでした。',
+            detail:
+              '再起動の指示は出ましたが、アプリが終了しませんでした。アップデートは適用されていません。\n\n' +
+              'このウィンドウはいったん終了して、リリースページからインストーラをダウンロードし、' +
+              '上書きインストールしてください。今のデータはそのまま残ります。',
+            buttons: ['リリースページを開く', '閉じる'],
+            defaultId: 0,
+            cancelId: 1,
+          }
+        : {
+            message: 'The update could not be applied.',
+            detail:
+              'The restart was requested but the app never quit, so the update is not installed.\n\n' +
+              'Quit this window, then download the installer from the release page and install over ' +
+              'the current app. Your data is left untouched.',
+            buttons: ['Open release page', 'Close'],
+            defaultId: 0,
             cancelId: 1,
           }
     case 'download-failed':
