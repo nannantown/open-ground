@@ -206,6 +206,12 @@ const alwaysAcquireLock: IntegrationDeps['acquireLock'] = async () => ({
 const card = (id: string, over: Partial<ProjectTask> = {}): ProjectTask => ({
   id,
   title: `task ${id}`,
+  // A COMPLETE card by default: gate ⑦ (hasCompletionConditions) refuses to
+  // dispatch a card with an empty body, so a fixture without notes would mean
+  // "a card still being written" — not what the ordering / column / file tests
+  // are about. Tests that set `notes` keep their own value; the ⑦ tests below
+  // pass `notes: ''` deliberately.
+  notes: 'completion conditions',
   done: false,
   createdAt: `2026-06-23T00:00:0${id.length}Z`,
   boardColumn: 'todo',
@@ -635,6 +641,39 @@ describe('selectDispatch', () => {
       card('done', { boardColumn: 'done', boardOrder: 4 }),
     ]
     expect(selectDispatch(mixed, new Set(), 10).map((c) => c.id)).toEqual(['todo'])
+  })
+
+  // ⑦ CONTENT REQUIRED — the 2026-09-11 accident, in the gate that stops it.
+  // The owner's supply officer queued two cards; autopilot handed BOTH to
+  // workers 8 seconds later, before the 完了条件 were written, so the workers
+  // started on a title alone. The shipped supply procedure itself said to add
+  // the title first and fill notes in a SECOND write, so every queued card
+  // passed through a window where it was dispatchable and incomplete.
+  it('⑦ never dispatches a card whose body is EMPTY — a card being written is not work', () => {
+    const half = [
+      card('titleOnly', { notes: '', boardOrder: 0 }),
+      card('ready', { notes: '完了条件: テストが緑', boardOrder: 1 }),
+    ]
+    // The empty one is SKIPPED, not merely deprioritised — and the complete one
+    // behind it still goes, so a placeholder never blocks the queue either.
+    expect(selectDispatch(half, new Set(), 10).map((c) => c.id)).toEqual(['ready'])
+  })
+
+  it('⑦ treats whitespace-only and ABSENT notes the same as empty', () => {
+    const blank = [
+      card('spaces', { notes: '   \n\t ', boardOrder: 0 }),
+      card('absent', { notes: undefined, boardOrder: 1 }),
+    ]
+    expect(selectDispatch(blank, new Set(), 10)).toEqual([])
+  })
+
+  it('⑦ HOLDS rather than drops — the same card is picked once its body lands', () => {
+    // The recovery half of the contract: the writer finishes the card and the
+    // next pass takes it. Nothing has to be re-queued or re-created.
+    const before = card('c', { notes: '', boardOrder: 0 })
+    expect(selectDispatch([before], new Set(), 1)).toEqual([])
+    const after = { ...before, notes: '完了条件: 数字が入る' }
+    expect(selectDispatch([after], new Set(), 1).map((c) => c.id)).toEqual(['c'])
   })
 
   it('③ does not dispatch two content-duplicate todos in one pass', () => {

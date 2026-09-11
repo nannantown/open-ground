@@ -155,6 +155,8 @@ export const board = {
     'board.run.buttonTitle':
       'Launch a claude session and start this task right away (the prompt is sent for you)',
     'board.run.needsContent': 'Write what to do to run this task.',
+    'board.run.needsContentSwarm':
+      'Write what to do — while the body is empty, autopilot will not hand this card to a worker (Run still dispatches it now).',
     'board.run.hint': 'Run opens the terminal and starts this task automatically.',
     // Swarm ON: 実行 hands the card to a worker instead of opening a terminal.
     // 完了 drawer — a record, not a launcher.
@@ -388,6 +390,8 @@ export const board = {
     'board.run.buttonTitle':
       'claude セッションを起動して、このタスクをすぐに開始します（プロンプトは自動送信されます）',
     'board.run.needsContent': '内容を書くと実行できます。',
+    'board.run.needsContentSwarm':
+      '内容を書いてください。空のあいだは自動運転では worker に渡しません(「実行」を押せば今すぐ渡せます)。',
     'board.run.hint': '実行するとターミナルが開き、このタスクが自動で始まります。',
     'board.done.heading': '結果',
     'board.done.branch': 'ブランチ',

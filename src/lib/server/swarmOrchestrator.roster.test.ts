@@ -131,7 +131,7 @@ afterEach(async () => {
 describe('card 3 wiring — write-through on dispatch (runDispatchPass → syncRoster)', () => {
   it('persists a spawned worker to roster.json with every field', async () => {
     const engine = newEngine({ path: project, running: true })
-    const card: ProjectTask = { id: 'c1', title: 'Roster me', boardColumn: 'todo', reworkCount: 2 } as unknown as ProjectTask
+    const card: ProjectTask = { id: 'c1', title: 'Roster me', notes: 'completion conditions', boardColumn: 'todo', reworkCount: 2 } as unknown as ProjectTask
     const spawn: SpawnSwarmWorkerResponse = {
       terminalId: 'pty-c1',
       agentSessionId: 'sess-xyz',
@@ -389,7 +389,7 @@ describe('card 3 — an UNRECONCILED engine merges, never erases (2026-07-29)', 
     const engine = newEngine({ path: project, running: true })
     expect(engine.rosterReconciled).toBeFalsy()
 
-    const card: ProjectTask = { id: 'c-new', title: 'New', boardColumn: 'todo' } as unknown as ProjectTask
+    const card: ProjectTask = { id: 'c-new', title: 'New', notes: 'completion conditions', boardColumn: 'todo' } as unknown as ProjectTask
     await runDispatchPass(
       engine,
       stubDeps({
@@ -430,7 +430,7 @@ describe('card 3 — an UNRECONCILED engine merges, never erases (2026-07-29)', 
     const engine = newEngine({ path: project, running: true })
     engine.rosterReconciled = true // what resumeEngines sets after reconcileRoster
 
-    const card: ProjectTask = { id: 'c-new', title: 'New', boardColumn: 'todo' } as unknown as ProjectTask
+    const card: ProjectTask = { id: 'c-new', title: 'New', notes: 'completion conditions', boardColumn: 'todo' } as unknown as ProjectTask
     await runDispatchPass(
       engine,
       stubDeps({

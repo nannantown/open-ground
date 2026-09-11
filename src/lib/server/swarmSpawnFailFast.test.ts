@@ -38,7 +38,8 @@ const T0 = Date.parse('2026-08-13T00:00:00Z')
 const MIN = 60_000
 
 const card = (id: string): ProjectTask =>
-  ({ id, title: `card ${id}`, boardColumn: 'todo' }) as unknown as ProjectTask
+  // Complete by default: gate ⑦ holds a body-less card (see selectDispatch).
+  ({ id, title: `card ${id}`, notes: 'completion conditions', boardColumn: 'todo' }) as unknown as ProjectTask
 
 const sdkSpawn = (id: string): SpawnSwarmWorkerResponse => ({
   terminalId: '',

@@ -137,7 +137,7 @@ scheduleNext(TICK_MS=3s) ──▶ runEnginePass
 
 fill の直前(:4450-4467)。`spawnBlock(now, allowedTiers)` が非 null なら**新規 dispatch を全停止**(monitor/reconcile は動く)。2 種: `all-cooling`(全有効 tier 冷却中 — `parkUntil` に最早 reset)/ `none-allowed`(owner が全 tier OFF — 期限なし、escalation を 1 回上げる :4348-4370)。enter-edge のみ log(`spawnBlockSig`)。解除も edge で log(:4463-4467)。詳細は 04 章。
 
-### 4.3 selectDispatch — 6 ゲート(:509-572)
+### 4.3 selectDispatch — 7 ゲート
 
 キュー順は `sortTodos`(:418 → `sortByPriority`: 実効優先度(静的 + aging)→ boardOrder → createdAt)。各候補に:
 
@@ -149,6 +149,7 @@ fill の直前(:4450-4467)。`spawnBlock(now, allowedTiers)` が非 null なら*
 | ③ | CONTENT | :562-563 | title+notes の正規化キー(`contentKey` :433 — NUL 区切り :437-441)が active work / 先行 pick と重複したらスキップ |
 | ④ | FILE | :564-565 | `files:` / `ファイル:` 指令行で**宣言された**ファイル(`declaredFiles` :457 — opt-in、散文中のパスは対象外)が claim 済みなら保留(同一ファイル作業の直列化) |
 | ⑤ | DEPENDS | :566 | `dependsOn` の**実在する未 done** 前提がある間は保留(:526-529)。削除済み/typo の id は「満たされた」扱い — 永久 stuck にしない |
+| ⑦ | CONTENT REQUIRED | `hasCompletionConditions` | **内容(notes)が空のカードは配らない**(2026-09-11 追加)。⚠ 実測の事故: 補給官が積んだ2枚を**8秒後**に司令官が worker へ配布し、**完了条件が書かれる前**に着手した。原因は書き手のミスではなく**同梱の補給官手順書自体**が「先に題名だけ `add` → 後で notes を PUT」と書いていたこと(skills/supply/SKILL.md step 4 — 同じ変更で一括書き込みに修正)。指示は安全装置ではないので、不変条件はここに置いた。**捨てずに保留** — 内容が入れば次の周回で拾う。**手動の「実行」は対象外**(押すこと自体が「今の内容で配れ」という表明)。保留中のカードはジャーナルに1行(held 集合の変化時のみ)+ カード詳細に理由が出る |
 
 "active work" = doing 列 ∪ **review 列**(promote 済みでも未統合の branch は競合面)∪ counted workers(:536-543)。pick するたび claim 集合が育つので、同一 pass 内の衝突も防がれる(:567-569)。純関数(IO なし)。
 

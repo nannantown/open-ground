@@ -2366,7 +2366,14 @@ export const BoardModule = ({
                     )}
                     <p className="text-meta leading-relaxed text-ink-faint">
                       {!(detailTask.notes ?? '').trim()
-                        ? t('board.run.needsContent')
+                        ? // ⚠ UNDER SWARM THIS IS NOT JUST ADVICE (2026-09-11).
+                          // An empty body means the engine's dispatch gate ⑦
+                          // holds the card, so the hint must say that and not
+                          // merely 「内容を書くと実行できます」 — the owner's
+                          // accident was a card taken 8s after creation, and the
+                          // fix makes the opposite state (a card that sits)
+                          // something they need explained.
+                          t(swarmVisible ? 'board.run.needsContentSwarm' : 'board.run.needsContent')
                         : swarmVisible
                           ? t('board.run.hintWorker')
                           : t('board.run.hint')}

@@ -22,7 +22,9 @@ import type { ProjectTask, SpawnSwarmWorkerResponse } from '@/lib/types'
 // branch ends up as) rather than git.
 
 const card = (over: Partial<ProjectTask> & { id: string }): ProjectTask =>
-  ({ title: `card ${over.id}`, done: false, boardColumn: 'todo', ...over }) as ProjectTask
+  // A COMPLETE card by default — dispatch gate ⑦ (hasCompletionConditions)
+  // holds a card with an empty body, which is not what these tests are about.
+  ({ title: `card ${over.id}`, notes: 'completion conditions', done: false, boardColumn: 'todo', ...over }) as ProjectTask
 
 const engineLiteral = (path: string) =>
   ({

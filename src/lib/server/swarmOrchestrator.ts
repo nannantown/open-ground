@@ -619,6 +619,25 @@ export const isTodoCard = (t: ProjectTask): boolean =>
  *  (An undefined column never folds to 'review', so the explicit check suffices.) */
 export const isReviewCard = (t: ProjectTask): boolean => t.boardColumn === 'review'
 
+/** Does this card carry the COMPLETION CONDITIONS a worker needs — i.e. is its
+ *  `notes` body non-empty?
+ *
+ *  ⚠ THE ACCIDENT THIS EXISTS FOR (owner report, 2026-09-11). The supply officer
+ *  queued two cards; autopilot dispatched BOTH to workers 8 seconds later, before
+ *  the 完了条件 had been written. The workers started on a title alone. This was
+ *  not a mistake by the writer — the SHIPPED supply procedure said to `add` the
+ *  title first and fill `notes` in a second write (skills/supply/SKILL.md step
+ *  4), so every queued card passed through a window where it was dispatchable
+ *  and incomplete. The procedure is fixed too, but an instruction is not a
+ *  guard: any writer (a human typing into the Board's 未着手 column included)
+ *  can leave a card title-only for a moment, and the engine ticks every 3s.
+ *
+ *  So the invariant lives HERE, in the queue gate: a card with no body is not
+ *  work, it is a placeholder. The owner's manual 実行 button is deliberately
+ *  unaffected — pressing it IS the statement "dispatch this as it stands". */
+export const hasCompletionConditions = (t: ProjectTask): boolean =>
+  (t.notes ?? '').trim().length > 0
+
 /** Dispatch queue order. Delegates to the shared {@link sortByPriority} (in
  *  src/lib/boardPriority.ts — one source of truth with the Board UI) so the
  *  engine pulls cards by effective priority FIRST (static priority + aging:
@@ -688,7 +707,7 @@ export const declaredFiles = (t: ProjectTask): Set<string> => {
   return out
 }
 
-/** The next cards to dispatch this pass. Queue order (sortTodos), gated by SIX
+/** The next cards to dispatch this pass. Queue order (sortTodos), gated by SEVEN
  *  independent rules so the engine never starts unsafe parallel work:
  *    ① COLUMN  — only `todo` cards are ever candidates. blocked / doing / review /
  *       done are filtered out here (the gate lives in this function, not just the
@@ -711,6 +730,12 @@ export const declaredFiles = (t: ProjectTask): Set<string> => {
  *       not yet `done` is held until that prerequisite lands, so the supply
  *       officer's "B before A" ordering is honored. An absent (deleted) prereq
  *       id is treated as satisfied — it never strands a card forever.
+ *    ⑦ CONTENT REQUIRED — a card with an EMPTY body ({@link hasCompletionConditions})
+ *       is never dispatched: it is a card being written, not a card to work on
+ *       (owner report 2026-09-11 — two cards dispatched 8s after creation, before
+ *       their 完了条件 existed). Held, not dropped: the moment the body lands the
+ *       card is picked on the next pass, and the manual 実行 button bypasses this
+ *       gate by design.
  *  "Active work" = the doing column ∪ the review column ∪ the counted workers
  *  (dispatchedIds resolved against `tasks`). REVIEW is included because a promoted
  *  worker's branch is still UNMERGED while it sits in review (integration is a
@@ -771,6 +796,9 @@ export const selectDispatch = (
     //   improvement points, but NONE of them spawn a worker without explicit owner
     //   sign-off. A human-authored card (no selfSupplyKey) is unaffected.
     if (card.selfSupplyKey && !card.selfSupplyApproved) continue
+    // ⑦ CONTENT REQUIRED (owner report 2026-09-11) — a card whose body is empty
+    //   is a placeholder, not work. See hasCompletionConditions for the accident.
+    if (!hasCompletionConditions(card)) continue
     const k = contentKey(card)
     if (k && claimedContent.has(k)) continue // ③ duplicate content
     const files = Array.from(declaredFiles(card))
@@ -2179,6 +2207,11 @@ export interface ProjectEngine {
    *  (上がった/下がった) instead of a 3s heartbeat that would churn the 200-line ring
    *  buffer. Optional (a fresh engine has no prior decision). In-memory only. */
   lastScaleSig?: string
+  /** Signature of the todo cards currently HELD for an empty body (gate ⑦,
+   *  2026-09-11). Journalled on the EDGE only: the pass runs every 3s and a
+   *  card can sit unfinished for minutes, so logging per tick would bury the
+   *  journal the owner is told to grep. In-memory only. */
+  incompleteHeldSig?: string
   /** QUOTA PARK (card 0add9d30) — epoch ms of the earliest reset while every
    *  ENABLED model tier is cooling (swarmAllowedModels.spawnBlock), mirrored here
    *  ONLY so the dashboard can show the deadline — the table itself lives in
@@ -8863,6 +8896,26 @@ export const runDispatchPass = async (
   // same-file / duplicate / dep-blocked todos out), then DYNAMICALLY scale the
   // target to that backlog instead of always filling to MAX (card ea369937).
   const dispatchable = selectDispatch(tasks, countedIds, ORCHESTRATOR_MAX_WORKERS)
+  // SAY WHY A CARD IS SITTING (gate ⑦, 2026-09-11). A card held for an empty
+  // body looks exactly like a card nobody has reached yet, and the owner's first
+  // question after this fix is "why is my card not moving?" — so the engine
+  // names them, once per change of the held set (never per 3s tick).
+  const heldIncomplete = todos.filter(
+    (t) => !countedIds.has(t.id) && t.abandoned !== true && !hasCompletionConditions(t),
+  )
+  const heldSig = heldIncomplete.map((t) => t.id).sort().join(',')
+  if (heldSig !== (engine.incompleteHeldSig ?? '')) {
+    engine.incompleteHeldSig = heldSig
+    if (heldIncomplete.length) {
+      logLine(
+        engine,
+        'info',
+        `内容(完了条件)が空のカード ${heldIncomplete.length} 件は自動では配りません — 内容を書けば次の周回で拾います: ` +
+          heldIncomplete.map((t) => shorten(t.title ?? '')).join(' / '),
+        'dispatch',
+      )
+    }
+  }
   const target = computeTargetWorkers({
     liveWorkers: live,
     dispatchableTodos: dispatchable.length,

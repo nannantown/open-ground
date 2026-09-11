@@ -118,6 +118,8 @@ const seedCard = async (task: Partial<ProjectTask> & { id: string }): Promise<vo
   await mutateProjectData(proj, (data) => {
     data.tasks.push({
       title: 'fix the thing',
+      // Complete by default: dispatch gate ⑦ holds a body-less card.
+      notes: 'completion conditions',
       done: false,
       createdAt: new Date(0).toISOString(),
       boardColumn: 'todo',

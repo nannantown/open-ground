@@ -328,6 +328,9 @@ const wakeFake = (): {
 const todoCard = (id: string, over: Partial<ProjectTask> = {}): ProjectTask => ({
   id,
   title: `card ${id}`,
+  // Complete by default: dispatch gate ⑦ (hasCompletionConditions) holds a card
+  // whose body is empty, and these tests are about git/worktree behaviour.
+  notes: 'completion conditions',
   done: false,
   createdAt: `2026-06-24T00:00:0${id.length}Z`,
   boardColumn: 'todo',

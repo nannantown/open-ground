@@ -56,6 +56,9 @@ const T0 = 1_700_000_000_000
 const mk = (over: Partial<ProjectTask>): ProjectTask => ({
   id: 'x',
   title: 't',
+  // Complete by default: dispatch gate ⑦ (hasCompletionConditions) holds a card
+  // with an empty body, which would mask the self-supply gate ⑥ under test.
+  notes: 'completion conditions',
   done: false,
   createdAt: '2026-01-01T00:00:00Z',
   boardColumn: 'todo',

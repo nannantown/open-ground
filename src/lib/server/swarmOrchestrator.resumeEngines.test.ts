@@ -375,7 +375,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
       // the freeze is broken — record that. One todo card, so the pass WOULD spawn.
       fetchTasks: async () => {
         if (!reconcileResolved) fetchedBeforeReconcileResolved = true
-        return [{ id: 'card-1', title: 'freeze me', boardColumn: 'todo' } as never]
+        return [{ id: 'card-1', title: 'freeze me', notes: 'completion conditions', boardColumn: 'todo' } as never]
       },
       moveToDoing: async () => true,
       isAlive: () => true,
@@ -723,7 +723,7 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
     const spy = spawnSpy()
     const deps = liveDeps({
       spawnWorker: spy.fn,
-      fetchTasks: async () => [{ id: 'card-1', title: 'resume me', boardColumn: 'todo' } as never],
+      fetchTasks: async () => [{ id: 'card-1', title: 'resume me', notes: 'completion conditions', boardColumn: 'todo' } as never],
     })
     await resumeEngines(deps, {
       listProjectPaths: async () => [projA],
@@ -738,7 +738,7 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
     expect(spy.calls[0].resumeSessionId).toBe(ENTRY.sessionId)
     const state = await getOrchestratorState(
       projA,
-      liveDeps({ fetchTasks: async () => [{ id: 'card-1', title: 'x', boardColumn: 'todo' } as never] }),
+      liveDeps({ fetchTasks: async () => [{ id: 'card-1', title: 'x', notes: 'completion conditions', boardColumn: 'todo' } as never] }),
     )
     expect(state.workers.filter((x) => x.taskId === 'card-1')).toHaveLength(1)
   })
@@ -788,7 +788,7 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
       },
       fetchTasks: async () => [
         { id: 'card-1', title: 'resume me', boardColumn: 'doing' } as never,
-        { id: 'card-2', title: 'terminator', boardColumn: 'todo' } as never,
+        { id: 'card-2', title: 'terminator', notes: 'completion conditions', boardColumn: 'todo' } as never,
       ],
       recoverCard: async (_p, taskId, column) => {
         recoveredCards.push({ taskId, column })

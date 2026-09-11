@@ -56,6 +56,7 @@
 | 症状 | 直行先 |
 |---|---|
 | worker が動かない / 消えた / 心拍が古く見える | 02 章(§4 heartbeatAt 凍結は 0711 根治済み、§6 worktree 削除の全経路) |
+| **カードを積んだのに自動で配られない / 未着手のまま動かない** | 01 章 **§4.3 ゲート⑦**(2026-09-11) — **内容(完了条件)が空のカードは配らない**。ジャーナルに「内容(完了条件)が空のカード N 件は自動では配りません」が1行出る。内容を書けば次の周回で拾う。急ぐならカード詳細の「実行」(手動はゲート対象外)。0.11.106 より前は逆の事故が起きた(空のカードが8秒で配布され、完了条件なしで着手) |
 | **カフェ等でネットに繋いだのに司令官が「待機中」のまま動かない** | 03 章 **§5.9**(2026-09-02) — 圏外中の声かけは保留(予算を燃やさない)、復帰の立ち上がりで予算リセット+即声かけ。帯は「オフライン待ち」。0.11.103 より前の版では圏外の声かけが「無視」として課金され予算が尽きて沈黙する(手動復旧 = Swarm タブ → マネージャー → 「状況」) |
 | **上限(週次含む)が明けても worker が復活しない / カードは「実行中」なのに稼働 0 / 実行中カードの詳細に実行ボタンが出る** | 01 章 **§7.4d**(2026-09-01) — unowned な作業途中カードは `collectUnownedDoing` が 30 秒猶予ののち todo へ回収(quota-parked 卓は停止+salvage 込み)、上限明けは冷却テーブルが自動で解く。ドロワーは union リスト(`GET /api/swarm/workers`)で生きた卓の画面 or 中断の説明を出す(0.11.102) |
 | **レビュー待ちのまま司令官が動かない**(review にカードが溜まる・`manager-woke` も鐘も来ない) | **03 章 §7-10**(2026-08-14 解決)。卓が**在るのに**統合しない形は `manager-unrevivable`(=「卓を*起動*できない」)には絶対に乗らないので、専用の鐘 **`manager-unresponsive`** で届く — 条件は「卓は idle か stall した active」×「nudge 予算を使い切った or 声かけ不能が3回連続」×「統合待ちが 40 分以上滞留」で、**待ちバッチ 1 本につき 1 回だけ**。同条件で **SDK 卓なら 1 度だけ閉じて立て直す**(PTY 卓はオーナーの端末なので決して閉じない)。滞留時計は `engine.json` の `reviewWaitingSince` に永続化されているので、**再起動しても 40 分窓は巻き戻らない**(以前は再起動のたびにゼロに戻り、これが同じ事象を何度も見逃した原因)。鐘も出ていないなら §7-11(自分で描き続けたまま固まった卓)を疑う |
@@ -97,7 +98,7 @@
 flowchart TB
   subgraph pass["runEnginePass — 3 秒 tick・pass は常に 1 本(passInFlight で二重は bail)— 01 章 §1・§3"]
     direction TB
-    D["<b>dispatch pass</b>(runExclusive)<br/>board 全読み → monitor(promote / stall / rate-limit / 回収)<br/>→ reconcile → SPAWN PARK(quota+mask ゲート)<br/>→ fill: selectDispatch 6 ゲート → 予約 → spawn"]
+    D["<b>dispatch pass</b>(runExclusive)<br/>board 全読み → monitor(promote / stall / rate-limit / 回収)<br/>→ reconcile → SPAWN PARK(quota+mask ゲート)<br/>→ fill: selectDispatch 7 ゲート → 予約 → spawn"]
     O["anomaly 検出 → FATAL 通知 → <b>overseer pass</b>(S1〜S11) → self-supply kick"]
     D --> O
   end
@@ -216,7 +217,7 @@ flowchart TB
 
 | 章・節 | 何が裏取りできるか |
 |---|---|
-| [01 章](01-engine-core.md) **§9** | 対象コミットの鮮度 / エンジン状態(GET orchestrator)/ journal の scale・park・dispatch 行 / server-truth worker 一覧 / 心拍ディスク直読 / 定数の実値 / 二重 dispatch 封鎖の現物 / selectDispatch 6 ゲート / monitor 飢餓の観測(journal 時刻の空白) / **カード単位トークン消費(`npm run swarm:audit` — 手数/束ね率/文脈max/出力。done 時の journal `consumption:` 行と同じ計量器)** / **日次燃費日報(毎日 09:00 ローカル・決定論 LLM ゼロ・ベル通知+劣化日のみ blocked 起票=todo 移動が承認。sentinel は `jq . ~/.openground/daily-fuel-report.json`)** |
+| [01 章](01-engine-core.md) **§9** | 対象コミットの鮮度 / エンジン状態(GET orchestrator)/ journal の scale・park・dispatch 行 / server-truth worker 一覧 / 心拍ディスク直読 / 定数の実値 / 二重 dispatch 封鎖の現物 / selectDispatch 7 ゲート / monitor 飢餓の観測(journal 時刻の空白) / **カード単位トークン消費(`npm run swarm:audit` — 手数/束ね率/文脈max/出力。done 時の journal `consumption:` 行と同じ計量器)** / **日次燃費日報(毎日 09:00 ローカル・決定論 LLM ゼロ・ベル通知+劣化日のみ blocked 起票=todo 移動が承認。sentinel は `jq . ~/.openground/daily-fuel-report.json`)** |
 | [02 章](02-worker-lifecycle.md) **§8** | repo キー導出 / 全 worker のディスク心拍一覧 / workers API との突き合わせ(凍結の確認)/ worktree 実在確認 / promote 条件の手動再現(rev-list)/ dirty 判定 / 停止・削除・RESTART・手動 dispatch の実操作 |
 | [03 章](03-integration-review.md) **§6** | reviews[] の現在値 / conflict 表示の真因区別(journal)/ automerge route の 404 確認(撤去ピン)/ resolve(blocked・todo)/ **diff サイズ測定(凍結境界 22〜34KB との突合)** / classify の手動再現 / verify・review worktree 残骸 / カード 58335c7f の本文 |
 | [04 章](04-quota-models.md) **§10** | mask がソース・bundle に入っているか / 定数の現在値 / センサー書込箇所が 3 つだけ(worker arm / reviewer arm / 層Eプローブ) / spawn 経路の fail-closed / **launchTier(唯一の真実)** / 手動 cool・uncool の実験 / **冷却 file(`jq . ~/.openground/swarm-quota.json`)の読み方**(⚠ `server.log` は存在しない=偽陰性) / **壁の有無は `claude --model <tier> -p` のプローブ**(`/usage` では fable 単独枯渇は見えない — engine は層E(§5.8)が spawn 直前に同じプローブを自動で叩く) / 層Eの6経路配線 grep / ケーススタディの一次痕跡 |

@@ -162,10 +162,28 @@ curl -s -X POST $OG/api/swarm/manager/say -H 'content-type: application/json' \
      swarmWorkerRegistry/swarmJanitor/server/routes/swarm/server/routes/project), require
      "update relevant docs/commander/ section (or note why not)". Structural changes also
      require the matching docs/MAP.md update.
-4. **Push to Board:todo**: `POST $OG/api/project/tasks` `add` (title, end of todo) →
-   `GET /api/project` → find card → fill `notes`(+`priority` if urgent/high) →
-   `PUT /api/project` with the GET's `updatedAt` (CAS). Dedupe-check via `GET /api/project`
-   on todo first. Read back to confirm.
+4. **Push to Board:todo — ONE WRITE, complete card.** Dedupe-check via
+   `GET /api/project` on todo first, then write the card WITH its completion
+   conditions in a single `PUT /api/project` (append your card object to the
+   GET's `tasks`, send the GET's `updatedAt` as the CAS token). Read back to
+   confirm.
+
+   ⚠ **Never create a card and fill `notes` afterwards.** This step used to say
+   `add` (title only) → GET → fill notes → PUT, and on 2026-09-11 that window
+   cost real work: autopilot dispatched two cards **8 seconds** after creation,
+   so the workers started from a title with no completion conditions. The
+   engine now refuses to dispatch a card whose body is empty (selectDispatch
+   gate ⑦), which contains the damage — but a card you leave half-written is a
+   card that sits in `todo` doing nothing, and the owner has to ask why.
+
+   Minimum card object: `{ id: <uuid>, title, notes, done: false,
+   createdAt: <ISO>, boardColumn: 'todo' }` (+ `priority` when urgent/high).
+   `notes` MUST carry the observable completion conditions — that is the whole
+   point of the card.
+
+   If you cannot finish the card yet (you still need an answer from the user),
+   write it with `boardColumn: 'blocked'` and move it to `todo` once it is
+   complete. A blocked card is never dispatched, by design.
 5. **Report 1 line/card**: "Queued to Board:todo → ⟨title⟩ (priority: X)." Nothing more —
    dispatching is the commander's job.
 
@@ -193,8 +211,11 @@ Only the HTTP API. Base URL from the auto-injected "OPEN GROUND context" card:
 | Deprioritize | `POST $OG/api/project/tasks` body `{path, setColumn:[{"id":"<full UUID>","column":"blocked"}]}` |
 | Revive blocked card | same, `"column":"todo"` (resets rework counter) |
 
-**notes + priority**: `add` only takes a title — set via `GET /api/project` →
-`PUT /api/project` with the GET's `updatedAt` (CAS). Always read back to confirm.
+**notes + priority**: `add` only takes a TITLE, so it cannot produce a complete
+card — prefer one `PUT /api/project` carrying the finished card (see step 4; the
+GET's `updatedAt` is the CAS token). Always read back to confirm. A card with an
+empty `notes` is held by the engine's dispatch gate ⑦ and will sit in `todo`
+until you finish it.
 
 `priority`: `'urgent'|'high'|'normal'|'low'` (urgency via priority, not position — engine
 pulls by effective priority, static + age-based escalation, so urgent-but-last-queued is
