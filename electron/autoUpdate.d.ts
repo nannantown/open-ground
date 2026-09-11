@@ -34,6 +34,30 @@ export const INSTALL_WATCHDOG_MS: number
  *  module comment for the 2026-09-11 "Restart now does nothing" defect. */
 export function eagerSquirrelHandoff(platform: string, settingEnabled: boolean): boolean
 
+/** How long to wait for the OS installer to stage a downloaded update. */
+export const STAGE_WAIT_MS: number
+
+/** Does this platform's OS installer have to STAGE the update before the app can
+ *  quit into it? macOS only (Squirrel.Mac unpacks + verifies asynchronously). */
+export function installStagingRequired(platform: string): boolean
+
+/** May the forked server be torn down right now — i.e. will the quit be
+ *  immediate? 'staging' means wait instead, with the app left whole. */
+export function installReadiness(platform: string, staged: boolean): 'ready' | 'staging'
+
+/** Wait until the OS installer reports the update staged. Resolves true when
+ *  staged, false on timeout. Re-checks after subscribing so a staged-in-the-gap
+ *  edge is never missed. */
+export function waitForInstallStaged(deps: {
+  isStaged: () => boolean
+  onStaged: (cb: () => void) => (() => void) | void
+  timers?: {
+    setTimeout?: (fn: () => void, ms: number) => unknown
+    clearTimeout?: (h: unknown) => void
+    timeoutMs?: number
+  }
+}): Promise<boolean>
+
 /** Injectable side effects of the "Restart now" sequence. */
 export interface ApplyDownloadedUpdateDeps {
   /** Flip the module-level isQuitting flag (so health waits bail / 'exit' is treated

@@ -445,6 +445,21 @@ On macOS that was both wrong and load-bearing — see the next box.)
 > through `eagerSquirrelHandoff()` — the helper was never the part that broke,
 > the call site was.
 
+> **Wait for the OS installer; never tear the app down to wait (0.11.108).**
+> Pinning the flag above moves staging to download time, so a click is *usually*
+> instant — but a user who clicks within seconds of the dialog appearing still
+> arrives before Squirrel has finished unpacking, and the mandatory
+> teardown-first ordering then produced an unusable window that would not quit,
+> for as long as unpacking took. Staging is therefore **observed, not guessed**:
+> `electron.autoUpdater` (the native updater MacUpdater drives) emits
+> `update-downloaded` when the update is staged, so `applyUpdateWhenStaged` waits
+> on that with the app **whole — server alive, window usable** — and quits the
+> instant it lands. The wait is visible (OS toast + indeterminate dock bar) and
+> bounded by `STAGE_WAIT_MS`; on timeout the `install-not-ready` dialog says the
+> app is fine, because it is. `installReadiness()` is the pure decision, and a
+> source pin asserts `applyDownloadedUpdate` — which performs the teardown — has
+> exactly ONE call site and that it sits inside the gate.
+
 > **Never let an install fail silently.** Both sightings of this defect
 > (2026-06-25, 2026-09-11) presented identically to the user: a button that did
 > nothing. `applyDownloadedUpdate` therefore arms a **watchdog before** calling

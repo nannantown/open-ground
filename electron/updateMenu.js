@@ -335,6 +335,33 @@ function updateDialogText(lang, kind, opts) {
             defaultId: 1,
             cancelId: 1,
           }
+    case 'install-not-ready':
+      // The OTHER half of the 2026-09-11 report: the user pressed restart while
+      // macOS was still unpacking the update, and waited. Nothing was torn down
+      // (that is the point — see installReadiness), so unlike 'install-stuck'
+      // the app is perfectly fine; the honest statement is "not yet", not
+      // "broken". Never imply they have to do something drastic.
+      return ja
+        ? {
+            message: 'まだ更新の準備が終わりませんでした。',
+            detail:
+              'macOS 側の準備に時間がかかっています。アプリはそのまま使えます — 何も壊れていません。\n\n' +
+              'しばらくしてからもう一度「再起動」を選ぶか、急ぐならリリースページからインストーラを' +
+              'ダウンロードして上書きしてください。',
+            buttons: ['リリースページを開く', '閉じる'],
+            defaultId: 1,
+            cancelId: 1,
+          }
+        : {
+            message: 'The update is not ready yet.',
+            detail:
+              'macOS is still preparing it. The app keeps working as it is — nothing is broken.\n\n' +
+              'Try "Restart" again in a little while, or download the installer from the release ' +
+              'page if you would rather not wait.',
+            buttons: ['Open release page', 'Close'],
+            defaultId: 1,
+            cancelId: 1,
+          }
     case 'install-stuck':
       // THE SILENCE THIS BREAKS (2026-09-11). "Restart now" handed the update to
       // electron-updater and the app then did not quit — on macOS quitAndInstall

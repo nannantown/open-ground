@@ -101,12 +101,14 @@ export type UpdateDialogKind =
   | 'downloaded'
   | 'download-failed'
   | 'install-stuck'
+  | 'install-not-ready'
 
 export interface UpdateDialogText {
   message: string
   detail: string
-  /** Present only for 'downloaded' (Restart now / Later), 'download-failed' and
-   *  'install-stuck' (Open release page / Close). */
+  /** Present only for 'downloaded' (Restart now / Later) and the three failure
+   *  kinds 'download-failed' / 'install-stuck' / 'install-not-ready'
+   *  (Open release page / Close). */
   buttons?: string[]
   defaultId?: number
   cancelId?: number

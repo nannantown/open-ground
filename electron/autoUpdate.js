@@ -84,6 +84,97 @@ function hasLiveForkedChildren(handles) {
   )
 }
 
+/** How long to wait for the OS installer to STAGE a downloaded update before
+ *  giving up and saying so. Generous: the app ships unpacked (`asar: false`, so
+ *  Squirrel.Mac unzips and code-signature-verifies tens of thousands of files
+ *  rather than one archive), and a slow disk makes that minutes, not seconds.
+ *  Waiting costs nothing here — the app stays fully usable throughout. */
+const STAGE_WAIT_MS = 5 * 60 * 1000
+
+/**
+ * Pure: does this platform's OS installer have to STAGE the update before the
+ * app is able to quit into it?
+ *
+ * macOS only. Squirrel.Mac fetches the zip (from electron-updater's local proxy
+ * server), unpacks it and verifies its signature ASYNCHRONOUSLY; `quitAndInstall()`
+ * can only quit once that has landed. On Windows/Linux electron-updater runs the
+ * installer from inside quitAndInstall itself, so there is nothing to wait for.
+ *
+ * @param {string} platform — process.platform
+ * @returns {boolean}
+ */
+function installStagingRequired(platform) {
+  return platform === 'darwin'
+}
+
+/**
+ * Pure: may we tear the forked server down RIGHT NOW?
+ *
+ * ⚠ WHY THIS EXISTS (owner, 2026-09-11, the second half of the same report).
+ * Pinning `autoInstallOnAppQuit` true (eagerSquirrelHandoff) moves the staging
+ * work to download time, so by the time a user reads the dialog and clicks it is
+ * usually done. USUALLY. Click within a few seconds of the dialog appearing and
+ * staging is still running — and the old sequence tore the back-end down first
+ * regardless, so the user got a window that could not be used and would not
+ * quit, for however long unpacking took, with nothing on screen saying why.
+ *
+ * So the teardown is gated on readiness instead of guessed at: 'staging' means
+ * WAIT, with the app whole and usable, and quit the instant the installer is
+ * ready. Nothing is destroyed in order to wait.
+ *
+ * @param {string} platform
+ * @param {boolean} staged — has the OS installer reported the update staged?
+ * @returns {'ready' | 'staging'}
+ */
+function installReadiness(platform, staged) {
+  if (!installStagingRequired(platform)) return 'ready'
+  return staged === true ? 'ready' : 'staging'
+}
+
+/**
+ * Wait until the OS installer reports the update staged.
+ *
+ * Event-driven with a bounded fallback, and — the part worth a test — it
+ * re-checks `isStaged()` AFTER subscribing, because the event can land in the
+ * gap between the first check and the subscription, and a missed edge here would
+ * mean waiting out the whole timeout on an update that is ready.
+ *
+ * @param {{
+ *   isStaged: () => boolean,
+ *   onStaged: (cb: () => void) => (() => void) | void,
+ *   timers?: { setTimeout?: Function, clearTimeout?: Function, timeoutMs?: number },
+ * }} deps
+ * @returns {Promise<boolean>} true = staged, false = timed out
+ */
+function waitForInstallStaged(deps) {
+  const { isStaged, onStaged, timers } = deps
+  if (isStaged()) return Promise.resolve(true)
+  const set = (timers && timers.setTimeout) || setTimeout
+  const clear = (timers && timers.clearTimeout) || clearTimeout
+  const ms = timers && Number.isFinite(timers.timeoutMs) ? timers.timeoutMs : STAGE_WAIT_MS
+  return new Promise((resolve) => {
+    let settled = false
+    let timer
+    let unsubscribe = () => {}
+    const settle = (v) => {
+      if (settled) return
+      settled = true
+      clear(timer)
+      try {
+        unsubscribe()
+      } catch {
+        /* listener already gone — nothing to undo */
+      }
+      resolve(v)
+    }
+    const off = onStaged(() => settle(true))
+    if (typeof off === 'function') unsubscribe = off
+    timer = set(() => settle(false), ms)
+    // Close the subscribe race: staged between the check above and the listener.
+    if (isStaged()) settle(true)
+  })
+}
+
 /** How long after `quitAndInstall()` a still-running app counts as a FAILED
  *  install. Generous on purpose: on the happy path the process is gone in well
  *  under a second, and the slowest legitimate case (Squirrel.Mac unpacking a
@@ -196,7 +287,11 @@ function applyDownloadedUpdate(deps) {
 
 module.exports = {
   INSTALL_WATCHDOG_MS,
+  STAGE_WAIT_MS,
   eagerSquirrelHandoff,
+  installStagingRequired,
+  installReadiness,
+  waitForInstallStaged,
   hasLiveForkedChildren,
   applyDownloadedUpdate,
 }

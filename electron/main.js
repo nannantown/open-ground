@@ -47,6 +47,8 @@ const {
 } = require('./selfUpdate')
 const {
   eagerSquirrelHandoff,
+  installReadiness,
+  waitForInstallStaged,
   hasLiveForkedChildren,
   applyDownloadedUpdate,
 } = require('./autoUpdate')
@@ -1965,6 +1967,19 @@ let downloadedUpdate = null
 let downloadedUpdateAt = 0
 // Guard against two manual checks racing two dialogs.
 let manualCheckInFlight = false
+// ── The OS installer's own staging state (macOS) ────────────────────────────
+// electron-updater hands a downloaded zip to Squirrel.Mac, which fetches,
+// unpacks and signature-verifies it ASYNCHRONOUSLY; only after that can
+// quitAndInstall() actually quit. `electron.autoUpdater` IS that native updater
+// (the same object MacUpdater drives), so its 'update-downloaded' is the one
+// honest signal for "the quit will be immediate". Listening is side-effect free
+// — we never call the native updater ourselves.
+let nativeUpdaterHandle = null
+let squirrelStaged = false
+// One apply at a time: the dialog can be re-opened from the menu while a staging
+// wait is in flight, and two waits racing two teardowns is not a thing to allow.
+let applyInFlight = false
+
 // True while a download the app ANNOUNCED (the manual check's "downloading in
 // the background" dialog) is in flight — the one case where a later 'error'
 // must surface as a dialog instead of dying in stdout (2026-08-13). Background
@@ -2040,15 +2055,7 @@ async function maybeAutoApplyUpdate() {
     clearInterval(autoApplyTimer)
     autoApplyTimer = null
   }
-  await applyDownloadedUpdate({
-    setQuitting: (v) => {
-      isQuitting = v
-    },
-    shutdownServerChild,
-    quitAndInstall: () =>
-      autoUpdaterHandle ? autoUpdaterHandle.quitAndInstall() : app.quit(),
-    onStuck: () => reportInstallStuck(downloadedUpdate && downloadedUpdate.version),
-  }).catch(() => {})
+  await applyUpdateWhenStaged(downloadedUpdate && downloadedUpdate.version)
 }
 
 /** Arm the recurring evaluation after a download lands (idempotent). */
@@ -2085,6 +2092,102 @@ function showUpdateDialog(kind, opts) {
   })
 }
 
+/** Say that the restart they asked for is waiting on the OS — the whole point of
+ *  the readiness gate is that the app is still ALIVE while it waits, so the one
+ *  thing that must not happen is silence.
+ *
+ *  Deliberately NOT the swarm notification channel: those rows are the swarm's
+ *  needs-attention feed (and typed + labelled + translated as such), and "macOS
+ *  is unzipping" belongs in neither. Two main-process primitives that already
+ *  exist say it without inventing a contract: the dock/taskbar bar and an OS
+ *  toast. Both follow Settings.language like every other owner-facing string. */
+function notifyPreparingInstall(version) {
+  // > 1 is macOS's INDETERMINATE bar: "something is happening", without
+  // pretending to a percentage we do not have (Squirrel reports none).
+  setUpdateDockProgress(2)
+  const ja = updateDialogLanguage() === 'ja'
+  const named = version
+    ? `OPEN GROUND ${version}`
+    : ja
+      ? '新しいバージョン'
+      : 'A new version of OPEN GROUND'
+  showOsNotification(
+    'OPEN GROUND',
+    ja
+      ? `${named} の準備をしています。終わり次第、自動で再起動します — それまでは今のまま使えます。`
+      : `Preparing ${named}. It restarts itself as soon as that finishes — keep using the app until then.`,
+  )
+}
+
+/** Staging never finished. NOTHING was torn down, so the app is fine — say that,
+ *  and offer the manual route for someone who would rather not wait. */
+function reportInstallNotReady(version) {
+  console.error('[updater] the OS installer never staged the update — not applying')
+  setUpdateDockProgress(-1)
+  showUpdateDialog('install-not-ready', { version })
+    .then((res) => {
+      if (res.response === 0) void shell.openExternal(RELEASE_NOTES_URL).catch(() => {})
+    })
+    .catch(() => {})
+}
+
+/**
+ * Apply a downloaded update — but only once the OS installer can actually quit
+ * into it. THE ONLY route to applyDownloadedUpdate; both doors (the dialog's
+ * "Restart now" and the hands-free loop) come through here.
+ *
+ * ⚠ WHY THE GATE (owner, 2026-09-11). The teardown-before-quitAndInstall
+ * ordering is mandatory (0.11.8), so tearing down while macOS is still unpacking
+ * left a window that could not be used and would not quit, silently, for as long
+ * as unpacking took. Waiting costs nothing: during the wait the app is WHOLE —
+ * server alive, window usable — and it quits the instant staging lands.
+ */
+async function applyUpdateWhenStaged(version) {
+  if (applyInFlight) {
+    // A second press is not a second install; it is "did you hear me?".
+    notifyPreparingInstall(version)
+    return
+  }
+  applyInFlight = true
+  // Only WAIT when we can actually observe staging. A darwin build whose native
+  // handle failed to wire would otherwise sit out the whole timeout on an update
+  // that may well be ready — so fall through to the old behaviour (+ watchdog)
+  // rather than invent a delay.
+  if (nativeUpdaterHandle && installReadiness(process.platform, squirrelStaged) === 'staging') {
+    console.log('[updater] waiting for the OS installer to stage the update before tearing down')
+    notifyPreparingInstall(version)
+    const staged = await waitForInstallStaged({
+      isStaged: () => squirrelStaged,
+      onStaged: (cb) => {
+        nativeUpdaterHandle.once('update-downloaded', cb)
+        return () => {
+          try {
+            nativeUpdaterHandle.removeListener('update-downloaded', cb)
+          } catch {
+            /* handle went away with the updater — nothing to detach */
+          }
+        }
+      },
+    })
+    if (!staged) {
+      applyInFlight = false
+      reportInstallNotReady(version)
+      return
+    }
+  }
+  await applyDownloadedUpdate({
+    setQuitting: (v) => {
+      isQuitting = v
+    },
+    shutdownServerChild,
+    // Fall back to a plain quit if the handle is somehow gone: by this point the
+    // server child has already been torn down, so doing NOTHING would leave the
+    // user staring at a live window backed by a dead server.
+    quitAndInstall: () => (autoUpdaterHandle ? autoUpdaterHandle.quitAndInstall() : app.quit()),
+    onStuck: () => reportInstallStuck(version),
+  }).catch(() => {})
+}
+
 /**
  * The watchdog's voice: the app asked to restart-and-install and is STILL HERE.
  *
@@ -2115,25 +2218,11 @@ function promptRestartForUpdate(version) {
   return showUpdateDialog('downloaded', { version })
     .then((res) => {
       if (res.response !== 0) return
-      // Tear the forked server down FIRST, then quitAndInstall. Otherwise the
-      // before-quit handler preventDefault()s quitAndInstall's quit and replaces
-      // it with a plain app.quit() — the update downloads but is never applied, so
-      // "Restart now" appears to do nothing (observed 2026-06-25). Settling
-      // shutdownServerChild first leaves serverChild null/killed by the time
-      // quitAndInstall fires, so before-quit no longer intercepts it. The ordered
-      // sequence lives in electron/autoUpdate.js, locked by autoUpdate.test.ts.
-      applyDownloadedUpdate({
-        setQuitting: (v) => {
-          isQuitting = v
-        },
-        shutdownServerChild,
-        // Fall back to a plain quit if the handle is somehow gone: by this point
-        // the server child has already been torn down, so doing NOTHING would
-        // leave the user staring at a live window backed by a dead server.
-        quitAndInstall: () =>
-          autoUpdaterHandle ? autoUpdaterHandle.quitAndInstall() : app.quit(),
-        onStuck: () => reportInstallStuck(version),
-      }).catch(() => {})
+      // Everything about HOW this applies lives in applyUpdateWhenStaged: wait
+      // for the OS installer if it is not ready (without destroying anything),
+      // then tear the forked server down BEFORE quitAndInstall (mandatory — see
+      // electron/autoUpdate.js), then say so if the quit never happens.
+      void applyUpdateWhenStaged(version)
     })
     .catch(() => {})
 }
@@ -2249,6 +2338,21 @@ function initAutoUpdater() {
   }
   autoUpdaterHandle = autoUpdater
   autoUpdaterInit = 'ready'
+  // Observe the OS installer (macOS). This is the only trustworthy answer to
+  // "will quitAndInstall actually quit?" — see applyUpdateWhenStaged. Listening
+  // only; the native updater is never driven from here.
+  try {
+    if (process.platform === 'darwin') {
+      nativeUpdaterHandle = require('electron').autoUpdater
+      nativeUpdaterHandle.on('update-downloaded', () => {
+        squirrelStaged = true
+        console.log('[updater] the OS installer staged the update — a restart is now immediate')
+      })
+    }
+  } catch (err) {
+    nativeUpdaterHandle = null
+    console.warn('[updater] could not observe the OS installer:', err && err.message)
+  }
 
   // We drive the "apply" step ourselves (a dialog button), so disable the
   // built-in auto-install-on-quit — otherwise a downloaded update would also
@@ -2307,6 +2411,10 @@ function initAutoUpdater() {
     // Remember it: if the user picks "Later", the menu's manual check must offer
     // THIS restart instead of asking GitHub again about an update already on disk.
     downloadedUpdate = { version }
+    // A NEW download is not staged yet, whatever the last one managed. Safe to
+    // reset here: electron-updater emits this BEFORE handing the zip over, so
+    // the native 'update-downloaded' that flips the flag always comes after.
+    squirrelStaged = false
     // When it landed — the escalation below and the poll loop both age from this.
     // WHAT HANDS-FREE MEANS, and what it used to mean by accident.
     //

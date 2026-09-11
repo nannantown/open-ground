@@ -310,6 +310,7 @@ describe('updateDialogText', () => {
     'downloaded',
     'download-failed',
     'install-stuck',
+    'install-not-ready',
   ] as const
 
   it('every kind has non-empty copy in BOTH languages', () => {
@@ -322,7 +323,7 @@ describe('updateDialogText', () => {
     }
   })
 
-  it('only "downloaded", "download-failed" and "install-stuck" offer buttons, with safe defaults', () => {
+  it('only "downloaded" and the three failure kinds offer buttons, with safe defaults', () => {
     for (const lang of ['en', 'ja'] as const) {
       const downloaded = updateDialogText(lang, 'downloaded', { version: '0.12.0' })
       expect(downloaded.buttons).toHaveLength(2)
@@ -342,8 +343,19 @@ describe('updateDialogText', () => {
       expect(stuck.buttons).toHaveLength(2)
       expect(stuck.defaultId).toBe(0)
       expect(stuck.cancelId).toBe(1)
+      // Staging that has not finished is not a failure to escalate: the app is
+      // whole, so the DEFAULT is "Close" — unlike download-failed, where opening
+      // the release page is the only way forward.
+      const notReady = updateDialogText(lang, 'install-not-ready', { version: '0.12.0' })
+      expect(notReady.buttons).toHaveLength(2)
+      expect(notReady.defaultId).toBe(1)
+      expect(notReady.cancelId).toBe(1)
       for (const kind of KINDS.filter(
-        (k) => k !== 'downloaded' && k !== 'download-failed' && k !== 'install-stuck',
+        (k) =>
+          k !== 'downloaded' &&
+          k !== 'download-failed' &&
+          k !== 'install-stuck' &&
+          k !== 'install-not-ready',
       )) {
         expect(updateDialogText(lang, kind).buttons, `${lang}/${kind}`).toBeUndefined()
       }
@@ -374,6 +386,22 @@ describe('updateDialogText', () => {
     // And it must never imply data loss — the user's work is untouched.
     expect(en.detail).toMatch(/untouched|left/i)
     expect(ja.detail).toContain('残ります')
+  })
+
+  it('"install-not-ready" says nothing is broken — it is a WAIT, not a failure', () => {
+    // The distinction that matters to the reader: install-stuck happens after the
+    // back-end was torn down (the window is dead); install-not-ready happens with
+    // the app fully alive, because the readiness gate refused to tear anything
+    // down. Copy that blurred the two would send someone quitting a working app.
+    const en = updateDialogText('en', 'install-not-ready', { version: '0.11.108' })
+    expect(en.message).toMatch(/not ready yet/i)
+    expect(en.detail).toMatch(/keeps working|nothing is broken/i)
+    const ja = updateDialogText('ja', 'install-not-ready', { version: '0.11.108' })
+    expect(ja.detail).toContain('そのまま使えます')
+    expect(ja.detail).toContain('何も壊れていません')
+    // …and it must NOT tell them to quit, which is install-stuck's advice.
+    expect(en.detail).not.toMatch(/quit/i)
+    expect(ja.detail).not.toContain('終了して')
   })
 
   it('surfaces the real error text, and still says what to do when there is none', () => {

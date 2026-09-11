@@ -4,7 +4,11 @@ import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import {
   INSTALL_WATCHDOG_MS,
+  STAGE_WAIT_MS,
   eagerSquirrelHandoff,
+  installStagingRequired,
+  installReadiness,
+  waitForInstallStaged,
   hasLiveForkedChildren,
   applyDownloadedUpdate,
 } from '../../electron/autoUpdate'
@@ -321,14 +325,163 @@ describe('electron/main.js wiring — autoInstallOnAppQuit and the watchdog', ()
     for (const args of calls) expect(args).toContain('process.platform')
   })
 
-  it('both "apply the update" call sites carry the stuck-install watchdog', () => {
+  it('every "apply the update" call site carries the stuck-install watchdog', () => {
     // A silent no-op is the failure mode; onStuck is the only thing that speaks.
     const applyCalls = code.split('applyDownloadedUpdate({').slice(1)
-    expect(applyCalls.length, 'expected the dialog path and the hands-free path').toBe(2)
+    expect(applyCalls.length, 'no apply site found — update this guard, not the app').toBeGreaterThan(0)
     for (const call of applyCalls) {
       // Look only as far as the call's own closing brace-paren.
       const body = call.slice(0, call.indexOf('})'))
       expect(body).toContain('onStuck:')
     }
+  })
+
+  it('NOTHING applies an update without passing the readiness gate first', () => {
+    // The 2026-09-11 second half: tearing the back-end down while macOS is still
+    // unpacking leaves an unusable window that will not quit. applyDownloadedUpdate
+    // performs that teardown, so every route to it must come through
+    // applyUpdateWhenStaged — which waits, with the app whole, when not ready.
+    // A new "just apply it" shortcut is exactly the regression to catch here.
+    const gate = 'async function applyUpdateWhenStaged'
+    expect(code, 'the readiness gate is gone — this guard guards nothing').toContain(gate)
+    const applySites = Array.from(code.matchAll(/applyDownloadedUpdate\(\{/g)).map((m) => m.index ?? 0)
+    expect(applySites.length).toBe(1)
+    // …and that one site sits INSIDE the gate function.
+    const gateStart = code.indexOf(gate)
+    expect(applySites[0]).toBeGreaterThan(gateStart)
+    // Both doors (the dialog and the hands-free loop) call the gate.
+    expect(Array.from(code.matchAll(/applyUpdateWhenStaged\(/g)).length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('the readiness gate only waits when staging is OBSERVABLE', () => {
+    // A darwin build whose native-updater handle failed to wire would otherwise
+    // sit out the whole STAGE_WAIT_MS on an update that may well be ready.
+    const gateBody = code.slice(code.indexOf('async function applyUpdateWhenStaged'))
+    expect(gateBody).toMatch(/nativeUpdaterHandle && installReadiness\(/)
+  })
+})
+
+// ── The readiness gate (the second half of the 2026-09-11 report) ────────────
+// Pinning autoInstallOnAppQuit true moves staging to download time, so a click
+// is USUALLY instant. Click within seconds of the dialog and it is not — and the
+// old sequence tore the back-end down anyway, leaving a window that could not be
+// used and would not quit, silently, for as long as unpacking took.
+describe('installStagingRequired / installReadiness', () => {
+  it('macOS must stage before the app can quit; other platforms need not', () => {
+    expect(installStagingRequired('darwin')).toBe(true)
+    expect(installStagingRequired('win32')).toBe(false)
+    expect(installStagingRequired('linux')).toBe(false)
+  })
+
+  it('on macOS an UNSTAGED update means WAIT — never tear the back-end down', () => {
+    expect(installReadiness('darwin', false)).toBe('staging')
+    expect(installReadiness('darwin', true)).toBe('ready')
+  })
+
+  it('off macOS it is always ready — quitAndInstall runs the installer itself', () => {
+    expect(installReadiness('win32', false)).toBe('ready')
+    expect(installReadiness('linux', false)).toBe('ready')
+  })
+
+  it('a non-boolean staged flag is not "ready" (fail toward waiting, never toward a dead window)', () => {
+    expect(installReadiness('darwin', undefined as unknown as boolean)).toBe('staging')
+    expect(installReadiness('darwin', 'yes' as unknown as boolean)).toBe('staging')
+  })
+})
+
+describe('waitForInstallStaged', () => {
+  it('resolves immediately when already staged, without subscribing', async () => {
+    let subscribed = false
+    await expect(
+      waitForInstallStaged({
+        isStaged: () => true,
+        onStaged: () => {
+          subscribed = true
+          return () => {}
+        },
+      }),
+    ).resolves.toBe(true)
+    expect(subscribed).toBe(false)
+  })
+
+  it('resolves true when the OS reports staging, and unsubscribes', async () => {
+    let notify: (() => void) | null = null
+    let off = 0
+    const p = waitForInstallStaged({
+      isStaged: () => false,
+      onStaged: (cb) => {
+        notify = cb
+        return () => {
+          off += 1
+        }
+      },
+      timers: { setTimeout: () => null, clearTimeout: () => {}, timeoutMs: 1 },
+    })
+    notify!()
+    await expect(p).resolves.toBe(true)
+    // The listener is detached exactly once — a retained listener on a long-lived
+    // native updater would fire into a dead closure on the next download.
+    expect(off).toBe(1)
+  })
+
+  it('CLOSES THE SUBSCRIBE RACE: staged between the first check and the listener', async () => {
+    // The edge that would otherwise cost the whole timeout on a ready update:
+    // Squirrel finishes in the gap, so the event has already been emitted and
+    // will never be emitted again. Only the post-subscribe re-check catches it.
+    let staged = false
+    await expect(
+      waitForInstallStaged({
+        isStaged: () => staged,
+        onStaged: () => {
+          staged = true // the event landed while we were subscribing
+          return () => {}
+        },
+        timers: { setTimeout: () => null, clearTimeout: () => {}, timeoutMs: 1 },
+      }),
+    ).resolves.toBe(true)
+  })
+
+  it('resolves false on timeout, and never resolves twice', async () => {
+    let fireTimeout: (() => void) | null = null
+    let notify: (() => void) | null = null
+    const p = waitForInstallStaged({
+      isStaged: () => false,
+      onStaged: (cb) => {
+        notify = cb
+        return () => {}
+      },
+      timers: {
+        setTimeout: (fn: () => void) => {
+          fireTimeout = fn
+          return 'h'
+        },
+        clearTimeout: () => {},
+        timeoutMs: 1,
+      },
+    })
+    fireTimeout!()
+    await expect(p).resolves.toBe(false)
+    // A late native event must not re-settle (it would resolve a settled promise
+    // and, worse, suggest the wait succeeded after we already said it did not).
+    expect(() => notify!()).not.toThrow()
+  })
+
+  it('a missing unsubscribe is tolerated (the handle may already be gone)', async () => {
+    let notify: (() => void) | null = null
+    const p = waitForInstallStaged({
+      isStaged: () => false,
+      onStaged: (cb) => {
+        notify = cb
+        // returns void — no unsubscribe available
+      },
+      timers: { setTimeout: () => null, clearTimeout: () => {}, timeoutMs: 1 },
+    })
+    notify!()
+    await expect(p).resolves.toBe(true)
+  })
+
+  it('the default wait is long enough for a real unpack, and bounded', () => {
+    expect(STAGE_WAIT_MS).toBeGreaterThanOrEqual(60_000)
+    expect(STAGE_WAIT_MS).toBeLessThanOrEqual(15 * 60_000)
   })
 })
