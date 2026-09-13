@@ -1,11 +1,18 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { RotateCcw, RefreshCw } from 'lucide-react'
 import type { ClaudeUsage, UsageBreakdown, UsageSourceKind } from '@/lib/types'
 import type { MessageKey } from '@/i18n/messages'
 import { usageLevel, type UsageLevel } from '@/lib/usageThresholds'
+import { anchoredPopoverBox, type PopoverBox } from '@/lib/anchoredPopover'
 import { useT } from '@/i18n/I18nContext'
 
 const POLL_MS = 60_000
+
+/** The popover's fixed width. Kept as a number because the viewport clamp needs
+ *  it (anchoredPopoverBox) — the Tailwind class below is generated from it so the
+ *  two can never drift. */
+const POPOVER_W = 264
 
 // Gauge-fill colour per severity level: green until 80%, amber at 80%, red at
 // 100% (the "80%で黄・100%で赤" spec, centralised in usageThresholds).
@@ -44,6 +51,10 @@ export const UsageHud = () => {
   const [breakdown, setBreakdown] = useState<UsageBreakdown | null | undefined>(undefined)
   const aborter = useRef<AbortController | null>(null)
   const ref = useRef<HTMLDivElement>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  /** Client-space placement of the portaled popover; null while closed. */
+  const [box, setBox] = useState<PopoverBox | null>(null)
   // Re-render every 30s so the relative "resets in" / "updated" labels tick.
   const [, force] = useReducer((x: number) => x + 1, 0)
   useEffect(() => {
@@ -96,11 +107,39 @@ export const UsageHud = () => {
     }
   }, [open, breakdown])
 
+  // Measure the trigger and place the popover, re-measuring while it is open so
+  // a window resize cannot leave it hanging off an edge (the owner's report was
+  // exactly "it gets cut off"). useLayoutEffect: position before the browser
+  // paints, so the popover never appears in the wrong place for one frame.
+  useLayoutEffect(() => {
+    if (!open) {
+      setBox(null)
+      return
+    }
+    const place = () => {
+      const r = btnRef.current?.getBoundingClientRect()
+      if (!r) return
+      setBox(
+        anchoredPopoverBox(r, { width: window.innerWidth, height: window.innerHeight }, {
+          width: POPOVER_W,
+        }),
+      )
+    }
+    place()
+    window.addEventListener('resize', place)
+    return () => window.removeEventListener('resize', place)
+  }, [open])
+
   // Close the popover on outside-click / Escape.
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+      const target = e.target as Node
+      // The popover lives in a BODY PORTAL now, so it is not inside `ref` —
+      // checking only the trigger would close it on its own first click (and
+      // make the refresh button unclickable). Both subtrees count as "inside".
+      if (popRef.current?.contains(target)) return
+      if (ref.current && !ref.current.contains(target)) setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
     document.addEventListener('mousedown', onDown)
@@ -182,6 +221,7 @@ export const UsageHud = () => {
   return (
     <div ref={ref} className="relative">
       <button
+        ref={btnRef}
         type="button"
         onClick={() => setOpen((o) => !o)}
         title={tooltip}
@@ -225,8 +265,18 @@ export const UsageHud = () => {
         )}
       </button>
 
-      {open && (
-        <div className="absolute right-0 top-full z-30 mt-1.5 w-[264px] rounded-[3px] border border-line bg-bg-card p-3.5 text-ink shadow-card-hover">
+      {open && box && createPortal(
+        // BODY PORTAL at z-overlay-modal, not `absolute … z-30` inside the header
+        // (owner, 2026-09-13: inside a project the Board's supply dock — also
+        // z-30, later in the DOM — painted straight over this, so everything
+        // below its top edge was invisible). The project panel is ONE stacking
+        // context, so no z-index in here could have won; leaving it is the fix.
+        // `maxHeight` + overflow-y-auto is the other half: the 7-day breakdown
+        // makes this tall, and it must end in a scroll, never off the screen.
+        <div
+          ref={popRef}
+          style={{ right: box.right, top: box.top, maxHeight: box.maxHeight }}
+          className="fixed z-overlay-modal w-[264px] overflow-y-auto rounded-[3px] border border-line bg-bg-card p-3.5 text-ink shadow-card-hover">
           <div className="mb-2.5 flex items-baseline justify-between">
             <p className="label-cap text-ink-muted">{t('misc.usage.heading')}</p>
             {model && <span className="text-meta text-ink-subtle">{model}</span>}
@@ -326,7 +376,8 @@ export const UsageHud = () => {
           {pct != null && (
             <p className="mt-2 text-micro leading-relaxed text-ink-faint">{t('misc.usage.live')}</p>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )
