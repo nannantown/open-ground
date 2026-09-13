@@ -2844,6 +2844,12 @@ export type SwarmInfoEvent =
   /** Not a swarm event either (cf. 'session-limit'): the MACHINE has accumulated
    *  orphaned, un-killable processes. See stuckProcessWatch.ts + 07 章 §7. */
   | 'stuck-processes'
+  /** A worker declared ready while no commits exist anywhere the engine can see
+   *  (parent branch AND nested repos). Not promoted (a declaration is not a
+   *  proof), held un-nudged for a short grace, then parked in 'blocked'. Told at
+   *  first sight so finished-but-invisible work is never a silent stall again
+   *  (2026-09-13 — swarmOrchestrator.ts classifyWorker / READY_WITHOUT_WORK_GRACE_MS). */
+  | 'ready-without-work'
 
 /** The payload of a 'swarm-info' notification — the info-grade sibling of
  *  {@link SwarmFatalNotification}: same persisted-bell + OS-toast plumbing,

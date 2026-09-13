@@ -548,6 +548,71 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     expect(col('a')).toBe('blocked')
   })
 
+  it('NESTED REPO (2026-09-13): promotes a worker whose commits live in a linked worktree of a CHILD repo — parent branch at 0', async () => {
+    // The sns-hub incident, re-created with real git. The project is a parent
+    // folder; the worker does its work in a linked worktree of an INDEPENDENT
+    // child repo that it parks inside its own swarm worktree (`.child-wt`),
+    // commits there, and beats ready:true. The parent's swarm branch never
+    // moves. Before this fix: never promoted, nudged as a stall, finished work
+    // invisible for 26 minutes.
+    const { proj } = await setupRepo()
+    // An independent child repo with its own bare origin (origin/main resolvable).
+    const childOrigin = join(scratch, 'child.git')
+    const child = join(scratch, 'child')
+    await git(scratch, ['init', '--bare', '-b', 'main', childOrigin])
+    await git(scratch, ['init', '-b', 'main', child])
+    await git(child, ['config', 'user.email', 'dev@test'])
+    await git(child, ['config', 'user.name', 'Dev'])
+    await git(child, ['remote', 'add', 'origin', childOrigin])
+    await writeFile(join(child, 'README.md'), '# child\n')
+    await git(child, ['add', '-A'])
+    await git(child, ['commit', '-m', 'child base'])
+    await git(child, ['push', '-u', 'origin', 'main'])
+
+    const alive = new Set<string>()
+    const { col, boardDeps } = makeBoard([todoCard('a')])
+    let nestedWt = ''
+    const spawn = (async ({ hint }: { title: string; hint?: string }) => {
+      const wt = await createSwarmWorktree(proj, { hint })
+      const terminalId = `pty-${wt.branch}`
+      alive.add(terminalId)
+      // The worker's real deliverable: a linked worktree of the CHILD repo, one
+      // level under its own worktree, with one commit on a feature branch.
+      nestedWt = join(wt.worktree, '.child-wt')
+      await git(child, ['worktree', 'add', nestedWt, '-b', 'feat/port'])
+      await writeFile(join(nestedWt, 'port.ts'), 'export const ported = true\n')
+      await git(nestedWt, ['add', '-A'])
+      await git(nestedWt, ['commit', '-m', 'port IG metrics'])
+      return { terminalId, agentSessionId: 'sess', worktree: wt.worktree, branch: wt.branch }
+    }) as OrchestratorDeps['spawnWorker']
+    const deps: OrchestratorDeps & IntegrationDeps = {
+      ...defaultDeps(), // REAL countCommitsAhead + REAL countNestedCommits
+      ...boardDeps,
+      review: reviewClean,
+      spawnWorker: spawn,
+      isAlive: (w) => alive.has(w.terminalId!),
+      readHeartbeat: async () => ({ ready: true, blocked: false, at: new Date().toISOString() }),
+      killPty: () => {},
+    }
+    const engine = newEngine(proj)
+
+    await runDispatchPass(engine, deps) // dispatch → doing
+    expect(col('a')).toBe('doing')
+    const { worktree, branch } = engine.workers[0]
+    // The premise of the incident: the PARENT branch really is at 0…
+    expect(await deps.countCommitsAhead(proj, branch)).toBe(0)
+    // …and the nested scanner really does see the child's commit.
+    expect(await deps.countNestedCommits!(worktree)).toEqual({ commits: 1, repos: ['.child-wt'] })
+
+    await runDispatchPass(engine, deps) // monitor → promote
+    expect(col('a')).toBe('review')
+    const line = engine.log.find((l) => l.message.startsWith('promoted to review'))
+    expect(line?.message).toContain('.child-wt')
+    expect(line?.message).toContain('1 コミット')
+    // …and NOT the stall ladder: no nudge line, no reclaim.
+    expect(engine.log.some((l) => /stalled|nudged/.test(l.message))).toBe(false)
+  })
+
   it('(1)+(3) RECOVERS a crashed worker: REAL worktree torn down + card requeued, no zombie', async () => {
     const { proj } = await setupRepo()
     const alive = new Set<string>()

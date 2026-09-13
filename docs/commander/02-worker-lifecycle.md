@@ -450,8 +450,32 @@ dispatch ──> starting ──(心拍 or コミット or 25秒経過)──> r
 ### 5.2 promote 条件(`classifyWorker` — swarmOrchestrator.ts:1024-1034)
 
 ```
-promote = commitsAhead > 0 && ( ready || ( !alive && !blocked ) )
+hasWork = commitsAhead > 0 || nestedCommits > 0      # probeHasWork(2026-09-13〜)
+promote = hasWork && ( ready || ( !alive && !blocked ) )
 ```
+
+**【改訂 2026-09-13・入れ子リポの成果】** `hasWork` は親ブランチだけでなく **worker の
+worktree 直下(1 階層)にある別リポ / linked worktree のコミット**も数える
+(`defaultCountNestedCommits` — 各子リポを**その子リポ自身の trunk**(origin/HEAD → main)
+に対して `rev-list --count` し合算。symlink は追わない(node_modules は本体への symlink)。
+親の count が 0 のときだけ走る = 単一リポの通常 worker はコストゼロ)。実測の事故:
+`sns-hub`(独立 GitHub リポ 3 つを束ねる親フォルダ)の worker が親 worktree 直下に
+`.trending-wt` / `.figma-wt`(子リポの linked worktree)を作り各 1 コミット・`ready:true`
+を打ったが、親ブランチ 0 コミットのため promote されず **stall 扱いで 10 分 nudge → 「recovered
+after nudge」の往復**に落ち、完成品が 26 分放置された(補給官が manager/say で手動起動)。
+promote 行には `成果の所在: 入れ子リポ .trending-wt / .figma-wt に N コミット(親ブランチは 0)` が
+付く — 司令官の最初の一手 `git rev-list origin/main..<branch>` は 0 を返すので、これが無いと
+「統合するものが無い」に読める。
+
+**【同日・ready-without-work】** `ready && !hasWork && alive` は promote しない(戒 2 —
+宣言は証明ではない)が、**「まだ作業中」とも「事故で沈黙」とも別の判定** `readyWithoutWork` を
+返す。monitor はこれを (a) 初見で journal warn 1 行 + info 通知 `ready-without-work`(1 回だけ)、
+(b) `READY_WITHOUT_WORK_GRACE_MS`(3 分)は **nudge せず保持**(完了済み worker への Enter /
+「Continue.」は答えさせるだけで、それが事故の往復の正体)、(c) 超過で `recoverLost('ready-without-work')`
+→ **blocked**(理由文 `完了を申告したが成果のコミットが見つからない … 司令官の確認待ちとして停止`)。
+teardown の WIP 保全がコミット忘れをブランチに救う。猶予中に親 or 入れ子にコミットが現れれば
+そのまま promote(保持は刑ではない)。番人: `swarmOrchestrator.test.ts`「READY WITHOUT WORK」
++ 実 git `swarmOrchestrator.integration.test.ts`「NESTED REPO」。
 
 - `commitsAhead` = **branch ref が trunk より先行しているコミット数**(:3043 `defaultCountCommitsAhead`)。worktree ではなく共有 repo の branch ref で数えるので worktree 消滅後も判定可能。trunk はプロジェクトごとに解決(origin/main 固定ではない)
 - `ready` = 心拍ファイルの `readyToMerge === true`(:3100、`defaultReadHeartbeat` 内)

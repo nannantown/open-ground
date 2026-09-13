@@ -23,6 +23,8 @@ import {
   RATE_LIMIT_GRACE_MS,
   QUOTA_STOP_DEBOUNCE_MS,
   QUESTION_GRACE_MS,
+  READY_WITHOUT_WORK_GRACE_MS,
+  probeHasWork,
   classifyOutput,
   endsInRateLimit,
   RATE_LIMIT_TAIL_MAX,
@@ -274,6 +276,8 @@ const makeDeps = (init: {
   //   models a PERMANENTLY rejected Board write, the only way to walk a kept move past
   //   MOVE_STUCK_MAX_RETRIES (reviewFails above fails once, so it can never reach it)
   commits?: Map<string, number> // taskId → commits ahead of trunk
+  commitsUnknown?: Set<string> // taskIds whose parent count is UNREADABLE (countCommitsAhead → null)
+  nested?: Map<string, { commits: number; repos: string[] }> // taskId → commits in NESTED repos under its worktree
   heartbeats?: Map<string, HeartbeatSign> // taskId → heartbeat
   recoverFails?: Set<string> // taskIds whose FIRST recover (todo/blocked) move returns false
   recoverTodoFails?: Set<string> // taskIds whose recover-to-'todo' ALWAYS fails (a 'blocked'
@@ -312,6 +316,8 @@ const makeDeps = (init: {
   const occupied = new Set(init.occupied ?? [])
   const recoverTodoFails = new Set(init.recoverTodoFails ?? [])
   const commits = init.commits ?? new Map<string, number>()
+  const commitsUnknown = init.commitsUnknown ?? new Set<string>()
+  const nested = init.nested ?? new Map<string, { commits: number; repos: string[] }>()
   const heartbeats = init.heartbeats ?? new Map<string, HeartbeatSign>()
   const outputs = init.outputs ?? new Map<string, number>()
   const screens = init.screens ?? new Map<string, string>()
@@ -385,7 +391,11 @@ const makeDeps = (init: {
       }
       return true
     },
-    countCommitsAhead: async (_path, branch) => commits.get(idOf(branch)) ?? 0,
+    countCommitsAhead: async (_path, branch) =>
+      commitsUnknown.has(idOf(branch)) ? null : (commits.get(idOf(branch)) ?? 0),
+    // Keyed by the fake worktree `/wt/<taskId>` (see spawnWorker above).
+    countNestedCommits: async (worktree) =>
+      nested.get(worktree.replace(/^\/wt\//, '')) ?? { commits: 0, repos: [] },
     readHeartbeat: async (_path, branch) => heartbeats.get(idOf(branch)) ?? null,
     // Keyed by workerKey (terminalId for a PTY worker — byte-identical to the old
     // fake — sdkSessionId for an SDK one), so SDK-runtime workers can be driven
@@ -867,6 +877,188 @@ describe('classifyWorker — the conservative DONE judgement', () => {
     expect(
       classifyWorker(probe({ alive: true, commitsAhead: 0, heartbeat: { ready: false, blocked: false } }), false).stage,
     ).toBe('running')
+  })
+})
+
+// ── 2026-09-13: work that lives in a NESTED repo, and a ready with nothing behind it ──
+// The sns-hub incident: a parent-folder project whose worker committed in linked
+// worktrees of two CHILD repos parked inside its own worktree, beat ready:true,
+// and was never promoted (the parent branch was at 0), then nudged as a stall
+// for ten minutes. Finished work sat unnoticed for 26 minutes.
+describe('classifyWorker — nested-repo work and the ready-without-work verdict', () => {
+  const probe = (over: Partial<WorkerProbe> = {}): WorkerProbe => ({
+    alive: true,
+    commitsAhead: 0,
+    heartbeat: null,
+    ...over,
+  })
+  const ready = { ready: true, blocked: false }
+
+  it('probeHasWork counts commits in nested repos, absent ⇒ 0 (old literals keep their meaning)', () => {
+    expect(probeHasWork(probe())).toBe(false)
+    expect(probeHasWork(probe({ commitsAhead: 1 }))).toBe(true)
+    expect(probeHasWork(probe({ nestedCommits: 1 }))).toBe(true)
+    expect(probeHasWork(probe({ nestedCommits: 0 }))).toBe(false)
+  })
+
+  it('THE INCIDENT: ready + parent branch 0 + commits in a nested repo ⇒ promoted', () => {
+    const v = classifyWorker(probe({ commitsAhead: 0, nestedCommits: 2, nestedRepos: ['.trending-wt'], heartbeat: ready }), true)
+    expect(v).toEqual({ promote: true, stage: 'done' })
+  })
+
+  it('a DEAD worker with nested commits and no blocker is promoted too (same rule as parent commits)', () => {
+    const v = classifyWorker(probe({ alive: false, commitsAhead: 0, nestedCommits: 1, heartbeat: null }), true)
+    expect(v).toEqual({ promote: true, stage: 'done' })
+  })
+
+  it('ready with NO commits anywhere ⇒ NOT promoted (戒2), but NAMED ready-without-work', () => {
+    // The floor stays: a declaration is not a proof. What changes is that the
+    // monitor can now tell this apart from "still working" and "silent".
+    const v = classifyWorker(probe({ commitsAhead: 0, nestedCommits: 0, heartbeat: ready }), true)
+    expect(v.promote).toBe(false)
+    expect(v.stage).toBe('running')
+    expect(v.readyWithoutWork).toBe(true)
+  })
+
+  it('the verdict is ONLY for a live, ready, empty worker — never for anything else', () => {
+    // alive + no ready-sign: ordinary working — no verdict.
+    expect(classifyWorker(probe({ commitsAhead: 0, heartbeat: null }), true).readyWithoutWork).toBeUndefined()
+    // nested work present: promoted, no verdict.
+    expect(classifyWorker(probe({ nestedCommits: 1, heartbeat: ready }), true).readyWithoutWork).toBeUndefined()
+    // dead + ready + empty: the crash path owns it (recoveryColumn's ready⇒blocked).
+    expect(classifyWorker(probe({ alive: false, heartbeat: ready }), true).readyWithoutWork).toBeUndefined()
+  })
+})
+
+describe('recoveryColumn — nested work is work; ready-without-work parks', () => {
+  const p = (over: Partial<WorkerProbe> = {}): WorkerProbe => ({
+    alive: false,
+    commitsAhead: 0,
+    heartbeat: null,
+    ...over,
+  })
+
+  it('a crash whose commits live in a NESTED repo parks in blocked (twin guard), never todo', () => {
+    // A fresh dispatch knows nothing about the child repo's branch — exactly the
+    // "never auto-redo work the engine can see" rule, one level down.
+    expect(recoveryColumn(p({ commitsAhead: 0, nestedCommits: 1 }), 0, 1)).toBe('blocked')
+  })
+
+  it("the 'ready-without-work' reason parks regardless of heartbeat or budget", () => {
+    expect(recoveryColumn(p({ heartbeat: null }), 0, 5, 'ready-without-work')).toBe('blocked')
+  })
+})
+
+describe('monitor — READY WITHOUT WORK: told once, held un-nudged, then parked (2026-09-13)', () => {
+  const T0 = Date.parse('2026-09-13T00:00:00Z')
+  const startedAt = new Date(T0).toISOString()
+  const w1 = () =>
+    worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt })
+  // A heartbeat that is ALREADY silent past the stall threshold: pre-fix this is
+  // precisely the worker the ladder nudged ("recovered after nudge").
+  const readyAtT0 = { ready: true, blocked: false, phase: 'done', at: startedAt }
+
+  it('first sight: a warn line naming the missing commits, NO nudge, the worker is kept', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      heartbeats: new Map([['a', readyAtT0]]),
+    })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    const line = engine.log.find((l) => l.message.includes('完了を申告しましたが'))
+    expect(line?.level).toBe('warn')
+    expect(line?.message).toContain('親ブランチ 0')
+    expect(line?.message).toContain('入れ子リポ 0')
+    // The old behaviour, asserted absent: no Enter/"Continue." at a finished worker.
+    expect(deps.nudged).toEqual([])
+    expect(deps.escalated).toEqual([])
+    expect(deps.recovered).toEqual([])
+    expect(deps.reviews).toEqual([])
+    expect(engine.workers).toHaveLength(1)
+    expect(engine.readyWithoutWork?.has(workerKey(w1()))).toBe(true)
+  })
+
+  it('is told ONCE — a second pass inside the grace adds no second line', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      heartbeats: new Map([['a', readyAtT0]]),
+    })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 2)
+    expect(engine.log.filter((l) => l.message.includes('完了を申告しましたが'))).toHaveLength(1)
+    expect(deps.nudged).toEqual([])
+  })
+
+  it("past the grace: PARKED in blocked with reason 'ready-without-work' — not 'stall'", async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      heartbeats: new Map([['a', readyAtT0]]),
+    })
+    const first = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, first)
+    await runDispatchPass(engine, deps, first + READY_WITHOUT_WORK_GRACE_MS + 1)
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }])
+    expect(deps.teardownOpts.map((o) => o.reason)).toEqual(['ready-without-work'])
+    expect(deps.nudged).toEqual([])
+    const stop = engine.log.find((l) => l.message.includes('司令官の確認待ちとして停止'))
+    expect(stop?.level).toBe('warn')
+    expect(engine.log.some((l) => /stalled — reclaimed/.test(l.message))).toBe(false)
+    expect(engine.readyWithoutWork?.size ?? 0).toBe(0)
+  })
+
+  it('nested commits appearing on a later pass PROMOTE it — the hold is not a sentence', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const nested = new Map<string, { commits: number; repos: string[] }>()
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      heartbeats: new Map([['a', readyAtT0]]),
+      nested,
+    })
+    const first = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, first) // held
+    expect(deps.reviews).toEqual([])
+    nested.set('a', { commits: 1, repos: ['.figma-wt'] }) // the child repo's commit lands
+    await runDispatchPass(engine, deps, first + 3_000)
+    expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(deps.recovered).toEqual([])
+    const line = engine.log.find((l) => l.message.startsWith('promoted to review'))
+    expect(line?.message).toContain('.figma-wt')
+    expect(engine.readyWithoutWork?.size ?? 0).toBe(0) // the hold was cleared by the promote
+  })
+
+  it('an UNREADABLE parent count is said so, not reported as a proven zero', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      heartbeats: new Map([['a', readyAtT0]]),
+      commitsUnknown: new Set(['a']),
+    })
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    const line = engine.log.find((l) => l.message.includes('完了を申告しましたが'))
+    expect(line?.message).toContain('読めず')
+    expect(line?.message).not.toContain('親ブランチ 0')
+    expect(deps.nudged).toEqual([])
+  })
+
+  it('the nested scan runs ONLY when the parent branch shows nothing', async () => {
+    // The cost bound: a normal single-repo worker with commits never pays for
+    // a directory scan.
+    const engine = newEngine({ workers: [w1()] })
+    let scans = 0
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      commits: new Map([['a', 2]]),
+      heartbeats: new Map([['a', readyAtT0]]),
+    })
+    deps.countNestedCommits = async () => {
+      scans += 1
+      return { commits: 0, repos: [] }
+    }
+    await runDispatchPass(engine, deps, T0 + 1_000)
+    expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(scans).toBe(0)
   })
 })
 

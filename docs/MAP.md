@@ -406,6 +406,7 @@
   ⚠ **蘇生の nudge(`defaultNudgeManager`)と混同しない** — あちらは ESC を先に送る破壊的な操作で、
   4本のゲート(10分/5分/10分/3回)はその破壊性の代償。ここを「遅いから」と短くするのは
   2026-07-18 の事故(生きた卓を3回蘇生し誤 fatal)の再発。正典 = commander/03 §2.3
+- **worker の「成果あり」は親ブランチ + worktree 直下の入れ子リポ**(`swarmOrchestrator.ts` `probeHasWork` / `defaultCountNestedCommits`、2026-09-13)。親フォルダ型プロジェクトの worker は子リポの linked worktree に成果を出すので、親だけ数えると完成品が stall に化ける。ready なのにどこにもコミットが無いときは `ready-without-work`(nudge せず 3 分保持 → blocked、初見で通知)。
 - **stall 判定の生存チャネルは 4 本**(すべて `swarmOrchestrator.ts` 内。①心拍 ②PTY 出力
   ③transcript/sub-agent mtime = `sessionAgentActivityAt`(2026-07-23) ④**実行中の背景タスク** =
   `sessionBackgroundTaskAt`(2026-07-27)。畳み込みは `lastActivityMs` / `classifyStall`、上限は

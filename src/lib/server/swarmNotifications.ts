@@ -249,6 +249,7 @@ const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
   // Also not a swarm event: the MACHINE is accumulating un-killable processes
   // (stuckProcessWatch.ts). Titled for what the owner sees, not the subsystem.
   'stuck-processes': 'Machine — stuck processes are piling up (restart clears them)',
+  'ready-without-work': 'Swarm — a worker says done, but no commits were found (check where the work is)',
 }
 
 /** The OS toast (title + body) for an info event — same shape as the fatal one. */

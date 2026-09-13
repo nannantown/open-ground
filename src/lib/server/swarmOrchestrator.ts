@@ -63,6 +63,7 @@
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { readFile, readdir, stat, lstat, symlink, unlink, mkdir } from 'fs/promises'
+import type { Dirent } from 'fs'
 import { join, resolve, dirname, basename } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { canonicalize } from './canonicalize'
@@ -581,6 +582,14 @@ export const QUOTA_STOP_DEBOUNCE_MS = 60_000
  *  slot until the 90-min runaway ceiling. Generous (the owner may be away) but far
  *  under MAX_EXEC_MS; the question stays in the escalations inbox after parking, and
  *  'blocked' is the human lane (no auto-respawn re-asking). Adjustable via env. */
+/** How long a worker that declared ready WITHOUT any visible commits is held
+ *  (un-nudged) before its card is parked in 'blocked'. Short on purpose: workers
+ *  are told to commit BEFORE declaring ready, so a ready with nothing behind it
+ *  is either a forgotten commit (the teardown's WIP salvage rescues that) or work
+ *  somewhere the engine cannot see — both want a human, not a wait. The commander
+ *  is told at FIRST sight; this only bounds the slot. (2026-09-13.) */
+export const READY_WITHOUT_WORK_GRACE_MS = 3 * 60 * 1000
+
 export const QUESTION_GRACE_MS = Math.min(
   envMinutesMs('OPENGROUND_SWARM_QUESTION_GRACE_MIN', 30, 5, 360),
   MAX_EXEC_MS - 60_000,
@@ -1203,9 +1212,27 @@ export interface WorkerProbe {
    *  there IS work" (because guessing zero there orphans a committed branch).
    *  Absent ⇒ false, so an older/handwritten probe literal keeps today's meaning. */
   commitsUnknown?: boolean
+  /** Commits found in NESTED repos inside the worker's worktree — git repos /
+   *  linked worktrees the worker created one level down (a parent folder that
+   *  bundles several independent repos gets its deliverables THERE, and the
+   *  parent's swarm branch stays at 0). Summed across repos, each measured
+   *  against its OWN resolved trunk (see {@link defaultCountNestedCommits}).
+   *  Absent ⇒ 0, so an older/handwritten probe literal keeps today's meaning.
+   *  (2026-09-13 — the sns-hub incident, see {@link classifyWorker}.) */
+  nestedCommits?: number
+  /** The nested repos those commits live in (directory names under the worktree),
+   *  display/journal only — so the commander is told WHERE to look. */
+  nestedRepos?: readonly string[]
   /** The worker's heartbeat sign, or null if it never wrote one. */
   heartbeat: HeartbeatSign | null
 }
+
+/** Is there integrable work ANYWHERE the engine can see — on the parent's swarm
+ *  branch, or in a nested repo under the worktree? The one definition both the
+ *  promote gate ({@link classifyWorker}) and the twin guard ({@link recoveryColumn})
+ *  read, so "work exists" can never mean two different things. */
+export const probeHasWork = (probe: WorkerProbe): boolean =>
+  probe.commitsAhead > 0 || (probe.nestedCommits ?? 0) > 0
 
 /** Coarse cause bucket for a dead worker's PTY exit — the only diagnosable trace
  *  left once a crash is reclaimed (2026-07 investigation: workers were observed
@@ -1321,13 +1348,31 @@ export const classifyWorkerExit = (
 export const classifyWorker = (
   probe: WorkerProbe,
   startupElapsed: boolean,
-): { promote: boolean; stage: OrchestratorWorkerStage } => {
+): { promote: boolean; stage: OrchestratorWorkerStage; readyWithoutWork?: true } => {
   const ready = probe.heartbeat?.ready === true
   const blocked = probe.heartbeat?.blocked === true
-  const hasWork = probe.commitsAhead > 0
+  // ⚠ WORK CAN LIVE IN A NESTED REPO (owner report, 2026-09-13). A project that is
+  // a parent folder bundling independent repos (sns-hub) gets its deliverables
+  // in linked worktrees the worker creates INSIDE its own worktree — one commit
+  // in each child repo, ZERO on the parent's swarm branch. The old gate read the
+  // parent count alone, so a worker that had finished, committed, and beat
+  // ready:true was "not done"; it then fell into the stall ladder, was nudged
+  // ("recovered after nudge" — the nudge made it answer, which reset the
+  // silence clock), and its finished work sat unnoticed for 26 minutes until
+  // the supply officer woke the commander by hand. probeHasWork folds the nested
+  // count in; the parent-only count stays exactly as it was for callers that
+  // want it (the twin guard names the parent branch specifically).
+  const hasWork = probeHasWork(probe)
   const promote = hasWork && (ready || (!probe.alive && !blocked))
   if (promote) return { promote: true, stage: 'done' }
   if (!probe.alive) return { promote: false, stage: 'running' }
+  // READY WITHOUT WORK — a live worker that DECLARED itself done while the engine
+  // can find no commits anywhere. The floor stays: a declaration is not a proof
+  // (戒2 — 00-INDEX), so it is NOT promoted. But it is not "still working" either,
+  // and treating it as an ordinary silent worker is exactly what made the
+  // incident invisible: nudges only make a finished worker talk. Named so the
+  // monitor can say so and park it, instead of poking it for ten minutes.
+  if (ready && !hasWork) return { promote: false, stage: 'running', readyWithoutWork: true }
   const working = hasWork || probe.heartbeat !== null || startupElapsed
   return { promote: false, stage: working ? 'running' : 'starting' }
 }
@@ -1346,6 +1391,12 @@ export type WorkerRecoveryReason =
   | 'runaway'
   | 'integration-wait'
   | 'rate-limit'
+  // 'ready-without-work' (2026-09-13): the worker declared ready while no commits
+  // exist anywhere the engine can see (parent branch AND nested repos). Held for
+  // READY_WITHOUT_WORK_GRACE_MS without nudging, then PARKED in 'blocked' — the
+  // human lane — with the commander told at first sight. Never a 'stall': a
+  // finished worker is silent on purpose.
+  | 'ready-without-work'
   // ('permission' died 2026-08-13 with the PTY worker runtime — the trust
   // dialog it parked on is a TUI frame an SDK session can never render.)
   | 'question'
@@ -1426,7 +1477,7 @@ export const recoveryColumn = (
   reason: WorkerRecoveryReason = 'crash',
 ): 'todo' | 'blocked' | 'review' => {
   if (reason === 'rate-limit') return 'todo'
-  if (reason === 'runaway' || reason === 'question') return 'blocked'
+  if (reason === 'runaway' || reason === 'question' || reason === 'ready-without-work') return 'blocked'
   // A worker's OWN blocked declaration outranks the integration-wait exemption.
   // The exemption exists to jump ONE rule — `heartbeat.ready ⇒ blocked` below,
   // which a 差し戻し'd worker still trips on its pre-差し戻し heartbeat (the 0718
@@ -1454,7 +1505,10 @@ export const recoveryColumn = (
   // reads 0 as "safe to requeue". In a repo whose trunk is neither origin/main nor
   // main that was EVERY worker on EVERY pass: a crashed worker's committed branch
   // was orphaned by the next dispatch and the work redone from zero.
-  if (probe.commitsAhead > 0 || probe.commitsUnknown === true) return 'blocked'
+  // …and NESTED-repo commits are work too (2026-09-13, probeHasWork): a crash whose
+  // deliverables sit in a child repo under the worktree has just as much to lose to
+  // a fresh dispatch that knows nothing about them.
+  if (probeHasWork(probe) || probe.commitsUnknown === true) return 'blocked'
   if (requeues >= maxRequeues) return 'blocked'
   return 'todo'
 }
@@ -2159,6 +2213,13 @@ export interface ProjectEngine {
    *  reads normal or the worker leaves the live set. Optional (older-build
    *  backfill). In-memory only. */
   questionWaits?: Map<string, { since: number }>
+  /** Per-worker (workerKey) first-seen clock of a READY-WITHOUT-WORK hold
+   *  ({@link classifyWorker}): `since` (epoch ms) the worker was first seen
+   *  declaring ready with no commits anywhere the engine can see. Drives the
+   *  "tell the commander once, hold un-nudged for READY_WITHOUT_WORK_GRACE_MS,
+   *  then park in 'blocked'" bound. Cleared on promote / park / ceiling.
+   *  Optional (older-build backfill). In-memory only. */
+  readyWithoutWork?: Map<string, { since: number }>
   /** Per-CARD (taskId) first-seen clock of the unowned-doing sweep
    *  ({@link collectUnownedDoing}): epoch ms the card was first observed in
    *  'doing' with no counted worker. Drives the grace that separates a dispatch
@@ -2284,6 +2345,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
       integrationWaitMs: new Map(),
       questionRaised: new Map(),
       questionWaits: new Map(),
+      readyWithoutWork: new Map(),
       unownedDoingSeen: new Map(),
       log: [],
       anomalies: [],
@@ -2324,6 +2386,7 @@ const getOrCreateEngine = (key: string): ProjectEngine => {
     engine.integrateInFlight ??= false
     engine.questionRaised ??= new Map()
     engine.questionWaits ??= new Map()
+    engine.readyWithoutWork ??= new Map()
     engine.selfSupply ??= initSelfSupplyRuntime()
     engine.overseer ??= initOverseerRuntime()
     engine.notified ??= new Set()
@@ -3058,6 +3121,12 @@ export interface OrchestratorDeps {
   /** `null` ⇒ git could not answer. NEVER read that as 0 — see
    *  {@link defaultCountCommitsAhead}. */
   countCommitsAhead: (projectPath: string, branch: string) => Promise<number | null>
+  /** Commits in NESTED repos one level under the worker's worktree, each measured
+   *  against its own trunk — where a parent-folder project's deliverables really
+   *  are (2026-09-13). Only consulted when the parent count is 0, so the common
+   *  case pays nothing. Optional so existing dep literals keep compiling; the
+   *  default scanner is used when absent. Any failure ⇒ 0 (no proof, no promote). */
+  countNestedCommits?: (worktree: string) => Promise<NestedWorkProbe>
   /** The worker's heartbeat sign for its branch, or null when it never wrote
    *  one / it's unreadable. Carries the display-only phase/note/at too. (Card②) */
   readHeartbeat: (
@@ -4727,6 +4796,70 @@ const defaultCountCommitsAhead = async (
     return Number.isFinite(n) && n > 0 ? n : 0
   }
   return null // every candidate trunk ref failed to verify
+}
+
+/** What {@link defaultCountNestedCommits} found: the summed commit count and the
+ *  nested repos (directory names under the worktree) that carry them. */
+export interface NestedWorkProbe {
+  commits: number
+  repos: string[]
+}
+
+/** Directory names never treated as a nested repo. `node_modules` is the shared
+ *  symlink to the main checkout (02 章 §2.3) — a symlink is skipped by the
+ *  Dirent check anyway, this just says so. */
+const NESTED_SCAN_SKIP = new Set(['.git', 'node_modules'])
+
+/**
+ * Count commits in NESTED repos one level under a worker's worktree.
+ *
+ * ⚠ THE INCIDENT THIS EXISTS FOR (owner report, 2026-09-13, v0.11.105–108). The
+ * project `sns-hub` is a parent folder bundling three independent GitHub repos.
+ * Its worker created linked worktrees of two of them INSIDE its own swarm
+ * worktree (`.trending-wt`, `.figma-wt`), committed once in each, and beat
+ * ready:true. The parent's swarm branch stayed at 0 commits, so
+ * {@link defaultCountCommitsAhead} — which measures ONLY that branch — answered
+ * 0, the promote gate held, and the worker was nudged as a stall instead.
+ *
+ * Bounded by design, because this runs inside the 3s monitor pass:
+ *   • ONE level deep (a worker parks its nested worktrees directly under its
+ *     own), and only when the parent count is already 0 (see the monitor) —
+ *     so a normal single-repo worker never pays for it;
+ *   • never follows symlinks (`Dirent.isDirectory()` is false for one, and
+ *     `node_modules` is a symlink into the main checkout — following it would
+ *     scan the whole project);
+ *   • each nested repo is measured against ITS OWN resolved trunk
+ *     ({@link commitBasePreference}: origin/HEAD → main), exactly like the parent;
+ *   • every failure is a 0, never a throw — this is EVIDENCE FOR a promotion,
+ *     and "no proof" is the harmless direction for that gate.
+ */
+const defaultCountNestedCommits = async (worktree: string): Promise<NestedWorkProbe> => {
+  const none: NestedWorkProbe = { commits: 0, repos: [] }
+  let entries: Dirent[]
+  try {
+    entries = await readdir(worktree, { withFileTypes: true })
+  } catch {
+    return none // worktree gone / unreadable — no nested evidence
+  }
+  let commits = 0
+  const repos: string[] = []
+  for (const e of entries) {
+    if (!e.isDirectory() || NESTED_SCAN_SKIP.has(e.name)) continue
+    const dir = join(worktree, e.name)
+    if (!isGitRepoRoot(dir)) continue // a `.git` FILE (linked worktree) counts — existsSync
+    const bases = await commitBasePreference(dir)
+    for (const base of bases) {
+      if ((await gitOut(dir, ['rev-parse', '--verify', '--quiet', base])) === null) continue
+      const out = await gitOut(dir, ['rev-list', '--count', `${base}..HEAD`])
+      const n = out === null ? 0 : Number.parseInt(out, 10)
+      if (Number.isFinite(n) && n > 0) {
+        commits += n
+        repos.push(e.name)
+      }
+      break // the first trunk ref that verifies is the measure — same as the parent
+    }
+  }
+  return { commits, repos }
 }
 
 /** Repo-key cache (projectPath → swarm heartbeat dir key). The key is stable for
@@ -6940,6 +7073,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   spawnWorker: defaultSpawnWorker,
   isAlive: (w) => runtimeOf(w).isAlive(w),
   countCommitsAhead: defaultCountCommitsAhead,
+  countNestedCommits: defaultCountNestedCommits,
   readHeartbeat: defaultReadHeartbeat,
   recoverCard: defaultRecoverCard,
   recoverWorker: defaultRecoverWorker,
@@ -7101,7 +7235,9 @@ const monitorWorkers = async (
               ? 'quota-stopped — requeued'
               : reason === 'question'
                 ? 'free-text question unanswered too long — parked'
-                : 'lost'
+                : reason === 'ready-without-work'
+                  ? '完了を申告したが成果のコミットが見つからない(親ブランチ 0・入れ子リポ 0)— 司令官の確認待ちとして停止'
+                  : 'lost'
     let teardown: {
       removed: boolean
       reason?: string
@@ -7537,11 +7673,25 @@ const monitorWorkers = async (
     } catch {
       /* treat as null */
     }
+    // NESTED-repo evidence (2026-09-13) — consulted ONLY when the parent branch
+    // shows nothing (0 or unreadable), so the single-repo common case never pays
+    // for the scan. See defaultCountNestedCommits for the incident.
+    let nestedCommits = 0
+    let nestedRepos: string[] = []
+    if (commitsAhead === 0 && w.worktree && deps.countNestedCommits) {
+      try {
+        const nested = await deps.countNestedCommits(w.worktree)
+        nestedCommits = nested.commits
+        nestedRepos = nested.repos
+      } catch {
+        /* no nested evidence — the harmless direction for a promote gate */
+      }
+    }
+    const probe: WorkerProbe = { alive, commitsAhead, commitsUnknown, heartbeat, nestedCommits, nestedRepos }
 
-    let { promote, stage } = classifyWorker(
-      { alive, commitsAhead, commitsUnknown, heartbeat },
-      sinceStart(w.startedAt) >= STARTUP_GRACE_MS,
-    )
+    const verdict = classifyWorker(probe, sinceStart(w.startedAt) >= STARTUP_GRACE_MS)
+    let { promote, stage } = verdict // reassigned by the 差し戻し suppression below
+    const readyWithoutWork = verdict.readyWithoutWork === true
 
     // 差し戻し後の re-promote 抑制(re-promote race 対策): a worker the integrate stage just sent
     // review→doing carries `reworkAt`; its heartbeat FILE still says readyToMerge:true (the engine
@@ -7571,7 +7721,15 @@ const monitorWorkers = async (
         moved = false
       }
       if (moved) {
-        logLine(engine, 'info', `promoted to review: ${shorten(w.taskTitle)} → ${w.branch}`, 'promote')
+        engine.readyWithoutWork?.delete(workerKey(w))
+        // When the deliverables are NOT on the parent branch, say where they are —
+        // the commander's first move is `git rev-list origin/main..<branch>`, which
+        // answers 0 here, and without this line that reads as "nothing to review".
+        const nestedNote =
+          commitsAhead === 0 && nestedCommits > 0
+            ? ` — 成果の所在: 入れ子リポ ${nestedRepos.join(' / ')} に ${nestedCommits} コミット(親ブランチは 0)`
+            : ''
+        logLine(engine, 'info', `promoted to review: ${shorten(w.taskTitle)} → ${w.branch}${nestedNote}`, 'promote')
         // 着地台帳 (swarm-landed.json): the DURABLE twin of that promote line —
         // the journal ring dies with the process, the weekly landed KPI must
         // not. Awaited (one small JSON write) and fail-open by contract, so a
@@ -7665,7 +7823,7 @@ const monitorWorkers = async (
         await recoverLost(
           w,
           card,
-          { alive, commitsAhead, commitsUnknown, heartbeat },
+          probe,
           pendingReason,
           pendingReason === 'integration-wait' ? pending?.shape : undefined,
         )
@@ -7797,6 +7955,7 @@ const monitorWorkers = async (
       engine.nudges.delete(workerKey(w))
       engine.questionRaised?.delete(workerKey(w))
       engine.questionWaits?.delete(workerKey(w))
+      engine.readyWithoutWork?.delete(workerKey(w))
       engine.integrationWaitMs?.delete(workerKey(w))
       const ranMin = Math.floor((now - startedMs) / 60_000)
       const waitedMin = Math.floor(waitedMs / 60_000)
@@ -7940,12 +8099,59 @@ const monitorWorkers = async (
         await recoverLost(
           w,
           card,
-          { alive, commitsAhead, commitsUnknown, heartbeat },
+          probe,
           reason,
           reason === 'integration-wait' ? shape : undefined,
         )
       )
         next.push(w)
+      continue
+    }
+
+    // ── READY WITHOUT WORK (2026-09-13) — see classifyWorker ──────────────────
+    // A live worker that DECLARED itself done while no commits exist anywhere the
+    // engine can see. Not promoted (a declaration is not a proof — 戒2), but not
+    // treated as an accidentally-silent worker either: the incident's worker was
+    // nudged for ten minutes, answered each nudge ("recovered after nudge"), and
+    // so was never reclaimed and never promoted — a flap that hid finished work
+    // for 26 minutes. Here: tell the commander ONCE at first sight, hold the slot
+    // WITHOUT nudging for READY_WITHOUT_WORK_GRACE_MS (a late commit or a nested
+    // repo appearing on a later pass simply promotes it), then PARK in 'blocked'
+    // — the human lane, where the teardown's WIP salvage also rescues a forgotten
+    // commit onto the branch.
+    if (readyWithoutWork) {
+      engine.readyWithoutWork ??= new Map()
+      const key = workerKey(w)
+      const seen = engine.readyWithoutWork.get(key)
+      const where = commitsUnknown ? '親ブランチのコミット数を読めず' : '親ブランチ 0'
+      if (!seen) {
+        engine.readyWithoutWork.set(key, { since: now })
+        logLine(
+          engine,
+          'warn',
+          `worker が完了を申告しましたが、成果のコミットが見つかりません(${where}・入れ子リポ 0)— ` +
+            `${Math.round(READY_WITHOUT_WORK_GRACE_MS / 60_000)} 分は声をかけずに再確認し、それでも無ければ blocked に停めます: ` +
+            `${w.branch} (${shorten(w.taskTitle)})`,
+        )
+        void createSwarmInfoNotification({
+          event: 'ready-without-work',
+          projectPath: engine.path,
+          branch: w.branch,
+          taskTitle: w.taskTitle || undefined,
+          ...(card?.id ? { taskId: card.id } : {}),
+          detail: `worker が完了を申告しましたが、成果のコミットが見つかりません(${where}・入れ子リポ 0)。成果の所在を確認してください。`,
+        }).catch(() => {})
+      } else if (now - seen.since >= READY_WITHOUT_WORK_GRACE_MS) {
+        engine.readyWithoutWork.delete(key)
+        engine.nudges.delete(key)
+        if (await recoverLost(w, card, probe, 'ready-without-work')) next.push(w)
+        continue
+      }
+      // Held un-nudged: a finished worker is silent on purpose, and an Enter /
+      // "Continue." only makes it answer — the very flap that kept the incident's
+      // worker alive, un-reclaimed and un-promoted.
+      engine.nudges.delete(key)
+      next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
       continue
     }
 
@@ -8123,7 +8329,7 @@ const monitorWorkers = async (
         'warn',
         `worker quota-stopped — cooling the tier and requeueing the card (fail-fast; retry rides the cooling clock)${cooling}: ${w.branch} (${shorten(w.taskTitle)})`,
       )
-      if (await recoverLost(w, card, { alive, commitsAhead, commitsUnknown, heartbeat }, 'rate-limit')) next.push(w)
+      if (await recoverLost(w, card, probe, 'rate-limit')) next.push(w)
       continue
     }
 
@@ -8230,7 +8436,7 @@ const monitorWorkers = async (
         } else if (now - qw.since >= QUESTION_GRACE_MS) {
           engine.questionWaits.delete(workerKey(w))
           engine.questionRaised?.delete(workerKey(w))
-          if (await recoverLost(w, card, { alive, commitsAhead, commitsUnknown, heartbeat }, 'question')) next.push(w)
+          if (await recoverLost(w, card, probe, 'question')) next.push(w)
           continue
         }
         next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
@@ -8250,7 +8456,7 @@ const monitorWorkers = async (
       // A silent worker is reclaimed like a crash: recoveryColumn (via recoverLost)
       // sends a bare hang to 'todo' (one retry) or 'blocked' (budget spent), never
       // to review — a stall NEVER fakes progress.
-      if (await recoverLost(w, card, { alive, commitsAhead, commitsUnknown, heartbeat }, 'stall')) next.push(w)
+      if (await recoverLost(w, card, probe, 'stall')) next.push(w)
       continue
     }
     if (stall.action === 'escalate') {
