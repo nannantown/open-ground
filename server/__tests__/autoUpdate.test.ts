@@ -485,3 +485,70 @@ describe('waitForInstallStaged', () => {
     expect(STAGE_WAIT_MS).toBeLessThanOrEqual(15 * 60_000)
   })
 })
+
+describe('applyDownloadedUpdate — the pending-install marker (beforeInstall)', () => {
+  it('runs beforeInstall AFTER teardown + watchdog arming and BEFORE quitAndInstall', async () => {
+    const calls: string[] = []
+    await applyDownloadedUpdate({
+      setQuitting: () => calls.push('setQuitting') as unknown as void,
+      shutdownServerChild: async () => calls.push('teardown') as unknown as void,
+      quitAndInstall: () => calls.push('quitAndInstall') as unknown as void,
+      onStuck: () => {},
+      beforeInstall: () => calls.push('beforeInstall') as unknown as void,
+      timers: { setTimeout: () => (calls.push('armed'), null), watchdogMs: 1 },
+    })
+    // The marker must be on disk BEFORE the process can vanish inside quitAndInstall.
+    expect(calls).toEqual(['setQuitting', 'teardown', 'armed', 'beforeInstall', 'quitAndInstall'])
+  })
+
+  it('a beforeInstall that THROWS never blocks the install', async () => {
+    const calls: string[] = []
+    await applyDownloadedUpdate({
+      setQuitting: () => {},
+      shutdownServerChild: async () => {},
+      quitAndInstall: () => calls.push('quitAndInstall') as unknown as void,
+      beforeInstall: () => {
+        throw new Error('disk full')
+      },
+    })
+    expect(calls).toEqual(['quitAndInstall'])
+  })
+})
+
+describe('electron/main.js wiring — the updater has a memory (2026-09-13)', () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+  const main = readFileSync(join(repoRoot, 'electron/main.js'), 'utf8')
+  const code = main
+    .split('\n')
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+    .join('\n')
+
+  it('no updater line goes to the console alone — every one rides the file logger', () => {
+    // The exact defect: 17 `[updater]` lines that only a Terminal launch could read.
+    expect(code).not.toMatch(/console\.(log|error|warn)\((['`])\[updater\]/)
+    expect(code).toContain("makeUpdaterLogger({ path: updaterLogPath(), tag: 'updater' })")
+  })
+
+  it("electron-updater's own narrative is pointed at the same file", () => {
+    expect(code).toMatch(/autoUpdater\.logger = makeUpdaterLogger\(/)
+  })
+
+  it('the apply site writes the pending-install marker, and boot checks it before wiring the updater', () => {
+    const apply = code.slice(code.indexOf('applyDownloadedUpdate({'))
+    expect(apply.slice(0, apply.indexOf('})'))).toContain('beforeInstall:')
+    expect(code).toContain('writePendingInstall({ path: pendingInstallPath()')
+    const boot = code.indexOf('reportFailedInstallOnBoot()')
+    const init = code.indexOf('initAutoUpdater()')
+    expect(boot).toBeGreaterThan(-1)
+    expect(init).toBeGreaterThan(-1)
+    expect(boot).toBeLessThan(init)
+    expect(code).toContain("showUpdateDialog('install-failed'")
+  })
+
+  it('the OS installer\'s errors are logged, and a re-announced SAME version keeps its staged flag', () => {
+    expect(code).toMatch(/nativeUpdaterHandle\.on\('error'/)
+    // The desync: resetting squirrelStaged on every electron-updater
+    // 'update-downloaded' forgot a staging Squirrel will not repeat.
+    expect(code).toContain('downloadedUpdate.version !== version) squirrelStaged = false')
+  })
+})

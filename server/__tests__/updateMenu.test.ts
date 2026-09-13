@@ -311,6 +311,7 @@ describe('updateDialogText', () => {
     'download-failed',
     'install-stuck',
     'install-not-ready',
+    'install-failed',
   ] as const
 
   it('every kind has non-empty copy in BOTH languages', () => {
@@ -323,7 +324,7 @@ describe('updateDialogText', () => {
     }
   })
 
-  it('only "downloaded" and the three failure kinds offer buttons, with safe defaults', () => {
+  it('only "downloaded" and the failure kinds offer buttons, with safe defaults', () => {
     for (const lang of ['en', 'ja'] as const) {
       const downloaded = updateDialogText(lang, 'downloaded', { version: '0.12.0' })
       expect(downloaded.buttons).toHaveLength(2)
@@ -350,12 +351,19 @@ describe('updateDialogText', () => {
       expect(notReady.buttons).toHaveLength(2)
       expect(notReady.defaultId).toBe(1)
       expect(notReady.cancelId).toBe(1)
+      // Boot-time install failure: THREE buttons — the log is the point, so it is
+      // the default; the release page is the way on; Close cancels.
+      const installFailed = updateDialogText(lang, 'install-failed', { version: '0.11.110', from: '0.11.108' })
+      expect(installFailed.buttons).toHaveLength(3)
+      expect(installFailed.defaultId).toBe(0)
+      expect(installFailed.cancelId).toBe(2)
       for (const kind of KINDS.filter(
         (k) =>
           k !== 'downloaded' &&
           k !== 'download-failed' &&
           k !== 'install-stuck' &&
-          k !== 'install-not-ready',
+          k !== 'install-not-ready' &&
+          k !== 'install-failed',
       )) {
         expect(updateDialogText(lang, kind).buttons, `${lang}/${kind}`).toBeUndefined()
       }
@@ -402,6 +410,22 @@ describe('updateDialogText', () => {
     // …and it must NOT tell them to quit, which is install-stuck's advice.
     expect(en.detail).not.toMatch(/quit/i)
     expect(ja.detail).not.toContain('終了して')
+  })
+
+  it('"install-failed" names BOTH versions and carries the log tail', () => {
+    // The whole point: "we quit to install X and woke up as Y" plus the record.
+    const en = updateDialogText('en', 'install-failed', { version: '0.11.110', from: '0.11.108', logTail: 'ERR line' })
+    expect(en.message).toContain('0.11.110')
+    expect(en.message).toMatch(/not installed/i)
+    expect(en.detail).toContain('v0.11.108')
+    expect(en.detail).toContain('ERR line')
+    expect(en.detail).toContain('updater.log')
+    const ja = updateDialogText('ja', 'install-failed', { version: '0.11.110', from: '0.11.108', logTail: 'ERR line' })
+    expect(ja.message).toContain('入りませんでした')
+    expect(ja.detail).toContain('v0.11.108')
+    expect(ja.detail).toContain('ERR line')
+    // No tail ⇒ no dangling header.
+    expect(updateDialogText('en', 'install-failed', { version: '0.11.110' }).detail).not.toContain('log tail')
   })
 
   it('surfaces the real error text, and still says what to do when there is none', () => {

@@ -230,14 +230,17 @@ function manualCheckOutcome(args) {
  * true right now" and every detail answers "so what do I do".
  *
  * @param {'en' | 'ja'} lang
- * @param {'dev' | 'lockdown' | 'busy' | 'starting' | 'unavailable' | 'up-to-date' | 'downloading' | 'error' | 'downloaded' | 'download-failed' | 'install-stuck'} kind
- * @param {{ version?: string | null, error?: string | null }} [opts]
+ * @param {'dev' | 'lockdown' | 'busy' | 'starting' | 'unavailable' | 'up-to-date' | 'downloading' | 'error' | 'downloaded' | 'download-failed' | 'install-stuck' |
+ *   'install-not-ready' | 'install-failed'} kind
+ * @param {{ version?: string | null, error?: string | null, from?: string | null, logTail?: string | null }} [opts]
  * @returns {{ message: string, detail: string, buttons?: string[], defaultId?: number, cancelId?: number }}
  */
 function updateDialogText(lang, kind, opts) {
   const ja = lang === 'ja'
   const v = (opts && opts.version) || ''
   const err = (opts && opts.error) || ''
+  const from = (opts && opts.from) || ''
+  const logTail = (opts && opts.logTail) || ''
   const named = v ? `OPEN GROUND ${v}` : ja ? '新しいバージョン' : 'A new version of OPEN GROUND'
 
   switch (kind) {
@@ -334,6 +337,37 @@ function updateDialogText(lang, kind, opts) {
             buttons: ['Restart now', 'Later'],
             defaultId: 1,
             cancelId: 1,
+          }
+    case 'install-failed':
+      // Reached on BOOT, not on a click (electron/updaterLog.js checkPendingInstall):
+      // the previous run quit to install `version` and this run woke up as `from`.
+      // The OS installer's work happens after the app is gone, so this is the
+      // first moment the app can know — and the third sighting (2026-09-13) of
+      // "restart, come back on the old version, no explanation" is why it must
+      // say so here rather than re-show the "downloaded" dialog as if nothing
+      // happened. The log tail rides along so the owner can hand it over.
+      return ja
+        ? {
+            message: `${named} は入りませんでした。`,
+            detail:
+              `前回「今すぐ再起動」で入れ替えを始めましたが、起動してみると ${from ? `v${from}` : '前の版'} のままでした。` +
+              '入れ替えは macOS 側の処理で、その途中で止まっています。\n\n' +
+              '「ログを開く」で記録（~/.openground/updater.log）が見られます。急ぐならリリースページからインストーラを入れてください。' +
+              (logTail ? `\n\n— 記録の末尾 —\n${logTail}` : ''),
+            buttons: ['ログを開く', 'リリースページを開く', '閉じる'],
+            defaultId: 0,
+            cancelId: 2,
+          }
+        : {
+            message: `${named} was not installed.`,
+            detail:
+              `The last run quit to install it, but this run came back as ${from ? `v${from}` : 'the previous version'}. ` +
+              'The swap is done by macOS after the app exits, and it did not complete.\n\n' +
+              '"Open log" shows the record (~/.openground/updater.log). To move on now, install from the release page.' +
+              (logTail ? `\n\n— log tail —\n${logTail}` : ''),
+            buttons: ['Open log', 'Open release page', 'Close'],
+            defaultId: 0,
+            cancelId: 2,
           }
     case 'install-not-ready':
       // The OTHER half of the 2026-09-11 report: the user pressed restart while

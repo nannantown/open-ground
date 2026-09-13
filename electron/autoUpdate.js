@@ -250,17 +250,24 @@ function eagerSquirrelHandoff(platform, settingEnabled) {
  *    call (anything after it is unreachable on the happy path, where the process
  *    is already gone) and fires only in the world where the app is still alive.
  *
+ * 5. `beforeInstall` (optional) runs immediately before the install call — the
+ *    place to write the pending-install marker (electron/updaterLog.js) that
+ *    lets the NEXT boot notice the install did not happen. It runs after the
+ *    watchdog is armed and is wrapped: a marker that cannot be written must
+ *    never keep the update from being applied.
+ *
  * @param {{
  *   setQuitting: (v: boolean) => void,
  *   shutdownServerChild: () => Promise<unknown>,
  *   quitAndInstall: () => void,
  *   onStuck?: () => void,
+ *   beforeInstall?: () => void,
  *   timers?: { setTimeout?: Function, watchdogMs?: number },
  * }} deps
  * @returns {Promise<void>}
  */
 function applyDownloadedUpdate(deps) {
-  const { setQuitting, shutdownServerChild, quitAndInstall, onStuck, timers } = deps
+  const { setQuitting, shutdownServerChild, quitAndInstall, onStuck, beforeInstall, timers } = deps
   setQuitting(true)
   // Byte-for-byte the field-tested 0.11.8 fix: setQuitting → shutdownServerChild()
   // → (via .finally) quitAndInstall(). .finally runs the install even if teardown
@@ -280,6 +287,13 @@ function applyDownloadedUpdate(deps) {
       // Never be the reason the process stays alive: Electron's own event loop
       // keeps main running, so an unref'd timer still fires while the app does.
       if (handle && typeof handle.unref === 'function') handle.unref()
+    }
+    if (typeof beforeInstall === 'function') {
+      try {
+        beforeInstall()
+      } catch {
+        /* the marker is a diagnostic; the install is the point */
+      }
     }
     quitAndInstall()
   })

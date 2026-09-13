@@ -52,6 +52,19 @@ const {
   hasLiveForkedChildren,
   applyDownloadedUpdate,
 } = require('./autoUpdate')
+// The updater's MEMORY (2026-09-13): every updater line to ~/.openground/updater.log,
+// and a pending-install marker the next boot checks. See electron/updaterLog.js.
+const {
+  updaterLogPath,
+  pendingInstallPath,
+  makeUpdaterLogger,
+  tailUpdaterLog,
+  writePendingInstall,
+  checkPendingInstall,
+} = require('./updaterLog')
+// Our own updater lines. Mirrors to the console too, so a Terminal-launched
+// diagnosis still streams; the file is what survives a packaged launch.
+const ulog = makeUpdaterLogger({ path: updaterLogPath(), tag: 'updater' })
 const {
   AUTO_APPLY_POLL_MS,
   SAFETY_FETCH_TIMEOUT_MS,
@@ -1854,6 +1867,12 @@ async function start() {
     }
   }
 
+  // Did the LAST run quit to install an update that then did not happen? The OS
+  // installer works after the app is gone, so this — waking up and comparing
+  // versions — is the first moment the app can know. Before initAutoUpdater so
+  // the answer is on screen before the same "downloaded" dialog could reappear.
+  reportFailedInstallOnBoot()
+
   // Auto-update wiring (Fix #14). Only ever runs in a packaged build — in dev
   // (isPackaged=false) electron-updater would hit GitHub and log spurious
   // "cannot find update feed"/dev errors, so we never even require it there.
@@ -2047,10 +2066,10 @@ async function maybeAutoApplyUpdate() {
     safety: downloadedUpdate ? await fetchRestartSafety() : null,
   })
   if (!decision.apply) {
-    console.log(`[updater] auto-apply deferred: ${decision.reason}`)
+    ulog.info(`auto-apply deferred: ${decision.reason}`)
     return
   }
-  console.log('[updater] auto-applying update', downloadedUpdate && downloadedUpdate.version)
+  ulog.info('auto-applying update', downloadedUpdate && downloadedUpdate.version)
   if (autoApplyTimer) {
     clearInterval(autoApplyTimer)
     autoApplyTimer = null
@@ -2122,7 +2141,7 @@ function notifyPreparingInstall(version) {
 /** Staging never finished. NOTHING was torn down, so the app is fine — say that,
  *  and offer the manual route for someone who would rather not wait. */
 function reportInstallNotReady(version) {
-  console.error('[updater] the OS installer never staged the update — not applying')
+  ulog.error('the OS installer never staged the update — not applying')
   setUpdateDockProgress(-1)
   showUpdateDialog('install-not-ready', { version })
     .then((res) => {
@@ -2154,7 +2173,7 @@ async function applyUpdateWhenStaged(version) {
   // that may well be ready — so fall through to the old behaviour (+ watchdog)
   // rather than invent a delay.
   if (nativeUpdaterHandle && installReadiness(process.platform, squirrelStaged) === 'staging') {
-    console.log('[updater] waiting for the OS installer to stage the update before tearing down')
+    ulog.info('waiting for the OS installer to stage the update before tearing down')
     notifyPreparingInstall(version)
     const staged = await waitForInstallStaged({
       isStaged: () => squirrelStaged,
@@ -2185,7 +2204,42 @@ async function applyUpdateWhenStaged(version) {
     // user staring at a live window backed by a dead server.
     quitAndInstall: () => (autoUpdaterHandle ? autoUpdaterHandle.quitAndInstall() : app.quit()),
     onStuck: () => reportInstallStuck(version),
+    // "We are quitting to install X, running Y." The next boot reads this and,
+    // if it wakes up as Y, says the install failed — with the log's tail —
+    // instead of re-showing the "downloaded" dialog as if nothing happened.
+    beforeInstall: () => {
+      ulog.info(`quitting to install ${version || '(unknown version)'} (running ${app.getVersion()})`)
+      writePendingInstall({ path: pendingInstallPath(), from: app.getVersion(), to: version || '' })
+    },
   }).catch(() => {})
+}
+
+/**
+ * Boot-time verdict on the previous run's install (electron/updaterLog.js).
+ * 'failed' is the one that speaks: a dialog with the log's tail and a button
+ * that opens the log — the third "came back on the old version, no explanation"
+ * (2026-09-13) is the reason. 'installed' / 'stale' / 'none' only log.
+ * Wrapped so a broken marker can never keep the app from launching.
+ */
+function reportFailedInstallOnBoot() {
+  try {
+    const verdict = checkPendingInstall({ path: pendingInstallPath(), currentVersion: app.getVersion() })
+    if (verdict.kind === 'none') return
+    ulog.info(`boot: pending install ${verdict.from} → ${verdict.to} (${verdict.at || '?'}) — ${verdict.kind}`)
+    if (verdict.kind !== 'failed') return
+    void showUpdateDialog('install-failed', {
+      version: verdict.to,
+      from: verdict.from,
+      logTail: tailUpdaterLog(updaterLogPath(), 25),
+    })
+      .then((res) => {
+        if (res.response === 0) void shell.openPath(updaterLogPath()).catch(() => {})
+        else if (res.response === 1) void shell.openExternal(RELEASE_NOTES_URL).catch(() => {})
+      })
+      .catch(() => {})
+  } catch (err) {
+    console.error('[openground] pending-install check skipped:', err && err.message ? err.message : err)
+  }
 }
 
 /**
@@ -2199,7 +2253,7 @@ async function applyUpdateWhenStaged(version) {
  * the dead back-end.
  */
 function reportInstallStuck(version) {
-  console.error('[updater] quitAndInstall did not quit — the update was NOT applied')
+  ulog.error('quitAndInstall did not quit — the update was NOT applied')
   showUpdateDialog('install-stuck', { version })
     .then((res) => {
       if (res.response === 0) void shell.openExternal(RELEASE_NOTES_URL).catch(() => {})
@@ -2311,7 +2365,7 @@ function installApplicationMenu() {
           // the try — a dialog that rejects (window destroyed mid-prompt) would
           // otherwise surface as an unhandled rejection in the main process.
           void checkForUpdatesInteractive().catch((err) => {
-            console.error('[updater] manual check failed:', err && err.message)
+            ulog.error('manual check failed:', err && err.message)
           })
         },
         onOpenReleaseNotes: () => {
@@ -2331,13 +2385,17 @@ function initAutoUpdater() {
   try {
     ;({ autoUpdater } = require('electron-updater'))
   } catch (err) {
-    console.error('[updater] electron-updater unavailable:', err && err.message)
+    ulog.error('electron-updater unavailable:', err && err.message)
     // NOW "this build has no updater" is the truth, and the menu may say it.
     autoUpdaterInit = 'unavailable'
     return
   }
   autoUpdaterHandle = autoUpdater
   autoUpdaterInit = 'ready'
+  // electron-updater's internal narrative (proxy server for Squirrel, what
+  // Squirrel requested, native errors) — the part that was stdout-only when the
+  // 2026-09-13 install vanished without a trace.
+  autoUpdater.logger = makeUpdaterLogger({ path: updaterLogPath(), tag: 'electron-updater' })
   // Observe the OS installer (macOS). This is the only trustworthy answer to
   // "will quitAndInstall actually quit?" — see applyUpdateWhenStaged. Listening
   // only; the native updater is never driven from here.
@@ -2346,12 +2404,15 @@ function initAutoUpdater() {
       nativeUpdaterHandle = require('electron').autoUpdater
       nativeUpdaterHandle.on('update-downloaded', () => {
         squirrelStaged = true
-        console.log('[updater] the OS installer staged the update — a restart is now immediate')
+        ulog.info('the OS installer staged the update — a restart is now immediate')
+      })
+      nativeUpdaterHandle.on('error', (err) => {
+        ulog.error('OS installer (Squirrel) error:', err && err.message ? err.message : err)
       })
     }
   } catch (err) {
     nativeUpdaterHandle = null
-    console.warn('[updater] could not observe the OS installer:', err && err.message)
+    ulog.warn('could not observe the OS installer:', err && err.message)
   }
 
   // We drive the "apply" step ourselves (a dialog button), so disable the
@@ -2363,17 +2424,17 @@ function initAutoUpdater() {
   autoUpdater.autoInstallOnAppQuit = eagerSquirrelHandoff(process.platform, autoUpdateEnabled())
 
   autoUpdater.on('checking-for-update', () => {
-    console.log('[updater] checking for update…')
+    ulog.info('checking for update…')
   })
   autoUpdater.on('update-available', (info) => {
-    console.log('[updater] update available:', info && info.version)
+    ulog.info('update available:', info && info.version)
   })
   autoUpdater.on('update-not-available', (info) => {
-    console.log('[updater] up to date:', info && info.version)
+    ulog.info('up to date:', info && info.version)
   })
   autoUpdater.on('error', (err) => {
     // Non-fatal: a failed update check must never take the app down.
-    console.error('[updater] error:', err && err.message ? err.message : err)
+    ulog.error('error:', err && err.message ? err.message : err)
     setUpdateDockProgress(-1)
     // A download the app ANNOUNCED (the manual check's "downloading in the
     // background… you will be asked to restart" dialog) must not die silently —
@@ -2394,7 +2455,7 @@ function initAutoUpdater() {
     }
   })
   autoUpdater.on('download-progress', (p) => {
-    console.log(`[updater] downloading ${Math.round(p.percent)}%`)
+    ulog.info(`downloading ${Math.round(p.percent)}%`)
     // Ambient, not modal: the dock icon carries the download so "is anything
     // happening?" has an answer without a dialog (the 2026-08-13 stuck-looking
     // update). percent is 0–100 from electron-updater; clamp defensively.
@@ -2403,18 +2464,22 @@ function initAutoUpdater() {
   })
   autoUpdater.on('update-downloaded', (info) => {
     const version = (info && info.version) || ''
-    console.log('[updater] update downloaded:', version || '(unknown version)')
+    ulog.info('update downloaded:', version || '(unknown version)')
     // The announced download kept its promise — retire the failure watch and
     // the dock progress bar.
     announcedDownloadLive = false
     setUpdateDockProgress(-1)
     // Remember it: if the user picks "Later", the menu's manual check must offer
     // THIS restart instead of asking GitHub again about an update already on disk.
-    downloadedUpdate = { version }
-    // A NEW download is not staged yet, whatever the last one managed. Safe to
+    // A NEW version is not staged yet, whatever the last one managed. Safe to
     // reset here: electron-updater emits this BEFORE handing the zip over, so
     // the native 'update-downloaded' that flips the flag always comes after.
-    squirrelStaged = false
+    // The SAME version re-announced (the hourly poll re-finds the cached file)
+    // keeps its staged flag: Squirrel refuses a second check while it is
+    // awaiting relaunch, so a reset here would never be undone and "Restart
+    // now" would sit out the whole staging wait for an update that is ready.
+    if (!downloadedUpdate || downloadedUpdate.version !== version) squirrelStaged = false
+    downloadedUpdate = { version }
     // When it landed — the escalation below and the poll loop both age from this.
     // WHAT HANDS-FREE MEANS, and what it used to mean by accident.
     //
@@ -2462,7 +2527,7 @@ function initAutoUpdater() {
   // server's fetch floor cannot reach; this is its counterpart guard.
   const maybeCheck = (label) => {
     if (isLockdownEnabled()) {
-      console.log(`[updater] ${label} check skipped — work mode (lockdown) is on`)
+      ulog.info(`${label} check skipped — work mode (lockdown) is on`)
       return
     }
     // Keep the flag in step with the LIVE setting, platform-aware: on
@@ -2474,7 +2539,7 @@ function initAutoUpdater() {
     // contract as the lockdown read above).
     autoUpdater.autoInstallOnAppQuit = eagerSquirrelHandoff(process.platform, autoUpdateEnabled())
     autoUpdater.checkForUpdatesAndNotify().catch((err) => {
-      console.error(`[updater] ${label} check failed:`, err && err.message)
+      ulog.error(`${label} check failed:`, err && err.message)
     })
   }
   // Arm the release-time bell: onServerMessage rings this on the server's

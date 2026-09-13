@@ -70,6 +70,9 @@ export interface ApplyDownloadedUpdateDeps {
   /** Watchdog: called when the app is STILL RUNNING this long after the install
    *  step, i.e. the install silently failed to quit. Armed before quitAndInstall. */
   onStuck?: () => void
+  /** Runs immediately before quitAndInstall (after the watchdog is armed) — where
+   *  the pending-install marker is written. Wrapped: a throw never blocks the install. */
+  beforeInstall?: () => void
   /** Injection seam for the watchdog's clock (tests pass a fake + short delay). */
   timers?: { setTimeout?: (fn: () => void, ms: number) => unknown; watchdogMs?: number }
 }

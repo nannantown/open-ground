@@ -460,6 +460,22 @@ On macOS that was both wrong and load-bearing — see the next box.)
 > source pin asserts `applyDownloadedUpdate` — which performs the teardown — has
 > exactly ONE call site and that it sits inside the gate.
 
+> **The updater has a memory (0.11.111).** Third sighting, 2026-09-13: "Restart
+> now" → the app quit → it came back on the OLD version, and nothing on disk
+> said why. Every updater line (ours AND electron-updater's) went to a packaged
+> app's stdout; the OS installer's own log (`~/Library/Caches/local.openground.app.ShipIt/ShipIt_stderr.log`)
+> had no entry at all — which only says where the failure was NOT. Now
+> (`electron/updaterLog.js`): **every updater line lands in
+> `~/.openground/updater.log`** (`autoUpdater.logger` is pointed at the same
+> file, so Squirrel's proxy/request narrative and native errors are in it),
+> capped at 512 KB; and **a pending-install marker** (`update-pending.json`,
+> "quitting to install X, running Y") is written right before the install call
+> so the **next boot** can compare itself to it — woke up as Y ⇒ the
+> `install-failed` dialog, with the log's tail and an "Open log" button, instead
+> of the same "downloaded" dialog as if nothing had happened. Diagnosing from
+> a Terminal launch (`"/Applications/OPEN GROUND.app/Contents/MacOS/OPEN GROUND"`)
+> still works — the logger mirrors to the console.
+
 > **Never let an install fail silently.** Both sightings of this defect
 > (2026-06-25, 2026-09-11) presented identically to the user: a button that did
 > nothing. `applyDownloadedUpdate` therefore arms a **watchdog before** calling
