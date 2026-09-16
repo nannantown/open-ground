@@ -783,32 +783,91 @@ r to retry
 
 ---
 
-## 5.9 希望 tier の方針 — 常駐する席は opus、重いカードだけ fable(2026-09-02)
+## 5.9 希望 tier の方針 — fable は重いカードの worker だけ(2026-09-16 で完結)
 
 層A〜Eは「枯れた tier を避ける」機構で、**何を希望するか**はこの前段
 (`desiredModelEffort`、swarmLaunch.ts)が決める。optimize(既定)の現行方針:
 
 | 席 | model / effort | 理由 |
 |---|---|---|
-| worker(重いカード) | **fable / max** | 能力が結果を分けるのはここ。**変更していない** |
+| worker(重いカード) | **fable / max** | 能力が結果を分けるのはここ。**唯一の fable 枠**・変更していない |
 | worker(通常) | opus / medium | 0.11.97 のオーナー決定(基準は opus) |
 | worker(軽い) | sonnet / low | |
-| **司令官・監督の卓** | **opus / high**(旧: fable / high) | ⚠ 2026-09-02 変更 |
+| 司令官・監督の卓 | opus / high(旧: fable / high) | 2026-09-02 変更 |
+| **敵対レビューのパネル** | **opus / high**(旧: fable 固定・モードを一切見ていなかった) | ⚠ **2026-09-16 変更** |
 | 補給官 | sonnet / medium | 意図をカードに翻訳するだけ |
 
-**卓の tier を下げた理由(実測)**: 卓は**常駐する**。司令官はセッション中ずっと
+**卓の tier を下げた理由(2026-09-02)**: 卓は**常駐する**。司令官はセッション中ずっと
 プロジェクトに座り、声をかけられるたびに文脈を読み直すので、統合が起きていなくても
 トップ tier を燃やし続ける — worker がカードの実行中だけ課金されるのとは性質が違う。
-2026-09-01/02 にオーナーの週次 Fable が、重いカードが1枚も走っていない状態で半分
-消えた。判断の質を落とす変更ではない: opus は**同じ梯子の中段**(0.11.97 以降、通常
-カードの worker が既に走っている段)で、effort は high のまま。
+
+**⛔ 卓を下げても週次 Fable は減らなかった — 犯人は別だった(2026-09-16 実測)**。
+09-02 の変更後もオーナーの週次 Fable は **51%**(直近5h で全体の 37%)のまま。当然の
+仮説は「卓がまだ fable に漏れている」だったが、**実測すると外れ**だった。以下は仮説を
+潰した順で、同じ誤診を繰り返さないために全部残す。
+
+1. **卓は既に opus だった**。`ps -eo command` で生きている `claude` を全部読むと、
+   司令官・監督は `--effort high --model opus`、補給官は `--model sonnet`。
+   **卓からの fable はゼロ**。09-02 の変更は効いている。
+2. **敵対レビューのパネルは「fable 固定」だが、本番では1度も呼ばれていない**。
+   `makeAdversarialReview` はモデルを `opts.model ?? SWARM_LAUNCH_MODEL` で決めており、
+   実行モードを一度も参照していなかった(= 本物のバグ)。ただし 03 章 §5 のとおり
+   **`deps.review` は 2026-07-15 以降 呼び出し元がゼロ**で、配線(:7123)が残っているだけ。
+   **したがって現在の消費には寄与していない**。2026-09-16 に mode 連動へ直したのは、
+   将来レビューを再配線した日に同じ穴が再発しないようにするためであって、**この修正自体は
+   今の Fable を1トークンも減らさない**。減ると書いてはいけない。
+3. **真犯人は worker の heavy 判定だった**。`classifyCardWeight` は
+   「HEAVY_SIGNALS に一致」**または**「title+notes が 1200 文字超」で heavy とする。
+   本プロジェクトの実カード **330 枚を同じ規則で分類した実測**:
+
+   | 判定 | 枚数 | 割合 |
+   |---|---|---|
+   | heavy(fable/max を希望) | **227** | **69%** |
+   | └ うち HEAVY_SIGNALS 一致 | 152 | 46% |
+   | └ うち **1200文字超だけ**が理由 | 75 | 23% |
+   | medium(opus) | 83 | 25% |
+   | light(sonnet) | 20 | 6% |
+
+   **カードの約7割が fable を希望している**。`guard` / `auth` / `削除` / `security` /
+   `migration` のような語は OG のカードにごく普通に出るうえ、`/order` の定型文を含む
+   カード本文は 1200 文字を簡単に超える。「重い設計カードだけ fable」という意図に対し、
+   実装は**ほぼ全カードを重いと判定している**。
+
+**⇒ 週次 Fable を実際に動かすレバーは heavy 判定(しきい値・語彙)であって、席の割当では
+ない。** 本カードは「`classifyCardWeight` の heavy 判定は変更しない」を明示条件に含んで
+いたため手を付けていない。ここを動かすかどうかはオーナー判断として未決のまま残っている。
+
+**いまの不変条件**: optimize では **fable を希望するのは `worker` × heavy カードの1組だけ**。
+`reviewer` は `SwarmModelRole` union の正式メンバーになり、他の席と同じく
+`desiredModelEffort` に問い合わせる。判断の質は落としていない — レビューは判断席なので
+**effort は high のまま**で、下げたのは model だけ。
+
+同じ 09-16 に、**黙って fable に落ちる既定値**も3つ塞いだ(いずれも「呼び忘れたら最上位
+tier」という形をしていた。存在検査は沈黙する):
+- `swarmLaunchDefaults(remoteName, me)` の `me` を**必須引数**にした。以前は省略すると
+  `SWARM_LAUNCH_MODEL`/max に落ちたので、モードを解決し忘れた呼び出しが**無言で**
+  最上位 tier に座れた。必須化で同じミスは **tsc のビルドエラー**になる(過大近似側へ)。
+  これは机上の話ではなく、**必須化した瞬間に実在の4経路**(`swarmManager` /
+  `swarmSupply` / `swarmManagerSdk` / `swarmWorkerSdk` が `me?:` を渡していた)が
+  型エラーで露出した。
+- 上記4経路の `me?:` も必須に変えた(同じ理由で連鎖的に必須化される)。
+- `makeOverseerBrain` の `opts.model` 既定を `SWARM_DEFAULT_MODEL` に変更。
+  引数無しの `runOverseerBrain` エクスポートが matrix を迂回して fable を希望していた。
 
 これは**希望値**であって quota フォールバックではない — opus 自体が冷えていれば
-`resolveAvailableTier` が従来どおりさらに下へ歩く。
+`resolveAvailableTier` が従来どおりさらに下へ歩く(fable へ「上がる」経路も不変)。
+`max` を明示選択したときは従来どおり全席 fable、`economy` は全席 sonnet。
 
-**歯**: `swarmLaunch.test.ts`「optimize runs the always-on DESKS on opus/high」
-(卓を fable に戻す変異で赤を実測)。同じテストが**重いカードは fable/max のまま**も
-固定しているので、卓と一緒に worker を下げる変異も赤になる。
+**歯**(いずれも変異で赤を実測済み):
+- `swarmLaunch.test.ts`「fable containment」— **役割 union を全部なめて**、optimize で
+  fable を希望する (席, カード) の組が `['worker/heavy']` **ちょうど1つ**であることを固定する。
+  個別の席を1つずつ確かめる形にしなかったのは、今回の漏れが「誰も列挙していなかった席」
+  だったから。union に足し忘れた席は `desiredModelEffort` を呼べない(tsc が落ちる)ので、
+  **列挙漏れは沈黙ではなくビルドエラー**になる。
+- `swarmOrchestrator.integration.test.ts`「an UNPINNED panel launches reviewers on the
+  MODE tier」— 実パネルを回し、**レビュアーが実際に渡されたモデル**を捕まえる(解決関数の
+  戻り値ではなく配線を見る)。定数固定に戻す変異で `['fable','fable','fable']` の赤を実測。
+- `swarmLaunch.test.ts`「optimize runs the always-on DESKS on opus/high」(09-02 分)は据え置き。
 
 ### 5.9.1 何が使ったのかを見る(GET /api/usage/breakdown)
 

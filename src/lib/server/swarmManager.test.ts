@@ -1,4 +1,3 @@
-import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
 import { describe, it, expect, beforeEach } from 'vitest'
 import { buildClaudeArgv } from './claudeTerminal'
 import {
@@ -21,12 +20,18 @@ import type { TerminalInfo } from './terminal'
 // Mirrors swarmSupply.test.ts: the commander is the supply officer's sibling —
 // same no-worktree, real-tree, tagged-bypass shape, different skill + role.
 
+/** The mode-resolved model/effort every fixture below launches with — what
+ *  `resolveSwarmModelEffortProbed(mode, 'manager')` returns under the DEFAULT
+ *  `optimize` mode. Deliberately NOT the top tier: `me` became a required
+ *  argument on 2026-09-16 precisely because omitting it used to mean fable. */
+const ME = { model: 'opus', effort: 'high' } as const
+
 describe('managerLaunchOpts (commander launch contract)', () => {
   // `lang` is a REQUIRED argument (2026-08-13 rework — see swarmWorker.ts
   // buildOrderInjection's doc comment): every fixture below fixes it to 'en'
   // so the OTHER assertions (bypass/tag/model/…) stay independent of the
   // language describe block further down, which exercises 'en' vs 'ja' itself.
-  const base = managerLaunchOpts('/repo', 'sid-1', { lang: 'en' })
+  const base = managerLaunchOpts('/repo', 'sid-1', { lang: 'en' }, ME)
 
   it('runs in the project PRIMARY checkout (cwd), not a worktree', () => {
     expect(base.cwd).toBe('/repo')
@@ -60,9 +65,17 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     expect(base.appContext).toBe(true)
   })
 
-  it('runs at the shared top tier (SWARM_LAUNCH_MODEL) / max', () => {
-    expect(base.model).toBe(SWARM_LAUNCH_MODEL)
-    expect(base.effort).toBe('max')
+  // The desk does NOT pick a tier — it passes through what the caller resolved
+  // from the execution mode. That is the whole contract since 2026-09-16: this
+  // function used to DEFAULT to the top tier when `me` was omitted, so a caller
+  // that forgot to consult the mode silently seated the commander on fable. `me`
+  // is now required, and this asserts the pass-through rather than a default.
+  it('passes the mode-resolved model/effort through — it does not choose a tier', () => {
+    expect(base.model).toBe(ME.model)
+    expect(base.effort).toBe(ME.effort)
+    // A hardcoded tier would survive the two lines above only if it happened to
+    // equal ME, so pin the negative too: the scarcest tier must not appear here.
+    expect(base.model).not.toBe('fable')
   })
 
   it('starts with Remote Control ON — legacy fixed name when no remoteName resolved', () => {
@@ -76,7 +89,7 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     // <project>" via resolveSwarmRemoteName (language = Settings.language) so the
     // claude.ai / mobile session list reads WHICH project's commander this is —
     // the fix for the wall of identical 'manager' rows (owner feedback 2026-07-18).
-    const named = managerLaunchOpts('/proj', 'sid-rc', { remoteName: 'マネージャー 受注管理', lang: 'en' })
+    const named = managerLaunchOpts('/proj', 'sid-rc', { remoteName: 'マネージャー 受注管理', lang: 'en' }, ME)
     expect(named.remoteControl).toBe('マネージャー 受注管理')
   })
 
@@ -91,7 +104,7 @@ describe('managerLaunchOpts (commander launch contract)', () => {
   })
 
   it('forwards cols/rows when given', () => {
-    const o = managerLaunchOpts('/repo', 'sid-2', { cols: 100, rows: 30, lang: 'en' })
+    const o = managerLaunchOpts('/repo', 'sid-2', { cols: 100, rows: 30, lang: 'en' }, ME)
     expect(o.cols).toBe(100)
     expect(o.rows).toBe(30)
   })
@@ -111,19 +124,19 @@ describe('managerLaunchOpts (commander launch contract)', () => {
     // so these check LITERAL substrings instead, matching the worker test's
     // pattern in swarmWorker.test.ts).
     it('en ⇒ appends the English reply-language directive (literal marker)', () => {
-      const o = managerLaunchOpts('/repo', 'sid-lang-en', { lang: 'en' })
+      const o = managerLaunchOpts('/repo', 'sid-lang-en', { lang: 'en' }, ME)
       expect(o.initialPrompt!.startsWith(MANAGER_INJECTION)).toBe(true)
       expect(o.initialPrompt).toContain('[Reply language]')
       expect(o.initialPrompt).not.toContain('【返答言語】')
     })
     it('ja ⇒ appends the Japanese reply-language directive (literal marker)', () => {
-      const o = managerLaunchOpts('/repo', 'sid-lang-ja', { lang: 'ja' })
+      const o = managerLaunchOpts('/repo', 'sid-lang-ja', { lang: 'ja' }, ME)
       expect(o.initialPrompt!.startsWith(MANAGER_INJECTION)).toBe(true)
       expect(o.initialPrompt).toContain('【返答言語】')
       expect(o.initialPrompt).not.toContain('[Reply language]')
     })
     it('resume + lang ⇒ directive rides the resume prompt too (literal marker)', () => {
-      const o = managerLaunchOpts('/repo', 'sid-lang-resume', { resume: true, lang: 'ja' })
+      const o = managerLaunchOpts('/repo', 'sid-lang-resume', { resume: true, lang: 'ja' }, ME)
       expect(o.initialPrompt!.startsWith(MANAGER_RESUME_INJECTION)).toBe(true)
       expect(o.initialPrompt).toContain('【返答言語】')
     })
@@ -131,7 +144,7 @@ describe('managerLaunchOpts (commander launch contract)', () => {
 
   // ── RESUME (swarmSessions.ts): the commander survives an app restart ──────
   describe('resume', () => {
-    const resumed = managerLaunchOpts('/repo', 'sid-old', { resume: true, lang: 'en' })
+    const resumed = managerLaunchOpts('/repo', 'sid-old', { resume: true, lang: 'en' }, ME)
 
     it('a FRESH launch is byte-identical to the pre-resume contract (no `resume` flag)', () => {
       expect(base.resume).toBeUndefined()
@@ -175,7 +188,7 @@ describe('managerLaunchOpts (commander launch contract)', () => {
       expect(resumed.strictMcpConfig).toBe(true)
       expect(resumed.appContext).toBe(true)
       expect(resumed.remoteControl).toBe('manager')
-      expect(resumed.model).toBe(SWARM_LAUNCH_MODEL)
+      expect(resumed.model).toBe(ME.model)
     })
   })
 })

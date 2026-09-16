@@ -385,7 +385,10 @@
   `systemPrompt.append` で明示注入する(`scripts/probe-sdk-skill-resolution.mts` /
   `probe-sdk-system-prompt.mts`)。
 - 入口だけ: `swarmOrchestrator.ts`(エンジン tick)/ `swarmWorker.ts` / `swarmLaunch.ts`(spawn・
-  モデル/effort/リモコン名解決)/ `swarmIntegrate.ts` / `swarmOverseer*.ts` / `swarmEscalations.ts` /
+  モデル/effort/リモコン名解決。**どの席がどのモデルを希望するかは `desiredModelEffort` 一本**で、
+  役割は `SwarmModelRole` union に列挙する — union に無い席はそもそも問い合わせられない=tsc が落ちる。
+  既定 optimize で `fable` を希望するのは **worker × heavy カードだけ**、他は `SWARM_DEFAULT_MODEL='opus'`
+  以下。表と実測は docs/commander/04-quota-models.md §5.9)/ `swarmIntegrate.ts` / `swarmOverseer*.ts` / `swarmEscalations.ts` /
   `swarmQuota.ts` / route: `server/routes/swarm.ts` / UI: `modules/SwarmModule.tsx` + `useSwarmEngine.ts`
 - **エンジンの再起動永続化**(2026-07-22, card 2): `swarmEnginePersistence.ts`(engine intent
   write-through `~/.openground/projects/<uuid>/engine.json` + crash-loop breaker ring

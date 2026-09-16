@@ -1929,6 +1929,76 @@ describe('makeAdversarialReview — REAL panel orchestration (injected reviewers
     expect(r.mustFix).toBe(0)
   })
 
+  // ── The fable hole this panel HAD (owner, 2026-09-16) ──────────────────────
+  // `makeAdversarialReview` used to read `opts.model ?? SWARM_LAUNCH_MODEL`, so an
+  // unpinned panel — which is how defaultDeps wires it — desired the TOP tier in
+  // every execution mode, one `claude` PER LENS.
+  //
+  // ⚠ It was not the drain. `deps.review` has had no non-test caller since
+  // 2026-07-15, so this hole was not costing anything; the measured driver of the
+  // owner's 51% Fable week is the worker heavy classifier
+  // (docs/commander/04-quota-models.md §5.9). This test exists so that re-wiring
+  // review later cannot re-open the hole unnoticed — a containment, not a saving.
+  //
+  // This asserts the MODEL THE REVIEWERS WERE ACTUALLY LAUNCHED WITH, captured off
+  // the real panel's own spawn argument — not that a resolver function returns the
+  // right string in isolation. The unit matrix in swarmLaunch.test.ts covers the
+  // decision; this covers the WIRING, which is the half that was broken: the
+  // decision function was already correct for manager/overseer while this call
+  // site quietly ignored it.
+  // ⚠ This reads the AMBIENT execution mode rather than pinning one: the panel
+  // calls getExecutionMode() itself, and the suite runs with settings unset, so
+  // the mode resolves to DEFAULT_EXECUTION_MODE ('optimize') and the expected tier
+  // below is opus. That coupling is deliberate-but-implicit; it fails SAFE (a
+  // leaked non-default mode makes this test red, never falsely green). Pin the
+  // mode here if this suite ever gains a test that writes executionMode.
+  it('an UNPINNED panel launches reviewers on the MODE tier, not the top tier', async () => {
+    const { proj } = await setupRepo()
+    const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
+    const res = await spawn({ projectPath: proj, title: 'card tier', hint: 'tier' })
+    await git(proj, ['fetch', 'origin', 'main'])
+    const tip = await tipOf(proj, res.branch)
+
+    const seen: string[] = []
+    // No `model` — exactly how defaultDeps builds the production panel.
+    const review = makeAdversarialReview({
+      reviewers: 3,
+      runReviewer: async (a) => {
+        seen.push(a.model)
+        return CLEAN
+      },
+    })
+    const r = await review(proj, res.branch, 'main', { tip })
+
+    expect(r.decision).toBe('integrate')
+    expect(seen).toHaveLength(3) // the real panel ran
+    // The default execution mode is `optimize` ⇒ the reviewer tier is opus.
+    expect(seen).toEqual(['opus', 'opus', 'opus'])
+    // State the invariant separately from the value: whatever the mode resolves
+    // to, an unpinned panel must never seat itself on the scarce tier by default.
+    expect(seen).not.toContain('fable')
+  })
+
+  it('still honours an EXPLICITLY pinned panel model (the override survives)', async () => {
+    const { proj } = await setupRepo()
+    const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
+    const res = await spawn({ projectPath: proj, title: 'card pin', hint: 'pin' })
+    await git(proj, ['fetch', 'origin', 'main'])
+    const tip = await tipOf(proj, res.branch)
+
+    const seen: string[] = []
+    const review = makeAdversarialReview({
+      reviewers: 2,
+      model: 'sonnet',
+      runReviewer: async (a) => {
+        seen.push(a.model)
+        return CLEAN
+      },
+    })
+    await review(proj, res.branch, 'main', { tip })
+    expect(seen).toEqual(['sonnet', 'sonnet'])
+  })
+
   it('all reviewers abstain (no marker) → defer — never a false clean', async () => {
     const { proj } = await setupRepo()
     const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })

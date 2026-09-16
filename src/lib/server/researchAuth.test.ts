@@ -123,6 +123,7 @@ describe('worker spawn passthrough', () => {
       claudeBin: '/usr/local/bin/claude',
       env: { PATH: '/bin', TWITTER_AUTH_TOKEN: SECRET_A, TWITTER_CT0: SECRET_B },
       lang: 'en',
+      me: { model: 'opus', effort: 'medium' },
     })
     const env = built.options.env as Record<string, string>
     expect(env.TWITTER_AUTH_TOKEN).toBe(SECRET_A)

@@ -342,14 +342,25 @@ describe('makeAdversarialReview — lens panel end-to-end (real git, HOME-isolat
     expect(seen).toHaveLength(0) // not ONE reviewer burned into the exhausted wall
   }, 30_000)
 
-  // The panel defaults to SWARM_LAUNCH_MODEL (fable). Before the hard mask it was
-  // the "half-lung" of this feature: workers respected a retired tier, reviewers
-  // did not — every reviewer abstained and the defer streak burned to needs-human
-  // (the 0a7c641 symptom). These pin the panel to the same mask.
-  it('a switched-OFF top tier moves the panel DOWN the ladder (not into the retired tier)', async () => {
+  // The panel asks the execution mode for its tier (2026-09-16); under the default
+  // `optimize` that is opus. Before the hard mask this was the "half-lung" of the
+  // feature: workers respected a retired tier, reviewers did not — every reviewer
+  // abstained and the defer streak burned to needs-human (the 0a7c641 symptom).
+  // These pin the panel to the same mask.
+  //
+  // ⚠ WHY BOTH fable AND opus ARE SWITCHED OFF HERE. This test used to turn off
+  // fable alone, which worked only because the panel WANTED fable: the mask then
+  // had to actually walk the ladder to reach opus. Once the desired tier became
+  // opus, switching off fable alone stopped exercising anything — the desired tier
+  // was still allowed, so `resolveAvailableTierProbed` became an identity and the
+  // assertion held even if the whole ladder walk were deleted. A guard that passes
+  // against the removal of the thing it guards is not a guard (CLAUDE.md 検証の掟
+  // §1/§2). Turning off the DESIRED tier too forces a real descent, so the
+  // expectation below can only be met by the mask + ladder genuinely running.
+  it('a switched-OFF desired tier moves the panel DOWN the ladder (not into a retired tier)', async () => {
     const proj = await setupRepo()
     const { branch, tip } = await branchWithCommit(proj)
-    await setSettings({ swarmAllowedModels: { fable: false } })
+    await setSettings({ swarmAllowedModels: { fable: false, opus: false } })
     try {
       const models: string[] = []
       const review = makeAdversarialReview({
@@ -362,9 +373,14 @@ describe('makeAdversarialReview — lens panel end-to-end (real git, HOME-isolat
         },
       })
       const r = await review(proj, branch, 'main', { tip })
-      expect(r.decision).toBe('integrate') // it RAN — fable being off is not a park
+      expect(r.decision).toBe('integrate') // it RAN — retired tiers are not a park
       expect(models).toHaveLength(DEFAULT_REVIEW_LENSES.length)
-      expect(new Set(models)).toEqual(new Set(['opus'])) // never the retired fable
+      // sonnet is the first rung BELOW both retired tiers: reaching it proves the
+      // mask was consulted AND the ladder was walked, neither of which a pinned or
+      // identity-resolved panel could do.
+      expect(new Set(models)).toEqual(new Set(['sonnet']))
+      expect(models).not.toContain('fable')
+      expect(models).not.toContain('opus')
     } finally {
       await setSettings({ swarmAllowedModels: undefined })
     }

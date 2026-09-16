@@ -144,8 +144,9 @@ export const supplyLaunchOpts = (
     // rework commit for the open gap this does NOT close.
     lang: PromptLang
   },
-  // Mode-resolved model/effort (omitted ⇒ opus/max, back-compat).
-  me?: { model: string; effort?: ClaudeEffort },
+  // Mode-resolved model/effort. REQUIRED since 2026-09-16: an omitted `me` used
+  // to mean "top tier" (fable), i.e. the scarcest model, chosen by forgetting.
+  me: { model: string; effort?: ClaudeEffort },
 ): LaunchClaudeOpts => ({
   cwd,
   agentSessionId,

@@ -158,7 +158,7 @@ import {
   type WorkerRuntimeKind,
 } from './workerRuntime'
 import { removeClaudeFolderTrust } from './claudeTrust'
-import { SWARM_LAUNCH_MODEL, execModeMaxWorkers, resolveAvailableTierProbed } from './swarmLaunch'
+import { desiredModelEffort, execModeMaxWorkers, resolveAvailableTierProbed } from './swarmLaunch'
 // The limit-wording detector, extracted to swarmRateLimitText.ts (2026-07-13) so
 // the pre-launch tier probe shares it — see the re-export further down.
 import { endsInRateLimit } from './swarmRateLimitText'
@@ -6706,8 +6706,11 @@ export interface AdversarialReviewOpts {
   reworkThreshold?: number
   /** Per-reviewer wall-clock budget. Default {@link REVIEW_TIMEOUT_MS} (5 min). */
   timeoutMs?: number
-  /** Reviewer model. Default {@link SWARM_LAUNCH_MODEL} (the top tier, Fable 5) — adversarial
-   *  fact-check is a real judgment task. */
+  /** Reviewer model. Leave UNSET in production: the panel then asks the execution
+   *  mode for the `reviewer` tier at review time (`desiredModelEffort`) — opus/high
+   *  under the default `optimize`, fable under `max`. Set it only to PIN a tier
+   *  (tests, or a deliberate per-panel override); a pinned value skips the mode
+   *  entirely, which is how this used to default to the top tier in every mode. */
   model?: string
   /** Run ONE reviewer in `dir` and resolve its raw PTY output. INJECTABLE so the
    *  panel + tally logic is testable without spawning real claude (the default is
@@ -6765,7 +6768,10 @@ export const makeAdversarialReview = (
   const panel = lenses ? lenses.length : Math.max(1, opts.reviewers ?? REVIEW_PANEL_SIZE)
   const reworkThreshold = opts.reworkThreshold ?? 1
   const timeoutMs = opts.timeoutMs ?? REVIEW_TIMEOUT_MS
-  const model = opts.model ?? SWARM_LAUNCH_MODEL
+  // The DESIRED tier is resolved per REVIEW (inside the returned closure), not
+  // here at factory time: `defaultDeps` builds this panel once at module scope,
+  // so anything captured here can never see a mode the owner changes later.
+  const pinnedModel = opts.model
   const customRun = opts.runReviewer
   return async (projectPath, branch, target, o) => {
     const tip = o.tip
@@ -6849,6 +6855,35 @@ export const makeAdversarialReview = (
     // actually launch before the whole panel spawns into a wall /usage cannot
     // see (the fable-only exhaustion) — wall ⇒ the tier cools and the walk drops
     // a rung, exactly like the worker path (swarmTierProbe / resolveAvailableTierProbed).
+    //
+    // WHAT THE DESIRED TIER IS (changed 2026-09-16, owner). It used to be the
+    // constant SWARM_LAUNCH_MODEL — the panel was the one `claude` spawner that
+    // never asked the execution mode, so an unpinned panel desired the scarcest
+    // tier in `optimize` and even in `economy`, four reviewers deep
+    // (DEFAULT_REVIEW_LENSES). Now it asks the matrix like every other role, as
+    // `reviewer`: fable under `max`, opus/high under `optimize`, sonnet under
+    // `economy`. `opts.model` still wins when a caller pins one explicitly
+    // (tests, and a future per-panel override).
+    //
+    // ⚠ NOT a current saving. `deps.review` has had no non-test caller since
+    // 2026-07-15 (only the defaultDeps wiring below), so this panel is not
+    // spending fable today and this change does not reduce the owner's Fable
+    // week by a single token. It is here so that re-wiring review later cannot
+    // silently re-open the hole. The measured driver of the 51% is the worker
+    // heavy classifier — docs/commander/04-quota-models.md §5.9 is canon.
+    //
+    // Only the DESIRED tier moved. The ladder walk below is untouched, and it is
+    // still THIS call — with the freshly-read `allowed` mask — that decides what
+    // actually launches, so a cooling opus still steps to the best usable rung.
+    //
+    // ⚠ ONLY `.model` IS READ, AND THAT IS THE WHOLE TRUTH TODAY. The matrix also
+    // gives `reviewer` an effort of 'high', but there is nowhere to put it:
+    // `defaultRunReviewer` takes no `effort` argument, so every reviewer spawns at
+    // the CLI default. The matrix's effort for this seat is therefore context for
+    // the model choice, not a value that reaches a process. Wiring it would raise
+    // reviewer spend, so it is deliberately left unwired — if you ever do wire it,
+    // that is a spend change and needs its own decision.
+    const model = pinnedModel ?? desiredModelEffort(await getExecutionMode(), 'reviewer').model
     const panelModel = await resolveAvailableTierProbed(model, Date.now(), allowed)
     if (!panelModel) {
       return {

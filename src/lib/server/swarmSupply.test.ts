@@ -1,4 +1,3 @@
-import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
 import { describe, it, expect } from 'vitest'
 import { buildClaudeArgv } from './claudeTerminal'
 import { supplyLaunchOpts, SUPPLY_INJECTION, SUPPLY_RESUME_INJECTION } from './swarmSupply'
@@ -11,10 +10,17 @@ import { languageDirective } from './promptLang'
 // SWARM_MANAGER=1 — a TRUSTED session the worker-only PreToolUse veto does not
 // police; the /supply skill as the positional prompt).
 
+/** The mode-resolved model/effort every fixture below launches with — what
+ *  `resolveSwarmModelEffortProbed(mode, 'supply')` returns under the DEFAULT
+ *  `optimize` mode. Supply has always been the cheap desk (it only turns intent
+ *  into cards); what changed on 2026-09-16 is that `me` is REQUIRED, so an
+ *  omitted one can no longer fall back to the top tier behind everyone's back. */
+const ME = { model: 'sonnet', effort: 'medium' } as const
+
 describe('supplyLaunchOpts (supply launch contract)', () => {
   // `lang` is a REQUIRED argument (2026-08-13 rework) — fixed to 'en' here so
   // the OTHER assertions stay independent of the language describe block below.
-  const base = supplyLaunchOpts('/repo', 'sid-1', { lang: 'en' })
+  const base = supplyLaunchOpts('/repo', 'sid-1', { lang: 'en' }, ME)
 
   it('runs in the project PRIMARY checkout (cwd), not a worktree', () => {
     expect(base.cwd).toBe('/repo')
@@ -46,9 +52,14 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
     expect(base.appContext).toBe(true)
   })
 
-  it('runs at the shared top tier (SWARM_LAUNCH_MODEL) / max', () => {
-    expect(base.model).toBe(SWARM_LAUNCH_MODEL)
-    expect(base.effort).toBe('max')
+  // The desk does NOT pick a tier — it passes through what the caller resolved
+  // from the execution mode. Until 2026-09-16 this function DEFAULTED to the top
+  // tier when `me` was omitted, and this test asserted that default was correct;
+  // it was in fact a silent way to spend the scarcest quota. `me` is required now.
+  it('passes the mode-resolved model/effort through — it does not choose a tier', () => {
+    expect(base.model).toBe(ME.model)
+    expect(base.effort).toBe(ME.effort)
+    expect(base.model).not.toBe('fable')
   })
 
   it('starts with Remote Control ON — legacy fixed name when no remoteName resolved', () => {
@@ -61,7 +72,7 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
     // spawnSwarmSupply resolves 「タスク窓口 <プロジェクト表示名>」/ "Supply officer
     // <project>" via resolveSwarmRemoteName so the claude.ai / mobile list reads
     // WHICH project's supply desk this is (owner feedback 2026-07-18).
-    const named = supplyLaunchOpts('/proj', 'sid-rc', { remoteName: 'タスク窓口 受注管理', lang: 'en' })
+    const named = supplyLaunchOpts('/proj', 'sid-rc', { remoteName: 'タスク窓口 受注管理', lang: 'en' }, ME)
     expect(named.remoteControl).toBe('タスク窓口 受注管理')
   })
 
@@ -71,7 +82,7 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
   })
 
   it('forwards cols/rows when given', () => {
-    const o = supplyLaunchOpts('/repo', 'sid-2', { cols: 100, rows: 30, lang: 'en' })
+    const o = supplyLaunchOpts('/repo', 'sid-2', { cols: 100, rows: 30, lang: 'en' }, ME)
     expect(o.cols).toBe(100)
     expect(o.rows).toBe(30)
   })
@@ -87,19 +98,19 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
     // that silently drops the directive on one branch still shows as red
     // (see swarmWorker.test.ts for the same pattern).
     it('en ⇒ appends the English reply-language directive (literal marker)', () => {
-      const o = supplyLaunchOpts('/repo', 'sid-lang-en', { lang: 'en' })
+      const o = supplyLaunchOpts('/repo', 'sid-lang-en', { lang: 'en' }, ME)
       expect(o.initialPrompt!.startsWith(SUPPLY_INJECTION)).toBe(true)
       expect(o.initialPrompt).toContain('[Reply language]')
       expect(o.initialPrompt).not.toContain('【返答言語】')
     })
     it('ja ⇒ appends the Japanese reply-language directive (literal marker)', () => {
-      const o = supplyLaunchOpts('/repo', 'sid-lang-ja', { lang: 'ja' })
+      const o = supplyLaunchOpts('/repo', 'sid-lang-ja', { lang: 'ja' }, ME)
       expect(o.initialPrompt!.startsWith(SUPPLY_INJECTION)).toBe(true)
       expect(o.initialPrompt).toContain('【返答言語】')
       expect(o.initialPrompt).not.toContain('[Reply language]')
     })
     it('resume + lang ⇒ directive rides the resume prompt too (literal marker)', () => {
-      const o = supplyLaunchOpts('/repo', 'sid-lang-resume', { resume: true, lang: 'ja' })
+      const o = supplyLaunchOpts('/repo', 'sid-lang-resume', { resume: true, lang: 'ja' }, ME)
       expect(o.initialPrompt!.startsWith(SUPPLY_RESUME_INJECTION)).toBe(true)
       expect(o.initialPrompt).toContain('【返答言語】')
     })
@@ -107,7 +118,7 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
 
   // ── RESUME (swarmSessions.ts): the desk survives an app restart ───────────
   describe('resume', () => {
-    const resumed = supplyLaunchOpts('/repo', 'sid-old', { resume: true, lang: 'en' })
+    const resumed = supplyLaunchOpts('/repo', 'sid-old', { resume: true, lang: 'en' }, ME)
 
     it('a FRESH launch is byte-identical to the pre-resume contract (no `resume` flag)', () => {
       // The old behaviour must be untouched when there is nothing to resume — this is
@@ -151,7 +162,7 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
       expect(resumed.strictMcpConfig).toBe(true)
       expect(resumed.appContext).toBe(true)
       expect(resumed.remoteControl).toBe('supply')
-      expect(resumed.model).toBe(SWARM_LAUNCH_MODEL)
+      expect(resumed.model).toBe(ME.model)
     })
   })
 })

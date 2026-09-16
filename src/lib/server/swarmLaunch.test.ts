@@ -4,7 +4,10 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   SWARM_LAUNCH_MODEL,
+  SWARM_DEFAULT_MODEL,
   SWARM_LAUNCH_EFFORT,
+  desiredModelEffort,
+  type SwarmModelRole,
   swarmLaunchDefaults,
   swarmRemoteControlName,
   resolveSwarmRemoteName,
@@ -63,8 +66,13 @@ describe('swarmLaunch (shared swarm launch defaults)', () => {
     expect(CLAUDE_EFFORTS).toContain('max')
   })
 
-  it('swarmLaunchDefaults(name) spreads model + effort + the Remote Control name', () => {
-    expect(swarmLaunchDefaults('worker')).toEqual({
+  it('swarmLaunchDefaults(name, me) spreads model + effort + the Remote Control name', () => {
+    // `me` is REQUIRED (2026-09-16). It used to default to the top tier, so this
+    // test could call `swarmLaunchDefaults('worker')` and still read `fable` —
+    // which is exactly how a caller that forgot to consult the execution mode
+    // spent the scarcest quota in silence. Now the tier must be named at the
+    // call, and tsc rejects the one-argument form outright.
+    expect(swarmLaunchDefaults('worker', { model: 'fable', effort: 'max' })).toEqual({
       model: 'fable',
       effort: 'max',
       remoteControl: 'worker',
@@ -72,15 +80,15 @@ describe('swarmLaunch (shared swarm launch defaults)', () => {
   })
 
   it('carries the role through as the Remote Control session name', () => {
-    expect(swarmLaunchDefaults('supply').remoteControl).toBe('supply')
-    expect(swarmLaunchDefaults('worker').remoteControl).toBe('worker')
+    expect(swarmLaunchDefaults('supply', { model: 'sonnet' }).remoteControl).toBe('supply')
+    expect(swarmLaunchDefaults('worker', { model: 'opus' }).remoteControl).toBe('worker')
   })
 
   it('omits effort entirely (never effort:undefined) when the guard rejects it', () => {
     // SWARM_LAUNCH_EFFORT is guarded against CLAUDE_EFFORTS; whenever it survives
     // as a value the default carries it, and the key is present-or-absent — never
     // an explicit undefined that would clutter the spread.
-    const d = swarmLaunchDefaults('worker')
+    const d = swarmLaunchDefaults('worker', { model: 'opus', effort: SWARM_LAUNCH_EFFORT })
     if (SWARM_LAUNCH_EFFORT === undefined) {
       expect('effort' in d).toBe(false)
     } else {
@@ -904,5 +912,99 @@ describe('resolveAvailableTierProbed / resolveSwarmModelEffortProbed (pre-launch
     )
     expect(me).toBeNull()
     expect(calls).toEqual([])
+  })
+})
+
+// ─── FABLE CONTAINMENT (owner, 2026-09-16) ───────────────────────────────────
+// The owner's weekly FABLE pool is the scarce one; Opus has headroom. The rule is
+// therefore a CONTAINMENT rule, not a frugality one: under the default `optimize`
+// mode, fable may be the desired tier for EXACTLY ONE slot — a heavy design
+// card's worker — and every other slot desires opus (or cheaper).
+//
+// This sweeps the WHOLE matrix rather than checking the roles known to be wrong,
+// because the failure mode being guarded is a seat that NOBODY listed: one that
+// reads SWARM_LAUNCH_MODEL directly instead of asking the mode, and so appears in
+// no model table to audit. That is not hypothetical — the adversarial review panel
+// was exactly that, and a per-role assertion could not have found it. (It cost
+// nothing: `deps.review` has had no non-test caller since 2026-07-15, so the panel
+// spent no fable. The owner's 51% Fable week came from the heavy WORKER seat —
+// 227 of 330 real cards classify heavy; docs/commander/04-quota-models.md §5.9 is
+// canon. Do not read this guard as having recovered that 51%.)
+//
+// Enumerating SwarmModelRole means a role added later is covered the day it is
+// added — and a role added WITHOUT being added to the union cannot reach
+// desiredModelEffort at all, because tsc rejects it (the over-approximation half
+// of the guard).
+describe('fable containment — optimize desires the top tier for heavy worker cards ONLY', () => {
+  const ROLES: SwarmModelRole[] = ['worker', 'supply', 'manager', 'overseer', 'reviewer']
+  const HEAVY = { title: 'auth guard rewrite', notes: 'security' } // matches HEAVY_SIGNALS
+  const ORDINARY = { title: 'add a button', notes: 'small ui tweak' }
+
+  it('names fable for exactly one (role, card) pair in optimize — the heavy worker', () => {
+    const wantsFable: string[] = []
+    for (const role of ROLES) {
+      for (const [label, card] of [['heavy', HEAVY], ['ordinary', ORDINARY]] as const) {
+        if (desiredModelEffort('optimize', role, card).model === SWARM_LAUNCH_MODEL) {
+          wantsFable.push(`${role}/${label}`)
+        }
+      }
+    }
+    expect(wantsFable).toEqual(['worker/heavy'])
+  })
+
+  it('gives every non-worker role opus in optimize — including the reviewer panel', () => {
+    // The reviewer is the one this card was written for. It is a judgment seat, so
+    // the matrix keeps its effort HIGH — the change is the MODEL, not the thinking.
+    // ⚠ For `reviewer` that effort is matrix-only: defaultRunReviewer takes no
+    // `effort` argument, so reviewers actually spawn at the CLI default (see
+    // makeAdversarialReview). The assertion below is still the right contract for
+    // desiredModelEffort — just do not read it as describing a spawned process.
+    for (const role of ['manager', 'overseer', 'reviewer'] as const) {
+      expect(desiredModelEffort('optimize', role)).toEqual({
+        model: SWARM_DEFAULT_MODEL,
+        effort: 'high',
+      })
+    }
+    // Supply stays sonnet — cheaper still, and it never touched the fable pool.
+    expect(desiredModelEffort('optimize', 'supply').model).toBe('sonnet')
+  })
+
+  // ⚠ "EVERY role" is about desiredModelEffort itself, which is what this asserts.
+  // One CALLER opts out: makeOverseerBrain's arg-less fallback resolves its seat at
+  // DEFAULT_EXECUTION_MODE, so `runOverseerBrain` stays on the optimize tier even
+  // under `max`. It has no production caller, so nothing diverges in practice.
+  it('leaves `max` alone — an explicit max run still puts EVERY role on the top tier', () => {
+    for (const role of ROLES) {
+      expect(desiredModelEffort('max', role, ORDINARY).model).toBe(SWARM_LAUNCH_MODEL)
+    }
+  })
+
+  it('leaves `economy` alone — sonnet everywhere, and never fable', () => {
+    for (const role of ROLES) {
+      expect(desiredModelEffort('economy', role, HEAVY).model).toBe('sonnet')
+    }
+  })
+
+  it('keeps the heavy classifier itself untouched — heavy still means top tier/max', () => {
+    // Condition 3 of the card: classifyCardWeight's heavy rule does not move, so a
+    // genuinely heavy design card keeps the capability it had before this change.
+    expect(desiredModelEffort('optimize', 'worker', HEAVY)).toEqual({
+      model: SWARM_LAUNCH_MODEL,
+      effort: 'max',
+    })
+  })
+
+  it('puts an ordinary card — and a card with NO signals at all — on opus', () => {
+    expect(desiredModelEffort('optimize', 'worker', ORDINARY).model).toBe(SWARM_DEFAULT_MODEL)
+    expect(desiredModelEffort('optimize', 'worker').model).toBe(SWARM_DEFAULT_MODEL)
+  })
+
+  it('SWARM_DEFAULT_MODEL is a real rung BELOW the top tier (not an alias for it)', () => {
+    // Cheap protection against a future "bump the tier" edit that sets both
+    // constants to the same string and silently re-opens the leak everywhere.
+    expect(SWARM_DEFAULT_MODEL).not.toBe(SWARM_LAUNCH_MODEL)
+    expect(MODEL_TIER_LADDER.indexOf(SWARM_DEFAULT_MODEL as (typeof MODEL_TIER_LADDER)[number])).toBeGreaterThan(
+      MODEL_TIER_LADDER.indexOf(SWARM_LAUNCH_MODEL as (typeof MODEL_TIER_LADDER)[number]),
+    )
   })
 })

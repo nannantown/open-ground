@@ -22,6 +22,10 @@ const plan = (over: Partial<Parameters<typeof sdkManagerLaunchPlan>[0]> = {}) =>
     port: 47776,
     env: { PATH: '/bin', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDECODE: '1' },
     lang: 'en',
+    // `me` is required (2026-09-16); the default here is what the commander
+    // resolves to under the default `optimize` mode. `...over` still lets a
+    // single test pin a different tier.
+    me: { model: 'opus', effort: 'high' },
     ...over,
   })
 

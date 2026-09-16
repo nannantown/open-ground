@@ -32,6 +32,10 @@ const plan = (over: Partial<Parameters<typeof sdkWorkerLaunchPlan>[0]> = {}) =>
     evaluateFn: okGuard,
     env: { PATH: '/usr/bin', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDECODE: '1', FOO: 'bar' } as NodeJS.ProcessEnv,
     lang: 'en',
+    // `me` is required (2026-09-16); the default here is what an ORDINARY card's
+    // worker resolves to under the default `optimize` mode (a HEAVY card would
+    // resolve to fable — the one slot that still may). `...over` can pin another.
+    me: { model: 'opus', effort: 'medium' },
     ...over,
   })
 
@@ -99,6 +103,7 @@ describe('sdkWorkerLaunchPlan — the worker launch contract (SDK-only since 202
         claudeBin: BIN,
         evaluateFn: okGuard,
         lang: 'en',
+        me: { model: 'opus', effort: 'medium' },
       }).initialPrompt,
     )
   })

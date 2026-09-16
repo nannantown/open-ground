@@ -26,6 +26,8 @@ import {
   terminateSdkSession,
 } from '../src/lib/server/sdkSession'
 import { getPromptLang } from '../src/lib/server/promptLang'
+import { resolveSwarmModelEffort } from '../src/lib/server/swarmLaunch'
+import { getExecutionMode } from '../src/lib/server/store'
 import { randomUUID } from 'crypto'
 
 const main = async () => {
@@ -47,11 +49,25 @@ const main = async () => {
   // literally here is the only thing that would have caught this at the time —
   // resolving it for real is the more honest fix.
   const lang = await getPromptLang()
+  // `me` is REQUIRED since 2026-09-16 (it used to default to the top tier, which
+  // is how a caller that skipped the mode silently spent fable), so resolve it
+  // rather than hand-picking one — same reason `lang` is resolved above.
+  //
+  // The SYNC resolver, deliberately: `resolveSwarmModelEffortProbed` would spawn a
+  // real headless `claude --model <tier> -p` before this script printed anything,
+  // which a read-only diagnostic must not do (it burns quota just to describe a
+  // launch). The sync core reads the same execution mode, cooling table,
+  // allow-mask and usage cache, so it reports the tier a real commander would get;
+  // the only thing skipped is the pre-launch probe, which exists to protect an
+  // actual spawn and has nothing to protect here.
+  const me = resolveSwarmModelEffort(await getExecutionMode(), 'manager')
+  if (!me) throw new Error('every model tier is switched OFF — a commander cannot be launched')
   const plan = sdkManagerLaunchPlan({
     projectPath,
     agentSessionId: randomUUID(),
     claudeBin: pre.claudeBin,
     lang,
+    me,
   })
   for (const w of plan.warnings) console.log(`warning: ${w}`)
   const sp = plan.options.systemPrompt as { append?: string }

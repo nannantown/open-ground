@@ -66,6 +66,7 @@ import {
   setAllowedModelTiersCache,
   __resetAllowedModelsForTest,
 } from './swarmAllowedModels'
+import { SWARM_DEFAULT_MODEL } from './swarmLaunch'
 import type { LaunchClaudeOpts } from './claudeTerminal'
 
 const launchedOpts = (): LaunchClaudeOpts => {
@@ -178,10 +179,16 @@ describe('makeOverseerBrain — launch containment wiring (D4 + the no-egress de
   describe('model hard mask (Settings.swarmAllowedModels)', () => {
     beforeEach(() => __resetAllowedModelsForTest())
 
-    it('launches on the DEFAULT top tier when every tier is enabled', async () => {
+    // Changed 2026-09-16: the no-`model` default is SWARM_DEFAULT_MODEL (opus),
+    // not the top tier. This default is reached only by the arg-less
+    // `runOverseerBrain` export — i.e. a path that never consults the execution
+    // mode — so defaulting it to the scarcest tier was a silent fable leak.
+    // C-core still passes the mode-resolved tier explicitly (asserted below).
+    it('launches on SWARM_DEFAULT_MODEL — NOT the top tier — when every tier is enabled', async () => {
       const runner = makeOverseerBrain({ timeoutMs: 1, sandboxAvailable: false })
       await runner({ prompt: 'p', projectPath: '/proj' })
-      expect(launchedOpts().model).toBe('fable')
+      expect(launchedOpts().model).toBe(SWARM_DEFAULT_MODEL)
+      expect(launchedOpts().model).not.toBe('fable')
     })
 
     it('steps DOWN the ladder when the top tier is switched OFF', async () => {

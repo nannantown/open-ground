@@ -83,8 +83,10 @@ export interface SdkManagerOptsInput {
   /** The claude conversation id (`sessionId` fresh / `resume` continuing). */
   agentSessionId: string
   resume?: boolean
-  /** Mode-resolved model/effort. Omitted ⇒ the historical swarm defaults. */
-  me?: { model: string; effort?: ClaudeEffort }
+  /** Mode-resolved model/effort. REQUIRED since 2026-09-16 — the old optional
+   *  fell back to the TOP tier (fable), so forgetting it spent the scarcest
+   *  quota silently. */
+  me: { model: string; effort?: ClaudeEffort }
   /** Resolved by the caller's preflight; must be the USER'S claude. */
   claudeBin: string
   /** Loopback port the app-context card points the commander's `curl` at. */

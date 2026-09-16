@@ -46,7 +46,8 @@ import { removeClaudeFolderTrust } from './claudeTrust'
 import { ensureBrainEgressProxy } from './egressProxy'
 import { youCorpusFile, openGroundHome } from './paths'
 import { brainRoutingRule } from './swarmDecisionRouting'
-import { SWARM_LAUNCH_MODEL, SWARM_LAUNCH_EFFORT, resolveAvailableTierProbed } from './swarmLaunch'
+import { desiredModelEffort, resolveAvailableTierProbed } from './swarmLaunch'
+import { DEFAULT_EXECUTION_MODE } from '../types'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import {
   classifyReversibility,
@@ -441,9 +442,12 @@ export const brainSandboxAvailable = (platform: NodeJS.Platform = process.platfo
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /** Build a {@link BrainRunner} that spawns a one-off `claude` PTY per D4 and
- *  marker-scrapes its verdict. `model`/`effort` default to the top tier
- *  (SWARM_LAUNCH_MODEL/effort); C-core passes `resolveSwarmModelEffort(mode,
- *  'overseer')` for mode-aware runs. The PTY runs in a FRESH EMPTY scratch dir
+ *  marker-scrapes its verdict. `model`/`effort` default to whatever the MATRIX
+ *  gives the `overseer` seat under {@link DEFAULT_EXECUTION_MODE} (opus/high today
+ *  — NOT the top tier, since 2026-09-16: fable is reserved for heavy worker cards).
+ *  That default is reached only by the no-arg `runOverseerBrain` export, which
+ *  would otherwise bypass the mode matrix entirely; C-core passes
+ *  `resolveSwarmModelEffort(mode, 'overseer')` for mode-aware runs. The PTY runs in a FRESH EMPTY scratch dir
  *  under the app home (NOT the repo, NOT a worktree — the brain gets no repo
  *  access; all judgment material is the corpus path + the fenced question), with
  *  `strictMcpConfig` (D4: a non-sandbox auto-triggered utility MUST ignore
@@ -469,16 +473,24 @@ export const makeOverseerBrain = (
     egressProxyPort?: () => Promise<number>
   } = {},
 ): BrainRunner => {
-  const model = opts.model ?? SWARM_LAUNCH_MODEL
-  const effort = opts.effort ?? SWARM_LAUNCH_EFFORT
+  // The no-arg fallback ASKS THE MATRIX for the overseer seat rather than naming a
+  // tier here. Naming one is how this default drifted twice: it was the top tier
+  // until 2026-09-16 (a silent fable leak), and then opus paired with
+  // SWARM_LAUNCH_EFFORT — i.e. opus/MAX, while the matrix's overseer seat is
+  // opus/HIGH. Deriving both fields from one call means the fallback cannot
+  // disagree with the matrix again. C-core still passes the mode-resolved values
+  // explicitly; this is only the arg-less `runOverseerBrain` path.
+  const seat = desiredModelEffort(DEFAULT_EXECUTION_MODE, 'overseer')
+  const model = opts.model ?? seat.model
+  const effort = opts.effort ?? seat.effort
   const timeoutMs = opts.timeoutMs ?? OVERSEER_BRAIN_TIMEOUT_MS
   const sandboxed = opts.sandboxAvailable ?? brainSandboxAvailable()
   const proxyPortOf = opts.egressProxyPort ?? (async () => (await ensureBrainEgressProxy()).port)
   return async ({ prompt, signal }) => {
     if (signal?.aborted) return ''
     // HARD MASK (Settings.swarmAllowedModels), resolved AT SPAWN like every other
-    // claude path (worker launch / reviewer panel): the cerebrum defaults to the top
-    // tier, so a fable that the owner has switched OFF — or that is cooling — must
+    // claude path (worker launch / reviewer panel): whatever tier the matrix hands
+    // this seat, one the owner has switched OFF — or that is cooling — must
     // move this launch down the ladder here rather than seat the brain on a dry
     // model and have it answer nothing. Null ⇒ no tier is enabled at all: throw, and
     // the runner fails CLOSED (answerAsOwner escalates to the owner) — the same
@@ -622,5 +634,6 @@ export const makeOverseerBrain = (
   }
 }
 
-/** The default proxy brain runner (top-tier model, 5-min budget). */
+/** The default proxy brain runner — the matrix's `overseer` seat under the default
+ *  execution mode (opus/high today, NOT the top tier), 5-min budget. */
 export const runOverseerBrain: BrainRunner = makeOverseerBrain()
