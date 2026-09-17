@@ -118,6 +118,10 @@ describe('GET /api/swarm/workers — the client must not lose what the server se
   it('carries an SDK worker through with its runtime AND its session handle', async () => {
     const built = await listSwarmWorkers('/proj', makeDeps({
       getOrchestratorState: async () => ({ ...emptyEngineState, workers: [sdkEngineWorker] }),
+      // Its session is LIVE in the SDK pool — since 2026-09-17 the registry
+      // publishes `sdkSessionId` only when the pool has it (same rule as
+      // `terminalId`), so a healthy fixture must say so.
+      listActiveSdkWorkers: () => [{ id: 'sdk-sess-1', cwd: '/wt/sdk-a' }],
     }))
     // The server's half of the contract, stated outright so a regression THERE
     // is not silently absorbed by this test's own fixture.
@@ -139,6 +143,7 @@ describe('GET /api/swarm/workers — the client must not lose what the server se
         workers: [sdkEngineWorker, ptyEngineWorker],
       }),
       listActiveTerminals: () => activeTerminals([{ id: 'pty-1', cwd: '/wt/pty-b', status: 'working' }]),
+      listActiveSdkWorkers: () => [{ id: 'sdk-sess-1', cwd: '/wt/sdk-a' }],
       readHeartbeats: async () =>
         new Map([
           [

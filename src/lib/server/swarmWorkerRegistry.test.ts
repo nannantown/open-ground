@@ -121,6 +121,11 @@ describe('listSwarmWorkers — server-truth union', () => {
         ],
       }),
       listActiveTerminals: () => activeTerminals([]), // the PTY pool is EMPTY
+      // The session IS live in the SDK pool. Until 2026-09-17 this fixture had no
+      // SDK pool at all and still passed, because `sdkSessionId` was copied off
+      // the roster unchecked — which is the leak the "GONE from the pool" case
+      // below pins. A healthy SDK worker always has its session here.
+      listActiveSdkWorkers: () => [{ id: 'sdk-abc', cwd: '/wt/sdk-x' }],
     })
     const out = await listSwarmWorkers('/proj', deps)
     expect(out).toHaveLength(1)
@@ -172,6 +177,48 @@ describe('listSwarmWorkers — server-truth union', () => {
     expect(out).toHaveLength(1) // claimed by the engine — not also folded in as unclaimed
     expect(out[0].terminalId).toBeUndefined()
     expect(out[0]).toMatchObject({ runtime: 'sdk', sdkSessionId: 'sdk-live' })
+  })
+
+  it('an engine SDK worker whose session is GONE from the pool loses its sdkSessionId — roster memory is not liveness', async () => {
+    // 2026-09-17, from a Ground card stamped RUNNING over a swarm with nothing
+    // moving. `terminalId` is re-looked-up in the PTY pool BY CWD on every call;
+    // `sdkSessionId` was copied straight off the engine's roster record with no
+    // pool check at all. A roster row outlives its session (the monitor reclaims
+    // it on a later pass, not instantly), so the record kept publishing a handle
+    // that addressed nothing — and every consumer that reads "has a handle" as
+    // "is alive" (the Ground lamp's liveWorkForProject first of all) drew a dead
+    // worker as running. Both handles now obey ONE rule: present only when the
+    // pool has a live session at that cwd.
+    const deps = makeDeps({
+      getOrchestratorState: async () => ({
+        ...emptyEngineState,
+        workers: [
+          engineWorker({
+            terminalId: '',
+            runtime: 'sdk',
+            sdkSessionId: 'sdk-dead',
+            worktree: '/wt/sdk-dead',
+            branch: 'swarm/sdk-dead',
+          }) as OrchestratorWorker,
+        ],
+      }),
+      listActiveTerminals: () => activeTerminals([]),
+      // The pool is NOT empty — someone else's session is live at another cwd —
+      // so a fix that merely asks "does any SDK session exist" would still leak.
+      // (That other cwd has no swarm/* branch in this fixture, so the unclaimed
+      // arm does not fold it in either.)
+      listActiveSdkWorkers: () => [{ id: 'sdk-other', cwd: '/wt/sdk-other' }],
+    })
+    const out = await listSwarmWorkers('/proj', deps)
+    const dead = out.find((w) => w.worktree === '/wt/sdk-dead')
+    expect(dead).toBeDefined()
+    expect(dead?.sdkSessionId).toBeUndefined()
+    expect(dead?.terminalId).toBeUndefined()
+    // The engine's own fields survive — it is still the engine's worker, and
+    // `runtime` is provenance (what it RAN on), not a liveness claim. Only the
+    // handle is withdrawn, which is exactly what the heartbeat-only arm emits
+    // for a dead worker, so the tab draws it the same way (exited, restartable).
+    expect(dead).toMatchObject({ taskId: 'task-1', runtime: 'sdk' })
   })
 
   it('an UNCLAIMED SDK worker (curl-direct dispatch) is found in the SDK pool', async () => {

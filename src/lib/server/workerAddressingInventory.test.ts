@@ -669,7 +669,7 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   },
   'src/lib/server/groundLamps.ts': {
     tier: 'both-pools',
-    why: 'GET /api/ground/lamps — whether a project is 作業中 or 途中でとまっている. A one-pool answer here is a LIE THE OWNER READS: swarm workers run on the SDK, so asking the PTY pool alone reports "nothing is moving" over a swarm working perfectly, and the card then says the project stalled. It goes through listAllActiveDesks (both pools) for the plain-pane arm, and through listSwarmWorkers — which itself reads both runtimes — for the worker arm.',
+    why: 'GET /api/ground/lamps — whether a project is 作業中 or 途中でとまっている. A one-pool answer here is a LIE THE OWNER READS: swarm workers run on the SDK, so asking the PTY pool alone reports "nothing is moving" over a swarm working perfectly, and the card then says the project stalled. It goes through listAllActiveDesks (both pools) for the plain-pane arm, and through listSwarmWorkers — which itself reads both runtimes — for the worker arm. 2026-09-17: the worker arm takes each worker\'s ONE handle (sdkSessionId || terminalId, the identity invariant) and looks it up in that same both-pools list for a \'working\' status — a resident-but-parked SDK session (finished, awaiting integration) is alive, not working, and had kept the sns-hub card stamped RUNNING for hours.',
     ptyFns: [],
     sdkCalls: ['listAllActiveDesks'],
   },

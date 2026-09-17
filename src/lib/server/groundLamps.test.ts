@@ -218,21 +218,78 @@ describe('liveWorkForProject — desks are machinery, not project work', () => {
   const desks = (claude: ActiveTerminalsResponse['claude']): (() => ActiveTerminalsResponse) =>
     () => ({ cwds: claude.map((c) => c.cwd), claude })
 
-  it('a swarm worker holding a live handle counts — either runtime', async () => {
+  // A worker's worktree lives under the central data dir, never under the
+  // project path — so a worker is attributed by its HANDLE's id in the pools,
+  // not by cwd. These fixtures keep that distance deliberately.
+  const wt = worker().worktree
+
+  it('a swarm worker counts while its session is WORKING — either runtime', async () => {
+    // Rewritten 2026-09-17. This case used to pass on the handle alone
+    // (`desks([])`): "a handle is written only while the runtime is alive" had
+    // been read as "…only while the worker is working". Measured on sns-hub: an
+    // SDK worker that had FINISHED (heartbeat phase done, ready:true, last beat
+    // 3.5 h earlier) stays resident in the pool until the commander integrates
+    // it, so its handle was live and the Ground card said RUNNING over a project
+    // where nothing moved — the owner asked 「なぜrunningになっている?」 twice.
+    // Alive is not working. The pane's status, the same verdict the owner's own
+    // pane is judged by in the cases below, is the evidence now.
     expect(
       await liveWorkForProject('/repo/a', {
         listWorkers: async () => [worker({ sdkSessionId: 'sdk-1' })],
-        listDesks: desks([]),
+        listDesks: desks([{ id: 'sdk-1', cwd: wt, status: 'working' }]),
         canon,
       }),
     ).toBe(true)
     expect(
       await liveWorkForProject('/repo/a', {
         listWorkers: async () => [worker({ terminalId: 't-1' })],
-        listDesks: desks([]),
+        listDesks: desks([{ id: 't-1', cwd: wt, status: 'working' }]),
         canon,
       }),
     ).toBe(true)
+  })
+
+  it('a worker whose session is resident but PARKED does not count — the sns-hub RUNNING report (2026-09-17)', async () => {
+    // 'waiting' = its turn is over (finished and awaiting integration, or asking
+    // something — which reaches the owner through the escalation inbox, the
+    // surface groundLamp() already ranks first). 'idle' = quiet for long enough
+    // that nothing is being generated. Neither is the project moving.
+    for (const status of ['waiting', 'idle'] as const) {
+      expect(
+        await liveWorkForProject('/repo/a', {
+          listWorkers: async () => [worker({ sdkSessionId: 'sdk-1' })],
+          listDesks: desks([{ id: 'sdk-1', cwd: wt, status }]),
+          canon,
+        }),
+      ).toBe(false)
+      expect(
+        await liveWorkForProject('/repo/a', {
+          listWorkers: async () => [worker({ terminalId: 't-1' })],
+          listDesks: desks([{ id: 't-1', cwd: wt, status }]),
+          canon,
+        }),
+      ).toBe(false)
+    }
+  })
+
+  it('a worker whose handle is in NEITHER pool does not count — the registry said so, the pools did not', async () => {
+    // The registry's record is the claim; the pools are the evidence. A handle
+    // no pool can vouch for (a roster row outliving its session, a fake-deps
+    // registry) must not light the lamp on its own.
+    expect(
+      await liveWorkForProject('/repo/a', {
+        listWorkers: async () => [worker({ sdkSessionId: 'sdk-1' })],
+        listDesks: desks([]),
+        canon,
+      }),
+    ).toBe(false)
+    expect(
+      await liveWorkForProject('/repo/a', {
+        listWorkers: async () => [worker({ terminalId: 't-1' })],
+        listDesks: desks([]),
+        canon,
+      }),
+    ).toBe(false)
   })
 
   it("the SUPPLY DESK mid-pass does NOT count — the owner's own report", async () => {

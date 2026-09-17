@@ -32,7 +32,7 @@ import { getSettings } from './store'
 import { countOpenEscalationsByProject } from './swarmEscalations'
 import { listSwarmWorkers } from './swarmWorkerRegistry'
 import { listAllActiveDesks } from './liveDesks'
-import type { GroundLampRow, GroundLampsResponse } from '@/lib/types'
+import type { ClaudeActivity, GroundLampRow, GroundLampsResponse } from '@/lib/types'
 
 export interface GroundLampDeps {
   /** DI: every registered project, as `{ id, path }`. */
@@ -59,9 +59,17 @@ const defaultStartedFor = async (projectPath: string): Promise<number | undefine
 
 /** Is anything ACTUALLY moving this project — either runtime.
  *
- *  A swarm worker counts when it holds a live handle: a `terminalId` (PTY) or an
- *  `sdkSessionId` (the SDK pool). Both are written only while the runtime is
- *  alive, which is what makes them a liveness signal rather than a record of one.
+ *  A swarm worker counts while its session is WORKING. The registry's handle
+ *  (`terminalId` for a PTY, `sdkSessionId` for the SDK pool) names a pane in the
+ *  both-pools list, and THAT pane's status must be 'working'. The handle alone
+ *  is not enough — measured 2026-09-17 on sns-hub: a worker that had FINISHED
+ *  (heartbeat phase done, ready:true, last beat 3.5 h earlier) stays resident in
+ *  the SDK pool until the commander integrates it, so its handle was live and
+ *  the Ground card said RUNNING over a project where nothing moved; the owner
+ *  asked 「なぜrunningになっている?」 twice. Alive is not working. A worker
+ *  between turns (finished, asking, quota-parked) is judged by the same verdict
+ *  the owner's own pane is judged by right below — and a handle no pool can
+ *  vouch for (a roster row outliving its session) counts for nothing.
  *
  *  A plain `claude` pane counts when it is WORKING — not merely open. A session
  *  parked at its prompt is a fact about the machine; treating it as live work is
@@ -73,8 +81,8 @@ const defaultStartedFor = async (projectPath: string): Promise<number | undefine
  *  the Board, and each of those passes lit the lamp for a project where not one
  *  card was moving — the exact housekeeping-as-work lie this lamp was rebuilt to
  *  remove, re-entering through the working/waiting split. The work a desk DRIVES
- *  is visible on its own: dispatched workers hold live handles (counted above),
- *  and a desk that needs the owner raises an escalation, which outranks
+ *  is visible on its own: dispatched workers mid-turn are counted above, and a
+ *  desk that needs the owner raises an escalation, which outranks
  *  everything in groundLamp(). `ClaudeActivity.desk` is the marker (set from
  *  TerminalInfo.deskLabel / the SDK session's role — only desk launchers write
  *  those; a hand-started `claude` in the same repo never carries one), so the
@@ -99,15 +107,33 @@ export const liveWorkForProject = async (
   const listWorkers = deps.listWorkers ?? listSwarmWorkers
   const listDesks = deps.listDesks ?? listAllActiveDesks
   const canon = deps.canon ?? canonicalize
+  // ONE both-pools read; both arms below are questions about it. Unreadable ⇒
+  // empty: then no pane can be seen working, and "no evidence" is never "working".
+  let panes: ClaudeActivity[]
+  try {
+    panes = listDesks().claude
+  } catch {
+    panes = []
+  }
+  const working = new Set(panes.filter((a) => a.status === 'working').map((a) => a.id))
   try {
     const workers = await listWorkers(projectPath)
-    if (workers.some((w) => w.terminalId || w.sdkSessionId)) return true
+    if (
+      workers.some((w) => {
+        // The ONE handle this worker's runtime names (pty ⇔ terminalId, sdk ⇔
+        // sdkSessionId — the identity invariant, workerRuntime.ts), looked up in
+        // the both-pools list. Absent on a dead worker ⇒ nothing to look up.
+        const handle = w.sdkSessionId || w.terminalId
+        return !!handle && working.has(handle)
+      })
+    )
+      return true
   } catch {
-    /* the registry is unreadable — fall through to the PTY list */
+    /* the registry is unreadable — fall through to the owner's own panes */
   }
   try {
     const canonPath = await canon(projectPath)
-    return listDesks().claude.some(
+    return panes.some(
       (a) =>
         !a.desk &&
         a.status === 'working' &&

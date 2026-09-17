@@ -219,7 +219,18 @@ export const listSwarmWorkers = async (
   //    show a heartbeat frozen at whatever the monitor last folded, hours behind the
   //    real disk timestamp (misdiagnosed as dead — see docs/commander/02-worker-lifecycle.md §4).
   for (const w of engineState?.workers ?? []) {
+    // BOTH handles are re-looked-up in their pool BY CWD, here, on every call —
+    // never copied off the roster row. The row is the engine's MEMORY of the
+    // worker; the pools are where it actually lives, and the two part ways the
+    // moment a session ends (the monitor reclaims the row on a later pass, not
+    // instantly). Until 2026-09-17 only `terminalId` was looked up and
+    // `sdkSessionId` was copied through unchecked, so a finished-or-dead SDK
+    // worker kept publishing a handle that addressed nothing — and every reader
+    // of "has a handle ⇒ alive" (the Ground lamp's liveWorkForProject first of
+    // all) stamped the project RUNNING over nothing moving. A handle in this
+    // record is a liveness claim, and only the pool may make it.
     const terminalId = liveCwdToTerminalId.get(w.worktree)
+    const sdkSessionId = liveCwdToSdkId.get(w.worktree)
     const hb = heartbeats.get(w.worktree)
     const heartbeatAt = hb?.updatedAt ?? w.heartbeatAt
     byWorktree.set(w.worktree, {
@@ -233,7 +244,7 @@ export const listSwarmWorkers = async (
       // renderer and drew a healthy, working SDK worker as an EXITED one. The SDK
       // tile (SdkWorkerPane) was unreachable for engine workers entirely.
       ...(w.runtime === 'sdk' ? { runtime: 'sdk' as const } : {}),
-      ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
+      ...(sdkSessionId ? { sdkSessionId } : {}),
       ...(terminalId ? { terminalId } : {}),
       taskId: w.taskId,
       taskTitle: w.taskTitle,
