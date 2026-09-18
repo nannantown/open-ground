@@ -274,7 +274,11 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     // actually spent (the heavy-card worker below stays fable/max).
     expect(resolveSwarmModelEffort('optimize', 'manager')).toEqual({ model: 'opus', effort: 'high' })
     expect(resolveSwarmModelEffort('optimize', 'overseer')).toEqual({ model: 'opus', effort: 'high' })
-    expect(resolveSwarmModelEffort('optimize', 'supply')!.model).toBe('sonnet')
+    // ⚠ OWNER DECISION 2026-09-18: the supply desk is opus too (it investigates
+    // and specifies cards — sonnet was under-powered), still at MEDIUM effort.
+    // A mutation that drops it back to sonnet, or lifts it to fable, turns this
+    // red (red measured against a temporary 'sonnet' on 2026-09-18).
+    expect(resolveSwarmModelEffort('optimize', 'supply')).toEqual({ model: 'opus', effort: 'medium' })
     // …and the thing that must NOT have moved with them: a heavy card is still
     // top tier. A mutation that sends heavy work to opus too turns this red.
     expect(
@@ -965,8 +969,13 @@ describe('fable containment — optimize desires the top tier for heavy worker c
         effort: 'high',
       })
     }
-    // Supply stays sonnet — cheaper still, and it never touched the fable pool.
-    expect(desiredModelEffort('optimize', 'supply').model).toBe('sonnet')
+    // Supply joined the opus row on 2026-09-18 (owner) at MEDIUM effort — a desk
+    // that investigates and specifies, not a transcriber. Still never fable: the
+    // containment test above counts it.
+    expect(desiredModelEffort('optimize', 'supply')).toEqual({
+      model: SWARM_DEFAULT_MODEL,
+      effort: 'medium',
+    })
   })
 
   // ⚠ "EVERY role" is about desiredModelEffort itself, which is what this asserts.

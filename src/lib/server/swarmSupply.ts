@@ -321,7 +321,10 @@ const launchNewSupplyDesk = async (
   const session = opts.fresh
     ? { agentSessionId: randomUUID(), resume: false }
     : await resolveSwarmSession(opts.projectPath, 'supply')
-  // Token budget (card 68d8e00f): economy/optimize run the supply officer on sonnet.
+  // Token budget (card 68d8e00f): the execution MODE picks the desk's tier —
+  // economy runs the supply officer on sonnet; optimize on opus since 2026-09-18
+  // (owner: the desk investigates and specifies, sonnet was under-powered); max
+  // on the top tier. desiredModelEffort (swarmLaunch.ts) is the one source.
   // Null ⇒ every tier switched OFF: no model, no spawn (the same hard mask every
   // other swarm role obeys — fail-CLOSED). Checked BEFORE we record anything, so a
   // refused launch never leaves a session id pointing at a conversation that

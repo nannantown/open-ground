@@ -353,8 +353,17 @@ export const desiredModelEffort = (
   // docs/commander/04-quota-models.md §5.9, which is canon for this attribution.
   if (role === 'manager' || role === 'overseer' || role === 'reviewer')
     return { model: SWARM_DEFAULT_MODEL, effort: guardEffort('high') }
-  // The supply officer only translates intent into cards — sonnet is plenty.
-  if (role === 'supply') return { model: 'sonnet', effort: guardEffort('medium') }
+  // The supply officer is the owner's front desk: it interviews the request,
+  // reads the existing code, and turns intent into cards with OBSERVABLE
+  // completion conditions — investigation and judgment, not transcription.
+  // Owner decision 2026-09-18 (「補給官が sonnet だと流石に大変」): desire OPUS,
+  // the same middle rung the other always-on desks sit on. Effort stays
+  // `medium` — the instruction was about the MODEL only. The cost is understood
+  // and accepted: the desk is always-on, so opus burn rises, and the owner ruled
+  // that an under-powered front desk is the worse problem. Opus is a separate
+  // pool from fable, so the 2026-09-16 "fable = heavy worker cards ONLY"
+  // containment is untouched (the fable-containment tests pin that).
+  if (role === 'supply') return { model: SWARM_DEFAULT_MODEL, effort: guardEffort('medium') }
   // Workers route by card weight across THREE tiers (owner, 2026-08-26):
   // heavy design work keeps the top tier, the BASE is opus, and only genuinely
   // trivial cards drop to sonnet.
@@ -560,9 +569,14 @@ export const resolveAvailableTierProbed = async (
 //                                                     (fable→opus→sonnet→haiku)
 //   optimize  fable: HEAVY worker cards ONLY         each desired tier resolved
 //             opus:  commander / overseer /           among what's available (down)
-//                    REVIEWER panel / normal cards
-//             sonnet: supply / chore workers
+//                    REVIEWER panel / SUPPLY desk /
+//                    normal cards
+//             sonnet: chore (light) worker cards
 //   economy   sonnet everywhere (workers low)        sonnet, else next tier below
+//
+// The SUPPLY desk row moved sonnet → opus on 2026-09-18 (owner): the desk
+// investigates and specifies, it does not merely transcribe; opus is not the
+// fable pool, so the single fable cell below is untouched.
 //
 // `optimize` narrowed to a SINGLE fable cell on 2026-09-16 (owner). Before that
 // the commander/overseer row had already moved to opus (2026-09-02) but the

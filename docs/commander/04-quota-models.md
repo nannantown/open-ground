@@ -795,7 +795,7 @@ r to retry
 | worker(軽い) | sonnet / low | |
 | 司令官・監督の卓 | opus / high(旧: fable / high) | 2026-09-02 変更 |
 | **敵対レビューのパネル** | **opus / high**(旧: fable 固定・モードを一切見ていなかった) | ⚠ **2026-09-16 変更** |
-| 補給官 | sonnet / medium | 意図をカードに翻訳するだけ |
+| 補給官 | **opus / medium**(旧: sonnet / medium) | ⚠ **2026-09-18 変更**(オーナー決定「補給官が sonnet だと流石に大変」)。要望のヒアリング・既存コードの調査・観測可能な完了条件へのカード化を担う席で、調査と判断の質が要る。effort は据え置き。opus は fable とは別枠なので「唯一の fable 枠」は不変 |
 
 **卓の tier を下げた理由(2026-09-02)**: 卓は**常駐する**。司令官はセッション中ずっと
 プロジェクトに座り、声をかけられるたびに文脈を読み直すので、統合が起きていなくても
@@ -807,7 +807,8 @@ r to retry
 潰した順で、同じ誤診を繰り返さないために全部残す。
 
 1. **卓は既に opus だった**。`ps -eo command` で生きている `claude` を全部読むと、
-   司令官・監督は `--effort high --model opus`、補給官は `--model sonnet`。
+   司令官・監督は `--effort high --model opus`、補給官は `--model sonnet`(当時。
+   2026-09-18 に opus へ変更 — 上表)。
    **卓からの fable はゼロ**。09-02 の変更は効いている。
 2. **敵対レビューのパネルは「fable 固定」だが、本番では1度も呼ばれていない**。
    `makeAdversarialReview` はモデルを `opts.model ?? SWARM_LAUNCH_MODEL` で決めており、
