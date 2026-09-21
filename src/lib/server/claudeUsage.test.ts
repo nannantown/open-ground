@@ -198,6 +198,60 @@ describe('sessionContextTokens — one session’s current context fill', () => 
     expect(await sessionContextTokens('sess-2', dir)).toBeNull()
   })
 
+  // A compaction newer than the last reply IS the current fill (2026-09-18). The
+  // boundary line's shape is the one claude actually wrote on a real supply desk
+  // and on both throwaway probe desks (scripts/probe-desk-compact.mts).
+  const boundary = (pre: number, post: unknown, trigger = 'manual') =>
+    JSON.stringify({
+      parentUuid: null,
+      type: 'system',
+      subtype: 'compact_boundary',
+      content: 'Conversation compacted',
+      compactMetadata: { trigger, preTokens: pre, postTokens: post },
+      timestamp: new Date().toISOString(),
+    })
+
+  it('after a compaction with no reply since, reports the POST-compaction fill', async () => {
+    resetJsonlWalkMemo()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-'))
+    const opus = 'claude-opus-4-8'
+    writeFileSync(
+      join(dir, 'sess-c1.jsonl'),
+      [
+        rec(Date.now(), 'm1', 1, { input_tokens: 10, cache_read_input_tokens: 400_000, cache_creation_input_tokens: 5 }, opus),
+        boundary(400_015, 15_794),
+      ].join('\n'),
+    )
+    // Without the boundary rule this reads 400,015 — a desk that already
+    // compacted would be compacted again every pass.
+    expect(await sessionContextTokens('sess-c1', dir)).toBe(15_794)
+  })
+
+  it('a reply AFTER the compaction wins again (the boundary is only the latest fact until then)', async () => {
+    resetJsonlWalkMemo()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-'))
+    const opus = 'claude-opus-4-8'
+    writeFileSync(
+      join(dir, 'sess-c2.jsonl'),
+      [
+        rec(Date.now(), 'm1', 1, { input_tokens: 10, cache_read_input_tokens: 400_000 }, opus),
+        boundary(400_010, 15_794, 'auto'),
+        rec(Date.now(), 'm2', 1, { input_tokens: 3, cache_read_input_tokens: 20_000, cache_creation_input_tokens: 1_000 }, opus),
+      ].join('\n'),
+    )
+    expect(await sessionContextTokens('sess-c2', dir)).toBe(21_003)
+  })
+
+  it('a boundary with no readable postTokens is "unknown" (null), never the stale pre-compaction number', async () => {
+    resetJsonlWalkMemo()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-'))
+    writeFileSync(
+      join(dir, 'sess-c3.jsonl'),
+      [rec(Date.now(), 'm1', 1, { input_tokens: 500_000 }, 'claude-opus-4-8'), boundary(500_000, undefined)].join('\n'),
+    )
+    expect(await sessionContextTokens('sess-c3', dir)).toBeNull()
+  })
+
   it('pins the auto-compact denominator at 200k', () => {
     expect(CONTEXT_WINDOW_TOKENS).toBe(200_000)
   })

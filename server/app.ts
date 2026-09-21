@@ -26,18 +26,11 @@ import { sdkSessionRoutes } from './routes/sdkSession'
 import { feedbackRoutes } from './routes/feedback'
 import { authRoutes } from './routes/auth'
 import { customModulesRoutes } from './routes/customModules'
-import { moduleSubmissionsRoutes } from './routes/moduleSubmissions'
 import { collabRoutes } from './routes/collab'
-import { youCorpusRoutes } from './routes/youCorpus'
-import { personaRoutes } from './routes/persona'
-import { personaChatRoutes } from './routes/personaChat'
 import { researchRoutes } from './routes/research'
 import { originIsLocal, hostIsLocal } from './loopback'
 
 // ── CSRF / cross-origin guard helpers ──────────────────────────────────────
-// The loopback predicates live in ./loopback so route modules (e.g.
-// routes/youCorpus.ts, which guards its sensitive GETs against DNS rebinding)
-// can reuse the EXACT same check without importing this file (app ↔ route cycle).
 // See ./loopback for the full threat-model note.
 
 export const createApp = () => {
@@ -121,11 +114,7 @@ export const createApp = () => {
     .route('/', feedbackRoutes)  // G — in-app feedback proxy (env-gated)
     .route('/', authRoutes)      // H — optional app login (Supabase Auth, env-gated)
     .route('/', customModulesRoutes) // I — custom tab modules (role-gated; docs/CUSTOM_TABS_PLAN.md)
-    .route('/', moduleSubmissionsRoutes) // J — module submission review queue (env-gated; docs/CUSTOM_TABS_PLAN.md)
     .route('/', collabRoutes)    // K — realtime collab gating + per-project resolution (env-gated)
-    .route('/', youCorpusRoutes) // L — proxy judgment corpus (you-corpus; local personal state)
-    .route('/', personaRoutes)   // L2 — persona courses: score + store + mint into the corpus
-    .route('/', personaChatRoutes) // L3 — persona conversation + claude.ai export import (spawns claude)
     .route('/', researchRoutes)  // M — research channels: checker + local-only cookie store
 
   // Any /api/* not matched above is a genuine API 404 — it must NOT fall

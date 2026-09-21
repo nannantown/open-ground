@@ -198,7 +198,9 @@ describe('OG never disables native auto-compact (source scan)', () => {
   // claudeSlash.ts is the owner-pressed sender, terminal.ts hosts its
   // `:id/slash` adapter route. Every OTHER module must stay free of /compact —
   // "compression is native" means OG never drives it on its own initiative.
-  const SANCTIONED_SLASH_SENDERS = ['claudeSlash.ts', 'terminal.ts']
+  // + supplyContextCap.ts (2026-09-18, owner decision) — the one AUTOMATIC
+  // caller; pinned and gated by the two tests below.
+  const SANCTIONED_SLASH_SENDERS = ['claudeSlash.ts', 'terminal.ts', 'supplyContextCap.ts']
 
   it('no OG module sends a /compact command to a PTY, except the manual escape hatch', async () => {
     // The other half of "compression is native": OG must not drive compaction
@@ -213,6 +215,35 @@ describe('OG never disables native auto-compact (source scan)', () => {
       if (/['"`]\/compact/.test(src)) offenders.push(f)
     }
     expect(offenders).toEqual([])
+  })
+
+  // ONE automatic caller exists since 2026-09-18, by OWNER DECISION: the
+  // resident-desk context cap compacts the SUPPLY desk early (supplyContextCap.ts)
+  // because native auto-compact on a 1M desk fires near ~950k and every turn
+  // until then re-reads the whole context (measured as the main 5-hour-window
+  // burn). It does not DISABLE or replace native compaction — it adds one early
+  // trigger, for one desk role, through the sanctioned sender. Fixed here
+  // structurally so a second automatic caller cannot appear silently: the set of
+  // modules that call the sender is exact, and the automatic one must keep the
+  // three live-desk write refusals and the owner-settable cap (0 = off).
+  const SLASH_SENDER_CALLERS = ['server/routes/terminal.ts', 'src/lib/server/supplyContextCap.ts']
+
+  it('the slash sender is called ONLY by the manual route and the supply desk cap', async () => {
+    const files = [...(await sourceFiles(SERVER_DIR)), ...(await sourceFiles(ROUTES_DIR))]
+    const callers = []
+    for (const f of files) {
+      if (f.endsWith('claudeSlash.ts')) continue
+      if (/sendClaudeSlash\s*\(/.test(await readFile(f, 'utf8'))) callers.push(f)
+    }
+    expect(callers.map((f) => f.slice(process.cwd().length + 1)).sort()).toEqual(SLASH_SENDER_CALLERS)
+  })
+
+  it('the automatic caller is gated: live-desk refusals + the owner cap + supply desks only', async () => {
+    const src = await readFile(join(SERVER_DIR, 'supplyContextCap.ts'), 'utf8')
+    expect(src).toMatch(/if \(!noticeDeliverable\(deps\.screen\(d\.id\)\)\) continue/)
+    expect(src).toMatch(/cap: getDeskContextCapTokens/)
+    expect(src).toMatch(/if \(!\(cap > 0\)\) continue/)
+    expect(src).toMatch(/d\.deskLabel === SUPPLY_DESK_LABEL/)
   })
 
   it('the sanctioned /compact sender is manual + fail-closed (not an autonomous trigger)', async () => {

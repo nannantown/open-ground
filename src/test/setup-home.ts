@@ -192,14 +192,14 @@ for (const key of [
   'SUPABASE_FEEDBACK_TABLE',
   'FEEDBACK_ADMIN_EMAILS',
   // Custom-tab modules (server/routes/customModules.ts) read these the same
-  // lazy way — clear them so the owner's live shell can't flip role/market
+  // lazy way — clear them so the owner's live shell can't flip role
   // gating cases.
   'SUPABASE_MODULES_TABLE',
   'SUPABASE_ROLES_TABLE',
   'OPENGROUND_OWNER_EMAILS',
   'OPENGROUND_TESTER_EMAILS',
-  // Module submission queue (server/routes/moduleSubmissions.ts) — same lazy
-  // reads, so clear them too (incl. the admin allowlist) for a hermetic baseline.
+  // Clear retired distribution configuration too; old parent environments
+  // must not leak into tests that verify these features remain absent.
   'SUPABASE_SUBMISSIONS_TABLE',
   'MODULE_ADMIN_EMAILS',
   // Realtime collab (server/routes/collab*.ts + ticket.ts readCollabWsUrl) —

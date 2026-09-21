@@ -1,3 +1,5 @@
+// New manager launches are SDK-only. PTY addressing here is compatibility for
+// already-running legacy desks, so updates cannot orphan them or spawn a twin.
 // swarmManagerRuntime — "is there a commander desk, and can I speak to it?",
 // answered without caring which runtime carries it.
 //

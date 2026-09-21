@@ -22,7 +22,6 @@ import {
   type IntegrationDeps,
   type AnomalyDeps,
 } from './swarmOrchestrator'
-import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
 import { settingsFile, projectCentralDir } from './paths'
 import type { ProjectTask, OrchestratorWorker } from '../types'
@@ -264,7 +263,6 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine =>
     permissionWaits: new Map(),
     log: [],
     anomalies: [],
-    selfSupply: initSelfSupplyRuntime(),
     overseer: initOverseerRuntime(),
     notified: new Set(),
     pendingFatal: [],

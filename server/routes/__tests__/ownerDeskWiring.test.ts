@@ -66,7 +66,6 @@ vi.mock('@/lib/server/claudeConnection', () => ({
 
 import { app } from '../../app'
 import { __resetMigrationCacheForTests } from '@/lib/server/registry'
-import { managerLaunchOpts } from '@/lib/server/swarmManager'
 import { supplyLaunchOpts } from '@/lib/server/swarmSupply'
 
 const json = (body: unknown): RequestInit => ({
@@ -139,13 +138,6 @@ describe('owner-desk wiring — the commander and supply desks', () => {
   // These two are the only desks with a `deskLabel`, and the label is what lets
   // one merged bell row say WHICH conversation stopped ("「OG」の司令官・補給官").
   // Dropping either field degrades a real message silently.
-  it('managerLaunchOpts opens an owner desk named 司令官', () => {
-    expect(managerLaunchOpts('/tmp/p', 'sid', { lang: 'en' }, { model: 'opus', effort: 'high' })).toMatchObject({
-      ownerDesk: true,
-      deskLabel: '司令官',
-    })
-  })
-
   it('supplyLaunchOpts opens an owner desk named 補給官', () => {
     expect(supplyLaunchOpts('/tmp/p', 'sid', { lang: 'en' }, { model: 'sonnet', effort: 'medium' })).toMatchObject({
       ownerDesk: true,

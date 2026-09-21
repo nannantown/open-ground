@@ -155,6 +155,19 @@ curl -s -X POST $OG/api/swarm/manager/say -H 'content-type: application/json' \
    - **notes** = completion condition + checklist + scope/constraints; worker gets this as
      `/order ゴール: …` via commander. No infinite superlatives — translate to a measurable
      proxy (behavior, green tests, checklist), same discipline as [[order]].
+   - **tier** = the card's DIFFICULTY — decides which model / effort the worker runs
+     on (owner decision 2026-09-18). **Read the code the card touches before you
+     pick it** — judge the difficulty of the change, not the length of the brief
+     (a detailed completion condition is not a hard task). One of:
+     - `touch` — small, well-understood change (typo, copy, rename, one-line fix).
+     - `standard` — ordinary feature / bug work. The default when unsure.
+     - `design` — structural or judgment-heavy work (new mechanism, cross-cutting
+       change, tricky concurrency / state).
+     - `ultra` — the hardest work only; it spends the scarcest model budget.
+     Never write a model name on the card (the tier → model table lives in the app
+     and changes with the roster). Safety-sensitive cards (auth, deletion, billing,
+     sandbox/guard, migration, security…) are floored at `design` by the app even if
+     you write lower — still write your honest call.
    - Split large requests into independent, non-file-overlapping subtasks.
    - **Swarm-core touches require a docs follow-up as a completion condition** — for
      SWARM_CODE_PATHS files (swarmOrchestrator/swarmWorker/swarmQuota/swarmAllowedModels/
@@ -176,10 +189,12 @@ curl -s -X POST $OG/api/swarm/manager/say -H 'content-type: application/json' \
    gate ⑦), which contains the damage — but a card you leave half-written is a
    card that sits in `todo` doing nothing, and the owner has to ask why.
 
-   Minimum card object: `{ id: <uuid>, title, notes, done: false,
+   Minimum card object: `{ id: <uuid>, title, notes, tier, done: false,
    createdAt: <ISO>, boardColumn: 'todo' }` (+ `priority` when urgent/high).
    `notes` MUST carry the observable completion conditions — that is the whole
-   point of the card.
+   point of the card. `tier` is the difficulty you judged in step 3 after reading
+   the code (`touch` / `standard` / `design` / `ultra`); omit it only if you truly
+   could not judge (the app then estimates from keywords).
 
    If you cannot finish the card yet (you still need an answer from the user),
    write it with `boardColumn: 'blocked'` and move it to `todo` once it is
@@ -211,8 +226,8 @@ Only the HTTP API. Base URL from the auto-injected "OPEN GROUND context" card:
 | Deprioritize | `POST $OG/api/project/tasks` body `{path, setColumn:[{"id":"<full UUID>","column":"blocked"}]}` |
 | Revive blocked card | same, `"column":"todo"` (resets rework counter) |
 
-**notes + priority**: `add` only takes a TITLE, so it cannot produce a complete
-card — prefer one `PUT /api/project` carrying the finished card (see step 4; the
+**notes + priority + tier**: `add` only takes a TITLE, so it cannot produce a complete
+card (no notes, no difficulty `tier`) — prefer one `PUT /api/project` carrying the finished card (see step 4; the
 GET's `updatedAt` is the CAS token). Always read back to confirm. A card with an
 empty `notes` is held by the engine's dispatch gate ⑦ and will sit in `todo`
 until you finish it.

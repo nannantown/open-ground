@@ -1,17 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
-import { mkdtemp, mkdir, rm, realpath, writeFile, readFile } from 'fs/promises'
-import { existsSync } from 'fs'
+import { mkdtemp, mkdir, rm, realpath, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
-import { join, basename } from 'path'
+import { join } from 'path'
 import {
   classifyBranch,
-  integrateBranch,
   resolveTarget,
   fetchTarget,
   isSwarmBranch,
-  buildConflictRebaseInstruction,
 } from './swarmIntegrate'
 
 // Tests against REAL local git fixtures in a tmpdir (mergedBranches /
@@ -44,7 +41,6 @@ const git = async (cwd: string, args: string[]): Promise<string> =>
 
 let scratch: string
 let token = 0
-const intDir = () => join(scratch, `integrate-${token++}`)
 
 beforeEach(async () => {
   scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-swarm-integrate-')))
@@ -105,16 +101,6 @@ async function advanceTrunk(other: string, file: string, content: string, msg: s
   await git(other, ['push', 'origin', 'main'])
 }
 
-/** The bare origin's main tip sha. */
-const trunkTip = async (origin: string): Promise<string> =>
-  (await git(origin, ['rev-parse', 'main'])).trim()
-
-/** Does the bare origin's main contain a file (read via a fresh archive)? */
-async function trunkHasFile(origin: string, file: string): Promise<boolean> {
-  const out = await git(origin, ['ls-tree', '--name-only', 'main'])
-  return out.split('\n').map((s) => s.trim()).includes(file)
-}
-
 // ── pure guard ────────────────────────────────────────────────────────────────
 
 describe('isSwarmBranch', () => {
@@ -165,7 +151,7 @@ describe('classifyBranch — read-only readiness', () => {
     const { project } = await makeRemote()
     await commitOnBranch(project, 'swarm/done', 'd.txt', 'D\n', 'add d')
     await fetchTarget(project, 'main')
-    await integrateBranch(project, 'swarm/done', { target: 'main', integrateDir: intDir() })
+    await git(project, ['push', 'origin', 'swarm/done:main'])
     await fetchTarget(project, 'main')
     // Its tip is now contained in the trunk → still classified ff (finalizable).
     expect(await classifyBranch(project, 'swarm/done', 'main')).toBe('ff')
@@ -186,168 +172,5 @@ describe('classifyBranch — read-only readiness', () => {
     await git(solo, ['add', '.']); await git(solo, ['commit', '-m', 'c'])
     await git(solo, ['branch', 'swarm/x'])
     expect(await classifyBranch(solo, 'swarm/x', 'main')).toBe('unknown')
-  })
-})
-
-// ── integrateBranch — the clean fast-forward path ─────────────────────────────
-
-describe('integrateBranch — fast-forward', () => {
-  it('pushes a clean branch straight to the trunk (mode ff)', async () => {
-    const { origin, project } = await makeRemote()
-    await commitOnBranch(project, 'swarm/ff', 'a.txt', 'A\n', 'add a')
-    await fetchTarget(project, 'main')
-    const before = await trunkTip(origin)
-
-    const out = await integrateBranch(project, 'swarm/ff', { target: 'main', integrateDir: intDir() })
-    expect(out).toEqual({ status: 'integrated', mode: 'ff' })
-    // The trunk moved and now carries the branch's file.
-    expect(await trunkTip(origin)).not.toBe(before)
-    expect(await trunkHasFile(origin, 'a.txt')).toBe(true)
-  })
-
-  it('treats an already-merged branch as integrated without re-pushing', async () => {
-    const { origin, project } = await makeRemote()
-    await commitOnBranch(project, 'swarm/once', 'a.txt', 'A\n', 'add a')
-    await fetchTarget(project, 'main')
-    await integrateBranch(project, 'swarm/once', { target: 'main', integrateDir: intDir() })
-    await fetchTarget(project, 'main')
-    const tip = await trunkTip(origin)
-
-    const again = await integrateBranch(project, 'swarm/once', { target: 'main', integrateDir: intDir() })
-    expect(again).toEqual({ status: 'integrated', mode: 'ff' })
-    expect(await trunkTip(origin)).toBe(tip) // no new commit
-  })
-})
-
-// ── integrateBranch — the rebase path ─────────────────────────────────────────
-
-describe('integrateBranch — rebase', () => {
-  it('rebases a diverged but non-conflicting branch and fast-forwards (mode rebase)', async () => {
-    const { origin, project, other } = await makeRemote()
-    await commitOnBranch(project, 'swarm/div', 'b.txt', 'B\n', 'add b')
-    await advanceTrunk(other, 'c.txt', 'C\n', 'trunk c') // different file → no conflict
-    await fetchTarget(project, 'main')
-
-    const out = await integrateBranch(project, 'swarm/div', { target: 'main', integrateDir: intDir() })
-    expect(out).toEqual({ status: 'integrated', mode: 'rebase' })
-    // The trunk now carries BOTH the trunk's and the branch's file.
-    expect(await trunkHasFile(origin, 'c.txt')).toBe(true)
-    expect(await trunkHasFile(origin, 'b.txt')).toBe(true)
-  })
-
-  it('leaves no integration worktree behind after a rebase', async () => {
-    const { project, other } = await makeRemote()
-    await commitOnBranch(project, 'swarm/div2', 'b.txt', 'B\n', 'add b')
-    await advanceTrunk(other, 'c.txt', 'C\n', 'trunk c')
-    await fetchTarget(project, 'main')
-    const dir = intDir()
-    await integrateBranch(project, 'swarm/div2', { target: 'main', integrateDir: dir })
-    expect(existsSync(dir)).toBe(false)
-  })
-})
-
-// ── integrateBranch — conflict (the safety-critical case) ─────────────────────
-
-describe('integrateBranch — conflict', () => {
-  it('aborts on a real conflict, pushes nothing, leaves the branch untouched', async () => {
-    const { origin, project, other } = await makeRemote()
-    // Both sides change fileX differently → rebase conflict.
-    await commitOnBranch(project, 'swarm/conf', 'fileX', 'from-swarm\n', 'swarm edits X')
-    const branchTipBefore = (await git(project, ['rev-parse', 'refs/heads/swarm/conf'])).trim()
-    await advanceTrunk(other, 'fileX', 'from-trunk\n', 'trunk edits X')
-    await fetchTarget(project, 'main')
-    const trunkBefore = await trunkTip(origin)
-    const dir = intDir()
-
-    const out = await integrateBranch(project, 'swarm/conf', { target: 'main', integrateDir: dir })
-    // The conflicted file(s) are captured (the human's resolution hint) before the
-    // abort — a pure read of the mid-conflict index.
-    expect(out).toEqual({ status: 'conflict', files: ['fileX'] })
-
-    // Trunk NOT advanced by us (still just the trunk's own edit).
-    expect(await trunkTip(origin)).toBe(trunkBefore)
-    const trunkX = await git(origin, ['show', 'main:fileX'])
-    expect(trunkX).toBe('from-trunk\n')
-    // The worker's branch ref is untouched (no force, no rewrite).
-    expect((await git(project, ['rev-parse', 'refs/heads/swarm/conf'])).trim()).toBe(branchTipBefore)
-    // No half-rebase / leftover worktree. Derive the worktree-metadata name from the
-    // dir we actually passed (git names .git/worktrees/<basename>), not from a fragile
-    // `token - 1` recomputation that silently breaks if the counter is touched between.
-    expect(existsSync(dir)).toBe(false)
-    expect(existsSync(join(project, '.git', 'worktrees', basename(dir)))).toBe(false)
-  })
-})
-
-// ── integrateBranch — refusals (only ever the worker's own swarm branch) ───────
-
-describe('integrateBranch — refusals', () => {
-  it('skips a non-swarm branch without touching anything', async () => {
-    const { origin, project } = await makeRemote()
-    await git(project, ['branch', 'feature/x', 'origin/main'])
-    const before = await trunkTip(origin)
-    const out = await integrateBranch(project, 'feature/x', { target: 'main', integrateDir: intDir() })
-    expect(out).toEqual({ status: 'skipped', reason: 'not a swarm branch' })
-    expect(await trunkTip(origin)).toBe(before)
-  })
-
-  it('skips when there is no remote trunk', async () => {
-    const solo = join(scratch, 'solo2')
-    await mkdir(solo)
-    await git(solo, ['init', '-b', 'main'])
-    await writeFile(join(solo, 'f'), 'x\n')
-    await git(solo, ['add', '.']); await git(solo, ['commit', '-m', 'c'])
-    await git(solo, ['branch', 'swarm/x'])
-    const out = await integrateBranch(solo, 'swarm/x', { target: 'main', integrateDir: intDir() })
-    expect(out).toEqual({ status: 'skipped', reason: 'no remote trunk' })
-  })
-
-  it('skips a swarm branch whose tip is missing', async () => {
-    const { project } = await makeRemote()
-    const out = await integrateBranch(project, 'swarm/ghost', { target: 'main', integrateDir: intDir() })
-    expect(out).toEqual({ status: 'skipped', reason: 'branch tip not found' })
-  })
-})
-
-// ── buildConflictRebaseInstruction (card 012a2848) — the worker delegation text ──
-describe('buildConflictRebaseInstruction', () => {
-  it('encodes the rebase command against the trunk and names the conflicting files', () => {
-    const msg = buildConflictRebaseInstruction({
-      branch: 'swarm/w1-abc',
-      target: 'main',
-      files: ['src/a.ts', 'src/b.ts'],
-    })
-    expect(msg).toContain('swarm/w1-abc')
-    expect(msg).toContain('git rebase origin/main') // exact command to land atop trunk
-    expect(msg).toContain('src/a.ts')
-    expect(msg).toContain('src/b.ts')
-    // It is a SINGLE line (the orchestrator writes it to a PTY as one turn).
-    expect(msg).not.toContain('\n')
-  })
-
-  it('states the HARD safety contract: rebase your OWN branch, never (force-)push (condition 2)', () => {
-    const msg = buildConflictRebaseInstruction({ branch: 'swarm/x', target: 'main' })
-    expect(msg).toContain('自分のブランチ') // own branch only
-    expect(msg).toContain('force-push') // ...and the prohibition on it
-    expect(msg).toMatch(/push はしない/) // the worker never pushes — the engine lands it
-  })
-
-  it('falls back to a git-status hint when no files are surfaced, and respects a custom remote', () => {
-    const msg = buildConflictRebaseInstruction({ branch: 'swarm/x', target: 'develop', remote: 'upstream' })
-    expect(msg).toContain('git status') // no file list → tell the worker how to find it
-    expect(msg).toContain('git rebase upstream/develop') // honors the remote + target
-  })
-
-  it('caps a pathological conflict-file list so the line stays legible', () => {
-    const files = Array.from({ length: 25 }, (_, i) => `src/f${i}.ts`)
-    const msg = buildConflictRebaseInstruction({ branch: 'swarm/x', target: 'main', files })
-    expect(msg).toContain('他15件') // 25 - 10 shown
-    expect(msg).toContain('src/f0.ts')
-    expect(msg).not.toContain('src/f10.ts') // beyond the cap, not listed inline
-  })
-
-  it('ignores blank/whitespace file entries (no empty tokens in the line)', () => {
-    const msg = buildConflictRebaseInstruction({ branch: 'swarm/x', target: 'main', files: ['', '  ', 'src/real.ts'] })
-    expect(msg).toContain('競合ファイル: src/real.ts')
-    expect(msg).not.toContain('競合ファイルは git status') // a real file IS present → not the fallback
   })
 })

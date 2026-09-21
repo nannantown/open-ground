@@ -36,41 +36,28 @@ export interface ModuleDef extends TabDef {
   /** Ships pre-installed as part of the default set. A native can be HIDDEN
    *  per project (ProjectData.disabledModules) but never uninstalled. */
   default: true
-  /** Owner-only experiment gate. When set, the module is HIDDEN from EVERY
-   *  surface — tab row, "+" picker, Ctrl+Tab cycle, render branch — unless AT
-   *  LEAST ONE of these experiments is OPEN for the current user (owner + the
-   *  settings toggle, resolved server-side; see {@link ModuleGate} and
-   *  ExperimentId in types). Absent ⇒ an always-on default module. A gated
-   *  module never appears in release notes or the in-app manual (both
-   *  hand-written, never derived from this registry).
-   *
-   *  ANY-OF, not all-of: a module may ride along with a neighbouring experiment
-   *  while keeping its own flag as a second, independent way in. (The Persona
-   *  surface was the case that introduced this. It is no longer a tab — it
-   *  describes the OWNER rather than a project, so it now opens from the Ground
-   *  toolbar; its gate kept the same any-of rule and lives in
-   *  src/lib/persona/gate.ts.) */
+
+  audience: 'public' | 'owner'
+
   experiments?: readonly ExperimentId[]
 }
 
-/** Which owner-only experiments are currently OPEN for this user. Built from the
- *  resolved /api/experiments flags via {@link gateFromFlags}. The EMPTY set (the
- *  default below) hides every experimental module — exactly the shipped,
- *  signed-out, and non-owner state, so visibility fails closed. */
+/** Server-resolved visibility. Swarm's public/local unlock never grants owner
+ *  features. An omitted gate hides both owner features and closed experiments. */
 export interface ModuleGate {
   openExperiments: ReadonlySet<ExperimentId>
+  ownerFeatures: boolean
 }
 
 /** The safe default gate: no experiment open ⇒ experimental modules stay
  *  invisible. Every visibility helper defaults to this so a caller that forgets
  *  to thread the gate (and every existing pre-experiment call site / test)
  *  fails CLOSED — the experimental module is hidden, never accidentally shown. */
-const NO_EXPERIMENTS: ModuleGate = { openExperiments: new Set() }
+const NO_EXPERIMENTS: ModuleGate = { openExperiments: new Set(), ownerFeatures: false }
 
-/** Build a {@link ModuleGate} from resolved experiment flags: an experiment is
- *  in the open set only when its flag is true. (The flags are already
- *  owner-ANDed server-side, so a non-owner's flags are all false ⇒ empty set.) */
-export const gateFromFlags = (flags: ExperimentFlags): ModuleGate => ({
+/** Owner access comes from /api/experiments.eligible, not from the Swarm flag. */
+export const gateFromFlags = (flags: ExperimentFlags, ownerFeatures = false): ModuleGate => ({
+  ownerFeatures,
   openExperiments: new Set(
     (Object.keys(flags) as ExperimentId[]).filter((id) => flags[id]),
   ),
@@ -109,27 +96,18 @@ export const customModuleTabDef = (m: { id: string; label: string }): TabDef => 
 // The 'goals' (Tasks) and 'overview' tabs were removed outright in the
 // terminal-only purge — every module in the registry is always enabled.
 export const MODULES: ModuleDef[] = [
-  { id: 'board', label: 'Board', icon: <Columns3 size={10} strokeWidth={2.25} />, kind: 'native', default: true },
-  { id: 'canvas', label: 'Canvas', icon: <Palette size={10} strokeWidth={2.25} />, kind: 'native', default: true },
-  { id: 'terminal', label: 'Terminal', icon: <Terminal size={10} strokeWidth={2.25} />, kind: 'native', default: true },
+  { id: 'board', label: 'Board', icon: <Columns3 size={10} strokeWidth={2.25} />, kind: 'native', default: true, audience: 'public' },
+  { id: 'canvas', label: 'Canvas', icon: <Palette size={10} strokeWidth={2.25} />, kind: 'native', default: true, audience: 'owner' },
+  { id: 'terminal', label: 'Terminal', icon: <Terminal size={10} strokeWidth={2.25} />, kind: 'native', default: true, audience: 'public' },
   // Research — the per-project research-report library (docs/research/*.md,
-  // read-only; server/routes/research.ts). Always-on default. Its name is
+  // server/routes/research.ts). Owner surface. Its name is
   // product copy rather than a fixed product noun, so it carries a `labelKey`:
   // renaming the tab in both languages is a one-key edit in
   // src/i18n/messages/research.ts.
-  { id: 'research', label: 'Research', labelKey: 'research.tabLabel', icon: <BookOpenText size={10} strokeWidth={2.25} />, kind: 'native', default: true },
-  // Owner-only experiments (hidden by default). `experiments: [<id>…]` keeps each
-  // out of every visible surface until one of those gates is open (owner + the
-  // settings toggle). Listed last so, when shown, they sit after the always-on
-  // defaults in registry order.
-  { id: 'swarm', label: 'Swarm', icon: <Network size={10} strokeWidth={2.25} />, kind: 'native', default: true, experiments: ['swarm'] },
-  // NOT HERE ON PURPOSE — Persona. It was a gated module until 2026-08-14, but
-  // the surface is about the OWNER, not a repo: its data lives in
-  // ~/.openground/ and was therefore identical on every project's tab. It now
-  // opens from the GROUND toolbar beside Settings / Manual / Skills
-  // (src/components/canvas/PersonaPanel.tsx, gated by src/lib/persona/gate.ts).
-  // Adding it back here would put the owner's stand-in behind a per-project
-  // address it has no per-project meaning for.
+  { id: 'research', label: 'Research', labelKey: 'research.tabLabel', icon: <BookOpenText size={10} strokeWidth={2.25} />, kind: 'native', default: true, audience: 'owner' },
+  // Swarm retains its existing owner/local unlock and public macOS opt-in.
+  { id: 'swarm', label: 'Swarm', icon: <Network size={10} strokeWidth={2.25} />, kind: 'native', default: true, audience: 'public', experiments: ['swarm'] },
+
 ]
 
 // Whether a module is visible GLOBALLY for this user. A plain default module is
@@ -143,7 +121,8 @@ export const isModuleEnabled = (
   m: ModuleDef,
   gate: ModuleGate = NO_EXPERIMENTS,
 ): boolean =>
-  !m.experiments || m.experiments.some((id) => gate.openExperiments.has(id))
+  (m.audience === 'public' || gate.ownerFeatures) &&
+  (!m.experiments || m.experiments.some((id) => gate.openExperiments.has(id)))
 
 /** The SAME predicate, addressed by id — for the render branches in
  *  ProjectPanel, which re-check the gate before mounting an experimental

@@ -39,7 +39,6 @@ import {
   type IntegrationDeps,
   type AnomalyDeps,
 } from './swarmOrchestrator'
-import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
 import { readEngineIntent, writeEngineIntent } from './swarmEnginePersistence'
 import { projectDataFile } from './projectDataPath'
@@ -85,7 +84,6 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine => ({
   nudges: new Map(),
   log: [],
   anomalies: [],
-  selfSupply: initSelfSupplyRuntime(),
   overseer: initOverseerRuntime(),
   notified: new Set(),
   pendingFatal: [],
@@ -215,7 +213,6 @@ describe('review dwell clock — the seed back (resumeEngines)', () => {
     const waitingSince = T0 - MANAGER_INTEGRATION_STALL_MS - 60_000
     await writeEngineIntent(proj, {
       desiredRunning: true,
-      selfSupply: false,
       overseer: false,
       reviewWaitingSince: { 'swarm/a': waitingSince },
     })
@@ -240,7 +237,7 @@ describe('review dwell clock — the seed back (resumeEngines)', () => {
   it('an ABSENT or CORRUPT persisted clock degrades to today\'s behaviour — never a failed resume', async () => {
     // Fail-open in the read direction: the file is hand-editable on disk, and a
     // clock that cannot be trusted must cost only the head start, never the boot.
-    await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(proj, { desiredRunning: true, overseer: false })
     const file = await projectDataFile(proj, 'engine.json')
     const raw = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
     // Every shape a torn/edited file can take: wrong type, wrong value types, junk.
@@ -264,7 +261,6 @@ describe('review dwell clock — the seed back (resumeEngines)', () => {
     // the app was closed cannot hold the clock back.
     await writeEngineIntent(proj, {
       desiredRunning: true,
-      selfSupply: false,
       overseer: false,
       reviewWaitingSince: { 'swarm/gone': T0 - 3 * MANAGER_INTEGRATION_STALL_MS, 'swarm/a': T0 - 60_000 },
     })

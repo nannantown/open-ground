@@ -44,6 +44,7 @@ export type Block =
 
 export interface Section {
   id: string
+  ownerOnly?: boolean
   icon: ReactNode
   kicker: Bi
   title: Bi
@@ -84,8 +85,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'There are two layers. Layer 1 is the Ground — the portfolio of project cards, where the core experience is overview. Layer 2 opens when you click a card: a workspace for that one project with three tabs — Board, Canvas, and Terminal.',
-          ja: '構造は2層です。レイヤー1はグラウンド —— プロジェクトカードのポートフォリオで、主役は「俯瞰」。レイヤー2はカードをクリックすると開く、そのプロジェクト専用のワークスペースで、Board・Canvas・Terminal の3タブで構成されます。',
+          en: 'Ground shows your projects together. Open a project for Board and Terminal. Swarm can be enabled in Settings on macOS. Canvas, Research and custom tabs are currently owner-only; previously saved data is retained.',
+          ja: 'グラウンドでプロジェクトを一覧し、開くと Board・Terminal が使えます。macOS では設定から Swarm をオンにできます。Canvas・Research・追加タブは現在オーナー向けですが、以前の保存データは残ります。',
         },
       },
       {
@@ -136,8 +137,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'A project opens into Board (plan and run tasks), Canvas (design and brainstorm), and Terminal (raw claude or a shell).',
-          ja: 'プロジェクトは Board（計画と実行）・Canvas（デザインとブレスト）・Terminal（生の claude やシェル）に展開します。',
+          en: 'A project opens into Board (plan and run tasks) and Terminal (claude or a shell), with Swarm available when enabled.',
+          ja: 'プロジェクトでは Board（計画と実行）と Terminal（claude やシェル）を使えます。Swarm はオンにすると表示されます。',
         },
       },
       { kind: 'subhead', text: { en: '3 · Run your first task', ja: '3 · 最初のタスクを実行する' } },
@@ -363,6 +364,7 @@ export const MANUAL_SECTIONS: Section[] = [
   // ─────────────────────────────── 6 · Canvas ───────────────────────────────
   {
     id: 'canvas',
+    ownerOnly: true,
     icon: <Palette {...ICON} />,
     kicker: { en: 'Layer 2 · Tab', ja: 'レイヤー2 · タブ' },
     title: { en: 'Canvas — design & brainstorm', ja: 'キャンバス — デザインとブレスト' },
@@ -480,12 +482,13 @@ export const MANUAL_SECTIONS: Section[] = [
   // ──────────────────────────── 8 · Custom tabs ─────────────────────────────
   {
     id: 'custom',
+    ownerOnly: true,
     icon: <Puzzle {...ICON} />,
     kicker: { en: 'Advanced', ja: '上級' },
     title: { en: 'Custom tabs', ja: 'カスタムタブ' },
     intro: {
-      en: 'Build your own per-project tab, edit it with claude, and share it through a marketplace.',
-      ja: 'プロジェクトタブを自作し、claude で編集し、マーケットで共有する。',
+      en: 'Build your own per-project tab and edit it locally with claude.',
+      ja: 'プロジェクトタブを自作し、手元で claude と編集する。',
     },
     blocks: [
       {
@@ -503,21 +506,20 @@ export const MANUAL_SECTIONS: Section[] = [
           ja: 'タブの横に claude のターミナルが開き、モジュールのフォルダ（`~/.openground/custom-modules/<id>/`）で作業します。ソースを編集すると、プレビューがホットリロードされます。',
         },
       },
-      { kind: 'subhead', text: { en: 'Library & marketplace', ja: 'ライブラリとマーケット' } },
+      { kind: 'subhead', text: { en: 'Library', ja: 'ライブラリ' } },
       {
         kind: 'bullets',
         items: [
           { en: 'Attach / Detach a module per project (Detach is non-destructive).', ja: 'モジュールはプロジェクトごとに アタッチ / デタッチ（デタッチは非破壊）。' },
-          { en: 'Publish a module to the marketplace; install published ones into your library.', ja: 'モジュールをマーケットに公開し、公開済みのものを自分のライブラリにインストール。' },
-          { en: 'Roles: an owner authors and publishes; a tester can install; everyone else sees existing tabs read-only.', ja: 'ロール：owner は作成・公開でき、tester はインストール可、それ以外は既存タブを読み取り専用で閲覧。' },
+          { en: 'Owners can create and edit tabs; testers can create and edit local tabs. Everyone can view existing tabs.', ja: 'owner は作成・編集でき、tester はローカルのタブを作成・編集できます。既存タブの閲覧は誰でも可能です。' },
         ],
       },
       {
         kind: 'note',
         tone: 'info',
         text: {
-          en: 'Roles are enforced on the server (Supabase, RLS); client gating is cosmetic. The marketplace appears only when it is configured.',
-          ja: 'ロールはサーバー側（Supabase・RLS）で強制されます。クライアント側のガードは見た目だけです。マーケットは設定済みのときだけ表示されます。',
+          en: 'Editing permissions are enforced on the server. Previously installed tabs remain available with their existing permissions.',
+          ja: '編集権限はサーバー側で確認します。以前インストールしたタブは、これまでと同じ権限で使えます。',
         },
       },
     ],
@@ -547,8 +549,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'For confidential machines: Settings → Advanced → Work mode is a one-toggle kill switch for every connection that isn’t your own Claude. While it is on, OPEN GROUND stops talking to anything else — update checks, release notes, feedback, the marketplace, sign-in (including token refreshes for an existing login), and shared projects are all disabled, and the server refuses any other outbound request as a backstop. Your claude CLI keeps working as usual — the whole point is “Claude only”.',
-          ja: '機密情報を扱うマシン向け：設定 → 詳細設定 → 業務モード は、自分の Claude 以外のすべての通信を 1 トグルで止めるキルスイッチです。オンの間、OPEN GROUND は Claude 以外のどことも通信しません —— アップデート確認・リリースノート・フィードバック・マーケットプレイス・サインイン（ログイン済みセッションのトークン更新も含む）・共有プロジェクトはすべて無効になり、その他の外向き通信もサーバーが最後の砦として拒否します。claude CLI はそのまま使えます —— 「Claude だけ」がこのモードの目的です。',
+          en: 'For confidential machines: Settings → Advanced → Work mode is a one-toggle kill switch for every connection that isn’t your own Claude. While it is on, OPEN GROUND stops talking to anything else — update checks, release notes, feedback, sign-in (including token refreshes for an existing login), and shared projects are all disabled, and the server refuses any other outbound request as a backstop. Your claude CLI keeps working as usual — the whole point is “Claude only”.',
+          ja: '機密情報を扱うマシン向け：設定 → 詳細設定 → 業務モード は、自分の Claude 以外のすべての通信を 1 トグルで止めるキルスイッチです。オンの間、OPEN GROUND は Claude 以外のどことも通信しません —— アップデート確認・リリースノート・フィードバック・サインイン（ログイン済みセッションのトークン更新も含む）・共有プロジェクトはすべて無効になり、その他の外向き通信もサーバーが最後の砦として拒否します。claude CLI はそのまま使えます —— 「Claude だけ」がこのモードの目的です。',
         },
       },
       {
@@ -705,7 +707,7 @@ export const MANUAL_SECTIONS: Section[] = [
           { k: '⌘C · ⌘V', v: { en: 'Terminal: copy · paste (image paste saves a file).', ja: 'ターミナル：コピー · 貼り付け（画像はファイルとして保存）。' } },
           { k: '⇧Enter', v: { en: 'Terminal: newline without sending.', ja: 'ターミナル：送信せず改行。' } },
           { k: 'Alt+← / →', v: { en: 'Terminal: reorder panes.', ja: 'ターミナル：ペインを並べ替え。' } },
-          { k: 'Ctrl+Tab', v: { en: 'Panel: cycle Board / Canvas / Terminal tabs.', ja: 'パネル：Board / Canvas / Terminal を循環。' } },
+          { k: 'Ctrl+Tab', v: { en: 'Panel: cycle visible tabs.', ja: 'パネル：表示中のタブを循環。' } },
         ],
       },
       { kind: 'subhead', text: { en: 'Where your data lives', ja: 'データの保存場所' } },

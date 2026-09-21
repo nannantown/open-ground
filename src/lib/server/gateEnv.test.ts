@@ -29,7 +29,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { existsSync } from 'fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import { readFile, } from 'fs/promises'
 import { tmpdir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -168,7 +168,6 @@ describe('no spawn site hands untrusted code the raw engine env', () => {
   // regression, and the docs must not claim more than that.
   const files = [
     'src/lib/server/swarmOrchestrator.ts',
-    'src/lib/server/swarmSelfSupply.ts',
     'electron/main.js',
   ]
 
@@ -197,74 +196,6 @@ describe('no spawn site hands untrusted code the raw engine env', () => {
       ).toEqual([])
     })
   }
-
-  it('runCapture BEHAVIOURALLY hands the scanner a gate env, not the ambient one', async () => {
-    // Review round 3, nit 1: the textual pin above is the only thing guarding the
-    // self-supply scanners, and a laundered spelling (`const ambient = process.env;
-    // env: ambient`) walks straight past it — measured, 32 tests stayed green. This
-    // asserts the env the spawn primitive ACTUALLY receives, so no spelling helps.
-    const { runGateProcess } = await import('./gateProcess')
-    const { runCapture } = await import('./swarmSelfSupply')
-    const spy = vi.mocked(runGateProcess)
-    spy.mockClear()
-
-    const engineHome = process.env.OPENGROUND_HOME
-    const marker = 'ambient-secret-that-must-not-travel'
-    vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', marker)
-    vi.stubEnv('OPENGROUND_COLLAB_TICKET_SECRET', marker)
-    try {
-      await runCapture('/tmp/some-project', '/tmp/some-project/node_modules/.bin/tsc', ['--noEmit'])
-    } finally {
-      vi.unstubAllEnvs()
-    }
-
-    expect(spy).toHaveBeenCalledTimes(1)
-    const env = spy.mock.calls[0][2].env
-    expect(env.OPENGROUND_HOME).not.toBe(engineHome)
-    expect(env.OPENGROUND_HOME).toContain(GATE_HOME_PREFIX)
-    expect(env.SUPABASE_SERVICE_ROLE_KEY).toBeUndefined()
-    expect(env.OPENGROUND_COLLAB_TICKET_SECRET).toBeUndefined()
-    // Not a stripped-empty env — the scanner still needs to be able to run.
-    expect(env.PATH).toBe(process.env.PATH)
-  })
-
-  it('testCheck BEHAVIOURALLY hands the branch suite a gate env (biggest blast radius)', async () => {
-    // Review round 4 nit: the four gate checks were textual-pin-only, and a
-    // laundered spelling walks past a textual pin. testCheck is the one that runs
-    // the branch's ENTIRE test suite, so it gets the same behavioural backstop
-    // runCapture got in round 3. Measured: revert testCheck to `env: ambient` and
-    // this goes red while the source pin stays green.
-    const { runGateProcess } = await import('./gateProcess')
-    const { testCheck } = await import('./swarmOrchestrator')
-    const spy = vi.mocked(runGateProcess)
-    spy.mockClear()
-
-    // testCheck.run stats <dir>/node_modules/.bin/vitest before spawning.
-    const dir = await mkdtemp(join(tmpdir(), 'og-gate-testcheck-'))
-    try {
-      await mkdir(join(dir, 'node_modules', '.bin'), { recursive: true })
-      await writeFile(join(dir, 'node_modules', '.bin', 'vitest'), '#!/bin/sh\n')
-
-      const engineHome = process.env.OPENGROUND_HOME
-      vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', 'must-not-travel')
-      vi.stubEnv('ANTHROPIC_API_KEY', 'must-not-travel')
-      try {
-        await testCheck.run(dir)
-      } finally {
-        vi.unstubAllEnvs()
-      }
-
-      expect(spy).toHaveBeenCalledTimes(1)
-      const env = spy.mock.calls[0][2].env
-      expect(env.OPENGROUND_HOME).not.toBe(engineHome)
-      expect(env.OPENGROUND_HOME).toContain(GATE_HOME_PREFIX)
-      expect(env.SUPABASE_SERVICE_ROLE_KEY).toBeUndefined()
-      expect(env.ANTHROPIC_API_KEY).toBeUndefined()
-      expect(env.PATH).toBe(process.env.PATH)
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => {})
-    }
-  })
 
   it('the pin catches BOTH spellings a revert would use', () => {
     // Guards the guard: nit 3 was that `Object.assign({}, process.env, { PATH })`

@@ -30,7 +30,6 @@ const seed = async (path: string, running: boolean) => {
     path: key,
     running,
     manualStop: false,
-    selfSupply: { enabled: false },
     overseer: { enabled: false, brainResults: [] },
     workers: [],
     reviews: [{ taskId: 't1', branch: 'swarm/a' }],

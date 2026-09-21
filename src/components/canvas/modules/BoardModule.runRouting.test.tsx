@@ -25,6 +25,7 @@
 // the run footer for a done card.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, cleanup, fireEvent, act } from '@testing-library/react'
+import { useState } from 'react'
 import type { ProjectData, ProjectMeta, ProjectTask } from '@/lib/types'
 
 vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k }) }))
@@ -63,22 +64,27 @@ const project = { id: 'p1', name: 'proj', path: '/tmp/proj', hasGit: true } as P
 
 const renderDrawer = (data: ProjectData, opts: { swarmVisible?: boolean } = {}) => {
   const onLaunchTask = vi.fn(async () => ({ ok: true }))
-  const utils = render(
-    <BoardModule
-      data={data}
-      project={project}
-      persist={vi.fn()}
-      detailId="t1"
-      onOpenDetail={vi.fn()}
-      renderConversation={() => <div data-testid="conversation" />}
-      hasTerminalSlot={() => false}
-      liveTerminalId={() => null}
-      onDeleteTask={vi.fn()}
-      onLaunchTask={onLaunchTask}
-      swarmVisible={opts.swarmVisible ?? false}
-    />,
-  )
-  return { ...utils, onLaunchTask }
+  const onPersist = vi.fn()
+  const Harness = ({ swarmVisible = opts.swarmVisible ?? false }: { swarmVisible?: boolean }) => {
+    const [current, persist] = useState(data)
+    return (
+      <BoardModule
+        data={current}
+        project={project}
+        persist={next => { onPersist(next); persist(next) }}
+        detailId="t1"
+        onOpenDetail={vi.fn()}
+        renderConversation={() => <div data-testid="conversation" />}
+        hasTerminalSlot={() => false}
+        liveTerminalId={() => null}
+        onDeleteTask={vi.fn()}
+        onLaunchTask={onLaunchTask}
+        swarmVisible={swarmVisible}
+      />
+    )
+  }
+  const utils = render(<Harness />)
+  return { ...utils, onLaunchTask, onPersist, setSwarmVisible: (value: boolean) => utils.rerender(<Harness swarmVisible={value} />) }
 }
 
 const flush = () => act(async () => {})
@@ -103,6 +109,35 @@ afterEach(() => {
 })
 
 describe('実行 with the swarm ON', () => {
+  it('hides board-wide manual defaults under Swarm and restores their saved values without writes', async () => {
+    localStorage.setItem('openground.board.defaultsOpen.p1', '1')
+    const data: ProjectData = {
+      ...makeData(makeTask()),
+      config: { completionFlow: 'pr', targetBranch: 'main' },
+      launch: { model: 'sonnet', effort: 'high', permissionMode: 'plan' },
+    }
+    const view = renderDrawer(data)
+    await flush()
+    const checkDefaults = () => {
+      expect(view.getByLabelText('board.run.flowLabel')).toHaveValue('pr')
+      expect(view.getByLabelText('board.run.modelLabel')).toHaveValue('sonnet')
+      expect(view.getByLabelText('board.run.effortLabel')).toHaveValue('high')
+      expect(view.getByLabelText('board.defaults.permLabel')).toHaveValue('plan')
+    }
+    checkDefaults()
+    view.setSwarmVisible(true)
+    await flush()
+    expect(view.queryByText('board.defaults.label')).toBeNull()
+    expect(view.queryByLabelText('board.run.modelLabel')).toBeNull()
+    expect(view.queryByLabelText('board.defaults.permLabel')).toBeNull()
+    expect(view.getByText('board.run.button')).toBeTruthy()
+    view.setSwarmVisible(false)
+    await flush()
+    checkDefaults()
+    expect(view.onPersist).not.toHaveBeenCalled()
+    expect(localStorage.getItem('openground.board.defaultsOpen.p1')).toBe('1')
+  })
+
   it('dispatches a WORKER instead of opening a terminal', async () => {
     const { getByText, onLaunchTask } = renderDrawer(makeData(makeTask()), { swarmVisible: true })
     await flush()
@@ -137,6 +172,17 @@ describe('実行 with the swarm ON', () => {
 
     expect(onLaunchTask).toHaveBeenCalled()
     expect(reqs.some(r => r.url === '/api/swarm/worker')).toBe(false)
+  })
+
+  it('sends an explicit reset after changing the difficulty back to Auto', async () => {
+    const { getByText, getByRole } = renderDrawer(makeData(makeTask({ tier: 'ultra' })), { swarmVisible: true })
+    await flush()
+    fireEvent.click(getByText('board.detail.optionsLabel'))
+    fireEvent.click(getByRole('button', { name: 'board.detail.tier.auto' }))
+    expect(getByRole('button', { name: 'board.detail.tier.auto' })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(getByText('board.run.button'))
+    await flush()
+    expect(reqs.find(r => r.url === '/api/swarm/worker')?.body.tier).toBeNull()
   })
 
   it('hides the per-card run settings, which a worker answers to none of', async () => {

@@ -1,4 +1,5 @@
-import { MousePointer2, Type, StickyNote, Frame, Square, Circle, MessageSquareText, Image as ImageIcon, Sparkles } from 'lucide-react'
+import { useState } from 'react'
+import { MousePointer2, Type, StickyNote, Frame, Square, Circle, MessageSquareText, Image as ImageIcon, Sparkles, Pencil, Check } from 'lucide-react'
 import type { Tool } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
 
@@ -48,6 +49,9 @@ const TOOLS: { id: Tool; label: string; icon: React.ReactNode }[] = [
 export const ToolPalette = ({ tool, onToolChange, variant = 'page', onGenerate }: Props) => {
   const { t: tr } = useT()
   const horizontal = variant === 'embedded'
+  const [expanded, setExpanded] = useState(false)
+  // Keyboard selection must expose the active tool even while collapsed.
+  const toolsVisible = horizontal || expanded || tool !== 'select'
   const buttonShape = horizontal ? 'rounded-full' : 'rounded-[2px]'
   return (
     <div
@@ -64,7 +68,22 @@ export const ToolPalette = ({ tool, onToolChange, variant = 'page', onGenerate }
           horizontal ? 'flex-row items-center rounded-full' : 'flex-col rounded-[3px]',
         ].join(' ')}
       >
-        {TOOLS.filter(
+        {!horizontal && (
+          <button
+            type="button"
+            title={tr(toolsVisible ? 'toolbar.finishLayout' : 'toolbar.editLayout')}
+            aria-label={tr(toolsVisible ? 'toolbar.finishLayout' : 'toolbar.editLayout')}
+            aria-expanded={toolsVisible}
+            onClick={() => {
+              setExpanded(!toolsVisible)
+              if (toolsVisible) onToolChange('select')
+            }}
+            className="flex h-9 w-9 items-center justify-center rounded-[2px] bg-bg-card text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-inset active:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {toolsVisible ? <Check size={15} strokeWidth={1.75} /> : <Pencil size={15} strokeWidth={1.75} />}
+          </button>
+        )}
+        {toolsVisible && TOOLS.filter(
           // Project-Canvas-only tools (see EMBEDDED_ONLY) surface only on the
           // embedded variant; the top-level Ground portal is for project cards /
           // frames, not live previews, per-project assets, or shape primitives.
@@ -74,6 +93,7 @@ export const ToolPalette = ({ tool, onToolChange, variant = 'page', onGenerate }
             key={t.id}
             onClick={() => onToolChange(t.id)}
             title={t.label}
+            aria-pressed={tool === t.id}
             className={[
               'flex h-9 w-9 items-center justify-center transition-colors',
               buttonShape,

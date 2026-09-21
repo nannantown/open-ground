@@ -1,32 +1,16 @@
-// egressProxy — a host-side, allowlist-only HTTP CONNECT proxy on 127.0.0.1.
-//
-// This is the "egress-proxy follow-up" docs/SANDBOX_EXPERIMENT.md names: Seatbelt
-// cannot filter outbound by HOSTNAME, so a sandboxed process that must reach ONE
-// approved service gets `network: 'loopback'` (sandbox.ts — every off-machine
-// destination kernel-denied) plus HTTPS_PROXY pointed here; the DOMAIN decision
-// then happens OUTSIDE the sandbox, in this process. The overseer brain is the
-// user: it holds the private you-corpus in context, so its claude may reach
-// Anthropic (the subscription endpoint) and NOTHING else — a prompt-injected
-// brain trying any other host is refused twice (kernel EPERM on a direct
-// connect; 403 here on a proxied one), and the refusal is LOGGED (an exfil
-// attempt is a signal, not just an error).
-//
-// CONNECT-only: claude→Anthropic is pure TLS-over-443. Plain HTTP requests are
-// refused (403) — nothing the brain legitimately does needs cleartext HTTP.
-// Loopback-bound + allowlisted, so this is NOT an open relay: it grants a local
-// process nothing it couldn't already do un-sandboxed (any local process can
-// reach Anthropic directly); its sole purpose is to be the ONE hole the
-// loopback-confined brain can use.
+// Shared provider-host policy and an explicit loopback CONNECT proxy factory.
+// Work mode uses the allowlist/matcher without opening a listener. The sandbox
+// diagnostic calls createEgressProxy to test a loopback-only profile: Seatbelt
+// blocks direct off-machine connections and this host-side proxy filters domains.
+// There is no app singleton or Persona caller. CONNECT defaults to TLS port 443;
+// plain HTTP is refused and every listener binds only to 127.0.0.1.
 
 import { createServer, type Server } from 'http'
 import { connect as netConnect } from 'net'
 
-/** Domains the BRAIN's claude may CONNECT to — the subscription path and nothing
- *  else. Suffix-matched (subdomains included): `anthropic.com` covers
- *  api/statsig/console.anthropic.com; `claude.ai` covers the OAuth token refresh
- *  a subscription session may perform. Error-reporting hosts (sentry etc.) are
- *  deliberately ABSENT — a corpus-holding process sends telemetry nowhere; a
- *  refused CONNECT fails fast (403), it does not hang the client. */
+/** Legacy name for the provider allowlist shared with Work mode. Exact hosts
+ *  and subdomains match; other telemetry/error-reporting hosts remain excluded.
+ *  Keep this policy independent of whether a diagnostic proxy is running. */
 export const BRAIN_EGRESS_ALLOW_HOSTS: readonly string[] = ['anthropic.com', 'claude.ai']
 
 export interface EgressProxyOptions {
@@ -145,26 +129,4 @@ export const createEgressProxy = (opts: EgressProxyOptions): Promise<EgressProxy
       })
     })
   })
-}
-
-// ── The brain's singleton (survives tsx-watch reloads — the globalThis pattern) ──
-
-interface EgressProxyGlobal {
-  __openground_brain_egress_proxy?: Promise<EgressProxyHandle>
-}
-const G = globalThis as unknown as EgressProxyGlobal
-
-/** The ONE brain egress proxy, lazily started on first use. A failed start is NOT
- *  cached (a later call retries); the caller treats a rejection as "no proxy" and
- *  fails CLOSED (no brain launch without the sandbox+proxy pair on darwin). */
-export const ensureBrainEgressProxy = (): Promise<EgressProxyHandle> => {
-  if (!G.__openground_brain_egress_proxy) {
-    G.__openground_brain_egress_proxy = createEgressProxy({
-      allowHosts: BRAIN_EGRESS_ALLOW_HOSTS,
-    }).catch((e: unknown) => {
-      G.__openground_brain_egress_proxy = undefined
-      throw e
-    })
-  }
-  return G.__openground_brain_egress_proxy
 }

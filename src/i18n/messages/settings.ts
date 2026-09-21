@@ -5,9 +5,6 @@ export const settings = {
   en: {
     'settings.eyebrow': 'Preferences',
     // Feedback entry
-    'settings.feedback.heading': 'Feedback',
-    'settings.feedback.body': 'Your feedback shapes OPEN GROUND — we ship updates fast, often within days.',
-    'settings.feedback.button': 'Send feedback',
     // Language
     'settings.language.heading': 'Language',
     'settings.language.hint': 'Auto-detected from your system; override it here.',
@@ -24,9 +21,6 @@ export const settings = {
     'settings.experiments.swarmHint':
       'Reveals the Swarm tab and its controls for you only — nothing runs on its own. Worker dispatch and the overseer both default off and stay off until you explicitly arm them, and reset to off on every restart. See the manual’s Swarm chapter for the full disclosure.',
     'settings.experiments.sandbox': 'Sandbox Claude (macOS)',
-    'settings.experiments.persona': 'Persona',
-    'settings.experiments.personaHint':
-      'Reveals the Persona entry in the top toolbar for you only — a place to read and correct what your stand-in knows about how you decide things. It only reads and writes your own notes on this machine; nothing is shared and nothing runs on its own. Turning Swarm on also reveals it, so the entry can be there with this switch off.',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
     // Public swarm opt-in (all users, macOS only) — "still being tuned"
@@ -35,11 +29,6 @@ export const settings = {
     'settings.swarmOptIn.label': 'Enable the Swarm tab',
     'settings.swarmOptIn.warning':
       'Swarm runs autonomous Claude workers for you. Before turning it on, know: it uses your own Claude subscription and can run several sessions at once, so it may consume your quota heavily; workers run Claude with tool-permission prompts skipped, inside isolated copies of your project; and its notifications are currently in Japanese only. It is still being tuned and is not covered by support.',
-    'settings.personaOptIn.heading': 'Persona (experimental)',
-    'settings.personaOptIn.hint': 'Still being tuned. Off by default — turn it on only if you want it.',
-    'settings.personaOptIn.label': 'Enable the Persona screen',
-    'settings.personaOptIn.warning':
-      'Persona builds a private picture of you from your own conversations, to help you understand yourself. Before turning it on, know: everything stays on this machine (your own corpus, never shared); each turn spends your own Claude subscription; and a turn runs Claude with tool-permission prompts skipped, inside a locked-down scratch session. It is still being tuned and is not covered by support.',
     // Completion chime (settings.soundOnDone / soundOnDoneVolume)
     'settings.wordpress.heading': 'Blog publishing (WordPress)',
     'settings.wordpress.hint':
@@ -74,7 +63,7 @@ export const settings = {
     'settings.lockdown.heading': 'Work mode',
     'settings.lockdown.label': 'Block non-Anthropic connections',
     'settings.lockdown.hint':
-      'For confidential machines. Turns off everything that talks to a server other than your own Claude: update checks, release notes, feedback, marketplace, sign-in, and shared projects. Your claude CLI keeps working as usual. Turning it off restores everything.',
+      'For confidential machines. Turns off everything that talks to a server other than your own Claude: update checks, release notes, feedback, sign-in, and shared projects. Your claude CLI keeps working as usual. Turning it off restores everything.',
     'settings.lockdown.badge': 'Work mode is on — connections other than Claude are blocked.',
     // Plan
     // Workspace
@@ -165,9 +154,6 @@ export const settings = {
   } as Record<string, string>,
   ja: {
     'settings.eyebrow': '環境設定',
-    'settings.feedback.heading': 'フィードバック',
-    'settings.feedback.body': 'いただいた声が OPEN GROUND を形づくります。数日のうちに反映されることもあります。',
-    'settings.feedback.button': 'フィードバックを送る',
     'settings.language.heading': '言語',
     'settings.language.hint': 'システム言語から自動判定します。ここで手動変更できます。',
     'settings.displayName.heading': '表示名',
@@ -179,9 +165,6 @@ export const settings = {
     'settings.experiments.swarmHint':
       'この端末で Swarm タブと操作を可視化するだけで、それ自体では何も自動実行されません。worker 起動・監督はどちらも既定オフで、あなたが個別に明示オンにするまで動かず、再起動のたびにオフへ戻ります。詳しくはマニュアルの Swarm 章を参照してください。',
     'settings.experiments.sandbox': 'Claude をサンドボックス化 (macOS)',
-    'settings.experiments.persona': 'ペルソナ',
-    'settings.experiments.personaHint':
-      'この端末で上部ツールバーに「ペルソナ」の入口を出します。あなたの分身が持っている「あなたの決め方」を読み、違っていれば訂正できる場所です。この端末にあるあなた自身の記録を読み書きするだけで、外部には共有されず、それ自体では何も自動実行されません。なお Swarm をオンにすると同じ入口が出るため、このスイッチがオフでも入口が見えていることがあります。',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
     'settings.swarmOptIn.heading': 'Swarm(試験運用)',
@@ -189,11 +172,6 @@ export const settings = {
     'settings.swarmOptIn.label': 'Swarm タブを有効にする',
     'settings.swarmOptIn.warning':
       'Swarm はあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。通知は当面日本語のみです。まだ調整中で、サポート対象外です。',
-    'settings.personaOptIn.heading': 'ペルソナ(試験運用)',
-    'settings.personaOptIn.hint': 'まだ調整中です。既定はオフ — 使いたい場合だけオンにしてください。',
-    'settings.personaOptIn.label': 'ペルソナ画面を有効にする',
-    'settings.personaOptIn.warning':
-      'ペルソナは、あなた自身の会話からあなた像を組み立て、自己理解を助けます。オンにする前に確認してください: すべてこのパソコンの中だけに保存されます(あなた自身のコーパスで、外には出ません)。1ターンごとにあなた自身の Claude サブスクを使います。1ターンはツールの許可確認をスキップした Claude を、隔離されたスクラッチセッションの中で実行します。まだ調整中で、サポート対象外です。',
     'settings.wordpress.heading': 'ブログ投稿 (WordPress)',
     'settings.wordpress.hint':
       'レポート画面で「ブログへ」を押した調査レポートだけを、自分の WordPress サイトへ下書きとして送ります。公開は WordPress 側であなたが押します。送ったレポートを書き直すと同じ下書きが更新されます。WordPress 側で編集・削除した下書きには二度と触りません。対象は自分でインストールした WordPress のみ（管理画面が 自分のドメイン/wp-admin にあるタイプ）。wordpress.com のサイトは対象外です。',
@@ -219,7 +197,7 @@ export const settings = {
     'settings.lockdown.heading': '業務モード',
     'settings.lockdown.label': 'Anthropic 以外の外部通信を遮断',
     'settings.lockdown.hint':
-      '機密情報を扱うマシン向け。自分の Claude 以外のサーバーと通信する機能 — アップデート確認・リリースノート・フィードバック・マーケットプレイス・サインイン・共有プロジェクト — をすべて止めます。claude CLI はそのまま使えます。オフに戻せば全機能が復帰します。',
+      '機密情報を扱うマシン向け。自分の Claude 以外のサーバーと通信する機能 — アップデート確認・リリースノート・フィードバック・サインイン・共有プロジェクト — をすべて止めます。claude CLI はそのまま使えます。オフに戻せば全機能が復帰します。',
     'settings.lockdown.badge': '業務モード ON — Claude 以外の外部通信を遮断中',
     'settings.workspace.heading': 'デフォルトの作業フォルダ',
     'settings.workspace.hint': '新規作成したプロジェクトの置き場所です。既存フォルダのインポートはどこからでも可能です。',

@@ -17,7 +17,7 @@
 // Pure (no React / no registry import) so it unit-tests under the node vitest
 // environment; the caller passes the live enabled-id list from the registry.
 
-import { isCustomTabId, type ModuleId } from '@/lib/modules/ids'
+import { MODULE_IDS, isCustomTabId, type ModuleId } from '@/lib/modules/ids'
 
 // Generic over the id type so the same reconciliation serves the built-in
 // ModuleId row and the widened row that includes `custom:<uuid>` tab ids
@@ -42,26 +42,18 @@ export function effectiveTabOrder<T extends string = ModuleId>(
   return out
 }
 
-// Re-insert saved `custom:*` ids that are missing from a reordered row.
-//
-// A drag performed BEFORE the custom-module list has loaded reorders a row
-// that holds only the built-ins (effectiveTabOrder drops ids absent from the
-// enabled set) — persisting that row verbatim would silently scrub every
-// custom id from the saved order, resetting those tabs' dragged positions to
-// "appended at the end" once the list arrives. Each missing custom id is
-// re-inserted after its nearest predecessor (in saved order) that survived
-// into the reordered row, so adjacent custom tabs keep their saved relative
-// order and a head-of-row custom tab stays at the head. Only `custom:*` ids
-// are preserved — a dropped builtin means the registry retired it, whereas a
-// dropped custom id here just means the authoritative list hasn't loaded yet.
-export function preserveCustomTabs<T extends string>(
+// Preserve saved but hidden tabs when reordering the visible projection. Role
+// changes, disabled modules and a loading library are not deletions. Missing
+// known IDs stay next to their saved predecessor; truly retired native IDs do
+// not return. Explicit detach still removes its ID through detachCustomTab.
+export function preserveHiddenTabs<T extends string>(
   saved: readonly string[] | undefined,
   reordered: readonly T[],
 ): T[] {
   const out: T[] = [...reordered]
   const savedIds = saved ?? []
   savedIds.forEach((id, idx) => {
-    if (!isCustomTabId(id) || out.includes(id as T)) return
+    if ((!isCustomTabId(id) && !MODULE_IDS.includes(id as ModuleId)) || out.includes(id as T)) return
     let insertAt = 0
     for (let i = idx - 1; i >= 0; i--) {
       const at = out.indexOf(savedIds[i] as T)

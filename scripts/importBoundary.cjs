@@ -38,16 +38,17 @@ const PTY_BY_DESIGN = [
   'src/lib/server/ownerDeskLimit.ts', //      watches the OWNER's own PTY desk
   'src/lib/server/swarmEnvPreflight.ts', //   probes a throwaway PTY before launch
   'src/lib/server/swarmJanitor.ts', //        sweeps the PTY pool's own leftovers
-  'src/lib/server/swarmOverseerBrain.ts', //  reads a PTY screen for the brain pass
-  'src/lib/server/personaChat.ts', //         one-off PTY per persona turn, marker-scraped
   //                                          (it spawns the desk it reads; there is no
   //                                          worker here to address on either runtime)
   'src/lib/server/researchKnowledge.ts', //   one-off PTY per digest/ask, marker-scraped
-  //                                          (same shape as personaChat: it subscribes to
-  //                                          and kills ONLY the terminal it just launched)
+  //                                          (subscribes to and kills ONLY the
+  //                                          terminal it just launched)
   'src/lib/server/swarmSupply.ts', //        the supply desk is PTY-ONLY BY DESIGN
   //                                          (Remote Control lives on the PTY runtime;
   //                                          stopSwarmSupplyDesks kills by desk label)
+  'src/lib/server/supplyContextCap.ts', //   compacts the SUPPLY desk (PTY-only, above):
+  //                                          lists owner PTY desks by the supply label,
+  //                                          reads a screen, types /compact into it
   'server/routes/customModules.ts', //        custom tabs are PTY panes by design
   'server/routes/sse.ts', //                  the PTY output stream
   'server/index.ts', //                       starts/stops the PTY sweep loop

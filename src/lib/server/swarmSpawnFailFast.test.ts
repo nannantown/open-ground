@@ -26,7 +26,6 @@ import {
   type AnomalyDeps,
 } from './swarmOrchestrator'
 import { SdkWorkerUnavailableError } from './swarmWorkerSdk'
-import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
 import { listSwarmNotifications } from './swarmNotifications'
 import { swarmNotificationsFile } from './paths'
@@ -76,7 +75,6 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine =>
     permissionWaits: new Map(),
     log: [],
     anomalies: [],
-    selfSupply: initSelfSupplyRuntime(),
     overseer: initOverseerRuntime(),
     notified: new Set(),
     pendingFatal: [],

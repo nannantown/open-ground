@@ -128,11 +128,8 @@ export interface LaunchClaudeOpts {
   // Enforced by claude's own permission layer, where deny rules take precedence
   // over every mode — including `--dangerously-skip-permissions` (bypass) — so
   // the listed tools are structurally unusable, not merely un-prompted. Opt-in
-  // per launch and empty by default: ONLY containment-critical utility sessions
-  // pass it (the overseer brain denies WebFetch/WebSearch/Bash/Task so a prompt-
-  // injected brain has no network-egress tool — nor a sub-agent to launch one —
-  // to exfiltrate the you-corpus with); workers / supply / the user's own
-  // terminals pass nothing and their launch line stays byte-identical.
+  // per launch and empty by default. Research knowledge sessions pass their
+  // utility-specific deny list; workers, supply and interactive terminals do not.
   disallowedTools?: string[]
   // Mark this as a HEADLESS UTILITY session: a real claude PTY whose output is
   // marker-scraped, with NO user-visible pane (auto-title / auto-description).
@@ -187,8 +184,8 @@ export interface LaunchClaudeOpts {
   // profile: outbound open, no listeners) — workers / the interactive terminal
   // are unchanged. 'loopback' kernel-denies every off-machine destination; the
   // caller pairs it with an `env` HTTPS_PROXY pointing at the host-side
-  // allowlist CONNECT proxy (egressProxy.ts) — the overseer brain's egress
-  // close. Ignored unless `sandbox` is on.
+  // allowlist CONNECT proxy (egressProxy.ts). Retained for explicit callers and
+  // sandbox diagnostics; there is no Persona caller. Ignored unless `sandbox` is on.
   sandboxNetwork?: 'all' | 'loopback'
   // Arm the DETERMINISTIC PreToolUse deny veto (A3/L4) for this session:
   // injects OPENGROUND_GUARD=1 (+ OPENGROUND_GUARD_WRITE_ROOTS from writeRoots)

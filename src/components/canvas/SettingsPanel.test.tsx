@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, fireEvent, screen, act } from '@testing-library/react'
+import { render, fireEvent, screen, act, within } from '@testing-library/react'
 
 // Identity translator + a network-free api client. The panel's open-effect
 // fetches GET /api/settings for the display-name placeholder; the autosave
@@ -56,6 +56,33 @@ const renderPanel = (onSave: (s: Settings) => void, open = true) =>
   )
 
 describe('SettingsPanel autosave', () => {
+  it('hides owner settings without erasing their values during a public settings edit', () => {
+    const wordpress = { baseUrl: 'https://saved.example', username: 'saved', appPassword: 'fixture' }
+    const onSave = vi.fn()
+    render(<SettingsPanel open settings={{ ...baseSettings, wordpress }} onClose={() => {}} onSave={onSave} />)
+    expect(screen.queryByText('settings.wordpress.heading')).toBeNull()
+    expect(screen.queryByText('settings.research.heading')).toBeNull()
+    const input = screen.getByRole('textbox', { name: 'settings.displayName.heading' })
+    fireEvent.change(input, { target: { value: 'Public user' } })
+    fireEvent.blur(input)
+    expect(onSave.mock.calls[0][0].wordpress).toEqual(wordpress)
+  })
+
+  it('keeps the public Swarm opt-in available and saves its value with legacy settings intact', () => {
+    const onSave = vi.fn()
+    render(<SettingsPanel open settings={baseSettings} swarmOptInAvailable onClose={() => {}} onSave={onSave} />)
+    fireEvent.click(screen.getByText('settings.advanced'))
+    const group = screen.getByRole('group', { name: 'settings.swarmOptIn.label' })
+    fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.on' }))
+    expect(onSave.mock.calls.at(-1)?.[0].swarmOptIn).toBe(true)
+    fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.off' }))
+    expect(onSave.mock.calls.at(-1)?.[0].swarmOptIn).toBe(false)
+  })
+
+  it('still exposes saved WordPress settings to the owner', () => {
+    render(<SettingsPanel open experimentsEligible settings={baseSettings} onClose={() => {}} onSave={vi.fn()} />)
+    expect(screen.getByText('settings.wordpress.heading')).toBeTruthy()
+  })
   beforeEach(() => {
     vi.useFakeTimers()
   })

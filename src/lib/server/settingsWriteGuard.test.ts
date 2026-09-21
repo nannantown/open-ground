@@ -10,7 +10,7 @@
 // Measured 2026-08-02 (isolated HOME), before the fix:
 //
 //     seed  {"projects":[{a},{b}], "defaultWorkspace":"/tmp/ws"} → chmod 000
-//     call  setSettings({ swarmManagerRuntime: { mode: 'pty' } })
+//     call  setSettings({ language: 'ja' })
 //     after {"projects":[], "defaultWorkspace":null, …}
 //
 // Two registered projects to zero, no exception, no log. `atomicWriteJson` is
@@ -90,7 +90,7 @@ describe('settings writers refuse to overwrite a settings.json they cannot read'
     await seed()
     if (!(await denyRead())) ctx.skip()
 
-    await expect(setSettings({ swarmManagerRuntime: { mode: 'pty' } })).rejects.toThrow()
+    await expect(setSettings({ language: 'ja' })).rejects.toThrow()
 
     // THE assertion. "It threw" is not enough — the bug wrote DEFAULTS and
     // returned normally, so the only proof is what is on disk afterwards.

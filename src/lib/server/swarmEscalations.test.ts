@@ -21,7 +21,7 @@ import {
   MAX_ESCALATION_PLAIN_QUESTION,
   ENTER_RETRY_MAX,
 } from './swarmEscalations'
-import { escalationsFile, escalationShotsDir, youCorpusAdditionsFile } from './paths'
+import { escalationsFile, escalationShotsDir } from './paths'
 import { readUnparkIntent } from './swarmOrchestrator'
 import { BRACKETED_PASTE_START, BRACKETED_PASTE_END } from './pastePrompt'
 import type { OpenEscalationInput } from './swarmEscalations'
@@ -92,7 +92,7 @@ describe('openEscalation — persistence, idempotency, capture', () => {
   it('persists one open record and fires the notification once', async () => {
     const { calls, notify } = makeNotify()
     const { escalation, deduped } = await openEscalation(
-      openInput({ proxyDraft: { answer: '埋めない', confidence: 'high', isAbstention: false } }),
+      openInput(),
       { notify },
     )
     expect(deduped).toBe(false)
@@ -106,7 +106,7 @@ describe('openEscalation — persistence, idempotency, capture', () => {
     const list = await listEscalations()
     expect(list).toHaveLength(1)
     expect(list[0].question).toContain('Stripe')
-    expect(list[0].proxyDraft?.confidence).toBe('high')
+    expect(list[0]).not.toHaveProperty('proxyDraft')
     expect(list[0].whyEscalated).toBe('irreversible')
   })
 
@@ -262,9 +262,6 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
           return true
         },
         sleep: async () => {},
-        appendMemory: async (input: { text: string; tags?: string[] }) => {
-          memory.push(input)
-        },
         queueForNextDispatch: async (
           projectPath: string,
           taskId: string,
@@ -289,7 +286,6 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     const res = await answerEscalation(escalation.id, '埋めない。ビルド時に env から注入する。', h.deps)
 
     expect(res.delivery).toBe('injected')
-    expect(res.memoryWritten).toBe(true)
     expect(res.escalation.status).toBe('injected')
     expect(res.escalation.answer).toContain('env から注入')
     expect(res.escalation.injectedAt).toBeTruthy()
@@ -303,14 +299,9 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     expect(h.writes[1].data).toBe('\r')
 
     // Memory carries the owner's Q→A, tagged for the training pipeline.
-    expect(h.memory).toHaveLength(1)
-    expect(h.memory[0].text).toContain('Q: ')
     // Labelled in words, not `→ A:` — the corpus is what the brain reads back, and
     // an `A:` answer next to the question's own `A: …` option is the misreading
     // this routing work exists to prevent (same rule as the injection).
-    expect(h.memory[0].text).toContain('→ オーナーの回答: 埋めない')
-    expect(h.memory[0].tags).toContain('escalation')
-    expect(h.memory[0].tags).toContain('irreversible')
 
     // Nothing was queued — the live path won.
     expect(h.queued).toHaveLength(0)
@@ -493,7 +484,6 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     const res = await answerEscalation(escalation.id, '答えはD', h.deps)
     expect(res.delivery).toBe('skipped')
     expect(res.escalation.status).toBe('answered')
-    expect(res.memoryWritten).toBe(true)
   })
 
   it('a project no longer in the registry is NOT injected into (defence in depth)', async () => {
@@ -505,7 +495,6 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     expect(res.delivery).toBe('skipped')
     expect(h.writes).toHaveLength(0)
     expect(h.queued).toHaveLength(0)
-    expect(res.memoryWritten).toBe(true) // learning is project-independent
   })
 
   it('re-answering never rewrites the decision: first answer stands, memory written once, only DELIVERY retries', async () => {
@@ -516,8 +505,6 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     const second = await answerEscalation(escalation.id, '二度目の回答', h.deps)
     expect(second.delivery).toBe('queued') // the delivery leg re-ran…
     expect(second.escalation.answer).toBe('最初の回答') // …but the decision did not change
-    expect(second.memoryWritten).toBe(false)
-    expect(h.memory).toHaveLength(1) // learned exactly once
     expect(h.queued[1].line).toContain('最初の回答') // the retry carries the ORIGINAL answer
   })
 
@@ -536,69 +523,6 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     await expect(answerEscalation('nope', 'x', h.deps)).rejects.toBeInstanceOf(
       EscalationNotFoundError,
     )
-  })
-
-  it('a memory failure never blocks the unblock (memoryWritten:false, delivery proceeds)', async () => {
-    const { notify } = makeNotify()
-    const { escalation } = await openEscalation(openInput({ terminalId: 'pty-1' }), { notify })
-    const h = answerDeps()
-    h.deps.appendMemory = async () => {
-      throw new Error('corpus unavailable')
-    }
-    const res = await answerEscalation(escalation.id, '回答F', h.deps)
-    expect(res.memoryWritten).toBe(false)
-    expect(res.delivery).toBe('injected')
-  })
-
-  it('DEFAULT memory wiring really appends the Q→A to you-corpus additions', async () => {
-    const { notify } = makeNotify()
-    const { escalation } = await openEscalation(openInput({ taskId: undefined }), { notify })
-    const h = answerDeps()
-    const res = await answerEscalation(escalation.id, '本人の実回答', {
-      ...h.deps,
-      appendMemory: undefined, // fall through to the real appendJudgment
-    })
-    expect(res.memoryWritten).toBe(true)
-    const additions = JSON.parse(await readFile(youCorpusAdditionsFile(), 'utf8')) as Array<{
-      text: string
-      tags?: string[]
-    }>
-    expect(additions).toHaveLength(1)
-    expect(additions[0].text).toContain('本人の実回答')
-    expect(additions[0].tags).toContain('escalation')
-  })
-
-  // M2 — the corpus must record the question the owner ACTUALLY READ. The UI shows
-  // plainQuestion as the primary text (the technical original folds into a details
-  // pane), so pairing their answer with the technical wording misattributes it. The
-  // routing question is the sharp case: "まかせる" (= "you decide") filed under
-  // "which library should we use?" would teach the next brain something about the
-  // LIBRARY — inverting the whole point of routing.
-  it('learns the PLAIN question the owner answered, not the technical original', async () => {
-    const { notify } = makeNotify()
-    const { escalation } = await openEscalation(
-      openInput({
-        taskId: undefined,
-        question: 'ライブラリはAとBのどちらを使うべきですか？',
-        plainQuestion: [
-          'これはあなたが決めたい種類の話ですか？',
-          '「まかせる」と書く → AIが判断して先へ進みます。',
-          '「自分で決める」と書く → 続けてあなたの考えを書いてください。',
-        ].join('\n'),
-      }),
-      { notify },
-    )
-    const h = answerDeps()
-    await answerEscalation(escalation.id, 'まかせる', { ...h.deps, appendMemory: undefined })
-    const additions = JSON.parse(await readFile(youCorpusAdditionsFile(), 'utf8')) as Array<{
-      text: string
-    }>
-    expect(additions[0].text).toContain('これはあなたが決めたい種類の話ですか？')
-    expect(additions[0].text).not.toContain('ライブラリはAとBのどちらを使うべきですか？')
-    // The technical text is NOT lost — it stays on the record (and the worker's
-    // injection carries it too, labelled as the worker's own question).
-    const [stored] = await listEscalations()
-    expect(stored.question).toBe('ライブラリはAとBのどちらを使うべきですか？')
   })
 
   it('DEFAULT queue wiring (lazy import → engine rework slot) resolves to queued', async () => {
@@ -635,7 +559,6 @@ describe('dismissEscalation', () => {
     await answerEscalation(escalation.id, '回答', {
       write: () => false,
       sleep: async () => {},
-      appendMemory: async () => {},
       queueForNextDispatch: async () => {},
       isPathAllowed: async () => true,
     })
@@ -668,7 +591,6 @@ describe('retention — fail-closed pruning (the card Done condition)', () => {
     await answerEscalation(fresh.escalation.id, '回答', {
       write: () => false,
       sleep: async () => {},
-      appendMemory: async () => {},
       queueForNextDispatch: async () => {},
       isPathAllowed: async () => true,
     })
@@ -810,8 +732,6 @@ describe('adversarial-review hardening (2026-07-03 pass)', () => {
     expect(second.delivery).toBe('injected')
     expect(second.escalation.status).toBe('injected')
     expect(second.escalation.answer).toBe('最終回答') // the first answer stands
-    expect(second.memoryWritten).toBe(false)
-    expect(h.memory).toHaveLength(1) // learned exactly once
     // The injected payload carried the ORIGINAL answer.
     expect(h.writes[0].data).toContain('最終回答')
   })
@@ -895,9 +815,6 @@ const answerDepsShared = () => {
         return true
       },
       sleep: async () => {},
-      appendMemory: async (input: { text: string; tags?: string[] }) => {
-        memory.push(input)
-      },
       queueForNextDispatch: async (projectPath: string, taskId: string, line: string) => {
         queued.push({ projectPath, taskId, line })
       },

@@ -1,41 +1,27 @@
 // @vitest-environment node
-//
-// The RESTART, end to end. swarmSessions.test.ts pins the decision logic and
-// swarmSupply/swarmManager.test.ts pin the launch contract; this one actually DRIVES
-// the two desks through `spawnSwarmSupply` / `spawnSwarmManager` — real registry, real
-// central store, real node-pty, real login shell, real launch command line — and reads
-// back the exact argv `claude` was handed on each boot.
-//
-// Only the `claude` BINARY is stood in for (OPENGROUND_CLAUDE_BIN → a stub that dumps
-// its argv and writes the session transcript exactly where claude would). That is the
-// one thing we cannot drive: OPEN GROUND is subscription-only, so spawning the real CLI
-// would open a live billed session. Everything the app itself does is genuinely executed.
-//
-// What it proves — the goal's observable conditions, in the order a user hits them:
-//   BOOT 1 (cold)     → `--session-id <new>` : a fresh conversation, as before.
-//   …app restarts…    → the PTY dies; nothing is left in memory; the id is on disk.
-//   BOOT 2 (restart)  → `--resume <THE SAME id>`, never `--session-id`, and the commander
-//                       is handed the re-read-the-Board order rather than a bare skill.
-//   BOOT 3 (wiped)    → transcript deleted mid-life ⇒ back to `--session-id <new>`,
-//                       the desk still launches (fail-open — no dead PTY, no 500).
+// Restart acceptance: real SDK manager / PTY supply, real disk and registry.
+// Only the CLI is an offline fixture; no subscription calls or real HOME writes.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtemp, mkdir, rm, realpath, readFile, writeFile, chmod, unlink } from 'fs/promises'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, resolve } from 'path'
+import { parseArgs } from 'util'
 import { addProjectEntry, __resetMigrationCacheForTests } from './registry'
+import { claudeConnection } from './claudeConnection'
 import { claudeDirName } from './claudeProjectDir'
-import { isClaudeSessionLive, killTerminal, listLiveDesksIn } from './terminal'
+import { isClaudeSessionLive, killTerminal } from './terminal'
 import {
   spawnSwarmManager,
   MANAGER_INJECTION,
   MANAGER_RESUME_INJECTION,
-  MANAGER_DESK_LABEL,
 } from './swarmManager'
 import { spawnSwarmSupply, SUPPLY_INJECTION, SUPPLY_RESUME_INJECTION } from './swarmSupply'
 import { readSwarmSessions, recordSwarmSession } from './swarmSessions'
 import { languageDirective } from './promptLang'
 import { setSettings } from './store'
+import { getSdkSession, listSdkSessions, terminateSdkSession, __resetSdkSessionsForTests } from './sdkSession'
+import { listManagerDesks } from './swarmManagerRuntime'
 import { defaultManagerPresence } from './swarmOrchestrator'
 
 // A stand-in for `claude` that does the two things this test needs: dump the argv it was
@@ -90,34 +76,6 @@ mv "${capdir}/tmp.$$" "${capdir}/launch.$n"
 exit 0
 `
 
-// A KEEP-ALIVE variant of the stub for the bug-B test, which needs a LIVE desk in the pool
-// (the resume tests deliberately want theirs to EXIT so `--resume` is exercised — the
-// opposite requirement). Everything up to publishing `launch.N` is identical; then, instead
-// of exiting, it blocks forever so the PTY stays live until the test kills it. `exec cat`
-// is a zero-CPU wait for input that never comes (no busy sleep loop).
-const ALIVE_STUB = (capdir: string) => `#!/bin/sh
-set -u
-case "\${1:-}" in
-  --version|-v) echo "stub-claude 0.0.0"; exit 0 ;;
-  auth) [ "\${2:-}" = "status" ] && { echo '{"loggedIn":true}'; exit 0; } ;;
-esac
-n=0
-while ! mkdir "${capdir}/claim.$n" 2>/dev/null; do n=$((n+1)); done
-sid=""; prev=""
-for a in "$@"; do
-  case "$prev" in --session-id|--resume) sid="$a" ;; esac
-  prev="$a"
-done
-if [ -n "$sid" ]; then
-  dir=$(pwd -P | sed 's/[^a-zA-Z0-9]/-/g')
-  mkdir -p "$HOME/.claude/projects/$dir"
-  printf '{"type":"system","subtype":"init","sessionId":"%s"}\\n' "$sid" >> "$HOME/.claude/projects/$dir/$sid.jsonl"
-fi
-printf '%s\\n' "$@" > "${capdir}/tmp.$$"
-mv "${capdir}/tmp.$$" "${capdir}/launch.$n"
-exec cat
-`
-
 interface Launch {
   argv: string[]
   /** The uuid claude was given, and which flag carried it. */
@@ -128,13 +86,16 @@ interface Launch {
 }
 
 const parseLaunch = (dump: string): Launch => {
-  const argv = dump.split('\n').filter((l) => l.length > 0)
-  const i = argv.findIndex((a) => a === '--session-id' || a === '--resume')
+  const sdk = dump.startsWith('{') ? JSON.parse(dump) as { argv: string[]; prompt: string } : null
+  const argv = sdk?.argv ?? dump.split('\n').filter((l) => l.length > 0)
+  const { values } = parseArgs({ args: argv, strict: false, allowPositionals: true, options: {
+    resume: { type: 'string' }, 'session-id': { type: 'string' },
+  } })
   return {
     argv,
-    flag: i >= 0 ? (argv[i] as '--session-id' | '--resume') : null,
-    sessionId: i >= 0 ? argv[i + 1] : null,
-    prompt: argv[argv.length - 1],
+    flag: values.resume ? '--resume' : values['session-id'] ? '--session-id' : null,
+    sessionId: (values.resume ?? values['session-id'] ?? null) as string | null,
+    prompt: sdk?.prompt ?? argv[argv.length - 1],
   }
 }
 
@@ -151,7 +112,7 @@ const until = async <T>(what: string, probe: () => Promise<T | null>, ms = 30_00
 }
 
 // Windows frames the launch line through PowerShell and could not run an `sh` stub.
-describe.skipIf(process.platform === 'win32')('swarm desks across an app restart (real PTY)', () => {
+describe.skipIf(process.platform === 'win32')('swarm desks across an app restart (real SDK and PTY)', () => {
   let home: string
   let claudeHome: string
   let scratch: string
@@ -178,8 +139,13 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
 
   const nthLaunch = (n: number) =>
     until(`launch #${n}`, async () => {
+      const failed = listSdkSessions().find((session) => session.status === 'failed')
+      if (failed) throw new Error(`SDK fixture failed: ${failed.exitReason}`)
       const l = await launches()
       return l.length >= n ? l[n - 1] : null
+    }).catch(async (error) => {
+      const trace = await readFile(join(capdir, 'protocol.jsonl'), 'utf8').catch(() => '(no CLI trace)')
+      throw new Error(`${String(error)}; sessions=${JSON.stringify(listSdkSessions())}; trace=${trace}`)
     })
 
   // The app restart. In production the whole process dies: every PTY goes with it and
@@ -203,15 +169,23 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
       const l = await launches()
       return l.filter((x) => x.sessionId === sessionId).length >= nth ? true : null
     })
-    killTerminal(terminalId)
-    await until('the PTY to be gone', async () => (isClaudeSessionLive(sessionId) ? null : true))
+    if (terminalId) {
+      killTerminal(terminalId)
+      await until('the PTY to be gone', async () => (isClaudeSessionLive(sessionId) ? null : true))
+    } else {
+      const sdk = listSdkSessions().find((session) => session.agentSessionId === sessionId && !session.reaped)
+      if (sdk) {
+        terminateSdkSession(sdk.id)
+        await until('the SDK process to be gone', async () => getSdkSession(sdk.id)?.reaped ? true : null)
+      }
+    }
   }
 
   beforeEach(async () => {
     home = await realpath(await mkdtemp(join(tmpdir(), 'og-resume-home-')))
     claudeHome = await realpath(await mkdtemp(join(tmpdir(), 'og-resume-claude-')))
     scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-resume-scratch-')))
-    for (const k of ['OPENGROUND_HOME', 'HOME', 'OPENGROUND_CLAUDE_BIN']) saved[k] = process.env[k]
+    for (const k of ['OPENGROUND_HOME', 'HOME', 'OPENGROUND_CLAUDE_BIN', 'OPENGROUND_TEST_LAUNCH_DIR']) saved[k] = process.env[k]
     process.env.OPENGROUND_HOME = home
     process.env.HOME = claudeHome
     __resetMigrationCacheForTests()
@@ -222,22 +196,29 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
 
     capdir = join(scratch, 'launches')
     await mkdir(capdir, { recursive: true })
+    process.env.OPENGROUND_TEST_LAUNCH_DIR = capdir
+    __resetSdkSessionsForTests()
     const bin = join(scratch, 'stub-claude.sh')
     await writeFile(bin, STUB(capdir))
     await chmod(bin, 0o755)
     process.env.OPENGROUND_CLAUDE_BIN = bin
 
-    // ⚠ THIS FILE IS THE **PTY** COMMANDER'S INTEGRATION SUITE — it drives a real
-    // PTY through a stub `claude` and reads what landed on its command line, so
-    // it must ask for that runtime rather than inherit whichever one is current.
-    // Since 2026-08-02 the absent dial means SDK, and an SDK commander spawns no
-    // PTY at all: these four tests went red not because resume broke but because
-    // they were suddenly testing a different runtime than their own title says.
-    // The SDK commander's resume is covered in swarmManager.spawn.test.ts.
-    await setSettings({ swarmManagerRuntime: { mode: 'pty' } })
+    // A wrapper lets the supply retain its real PTY fixture while manager launches
+    // exercise the actual SDK stream protocol and the same persisted sessions.
+    const managerFixture = resolve('e2e/fixtures/manager-claude.mjs')
+    await writeFile(bin, STUB(capdir).replace('set -u',
+      'set -u\ncase " $* " in *" --input-format stream-json "*) exec ' +
+      JSON.stringify(process.execPath) + ' ' + JSON.stringify(managerFixture) + ' "$@" ;; esac'))
+    // The preflight must admit the SDK version, while the shell remains unchanged.
+    await writeFile(bin, (await readFile(bin, 'utf8')).replaceAll('stub-claude 0.0.0', '2.1.220'))
+    await claudeConnection(true)
   })
 
   afterEach(async () => {
+    for (const session of listSdkSessions()) terminateSdkSession(session.id)
+    for (const session of listSdkSessions())
+      await until('SDK cleanup', async () => getSdkSession(session.id)?.reaped ? true : null)
+    __resetSdkSessionsForTests()
     for (const [k, v] of Object.entries(saved)) {
       if (v !== undefined) process.env[k] = v
       // NEVER unset the home vars: empty means the user's REAL ~/.openground
@@ -284,7 +265,7 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     expect(second.prompt).toContain('todo/doing/review')
     // The whole order must have arrived as ONE argv token (the slash-command contract) —
     // a split prompt would reach claude as junk after `/og-manage`.
-    expect(second.argv.filter((a) => a === second.prompt)).toHaveLength(1)
+    expect(second.prompt).not.toContain('\n')
 
     await appRestart(warm.agentSessionId, warm.terminalId, 2) // its 2nd launch — same uuid
 
@@ -296,7 +277,7 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
 
     const healed = await spawnSwarmManager({ projectPath: proj })
     expect(healed.resumed).toBe(false) // fail-open …
-    expect(healed.terminalId).toBeTruthy() // … and the desk still came up
+    expect(healed.sdkSessionId).toBeTruthy() // … and the desk still came up
     expect(healed.agentSessionId).not.toBe(cold.agentSessionId)
 
     const third = await nthLaunch(3)
@@ -326,6 +307,26 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     expect(second.argv).not.toContain('--session-id')
     expect(second.prompt).toBe(SUPPLY_RESUME_INJECTION + languageDirective('en'))
     await appRestart(warm.agentSessionId, warm.terminalId, 2) // its 2nd launch — same uuid
+  }, 90_000)
+
+  it('resumes a legacy PTY conversation on SDK without rewriting its saved history', async () => {
+    const sessionId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    const dir = join(claudeHome, '.claude', 'projects', claudeDirName(proj))
+    await mkdir(dir, { recursive: true })
+    const history = JSON.stringify({ type: 'user', sessionId, message: { role: 'user', content: 'Keep my earlier conversation' } }) + '\n'
+    const file = join(dir, `${sessionId}.jsonl`)
+    await writeFile(file, history)
+    await recordSwarmSession(proj, 'manager', sessionId)
+    await setSettings({ swarmManagerRuntime: { mode: 'pty' } } as never)
+
+    const desk = await spawnSwarmManager({ projectPath: proj })
+    const launch = await nthLaunch(1)
+    expect(desk.runtime).toBe('sdk')
+    expect(desk.resumed).toBe(true)
+    expect(launch.flag).toBe('--resume')
+    expect(launch.sessionId).toBe(sessionId)
+    expect((await readFile(file, 'utf8')).startsWith(history)).toBe(true)
+    await appRestart(sessionId, desk.terminalId)
   }, 90_000)
 
   it('the two desks resume INDEPENDENTLY (one file, two conversations)', async () => {
@@ -398,24 +399,16 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
   // code presence then returned 'absent' (the ONLY spawn trigger) and the engine built a
   // twin; here both the pool-backed presence and the pool-backed spawn guard refuse to.
   it('a live desk the record has LOST its id for is not absent, and a 2nd spawn reuses it — never a twin (bug B)', async () => {
-    // This desk must STAY UP (the opposite of the resume tests), so swap in the keep-alive
-    // stub before spawning — the pool can only be the existence authority for a desk that
-    // is actually in it.
-    const aliveBin = join(scratch, 'alive-claude.sh')
-    await writeFile(aliveBin, ALIVE_STUB(capdir))
-    await chmod(aliveBin, 0o755)
-    process.env.OPENGROUND_CLAUDE_BIN = aliveBin
-
-    // A real commander desk boots (real launchClaude → real PTY → live stub) and stays up.
+    // The SDK fixture stays alive between turns.
     const desk = await spawnSwarmManager({ projectPath: proj })
     await nthLaunch(1)
-    await until('the desk to be live', async () => (isClaudeSessionLive(desk.agentSessionId) ? true : null))
+    await until('the desk to be live', async () => listManagerDesks(proj).length ? true : null)
 
     // The POOL — the authority the fix relies on — sees it under its 司令官 label in this
     // cwd. (This is the empirical proof deskLabel/ownerDesk/cwd propagate to the pool.)
-    const inPool = listLiveDesksIn(proj, MANAGER_DESK_LABEL)
+    const inPool = listManagerDesks(proj)
     expect(inPool).toHaveLength(1)
-    expect(inPool[0].id).toBe(desk.terminalId)
+    expect(inPool[0].handleId).toBe(desk.sdkSessionId)
     expect(inPool[0].agentSessionId).toBe(desk.agentSessionId)
 
     // bug B's SYMPTOM: corrupt the single record slot (a swallowed / overwritten write).
@@ -431,11 +424,11 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     // exists instead of building a twin — the invariant "≤1 commander desk per project".
     const twin = await spawnSwarmManager({ projectPath: proj })
     expect(twin.reused).toBe(true)
-    expect(twin.terminalId).toBe(desk.terminalId) // the SAME desk, not a new PTY
+    expect(twin.sdkSessionId).toBe(desk.sdkSessionId) // the SAME desk, not a new PTY
     expect(twin.agentSessionId).toBe(desk.agentSessionId)
 
     // Still exactly ONE desk and ONE launch — no second `claude` was ever spawned.
-    expect(listLiveDesksIn(proj, MANAGER_DESK_LABEL)).toHaveLength(1)
+    expect(listManagerDesks(proj)).toHaveLength(1)
     expect(await launches()).toHaveLength(1)
 
     // …and the guard RECONCILED the corrupted slot back onto the live desk on the way
@@ -443,7 +436,6 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     expect((await readSwarmSessions(proj)).manager?.sessionId).toBe(desk.agentSessionId)
 
     // Tear the live desk down (the keep-alive stub blocks on stdin until its PTY dies).
-    killTerminal(desk.terminalId)
-    await until('the desk to be gone', async () => (isClaudeSessionLive(desk.agentSessionId) ? null : true))
+    await appRestart(desk.agentSessionId, desk.terminalId)
   }, 90_000)
 })

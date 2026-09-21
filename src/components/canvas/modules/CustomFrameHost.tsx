@@ -325,9 +325,15 @@ const HostedFrame = ({
 
 /** Mounted ONCE in App (never conditionally — a remount would reload every
  *  frame). Renders all hosted frames and owns playback intake + keep-alive GC. */
-export const CustomFrameHost = () => {
+export const CustomFrameHost = ({ enabled = true }: { enabled?: boolean }) => {
   const hosted = useCustomFrames()
   const playback = usePlayback()
+
+  useEffect(() => {
+    if (!enabled) {
+      for (const id of Array.from(hosted.keys())) destroyFrame(id)
+    }
+  }, [enabled, hosted])
 
   // `og-playback` intake: verify the sender is one of OUR hosted frames, then
   // report into the global playback store (which the tab row / Ground cards /
@@ -399,7 +405,7 @@ export const CustomFrameHost = () => {
     return () => timers.forEach(clearTimeout)
   }, [hosted, playback])
 
-  if (hosted.size === 0) return null
+  if (!enabled || hosted.size === 0) return null
   const hiddenFrames = Array.from(hosted.values()).filter((f) => f.anchor === null)
   return (
     <>

@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import type { TaskTier } from '@/lib/types'
+import { resolveCardTier } from '@/lib/cardTier'
 
 // ─── worker の目標は「画面に今あるもの」 (2026-08-26) ──────────────────────────
 //
@@ -19,7 +21,7 @@ import { join } from 'path'
 // The claim/identity half must NOT move with it: `taskId` still decides which
 // card is taken todo→doing and which twin dispatch is refused.
 
-const spawnCalls: { title: string; notes?: string }[] = []
+const spawnCalls: { title: string; notes?: string; tier?: TaskTier }[] = []
 vi.mock('@/lib/server/claudePreflight', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/server/claudePreflight')>()),
   claudeRunPreflight: async () => ({ ok: true }),
@@ -32,8 +34,8 @@ vi.mock('@/lib/server/swarmWorker', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/server/swarmWorker')>()
   return {
     ...actual,
-    spawnSwarmWorker: async (o: { title: string; notes?: string }) => {
-      spawnCalls.push({ title: o.title, notes: o.notes })
+    spawnSwarmWorker: async (o: { title: string; notes?: string; tier?: TaskTier }) => {
+      spawnCalls.push({ title: o.title, notes: o.notes, tier: o.tier })
       return { branch: 'swarm/x', worktree: '/w', runtime: 'sdk', sdkSessionId: 's1' }
     },
   }
@@ -165,5 +167,36 @@ describe('POST /api/swarm/worker — the goal is what is on screen', () => {
     await app.request('/api/swarm/worker', json({ path: dir, taskId: 'c1', title: 'live title' }))
     const after = await readProjectData(dir)
     expect(after.tasks[0].boardColumn).toBe('doing')
+  })
+
+  it.each([
+    [{}, 'ultra'],
+    [{ tier: 'touch' }, 'touch'],
+    [{ tier: null }, undefined],
+    [{ tier: 'invalid' }, 'ultra'],
+  ] as const)('uses the live difficulty override %j before autosave', async (live, tier) => {
+    await seedCard({ tier: 'ultra' })
+    const res = await app.request('/api/swarm/worker', json({ path: dir, taskId: 'c1', ...live }))
+    expect(res.status).toBe(200)
+    expect(spawnCalls).toHaveLength(1)
+    expect(spawnCalls[0].tier).toBe(tier)
+    expect(resolveCardTier(spawnCalls[0])).toBe(tier ?? 'standard')
+  })
+
+  it('clearing the difficulty cannot erase the saved safety floor', async () => {
+    await seedCard({ notes: 'Change auth checks', tier: 'ultra' })
+    const res = await app.request(
+      '/api/swarm/worker',
+      json({ path: dir, taskId: 'c1', tier: null, notes: 'Shorter live brief' }),
+    )
+    expect(res.status).toBe(200)
+    expect(spawnCalls[0].tier).toBe('design')
+    expect(resolveCardTier(spawnCalls[0])).toBe('design')
+  })
+
+  it('carries an explicit difficulty for a title-only launch too', async () => {
+    const res = await app.request('/api/swarm/worker', json({ path: dir, title: 'Ordinary task', tier: 'ultra' }))
+    expect(res.status).toBe(200)
+    expect(spawnCalls[0].tier).toBe('ultra')
   })
 })

@@ -6,7 +6,6 @@ import { randomUUID } from 'crypto'
 import {
   resumeEngines,
   getOrchestratorState,
-  startOrchestrator,
   defaultDeps,
   resumeStartedAtMs,
   MAX_EXEC_MS,
@@ -15,11 +14,12 @@ import {
   type IntegrationDeps,
   type AnomalyDeps,
 } from './swarmOrchestrator'
-import { writeEngineIntent, readEngineIntent } from './swarmEnginePersistence'
+import { writeEngineIntent } from './swarmEnginePersistence'
 import { canonicalize } from './canonicalize'
 import { rememberSwarmManualStop, forgetSwarmManualStop } from './store'
 import { settingsFile, engineBootsFile } from './paths'
-import type { AppNotification, SwarmInfoNotification } from '../types'
+import type { AppNotification, SwarmInfoNotification, TaskTier } from '../types'
+import { desiredModelEffort } from './swarmLaunch'
 
 // resumeEngines() is card 2's boot re-hydration entry point
 // (docs/ENGINE_PERSISTENCE_PLAN.md §4). These tests register REAL project
@@ -106,7 +106,7 @@ const readNotificationsFresh = async (): Promise<AppNotification[]> => {
 
 describe('resumeEngines — boot re-hydration (card 2)', () => {
   it('resumes a project whose engine.json says desiredRunning:true', async () => {
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     const result = await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
     const keyA = await canonicalize(projA)
     expect(result.suppressed).toBe(false)
@@ -125,7 +125,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
     // resumeEngines is a ONE-LINE, easy-to-miss regression that the rest of the
     // suite does not catch (confirmed by mutation: adding that line leaves every
     // OTHER test in this file green).
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: true })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: true })
     const result = await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
     expect(result.resumed).toHaveLength(1) // the drain itself still resumes...
     const state = await getOrchestratorState(projA, safeDeps())
@@ -141,7 +141,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
   })
 
   it('an EXPLICIT desiredRunning:false (a prior stopOrchestrator) stays OFF — this is the direct observation of completion condition ⑤, not just the absent-file case above', async () => {
-    await writeEngineIntent(projA, { desiredRunning: false, selfSupply: true, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: false, overseer: false })
     const result = await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
     expect(result.resumed).toHaveLength(0)
     const state = await getOrchestratorState(projA, safeDeps())
@@ -150,7 +150,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
 
   it('a persisted manual-stop record wins over desiredRunning (supremacy)', async () => {
     const keyA = await canonicalize(projA)
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     await rememberSwarmManualStop(keyA)
     const result = await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
     expect(result.resumed).not.toContain(keyA)
@@ -168,7 +168,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
     // `running`, the tick chain never started, so those workers ran with NOBODY
     // monitoring them (no stall detection, no runaway clock, no reclaim).
     const keyA = await canonicalize(projA)
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
 
     const result = await resumeEngines(safeDeps(), {
       listProjectPaths: async () => [projA],
@@ -202,7 +202,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
     // raise 'engine-resume-suppressed'; this one — the likeliest of the three —
     // was the only mute one.
     preflightMock.ok = false
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     const result = await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
     expect(result.resumed).toHaveLength(0)
     // `suppressed` stays false: that flag means "the whole boot was suppressed",
@@ -218,8 +218,8 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
   })
 
   it('resumes multiple projects independently and fires ONE summarizing info notification', async () => {
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
-    await writeEngineIntent(projB, { desiredRunning: true, selfSupply: true, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+    await writeEngineIntent(projB, { desiredRunning: true, overseer: false })
     const result = await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA, projB] })
     expect(result.resumed).toHaveLength(2)
     const notifications = await readNotificationsFresh()
@@ -238,7 +238,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
   })
 
   it('crash-loop breaker: 3 boots of the same version within 10 minutes suppresses resume + fires a fatal notification', async () => {
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     const now = 1_000_000
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA], now, appVersion: '9.9.9' })
     await resumeEngines(safeDeps(), {
@@ -261,7 +261,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
   })
 
   it('a VERSION BUMP resets the breaker window (self-update cutover is not a crash loop)', async () => {
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     const now = 2_000_000
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA], now, appVersion: '1.0.0' })
     await resumeEngines(safeDeps(), {
@@ -279,7 +279,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
   })
 
   it('FAIL-CLOSED: if the boot ring itself cannot be persisted, resumeEngines suppresses this boot (never resumes with an unrecordable breaker)', async () => {
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     // Directing engine-boots.json AT a directory makes recordEngineBoot's write
     // fail — recordEngineBoot itself is covered in swarmEnginePersistence.test.ts;
     // this test is the end-to-end proof that resumeEngines actually WIRES that
@@ -300,41 +300,6 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
     }
   })
 
-  it('nit fix (2nd rework): manually pressing ON after a SUPPRESSED boot resume backfills selfSupply from the persisted intent instead of clobbering it with false', async () => {
-    // Set up exactly the gap the reviewer found: a persisted intent that says
-    // selfSupply was ON, but this boot's resumeEngines() never got to touch the
-    // project (breaker tripped) — so the in-memory engine, once it eventually
-    // gets created, starts from the ProjectEngine defaults (selfSupply: false).
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: true, overseer: false })
-    const now = 5_000_000
-    // Trip the breaker with THREE EMPTY-PROJECT-LIST boots first — projA must
-    // never actually get resumed by these (an empty list can't touch it), only
-    // fill the boot ring so the FOURTH call (which finally includes projA) is
-    // the one that's suppressed. (Including projA in the tripping calls would
-    // let call #1/#2 — pre-trip — actually resume it for real, which is a
-    // different scenario than the one this test targets: NEVER having gotten a
-    // chance to resume before the owner presses ON by hand.)
-    await resumeEngines(safeDeps(), { listProjectPaths: async () => [], now, appVersion: '7.0.0' })
-    await resumeEngines(safeDeps(), { listProjectPaths: async () => [], now: now + 1000, appVersion: '7.0.0' })
-    await resumeEngines(safeDeps(), { listProjectPaths: async () => [], now: now + 2000, appVersion: '7.0.0' })
-    const suppressedBoot = await resumeEngines(safeDeps(), {
-      listProjectPaths: async () => [projA],
-      now: now + 3000,
-      appVersion: '7.0.0',
-    })
-    expect(suppressedBoot.suppressed).toBe(true)
-    expect((await getOrchestratorState(projA, safeDeps())).running).toBe(false)
-    // The persisted intent is untouched by the suppression itself.
-    expect((await readEngineIntent(projA)).selfSupply).toBe(true)
-
-    // Owner manually presses ON (unaware the automatic resume was held back).
-    const state = await startOrchestrator(projA, safeDeps())
-    expect(state.running).toBe(true)
-    expect(state.selfSupply).toBe(true) // backfilled — NOT silently reset to false
-    // ...and the write-through this triggers doesn't re-lose it either.
-    expect((await readEngineIntent(projA)).selfSupply).toBe(true)
-  })
-
   // ── card 3 — RECONCILE-FIRST, SPAWN FROZEN (completion condition ②) ──────────
   it('condition ②: the dispatch pass is FROZEN until the roster reconcile resolves (reconcile-first)', async () => {
     // The freeze is the `await reconcile(key)` that sits BEFORE runEnginePass is kicked
@@ -351,7 +316,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
     // move it after the runEnginePass kick) and runEnginePass is fired while reconcile
     // is still parked, so fetchTasks runs with `reconcileResolved` false → the probe
     // trips and the final `toBe(false)` goes RED. (Verified by mutation, 2026-07-23.)
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
 
     let releaseReconcile = (): void => {}
     const reconcileGate = new Promise<void>((r) => {
@@ -448,7 +413,6 @@ describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
     const spawned: string[] = []
     await writeEngineIntent(projA, {
       desiredRunning: true,
-      selfSupply: false,
       overseer: false,
       managerDesired: true,
     })
@@ -464,7 +428,7 @@ describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
 
   it('no managerDesired ⇒ NOTHING is spawned (a desk the owner never opened stays closed)', async () => {
     const spawned: string[] = []
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     await resumeEngines(safeDeps(), {
       listProjectPaths: async () => [projA],
       spawnManager: async ({ projectPath }) => {
@@ -484,7 +448,6 @@ describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
     const spawned: string[] = []
     await writeEngineIntent(projA, {
       desiredRunning: false,
-      selfSupply: false,
       overseer: false,
       managerDesired: true,
     })
@@ -509,7 +472,6 @@ describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
     await rememberSwarmManualStop(await canonicalize(projA))
     await writeEngineIntent(projA, {
       desiredRunning: true,
-      selfSupply: false,
       overseer: false,
       managerDesired: true,
     })
@@ -533,7 +495,6 @@ describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
     preflightMock.ok = false
     await writeEngineIntent(projA, {
       desiredRunning: false,
-      selfSupply: false,
       overseer: false,
       managerDesired: true,
     })
@@ -549,11 +510,10 @@ describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
   it('NOT SILENT: a spawn that THROWS is reported, and the boot carries on', async () => {
     await writeEngineIntent(projA, {
       desiredRunning: false,
-      selfSupply: false,
       overseer: false,
       managerDesired: true,
     })
-    await writeEngineIntent(projB, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projB, { desiredRunning: true, overseer: false })
     const result = await resumeEngines(safeDeps(), {
       listProjectPaths: async () => [projA, projB],
       spawnManager: async () => {
@@ -628,7 +588,7 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
   })
 
   it('condition ①: a PROVEN candidate is `--resume` respawned (persisted id + SAME worktree) and adopted into engine.workers', async () => {
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     const spy = spawnSpy()
     const deps = liveDeps({
       spawnWorker: spy.fn,
@@ -653,8 +613,40 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
     expect(w?.reworkCount).toBe(ENTRY.reworkCount) // carried across the restart
   })
 
+  it('SAFETY FLOOR survives a restart: a danger word only in the NOTES still floors a touch card on --resume', async () => {
+    // Review 2026-09-18 (must-fix 1): the resume spawn re-resolves the model, and
+    // the floor reads title+notes — resume used to pass the title only, so this
+    // card ran at design before the restart and at touch (sonnet/low) after it.
+    // Red measured 2026-09-18 by dropping the `notes` spread from the resume spawn.
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+    const seen: Array<{ title: string; notes?: string; tier?: TaskTier }> = []
+    const deps = liveDeps({
+      spawnWorker: async (opts) => {
+        seen.push({ title: opts.title, notes: opts.notes, tier: opts.tier })
+        return {
+          terminalId: 't-resume',
+          agentSessionId: opts.resumeSessionId ?? 'x',
+          worktree: opts.worktree ?? ENTRY.worktree,
+          branch: ENTRY.branch,
+        }
+      },
+      fetchTasks: async () =>
+        [{ id: 'card-1', title: 'small fix', notes: 'refresh the auth token', tier: 'touch', boardColumn: 'doing' }] as never,
+    })
+    await resumeEngines(deps, {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([ENTRY]),
+      proveResumable: async () => true,
+    })
+    expect(seen).toHaveLength(1)
+    // What the REAL resolver makes of exactly what the resume spawn was handed.
+    expect(desiredModelEffort('optimize', 'worker', seen[0])).toEqual({ model: 'opus', effort: 'high' })
+    expect(seen[0].notes).toContain('auth')
+    expect(seen[0].tier).toBe('touch')
+  })
+
   it('condition ②: an UNPROVEN candidate (missing/empty/orphan-fresh transcript) FALLS BACK — no --resume, left to crash reclaim', async () => {
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     const spy = spawnSpy()
     await resumeEngines(liveDeps({ spawnWorker: spy.fn }), {
       listProjectPaths: async () => [projA],
@@ -667,7 +659,7 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
   })
 
   it('a candidate with NO captured session id cannot resume — no spawn (older roster row / lost id)', async () => {
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     const spy = spawnSpy()
     await resumeEngines(liveDeps({ spawnWorker: spy.fn }), {
       listProjectPaths: async () => [projA],
@@ -678,7 +670,7 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
   })
 
   it('a resume spawn that THROWS (a preflight / guard-wiring refusal, a gone worktree) falls back WITHOUT crashing the boot', async () => {
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     const throwingSpawn = async (): Promise<Awaited<ReturnType<OrchestratorDeps['spawnWorker']>>> => {
       throw new Error('L4 guard wiring failed verification — worker spawn refused')
     }
@@ -700,7 +692,7 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
     // resumeEngines and this project would resume + spawn despite no usable claude
     // ⇒ RED.
     preflightMock.ok = false
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     const spy = spawnSpy()
     const result = await resumeEngines(liveDeps({ spawnWorker: spy.fn }), {
       listProjectPaths: async () => [projA],
@@ -719,7 +711,7 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
     // `adoptResumeCandidates` to AFTER `void runEnginePass(engine, deps)` (or drop
     // it) and the pass dispatches a FRESH twin onto card-1 → a SECOND spawn with no
     // resumeSessionId + a 2nd worker ⇒ this goes RED.
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     const spy = spawnSpy()
     const deps = liveDeps({
       spawnWorker: spy.fn,
@@ -799,7 +791,7 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
         return { removed: true }
       },
     })
-    await writeEngineIntent(projA, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
     await resumeEngines(deps, {
       listProjectPaths: async () => [projA],
       reconcileRoster: reconcileYielding([entry]),

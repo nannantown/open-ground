@@ -129,63 +129,6 @@ export const escalationShotsDir = () => join(openGroundHome(), 'escalation-shots
 // dedup guard). App STATE, not a preference — its own file for the same reasons
 // as swarm-quota.json above. See src/lib/server/dailyFuelReport.ts.
 export const dailyFuelReportFile = () => join(openGroundHome(), 'daily-fuel-report.json')
-// The proxy's externalised JUDGMENT AXIS ("あなたの判断軸"). A single,
-// self-describing markdown file assembled from CONCEPT.md + the OPEN GROUND
-// auto-memory + hand-added judgments, written 0600 — it can be injected at proxy
-// startup. PERSONAL data: it lives ONLY here under the app home, never inside a
-// git repo (and is defensively gitignored). The growing hand-added judgments are
-// kept beside it as a JSON array. See src/lib/server/youCorpus.ts and
-// docs/YOU_CORPUS_PLAN.md.
-export const youCorpusFile = () => join(openGroundHome(), 'you-corpus.md')
-export const youCorpusAdditionsFile = () => join(openGroundHome(), 'you-corpus-additions.json')
-// The INTERVIEW LOOP's once-a-day state (ペルソナタブの「今日の1問」). Holds the
-// question asked on each local day plus the subject keys already covered, so the
-// 1-question-a-day cap and the "never re-ask the same observation" rule both
-// survive a restart. PERSONAL like the corpus itself (it quotes the owner's own
-// board activity) — app home only, never a repo. The ANSWERS are not stored here:
-// they go to the corpus through appendJudgment, which stays the single record.
-// See src/lib/server/personaInterview.ts.
-export const personaInterviewFile = () => join(openGroundHome(), 'persona-interview.json')
-/** 「どれが自分ではないか」 — the open check, and which lines were mistaken for a
- *  stranger's. Separate from the interview state: it writes nothing to the
- *  corpus and answers on a different clock (material, not days). */
-export const personaTellApartFile = () => join(openGroundHome(), 'persona-tell-apart.json')
-// The PERSONA COURSES store (ペルソナタブの診断コース): the last result per course
-// plus the results a retake displaced (capped), written 0600. PERSONAL like the
-// corpus and the interview state — app home only, never a repo. The instrument
-// and its scoring stay pure in src/lib/persona/instruments.ts; only the outcome
-// is stored here, and each finding is ALSO minted into the corpus through
-// appendJudgment (one writer). See src/lib/server/personaCourses.ts.
-export const personaCoursesFile = () => join(openGroundHome(), 'persona-courses.json')
-// The DECISION LEDGER (ペルソナタブの「実際にやったこと」): one record per proxy-you
-// decision — the stand-in answered on the owner's behalf, handed the question back
-// to them, or abstained — plus the owner's later answer when one of those questions
-// came back answered. The COMPLEMENT of persona-courses.json: that file is what the
-// owner SAYS about themselves (self-report), this one is what their stand-in DID
-// against real work, and the said-vs-did gap only exists because both are kept.
-// PERSONAL like the corpus and the courses beside it — app home only, never a repo,
-// 0600, and no route hands its free text to a non-loopback caller. CAPPED to the
-// newest N (unlike escalations.json, which must never lose an open question): a
-// dropped ledger row costs a statistic, not a decision. See
-// src/lib/server/personaLedger.ts.
-export const personaLedgerFile = () => join(openGroundHome(), 'persona-ledger.json')
-// The IMPORT LEDGER for claude.ai data exports (dropping conversations.json onto
-// the persona conversation). One record per file that has ALREADY been distilled
-// into the corpus, keyed by the sha256 of the file's bytes, written 0600.
-// It exists for one reason: ManualJudgment has NO idempotency key, so importing
-// the same export twice would append every distilled line a second time —
-// doubling the node count and the lit points on the figure, with no way to tell
-// the copies apart afterwards in an append-only store. A known sha is REFUSED
-// with an explicit message rather than silently merged. PERSONAL like the corpus
-// beside it — app home only, never a repo. See src/lib/server/personaImport.ts.
-export const personaImportsFile = () => join(openGroundHome(), 'persona-imports.json')
-// Working dirs for persona conversation runs — ONE per conversation, reused
-// across its turns (`--resume` resolves a session against the dir it started
-// in). Under the app home rather than os.tmpdir() so retention can reach them
-// and so they stay off macOS's /var/folders realpath. Each dir also earns a
-// `hasTrustDialogAccepted` entry in ~/.claude.json, so a leftover here is TWO
-// leaks, not one — swept at boot by retention.ts's sweepPersonaScratch.
-export const personaScratchRootDir = () => join(openGroundHome(), 'persona-scratch')
 export const runsDir = () => join(openGroundHome(), 'runs')
 export const runFile = (id: string) => join(runsDir(), `${id}.json`)
 // Dismissed runs are *moved* here rather than unlinked, so an accidental

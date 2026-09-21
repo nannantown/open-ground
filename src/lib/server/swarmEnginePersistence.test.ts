@@ -46,22 +46,22 @@ afterEach(async () => {
 describe('swarmEnginePersistence — engine intent (write-through, fail-quiet-to-OFF / fail-open)', () => {
   it('readEngineIntent defaults to not-running when engine.json was never written', async () => {
     const intent = await readEngineIntent(projDir)
-    expect(intent).toEqual({ desiredRunning: false, selfSupply: false, overseer: false, updatedAt: 0 })
+    expect(intent).toEqual({ desiredRunning: false, overseer: false, updatedAt: 0 })
   })
 
   it('round-trips a written intent', async () => {
     const ok = await writeEngineIntent(
       projDir,
-      { desiredRunning: true, selfSupply: true, overseer: false },
+      { desiredRunning: true, overseer: false },
       5000,
     )
     expect(ok).toBe(true)
     const intent = await readEngineIntent(projDir)
-    expect(intent).toEqual({ desiredRunning: true, selfSupply: true, overseer: false, updatedAt: 5000 })
+    expect(intent).toEqual({ desiredRunning: true, overseer: false, updatedAt: 5000 })
   })
 
   it('lands the file at ~/.openground/projects/<uuid>/engine.json', async () => {
-    await writeEngineIntent(projDir, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projDir, { desiredRunning: true, overseer: false })
     const raw = await readFile(join(projectCentralDir(uuid), 'engine.json'), 'utf8')
     expect(JSON.parse(raw).desiredRunning).toBe(true)
   })
@@ -79,36 +79,36 @@ describe('swarmEnginePersistence — engine intent (write-through, fail-quiet-to
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, 'engine.json'), JSON.stringify({ desiredRunning: 'yes', overseer: 1 }))
     const intent = await readEngineIntent(projDir)
-    expect(intent).toEqual({ desiredRunning: false, selfSupply: false, overseer: false, updatedAt: 0 })
+    expect(intent).toEqual({ desiredRunning: false, overseer: false, updatedAt: 0 })
   })
 
   it('patchEngineIntent updates only the given field, preserving the rest read fresh from disk', async () => {
-    await writeEngineIntent(projDir, { desiredRunning: true, selfSupply: false, overseer: false }, 1000)
-    const ok = await patchEngineIntent(projDir, { selfSupply: true }, 2000)
+    await writeEngineIntent(projDir, { desiredRunning: true, overseer: false }, 1000)
+    const ok = await patchEngineIntent(projDir, { overseer: true }, 2000)
     expect(ok).toBe(true)
     const intent = await readEngineIntent(projDir)
-    expect(intent).toEqual({ desiredRunning: true, selfSupply: true, overseer: false, updatedAt: 2000 })
+    expect(intent).toEqual({ desiredRunning: true, overseer: true, updatedAt: 2000 })
   })
 
   it('patchEngineIntent never resurrects a stale desiredRunning:false into true, and vice versa — it only ever touches its own field', async () => {
-    await writeEngineIntent(projDir, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(projDir, { desiredRunning: true, overseer: false })
     await patchEngineIntent(projDir, { overseer: true })
     let intent = await readEngineIntent(projDir)
-    expect(intent).toMatchObject({ desiredRunning: true, selfSupply: false, overseer: true })
+    expect(intent).toMatchObject({ desiredRunning: true, overseer: true })
 
-    await writeEngineIntent(projDir, { desiredRunning: false, selfSupply: true, overseer: false })
-    await patchEngineIntent(projDir, { selfSupply: false })
+    await writeEngineIntent(projDir, { desiredRunning: false, overseer: true })
+    await patchEngineIntent(projDir, { overseer: false })
     intent = await readEngineIntent(projDir)
     // desiredRunning stays FALSE — a patch call must never flip it, in EITHER
     // direction, even though nothing here explicitly asked for false.
-    expect(intent).toMatchObject({ desiredRunning: false, selfSupply: false, overseer: false })
+    expect(intent).toMatchObject({ desiredRunning: false, overseer: false })
   })
 
   it('patchEngineIntent on a never-written project starts from defaults, not a throw', async () => {
-    const ok = await patchEngineIntent(projDir, { selfSupply: true })
+    const ok = await patchEngineIntent(projDir, { overseer: true })
     expect(ok).toBe(true)
     const intent = await readEngineIntent(projDir)
-    expect(intent).toMatchObject({ desiredRunning: false, selfSupply: true, overseer: false })
+    expect(intent).toMatchObject({ desiredRunning: false, overseer: true })
   })
 
   it('fail-open: writing for an UNREGISTERED project returns false, never throws', async () => {
@@ -116,7 +116,6 @@ describe('swarmEnginePersistence — engine intent (write-through, fail-quiet-to
     try {
       const ok = await writeEngineIntent(unregistered, {
         desiredRunning: true,
-        selfSupply: false,
         overseer: false,
       })
       expect(ok).toBe(false)
@@ -248,51 +247,5 @@ describe('swarmEnginePersistence — crash-loop breaker ring', () => {
       vi.resetModules()
       await rm(root, { recursive: true, force: true })
     }
-  })
-})
-
-// ── The daily self-supply cap must survive a restart (2026-07-29) ────────────
-// `selfSupply.enabled` was already restored at boot while the DAILY COUNTER
-// lived only in memory, so every restart re-armed self-supply with a fresh
-// budget. The engine restarts on every self-update — i.e. exactly when it has
-// been proposing work to itself — so the guard that exists to bound a runaway
-// was being reset by the very loop it bounds, and each round re-spawns the full
-// scan (tsc + eslint + a whole `vitest run`).
-describe('EngineIntent — the self-supply daily budget round-trips', () => {
-  it('persists and restores dayKey + dayCount', async () => {
-    await writeEngineIntent(projDir, {
-      desiredRunning: true,
-      selfSupply: true,
-      overseer: false,
-      selfSupplyDayKey: '2026-07-29',
-      selfSupplyDayCount: 4,
-    })
-    const back = await readEngineIntent(projDir)
-    expect(back.selfSupplyDayKey).toBe('2026-07-29')
-    expect(back.selfSupplyDayCount).toBe(4)
-  })
-
-  it('an OLDER engine.json without the fields degrades to "no count yet", never to unbounded', async () => {
-    const dir = projectCentralDir(uuid)
-    await mkdir(dir, { recursive: true })
-    await writeFile(
-      join(dir, 'engine.json'),
-      JSON.stringify({ desiredRunning: true, selfSupply: true, overseer: false, updatedAt: 1 }),
-      'utf8',
-    )
-    const back = await readEngineIntent(projDir)
-    expect(back.selfSupply).toBe(true)
-    expect(back.selfSupplyDayCount).toBeUndefined() // ⇒ today's budget, not an unbounded one
-  })
-
-  it('a corrupt/negative count is ignored rather than trusted', async () => {
-    await writeEngineIntent(projDir, {
-      desiredRunning: true,
-      selfSupply: true,
-      overseer: false,
-      selfSupplyDayKey: '2026-07-29',
-      selfSupplyDayCount: -5,
-    })
-    expect((await readEngineIntent(projDir)).selfSupplyDayCount).toBeUndefined()
   })
 })

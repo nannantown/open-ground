@@ -5,13 +5,12 @@ import { InfiniteCanvas } from '@/components/canvas/InfiniteCanvas'
 import { CustomFrameHost, destroyFramesForProject } from '@/components/canvas/modules/CustomFrameHost'
 import { usePlayback } from '@/lib/playback/playbackStore'
 import { Toolbar } from '@/components/canvas/Toolbar'
+import { OwnerViewSwitch } from '@/components/canvas/OwnerViewSwitch'
 import { ToolPalette } from '@/components/canvas/ToolPalette'
 import { SettingsPanel } from '@/components/canvas/SettingsPanel'
 import { NewProjectModal } from '@/components/canvas/NewProjectModal'
 import { FeedbackModal } from '@/components/canvas/FeedbackModal'
 import { GlobalSkillsPanel } from '@/components/canvas/GlobalSkillsPanel'
-import { PersonaPanel } from '@/components/canvas/PersonaPanel'
-import { isPersonaOpen } from '@/lib/persona/gate'
 import { AccountModal } from '@/components/canvas/AccountModal'
 import { ProjectJumpPalette } from '@/components/canvas/ProjectJumpPalette'
 import { ProjectPanel } from '@/components/canvas/ProjectPanel'
@@ -34,6 +33,7 @@ import { useCanvasHistory } from '@/lib/useCanvasHistory'
 import { newId } from '@/lib/ids'
 import { loadPersistedView, savePersistedView } from '@/lib/persistView'
 import { api } from '@/lib/api-client'
+import { descriptionForLang } from '@/lib/descriptionLang'
 import { pickFolder } from '@/lib/pickFolder'
 import { useAuth } from '@/lib/auth/AuthContext'
 import { useT } from '@/i18n/I18nContext'
@@ -53,7 +53,6 @@ import type {
   ProjectsResponse,
   Tool,
   FeedbackConfigResponse,
-  ModuleSubmissionsConfigResponse,
 } from '@/lib/types'
 
 // localStorage key holding the newest feedback created_at the owner has seen in
@@ -68,13 +67,6 @@ const FEEDBACK_SEEN_KEY = 'openground:feedbackSeenAt'
 const ONBOARDED_KEY = 'openground:onboarded'
 const feedbackSeenKey = (sourceId: string | null) =>
   sourceId ? `${FEEDBACK_SEEN_KEY}:${sourceId}` : FEEDBACK_SEEN_KEY
-
-// Same "last seen" scheme for the owner's module-submission review queue
-// (docs/CUSTOM_TABS_PLAN.md) — scoped per Supabase source so it never carries a
-// stale marker across projects/tables.
-const MODULE_SUBMISSION_SEEN_KEY = 'openground:moduleSubmissionSeenAt'
-const moduleSubmissionSeenKey = (sourceId: string | null) =>
-  sourceId ? `${MODULE_SUBMISSION_SEEN_KEY}:${sourceId}` : MODULE_SUBMISSION_SEEN_KEY
 
 // Stable id for a collab-invite notification — the read-state key persisted
 // server-side (so re-login keeps unread state). Keyed by collabProjectId, which
@@ -146,7 +138,7 @@ export function nextSelectionOnOpenOwned(id: string): {
 }
 
 export default function App() {
-  const { t } = useT()
+  const { t, lang } = useT()
   const [projects, setProjects] = useState<ProjectMeta[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
   const [canvas, setCanvas] = useState<CanvasState | null>(null)
@@ -176,13 +168,6 @@ export default function App() {
   // Stable id of the Supabase data source (from /config) used to scope the
   // localStorage "seen" marker. Null until the config probe resolves.
   const [feedbackSourceId, setFeedbackSourceId] = useState<string | null>(null)
-  // Module submission review queue (docs/CUSTOM_TABS_PLAN.md) — same shape as the
-  // feedback inbox. canReview (owner build: service-role key + admin allowlist)
-  // gates the "Tab submissions" inbox in Settings and the gear dot; sourceId
-  // scopes the "seen" marker. Public build → canReview false, nothing shows.
-  const [moduleReviewCanReview, setModuleReviewCanReview] = useState(false)
-  const [moduleSubmissionUnread, setModuleSubmissionUnread] = useState(0)
-  const [moduleSubmissionSourceId, setModuleSubmissionSourceId] = useState<string | null>(null)
   // Current signed-in app user. `canRead` (owner inbox) can depend on identity
   // when an admin allowlist is set, so we re-probe feedback config when it changes.
   const { user: authUser } = useAuth()
@@ -203,13 +188,6 @@ export default function App() {
   // Full-screen in-app manual (the "?" toolbar entry + first-run link).
   const [manualOpen, setManualOpen] = useState(false)
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false)
-  // The Persona surface (the owner's stand-in), opened from the Ground toolbar.
-  // It lives HERE rather than in the per-project tab row because it describes the
-  // OWNER, not a repo — its notes live in ~/.openground/ and are identical on
-  // every project — so Ground, where the other app-wide surfaces (Settings,
-  // Manual, Skills) are addressed, is where it belongs. Both the entry and the
-  // mount are gated below by isPersonaOpen (persona OR swarm).
-  const [personaOpen, setPersonaOpen] = useState(false)
   // Realtime collab (member flow). `enabled` gates collab entirely — the default
   // build (no collab env) shows nothing. `sharedDialogOpen` is the join dialog,
   // opened EITHER by the Toolbar "Shared with me" entry (the member's path to the
@@ -222,7 +200,18 @@ export default function App() {
   // the Settings toggle to the owner; `flags` gates which modules surface as tabs
   // in the project panel. Refreshed after a settings save (see saveSettings) so a
   // toggle shows/hides its module immediately.
-  const experiments = useExperiments()
+  const experiments = useExperiments(authUser?.id)
+  const [previewPublic, setPreviewPublic] = useState(false)
+  const publicPreview = experiments.eligible && previewPublic
+  const ownerFeatures = experiments.eligible && !publicPreview
+  const visibleExperiments = useMemo(() => publicPreview
+    ? { swarm: experiments.swarmOptIn.enabled, sandbox: false }
+    : experiments.flags, [publicPreview, experiments.swarmOptIn.enabled, experiments.flags])
+  // Preview is window-local and never becomes a saved setting or an auth role.
+  useEffect(() => { setPreviewPublic(false) }, [authUser?.id, experiments.eligible])
+  useEffect(() => {
+    if (!ownerFeatures) setSkillsPanelOpen(false)
+  }, [ownerFeatures])
   const [sharedDialogOpen, setSharedDialogOpen] = useState(false)
   const [openShared, setOpenShared] = useState<{ id: string; label: string } | null>(null)
   // Ground member flow: projects shared WITH the user (owned:false from
@@ -557,17 +546,6 @@ export default function App() {
         }
       })
       .catch(() => {})
-    // Module submission review config (same identity-dependent canReview gate as
-    // feedback — re-probed on login/logout via the effect's authUser dependency).
-    fetch('/api/module-submissions/config')
-      .then((res) => res.json() as Promise<Partial<ModuleSubmissionsConfigResponse>>)
-      .then((data) => {
-        if (!cancelled) {
-          setModuleReviewCanReview(!!data.canReview)
-          setModuleSubmissionSourceId(data.sourceId ?? null)
-        }
-      })
-      .catch(() => {})
     return () => {
       cancelled = true
     }
@@ -722,48 +700,6 @@ export default function App() {
       setFeedbackUnread(0)
     },
     [feedbackSourceId],
-  )
-
-  // The module-submission unread poll — same cadence + Settings-open pause as the
-  // feedback poll above (the inbox marks everything seen the moment it loads, so a
-  // stale poll must not resurrect the dot while Settings is open).
-  useEffect(() => {
-    if (!moduleReviewCanReview || settingsOpen) return
-    let cancelled = false
-    let lastPoll = 0
-    const poll = () => {
-      lastPoll = Date.now()
-      const since = localStorage.getItem(moduleSubmissionSeenKey(moduleSubmissionSourceId)) ?? ''
-      const q = since ? `?since=${encodeURIComponent(since)}` : ''
-      fetch(`/api/module-submissions/unread${q}`)
-        .then((res) => (res.ok ? (res.json() as Promise<{ count?: number }>) : null))
-        .then((data) => {
-          if (!cancelled && data) setModuleSubmissionUnread(data.count ?? 0)
-        })
-        .catch(() => {})
-    }
-    const onFocus = () => {
-      if (Date.now() - lastPoll >= 60_000) poll()
-    }
-    poll()
-    const id = window.setInterval(poll, 300_000)
-    window.addEventListener('focus', onFocus)
-    return () => {
-      cancelled = true
-      window.clearInterval(id)
-      window.removeEventListener('focus', onFocus)
-    }
-  }, [moduleReviewCanReview, settingsOpen, moduleSubmissionSourceId])
-
-  // Called by the review inbox once it loads: record the newest timestamp as
-  // "seen" (scoped per data source) and clear the gear dot.
-  const markModuleSubmissionSeen = useCallback(
-    (latestCreatedAt: string | null) => {
-      if (latestCreatedAt)
-        localStorage.setItem(moduleSubmissionSeenKey(moduleSubmissionSourceId), latestCreatedAt)
-      setModuleSubmissionUnread(0)
-    },
-    [moduleSubmissionSourceId],
   )
 
   // Poll each project's lamp inputs (every 5s, skipped while the tab is hidden;
@@ -1237,6 +1173,9 @@ export default function App() {
   // The frame the selected card sits inside supplies its category label —
   // derived from canvas geometry, not a hand-typed field.
   const frameLabel = singleSelected ? frameLabelFor(singleSelected.id, canvas) : null
+  const viewModeControl = experiments.eligible ? (
+    <OwnerViewSwitch publicPreview={publicPreview} onChange={setPreviewPublic} />
+  ) : undefined
 
   return (
     <main className="h-screen w-screen overflow-hidden bg-bg relative">
@@ -1292,14 +1231,8 @@ export default function App() {
         onImport={importProject}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenManual={() => setManualOpen(true)}
-        onOpenSkills={() => setSkillsPanelOpen(true)}
-        // Owner-only, hidden by default: the Persona entry appears only when the
-        // persona OR swarm experiment is open. Passing `undefined` when the gate
-        // is closed is what hides it (the same undefined-hides-the-entry pattern
-        // as onOpenShared / onFeedback / onAccount above), so a non-owner build
-        // never renders the button at all — the feature's existence stays hidden
-        // rather than being drawn and then refused.
-        onOpenPersona={isPersonaOpen(experiments.flags) ? () => setPersonaOpen(true) : undefined}
+        onOpenSkills={ownerFeatures ? () => setSkillsPanelOpen(true) : undefined}
+        viewModeControl={!singleSelected && !openShared ? viewModeControl : undefined}
         // Member entry to the join dialog — the INITIAL join needs it (a member
         // with an invite code/link has nowhere to paste it otherwise; already-
         // joined projects also show as Ground cards). Gated on collabEnabled, so
@@ -1315,10 +1248,7 @@ export default function App() {
         unreadNotifications={unreadNotifications}
         onOpenNotification={openNotification}
         onNotificationsSeen={markNotificationsSeen}
-        // The settings-gear dot covers BOTH owner inboxes (feedback + tab
-        // submissions); either having unread lights it, opening Settings (which
-        // loads both inboxes and marks them seen) clears it.
-        unreadFeedback={feedbackUnread + moduleSubmissionUnread}
+        unreadFeedback={ownerFeatures ? feedbackUnread : 0}
         projectCount={visibleProjects.length}
         usage={<UsageHud />}
       />
@@ -1332,9 +1262,11 @@ export default function App() {
         onRelocate={relocateProject}
         frameLabel={frameLabel}
         feedbackEnabled={feedbackEnabled}
-        // Owner-only experiment gate: which experimental modules surface as tabs.
-        // All-false for non-owners, so the row is unchanged for everyone else.
-        experiments={experiments.flags}
+        // Preview uses the public opt-in; actual role and running jobs stay intact.
+        experiments={visibleExperiments}
+        ownerFeatures={ownerFeatures}
+        viewModeControl={viewModeControl}
+        accessLoaded={experiments.loaded}
         onClose={openShared ? () => setOpenShared(null) : () => setSelectedIds([])}
         onRemove={removeFromCanvas}
         onSaved={(path, d) =>
@@ -1343,7 +1275,7 @@ export default function App() {
               p.path === path
                 ? {
                     ...p,
-                    description: d.description,
+                    description: descriptionForLang(d, lang),
                     openTaskCount: d.tasks.filter((t) => !t.done).length,
                     totalTaskCount: d.tasks.length,
                   }
@@ -1381,7 +1313,7 @@ export default function App() {
           (a remount would reload every hosted frame and cut any audio). It
           renders nothing until a custom tab is opened; a frame whose embedded
           app is playing audio survives tab/project switches here, hidden. */}
-      <CustomFrameHost />
+      <CustomFrameHost enabled={ownerFeatures} />
       {/* Realtime collab — the join dialog (member flow), opened by an invite
           deep link. Gated on collabEnabled, so the default build never mounts it.
           The shared panel is a folder-less overlay (its own doc source); it
@@ -1465,25 +1397,13 @@ export default function App() {
         onReload={load}
         // Owner-only: reveals the experiment toggles. Non-owners never see them
         // (eligible:false), so the feature's existence stays hidden.
-        experimentsEligible={experiments.eligible}
+        experimentsEligible={ownerFeatures}
         // Public swarm opt-in (all users, macOS only). available gates the
         // toggle's visibility; enabled reflects the current choice.
         swarmOptInAvailable={experiments.swarmOptIn.available}
         swarmOptInEnabled={experiments.swarmOptIn.enabled}
-        personaOptInAvailable={experiments.personaOptIn.available}
-        personaOptInEnabled={experiments.personaOptIn.enabled}
-        feedbackCanRead={feedbackCanRead}
+        feedbackCanRead={ownerFeatures && feedbackCanRead}
         onFeedbackSeen={markFeedbackSeen}
-        moduleReviewCanReview={moduleReviewCanReview}
-        onModuleSubmissionSeen={markModuleSubmissionSeen}
-        onOpenFeedback={
-          feedbackEnabled
-            ? () => {
-                setSettingsOpen(false)
-                setFeedbackOpen(true)
-              }
-            : undefined
-        }
       />
       <NewProjectModal
         open={newProjectOpen}
@@ -1520,18 +1440,8 @@ export default function App() {
           setOnboarded(true)
         }}
       />
-      <ManualPanel open={manualOpen} onClose={() => setManualOpen(false)} />
-      <GlobalSkillsPanel open={skillsPanelOpen} onClose={() => setSkillsPanelOpen(false)} />
-      {/* Re-asking the gate HERE, not just when drawing the button, is what keeps
-          the door and the room from disagreeing: the flags are re-fetched on
-          window focus, so a gate that closes under a panel already on screen
-          (the experiment switched off in another window) takes the surface with
-          it instead of leaving the owner's corpus mounted behind a door that no
-          longer exists. */}
-      <PersonaPanel
-        open={personaOpen && isPersonaOpen(experiments.flags)}
-        onClose={() => setPersonaOpen(false)}
-      />
+      <ManualPanel open={manualOpen} ownerFeatures={ownerFeatures} onClose={() => setManualOpen(false)} />
+      <GlobalSkillsPanel open={ownerFeatures && skillsPanelOpen} onClose={() => setSkillsPanelOpen(false)} />
       <ProjectJumpPalette
         open={jumpOpen}
         projects={visibleProjects}

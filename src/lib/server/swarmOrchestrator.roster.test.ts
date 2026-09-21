@@ -19,7 +19,6 @@ import {
   type IntegrationDeps,
   type AnomalyDeps,
 } from './swarmOrchestrator'
-import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
 import { readRoster, writeRoster, type RosterEntry } from './swarmWorkerRoster'
 import { canonicalize } from './canonicalize'
@@ -67,7 +66,6 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine => ({
   nudges: new Map(),
   log: [],
   anomalies: [],
-  selfSupply: initSelfSupplyRuntime(),
   overseer: initOverseerRuntime(),
   notified: new Set(),
   pendingFatal: [],

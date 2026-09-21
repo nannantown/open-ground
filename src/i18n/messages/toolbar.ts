@@ -17,12 +17,11 @@ export const toolbar = {
     'toolbar.settingsWithUnread': 'Settings ({count} new feedback)',
     'toolbar.manual': 'Manual',
     'toolbar.skills': 'Skills',
-    // Persona — the Ground entry to the owner's stand-in (owner-only; the entry
-    // is absent unless the persona or swarm experiment is open). `persona` is
-    // the permanent button label, `personaTooltip` the hover, which is where the
-    // "what is this" lives since the label is one word.
-    'toolbar.persona': 'Persona',
-    'toolbar.personaTooltip': 'Persona — what your stand-in knows about how you decide',
+    'toolbar.viewMode': 'Feature display',
+    'toolbar.ownerView': 'Owner view',
+    'toolbar.publicView': 'Public view',
+    'toolbar.editLayout': 'Edit layout',
+    'toolbar.finishLayout': 'Finish layout editing',
     'toolbar.themeDark': 'Switch to dark mode',
     'toolbar.themeLight': 'Switch to light mode',
     'toolbar.sharedWithMe': 'Shared with me',
@@ -48,8 +47,11 @@ export const toolbar = {
     'toolbar.settingsWithUnread': '設定（新着フィードバック {count} 件）',
     'toolbar.manual': 'マニュアル',
     'toolbar.skills': 'スキル',
-    'toolbar.persona': 'ペルソナ',
-    'toolbar.personaTooltip': 'ペルソナ — 分身が持っている「あなたの決め方」',
+    'toolbar.viewMode': '機能の表示',
+    'toolbar.ownerView': 'オーナー表示',
+    'toolbar.publicView': '一般ユーザー表示',
+    'toolbar.editLayout': '配置を編集',
+    'toolbar.finishLayout': '配置の編集を終了',
     'toolbar.themeDark': 'ダークモードに切り替え',
     'toolbar.themeLight': 'ライトモードに切り替え',
     'toolbar.sharedWithMe': '共有プロジェクト',

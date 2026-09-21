@@ -34,7 +34,6 @@ import {
   type AnomalyDeps,
 } from './swarmOrchestrator'
 import { isTierCooling, __resetQuotaForTest } from './swarmQuota'
-import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
 import { swarmNotificationsFile } from './paths'
 import type { OrchestratorWorker, ProjectTask } from '../types'
@@ -84,7 +83,6 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine =>
     nudges: new Map(),
     log: [],
     anomalies: [],
-    selfSupply: initSelfSupplyRuntime(),
     overseer: initOverseerRuntime(),
     notified: new Set(),
     pendingFatal: [],

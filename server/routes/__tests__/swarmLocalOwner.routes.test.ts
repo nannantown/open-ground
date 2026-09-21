@@ -21,7 +21,7 @@ import type { ExperimentsResponse } from '@/lib/types'
 //      which pins the locked default),
 //   2. GET /api/experiments mirrors the unlock to the client (flags.swarm) so
 //      the Swarm tab appears — without widening `eligible` or `sandbox`,
-//   3. the unlock is SWARM-SCOPED: marketplace / custom-tab routes still 403,
+//   3. the unlock is SWARM-SCOPED: custom-tab creation still 403,
 //   4. the unlock can NEVER be set through a request: POST /api/settings drops
 //      the key (it is not in USER_SETTINGS_KEYS), and swarm stays 403 after,
 //   5. escalations actually read/write end-to-end while signed out + unlocked.
@@ -115,23 +115,17 @@ describe('swarm local owner unlock — env OPENGROUND_LOCAL_OWNER=1', () => {
     // owner's personal corpus, most of all — is a leak this must catch.
     expect(body).toEqual({
       eligible: false,
-      flags: { swarm: true, sandbox: false, persona: false },
-      // The public opt-in block: unavailable on this (non-macOS) test host and
-      // off — the LOCAL unlock is a separate path and must not report itself as
-      // the user opt-in.
-      swarmOptIn: { available: false, enabled: false },
-      // Persona is its own beta (2026-08-20): the swarm unlock never touches it,
-      // and its opt-in — available on every platform — is off here.
-      personaOptIn: { available: true, enabled: false },
+      flags: { swarm: true, sandbox: false },
+      // Public availability follows the host OS; the LOCAL unlock must never
+      // report itself as the user's opt-in.
+      swarmOptIn: { available: process.platform === 'darwin', enabled: false },
     })
   })
 
-  it('the unlock is SWARM-SCOPED: marketplace/custom-tab routes still 403 signed out', async () => {
+  it('the unlock is SWARM-SCOPED: custom-tab creation still 403 signed out', async () => {
     process.env.OPENGROUND_LOCAL_OWNER = '1'
     // Role-'none'-forbidden route (tester or owner may pass — signed out may not).
     expect((await app.request('/api/custom-modules', json({}))).status).toBe(403)
-    // Owner-only marketplace publish (writes to Supabase when signed in).
-    expect((await app.request('/api/custom-modules/some-id/publish', json({}))).status).toBe(403)
   })
 })
 

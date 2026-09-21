@@ -1,10 +1,7 @@
 // swarmGate.ts — the swarm control plane's access gate: owner app-login OR an
 // explicit LOCAL unlock. A dedicated seam so the swarm gate stays separate from
-// the marketplace/custom-tab role machinery (roles.ts): the marketplace routes
-// (customModules / moduleSubmissions) keep gating on the signed-in role and
-// NEVER honour the local unlock — they publish to Supabase, where a signed-out
-// caller has no JWT and could do nothing real anyway; keeping the gates apart
-// keeps their meanings apart.
+// local custom-tab role machinery (roles.ts). Custom-module management keeps
+// gating on the signed-in role and never honours the swarm-only local unlock.
 //
 // WHY A LOCAL UNLOCK IS SAFE — the swarm owner gate is a feature-VISIBILITY
 // flag, not a security boundary: the core PTY route (POST /api/terminal)

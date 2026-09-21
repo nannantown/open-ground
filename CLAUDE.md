@@ -318,8 +318,8 @@ port (47776). `@/*` maps to `src/*`.
   esbuild (`scripts/build-server.js`) to `server/dist/index.cjs`, which
   Electron forks in prod.
 - **`server/routes/`**: health, project, canvas, canvasAi, misc, terminal,
-  sse, auth, collab, customModules, moduleSubmissions, feedback, swarm,
-  ticket, youCorpus. `server/middleware/projectPath.ts` adapts
+  sse, auth, collab, customModules, feedback, swarm,
+  ticket, research. `server/middleware/projectPath.ts` adapts
   `validateProjectPath` to Hono. `server/routes/_shared.ts` holds
   cross-route helpers (e.g. `validateName`).
 

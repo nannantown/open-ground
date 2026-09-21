@@ -4,6 +4,12 @@
 **読者**: 司令塔(og-manage / manage セッション)。worker の一生に関わる全ての状態とその在り処を、コード根拠付きで示す。
 **関連**: `01-engine-core.md`(エンジン中枢 tick/pass/dispatch/monitor — 別章)。
 
+> **追記(2026-09-18・常駐卓の文脈に上限を設けた)**: worker ではなく**司令官・補給官の卓**の話だが、
+> 卓の一生(再開の仕方)が変わったのでここにも記す。`Settings.deskContextCapTokens`(既定 300,000・0 で無効)を
+> 超えた卓は、**司令官 = 次の spawn で前回の会話を resume せず新しい会話で作り直す**(復帰指示
+> `MANAGER_RESUME_INJECTION` はそのまま渡す)/ **補給官 = 生きている卓に空いた時だけ `/compact` を1回送る**。
+> エンジンログに「卓を作り直した(文脈 N → 0)」「卓を圧縮した(文脈 N → M)」が出る。正典は 05 章 §10.6。
+
 ---
 
 ## 0. 司令塔が最初に知るべき 3 つの真実
@@ -187,17 +193,11 @@ PTY に流し、オーナーはバグと読んだ — 下の歴史 ⚠ 群も同
 (隔離 HOME で実測 0802)。教訓は生きている: **決めるのは reader、規則の置き場所を
 テストしても出荷経路の証拠にならない**。
 
-⚠ **ファイルが読めないときは PTY**(2026-08-02)— この file-level fail-closed 規則は
-**司令官ダイヤルに現存**(worker reader は削除済み)。`settings.json` が読めない /
-parse できない / 非オブジェクト / 切れた symlink ⇒ `getManagerRuntimeDial` は `'pty'`。
-番人は `src/lib/server/runtimeDialFileHealth.test.ts`。03 章 §2.3 冒頭も同じ話。
-
-⚠ **盤面(Swarm パネル)の値は導出ではなくサーバの実効値**(2026-08-02)。`GET /api/settings` が
-`runtimeDialsEffective:{manager}`(0813 に worker/workerCap を撤去)を返し、パネルはそれを
-描くだけ。以前はパネルが生の設定キーからサーバ規則を再実装しており、**同じ日に表示ズレを
-2件**産んだ。**司令塔が「盤面はこう出ている」と報告するときは、その値がサーバの実効値で
-あることを前提にしてよい** —— ただし前提が成り立つのは `swarmRuntimeDialParity.test.ts`
-(reader ⇄ 配られる値を比較)が緑である限り。
+**2026-09-21 update:** the manager dial and its derived settings response have
+also been removed. Both workers and new managers are SDK-only. Old settings
+remain inert; failed SDK startup stays visible. The earlier file-health/dial
+parity rules are historical, not a fallback path. Settings write protection
+still prevents overwriting unreadable files. See 03 §2.3 and SIMPLIFICATION.md.
 
 司令塔が知っておくべきことは 4 つだけ:
 
@@ -238,8 +238,7 @@ parse できない / 非オブジェクト / 切れた symlink ⇒ `getManagerRu
 
 **戻し方(kill switch)は worker には無い(0813)**: `swarmWorkerRuntime` は削除済みで、
 書いても不活性。SDK が確立できない機体では worker は立たず(カードは todo に残り、鐘が
-鳴り、復旧後に自動再開)、それが意図された挙動。司令官卓の `swarmManagerRuntime` だけが
-残る手動スイッチ。
+鳴り、復旧後に自動再開)、それが意図された挙動。司令官の手動スイッチも 2026-09-21 に削除した。
 
 以下 2.4〜2.6 は **PTY worker** の話。SDK worker の起動オプションは
 `swarmWorkerSdk.sdkWorkerLaunchPlan` が組み、対応関係は設計書 §4 の表にある。
@@ -305,7 +304,7 @@ claude --session-id <uuid> --dangerously-skip-permissions \
 |---|---|---|
 | `--session-id <uuid>` | claudeTerminal.ts:331 | fresh 起動。JSONL の場所が決定的になる |
 | `--dangerously-skip-permissions` | swarmWorker.ts:512(`permissionMode:'bypass'` を spread の**後**に置き無条件化)→ claudeTerminal.ts:335-339 | 無人 worker が承認プロンプトで永久停止しないため |
-| `--model` / `--effort` | `resolveSwarmModelEffort`(実行モード×カード重み×quota 冷却×許可 tier マスク — swarmLaunch.ts:510、2026-07-20 実測。この節は識別名追加以降さらにシフトしているので関数名で引くこと)。worktree 作成**前**に解決し、全 tier OFF なら `NoAllowedModelTierError` で spawn 自体を fail-closed(swarmWorker.ts:594) | **2026-09-16 訂正**: 既定(optimize)は**カード重みで決まる** — heavy=`SWARM_LAUNCH_MODEL='fable'`/max、通常=`SWARM_DEFAULT_MODEL='opus'`/medium、軽い=sonnet/low。「既定は最上位 tier」は `max` モードだけの話。⚠ 実測(0916): 実カード330枚の **69% が heavy 判定**(うち23%は本文1200字超だけが理由)なので、事実上ほとんどの worker が fable を希望している — 04 章 §5.9 |
+| `--model` / `--effort` | `resolveSwarmModelEffort`(実行モード×カードの難易度 tier(安全床込み)×quota 冷却×許可 tier マスク — swarmLaunch.ts:510、2026-07-20 実測。この節は識別名追加以降さらにシフトしているので関数名で引くこと)。worktree 作成**前**に解決し、全 tier OFF なら `NoAllowedModelTierError` で spawn 自体を fail-closed(swarmWorker.ts:594) | **2026-09-18 改訂**: 既定(optimize)は**カードの難易度 `tier` で決まる**(`TIER_MODEL_EFFORT`) — touch=sonnet/low、standard(既定)=opus/medium、design=opus/high、ultra=`SWARM_LAUNCH_MODEL='fable'`/max。安全語に当たるカードは design 未満にならない(安全床)。1200字規則は削除。`tier` は無人配車(orchestrator)と Board 実行の両方から `spawnSwarmWorker({tier})` で届く。「既定は最上位 tier」は `max` モードだけの話 — 04 章 §5.9 |
 | `--strict-mcp-config` | swarmWorker.ts:498 | user-scope `~/.claude.json` / project `.mcp.json` の MCP サーバを**一切ロードしない**。bypass worker にとって MCP は guard(PreToolUse hook)の外側にある RCE 経路なので、発生源ごと閉じる |
 | `--remote-control '<識別名>'` | `spawnSwarmWorker` → `resolveSwarmRemoteName('worker', projectPath, title)`(swarmLaunch.ts)→ `workerLaunchOpts` opts.remoteName → `swarmLaunchDefaults` | claude.ai / モバイルの一覧で「どのプロジェクトの・何のカードのセッションか」読める識別名(2026-07-18 — 固定 'worker' が大量に並び区別不能だったオーナー直接フィードバックの根治)。JA「ワーカー <プロジェクト表示名>: <カードtitle要約>」/ EN "Worker <project>: <task>"。言語=Settings.language(spawn 時読み・切替は次 spawn から)、表示名=registry displayName‖フォルダ名(git リポ名ではない)、空白正規化+60 code point 切詰め。名前制約は実測済(CLI 2.1.214 — 日本語/スペース/長名すべて受理・一覧表示)。解決失敗時は旧固定名 'worker' に落ちて spawn は通る(never-throws)。manager/supply も同型: 「マネージャー <表示名>」/"Manager <project>"・「タスク窓口 <表示名>」/"Supply officer <project>"(各 spawnSwarmManager / spawnSwarmSupply が解決) |
 | positional prompt | swarmWorker.ts:516 `buildOrderInjection` | `/order ゴール: …` を**起動時引数**として渡す(後述) |
@@ -315,7 +314,7 @@ claude --session-id <uuid> --dangerously-skip-permissions \
 
 **注入されるテキストの構成**(swarmWorker.ts:181-190 `buildOrderInjection`): `/order ゴール: <title> — <notes>` + (差し戻し再投入なら)`【前回の差し戻し理由…】<priorFailure>` + **worker 規律**(:176 `WORKER_ORDER_RULES` — push 全形態禁止・commit+ready で停止・心拍必須(30 分無心拍は anomaly)。2e7beb2 事故 = worker が /order スキルの司令塔向け §4 を実行して main に push した、の再発防止として全 spawn に焼き込み)+ (2026-08-13 追加、**必須**)**返答言語 directive**(`languageDirective` — `promptLang.ts`)。
 
-**返答言語(2026-08-13 追加・同日リワーク済み)**: `WORKER_ORDER_RULES`(および manager/supply の規律文)自体は**日本語のまま不変**(モデルへの指示文であり、翻訳対象ではない) — 変えたのは**モデルからの返答**(チャット・心拍 `blocker`/escalation の質問文・状況報告 — commit/PR 本文は対象外、CLAUDE.md「Language policy」に一任。2026-08-13 2周目レビューで修正)の言語。`buildOrderInjection` / `workerLaunchOpts`(swarmWorker.ts)・`managerLaunchOpts`(swarmManager.ts)・`supplyLaunchOpts`(swarmSupply.ts)・対応する SDK 経路(`sdkWorkerLaunchPlan` — worker専用 / `sdkManagerLaunchPlan` — manager専用。**supply に SDK 経路は無い**、PTY のみ)は `lang: 'en'|'ja'` を**必須引数**として受け、末尾に `languageDirective(lang)` を1行追記する。
+**返答言語(2026-08-13 追加・同日リワーク済み)**: `WORKER_ORDER_RULES`(および manager/supply の規律文)自体は**日本語のまま不変**(モデルへの指示文であり、翻訳対象ではない) — 変えたのは**モデルからの返答**(チャット・心拍 `blocker`/escalation の質問文・状況報告 — commit/PR 本文は対象外、CLAUDE.md「Language policy」に一任。2026-08-13 2周目レビューで修正)の言語。`buildOrderInjection` / `workerLaunchOpts`(swarmWorker.ts)・`supplyLaunchOpts`(swarmSupply.ts)・対応する SDK 経路(`sdkWorkerLaunchPlan` — worker専用 / `sdkManagerLaunchPlan` — manager専用。**supply に SDK 経路は無い**、PTY のみ)は `lang: 'en'|'ja'` を**必須引数**として受け、末尾に `languageDirective(lang)` を1行追記する。
 
 **`lang` は意図的に optional にしていない**(初版は optional だった — 敵対レビューの変異実験で、5 spawn 経路のうち worker SDK・worker PTY・manager SDK の3つは「production 側の呼び出しから `lang` を渡す1行を消しても」ユニット/integration スイート 951 件が全緑のままだと判明した。`spawnSwarmWorker`/`launchSdkDesk` は curl でしか実機検証されておらず、`swarmSessions.integration.test.ts` が実際に spawn してプロンプトを読むのは manager/supply の **PTY のみ**——worker(SDK/PTY 双方)と manager SDK は無防備だった)。CLAUDE.md「検証の掟」§4 の「存在検査(登録漏れ=沈黙)ではなく過大近似(そもそも名前が見えない=ビルドエラー)へ」に従い、`lang` を必須型にして**配線漏れが `tsc --noEmit` で赤になる**構造に倒した(`opts: {...} = {}` の既定値も同時に廃止 — 既定値があると `lang` 必須型でも呼び出し側が省略できてしまう)。実際の spawn(`spawnSwarmWorker` / `spawnSwarmManager` / `spawnSwarmSupply`)は `getPromptLang()`(`Settings.language`、未設定は英語既定)を一度だけ解決し、SDK/PTY 両経路(supply は PTY のみ)へ同じ値を通す。
 

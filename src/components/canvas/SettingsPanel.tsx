@@ -8,11 +8,9 @@ import {
   Terminal,
   Inbox,
   RefreshCw,
-  MessageSquare,
 } from 'lucide-react'
 import { DialogHeader } from '@/components/ui/overlay'
 import { Markdown } from '@/components/canvas/Markdown'
-import { ModuleReviewInbox } from '@/components/canvas/modules/ModuleReviewInbox'
 import { pickReleaseNotesLang } from '@/lib/releaseNotesLang'
 import type {
   Settings,
@@ -47,15 +45,7 @@ interface Props {
   feedbackCanRead?: boolean
   /** Called once the inbox has loaded, with the newest submission's created_at. */
   onFeedbackSeen?: (latestCreatedAt: string | null) => void
-  /** When provided, renders a clear "Send feedback" button that opens the
-   *  composer. Omit to hide the entry entirely. */
-  onOpenFeedback?: () => void
-  /** When true the server can read the module submission queue (owner build), so
-   *  the "Tab submissions" review inbox shows. False on the public build. */
-  moduleReviewCanReview?: boolean
-  /** Called once the review inbox loads, with the newest submission's created_at. */
-  onModuleSubmissionSeen?: (latestCreatedAt: string | null) => void
-  /** Owner-only: when true, reveal the experiment toggles (Advanced). Resolved
+  /** Owner-only: reveal Research/WordPress and experiment toggles. Resolved
    *  server-side from the og_roles owner role. Non-owners get false, so the
    *  toggles — and the very existence of the experiments — stay hidden. */
   experimentsEligible?: boolean
@@ -64,8 +54,6 @@ interface Props {
    *  experiments section above. */
   swarmOptInAvailable?: boolean
   swarmOptInEnabled?: boolean
-  personaOptInAvailable?: boolean
-  personaOptInEnabled?: boolean
 }
 
 // Settings drawer. Deliberately minimal: only real preferences are visible
@@ -144,14 +132,9 @@ export const SettingsPanel = ({
   onReload,
   feedbackCanRead = false,
   onFeedbackSeen,
-  onOpenFeedback,
-  moduleReviewCanReview = false,
-  onModuleSubmissionSeen,
   experimentsEligible = false,
   swarmOptInAvailable = false,
   swarmOptInEnabled = false,
-  personaOptInAvailable = false,
-  personaOptInEnabled = false,
 }: Props) => {
   const { t, lang, setLang } = useT()
   const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
@@ -160,11 +143,9 @@ export const SettingsPanel = ({
   // immediately on toggle (below) and re-seeded from settings on open.
   const [swarmExp, setSwarmExp] = useState(settings.experiments?.swarm === true)
   const [sandboxExp, setSandboxExp] = useState(settings.experiments?.sandbox === true)
-  const [personaExp, setPersonaExp] = useState(settings.experiments?.persona === true)
   // Public swarm opt-in (all users). Seeded from the resolved server state
   // (swarmOptInEnabled prop), persisted immediately like the toggles above.
   const [swarmOptIn, setSwarmOptInState] = useState(swarmOptInEnabled)
-  const [personaOptIn, setPersonaOptInState] = useState(personaOptInEnabled)
   // Work mode (lockdown) — the non-Anthropic egress kill switch. Same
   // instant-feedback + persist-immediately pattern as the experiment toggles.
   const [lockdown, setLockdownState] = useState(settings.lockdownMode === true)
@@ -238,9 +219,7 @@ export const SettingsPanel = ({
     setDisplayName(settings.displayName ?? '')
     setSwarmExp(settings.experiments?.swarm === true)
     setSandboxExp(settings.experiments?.sandbox === true)
-    setPersonaExp(settings.experiments?.persona === true)
     setSwarmOptInState(settings.swarmOptIn === true)
-    setPersonaOptInState(settings.personaOptIn === true)
     setLockdownState(settings.lockdownMode === true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
@@ -274,18 +253,6 @@ export const SettingsPanel = ({
     })
   }
 
-  const setPersona = (next: boolean) => {
-    if (next === personaExp) return
-    setPersonaExp(next)
-    const s = settingsRef.current
-    onSaveRef.current({
-      ...s,
-      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
-      displayName: latest.current.displayName.trim(),
-      experiments: { ...s.experiments, persona: next },
-    })
-  }
-
   // Flip the PUBLIC swarm opt-in and persist immediately. The server re-resolves
   // the gate on the settings save (App.saveSettings → experiments.refresh), so
   // the Swarm tab appears/disappears right away. macOS-gated server-side.
@@ -298,20 +265,6 @@ export const SettingsPanel = ({
       defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
       displayName: latest.current.displayName.trim(),
       swarmOptIn: next,
-    })
-  }
-
-  // The PUBLIC persona opt-in — same shape as the swarm one, but offered on
-  // every platform (personaOptInAvailable is always true server-side).
-  const setPersonaOptIn = (next: boolean) => {
-    if (next === personaOptIn) return
-    setPersonaOptInState(next)
-    const s = settingsRef.current
-    onSaveRef.current({
-      ...s,
-      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
-      displayName: latest.current.displayName.trim(),
-      personaOptIn: next,
     })
   }
 
@@ -457,23 +410,6 @@ export const SettingsPanel = ({
             </div>
           )}
 
-          {/* Feedback — a clear, single call to action (not a label). */}
-          {onOpenFeedback && (
-            <section className="mb-6 rounded-[3px] border border-line bg-bg-inset/40 px-4 py-3.5">
-              <p className="label-cap text-ink-muted mb-1">{t('settings.feedback.heading')}</p>
-              <p className="text-meta text-ink-subtle leading-relaxed mb-3">
-                {t('settings.feedback.body')}
-              </p>
-              <button
-                onClick={onOpenFeedback}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-[2px] border border-line-strong bg-bg px-4 py-2.5 text-ui text-ink transition-all duration-150 hover:border-accent hover:bg-plane hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              >
-                <MessageSquare size={14} strokeWidth={1.75} />
-                {t('settings.feedback.button')}
-              </button>
-            </section>
-          )}
-
           {/* Language */}
           <Section heading={t('settings.language.heading')} hint={t('settings.language.hint')}>
             <div
@@ -544,7 +480,7 @@ export const SettingsPanel = ({
               machine (GET /api/research/channels, local checks only), plus the
               local-only X cookie store behind a disclosure. Mounted per open so
               the checks re-run each time the drawer opens. */}
-          {open && <ResearchChannelsSection />}
+          {open && experimentsEligible && <ResearchChannelsSection />}
 
           {/* Blog publishing — research reports → WordPress DRAFTS. Configuring
               this IS the opt-in (blogPublish.ts is inert without it); the
@@ -552,7 +488,7 @@ export const SettingsPanel = ({
               (normalizeWordPressSettings). Explicit save button, not the
               debounced text flow: a half-typed password must never be
               persisted by a blur. */}
-          {open && <WordPressSection settings={settings} onSave={onSave} />}
+          {open && experimentsEligible && <WordPressSection settings={settings} onSave={onSave} />}
 
           {/* Completion chime — ON/OFF + volume + test-play. The sound itself is
               played by the managed Stop hook (attended desks only); the server
@@ -602,11 +538,8 @@ export const SettingsPanel = ({
             </div>
           </Section>
 
-          {/* Owner-only inboxes — only when the server can read submissions. */}
+          {/* Owner-only feedback inbox — only when the server can read submissions. */}
           {open && feedbackCanRead && <FeedbackInbox onSeen={onFeedbackSeen} />}
-          {open && moduleReviewCanReview && (
-            <ModuleReviewInbox onSeen={onModuleSubmissionSeen} />
-          )}
 
           {/* Release notes — what changed, per published version. */}
           {open && <ReleaseNotesSection />}
@@ -752,33 +685,6 @@ export const SettingsPanel = ({
                   </Section>
                 )}
 
-                {/* PUBLIC persona opt-in — all platforms (personaOptInAvailable
-                    is always true). Same "still tuning" posture as swarm; the
-                    warning discloses subscription cost + permission-bypass
-                    claude over the user's own local corpus. */}
-                {personaOptInAvailable && (
-                  <Section
-                    heading={t('settings.personaOptIn.heading')}
-                    hint={t('settings.personaOptIn.hint')}
-                  >
-                    <div className="flex flex-col gap-2.5">
-                      <ExperimentToggle
-                        label={t('settings.personaOptIn.label')}
-                        value={personaOptIn}
-                        onChange={setPersonaOptIn}
-                        offLabel={t('settings.experiments.off')}
-                        onLabel={t('settings.experiments.on')}
-                      />
-                      <p
-                        role="note"
-                        className="rounded-[3px] border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-meta leading-relaxed text-amber-600/90"
-                      >
-                        {t('settings.personaOptIn.warning')}
-                      </p>
-                    </div>
-                  </Section>
-                )}
-
                 {/* Experiments — owner only (experimentsEligible from the
                     server's og_roles owner check). Hidden for everyone else, so
                     the toggles never betray the feature's existence. The same
@@ -802,14 +708,6 @@ export const SettingsPanel = ({
                         label={t('settings.experiments.sandbox')}
                         value={sandboxExp}
                         onChange={setSandbox}
-                        offLabel={t('settings.experiments.off')}
-                        onLabel={t('settings.experiments.on')}
-                      />
-                      <ExperimentToggle
-                        label={t('settings.experiments.persona')}
-                        hint={t('settings.experiments.personaHint')}
-                        value={personaExp}
-                        onChange={setPersona}
                         offLabel={t('settings.experiments.off')}
                         onLabel={t('settings.experiments.on')}
                       />
@@ -1493,4 +1391,3 @@ const formatFeedbackDate = (iso: string): string => {
     minute: '2-digit',
   })
 }
-

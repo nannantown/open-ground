@@ -1,5 +1,11 @@
 # 06 — Overseer 信号系(S1〜S11)とエスカレーション/通知ストア
 
+## Current Contract (2026-09-19)
+
+Monitoring is deterministic. S4 questions always reach the human inbox; there is no brain, corpus learning, proxy draft, T1 auto-answer, model budget or sandbox-warning response. Existing stop/re-arm, notifications, deduplication, receipt checks and human answer delivery remain.
+See [SIMPLIFICATION.md](SIMPLIFICATION.md) for the current entry points and verification.
+Any descriptions of the retired paths below are historical, not operating instructions.
+
 > **対象コミット: `0d1f7f0`** (origin/main tip, 2026-07-10)。初版は `cc7c60e` のソース基準で、
 > `d8431c3`(S3/S10 再投函根絶: 24h 窓 + createdAt キー + 永続受領判定)と `aa9cb8d`(受領台帳
 > 読みの strict 化)を反映済み。`0d1f7f0`(quota 検知根治)は overseer/escalations に変更なし —

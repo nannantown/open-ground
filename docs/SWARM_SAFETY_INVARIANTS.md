@@ -115,7 +115,7 @@ signed out — exactly what the sweep forbids.
 env var is cleared in `beforeEach`, and the opt-in setting is unset + the test
 host is non-macOS), pinning the locked shipped default. The unlocked side — both
 local-unlock sources open every route signed-out, the unlock is swarm-scoped
-(marketplace stays 403), and `POST /api/settings` can never set the `swarmLocalOwner`
+(custom-tab creation stays 403), and `POST /api/settings` can never set the `swarmLocalOwner`
 key — is pinned by `server/routes/__tests__/swarmLocalOwner.routes.test.ts`. The
 public opt-in opener (macOS-only, swarm-scoped, opens the gate but NEVER
 sandbox/persona) is pinned by `src/lib/server/swarmGate.test.ts` +

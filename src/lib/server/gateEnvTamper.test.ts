@@ -1,27 +1,10 @@
-// gateEnvTamper.test.ts — the END-TO-END demonstration for invariant F: a
-// worktree whose HOME isolation has been removed still cannot reach the engine's
-// home. Split out of gateEnv.test.ts in review round 1 (nit 6) for one reason:
-//
-//   THIS FILE SPAWNS A REAL VITEST. gateEnv.test.ts is a member of
-//   SWARM_SAFETY_TESTS, which the merge gate runs under a 240s budget; a
-//   spawn-heavy test inside that budget nests an inner timeout (180s here, 600s
-//   in testCheck itself) under the outer one, and on a saturated machine that
-//   nesting turns into a load-induced false RED and an unnecessary 差し戻し.
-//   Cheap, deterministic assertions belong in the gate; this demonstration does
-//   not. It still runs on every branch via the full `npm test` (testCheck).
-//
-// What stays in the net is the part with the actual teeth — gateEnv.test.ts's
-// source pin, which catches a spawn site reverting to a raw env handoff without
-// spawning anything.
-
 import { describe, it, expect } from 'vitest'
 import { existsSync } from 'fs'
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'fs/promises'
 import { homedir, tmpdir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { GATE_HOME_PREFIX } from './gateProcess'
-import { testCheck } from './swarmOrchestrator'
+import { GATE_HOME_PREFIX, runGateProcess, withGateEnv } from './gateProcess'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 
@@ -29,8 +12,8 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
  *  `vitest.config.ts` no longer lists `setupFiles`, and `src/test/setup-home.ts`
  *  is gutted to a no-op. Nothing in the tree re-pins OPENGROUND_HOME — so
  *  whatever the ENGINE hands over is what the suite gets, which is the property
- *  under test. node_modules is symlinked from the main checkout exactly the way
- *  makeVerify does it, so this runs the project's real vitest binary. */
+ *  under test. node_modules is symlinked from the main checkout so the fixture uses
+ *  the project's real vitest binary. */
 const buildTamperedFixture = async (): Promise<string> => {
   const dir = await mkdtemp(join(tmpdir(), 'og-gate-tamper-fixture-'))
   await mkdir(join(dir, 'src', 'test'), { recursive: true })
@@ -110,19 +93,22 @@ describe('the gate against a worktree whose HOME isolation was removed', () => {
 
       const dir = await buildTamperedFixture()
       try {
-        expect(await testCheck.applicable(dir)).toBe(true)
-        const result = await testCheck.run(dir)
+        const result = await withGateEnv((env) => runGateProcess(
+          process.execPath,
+          [join(repoRoot, 'node_modules/vitest/vitest.mjs'), 'run', '--maxWorkers=1'],
+          { cwd: dir, timeout: 120_000, maxBuffer: 2_000_000, env },
+        ))
 
         // Vacuity guard: if the probe never ran, every assertion below is empty.
         const reportPath = join(dir, 'resolved-home.txt')
         expect(
           existsSync(reportPath),
-          `the probe never ran — the fixture is broken, not the code. check output: ${result.output}`,
+          `the probe never ran — the fixture is broken, not the code. check output: ${result.stdout + result.stderr}`,
         ).toBe(true)
         const childHome = (await readFile(reportPath, 'utf8')).trim()
 
         // THE INVARIANT: what the untrusted suite could reach was OUR throwaway.
-        // TEETH (verified by hand): revert testCheck to `{ ...process.env }` and
+        // TEETH (verified by hand): revert the launcher to `{ ...process.env }` and
         // childHome becomes byte-identical to engineHome, failing right here.
         expect(childHome).not.toBe(engineHome)
         expect(childHome.startsWith(tmpdir())).toBe(true)
@@ -136,7 +122,7 @@ describe('the gate against a worktree whose HOME isolation was removed', () => {
         expect(existsSync(join(homedir(), '.openground', 'GATE-ESCAPE-CANARY.txt'))).toBe(false)
 
         // A green fixture suite must still read as green through the gate.
-        expect(result.ok, `check output: ${result.output}`).toBe(true)
+        expect(result.stdout).toContain('1 passed')
       } finally {
         await rm(dir, { recursive: true, force: true }).catch(() => {})
       }

@@ -90,6 +90,10 @@ last=""
 for a in "$@"; do last="$a"; done
 case "$last" in
   *"# Task:"*) printf '%s\n' "$last" ;;
+  *"OPENGROUND_DESC_EN:"*)
+    printf '%s\n' 'OPENGROUND_DESC_EN: A project for testing saved descriptions. ::OG_DESC_END::'
+    printf '%s\n' 'OPENGROUND_DESC_JA: 説明の保存を確認するプロジェクトです。 ::OG_DESC_END::'
+    ;;
 esac
 
 # --- build the OPENGROUND_RESULT payload -----------------------------------

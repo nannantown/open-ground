@@ -101,9 +101,6 @@ const mount = (session: ManagerSession | null) => {
       busy={false}
       error={null}
       onToggleOverseer={() => {}}
-      sandboxWarning={false}
-      runtimeDials={{ manager: 'sdk' }}
-      onToggleRuntime={() => {}}
     />,
   )
 }
@@ -114,6 +111,16 @@ const sdkSession = (sdkSessionId: string): ManagerSession => ({
   terminalId: '',
   runtime: 'sdk',
   sdkSessionId,
+})
+
+describe('SDK-only manager controls', () => {
+  it('keeps monitoring but removes runtime selection even inside Settings', () => {
+    const view = mount(null)
+    fireEvent.click(view.getByRole('button', { name: 'projectPanel.swarm.manager.dialsHeading' }))
+    expect(view.getByRole('group', { name: 'projectPanel.swarm.manager.overseer' })).toBeTruthy()
+    expect(view.queryByText('projectPanel.swarm.runtime.heading')).toBeNull()
+    expect(view.queryByRole('group', { name: 'projectPanel.swarm.runtime.manager' })).toBeNull()
+  })
 })
 
 describe('managerSdkStatus', () => {
@@ -182,9 +189,6 @@ describe('the commander beacon follows the SDK desk (②)', () => {
         busy={false}
         error={null}
         onToggleOverseer={() => {}}
-        sandboxWarning={false}
-        runtimeDials={{ manager: 'sdk' }}
-        onToggleRuntime={() => {}}
       />,
     )
     expect(beacon(getByRole)).toBe('projectPanel.swarm.statusStarting')
@@ -210,9 +214,6 @@ describe('the command bar is keyed by the DESK, not by a PTY id (③)', () => {
         busy={false}
         error={null}
         onToggleOverseer={() => {}}
-        sandboxWarning={false}
-        runtimeDials={{ manager: 'sdk' }}
-        onToggleRuntime={() => {}}
       />,
     )
 

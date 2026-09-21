@@ -45,7 +45,7 @@ import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
 import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
 import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
 import { researchWorkerEnv } from './researchAuth'
-import type { RemoveSwarmWorktreeResponse, SpawnSwarmWorkerResponse } from '../types'
+import type { RemoveSwarmWorktreeResponse, SpawnSwarmWorkerResponse, TaskTier } from '../types'
 
 const execFile = promisify(execFileCb)
 
@@ -155,15 +155,7 @@ const flattenOneLine = (s: string): string =>
  *  here (①何を決めてほしいか ②選択肢 ③各選択の影響), tech detail demoted to a
  *  trailing parenthesis.
  *
- *  WHO DECIDES (2026-07-18 owner instruction): asking PLAINLY is only half of it —
- *  the question must also be ADDRESSED right. The plain-language rule above made
- *  a technical trade-off readable to the owner; it did not stop it from being
- *  sent to them at all. {@link DECISION_ROUTING_RULES} (swarmDecisionRouting.ts)
- *  is appended for that: route by the owner's 「関与の観測地図」 before escalating,
- *  decide the delegated areas yourself, and ask ONE plain routing question when
- *  the area is not on the map. It is a DIGEST of the corpus map — a worker cannot
- *  read you-corpus itself (personal data + a worker is an egress path); see that
- *  module's header for the sync obligation.
+ *  Approval boundaries come from DECISION_ROUTING_RULES, never a learned profile.
  *
  *  HOW IT IS DECIDED (2026-07-18 owner instruction, same conversation): routing a
  *  technical call AWAY from the owner makes the worker its receiver — and the
@@ -609,6 +601,13 @@ export interface SpawnSwarmWorkerOpts {
   /** Board goal — typically a card's title (+ notes). Injected as the /order. */
   title: string
   notes?: string
+  /** The card's DIFFICULTY tier (ProjectTask.tier, 2026-09-18) — picks this
+   *  worker's model/effort in `optimize` via resolveCardTier / TIER_MODEL_EFFORT
+   *  (safety floor included). Model-selection input ONLY: it is not part of the
+   *  /order text. Absent ⇒ the keyword estimator decides. Every dispatch path
+   *  threads it — the unattended engine (swarmOrchestrator) AND the Board's
+   *  実行 route — so the tier is not a Board-button-only feature. */
+  tier?: TaskTier
   /* (liveWorkers / env / cols / rows were DELETED 2026-08-13 with the PTY
    * worker: the roster-assisted SDK slot count died with the cap, the env role
    * tag and the terminal dimensions were PTY launch inputs. An old client
@@ -711,10 +710,17 @@ const notifyGuardUnwired = async (
 export const spawnSwarmWorker = async (
   opts: SpawnSwarmWorkerOpts,
 ): Promise<SpawnSwarmWorkerResponse> => {
-  // Token budget (card 68d8e00f): the mode (+ this card's weight, in optimize) picks
-  // the worker's model/effort. economy ⇒ sonnet/low, max ⇒ fable/max, optimize ⇒ heavy
-  // cards fable, chores sonnet. A per-card explicit override still wins via the Board
-  // 実行 button's task.run; unattended orchestrator dispatch has none, so it rides the mode.
+  // Token budget (card 68d8e00f): the mode (+ this card's DIFFICULTY TIER, in
+  // optimize) picks the worker's model/effort. economy ⇒ sonnet/low, max ⇒ top
+  // tier/max, optimize ⇒ TIER_MODEL_EFFORT[resolveCardTier(card)] (touch sonnet/low
+  // … ultra top/max; a safety-keyword card never below design).
+  //
+  // ⚠ There is NO per-card model/effort override on this path — whoever
+  // dispatches. `TaskRunSettings.model/effort` (the drawer's Model/Effort selects)
+  // are read only by the swarm-OFF terminal launch; with the swarm ON the Board's
+  // 実行 hands the card to this function (BoardModule dispatchAsWorker →
+  // POST /api/swarm/worker) and those fields are not consulted. The per-card lever
+  // for a worker is `tier` — and the engine's unattended dispatch passes it too.
   //
   // Resolved BEFORE the worktree is created: with every tier switched OFF there is
   // no model to launch on, and failing here leaves no orphan worktree/branch behind
@@ -727,7 +733,7 @@ export const spawnSwarmWorker = async (
   const me = await resolveSwarmModelEffortProbed(
     await getExecutionMode(),
     'worker',
-    { title: opts.title, notes: opts.notes },
+    { title: opts.title, notes: opts.notes, tier: opts.tier },
     Date.now(),
     await getAllowedModelTiers(),
   )

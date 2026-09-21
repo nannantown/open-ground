@@ -22,6 +22,7 @@
 //       scratch) and the worker PTY is killed — no zombie worktree / slot.
 //   (5) a `blocked`-column card is NEVER dispatched.
 
+import { runGateProcess } from './gateProcess'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, realpath, writeFile, readFile, stat, utimes } from 'fs/promises'
 import { existsSync, readFileSync, rmSync, mkdtempSync } from 'fs'
@@ -35,18 +36,6 @@ import {
   runIntegratePass,
   defaultDeps,
   commitWipBeforeTeardown,
-  makeVerify,
-  makeAdversarialReview,
-  tscCheck,
-  touchesSwarmPaths,
-  swarmSafetyCheck,
-  swarmSafetyConditional,
-  lintCheck,
-  testCheck,
-  lintConditional,
-  testConditional,
-  runGateProcess,
-  SWARM_SAFETY_TESTS,
   STALL_SILENCE_MS,
   STALL_NUDGE_COOLDOWN_MS,
   MAX_EXEC_MS,
@@ -76,13 +65,11 @@ import {
   type OrchestratorDeps,
   type IntegrationDeps,
   type ProjectEngine,
-  type VerifyCheck,
 } from './swarmOrchestrator'
 import { createSwarmWorktree } from './swarmWorker'
 import { recordSwarmSession } from './swarmSessions'
 import { sessionJsonlPath, sessionSubagentsDir } from './transcript'
-import { isTierCooling, __resetQuotaForTest } from './swarmQuota'
-import { initSelfSupplyRuntime } from './swarmSelfSupply'
+import { __resetQuotaForTest } from './swarmQuota'
 import { initOverseerRuntime } from './swarmOverseer'
 import type { ProjectTask, SwarmFatalNotification } from '../types'
 
@@ -155,20 +142,6 @@ const setupRepoMaster = async (): Promise<Repo> => {
   return { proj, origin }
 }
 
-/** Advance the REMOTE trunk out-of-band (a second clone pushes to origin/main),
- *  so a worker branched off the older trunk now diverges. `content` lands at
- *  `file` — disjoint from a worker's file → a clean rebase; same file → conflict. */
-const advanceTrunk = async (origin: string, file: string, content: string): Promise<void> => {
-  const other = await mkdtemp(join(scratch, 'other-'))
-  await git(scratch, ['clone', origin, other])
-  await git(other, ['config', 'user.email', 'other@test'])
-  await git(other, ['config', 'user.name', 'Other'])
-  await writeFile(join(other, file), content)
-  await git(other, ['add', '-A'])
-  await git(other, ['commit', '-m', `trunk: ${file}`])
-  await git(other, ['push', 'origin', 'main'])
-}
-
 // ── In-memory board (the real deps would hit the HTTP API) ─────────────────────
 const makeBoard = (cards: ProjectTask[]) => {
   const board = new Map<string, ProjectTask>(cards.map((c) => [c.id, { ...c }]))
@@ -179,7 +152,6 @@ const makeBoard = (cards: ProjectTask[]) => {
     | 'moveToDoing'
     | 'moveToReview'
     | 'fetchReview'
-    | 'moveToDone'
     | 'markConflict'
     | 'recoverCard'
   > = {
@@ -202,12 +174,6 @@ const makeBoard = (cards: ProjectTask[]) => {
       Array.from(board.values())
         .filter((c) => c.boardColumn === 'review')
         .map((c) => ({ ...c })),
-    moveToDone: async (_p, id) => {
-      const c = board.get(id)
-      if (!c) return false
-      c.boardColumn = 'done'
-      return true
-    },
     markConflict: async (_p, id, value) => {
       const c = board.get(id)
       if (!c) return false
@@ -274,7 +240,6 @@ const newEngine = (proj: string, over: Partial<ProjectEngine> = {}): ProjectEngi
   stuckMoves: new Map(),
   log: [],
   anomalies: [],
-  selfSupply: initSelfSupplyRuntime(),
   overseer: initOverseerRuntime(),
   notified: new Set(),
   pendingFatal: [],
@@ -283,19 +248,6 @@ const newEngine = (proj: string, over: Partial<ProjectEngine> = {}): ProjectEngi
 })
 
 const exists = (p: string) => stat(p).then(() => true).catch(() => false)
-
-// The adversarial-review dep is FAKED to CLEAN ('integrate') here: these end-to-end
-// tests exercise the REAL git landing mechanics (FF / rebase / conflict / verify
-// gate), NOT the claude review panel (that's unit-tested separately in
-// swarmOrchestrator.test.ts). Without this override the REAL makeAdversarialReview
-// in defaultDeps() would spawn N real `claude` sessions in the scratch repo.
-const reviewClean: NonNullable<IntegrationDeps['review']> = async () => ({
-  decision: 'integrate',
-  verdicts: [],
-  mustFix: 0,
-  clean: 3,
-  reason: 'review faked clean (integration test)',
-})
 
 // MANAGER-ONLY INTEGRATION (2026-07-15): the integrate pass now WAKES the commander
 // instead of merging. The REAL defaultWakeManager spawns a `claude` PTY
@@ -378,13 +330,6 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       spawnWorker: makeSpawn(proj, alive, { file: (b) => `${b.replace(/[^a-z0-9]/gi, '_')}.txt`, scratch: true }),
       isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => ({ ready: true, blocked: false }),
-      // killPty now takes the WORKER (workerRuntime seam), not a bare id. For a
-      // PTY worker the key IS terminalId, so the assertions are unchanged.
-      killPty: (w) => {
-        const id = w.terminalId!
-        killed.push(id)
-        alive.delete(id)
-      },
     }
     const engine = newEngine(proj)
 
@@ -446,7 +391,6 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       spawnWorker: makeSpawn(proj, alive, { file: (b) => `${b.replace(/[^a-z0-9]/gi, '_')}.txt`, scratch: true }),
       isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => ({ ready: true, blocked: false }),
-      killPty: () => {},
     }
     const engine = newEngine(proj)
 
@@ -487,14 +431,12 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(),
       ...boardDeps,
-      review: reviewClean,
       spawnWorker: async (o) => {
         spawned.push(o.title)
         return baseSpawn(o)
       },
       isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => null,
-      killPty: () => {},
     }
     await runDispatchPass(newEngine(proj), deps)
     // Only the todo card was dispatched; the blocked card was left untouched.
@@ -528,7 +470,6 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       spawnWorker: spawn,
       isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => null,
-      killPty: () => {},
     }
     const engine = newEngine(proj)
 
@@ -588,11 +529,9 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(), // REAL countCommitsAhead + REAL countNestedCommits
       ...boardDeps,
-      review: reviewClean,
       spawnWorker: spawn,
       isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => ({ ready: true, blocked: false, at: new Date().toISOString() }),
-      killPty: () => {},
     }
     const engine = newEngine(proj)
 
@@ -633,7 +572,6 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       spawnWorker: spawn,
       isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => null,
-      killPty: () => {},
     }
     const engine = newEngine(proj)
 
@@ -677,7 +615,6 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       spawnWorker: spawn,
       isAlive: () => true, // BUSY throughout — only the runaway ceiling can stop it
       readHeartbeat: async () => null,
-      killPty: () => {},
     }
     const engine = newEngine(proj)
 
@@ -735,7 +672,6 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
       spawnWorker: spawn,
       isAlive: (w) => alive.has(w.terminalId!),
       readHeartbeat: async () => null,
-      killPty: () => {},
     }
     const engine = newEngine(proj)
     await runDispatchPass(engine, deps)
@@ -867,7 +803,6 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
         escalated.push(w.terminalId!)
         return true
       },
-      killPty: () => {},
     }
     const engine = newEngine(proj)
 
@@ -1602,182 +1537,6 @@ describe('readManagerHeartbeatInfo — the presence snapshot the Swarm tab rende
   })
 })
 
-// ── tscCheck — the default verification check ─────────────────────────────────
-// The (1) gate's real verdict source. `applicable` is a TS-PROJECT test (a
-// tsconfig), NOT an environment test, so a non-TS repo is never blocked; but a TS
-// project we can't actually compile (no node_modules) is reported RED, not waved
-// through — the gate never silently auto-merges unverified TS.
-
-describe('tscCheck — default verify check', () => {
-  it('applicable: true only with a tsconfig.json (a non-TS project is never gated)', async () => {
-    const dir = await realpath(await mkdtemp(join(tmpdir(), 'og-tsc-app-')))
-    expect(await tscCheck.applicable(dir)).toBe(false) // no tsconfig → not a TS project
-    await writeFile(join(dir, 'tsconfig.json'), '{}')
-    expect(await tscCheck.applicable(dir)).toBe(true)
-    await rm(dir, { recursive: true, force: true })
-  })
-
-  it('run: BLOCKS (ok:false) when node_modules is absent — never silently passes a TS project', async () => {
-    const dir = await realpath(await mkdtemp(join(tmpdir(), 'og-tsc-run-')))
-    const r = await tscCheck.run(dir) // no node_modules/.bin/tsc present
-    expect(r.ok).toBe(false)
-    expect(r.output).toMatch(/node_modules|tsc unavailable/)
-    await rm(dir, { recursive: true, force: true })
-  })
-
-  it('run: passes (ok:true) a clean tree against the REAL tsc compiler', async () => {
-    // A minimal worktree with a trivially-correct .ts file + THIS repo's whole
-    // node_modules symlinked in (exactly what makeVerify does, so tsc resolves its
-    // typescript package + libs) → a real `tsc --noEmit` goes green. Proves run()
-    // actually invokes the compiler, not just the binary-presence check.
-    const realNm = join(process.cwd(), 'node_modules')
-    if (!(await stat(join(realNm, '.bin', 'tsc')).then(() => true).catch(() => false))) return
-    const dir = await realpath(await mkdtemp(join(tmpdir(), 'og-tsc-green-')))
-    const { symlink, unlink } = await import('fs/promises')
-    try {
-      await writeFile(
-        join(dir, 'tsconfig.json'),
-        JSON.stringify({ compilerOptions: { noEmit: true, strict: true, skipLibCheck: true } }),
-      )
-      await writeFile(join(dir, 'ok.ts'), 'export const n: number = 1\n')
-      await symlink(realNm, join(dir, 'node_modules')) // whole tree, like makeVerify
-      const r = await tscCheck.run(dir)
-      expect(r.ok).toBe(true)
-    } finally {
-      // Drop the symlink BEFORE rm (defensive — rm never follows a symlinked dir,
-      // but unlink the pointer first so the real node_modules can't be at risk).
-      await unlink(join(dir, 'node_modules')).catch(() => {})
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-})
-
-// ── Swarm self-modification gate (card 34d42890) ─────────────────────────────
-// A branch that touches swarm code must keep the A1 safety net (swarmSafety.*,
-// card 8d778645) GREEN before it can auto-merge — the self-modification guard.
-// The matcher is pure; the suite-runner check is exercised on its cheap branches;
-// and the END-TO-END gate is driven through the REAL makeVerify composition (real
-// diff detection + real worktree/rebase) with a FAKE safety check so the BEHAVIOR
-// is deterministic and fast (the actual suite is green today — 50 tests in
-// swarmSafety.test.ts — and is run via the REAL vitest path in production).
-
-describe('touchesSwarmPaths — the swarm-code path matcher', () => {
-  it('matches each enumerated swarm path, rejects unrelated + look-alikes', () => {
-    // swarm code (the goal's enumerated globs) → true
-    expect(touchesSwarmPaths(['src/lib/server/swarmOrchestrator.ts'])).toBe(true)
-    expect(touchesSwarmPaths(['src/lib/server/swarmIntegrate.ts'])).toBe(true)
-    expect(touchesSwarmPaths(['src/lib/server/swarmSafety.test.ts'])).toBe(true) // the net itself
-    expect(touchesSwarmPaths(['server/routes/swarm.ts'])).toBe(true)
-    expect(touchesSwarmPaths(['server/routes/project.ts'])).toBe(true) // Board API — the swarm contract surface (docs/commander/05)
-    expect(touchesSwarmPaths(['server/routes/__tests__/swarmSafety.routes.test.ts'])).toBe(true) // the route net
-    expect(touchesSwarmPaths(['src/components/canvas/modules/SwarmModule.tsx'])).toBe(true)
-    expect(touchesSwarmPaths(['src/components/canvas/modules/SwarmSupplyPane.tsx'])).toBe(true)
-    // server/index.ts (2026-07-22, card 2) — the one place resumeEngines() is
-    // wired in (the process.send gate + the boot-time call), outside every
-    // other glob above; without this entry a diff dropping that wiring would
-    // touch NO swarm path and never trip the safety gate.
-    expect(touchesSwarmPaths(['server/index.ts'])).toBe(true)
-    // one swarm file among many unrelated ones → still true
-    expect(touchesSwarmPaths(['README.md', 'src/lib/server/swarmWorker.ts'])).toBe(true)
-    // unrelated → false (condition 3: these branches must not be slowed)
-    expect(touchesSwarmPaths([])).toBe(false)
-    expect(touchesSwarmPaths(['README.md', 'src/App.tsx'])).toBe(false)
-    expect(touchesSwarmPaths(['src/lib/server/projectData.ts'])).toBe(false) // not swarm*
-    expect(touchesSwarmPaths(['src/components/canvas/modules/BoardModule.tsx'])).toBe(false)
-    // look-alikes the TIGHT anchors must REJECT (no over-broad matching)
-    expect(touchesSwarmPaths(['src/lib/server/sub/swarmX.ts'])).toBe(false) // not directly under the dir
-    expect(touchesSwarmPaths(['docs/swarm.ts'])).toBe(false) // wrong dir
-    expect(touchesSwarmPaths(['server/routes/swarmObsolete.ts'])).toBe(false) // only swarm.ts exact
-    expect(touchesSwarmPaths(['server/routes/projectMeta.ts'])).toBe(false) // only project.ts exact
-  })
-})
-
-describe('swarmSafetyCheck — the real swarm-safety suite runner', () => {
-  it('applicable: true only when EVERY safety test file is present', async () => {
-    const empty = await realpath(await mkdtemp(join(scratch, 'ss-empty-')))
-    expect(await swarmSafetyCheck.applicable(empty)).toBe(false) // no files → not OPEN GROUND's source
-    // every file present (empty stubs) → applicable
-    const has = await realpath(await mkdtemp(join(scratch, 'ss-has-')))
-    for (const t of SWARM_SAFETY_TESTS) {
-      await mkdir(dirname(join(has, t)), { recursive: true })
-      await writeFile(join(has, t), '')
-    }
-    expect(await swarmSafetyCheck.applicable(has)).toBe(true)
-    // only ONE of them present → NOT applicable (an incomplete net is not the net)
-    const partial = await realpath(await mkdtemp(join(scratch, 'ss-partial-')))
-    await mkdir(dirname(join(partial, SWARM_SAFETY_TESTS[0])), { recursive: true })
-    await writeFile(join(partial, SWARM_SAFETY_TESTS[0]), '')
-    expect(await swarmSafetyCheck.applicable(partial)).toBe(false)
-  })
-
-  it('run: RED when a safety file is MISSING in the branch (deletion/tamper never passes)', async () => {
-    // A worktree whose net is incomplete (one file deleted) must NOT pass on the
-    // survivors — vitest would silently skip the missing file, so run() guards on it.
-    const dir = await realpath(await mkdtemp(join(scratch, 'ss-tampered-')))
-    await mkdir(dirname(join(dir, SWARM_SAFETY_TESTS[0])), { recursive: true })
-    await writeFile(join(dir, SWARM_SAFETY_TESTS[0]), '') // only ONE of them present
-    const r = await swarmSafetyCheck.run(dir)
-    expect(r.ok).toBe(false)
-    expect(r.output).toMatch(/safety test missing/)
-  })
-
-  it('run: RED when vitest is unavailable (uninstalled project) — never waved through', async () => {
-    // Net intact (every file present) but no node_modules/.bin/vitest → still RED.
-    const dir = await realpath(await mkdtemp(join(scratch, 'ss-novitest-')))
-    for (const t of SWARM_SAFETY_TESTS) {
-      await mkdir(dirname(join(dir, t)), { recursive: true })
-      await writeFile(join(dir, t), '')
-    }
-    const r = await swarmSafetyCheck.run(dir)
-    expect(r.ok).toBe(false)
-    expect(r.output).toMatch(/vitest unavailable/)
-  })
-})
-
-// ── lint + test quality-floor checks (card 4e7f2151) ─────────────────────────
-// The two NEW always-on merge gates. Like tscCheck, each is `applicable` only to a
-// project that actually carries the tooling (an eslint / vitest config) — a foreign
-// repo the engine drives is never blocked on a gate it can't run — and `run` reports
-// RED (never silently passes) when the binary is absent in the to-be-landed tree.
-describe('lintCheck + testCheck — the project quality-floor verify checks', () => {
-  it('lintCheck.applicable: true with an eslint config (eslintrc OR flat), false without', async () => {
-    const none = await realpath(await mkdtemp(join(scratch, 'lint-none-')))
-    expect(await lintCheck.applicable(none)).toBe(false) // no eslint setup → never blocked
-    const rc = await realpath(await mkdtemp(join(scratch, 'lint-rc-')))
-    await writeFile(join(rc, '.eslintrc.json'), '{}') // what OPEN GROUND uses
-    expect(await lintCheck.applicable(rc)).toBe(true)
-    const flat = await realpath(await mkdtemp(join(scratch, 'lint-flat-')))
-    await writeFile(join(flat, 'eslint.config.js'), 'export default []')
-    expect(await lintCheck.applicable(flat)).toBe(true)
-  })
-
-  it('lintCheck.run: RED when eslint is unavailable (uninstalled project) — never waved through', async () => {
-    const dir = await realpath(await mkdtemp(join(scratch, 'lint-nobin-')))
-    const r = await lintCheck.run(dir) // no node_modules/.bin/eslint
-    expect(r.ok).toBe(false)
-    expect(r.output).toMatch(/eslint unavailable/)
-  })
-
-  it('testCheck.applicable: true with a vitest/vite config, false without', async () => {
-    const none = await realpath(await mkdtemp(join(scratch, 'test-none-')))
-    expect(await testCheck.applicable(none)).toBe(false)
-    const vt = await realpath(await mkdtemp(join(scratch, 'test-vt-')))
-    await writeFile(join(vt, 'vitest.config.ts'), 'export default {}') // what OPEN GROUND uses
-    expect(await testCheck.applicable(vt)).toBe(true)
-    const vite = await realpath(await mkdtemp(join(scratch, 'test-vite-')))
-    await writeFile(join(vite, 'vite.config.ts'), 'export default {}') // vitest reads vite config too
-    expect(await testCheck.applicable(vite)).toBe(true)
-  })
-
-  it('testCheck.run: RED when vitest is unavailable (uninstalled project) — never waved through', async () => {
-    const dir = await realpath(await mkdtemp(join(scratch, 'test-nobin-')))
-    await writeFile(join(dir, 'vitest.config.ts'), 'export default {}')
-    const r = await testCheck.run(dir) // no node_modules/.bin/vitest
-    expect(r.ok).toBe(false)
-    expect(r.output).toMatch(/vitest unavailable/)
-  })
-})
-
 // ── runGateProcess — the fork-pool group reaper (card 4e7f2151 MUST-FIX) ─────────
 // The two vitest gates + the eslint gate spawn a tool that FORKS a worker pool (vitest
 // with no explicit pool uses the default FORK pool = child_process workers). execFile's
@@ -1878,309 +1637,4 @@ describe('runGateProcess — reaps the whole fork pool on a timeout (no orphaned
     },
     45000, // gate timeout (8s) + worker-death condition-wait (≤15s) + REAL-process headroom under load
   )
-})
-
-// ── makeAdversarialReview — REAL panel orchestration (card a14329dc) ───────────
-// Drives the REAL makeAdversarialReview (real worktree materialize + rebase + diff +
-// tally) with an INJECTED runReviewer (no claude) so the panel/decision logic is
-// exercised end-to-end deterministically — closing the gap between the pure
-// tallyReview unit tests and the routing tests (which fake the whole `review` dep).
-describe('makeAdversarialReview — REAL panel orchestration (injected reviewers, real git)', () => {
-  const MUSTFIX = (note: string) => `reviewing the diff…\nOPENGROUND_REVIEW: MUST_FIX ${note} ::OG_REVIEW_END::`
-  const CLEAN = 'looks fine to me\nOPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::'
-  const ABSTAIN = 'the session hung and never emitted a verdict marker'
-  // Deterministic per 1-based reviewer index, regardless of Promise.all timing.
-  const byIndex = (m: Record<number, string>) => (a: { index: number }) => m[a.index] ?? CLEAN
-  const tipOf = async (proj: string, branch: string) =>
-    (await git(proj, ['rev-parse', `refs/heads/${branch}`])).stdout.trim()
-
-  it('majority must-fix (2 of 3) → rework, must-fix note surfaced, REAL panel ran', async () => {
-    const { proj } = await setupRepo()
-    const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'change\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card a', hint: 'a' })
-    await git(proj, ['fetch', 'origin', 'main'])
-    const tip = await tipOf(proj, res.branch)
-    let spawned = 0
-    const review = makeAdversarialReview({
-      reviewers: 3,
-      runReviewer: async (a) => {
-        spawned++
-        return byIndex({ 1: MUSTFIX('off-by-one in the loop'), 2: MUSTFIX('null deref'), 3: CLEAN })(a)
-      },
-    })
-    const r = await review(proj, res.branch, 'main', { tip })
-    expect(r.decision).toBe('rework')
-    expect(r.mustFix).toBe(2)
-    expect(r.clean).toBe(1)
-    expect(r.reason).toContain('off-by-one')
-    expect(spawned).toBe(3) // a real 3-reviewer panel ran in the materialized worktree
-  })
-
-  it('unanimous clean → integrate', async () => {
-    const { proj } = await setupRepo()
-    const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card c', hint: 'c' })
-    await git(proj, ['fetch', 'origin', 'main'])
-    const tip = await tipOf(proj, res.branch)
-    const review = makeAdversarialReview({ reviewers: 3, runReviewer: async () => CLEAN })
-    const r = await review(proj, res.branch, 'main', { tip })
-    expect(r.decision).toBe('integrate')
-    expect(r.clean).toBe(3)
-    expect(r.mustFix).toBe(0)
-  })
-
-  // ── The fable hole this panel HAD (owner, 2026-09-16) ──────────────────────
-  // `makeAdversarialReview` used to read `opts.model ?? SWARM_LAUNCH_MODEL`, so an
-  // unpinned panel — which is how defaultDeps wires it — desired the TOP tier in
-  // every execution mode, one `claude` PER LENS.
-  //
-  // ⚠ It was not the drain. `deps.review` has had no non-test caller since
-  // 2026-07-15, so this hole was not costing anything; the measured driver of the
-  // owner's 51% Fable week is the worker heavy classifier
-  // (docs/commander/04-quota-models.md §5.9). This test exists so that re-wiring
-  // review later cannot re-open the hole unnoticed — a containment, not a saving.
-  //
-  // This asserts the MODEL THE REVIEWERS WERE ACTUALLY LAUNCHED WITH, captured off
-  // the real panel's own spawn argument — not that a resolver function returns the
-  // right string in isolation. The unit matrix in swarmLaunch.test.ts covers the
-  // decision; this covers the WIRING, which is the half that was broken: the
-  // decision function was already correct for manager/overseer while this call
-  // site quietly ignored it.
-  // ⚠ This reads the AMBIENT execution mode rather than pinning one: the panel
-  // calls getExecutionMode() itself, and the suite runs with settings unset, so
-  // the mode resolves to DEFAULT_EXECUTION_MODE ('optimize') and the expected tier
-  // below is opus. That coupling is deliberate-but-implicit; it fails SAFE (a
-  // leaked non-default mode makes this test red, never falsely green). Pin the
-  // mode here if this suite ever gains a test that writes executionMode.
-  it('an UNPINNED panel launches reviewers on the MODE tier, not the top tier', async () => {
-    const { proj } = await setupRepo()
-    const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card tier', hint: 'tier' })
-    await git(proj, ['fetch', 'origin', 'main'])
-    const tip = await tipOf(proj, res.branch)
-
-    const seen: string[] = []
-    // No `model` — exactly how defaultDeps builds the production panel.
-    const review = makeAdversarialReview({
-      reviewers: 3,
-      runReviewer: async (a) => {
-        seen.push(a.model)
-        return CLEAN
-      },
-    })
-    const r = await review(proj, res.branch, 'main', { tip })
-
-    expect(r.decision).toBe('integrate')
-    expect(seen).toHaveLength(3) // the real panel ran
-    // The default execution mode is `optimize` ⇒ the reviewer tier is opus.
-    expect(seen).toEqual(['opus', 'opus', 'opus'])
-    // State the invariant separately from the value: whatever the mode resolves
-    // to, an unpinned panel must never seat itself on the scarce tier by default.
-    expect(seen).not.toContain('fable')
-  })
-
-  it('still honours an EXPLICITLY pinned panel model (the override survives)', async () => {
-    const { proj } = await setupRepo()
-    const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card pin', hint: 'pin' })
-    await git(proj, ['fetch', 'origin', 'main'])
-    const tip = await tipOf(proj, res.branch)
-
-    const seen: string[] = []
-    const review = makeAdversarialReview({
-      reviewers: 2,
-      model: 'sonnet',
-      runReviewer: async (a) => {
-        seen.push(a.model)
-        return CLEAN
-      },
-    })
-    await review(proj, res.branch, 'main', { tip })
-    expect(seen).toEqual(['sonnet', 'sonnet'])
-  })
-
-  it('all reviewers abstain (no marker) → defer — never a false clean', async () => {
-    const { proj } = await setupRepo()
-    const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card x', hint: 'x' })
-    await git(proj, ['fetch', 'origin', 'main'])
-    const tip = await tipOf(proj, res.branch)
-    const review = makeAdversarialReview({ reviewers: 3, runReviewer: async () => ABSTAIN })
-    const r = await review(proj, res.branch, 'main', { tip })
-    expect(r.decision).toBe('defer')
-    expect(r.mustFix).toBe(0)
-    expect(r.clean).toBe(0)
-  })
-
-  // The reviewer arm of the quota sensor (2026-07-09). The monitor only watches
-  // WORKER screens, so before this a panel that walked into the wall first cooled
-  // nothing: three abstentions → "多数決つかず [must-fix 0 / clean 0]" → the defer
-  // streak burned to needs-human → the next panel spawned on the same dry tier.
-  describe('a reviewer that hits the model limit', () => {
-    // Verbatim CLI notice — the same fixture the classifier pins.
-    const LIMITED =
-      "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
-    beforeEach(() => __resetQuotaForTest())
-    afterEach(() => __resetQuotaForTest())
-
-    it('cools the panel tier and defers as an ENGINE park (not a review failure)', async () => {
-      const { proj } = await setupRepo()
-      const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
-      const res = await spawn({ projectPath: proj, title: 'card q', hint: 'q' })
-      await git(proj, ['fetch', 'origin', 'main'])
-      const tip = await tipOf(proj, res.branch)
-      expect(isTierCooling('fable', Date.now())).toBe(false)
-
-      const review = makeAdversarialReview({ reviewers: 3, model: 'fable', runReviewer: async () => LIMITED })
-      const r = await review(proj, res.branch, 'main', { tip })
-
-      expect(r.decision).toBe('defer') // never merge un-reviewed
-      // An exhausted panel is an engine hold, so it must NOT burn MAX_REVIEW_DEFERS.
-      expect(r.skippedForPark).toBe(true)
-      expect(r.reason).toContain('fable')
-      // The sighting landed in the cooling table ⇒ the next panel AND every worker
-      // dispatch now resolve one rung down the ladder.
-      expect(isTierCooling('fable', Date.now())).toBe(true)
-      expect(isTierCooling('opus', Date.now())).toBe(false)
-    })
-
-    it('does NOT cool when the reviewer VOTED while quoting the limit wording (e.g. reviewing this patch)', async () => {
-      const { proj } = await setupRepo()
-      const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
-      const res = await spawn({ projectPath: proj, title: 'card r', hint: 'r' })
-      await git(proj, ['fetch', 'origin', 'main'])
-      const tip = await tipOf(proj, res.branch)
-
-      const review = makeAdversarialReview({
-        reviewers: 3,
-        model: 'fable',
-        runReviewer: async () => `the diff adds the pattern for "${LIMITED}"\n${CLEAN}`,
-      })
-      const r = await review(proj, res.branch, 'main', { tip })
-
-      // A real verdict was cast — the transcript merely mentions the notice.
-      expect(r.decision).toBe('integrate')
-      expect(r.clean).toBe(3)
-      expect(isTierCooling('fable', Date.now())).toBe(false)
-    })
-
-    // The precision hole this pair pins shut: "abstained × the transcript CONTAINS
-    // limit wording" was the whole test, so a reviewer reading the rate-limit code
-    // (swarmQuota.ts / this arm) quoted the notice, fumbled its verdict marker, and
-    // cooled a perfectly healthy tier for 20 minutes. Quoting is now separated from
-    // dying by two independent conditions — see the sensor's comment.
-    it('does NOT cool when EVERY reviewer abstained but only QUOTED the wording mid-transcript', async () => {
-      const { proj } = await setupRepo()
-      const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
-      const res = await spawn({ projectPath: proj, title: 'card q2', hint: 'q2' })
-      await git(proj, ['fetch', 'origin', 'main'])
-      const tip = await tipOf(proj, res.branch)
-
-      // What a reviewer of THIS patch actually prints: the diff's verbatim fixture,
-      // then a page of analysis, then a verdict line whose end token never lands
-      // (⇒ abstention). The notice is quoted, but the session lived on past it.
-      const QUOTING_ABSTAINER = [
-        'Reading the diff against origin/main…',
-        `+  // The CLI's PER-MODEL exhaustion notice, verbatim: "${LIMITED}"`,
-        '+  /reached your .{0,40}\\blimit\\b/,',
-        ...Array.from(
-          { length: 12 },
-          (_, i) =>
-            `Hunk ${i + 1}: the guard holds for the empty-string case and the pattern list stays anchored, so nothing regresses here.`,
-        ),
-        'OPENGROUND_REVIEW: CLEAN', // marker opened, never closed → no verdict scraped
-      ].join('\n')
-
-      const review = makeAdversarialReview({ reviewers: 3, model: 'fable', runReviewer: async () => QUOTING_ABSTAINER })
-      const r = await review(proj, res.branch, 'main', { tip })
-
-      // A healthy tier stays healthy — the swarm keeps its top model.
-      expect(isTierCooling('fable', Date.now())).toBe(false)
-      // Un-decided panel ⇒ an ordinary defer that DOES belong to the review streak
-      // (it is the panel failing, not the engine holding for quota).
-      expect(r.decision).toBe('defer')
-      expect(r.skippedForPark).toBeFalsy()
-      expect(r.reason).toContain('多数決つかず')
-    })
-
-    it('does NOT cool when one reviewer died at the wall but ANOTHER on the same tier voted', async () => {
-      const { proj } = await setupRepo()
-      const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
-      const res = await spawn({ projectPath: proj, title: 'card q3', hint: 'q3' })
-      await git(proj, ['fetch', 'origin', 'main'])
-      const tip = await tipOf(proj, res.branch)
-
-      // Reviewer 1's transcript ENDS in the notice — on its own that is a sighting.
-      // But reviewers 2+3 completed full reviews on the SAME tier, concurrently:
-      // positive proof it still serves sessions. Cooling waits for a panel that
-      // nobody got through (the next one, if the tier really is going dry).
-      const review = makeAdversarialReview({
-        reviewers: 3,
-        model: 'fable',
-        runReviewer: async (a) => byIndex({ 1: LIMITED })(a),
-      })
-      const r = await review(proj, res.branch, 'main', { tip })
-
-      expect(isTierCooling('fable', Date.now())).toBe(false)
-      expect(r.decision).toBe('integrate') // 2 of 3 clean — a real majority
-      expect(r.clean).toBe(2)
-    })
-  })
-
-  it('empty diff (tip already at trunk) → integrate WITHOUT spawning the panel', async () => {
-    const { proj } = await setupRepo()
-    await git(proj, ['fetch', 'origin', 'main'])
-    const trunkSha = (await git(proj, ['rev-parse', 'origin/main'])).stdout.trim()
-    let spawned = 0
-    const review = makeAdversarialReview({
-      reviewers: 3,
-      runReviewer: async () => {
-        spawned++
-        return CLEAN
-      },
-    })
-    const r = await review(proj, 'swarm/empty', 'main', { tip: trunkSha })
-    expect(r.decision).toBe('integrate')
-    expect(spawned).toBe(0) // nothing to review → no reviewer launched
-  })
-
-  it('skipIfTip === tip → rework (skipped), no panel spawned', async () => {
-    const { proj } = await setupRepo()
-    const spawn = makeSpawn(proj, new Set(), { file: () => 'worker.txt', content: 'ok\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card s', hint: 's' })
-    await git(proj, ['fetch', 'origin', 'main'])
-    const tip = await tipOf(proj, res.branch)
-    let spawned = 0
-    const review = makeAdversarialReview({
-      reviewers: 3,
-      runReviewer: async () => {
-        spawned++
-        return CLEAN
-      },
-    })
-    const r = await review(proj, res.branch, 'main', { tip, skipIfTip: tip })
-    expect(r.decision).toBe('rework')
-    expect(r.skipped).toBe(true)
-    expect(spawned).toBe(0) // unchanged tip → panel short-circuited
-  })
-
-  it('rebase conflict → integrate (deferred to integrate, panel not run)', async () => {
-    const { proj, origin } = await setupRepo()
-    const spawn = makeSpawn(proj, new Set(), { file: () => 'collide.txt', content: 'WORKER\n', scratch: false })
-    const res = await spawn({ projectPath: proj, title: 'card k', hint: 'k' })
-    await advanceTrunk(origin, 'collide.txt', 'TRUNK\n') // same file, diverging → rebase conflict
-    await git(proj, ['fetch', 'origin', 'main'])
-    const tip = await tipOf(proj, res.branch)
-    let spawned = 0
-    const review = makeAdversarialReview({
-      reviewers: 3,
-      runReviewer: async () => {
-        spawned++
-        return CLEAN
-      },
-    })
-    const r = await review(proj, res.branch, 'main', { tip })
-    expect(r.decision).toBe('integrate') // conflict is integrate's to own/stamp, not review's
-    expect(spawned).toBe(0) // reviewers never ran (rebase failed before they could)
-  })
 })

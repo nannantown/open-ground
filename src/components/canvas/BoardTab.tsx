@@ -26,7 +26,7 @@ type TFn = (key: MessageKey, vars?: Record<string, string | number>) => string
 // The run-defaults strip's quiet inline selects — one shared class so the
 // four pickers can't drift apart visually.
 const DEFAULTS_SELECT_CLS =
-  'rounded-[3px] border border-line bg-bg px-1.5 py-1 text-meta text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
+  'min-w-0 rounded-[3px] border border-line bg-bg px-1.5 py-1 text-meta text-ink-muted transition-colors hover:border-ink-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-40'
 
 // ─── Board tab ───────────────────────────────────────────────────────────────
 // A kanban of task cards (one source of truth in the central tasks.json).
@@ -365,6 +365,8 @@ interface BoardTabProps {
   /** The project is a git repo — shows the completion-flow default (merge/PR
    *  is meaningless without git) in the run-defaults strip. */
   hasGit?: boolean
+  /** Manual launch preferences do not apply when Run dispatches a Swarm worker. */
+  showRunDefaults?: boolean
   /** Registry UUID — keys the per-project "Mine only" toggle in localStorage. */
   projectId?: string
   /** Absolute project path — needed by the merged-branch poll (B018). Unset
@@ -425,6 +427,7 @@ export const BoardTab = ({
   onCreateTask,
   projectMissing,
   hasGit,
+  showRunDefaults = true,
   projectId,
   projectPath,
   displayName,
@@ -777,7 +780,7 @@ export const BoardTab = ({
           select autosaves: completion flow is SHARED policy (config), model /
           effort / permission mode are PERSONAL launch prefs (central, never in
           the repo). */}
-      <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1.5 px-8 pb-2">
+      {showRunDefaults && <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1.5 px-8 pb-2">
         <button
           type="button"
           onClick={toggleDefaultsOpen}
@@ -795,7 +798,7 @@ export const BoardTab = ({
         {defaultsOpen && (
           <>
             {hasGit && (
-              <label className="flex items-center gap-1 text-micro text-ink-faint">
+              <label className="flex min-w-0 max-w-full items-center gap-1 text-micro text-ink-faint">
                 {t('board.run.flowLabel')}
                 <select
                   value={data.config?.completionFlow ?? 'merge'}
@@ -816,7 +819,7 @@ export const BoardTab = ({
                 </select>
               </label>
             )}
-            <label className="flex items-center gap-1 text-micro text-ink-faint">
+            <label className="flex min-w-0 max-w-full items-center gap-1 text-micro text-ink-faint">
               {t('board.run.modelLabel')}
               <select
                 value={data.launch?.model ?? ''}
@@ -840,7 +843,7 @@ export const BoardTab = ({
                 ))}
               </select>
             </label>
-            <label className="flex items-center gap-1 text-micro text-ink-faint">
+            <label className="flex min-w-0 max-w-full items-center gap-1 text-micro text-ink-faint">
               {t('board.run.effortLabel')}
               <select
                 value={data.launch?.effort ?? ''}
@@ -866,7 +869,7 @@ export const BoardTab = ({
                 ))}
               </select>
             </label>
-            <label className="flex items-center gap-1 text-micro text-ink-faint">
+            <label className="flex min-w-0 max-w-full items-center gap-1 text-micro text-ink-faint">
               {t('board.defaults.permLabel')}
               <select
                 value={data.launch?.permissionMode ?? 'default'}
@@ -892,7 +895,7 @@ export const BoardTab = ({
             </label>
           </>
         )}
-      </div>
+      </div>}
 
       {/* Columns — always rendered, even at 0 cards, so the lane structure tasks
           flow into is visible from the very first visit. Tasks are authored

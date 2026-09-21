@@ -4,14 +4,12 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { answerEscalation, openEscalation } from './swarmEscalations'
 import { escalationsFile } from './paths'
-import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import {
   initOverseerRuntime,
   runOverseerPass,
   type OverseerDeps,
   type OverseerEngine,
 } from './swarmOverseer'
-import { handleWorkerQuestion } from './swarmQuestions'
 import { app } from '../../../server/app'
 import { writeSession, clearSession } from './authStore'
 import { __resetMigrationCacheForTests, addImportedProjectEntry } from './registry'
@@ -34,7 +32,6 @@ import {
   renderSdkTail,
   sdkRecentOutputHead,
   workerKey,
-  type WorkerHandle,
 } from './workerRuntime'
 
 // CAN THE OWNER'S ANSWER REACH AN SDK WORKER AT ALL?
@@ -127,7 +124,6 @@ const answerSeams = () => {
     queued,
     deps: {
       isPathAllowed: async () => true,
-      appendMemory: async () => {},
       canPushInto: async () => true,
       push: (id: string, text: string) => {
         pushes.push({ id, text })
@@ -358,7 +354,6 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine =>
     nudges: new Map(),
     log: [],
     anomalies: [],
-    selfSupply: initSelfSupplyRuntime(),
     overseer: initOverseerRuntime(),
     notified: new Set(),
     pendingFatal: [],
@@ -619,13 +614,10 @@ const overseerDeps = (
   now: () => 1_000_000_000_000,
   isAlive: () => true,
   readHeartbeat: async () => null,
-  answerAsOwner: async () => ({ kind: 'answer', text: 'ok', confidence: 'high' }),
   openEscalation: async (input) => {
     raised.push(input)
     return { escalation: { id: `esc-${raised.length}`, status: 'open' } as never, deduped: false }
   },
-  canInjectInto: async () => true,
-  injectAnswer: async () => true,
   notifyInfo: async () => ({}),
   peekUsagePct: () => null,
   refreshUsage: () => {},
@@ -666,58 +658,6 @@ describe('⑥a the overseer’s raiseToInbox carries the worker’s WHOLE addres
     expect(raised[0].terminalId).toBeFalsy()
   })
 
-  it('the brain-drain’s “delivery failed → inbox” lane names the SDK session', async () => {
-    // This record exists BECAUSE delivery failed, so the inbox row is the owner's
-    // ONLY remaining route back to that worker. Dropping the address here means
-    // the proxy's answer can never reach it by any path.
-    const raised: OpenEscalationInput[] = []
-    const engine = overseerEngine()
-    engine.overseer.brainResults.push({
-      signalKey: 'S4:sdk-w1',
-      question: 'どちらの案で進めますか？',
-      context: 'ctx',
-      taskId: 'card-w1',
-      branch: 'swarm/w1',
-      runtime: 'sdk',
-      sdkSessionId: 'sdk-w1',
-      terminalId: '',
-      answer: { kind: 'answer', text: 'A案で', confidence: 'high' },
-    })
-    await runOverseerPass(
-      engine,
-      [],
-      () => {},
-      overseerDeps(raised, { deliverAnswer: async () => false }),
-    )
-
-    expect(raised).toHaveLength(1)
-    expect(raised[0].runtime).toBe('sdk')
-    expect(raised[0].sdkSessionId).toBe('sdk-w1')
-    expect(raised[0].proxyDraft?.answer).toBe('A案で')
-  })
-
-  it('the brain-drain’s ESCALATE lane names the SDK session', async () => {
-    const raised: OpenEscalationInput[] = []
-    const engine = overseerEngine()
-    engine.overseer.brainResults.push({
-      signalKey: 'S4:sdk-w1',
-      question: 'この worktree を消してよいですか？',
-      context: 'ctx',
-      taskId: 'card-w1',
-      branch: 'swarm/w1',
-      runtime: 'sdk',
-      sdkSessionId: 'sdk-w1',
-      terminalId: '',
-      answer: { kind: 'escalate', why: 'irreversible', reason: '不可逆' },
-    })
-    await runOverseerPass(engine, [], () => {}, overseerDeps(raised))
-
-    expect(raised).toHaveLength(1)
-    expect(raised[0].whyEscalated).toBe('irreversible')
-    expect(raised[0].runtime).toBe('sdk')
-    expect(raised[0].sdkSessionId).toBe('sdk-w1')
-  })
-
   it('a PTY worker’s raise is unchanged (no runtime field, the real terminalId)', async () => {
     const raised: OpenEscalationInput[] = []
     const engine = overseerEngine({
@@ -743,118 +683,6 @@ describe('⑥a the overseer’s raiseToInbox carries the worker’s WHOLE addres
     expect(raised[0].terminalId).toBe('pty-w1')
     expect(raised[0].runtime).toBeUndefined()
     expect(raised[0].sdkSessionId).toBeUndefined()
-  })
-})
-
-describe('⑥b handleWorkerQuestion delivers on the worker’s OWN runtime', () => {
-  const question = {
-    projectPath: '/proj',
-    question: 'どのDBを使いますか？',
-    context: 'ctx',
-    taskId: 'card-q',
-    branch: 'swarm/q',
-  }
-  const ptyIsPoison = {
-    canInjectInto: async () => {
-      throw new Error('the PTY pool must never be asked about an SDK worker')
-    },
-    inject: async () => {
-      throw new Error('the PTY pool must never be written to for an SDK worker')
-    },
-  }
-
-  it('pushes the answer into the SDK session — the PTY pool is never asked', async () => {
-    const pushes: { id: string; text: string }[] = []
-    const out = await handleWorkerQuestion(
-      { ...question, runtime: 'sdk', sdkSessionId: 'sdk-q1', terminalId: '' },
-      {
-        ...ptyIsPoison,
-        answer: async () => ({ kind: 'answer', text: 'Postgres で', confidence: 'high' }),
-        canPushInto: async () => true,
-        push: (id, text) => {
-          pushes.push({ id, text })
-          return true
-        },
-        escalate: async () => {
-          throw new Error('a delivered answer must not also be escalated')
-        },
-      },
-    )
-
-    expect(out).toEqual({ outcome: 'injected', answer: 'Postgres で', confidence: 'high' })
-    expect(pushes).toHaveLength(1)
-    expect(pushes[0].id).toBe('sdk-q1')
-    expect(pushes[0].text).toContain('Postgres で')
-    expect(pushes[0].text).toContain('どのDBを使いますか？')
-  })
-
-  it('when the SDK target refuses, the escalation still NAMES that session', async () => {
-    // The fallback row has to be answerable. Raising it without the address is
-    // the same dead end as not raising it at all.
-    const raised: OpenEscalationInput[] = []
-    const out = await handleWorkerQuestion(
-      { ...question, runtime: 'sdk', sdkSessionId: 'sdk-q1', terminalId: '' },
-      {
-        ...ptyIsPoison,
-        answer: async () => ({ kind: 'answer', text: 'A案で', confidence: 'medium' }),
-        canPushInto: async () => false,
-        push: () => {
-          throw new Error('must not push past a refusing guard')
-        },
-        escalate: async (i) => {
-          raised.push(i)
-          return { escalation: { id: 'e1' } as Escalation, deduped: false }
-        },
-      },
-    )
-
-    expect(out.outcome).toBe('escalated')
-    expect(raised[0].runtime).toBe('sdk')
-    expect(raised[0].sdkSessionId).toBe('sdk-q1')
-    expect(raised[0].terminalId).toBeFalsy()
-    expect(raised[0].proxyDraft?.answer).toBe('A案で')
-  })
-
-  it('a PTY worker still goes through the PTY seams (unchanged)', async () => {
-    const injected: { id: string; text: string }[] = []
-    const out = await handleWorkerQuestion(
-      { ...question, terminalId: 'pty-q1' },
-      {
-        answer: async () => ({ kind: 'answer', text: 'SQLiteで', confidence: 'high' }),
-        canInjectInto: async () => true,
-        inject: async (id, text) => {
-          injected.push({ id, text })
-          return true
-        },
-        push: () => {
-          throw new Error('the SDK pool must never be pushed for a PTY worker')
-        },
-        escalate: async () => {
-          throw new Error('must not escalate a delivered answer')
-        },
-      },
-    )
-    expect(out.outcome).toBe('injected')
-    expect(injected.map((i) => i.id)).toEqual(['pty-q1'])
-  })
-
-  it('the whole conduit is overridable in ONE seam, and receives the whole handle', async () => {
-    const seen: WorkerHandle[] = []
-    await handleWorkerQuestion(
-      { ...question, runtime: 'sdk', sdkSessionId: 'sdk-q1', terminalId: '' },
-      {
-        ...ptyIsPoison,
-        answer: async () => ({ kind: 'answer', text: 'x', confidence: 'high' }),
-        deliver: async (target) => {
-          seen.push(target)
-          return true
-        },
-        escalate: async () => {
-          throw new Error('delivered')
-        },
-      },
-    )
-    expect(seen).toEqual([{ runtime: 'sdk', sdkSessionId: 'sdk-q1' }])
   })
 })
 

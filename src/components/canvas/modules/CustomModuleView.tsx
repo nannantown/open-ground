@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Loader2 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import type {
   CustomModuleDef,
@@ -36,9 +35,8 @@ import {
 // 2026-08-15; this is now its only mount.) Its sessions are
 // cwd'd at the MODULE dir (server-resolved from the moduleId, so the
 // validateProjectPath boundary stays untouched) and they auto-spawn: the dock's
-// whole point here is "claude inside this tab". The header keeps only Publish
-// (cosmetic gating; the server enforces roles); delete/uninstall live in the
-// tab row's right-click menu (ViewTabs).
+// whole point here is "claude inside this tab". Distribution controls are gone;
+// local editing and the sandboxed preview remain.
 
 const POLL_MS = 1500
 
@@ -59,7 +57,6 @@ export const CustomModuleView = ({
   role,
   setup,
   onSetupConsumed,
-  onChanged,
 }: {
   module: CustomModuleDef
   /** The project whose tab row hosts this view — stamped onto the hosted
@@ -71,22 +68,11 @@ export const CustomModuleView = ({
    *  and paste the brush-up prompt (unsent). Consumed once. */
   setup?: boolean
   onSetupConsumed?: () => void
-  /** The module def changed server-side (publish bumps version) — re-fetch. */
-  onChanged: () => Promise<void> | void
 }) => {
   const { t } = useT()
-  const isOwner = role === 'owner'
-  // Authoring — the sidebar claude session AND the header actions — is open to
-  // testers too: a tester builds a tab locally, then SUBMITS it to the owner for
-  // review (docs/CUSTOM_TABS_PLAN.md). Only role 'none' renders read-only.
   const canAuthor = role !== 'none'
   const [src, setSrc] = useState<CustomModuleSourceResponse | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
-  // Publish/submit progress + inline notice (the panel has no toast system;
-  // inline text next to the buttons is the established pattern).
-  const [publishing, setPublishing] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
-  const [notice, setNotice] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
   const onSetupConsumedRef = useRef(onSetupConsumed)
   onSetupConsumedRef.current = onSetupConsumed
   // Live mirror for the poll's failure branch (an updater must stay pure).
@@ -229,141 +215,9 @@ export const CustomModuleView = ({
     [module.id],
   )
 
-  const publish = async () => {
-    if (publishing) return
-    setPublishing(true)
-    setNotice(null)
-    try {
-      const r = await fetch(`/api/custom-modules/${module.id}/publish`, {
-        method: 'POST',
-      })
-      const body = (await r.json().catch(() => ({}))) as {
-        version?: number
-        error?: string
-        publishUnavailable?: boolean
-      }
-      if (!r.ok) {
-        setNotice({
-          kind: 'error',
-          text: body.publishUnavailable
-            ? t('customTabs.publishUnavailable')
-            : t('customTabs.publishFailed', { error: body.error ?? `HTTP ${r.status}` }),
-        })
-        return
-      }
-      setNotice({
-        kind: 'ok',
-        text: t('customTabs.published', {
-          version: String(body.version ?? (module.version ?? 0) + 1),
-        }),
-      })
-      await onChanged() // pick up remoteId / publishedAt / version
-    } catch {
-      setNotice({
-        kind: 'error',
-        text: t('customTabs.publishFailed', { error: t('projectPanel.networkError') }),
-      })
-    } finally {
-      setPublishing(false)
-    }
-  }
-
-  // Tester action: submit the CURRENT source to the owner for review
-  // (docs/CUSTOM_TABS_PLAN.md). The owner approves → it's published to the
-  // marketplace. Reuses the inline-notice pattern; disabled until source loads.
-  const submit = async () => {
-    if (submitting || !src) return
-    setSubmitting(true)
-    setNotice(null)
-    try {
-      const r = await fetch('/api/module-submissions', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name: module.label,
-          description: module.description,
-          framework: module.framework,
-          source: src.source,
-        }),
-      })
-      const body = (await r.json().catch(() => ({}))) as { error?: string }
-      if (!r.ok) {
-        setNotice({
-          kind: 'error',
-          text:
-            r.status === 503
-              ? t('customTabs.submitUnavailable')
-              : t('customTabs.submitFailed', { error: body.error ?? `HTTP ${r.status}` }),
-        })
-        return
-      }
-      setNotice({ kind: 'ok', text: t('customTabs.submitted') })
-    } catch {
-      setNotice({
-        kind: 'error',
-        text: t('customTabs.submitFailed', { error: t('projectPanel.networkError') }),
-      })
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  const headerBtn =
-    'shrink-0 rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
-
   return (
     <div className="flex min-h-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {canAuthor && (
-          <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-8 py-2">
-            <span
-              className="min-w-0 flex-1 truncate text-ui text-ink-muted"
-              title={module.description || module.label}
-            >
-              {module.label}
-              {typeof module.version === 'number' && (
-                <span className="ml-1.5 font-mono text-micro text-ink-faint">
-                  {t('customTabs.publishedBadge', { version: String(module.version) })}
-                </span>
-              )}
-            </span>
-            {notice && (
-              <span
-                role="status"
-                title={notice.text}
-                className={[
-                  'max-w-[320px] truncate text-meta',
-                  notice.kind === 'error' ? 'text-accent' : 'text-ink-faint',
-                ].join(' ')}
-              >
-                {notice.text}
-              </span>
-            )}
-            {/* owner publishes official modules; a tester submits the current
-                source to the owner for review (then approve publishes it). */}
-            {isOwner ? (
-              <button
-                type="button"
-                onClick={() => void publish()}
-                disabled={publishing}
-                className={headerBtn}
-              >
-                {publishing && <Loader2 size={10} className="mr-1 inline animate-spin" />}
-                {publishing ? t('customTabs.publishing') : t('customTabs.publish')}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => void submit()}
-                disabled={submitting || !src}
-                className={headerBtn}
-              >
-                {submitting && <Loader2 size={10} className="mr-1 inline animate-spin" />}
-                {submitting ? t('customTabs.submitting') : t('customTabs.submit')}
-              </button>
-            )}
-          </div>
-        )}
         <div className="min-h-0 flex-1 bg-bg-deep">
           {/* The hosted iframe (CustomFrameHost) draws itself over this anchor
               while the tab is visible; the div only supplies the geometry. */}

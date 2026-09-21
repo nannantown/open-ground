@@ -68,6 +68,22 @@ const playingMsg = (playing: boolean) => ({
 })
 
 describe('CustomFrameHost keep-alive', () => {
+  it('stops background playback when owner surfaces close and does not resurrect it', () => {
+    const { container, rerender } = render(<CustomFrameHost enabled />)
+    act(() => {
+      attachFrameAnchor(MODULE_ID, anchor, 'Saved tab', PROJ)
+      setFrameSource(MODULE_ID, '<html>Saved content</html>', 'Saved tab')
+      reportPlayback(MODULE_ID, playingMsg(true))
+      detachFrameAnchor(MODULE_ID)
+    })
+    expect(container.querySelector('iframe')).not.toBeNull()
+    rerender(<CustomFrameHost enabled={false} />)
+    expect(container.querySelector('iframe')).toBeNull()
+    expect(getPlaybackSnapshot().size).toBe(0)
+    expect(getCustomFramesSnapshot().size).toBe(0)
+    rerender(<CustomFrameHost enabled />)
+    expect(container.querySelector('iframe')).toBeNull()
+  })
   it('renders an anchored frame once its source lands', () => {
     const { container, unmount } = render(<CustomFrameHost />)
     act(() => {

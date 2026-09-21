@@ -1,5 +1,11 @@
 # 04 — Quota・冷却・使用可能モデル mask(三層モデル)
 
+## Current Contract (2026-09-19)
+
+Only worker, manager and supply launch models now. Persona/overseer-brain and old panel reviewer roles are gone; their previous quota/spend descriptions are historical. Current tier selection, caps, sensors, cooling and allowed-model gates are unchanged.
+See [SIMPLIFICATION.md](SIMPLIFICATION.md) for the current entry points and verification.
+Any descriptions of the retired paths below are historical, not operating instructions.
+
 **対象コミット: `cc7c60e`**(使用可能モデル mask は `d1485ea`(2026-07-09 18:05 +0900)で main 入り)
 **読者: 将来の司令塔(og-manage)セッション。** モデル枯渇まわりで誤診しないための正確な機構文書。全主張に file:line の根拠を付す。行番号は上記コミット時点のもの — ズレたら §10 の grep で自分で裏取りすること。
 > **部分更新(2026-07-10)**: `0d1f7f0` が**検知 21 分遅延の 3 因子(§3.2 沈黙ゲート / §3.3 装飾再描画 / §3.6 monitor 飢餓)をすべて根治**した — 各節に注記済み、§4 の実測は歴史(照合点)として保持。根治後の機構と到達判定は TARGET-STATE §1 が正典(0d1f7f0 基準の行番号つき)。層 A/B/C の三層モデル自体と §5 以降の park/mask 機構は不変。swarmOrchestrator.ts の行番号は :355 以降 +38〜+381 シフト(00-INDEX 冒頭)。
@@ -783,16 +789,49 @@ r to retry
 
 ---
 
-## 5.9 希望 tier の方針 — fable は重いカードの worker だけ(2026-09-16 で完結)
+## 5.9 希望 tier の方針 — fable は `ultra` カードの worker だけ(2026-09-18 改訂)
 
 層A〜Eは「枯れた tier を避ける」機構で、**何を希望するか**はこの前段
 (`desiredModelEffort`、swarmLaunch.ts)が決める。optimize(既定)の現行方針:
 
+**worker は カードの難易度の型 `ProjectTask.tier` で引く(2026-09-18 オーナー決定
+「文字数ではなくて難易度」)**。型は補給官がコードを読んで書き、オーナーが Board の
+ドロワー(「難易度」)で上書きできる。**カードにはモデル名を書かない** — 型→(モデル,
+effort)の変換表は `TIER_MODEL_EFFORT`(swarmLaunch.ts)の1箇所だけ。
+
+| worker の型 | model / effort | 備考 |
+|---|---|---|
+| `touch`(軽微) | sonnet / low | |
+| `standard`(標準・既定) | opus / medium | 型も推定材料も無いカードはここ |
+| `design`(設計) | opus / high | **安全床**: HEAVY_SIGNALS(auth/認証/delete/削除/billing/課金/sandbox/guard/security/migration 等)に当たるカードは、書かれた型が `touch`/`standard` でも `design` に引き上げる(`resolveCardTier` / `SAFETY_FLOOR_TIER`) |
+| `ultra`(最大) | **fable / max** | **唯一の fable 枠** |
+
+判定ロジック(推定+安全床)は**クライアントからも読める純モジュール `src/lib/cardTier.ts`** に
+あり、swarmLaunch.ts はそれを re-export するだけ(判定は1箇所)。Board のドロワーは同じ
+`resolveCardTier` で**実効の型**を出す(「実際は: 設計(安全のため引き上げ)」「自動 → 標準」)。
+型のピッカーは swarm が見えるときだけ出る(swarm を使わない利用者には効かない操作なので)。
+型が書かれていないカードは `resolveCardTier` のキーワード推定: 軽い語(typo/rename/文言…)
+かつ 400 字未満 → `touch`、それ以外 → `standard`、安全語 → 床で `design`。
+**`title+notes > 1200 字 ⇒ heavy(fable/max)` の規則は削除した** — 補給官スキルは完了条件を
+詳しく書けと要求するので、丁寧に書いたカードほど最上位+最大出力に昇格する自家撞着だった。
+⚠ 移行の影響: 型の無い既存カードのうち安全語に当たるもの(旧 heavy の 46%)は fable/max →
+opus/high に下がる。最上位で走らせたいカードは `ultra` を明示する。
+`max` / `economy` モードは従来どおり(型を見ない)。`TaskRunSettings.model/effort`(ドロワーの
+モデル/effort)は **swarm OFF の端末起動だけ**が読む脱出ハッチで、worker には効かない。
+配線(3経路すべて `spawnSwarmWorker({title, notes, tier})` → `resolveSwarmModelEffortProbed`):
+- **無人配車**: dispatch は予約後の**再読込(fresh)1回**から title・notes・tier を取って
+  `spawnWorker` に渡す(古い picks スナップショットと混ぜない)。
+- **再起動後の再開(resume)**: `adoptResumeCandidates` が同じ board 読みから title・**notes**・tier を
+  渡す。resume のプロンプトは `WORKER_RESUME_INJECTION` で notes を使わないが、**モデルは resume でも
+  毎回解決し直す**ので、安全床のために notes が要る(2026-09-18 レビューで、本文だけに危険語がある
+  touch カードが再起動後 sonnet/low に落ちるのを実測 → 修正・番人
+  `swarmOrchestrator.resumeEngines.test.ts`「SAFETY FLOOR survives a restart」)。
+- **Board 実行**(`POST /api/swarm/worker`): カードの tier、ライブ値があればそれ。ライブの
+  title/notes は保存済みの本文を**置き換える**ので、床は**保存済みカードの本文でも**判定する
+  (`applySafetyFloor` — 引き上げ専用)。
+
 | 席 | model / effort | 理由 |
 |---|---|---|
-| worker(重いカード) | **fable / max** | 能力が結果を分けるのはここ。**唯一の fable 枠**・変更していない |
-| worker(通常) | opus / medium | 0.11.97 のオーナー決定(基準は opus) |
-| worker(軽い) | sonnet / low | |
 | 司令官・監督の卓 | opus / high(旧: fable / high) | 2026-09-02 変更 |
 | **敵対レビューのパネル** | **opus / high**(旧: fable 固定・モードを一切見ていなかった) | ⚠ **2026-09-16 変更** |
 | 補給官 | **opus / medium**(旧: sonnet / medium) | ⚠ **2026-09-18 変更**(オーナー決定「補給官が sonnet だと流石に大変」)。要望のヒアリング・既存コードの調査・観測可能な完了条件へのカード化を担う席で、調査と判断の質が要る。effort は据え置き。opus は fable とは別枠なので「唯一の fable 枠」は不変 |
@@ -801,7 +840,7 @@ r to retry
 プロジェクトに座り、声をかけられるたびに文脈を読み直すので、統合が起きていなくても
 トップ tier を燃やし続ける — worker がカードの実行中だけ課金されるのとは性質が違う。
 
-**⛔ 卓を下げても週次 Fable は減らなかった — 犯人は別だった(2026-09-16 実測)**。
+**⛔ 卓を下げても週次 Fable は減らなかった(2026-09-16 実測)— 原因は未確定**。
 09-02 の変更後もオーナーの週次 Fable は **51%**(直近5h で全体の 37%)のまま。当然の
 仮説は「卓がまだ fable に漏れている」だったが、**実測すると外れ**だった。以下は仮説を
 潰した順で、同じ誤診を繰り返さないために全部残す。
@@ -817,9 +856,10 @@ r to retry
    **したがって現在の消費には寄与していない**。2026-09-16 に mode 連動へ直したのは、
    将来レビューを再配線した日に同じ穴が再発しないようにするためであって、**この修正自体は
    今の Fable を1トークンも減らさない**。減ると書いてはいけない。
-3. **真犯人は worker の heavy 判定だった**。`classifyCardWeight` は
-   「HEAVY_SIGNALS に一致」**または**「title+notes が 1200 文字超」で heavy とする。
-   本プロジェクトの実カード **330 枚を同じ規則で分類した実測**:
+3. **分類の実測(事実として正しい)— ただし原因帰属は撤回(項目4参照)**。旧
+   `classifyCardWeight` は「HEAVY_SIGNALS に一致」**または**「title+notes が 1200 文字超」で
+   heavy(fable/max を希望)としていた。本プロジェクトの実カード **330 枚を同じ規則で分類した
+   実測**:
 
    | 判定 | 枚数 | 割合 |
    |---|---|---|
@@ -829,16 +869,30 @@ r to retry
    | medium(opus) | 83 | 25% |
    | light(sonnet) | 20 | 6% |
 
-   **カードの約7割が fable を希望している**。`guard` / `auth` / `削除` / `security` /
-   `migration` のような語は OG のカードにごく普通に出るうえ、`/order` の定型文を含む
-   カード本文は 1200 文字を簡単に超える。「重い設計カードだけ fable」という意図に対し、
-   実装は**ほぼ全カードを重いと判定している**。
+   これは「**当時の**カードの約7割が fable を**希望していた**」という希望 tier の分布であって、
+   **消費量の測定ではない**。2026-09-16 版はここから「週次 Fable 51% の真犯人は heavy 判定」と
+   結論したが、**その帰属は撤回する**(項目4)。この分類は 2026-09-18 に難易度の型 `tier` へ
+   置き換えた(上の表 — 長さ規則は削除、安全語は `design` の床)。これは**正しさの修正**
+   (丁寧に書いたカードほど高く走る逆インセンティブの除去)であり、51% への対策として
+   数えてはいけない。
+4. **【2026-09-18 実測】消費の内訳 — どのモデル枠で測った数字かを分けて読む**。
+   `GET /api/usage/breakdown`(§5.9.1、直近7日・課金トークン・モデル×走った場所)の実測:
 
-**⇒ 週次 Fable を実際に動かすレバーは heavy 判定(しきい値・語彙)であって、席の割当では
-ない。** 本カードは「`classifyCardWeight` の heavy 判定は変更しない」を明示条件に含んで
-いたため手を付けていない。ここを動かすかどうかはオーナー判断として未決のまま残っている。
+   - **全モデル合計**(総計 123.0M トークン)のうち `swarm-worker` は **約19%**(09-18 の計測で
+     19.4%、同日の再読込で 19.6% — 窓が動くので小数点は揺れる)。全モデル合計で見た本丸は
+     常駐卓とオーナー自身の会話(`project`/`other`)で、卓は常駐して文脈が伸び続け、自動圧縮の
+     発火点が遅いので1回ごとの読み直しが重くなる。⚠ ただし**卓は opus で動いている**(項目1)
+     ので、**卓の文脈は Fable 枠の消費を説明できない** — これは**全モデル合計(と opus 枠)**の話。
+   - **Fable 枠だけ**(同じ7日窓、fable 合計 22.3M トークン): `other` 9.1M(約41%)・
+     `swarm-worker` 8.7M(約39%)・`project` 4.5M(約20%)。
+   - **Fable 51% の中身は分かっていない**。51% は週次**上限に対する割合**(09-16 時点の週)で、
+     上の数字は**トークン数**(09-11〜09-18 の窓)— 窓も単位も違うので、51% を席ごとに割り振る
+     ことはできない。`other`(登録プロジェクト外の cwd)が何かも transcript からは特定できない
+     (§5.9.1)。**推測で埋めない**: 分かっているのは「卓は fable を使っていない」「レビューパネルは
+     呼ばれていない」「worker は Fable トークンの約4割(この7日窓)」まで。
 
-**いまの不変条件**: optimize では **fable を希望するのは `worker` × heavy カードの1組だけ**。
+**いまの不変条件**: optimize では **fable を希望するのは `worker` × `ultra` カードの1組だけ**
+(2026-09-18 まで「heavy カード」)。
 `reviewer` は `SwarmModelRole` union の正式メンバーになり、他の席と同じく
 `desiredModelEffort` に問い合わせる。判断の質は落としていない — レビューは判断席なので
 **effort は high のまま**で、下げたのは model だけ。
@@ -861,7 +915,8 @@ tier」という形をしていた。存在検査は沈黙する):
 
 **歯**(いずれも変異で赤を実測済み):
 - `swarmLaunch.test.ts`「fable containment」— **役割 union を全部なめて**、optimize で
-  fable を希望する (席, カード) の組が `['worker/heavy']` **ちょうど1つ**であることを固定する。
+  fable を希望する (席, カード) の組が `['worker/ultra']` **ちょうど1つ**であることを固定する
+  (安全語カード `heavy` は含まれない — 床は design)。
   個別の席を1つずつ確かめる形にしなかったのは、今回の漏れが「誰も列挙していなかった席」
   だったから。union に足し忘れた席は `desiredModelEffort` を呼べない(tsc が落ちる)ので、
   **列挙漏れは沈黙ではなくビルドエラー**になる。
@@ -869,6 +924,12 @@ tier」という形をしていた。存在検査は沈黙する):
   MODE tier」— 実パネルを回し、**レビュアーが実際に渡されたモデル**を捕まえる(解決関数の
   戻り値ではなく配線を見る)。定数固定に戻す変異で `['fable','fable','fable']` の赤を実測。
 - `swarmLaunch.test.ts`「optimize runs the always-on DESKS on opus/high」(09-02 分)は据え置き。
+- **2026-09-18 追加(すべて変異で赤を実測済み)**: 型の表(`TIER_MODEL_EFFORT` の1行を
+  書き換える変異で赤)/ 安全床(明示の型が床を素通りする変異で赤)/ 1200 字規則の不在
+  (`length > 1200 ⇒ ultra` を戻す変異で赤)/ 無人配車の配線 — `swarmOrchestrator.test.ts`
+  「difficulty tier — threaded through the unattended engine dispatch」(dispatch から
+  `tier` を落とす変異・再読込でなく古いスナップショットを読む変異で赤)と
+  `swarmWorkerTier.test.ts`(`spawnSwarmWorker` がリゾルバに `tier` を渡さない変異で赤)。
 
 ### 5.9.1 何が使ったのかを見る(GET /api/usage/breakdown)
 
@@ -887,7 +948,7 @@ transcript では区別できない(両方リポジトリ直下で走る)。UI �
 
 ```
 [spawn 要求: worker/manager/supply/panel/brain]
-        │ desired tier ← 実行モード×role×カード重み (swarmLaunch.ts:148-174)
+        │ desired tier ← 実行モード×role×カードの難易度 tier(安全床込み — desiredModelEffort / resolveCardTier)
         ▼
 resolveAvailableTierProbed(desired, now, allowed, usage)   … 層A+C+D+E (§5.8。同期 walk=層A+C+D で tier を選び、
         │                                                     未知ならプローブ→壁なら markRateLimited して1段下げ再 walk)

@@ -50,6 +50,7 @@ import { isLockdownEnabledSync } from './lockdown'
 import { projectDataDir, projectDataFile } from './projectDataPath'
 import { listResearchReports, readResearchReport, titleFrom } from './researchReports'
 import { getSettings } from './store'
+import { getCustomTabRole } from './roles'
 
 // ─── ledger ──────────────────────────────────────────────────────────────────
 
@@ -462,7 +463,7 @@ export const markResearchForBlog = async (
   return { ok: true, ...(info[file] ? { blog: info[file] } : {}) }
 }
 
-/** One pass over every registered project. Inert without Settings.wordpress;
+/** One pass over every registered project. Inert without owner access or Settings.wordpress;
  *  deliberately skipped in lockdown (the fetch floor would refuse anyway). */
 export const blogPublishTick = async (deps: BlogPublishDeps = {}): Promise<void> => {
   if (globalThis.__openground_blog_publish_inflight) return
@@ -477,6 +478,9 @@ export const blogPublishTick = async (deps: BlogPublishDeps = {}): Promise<void>
     }
     const wp = settings.wordpress
     if (!wp?.baseUrl || !wp.username || !wp.appPassword) return
+    // Hidden for public users: retain credentials/ledger, but do not send
+    // background requests. A later owner session can resume the same queue.
+    if (await getCustomTabRole().catch(() => 'none') !== 'owner') return
     for (const p of settings.projects ?? []) {
       if (typeof p?.path === 'string' && p.path) {
         await sweepProjectBlogPublish(p.path, wp, deps).catch(() => {})

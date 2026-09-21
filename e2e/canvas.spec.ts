@@ -155,6 +155,10 @@ const center = (b: { x: number; y: number; width: number; height: number }) => (
 
 test.describe('Canvas tab (Figma parity)', () => {
   test.beforeEach(async ({ page, request }) => {
+    await page.route('**/api/experiments', route => route.fulfill({ json: {
+      eligible: true, flags: { swarm: false, sandbox: false },
+      swarmOptIn: { available: true, enabled: false },
+    } }))
     await ensureSeeded(request)
     await page.addInitScript(
       ([projectId]) => {

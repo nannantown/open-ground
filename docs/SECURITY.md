@@ -72,10 +72,13 @@
 | # | 宛先 | 送信されるデータ | 契機 | 自動 | 無効化方法 | コード |
 |---|---|---|---|:--:|---|---|
 | 18 | **Supabase** `/rest/v1/feedback`(INSERT) | フィードバック本文・任意入力のメール・**添付スクリーンショット最大6枚(base64)** + サーバが付加するアプリ版・OS・登録プロジェクト数。**未サインインでも送信可**(anon key) | フィードバックフォームの送信ボタン | ❌ | 使わない。スクショに機密画面が写り込む点に運用注意 | `feedback.ts:270-319` |
-| 19 | **Supabase** `/rest/v1/og_custom_modules` / `og_module_submissions` | 公開/提出時: **モジュールのソースコード全文** + 提出者メール | マーケットプレイスの公開/提出ボタン(owner/tester ロールのみ UI 表示) | ❌ | 使わない | `customModulesSubmissions.ts:97-114` |
 | 20 | **Supabase authorize / accounts.google.com / github.com**(OS ブラウザ) | OAuth authorize URL(PKCE challenge 等)。認証自体はアプリ外のブラウザが担う | 「Sign in」のプロバイダボタン | ❌ | サインインしない | `electron/main.js:491-513`(https + allowlist 強制) |
-| 21 | **任意ホスト**(カスタムタブ/マーケットのモジュール JS) | そのタブ内でユーザーが入力した内容・IP/UA(モジュール作者のコード次第) | マーケットからインストールしたカスタムタブを開いている間 | モジュール依存 | マーケットからインストールしない | `CustomFrameHost.tsx:282`(`sandbox="allow-scripts"`、ネットワーク制限なし) |
-| 22 | **anthropic.com / claude.ai:443**(egress プロキシ経由) | claude の TLS トラフィックを Hono が CONNECT 中継(中身は不可視)。**allowlist 2ドメイン・443・CONNECT のみ・127.0.0.1 バインド** | swarm 監督ノード(overseer brain)を owner が起動した構成でのみ。既定では起動しない | ❌ | swarm 自律機能を使わない(再起動で必ず OFF) | `egressProxy.ts:30,86-125` |
+| 21 | **任意ホスト**(ローカルに保存したカスタムタブの JS) | そのタブ内でユーザーが入力した内容・IP/UA(モジュール作者のコード次第) | カスタムタブを開いている間 | モジュール依存 | 信頼しないカスタムタブを開かない | `CustomFrameHost.tsx:282`(`sandbox="allow-scripts"`、ネットワーク制限なし) |
+
+Rows #19 (tab distribution) and #22 (Persona proxy startup) were retired on
+2026-09-20. Their application callers are gone; historical remote records remain.
+The explicit sandbox probe and shared Work mode host policy are retained. This
+retirement note is not a new audit of the other historical findings below.
 
 ### 1-D. ビルド/インストール時のみ(エンドユーザーの .app 利用では発生しない)
 
@@ -87,7 +90,7 @@
 | electronjs.org/headers | postinstall(`electron-builder install-app-deps` が node-pty を再ビルド) | `~/.electron-gyp` に事前配置でオフライン化可 |
 | electron-builder-binaries / registry(自バージョン照会) | `npm run dist`(配布ビルド時のみ) | `NO_UPDATE_NOTIFIER=1` で照会抑止 |
 | Apple notary service | `npm run dist`(署名・公証) | リリース作業機のみ |
-| **開発用スクリプトの手動実行** | `scripts/sandbox-probe.ts`(到達性テスト: api.anthropic.com / example.com)、`scripts/overseer-brain-smoke.ts`(**実 claude を1回呼ぶ** — スクリプト自身が "COSTS ONE SUBSCRIPTION CALL" と明記)、`scripts/dump-board-room.mjs` / `watch-board-room.mjs`(collab Worker へ WS 接続して Board の中身を読む) | いずれも開発者が明示的に叩いたときのみ。**アプリの利用では発生しない** |
+| **開発用スクリプトの手動実行** | `scripts/sandbox-probe.ts`(到達性テスト: api.anthropic.com / example.com)、`scripts/dump-board-room.mjs` / `watch-board-room.mjs`(collab Worker へ WS 接続して Board の中身を読む) | いずれも開発者が明示的に叩いたときのみ。**アプリの利用では発生しない** |
 
 ### 1-E. **git-shared モード(Share via Git)— この版には存在しない**
 
@@ -151,7 +154,7 @@
 
 - **クロスオリジン防御はある**: `server/app.ts:55-70` が **POST/PUT/PATCH/DELETE** に対し、Origin が非ループバックなら 403、Host が非ループバックなら 403(DNS リバインディング対策)。→ **悪意ある Web ページからの書き込みは防がれる**。
 - **しかし GET は素通し**(`app.ts` の guard は状態変更メソッドのみ検査)。GET にループバック検証を持つのは `youCorpus` ルートだけで、他は無防備。DNS リバインディングが成立すると、悪意あるページが `GET /api/settings`(全プロジェクトの絶対パス)、`GET /api/project/file-diff`(**リポジトリのソース差分そのもの**)、`GET /api/project`(タスク本文)、`GET /api/auth/session`(メール)などを**読み取れる**(§8-3)。
-- **呼び出し元認証は存在しない**: `terminal` / `project` / `canvas` / `misc` の各ルーターにセッション検査はゼロ(owner ゲートがあるのは swarm / collab / customModules / feedback / moduleSubmissions のみ)。**同一マシンで動く非ブラウザのプロセス**は Origin ヘッダを付けずに全 API を叩けるため、`POST /api/terminal` → `POST /api/terminal/:id/input` で**任意コマンドを実行できる**(§8-3)。これは「ローカル単一ユーザーツール」という設計前提の裏返しであり、共用端末では前提が崩れる。
+- **呼び出し元認証は存在しない**: `terminal` / `project` / `canvas` / `misc` の各ルーターにセッション検査はゼロ(owner ゲートがあるのは swarm / collab / customModules / feedback のみ)。**同一マシンで動く非ブラウザのプロセス**は Origin ヘッダを付けずに全 API を叩けるため、`POST /api/terminal` → `POST /api/terminal/:id/input` で**任意コマンドを実行できる**(§8-3)。これは「ローカル単一ユーザーツール」という設計前提の裏返しであり、共用端末では前提が崩れる。
 
 ### 3.3 機密ファイルの保存場所
 
@@ -479,7 +482,7 @@ Anthropic §1-A #1、ユーザー自身の git remote への push §1-A #8 — �
 | #10 Supabase ログイン | `/api/auth/config` → `{enabled:false}`(Sign in UI 非表示)、start/callback/signout は 503。`/api/auth/session` は**トークンリフレッシュせず・auth.json に触れず**サインアウト扱いを返す(保存済みセッションはローカルに保持 = OFF で復帰・revoke しない) |
 | #11-16 collab / roles | `/api/collab/config` → `{enabled:false}`(SPA は collab バンドル自体をロードしない → CF Worker への WS が張られない)、他の collab route は group middleware で 503。`supabaseAuth.postToken` / `getFreshSession` が null を返す(projectMembers / collabInvites / roles を網ごと止める単一 seam)。roles は env override(`OPENGROUND_OWNER_EMAILS`)か最終キャッシュへ degrade — **業務モードで swarm を使う owner は §11 のローカル解錠と `OPENGROUND_OWNER_EMAILS` を併用する** |
 | #13 サーバ側 collab mirror(ws) | `collabMirrorCore` が enqueue を入口で drop + `openScopedDoc` が接続前に throw。トグル前から生きていた mirror 接続は ~60秒の idle 解体で自然死し、再接続は不能(チケット発行が lockdown-null)。ON 中に漏れた書込は既存の再起動ギャップと同じ治癒(OFF 後の最初の書込がディスク全量を再ミラー) |
-| #19 marketplace / 提出 | 一覧・インストール・公開・提出 route は 503。`GET /api/custom-modules` は 200 のまま `marketAvailable:false` を返す(ローカル CRUD は生存・市場導線だけ UI から消える) |
+| #19 marketplace / 提出 | 機能撤去済み。旧 route は業務モードに関係なく 404。ローカルの追加タブ CRUD はそのまま利用可能 |
 
 **層2: fetch 底網** — `installLockdownFetchGuard()`(`src/lib/server/lockdown.ts`、
 server/index.ts で常設)。サーバプロセスの global `fetch` を wrap し、ON の間、宛先

@@ -174,7 +174,6 @@ const engineState = (): SwarmOrchestratorState => ({
   running: false,
   manualStop: false,
   manualStopPersisted: false,
-  selfSupply: false,
   overseer: false,
   workers: [],
   reviews: [],

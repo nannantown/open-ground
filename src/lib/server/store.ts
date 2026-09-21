@@ -10,7 +10,7 @@ import {
 } from './swarmAllowedModels'
 import { setLockdownCache } from './lockdown'
 import type { Settings, CanvasState, ExecutionMode, SwarmAllowedModels, SwarmPaneId, WordPressSettings } from '../types'
-import { SWARM_PANE_IDS } from '../types'
+import { SWARM_PANE_IDS, DEFAULT_DESK_CONTEXT_CAP_TOKENS } from '../types'
 
 const DEFAULT_SETTINGS: Settings = {
   projects: [],
@@ -213,7 +213,7 @@ export class SettingsUnreadableError extends Error {
  *  tells the truth. It did not: the tolerant reader turned an unreadable or
  *  corrupt file into DEFAULT_SETTINGS, so the merge persisted the DEFAULTS as
  *  the new truth. Measured 2026-08-02 (isolated HOME): a settings.json holding
- *  two registered projects, chmod 000, then `setSettings({swarmManagerRuntime})`
+ *  two registered projects, chmod 000, then `setSettings({language})`
  *  ⇒ `projects: []`, `defaultWorkspace: null`, no exception, no log.
  *
  *  `projects` is not merely a list — it is the validateProjectPath ALLOWLIST and
@@ -321,7 +321,6 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   // key is no longer user-settable. An old client that still POSTs it gets the
   // key silently dropped here — the required back-compat — and a stale key in
   // an existing settings.json is simply never read (readJson is tolerant).
-  'swarmManagerRuntime',
   'lockdownMode',
   // The PUBLIC swarm opt-in (all users). Request-settable BY DESIGN — the swarm
   // gate is feature-visibility, not a security boundary (swarmGate.ts). Narrowed
@@ -333,43 +332,11 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   // never widen the validateProjectPath allowlist. Narrowed below to the exact
   // three-string shape (https enforced); `null` clears it.
   'wordpress',
-  // The PUBLIC persona opt-in (all users, all platforms). Same design as
-  // swarmOptIn — request-settable because the persona gate is feature-
-  // visibility over the caller's OWN loopback-local corpus (personaGate.ts).
-  // Narrowed to a literal boolean below.
-  'personaOptIn',
+  // The resident-desk context cap (tokens; 0 = off). Request-settable by design:
+  // it only decides WHEN a desk is recycled/compacted, never a path boundary.
+  // Narrowed to a non-negative integer below.
+  'deskContextCapTokens',
 ]
-
-/** Narrow an untrusted runtime dial to `{ mode }`. Anything else returns
- *  undefined so the key is DROPPED and the previous value survives — the same
- *  "refuse a meaningless patch" stance as the swarmAllowedModels all-off and
- *  swarmPaneOrder all-garbage guards.
- *
- *  Only a literal 'pty' or 'sdk' is persisted; anything else (absent, null, a
- *  forged string) drops the key rather than storing a value a reader would have
- *  to guess at. What the dial READER then makes of a MISSING key:
- *  absent ⇒ 'sdk' (since 2026-08-02); an unrecognised MODE VALUE ⇒ pty — but a
- *  CONTAINER we cannot read `mode` out of is NOT that case (a non-object, or an
- *  object with no `mode` key: `?.mode` is then undefined, so the reader
- *  resolves it to 'sdk'). This normalizer does NOT implement that half either.
- *  It REFUSES a garbage patch (returns undefined; the caller drops it from the
- *  PATCH) so the PREVIOUS dial survives rather than falling to any default —
- *  pinned by settingsRuntimeDials.test.ts. On a machine that had no dial
- *  written yet, that refusal therefore leaves the key ABSENT, which the
- *  commander's reader resolves to 'sdk'. The key is deliberately inert with
- *  respect to the validateProjectPath allowlist — it selects a runtime, it
- *  cannot widen any boundary — so admitting it to USER_SETTINGS_KEYS does not
- *  weaken the narrowing this function's caller exists to perform.
- *
- *  (Until 2026-08-13 this narrower also served the worker dial and carried its
- *  optional `sdkMaxWorkers` slot cap. The PTY worker runtime was deleted —
- *  workers are SDK-only, so there is no worker dial and nothing to cap.) */
-const normalizeRuntimeDial = (v: unknown): { mode: 'pty' | 'sdk' } | undefined => {
-  if (v === null || typeof v !== 'object' || Array.isArray(v)) return undefined
-  const raw = v as { mode?: unknown }
-  if (raw.mode !== 'pty' && raw.mode !== 'sdk') return undefined
-  return { mode: raw.mode }
-}
 
 /** Narrow an untrusted `swarmPaneOrder` body to the known pane ids, in the
  *  caller's order, DEDUPED. A forged POST /api/settings therefore can't persist
@@ -451,16 +418,6 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
     if (clean) safe.swarmPaneOrder = clean
     else delete safe.swarmPaneOrder
   }
-  // The commander's Agent-SDK runtime dial, narrowed to `{ mode }` — see
-  // normalizeRuntimeDial. A garbage patch is refused rather than persisted, so a
-  // UI bug can never leave an unreadable shape where a runtime decision is made.
-  // (The worker dial is gone — workers are SDK-only since 2026-08-13; a POSTed
-  // `swarmWorkerRuntime` never reaches here because USER_SETTINGS_KEYS dropped it.)
-  if (Object.prototype.hasOwnProperty.call(safe, 'swarmManagerRuntime')) {
-    const clean = normalizeRuntimeDial(safe.swarmManagerRuntime)
-    if (clean) safe.swarmManagerRuntime = { mode: clean.mode }
-    else delete safe.swarmManagerRuntime
-  }
   // Store the lockdown switch as a REAL boolean: only a literal `true` turns it
   // on (a forged truthy string must not), everything else persists `false`.
   if (Object.prototype.hasOwnProperty.call(safe, 'lockdownMode')) {
@@ -472,8 +429,13 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   if (Object.prototype.hasOwnProperty.call(safe, 'swarmOptIn')) {
     safe.swarmOptIn = safe.swarmOptIn === true
   }
-  if (Object.prototype.hasOwnProperty.call(safe, 'personaOptIn')) {
-    safe.personaOptIn = safe.personaOptIn === true
+  // Desk context cap: a finite, non-negative number is stored floored (0 = off);
+  // anything else is REFUSED — key dropped, previous value survives — so a
+  // forged string can neither disable the cap nor set a nonsense threshold.
+  if (Object.prototype.hasOwnProperty.call(safe, 'deskContextCapTokens')) {
+    const v = safe.deskContextCapTokens
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) safe.deskContextCapTokens = Math.floor(v)
+    else delete safe.deskContextCapTokens
   }
   // WordPress target: `null` CLEARS (merged spread drops an undefined key on
   // write), a valid {baseUrl, username, appPassword} is stored trimmed with the
@@ -532,74 +494,6 @@ export const getAllowedModelTiers = async (): Promise<SwarmAllowedModels> =>
 // on 2026-08-13 — workers are SDK-only; a worker spawn that cannot establish
 // the SDK runtime now fails fast instead of degrading to a PTY. A stale
 // `swarmWorkerRuntime` key in an existing settings.json is simply never read.)
-
-// ─── Swarm COMMANDER runtime dial (Settings.swarmManagerRuntime) ─────────────
-// The commander's kill switch, read through here so the resolution lives in ONE
-// place: an unreadable file or a hand-corrupted value degrades to PTY, never to
-// an experimental runtime. WHAT that resolution is changed on 2026-08-02 —
-// absent ⇒ sdk, explicit 'pty' and anything unrecognised ⇒ pty (the polarity
-// note on the function has the evidence). This dial deliberately SURVIVED the
-// 2026-08-13 worker-dial deletion: unlike a worker, a PTY commander desk is a
-// real product surface (the owner's phone window rides Remote Control), so the
-// manual switch stays.
-/** Which runtime this project's commander desk runs on. Absent ⇒ SDK.
- *
- *  ⚠ THIS DEFAULT MOVED A DAY AFTER THE WORKER'S (2026-08-02), and the delay was
- *  a measured coverage gap rather than caution. On 08-01 the SDK commander was
- *  already proven on a real machine — it seats, holds the singleton against a
- *  second launch, takes `say`, stops and relaunches — but the property the
- *  2026-07-19 eleven-desk incident was actually about was not: the check-then-act
- *  CRITICAL SECTION. Every "TWO/THREE truly simultaneous calls open ONE desk"
- *  test drove the PTY path, because the file that owns them fakes `launchClaude`.
- *  Defaulting to a runtime whose twin-prevention race is untested is that
- *  incident's trade, made on purpose.
- *
- *  `swarmManager.spawn.test.ts` now runs the race on BOTH runtimes, and the SDK
- *  block was proven to bite: removing the spawn lock reds 22 tests, dropping the
- *  SDK pool from the singleton guard reds 4, and reading liveness from `status`
- *  instead of `reaped` (so a desk still unwinding reads as absent) reds 1.
- *
- *  Polarity, unchanged where it matters: explicit 'pty' ⇒ pty (the kill switch),
- *  explicit 'sdk' ⇒ sdk, ABSENT ⇒ sdk, an unrecognised MODE VALUE ⇒ pty.
- *
- *  ⚠ THE FILE LEVEL IS A SEPARATE RULE FROM THE VALUE LEVEL, AND THIS NOTE IS
- *  THE ONE PLACE THAT STATES IT. Callers point here instead of restating it;
- *  three separate restatements drifted from the code before that rule
- *  (2026-08-02). An UNREADABLE or UNPARSEABLE settings.json ⇒ pty — the kill
- *  switch — while an ABSENT one keeps its ⇒ sdk. The two are told apart by
- *  ConfigReadHealth, because before it they were not: readJson swallowed the
- *  read failure and the parse failure alike and returned the fallback, so a
- *  chmod-000 file and a fresh install both arrived here as `mode: undefined`.
- *  Measured 2026-08-02 (isolated HOME), the behaviour that fixed:
- *  an explicit {"mode":"pty"} + chmod 000 ⇒ SDK, and broken JSON ⇒ SDK. An owner
- *  who had deliberately turned the SDK commander off got it back the moment the
- *  file stopped being readable. "A settings file we cannot parse is not evidence
- *  that the SDK runtime is wanted" was written here long before it was true; it
- *  is true now, and runtimeDialFileHealth.test.ts is what keeps it that way.
- *
- *  A caller that wraps this in `.catch(() => pty)` (swarmManager's
- *  `launchNewDesk`) reaches that fallback only from a REJECT — a narrower door
- *  than it looks, and NOT the one the corrupt-file case comes through (that one
- *  resolves, to pty, above). `getSettings` can reject when
- *  `ensureOpenGroundHome()` does — it is awaited OUTSIDE the read's try — but
- *  `homeReady` caches the RESOLVED promise and evicts on reject (paths.ts:201-264,
- *  `homeReady = null` — self-heal), so only an ensure that has not yet cached a
- *  RESOLVED promise can reject that way. Not merely the first CALL: while the
- *  cause persists every call re-enters and re-rejects (measured 2026-08-02 — an
- *  unreadable HOME parent rejected calls #1, #2 and #3 alike, and #4 resolved
- *  once the mode bits were restored). A desk launched on a long-running server
- *  is normally past that window. */
-export const getManagerRuntimeDial = async (): Promise<{ mode: 'pty' | 'sdk' }> => {
-  const { settings, health } = await getSettingsWithHealth()
-  // FILE level first: a settings.json we cannot read is not consent to run the
-  // experimental runtime — whatever it may have said before it broke. ABSENT is
-  // NOT this case (nothing written yet is a fresh install, and its rule is sdk).
-  if (health === 'unreadable') return { mode: 'pty' }
-  const m = settings.swarmManagerRuntime?.mode
-  if (m === 'pty') return { mode: 'pty' }
-  if (m === 'sdk' || m === undefined) return { mode: 'sdk' }
-  return { mode: 'pty' } // unrecognised ⇒ the conservative runtime
-}
 
 // ─── Swarm autonomy "remembered ON" set (Settings.swarmAutonomyOn) ────────────
 // The ONLY autonomy state that survives a restart — a REMINDER, never an
@@ -697,6 +591,16 @@ export const isSwarmManualStopPersisted = async (key: string): Promise<boolean> 
 // A hand-corrupted / absent value degrades to the smart default via asExecutionMode.
 export const getExecutionMode = async (): Promise<ExecutionMode> =>
   asExecutionMode((await getSettings()).executionMode)
+
+// ─── Resident-desk context cap (Settings.deskContextCapTokens) ────────────────
+// The one reader the commander spawn and the supply compaction loop consult.
+// Absent / hand-corrupted ⇒ the shipped default; 0 ⇒ off (never cut a desk).
+export const getDeskContextCapTokens = async (): Promise<number> => {
+  const v = (await getSettings()).deskContextCapTokens
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0
+    ? Math.floor(v)
+    : DEFAULT_DESK_CONTEXT_CAP_TOKENS
+}
 
 // ─── Work mode / lockdown (Settings.lockdownMode) ─────────────────────────────
 // The authoritative reader every egress feature gate consults (see lockdown.ts

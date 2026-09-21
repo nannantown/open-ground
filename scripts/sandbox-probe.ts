@@ -127,7 +127,7 @@ const main = async (): Promise<never> => {
   // The OVERSEER-BRAIN profile: same home/cwd shape but network:'loopback' — the
   // egress-close battery below proves off-machine outbound is KERNEL-denied while
   // the loopback allowlist proxy remains reachable (docs/SANDBOX_EXPERIMENT.md
-  // egress-proxy follow-up; wired in swarmOverseerBrain.makeOverseerBrain).
+  // loopback probe section). Historical BRAIN labels identify this profile only.
   writeFileSync(brainProfilePath, buildSandboxProfile({ cwd, home: HOME, network: 'loopback' }))
   // See realHomeProfilePath above — real home, one read-only keychain probe.
   writeFileSync(realHomeProfilePath, buildSandboxProfile({ cwd, home: REAL_HOME }))
@@ -196,8 +196,8 @@ const main = async (): Promise<never> => {
   // thing under test) or the mkdir merely failed — a false green of exactly the
   // kind this file already pre-creates gitdirs to avoid.
   mkdirSync(join(HOME, 'Library', 'Keychains', 'login.keychainDIR'), { recursive: true })
-  // The REAL allowlist CONNECT proxy (running UNsandboxed, as it does in the app)
-  // — the brain probes tunnel through it exactly like the brain's claude would.
+  // The real allowlist CONNECT proxy runs outside the diagnostic sandbox.
+  // No application singleton starts it; this explicit probe owns its lifetime.
   const egress = await createEgressProxy({ allowHosts: BRAIN_EGRESS_ALLOW_HOSTS })
   const proxyEnv = {
     HTTPS_PROXY: `http://127.0.0.1:${egress.port}`,

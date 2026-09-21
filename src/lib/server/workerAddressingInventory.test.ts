@@ -738,7 +738,7 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   // ── the engine ──
   'src/lib/server/swarmOrchestrator.ts': {
     tier: 'runtime-dispatched',
-    why: 'The engine. Every worker-reaching path branches on the id it was given (sdkId ? endSdk : endTerminal) or goes through workerKey; the raw pool calls that remain are the pty arms and the one-off review-panel PTYs.',
+    why: 'The engine. Every worker-reaching path branches on the id it was given (sdkId ? endSdk : endTerminal) or goes through workerKey; the raw pool calls that remain are the pty arms.',
     ptyFns: [
       'claudeSessionActivity',
       'getTerminal',
@@ -753,7 +753,6 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       'isTerminalProcessAlive',
       'killTerminal',
       'listLiveDesksIn',
-      'subscribeTerminal',
       'waitForTerminalGone',
       'writeInput',
     ],
@@ -774,7 +773,6 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       // live shape the sweep may reclaim, and telling it apart from a working
       // one needs the pool's own session list (status), not just occupancy.
       'listSdkSessionsIn',
-      'stopAllDesksInDirAndWait',
       'terminateSdkSession',
       'waitForSdkSessionGone',
     ],
@@ -787,24 +785,17 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     sdkCalls: ['deliverAnswerToWorker', 'getSdkSession', 'isSdkSessionLive', 'pushSdkInput'],
     sdkHandleFloor: 21,
   },
-  'src/lib/server/swarmQuestions.ts': {
-    tier: 'runtime-dispatched',
-    why: 'Carries the WHOLE worker handle (runtime + the one id it names) and lets deliverAnswerToWorker branch. It used to test `if (input.terminalId)`, which was false for every SDK worker while reporting success.',
-    ptyFns: [],
-    sdkCalls: ['deliverAnswerToWorker'],
-    sdkHandleFloor: 7,
-  },
   'src/lib/server/swarmOverseer.ts': {
     tier: 'runtime-dispatched',
-    why: 'The overseer addresses workers by handle and delivers through deliverAnswerToWorker; canInjectInto survives only as the injected pty arm.',
+    why: 'Monitoring carries the full worker handle into the human inbox. It never delivers answers itself.',
     ptyFns: [],
-    sdkCalls: ['deliverAnswerToWorker'],
-    sdkHandleFloor: 10,
+    sdkCalls: [],
+    sdkHandleFloor: 3,
   },
   'src/lib/server/swarmManager.ts': {
     tier: 'runtime-dispatched',
-    why: 'Seats the commander on the SDK runtime when the dial says so and falls back to a PTY desk otherwise; watchSdkDeskForLimit is the SDK twin of the PTY quota watch.',
-    ptyFns: ['getTerminalScreen', 'onTerminalExit'],
+    why: 'New managers are SDK-only; quota and early-exit watches consume SDK events. Legacy in-flight PTY adoption goes through listManagerDesks.',
+    ptyFns: [],
     sdkCalls: ['attachSdkListener', 'preloadSdk', 'spawnSdkSession'],
     sdkHandleFloor: 5,
   },
@@ -815,15 +806,16 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     sdkCalls: ['liveDeskOccupies', 'preloadSdk', 'spawnSdkSession', 'stopAllDesksInDirAndWait'],
     sdkHandleFloor: 1,
   },
-  'src/lib/server/swarmOverseerBrain.ts': {
-    tier: 'pty-only-by-design',
-    why: 'Runs the overseer brain as its own short-lived one-off claude PTY that this module spawns, reads and kills. It is not a swarm worker and has no roster entry, so there is no second runtime to dispatch to.',
-    ptyFns: ['killTerminal', 'subscribeTerminal'],
-  },
   'src/lib/server/swarmSupply.ts': {
     tier: 'pty-only-by-design',
     why: 'The supply desk is deliberately kept on the PTY runtime (docs/commander/00-INDEX.md: it is the outside phone line that must survive the commander moving to SDK, where the remote control disappears). 0803: it also OWNS stopping its desks (stopSwarmSupplyDesks — kill by desk label), so the route layer never reaches the PTY pool directly.',
     ptyFns: ['killTerminal', 'listLiveDesksIn', 'isTerminalProcessAlive'],
+  },
+
+  'src/lib/server/supplyContextCap.ts': {
+    tier: 'pty-only-by-design',
+    why: 'Compacts the SUPPLY desk early (desk context cap, 2026-09-18), and the supply desk is deliberately PTY-only (swarmSupply.ts above): it lists owner PTY desks by the supply label, reads the rendered screen for the three live-desk write refusals (noticeDeliverable), and types the compaction into that same pane. The SDK equivalent (pushSdkInput) was measured to work but has no supply desk to address.',
+    ptyFns: ['listOwnerDeskTerminals', 'isTerminalProcessAlive', 'getTerminalScreen', 'writeInput'],
   },
 
   // ── one-off utility PTYs: each spawns its own claude, reads it, kills it ──
@@ -845,11 +837,6 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   'src/lib/server/generateSkill.ts': {
     tier: 'pty-only-by-design',
     why: 'A one-off claude PTY for skill generation, spawned and killed in the same function. Not a worker.',
-    ptyFns: ['killTerminal', 'subscribeTerminal'],
-  },
-  'src/lib/server/personaChat.ts': {
-    tier: 'pty-only-by-design',
-    why: 'One claude PTY per persona conversation turn (and per export distillation), spawned, marker-scraped and killed inside makePersonaTurn. It is the owner talking to their own stand-in — there is no worker record, no roster entry and no second runtime to dispatch to. The `--resume` continuity is carried by the SESSION id + the conversation scratch dir, never by a terminalId held across turns. NOTE for the next inventory: the two pool calls go through INJECTED ALIASES (`const kill = opts.kill ?? killTerminal`, the test seam), so the call-SITE scan below finds nothing here and this file-level entry is the only thing that records them.',
     ptyFns: ['killTerminal', 'subscribeTerminal'],
   },
   'src/lib/server/generateTaskTitle.ts': {
@@ -1111,16 +1098,6 @@ const SITES: Record<string, Decl & { count: number }> = {
     count: 1,
     why: 'Reads the output of the one-off title-generation PTY this module just spawned.',
   },
-  'src/lib/server/swarmOverseerBrain.ts::killTerminal': {
-    tier: 'pty-only-by-design',
-    count: 2,
-    why: 'Tears down the one-off overseer-brain PTY this module just spawned (abort path and finally path).',
-  },
-  'src/lib/server/swarmOverseerBrain.ts::subscribeTerminal': {
-    tier: 'pty-only-by-design',
-    count: 1,
-    why: 'Reads the output of the one-off overseer-brain PTY this module just spawned.',
-  },
   'src/lib/server/claudeTerminal.ts::writeInput': {
     tier: 'pty-only-by-design',
     count: 2,
@@ -1130,18 +1107,6 @@ const SITES: Record<string, Decl & { count: number }> = {
     tier: 'pty-only-by-design',
     count: 1,
     why: 'launchClaude tearing down the PTY it just created when the launch fails.',
-  },
-
-  // the engine
-  'src/lib/server/swarmOrchestrator.ts::killTerminal': {
-    tier: 'pty-only-by-design',
-    count: 2,
-    why: 'The adversarial review panel runs each lens as its own one-off PTY it spawns and kills (abort path and finally path). Reviewers are not roster workers and never run on the SDK runtime.',
-  },
-  'src/lib/server/swarmOrchestrator.ts::subscribeTerminal': {
-    tier: 'pty-only-by-design',
-    count: 1,
-    why: 'Buffers the output of one adversarial-review-panel PTY the same function just spawned.',
   },
   'src/lib/server/swarmOrchestrator.ts::getTerminal': {
     tier: 'runtime-dispatched',
@@ -1214,7 +1179,7 @@ const STATUS_SITES: Record<string, Decl & { count: number }> = {
   'src/lib/server/swarmManager.ts': {
     tier: 'runtime-dispatched',
     count: 3,
-    why: "Two different non-liveness reads. (a) The spawn-time one: a session that died INSIDE spawnSdkSession reports 'failed' synchronously, and this is the runtime-dispatch decision itself — drop it and seat a PTY commander instead. (b) The death-on-arrival watch reads the pool's ANNOUNCED terminal status frame, which is the SDK counterpart of onTerminalExit — it is a death notice arriving, not a question about whether the desk is alive. Liveness for a seated desk is isManagerDeskAlive, which reads reaped.",
+    why: "Two non-liveness reads: a failed synchronous SDK spawn throws without fallback; the death-on-arrival watch consumes announced terminal status events. Live desk checks still use isManagerDeskAlive and reaped.",
   },
 }
 

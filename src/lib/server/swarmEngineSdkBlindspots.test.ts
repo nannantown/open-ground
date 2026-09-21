@@ -87,14 +87,11 @@ vi.mock('./swarmLaunch', async (importOriginal) => ({
   resolveSwarmRemoteName: async () => 'manager',
 }))
 
-import { readdirSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
-import { fileURLToPath } from 'url'
 import { writeFile, rm, mkdtemp } from 'fs/promises'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
 import {
-  touchesSwarmPaths,
   defaultDeps,
   resumeEngines,
   getOrchestratorState,
@@ -104,7 +101,6 @@ import {
   type AnomalyDeps,
 } from './swarmOrchestrator'
 import { watchSdkDeskForDeathOnArrival, DESK_DOA_WINDOW_MS, spawnSwarmManager } from './swarmManager'
-import { setSettings } from './store'
 import type { SdkStreamFrame } from './sdkSession'
 import type { SdkEvent } from './sdkEvents'
 import { writeEngineIntent } from './swarmEnginePersistence'
@@ -116,100 +112,6 @@ import { forgetSwarmManualStop } from './store'
 import { settingsFile, engineBootsFile } from './paths'
 
 vi.setConfig({ testTimeout: 60_000 })
-
-// ── ① the self-modification gate's membership criterion ──────────────────────
-//
-// SWARM_CODE_PATHS is a list of path regexes, and a list of names rots. The
-// criterion it approximates is written in its header; these tests RE-DERIVE that
-// criterion from the working tree, so a file that joins either family without a
-// matching pattern turns this file RED — which is the whole point (a plain
-// enumeration test would only re-state the list back to itself).
-
-const repoRoot = fileURLToPath(new URL('../../../', import.meta.url))
-
-/** Files DIRECTLY under `dir` (no recursion — the patterns are dir-anchored). */
-const filesIn = (dir: string): string[] => {
-  const abs = join(repoRoot, dir)
-  if (!existsSync(abs)) return []
-  return readdirSync(abs, { withFileTypes: true })
-    .filter((d) => d.isFile())
-    .map((d) => `${dir}/${d.name}`)
-}
-
-/** The dirs the naming convention is anchored to. */
-const CONVENTION_DIRS = [
-  'src/lib/server',
-  'server/routes',
-  'server/routes/__tests__',
-  'src/components/canvas/modules',
-]
-
-/** The desk-runtime seams. Importing ANY of these means the file can change how a
- *  live desk behaves: sdkSession = the SDK pool, workerRuntime = the pty⇔sdk
- *  dispatcher, liveDesks = the ask-BOTH-pools seam. */
-const SEAMS = ['sdkSession', 'workerRuntime', 'liveDesks']
-const SEAM_SPECIFIERS = SEAMS.flatMap((m) => [`'./${m}'`, `'@/lib/server/${m}'`])
-
-describe('① SWARM_CODE_PATHS — the swarm self-modification gate must see the SDK runtime', () => {
-  it('family (a): EVERY sdk*/Sdk*-named file on disk, in every convention dir, trips the gate', () => {
-    const named = CONVENTION_DIRS.flatMap(filesIn).filter((p) => {
-      const base = p.slice(p.lastIndexOf('/') + 1)
-      return /^sdk/i.test(base)
-    })
-    // Sanity: the scan actually found the runtime (a broken scan must not pass by
-    // finding nothing).
-    expect(named).toContain('src/lib/server/sdkSession.ts')
-    expect(named).toContain('src/lib/server/sdkEvents.ts')
-    expect(named).toContain('src/lib/server/sdkGuardHook.ts')
-    expect(named).toContain('server/routes/sdkSession.ts')
-    expect(named).toContain('src/components/canvas/modules/SdkWorkerPane.tsx')
-    expect(named.length).toBeGreaterThanOrEqual(10)
-
-    const missed = named.filter((p) => !touchesSwarmPaths([p]))
-    expect(missed).toEqual([])
-  })
-
-  it('family (b): every SERVER file that imports a desk-runtime seam trips the gate', () => {
-    const serverFiles = ['src/lib/server', 'server/routes', 'server/routes/__tests__']
-      .flatMap(filesIn)
-      .filter((p) => p.endsWith('.ts'))
-    const importers = serverFiles.filter((p) => {
-      const src = readFileSync(join(repoRoot, p), 'utf8')
-      return SEAM_SPECIFIERS.some((s) => src.includes(s))
-    })
-    // The two members of (b) that the naming convention does NOT cover — the
-    // reason family (b) is checked from disk at all.
-    expect(importers).toContain('src/lib/server/worktreeCleanup.ts')
-    expect(importers).toContain('server/routes/terminal.ts')
-
-    const missed = importers.filter((p) => !touchesSwarmPaths([p]))
-    expect(missed).toEqual([])
-  })
-
-  it('the SDK patterns are a CRITERION, not an enumeration — a file that does not exist yet is already covered', () => {
-    // If someone ever replaces the prefix patterns with an explicit list of
-    // today's filenames, these go red: that is the regression this pins.
-    expect(touchesSwarmPaths(['src/lib/server/sdkBrandNewThing.ts'])).toBe(true)
-    expect(touchesSwarmPaths(['src/lib/server/sdkBrandNewThing.test.ts'])).toBe(true)
-    expect(touchesSwarmPaths(['server/routes/sdkBrandNewRoute.ts'])).toBe(true)
-    expect(touchesSwarmPaths(['server/routes/__tests__/sdkBrandNew.test.ts'])).toBe(true)
-    expect(touchesSwarmPaths(['src/components/canvas/modules/SdkBrandNewPane.tsx'])).toBe(true)
-    expect(touchesSwarmPaths(['src/lib/server/workerRuntime.ts'])).toBe(true)
-    expect(touchesSwarmPaths(['src/lib/server/liveDesks.ts'])).toBe(true)
-  })
-
-  it('the widening stayed anchored — unrelated files still do NOT pay for the swarm gate', () => {
-    // Guards the other direction: matching everything is as useless as matching
-    // nothing (every branch would run the swarm suite and the signal would be
-    // renamed noise). These mirror the negatives pinned in the integration test.
-    expect(touchesSwarmPaths(['src/lib/server/projectData.ts'])).toBe(false)
-    expect(touchesSwarmPaths(['src/components/canvas/modules/BoardModule.tsx'])).toBe(false)
-    expect(touchesSwarmPaths(['src/lib/server/sub/sdkX.ts'])).toBe(false) // not directly under the dir
-    expect(touchesSwarmPaths(['docs/sdkSession.ts'])).toBe(false) // wrong dir
-    expect(touchesSwarmPaths(['src/lib/server/canvasData.ts'])).toBe(false)
-    expect(touchesSwarmPaths([])).toBe(false)
-  })
-})
 
 // ── ② the SDK commander desk's death-on-arrival learning ─────────────────────
 
@@ -465,7 +367,6 @@ describe('②-wiring: launchSdkDesk actually ARMS the death-on-arrival watch', (
       claudeBin: '/usr/local/bin/claude',
       cliVersion: '2.1.220',
     })
-    await setSettings({ swarmManagerRuntime: { mode: 'sdk' } })
   })
 
   it('an SDK commander that refuses on arrival cools its tier and drops its session pointer', async () => {
@@ -612,7 +513,7 @@ describe('③ boot resume under SDK-only fail-fast — no degrade notice, no str
     )
     await rm(engineBootsFile(), { recursive: true, force: true })
     try {
-      await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: false })
+      await writeEngineIntent(proj, { desiredRunning: true, overseer: false })
       const deps = safeDeps({
         spawnWorker: spawn,
         fetchTasks: async () =>
@@ -668,7 +569,7 @@ describe('③ boot resume under SDK-only fail-fast — no degrade notice, no str
     )
     await rm(engineBootsFile(), { recursive: true, force: true })
     try {
-      await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: false })
+      await writeEngineIntent(proj, { desiredRunning: true, overseer: false })
       const deps = safeDeps({
         spawnWorker: async () => {
           throw new SdkWorkerUnavailableError(['CLI signed out after the update'])

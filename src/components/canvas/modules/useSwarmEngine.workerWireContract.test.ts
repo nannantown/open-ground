@@ -33,7 +33,6 @@ const emptyEngineState: SwarmOrchestratorState = {
   running: true,
   manualStop: false,
   manualStopPersisted: false,
-  selfSupply: false,
   overseer: false,
   workers: [],
   reviews: [],

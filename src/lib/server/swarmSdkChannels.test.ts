@@ -314,13 +314,10 @@ const overseerDeps = (raised: Raised, over: Partial<OverseerDeps> = {}): Oversee
   now: () => 1_700_000_000_000,
   isAlive: () => true,
   readHeartbeat: async () => null,
-  answerAsOwner: async () => ({ kind: 'answer', text: '答え', confidence: 'high' }),
   openEscalation: async (input) => {
     raised.opened.push(input)
     return { escalation: { id: `esc-${raised.opened.length}`, status: 'open' } as never, deduped: false }
   },
-  canInjectInto: async () => true,
-  injectAnswer: async () => true,
   notifyInfo: async () => ({}),
   peekUsagePct: () => null,
   refreshUsage: () => {},
@@ -418,96 +415,5 @@ describe('overseer S4: two blocked SDK workers are two workers', () => {
     )
     expect(out.ran).toBe(true)
     expect(raised.opened.map((o) => o.branch)).toEqual(['swarm/ok'])
-  })
-})
-
-describe('overseer T1: a proxy answer reaches an SDK worker', () => {
-  it('delivers into the SDK session instead of raising a delivery failure', async () => {
-    const seen: string[] = []
-    const s = spawnSdkSession({ cwd: '/wt/t1', role: 'worker', options: {}, queryFn: echoQuery(seen) })
-    await settle()
-
-    const raised: Raised = { opened: [] }
-    const ov = armedRuntime({
-      // A brain result parked by a PRIOR pass — exactly what the fire-and-forget
-      // chain leaves behind, carrying the worker's whole handle.
-      brainResults: [
-        {
-          signalKey: 'S4:sdk-t1',
-          question: 'A案とB案、どちらで進めますか？',
-          context: 'ctx',
-          taskId: 'card-t1',
-          branch: 'swarm/t1',
-          runtime: 'sdk',
-          sdkSessionId: s.id,
-          answer: { kind: 'answer', text: 'B案で進めてください', confidence: 'high' },
-        },
-      ],
-    })
-    const engine = engineWith(
-      [{ ...sdkHandle(s.id), branch: 'swarm/t1', taskId: 'card-t1', taskTitle: 'T1' }],
-      ov,
-    )
-
-    await runOverseerPass(
-      engine,
-      [],
-      () => {},
-      overseerDeps(raised, {
-        // Only the registry lookup is faked — the RUNTIME BRANCH under test is
-        // the real one inside deliverAnswerToWorker.
-        deliverAnswer: (target, projectPath, text) =>
-          deliverAnswerToWorker(target, projectPath, text, { canPushInto: async () => true }),
-      }),
-    )
-    await settle()
-
-    // The answer landed in the worker's own conversation…
-    expect(seen.some((t) => t.includes('B案で進めてください'))).toBe(true)
-    // …and the owner was NOT told the delivery failed. Before the fix this was
-    // the ONLY outcome for an SDK worker: an inbox row saying "the proxy answered
-    // but could not deliver it — please hand it over yourself", every pass.
-    expect(raised.opened).toHaveLength(0)
-    terminateSdkSession(s.id)
-  })
-
-  it('a PTY worker still goes through the injected canInjectInto / injectAnswer deps', async () => {
-    // The other half of the same claim: adding the SDK arm must not quietly
-    // re-route the PTY one (those two deps are what every existing overseer test
-    // observes).
-    const injected: { terminalId: string; text: string }[] = []
-    const raised: Raised = { opened: [] }
-    const ov = armedRuntime({
-      brainResults: [
-        {
-          signalKey: 'S4:term-1',
-          question: 'どちらにしますか？',
-          context: 'ctx',
-          taskId: 'card-p',
-          branch: 'swarm/p',
-          terminalId: 'term-1',
-          answer: { kind: 'answer', text: 'A で', confidence: 'high' },
-        },
-      ],
-    })
-    const engine = engineWith(
-      [{ terminalId: 'term-1', branch: 'swarm/p', taskId: 'card-p', taskTitle: 'P' }],
-      ov,
-    )
-    await runOverseerPass(
-      engine,
-      [],
-      () => {},
-      overseerDeps(raised, {
-        injectAnswer: async (terminalId, text) => {
-          injected.push({ terminalId, text })
-          return true
-        },
-      }),
-    )
-    expect(injected).toHaveLength(1)
-    expect(injected[0].terminalId).toBe('term-1')
-    expect(injected[0].text).toContain('A で')
-    expect(raised.opened).toHaveLength(0)
   })
 })

@@ -9,7 +9,11 @@ import type { ProjectData } from '@/lib/types'
 // seconds (and on window focus) and feeds the result here to decide whether to
 // adopt it — without clobbering local work or churning the board needlessly.
 //
-// The three outcomes, and WHY each exists:
+// The outcomes, and WHY each exists:
+//
+//  • stale — another load/save was adopted while this read was in flight.
+//    Ignore the late response; the next poll reads from the new baseline.
+//    This orders requests without rejecting a deliberately restored backup.
 //
 //  • skip-local-edit — the panel has an unsaved local edit (its current data no
 //    longer matches what it last persisted/loaded). The local edit wins THIS
@@ -36,6 +40,7 @@ import type { ProjectData } from '@/lib/types'
 // Single-user, after-wins, byte-comparison — kept as a pure function so the
 // policy is one place, documented, and unit-tested independent of the panel.
 export type ReconcileDecision =
+  | { kind: 'stale' }
   | { kind: 'skip-local-edit' }
   | { kind: 'echo' }
   | { kind: 'adopt'; data: ProjectData; json: string }
@@ -44,6 +49,7 @@ export const reconcileExternalData = ({
   current,
   lastSavedJson,
   fetched,
+  requestedFromJson,
 }: {
   /** The panel's live in-memory ProjectData (null before the first load). */
   current: ProjectData | null
@@ -51,7 +57,12 @@ export const reconcileExternalData = ({
   lastSavedJson: string
   /** The freshly-fetched ProjectData from the poll / focus refetch. */
   fetched: ProjectData
+  /** Saved snapshot when this GET started, before awaiting its response. */
+  requestedFromJson?: string
 }): ReconcileDecision => {
+  if (requestedFromJson !== undefined && requestedFromJson !== lastSavedJson) {
+    return { kind: 'stale' }
+  }
   // A pending local edit diverges from the last saved snapshot → local wins.
   if (current && JSON.stringify(current) !== lastSavedJson) {
     return { kind: 'skip-local-edit' }

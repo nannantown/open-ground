@@ -6,10 +6,8 @@ import {
   createModule,
   deleteModule,
   getModule,
-  installModule,
   isValidModuleId,
   listModules,
-  markPublished,
   readModuleSource,
   starterSource,
   updateModule,
@@ -144,49 +142,6 @@ describe('deleteModule', () => {
   it('false for invalid / unknown ids', async () => {
     expect(await deleteModule('../nope')).toBe(false)
     expect(await deleteModule('123e4567-e89b-42d3-a456-426614174000')).toBe(false)
-  })
-})
-
-describe('markPublished', () => {
-  it('stamps remoteId / version / publishedAt onto the def', async () => {
-    const def = await createModule({ label: 'P', description: '' })
-    const meta = {
-      remoteId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-      version: 3,
-      publishedAt: '2026-06-12T00:00:00Z',
-    }
-    const updated = await markPublished(def.id, meta)
-    expect(updated).toMatchObject(meta)
-    expect(await getModule(def.id)).toMatchObject(meta)
-  })
-})
-
-describe('installModule', () => {
-  const row = {
-    remoteId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-    label: 'Market Tab',
-    description: 'from the marketplace',
-    framework: 'react' as const,
-    version: 2,
-    publishedAt: '2026-06-12T00:00:00Z',
-    source: 'export default () => <div>installed</div>\n',
-  }
-
-  it('writes a local copy with origin installed', async () => {
-    const def = await installModule(row)
-    expect(def.origin).toBe('installed')
-    expect(def.remoteId).toBe(row.remoteId)
-    expect(def.label).toBe('Market Tab')
-    expect((await readModuleSource(def.id))?.source).toBe(row.source)
-  })
-
-  it('re-installing the same remoteId updates in place (no duplicate)', async () => {
-    const first = await installModule(row)
-    const second = await installModule({ ...row, version: 3, source: 'updated\n' })
-    expect(second.id).toBe(first.id)
-    expect(second.version).toBe(3)
-    expect(await listModules()).toHaveLength(1)
-    expect((await readModuleSource(first.id))?.source).toBe('updated\n')
   })
 })
 

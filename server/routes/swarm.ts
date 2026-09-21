@@ -79,15 +79,12 @@ import {
   resolveOrchestratorReview,
   getOrchestratorState,
   drainTickOrchestrator,
-  setSelfSupply,
   setOverseer,
   dismissOverseerReminder,
   writeManagerHeartbeat,
   noticeDeliverable,
   ClaudeNotReadyError,
 } from '@/lib/server/swarmOrchestrator'
-import { approveSelfSupplyCard } from '@/lib/server/swarmSelfSupply'
-import { brainSandboxAvailable } from '@/lib/server/swarmOverseerBrain'
 import { listSwarmNotifications, markSwarmNotificationHandled } from '@/lib/server/swarmNotifications'
 import {
   listEscalations,
@@ -121,19 +118,20 @@ import {
   isSelfProject,
 } from '@/lib/server/swarmLandedLedger'
 import { basename } from 'path'
-import type { SwarmAllowedModels } from '@/lib/types'
+import { asTaskTier, type SwarmAllowedModels } from '@/lib/types'
+import { applySafetyFloor } from '@/lib/cardTier'
 import type {
   AppNotificationsResponse,
   EscalationsResponse,
   EscalationOpenResponse,
   EscalationAnswerResponse,
   EscalationDismissResponse,
-  EscalationProxyDraft,
   EscalationWhy,
   SwarmQuotaResponse,
   SwarmLandedKpi,
   SwarmLandedWeek,
   SpawnSwarmWorkerResponse,
+  TaskTier,
 } from '@/lib/types'
 
 // The /order goal (card title + notes) is typed into the TUI as ONE line. A
@@ -287,6 +285,10 @@ export const swarmRoutes = new Hono()
     // Resolve the goal: a Board card (taskId) wins; else an explicit title.
     let title = ''
     let notes: string | undefined
+    // Difficulty tier (2026-09-18): the card's, with the client's LIVE value
+    // winning for the same debounce reason as title/notes below. Null clears an
+    // unsaved override; omission and junk preserve the stored value.
+    let tier: TaskTier | undefined = asTaskTier(body?.tier)
     const taskId = typeof body?.taskId === 'string' ? body.taskId : ''
     if (taskId) {
       // The path passed validateProjectPath, so this read cannot escape the
@@ -296,6 +298,7 @@ export const swarmRoutes = new Hono()
       if (!card) return c.json({ error: 'task not found' }, 404)
       title = card.title ?? ''
       notes = typeof card.notes === 'string' ? card.notes : undefined
+      tier = asTaskTier(card.tier)
       // ⚠ THE CLIENT'S LIVE FIELDS WIN OVER THE DISK COPY (2026-08-26), the same
       // contract composeTaskPrompt has always had for the terminal path
       // ({@link LiveTaskFields}). The Board drawer DEBOUNCES its edits (~350ms)
@@ -307,6 +310,12 @@ export const swarmRoutes = new Hono()
       // Bounded by MAX_GOAL below like every other goal, and owner-gated above.
       if (typeof body?.title === 'string' && body.title.trim()) title = body.title
       if (typeof body?.notes === 'string' && body.notes.trim()) notes = body.notes
+      tier = body?.tier === null ? undefined : asTaskTier(body?.tier) ?? tier
+      // SAFETY FLOOR on the STORED card too: the live fields above REPLACE the
+      // stored title/notes, so a live body without the danger word would
+      // otherwise drop the floor the saved card trips (spawnSwarmWorker only
+      // sees what it is handed). Raise-only — never lowers a written tier.
+      tier = applySafetyFloor(tier, `${card.title ?? ''}\n${card.notes ?? ''}`)
     } else if (typeof body?.title === 'string' && body.title.trim()) {
       title = body.title
       notes = typeof body?.notes === 'string' ? body.notes : undefined
@@ -420,6 +429,7 @@ export const swarmRoutes = new Hono()
         projectPath: path,
         title,
         notes,
+        ...(tier ? { tier } : {}),
         hint,
         worktree: reuse,
       })
@@ -510,20 +520,6 @@ export const swarmRoutes = new Hono()
       return c.json({ error: `failed to spawn supply: ${e?.message ?? e}` }, 500)
     }
   })
-  // --- POST /api/swarm/manager — spawn the in-app commander (司令官) ----------
-  // Body: { path, cols?, rows?, fresh? }. Launches ONE interactive claude PTY in the
-  // project's PRIMARY checkout (NOT a worktree) running the /manage skill — the
-  // conversational commander the owner talks to (status / merge / advise),
-  // complementing the autonomous orchestrator engine. No worktree is created
-  // (the commander operates on the primary checkout), so there is nothing to
-  // tear down — stopping it is a plain terminal kill (DELETE /api/terminal/:id).
-  // Owner-only + validated + preflighted exactly like /supply; bypass +
-  // SWARM_MANAGER=1 (set in swarmManager) — a role TAG, not a guard opt-in:
-  // the WORKER-ONLY PreToolUse veto never polices the trusted commander.
-  // RESUMES the project's previous commander conversation by default (the response's
-  // `resumed` says which happened) — and a resumed commander re-reads the Board
-  // before it speaks, because the engine's in-memory roster did NOT survive the
-  // restart even though the conversation did. `fresh:true` opts out (swarmSessions.ts).
   // --- POST /api/swarm/supply/stop — the owner turns the supply desk OFF -----
   // Body: { path }. Kills every live supply-desk PTY in the project and clears
   // the persisted supplyDesired flag — the counterpart of the spawn route's
@@ -547,10 +543,10 @@ export const swarmRoutes = new Hono()
     await patchEngineIntent(path, { supplyDesired: false }).catch(() => {})
     return c.json({ ok: true, stopped })
   })
+  // Managers launch through the SDK with /og-manage in the primary checkout.
+  // Supply keeps its interactive PTY. Both preserve conversation IDs on restart.
   .post('/api/swarm/manager', async (c) => {
-    // OWNER-ONLY gate (see /api/swarm/worker): the commander session is an
-    // owner-only control-plane spawn. Non-owner / signed-out → 403, before any
-    // body parse / path validation.
+    // Shared Swarm access gate, including the public opt-in, before body parsing.
     if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
@@ -562,8 +558,7 @@ export const swarmRoutes = new Hono()
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
 
-    // Preflight BEFORE spawning: a missing/signed-out claude would open its own
-    // OAuth browser and orphan a PTY. Same machine-readable 503 as /supply.
+    // Refuse an unavailable or signed-out CLI before spawning, as /supply does.
     const pre = await claudeRunPreflight()
     if (!pre.ok) return c.json(pre.body, 503)
 
@@ -582,15 +577,13 @@ export const swarmRoutes = new Hono()
       )
     }
 
-    const cols = Number.isFinite(body?.cols) ? Number(body.cols) : undefined
-    const rows = Number.isFinite(body?.rows) ? Number(body.rows) : undefined
     try {
       // Default: RESUME the project's persisted commander conversation when claude
       // can still load it (swarmSessions.ts). The resumed commander is ordered to
       // re-read the Board first — its conversation survived the restart, the
       // engine's in-memory roster did not. `fresh:true` forces a new conversation.
       const fresh = body?.fresh === true
-      const res = await spawnSwarmManager({ projectPath: path, cols, rows, fresh })
+      const res = await spawnSwarmManager({ projectPath: path, fresh })
       // The owner wants this desk UP — remember it across restarts (engine.json),
       // the exact twin of the supply spawn's write above. WITHOUT this the
       // commander was the ONE desk with nothing to come back for: an update
@@ -937,41 +930,8 @@ export const swarmRoutes = new Hono()
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json(await resolveOrchestratorReview(path, taskId, target))
   })
-  // --- POST /api/swarm/orchestrator/selfsupply — arm/disarm self-supply (b3fbbfba) -
-  // Body: { path, enabled:boolean }. Toggles the engine proposing its OWN
-  // improvement cards (discovered from tsc/lint/test/anomalies/TODOs) into todo. A
-  // SEPARATE switch from autonomy (start/stop) and auto-integrate, default OFF.
-  // Even when ON, a proposed card is owner-approval-gated (see /approve below): the
-  // engine FILLS todo but never auto-dispatches what it proposed. Ignition waits
-  // for the rest of the safety net to land — until then this stays OFF.
-  // Owner-only + validated, like the rest of /api/swarm/*.
-  .post('/api/swarm/orchestrator/selfsupply', async (c) => {
-    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
-    let body: any
-    try {
-      body = await c.req.json()
-    } catch {
-      return c.json({ error: 'invalid body' }, 400)
-    }
-    const path = typeof body?.path === 'string' ? body.path : ''
-    if (!path) return c.json({ error: 'path is required' }, 400)
-    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-    if (typeof body?.enabled !== 'boolean') return c.json({ error: 'enabled is required' }, 400)
-    return c.json(await setSelfSupply(path, body.enabled))
-  })
   // --- POST /api/swarm/orchestrator/overseer — arm/disarm the OVERSEER (EPIC C) ----
-  // Body: { path, enabled:boolean }. Toggles the autonomous proxy-you BRAINSTEM (the
-  // THIRD toggle — D1): it watches the swarm and, on judgment edges, wakes a one-off
-  // brain (fire-and-forget) or raises to the human inbox. SEPARATE from autonomy
-  // (start/stop) / selfSupply, default OFF, in-memory (a restart re-arms
-  // OFF — K2). ASYMMETRIC: an explicit autonomy OFF CLEARS it (the owner re-arms every
-  // session). Owner-only + validated, like the rest of /api/swarm/* (K3). GET carries
-  // no mutation (K8); this POST is the only path that sets `enabled` true.
-  // L3: the brain's one-off PTY is ALWAYS kernel-sandboxed on macOS (network
-  // loopback + the allowlist egress proxy — swarmOverseerBrain, NOT gated on the
-  // owner experiment), so the warning fires only where that close is UNAVAILABLE
-  // (off-darwin / sandbox-exec gone): there the brain runs on the permission-layer
-  // stop-gap alone (a structural READ-ONLY design + budget still hold).
+  // Deterministic monitoring only: owner questions, failures, usage and cleanup.
   .post('/api/swarm/orchestrator/overseer', async (c) => {
     if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
@@ -985,12 +945,7 @@ export const swarmRoutes = new Hono()
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     if (typeof body?.enabled !== 'boolean') return c.json({ error: 'enabled is required' }, 400)
     const state = await setOverseer(path, body.enabled)
-    // Surface the L3 warning to the UI when ARMING on a host where the brain's
-    // structural egress close cannot exist (non-darwin, or sandbox-exec removed) —
-    // it signals the reduced containment honestly. On macOS the brain is always
-    // sandboxed regardless of the owner experiment, so no warning fires there.
-    const sandboxWarning = body.enabled && !brainSandboxAvailable()
-    return c.json({ ...state, sandboxWarning })
+    return c.json(state)
   })
   // --- POST /api/swarm/orchestrator/overseer/dismiss — forget the restore reminder --
   // Body: { path }. card 2b: clears the persisted `overseer:true` in engine.json so the
@@ -1011,27 +966,6 @@ export const swarmRoutes = new Hono()
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json(await dismissOverseerReminder(path))
-  })
-  // --- POST /api/swarm/orchestrator/selfsupply/approve — approve a proposed card --
-  // Body: { path, cardId }. The owner green-lights ONE self-supplied (engine-
-  // proposed) card for dispatch: sets selfSupplyApproved on the card so
-  // selectDispatch stops skipping it. The per-card runaway gate — a self-supplied
-  // card never spawns a worker until this runs. Idempotent (a non-self-supplied /
-  // already-approved / absent card is a no-op). Owner-only + validated.
-  .post('/api/swarm/orchestrator/selfsupply/approve', async (c) => {
-    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
-    let body: any
-    try {
-      body = await c.req.json()
-    } catch {
-      return c.json({ error: 'invalid body' }, 400)
-    }
-    const path = typeof body?.path === 'string' ? body.path : ''
-    const cardId = typeof body?.cardId === 'string' ? body.cardId : ''
-    if (!path) return c.json({ error: 'path is required' }, 400)
-    if (!cardId) return c.json({ error: 'cardId is required' }, 400)
-    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-    return c.json(await approveSelfSupplyCard(path, cardId))
   })
   // ─── Escalations inbox (C1 — docs/OVERSEER_DESIGN.md §8) ───────────────────
   // The HUMAN VALVE: questions the swarm could not (or must not) answer land
@@ -1061,7 +995,7 @@ export const swarmRoutes = new Hono()
   })
   // --- POST /api/swarm/escalations/open — raise a question to the user -------
   // Body: { path, question, context, plainQuestion?, whyEscalated, receiptKey?,
-  //         taskId?, branch?, runtime?, terminalId?, sdkSessionId?, proxyDraft? }.
+  //         taskId?, branch?, runtime?, terminalId?, sdkSessionId? }.
   // `runtime` + the ONE handle it names is the blocked worker's ADDRESS — an
   // SDK worker CANNOT be named by terminalId (it is the empty string).
   // Idempotent on receiptKey while
@@ -1094,27 +1028,6 @@ export const swarmRoutes = new Hono()
     const whyEscalated = whys.find((w) => w === body?.whyEscalated)
     if (!whyEscalated) {
       return c.json({ error: 'whyEscalated must be irreversible | insufficient-info | policy' }, 400)
-    }
-    // proxyDraft is optional but, when present, must be WELL-FORMED — silently
-    // dropping a malformed draft would hide the proxy's provisional answer from
-    // the owner (fail-loud beats fail-quiet on the decision surface).
-    let proxyDraft: EscalationProxyDraft | undefined
-    if (body?.proxyDraft !== undefined) {
-      const d = body.proxyDraft
-      const confidences = ['high', 'medium', 'low']
-      if (
-        !d ||
-        typeof d !== 'object' ||
-        typeof d.answer !== 'string' ||
-        !confidences.includes(d.confidence) ||
-        typeof d.isAbstention !== 'boolean'
-      ) {
-        return c.json({ error: 'proxyDraft is malformed' }, 400)
-      }
-      if (d.answer.length > MAX_ESCALATION_ANSWER) {
-        return c.json({ error: 'proxyDraft.answer too large' }, 400)
-      }
-      proxyDraft = { answer: d.answer, confidence: d.confidence, isAbstention: d.isAbstention }
     }
     // The blocked worker's ADDRESS. `runtime` is what tells openEscalation which
     // handle names the worker (pty ⇔ terminalId, sdk ⇔ sdkSessionId —
@@ -1170,7 +1083,6 @@ export const swarmRoutes = new Hono()
         ...(runtime ? { runtime } : {}),
         terminalId: typeof body?.terminalId === 'string' ? body.terminalId : undefined,
         sdkSessionId: typeof body?.sdkSessionId === 'string' ? body.sdkSessionId : undefined,
-        proxyDraft,
       })
       return c.json<EscalationOpenResponse>(res)
     } catch (e: any) {
@@ -1178,8 +1090,7 @@ export const swarmRoutes = new Hono()
     }
   })
   // --- POST /api/swarm/escalations/answer — the owner's decision --------------
-  // Body: { id, answer }. Persists the answer, writes the Q→A back to you-corpus
-  // memory (owner answers only), then delivers: injects into the LIVE worker PTY
+  // Body: { id, answer }. Persists the answer, then delivers to the live worker
   // or queues for the card's next dispatch. Re-answering an answered record is
   // an idempotent no-op; answering a dismissed one is 409.
   .post('/api/swarm/escalations/answer', async (c) => {

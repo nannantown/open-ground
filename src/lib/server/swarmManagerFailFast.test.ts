@@ -1,29 +1,6 @@
 // @vitest-environment node
-//
-// THE COMMANDER'S SDK FAIL-FAST CONTRACT (2026-08-13).
-//
-// This file used to pin the OPPOSITE behaviour (swarmManagerFallback.test.ts):
-// dial 'sdk' + an SDK path that could not be established ⇒ a PTY desk plus a
-// `fellBackBecause` reason on the response. The owner deleted that
-// auto-fallback together with the worker's — a fallback that absorbs real
-// breakage keeps it broken forever, and an invisible degrade is
-// indistinguishable from a switch that does not work. The new contract:
-//
-//   • dial 'sdk' ⇒ the spawn either RETURNS an SDK desk or THROWS
-//     SdkManagerUnavailableError — launchClaude is NEVER reached from an SDK
-//     dial, and no desk is seated on a failure;
-//   • dial 'pty' (the EXPLICIT kill switch — it survives) ⇒ a plain PTY desk,
-//     and the SDK path is not even consulted;
-//   • the throw's message names the cause, because the route turns it into the
-//     500 body the owner reads (a console.warn inside a forked server in a
-//     packaged app reaches nobody — that part of the old lesson still holds).
-//
-// The retry/bell story for a broken machine lives with the CALLERS: the
-// engine's resurrection reflex counts a failed wake (grace → 3-strike
-// 'manager-unrevivable' fatal → 30-min re-arm), and the 司令官 button surfaces
-// the error text directly. Every side effect is mocked — no PTY, no claude, no
-// SDK session — and HOME is the suite's tmp dir, so the dial write never
-// touches the real ~/.openground.
+// Every new manager uses SDK, including installs with legacy PTY settings.
+// Failures remain visible and must never open a terminal fallback.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -74,7 +51,7 @@ vi.mock('./sdkSession', async (importOriginal) => ({
   spawnSdkSession: mocks.spawnSdkSession,
 }))
 
-import { spawnSwarmManager, MANAGER_DESK_LABEL } from './swarmManager'
+import { spawnSwarmManager } from './swarmManager'
 import { SdkManagerUnavailableError } from './swarmManagerSdk'
 import { setSettings } from './store'
 
@@ -94,11 +71,9 @@ beforeEach(async () => {
   mocks.sdkManagerLaunchPlan.mockReturnValue({ options: {}, initialPrompt: '/og-manage', warnings: [] })
   mocks.launchClaude.mockImplementation(() => {
     throw new Error(
-      'launchClaude must never be reached from an SDK dial (the auto-fallback was deleted 2026-08-13)',
+      'launchClaude must never be reached for an SDK-only manager',
     )
   })
-  // The dial the whole file is about. Written to the ISOLATED tmp home.
-  await setSettings({ swarmManagerRuntime: { mode: 'sdk' } })
 })
 
 describe('commander SDK fail-fast — an SDK dial never seats a PTY desk', () => {
@@ -178,19 +153,17 @@ describe('commander SDK fail-fast — an SDK dial never seats a PTY desk', () =>
     expect(mocks.launchClaude).not.toHaveBeenCalled()
   })
 
-  it('the EXPLICIT pty dial still seats a PTY desk — and never consults the SDK path', async () => {
-    // The kill switch survives the fallback's deletion on purpose: an owner can
-    // still force the commander onto a terminal (Remote Control), and that
-    // choice must not run any SDK code.
-    await setSettings({ swarmManagerRuntime: { mode: 'pty' } })
-    mocks.launchClaude.mockImplementation(() => ({ terminalId: 'term-1' }))
+  it('a legacy PTY preference cannot change the SDK-only launch path', async () => {
+    await setSettings({ swarmManagerRuntime: { mode: 'pty' } } as never)
+    mocks.sdkManagerPreflight.mockReturnValue({
+      ok: true, problems: [], claudeBin: '/usr/local/bin/claude', cliVersion: '2.1.220',
+    })
+    mocks.spawnSdkSession.mockReturnValue({ id: 'sdk-live', status: 'working' })
 
     const r = await spawnSwarmManager({ projectPath: PROJ })
 
-    expect(r.runtime).toBe('pty')
-    expect(r.terminalId).toBe('term-1')
-    expect(mocks.sdkManagerPreflight).not.toHaveBeenCalled()
-    expect(mocks.spawnSdkSession).not.toHaveBeenCalled()
-    expect(MANAGER_DESK_LABEL).toBeTruthy()
+    expect(r.runtime).toBe('sdk')
+    expect(r.sdkSessionId).toBe('sdk-live')
+    expect(mocks.launchClaude).not.toHaveBeenCalled()
   })
 })

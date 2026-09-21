@@ -1,70 +1,13 @@
-// swarmManager — the in-app, tmux-free replacement for the shell swarm's
-// `manager` cockpit pane (the `/manage` commander). It is the "commander
-// (司令官)" CONVERSATION primitive of the OPEN GROUND swarm port (docs /
-// auto-memory project_inapp_swarm_port): the owner's INTEGRATION DESK. Given a
-// registered project it launches ONE interactive `claude` PTY in the project's
-// PRIMARY checkout running the `/og-manage` skill — the tmux-free commander
-// protocol — which monitors the workers, answers "状況 / マージ / 掃除 / 相談",
-// and integrates finished `swarm/*` branches (FF / rebase only, never forced)
-// — all in conversation with the user, driving the app's own HTTP API (never
-// tmux; the shell cockpit's `/manage` skill stays tmux-land, untouched).
-//
-// This is the human-in-the-loop counterpart to the AUTONOMOUS engine
-// (swarmOrchestrator, behind /api/swarm/orchestrator): the engine is the
-// unattended drain → dispatch → monitor → integrate loop the commander dashboard
-// arms with its toggles; THIS session is the commander you talk to. The two
-// coexist on the same tab.
-//
-// Like the SUPPLY officer (swarmSupply.ts) and UNLIKE a WORKER (swarmWorker.ts),
-// the commander conversation gets NO worktree: it operates on the primary
-// checkout. It runs bypass and — under WORKER-ONLY guard scoping (2026-07) — is
-// NOT policed by the PreToolUse veto: the commander is the human-in-the-loop
-// integration desk, a TRUSTED session the user talks to, so it runs with the same
-// freedom as a plain claude (the veto polices only the confined, unattended worker
-// — see scripts/openground-guard.js). SWARM_MANAGER=1 now only TAGS the session as
-// the commander for tooling/skills, not as a guard opt-in. There is nothing to
-// tear down on stop; stopping it is a plain PTY kill (the terminal DELETE route).
-//
-// This mirrors the shell `manager` launcher's FLAGS exactly — but hands claude
-// the app-native skill instead of the cockpit one:
-//   shell:  exec env SWARM_MANAGER=1 claude --model opus --effort max \
-//               --dangerously-skip-permissions --remote-control manager "/manage"
-//   in-app: same flags, positional prompt = "/og-manage"
-//   - SWARM_MANAGER=1 — TAGS the session as the swarm commander (for tooling /
-//     the commander skill). Under worker-only guard scoping it is NOT a guard
-//     opt-in: the trusted commander is not policed by the PreToolUse veto.
-//   - bypass (--dangerously-skip-permissions) — the commander runs git
-//     (status / merge / branch -d) and Board moves unattended-style so the
-//     conversation isn't interrupted by a tool-approval prompt each turn; its
-//     safety net is the human in the loop, not the veto.
-//   - opus / max — the commander reasons about integration order, conflicts and
-//     worker state at full capability (mirrors the shell launcher).
-//   - /og-manage as claude's POSITIONAL prompt — claude runs the skill on
-//     startup, then stays interactive for the conversation. (A TUI-injected
-//     slash command would not submit — the delivery fix swarmSupply/swarmWorker
-//     document.) The skill difference is the point: /manage assumes a tmux
-//     cockpit (swarm-pane.sh dispatch, respawn, swarm-watch), none of which
-//     exist inside the app's PTY; /og-manage speaks the app's HTTP API instead.
-// Subscription-only: launchClaude drives the user's `claude` CLI, never
-// `claude -p` / the SDK.
+// SDK-only manager desk in the project's primary checkout. Conversation resume,
+// quota learning and the one-desk-per-project lock apply to every new launch.
+// Existing legacy PTY desks remain addressable until stopped; never seat a twin.
 
 import { randomUUID } from 'crypto'
 import { resolve } from 'path'
-import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
-import {
-  swarmLaunchDefaults,
-  resolveSwarmModelEffortProbed,
-  resolveSwarmRemoteName,
-} from './swarmLaunch'
+import { resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { resolveSwarmSession, recordSwarmSession, forgetSwarmSessionIf } from './swarmSessions'
-import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
-// ⚠ PTY-ONLY functions are deliberately NOT imported here. `listLiveDesksIn` /
-// `isTerminalProcessAlive` answer desk presence for one pool, and a commander
-// desk can live on either — asking them is how a TWIN commander gets seated.
-// Presence goes through swarmManagerRuntime (both pools); see docs/MAP.md §5.
-import { onTerminalExit, getTerminalScreen } from './terminal'
-import { matchesQuotaExhaustion, normalizeScreen } from './swarmRateLimitText'
+import { getPromptLang, type PromptLang } from './promptLang'
 import { markRateLimited, isModelTier } from './swarmQuota'
 import { installOgManageSkill } from './ogManageSkill'
 import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
@@ -87,13 +30,14 @@ import {
   type SdkStreamFrame,
 } from './sdkSession'
 import { watchSdkDeskForLimit } from './sdkDeskLimit'
-import { getExecutionMode, getAllowedModelTiers, getManagerRuntimeDial } from './store'
+import { getExecutionMode, getAllowedModelTiers } from './store'
+import { recycleDeskSessionIfOverCap, deskRecycledLogLine } from './deskContextCap'
+import { logToEngine } from './engineLogSink'
 import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmManagerResponse } from '../types'
 
-/** The skill the commander session runs, handed to claude as its positional
- *  prompt (claude submits it on startup; a TUI-injected slash command would
- *  not). The role is the `manager` (Remote Control label) running `/og-manage`
+/** The skill the SDK commander runs from its initial prompt.
+ *  The role is the `manager` running `/og-manage`
  *  — the tmux-FREE commander protocol (~/.claude/skills/og-manage/): its eyes
  *  are GET /api/swarm/workers + git, it dispatches via POST /api/swarm/worker,
  *  and it never mentions or runs tmux. The shell cockpit's `/manage` (tmux
@@ -103,8 +47,8 @@ import { type SpawnSwarmManagerResponse } from '../types'
  *  points at the app-native sibling instead. */
 export const MANAGER_INJECTION = '/og-manage'
 
-/** The owner-facing name of this desk, carried onto its PTY pool entry
- *  (`TerminalInfo.deskLabel`). Consumers: the model-limit watch names the desk
+/** The owner-facing name of this desk, also used to identify legacy PTY entries.
+ *  Consumers: the model-limit watch names the desk
  *  by it (ownerDeskLimit.ts), and the singleton guard IDENTIFIES a commander
  *  desk by it — the pool is the only authority that cannot desynchronise from
  *  itself. A desk the owner started by hand carries no label, so it is never
@@ -130,7 +74,7 @@ export { MANAGER_DESK_LABEL }
  *      "the three workers I dispatched" is describing a world that no longer
  *      exists for THAT detail.
  *    - Its ENGINE ON/OFF state may or may not be what it remembers, in EITHER
- *      direction: `running` (and `selfSupply`) can now come back on its OWN,
+ *      direction: `running` can now come back on its OWN,
  *      with no owner action, if the project's `engine.json` said
  *      `desiredRunning:true` before the restart (boot's `resumeEngines()` —
  *      the reversal of the old "restart always turns autonomy off" rule). So
@@ -155,7 +99,7 @@ export { MANAGER_DESK_LABEL }
  *  risks being split / collapsed into a `[Pasted text]` chip where `/og-manage` is
  *  never parsed as a command. */
 export const MANAGER_RESUME_INJECTION =
-  '/og-manage セッション再開: アプリ再起動をまたいで前回の会話を復元した。記憶をそのまま前提にするな — worker roster・review・journal は再起動で全消えし(card 3 未着手)、再起動はたいていリリースなのでコード自体も変わっている。エンジンの running/selfSupply は前回 ON だった意図が自動で戻っていることがある(boot 時の自動再開・owner の手動停止があれば戻らない)ので、今の running が「誰かが今つけた」のか「前回の意図が生き残った」のかは決めつけるな。最初にやることは1つだけ: 「状況」を頭から実行し、Board の実体(todo/doing/review)・worker 一覧・エンジン状態を API と git で読み直して、その結果だけを根拠に現状を報告する。前回の認識との食い違いがあれば現物(API/git)を正とし、食い違った点を明示すること。'
+  '/og-manage セッション再開: アプリ再起動をまたいで前回の会話を復元した。記憶をそのまま前提にするな — worker roster・review・journal は再起動で全消えし(card 3 未着手)、再起動はたいていリリースなのでコード自体も変わっている。エンジンの running は前回 ON だった意図が自動で戻っていることがある(boot 時の自動再開・owner の手動停止があれば戻らない)ので、今の running が「誰かが今つけた」のか「前回の意図が生き残った」のかは決めつけるな。最初にやることは1つだけ: 「状況」を頭から実行し、Board の実体(todo/doing/review)・worker 一覧・エンジン状態を API と git で読み直して、その結果だけを根拠に現状を報告する。前回の認識との食い違いがあれば現物(API/git)を正とし、食い違った点を明示すること。'
 
 /** How long after launch a commander desk's death still counts as DEATH ON
  *  ARRIVAL — i.e. as evidence about the TIER rather than about the work.
@@ -169,138 +113,10 @@ export const MANAGER_RESUME_INJECTION =
  *  same reason: it bounds a `claude` that has to boot before it can answer.) */
 export const DESK_DOA_WINDOW_MS = 90_000
 
-/** LEARN FROM THE CORPSE: if the desk we just launched dies on arrival because
- *  its MODEL is spent, cool that tier so the next launch does not repeat it.
- *
- *  WHY THIS EXISTS ALONGSIDE THE PRE-LAUNCH PROBE (2026-07-19). The probe is a
- *  PREDICTION and every prediction has a fail-open path — it waits at most 8s,
- *  it cannot run without a resolved binary, and a tier can dry up in the seconds
- *  between the verdict and the spawn. When the prediction misses, the outcome is
- *  a desk that prints "You've reached your Fable 5 limit." and exits, and the
- *  engine's only recorded reaction was to try again 5 minutes later — on the same
- *  tier, because nothing had written the wall down. Four desks died that way.
- *  An OUTCOME is strictly better evidence than a prediction, and it is free: the
- *  desk already paid for it. This closes the loop no pre-launch check can.
- *
- *  ONLY THE CLI'S QUOTA-REFUSAL WORDING COOLS ANYTHING — the same polarity rule
- *  the probe follows (swarmRateLimitText.QUOTA_EXHAUSTION_PATTERNS, and the
- *  measured 2026-07-13 reason for it): a mark here is 20 PERSISTED minutes
- *  applied to every spawn path, so a desk that died of a crash, an owner's ^D, a
- *  bad skill or a transient 529 must NOT drag a healthy tier down with it. "The
- *  desk died young" is not evidence about the tier; "the desk said the tier is
- *  spent" is.
- *
- *  ALSO FORGETS THE STALE SESSION POINTER — BUT ONLY FOR A FRESH DESK. A FRESH
- *  desk (wasResumed=false) that dies quoting a quota refusal leaves behind a
- *  transcript containing nothing but that refusal, and the session record
- *  recordSwarmSession just wrote still names it; left alone, the NEXT commander
- *  launch's resolveSwarmSession would see that dead-but-loadable one-liner and
- *  `--resume` it instead of opening a real fresh desk. forgetSwarmSessionIf is
- *  compare-and-delete (keyed on the exact sessionId this watch was armed for),
- *  so a LATER launch that already recorded a good session over this one is
- *  never clobbered.
- *
- *  A RESUMED desk (wasResumed=true) must NEVER be forgotten this way: its
- *  transcript is days of real integration history plus one refusal line, and
- *  `--resume` on it is exactly the memory the commander is supposed to keep
- *  (docs/commander/00-INDEX.md's "conversation history survives restarts"
- *  guarantee). Forgetting it here would trade a working `--resume` for a wiped
- *  memory to save nothing — the next launch mints a session that has forgotten
- *  everything instead of resuming one that remembers everything but a refusal.
- *
- *  Best-effort throughout: a missing screen, an unreadable pool entry or a
- *  non-ladder model string all mean "learned nothing", never a thrown spawn.
- *
- *  MANAGER-ONLY, despite the generic name: the session-forget branch hardcodes
- *  the `'manager'` role (swarmSessions.SwarmSessionRole), because the only
- *  caller today is the commander's own launch path. If a future caller ever
- *  arms this watch for the SUPPLY desk, that hardcoded role must become a
- *  parameter first — otherwise a supply-desk DOA death would silently forget
- *  the COMMANDER's session record instead of its own. */
-export const watchDeskForDeathOnArrival = (
-  terminalId: string,
-  tier: string,
-  projectPath: string,
-  agentSessionId: string,
-  wasResumed: boolean,
-  deps: {
-    watch?: typeof onTerminalExit
-    screen?: (id: string) => string | null
-    now?: () => number
-    forget?: typeof forgetSwarmSessionIf
-  } = {},
-): void => {
-  if (!isModelTier(tier)) return // never cool an arbitrary model string
-  const nowFn = deps.now ?? Date.now
-  const bornAt = nowFn()
-  const stop = (deps.watch ?? onTerminalExit)(terminalId, () => {
-    try {
-      if (nowFn() - bornAt > DESK_DOA_WINDOW_MS) return // it lived; its death says nothing
-      const screen = (deps.screen ?? getTerminalScreen)(terminalId)
-      if (!screen) return
-      if (!matchesQuotaExhaustion(normalizeScreen(screen))) return
-      const until = markRateLimited(tier, { ptyText: screen, now: nowFn() })
-      console.warn(
-        `[swarmManager] 司令官卓が tier '${tier}' の枯渇で起動即死 — ` +
-          `${tier} を ${new Date(until).toISOString()} まで冷却(次の起動は1段下の tier)`,
-      )
-      // A resumed session's transcript is real history, not just a refusal —
-      // never drop the pointer to it (see the header above).
-      if (!wasResumed) {
-        void (deps.forget ?? forgetSwarmSessionIf)(projectPath, 'manager', agentSessionId).catch(
-          () => {},
-        )
-      }
-    } catch {
-      /* learning is best-effort; a fault here must never surface as a spawn error */
-    }
-  })
-  // Disarm once the desk has outlived the window, so a long-lived commander's
-  // eventual exit is never read as a launch failure.
-  if (stop) setTimeout(stop, DESK_DOA_WINDOW_MS).unref?.()
-}
-
-/** The SDK arm of {@link watchDeskForDeathOnArrival} (2026-08-01).
- *
- *  WHY THIS EXISTS AT ALL. The SDK launch path armed only
- *  {@link watchSdkDeskForLimit}, and justified the missing death-watch with "an
- *  SDK session has no screen to race". That is true of ONE of the PTY watcher's
- *  three jobs. Read the corpse-learning watcher again and it does:
- *    1. SAMPLE THE SCREEN for the refusal wording — the only job a screenless
- *       runtime genuinely does not need (an SDK desk is TOLD: sdkEvents distils
- *       the CLI's refusal into a `quota_refusal` event on the session's stream);
- *    2. COOL THE TIER — `markRateLimited`, 20 persisted minutes, so the NEXT
- *       launch (the engine's resuscitation reflex fires every few minutes) does
- *       not seat another commander on the same spent tier. This is the whole
- *       point of the 2026-07-19 incident: four desks died in a row because
- *       nothing wrote the wall down;
- *    3. FORGET THE STALE SESSION POINTER for a FRESH desk — `forgetSwarmSessionIf`,
- *       so the next launch does not `--resume` a transcript whose entire content
- *       is one refusal line.
- *  Jobs 2 and 3 are runtime-agnostic — they are about the TIER and about the
- *  SESSION RECORD, neither of which knows what carried the conversation — and an
- *  SDK commander had NEITHER. The dial flipping to 'sdk' silently disabled both.
- *
- *  WHAT REPLACES THE SCREEN RACE. The `quota_refusal` event itself, inside the
- *  same {@link DESK_DOA_WINDOW_MS} birth window. No exit to wait for: on a PTY,
- *  "it exited" is the only proof that the wording was a STOP and not the desk
- *  merely printing about limits; on the SDK stream the event IS the CLI's own
- *  refusal message (matched against the SDK's exported prefix list), so there is
- *  no picture to misread. The window is still checked, for the identical reason
- *  it is checked on the PTY side: a refusal on day three is evidence about the
- *  work, not about the launch.
- *
- *  POLARITY IS NOT FORKED PER RUNTIME. `matchesQuotaExhaustion(normalizeScreen(…))`
- *  — the SAME predicate on the SAME wording list the PTY watch uses. A refusal
- *  that does not match cools NOTHING (the fail-safe direction: a missed mark
- *  costs one retry that re-learns the truth; a wrong mark parks a healthy tier).
- *
- *  MANAGER-ONLY, exactly like its PTY twin: the forget branch hardcodes the
- *  `'manager'` role. Arming this for the supply desk requires parameterising that
- *  first, or a supply DOA would forget the COMMANDER's session record.
- *
- *  Returns a detach function, or null when the session could not be subscribed
- *  to (already gone). Never throws — learning is best-effort. */
+/** Cool a tier only after a confirmed quota refusal followed by an early exit.
+ *  Forget a refusal-only fresh session, never a resumed conversation's history.
+ *  Compare-and-forget protects a newer session pointer. The SDK stream replay
+ *  lets this watcher attach after the session record is written without a race. */
 export const watchSdkDeskForDeathOnArrival = (
   sdkSessionId: string,
   tier: string,
@@ -366,7 +182,7 @@ export const watchSdkDeskForDeathOnArrival = (
           `${tier} を ${new Date(until).toISOString()} まで冷却(次の起動は1段下の tier)`,
       )
       // A resumed session's transcript is real history, not just a refusal —
-      // never drop the pointer to it (see watchDeskForDeathOnArrival's header).
+      // never drop the pointer to it (even after a quota refusal).
       if (!wasResumed) {
         void forget(projectPath, 'manager', agentSessionId).catch(() => {})
       }
@@ -389,91 +205,14 @@ export const watchSdkDeskForDeathOnArrival = (
 }
 
 export interface SpawnSwarmManagerOpts {
-  /** The registered project to command — the commander PTY's cwd (its primary
+  /** The registered project to command — the manager session's cwd (its primary
    *  checkout). The route validates this with validateProjectPath first. */
   projectPath: string
-  cols?: number
-  rows?: number
   /** Force a BRAND-NEW conversation, ignoring (and overwriting) the persisted
    *  session id. The escape hatch for a restored context that has gone bad — off
    *  by default, so the normal button always resumes. */
   fresh?: boolean
 }
-
-/** Build the LaunchClaudeOpts for a commander conversation — pure + exported so
- *  the launch contract is unit-tested without spawning a PTY:
- *   - cwd = the project's PRIMARY checkout (NOT a worktree); the commander reads
- *     the repo, moves Board cards and integrates `swarm/*` branches on the trunk.
- *   - permissionMode:'bypass' — so its git + Board moves aren't gated by a
- *     tool-approval prompt on every turn (mirrors the shell `--dangerously-skip-…`).
- *   - env { SWARM_MANAGER:'1' } — TAGS the session as the swarm commander for
- *     tooling / the /manage skill. Under worker-only guard scoping this is NOT a
- *     guard opt-in: the trusted commander is unpoliced (the veto polices only the
- *     confined worker, which passes OPENGROUND_GUARD=1 + write roots instead).
- *   - appContext:true — the commander drives the Board (drain todo → review →
- *     done) through the app's HTTP API, so the app-context card is on-mission
- *     (same as supply; the worker turns it off for leanness).
- *   - model/effort/remoteControl — opus/max + Remote Control ON via the shared
- *     swarm launch default (swarmLaunch.ts), mirroring the shell commander's
- *     `--model opus --effort max … --remote-control <name>`. effort is
- *     CLAUDE_EFFORTS-guarded there. The Remote Control session name is the
- *     IDENTIFIABLE one the spawn path resolved (resolveSwarmRemoteName:
- *     「マネージャー <プロジェクト表示名>」/ "Manager <project>" per the app
- *     language) — opts.remoteName; absent (legacy caller) it falls back to the
- *     historical fixed 'manager'.
- *   - initialPrompt — `/og-manage` positional (claude runs the tmux-free
- *     commander skill on startup). */
-//   - resume — when the project already has a commander conversation claude can
-//     load (swarmSessions.resolveSwarmSession proved it), the SAME session id rides
-//     `--resume` instead of `--session-id` (buildClaudeArgv), so the commander wakes
-//     up remembering the last weeks of integration — with the re-read-the-Board
-//     order above. Absent ⇒ the historical fresh-session launch, byte-for-byte.
-export const managerLaunchOpts = (
-  cwd: string,
-  agentSessionId: string,
-  opts: {
-    cols?: number
-    rows?: number
-    resume?: boolean
-    remoteName?: string
-    // Settings.language, resolved by the caller. REQUIRED — not optional, no
-    // default `{}` on `opts` any more — so a caller that forgets to thread it
-    // through fails `tsc` instead of silently spawning a commander whose
-    // replies ignore the setting (see buildOrderInjection's doc comment,
-    // swarmWorker.ts, for the 2026-08-13 rework rationale).
-    lang: PromptLang
-  },
-  // Mode-resolved model/effort. REQUIRED since 2026-09-16: an omitted `me` used
-  // to mean "top tier" (fable), i.e. the scarcest model, chosen by forgetting.
-  me: { model: string; effort?: ClaudeEffort },
-): LaunchClaudeOpts => ({
-  cwd,
-  agentSessionId,
-  permissionMode: 'bypass',
-  appContext: true,
-  // The manager is NOT policed by the PreToolUse veto (worker-only scoping), so
-  // strictMcpConfig is no longer a veto-pairing requirement here. Kept as
-  // DEFENSE-IN-DEPTH: the commander boots with only its explicit MCP config (none)
-  // instead of inheriting whatever user-scope MCP servers happen to be present,
-  // keeping the engine-driven commander deterministic. (The confined WORKER still
-  // REQUIRES strictMcpConfig — mcp__* tools bypass ITS veto; see swarmWorker.ts.)
-  strictMcpConfig: true,
-  // The commander is a DESK the owner talks to ("状況" / "マージ"), not an
-  // unattended worker: when it stops on a spent model quota the owner's own
-  // conversation is stopped, and nothing else notices (the engine's resuscitation
-  // reflex only runs while the engine does). Watched by ownerDeskLimit.ts, which
-  // names it by the role the owner knows it as — an account-wide exhaustion stops
-  // every desk at once, so "which conversation" has to be in the message.
-  ownerDesk: true,
-  deskLabel: MANAGER_DESK_LABEL,
-  ...swarmLaunchDefaults(opts.remoteName ?? 'manager', me),
-  env: { SWARM_MANAGER: '1' },
-  cols: opts.cols,
-  rows: opts.rows,
-  ...(opts.resume ? { resume: true } : {}),
-  initialPrompt:
-    (opts.resume ? MANAGER_RESUME_INJECTION : MANAGER_INJECTION) + languageDirective(opts.lang),
-})
 
 /** ONE DESK PER PROJECT, decided on the POOL (2026-07-19 incident): if a labelled
  *  commander desk is live in `projectPath`, ADOPT it — return its terminal (and
@@ -506,17 +245,8 @@ export const managerLaunchOpts = (
  *  and can therefore NEVER create a second desk. That is why the timeout path in
  *  {@link spawnSwarmManager} may call it without holding the spawn lock. */
 const adoptLiveDesk = async (projectPath: string): Promise<SpawnSwarmManagerResponse | null> => {
-  // BOTH POOLS (2026-07-31, stage 3). `listManagerDesks` asks the PTY pool AND
-  // the SDK pool, and re-confirms PTY entries against the process table — the
-  // pool's `finishedAt` is stamped by an ASYNCHRONOUS onExit, so right after a
-  // kill (the Restart button: DELETE the terminal, then POST a respawn) it can
-  // still list a desk the OS already reaped.
-  //
-  // Spanning both pools is not tidiness, it is the invariant: the dial can be
-  // flipped between two spawns, so a project whose commander is a live PTY and
-  // whose dial now says 'sdk' would — with a PTY-only check — get an SDK desk
-  // seated beside it. Two commanders integrating one trunk is exactly the
-  // 2026-07-15 concurrent-integration hazard, arrived at from a new direction.
+  // Preserve in-flight legacy PTY desks across a dev reload. New launches use
+  // SDK only, but an existing PTY must still block a second manager and be usable.
   // ⚠ A DESK ASKED TO STOP IS NOT A DESK TO REUSE (overnight review 2026-08-04,
   // cycle 3 — a regression in cycle 1's own fix). `stopping` marks a session
   // whose `closed` flag is already set: `pushSdkInput` refuses it, the engine
@@ -562,12 +292,7 @@ const adoptLiveDesk = async (projectPath: string): Promise<SpawnSwarmManagerResp
  *  reads the budget from the module that spends it. */
 export { DESK_SPAWN_LOCK_WAIT_MS }
 
-/** Launch ONE interactive claude PTY in the project's primary checkout running
- *  the `/og-manage` skill (handed positionally so claude submits it on startup).
- *  Subscription-only (launchClaude — never `claude -p`/the SDK). Returns as soon
- *  as the PTY is up; claude boots and invokes /manage on its own. No worktree is
- *  created, so there is nothing to clean up on stop — the caller just kills the
- *  PTY. */
+/** Start an SDK manager, or adopt an existing desk without interrupting it. */
 export const spawnSwarmManager = async (
   opts: SpawnSwarmManagerOpts,
 ): Promise<SpawnSwarmManagerResponse> => {
@@ -575,7 +300,7 @@ export const spawnSwarmManager = async (
   //
   // {@link adoptLiveDesk} decides existence on the pool, which cannot desynchronise
   // from itself — but reading it is only half the guard. Between that read and the
-  // `launchClaude` that finally puts a desk INTO the pool sit four awaits (the
+  // SDK spawn that finally puts a desk INTO the pool sit four awaits (the
   // session probe, the skill install, two settings reads, and the tier probe, which
   // alone can spend tens of seconds walking the ladder). Two callers arriving inside
   // that window both read "no desk" and both spawn: a textbook check-then-act with
@@ -647,9 +372,22 @@ const launchNewDesk = async (
   // open in a live PTY, project moved) and it opens a fresh one instead — the desk
   // always launches. `fresh` skips the lookup outright (and overwrites the record
   // below): the owner's way out of a restored context that has gone bad.
-  const session = opts.fresh
+  const resolved = opts.fresh
     ? { agentSessionId: randomUUID(), resume: false }
     : await resolveSwarmSession(opts.projectPath, 'manager')
+  // DESK CONTEXT CAP (owner decision 2026-09-18 — deskContextCap.ts): a resumable
+  // conversation already over the cap is NOT resumed; a fresh one opens instead,
+  // still handed MANAGER_RESUME_INJECTION (`recycled`) so the new desk re-reads
+  // the world before it speaks. The commander is stateless by design, so this
+  // loses nothing and stops every later turn re-reading a huge context.
+  const capped = await recycleDeskSessionIfOverCap(resolved)
+  const session = { ...capped.session, recycled: capped.recycledFromTokens !== null }
+  const noteRecycled = (): void => {
+    if (capped.recycledFromTokens !== null)
+      logToEngine(opts.projectPath, 'info', deskRecycledLogLine('司令官', capped.recycledFromTokens))
+  }
+  const recycledField =
+    capped.recycledFromTokens !== null ? { recycledFromTokens: capped.recycledFromTokens } : {}
   // Self-repair the /og-manage skill RIGHT BEFORE launch (idempotent, best-
   // effort): the boot-time install covers the normal path, but a skill deleted
   // mid-session — or a dev server that booted before the skill shipped — would
@@ -687,7 +425,7 @@ const launchNewDesk = async (
   // Token budget (card 68d8e00f): economy runs the commander on sonnet; optimize keeps
   // it on the top tier (its integration / safety-review judgment is quality-critical).
   // Null ⇒ the owner switched every tier OFF: no model, no spawn (fail-CLOSED — the
-  // commander is a claude PTY like any other and honors the same hard mask).
+  // commander honors the same hard mask as every other role).
   // PROBED (2026-07-13): the 2026-07-13 burn was exactly THIS path — a commander
   // seated on a fable whose tier-local wall /usage could not show. One collapsed
   // headless probe (swarmTierProbe) now confirms the tier before the desk spawns;
@@ -700,102 +438,17 @@ const launchNewDesk = async (
     await getAllowedModelTiers(),
   )
   if (!me) throw new NoAllowedModelTierError()
-  // Remote Control 名の識別化: 「マネージャー <プロジェクト表示名>」/ "Manager
-  // <project>"(言語は Settings.language、表示名は registry の displayName ||
-  // フォルダ名)。resolveSwarmRemoteName は never-throws — 解決に失敗しても旧固定名
-  // 'manager' で spawn は通る。
-  // ── RUNTIME FORK (stage 3) ──────────────────────────────────────────────────
-  // Everything above this line is runtime-agnostic and must stay that way: the
-  // session resume decision, the skill self-repair, the tier probe and the hard
-  // model mask apply to a commander whatever carries it. Only the SPAWN differs.
-  //
-  // The dial is read here rather than passed in, so the engine's resuscitation
-  // reflex and the owner's button can never disagree about which runtime this
-  // project's commander uses. Since 2026-08-02 an ABSENT dial is an SDK desk;
-  // an explicit 'pty' and any unrecognised MODE VALUE are a PTY.
-  //
-  // The dial's FILE-level behaviour — an unreadable / unparseable settings.json,
-  // and when the `.catch` below actually fires — is documented in ONE place:
-  // store.getManagerRuntimeDial. Do not restate it here.
-  const dial = await getManagerRuntimeDial().catch(() => ({ mode: 'pty' as const }))
-  // Settings.language ⇒ the commander's user-facing replies follow it — resolved
-  // once and threaded into both the SDK and PTY launch paths below.
   const lang = await getPromptLang()
-  if (dial.mode === 'sdk') {
-    // FAIL-FAST (2026-08-13, with the worker fallback's deletion): an SDK dial
-    // either seats an SDK desk or THROWS SdkManagerUnavailableError — the
-    // silent DEGRADE-to-PTY that used to live here is gone. The reason: an
-    // invisible degrade looks exactly like a switch that does not work, and a
-    // fallback that absorbs real breakage keeps it broken forever. The PTY
-    // launch below is now reachable ONLY from an explicit 'pty' dial (or the
-    // unreadable-file fail-closed path) — it is the manual kill switch, not a
-    // safety net. Callers already carry the failure: the 司令官 button's route
-    // answers 500 with the reason, and the engine's resurrection reflex reads a
-    // wakeManager throw as a failed attempt (grace → 3-strike fatal bell →
-    // 30-min re-arm — its own backoff-and-bell, no new machinery needed).
-    return await launchSdkDesk(opts, session, me, lang)
-  }
-  const remoteName = await resolveSwarmRemoteName('manager', opts.projectPath)
-  const ref = launchClaude(
-    managerLaunchOpts(
-      opts.projectPath,
-      session.agentSessionId,
-      { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName, lang },
-      me,
-    ),
-  )
-  // Arm the death-watch BEFORE anything else can await: a tier this dry refuses in
-  // 1.4–3.8s (measured 2026-07-19), which is well inside the store write below.
-  watchDeskForDeathOnArrival(
-    ref.terminalId,
-    me.model,
-    opts.projectPath,
-    session.agentSessionId,
-    session.resume,
-  )
-  // Persist for the NEXT boot. Best-effort by design: a failed write only costs the
-  // commander its memory on the following launch (it starts fresh — the old
-  // behaviour), and must NEVER turn a successfully-spawned PTY into a 500.
-  await recordSwarmSession(opts.projectPath, 'manager', session.agentSessionId).catch((e) => {
-    // eslint-disable-next-line no-console
-    console.warn(`[swarmManager] could not persist the commander session id: ${String(e)}`)
-  })
-  return {
-    terminalId: ref.terminalId,
-    runtime: 'pty',
-    agentSessionId: session.agentSessionId,
-    resumed: session.resume,
-  }
+  const sdkDesk = await launchSdkDesk(opts, session, me, lang)
+  noteRecycled()
+  return { ...sdkDesk, ...recycledField }
 }
 
-/** Spawn the commander on the Agent SDK runtime, or THROW
- *  {@link SdkManagerUnavailableError} when it cannot be established.
- *
- *  ⚠ THIS USED TO DEGRADE INSTEAD OF THROW (until 2026-08-13): every failure
- *  below returned `{ fellBackBecause }` and the caller seated a PTY desk, on
- *  the theory that "a PTY commander beats no commander". That fallback died
- *  with the worker's: it absorbed real breakage so quietly that a broken SDK
- *  runtime looked like a switch that does not work. Now the failure is LOUD
- *  and the retry is the caller's: the route answers 500 with the reason, and
- *  the engine's resurrection reflex counts a failed wake (grace → 3-strike
- *  'manager-unrevivable' bell → 30-min re-arm) until the machine recovers.
- *  The PTY commander still exists — behind the EXPLICIT dial only.
- *
- *  What is deliberately NOT here, compared with the PTY branch:
- *   - no Remote Control (the flag is inert outside a REPL — the supply desk is
- *     the owner's phone window instead);
- *   - no SCREEN SAMPLING in the death-on-arrival watch. ⚠ This bullet used to say
- *     "no death-on-arrival watch" outright, and that was wrong (fixed 2026-08-01):
- *     the PTY watcher has THREE jobs and only the first — sampling the screen for
- *     the refusal wording and racing the exit — is a picture-reading workaround an
- *     SDK session does not need. Cooling the spent TIER and forgetting the stale
- *     SESSION POINTER are about the tier and the session record, not about how the
- *     conversation was carried, and an SDK commander was getting NEITHER. Both are
- *     armed below via {@link watchSdkDeskForDeathOnArrival}, driven by the
- *     session's own `quota_refusal` event instead of a screen race. */
+/** SDK failures remain visible to the route and the engine's existing retry /
+ *  recovery policy. Never fall back to a terminal launch. */
 const launchSdkDesk = async (
   opts: SpawnSwarmManagerOpts,
-  session: { agentSessionId: string; resume: boolean },
+  session: { agentSessionId: string; resume: boolean; recycled?: boolean },
   me: { model: string; effort?: ClaudeEffort },
   lang: PromptLang,
 ): Promise<SpawnSwarmManagerResponse> => {
@@ -809,6 +462,7 @@ const launchSdkDesk = async (
     projectPath: opts.projectPath,
     agentSessionId: session.agentSessionId,
     resume: session.resume,
+    recycled: session.recycled,
     me,
     claudeBin: pre.claudeBin,
     lang,

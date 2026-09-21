@@ -16,6 +16,22 @@
 ---
 
 ## 0. 契約と骨格 — 全変更の起点
+- Current local handoff/backlog audit (2026-09-21):
+  `commander/PRODUCT-HANDOFF-2026-09-21.md`. Records the combined unshipped
+  branch, verified behavior and all seven existing open OPEN GROUND cards.
+- Public/owner surface contract: `docs/PUBLIC_PRODUCT_SCOPE.md`. Public Board,
+  Terminal and opt-in Swarm; owner-only per-project Canvas, Research, custom tabs
+  and WordPress/Skills UI. Owner display preview: `OwnerViewSwitch.tsx` +
+  `App.tsx`; Ground tools collapse in `ToolPalette.tsx`. Automatic fuel reports
+  are owner-only (`dailyFuelReport.ts`); meters/safety remain public. Visibility
+  changes preserve existing data and hidden layouts. Public tabs have fixed
+  order/visibility; only owner view offers add/hide/reorder. Feedback has one
+  composer entry on Ground. The retired `/api/project/open` routes return 404;
+  `/api/project/open-editor` and `/api/project/open/pick` remain live.
+- Description display: `projectDataReconcile.ts` rejects responses overtaken by
+  another save/load; `App.tsx` and `ProjectPanel.tsx` share `descriptionForLang`.
+  Regressions: `ProjectPanel.description.test.tsx`, `App.render.test.tsx`, and
+  `e2e/project-description.spec.ts` (generation, late read, navigation/reload).
 - `src/lib/types.ts` — client/server 唯一の共有契約。API payload を変えたら必ずここ
 - `src/lib/schemas.ts` — 永続データの zod スキーマ(ProjectTaskSchema ほか)。カードの
   フィールド追加は types + schemas の両方(片方忘れると保存時に黙って消える)
@@ -79,6 +95,11 @@
 - 実行: `composeTaskPrompt.ts`(実行=AUTO-SENT の prompt 合成)/ `taskPrompt.ts` / `taskAssets.ts`
 - client lib: `boardDeps.ts` / `boardPriority.ts` / `boardWorker.ts` / `assignees.ts` / `cardTitle.ts`
 - テスト: `BoardModule.*.test.tsx` / `projectData*.test.ts` / `server/routes/__tests__/tasks.test.ts`
+- Difficulty picker browser coverage: `e2e/board-tier.spec.ts` (save, Auto reset,
+  reload, safety-floor status, desktop and narrow viewports).
+- Manual run-defaults visibility follows `BoardModule.swarmVisible`, the same
+  gate as Run routing and per-card settings. `BoardTab.showRunDefaults` changes
+  display only; saved launch preferences survive enabling/disabling Swarm.
 - 罠: API 契約の落とし穴(フル UUID 必須・列名・短縮 id 黙殺の歴史)は
   `docs/commander/05-board-api-contract.md`。collab 共有中は Y.Doc が権威 — サーバ側の Board
   書込みは collabMirror 経由でないとクライアントに巻き戻される(→ §6)。
@@ -167,6 +188,10 @@
   (navigate しても完走・per-id OCC)。
 
 ## 5. Swarm — 並列 worker エンジン(詳細は docs/commander/)
+
+- Current simplification contract: [commander/SIMPLIFICATION.md](commander/SIMPLIFICATION.md).
+  Persona, proxy answers, self-supply scans and the dormant engine integration panel
+  are removed. Human approvals, monitoring, stop/recovery, backups and quota guards remain.
 - **三役のキャラクター**(2026-08-15・オーナー承認): `src/lib/swarm/sprites.ts`(16×16 を
   **テキストのドット絵**で持つ — カワウソ=補給係 / フクロウ=司令官 / ウサギ=作業者。
   1枚の絵に状態ごとのパレットを塗る)+ `src/components/canvas/SwarmSprite.tsx`(canvas 描画・
@@ -353,33 +378,27 @@
   dispatch を階段(1m→5m→15m)で HOLD + `worker-spawn-failed` の鐘 + 復旧後は自動再開
   (`swarmSpawnFailFast.test.ts` / `swarmWorkerFailFast.test.ts`)。古い settings.json の
   `swarmWorkerRuntime` キーは**不活性**(読まれない・エラーにもならない)。
-  司令官ダイヤル(`swarmManagerRuntime`)だけが残る手動スイッチ。
-  ⚠ **盤面はサーバの実効値を描く(0802)** — `GET /api/settings` の
-  `runtimeDialsEffective:{manager}`(0813 に worker/workerCap を撤去・reader から算出・
-  読み取り専用・`USER_SETTINGS_KEYS` に足さない)。パネル側の導出(`dialOf`)は**削除済み**・
-  復活させないこと。
+  司令官も 2026-09-21 に SDK 専用化。旧設定は不活性、切り替え UI と実効値 API は削除。
   設計と実測台帳: `docs/SDK_WORKER_MIGRATION_PLAN.md`
   (0730 オーナー決定 — worker から段階導入・ダイヤル併存・PTY コードは消さない。
   **この併存方針は 0813 に「worker は SDK 専用」へ更新された** — 上の段を参照)。
   センサー対応表 §5 / ガード配線の非自明点 §4-G(**SDK は既定で settings をロードしない →
   素朴に spawn すると A3/L4 guard が黙って消える**・fail-closed 必須) / カード分割 §12。
   調査の正典は `SDK_CLIENT_INVESTIGATION.md`(実測台帳・「しない」だった旧結論の上書き経緯込み)
-- **司令官の SDK ランタイム(stage 3・実装済み・既定は 0802 に SDK へ反転=未設定なら SDK 卓)**: 入口は
+- **司令官の SDK ランタイム(2026-09-21 から新規起動は SDK 専用)**: 入口は
   `swarmManagerRuntime.ts`(**卓の在処を答える唯一の seam** — PTY プールと SDK プールの両方に聞く)/
   `swarmManagerSdk.ts`(launch plan + preflight)/ `swarmManagerLabel.ts`(循環を切る葉の定数)/
   `sdkDeskLimit.ts`(クォータ停止をイベント源で拾う)/ route `POST /api/swarm/manager/say`。
-  ダイヤル = `Settings.swarmManagerRuntime.mode`(不在⇒`'sdk'` / 明示 `'pty'`・壊れた **mode の値**⇒`'pty'`
-  ・`store.getManagerRuntimeDial`)。**0802 以降 worker 側の reader と同極性**(先に反転が届いたのは
-  司令官側で、worker 側が1日遅れた)。
-  ⚠ **`mode` を読み取れない容器**(非オブジェクト、または `mode` の無いオブジェクト)だと
-  `?.mode` が undefined になり `'sdk'` 側へ倒れる(実測 0802・**両ダイヤル共通**)。
+  起動は `swarmManager.ts` → `sdkManagerLaunchPlan` の一系統。旧設定は読み取らず、
+  POST は無視する。会話・作業データは保持。旧 PTY 卓は dev reload 中の稼働分だけ
+  検出・会話・停止を維持し、二重起動を防ぐ。停止後の次回起動は SDK。
   ⚠ **卓の存在判定を PTY プールだけに聞かないこと** — SDK 卓が毎パス `absent` と読まれ、
   5分ごとに二卓目が立つ(0719 の11卓事故と同じ形)。必ず `listManagerDesks`。
   ⚠ **SDK 卓に画面は無い**(`managerDeskScreen` は null)。null を「何も出ていない」と読むと
   正しい結論に誤った理由で辿り着く。等価な証拠は自分のストリームの `quota_refusal` イベント。
   ⚠ **リモコンは消える**(`--remote-control` は REPL 外で無効)。外からの窓口は **PTY のまま残す
   補給官**(`skills/supply/SKILL.md` の「状況」「質問に答える」「司令官に伝えて」)。ここが
-  stage 3 の前提であり、補給官が状況を答えられないうちにダイヤルを回すと外から監視できなくなる。
+  スマホからの状況確認と司令官への指示中継は引き続き補給官が担当する。
   実測(0731): SDK セッションでも `/og-manage` は解決する(slash commands 95本に在る・実際に読み込む)。
   ただし **Claude Code の system prompt は付かない** ので app-context カードは
   `systemPrompt.append` で明示注入する(`scripts/probe-sdk-skill-resolution.mts` /
@@ -387,8 +406,12 @@
 - 入口だけ: `swarmOrchestrator.ts`(エンジン tick)/ `swarmWorker.ts` / `swarmLaunch.ts`(spawn・
   モデル/effort/リモコン名解決。**どの席がどのモデルを希望するかは `desiredModelEffort` 一本**で、
   役割は `SwarmModelRole` union に列挙する — union に無い席はそもそも問い合わせられない=tsc が落ちる。
-  既定 optimize で `fable` を希望するのは **worker × heavy カードだけ**、他は `SWARM_DEFAULT_MODEL='opus'`
-  以下。表と実測は docs/commander/04-quota-models.md §5.9)/ `swarmIntegrate.ts` / `swarmOverseer*.ts` / `swarmEscalations.ts` /
+  既定 optimize の worker はカードの難易度 `ProjectTask.tier`(touch/standard/design/ultra)を
+  `TIER_MODEL_EFFORT` で引く。`fable` を希望するのは **worker × `ultra` カードだけ**、他は
+  `SWARM_DEFAULT_MODEL='opus'` 以下。罠: 安全語(auth/削除/課金…)のカードは書かれた型に関係なく
+  design 未満にならない(`resolveCardTier`)。`tier` は orchestrator の dispatch と Board 実行の両方から
+  `spawnSwarmWorker` に渡すこと — 片方だけだと無人配車で効かない。表と実測は
+  docs/commander/04-quota-models.md §5.9)/ `swarmIntegrate.ts` / `swarmOverseer*.ts` / `swarmEscalations.ts` /
   `swarmQuota.ts` / route: `server/routes/swarm.ts` / UI: `modules/SwarmModule.tsx` + `useSwarmEngine.ts`
 - **エンジンの再起動永続化**(2026-07-22, card 2): `swarmEnginePersistence.ts`(engine intent
   write-through `~/.openground/projects/<uuid>/engine.json` + crash-loop breaker ring
@@ -491,13 +514,20 @@
   汚さないため。seam は `server/index.ts` boot IIFE。
   テスト: `compactInstructionsInstall.test.ts` / 実測は `docs/CONTEXT_MANAGEMENT_PLAN.md` §3-A2実測
 - **タスク境界の自動 `/clear`**: `boundaryClear.ts`。**圧縮は 100% native(auto-compact)に委譲し、
-  OG は独自の `/compact` トリガを持たない** — OG が足すのは native に見えない
+  OG は独自の `/compact` トリガを持たない** — OG が足すのは native に見えない  OG は独自の `/compact` トリガを持たない**(**例外 1 つ・2026-09-18 オーナー決定**: 補給官の卓の
+  早期圧縮 = 下の「常駐卓の文脈上限」)— OG が足すのは native に見えない
   「Board のカードが終わった」だけ。カードが `done` に**遷移**すると(`server/routes/project.ts`
   の setColumn/markDone/rework 経路)、そのカードに紐づくペイン(`TerminalInfo.taskId` —
   **cwd では解決しない**。同プロジェクトの無関係ペインを巻き込むため)へ
   `Ctrl-U` + `/clear` を送る。作業中(`working` / `menuOpen`)は**スキップせず待つ**(120s で expire)。
   `menuOpen` は `claudeStatus` が `waiting` を返すので status と別判定 — でないと権限プロンプトに打ち込む。
   auto-compact を OG が切っていないことは `autoCompactGuard.ts` + ソース走査の歯で固定。
+- **常駐卓の文脈上限(2026-09-18)**: `deskContextCap.ts`(司令官の作り直し判定 — `swarmManager.launchNewDesk` が
+  resume 前に呼ぶ)+ `supplyContextCap.ts`(補給官の卓へ空き時に `/compact` — engine 非依存の boot ループ)+
+  `engineLogSink.ts`(卓コードからエンジンログへ1行 — orchestrator を import し返すと循環するための受け口)。
+  閾値 = `Settings.deskContextCapTokens`(既定 300,000・0=無効・allowlist 済)。測定 = `claudeUsage.sessionContextTokens`
+  (圧縮の境目が最後の返答より新しければ `postTokens` を返す)。罠: 補給官への書き込みは `noticeDeliverable` の3条件、
+  自動の送り手はこの1つだけ(`autoCompactGuard.test.ts` が呼び出し元を固定)。正典 docs/commander/05 §10.6。
   テスト: `boundaryClear.test.ts` / `autoCompactGuard.test.ts` /
   `server/routes/__tests__/boundaryClearRoute.test.ts`(実ルート経由の end-to-end)。
   正典 = `docs/CONTEXT_MANAGEMENT_PLAN.md` **§7**
@@ -565,16 +595,12 @@
 - テスト: `server/__tests__/`(selfUpdate / autoUpdate / forkEnv / startup / electronLockdown …)
 - 罠: `electron/*.js` は純 CommonJS — 触ったら `node --check`。asar:false は node-pty の制約で
   意図的。ポート 5174/47776 は不可侵 — 2本目の dev は `npm run dev:alt`。
-- ランタイム切替の**スイッチは Swarm タブ → 司令官 → 右サイドバー「動かし方(お試し)」**
-  (`SwarmManagerPane.tsx` の `runtimeDials` / `SwarmModule.tsx` の `toggleRuntime`)。
-  **残るのは司令官スイッチだけ** — worker スイッチは 0813 にダイヤルごと削除(worker は
-  SDK 専用)。**罠**: `POST /api/settings` は `USER_SETTINGS_KEYS` で body を絞るので、
-  新しい設定キーを**その配列に足さないと書き込みが黙って捨てられる**(スイッチは動いて見えるのに
-  何も変わらない — 0731 に実際に踏みかけた)。往復テスト=`server/routes/__tests__/settingsRuntimeDials.test.ts`
-  (旧 `swarmWorkerRuntime` キーの POST が**黙って無視される**back-compat 契約もここ)。
-  **表示側は逆**: トグルが描く値は `GET /api/settings` の `runtimeDialsEffective`(サーバ計算・
-  読み取り専用)で、**書き込みキーではないので allowlist には足さない**。盤面で規則を再実装しない
-  (`dialOf` は 0802 に削除)。表示⇄実挙動の番人=`src/lib/server/swarmRuntimeDialParity.test.ts`
+- Runtime selection was removed for everyone on 2026-09-21. New managers and
+  workers are SDK-only; supply/ordinary terminals remain PTY-based. Retired
+  settings POSTs are ignored while legacy data is preserved
+  (`settingsRuntimeDials.test.ts`). Coverage: `swarmManagerFailFast.test.ts`,
+  `swarmManager.spawn.test.ts`, `swarmSessions.integration.test.ts`,
+  `SwarmManagerPane.test.tsx`. Current contract: `commander/SIMPLIFICATION.md`.
 - 罠(2026-07-31 実観測): **`node_modules/electron/dist/Electron.app` が macOS に
   マルウェア判定されてゴミ箱に消える**。`npx electron` は SIGKILL → 直後に `.app` が消滅、
   再展開しても同じ(zip 自体は正規 — `checksums.json` の SHA-256 と一致)。未 notarize の
@@ -591,17 +617,18 @@
 - 罠: IME 2大対策 — 制御 textarea は変換中に値を凍結・Enter ハンドラは変換確定 Enter を奪わない。
   挙動を変えたら messages/ とマニュアルの両方を追随。
 
-## 10. Custom modules — ユーザー製タブ+マーケット
+## 10. Custom modules — ユーザー製タブ
 - server: `server/routes/customModules.ts` + `src/lib/server/customModules.ts`
-  (`~/.openground/custom-modules/` 読込・hot-reload)/ `customModulesMarket.ts` /
-  `customModulesSubmissions.ts` + `server/routes/moduleSubmissions.ts`(投稿・審査)
+  (`~/.openground/custom-modules/` 読込・hot-reload)
 - client: `src/components/canvas/moduleRegistry.tsx` — **タブセットの single source of truth** /
   `src/lib/modules/`(descriptor / ids / tabOrder / customTabAttach / useCustomModules / useExperiments)
 - UI: `modules/CustomFrameHost.tsx`(sandbox iframe host)/ `CustomTabPickerDialog` /
-  `CustomTabCreateDialog` / `MarketplaceDialog` / `ModuleReviewInbox`
-- 設計: `docs/CUSTOM_TABS_PLAN.md` / `MODULE_SUBMISSIONS_SETUP.md`
-- テスト: `customModules*.test.ts` / `routes/__tests__/customModules` ・ `moduleSubmissions` ・ `customModuleTerminal`
-- 罠: hot-reload はタブ hidden 中は停止する仕様。審査ロールは Supabase og_roles(§7)。
+  `CustomTabCreateDialog` / `CustomModuleView` / `TerminalDock` (`EmbeddedClaudeTerminal.tsx`)
+- 設計: `docs/CUSTOM_TABS_PLAN.md` (current local-only contract)
+- テスト: `customModules*.test.ts` / `routes/__tests__/customModules` ・ `retiredMarketplace.routes` ・ `customModuleTerminal`
+- 罠: hot-reload はタブ hidden 中は停止する仕様。編集ロールは Supabase og_roles(§7)。
+- Distribution retired 2026-09-20: no market, publish, submission or review routes.
+  Existing installed sources and their original role restrictions remain intact.
 
 ## 11. 小さい領域(1行ずつ)
 - feedback: `server/routes/feedback.ts` + `src/components/canvas/FeedbackModal.tsx` + `src/lib/feedbackImages.ts` —
@@ -611,229 +638,6 @@
 - SSE 基盤: `server/routes/sse.ts` + `src/lib/sseReconnect.ts`
 - skills: `src/lib/server/projectSkills.ts`(per-project `.claude/skills/`)/ `generateSkill.ts`
   (グローバル生成)+ `src/components/canvas/` の `GlobalSkillsPanel` / `SkillsModal`
-- ペルソナの診断コース(2026-08-14): 設問+採点は `src/lib/persona/instruments.ts`
-  (純粋・89問4コース。**逆転項目/軸の僅差判定/未完了は採点しない**の3性質が
-  `instruments.test.ts` で変異赤済み)。保存と corpus への流し込みは
-  `src/lib/server/personaCourses.ts`(`~/.openground/persona-courses.json` 0600・
-  retake は history に10件まで退避)、口は `server/routes/persona.ts`
-  (`GET /api/persona/courses` / `POST /api/persona/courses/:id/submit` /
-  `GET /api/persona/courses/:id/history` / `GET /api/persona/portrait`)。
-  **所見は appendJudgment 経由でしか corpus に入らない**(第二の書き手を作らない)。
-  過去の受験は `getPersonaCourseHistory`(store は古→新、返すのは**新しい順** —
-  反転は1か所だけ)。人物像は `getPersonaPortrait` が corpus 件数(直近7日ぶんも)と
-  判断台帳の通算値(下記)を数えて純粋な `src/lib/persona/portrait.ts` の
-  `composePortrait` に渡すだけで、
-  **サーバは1行も書かない**(証拠が無ければ `lines: []` が正解。store/corpus/台帳の
-  どれが読めなくても 200 で返す fail-open — 台帳が読めなければ仕事の行が消えるだけ)。
-  ⚠ 名称は正典: MBTI® / CliftonStrengths® は商標かつ設問非公開なので**再現も名乗りもしない** —
-  各コースの `source` 行(結果シートに逐語表示)がその約束で、番人が消えないよう固定している。
-- 判断台帳(分身が実際にやったこと・2026-08-14): 上のコースが**自己申告**なのに対し、
-  こちらは proxy-you が実務で下した判断の記録 —
-  `src/lib/server/personaLedger.ts`(`~/.openground/persona-ledger.json` 0600・
-  追記のみ・古い方から落とす上限つき)、口は `GET /api/persona/ledger`(loopback 限定
-  — `recent` にオーナー自身の実務の生文が乗る)。
-  **書き込み口は1つだけ**: `swarmOverseer.ts` の `withDecisionLedger` が本物の brain 呼び出しを
-  包む(`answer`⇒answered / `escalate why='insufficient-info'`⇒abstained / 他⇒asked)。
-  ⚠ 答えは**先に確定させてそのまま返し**、台帳の失敗は握り潰す — ここを素通しにすると
-  統計ファイルのディスク不調が overseer の `.catch` に届き、**確定していた proxy の回答が
-  黙って escalation に格下げされる**。
-  ⚠ 「オーナー本人が答えた」印(`answered`)は `swarmEscalations.answerEscalation` が
-  `ledgerMatchKey`(canonical パス+正規化した設問の先頭2000字 = エスカレーション側の
-  4096 クランプより**短い**ので照合が壊れない)で押す。**押せるのは分身が答えを控えた行
-  (`asked`/`abstained`)だけ** — 配達失敗した proxy 回答は同じ project+question で受信箱に
-  上がるので、絞らないと「分身が答えた」行に「人間が決めた」と刻まれ、意味が逆になる。
-  人物像への合流は通算値(`total`)で、週次は画面側のブロックが持つ(**窓は面ごとに1つ**)。
-- you-corpus: `server/routes/youCorpus.ts` + `src/lib/server/youCorpus.ts`
-  (`~/.openground/you-corpus.md` 0600・破損は .corrupt 退避)。UI は
-  `src/components/canvas/modules/PersonaModule.tsx`(owner 限定)。
-  **住所は Ground(2026-08-14 にプロジェクトのタブ行から移設)** — 中身は repo ではなく
-  **オーナー自身**の話で `~/.openground/` にあり、どのプロジェクトで開いても同一だったので、
-  Settings / Manual / Skills と同じ Ground ツールバーの `Fingerprint` 入口から
-  `src/components/canvas/PersonaPanel.tsx`(全面オーバーレイ・Esc と ✕ で閉じる)で開く。
-  **ゲートは `experiments.persona` または `experiments.swarm` のどちらかが開けば可視**で、
-  判定は `src/lib/persona/gate.ts` の `isPersonaOpen` 一本(App がボタンを出す時と
-  パネルを mount する時の両方で同じ述語を呼ぶ)。moduleRegistry / `MODULE_IDS` には
-  もう persona は無く、旧タブを開いたまま更新した人の `panelTab:'persona'` は
-  persistView が落として既定タブに戻る。手動追記は `GET /api/you-corpus/judgments`
-  を読み、一覧ではなく人型の図の「灯った点」として出す(下記)。
-  **訂正=追記**(編集も削除も経路が無い・元の記述は新しい記述の `context` に引用され、
-  `correctsId` に元の id が入る)。**読めない≠無い**: additions の読みは ENOENT のみ
-  空扱い、他の errno は throw(読み手を tolerant に戻すと `/judgments` が 200 `[]`・
-  status が manualCount 0 を返し、画面が満杯のコーパスに「まだ何もありません」を出す。
-  assemble に至っては判断を落とした本文で上書きする)。UI 側も読み込み失敗時は空状態を
-  出さない
-- 人型の図(ペルソナ画面の本体・2026-08-14 に一覧+シナプス網マップを置き換え):
-  `src/components/canvas/modules/PersonaFigure.tsx`。粒子1点=手書きメモ1件で、
-  灯り=知っていること/薄い点=進行中コースの未確定回答/脈打つ patch=いまの問いが
-  掘っている領域/塵=まだ形になっていない部分。ノードは `GET /api/you-corpus/judgments`
-  の `ManualJudgment[]` そのもの(別データソースを作らない)。**どの領域に座るかは純関数** —
-  2026-08-15 に `PersonaFigure.tsx` から `src/lib/persona/regions.ts` へ切り出し、
-  領域の語彙も zone(mind/values/craft/core/ground)から **region**
-  (head/chest/arms/legs/**people**=図の周りの halo)へ移行した。union は
-  `PersonaRegion`(`src/lib/types.ts` — 線を渡りタグにも乗るので契約側)、runtime の表
-  (`REGION_LABEL_KEY`/`COURSE_REGION`/`QUESTION_REGION`)はすべて exhaustive Record なので
-  **領域・コース・質問 kind の追加漏れはビルドエラー**(旧 `zone: string` + `asZone()` の
-  黙った既定値 `'mind'` は削除)。座席規則 `placeJudgment` は4段・先勝ち: ①`region:<id>`
-  タグ ②コースタグ ③取材ループの kind タグ ④それ以外は id ハッシュで **body の4領域だけに**
-  決定的に散らし `placed:false` を返す。⚠ **④は「読み」ではなく「散らし」** — halo に
-  入れると「これは他人の話だ」という主張になるので body 限定、かつ画面は領域名の代わりに
-  `persona.region.unplaced` を出す(region 以前の既存メモ〜159件がここに落ちる。
-  キーワードで後付けタグを書くと、追記のみのコーパスに誤ったラベルが恒久的に残る)。
-  番人は `src/lib/persona/regions.test.ts`(halo 不侵入・placed の意味)+
-  `PersonaModule.test.tsx`(unplaced が画面に出ること)で変異赤済み。
-  **座標も純関数** — 2026-08-15 に骨格へ作り直し、点の位置は
-  `src/lib/persona/armature.ts`(figure space = x は 0 中心・y は 0 冠→1 足裏。
-  `ARMATURE` の比率 + capsule/torso/ellipse サンプラ + `ARMATURE_SEED` の LCG)。
-  ⚠ **旧版は 2D canvas のアルファマスクを読み戻していたので jsdom では
-  `buildField` が丸ごと null**、つまり図の幾何は1行もテストされていなかった。
-  純化した目的の半分はこれ(`armature.test.ts` が field を sha256 で固定)。
-  ⚠ **halo(`people`)は体に入れない** — `buildArmaturePoints` の keep-clear
-  (`|x|<0.115 && 0.05<y<0.99` を `continue`)を外すと、胸を指しているのに
-  「人との関わり」が出る。当たり判定は `nearestPoint`(**箱ではなく最近傍**)で、
-  脚の間の空白は「何もない」と答える — 領域の外接矩形で判定すると空中で
-  「続けかた」が立つ。
-  ジェスチャは InfiniteCanvas と同一契約(素の wheel=パン・⌘/Ctrl+wheel=
-  カーソル基点ズーム `zoom*(1+(-deltaY*0.01))`・Space ドラッグ=パン、加えてタッチの
-  ピンチ/1本指パン)。canvas はキーボードから触れないので、**sr-only のリストは2本** —
-  灯った点1件=1ボタン(`persona.figure.nodeList`・テストもこの経路でノードを開く)と、
-  領域1つ=1ボタン(`persona.figure.regionList`)。後者が無いとホバー専用の
-  region probe にキーボードから一生届かない。probe の中身 `RegionSummary` は
-  **PersonaModule 側で組む**(図はコーパスを持たない)。`state:'unread'` は
-  数字を1つも出さず、`placed` と `unplaced` は**絶対に合算しない**
-  (合算は region 以前の〜159件に「読んだ」と主張させる)。番人は
-  `PersonaFigure.test.tsx`(getBoundingClientRect をスタブして本番のポインタ経路を
-  実走させる)。⚠ 旧 `src/lib/personaGraph.ts` /
-  `PersonaGraphView.tsx` は削除済み(この図が置き換えたもの・復元は git 履歴から)。
-- 結果シート: `src/components/canvas/modules/PersonaResultSheet.tsx`。サーバが採点した
-  `PersonaResult` をそのまま描くだけで**クライアントは一切計算しない**。`source` 行は逐語、
-  所見は出所つき、断り書き(`persona.result.caveat` = instruments.ts の
-  `PERSONA_RESULT_CAVEAT` と一字一句一致・テストで固定)は必ず出る。corpus に入った数は
-  `SubmitPersonaCourseResponse.minted` が正で、findings より少なければ「まだ渡っていない」
-  と明示する(見出し「ペルソナに入ったもの」が嘘をつかないための番人)。
-- 取材ループ(ペルソナ画面「今日の1問」): `src/lib/server/personaInterview.ts` +
-  `/api/you-corpus/interview`(POST=生成込み・GET=純読み)/`…/answer`/`…/skip`。
-  状態は `~/.openground/persona-interview.json` 0600。**claude を起動しない** —
-  生成はオーナーの実データに対する決定論的テンプレ穴埋め(`claude -p` 禁止の repo 規約
-  下では LLM 化は PTY 1セッション/日を意味する。それ以上に、①材料が無ければ質問を
-  出さない=汎用診断質問が構造的に作れない ②**カードには移動/承認の「時刻」が無い**
-  (`createdAt`・現在の列・耐久フラグ `reworkCount`/`selfSupplyApproved` はあるが、
-  それが**いつ**起きたかは無い)ので、LLM に board を渡すと「昨日 done にした」等の
-  検証不能な断定を書く)。速さを問えるのは escalation だけ(4時刻を持つ)。
-  **落とし穴6つ(すべて敵対レビューで実再現・回帰テスト済み)**:
-  ⓪**プロジェクト同一性は registry UUID・名前は同一性ではない** — basename も
-  `displayName`(型定義が「purely cosmetic」と明記)も一意でなく、`~/work/api` と
-  `~/oss/api` は同時登録できる。名前でグルーピングすると無関係な2repoのカードが
-  対にされ「起きていないレース」を断言し、それが corpus に恒久記録される。
-  `BoardCard` は名前フィールドを**持たない**(キーに使えない名前を置くこと自体が罠)。
-  検証は実 sweep 経由で — 別名 fixture のテストは空振りする
-  ①**検出器は必ず全ヒットを順位付きで返す** — 上位1件だけ返すと、動かない保留カードの
-  top hit は永遠に top のままで、一度聞いた時点でその kind が恒久沈黙する(保留10枚で
-  生涯1問だけ、が実測値) ②**カード年齢を「列に居た時間」として描かない** — 差し戻し
-  上限超過の経路は `createdAt` を触らずに blocked へ落とすので「40日保留のまま」は捏造。
-  「40日前に作った」と書く ③**answer/skip は state ロック必須** — corpus 書き込みの
-  await を挟むので、日付跨ぎで `lastAskedDate` が巻き戻り新しい質問が消える/同時回答で
-  corpus に二重書き。全検出器が throw した場合は空状態を騙らず fail loud
-  ④**「今日は聞くことがない」は完全な読み取りが要る** — 素材収集の失敗を握り潰すと、
-  一件も読めていないのにオーナーの記録について断言し、さらに `lastAskedDate` を焼いて
-  翌日まで再試行しない(③の fail loud と非対称なガードだった)。`InterviewMaterial.complete`
-  が false かつ候補ゼロなら throw・日を焼かない(route 500 → タブは断言せず非表示)。
-  候補が出た場合は部分 sweep でも聞く(1プロジェクトの破損で全体を黙らせない)。
-  ただし上流リーダーは寛容なので、壊れた `tasks.json` は「失敗」でなく**空**として
-  読まれる — `complete` が見えるのは実際に throw する故障だけ
-  ⑤**共有の stale フラグを回答の確認文に流用しない** — メモ欄と共有のため、失敗した
-  メモが後続の成功した回答の確認文を書き換える。回答は専用 state を持つ。
-  同じ観測は `askedSubjects` で二度聞かない・kind は使用回数の少ない順に自動ローテ。
-  回答は escalation 書き戻しと**同じ文面**(`Q:` / `→ オーナーの回答:`)で
-  `appendJudgment` へ — corpus 側で1つの声に見えるため。`meta.skipped`(保存できたが
-  corpus 再構築失敗)は `corpusStale` として UI まで運び、確認文自体を
-  `interview.answeredStale`(「まだ分身に渡っていません」)に差し替える — 警告を横に
-  出すだけでは「分身が覚えました」の嘘が消えないため(否定アサーションでピン)。文言方針(汎用診断質問の禁止)は **エクスポートした `DETECTORS` を列挙**
-  してピン — 検出器を足して CASE を足さないとテストが落ちる(旧版は固定6問にしか
-  BANNED を当てておらず、レビューで quiz 検出器を足しても92件全緑=歯が無かった)
-- 対話でコーパスが育つ経路(2026-08-15): `src/lib/server/personaChat.ts` +
-  口は `server/routes/personaChat.ts`(`GET|POST /api/persona/chat` /
-  `GET /api/persona/chat/turn/:id` / `POST /api/persona/chat/cancel` /
-  `POST /api/persona/import` / `GET /api/persona/import/:id`)。**コース系の
-  `server/routes/persona.ts` とは別ルータ**で、こちらは claude を起動しコーパスに
-  書くのでゲートが2枚(loopback + `experiments.persona`)+ 起動2経路は
-  `claudeRunPreflight`(未導入/未ログインは spawn 前に 503)。
-  ⚠ **不変条件は1つだけ: 学ぶのはオーナー自身の言葉だけ**。`parsePersonaTurn` は
-  `{ reply, kept }` を返し、書き手 `appendKeptLines` の**引数は `KeptLine[]` のみ**
-  (`reply` はスコープに無い) — 混ぜるには署名を書き換えるしかない、という構造で持つ。
-  番人 `personaChat.test.ts` は本番の `readManualJudgments` で読み戻して返答文の不在を見る。
-  1ターン = `--resume` した claude PTY 1本 + マーカー掻き取り(SDK でも `-p` でもない・
-  収容レシピは `makeOverseerBrain` と同じ = 空 scratch cwd・L4 guard 常時・darwin は
-  L3+loopback egress proxy・Bash/Task/WebFetch/WebSearch 拒否・strictMcp・hidden)。
-  ⚠ **落とし穴(2026-08-26 に実際に踏んだ): `--resume` は会話を画面に再表示する。**
-  そこには前ターンのマーカー行がそのまま含まれるので、素のマーカーだと**再開ターンの
-  最初のポーリングで完了判定が成立し、新しい答えを待たずに前回の返事と KEPT 文を
-  そのまま返す**(=2ターン目以降が1ターン目の丸写しになる。オーナー報告の
-  「会話になってない」がこれ)。対策は**ターンごとの nonce をマーカーに束縛**
-  (`personaTurnNonce` / `personaMarker`) — 前回の span は完了判定にもパーサにも
-  見えない。掻き取り方式で `--resume` を使う経路を新設するなら同じ手当てが要る。
-  ⚠ 継続性は `--resume` に**依存させない**: 直近 `PERSONA_HISTORY_TURNS` 往復を
-  `buildPersonaTurnPrompt` が prompt に明記する。`claude` は CI でもコンテナでも
-  動かないので「resume で会話が繋がる」は測れない仮定であり、測れるのは
-  プロンプトに書いた文だけ。番人は `personaChat.test.ts` の
-  「a resumed turn ignores the conversation replayed above it」と
-  結線側2本(`isComplete` が nonce 束縛か / 再開ターンが replay で成功しないか)。
-  差し替え口は `PersonaTurnRunner`(将来のストリーミング化はこの1ファイル。
-  ただし SDK へ寄せる判断は `docs/SDK_CLIENT_INVESTIGATION.md` §12 の規約が先)。
-  ⚠ **単発化は同期で claim する** — `startPersonaChatTurn` は**同期関数**で、
-  検査と書き込みの間に await が1つも無い(挟むと2つ目の POST が通り、
-  deskSpawnLock.ts の記録どおり「失敗もせず、前の会話を忘れる」)。会話は in-memory
-  (globalThis・再起動で消える。消えて困る半分は既にコーパスにある)。
-  マーカー抽出は `src/lib/server/ptyMarkers.ts` に**1実装だけ**
-  (`generateDescription.ts` が本番で払った ANSI 処理を切り出したもの。
-  `'<'` を含む候補を捨てるのがプロンプト自身のエコーを外す唯一の歯 —
-  対になるのは「答えに山括弧を書くな」というプロンプト側の半分)
-- claude.ai エクスポートの取り込み: `src/lib/server/personaImport.ts`。パーサは
-  純粋な `src/lib/claudeExport.ts`(**人間の発言だけ残す**・読めない行は数える)を
-  再実装しない。**全部は蒸留しない** — 直近 `IMPORT_MAX_MESSAGES`(400)/
-  `IMPORT_MAX_PROMPT_CHARS` の slice を1回の run で処理し、`notConsidered` を必ず返す
-  (「自分の取りこぼしを隠す数字」を出さないため)。材料は scratch の
-  `messages.txt` に書いて**パス渡し**(prompt は argv に載るので inline 不可)。
-  ⚠ **`ManualJudgment` に冪等キーは無い** → 同じファイルの二度取り込みは灯りごと倍増
-  するので、`~/.openground/persona-imports.json`(0600・ファイル bytes の sha)で拒否
-  + 正規化テキストの重複も skip して数える。sha は**完走時にだけ**記録する
-  (途中で落ちた回は再試行できる・二重書きはテキスト側が止める)。
-  zip は非対応(依存を足さない・クライアントが「中の conversations.json を出せ」と言う)
-- ペルソナ画面の**入口は会話**(2026-08-15・承認モック `persona-v2.html` が look と文言の
-  正典): `src/components/canvas/modules/PersonaConversation.tsx`(+ `PersonaPrivacyNote.tsx`)。
-  **fetch は1つも持たない** — 送信も polling も `PersonaModule` 側(図と同じ規約)。
-  ⚠ **「勝手に入る」は確認ダイアログが無いという意味であって、見えないところで書くという
-  意味ではない**。拾った1行は必ず**それが出た発言の下**に `PersonaKeptWrite.judgment` 込みで
-  出て、押すと既存の訂正コンポーザが開く(往復ゼロ)。拾わなかったターンは
-  `persona.chat.keptNone` と言う(チップが無い=見えない書き込み、を作らない)。
-  ⚠ **入力は Enter で送るので歯は `isComposing`**(和文の変換確定 Enter を盗むと
-  書きかけが飛ぶ)。⚠ **失敗しても言葉を失わない** — 入力は送信時に必ず空になるので、
-  オーナーの文字列は**送る前に turn へ入れて**おき、失敗した turn はそのまま画面に残して
-  retry を出す。`failTurn` を「turn を消す」に変えると `PersonaModule.test.tsx` が3本赤。
-  ⚠ **待ちは本物** — cold `claude` 起動は数十秒で、モックの 420ms は到達不能。
-  タイピング演出は置かず経過秒だけ出す(最初の poll 前と「今日の1問」の保存は
-  `persona.chat.sending`)。プレースホルダは18本を wander(`nextPromptIndex`・
-  `prefers-reduced-motion` では停止)で回す — この画面が**何をする所か**を言う唯一の場所。
-  ドロップは同じ入力欄で受け、sha-256(**ファイルの bytes**・`sha256Hex`)を付けて POST。
-  zip はクライアントで断る。プライバシー注記は**モック逐語で、やわらげ禁止**:
-  書くのは `~/.openground/` だけ / **ただし会話はオーナー自身の Claude を通って
-  Anthropic に行く** / 学習可否は claude.ai 側でしか変えられない。
-  `PersonaConversation.test.tsx` が3文を**辞書と一字一句照合**し、「会話もローカル」と
-  読める書き換えを正規表現で落とす(プライバシーの嘘はレビュー指摘ではなく赤で止める)
-- ペルソナ画面のレイアウト(2026-08-15 に mock へ寄せて全面改修・`PersonaModule.tsx`):
-  **ステージは絶対にスクロールしない**(会話の thread と結果シートだけが自分の中で
-  スクロールする)。四隅=①左上「ここが何か」2行 ②右上のカウント ③左下のコース1行1ボタン
-  ④下中央の会話、中央は図。読み物(人物像・判断台帳・meta strip)は**押して初めて出る**
-  1本の中央カラムで、`run ? … : correcting ? … : selected ? … : reading==='portrait' ? …`
-  の**if/else 連鎖**で描く(独立した boolean 3つだと2枚重なる状態が作れてしまう)。
-  上端は `top-16` — PersonaPanel の `BackLink` と図の recenter が `top-4` に居るため。
-  ⚠ **カウントは読めた面だけ出す**: `portrait===null`(失敗も「肖像でない 200」も同じ状態)
-  ならブロックごと不在、台帳は**通算ではなく今週**、そして一度も記録が無い台帳は行ごと
-  出さない(0 は「測ったが0」を意味してしまう)。「書き足す」ボタンは廃止 —
-  入るのは会話からで、コンポーザは**既存の1行の上でしか開かない**。
-  「今日の1問」は会話の**先頭ターン**(質問カードは廃止・`questionLoaded` が false の日は
-  何も言わない=次に打った文は会話へ行く)。swarm の自動返信の話は**この画面には無い**
-  (`SwarmManagerPane` の監督スイッチ横へ移動 —
-  `projectPanel.swarm.manager.overseerPersonaNote`)
 - sandbox 実験: `src/lib/server/sandbox.ts`(sandbox-exec 包囲・experiments.sandbox)—
   SBPL の落とし穴は `docs/SANDBOX_EXPERIMENT.md` 必読
 - lockdown: `src/lib/server/lockdown.ts` + `src/lib/lockdownClient.ts` + `electron/lockdown.js`

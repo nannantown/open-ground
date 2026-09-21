@@ -229,6 +229,20 @@ export const collectClaudeUsage = async (
   }
 }
 
+/** undefined ⇒ not a compaction boundary line; otherwise its postTokens (null
+ *  when the boundary does not say). See {@link sessionContextTokens}. */
+const compactBoundaryPostTokens = (raw: string): number | null | undefined => {
+  if (!raw || raw[0] !== '{' || raw.indexOf('"compact_boundary"') < 0) return undefined
+  try {
+    const obj = JSON.parse(raw)
+    if (obj?.type !== 'system' || obj?.subtype !== 'compact_boundary') return undefined
+    const post = obj?.compactMetadata?.postTokens
+    return typeof post === 'number' && Number.isFinite(post) ? post : null
+  } catch {
+    return undefined
+  }
+}
+
 /** The context-window FILL for one claude session, in tokens: the sum its LAST
  *  assistant turn reported carrying (`input + cache_read + cache_creation`) — the
  *  same number the CLI's own `/context` prints (verified equal to `38.8k/200k` in
@@ -272,6 +286,18 @@ export const sessionContextTokens = async (
   // Walk from the end so a long transcript costs one parse, not a full scan.
   const lines = raw.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
+    // A COMPACTION newer than the last reply: the context the session now
+    // carries is what the compaction left, not what the last reply carried —
+    // and no reply may follow for hours on a quiet desk. Without this the fill
+    // read stays at the PRE-compaction size until the next turn, so the gauge
+    // shows a full desk that is not, and the desk context cap
+    // (supplyContextCap.ts) would re-send `compact` into a desk that already
+    // did it. Measured 2026-09-18: claude writes `{type:'system',
+    // subtype:'compact_boundary', compactMetadata:{preTokens, postTokens}}` for
+    // both auto and manual compaction (PTY and SDK alike). An unreadable
+    // postTokens ⇒ null ("unknown"), never the stale pre-compaction number.
+    const boundary = compactBoundaryPostTokens(lines[i])
+    if (boundary !== undefined) return boundary
     const parsed = parseLine(lines[i])
     if (!parsed) continue
     const u = parsed.usage

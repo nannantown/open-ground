@@ -3,7 +3,7 @@
 // One GET /api/custom-modules returns BOTH the caller's role (decided
 // server-side from the stored app-login session — the client never computes
 // it) and the on-disk module list. ProjectPanel composes the tab row from the
-// modules and gates the management UI ("+", Market, owner actions) on the
+// modules and gates the management UI (local create/edit/delete actions) on the
 // role. `loaded` distinguishes "no custom tabs" from "haven't heard from the
 // server yet" so a persisted `custom:<id>` tab isn't discarded before the
 // list arrives.
@@ -18,18 +18,16 @@ import type {
 export interface CustomModulesState {
   role: CustomTabRole
   modules: CustomModuleDef[]
-  /** False while work mode (lockdown) blocks the marketplace — hides the
-   *  "Browse marketplace" entries (server-decided, like `role`). */
-  marketAvailable: boolean
   /** True once a fetch has succeeded at least once. */
   loaded: boolean
   refresh: () => Promise<void>
 }
 
-export function useCustomModules(): CustomModulesState {
+const NO_MODULES: CustomModuleDef[] = []
+
+export function useCustomModules(enabled = true): CustomModulesState {
   const [role, setRole] = useState<CustomTabRole>('none')
   const [modules, setModules] = useState<CustomModuleDef[]>([])
-  const [marketAvailable, setMarketAvailable] = useState(true)
   const [loaded, setLoaded] = useState(false)
   // Guards setState-after-unmount from a slow in-flight fetch.
   const aliveRef = useRef(true)
@@ -41,6 +39,7 @@ export function useCustomModules(): CustomModulesState {
   }, [])
 
   const refresh = useCallback(async () => {
+    if (!enabled) return
     try {
       const r = await fetch('/api/custom-modules', { cache: 'no-store' })
       if (!r.ok) return // route missing / server error — keep what we have
@@ -48,13 +47,11 @@ export function useCustomModules(): CustomModulesState {
       if (!aliveRef.current) return
       setRole(body.role ?? 'none')
       setModules(Array.isArray(body.modules) ? body.modules : [])
-      // Absent (an older server) reads as available — the pre-lockdown shape.
-      setMarketAvailable(body.marketAvailable !== false)
       setLoaded(true)
     } catch {
       // Offline / server restarting — keep the last-known list quietly.
     }
-  }, [])
+  }, [enabled])
 
   useEffect(() => {
     void refresh()
@@ -75,5 +72,7 @@ export function useCustomModules(): CustomModulesState {
     return () => window.removeEventListener('focus', onFocus)
   }, [refresh])
 
-  return { role, modules, marketAvailable, loaded, refresh }
+  return enabled
+    ? { role, modules, loaded, refresh }
+    : { role: 'none', modules: NO_MODULES, loaded: true, refresh }
 }

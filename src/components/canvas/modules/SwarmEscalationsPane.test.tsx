@@ -5,9 +5,9 @@ import { SwarmEscalationsPane } from './SwarmEscalationsPane'
 import type { EscalationView } from '@/lib/types'
 
 // The Escalations inbox panel (C1) — UI-side contract only: renders nothing
-// while the inbox is empty, lists an OPEN question with its stakes + proxy
-// draft, and fires the owner-gated POSTs with the right bodies. The server
-// journey (idempotency, delivery, memory) is covered in swarmEscalations.test.ts
+// while the inbox is empty, lists an OPEN question with its stakes,
+// and fires the owner-gated POSTs with the right bodies. The server
+// journey (idempotency, persistence, delivery) is covered in swarmEscalations.test.ts
 // + escalations.routes.test.ts; here the fetch layer is stubbed.
 
 vi.mock('@/i18n/I18nContext', () => ({
@@ -25,7 +25,6 @@ const escalation = (over: Partial<EscalationView> = {}): EscalationView => ({
   context: '公開リポに乗るため不可逆。',
   whyEscalated: 'irreversible',
   status: 'open',
-  proxyDraft: { answer: '埋めないのが通例です', confidence: 'medium', isAbstention: false },
   ...over,
 })
 
@@ -47,7 +46,6 @@ beforeEach(() => {
           JSON.stringify({
             escalation: { ...escalation(), status: 'answered' },
             delivery: 'queued',
-            memoryWritten: true,
           }),
           { status: 200 },
         )
@@ -74,12 +72,11 @@ describe('SwarmEscalationsPane', () => {
     expect(container.firstChild).toBeNull()
   })
 
-  it('lists an open question with stakes + proxy draft, and answers with the typed text', async () => {
+  it('lists an open question with stakes, and answers with the typed text', async () => {
     listPayload = [escalation()]
     const { getByText, getByPlaceholderText } = render(<SwarmEscalationsPane projectPath="/proj" />)
     await waitFor(() => getByText('本番キーを埋めますか？'))
     getByText('公開リポに乗るため不可逆。')
-    getByText('埋めないのが通例です')
 
     // The send button is disabled until an answer is typed (never a blank inject).
     const send = getByText('projectPanel.swarm.esc.answerSend').closest('button')!
@@ -129,16 +126,15 @@ describe('SwarmEscalationsPane', () => {
     getByText('レガシーの文脈。')
   })
 
-  it('“use draft” copies the proxy draft into the textarea; dismiss posts the id', async () => {
+  it('dismiss posts the id without supplying an answer', async () => {
     listPayload = [escalation()]
     const { getByText, getByPlaceholderText } = render(<SwarmEscalationsPane projectPath="/proj" />)
     await waitFor(() => getByText('本番キーを埋めますか？'))
 
-    fireEvent.click(getByText('projectPanel.swarm.esc.useDraft'))
     expect(
       (getByPlaceholderText('projectPanel.swarm.esc.answerPlaceholder') as HTMLTextAreaElement)
         .value,
-    ).toBe('埋めないのが通例です')
+    ).toBe('')
 
     fireEvent.click(getByText('projectPanel.swarm.esc.dismiss'))
     await waitFor(() => {

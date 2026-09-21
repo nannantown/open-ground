@@ -1,5 +1,10 @@
 # `experiments.sandbox` — owner-only Seatbelt sandbox for launched Claude (macOS)
 
+> Current-status note (2026-09-20): Persona and the overseer brain have been
+> removed. Brain-specific measurements below are historical, not live app paths.
+> Worker sandboxing, Work mode host restrictions and the manual kernel probe
+> remain. See the loopback probe section and Files below for current entry points.
+
 **Status:** owner-only experiment · default **OFF** · **macOS only** · not in release
 notes / the in-app manual until graduated.
 
@@ -319,51 +324,17 @@ list; under-claiming here is the point).
 
 ---
 
-## Overseer-brain egress close (`network:'loopback'` + allowlist proxy)
+## Loopback Network Probe
 
-The one launch path with the private **you-corpus in context** — the overseer
-brain (`swarmOverseerBrain.makeOverseerBrain`) — is now sandboxed
-**unconditionally on macOS** (NOT gated on this experiment; the experiment still
-gates the worker/interactive paths) with a **tighter network line**:
+The explicit `scripts/sandbox-probe.ts` diagnostic still tests
+`network: 'loopback'` with `createEgressProxy`: direct off-machine connections
+are kernel-denied and proxied TLS destinations are checked against the provider
+allowlist. Its historical `BRAIN:` labels identify profile test cases, not a
+running Persona feature. No application singleton starts this proxy anymore.
 
-- `buildSandboxProfile({ network: 'loopback' })` allows outbound ONLY to
-  loopback + local unix sockets; every off-machine destination falls to
-  `(deny default)` and is **kernel-refused** (EPERM). DNS still resolves
-  (libinfo rides mach IPC), but nothing off-machine connects.
-- The brain's claude reaches Anthropic exclusively through a host-side
-  **allowlist CONNECT proxy** on 127.0.0.1 (`egressProxy.ts`, `HTTPS_PROXY`
-  injected into the launch): `anthropic.com` / `claude.ai` (suffix-matched,
-  port 443) pass; everything else — telemetry (datadoghq), content bridges,
-  any exfil target — gets a logged 403. The DOMAIN decision happens OUTSIDE
-  the sandbox.
-- The `--disallowed-tools` deny list (WebFetch/WebSearch/Bash/Task) stays armed
-  as defense-in-depth; off-darwin (or if Apple removes sandbox-exec —
-  `brainSandboxAvailable`) it degrades gracefully back to that stop-gap alone.
-- **Keychain carve-in:** claude's subscription credential lives in the login
-  keychain, and Security.framework does that db's file I/O **from the client
-  process** — so a Seatbelt deny is an auth outage, not a secrecy trim. This
-  landed loopback-only first and was generalised to **both** profiles on
-  2026-07-19; see *Keychain* below for the measurements.
-
-Verified on the real kernel (`scripts/sandbox-probe.ts`, BRAIN battery — 72/72
-with the main battery, re-run 2026-07-19):
-
-```
-  ✓  want=deny  got=deny  BRAIN: OUTBOUND → 1.1.1.1:443 (external, direct)
-  ✓  want=allow got=allow BRAIN: DNS lookup api.anthropic.com (resolution path open)
-  ✓  want=allow got=allow BRAIN: OUTBOUND → 127.0.0.1 (the egress proxy)
-  ✓  want=allow got=allow BRAIN: https api.anthropic.com via allowlist proxy
-  ✓  want=deny  got=deny  BRAIN: https example.com via proxy (403 — not allowlisted)
-  ✓  want=deny  got=deny  BRAIN: BIND 127.0.0.1 (listener still denied)
-  ✓  want=allow got=allow BRAIN: claude --version (startup smoke, loopback profile)
-```
-
-And live (`scripts/overseer-brain-smoke.ts` — one real haiku-tier PTY,
-2026-07-08): the sandboxed+proxied brain answered a corpus-grounded question in
-11s (`ANSWER HIGH`), while its Datadog/content-bridge CONNECTs were 403'd —
-the closed egress demonstrably does not break the one legitimate path.
-
----
+`lockdown.ts` independently uses the same host allowlist and matcher for Work
+mode. Those shared restrictions, the profile builder, and the diagnostic proxy
+factory remain; removing the unused Persona launcher does not weaken them.
 
 ## Remaining manual QA
 
@@ -706,11 +677,8 @@ ms.date 2026-03-29). Retrieved 2026-07-28.
 
 - `src/lib/server/sandbox.ts` — `buildSandboxProfile` (pure SBPL builder, incl.
   the `network:'loopback'` egress-close mode) + `wrapWithSandboxExec`.
-- `src/lib/server/egressProxy.ts` — the loopback allowlist CONNECT proxy the
-  brain's claude rides (`ensureBrainEgressProxy`); `egressProxy.test.ts`.
-- `src/lib/server/swarmOverseerBrain.ts` — `makeOverseerBrain` wires the brain
-  launch: always-sandboxed on macOS, `sandboxNetwork:'loopback'`, `HTTPS_PROXY`;
-  `scripts/overseer-brain-smoke.ts` is its live smoke.
+- `src/lib/server/egressProxy.ts` — shared provider host policy and explicit
+  `createEgressProxy` diagnostic factory; `egressProxy.test.ts`.
 - `src/lib/server/claudeTerminal.ts` — `launchClaude` applies it: writes the
   profile to a temp file, wraps the argv, forces `bypass`.
 - `src/lib/server/experiments.ts` · `useExperiments.ts` · `types.ts` — the

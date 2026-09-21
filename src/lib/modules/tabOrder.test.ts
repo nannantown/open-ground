@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { effectiveTabOrder, moveTab, preserveCustomTabs } from '@/lib/modules/tabOrder'
+import { effectiveTabOrder, moveTab, preserveHiddenTabs } from '@/lib/modules/tabOrder'
 import { customTabId, type ModuleId } from '@/lib/modules/ids'
 
 // The default core registry order used across these tests.
@@ -130,7 +130,13 @@ describe('effectiveTabOrder with custom tab ids', () => {
   })
 })
 
-describe('preserveCustomTabs', () => {
+describe('preserveHiddenTabs', () => {
+  it('retains hidden native and custom tabs when a public user reorders the visible row', () => {
+    const saved = ['canvas', 'board', 'research', 'custom:saved', 'terminal', 'swarm']
+    const result = preserveHiddenTabs(saved, ['terminal', 'board'])
+    expect(result).toEqual(['canvas', 'terminal', 'swarm', 'board', 'research', 'custom:saved'])
+    expect(saved).toEqual(['canvas', 'board', 'research', 'custom:saved', 'terminal', 'swarm'])
+  })
   // A drag performed before the custom-module list has loaded reorders the
   // builtin-only row; persisting it verbatim would scrub the saved `custom:*`
   // ids (and their dragged positions). These cases pin the re-insertion.
@@ -141,7 +147,7 @@ describe('preserveCustomTabs', () => {
     const saved = ['terminal', CUSTOM_A, 'board', 'canvas']
     // The user dragged canvas to the front of the builtin-only row.
     const reordered = ['canvas', 'terminal', 'board']
-    expect(preserveCustomTabs(saved, reordered)).toEqual([
+    expect(preserveHiddenTabs(saved, reordered)).toEqual([
       'canvas',
       'terminal',
       CUSTOM_A,
@@ -152,7 +158,7 @@ describe('preserveCustomTabs', () => {
   it('keeps adjacent custom tabs in their saved relative order', () => {
     const saved = ['terminal', CUSTOM_A, CUSTOM_B, 'board', 'canvas']
     const reordered = ['board', 'terminal', 'canvas']
-    expect(preserveCustomTabs(saved, reordered)).toEqual([
+    expect(preserveHiddenTabs(saved, reordered)).toEqual([
       'board',
       'terminal',
       CUSTOM_A,
@@ -164,7 +170,7 @@ describe('preserveCustomTabs', () => {
   it('keeps a head-of-row custom tab at the head', () => {
     const saved = [CUSTOM_A, 'board', 'canvas', 'terminal']
     const reordered = ['terminal', 'board', 'canvas']
-    expect(preserveCustomTabs(saved, reordered)).toEqual([
+    expect(preserveHiddenTabs(saved, reordered)).toEqual([
       CUSTOM_A,
       'terminal',
       'board',
@@ -175,7 +181,7 @@ describe('preserveCustomTabs', () => {
   it('never duplicates a custom id already present in the row', () => {
     const saved = ['board', CUSTOM_A, 'canvas', 'terminal']
     const reordered = [CUSTOM_A, 'board', 'canvas', 'terminal']
-    expect(preserveCustomTabs(saved, reordered)).toEqual(reordered)
+    expect(preserveHiddenTabs(saved, reordered)).toEqual(reordered)
   })
 
   it('never resurrects a dropped builtin (only custom ids are preserved)', () => {
@@ -183,7 +189,7 @@ describe('preserveCustomTabs', () => {
     // reconciler dropped it on purpose, so the merge must not bring it back.
     const saved = ['board', 'goals', CUSTOM_A, 'canvas', 'terminal']
     const reordered = ['canvas', 'board', 'terminal']
-    expect(preserveCustomTabs(saved, reordered)).toEqual([
+    expect(preserveHiddenTabs(saved, reordered)).toEqual([
       'canvas',
       'board',
       CUSTOM_A,
@@ -193,7 +199,7 @@ describe('preserveCustomTabs', () => {
 
   it('is a no-op for an undefined or custom-free saved order', () => {
     const reordered = ['canvas', 'board', 'terminal']
-    expect(preserveCustomTabs(undefined, reordered)).toEqual(reordered)
-    expect(preserveCustomTabs(['terminal', 'board'], reordered)).toEqual(reordered)
+    expect(preserveHiddenTabs(undefined, reordered)).toEqual(reordered)
+    expect(preserveHiddenTabs(['terminal', 'board'], reordered)).toEqual(reordered)
   })
 })

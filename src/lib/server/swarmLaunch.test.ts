@@ -17,7 +17,9 @@ import {
   resolveAvailableTier,
   resolveAvailableTierProbed,
   isTopTierExhaustedByUsage,
-  classifyCardWeight,
+  resolveCardTier,
+  TIER_MODEL_EFFORT,
+  SAFETY_FLOOR_TIER,
   execModeMaxWorkers,
   asExecutionMode,
 } from './swarmLaunch'
@@ -253,7 +255,7 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
   })
 
   it('max mode = the top tier (fable)/max for every role', () => {
-    for (const role of ['worker', 'supply', 'manager', 'overseer'] as const) {
+    for (const role of ['worker', 'supply', 'manager'] as const) {
       expect(resolveSwarmModelEffort('max', role)).toEqual({ model: 'fable', effort: 'max' })
     }
   })
@@ -262,8 +264,6 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     expect(resolveSwarmModelEffort('economy', 'worker')).toEqual({ model: 'sonnet', effort: 'low' })
     expect(resolveSwarmModelEffort('economy', 'supply')).toEqual({ model: 'sonnet', effort: 'medium' })
     expect(resolveSwarmModelEffort('economy', 'manager')).toEqual({ model: 'sonnet', effort: 'medium' })
-    // The proxy-you overseer is an engine role — sonnet/medium, not a worker's low.
-    expect(resolveSwarmModelEffort('economy', 'overseer')).toEqual({ model: 'sonnet', effort: 'medium' })
   })
 
   it('optimize runs the always-on DESKS on opus/high — top tier is for heavy cards, not for sitting', () => {
@@ -273,26 +273,36 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     // HIGH effort on the middle rung; capability is preserved where it is
     // actually spent (the heavy-card worker below stays fable/max).
     expect(resolveSwarmModelEffort('optimize', 'manager')).toEqual({ model: 'opus', effort: 'high' })
-    expect(resolveSwarmModelEffort('optimize', 'overseer')).toEqual({ model: 'opus', effort: 'high' })
     // ⚠ OWNER DECISION 2026-09-18: the supply desk is opus too (it investigates
     // and specifies cards — sonnet was under-powered), still at MEDIUM effort.
     // A mutation that drops it back to sonnet, or lifts it to fable, turns this
     // red (red measured against a temporary 'sonnet' on 2026-09-18).
     expect(resolveSwarmModelEffort('optimize', 'supply')).toEqual({ model: 'opus', effort: 'medium' })
-    // …and the thing that must NOT have moved with them: a heavy card is still
-    // top tier. A mutation that sends heavy work to opus too turns this red.
+    // …and the thing that must NOT have moved with them: an `ultra` card is still
+    // top tier. A mutation that sends ultra work to opus too turns this red.
     expect(
-      resolveSwarmModelEffort('optimize', 'worker', {
-        title: 'sandbox guard for auth token deletion',
-        notes: 'security-critical',
-      }),
+      resolveSwarmModelEffort('optimize', 'worker', { title: 'rebuild the engine', tier: 'ultra' }),
     ).toEqual({ model: 'fable', effort: 'max' })
   })
 
-  it('optimize routes WORKERS across THREE tiers — fable / opus / sonnet by card weight', () => {
-    const heavy = { title: 'sandbox guard for auth token deletion', notes: 'security-critical' }
+  it('optimize routes WORKERS by DIFFICULTY TIER — the owner-approved table (2026-09-18)', () => {
+    // The four rows, exactly as approved. Each is a distinct (model, effort) pair,
+    // so ANY row edited to another row's value turns this red.
+    const at = (tier: 'touch' | 'standard' | 'design' | 'ultra') =>
+      resolveSwarmModelEffort('optimize', 'worker', { title: 'add a feature', tier })
+    expect(at('touch')).toEqual({ model: 'sonnet', effort: 'low' })
+    expect(at('standard')).toEqual({ model: 'opus', effort: 'medium' })
+    expect(at('design')).toEqual({ model: 'opus', effort: 'high' })
+    expect(at('ultra')).toEqual({ model: 'fable', effort: 'max' })
+    // The exported table IS what the resolver reads (one place, no second copy).
+    expect(TIER_MODEL_EFFORT).toEqual({
+      touch: { model: 'sonnet', effort: 'low' },
+      standard: { model: 'opus', effort: 'medium' },
+      design: { model: 'opus', effort: 'high' },
+      ultra: { model: 'fable', effort: 'max' },
+    })
+    // No tier written ⇒ the estimator: a short chore → touch row.
     const light = { title: '[follow-up] fix a typo in a comment', notes: 'nit' }
-    expect(resolveSwarmModelEffort('optimize', 'worker', heavy)).toEqual({ model: 'fable', effort: 'max' })
     expect(resolveSwarmModelEffort('optimize', 'worker', light)).toEqual({ model: 'sonnet', effort: 'low' })
     // ⚠ THE BASE IS OPUS (owner, 2026-08-26). This bucket is not just "a card with
     // no signal" — it is where every ordinary card lands, and it used to run on
@@ -309,7 +319,7 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     // base to sonnet (or to fable) collapses this set from three to two.
     const models = new Set(
       [
-        { title: 'sandbox auth deletion' }, // heavy
+        { title: 'rebuild the engine', tier: 'ultra' as const }, // top
         { title: 'add a feature' }, // base
         { title: '[minor] typo' }, // light
       ].map((c) => resolveSwarmModelEffort('optimize', 'worker', c)!.model),
@@ -317,16 +327,64 @@ describe('execution mode (token budget — card 68d8e00f)', () => {
     expect(Array.from(models).sort()).toEqual(['fable', 'opus', 'sonnet'])
   })
 
-  it('classifyCardWeight reads static signals (EN + JA), safe-middle by default', () => {
-    expect(classifyCardWeight({ title: 'add sandbox guard' })).toBe('heavy')
-    expect(classifyCardWeight({ title: '課金まわりの認証' })).toBe('heavy') // JA safety keywords
-    expect(classifyCardWeight({ title: '[MAJOR] release blocker' })).toBe('heavy')
-    expect(classifyCardWeight({ title: '[minor] rename a var' })).toBe('light')
-    expect(classifyCardWeight({ title: 'add a feature', notes: 'medium sized work' })).toBe('medium')
-    // A big brief ⇒ heavy even without a keyword (substantial work).
-    expect(classifyCardWeight({ title: 'x', notes: 'y'.repeat(1300) })).toBe('heavy')
-    // A heavy signal beats a light one.
-    expect(classifyCardWeight({ title: '[minor] but touches auth' })).toBe('heavy')
+  it('resolveCardTier: no tier written ⇒ keyword estimator (EN + JA), safe middle by default', () => {
+    // Safety keywords floor an unmarked card at `design` — NOT the top tier any
+    // more (before 2026-09-18 they meant fable/max).
+    expect(resolveCardTier({ title: 'add sandbox guard' })).toBe('design')
+    expect(resolveCardTier({ title: '課金まわりの認証' })).toBe('design') // JA safety keywords
+    expect(resolveCardTier({ title: '[MAJOR] release blocker' })).toBe('design')
+    expect(resolveCardTier({ title: '[minor] rename a var' })).toBe('touch')
+    expect(resolveCardTier({ title: 'add a feature', notes: 'medium sized work' })).toBe('standard')
+    // A safety signal beats a light one.
+    expect(resolveCardTier({ title: '[minor] but touches auth' })).toBe('design')
+  })
+
+  it('⚠ a LONG brief is not a hard task — the 1200-character rule is gone (2026-09-18)', () => {
+    // The supply skill asks for detailed completion conditions, so a length rule
+    // promoted the most carefully written cards to the most expensive tier. The
+    // same card must resolve the same tier whether its brief is short or long.
+    // Red measured on 2026-09-18 by temporarily restoring `|| text.length > 1200 ⇒
+    // ultra` in resolveCardTier.
+    const brief = 'Completion conditions: the button shows a spinner while saving. '
+    const short = { title: 'add a save spinner', notes: brief }
+    const long = { title: 'add a save spinner', notes: brief.repeat(40) } // ~2600 chars
+    expect(long.notes.length).toBeGreaterThan(2000)
+    expect(resolveCardTier(long)).toBe(resolveCardTier(short))
+    expect(resolveCardTier(long)).toBe('standard')
+    expect(desiredModelEffort('optimize', 'worker', long)).toEqual({ model: 'opus', effort: 'medium' })
+    // …and the tier the supply officer WROTE is honoured regardless of length.
+    expect(resolveCardTier({ ...long, tier: 'touch' })).toBe('touch')
+  })
+
+  it('an explicit tier wins over the estimator — in both directions', () => {
+    // Up: a keyword-free card the supply officer judged hard.
+    expect(resolveCardTier({ title: 'add a feature', tier: 'ultra' })).toBe('ultra')
+    expect(resolveCardTier({ title: 'add a feature', tier: 'design' })).toBe('design')
+    // Down: a chore-looking card the supply officer judged ordinary stays ordinary,
+    // and an ordinary-looking card judged trivial runs light.
+    expect(resolveCardTier({ title: '[minor] typo', tier: 'standard' })).toBe('standard')
+    expect(resolveCardTier({ title: 'add a feature', tier: 'touch' })).toBe('touch')
+    // Junk (a hand-edited card) is ignored like an absent tier — never a crash.
+    expect(resolveCardTier({ title: 'add a feature', tier: 'opus' as never })).toBe('standard')
+  })
+
+  it('⚠ SAFETY FLOOR — a safety-keyword card never runs below design, whatever tier is written', () => {
+    // The whole point: a mislabelled dangerous card must not run cheaply. Red
+    // measured on 2026-09-18 by temporarily letting an explicit tier skip the floor.
+    expect(SAFETY_FLOOR_TIER).toBe('design')
+    for (const card of [
+      { title: '認証まわりのトークン更新', tier: 'touch' as const },
+      { title: 'fix login', notes: 'touches the auth middleware', tier: 'standard' as const },
+      { title: 'drop old rows', notes: 'DB migration + delete', tier: 'touch' as const },
+      { title: '課金ページの文言', tier: 'touch' as const },
+    ]) {
+      expect(resolveCardTier(card)).toBe('design')
+      expect(desiredModelEffort('optimize', 'worker', card)).toEqual({ model: 'opus', effort: 'high' })
+    }
+    // The floor only ever RAISES: an ultra safety card stays ultra.
+    expect(resolveCardTier({ title: 'auth rewrite', tier: 'ultra' })).toBe('ultra')
+    // …and a card WITHOUT safety keywords is not dragged up by it.
+    expect(resolveCardTier({ title: 'rename a var', tier: 'touch' })).toBe('touch')
   })
 
   it('execModeMaxWorkers caps parallelism by mode, clamped to [1, hardMax]', () => {
@@ -388,26 +446,17 @@ describe('quota fallback — launch tier follows the foundation (Done ①②③)
     expect(resolveSwarmModelEffort('max', 'worker', undefined, NOW + HOUR + 1)!.model).toBe('fable')
   })
 
-  it('optimize heavy card also desires the top tier ⇒ drops to opus when fable cooling', () => {
+  it('optimize ultra card also desires the top tier ⇒ drops to opus when fable cooling', () => {
     cool('fable')
-    const heavy = { title: 'sandbox guard for auth', notes: 'security-critical' }
-    expect(resolveSwarmModelEffort('optimize', 'worker', heavy, NOW)!.model).toBe('opus')
+    const top = { title: 'rebuild the engine', tier: 'ultra' as const }
+    expect(resolveSwarmModelEffort('optimize', 'worker', top, NOW + HOUR + 1)!.model).toBe('fable')
+    expect(resolveSwarmModelEffort('optimize', 'worker', top, NOW)!.model).toBe('opus')
   })
 
   it('the manager (top-tier judgment席) follows the fallback too', () => {
     cool('fable')
     expect(resolveSwarmModelEffort('optimize', 'manager', undefined, NOW)!.model).toBe('opus')
     expect(resolveSwarmModelEffort('optimize', 'manager', undefined, NOW)!.effort).toBe('high')
-  })
-
-  it('the overseer (proxy-you judgment席, desires fable) drops to opus with effort intact', () => {
-    cool('fable')
-    // Both model (fable→opus, DOWN) and effort (high, unchanged) — covers the
-    // non-worker fallback path + effort preservation in the down direction (⑤).
-    expect(resolveSwarmModelEffort('optimize', 'overseer', undefined, NOW)).toEqual({
-      model: 'opus',
-      effort: 'high',
-    })
   })
 
   it('economy keeps its chosen sonnet while sonnet has headroom (fable/opus cooling is irrelevant)', () => {
@@ -721,7 +770,7 @@ describe('hard mask — a switched-OFF tier is never launched on', () => {
   it('every tier OFF ⇒ null: there is no model to launch on', () => {
     expect(resolveAvailableTier('fable', NOW, ALL_OFF)).toBeNull()
     expect(resolveAvailableTier('gpt-nonsense', NOW, ALL_OFF)).toBeNull()
-    for (const role of ['worker', 'supply', 'manager', 'overseer'] as const) {
+    for (const role of ['worker', 'supply', 'manager'] as const) {
       for (const mode of EXECUTION_MODES) {
         expect(resolveSwarmModelEffort(mode, role, undefined, NOW, ALL_OFF)).toBeNull()
       }
@@ -733,7 +782,7 @@ describe('hard mask — a switched-OFF tier is never launched on', () => {
   })
 
   it('max mode with fable OFF launches every role on opus, effort untouched', () => {
-    for (const role of ['worker', 'supply', 'manager', 'overseer'] as const) {
+    for (const role of ['worker', 'supply', 'manager'] as const) {
       expect(resolveSwarmModelEffort('max', role, undefined, NOW, off('fable'))).toEqual({
         model: 'opus',
         effort: 'max',
@@ -741,9 +790,10 @@ describe('hard mask — a switched-OFF tier is never launched on', () => {
     }
   })
 
-  it('optimize: a heavy card cannot reach a disabled top tier; chores skip a disabled sonnet', () => {
-    const heavy = { title: 'sandbox guard for auth', notes: 'security-critical' }
-    expect(resolveSwarmModelEffort('optimize', 'worker', heavy, NOW, off('fable'))!.model).toBe('opus')
+  it('optimize: an ultra card cannot reach a disabled top tier; chores skip a disabled sonnet', () => {
+    const top = { title: 'rebuild the engine', tier: 'ultra' as const }
+    expect(resolveSwarmModelEffort('optimize', 'worker', top, NOW)!.model).toBe('fable')
+    expect(resolveSwarmModelEffort('optimize', 'worker', top, NOW, off('fable'))!.model).toBe('opus')
     // sonnet OFF ⇒ the chore steps DOWN to haiku (never up onto the top tier by accident).
     // ⚠ An ACTUAL chore card, not `undefined`: since 2026-08-26 a card with no
     // signal is the opus BASE, so passing undefined here would exercise the base
@@ -922,7 +972,8 @@ describe('resolveAvailableTierProbed / resolveSwarmModelEffortProbed (pre-launch
 // ─── FABLE CONTAINMENT (owner, 2026-09-16) ───────────────────────────────────
 // The owner's weekly FABLE pool is the scarce one; Opus has headroom. The rule is
 // therefore a CONTAINMENT rule, not a frugality one: under the default `optimize`
-// mode, fable may be the desired tier for EXACTLY ONE slot — a heavy design
+// mode, fable may be the desired tier for EXACTLY ONE slot — an `ultra` (before
+// 2026-09-18: "heavy design")
 // card's worker — and every other slot desires opus (or cheaper).
 //
 // This sweeps the WHOLE matrix rather than checking the roles known to be wrong,
@@ -931,39 +982,41 @@ describe('resolveAvailableTierProbed / resolveSwarmModelEffortProbed (pre-launch
 // no model table to audit. That is not hypothetical — the adversarial review panel
 // was exactly that, and a per-role assertion could not have found it. (It cost
 // nothing: `deps.review` has had no non-test caller since 2026-07-15, so the panel
-// spent no fable. The owner's 51% Fable week came from the heavy WORKER seat —
-// 227 of 330 real cards classify heavy; docs/commander/04-quota-models.md §5.9 is
-// canon. Do not read this guard as having recovered that 51%.)
+// spent no fable. Nor is this guard what moved the owner's 51% Fable week: the
+// 2026-09-18 breakdown put swarm workers at 19.4% of the 7-day spend and the bulk
+// on the always-on desks' context; docs/commander/04-quota-models.md §5.9 is canon.)
 //
 // Enumerating SwarmModelRole means a role added later is covered the day it is
 // added — and a role added WITHOUT being added to the union cannot reach
 // desiredModelEffort at all, because tsc rejects it (the over-approximation half
 // of the guard).
-describe('fable containment — optimize desires the top tier for heavy worker cards ONLY', () => {
-  const ROLES: SwarmModelRole[] = ['worker', 'supply', 'manager', 'overseer', 'reviewer']
+describe('fable containment — optimize desires the top tier for ultra worker cards ONLY', () => {
+  const ROLES: SwarmModelRole[] = ['worker', 'supply', 'manager']
   const HEAVY = { title: 'auth guard rewrite', notes: 'security' } // matches HEAVY_SIGNALS
   const ORDINARY = { title: 'add a button', notes: 'small ui tweak' }
+  const ULTRA = { title: 'add a button', notes: 'small ui tweak', tier: 'ultra' as const }
+  const DESIGN = { title: 'add a button', tier: 'design' as const }
 
-  it('names fable for exactly one (role, card) pair in optimize — the heavy worker', () => {
+  it('names fable for exactly one (role, card) pair in optimize — the ultra worker', () => {
     const wantsFable: string[] = []
     for (const role of ROLES) {
-      for (const [label, card] of [['heavy', HEAVY], ['ordinary', ORDINARY]] as const) {
+      for (const [label, card] of [
+        ['heavy', HEAVY],
+        ['ordinary', ORDINARY],
+        ['ultra', ULTRA],
+        ['design', DESIGN],
+      ] as const) {
         if (desiredModelEffort('optimize', role, card).model === SWARM_LAUNCH_MODEL) {
           wantsFable.push(`${role}/${label}`)
         }
       }
     }
-    expect(wantsFable).toEqual(['worker/heavy'])
+    // A safety-keyword card is NOT a fable card any more (it floors at design).
+    expect(wantsFable).toEqual(['worker/ultra'])
   })
 
-  it('gives every non-worker role opus in optimize — including the reviewer panel', () => {
-    // The reviewer is the one this card was written for. It is a judgment seat, so
-    // the matrix keeps its effort HIGH — the change is the MODEL, not the thinking.
-    // ⚠ For `reviewer` that effort is matrix-only: defaultRunReviewer takes no
-    // `effort` argument, so reviewers actually spawn at the CLI default (see
-    // makeAdversarialReview). The assertion below is still the right contract for
-    // desiredModelEffort — just do not read it as describing a spawned process.
-    for (const role of ['manager', 'overseer', 'reviewer'] as const) {
+  it('gives every non-worker role opus in optimize — including the supply desk', () => {
+    for (const role of ['manager'] as const) {
       expect(desiredModelEffort('optimize', role)).toEqual({
         model: SWARM_DEFAULT_MODEL,
         effort: 'high',
@@ -978,10 +1031,6 @@ describe('fable containment — optimize desires the top tier for heavy worker c
     })
   })
 
-  // ⚠ "EVERY role" is about desiredModelEffort itself, which is what this asserts.
-  // One CALLER opts out: makeOverseerBrain's arg-less fallback resolves its seat at
-  // DEFAULT_EXECUTION_MODE, so `runOverseerBrain` stays on the optimize tier even
-  // under `max`. It has no production caller, so nothing diverges in practice.
   it('leaves `max` alone — an explicit max run still puts EVERY role on the top tier', () => {
     for (const role of ROLES) {
       expect(desiredModelEffort('max', role, ORDINARY).model).toBe(SWARM_LAUNCH_MODEL)
@@ -994,12 +1043,14 @@ describe('fable containment — optimize desires the top tier for heavy worker c
     }
   })
 
-  it('keeps the heavy classifier itself untouched — heavy still means top tier/max', () => {
-    // Condition 3 of the card: classifyCardWeight's heavy rule does not move, so a
-    // genuinely heavy design card keeps the capability it had before this change.
-    expect(desiredModelEffort('optimize', 'worker', HEAVY)).toEqual({
+  it('ultra keeps top tier/max; a safety-keyword card without a tier runs design (opus/high)', () => {
+    expect(desiredModelEffort('optimize', 'worker', ULTRA)).toEqual({
       model: SWARM_LAUNCH_MODEL,
       effort: 'max',
+    })
+    expect(desiredModelEffort('optimize', 'worker', HEAVY)).toEqual({
+      model: SWARM_DEFAULT_MODEL,
+      effort: 'high',
     })
   })
 

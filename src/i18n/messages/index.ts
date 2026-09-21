@@ -15,12 +15,11 @@ import { onboarding } from './onboarding'
 import { settings } from './settings'
 import { customTabs } from './customTabs'
 import { notifications } from './notifications'
-import { persona } from './persona'
 import { research } from './research'
 
 export type Lang = 'en' | 'ja'
 
-const groups = [common, projectPanel, board, modals, canvas, canvasElements, misc, toolbar, auth, screen, onboarding, settings, customTabs, notifications, persona, research]
+const groups = [common, projectPanel, board, modals, canvas, canvasElements, misc, toolbar, auth, screen, onboarding, settings, customTabs, notifications, research]
 
 export const messages: Record<Lang, Record<string, string>> = {
   en: Object.assign({}, ...groups.map(g => g.en)),

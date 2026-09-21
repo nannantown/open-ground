@@ -1,5 +1,11 @@
 # 03 — 統合パス: 統合は manager 専任・engine は ready 検知で司令官を起こすだけ
 
+## Current Contract (2026-09-19)
+
+The dormant verify/reviewer/automatic push implementation is deleted, including its TypeScript integration lock. Read-only readiness and the manual commander lock script remain.
+See [SIMPLIFICATION.md](SIMPLIFICATION.md) for the current entry points and verification.
+Any descriptions of the retired paths below are historical, not operating instructions.
+
 > **⚠ 2026-07-15 中核転換 — マネージャ専任化(manager-only integration)。**
 > **エンジンはもう統合しない。** review 列に ready カードが来たら、エンジンは
 > **司令官(manager)を起こすだけ**で、verify も敵対レビューも FF push も掃除も
@@ -152,53 +158,15 @@ engine は `globalThis` 上のプロジェクト別シングルトンで、**全
 
 ### 2.3 B相 — 司令官を起こす・落ちたら蘇生する(エンジン ON で常時 — 2026-07-16 トグル廃止)
 
-> **⚠ 2026-07-31(stage 3) — 司令官の卓は2種類ある。** `Settings.swarmManagerRuntime.mode`
-> が `'sdk'` なら司令官は **Agent SDK セッション**で、**PTY プールに一切現れない**。
-> **追記(2026-08-02・既定が反転した)**: `mode` キーが**不在なら `'sdk'`** に解決される
-> (明示 `'pty'` と未知の **mode の値**だけが PTY。**読める `settings.json` の中で
-> `mode` を読み取れない容器** — `swarmManagerRuntime` が非オブジェクト、または `mode` の
-> 無いオブジェクト — なら `?.mode` が undefined になり `'sdk'` 側へ倒れる。実測 0802)。
-> つまり**設定を触っていない機体の司令官は SDK 卓**で、
-> 本節を「既定は PTY」の前提で読んではいけない。
-> **worker ダイヤルも同日に同極性へ揃った**(`store.getWorkerRuntimeDial` — 0801 の反転が
-> reader に届いておらず、0.11.47 は盤面 ON のまま PTY worker を立てていた。02 章 §2.4-0)
-> **— が、その worker ダイヤルは 2026-08-13 に削除された**(worker は SDK 専用・fail-fast。
-> 02 章 §2.4-0 改訂版)。残るダイヤルは本節の司令官1本。
-> **Swarm パネルが描く値は `GET /api/settings` の `runtimeDialsEffective`**(0813 から
-> `{manager}` のみ)= この reader から算出したサーバの実効値で、パネル側の再導出は
-> 廃止した(0802)。
+> **SDK-only manager (2026-09-21).** Every new manager launches through
+> `swarmManagerSdk.ts`; the runtime setting and UI switch no longer exist.
+> Legacy `swarmManagerRuntime` keys are ignored without erasing the file.
+> SDK startup failures reach the existing retry/backoff and user-facing error
+> paths, never a terminal fallback. See [SIMPLIFICATION.md](SIMPLIFICATION.md).
 >
-> **⚠ ただし「書かれていない」と「読めない」は別物 —— ここが 2026-08-02 に反転した。**
-> **ファイル**が読めない(chmod 000・EACCES/EISDIR 等)/ parse できない / 全体が非オブジェクト
-> のときは **PTY**(= キルスイッチ側)に倒れる。SDK になるのは**不在**(まだ何も書いていない
-> 新規インストール)だけ。**修正前は両者が区別できず、明示 `{"mode":"pty"}` で SDK を止めた
-> 機体でも、そのファイルが読めなくなった瞬間に SDK 司令官卓が立っていた**(実測 0802 —
-> `readJson` が読み取り失敗も parse 失敗も飲んで fallback を返すため、破損が「キー不在」と
-> 同じ `undefined` として届いていた。`swarmManager.ts` の `.catch(() => pty)` は reject 専用
-> なので、この経路では永久に発火しない)。上段の**容器**の話は**読めるファイルの中**の
-> 値レベルの規則で、こちらの**ファイル**レベルとは別の層 —— 混ぜて読まないこと。
-> 正典は `store.getManagerRuntimeDial` の注記、番人は
-> `src/lib/server/runtimeDialFileHealth.test.ts`(chmod 000 / 壊れた JSON の両方を含み、
-> 修正前で赤を実測済み)。
->
-> **⚠ 適用範囲は「司令官ダイヤル1本」だけ —— 全部がそうなっていると読まないこと。**
-> (0813 まで worker ダイヤルにも同じ規則があったが、ダイヤルごと削除された。)
-> `unreadable ⇒ キルスイッチ側`を適用したのは `getManagerRuntimeDial`
-> と、**settings の書き手5経路**(`setSettings` /
-> `remember|forgetSwarmAutonomy` / `remember|forgetSwarmManualStop` — 読めないファイルへの
-> 書き戻しは `projects` を消すので reject する)のみ。同じ寛容リーダーに乗る
-> **`isLockdownEnabled`(`store.ts`・unreadable ⇒ OFF・`docs/SECURITY.md` に既知の限界として
-> 明記済み = 意図的)/ `getAllowedModelTiers`(unreadable ⇒ 全許可)/ `getExecutionMode`
-> (unreadable ⇒ 既定モード)は今も fail-open**。「規則だから全部そうなっているはず」で
-> 読むと、実際には開いている扉を閉まっていると誤認する。
->
-> **⚠ 切れた symlink も `unreadable` 側**(2026-08-02): dotfiles で `settings.json` を
-> symlink 化している機体では、リンク先が未マウントの間 `readFile` が ENOENT を返す —
-> 「まだ何も書いていない」と同じコード。`lstat` でリンク自体の在否を見て区別している
-> (`readJsonWithHealth`)。区別しないと、リンクが切れている間だけキルスイッチが SDK に
-> 倒れ、さらに書き込みがオーナーの symlink を実ファイルで置き換えてしまう(読み側の番人は
-> `runtimeDialFileHealth.test.ts` の C2、**書き側**は `settingsWriteGuard.test.ts` の
-> symlink ケース —— 別の保証なので番人も別)。
+> Settings write protection remains independent of runtime selection:
+> unreadable/corrupt files and dangling symlinks must not be overwritten.
+> Tests: `settingsWriteGuard.test.ts`, `groundLoadOnBrokenSettings.test.ts`.
 >
 > **⚠ 破損中は Ground そのものが開かない。** `GET /api/projects` は先頭で
 > `ensureProjectsMigrated()` を呼び、読めないファイルでは「まだ移行していない」と判断して
@@ -207,19 +175,17 @@ engine は `globalThis` 上のプロジェクト別シングルトンで、**全
 > これは直すべきバグではない —— migration を飛ばして 200 を返すと Ground が**空**で描画され、
 > オーナーには「全プロジェクトが消えた」と見える。原因を名指しした 500 のほうが親切。
 >
-> **ここまでのダイヤルの話は、どれも「司令官の卓が SDK になりうる」ことの帰結**。そして卓が
-> SDK になりうる以上、本節の presence・声かけ・蘇生は、terminal.ts を直に叩くのではなく
-> **`swarmManagerRuntime.ts`(`listManagerDesks` / `managerDeskForSession` /
-> `sayToManagerDesk`)を通す**。PTY プールだけを見る実装に戻すと、**健全な SDK 卓が毎パス
-> `absent` と読まれ、5 分ごとに二卓目が立つ** —— 下で塞いだ 0719 の 11 卓事故と同じ形を、
-> 競合ではなく**構造**として作り込むことになる。
+> Presence, delivery and stop still go through `swarmManagerRuntime.ts`.
+> Its PTY compatibility only addresses managers already running during a dev
+> reload; it cannot launch a PTY. Removing it could orphan a live desk or seat
+> a second manager beside it. SDK managers never appear in the terminal pool.
 > - **声かけの ESC は SDK 卓では送らない**(§2.3 の「打ちかけを消す」問題そのものが無い。
 >   mid-turn の push は CLI がキューし、受理は同期で分かる)。
 > - **SDK 卓に画面は無い**(`managerDeskScreen` は null)。null を「何も出ていない」と読むと
 >   正しい結論に誤った理由で辿り着く。クォータ停止の等価な証拠は自分のストリームの
 >   `quota_refusal` イベント(`sdkDeskLimit.ts`)。
 > - **リモコンは消える**。外からの窓口は **PTY のまま残す補給官**。これが stage 3 の前提で、
->   補給官が「状況」を答えられないうちにダイヤルを回すと外から監視できなくなる。
+>   補給官の「状況」報告と司令官への中継は維持する。
 > 正典は `docs/SDK_WORKER_MIGRATION_PLAN.md` §13-B。
 
 **2026-07-15〜。エンジンはもう統合しない。** B相の旧全体(高リスク hold・verify・敵対レビュー・
@@ -410,7 +376,7 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
                                        穴**: 許可 tier が3本以上あり全部「枯渇しているが spawn 自体は
                                        通る」状態だと、MAX 番目の wake の確率的 probe がたまたま
                                        通って spawnSwarmManager が投げず woke=true になる — が
-                                       起動即死(watchDeskForDeathOnArrival が同じ tier を quota で
+                                       起動即死(watchSdkDeskForDeathOnArrival が同じ tier を quota で
                                        冷却)なので原因は quota と同じ。woke=true だけを見ると
                                        これを恒久 flapping と誤判定して**永久ラッチ**する
                                        (旧不具合。origin 比では regression ではない=元は再アーム機構

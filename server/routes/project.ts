@@ -36,7 +36,6 @@ import {
   getCanvas,
   setCanvas,
 } from '@/lib/server/store'
-import { normalizeOpenApps } from '@/lib/server/openApps'
 import { EditorNotFoundError, openInEditor, openWithApp } from '@/lib/server/editorCli'
 import { detectInstalledEditors, resolveAllowedEditorBundle } from '@/lib/server/editorDetect'
 import {
@@ -361,64 +360,6 @@ export const projectRoutes = new Hono()
     const body = (await c.req.json().catch(() => ({}))) as { prUrl?: unknown }
     const prUrl = typeof body.prUrl === 'string' ? body.prUrl : ''
     return c.json(await fetchPrInfo(path, prUrl))
-  })
-  // ── /api/project/open ──────────────────────────────────────────────────
-  // GET → { apps } ; POST { path, app } → open folder in app ; PUT { apps } → save list
-  .get('/api/project/open', async (c) => {
-    const s = await getSettings()
-    return c.json({ apps: normalizeOpenApps(s.openApps) })
-  })
-  .post('/api/project/open', async (c) => {
-  const { path, app } = (await c.req.json()) as { path?: string; app?: string }
-  if (!path) return c.json({ error: 'path required' }, 400)
-  if (!app) return c.json({ error: 'app required' }, 400)
-  const s = await getSettings()
-  const apps = normalizeOpenApps(s.openApps)
-  const entry = apps.find((a) => a.name === app)
-  if (!entry) return c.json({ error: 'app not registered' }, 400)
-  if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-  try {
-    if (entry.mode === 'cwd' && entry.path) {
-      const { stdout } = await execFileAsync('plutil', [
-        '-convert',
-        'json',
-        '-o',
-        '-',
-        join(entry.path, 'Contents', 'Info.plist'),
-      ])
-      const exec = String(JSON.parse(stdout)?.CFBundleExecutable || '').trim()
-      if (!exec) throw new Error('cannot read executable name from Info.plist')
-      const binPath = join(entry.path, 'Contents', 'MacOS', exec)
-      const child = spawn(binPath, ['--working-directory', path], {
-        cwd: path,
-        env: { ...process.env, PWD: path },
-        detached: true,
-        stdio: 'ignore',
-      })
-      child.unref()
-    } else {
-      await execFileAsync('open', ['-a', entry.name, path])
-    }
-    return c.json({ ok: true })
-  } catch (e: any) {
-    return c.json({ error: e?.message ?? 'failed to open' }, 500)
-  }
-})
-  .put('/api/project/open', async (c) => {
-    const { apps } = (await c.req.json()) as { apps?: unknown }
-    if (!Array.isArray(apps)) return c.json({ error: 'apps must be an array' }, 400)
-    const cleaned = normalizeOpenApps(apps)
-    // Patch ONLY openApps. setSettings re-reads `current` inside its single-
-    // flight lock and merges `{...current, ...patch}`, so a patch carrying just
-    // the changed key preserves a CONCURRENT write to any OTHER key. The bug
-    // (audit MAJOR) spread a full stale snapshot here — `{...s, openApps}` —
-    // which re-injected the read-time `projects` (and every other field) on
-    // write, reverting a project registered between this handler's read and
-    // write and DROPPING it from the validateProjectPath allowlist. Passing
-    // only `{ openApps }` restores the lost-update protection setSettings is
-    // designed to give (see store.ts setSettings).
-    await setSettings({ openApps: cleaned })
-    return c.json({ apps: cleaned })
   })
   // ── /api/project/reveal ───────────────────────────────────────────────────
   // POST { path } → reveal the project folder in the OS file manager.

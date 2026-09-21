@@ -105,12 +105,12 @@ describe('POST /api/swarm/manager — opening the desk records the intent', () =
   })
 
   it('does not disturb the engine flags it did not state', async () => {
-    await patchEngineIntent(dir, { desiredRunning: true, selfSupply: true })
+    await patchEngineIntent(dir, { desiredRunning: true, })
     await app.request('/api/swarm/manager', json({ path: dir }))
     const after = await readEngineIntent(dir)
     expect(after.managerDesired).toBe(true)
     expect(after.desiredRunning).toBe(true)
-    expect(after.selfSupply).toBe(true)
+    expect(after).not.toHaveProperty('selfSupply')
   })
 })
 
@@ -124,7 +124,7 @@ describe('POST /api/swarm/manager/stop — closing the desk clears the intent', 
   })
 
   it('leaves autonomy alone — closing the desk is not pausing the engine', async () => {
-    await patchEngineIntent(dir, { desiredRunning: true, selfSupply: false })
+    await patchEngineIntent(dir, { desiredRunning: true, })
     await app.request('/api/swarm/manager', json({ path: dir }))
     await app.request('/api/swarm/manager/stop', json({ path: dir }))
     const after = await readEngineIntent(dir)

@@ -94,7 +94,6 @@ describe('custom tab TerminalDock (StrictMode)', () => {
             projectPath="/tmp/proj"
             role="owner"
             setup
-            onChanged={() => {}}
           />
         </StrictMode>,
       )
@@ -123,7 +122,7 @@ describe('custom tab TerminalDock (StrictMode)', () => {
     await act(async () => {
       render(
         <StrictMode>
-          <CustomModuleView module={MODULE} projectPath="/tmp/proj" role="owner" onChanged={() => {}} />
+          <CustomModuleView module={MODULE} projectPath="/tmp/proj" role="owner" />
         </StrictMode>,
       )
     })
@@ -140,7 +139,7 @@ describe('custom tab TerminalDock (StrictMode)', () => {
     await act(async () => {
       render(
         <StrictMode>
-          <CustomModuleView module={MODULE} projectPath="/tmp/proj" role="none" setup onChanged={() => {}} />
+          <CustomModuleView module={MODULE} projectPath="/tmp/proj" role="none" setup />
         </StrictMode>,
       )
     })
@@ -156,7 +155,7 @@ describe('custom tab TerminalDock (StrictMode)', () => {
     await act(async () => {
       render(
         <StrictMode>
-          <CustomModuleView module={MODULE} projectPath="/tmp/proj" role="tester" setup onChanged={() => {}} />
+          <CustomModuleView module={MODULE} projectPath="/tmp/proj" role="tester" setup />
         </StrictMode>,
       )
     })

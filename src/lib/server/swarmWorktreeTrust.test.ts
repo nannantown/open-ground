@@ -6,11 +6,9 @@ import { readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createSwarmWorktree, removeSwarmWorktree } from './swarmWorker'
-import { withRebasedWorktree } from './swarmOrchestrator'
 import { cleanProjectWorktrees } from './worktreeCleanup'
 import { ensureClaudeFolderTrusted } from './claudeTrust'
 import { canonicalize } from './canonicalize'
-import { centralWorktreesDir } from './paths'
 import { addProjectEntry, __resetMigrationCacheForTests } from './registry'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -162,30 +160,6 @@ describe('removeSwarmWorktree — ~/.claude.json trust pruning (Issue 1)', () =>
     // A sibling (e.g. the user's real project) keeps its trust — we prune ONLY the
     // removed worktree's key.
     expect(d.projects['/some/other/registered/project'].hasTrustDialogAccepted).toBe(true)
-  })
-})
-
-describe('withRebasedWorktree — reviewer .review-* trust pruning (Issue 1, LEAK 1)', () => {
-  it('drops the trust entry its fn seeded when the reviewer worktree is torn down', async () => {
-    const { proj, uuid } = await registeredRepo()
-    // withRebasedWorktree does NOT mkdir the central parent (production relies on a
-    // prior createSwarmWorktree having made it); create it so the .review-* add works.
-    await mkdir(centralWorktreesDir(uuid), { recursive: true })
-
-    let seededDir = ''
-    const res = await withRebasedWorktree(proj, 'main', 'main', async (dir) => {
-      // Exactly what defaultRunReviewer's launchClaude does for this .review-* dir.
-      seededDir = dir
-      ensureClaudeFolderTrusted(dir)
-      expect(read().projects[dir]?.hasTrustDialogAccepted).toBe(true)
-      return 'sentinel'
-    })
-
-    expect(res).toEqual({ ok: true, value: 'sentinel' })
-    expect(seededDir).not.toBe('')
-    // finally tore the reviewer worktree down AND pruned its trust entry — no
-    // .review-* path lingers in claude's projects map.
-    expect(read().projects[seededDir]).toBeUndefined()
   })
 })
 

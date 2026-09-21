@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { initSelfSupplyRuntime } from './swarmSelfSupply'
 import { initOverseerRuntime } from './swarmOverseer'
 // The line-kill byte, taken from the module that owns it rather than re-spelled here:
 // the NOTICE channel's contract is that it sends NEITHER this nor ESC.
@@ -13,7 +12,6 @@ import {
   RECOVER_MAX_REQUEUE,
   MOVE_STUCK_MAX_RETRIES,
   MAX_REWORKS,
-  MAX_CONFLICT_REWORKS,
   MAX_REVIEW_DEFERS,
   highRiskChangedPaths,
   STALL_SILENCE_MS,
@@ -76,13 +74,8 @@ import {
   runEnginePass,
   stopOrchestrator,
   setOverseer,
-  setSelfSupply,
   stopOrchestratorWorker,
   resolveOrchestratorReview,
-  tallyReview,
-  extractReviewVerdict,
-  buildReviewPrompt,
-  REVIEW_PANEL_SIZE,
   classifyMetricEvent,
   computeLeadTimeStats,
   computeSwarmKpis,
@@ -105,13 +98,9 @@ import {
   type OrchestratorDeps,
   type IntegrationDeps,
   type AnomalyDeps,
-  type SelfSupplyPassDeps,
   type HeartbeatSign,
   type ProjectEngine,
   type WorkerProbe,
-  type ReviewResult,
-  type ReviewDecision,
-  type ReviewerVerdict,
 } from './swarmOrchestrator'
 import type { ManagerRuntimeKind } from './swarmManagerRuntime'
 import { matchesRateLimit, normalizeScreen } from './swarmRateLimitText'
@@ -144,7 +133,7 @@ import type {
   SpawnSwarmWorkerResponse,
   SwarmFatalNotification,
 } from '../types'
-import type { IntegrateOutcome, ReviewReadiness } from './swarmIntegrate'
+import type { ReviewReadiness } from './swarmIntegrate'
 import type { OpenEscalationInput } from './swarmEscalations'
 
 // startOrchestrator gates on the REAL claudeRunPreflight (not an injected dep), which
@@ -174,35 +163,6 @@ vi.mock('./claudeUsageCli', async (importOriginal) => {
 // in swarmLaunch.test.ts (execModeMaxWorkers). Written to the isolated tmp HOME.
 beforeAll(async () => {
   await setSettings({ executionMode: 'max' })
-})
-
-// The commander engine's drain+dispatch+monitor logic, exercised with FAKE deps
-// (no timers, no globalThis, no PTYs, no git). The pure helpers (isTodoCard /
-// sortTodos / selectDispatch / classifyWorker) are tested directly; runDispatchPass
-// is driven through a recording fake so we assert the observable contract:
-//  ① ON dispatches oldest-first up to the cap and moves cards todo→doing; OFF
-//     dispatches nothing; a freed slot refills; spawn/move failures degrade
-//     without losing or duplicating a worker.
-//  ② each pass monitors dispatched workers and, ONLY when a worker is
-//     conservatively judged DONE (integrable commits AND a completion sign),
-//     moves its card doing→review recording the branch; ambiguous/broken workers
-//     stay in 'doing'; stages advance starting→running→done.
-// The real self-fetch board client + real spawn + real git/heartbeat probes are
-// exercised live.
-
-// ── Fixtures ──────────────────────────────────────────────────────────────────
-
-/** Always-succeeds fake for IntegrationDeps.acquireLock — the cross-process
- *  integration lock (swarmIntegrationLock.ts) is exercised against a REAL git
- *  repo in swarmOrchestrator.integration.test.ts; the unit tests here run
- *  against a fake `/proj` path (no real git repo), so they inject this stub to
- *  keep the pre-existing integrate-loop behavior unchanged. The lock's own
- *  skip-on-contention behavior is covered separately below (see "integration
- *  lock (cross-process)"). */
-const alwaysAcquireLock: IntegrationDeps['acquireLock'] = async () => ({
-  ok: true,
-  holder: { pid: 1, acquiredAt: '1970-01-01T00:00:00.000Z', label: 'test' },
-  release: async () => {},
 })
 
 const card = (id: string, over: Partial<ProjectTask> = {}): ProjectTask => ({
@@ -253,7 +213,6 @@ const newEngine = (over: Partial<ProjectEngine> = {}): ProjectEngine => ({
   nudges: new Map(),
   log: [],
   anomalies: [],
-  selfSupply: initSelfSupplyRuntime(),
   overseer: initOverseerRuntime(),
   notified: new Set(),
   pendingFatal: [],
@@ -293,7 +252,7 @@ const makeDeps = (init: {
   occupied?: Set<string> // taskIds whose worktree still holds a LIVE desk, so the
   //   teardown REFUSES ({removed:false, stillOccupied:true}) — the "ask again" answer
 }): OrchestratorDeps & {
-  spawned: { taskId: string; priorFailure?: string }[]
+  spawned: { taskId: string; priorFailure?: string; tier?: string; notes?: string }[]
   moves: { taskId: string; branch: string }[]
   reviews: { taskId: string; branch: string }[]
   recovered: { taskId: string; column: 'todo' | 'blocked' }[]
@@ -323,7 +282,7 @@ const makeDeps = (init: {
   const screens = init.screens ?? new Map<string, string>()
   const agentActivity = init.agentActivity ?? new Map<string, number>()
   const bgTasks = init.bgTasks ?? new Map<string, number>()
-  const spawned: { taskId: string; priorFailure?: string }[] = []
+  const spawned: { taskId: string; priorFailure?: string; tier?: string; notes?: string }[] = []
   const moves: { taskId: string; branch: string }[] = []
   const reviews: { taskId: string; branch: string }[] = []
   const recovered: { taskId: string; column: 'todo' | 'blocked' }[] = []
@@ -357,7 +316,7 @@ const makeDeps = (init: {
       const taskId = t?.id ?? `?${opts.title}`
       if (spawnFails.has(taskId)) throw new Error('spawn boom')
       n += 1
-      spawned.push({ taskId, priorFailure: opts.priorFailure })
+      spawned.push({ taskId, priorFailure: opts.priorFailure, tier: opts.tier, notes: opts.notes })
       const res: SpawnSwarmWorkerResponse = {
         terminalId: `pty-${taskId}-${n}`,
         agentSessionId: `sess-${n}`,
@@ -1930,17 +1889,9 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
     const deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = {
       ...base,
       fetchReview: async () => [],
-      changedPaths: async () => ({ tip: 'tip-x', files: [] }),
       prepareTarget: async () => 'main',
       classify: async () => 'ff',
-      verify: async () => ({ ok: true, tip: null }),
-      integrate: async () => ({ status: 'integrated', mode: 'ff' }),
-      acquireLock: alwaysAcquireLock,
-      moveToDone: async () => true,
       markConflict: async () => true,
-      cleanup: async () => ({ removed: true }),
-      killPty: () => {},
-      instructRework: () => {},
       // Manager-only integration (2026-07-15): inert wake half — no desk, no spawn.
       // The integrate pass never fires in these dispatch/runEnginePass unit tests
       // (the TICK_MS timer is cleared first), so these only satisfy the type.
@@ -2188,7 +2139,6 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
     it('stopOrchestrator CLEARS overseer.enabled but LEAVES selfSupply (the D1 asymmetry)', async () => {
       const key = await canonicalize('/proj-overseer-stopclear')
       const engine = newEngine({ path: key, running: true })
-      engine.selfSupply.enabled = true
       engine.overseer.enabled = true
       __seedEngineForTests(engine)
 
@@ -2197,7 +2147,6 @@ describe('auto-start the autonomous drain (card cf545637)', () => {
       // The most-dangerous stage is disarmed by an explicit OFF …
       expect(engine.overseer.enabled).toBe(false)
       // … while the benign switch survives (it re-acts on the next start).
-      expect(engine.selfSupply.enabled).toBe(true)
     })
 
     it('maybeAutoStartDrain (auto-drain re-ignition) NEVER sets overseer.enabled', async () => {
@@ -5651,29 +5600,12 @@ describe('isReviewCard', () => {
 const makeIntDeps = (init: {
   reviews: ProjectTask[]
   target?: string | null
-  outcomes?: Record<string, IntegrateOutcome>
   readiness?: Record<string, ReviewReadiness>
-  moveToDoneFails?: Set<string>
-  // Per-branch verification verdict (default: green). `tip` is the sha the fake
-  // reports for the memo key (default `tip-<branch>`, stable so skipIfTip matches);
-  // mutate an entry between passes to model a fix (tip changes ⇒ re-verify).
-  verifyResults?: Record<string, { ok: boolean; tip?: string | null; reason?: string }>
-  // 敵対レビュー(card a14329dc)テスト用: per-branch の ReviewResult。EITHER reviewResults
-  // OR reviewDefault が与えられたときだけ fake `review` dep を配線する(無指定なら review は
-  // undefined のまま = レビュー段スキップ = 既存テストは不変)。reviewDefault は reviewResults
-  // に無い branch の既定 decision。skipIfTip が tip に一致したら {decision:'rework',skipped:true}
-  // を返し、makeAdversarialReview の memo 短絡を再現する。
-  reviewResults?: Record<string, ReviewResult>
-  reviewDefault?: ReviewDecision
   // 差し戻し(rework)テスト用: dead = isAlive=false を返す terminalId(→ 'todo' 再 dispatch
   // 経路を駆動); moveToDoingFails / recoverFails は最初の review→doing / recover 書込を false に。
   dead?: Set<string>
   moveToDoingFails?: Set<string>
   recoverFails?: Set<string>
-  // Cross-process integration lock (0706 二重司令塔事故フォロー) fake: defaults to
-  // always-succeeds (pre-existing tests are unaffected); a test overrides with a
-  // fake that returns ok:false to exercise the skip-this-pass path.
-  acquireLock?: IntegrationDeps['acquireLock']
   // 高リスク force-hold (2026-07-15) テスト用: per-branch の changed-file リスト。
   // default は安全な1ファイル(既存テストは不変 — 完了条件『通常カードは1bitも
   // 変わらない』をスイート全体がそのまま固定する)。Error を与えると changedPaths が
@@ -5761,10 +5693,7 @@ const makeIntDeps = (init: {
   recycled: string[]
 } => {
   const reviews = [...init.reviews]
-  const outcomes = init.outcomes ?? {}
   const readiness = init.readiness ?? {}
-  const moveToDoneFails = new Set(init.moveToDoneFails ?? [])
-  const verifyResults = init.verifyResults ?? {}
   const integrated: string[] = []
   const moved: string[] = []
   const cleaned: string[] = []
@@ -5799,22 +5728,6 @@ const makeIntDeps = (init: {
   const dropReview = (taskId: string) => {
     const i = reviews.findIndex((c) => c.id === taskId)
     if (i >= 0) reviews.splice(i, 1)
-  }
-  // Fake adversarial-review dep — attached ONLY when reviewResults/reviewDefault is
-  // configured (else `review` stays undefined ⇒ runIntegratePass skips the stage,
-  // so every pre-existing integrate test is byte-for-byte unaffected). Records each
-  // call (branch/tip/skipIfTip) and honors the skipIfTip memo short-circuit.
-  const reviewConfigured = init.reviewResults !== undefined || init.reviewDefault !== undefined
-  const reviewResults = init.reviewResults ?? {}
-  const reviewDefault: ReviewDecision = init.reviewDefault ?? 'integrate'
-  const reviewDep: NonNullable<IntegrationDeps['review']> = async (_p, branch, _t, opts) => {
-    reviewed.push({ branch, tip: opts.tip, skipIfTip: opts.skipIfTip })
-    if (opts.skipIfTip && opts.skipIfTip === opts.tip) {
-      return { decision: 'rework', verdicts: [], mustFix: 0, clean: 0, skipped: true, reason: 'unchanged review' }
-    }
-    const r = reviewResults[branch]
-    if (r) return r
-    return { decision: reviewDefault, verdicts: [], mustFix: 0, clean: reviewDefault === 'integrate' ? 3 : 0, reason: `fake review ${reviewDefault}` }
   }
   return {
     reworkedToDoing,
@@ -5858,49 +5771,13 @@ const makeIntDeps = (init: {
     get deliveryReads() {
       return deliveryReads
     },
-    ...(reviewConfigured ? { review: reviewDep } : {}),
     pathsChecked,
     fetchReview: async () => [...reviews],
     prepareTarget: async () => (init.target === undefined ? 'main' : init.target),
     classify: async (_p, branch) => readiness[branch] ?? 'ff',
-    changedPaths: async (_p, branch) => {
-      pathsChecked.push(branch)
-      const cf = (init.changedFiles ?? {})[branch]
-      if (cf instanceof Error) throw cf
-      return { tip: (init.changedTips ?? {})[branch] ?? `tip-${branch}`, files: cf ?? ['src/lib/safe-change.ts'] }
-    },
-    verify: async (_p, branch, _t, opts) => {
-      verified.push({ branch, skipIfTip: opts?.skipIfTip })
-      const v = verifyResults[branch]
-      const tip = v?.tip === undefined ? `tip-${branch}` : v.tip
-      // Unchanged-since-failed → short-circuit (no check run), mirroring makeVerify.
-      if (opts?.skipIfTip && tip !== null && opts.skipIfTip === tip) {
-        return { ok: false, tip, reason: 'unchanged since last failed verification', skipped: true }
-      }
-      return v && v.ok === false ? { ok: false, tip, reason: v.reason ?? 'tsc red' } : { ok: true, tip }
-    },
-    integrate: async (_p, branch) => {
-      integrated.push(branch)
-      return outcomes[branch] ?? { status: 'integrated', mode: 'ff' }
-    },
-    acquireLock: init.acquireLock ?? alwaysAcquireLock,
-    moveToDone: async (_p, taskId) => {
-      if (moveToDoneFails.has(taskId)) return false
-      moved.push(taskId)
-      const i = reviews.findIndex((c) => c.id === taskId)
-      if (i >= 0) reviews.splice(i, 1)
-      return true
-    },
     markConflict: async (_p, taskId, value) => {
       marks.push({ taskId, value })
       return true
-    },
-    cleanup: async (_p, branch) => {
-      cleaned.push(branch)
-      return { removed: true }
-    },
-    killPty: (w) => {
-      killed.push(w.terminalId!)
     },
     // 差し戻し(rework)seam — review→doing 移動 / recovery 移動 / worker liveness /
     // teardown / 修正指示。runIntegratePass の reworkOrPark が使う。
@@ -5926,9 +5803,6 @@ const makeIntDeps = (init: {
     recoverWorker: async ({ terminalId }) => {
       tornDown.push(terminalId)
       return { removed: true }
-    },
-    instructRework: (terminalId, message) => {
-      instructed.push({ terminalId, message })
     },
     // MANAGER-ONLY INTEGRATION + RESURRECTION (2026-07-15 card B) wake seam.
     // managerPresence honours the `now` the pass injects: managerPresenceFn models a
@@ -6062,8 +5936,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     const engine = newEngine()
     const deps = makeIntDeps({
       reviews: [reviewCard('a', 'swarm/a')],
-      readiness: { 'swarm/a': 'ff' }, // maximally mergeable — the old engine WOULD have landed it
-      reviewDefault: 'integrate', // even with a lens panel wired + voting clean…
+      readiness: { 'swarm/a': 'ff' }, // even with a lens panel wired + voting clean…
     })
     await runIntegratePass(engine, deps)
     // …the engine moves main by NO route:
@@ -6258,7 +6131,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     // so spawnSwarmManager does not throw and wakeManager returns true — `lastWakeSpawned`
     // latches PERMANENT even though the seated desk died on arrival for quota (the SAME
     // root cause a `false` would already re-arm for). By the time the give-up ceiling
-    // fires, watchDeskForDeathOnArrival has cooled the tier it died on — simulate that by
+    // fires, watchSdkDeskForDeathOnArrival has cooled the tier it died on — simulate that by
     // marking EVERY ladder tier cooling before the give-up pass runs.
     __resetQuotaForTest()
     try {
@@ -7702,6 +7575,49 @@ describe('managerNoticeText', () => {
   })
 })
 
+// ── Difficulty tier reaches the UNATTENDED dispatch (2026-09-18) ──────────────
+// The card's `tier` must decide the worker's model on the engine's own dispatch,
+// not only when the owner presses 実行 on the Board. The engine hands it to
+// spawnWorker off the FRESH re-read (so an edit made while the card waited wins);
+// spawnSwarmWorker feeds it to the model resolver (swarmWorkerTier.test.ts).
+// Red measured 2026-09-18 by deleting the `tier` spread from the dispatch call.
+describe('difficulty tier — threaded through the unattended engine dispatch', () => {
+  it('passes the card tier to spawnWorker', async () => {
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'todo', tier: 'touch', notes: 'fix the auth token refresh' })] })
+    await runDispatchPass(engine, deps)
+    expect(deps.spawned).toHaveLength(1)
+    expect(deps.spawned[0].tier).toBe('touch')
+    // notes ride too — the safety floor reads them (auth ⇒ never below design).
+    expect(deps.spawned[0].notes).toContain('auth')
+  })
+
+  it('an untiered card passes no tier (the estimator decides downstream)', async () => {
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'todo' })] })
+    await runDispatchPass(engine, deps)
+    expect(deps.spawned).toHaveLength(1)
+    expect(deps.spawned[0].tier).toBeUndefined()
+  })
+
+  it('reads the tier from the FRESH board, not the pre-reservation snapshot', async () => {
+    const engine = newEngine()
+    const deps = makeDeps({ cards: [card('a', { boardColumn: 'todo', tier: 'standard' })] })
+    // The owner raises the card to ultra between the pick and the spawn: the
+    // re-read that guards the claim is the read the model must follow.
+    const realFetch = deps.fetchTasks
+    let calls = 0
+    deps.fetchTasks = async (p) => {
+      calls += 1
+      if (calls > 1) deps.board.set('a', { ...deps.board.get('a')!, tier: 'ultra' })
+      return realFetch(p)
+    }
+    await runDispatchPass(engine, deps)
+    expect(deps.spawned).toHaveLength(1)
+    expect(deps.spawned[0].tier).toBe('ultra')
+  })
+})
+
 // ── Learning loop — 差し戻し原因を次の再dispatchの /order に注入 (card fdf714ef) ──────
 // The whole point: a 差し戻し/rollback shouldn't repeat. A rework cause RECORDED on
 // engine.reworkReasons (post 2026-07-15 the engine no longer reworks during integrate
@@ -7798,146 +7714,6 @@ describe('pruneReworks', () => {
     expect(engine.reworkReasons.get('g')).toBe('tsc red')
     expect(engine.reworkReasons.get('v')).toBe('tsc red')
     expect(engine.reworkReasons.has('gone')).toBe(false)
-  })
-})
-
-// ── Adversarial review — majority vote (card a14329dc) ─────────────────────────
-// The PURE tally that decides the panel's verdict. STRICT majority of the FULL
-// panel; ties / non-votes DEFER (never a silent merge, never a 差し戻し bump).
-describe('tallyReview — adversarial-review majority vote', () => {
-  const v = (vote: ReviewerVerdict['vote'], note = ''): ReviewerVerdict => ({ reviewer: 0, vote, note })
-
-  it('majority must-fix → rework (condition 2), carrying the first must-fix note', () => {
-    const r = tallyReview([v('must-fix', 'off-by-one'), v('must-fix'), v('clean')], 3)
-    expect(r.decision).toBe('rework')
-    expect(r.mustFix).toBe(2)
-    expect(r.clean).toBe(1)
-    expect(r.reason).toContain('off-by-one')
-  })
-
-  it('unanimous must-fix → rework', () => {
-    expect(tallyReview([v('must-fix'), v('must-fix'), v('must-fix')], 3).decision).toBe('rework')
-  })
-
-  it('all clean → integrate (condition 3)', () => {
-    const r = tallyReview([v('clean'), v('clean'), v('clean')], 3)
-    expect(r.decision).toBe('integrate')
-    expect(r.clean).toBe(3)
-  })
-
-  it('minority must-fix (1 of 3) is OUTVOTED → integrate', () => {
-    expect(tallyReview([v('must-fix', 'nit'), v('clean'), v('clean')], 3).decision).toBe('integrate')
-  })
-
-  it('a tie among decisive votes (1-1, one abstention) → defer — thin signal, never merge', () => {
-    const r = tallyReview([v('must-fix'), v('clean'), v(null)], 3)
-    expect(r.decision).toBe('defer')
-    expect(r.mustFix).toBe(1)
-    expect(r.clean).toBe(1)
-  })
-
-  it('all reviewers abstained (no parseable verdict) → defer, not a merge', () => {
-    expect(tallyReview([v(null), v(null), v(null)], 3).decision).toBe('defer')
-  })
-
-  it('a lone clean vote (2 abstentions) does NOT reach majority → defer (a non-vote cannot lower the bar)', () => {
-    // panelSize 3 ⇒ majority 2; only ONE decisive (clean) vote ⇒ no majority ⇒ defer.
-    expect(tallyReview([v('clean'), v(null), v(null)], 3).decision).toBe('defer')
-  })
-
-  it('majority is computed over the FULL panel size, not the votes cast', () => {
-    // Two must-fix out of a panel of 3 ⇒ majority (2) reached even with a missing vote.
-    expect(tallyReview([v('must-fix'), v('must-fix'), v(null)], 3).decision).toBe('rework')
-  })
-})
-
-describe('extractReviewVerdict — verdict marker scrape', () => {
-  it('parses a CLEAN marker', () => {
-    expect(extractReviewVerdict(`blah\n${'OPENGROUND_REVIEW:'} CLEAN ::OG_REVIEW_END::`)).toEqual({
-      vote: 'clean',
-      note: '',
-    })
-  })
-
-  it('parses a MUST_FIX marker + its note', () => {
-    const raw = 'reading files…\nOPENGROUND_REVIEW: MUST_FIX deletes the safety net ::OG_REVIEW_END::'
-    expect(extractReviewVerdict(raw)).toEqual({ vote: 'must-fix', note: 'deletes the safety net' })
-  })
-
-  it('survives ANSI / cursor-position noise the TUI emits (no word fusing)', () => {
-    // CSI cursor-forward between words must become a space, not vanish.
-    const raw = '\x1b[2J\x1b[32mOPENGROUND_REVIEW:\x1b[0m MUST_FIX race\x1b[5C condition ::OG_REVIEW_END::'
-    const r = extractReviewVerdict(raw)
-    expect(r.vote).toBe('must-fix')
-    expect(r.note).toContain('race')
-    expect(r.note).toContain('condition')
-  })
-
-  it('takes the LAST verdict when the stream has several (the final answer)', () => {
-    const raw =
-      'OPENGROUND_REVIEW: MUST_FIX first ::OG_REVIEW_END:: … rethought …\nOPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::'
-    expect(extractReviewVerdict(raw).vote).toBe('clean')
-  })
-
-  it('REGRESSION: a real MUST_FIX note containing "<" is parsed (not flipped to clean/null)', () => {
-    // The old `!body.includes('<')` guard silently dropped exactly the must-fix notes an
-    // adversarial reviewer is MOST likely to write — comparisons / generics / JSX.
-    for (const note of ['the loop uses i < n but must be i <= n', 'returns List<T> unsorted', 'unclosed <div> in the mock']) {
-      const r = extractReviewVerdict(`reasoning…\nOPENGROUND_REVIEW: MUST_FIX ${note} ::OG_REVIEW_END::`)
-      expect(r.vote).toBe('must-fix')
-      expect(r.note).toBe(note)
-    }
-  })
-
-  it('SKIPS the prompt’s echoed `<VERDICT>` placeholder (its body is not a vote token)', () => {
-    // The echoed example line has body "<VERDICT>" → starts with neither MUST_FIX nor
-    // CLEAN → skipped → a non-vote (NOT a false clean).
-    expect(extractReviewVerdict('OPENGROUND_REVIEW: <VERDICT> ::OG_REVIEW_END::')).toEqual({ vote: null, note: '' })
-  })
-
-  it('SAFETY: a buffer with ONLY the echoed prompt (reviewer abstained) is a non-vote, never clean', () => {
-    // A reviewer that hangs / times out emits no verdict of its own — its buffer is just
-    // the echoed prompt. That MUST scrape to null (→ defer), never to a clean vote.
-    expect(extractReviewVerdict(buildReviewPrompt('origin/main')).vote).toBeNull()
-  })
-
-  it('the vote token must be a WHOLE WORD — a CLEAN/MUST_FIX *prefix* never fails open to a vote', () => {
-    // A contract-violating body that merely begins with a vote-token prefix is NOT a
-    // vote (the dangerous direction — "CLEANUP" → clean — is the one we must never take).
-    expect(extractReviewVerdict('OPENGROUND_REVIEW: CLEANUP the dead code ::OG_REVIEW_END::').vote).toBeNull()
-    expect(extractReviewVerdict('OPENGROUND_REVIEW: CLEANED already ::OG_REVIEW_END::').vote).toBeNull()
-    expect(extractReviewVerdict('OPENGROUND_REVIEW: MUST_FIXED earlier ::OG_REVIEW_END::').vote).toBeNull()
-    // But the real tokens — alone, or followed by a space/punctuation — still parse.
-    expect(extractReviewVerdict('OPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::').vote).toBe('clean')
-    expect(extractReviewVerdict('OPENGROUND_REVIEW: CLEAN. ::OG_REVIEW_END::').vote).toBe('clean')
-    expect(extractReviewVerdict('OPENGROUND_REVIEW: MUST_FIX bug ::OG_REVIEW_END::').vote).toBe('must-fix')
-  })
-
-  it('no marker at all → a non-vote (vote:null)', () => {
-    expect(extractReviewVerdict('the model rambled but never emitted a verdict')).toEqual({ vote: null, note: '' })
-  })
-})
-
-describe('buildReviewPrompt — the reviewer contract', () => {
-  it('embeds the trunk ref + the verdict marker template and the two vote words (read-only)', () => {
-    const p = buildReviewPrompt('origin/main')
-    expect(p).toContain('git diff origin/main...HEAD')
-    expect(p).toContain('OPENGROUND_REVIEW: <VERDICT> ::OG_REVIEW_END::') // the template line
-    expect(p).toContain('MUST_FIX')
-    expect(p).toContain('CLEAN')
-    expect(p).toContain('::OG_REVIEW_END::')
-    expect(p).toMatch(/independent adversarial code reviewer/i)
-    expect(p).toMatch(/READ-ONLY/i)
-  })
-
-  it('ECHO-SAFE: the prompt has NO line that scrapes to a real vote (the abstention safeguard)', () => {
-    // The whole point of the <VERDICT> template: the prompt's only verdict-shaped span
-    // is the placeholder, which is NOT a vote token. So a reviewer that emits nothing
-    // (its buffer = just the echoed prompt) scrapes to a non-vote, never a false clean.
-    expect(extractReviewVerdict(buildReviewPrompt('origin/main')).vote).toBeNull()
-    // Belt-and-suspenders: no bare echoed vote line.
-    expect(buildReviewPrompt('origin/main')).not.toContain('OPENGROUND_REVIEW: CLEAN ::OG_REVIEW_END::')
-    expect(buildReviewPrompt('origin/main')).not.toContain('OPENGROUND_REVIEW: MUST_FIX ')
   })
 })
 
@@ -8238,17 +8014,9 @@ describe('runEnginePass — never overlaps itself', () => {
       recentOutput: () => null,
       // Integration half — present but inert (no review cards).
       fetchReview: async () => [],
-      changedPaths: async () => ({ tip: 'tip-x', files: [] }),
       prepareTarget: async () => 'main',
       classify: async () => 'ff',
-      verify: async () => ({ ok: true, tip: null }),
-      integrate: async () => ({ status: 'integrated', mode: 'ff' }),
-      acquireLock: alwaysAcquireLock,
-      moveToDone: async () => true,
       markConflict: async () => true,
-      cleanup: async () => ({ removed: true }),
-      killPty: () => {},
-      instructRework: () => {},
       managerPresence: async () => 'absent',
       nudgeManager: async () => true,
       wakeManager: async () => true,
@@ -8261,107 +8029,6 @@ describe('runEnginePass — never overlaps itself', () => {
     expect(spawned).toEqual(['task a']) // dispatched exactly once, not twice
     expect(engine.workers).toHaveLength(1)
     expect(engine.passInFlight).toBe(false) // cleared after the pass settled
-  })
-})
-
-// ── runEnginePass ⇄ self-supply — the scan runs OFF the tick (audit 856daefb) ──
-// The self-supply scan spawns tsc(120s) + eslint(120s) + vitest(240s) SEQUENTIALLY.
-// It used to be awaited here, inside the passInFlight window — so for up to ~8 minutes
-// the engine did no dispatch, no integrate, and (the dangerous part) no monitor: the
-// stall / runaway / crash detection that recovers a wedged worker was simply not
-// running. The pass is now fired and left to run beside the tick.
-
-describe('runEnginePass — never blocks on the self-supply scan', () => {
-  /** Poll `pred` until true (or the cap elapses) — returns the instant the state lands. */
-  const waitUntil = async (pred: () => boolean, ms = 5000): Promise<boolean> => {
-    const deadline = Date.now() + ms
-    while (Date.now() < deadline) {
-      if (pred()) return true
-      await new Promise((r) => setTimeout(r, 5))
-    }
-    return pred()
-  }
-
-  it('returns while a scan is still spawning tools, and the NEXT tick still monitors', async () => {
-    const engine = newEngine({ selfSupply: { ...initSelfSupplyRuntime(), enabled: true } })
-    let fetches = 0
-    let scanEntered = false
-    let releaseScan: () => void = () => {}
-    const scanGate = new Promise<void>((r) => (releaseScan = r))
-    const deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps & SelfSupplyPassDeps = {
-      fetchTasks: async () => {
-        fetches++
-        return []
-      },
-      spawnWorker: async () => ({
-        terminalId: 'pty',
-        agentSessionId: 's',
-        worktree: '/wt',
-        branch: 'swarm/a',
-      }),
-      moveToDoing: async () => true,
-      moveToReview: async () => true,
-      countCommitsAhead: async () => 0,
-      readHeartbeat: async () => null,
-      recoverCard: async () => true,
-      recoverWorker: async () => ({ removed: true }),
-      isAlive: () => true,
-      lastOutputAt: () => null,
-      nudge: () => true,
-      escalate: async () => true,
-      recentOutput: () => null,
-      fetchReview: async () => [],
-      changedPaths: async () => ({ tip: 'tip-x', files: [] }),
-      prepareTarget: async () => 'main',
-      classify: async () => 'ff',
-      verify: async () => ({ ok: true, tip: null }),
-      integrate: async () => ({ status: 'integrated', mode: 'ff' }),
-      acquireLock: alwaysAcquireLock,
-      moveToDone: async () => true,
-      markConflict: async () => true,
-      cleanup: async () => ({ removed: true }),
-      killPty: () => {},
-      instructRework: () => {},
-      managerPresence: async () => 'absent',
-      nudgeManager: async () => true,
-      wakeManager: async () => true,
-      worktreeExists: async () => true,
-      // The scan stand-in: parked in its first scanner until the test releases it. The
-      // REAL scanners spawn tsc/eslint/vitest — a test must never do that.
-      selfSupplyDeps: {
-        now: () => Date.now(),
-        board: {
-          read: async () => ({ description: '', tasks: [], notes: '', updatedAt: 't0' }),
-          write: async (_p, d) => d,
-        },
-        scanTypeErrors: async () => {
-          scanEntered = true
-          await scanGate
-          return []
-        },
-        scanLintErrors: async () => [],
-        scanTestFailures: async () => [],
-        scanTodoComments: async () => [],
-      },
-    }
-
-    try {
-      // Would hang here (until the test's own timeout) if the tick awaited the scan.
-      await runEnginePass(engine, deps)
-      expect(engine.passInFlight).toBe(false) // the tick let go…
-      await waitUntil(() => scanEntered)
-      expect(engine.selfSupply.scanInFlight).toBe(true) // …while the scan runs beside it
-
-      // The next tick monitors normally instead of being frozen behind the scan — the
-      // observable that matters: stall/runaway/crash detection keeps running.
-      const before = fetches
-      await runEnginePass(engine, deps)
-      expect(fetches).toBeGreaterThan(before)
-      expect(engine.selfSupply.scanInFlight).toBe(true) // still the SAME scan, not a second
-    } finally {
-      releaseScan()
-    }
-    expect(await waitUntil(() => !engine.selfSupply.scanInFlight)).toBe(true)
   })
 })
 
@@ -8392,7 +8059,7 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
     managerPresence?: IntegrationDeps['managerPresence']
     recovered: { taskId: string; column: string }[]
     deadIds: Set<string>
-  }): OrchestratorDeps & IntegrationDeps & AnomalyDeps & SelfSupplyPassDeps => ({
+  }): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
     fetchTasks: async () => Array.from(over.board.values()).map((c) => ({ ...c })),
     spawnWorker: async () => ({ terminalId: 'pty-x', agentSessionId: 's', worktree: '/wt/x', branch: 'swarm/x' }),
     moveToDoing: async () => true,
@@ -8414,15 +8081,7 @@ describe('runEnginePass — never blocks on the integrate pass', () => {
     fetchReview: over.fetchReview,
     prepareTarget: async () => 'main',
     classify: async () => 'ff',
-    changedPaths: async () => ({ tip: 'tip-x', files: [] }),
-    verify: async () => ({ ok: true, tip: null }), // dead post-2026-07-15 (engine doesn't verify)
-    integrate: async () => ({ status: 'integrated', mode: 'ff' }), // dead — engine never merges
-    acquireLock: alwaysAcquireLock,
-    moveToDone: async () => true,
     markConflict: async () => true,
-    cleanup: async () => ({ removed: true }),
-    killPty: () => {},
-    instructRework: () => {},
     managerPresence: over.managerPresence ?? (async () => 'absent'),
     nudgeManager: async () => true,
     wakeManager: async () => true,
@@ -8594,17 +8253,9 @@ describe('runEnginePass ⇄ stopOrchestratorWorker — the blocked park survives
       recentOutput: () => null,
       // Integration half — present but inert (no review cards).
       fetchReview: async () => [],
-      changedPaths: async () => ({ tip: 'tip-x', files: [] }),
       prepareTarget: async () => 'main',
       classify: async () => 'ff',
-      verify: async () => ({ ok: true, tip: null }),
-      integrate: async () => ({ status: 'integrated', mode: 'ff' }),
-      acquireLock: alwaysAcquireLock,
-      moveToDone: async () => true,
       markConflict: async () => true,
-      cleanup: async () => ({ removed: true }),
-      killPty: () => {},
-      instructRework: () => {},
       managerPresence: async () => 'absent',
       nudgeManager: async () => true,
       wakeManager: async () => true,

@@ -25,7 +25,7 @@
 // load (`sweptLegacyDocks`), so sharing a path would let a later test read a
 // swept-clean store and pass vacuously.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, act } from '@testing-library/react'
+import { render, screen, act, fireEvent } from '@testing-library/react'
 import type { ProjectData, ProjectMeta } from '@/lib/types'
 import { VIEW_KEY } from '@/lib/persistView'
 
@@ -61,6 +61,7 @@ vi.mock('@/components/canvas/CanvasWorkspace', () => ({
 // steered per test.
 const h = vi.hoisted(() => ({
   projectGet: null as null | ((...a: unknown[]) => Promise<Response>),
+  paths: [] as string[],
 }))
 vi.mock('@/lib/api-client', () => {
   const benign = () =>
@@ -71,8 +72,10 @@ vi.mock('@/lib/api-client', () => {
     new Proxy(function () {} as object, {
       get: (_t, prop) =>
         prop === 'then' ? undefined : deep([...path, typeof prop === 'string' ? prop : String(prop)]),
-      apply: (_t, _this, args: unknown[]) =>
-        path.join('.') === 'project.$get' && h.projectGet ? h.projectGet(...args) : benign(),
+      apply: (_t, _this, args: unknown[]) => {
+        h.paths.push(path.join('.'))
+        return path.join('.') === 'project.$get' && h.projectGet ? h.projectGet(...args) : benign()
+      },
     })
   return { api: { api: deep([]) } }
 })
@@ -104,17 +107,18 @@ const noop = () => {}
 /** Land the panel on `tab` by seeding the persisted view for THIS project —
  *  the same path a reload restore takes, so the first-tab-default effect
  *  honours it instead of yanking the view to the leftmost tab. */
-const openOn = (p: ProjectMeta, tab: 'canvas' | 'board') => {
+const openOn = (p: ProjectMeta, tab: 'canvas' | 'board' | 'research' | `custom:${string}`) => {
   localStorage.setItem(VIEW_KEY, JSON.stringify({ projectId: p.id, panelTab: tab }))
 }
 
-const renderPanel = (p: ProjectMeta) =>
-  render(<ProjectPanel project={p} onClose={noop} onRemove={noop} frameLabel={null} />)
+const renderPanel = (p: ProjectMeta, ownerFeatures = false) =>
+  render(<ProjectPanel project={p} ownerFeatures={ownerFeatures} onClose={noop} onRemove={noop} frameLabel={null} />)
 
 type Call = { url: string; method: string }
 let calls: Call[] = []
 
 beforeEach(() => {
+  h.paths = []
   calls = []
   localStorage.clear()
   h.projectGet = () => Promise.resolve(new Response(JSON.stringify(VALID), { status: 200 }))
@@ -135,10 +139,47 @@ afterEach(() => {
 })
 
 describe('ProjectPanel — the Canvas/Board side terminal dock is gone', () => {
+  it('projects a fixed public tab set without editing the saved owner layout', async () => {
+    const p = project('fixed-tabs', '/tmp/fixed-tabs')
+    const saved = { ...VALID, tabOrder: ['terminal', 'canvas', 'board', 'swarm'], disabledModules: ['board', 'terminal'] }
+    h.projectGet = () => Promise.resolve(new Response(JSON.stringify(saved)))
+    render(<ProjectPanel project={p} experiments={{ swarm: true, sandbox: false }} onClose={noop} onRemove={noop} frameLabel={null} />)
+    await screen.findByTestId('board')
+    const board = screen.getByRole('button', { name: 'Board' })
+    const terminal = screen.getByRole('button', { name: 'Terminal' })
+    expect(board.compareDocumentPosition(terminal) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'customTabs.addTab' })).toBeNull()
+    expect(board.draggable).toBe(false)
+    fireEvent.keyDown(board, { key: 'ArrowRight', altKey: true })
+    fireEvent.contextMenu(board)
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(h.paths).not.toContain('project.$put')
+  })
+  it('hides project skills from public users and no longer fetches the retired app menu', async () => {
+    const p = project('public-skills', '/tmp/public-skills')
+    const view = renderPanel(p)
+    await screen.findByTestId('board')
+    expect(screen.queryByRole('button', { name: 'projectPanel.skillsButton' })).toBeNull()
+    expect(h.paths).not.toContain('project.open.$get')
+    expect(screen.getByRole('button', { name: 'projectPanel.openInEditor' })).toBeTruthy()
+    view.rerender(<ProjectPanel project={p} ownerFeatures onClose={noop} onRemove={noop} frameLabel={null} />)
+    expect(screen.getByRole('button', { name: 'projectPanel.skillsButton' })).toBeTruthy()
+  })
+  it.each(['canvas', 'research', 'custom:saved'] as const)('shows Board without changing a public user\'s saved %s view', async tab => {
+    const p = project(`public-${tab}`, `/tmp/public-${tab}`)
+    openOn(p, tab)
+    const savedView = localStorage.getItem(VIEW_KEY)
+    renderPanel(p)
+    expect(await screen.findByTestId('board')).toBeTruthy()
+    expect(screen.queryByTestId('project-canvas')).toBeNull()
+    expect(localStorage.getItem(VIEW_KEY)).toBe(savedView)
+    expect(calls.filter(c => /\/api\/(research|custom-modules|project\/canvases)(\/|\?|$)/.test(c.url))).toEqual([])
+  })
+
   it('the Canvas view renders no terminal dock', async () => {
     const p = project('uuid-canvas', '/tmp/proj-canvas-view')
     openOn(p, 'canvas')
-    renderPanel(p)
+    renderPanel(p, true)
     // Positive control: the Canvas view really did mount …
     expect(await screen.findByTestId('project-canvas')).toBeTruthy()
     // … and it carries neither the collapsed rail nor an expanded dock.

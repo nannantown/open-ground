@@ -15,7 +15,6 @@ import {
   Sparkles,
   SquareCode,
   Star,
-  Store,
   Terminal,
   Trash2,
   X,
@@ -95,7 +94,7 @@ import { ResearchModule } from '@/components/canvas/modules/ResearchModule'
 import { customTabId, customModuleIdFromTab, isCustomTabId, type ModuleId } from '@/lib/modules/ids'
 import { usePlayback } from '@/lib/playback/playbackStore'
 import { PlaybackEq } from '@/components/canvas/PlaybackEq'
-import { effectiveTabOrder, moveTab, preserveCustomTabs } from '@/lib/modules/tabOrder'
+import { effectiveTabOrder, moveTab, preserveHiddenTabs } from '@/lib/modules/tabOrder'
 import { attachCustomTab, detachCustomTab } from '@/lib/modules/customTabAttach'
 import { disableNativeModule, enableNativeModule } from '@/lib/modules/nativeEnable'
 import { useCustomModules } from '@/lib/modules/useCustomModules'
@@ -109,7 +108,6 @@ import {
 import { killEmbeddedTerminals } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { CustomTabCreateDialog } from '@/components/canvas/modules/CustomTabCreateDialog'
 import { CustomTabPickerDialog } from '@/components/canvas/modules/CustomTabPickerDialog'
-import { MarketplaceDialog } from '@/components/canvas/modules/MarketplaceDialog'
 import { capTrackingClass } from '@/lib/labelScript'
 
 // The per-project tabs are declared once in the module registry
@@ -126,7 +124,6 @@ const isMvpVisibleTab = isModuleIdEnabled
 const NO_EXPERIMENT_FLAGS: ExperimentFlags = {
   swarm: false,
   sandbox: false,
-  persona: false,
 }
 
 // The single right-click action a tab in the row offers: 'detach' a custom tab
@@ -276,6 +273,10 @@ interface Props {
    *  all-false ⇒ no experimental module shows — the default for every non-owner
    *  and the shipped build, so the tab row is unchanged for everyone else. */
   experiments?: ExperimentFlags
+  /** App-owner surfaces, independent of the public/local Swarm unlock. */
+  ownerFeatures?: boolean
+  viewModeControl?: React.ReactNode
+  accessLoaded?: boolean
   /** Member capability flag — the SINGLE owner/member switch. When present, this
    *  project is a folder-less collab project shared WITH the user, so ProjectPanel
    *  renders the member body (Board + Canvas over the Cloudflare DO — no Terminal/
@@ -298,6 +299,9 @@ const OwnedProjectBody = ({
   frameLabel,
   feedbackEnabled,
   experiments,
+  ownerFeatures = false,
+  viewModeControl,
+  accessLoaded = true,
 }: Props) => {
   const { t, lang } = useT()
   // Per-tab contextual feedback: opening the modal here tags the submission
@@ -531,6 +535,9 @@ const OwnedProjectBody = ({
   const [activeBranches, setActiveBranches] =
     useState<ActiveBranchesResponse | null>(null)
   const [skillsOpen, setSkillsOpen] = useState(false)
+  useEffect(() => {
+    if (!ownerFeatures) setSkillsOpen(false)
+  }, [ownerFeatures])
   // Body-portaled like the editor menu (see editorMenuPos) — same hosted-frame
   // stacking reason, same measured-on-open fixed positioning.
   const branchBtnRef = useRef<HTMLButtonElement | null>(null)
@@ -742,6 +749,7 @@ const OwnedProjectBody = ({
           // change is adopted. (A bespoke setData here silently ate unsaved edits.)
           // onSavedRef (not onSaved) keeps this consistent with the stable-identity
           // refresh pattern reloadProjectData established.
+          const requestedFromJson = lastSavedJson.current
           const fresh = await api.api.project
             .$get({ query: { path } }, { init: { cache: 'no-store' } })
             .catch(() => null)
@@ -750,6 +758,7 @@ const OwnedProjectBody = ({
             const decision = reconcileExternalData({
               current: dataRef.current,
               lastSavedJson: lastSavedJson.current,
+              requestedFromJson,
               fetched: d,
             })
             if (decision.kind === 'adopt') {
@@ -900,7 +909,7 @@ const OwnedProjectBody = ({
   // saved tab is validated against the registry so a stale retired tab
   // (e.g. the removed 'goals') can never strand the panel on a tab with no
   // row entry.
-  const [view, setView] = useState<PanelView>(() => {
+  const [requestedView, setView] = useState<PanelView>(() => {
     const saved = loadPersistedView().panelTab
     // 'board' is the new default leftmost tab now that Chats is gone (a stale
     // persisted 'tasks' fails isMvpVisibleTab and falls back here). A saved
@@ -915,19 +924,18 @@ const OwnedProjectBody = ({
   // union — `view` only ever holds a registry id or a `custom:*` id (both
   // validated above / by the tab row).
   useEffect(() => {
-    savePersistedView({ panelTab: view as PersistedPanelTab })
-  }, [view])
+    savePersistedView({ panelTab: requestedView as PersistedPanelTab })
+  }, [requestedView])
   // ── Custom tabs (docs/CUSTOM_TABS_PLAN.md) ───────────────────────────────
   // The global custom-module list + the caller's role, fetched once and
-  // refreshed after create/install/publish/delete. Custom tabs surface as
+  // refreshed after create/delete. Custom tabs surface as
   // `custom:<uuid>` ids appended after the built-ins.
   const {
     role: customRole,
     modules: customModules,
-    marketAvailable,
     loaded: customModulesLoaded,
     refresh: refreshCustomModules,
-  } = useCustomModules()
+  } = useCustomModules(ownerFeatures)
   // ATTACHMENT IS CANONICAL (docs/CUSTOM_TABS_PLAN.md — per-project
   // attachment): a module surfaces in THIS project's row only when its id is
   // listed in ProjectData.customTabs AND it still exists in the library.
@@ -936,35 +944,37 @@ const OwnedProjectBody = ({
     const lib = new Set(customModules.map(m => m.id))
     return (data?.customTabs ?? []).filter(id => lib.has(id))
   }, [data?.customTabs, customModules])
-  // Owner-only experiment gate (App resolves it server-side; all-false for
-  // non-owners and the shipped build). An experiment-gated module is invisible
-  // until its gate is open, so this Set is empty for everyone but the owner with
-  // the toggle on — keeping the registry filter below a no-op in the common case.
+  // Owner surfaces and the resolved Swarm flag are independent gates.
   const moduleGate = useMemo<ModuleGate>(
-    () => gateFromFlags(experiments ?? NO_EXPERIMENT_FLAGS),
+    () => gateFromFlags(experiments ?? NO_EXPERIMENT_FLAGS, ownerFeatures),
     // Depend on the `experiments` object itself, not individual flag keys — so
     // a future ExperimentId needs no matching edit here to be tracked.
     // useExperiments() hands out a referentially-stable `flags` object that
     // only changes identity when a value actually flips (see
     // src/lib/modules/useExperiments.ts), so this doesn't recompute on every
     // no-op focus re-check the way depending on the raw object always would.
-    [experiments],
+    [experiments, ownerFeatures],
   )
   // The enabled built-in module ids in registry (default) order — gated
   // experiments included only when `moduleGate` opens them — then with this
-  // project's HIDDEN natives (ProjectData.disabledModules) dropped. disabledModules
+  // owner's HIDDEN natives (ProjectData.disabledModules) dropped. disabledModules
   // is personal per-project state like tabOrder; a native ships pre-installed and
   // can't be uninstalled, but a project may drop it from its row. The resulting
   // order drives the tab row's left-to-right order AND the Ctrl+Tab cycle.
   const enabledNativeIds = useMemo<PanelView[]>(() => {
-    const hidden = new Set(data?.disabledModules ?? [])
+    const hidden = new Set(ownerFeatures ? data?.disabledModules ?? [] : [])
     return enabledModules(moduleGate).map(m => m.id).filter(id => !hidden.has(id))
-  }, [data?.disabledModules, moduleGate])
+  }, [data?.disabledModules, moduleGate, ownerFeatures])
   // Every id that can appear in the tab row: enabled built-ins in registry
   // order, then the ATTACHED custom tabs in attachment order. effectiveTabOrder
   // reconciles a saved per-project order against this set.
   const allTabIds = useMemo<PanelView[]>(
-    () => [...enabledNativeIds, ...attachedModuleIds.map(customTabId)],
+    () => {
+      const visible = [...enabledNativeIds, ...attachedModuleIds.map(customTabId)]
+      // An owner layout may hide every available tab. Keep a Board fallback
+      // without modifying the saved layout.
+      return visible.length ? visible : ['board']
+    },
     [enabledNativeIds, attachedModuleIds],
   )
   // The per-project, normalised tab order: the user's saved drag order
@@ -972,19 +982,12 @@ const OwnedProjectBody = ({
   // falling back to the default order when a project has none. Drives the tab
   // row, the Ctrl+Tab cycle, and the first-tab default below.
   const tabOrder = useMemo(
-    () => effectiveTabOrder<PanelView>(data?.tabOrder, allTabIds),
-    [data?.tabOrder, allTabIds],
+    () => ownerFeatures ? effectiveTabOrder<PanelView>(data?.tabOrder, allTabIds) : allTabIds,
+    [data?.tabOrder, allTabIds, ownerFeatures],
   )
-  // The active tab is no longer in this project's row — a custom tab detached
-  // here / deleted from the library (a stale localStorage value), OR a built-in
-  // now hidden via disabledModules. Land on the first remaining tab. Only judged
-  // once BOTH sources are in (the library list AND this project's data) — before
-  // that, "not in the row" just means "haven't heard from the server yet".
-  useEffect(() => {
-    if (!customModulesLoaded || !data) return
-    if (allTabIds.includes(view)) return
-    setView(tabOrder[0] ?? 'board')
-  }, [customModulesLoaded, data, view, allTabIds, tabOrder])
+  // Visibility is a projection, not a migration. Keep the requested tab intact
+  // while access loads or is unavailable; only a user action changes it.
+  const view = allTabIds.includes(requestedView) ? requestedView : tabOrder[0] ?? 'board'
   // "The leftmost tab opens by default." When a project's data first loads
   // (opening it, or switching to it — guarded so a same-project save/refetch
   // doesn't yank the view), land on that project's first tab. When the saved
@@ -992,7 +995,7 @@ const OwnedProjectBody = ({
   // misroute the default to a built-in.
   useEffect(() => {
     const path = project?.path
-    if (!path || !data || loadedDataPathRef.current !== path) return
+    if (!path || !data || !accessLoaded || loadedDataPathRef.current !== path) return
     if (defaultViewedPathRef.current === path) return
     // One-shot: only the first project-open after mount can be a reload
     // restore. When it is (App reopened the very project the mount-time view
@@ -1007,20 +1010,20 @@ const OwnedProjectBody = ({
       return
     }
     const savedFirst = data.tabOrder?.[0]
-    if (savedFirst && isCustomTabId(savedFirst) && !customModulesLoaded) return
+    if (ownerFeatures && savedFirst && isCustomTabId(savedFirst) && !customModulesLoaded) return
     defaultViewedPathRef.current = path
-    const first = effectiveTabOrder<PanelView>(data.tabOrder, allTabIds)[0] ?? 'board'
+    const first = tabOrder[0] ?? 'board'
     setView(first)
-  }, [project?.path, project?.id, data, customModulesLoaded, allTabIds])
-  // Custom-tab management UI: the "+" picker (owner|tester — attach from the
-  // library, jump to create), the create dialog it hands off to (owner), the
-  // marketplace (owner|tester), and the one-shot post-create setup — the
+  }, [project?.path, project?.id, data, customModulesLoaded, tabOrder, accessLoaded, ownerFeatures])
+  // Custom-tab management is an app-owner surface. The post-create setup records the
   // freshly created module's id, which makes its CustomModuleView auto-open
   // the sidebar, launch claude and paste the brush-up prompt (unsent).
   // Consumed once.
   const [pickerOpen, setPickerOpen] = useState(false)
+  useEffect(() => {
+    if (!ownerFeatures) setPickerOpen(false)
+  }, [ownerFeatures])
   const [customCreateOpen, setCustomCreateOpen] = useState(false)
-  const [marketOpen, setMarketOpen] = useState(false)
   const [customSetupId, setCustomSetupId] = useState<string | null>(null)
   // Attach a library module to THIS project (ProjectData.customTabs — the
   // same persist path tabOrder rides) and land on its tab. Reads through
@@ -1058,9 +1061,8 @@ const OwnedProjectBody = ({
   // reversible from the "+" picker): DETACH a custom tab (drop it from this
   // project's customTabs + scrub its custom:<id> from tabOrder; the module stays
   // in the library) or DISABLE a built-in (hide it via disabledModules). Both
-  // are personal per-project state, so no server role gate applies — detach is
-  // offered to anyone who manages custom tabs (customRole !== 'none'); hiding a
-  // native is everyone's right (it's just their own layout).
+  // are personal per-project state; only the owner view offers layout editing.
+  // Public view projects a fixed row without rewriting these preferences.
   const detachTabFromProject = useCallback(
     (tabId: string) => {
       if (!isCustomTabId(tabId)) return
@@ -1146,24 +1148,18 @@ const OwnedProjectBody = ({
     },
     [refreshCustomModules],
   )
-  // Persist a drag-reordered tab row to this project's ProjectData.tabOrder.
-  // Until the custom-module list has loaded, the rendered row — and thus
-  // moveTab's result — holds only the built-ins; persisting that verbatim
-  // would drop every saved `custom:*` id and reset those tabs' dragged
-  // positions. preserveCustomTabs re-inserts them next to their saved
-  // neighbours during that window (once loaded, the row is authoritative and
-  // a stale custom id is correctly scrubbed, like any retired builtin).
+  // Persist visible reordering without discarding the hidden part of the layout.
   const reorderTabs = useCallback(
     (from: number, to: number) => {
-      if (!data) return
+      if (!data || !ownerFeatures) return
       const next = moveTab(tabOrder, from, to)
       if (next.every((id, i) => id === tabOrder[i])) return
       persist({
         ...data,
-        tabOrder: customModulesLoaded ? next : preserveCustomTabs(data.tabOrder, next),
+        tabOrder: preserveHiddenTabs(data.tabOrder, next),
       })
     },
-    [data, tabOrder, persist, customModulesLoaded],
+    [data, tabOrder, persist, ownerFeatures],
   )
   // Mirrored up from TerminalPane so the Terminal tab can show `zsh · 163×44`
   // and a Restart button next to its label — the tab thus reads as the header
@@ -1763,6 +1759,7 @@ const OwnedProjectBody = ({
   const reloadProjectData = useCallback(async (): Promise<ProjectData | null> => {
     const path = project?.path
     if (!path) return null
+    const requestedFromJson = lastSavedJson.current
     try {
       const res = await api.api.project.$get(
         { query: { path } },
@@ -1780,9 +1777,10 @@ const OwnedProjectBody = ({
       const decision = reconcileExternalData({
         current: dataRef.current,
         lastSavedJson: lastSavedJson.current,
+        requestedFromJson,
         fetched: d,
       })
-      if (decision.kind === 'skip-local-edit') return null
+      if (decision.kind === 'skip-local-edit' || decision.kind === 'stale') return null
       if (decision.kind === 'echo') return d
       setData(decision.data)
       lastSavedJson.current = decision.json
@@ -1836,89 +1834,6 @@ const OwnedProjectBody = ({
     const iv = setInterval(tick, 5000)
     return () => clearInterval(iv)
   }, [project?.path, reloadProjectData])
-
-  // "Open this folder in…" — only the apps the user has registered. The first
-  // entry is the default for one-click Open; the dropdown can re-star it.
-  const [openMenuOpen, setOpenMenuOpen] = useState(false)
-  const [openApps, setOpenApps] = useState<OpenApp[]>([])
-  useEffect(() => {
-    api.api.project.open
-      .$get()
-      .then(r => r.json() as Promise<{ apps?: OpenApp[] }>)
-      .then((d) => setOpenApps(d.apps ?? []))
-      .catch(() => {})
-  }, [])
-  useEffect(() => {
-    if (!openMenuOpen) return
-    const close = () => setOpenMenuOpen(false)
-    window.addEventListener('mousedown', close)
-    return () => window.removeEventListener('mousedown', close)
-  }, [openMenuOpen])
-  const saveOpenApps = async (apps: OpenApp[]) => {
-    try {
-      await api.api.project.open.$put({ json: { apps } })
-    } catch {
-      /* best-effort; the in-memory list still updates */
-    }
-  }
-  const addOpenApp = (app: OpenApp) => {
-    if (!app.name.trim()) return
-    if (openApps.some(a => a.name === app.name)) return
-    const next = [...openApps, app]
-    setOpenApps(next)
-    saveOpenApps(next)
-  }
-  const removeOpenApp = (name: string) => {
-    const next = openApps.filter(a => a.name !== name)
-    setOpenApps(next)
-    saveOpenApps(next)
-  }
-  const makeDefaultOpenApp = (name: string) => {
-    const found = openApps.find(a => a.name === name)
-    if (!found || openApps[0]?.name === name) return
-    const next = [found, ...openApps.filter(a => a.name !== name)]
-    setOpenApps(next)
-    saveOpenApps(next)
-  }
-  const pickOpenApp = async () => {
-    try {
-      const res = await api.api.project.open.pick.$post()
-      const d = (await res.json()) as {
-        name?: string
-        path?: string
-        mode?: 'open' | 'cwd'
-        cancelled?: boolean
-        error?: string
-      }
-      if (d.cancelled || !d.name) return
-      if (d.error) {
-        alert(t('projectPanel.pickFailed', { error: d.error }))
-        return
-      }
-      addOpenApp({ name: d.name, path: d.path, mode: d.mode ?? 'open' })
-    } catch (e: any) {
-      alert(t('projectPanel.pickFailed', { error: e?.message ?? t('projectPanel.networkError') }))
-    }
-  }
-  const openIn = async (app: OpenApp) => {
-    setOpenMenuOpen(false)
-    if (!project) return
-    if (project.missing) {
-      alert(t('projectPanel.folderGone'))
-      return
-    }
-    try {
-      const res = await api.api.project.open.$post({
-        json: { path: project.path, app: app.name },
-      })
-      if (!res.ok) {
-        const e = (await res.json().catch(() => ({}))) as { error?: string }
-        alert(t('projectPanel.openFailed', { error: e.error ?? res.statusText }))
-      }
-    } catch (e: any) {
-      alert(t('projectPanel.openFailed', { error: e?.message ?? t('projectPanel.networkError') }))
-    }
-  }
 
   if (!project) return null
 
@@ -2274,10 +2189,9 @@ const OwnedProjectBody = ({
             it onto its own row; inner flex-wrap lets the share strip / HUD /
             feedback button flow onto further rows on very narrow windows. */}
         <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-x-3 gap-y-1.5">
-          {/* Skills: lists the Claude skills defined inside this project
-              (.claude/skills/). A quiet text+icon button — always present,
-              disabled only for a vanished folder. */}
-          <button
+          {viewModeControl}
+          {/* Owner UI only; the CLI can still read the project's skill files. */}
+          {ownerFeatures && <button
             type="button"
             onClick={() => setSkillsOpen(true)}
             disabled={project.missing}
@@ -2287,7 +2201,7 @@ const OwnedProjectBody = ({
           >
             <Sparkles size={12} strokeWidth={1.75} className="shrink-0" />
             {t('projectPanel.skillsButton')}
-          </button>
+          </button>}
           {/* Realtime-collab invite — a quiet text button, only when collab is
               enabled (default build: hidden, no collab UI at all). */}
           {collabEnabled && !project.missing && (
@@ -2346,7 +2260,7 @@ const OwnedProjectBody = ({
         view={view}
         onChange={setView}
         order={tabOrder}
-        onReorder={reorderTabs}
+        onReorder={ownerFeatures ? reorderTabs : undefined}
         terminalInfo={terminalInfo}
         // Same gate as `order` was built from, so the row can resolve a gated
         // module's icon/label; without it an open experiment's tab would have an
@@ -2356,15 +2270,11 @@ const OwnedProjectBody = ({
         // row renders them wherever `order` puts them; `order` only ever
         // contains tabs ATTACHED to this project (allTabIds above).
         customTabs={customModules.map(customModuleTabDef)}
-        // "+" opens the per-project picker — attach custom tabs AND show/hide
-        // built-ins. Both are personal per-project layout (no server role gate),
-        // so the picker is available to everyone, including role 'none'; the
-        // owner-only create + owner|tester marketplace entries inside it stay
-        // role-gated cosmetically (the server re-checks).
-        onAddTab={() => setPickerOpen(true)}
+        // Only owner view offers layout editing and the custom-tab library.
+        onAddTab={ownerFeatures ? () => setPickerOpen(true) : undefined}
         // Right-click menu on a tab: detach a custom (non-destructive — library
         // delete lives in the picker) or hide a built-in from this project.
-        rowMenu={{ actionFor: tabRowAction }}
+        rowMenu={ownerFeatures ? { actionFor: tabRowAction } : undefined}
         // Cards waiting in Review — the reviewer's pull signal (F066).
         badges={{
           board:
@@ -2572,7 +2482,7 @@ const OwnedProjectBody = ({
             </button>
           </div>
         </div>
-      ) : view === 'canvas' ? (
+      ) : view === 'canvas' && isModuleIdVisible('canvas', moduleGate) ? (
         // `min-h-0 flex-1` is load-bearing: ProjectCanvas's root is h-full
         // w-full, so it needs a definite-height parent (the column above is
         // `flex min-w-0 flex-1 flex-col`).
@@ -2581,28 +2491,13 @@ const OwnedProjectBody = ({
             projectPath={project.path}
           />
         </div>
-      ) : view === 'research' ? (
-        // The per-project research-report library — an always-on default module
-        // (no experiment gate; the server routes it reads are read-only and
-        // registry-guarded). Fetches its own data, so it mounts ahead of the
-        // loading/data checks like the other self-contained modules.
+      ) : view === 'research' && isModuleIdVisible('research', moduleGate) ? (
+        // Mount only for the app owner: opening this surface can start a digest.
         <ResearchModule project={project} />
       ) : view === 'swarm' && isModuleIdVisible('swarm', moduleGate) ? (
-        // Owner-only experiment. Re-checking the gate HERE — not just relying on
-        // the tab being hidden — means a forged `view: 'swarm'` (from a
-        // stale/hostile localStorage value) never renders the surface for a
-        // non-owner; the fallback effect then moves the view off it.
-        //
-        // Asked through the REGISTRY's predicate rather than a raw flag so the
-        // tab row and the mounted surface cannot disagree about who may see a
-        // module: there is one rule, in one place, and a module that grows a
-        // second way in needs no edit here.
-        //
-        // (There is no `persona` branch: that surface describes the OWNER, not a
-        // project, so it moved to the Ground toolbar — see
-        // src/components/canvas/PersonaPanel.tsx.)
+
         <SwarmModule project={project} />
-      ) : isCustomTabId(view) ? (
+      ) : isCustomTabId(view) && ownerFeatures ? (
         // Custom tab: the module's component in a sandboxed iframe, plus the
         // owner's claude sidebar. Keyed by module id so switching between two
         // custom tabs remounts cleanly (fresh poll, fresh sidebar state).
@@ -2614,7 +2509,6 @@ const OwnedProjectBody = ({
             role={customRole}
             setup={customSetupId === activeCustomModule.id}
             onSetupConsumed={() => setCustomSetupId(null)}
-            onChanged={refreshCustomModules}
           />
         ) : (
           // List still loading (or the module vanished — the fallback effect
@@ -2717,14 +2611,6 @@ const OwnedProjectBody = ({
           projectName={project.name}
           projectPath={project.path}
           data={data}
-          onBrowseMarket={
-            customRole !== 'none' && marketAvailable
-              ? () => {
-                  setProjectSettingsOpen(false)
-                  setMarketOpen(true)
-                }
-              : undefined
-          }
           onClose={() => setProjectSettingsOpen(false)}
           onChange={(config, launch) => {
             // Autosave: every committed change in the dialog persists right
@@ -2759,8 +2645,9 @@ const OwnedProjectBody = ({
         />
       )}
 
-      {pickerOpen && (
+      {ownerFeatures && pickerOpen && (
         <CustomTabPickerDialog
+          showCustomTabs={ownerFeatures}
           modules={customModules}
           role={customRole}
           attachedIds={new Set(attachedModuleIds)}
@@ -2776,18 +2663,10 @@ const OwnedProjectBody = ({
           // Create is owner-only (the server re-checks); the picker closes
           // and hands off to the create dialog.
           onCreateNew={
-            customRole === 'owner'
+            ownerFeatures && customRole === 'owner'
               ? () => {
                   setPickerOpen(false)
                   setCustomCreateOpen(true)
-                }
-              : undefined
-          }
-          onBrowseMarket={
-            customRole !== 'none' && marketAvailable
-              ? () => {
-                  setPickerOpen(false)
-                  setMarketOpen(true)
                 }
               : undefined
           }
@@ -2796,32 +2675,10 @@ const OwnedProjectBody = ({
         />
       )}
 
-      {customCreateOpen && (
+      {customCreateOpen && ownerFeatures && (
         <CustomTabCreateDialog
           onCreated={def => void onCustomTabCreated(def)}
           onClose={() => setCustomCreateOpen(false)}
-        />
-      )}
-
-      {marketOpen && (
-        <MarketplaceDialog
-          installedRemoteIds={
-            new Set(
-              customModules
-                .map(m => m.remoteId)
-                .filter((id): id is string => !!id),
-            )
-          }
-          onInstalled={async def => {
-            // The library list first (so the new module exists everywhere the
-            // row derives from), then auto-attach to the CURRENT project.
-            await refreshCustomModules()
-            const base = dataRef.current
-            if (base) {
-              persist({ ...base, customTabs: attachCustomTab(base.customTabs, def.id) })
-            }
-          }}
-          onClose={() => setMarketOpen(false)}
         />
       )}
 
@@ -2833,7 +2690,7 @@ const OwnedProjectBody = ({
       />
 
       <SkillsModal
-        open={skillsOpen}
+        open={ownerFeatures && skillsOpen}
         path={project.path}
         projectName={project.name}
         onClose={() => setSkillsOpen(false)}
@@ -2938,16 +2795,12 @@ const ProjectSettingsDialog = ({
   projectName,
   projectPath,
   data,
-  onBrowseMarket,
   onClose,
   onChange,
 }: {
   projectName: string
   projectPath: string
   data: ProjectData
-  /** Owner|tester: open the marketplace dialog (the parent closes settings
-   *  first). undefined hides the settings-side marketplace entry. */
-  onBrowseMarket?: () => void
   onClose: () => void
   onChange: (config: ProjectConfig, launch: ProjectLaunchPrefs) => void
 }) => {
@@ -3128,30 +2981,6 @@ const ProjectSettingsDialog = ({
               </p>
 
               <div className="mt-3 space-y-3.5">
-                {/* Text-diet 2026-08-03: the 「起動設定は Board へ移った」
-                    signage (2026-06-12 transition note) served its year. Cut. */}
-                {/* Marketplace — the tab row no longer carries a bare "Market"
-                    text entry; this is the settings-side way in (the "+" picker
-                    carries the other). owner|tester only. */}
-                {onBrowseMarket && (
-                  <div>
-                    <label className="mb-1 block label-cap text-ink-muted">
-                      {t('customTabs.market')}
-                    </label>
-                    <p className="text-ui leading-relaxed text-ink-faint">
-                      {t('customTabs.marketHint')}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={onBrowseMarket}
-                      className="mt-1.5 inline-flex items-center gap-2 rounded-sm border border-line px-2.5 py-1.5 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                    >
-                      <Store size={13} strokeWidth={2} className="shrink-0" />
-                      {t('customTabs.marketBrowse')}
-                    </button>
-                  </div>
-                )}
-
                 {/* ── Worktrees (B012/F082) — sweep the task/review checkouts
                     that pile up under ~/.openground/…/worktrees/. Only CLEAN
                     ones are removed; dirty ones are reported, never touched. */}
@@ -3319,7 +3148,7 @@ const ViewTabs = ({
   order: PanelView[]
   // Commit a drag from index `from` to insertion slot `to` (original-array index
   // space, matching moveTab's convention).
-  onReorder: (from: number, to: number) => void
+  onReorder?: (from: number, to: number) => void
   terminalInfo: TerminalInfo | null
   /** Owner-only experiment gate — the same one `order` was computed from, so the
    *  row can resolve a gated module's metadata. Omitted ⇒ no experiment open. */
@@ -3386,13 +3215,13 @@ const ViewTabs = ({
     setDropAt(null)
   }
   const commitDrop = () => {
-    if (dragFrom !== null && dropAt !== null) onReorder(dragFrom, dropAt)
+    if (dragFrom !== null && dropAt !== null) onReorder?.(dragFrom, dropAt)
     endDrag()
   }
   // Alt+Arrow keyboard reorder: nudge the focused tab left/right (accessible
   // alternative to dragging). Move = drop the tab one slot over.
   const onTabKeyDown = (e: ReactKeyboardEvent, i: number) => {
-    if (!e.altKey) return
+    if (!e.altKey || !onReorder) return
     if (e.key === 'ArrowLeft') {
       e.preventDefault()
       onReorder(i, i - 1)
@@ -3446,8 +3275,9 @@ const ViewTabs = ({
         return (
           <button
             key={m.id}
-            draggable
+            draggable={!!onReorder}
             onDragStart={e => {
+              if (!onReorder) { e.preventDefault(); return }
               e.dataTransfer.effectAllowed = 'move'
               // Firefox needs a payload for the drag to fire; we read state.
               e.dataTransfer.setData('text/plain', String(i))
@@ -3475,7 +3305,7 @@ const ViewTabs = ({
               setTabMenu({ id: m.id, x: e.clientX, y: e.clientY })
             }}
             onKeyDown={e => onTabKeyDown(e, i)}
-            title={t('projectPanel.dragToReorder')}
+            title={onReorder ? t('projectPanel.dragToReorder') : undefined}
             className={[
               // No negative margin: the strip is `overflow-x-auto` (it scrolls
               // when custom tabs pile up), and overflow clips on BOTH axes — a
@@ -3498,7 +3328,7 @@ const ViewTabs = ({
                 ? 'border-ink text-ink'
                 : 'border-transparent text-ink-muted hover:border-line-strong hover:text-ink active:text-ink',
               dimmed ? 'opacity-40' : '',
-              dragFrom !== null ? 'cursor-grabbing' : 'cursor-grab',
+              !onReorder ? 'cursor-pointer' : dragFrom !== null ? 'cursor-grabbing' : 'cursor-grab',
             ].join(' ')}
           >
             {barBefore && (
@@ -3535,9 +3365,7 @@ const ViewTabs = ({
           </button>
         )
       })}
-      {/* Custom-tab management (docs/CUSTOM_TABS_PLAN.md): a quiet trailing
-          "+" (owner: create) and a text "Market" entry (owner|tester) — both
-          invisible to everyone else. Text-first, no extra decoration. */}
+      {/* Per-project picker: existing tabs and built-in visibility. */}
       {onAddTab && (
         <button
           type="button"
@@ -3549,9 +3377,6 @@ const ViewTabs = ({
           <Plus size={12} strokeWidth={2.25} />
         </button>
       )}
-      {/* The marketplace no longer sits as a bare text entry in the tab row.
-          It moved into the "+" picker (「マーケットで探す」) and Project settings,
-          so the tab row stays tabs-only (docs/CUSTOM_TABS_PLAN.md). */}
       {tabMenu && menuAction && createPortal(
         // Body portal at overlay-modal z: the menu must open ABOVE a hosted
         // custom-tab iframe (CustomFrameHost, z 45), which any z inside the

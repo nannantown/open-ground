@@ -5,8 +5,11 @@
 // /api/settings on mount and PATCHes executionMode on change (fire-and-forget,
 // merged server-side, persisted), so it needs no prop-drilling through the deep
 // ProjectPanel → SwarmModule tree. Every in-app swarm launch (worker / supply /
-// commander) + the parallel cap read this mode server-side; a per-card override
-// still wins via the Board 実行 button.
+// commander) + the parallel cap read this mode server-side. There is no per-card
+// model override for a swarm worker: in `optimize` the card's difficulty `tier`
+// (set by the supply officer, adjustable in the Board drawer) picks its row, and
+// `max` / `economy` override every card alike. (The drawer's Model/Effort
+// selects only apply to the swarm-OFF terminal launch.)
 //
 // The menu carries a SECOND, independent switch beneath the modes: 使用可能モデル
 // (Settings.swarmAllowedModels) — the owner's permanent per-tier ON/OFF mask. A

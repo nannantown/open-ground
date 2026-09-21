@@ -1,5 +1,5 @@
 // swarmEnginePersistence — card 2 (docs/ENGINE_PERSISTENCE_PLAN.md §3/§4): the
-// engine's OWN intent (desiredRunning / selfSupply / overseer) write-through to
+// engine's OWN intent (desiredRunning / overseer / desk restoration) write-through to
 // disk, plus the boot-time crash-loop breaker ring. Both live OUTSIDE
 // swarmOrchestrator.ts's in-memory ProjectEngine so a restart can tell "was this
 // engine deliberately running" from "never started" — the gap 00-INDEX §2.1
@@ -22,12 +22,11 @@ import { engineBootsFile, ensureOpenGroundHome } from './paths'
 /** The engine's persisted intent for one project — read at boot to decide
  *  whether to resume, written every time the owner (or a toggle route) changes
  *  what the engine SHOULD be doing. `desiredRunning` mirrors `ProjectEngine.running`
- *  at the moment of the write; `selfSupply` / `overseer` mirror their `.enabled`
- *  flags. See {@link projectDataFile} — lives at
+ *  at the moment of the write; `overseer` mirrors its `.enabled` flag.
+ *  See {@link projectDataFile} — lives at
  *  `~/.openground/projects/<uuid>/engine.json`. */
 export interface EngineIntent {
   desiredRunning: boolean
-  selfSupply: boolean
   overseer: boolean
   /** The owner had the SUPPLY desk up when the app last ran (set on spawn,
    *  cleared on the explicit stop route). Read at boot by resumeEngines to
@@ -62,20 +61,6 @@ export interface EngineIntent {
    *  a permanent intent they never stated and can only clear by pressing 停止 on
    *  a desk they never started. */
   managerDesired?: boolean
-  /** The UTC day (`YYYY-MM-DD`) `selfSupplyDayCount` is counting, and the count
-   *  itself — self-supply's DAILY CAP, the guard that bounds how many cards the
-   *  engine may propose to itself in a day.
-   *
-   *  PERSISTED SINCE 2026-07-29, and the asymmetry is why: `enabled` was already
-   *  restored at boot while the counter lived only in memory, so every restart
-   *  re-armed self-supply with a FRESH daily budget. The engine restarts on every
-   *  self-update — i.e. exactly when it has been improving itself — so the cap
-   *  that exists to stop a runaway was being reset by the very loop it bounds,
-   *  and each round re-spawns the full scan (tsc + eslint + a whole `vitest run`).
-   *  Absent/0 reads as "no count yet", so an older engine.json degrades to today's
-   *  budget rather than to an unbounded one. */
-  selfSupplyDayKey?: string
-  selfSupplyDayCount?: number
   /** THE REVIEW-WAITING CLOCK — branch → epoch ms it was FIRST SEEN waiting in
    *  review (the disk mirror of `ProjectEngine.reviewSeenAt`).
    *
@@ -88,8 +73,7 @@ export interface EngineIntent {
    *  that stopped integrating was never once judged stalled and the owner was
    *  never told. The engine restarts on every self-update — i.e. exactly during
    *  the stretch it is most likely to leave work waiting — so the clock that
-   *  measures the stall was being reset by the loop it is supposed to catch
-   *  (the same shape as `selfSupplyDayCount` above).
+   *  measures the stall was being reset by the loop it is supposed to catch.
    *
    *  Absent / malformed ⇒ no clock, which is EXACTLY today's behaviour (the
    *  first pass re-stamps everything) — the field can only ever make the engine
@@ -129,7 +113,6 @@ const sanitizeReviewWaiting = (raw: unknown): Record<string, number> | undefined
 
 const DEFAULT_INTENT: Omit<EngineIntent, 'updatedAt'> = {
   desiredRunning: false,
-  selfSupply: false,
   overseer: false,
 }
 
@@ -145,14 +128,9 @@ export const readEngineIntent = async (projectPath: string): Promise<EngineInten
     const parsed = JSON.parse(raw) as Partial<EngineIntent>
     return {
       desiredRunning: parsed.desiredRunning === true,
-      selfSupply: parsed.selfSupply === true,
       overseer: parsed.overseer === true,
       ...(parsed.supplyDesired === true ? { supplyDesired: true } : {}),
       ...(parsed.managerDesired === true ? { managerDesired: true } : {}),
-      ...(typeof parsed.selfSupplyDayKey === 'string' ? { selfSupplyDayKey: parsed.selfSupplyDayKey } : {}),
-      ...(typeof parsed.selfSupplyDayCount === 'number' && parsed.selfSupplyDayCount >= 0
-        ? { selfSupplyDayCount: parsed.selfSupplyDayCount }
-        : {}),
       ...(() => {
         const w = sanitizeReviewWaiting(parsed.reviewWaitingSince)
         return w ? { reviewWaitingSince: w } : {}
@@ -164,31 +142,14 @@ export const readEngineIntent = async (projectPath: string): Promise<EngineInten
   }
 }
 
-/** What a writer states. The three REQUIRED flags are always the caller's
- *  current truth; every OPTIONAL field is preserve-by-default — omit it and the
- *  on-disk value survives, pass `false`/`null` to CLEAR it deliberately.
- *
- *  ⚠ THE SHAPE EXISTS BECAUSE THE ALTERNATIVE FAILED SILENTLY (2026-08-03).
- *  writeEngineIntent used to take the whole record and atomically REPLACE the
- *  file, so any writer that named only the three flags erased the optional ones
- *  it had never heard of. Two live features were losing state that way, with no
- *  error and no log: the supply desk's boot auto-resume (`supplyDesired`, added
- *  that same day — wiped by the very next autonomy toggle) and self-supply's
- *  daily cap (`selfSupplyDayKey`/`Count`, whose whole point since 2026-07-29 is
- *  that a restart must NOT hand the loop a fresh budget). Fixing the three call
- *  sites would have left the trap armed for the fourth. Preserve-by-default
- *  moves the invariant into the seam every write already passes through —
- *  a new optional field is safe by construction, and
- *  swarmEnginePersistenceMerge.test.ts reads the field list OUT of this
- *  interface so a future one is covered without anyone remembering to add it. */
+
+/** Required flags replace current intent; omitted optional fields preserve disk
+ *  values. Explicit false/null clears an optional flag. */
 export interface EngineIntentWrite {
   desiredRunning: boolean
-  selfSupply: boolean
   overseer: boolean
   supplyDesired?: boolean | null
   managerDesired?: boolean | null
-  selfSupplyDayKey?: string | null
-  selfSupplyDayCount?: number | null
   /** The review-waiting clock (see {@link EngineIntent.reviewWaitingSince}).
    *  Omit ⇒ the disk value survives; `null` OR an EMPTY object ⇒ cleared. The
    *  empty object clears rather than preserves because "no branch is waiting"
@@ -204,7 +165,7 @@ export interface EngineIntentWrite {
  *  (plan §3) but must not treat it as a reason to change in-memory behaviour.
  *
  *  Optional fields are MERGED from disk (see {@link EngineIntentWrite}); the
- *  three required flags are replaced with what the caller states. */
+ *  two required flags are replaced with what the caller states. */
 export const writeEngineIntent = async (
   projectPath: string,
   intent: EngineIntentWrite,
@@ -218,9 +179,6 @@ export const writeEngineIntent = async (
     const supplyDesired = intent.supplyDesired === undefined ? current.supplyDesired : intent.supplyDesired
     const managerDesired =
       intent.managerDesired === undefined ? current.managerDesired : intent.managerDesired
-    const dayKey = intent.selfSupplyDayKey === undefined ? current.selfSupplyDayKey : intent.selfSupplyDayKey
-    const dayCount =
-      intent.selfSupplyDayCount === undefined ? current.selfSupplyDayCount : intent.selfSupplyDayCount
     const reviewWaiting =
       intent.reviewWaitingSince === undefined
         ? current.reviewWaitingSince
@@ -232,12 +190,9 @@ export const writeEngineIntent = async (
     await mkdir(await projectDataDir(projectPath), { recursive: true })
     await atomicWriteJson(await engineIntentFile(projectPath), {
       desiredRunning: intent.desiredRunning,
-      selfSupply: intent.selfSupply,
       overseer: intent.overseer,
       ...(supplyDesired === true ? { supplyDesired: true } : {}),
       ...(managerDesired === true ? { managerDesired: true } : {}),
-      ...(typeof dayKey === 'string' && dayKey ? { selfSupplyDayKey: dayKey } : {}),
-      ...(typeof dayCount === 'number' && dayCount >= 0 ? { selfSupplyDayCount: dayCount } : {}),
       ...(reviewWaiting ? { reviewWaitingSince: reviewWaiting } : {}),
       updatedAt: now,
     } satisfies EngineIntent)
@@ -251,10 +206,10 @@ export const writeEngineIntent = async (
  *  FAIL-OPEN, same contract as {@link writeEngineIntent}.
  *
  *  WHY THIS EXISTS SEPARATELY from a full write of `{desiredRunning: engine.running,
- *  selfSupply: engine.selfSupply.enabled, overseer: engine.overseer.enabled}`: a full
+ *  overseer: engine.overseer.enabled}`: a full
  *  write derives `desiredRunning` from the CALLER's in-memory `engine.running` — which
  *  is only the true owner intent at the two sites that actually SET it
- *  (startOrchestrator / stopOrchestrator). A toggle route (setSelfSupply) that fires
+ *  (startOrchestrator / stopOrchestrator). A toggle route (setOverseer) that fires
  *  while `engine.running` is false for a reason OTHER than the owner turning it off —
  *  e.g. the crash-loop breaker suppressed this boot's resume, or preflight failed —
  *  must not stamp `desiredRunning:false` over a `true` the owner never touched. That
@@ -275,7 +230,6 @@ export const patchEngineIntent = async (
     {
       ...patch,
       desiredRunning: patch.desiredRunning ?? current.desiredRunning,
-      selfSupply: patch.selfSupply ?? current.selfSupply,
       overseer: patch.overseer ?? current.overseer,
     },
     now,

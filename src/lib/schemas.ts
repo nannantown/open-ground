@@ -75,6 +75,10 @@ export const ProjectTaskSchema = z.object({
   // never-the-card resilience as dueDate: a hand-edited junk value falls back to
   // undefined (= 'normal'), the card survives. (3点セット: types.ts / here.)
   priority: z.enum(['urgent', 'high', 'normal', 'low']).optional().catch(undefined),
+  // Difficulty tier (2026-09-18) — same drop-the-field-never-the-card contract.
+  // A literal enum like `priority`, so the schema stays a self-contained
+  // description of what is on disk.
+  tier: z.enum(['touch', 'standard', 'design', 'ultra']).optional().catch(undefined),
   // PR opened for the task (completionFlow 'pr') — set via tasks {setPrUrl}.
   // .catch(undefined): a malformed value (a hand-edited shared card) drops the
   // FIELD, never the whole card — same drop-the-field-never-the-card resilience
@@ -293,47 +297,6 @@ export const sanitizeFeedbackImages = (
   const total = r.data.reduce((n, im) => n + im.data.length, 0)
   if (total > MAX_FEEDBACK_IMAGES_TOTAL_B64) return []
   return r.data
-}
-
-// /api/module-submissions — a tester's submission of a built custom tab for the
-// owner to review (docs/CUSTOM_TABS_PLAN.md). The 200KB source cap mirrors the
-// og_module_submissions DB check so an oversized body is rejected at the door
-// with a clear 400 rather than bouncing off Postgres. 3点セット: SubmitModuleRequest
-// (types.ts) / this schema / the row build in src/lib/server/customModulesSubmissions.ts.
-export const MAX_SUBMISSION_SOURCE = 200_000
-
-export const SubmitModuleBodySchema = z.object({
-  name: z.string().trim().min(1, 'name is required').max(60, 'name must be 60 characters or fewer'),
-  description: z.string().max(4000, 'description must be 4000 characters or fewer').default(''),
-  framework: z.enum(['react', 'html']).default('react'),
-  source: z.string().min(1, 'source is required').max(MAX_SUBMISSION_SOURCE, 'source too large'),
-})
-
-// Read-side guard for the owner review inbox. GET /api/module-submissions reads
-// rows that `anon` INSERTed under RLS — the DB checks bound sizes + the
-// status/framework enums, but re-validate HERE (the sanitizeFeedbackImages
-// posture) so a crafted or legacy row can't crash the inbox (e.g. a non-string
-// field) or balloon the payload. A row that fails validation is dropped wholesale.
-const ModuleSubmissionRowSchema = z.object({
-  id: z.string(),
-  created_at: z.string(),
-  // Display-only; bounded + null-safe so a garbage value never reaches the inbox.
-  submitter_email: z.string().max(320).nullable().catch(null),
-  name: z.string().max(200).catch(''),
-  description: z.string().max(8000).catch(''),
-  framework: z.enum(['react', 'html']).catch('react'),
-  status: z.enum(['pending', 'approved', 'rejected']).catch('pending'),
-  published_remote_id: z.string().nullable().catch(null),
-  // Present only on the single-row fetch (the review preview); capped at the
-  // write cap so an over-cap legacy row is dropped, not rendered.
-  source: z.string().max(MAX_SUBMISSION_SOURCE).optional(),
-})
-
-export const sanitizeModuleSubmission = (
-  row: unknown,
-): z.infer<typeof ModuleSubmissionRowSchema> | null => {
-  const r = ModuleSubmissionRowSchema.safeParse(row)
-  return r.success ? r.data : null
 }
 
 // ---- Helpers --------------------------------------------------------------

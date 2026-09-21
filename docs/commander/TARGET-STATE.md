@@ -1,5 +1,11 @@
 # TARGET-STATE — 理想の稼働形(そこへ走るための北極星)
 
+## Current Contract (2026-09-19)
+
+The current target excludes Persona, proxy decisions and self-supply. Human approval, stop/recovery, backups, quota detection and commander-owned integration remain required.
+See [SIMPLIFICATION.md](SIMPLIFICATION.md) for the current entry points and verification.
+Any descriptions of the retired paths below are historical, not operating instructions.
+
 **対象コミット: `0d1f7f0`**(origin/main tip、2026-07-10)。初版は `a8429b6` 時点(ソース = `cc7c60e`)。その後 `3129a58`(§2 の実装)、`d8431c3`+`aa9cb8d`(§3 の実装)、`0d1f7f0`(§1 の実装)が main に入り、本改訂で反映済み — 本書と 03/06 章の file:line は `0d1f7f0` 基準、01/02/04/05 章は `cc7c60e` 基準のまま(乖離の扱いは 00-INDEX 冒頭)。2026-07-11 の `SWARM_CODE_PATHS` への `server/routes/project.ts` 編入で swarmOrchestrator.ts の :2630 以降は **+3 シフト** — 本書の §6 内参照は新値へ更新済み。
 **読者**: 将来の司令塔(og-manage / manage セッション)と、swarm コアを改修する worker。
 **この文書の役割**: 「swarm システムがこの状態で回っていれば健全」と言える条件を、**観測可能な形**(コマンドで真偽判定できる形)で列挙する。願望は書かない — 各項目は ①理想の観測可能条件 ②現状とのギャップ(file:line) ③対応カード ④到達判定コマンド、の 4 点で構成する。カード列の表記は 2026-07-10 時点のスナップショット(現在列は tasks.json で確認 — 00-INDEX §6)。
@@ -539,24 +545,25 @@ npx vitest run src/lib/server/swarmOrchestrator.integration.test.ts -t "docs-fre
    worker 画面経路・orchestrator の `limitScreen` クランプ / onset 窓
    (`RATE_LIMIT_EARLY_ONSET_MS` 系)・PTY nudge。削除がゴールで、
    保守はゴールではない。⚠ 削除対象は **worker 系統のみ** — 補給官の PTY(外部窓口・
-   リモコン)と `ownerDeskLimit`(人間の卓の監視)は**残る**。人間が座る卓は SDK 化しない。
+   リモコン)と `ownerDeskLimit`(人間の卓の監視)は**残る**。補給官と通常ターミナルは PTY を維持する。司令官は 2026-09-21 から SDK 専用。
 
 ### 現状とのギャップ
 
-- PTY 系統は fallback として現役。fallback 率の自動集計は無い(目視: spawn レスポンス /
-  engine-journal.jsonl)。必要が立証されたら台帳方式(`swarmLandedLedger` の型)を流用する —
-  立証前に作るのはこの節自身への違反。
-- `swarmEngineSdkBlindspots.test.ts` / `swarmRuntimeDialParity.test.ts` が既知の parity 面を
-  ピンしている — 新しい parity 欠陥が出たら、直す前にこの節の条件 2 に照らして
-  「その面ごと消せないか」を先に問う。
+- New workers and managers are SDK-only; no runtime fallback or selection UI
+  remains. Supply and ordinary terminals keep their interactive PTYs.
+- Manager PTY addressing remains only for existing in-flight desks across a dev
+  reload, not for new launches. Settings/history/task files are preserved.
+- `swarmEngineSdkBlindspots.test.ts`, `swarmManager.spawn.test.ts` and
+  `swarmSessions.integration.test.ts` cover event delivery, singleton protection
+  and conversation restart. Current scope: SIMPLIFICATION.md.
 
 ### 到達判定コマンド
 
 ```bash
 # live worker の runtime 内訳(0813 以降は構造的に sdk 一色 — pty が出たら旧レコードの残骸)
 curl -s "http://127.0.0.1:47776/api/swarm/workers?path=<PATH>" | jq '[.workers[] | (.runtime // "pty")] | group_by(.) | map({runtime: .[0], n: length})'
-# ダイヤルの実効値(サーバが実際に使う値 — パネルと同源。0813 から {manager} のみ)
-curl -s http://127.0.0.1:47776/api/settings | jq .runtimeDialsEffective
+# Manager presence (new launches use SDK; no settings dial)
+curl -s "http://127.0.0.1:47776/api/swarm/orchestrator?path=<PATH>" | jq .managerDesk
 # PTY 専用コードに「機能追加」が入っていないか(修理は可) — 直近の diff を目視
 git log --oneline -10 -- src/lib/server/swarmRateLimitText.ts src/lib/server/claudeScreen.ts
 ```

@@ -18,7 +18,13 @@ import {
   type ExecutionMode,
   EXECUTION_MODES,
   DEFAULT_EXECUTION_MODE,
+  type TaskTier,
 } from '../types'
+import { resolveCardTier, type TierCard } from '../cardTier'
+// Re-exported so server callers/tests keep ONE import site for the tier logic;
+// the logic itself lives in the pure src/lib/cardTier.ts so the Board drawer can
+// show the SAME effective tier the engine will run.
+export { resolveCardTier, SAFETY_FLOOR_TIER, type TierCard } from '../cardTier'
 // Remote Control 名の識別化(下の swarmRemoteControlName / resolveSwarmRemoteName):
 // 言語は OG の言語設定(Settings.language — promptLang)、プロジェクト表示名は
 // registry(displayName || フォルダ名)から spawn 時に解決する。registry は
@@ -62,7 +68,7 @@ import { peekCachedUsage, type CliUsage } from './claudeUsageCli'
 /** The TOP-TIER model — what "full capability" means today. Fable 5 superseded
  *  Opus 4.8 as the newest flagship (alias verified against the CLI: `--model
  *  fable` accepted, bogus aliases rejected). Used by max-output mode, optimize's
- *  quality-critical slots (commander / heavy cards), the engine's adversarial
+ *  top slot (the `ultra` difficulty tier), the engine's adversarial
  *  reviewer default, and the no-mode back-compat default. ONE constant so the
  *  next model generation is a one-line bump.
  *
@@ -73,7 +79,7 @@ import { peekCachedUsage, type CliUsage } from './claudeUsageCli'
  *  tier" definition the ladder's head and the non-launch defaults share. */
 export const SWARM_LAUNCH_MODEL = 'fable'
 
-/** The tier every slot that is NOT a heavy design card defaults to (owner,
+/** The tier every slot that is NOT an `ultra` card defaults to (owner,
  *  2026-09-16). The middle rung of the ladder — one step below
  *  {@link SWARM_LAUNCH_MODEL}, and the base every ordinary worker card has run on
  *  since 0.11.97.
@@ -83,15 +89,19 @@ export const SWARM_LAUNCH_MODEL = 'fable'
  *  (44.7% in one 5-hour window). The decision was NOT "burn fewer tokens": it was
  *  "move the burn OFF Fable and ONTO Opus", because the Fable pool is the one
  *  under pressure and the Opus pool has headroom. Fable is therefore reserved for
- *  the ONE slot that is meant to need the top tier — a heavy design card's worker
- *  — and every other slot names THIS constant instead.
+ *  the ONE slot that is meant to need the top tier — the worker of an `ultra`
+ *  card (a "heavy design card" before 2026-09-18) — and every other slot names
+ *  THIS constant instead.
  *
- *  ⚠ WHAT THE 51% WAS, AND WHAT IT WAS NOT. The measurement is real; the cause is
- *  NOT this constant's doing. Measured 2026-09-16: the heavy WORKER seat accounts
- *  for it — 227 of 330 real cards (69%) classify heavy and so desire fable. This
- *  constant does not touch that seat and therefore does not reduce the 51%.
- *  docs/commander/04-quota-models.md §5.9 is canon for the attribution; do not
- *  restate it here as if a seat other than the heavy worker caused it.
+ *  ⚠ WHAT THE 51% WAS, AND WHAT IT WAS NOT. The measurement is real; this
+ *  constant is not its cause and does not reduce it. The 2026-09-16 reading
+ *  pinned it on the heavy WORKER classifier (69% of real cards classified heavy);
+ *  the 2026-09-18 measurement by model × place overturned that: swarm workers
+ *  were only 19.4% of the 7-day spend — the bulk was the ALWAYS-ON desks'
+ *  context (it grows until a late auto-compact). The classifier WAS still wrong
+ *  (a thorough brief got promoted to the top tier by length alone) and is now
+ *  replaced by the card's difficulty tier — but that is a correctness fix, not
+ *  the fix for the 51%. docs/commander/04-quota-models.md §5.9 is canon.
  *
  *  What this constant IS for: making the next leak greppable. The hole it closed
  *  alongside — the adversarial review panel spelling the top tier *itself* instead
@@ -99,20 +109,15 @@ export const SWARM_LAUNCH_MODEL = 'fable'
  *  real hole but a DORMANT one (`deps.review` has had no non-test caller since
  *  2026-07-15), so closing it saved nothing and prevented a relapse. Grep for
  *  {@link SWARM_LAUNCH_MODEL}: every remaining use should be the ladder head, the
- *  `max` mode, or a heavy card.
+ *  `max` mode, or the `ultra` difficulty tier.
  *
  *  This is a DESIRED tier like any other: {@link resolveAvailableTier} still walks
  *  DOWN from it when opus is cooling, and still looks UP when every rung
  *  at-or-below is unusable. The quota ladder itself is untouched. */
 export const SWARM_DEFAULT_MODEL = 'opus'
 
-/** Every slot the mode matrix assigns a model to. `reviewer` is the adversarial
- *  review panel (one `claude` PER LENS, per review pass — see
- *  DEFAULT_REVIEW_LENSES); it was NOT a member until 2026-09-16, which is exactly
- *  how it stayed pinned to the top tier in every mode while the matrix claimed
- *  fable belonged to heavy cards alone. A role that spawns `claude` belongs in
- *  this union — if it is not here, no mode can reach it. */
-export type SwarmModelRole = 'worker' | 'supply' | 'manager' | 'overseer' | 'reviewer'
+/** Active model-launching roles; monitoring is deterministic. */
+export type SwarmModelRole = 'worker' | 'supply' | 'manager'
 
 /** The effort literal the swarm runs at. Kept as a raw string so the
  *  CLAUDE_EFFORTS membership check below is a REAL guard: a typo'd rename
@@ -266,50 +271,32 @@ export const asExecutionMode = (v: unknown): ExecutionMode =>
 const guardEffort = (e: string): ClaudeEffort | undefined =>
   CLAUDE_EFFORTS.includes(e as ClaudeEffort) ? (e as ClaudeEffort) : undefined
 
-/** How heavy a card is — drives model/effort in `optimize` mode. Purely STATIC
- *  (labels / keywords / size): judging weight with another `claude` call would
- *  itself burn the budget this feature exists to save. */
-export type CardWeight = 'heavy' | 'medium' | 'light'
-
-// Signals that a card is high-stakes → keep full capability (top tier/max). Safety +
-// architecture + release-blocking work, in EN and JA.
-const HEAVY_SIGNALS =
-  /(\bsandbox\b|\bguard\b|\bauth\b|認証|\bdelete\b|削除|\bbilling\b|課金|\bsecurity\b|セキュリティ|\bMAJOR\b|release[\s-]?block|リリースブロッカ|\bSPIKE\b|\bmigration\b|マイグレ|敵対レビュー|サンドボックス)/i
-// Signals that a card is low-stakes → Sonnet/low is plenty (chores, copy, follow-ups).
-const LIGHT_SIGNALS =
-  /(\[minor\]|\[follow[\s-]?up\]|\btypo\b|\brename\b|文言|\bcomment\b|コメント|\bnit\b|\bcleanup\b|\blint\b|\bdoc\b|\bcopy\b)/i
-
-/** Classify a card by static signals. Unknown/ambiguous → `medium` (the SAFE
- *  middle — never silently under-powers), and a heavy signal or a large brief
- *  (big notes ⇒ substantial work) wins over a light one. */
-export const classifyCardWeight = (card: { title?: string; notes?: string }): CardWeight => {
-  const text = `${card.title ?? ''}\n${card.notes ?? ''}`
-  if (HEAVY_SIGNALS.test(text) || text.length > 1200) return 'heavy'
-  if (LIGHT_SIGNALS.test(text) && text.length < 400) return 'light'
-  return 'medium'
+/** The ONE difficulty → (model, effort) table for a worker in `optimize` mode
+ *  (owner-approved, 2026-09-18). Cards carry the tier name only; this is the
+ *  single place a model name is attached to it, so a roster change is one edit
+ *  here instead of a rewrite of every card on disk. These are DESIRED tiers —
+ *  resolveAvailableTier still walks down from them when a model is cooling or
+ *  switched off. `ultra` is the only row that desires the top tier. */
+export const TIER_MODEL_EFFORT: Readonly<Record<TaskTier, { model: string; effort: ClaudeEffort }>> = {
+  touch: { model: 'sonnet', effort: 'low' },
+  standard: { model: SWARM_DEFAULT_MODEL, effort: 'medium' },
+  design: { model: SWARM_DEFAULT_MODEL, effort: 'high' },
+  ultra: { model: SWARM_LAUNCH_MODEL, effort: 'max' },
 }
 
 /** The DESIRED model + effort a swarm role would launch at under `mode`, BEFORE
  *  the quota fallback ({@link resolveSwarmModelEffort} maps the model through
- *  {@link resolveAvailableTier}). Workers in `optimize` route by card weight; the
- *  engine roles (supply/manager/overseer) key off the mode alone. Principle
+ *  {@link resolveAvailableTier}). Workers in `optimize` route by the card's
+ *  difficulty tier ({@link resolveCardTier} → {@link TIER_MODEL_EFFORT}); the
+ *  engine roles (supply/manager) key off the mode alone. Principle
  *  (card 68d8e00f): cut redundancy/volume, but keep CAPABILITY where a judgment's
- *  quality matters — so a HEAVY optimize card stays top-tier/max, and even economy
+ *  quality matters — so an `ultra` optimize card stays top-tier/max, and even economy
  *  roles keep `medium` effort (they reason across integration) while economy
- *  workers drop to `low`. The `overseer` (proxy-you brain, EPIC C) is a judgment席
- *  on par with the manager — its answer-as-owner decision is quality-critical, so
- *  it tracks the manager tier.
- *
- *  EXPORTED since 2026-09-16 so a spawn path that cannot use the full resolver
- *  (the adversarial review panel already owns its own ladder walk, with a
- *  freshly-read allow-mask) can still ask the MODE for its desired tier instead
- *  of hardcoding one. Asking this function is the ONLY sanctioned way to pick a
- *  model; a literal tier at a spawn site is the bug class this export exists to
- *  remove. */
+ *  workers drop to `low`. */
 export const desiredModelEffort = (
   mode: ExecutionMode,
   role: SwarmModelRole,
-  card?: { title?: string; notes?: string },
+  card?: TierCard,
 ): { model: string; effort?: ClaudeEffort } => {
   if (mode === 'max') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('max') }
   if (mode === 'economy') {
@@ -321,8 +308,7 @@ export const desiredModelEffort = (
   // elsewhere. The commander's integration / safety-review DECISION is
   // quality-critical, so it keeps HIGH EFFORT — but the MODEL is `opus`, not the
   // top tier (owner, 2026-09-02); the savings there come from fewer review bodies
-  // and a middle-rung model, not from thinking less. The proxy-you overseer is the
-  // same kind of seat and tracks it.
+  // and a middle-rung model, not from thinking less.
   //
   // WHY THE TIER MOVED. The desks are ALWAYS-ON: a commander sits in the project
   // for the whole session and re-reads its context on every poke, so it bills the
@@ -331,27 +317,13 @@ export const desiredModelEffort = (
   // weekly Fable budget was half spent with no heavy card in flight. The judgment
   // itself is not being cheapened: `opus` is the middle rung of the same ladder
   // (the base every ordinary worker card already runs on since 0.11.97) at HIGH
-  // effort, and the one thing that must stay top-tier — a HEAVY card's worker —
-  // is untouched below.
+  // effort, and the one thing that must stay top-tier — an `ultra` card's worker
+  // — is untouched below.
   //
   // Not a quota fallback: this is the DESIRED tier. resolveAvailableTier still
   // walks DOWN from here when opus itself is cooling, exactly as before.
   //
-  // The `reviewer` (adversarial review panel) joined this line on 2026-09-16. It
-  // is a judgment seat like the other two — an adversarial fact-check IS the
-  // quality gate — so it keeps HIGH effort; only the MODEL moved. It had never
-  // been in the matrix at all: `makeAdversarialReview` defaulted its model to
-  // SWARM_LAUNCH_MODEL, mode-blind, so an unpinned panel desired fable in EVERY
-  // mode, one per lens (four, with DEFAULT_REVIEW_LENSES).
-  //
-  // ⚠ This SAVES NOTHING TODAY, and must not be described as if it does.
-  // `deps.review` has had no non-test caller since 2026-07-15 — only the wiring at
-  // defaultDeps remains — so the panel is not spending fable now. This line is a
-  // CONTAINMENT: the day review is re-wired, it must not re-open the hole. The
-  // measured driver of the owner's 51% Fable week is elsewhere entirely (the
-  // worker heavy classifier — 69% of real cards classify heavy); see
-  // docs/commander/04-quota-models.md §5.9, which is canon for this attribution.
-  if (role === 'manager' || role === 'overseer' || role === 'reviewer')
+  if (role === 'manager')
     return { model: SWARM_DEFAULT_MODEL, effort: guardEffort('high') }
   // The supply officer is the owner's front desk: it interviews the request,
   // reads the existing code, and turns intent into cards with OBSERVABLE
@@ -361,24 +333,17 @@ export const desiredModelEffort = (
   // `medium` — the instruction was about the MODEL only. The cost is understood
   // and accepted: the desk is always-on, so opus burn rises, and the owner ruled
   // that an under-powered front desk is the worse problem. Opus is a separate
-  // pool from fable, so the 2026-09-16 "fable = heavy worker cards ONLY"
+  // pool from fable, so the 2026-09-16 "fable = one worker row ONLY"
   // containment is untouched (the fable-containment tests pin that).
   if (role === 'supply') return { model: SWARM_DEFAULT_MODEL, effort: guardEffort('medium') }
-  // Workers route by card weight across THREE tiers (owner, 2026-08-26):
-  // heavy design work keeps the top tier, the BASE is opus, and only genuinely
-  // trivial cards drop to sonnet.
-  //
-  // ⚠ What changed and why. This used to be a two-way pick — fable or sonnet —
-  // so `opus` existed in the ladder only as the rung a cooling fable fell to. It
-  // was never CHOSEN, which meant the ordinary card (the `medium` bucket, and
-  // the safe default whenever the static signals say nothing) ran on the cheapest
-  // reasoning tier the swarm has. The owner's call is that ordinary work deserves
-  // the middle tier, not the floor. Effort is deliberately untouched here: the
-  // instruction was about which MODEL each bucket gets.
-  const w = card ? classifyCardWeight(card) : 'medium'
-  if (w === 'heavy') return { model: SWARM_LAUNCH_MODEL, effort: guardEffort('max') }
-  if (w === 'light') return { model: 'sonnet', effort: guardEffort('low') }
-  return { model: SWARM_DEFAULT_MODEL, effort: guardEffort('medium') }
+  // Workers route by the card's DIFFICULTY tier (owner, 2026-09-18: 「文字数では
+  // なくて難易度」). The supply officer reads the code and writes `card.tier`; the
+  // one tier → (model, effort) table is TIER_MODEL_EFFORT above. No card ⇒ the
+  // `standard` row (opus/medium — the base since 2026-08-26), never a silent
+  // under-power. Only `ultra` desires the top tier; a safety-keyword card is
+  // floored at `design` inside resolveCardTier.
+  const row = TIER_MODEL_EFFORT[card ? resolveCardTier(card) : 'standard']
+  return { model: row.model, effort: guardEffort(row.effort) }
 }
 
 /** Map a DESIRED model tier to the one a worker should ACTUALLY launch on, given
@@ -388,7 +353,7 @@ export const desiredModelEffort = (
  *  can await settings; the globalThis mirror is the default).
  *
  *  The fallback steps DOWN the ladder (fable→opus→sonnet→haiku): a slot that
- *  wanted the top tier (max mode / heavy card / commander) gets the highest
+ *  wanted the top tier (max mode / an `ultra` card) gets the highest
  *  spawnable tier, and a slot that deliberately chose a cheaper tier (economy /
  *  optimize chore) keeps it unless it too is unusable, then drops further. Only
  *  when EVERY tier at-or-below `desired` is unusable does it look UP to the best
@@ -567,11 +532,13 @@ export const resolveAvailableTierProbed = async (
 //   ────────  ─────────────────────────────────────  ─────────────────────────────
 //   max       top (fable) for EVERY role             highest tier with headroom
 //                                                     (fable→opus→sonnet→haiku)
-//   optimize  fable: HEAVY worker cards ONLY         each desired tier resolved
-//             opus:  commander / overseer /           among what's available (down)
-//                    REVIEWER panel / SUPPLY desk /
-//                    normal cards
-//             sonnet: chore (light) worker cards
+//   optimize  fable: `ultra` worker cards ONLY       each desired tier resolved
+//             opus:  commander / SUPPLY desk /        among what's available (down)
+//                    `standard` (medium) + `design`
+//                    (high) worker cards
+//             sonnet: `touch` worker cards (low)
+//             (worker rows = TIER_MODEL_EFFORT; a
+//              safety-keyword card floors at design)
 //   economy   sonnet everywhere (workers low)        sonnet, else next tier below
 //
 // The SUPPLY desk row moved sonnet → opus on 2026-09-18 (owner): the desk
@@ -583,15 +550,11 @@ export const resolveAvailableTierProbed = async (
 // REVIEWER panel was not in this table at all — it hardcoded the top tier — so
 // the table described a system that did not exist. That gap was real but
 // DORMANT and cost nothing (`deps.review`: no non-test caller since 2026-07-15);
-// it is NOT where the owner's 51% Fable week went — that was the heavy WORKER
-// seat (04-quota-models.md §5.9). Two separate facts; do not join them.
+// it is NOT where the owner's 51% Fable week went (04-quota-models.md §5.9 — the
+// 2026-09-18 breakdown puts the bulk on the always-on desks' context, workers at
+// 19.4%). Two separate facts; do not join them.
 // If you add a slot that spawns `claude`, it goes in SwarmModelRole and in this
 // table, or it is invisible here in exactly the same way.
-//
-// ⚠ ONE EXCEPTION to the `max` row: makeOverseerBrain's arg-less fallback resolves
-// its seat at DEFAULT_EXECUTION_MODE, so `runOverseerBrain` stays on the optimize
-// tier even under `max`. It has no production caller, so this is documentation,
-// not a live divergence.
 //
 // So the user-confirmed behavior — "when the top tier's quota is spent, drop one
 // tier" — falls out of `max` and optimize's fable slots: they all resolve to the
@@ -638,7 +601,7 @@ export const resolveAvailableTierProbed = async (
 export const resolveSwarmModelEffort = (
   mode: ExecutionMode,
   role: SwarmModelRole,
-  card?: { title?: string; notes?: string },
+  card?: TierCard,
   now: number = Date.now(),
   allowed: SwarmAllowedModels = allowedModelTiers(),
   usage: CliUsage | null = peekCachedUsage(),
@@ -664,7 +627,7 @@ export const resolveSwarmModelEffort = (
 export const resolveSwarmModelEffortProbed = async (
   mode: ExecutionMode,
   role: SwarmModelRole,
-  card?: { title?: string; notes?: string },
+  card?: TierCard,
   now: number = Date.now(),
   allowed: SwarmAllowedModels = allowedModelTiers(),
   usage: CliUsage | null = peekCachedUsage(),

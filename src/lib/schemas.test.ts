@@ -190,6 +190,23 @@ describe('ProjectTaskSchema (legacy field stripping)', () => {
     if (r.success) expect(r.data.boardColumn).toBe('todo')
   })
 
+  it('difficulty tier: a valid value round-trips; junk drops the FIELD, never the card', () => {
+    for (const tier of ['touch', 'standard', 'design', 'ultra'] as const) {
+      const r = ProjectTaskSchema.safeParse({ id: 't1', title: 'x', done: false, createdAt: 'x', tier })
+      expect(r.success).toBe(true)
+      if (r.success) expect(r.data.tier).toBe(tier)
+    }
+    // A model name, a number, an object — a hand-edited card must not vanish.
+    for (const junk of ['opus', 3, { t: 1 }]) {
+      const r = ProjectTaskSchema.safeParse({ id: 't1', title: 'x', done: false, createdAt: 'x', tier: junk })
+      expect(r.success).toBe(true)
+      if (r.success) {
+        expect(r.data.id).toBe('t1')
+        expect(r.data.tier).toBeUndefined()
+      }
+    }
+  })
+
   it('leaves a valid boardColumn untouched (the catch only fires on junk)', () => {
     for (const col of ['todo', 'doing', 'review', 'done', 'blocked'] as const) {
       const r = ProjectTaskSchema.safeParse({ id: 't1', title: 'x', done: false, createdAt: 'x', boardColumn: col })

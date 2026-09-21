@@ -48,8 +48,6 @@ const SAMPLE: Record<string, unknown> = {
   // The commander desk's boot auto-resume (2026-08-26) — the twin of
   // supplyDesired, added after an update restart orphaned a running swarm.
   managerDesired: true,
-  selfSupplyDayKey: '2026-08-03',
-  selfSupplyDayCount: 7,
   // The review-waiting clock (2026-08-14) — branch → first-seen epoch ms.
   reviewWaitingSince: { 'swarm/a': 1_700_000_000_000, 'swarm/b': 1_700_000_060_000 },
 }
@@ -76,14 +74,12 @@ describe('engine.json write regime — optional fields survive a write that omit
   it('a three-flag full write PRESERVES every optional field (the incident, generalised)', async () => {
     await writeEngineIntent(projectPath, {
       desiredRunning: true,
-      selfSupply: true,
       overseer: false,
       ...(SAMPLE as object),
     })
     // The shape the three orchestrator call sites use — the one that erased.
     await writeEngineIntent(projectPath, {
       desiredRunning: false,
-      selfSupply: true,
       overseer: false,
     })
     const after = (await readEngineIntent(projectPath)) as unknown as Record<string, unknown>
@@ -97,7 +93,6 @@ describe('engine.json write regime — optional fields survive a write that omit
   it('patchEngineIntent preserves the optional fields it does not name', async () => {
     await writeEngineIntent(projectPath, {
       desiredRunning: true,
-      selfSupply: true,
       overseer: true,
       ...(SAMPLE as object),
     })
@@ -112,7 +107,6 @@ describe('engine.json write regime — optional fields survive a write that omit
   it('an explicit false/null still CLEARS — preserve-by-default must not make a field unclearable', async () => {
     await writeEngineIntent(projectPath, {
       desiredRunning: true,
-      selfSupply: false,
       overseer: false,
       ...(SAMPLE as object),
     })
@@ -123,10 +117,5 @@ describe('engine.json write regime — optional fields survive a write that omit
     // owner just closed must not be resurrected by the next boot's auto-resume.
     await patchEngineIntent(projectPath, { managerDesired: false })
     expect((await readEngineIntent(projectPath)).managerDesired).toBeUndefined()
-    // A new UTC day resets the counter through the same door.
-    await patchEngineIntent(projectPath, { selfSupplyDayCount: 0 })
-    expect((await readEngineIntent(projectPath)).selfSupplyDayCount).toBe(0)
-    // The other optional field is untouched by those clears.
-    expect((await readEngineIntent(projectPath)).selfSupplyDayKey).toBe(SAMPLE.selfSupplyDayKey)
   })
 })

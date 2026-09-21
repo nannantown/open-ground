@@ -15,10 +15,8 @@ export type ModuleId =
   // Listed here only so the type system knows it exists.
   | 'swarm'
 
-// RETIRED ids are simply absent from this list (e.g. 'persona', which left the
-// tab row on 2026-08-14 for the Ground toolbar — see
-// src/components/canvas/PersonaPanel.tsx). That absence is load-bearing rather
-// than tidy-up: persistView validates the saved panel tab against MODULE_IDS,
+// Retired IDs (including the removed Persona feature) are absent from this list.
+// That absence is load-bearing: persistView validates against MODULE_IDS,
 // so a user whose last-open tab was a retired one has that value DROPPED on
 // read and lands on the project's default tab — never on a blank panel with no
 // matching row entry.

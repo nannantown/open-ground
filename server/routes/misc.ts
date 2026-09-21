@@ -25,7 +25,6 @@ import {
   getNotificationState,
   markNotificationsRead,
   isLockdownEnabled,
-  getManagerRuntimeDial,
 } from '@/lib/server/store'
 import { resolveExperiments } from '@/lib/server/experiments'
 import { scanProjects } from '@/lib/server/scan'
@@ -45,7 +44,7 @@ import {
 } from '@/lib/server/registry'
 import { ensureShareEvacuated, evacuateImportedProject } from '@/lib/server/shareEvac'
 import { collectClaudeUsage, collectUsageBreakdown } from '@/lib/server/claudeUsage'
-import { encodeClaudeProjectKey } from '@/lib/server/youCorpus'
+import { claudeDirName } from '@/lib/server/claudeProjectDir'
 import {
   fetchClaudeUsageCli,
   invalidateUsageCache,
@@ -368,37 +367,8 @@ export const miscRoutes = new Hono()
   })
   // --- GET / POST /api/settings ---------------------------------------------
   .get('/api/settings', async (c) => {
-    // The persisted settings plus two NON-persisted, server-computed fields —
-    // the display-name suggestion (see suggestedDisplayName above) and the
-    // resolved commander runtime dial. The POST below never receives either
-    // back: the client saves only real Settings fields, and neither key is on
-    // USER_SETTINGS_KEYS, so a forged body carrying them is dropped.
-    //
-    // ⚠ WHY THE RESOLVED DIAL RIDES ALONG. The Swarm tab's toggle IS the kill
-    // switch for the SDK commander, and it used to re-implement the server's
-    // rule against the raw keys in this same body. That copy drifted twice on
-    // 2026-08-02: an absent dial drew ON while dispatch ran PTY, and (once an
-    // unreadable settings.json started falling to the kill switch) a broken
-    // file drew ON while the server ran PTY — the second one firing at exactly
-    // the moment the owner reads the switch. The raw keys CANNOT answer it: a
-    // tolerant read reports a missing key for both "never written" and "the
-    // file is unreadable", which resolve to opposite runtimes. So the answer is
-    // computed HERE, through the same reader desk launch (swarmManager.ts)
-    // consults — one extra small local read per GET, in exchange for a toggle
-    // that cannot lie. (The worker half of this block died 2026-08-13 with the
-    // worker dial: workers are SDK-only, there is no worker toggle to draw.)
-    const [settings, suggested, managerDial] = await Promise.all([
-      getSettings(),
-      suggestedDisplayName(),
-      getManagerRuntimeDial(),
-    ])
-    const body: SettingsResponse = {
-      ...settings,
-      suggestedDisplayName: suggested,
-      runtimeDialsEffective: {
-        manager: managerDial.mode,
-      },
-    }
+    const [settings, suggested] = await Promise.all([getSettings(), suggestedDisplayName()])
+    const body: SettingsResponse = { ...settings, suggestedDisplayName: suggested }
     return c.json(body)
   })
   .post('/api/settings', async (c) => {
@@ -550,7 +520,7 @@ export const miscRoutes = new Hono()
     }
     try {
       const settings = await getSettings()
-      const projectDirs = (settings.projects ?? []).map((p) => encodeClaudeProjectKey(p.path))
+      const projectDirs = (settings.projects ?? []).map((p) => claudeDirName(p.path))
       const body = await collectUsageBreakdown({ days, now, projectDirs })
       usageBreakdownCache = { days, at: now, body }
       return c.json(body)

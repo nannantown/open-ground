@@ -114,21 +114,6 @@ interface Props {
    *  autonomy OFF clears it, so the owner re-arms it every session (surfaced in its
    *  hint). Default OFF. */
   onToggleOverseer: (next: boolean) => void
-  /** The overseer was armed WITHOUT the sandbox experiment (L3) — show a reduced-
-   *  containment note under the switch. */
-  sandboxWarning: boolean
-  // ── Runtime dial (commander) ────────────────────────────────────────────────
-  /** THE SERVER'S OWN EFFECTIVE dial — `runtimeDialsEffective` off /api/settings,
-   *  passed through by SwarmModule without re-deriving anything. (It used to
-   *  resolve the raw settings keys client-side; that copy drifted from the server
-   *  twice on 2026-08-02 and the switches drew the opposite of what was running.)
-   *  `null` while the read is in flight OR if the server did not answer — the
-   *  switch renders disabled rather than claiming OFF, because "off" is a real
-   *  answer here and a wrong one is worse than a blank one. (The worker switch
-   *  died 2026-08-13 with the worker dial — workers are SDK-only.) */
-  runtimeDials: { manager: 'pty' | 'sdk' } | null
-  /** Persist the commander dial (POST /api/settings, sent by SwarmModule). */
-  onToggleRuntime: (which: 'manager', next: boolean) => void
   /** The durable 「外向き着地/週」 KPI — GET /api/swarm/kpi/landed, fetched by
    *  SwarmModule's useLandedKpi and threaded down (this pane never fetches).
    *  Aggregated across ALL registered projects, not just this one. null while
@@ -371,9 +356,6 @@ export const SwarmManagerPane = ({
   busy,
   error,
   onToggleOverseer,
-  sandboxWarning,
-  runtimeDials,
-  onToggleRuntime,
   landed = null,
   projectPath,
 }: Props) => {
@@ -396,7 +378,7 @@ export const SwarmManagerPane = ({
   // a relaunched desk starts from "not heard from yet" instead of inheriting the
   // dead one's last word.
   const [sdkStatus, setSdkStatus] = useState<{ id: string; status: SdkSessionStatus } | null>(null)
-  // The ⚙ settings disclosure (overseer + runtime dials). Closed by default,
+  // The monitoring settings disclosure. Closed by default,
   // per session — settings are set once; the gauges are what change.
   const [dialsOpen, setDialsOpen] = useState(false)
   const heardFromThisDesk =
@@ -485,12 +467,10 @@ export const SwarmManagerPane = ({
     consumption.activeWorkers > 0 ? formatDuration(consumption.activeRunMs) : '—'
 
   return (
-    // Two columns: the STAGE (commander conversation) and the DASHBOARD sidebar
-    // (engine controls). min-w-0 on the stage is load-bearing so the terminal can
-    // shrink.
-    <div className="flex h-full min-h-0 w-full">
+    // Stack on narrow screens so the dashboard cannot squeeze out the conversation.
+    <div className="flex h-full min-h-0 w-full flex-col overflow-y-auto md:flex-row md:overflow-hidden">
       {/* ── STAGE ──────────────────────────────────────────────────────────── */}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-bg">
+      <div className="flex min-h-[320px] min-w-0 shrink-0 flex-col bg-bg md:min-h-0 md:flex-1">
         {session ? (
           <>
             {/* Commander conversation header — identity + status + stop. */}
@@ -620,22 +600,17 @@ export const SwarmManagerPane = ({
       {/* ── DASHBOARD sidebar: engine controls ONLY ────────────────────────── */}
       {/* PAPER surface (bg-bg) — a dashboard, not a terminal, so the paper ink
           tokens keep 4.5:1+ contrast (the dark terminal bg lives on the stage). */}
-      {/* `overflow-y-auto` because every section below is `shrink-0` in an
-          unbounded column: without a scroll container the sixth section (the
-          runtime dials, added 2026-07-31) would simply be CLIPPED on a short
-          window — invisible, not squashed, which is the failure you never notice.
-          Scrolling is inert while the content fits, so nothing changes on a tall
-          window. */}
+      {/* Keep every dashboard section reachable on short windows. */}
       {/* 計器盤 2026-08-03 (the owner's「散乱」screenshot): the column is a WELL
           (bg-inset, no border — surface difference is the boundary), and the
-          rarely-touched switches (overseer + runtime dials, with their amber
-          warnings) fold into ONE quiet ⚙ row, closed by default. What stays in
+          rarely-touched monitoring control folds into one settings row,
+          closed by default. What stays in
           sight is only what changes by itself: the desk state and the gauges. */}
       {/* 320, not 280 (2026-08-04). The presence line 「マネージャーはいます（手が
           空いています）」 is 20 full-width chars = 240px, against 236px of inner
           width — 4px short, so it folded on EVERY window size, and a scrollbar
           made it worse. The labels are what they are; the column was wrong. */}
-      <aside className="flex w-[320px] shrink-0 flex-col overflow-y-auto bg-bg-inset">
+      <aside className="flex w-full shrink-0 flex-col bg-bg-inset md:w-[320px] md:overflow-y-auto">
         {/* ⚙ 設定 — collapsed disclosure. Settings are set once; a dashboard
             that always shows them is wallpaper (the warnings included — they
             show when the owner is actually AT the dials). */}
@@ -692,70 +667,11 @@ export const SwarmManagerPane = ({
               onToggle={(v) => onToggleOverseer(v)}
               t={t}
             />
-            {engine.overseer && sandboxWarning ? (
-              <p className="text-micro leading-snug text-amber-500/90" role="note">
-                {t('projectPanel.swarm.manager.overseerSandboxWarning')}
-              </p>
-            ) : null}
-            {/* THE PERSONA'S OTHER HALF, and it lives HERE rather than on the
-                Persona screen (2026-08-15, owner: 「swarmでの自動返信はサブ的な
-                ポジション」). That screen is for understanding yourself; the fact
-                that the same corpus can be SPENT answering a blocked worker is a
-                property of this switch, so it is stated next to the switch that
-                spends it. Always visible — it explains what arming this does,
-                which is exactly what a reader needs BEFORE they arm it. */}
-            <p className="text-micro leading-snug text-ink-faint" role="note">
-              {t('projectPanel.swarm.manager.overseerPersonaNote')}
-            </p>
           </div>
 
           {error && <p className="mt-2.5 text-meta leading-relaxed text-accent">{error}</p>}
         </div>
 
-        {/* ── Runtime dial (commander) ───────────────────────────────────────
-            Used to live ONLY in settings.json, which meant the owner — the one
-            person the experiment is gated to — could not turn it on without
-            hand-editing JSON. That is not a feature switch, it is a note to
-            the developer. So it surfaces here, next to the other engine
-            switches, with its real cost stated rather than implied.
-
-            The WORKER switch that used to sit above this one died 2026-08-13
-            with the worker dial: workers are SDK-only, there is no runtime to
-            switch a worker to.
-
-            Deliberately NOT disabled while the engine runs: unlike the overseer
-            (a stage of the running tick, which the server refuses to arm on a
-            stopped engine), a runtime dial is read at the moment a desk SPAWNS.
-            Flipping it mid-run is safe and simply lands on the next desk — the
-            hint says so, so the switch does not have to lie by being greyed. */}
-        <div className="shrink-0 border-t border-line px-4 py-3">
-          <div className="mb-3 flex items-center gap-2">
-            <Cpu size={13} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
-            <span className="label-cap shrink-0 whitespace-nowrap text-ink-faint">
-              {t('projectPanel.swarm.runtime.heading')}
-            </span>
-          </div>
-          <div className="flex flex-col gap-2.5">
-            <ControlRow
-              label={t('projectPanel.swarm.runtime.manager')}
-              hint={t('projectPanel.swarm.runtime.managerHint')}
-              value={runtimeDials?.manager === 'sdk'}
-              // null ⇒ the settings read has not answered. Disabled beats
-              // rendering a confident OFF we have not verified.
-              disabled={runtimeDials === null}
-              ariaLabel={t('projectPanel.swarm.runtime.manager')}
-              onToggle={(v) => onToggleRuntime('manager', v)}
-              t={t}
-            />
-            {/* The phone-window cost, shown ONLY once the switch is on — an
-                always-visible warning is wallpaper, and this one has to land. */}
-            {runtimeDials?.manager === 'sdk' ? (
-              <p className="text-micro leading-snug text-amber-500/90" role="note">
-                {t('projectPanel.swarm.runtime.managerWarning')}
-              </p>
-            ) : null}
-          </div>
-        </div>
           </>
         )}
 

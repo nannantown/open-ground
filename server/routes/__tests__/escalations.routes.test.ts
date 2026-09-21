@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtemp, mkdir, rm, realpath } from 'fs/promises'
+import { mkdtemp, mkdir, rm, realpath, readFile, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { app } from '../../app'
@@ -81,6 +81,12 @@ const openBody = (over: Record<string, unknown> = {}) => ({
 })
 
 describe('escalations routes — the owner journey', () => {
+  it('keeps retired proposal routes absent for an authenticated owner', async () => {
+    for (const path of ['/api/swarm/orchestrator/selfsupply', '/api/swarm/orchestrator/selfsupply/approve']) {
+      expect((await post(path, { path: project, enabled: true, taskId: 'old' })).status).toBe(404)
+    }
+  })
+
   it('open → list → answer → (409 on answering after dismiss)', async () => {
     // OPEN
     const openRes = await post('/api/swarm/escalations/open', openBody())
@@ -102,8 +108,10 @@ describe('escalations routes — the owner journey', () => {
     expect(list.escalations).toHaveLength(1)
     expect(list.escalations[0].id).toBe(opened.escalation.id)
 
-    // ANSWER — no live PTY on record → the card queue path ('queued'), and the
-    // real appendJudgment writes the Q→A back to the isolated you-corpus.
+    // Answering must not update the retired Persona archive.
+    const archive = join(home, 'you-corpus-additions.json')
+    const archivedBytes = '[{"id":"preserved","text":"Local archive"}]'
+    await writeFile(archive, archivedBytes)
     const ansRes = await post('/api/swarm/escalations/answer', {
       id: opened.escalation.id,
       answer: '埋めない。envから注入。',
@@ -112,7 +120,10 @@ describe('escalations routes — the owner journey', () => {
     const answered = (await ansRes.json()) as EscalationAnswerResponse
     expect(answered.escalation.status).toBe('answered')
     expect(answered.delivery).toBe('queued')
-    expect(answered.memoryWritten).toBe(true)
+    expect(answered).not.toHaveProperty('memoryWritten')
+    expect(await readFile(archive, 'utf8')).toBe(archivedBytes)
+    const afterAnswer = (await (await app.request(`/api/swarm/escalations?path=${encodeURIComponent(project)}`)).json()) as EscalationsResponse
+    expect(afterAnswer.escalations[0].answer).toBe('埋めない。envから注入。')
 
     // A fresh question, dismissed, then answered → 409 (loud, not silent).
     const open2 = (await (
@@ -145,17 +156,9 @@ describe('escalations routes — the owner journey', () => {
     expect(big.status).toBe(400)
   })
 
-  it('validates loudly: bad why=400, missing question=400, malformed proxyDraft=400', async () => {
+  it('validates loudly: bad why=400, missing question=400', async () => {
     expect((await post('/api/swarm/escalations/open', openBody({ whyEscalated: 'meh' }))).status).toBe(400)
     expect((await post('/api/swarm/escalations/open', openBody({ question: '  ' }))).status).toBe(400)
-    expect(
-      (
-        await post(
-          '/api/swarm/escalations/open',
-          openBody({ proxyDraft: { answer: 1, confidence: 'huge', isAbstention: 'yes' } }),
-        )
-      ).status,
-    ).toBe(400)
   })
 
   it('an unregistered path is refused (403) on open AND on the list filter', async () => {

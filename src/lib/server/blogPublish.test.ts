@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -15,6 +15,9 @@ import { getSettings, setSettings, setUserSettings, normalizeWordPressSettings }
 import { setLockdownCache } from './lockdown'
 import { projectDataFile } from './projectDataPath'
 import type { WordPressSettings } from '../types'
+import { getCustomTabRole } from './roles'
+
+vi.mock('./roles', () => ({ getCustomTabRole: vi.fn(async () => 'owner') }))
 
 // blogPublish — research reports → WordPress DRAFTS. The feature stands on five
 // promises (docs/BLOG_PUBLISH_PITCH.md): drafts only / one report = one post /
@@ -77,6 +80,7 @@ const postReqs = <T extends { url: string }>(reqs: T[]): T[] =>
 let proj = ''
 
 beforeEach(async () => {
+  vi.mocked(getCustomTabRole).mockResolvedValue('owner')
   __resetMigrationCacheForTests()
   setLockdownCache(false)
   proj = await mkdtemp(join(tmpdir(), 'og-blog-'))
@@ -382,6 +386,23 @@ describe('markResearchForBlog — the button itself', () => {
 })
 
 describe('blogPublishTick — the gates', () => {
+  it.each(['none', 'tester'] as const)('leaves saved reports, credentials and pending publication untouched for %s', async role => {
+    await report('saved.md', '# Saved report\n\nKeep this body.\n')
+    const failing = (async () => ({ ok: false, status: 599, json: async () => ({}) }) as Response) as typeof fetch
+    await press(failing, 'saved.md')
+    await setSettings({ wordpress: WP })
+    const before = await readBlogInfo(proj)
+    vi.mocked(getCustomTabRole).mockResolvedValue(role)
+    const wp = fakeWp()
+    await blogPublishTick({ fetchImpl: wp.fetchImpl })
+    expect(wp.reqs).toEqual([])
+    expect(await readBlogInfo(proj)).toEqual(before)
+    expect((await getSettings()).wordpress).toEqual(WP)
+    expect(await readFile(join(proj, 'docs/research/saved.md'), 'utf8')).toBe('# Saved report\n\nKeep this body.\n')
+    vi.mocked(getCustomTabRole).mockResolvedValue('owner')
+    await blogPublishTick({ fetchImpl: wp.fetchImpl })
+    expect(postReqs(wp.reqs)).toHaveLength(1)
+  })
   it('does nothing without Settings.wordpress (configuring it IS the opt-in)', async () => {
     await report('a.md', '# A\n\nbody\n')
     const wp = fakeWp()

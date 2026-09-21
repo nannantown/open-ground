@@ -117,7 +117,7 @@ export const projectPanel = {
       '{light}, low/medium effort, fewer parallel workers — minimise the weekly-budget burn.',
     'projectPanel.swarm.mode.optimize': 'Optimize',
     'projectPanel.swarm.mode.optimize.hint':
-      'Per-card weight decides — heavy/safety work gets the top tier ({top}), chores drop to {light}. The smart default.',
+      "Each card's difficulty decides — Ultra cards get the top tier ({top}), Touch cards drop to {light}, the rest run in between. The smart default.",
     // Usable models — the owner's PERMANENT per-tier switch (hard mask). Not the
     // transient quota cooling: an OFF tier never comes back on its own.
     'projectPanel.swarm.models.label': 'Usable models',
@@ -229,33 +229,8 @@ export const projectPanel = {
     // ON, a ready worker always wakes the manager desk; the engine never merges.)
     'projectPanel.swarm.manager.tab': 'Manager',
     'projectPanel.swarm.manager.badge': 'Manager',
-    'projectPanel.swarm.manager.overseer': 'Overseer (proxy-you)',
-    'projectPanel.swarm.manager.overseerHint':
-      'An autonomous proxy of YOU that watches the swarm: on a judgment edge it answers a blocked worker’s free-text question as you would (grounded in your corpus), or — for anything irreversible or that it cannot ground — raises it to your inbox. It only READS, ASKS, or ANSWERS; it never merges or dispatches. Budget-capped and off by default. Turning autonomy OFF also disarms this — so you re-arm it each session (it is never auto-resumed). On macOS its brain always runs kernel-sandboxed with network egress closed to Anthropic only.',
-    'projectPanel.swarm.manager.overseerSandboxWarning':
-      '⚠ Kernel-level containment is unavailable on this host (macOS sandbox-exec required) — the overseer’s brain runs with the permission-layer safeguards only. Its read-only design and budget still hold.',
-    // Moved here from the Persona screen (2026-08-15, owner: 「swarmでの自動返信は
-    // サブ的なポジション」). The Persona screen is about understanding yourself; the
-    // fact that the same corpus can be spent answering a worker belongs to the
-    // switch that spends it, not to the place it is built.
-    'projectPanel.swarm.manager.overseerPersonaNote':
-      'This switch is also what lets your persona answer in your place. What it knows is built on the Persona screen; whether it may be spent on the swarm is decided here.',
-    // Runtime dials (Agent SDK migration). No longer "both default OFF": with
-    // nothing written, the panel draws BOTH switches ON (`dialOf` resolves an
-    // absent dial to 'sdk'), so the copy below describes what OFF MEANS, not
-    // what ships. A switch changes only the NEXT desk that starts, never a
-    // running one.
-    // "all projects" is not a footnote: this section sits directly beneath the
-    // Overseer switch, which is PER-PROJECT engine state. Two switches side by
-    // side with different scopes and no label is a trap.
-    // (The worker switch that used to live here died 2026-08-13 with the worker
-    // dial — workers are SDK-only now, so there is no runtime to switch them to.)
-    'projectPanel.swarm.runtime.heading': 'Runtime (experimental · all projects)',
-    'projectPanel.swarm.runtime.manager': 'Commander on the Agent SDK',
-    'projectPanel.swarm.runtime.managerHint':
-      'The same, for the commander desk. Applies the next time the commander desk starts.',
-    'projectPanel.swarm.runtime.managerWarning':
-      '⚠ An SDK desk has no Remote Control — you can no longer reach the commander from your phone. The supply desk stays on a terminal and remains your window from outside: ask it for status, or have it relay an instruction to the commander.',
+    'projectPanel.swarm.manager.overseer': 'Monitoring',
+    'projectPanel.swarm.manager.overseerHint': 'Questions, stalled work and usage alerts. Off when stopped or restarted.',
     'projectPanel.swarm.manager.on': 'On',
     'projectPanel.swarm.manager.off': 'Off',
     'projectPanel.swarm.manager.engineRunning': 'Engine running',
@@ -450,9 +425,6 @@ export const projectPanel = {
     // Same reason as the ja string: name what is being ASKED OF the reader, not the
     // internal classification. This badge marks "your area, your call".
     'projectPanel.swarm.esc.whyPolicy': 'Your call',
-    'projectPanel.swarm.esc.proxyDraft': 'Proxy draft · confidence {confidence}',
-    'projectPanel.swarm.esc.abstention': 'The proxy abstained — it lacks your context here.',
-    'projectPanel.swarm.esc.useDraft': 'Use draft',
     'projectPanel.swarm.esc.techDetails': 'Technical details',
     'projectPanel.swarm.esc.screenshot': "Worker's screen at the time",
     'projectPanel.swarm.esc.answerPlaceholder': 'Your answer…',
@@ -475,7 +447,6 @@ export const projectPanel = {
     'projectPanel.swarm.esc.deliveryQueued':
       'Recorded. The worker that asked has already been stood down, so nothing restarts right away: if the card can go back to the queue it will carry your answer, and if its work is already saved on a branch the commander picks it up from there.',
     'projectPanel.swarm.esc.deliverySkipped': 'Recorded. Nothing live to deliver to.',
-    'projectPanel.swarm.esc.memoryWritten': 'Learned — written back to your corpus.',
     'projectPanel.swarm.esc.actionFailed': 'Escalation action failed: {error}',
     // Sidebar resizer
     // Chat header
@@ -549,8 +520,6 @@ export const projectPanel = {
     'projectPanel.settingsDisplayName': 'Your display name',
     'projectPanel.settingsDisplayNameHint': 'Used as your name on cards — a global setting, shared across all projects.',
     'projectPanel.settingsDisplayNameSaveFailed': 'Couldn’t save your display name: {error} — edit the field again to retry.',
-    'projectPanel.settingsPersonalHeading': 'Personal',
-    'projectPanel.settingsPersonalHint': 'Stored only on this machine — never synced.',
     'projectPanel.settingsCompletionFlow': 'Completion flow',
     'projectPanel.settingsFlowMerge': 'Merge directly',
     'projectPanel.settingsFlowPr': 'Open a PR',
@@ -878,7 +847,7 @@ export const projectPanel = {
       '{light}・低〜中effort・並列控えめ。週次枠の消費を最小化。',
     'projectPanel.swarm.mode.optimize': '最適化',
     'projectPanel.swarm.mode.optimize.hint':
-      'カードの重みで自動割当 — 安全系/重い仕事は最上位({top})、雑務は {light}。賢い既定（推奨）。',
+      'カードの難易度で割当 — 「最難」は最上位({top})、「軽微」は {light}、その間は中間のモデル。賢い既定（推奨）。',
     // 使用可能モデル — 恒久的な per-tier スイッチ（hard mask）。一時的な quota 冷却とは
     // 別レイヤーで、OFF にした tier は期限で復活しない。
     'projectPanel.swarm.models.label': '使用可能モデル',
@@ -983,29 +952,8 @@ export const projectPanel = {
     // ready で常にマネージャーを起こす。エンジン自身は統合しない。）
     'projectPanel.swarm.manager.tab': 'マネージャー',
     'projectPanel.swarm.manager.badge': 'マネージャー',
-    'projectPanel.swarm.manager.overseer': '監督（あなたの代理）',
-    'projectPanel.swarm.manager.overseerHint':
-      'あなたの自律代理が swarm を監視します。判断のエッジで、ブロックされた worker の自由文の質問にあなたの代わりに回答し（あなたのコーパスに基づく）、不可逆なもの・根拠が持てないものはあなたの受信箱へエスカレーションします。できるのは「読む・尋ねる・答える」だけ — 統合も dispatch もしません。予算上限つき・既定オフ。autonomy をオフにすると監督も解除されます — 毎セッション再度オンにしてください（自動復帰しません）。macOS では大脳は常にカーネル sandbox で動き、外部通信は Anthropic のみに封鎖されます。',
-    'projectPanel.swarm.manager.overseerSandboxWarning':
-      '⚠ この環境ではカーネルレベルの封じ込め（macOS の sandbox-exec）が利用できません — 監督の大脳は permission 層の防壁のみで動きます。読み取り専用設計と予算上限は有効です。',
-    'projectPanel.swarm.manager.overseerPersonaNote':
-      'ペルソナがあなたの代わりに答えるのも、このスイッチです。何を知っているかはペルソナ画面で育ち、それを swarm に使ってよいかどうかはここで決まります。',
-    // ランタイム切替(Agent SDK 移行)。「どちらも既定オフ」ではなくなった — 未設定なら
-    // 画面上は両方オンで描かれる(`dialOf` が不在を 'sdk' と解決する)。以下の文言は
-    // 「オフとは何か」の説明であって出荷時の状態の説明ではない。切り替えても**次に立つ卓**
-    // から適用され、動いている卓はそのまま。
-    // 「全プロジェクト」は注釈ではない: このすぐ上の監督スイッチは**プロジェクトごと**の
-    // エンジン状態で、範囲の違う2つが並んでいて何も書かないのは罠。
-    // （作業者スイッチは 2026-08-13 にダイヤルごと削除 — 作業者は SDK 専用に
-    // なったので、切り替える先の動かし方が存在しない。）
-    'projectPanel.swarm.runtime.heading': '動かし方（お試し・全プロジェクト共通）',
-    // ⚠ これらは素のテキストとして描画される（Markdown ではない）。強調に ** を
-    // 書くと画面にそのまま星印が出る（2026-07-31 の隔離プレビューで実見）。
-    'projectPanel.swarm.runtime.manager': '司令官を SDK で動かす',
-    'projectPanel.swarm.runtime.managerHint':
-      '司令官の卓も同じように。適用されるのは、次に司令官の卓が立つときからです。',
-    'projectPanel.swarm.runtime.managerWarning':
-      '⚠ SDK の卓には遠隔窓口がありません — スマホから司令官に話しかけられなくなります。外からの窓口は補給官が引き継ぎます（ターミナルのまま）: 状況を聞く・司令官への指示を中継する、はそのまま使えます。',
+    'projectPanel.swarm.manager.overseer': '状況の監視',
+    'projectPanel.swarm.manager.overseerHint': '質問・作業の停滞・利用上限を通知。停止・再起動時はオフ。',
     'projectPanel.swarm.manager.on': 'オン',
     'projectPanel.swarm.manager.off': 'オフ',
     'projectPanel.swarm.manager.engineRunning': 'エンジン稼働中',
@@ -1193,9 +1141,6 @@ export const projectPanel = {
     // 「あなたの領域だから、あなたが決める」ケース(ESCALATE OWNER のルーティング判定と
     // 恒久境界)なので、分類名ではなく“何を求められているか”を出す。
     'projectPanel.swarm.esc.whyPolicy': 'あなたが決めること',
-    'projectPanel.swarm.esc.proxyDraft': 'proxy の暫定回答 · 確信度 {confidence}',
-    'projectPanel.swarm.esc.abstention': 'proxy は回答を保留しました（あなたの情報が不足）。',
-    'projectPanel.swarm.esc.useDraft': '暫定回答を使う',
     'projectPanel.swarm.esc.techDetails': '技術的な詳細',
     'projectPanel.swarm.esc.screenshot': 'その時の worker 画面',
     'projectPanel.swarm.esc.answerPlaceholder': '回答を入力…',
@@ -1207,7 +1152,6 @@ export const projectPanel = {
     'projectPanel.swarm.esc.deliveryQueued':
       '回答を記録しました。質問した担当はすでに降りているので、すぐに作業が再開するとは限りません — このカードが順番待ちに戻せる状態なら次に呼ばれたときに回答が渡り、作業がすでにブランチに保存されている場合は司令官がそこから引き継ぎます。',
     'projectPanel.swarm.esc.deliverySkipped': '記録しました（配達先の worker/カードなし）。',
-    'projectPanel.swarm.esc.memoryWritten': '記憶に追記しました（you-corpus）。',
     'projectPanel.swarm.esc.actionFailed': 'エスカレーション操作に失敗: {error}',
     // Sidebar resizer
     // Chat header
@@ -1280,8 +1224,6 @@ export const projectPanel = {
     'projectPanel.settingsDisplayName': 'あなたの表示名',
     'projectPanel.settingsDisplayNameHint': 'カードの担当者名として使われます — 全プロジェクト共通のグローバル設定です。',
     'projectPanel.settingsDisplayNameSaveFailed': '表示名を保存できませんでした: {error} — もう一度入力すると再試行されます。',
-    'projectPanel.settingsPersonalHeading': '自分だけの設定',
-    'projectPanel.settingsPersonalHint': 'この端末にだけ保存され、同期されません。',
     'projectPanel.settingsCompletionFlow': '完了フロー',
     'projectPanel.settingsFlowMerge': '直接マージ',
     'projectPanel.settingsFlowPr': 'PRを作成',

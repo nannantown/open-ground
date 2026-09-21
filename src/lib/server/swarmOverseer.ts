@@ -1,51 +1,5 @@
-// swarmOverseer — the autonomous OVERSEER's BRAINSTEM (脳幹) pass: the "ignition"
-// that binds the shipped C1 inbox / C2 proxy-you brain / C4 reversibility gate into
-// one budgeted, edge-triggered watcher riding the engine's own 3s tick
-// (OVERSEER_DESIGN §5/§6/§10 C-core). It NEVER spawns its own driver (K1): it is a
-// stage of runEnginePass, like self-supply. Unlike self-supply — which is FIRED and
-// left to run beside the tick because its scanners spawn tsc/lint/vitest for minutes
-// (kickSelfSupplyPass) — this pass is cheap, pure logic, so the tick still awaits it.
-//
-// WHAT IT IS (three layers, this file is the BRAINSTEM):
-//   • 脳幹 (here) — a PURE-logic periodic pass. It READS already-computed engine
-//     state (anomalies / notified / the tick's tasks snapshot / worker heartbeats /
-//     a cached usage %) and, via a table of thresholds (OVERSEER_THRESHOLDS), decides
-//     "do nothing / wake the brain / raise to the human". It calls NO model itself.
-//   • 大脳 (swarmOverseerBrain.ts, C2) — an episodic one-off `claude` woken ONLY on a
-//     free-text worker question (S4). FIRE-AND-FORGET: the pass NEVER awaits it (D2) —
-//     awaiting one 5-min brain call would freeze the 3s tick chain (dispatch / stall /
-//     runaway detection) for the whole budget. The detached result lands in the
-//     in-memory mailbox (OverseerRuntime.brainResults) and the NEXT pass routes it.
-//   • 記憶 (you-corpus, B1) — the brain's grounding; the owner's answer is written back
-//     by C1's answerEscalation, never by this file (§8 invariant 6).
-//
-// WHY IT IS SAFE (the whole point of its shape — it can only READ, RAISE, or ASK):
-//   1. OFF BY DEFAULT + in-memory (K2) — engine.overseer.enabled starts false, only
-//      the owner-gated setOverseer flips it, a restart re-arms OFF. It is the THIRD
-//      toggle (D1), asymmetric to selfSupply: an explicit autonomy OFF
-//      (stopOrchestrator) CLEARS it, and an auto-drain re-ignition NEVER sets it
-//      (enabled only ever becomes true through the owner POST). So the most-dangerous
-//      stage never rides along on a machine-driven restart.
-//   2. NO GIT / NO DISPATCH — it never merges (the engine's integrateBranch owns that)
-//      and never spawns a worker (supply cards go through the Board's approval gate).
-//      Its only outward effects are: append an escalation (idempotent on receiptKey),
-//      inject a proxy answer into a LIVE worker PTY through the C1/W16 helper (a reply
-//      to a question, not a command), and fire info-grade bell/OS toasts (edge-deduped).
-//   3. BUDGET (L7) — the brain is throttled (≥10min between calls), day-capped (24/UTC
-//      day, HALVED on a usage warn), single-flight (one PTY at a time), and 5-min
-//      timed-out. A usage OVER (S9) THROTTLES it entirely (S4 degrades to a bare raise).
-//   4. FAIL-CLOSED (K6/C4) — the brain answers ONLY reversible, grounded questions;
-//      irreversible / unknown / thin-corpus routes to the human. The gate is
-//      reversibility, not confidence (all enforced inside answerAsOwner / C4).
-//
-// EDGE DISCIPLINE (§6): every signal fires on the RISING edge only — dedup is the
-// overseer's own responsibility (swarmNotifications does not dedup). `seen` maps a
-// signalKey → a fingerprint (sha / card id / count); a signal re-fires only when the
-// fingerprint MOVES. `watch` measures dwell (S5/S7/S11's "30min / 6h continuous").
-// Both are pruned each pass against the live condition set (pruneStuckMoves discipline),
-// so a resolved condition drops its tracking and a genuine recurrence re-fires. seen
-// and watch are in-memory — a restart / re-ON resets them (a persisting anomaly
-// re-fires, absorbed by the T3 receiptKey idempotency and per-Tier budgets — §6).
+// Deterministic monitoring: raise questions to the owner, report failures and
+// usage limits, and run bounded cleanup. Never answer on the owner's behalf.
 
 import type { ProjectTask, OrchestratorAnomaly, OrchestratorReview } from '../types'
 import type { SwarmInfoNotification, SwarmFatalNotification, EscalationStatus } from '../types'
@@ -54,27 +8,10 @@ import type { SwarmInfoNotification, SwarmFatalNotification, EscalationStatus } 
 // this file must never import a VALUE back. The readHeartbeat/isAlive VALUES the pass
 // needs are handed in through OverseerDeps (the orchestrator already owns them).
 import type { HeartbeatSign } from './swarmOrchestrator'
-import { workerKey, workerRuntimeKind, type WorkerHandle } from './workerRuntime'
-import {
-  answerAsOwner as realAnswerAsOwner,
-  makeOverseerBrain,
-  OVERSEER_BRAIN_TIMEOUT_MS,
-  type OwnerQuestion,
-  type OwnerAnswer,
-} from './swarmOverseerBrain'
-import { buildUnclassifiedRoutingPlainQuestion } from './swarmDecisionRouting'
-import {
-  ledgerMatchKey,
-  recordDecision as realRecordDecision,
-  type PersonaLedgerInput,
-} from './personaLedger'
+import { workerKey, type WorkerHandle } from './workerRuntime'
 import {
   openEscalation as realOpenEscalation,
   defaultReceiptKey,
-  injectAnswerIntoWorker,
-  defaultCanInjectInto,
-  deliverAnswerToWorker,
-  buildAnswerInjection,
   listEscalations as realListEscalations,
   listEscalationReceiptKeys,
   type OpenEscalationInput,
@@ -84,8 +21,6 @@ import { usageLevel } from '../usageThresholds'
 import { peekCachedUsage, refreshUsageCacheDetached } from './claudeUsageCli'
 import { runSwarmJanitor } from './swarmJanitor'
 import { createSwarmInfoNotification, listSwarmNotifications } from './swarmNotifications'
-import { resolveSwarmModelEffortProbed } from './swarmLaunch'
-import { getSettings, getAllowedModelTiers } from './store'
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
@@ -94,14 +29,8 @@ const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(
 /** The overseer's tunable constants — the single source the pass AND its tests read
  *  (SWARM_LAUNCH_MODEL-style one-place discipline). Durations reuse the existing
  *  STALL/QUIET/usage lockstep where the design pins them (10min/30min/80-100), plus
- *  the new overseer values (30min dwell, 6h re-notify, 24/day, 5min brain timeout). */
+ *  the new overseer values (30min dwell and 6h re-notify). */
 export interface OverseerThresholds {
-  /** Minimum wall-clock between brain (大脳) calls — the throttle (L7). */
-  brainMinIntervalMs: number
-  /** Max brain calls per UTC day (headline runaway cap); HALVED on a usage warn (S8). */
-  brainMaxPerDay: number
-  /** One brain call's hard timeout (= REVIEW_TIMEOUT_MS — D4). */
-  brainTimeoutMs: number
   /** S5 — a card dwelling in `blocked` this long is surfaced to the owner. */
   blockedStuckMs: number
   /** S7 — mergeable review cards piling up this long fire an info notice. */
@@ -123,16 +52,9 @@ export interface OverseerThresholds {
   janitorMs: number
   /** M8 — cap on the exponential backoff after a usage refresh keeps missing. */
   usageBackoffMaxMs: number
-  /** Watchdog slack past brainTimeoutMs after which a still-in-flight brain is
-   *  force-released (defense-in-depth: a settle-path hang must not pin single-flight
-   *  forever and silence S4). */
-  brainStuckSlackMs: number
 }
 
 export const OVERSEER_THRESHOLDS: OverseerThresholds = {
-  brainMinIntervalMs: 10 * 60_000, // 10min (OVERSEER_BRAIN_MIN_INTERVAL_MS)
-  brainMaxPerDay: 24, // OVERSEER_MAX_BRAIN_PER_DAY (UTC roll)
-  brainTimeoutMs: OVERSEER_BRAIN_TIMEOUT_MS, // 5min
   blockedStuckMs: 30 * 60_000, // 30min (lockstep with QUIET/STALL band)
   reviewIdleMs: 30 * 60_000, // 30min
   inboxStaleMs: 6 * 60 * 60_000, // 6h
@@ -140,8 +62,7 @@ export const OVERSEER_THRESHOLDS: OverseerThresholds = {
   escalationsPollMs: 60_000, // 60s
   fatalWindowMs: 24 * 60 * 60_000, // 24h — only fatals this fresh may open an escalation
   janitorMs: 15 * 60_000, // 15min
-  usageBackoffMaxMs: 15 * 60_000, // 15min
-  brainStuckSlackMs: 60_000, // 1min past the 5min timeout
+  usageBackoffMaxMs: 15 * 60_000,
 }
 
 /** The signal → Tier map (§6 表), as DATA so the pass is table-driven and the table
@@ -150,8 +71,8 @@ export const OVERSEER_THRESHOLDS: OverseerThresholds = {
  *  reader (and the log) can name every fire. S6 (todo 枯渇→次タスク起草) is
  *  DELIBERATELY ABSENT — §11 Q4 removed it from C-core's scope (goal generation is
  *  the highest-risk runaway; a later card owns it). */
-export type OverseerSignalId = 'S1' | 'S2' | 'S3' | 'S4' | 'S5' | 'S7' | 'S8' | 'S9' | 'S10' | 'S11'
-export type OverseerTier = 'T0prime' | 'T1' | 'T3' | 'THROTTLED'
+export type OverseerSignalId = 'S1' | 'S2' | 'S3' | 'S4' | 'S5' | 'S7' | 'S9' | 'S10' | 'S11'
+export type OverseerTier = 'T0prime' | 'T3' | 'THROTTLED'
 
 export interface OverseerSignalSpec {
   id: OverseerSignalId
@@ -164,59 +85,13 @@ export const OVERSEER_SIGNALS: readonly OverseerSignalSpec[] = [
   { id: 'S1', tier: 'T3', note: 'rework-exhausted (anomaly) → raise to the inbox' },
   { id: 'S2', tier: 'T3', note: 'all-workers-down (fatal) → raise to the inbox' },
   { id: 'S3', tier: 'T3', note: 'exec-timeout (fatal) → raise to the inbox' },
-  { id: 'S4', tier: 'T1', note: 'worker free-text question (heartbeat blockers) → proxy brain / escalate' },
+  { id: 'S4', tier: 'T3', note: 'worker free-text question → owner inbox' },
   { id: 'S5', tier: 'T3', note: 'blocked-column card dwelt 30min → raise to the inbox' },
   { id: 'S7', tier: 'T0prime', note: 'mergeable review cards idle 30min → info notice' },
-  { id: 'S8', tier: 'T0prime', note: 'usage warn (80%) → halve the brain day cap' },
-  { id: 'S9', tier: 'THROTTLED', note: 'usage over (100%) → THROTTLE the brain, S4 degrades to a bare raise' },
+  { id: 'S9', tier: 'THROTTLED', note: 'usage over (100%) → notify; questions still reach the owner' },
   { id: 'S10', tier: 'T3', note: 'selfUpdate rollback / canary-failed (fatal) → raise to the inbox' },
   { id: 'S11', tier: 'T0prime', note: 'inbox open record unanswered 6h → re-notify once' },
 ] as const
-
-// ── Runtime (§5 — in-memory, lives on ProjectEngine; a restart resets it → OFF) ──
-
-/** One brain call's outcome, parked in the mailbox by the fire-and-forget chain and
- *  drained + routed by the NEXT pass (D2). Carries the worker coordinates so the
- *  drain can inject the answer (T1) or open an escalation (T3) for the right worker. */
-export interface OverseerBrainResult {
-  signalKey: string
-  question: string
-  context: string
-  taskId?: string
-  branch?: string
-  /** The blocked worker's HANDLE, carried whole (pty ⇔ terminalId,
-   *  sdk ⇔ sdkSessionId — workerRuntime.ts's identity invariant).
-   *
-   *  It used to be `terminalId` alone, which is EMPTY for an SDK worker: the
-   *  drain below then had nothing to address, so a proxy answer for such a worker
-   *  could never be delivered — it was reported as "injection failed" and thrown
-   *  back at the owner every single time, for a worker that was sitting right
-   *  there waiting for it. Keep the whole handle; the conduit branches, not this
-   *  record. */
-  runtime?: 'pty' | 'sdk'
-  terminalId?: string
-  sdkSessionId?: string
-  /** null when the detached chain itself threw (answerAsOwner never throws, but the
-   *  chain is guarded belt-and-suspenders) → treated as an insufficient-info escalate. */
-  answer: OwnerAnswer | null
-  /** How many drains have already FAILED to route this result (raiseToInbox
-   *  returned false). Absent ⇒ 0. See {@link MAX_BRAIN_ROUTE_ATTEMPTS}. */
-  routeAttempts?: number
-}
-
-/** How many passes may try to route ONE brain result before it is dropped.
- *
- *  ⚠ WHY A RETRY EXISTS AT ALL (overnight review 2026-08-03). raiseToInbox
- *  returns false on an fs/notify hiccup and its own comment states the contract:
- *  "leave `seen` UNSET so the next pass retries; the receiptKey keeps a later
- *  retry idempotent". But the drain had already SPLICED every result out of the
- *  mailbox, and it ignored the return — so there was no next pass to retry with.
- *  A single failed write silently destroyed the worker's question AND the
- *  proxy's answer, and the worker went on waiting for an inbox entry that would
- *  never appear. Re-queueing restores the contract the callee was written to.
- *  Bounded so a permanently failing disk cannot grow the mailbox forever; the
- *  give-up is LOUD (the whole point is that this stopped being silent). */
-export const MAX_BRAIN_ROUTE_ATTEMPTS = 5
 
 /** Per-engine overseer state (§5). In-memory ONLY — held on the ProjectEngine, which
  *  lives on globalThis; a server restart resets it, which also re-arms `enabled` OFF
@@ -226,30 +101,10 @@ export interface OverseerRuntime {
   /** Armed? Default OFF — only the owner-gated setOverseer flips it true; an explicit
    *  autonomy OFF (stopOrchestrator) or a restart drops it false (D1). */
   enabled: boolean
-  /** The single-flight guard: true while ONE brain PTY is in flight (D2). */
-  assessInFlight: boolean
-  /** Aborts the in-flight brain (owner OFF / teardown). The brain runner kills its PTY
-   *  on abort (makeOverseerBrain). Present only while assessInFlight. */
-  brainAbort?: AbortController
-  /** The in-flight brain call's mailbox coordinates (present only while
-   *  assessInFlight). The watchdog needs them: a NEVER-SETTLING flight runs no
-   *  .then/.finally, so nothing would land in the mailbox for it — while its S4
-   *  `seen` fingerprint stays set, reading the SAME question as "already handled"
-   *  forever. On a force-release the watchdog synthesizes `{...brainInFlight,
-   *  answer:null}` into the mailbox so the question still fail-closes to the owner. */
-  brainInFlight?: Omit<OverseerBrainResult, 'answer'>
-  /** Fire-and-forget brain results awaiting routing next pass (the mailbox). */
-  brainResults: OverseerBrainResult[]
   /** Edge dedup: signalKey → fingerprint. A signal re-fires only when the fp moves. */
   seen: Map<string, string>
   /** Dwell measurement: watchKey → { since, fp }. For S5/S7/S11's "continuous for N". */
   watch: Map<string, { since: number; fp: string }>
-  /** Wall-clock of the last brain call — the throttle gate. */
-  lastBrainAt: number
-  /** Brain calls so far in `dayKey` — the day cap gate. */
-  brainCallsToday: number
-  /** UTC day ('YYYY-MM-DD') the count above is for — rolled at the first pass of a new day. */
-  dayKey: string
   /** M8 sub-cycle: last usage peek/refresh time. */
   lastUsageAt: number
   /** M8: don't re-fire a detached refresh before this (exponential backoff on misses). */
@@ -275,13 +130,8 @@ export interface OverseerRuntime {
 
 export const initOverseerRuntime = (): OverseerRuntime => ({
   enabled: false,
-  assessInFlight: false,
-  brainResults: [],
   seen: new Map(),
   watch: new Map(),
-  lastBrainAt: 0,
-  brainCallsToday: 0,
-  dayKey: '',
   lastUsageAt: 0,
   usageBackoffUntil: 0,
   lastEscalationsAt: 0,
@@ -293,8 +143,7 @@ export const initOverseerRuntime = (): OverseerRuntime => ({
 // ── The engine surface the pass reads (structural subset — no back-import cycle) ──
 
 /** The minimal ProjectEngine surface the overseer pass reads — a structural subset,
- *  so this module needs no VALUE import from swarmOrchestrator (avoids a cycle,
- *  mirrors SelfSupplyEngine). ProjectEngine satisfies it. */
+ *  so this module needs no VALUE import from swarmOrchestrator (avoids a cycle). ProjectEngine satisfies it. */
 export interface OverseerEngine {
   path: string
   running: boolean
@@ -339,24 +188,8 @@ export interface OverseerDeps {
   /** From the orchestrator's own deps (it already reads these each pass). */
   isAlive: (w: WorkerHandle) => boolean
   readHeartbeat: (projectPath: string, branch: string) => Promise<HeartbeatSign | null>
-  /** C2 — proxy-you brain. Resolves answer|escalate; NEVER throws. `signal` aborts it
-   *  on owner OFF / teardown. */
-  answerAsOwner: (q: OwnerQuestion, signal?: AbortSignal) => Promise<OwnerAnswer>
   /** C1 T3 — append an escalation (idempotent on receiptKey). */
   openEscalation: (input: OpenEscalationInput) => Promise<{ escalation: Escalation; deduped: boolean }>
-  /** W16 targeting guard — may we type an answer into this live PTY? (fail-closed) */
-  canInjectInto: (terminalId: string, projectPath: string) => Promise<boolean>
-  /** W16 — inject a proxy answer into a live worker PTY (bracketed paste + CR). */
-  injectAnswer: (terminalId: string, text: string) => Promise<boolean>
-  /** T1 — deliver a proxy answer to a live worker on EITHER runtime (guard +
-   *  delivery in one call; see swarmEscalations.deliverAnswerToWorker).
-   *
-   *  OPTIONAL, and the two PTY-shaped deps above are kept beside it ON PURPOSE:
-   *  they are the only knobs a PTY-worker test needs, and every existing dep
-   *  literal supplies exactly those. When this is absent the drain composes them
-   *  for a PTY target — byte-identical to before — and uses the real conduit for
-   *  an SDK target, which has no PTY equivalent to compose. */
-  deliverAnswer?: (target: WorkerHandle, projectPath: string, text: string) => Promise<boolean>
   /** T0'/S7/S9/S11 — info-grade bell + OS toast. */
   notifyInfo: (n: SwarmInfoNotification) => Promise<unknown>
   /** M8 — cached-only usage %, or null (miss/stale/idle). NEVER scrapes. */
@@ -384,76 +217,7 @@ export interface OverseerDeps {
   runJanitor: (projectPath: string) => Promise<unknown>
 }
 
-/** WRAP a proxy-you decision function so every SETTLED OwnerAnswer lands in the
- *  DECISION LEDGER (personaLedger.ts) — the record of what the owner's stand-in
- *  actually did, as opposed to what the owner said about themselves in the Persona
- *  courses. This is the ONE recording point on the production path: it is the only
- *  place that sees the question, the project AND the settled answer together.
- *
- *  THE MAPPING (the thing worth testing — an OwnerAnswer shape → a verdict the
- *  owner can read):
- *    answer                               ⇒ 'answered' (+ its reported confidence)
- *    escalate why='insufficient-info'     ⇒ 'abstained'
- *    escalate why='irreversible'|'policy' ⇒ 'asked'
- *  See personaLedger's header for why the 'abstained' lane deliberately absorbs the
- *  brain-failure paths that report the same `why` (and how `why`, stored verbatim,
- *  keeps the split recoverable).
- *
- *  ISOLATION — the ledger may NEVER affect the decision path. Three properties, all
- *  load-bearing:
- *   1. the answer is obtained FIRST and returned UNCHANGED; the ledger never sees a
- *      chance to alter or withhold it;
- *   2. the write is awaited, then swallowed. `recordDecision` already never throws;
- *      the try/catch here is the second wall, and it is what keeps an INJECTED
- *      failing writer (or a future recorder that forgets the contract) from turning
- *      a settled proxy answer into a rejected promise. The overseer's fire-and-
- *      forget chain would then route it as `answer: null` — i.e. a disk hiccup in a
- *      statistics file would silently downgrade a real answer to an escalation;
- *   3. a THROW FROM `inner` is not recorded and is not caught. That is a crash, not
- *      a decision (answerAsOwner itself never throws; the wrapper below can, before
- *      the brain is ever reached), and the caller's own .catch already handles it.
- *  Awaited rather than detached so the record has LANDED before the answer is handed
- *  back: the caller is already fire-and-forget, so this costs the tick nothing, and
- *  it means no reader can observe an answer whose record does not exist yet. */
-// Console, not the engine journal: the wrapper is built once at dep-construction
-// time and has no `log` sink in scope, and a failed STATISTIC write is not engine
-// news. Named so the swallow below is greppable rather than an anonymous catch.
-const warnLedgerFailure = (e: unknown): void => {
-  console.warn(`[openground:overseer] decision ledger write failed — ${errMsg(e)}`)
-}
-
-export const withDecisionLedger = (
-  inner: (q: OwnerQuestion, signal?: AbortSignal) => Promise<OwnerAnswer>,
-  record: (entry: PersonaLedgerInput) => Promise<void> = realRecordDecision,
-): ((q: OwnerQuestion, signal?: AbortSignal) => Promise<OwnerAnswer>) => {
-  return async (q, signal) => {
-    const answer = await inner(q, signal)
-    try {
-      await record({
-        projectPath: q.projectPath,
-        question: q.question,
-        // The key is built from the FULL question (the store truncates what it
-        // displays), so it still matches when the owner answers the escalation this
-        // decision raised — see personaLedger.ledgerMatchKey.
-        key: ledgerMatchKey({ projectPath: q.projectPath, question: q.question }),
-        ...(answer.kind === 'answer'
-          ? { verdict: 'answered' as const, confidence: answer.confidence }
-          : {
-              verdict: answer.why === 'insufficient-info' ? ('abstained' as const) : ('asked' as const),
-              why: answer.why,
-            }),
-      })
-    } catch (e) {
-      warnLedgerFailure(e)
-    }
-    return answer
-  }
-}
-
-/** Build the REAL dependency set. `io` (readHeartbeat / isAlive) comes from the
- *  orchestrator's own deps; everything else is the shipped C1/C2/C4/usage/janitor
- *  wiring. The brain runner is built per-call at the mode-resolved overseer tier
- *  (resolveSwarmModelEffort(mode, 'overseer') — manager-grade, D4). */
+/** Runtime monitoring dependencies. No model is invoked to answer questions. */
 export const defaultOverseerDeps = (io: {
   isAlive: (w: WorkerHandle) => boolean
   readHeartbeat: (projectPath: string, branch: string) => Promise<HeartbeatSign | null>
@@ -461,30 +225,7 @@ export const defaultOverseerDeps = (io: {
   now: () => Date.now(),
   isAlive: io.isAlive,
   readHeartbeat: io.readHeartbeat,
-  // Every settled proxy-you decision is recorded (see withDecisionLedger) — the
-  // ledger wraps the REAL brain call rather than sitting inside it, so the C2
-  // primitive stays free of storage concerns and this stays the single write point.
-  answerAsOwner: withDecisionLedger(async (q, signal) => {
-    const mode = await getSettings()
-      .then((s) => s.executionMode ?? 'optimize')
-      .catch(() => 'optimize' as const)
-    // Null ⇒ every tier switched OFF. Pass nothing and let makeOverseerBrain's own
-    // spawn-time mask check throw — the runner failing CLOSED is exactly how the
-    // brain already handles "cannot launch safely" (答えは出さず owner へ escalate),
-    // so there is no second refusal path to keep in sync.
-    // PROBED (2026-07-13): the cerebrum is a spawn path like any other — an
-    // UNKNOWN tier gets one collapsed pre-launch probe (swarmTierProbe) so the
-    // brain is never seated on a tier-local wall /usage cannot show.
-    const me = await resolveSwarmModelEffortProbed(mode, 'overseer', undefined, Date.now(), await getAllowedModelTiers())
-    return realAnswerAsOwner(q, {
-      runBrain: makeOverseerBrain({ model: me?.model, effort: me?.effort }),
-      signal,
-    })
-  }),
   openEscalation: realOpenEscalation,
-  canInjectInto: (terminalId, projectPath) => defaultCanInjectInto(terminalId, projectPath),
-  injectAnswer: (terminalId, text) => injectAnswerIntoWorker(terminalId, text),
-  deliverAnswer: (target, projectPath, text) => deliverAnswerToWorker(target, projectPath, text),
   notifyInfo: (n) => createSwarmInfoNotification(n),
   peekUsagePct: () => {
     const u = peekCachedUsage()
@@ -513,14 +254,7 @@ export const defaultOverseerDeps = (io: {
   runJanitor: (projectPath) => runSwarmJanitor(projectPath), // NO force / deleteRemote
 })
 
-// ── Pure helpers ─────────────────────────────────────────────────────────────────
-
-const dayKeyOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10)
-
-/** Does a heartbeat blocker read as a free-text QUESTION for the proxy (vs a
- *  mechanical "waiting on X" blocker)? A question mark, or a JA/EN interrogative
- *  cue. Best-effort — the brain + C4 make the real judgment downstream; this only
- *  keeps non-questions from burning brain budget. */
+/** Best-effort JA/EN question detection, distinct from a mechanical blocker. */
 export const looksLikeQuestion = (text: string): boolean => {
   const t = text.trim()
   if (!t) return false
@@ -531,37 +265,6 @@ export const looksLikeQuestion = (text: string): boolean => {
 }
 
 const shorten = (s: string, max = 80): string => (s.length > max ? `${s.slice(0, max)}…` : s)
-
-// ── Budget (L7) ───────────────────────────────────────────────────────────────
-
-/** Roll the per-UTC-day brain counter at the first pass of a new day. */
-const rollDay = (ov: OverseerRuntime, now: number): void => {
-  const dk = dayKeyOf(now)
-  if (ov.dayKey !== dk) {
-    ov.dayKey = dk
-    ov.brainCallsToday = 0
-  }
-}
-
-/** The brain's day cap for `now` — HALVED on a usage warn (S8, §6). */
-const brainDayCap = (config: OverseerThresholds, usageWarn: boolean): number =>
-  usageWarn ? Math.floor(config.brainMaxPerDay / 2) : config.brainMaxPerDay
-
-/** May a brain call fire this pass? Throttle + day cap + single-flight (L7). Returns
- *  the reason it's blocked (for the "skipped: budget" log — never fail-quiet, §6). */
-const brainBudget = (
-  ov: OverseerRuntime,
-  now: number,
-  config: OverseerThresholds,
-  usageWarn: boolean,
-): { ok: true } | { ok: false; reason: string } => {
-  if (ov.assessInFlight) return { ok: false, reason: 'brain already in flight (single-flight)' }
-  if (now - ov.lastBrainAt < config.brainMinIntervalMs)
-    return { ok: false, reason: `throttled (<${Math.round(config.brainMinIntervalMs / 60_000)}min since last)` }
-  const cap = brainDayCap(config, usageWarn)
-  if (ov.brainCallsToday >= cap) return { ok: false, reason: `day cap ${cap} reached` }
-  return { ok: true }
-}
 
 // ── T3 helper (raise to the inbox; idempotent on receiptKey — §8) ────────────────
 
@@ -600,7 +303,6 @@ const raiseToInbox = async (
      *  could not express was the only thing missing. Spread a
      *  {@link WorkerHandle}; do not pick one id out of it. */
     target?: WorkerHandle
-    proxyDraft?: OpenEscalationInput['proxyDraft']
   },
 ): Promise<boolean> => {
   try {
@@ -620,7 +322,6 @@ const raiseToInbox = async (
       ...(input.target?.runtime ? { runtime: input.target.runtime } : {}),
       ...(input.target?.terminalId ? { terminalId: input.target.terminalId } : {}),
       ...(input.target?.sdkSessionId ? { sdkSessionId: input.target.sdkSessionId } : {}),
-      ...(input.proxyDraft ? { proxyDraft: input.proxyDraft } : {}),
     })
     ov.lastEscalateAt = now
     return true
@@ -631,26 +332,18 @@ const raiseToInbox = async (
   }
 }
 
-// ── The pass (§5 D2 — engine tick 相乗り, never throws, NEVER awaits the brain) ──
+// The monitoring pass shares the engine tick and never throws into it.
 
 export interface OverseerOutcome {
   /** False when the pass short-circuited (disarmed) before observing. */
   ran: boolean
   /** Signal ids that fired an action this pass (for tests + the log). */
   fired: OverseerSignalId[]
-  /** True while a brain PTY is in flight after this pass (fire-and-forget). */
-  assessInFlight: boolean
   /** True while THROTTLED after this pass. */
   throttled: boolean
 }
 
-/** ONE overseer pass. No-op (ran:false) when disarmed. When armed: drains the brain
- *  mailbox from prior passes, evaluates the usage throttle, then walks the §6 signal
- *  table over already-computed state (anomalies / notified / the tick's `tasks`
- *  snapshot / worker heartbeats / cached usage), raising / asking / notifying on
- *  rising edges only. The brain is launched FIRE-AND-FORGET (never awaited — D2) so
- *  the 3s tick chain is never blocked. NEVER throws into the tick (fully guarded).
- *
+/** Observe cached state and heartbeats, raising questions and notices on edges.
  *  `tasks` is the tick's already-fetched Board snapshot (M3 — the overseer never does
  *  a 3rd full board read); null when THIS pass's board read failed (then task-derived
  *  signals S5/S7 skip, mirroring fireFatalNotifications). */
@@ -662,7 +355,7 @@ export const runOverseerPass = async (
   config: OverseerThresholds = OVERSEER_THRESHOLDS,
 ): Promise<OverseerOutcome> => {
   const ov = engine.overseer
-  if (!ov.enabled) return { ran: false, fired: [], assessInFlight: false, throttled: false } // OFF guard (D1)
+  if (!ov.enabled) return { ran: false, fired: [], throttled: false } // OFF guard (D1)
 
   const now = deps.now()
   const fired: OverseerSignalId[] = []
@@ -672,37 +365,7 @@ export const runOverseerPass = async (
   const activeWatch = new Set<string>()
 
   try {
-    rollDay(ov, now)
-
-    // WATCHDOG (defense-in-depth): a brain that outlives its own 5-min deadline + slack
-    // — e.g. a settle-path hang the runner's timeout didn't cover (a config read that
-    // never returns before runBrain, an aborted PTY that never emits 'exit') — must not
-    // pin the single-flight forever and SILENCE every future S4 (fail-to-silence). Force
-    // the abort + release so the next question can wake a fresh brain. lastBrainAt is the
-    // launch time; a live in-flight brain settles well within the deadline via its own
-    // finally, so this only ever fires on a genuine hang.
-    if (ov.assessInFlight && now - ov.lastBrainAt > config.brainTimeoutMs + config.brainStuckSlackMs) {
-      ov.brainAbort?.abort()
-      // A hung flight may NEVER settle — its .then/.finally never run, so no result
-      // will ever land in the mailbox, while its S4 `seen` fingerprint stays set and
-      // reads the SAME question as "already handled" forever (a silent drop, not just
-      // a stuck flight). Synthesize the null result HERE so this pass's drain below
-      // still routes the question to the owner (insufficient-info escalation). A
-      // LATE stale settle pushing a second result is harmless: the escalate side is
-      // receiptKey-idempotent, and a late real answer reaching the worker is a gain.
-      if (ov.brainInFlight) {
-        ov.brainResults.push({ ...ov.brainInFlight, answer: null })
-        ov.brainInFlight = undefined
-      }
-      ov.assessInFlight = false
-      ov.brainAbort = undefined
-      log('warn', 'overseer: brain exceeded timeout+slack — force-released the single-flight')
-    }
-
-    // 0. Drain the brain mailbox FIRST — route each prior fire-and-forget result.
-    await drainBrainResults(engine, ov, log, deps, now)
-
-    // 1. Usage throttle (S9) + warn (S8), from the CACHED % only (M8). Peek every
+    // 1. Usage limit notice (S9), from the CACHED % only (M8). Peek every
     //    pass; refresh (detached) at most once per sub-cycle when the cache misses.
     if (now - ov.lastUsageAt >= config.usagePollMs) {
       ov.lastUsageAt = now
@@ -713,7 +376,6 @@ export const runOverseerPass = async (
     }
     const pct = deps.peekUsagePct()
     const level = usageLevel(pct) // null/idle when unread — does NOT throttle (§5)
-    const usageWarn = level === 'warn'
     const nowThrottled = level === 'over'
     if (nowThrottled && !ov.throttled) {
       // S9 rising edge: one T3' info notice on ENTER. Recovery (<100) is silent.
@@ -721,11 +383,11 @@ export const runOverseerPass = async (
       await deps
         .notifyInfo({
           event: 'overseer-throttled',
-          detail: '監督が使用量上限(≥100%)で縮退中 — 判断系を止め、質問は素のまま受信箱へ直行します。',
+          detail: '使用量が上限に達しています。確認が必要な質問は引き続き受信箱に届きます。',
           projectPath: engine.path,
         })
         .catch(() => {})
-      log('warn', 'overseer: THROTTLED — usage at/over cap; brain paused, S4 degrades to a bare raise')
+      log('warn', 'overseer: usage at/over cap; owner questions remain available')
     }
     ov.throttled = nowThrottled
 
@@ -741,9 +403,8 @@ export const runOverseerPass = async (
     await detectStateAnomalies(engine, ov, log, deps, now, fired, activeSeen)
     if (doSubcycle) await detectEdgeFatals(engine, ov, log, deps, now, config, fired, activeSeen)
 
-    // 3. Worker free-text questions (S4) — the brain-ignition path (T1) or, when
-    //    THROTTLED, a bare raise (T3 direct).
-    await detectWorkerQuestions(engine, ov, log, deps, now, config, usageWarn, fired, activeSeen)
+    // 3. Questions always go directly to the owner, regardless of usage.
+    await detectWorkerQuestions(engine, ov, log, deps, now, fired, activeSeen)
 
     // 4. Dwell signals over the tick's task snapshot (S5 blocked / S7 review-idle).
     if (tasks) {
@@ -773,9 +434,6 @@ export const runOverseerPass = async (
     // that whole time EVERY 3s tick bailed on passInFlight: no monitor, so no
     // stall detection, no crash detection, no runaway clock, no quota sighting.
     // The engine went blind exactly while the overseer was meant to be watching.
-    // integrate (kickIntegratePass) and self-supply (kickSelfSupplyPass) were
-    // moved off the tick for this same reason; the janitor was the one left.
-    //
     // Fired and forgotten instead, with a synchronous in-flight guard so a later
     // tick cannot stack a second sweep on the same repo. `lastJanitorAt` is
     // stamped BEFORE the spawn (not after it completes) so the 15-minute cadence
@@ -794,8 +452,7 @@ export const runOverseerPass = async (
     }
 
     // Prune seen/watch for conditions no longer active — so a resolved condition drops
-    // its dedup and a genuine recurrence re-fires (§6). Never prune keys touched by an
-    // IN-FLIGHT brain (its signalKey stays in seen until the mailbox drains). Sub-cycle
+    // its dedup and a genuine recurrence re-fires (§6). Sub-cycle
     // detectors (S3/S10/S11) only re-register their keys on a sub-cycle pass, so their
     // keys are prunable ONLY when the sub-cycle actually ran this pass (doSubcycle).
     pruneTracking(ov, activeSeen, activeWatch, doSubcycle)
@@ -804,163 +461,10 @@ export const runOverseerPass = async (
     log('warn', `overseer: pass errored — ${errMsg(e)}`)
   }
 
-  return { ran: true, fired, assessInFlight: ov.assessInFlight, throttled: ov.throttled }
+  return { ran: true, fired, throttled: ov.throttled }
 }
 
-// ── Mailbox drain (route each fire-and-forget brain result — T1 inject / T3 raise) ──
-
-/** The worker HANDLE a mailbox entry addresses, rebuilt for the conduit. */
-const targetOf = (r: OverseerBrainResult): WorkerHandle => ({
-  ...(r.runtime ? { runtime: r.runtime } : {}),
-  ...(r.terminalId ? { terminalId: r.terminalId } : {}),
-  ...(r.sdkSessionId ? { sdkSessionId: r.sdkSessionId } : {}),
-})
-
-/** Deliver a proxy answer to the worker, on whatever runtime carries it.
- *
- *  ONE branch, in ONE place, and only because the injected PTY deps have no SDK
- *  counterpart to compose (see {@link OverseerDeps.deliverAnswer}). Never throws
- *  — a delivery failure must fall through to the inbox, not abort the drain. */
-const deliverProxyAnswer = async (
-  deps: OverseerDeps,
-  projectPath: string,
-  target: WorkerHandle,
-  text: string,
-): Promise<boolean> => {
-  if (deps.deliverAnswer) return deps.deliverAnswer(target, projectPath, text).catch(() => false)
-  if (workerRuntimeKind(target) === 'sdk') {
-    return deliverAnswerToWorker(target, projectPath, text).catch(() => false)
-  }
-  const id = target.terminalId
-  if (!id) return false
-  if (!(await deps.canInjectInto(id, projectPath).catch(() => false))) return false
-  return deps.injectAnswer(id, text).catch(() => false)
-}
-
-const drainBrainResults = async (
-  engine: OverseerEngine,
-  ov: OverseerRuntime,
-  log: OverseerLog,
-  deps: OverseerDeps,
-  now: number,
-): Promise<void> => {
-  if (ov.brainResults.length === 0) return
-  const results = ov.brainResults.splice(0, ov.brainResults.length)
-  // Re-queue a result whose inbox write FAILED so the next pass retries it —
-  // raiseToInbox's false is "transient, try again", and this drain used to throw
-  // that away along with the question (see MAX_BRAIN_ROUTE_ATTEMPTS). Bounded,
-  // and the give-up says so out loud.
-  const requeue = (r: OverseerBrainResult, what: string): void => {
-    const attempts = (r.routeAttempts ?? 0) + 1
-    if (attempts >= MAX_BRAIN_ROUTE_ATTEMPTS) {
-      log(
-        'warn',
-        `overseer: GIVING UP on ${what} after ${attempts} failed inbox writes — the question is lost: ${shorten(r.question)}`,
-      )
-      return
-    }
-    ov.brainResults.push({ ...r, routeAttempts: attempts })
-    log('warn', `overseer: inbox write failed for ${what} (attempt ${attempts}) — re-queued for the next pass`)
-  }
-  for (const r of results) {
-    const ans = r.answer
-    // A confident, reversible, grounded answer → inject it into the LIVE worker (T1).
-    // NOT written to you-corpus (only the OWNER's answer is — §8 invariant 6).
-    if (ans && ans.kind === 'answer') {
-      const ok = await deliverProxyAnswer(
-        deps,
-        engine.path,
-        targetOf(r),
-        buildAnswerInjection(r.question, ans.text),
-      )
-      if (ok) {
-        log('info', `overseer: proxy answered a worker question (${ans.confidence}) — injected: ${shorten(r.question)}`)
-        continue
-      }
-      // Worker gone / injection failed → fall through to the inbox so the answer isn't
-      // lost (the owner can re-deliver it; it rides the next-dispatch conduit via C1).
-      const raised = await raiseToInbox(deps, now, ov, {
-        projectPath: engine.path,
-        question: r.question,
-        context: `${r.context}\n\n(proxy が回答済みだが worker への配達に失敗 — 本人が届け直してください。)`,
-        whyEscalated: 'insufficient-info',
-        receiptKey: defaultReceiptKey({ projectPath: engine.path, taskId: r.taskId, question: r.question }),
-        taskId: r.taskId,
-        branch: r.branch,
-        // The SAME handle `deliverProxyAnswer` just tried, not the id it happens
-        // to carry: this record exists BECAUSE delivery failed, so it is the
-        // owner's only remaining route back to that exact worker.
-        target: targetOf(r),
-        proxyDraft: { answer: ans.text, confidence: ans.confidence, isAbstention: false },
-      })
-      if (!raised) {
-        requeue(r, 'an undeliverable proxy answer')
-        continue
-      }
-      log('warn', `overseer: proxy answer could not be injected — raised to the inbox: ${shorten(r.question)}`)
-      continue
-    }
-
-    // Escalate (irreversible / insufficient-info / no answer) → the inbox (T3), with
-    // the proxy's draft when it produced one (abstention flag set for calibrated "thin").
-    const why = ans && ans.kind === 'escalate' ? ans.why : 'insufficient-info'
-    const reason = ans && ans.kind === 'escalate' ? ans.reason : 'proxy brain produced no answer'
-    // UNCLASSIFIED lane (2026-07-18 owner design): the brain READ the corpus and
-    // judged it doesn't ground this — i.e. the area is not on the owner's
-    // 「関与の観測地図」. Rather than forwarding a question the owner may not even
-    // want to own, lead with the ONE routing question ("is this yours to decide?");
-    // their answer flows to you-corpus through the existing answer path and grows
-    // the map.
-    //
-    // GATED ON `abstained`, NOT ON `why` — load-bearing. 'insufficient-info' is
-    // ALSO what the FAILURE paths report: brain crash/timeout (incl. every model
-    // tier off / quota park), an unparseable verdict, and the watchdog's synthesized
-    // null result above. On those the corpus was never consulted, so the routing
-    // question would (a) assert a finding nobody made and promise a silence
-    // (「次から…なるべく止めないようにします」) the failure lane cannot honour, and worse
-    // (b) invite blanket delegation ("まかせる") for a question whose
-    // REVERSIBILITY nothing has judged — the keyword pre-gate is best-effort by
-    // design, so a paraphrased irreversible action is caught only by the brain's own
-    // ESCALATE, which is exactly what is missing when the brain is down. Those raise
-    // bare, keeping the worker's own question as the owner's primary text.
-    // 'irreversible'/'policy' are not wrapped either: both are already correctly
-    // addressed, so asking who owns them would be noise.
-    // ONE source for both surfaces below. `why` cannot stand in for either: it is
-    // 'insufficient-info' on the failure paths too (see the note above).
-    const abstained = ans?.kind === 'escalate' && !!ans.abstained
-    const plainQuestion = abstained
-      ? buildUnclassifiedRoutingPlainQuestion(r.question)
-      : undefined
-    const escalated = await raiseToInbox(deps, now, ov, {
-      projectPath: engine.path,
-      question: r.question,
-      context: `${r.context}\n\n(監督の proxy 判断: ${reason})`,
-      ...(plainQuestion ? { plainQuestion } : {}),
-      whyEscalated: why,
-      receiptKey: defaultReceiptKey({ projectPath: engine.path, taskId: r.taskId, question: r.question }),
-      taskId: r.taskId,
-      branch: r.branch,
-      // Whole handle — the owner's answer to THIS record is delivered through
-      // the record's persisted address (swarmEscalations.deliverAnswer).
-      target: targetOf(r),
-      // Same `abstained` gate, for the same reason the plainQuestion uses it: keyed
-      // on `why` this read TRUE for a crashed / unparseable / timed-out brain, so the
-      // UI labelled a FAILURE as a considered abstention ("コーパスが薄い") and swapped
-      // the real reason for that generic line. Keyed on `abstained`, a failure now
-      // renders its own `reason` — "proxy brain failed: …" — which is the truth and
-      // the thing the owner needs to act on. (Pre-existing on origin/main; the
-      // `abstained` flag this branch added is what makes the fix a one-liner.)
-      proxyDraft: { answer: reason, confidence: 'low', isAbstention: abstained },
-    })
-    if (!escalated) {
-      requeue(r, 'an escalated worker question')
-      continue
-    }
-    log('info', `overseer: proxy escalated a worker question (${why}) → inbox: ${shorten(r.question)}`)
-  }
-}
-
-// ── S4 — worker free-text questions (the brain-ignition path) ────────────────────
+// S4: worker questions go directly to the owner.
 
 const detectWorkerQuestions = async (
   engine: OverseerEngine,
@@ -968,8 +472,6 @@ const detectWorkerQuestions = async (
   log: OverseerLog,
   deps: OverseerDeps,
   now: number,
-  config: OverseerThresholds,
-  usageWarn: boolean,
   fired: OverseerSignalId[],
   activeSeen: Set<string>,
 ): Promise<void> => {
@@ -984,12 +486,7 @@ const detectWorkerQuestions = async (
     // EMPTY STRING (pty ⇔ terminalId, sdk ⇔ sdkSessionId), so `S4:${terminalId}`
     // gave the WHOLE SDK FLEET one shared slot in `seen` — and a dedup map with
     // one slot per fleet dedups nothing. Two blocked workers overwrite each
-    // other's fingerprint on every pass, so both questions re-fire on every pass:
-    // in the brain lane that re-charges the 大脳's 24/day cap and lets the two
-    // steal the single-flight from each other indefinitely (a THIRD blocked
-    // worker is never reached), and in the THROTTLED lane it re-raises both
-    // questions every tick. The receiptKey keeps the inbox itself from growing,
-    // which is exactly why nothing about this is visible from the owner's side.
+    // other's fingerprint on every pass, so both questions re-fire on every pass.
     // The engine's other per-worker maps (nudges, rateLimited, questionWaits…)
     // moved to workerKey for this reason; this table did not follow.
     //
@@ -1010,93 +507,21 @@ const detectWorkerQuestions = async (
 
     const context = `worker ${w.branch}（${w.taskTitle}）が blocked で自分では判断できない質問を心拍に記録。`
 
-    // THROTTLED (S9): the brain is paused — send the BARE question straight to the
-    // inbox (proxyDraft-less). The枠-starved moment is when a human is MOST needed;
-    // don't leave a silent gap (§5 / §6 S4).
-    if (ov.throttled) {
-      const ok = await raiseToInbox(deps, now, ov, {
-        projectPath: engine.path,
-        question: blockerText,
-        context: `${context}\n\n(監督が使用量上限で縮退中のため proxy 判断を経由せず直行。)`,
-        whyEscalated: 'policy',
-        receiptKey: fp,
-        taskId: w.taskId,
-        branch: w.branch,
-        // The roster worker IS a WorkerHandle — hand it over whole. This lane is
-        // the S9-degraded one, i.e. the moment the owner is MOST needed, and it
-        // used to pass `w.terminalId` (empty for every SDK worker), so the bare
-        // question landed in the inbox with nowhere to send the reply.
-        target: w,
-      })
-      if (ok) {
-        ov.seen.set(signalKey, fp)
-        fired.push('S4')
-        log('warn', `overseer: S4 (THROTTLED) — bare question → inbox: ${w.branch} (${shorten(blockerText)})`)
-      }
-      continue
-    }
-
-    // Normal: the budgeted, single-flight, fire-and-forget brain (T1).
-    const budget = brainBudget(ov, now, config, usageWarn)
-    if (!budget.ok) {
-      log('info', `overseer: S4 skipped — ${budget.reason}: ${w.branch} (${shorten(blockerText)})`)
-      continue // NOT marked seen → re-evaluated next pass when budget frees
-    }
-
-    // Mark seen + charge the budget NOW so a slow brain doesn't relaunch next pass.
-    ov.seen.set(signalKey, fp)
-    ov.assessInFlight = true
-    ov.lastBrainAt = now
-    ov.brainCallsToday += 1
-    fired.push('S4')
-    const controller = new AbortController()
-    ov.brainAbort = controller
-    // The WHOLE handle rides to the mailbox — the drain has to be able to address
-    // this worker on its own runtime hours later (see OverseerBrainResult).
-    const coords = {
+    const ok = await raiseToInbox(deps, now, ov, {
+      projectPath: engine.path,
+      question: blockerText,
+      context,
+      whyEscalated: 'policy',
+      receiptKey: fp,
       taskId: w.taskId,
       branch: w.branch,
-      ...(w.runtime ? { runtime: w.runtime } : {}),
-      ...(w.terminalId ? { terminalId: w.terminalId } : {}),
-      ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
+      target: w,
+    })
+    if (ok) {
+      ov.seen.set(signalKey, fp)
+      fired.push('S4')
+      log('info', `overseer: S4 question → owner inbox: ${w.branch} (${shorten(blockerText)})`)
     }
-    // Park the mailbox coordinates for the watchdog: only IT can deliver this
-    // question if the flight never settles (see the force-release above).
-    ov.brainInFlight = { signalKey, question: blockerText, context, ...coords }
-    log('info', `overseer: S4 → waking the proxy brain for a worker question: ${w.branch} (${shorten(blockerText)})`)
-    // FIRE-AND-FORGET (D2): NEVER awaited. The result lands in the mailbox for the
-    // next pass to route. answerAsOwner never throws, but guard the chain anyway.
-    void deps
-      .answerAsOwner({ question: blockerText, context, projectPath: engine.path }, controller.signal)
-      .then((answer) => {
-        ov.brainResults.push({ signalKey, question: blockerText, context, answer, ...coords })
-      })
-      .catch((e) => {
-        ov.brainResults.push({
-          signalKey,
-          question: blockerText,
-          context,
-          answer: null,
-          ...coords,
-        })
-        log('warn', `overseer: proxy brain chain errored — ${errMsg(e)}`)
-      })
-      .finally(() => {
-        // Release the single-flight ONLY while this flight still owns it. After a
-        // watchdog force-release a NEW brain may already be in flight (a fresh
-        // controller): this STALE settle must not clobber its assessInFlight /
-        // brainAbort — that would both let a THIRD brain launch (double budget)
-        // and orphan the new brain's abort handle. The owner-OFF teardown only
-        // calls brainAbort.abort() (never reassigns it), so ownership still reads
-        // true there and the normal release proceeds.
-        if (ov.brainAbort === controller) {
-          ov.assessInFlight = false
-          ov.brainAbort = undefined
-          ov.brainInFlight = undefined
-        }
-      })
-    // ONE brain per pass (single-flight) — stop scanning; other blocked workers wait.
-    return
   }
 }
 
@@ -1500,8 +925,6 @@ const pruneTracking = (
   subcycleRan: boolean,
 ): void => {
   for (const k of Array.from(ov.seen.keys())) {
-    // Keep an in-flight brain's S4 key until the mailbox drains it (its worker may
-    // not read as blocked between the raise and the answer landing).
     if (activeSeen.has(k)) continue
     // Sub-cycle keys survive a pass whose sub-cycle detectors never ran — only a
     // pass that actually re-evaluated them may conclude the condition resolved.

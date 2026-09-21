@@ -40,9 +40,6 @@ const baseProps = {
   busy: false,
   error: null,
   onToggleOverseer: () => {},
-  sandboxWarning: false,
-  runtimeDials: null,
-  onToggleRuntime: () => {},
 }
 
 const landedWith = (weeks: SwarmLandedKpi['weeks']): SwarmLandedKpi => ({

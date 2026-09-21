@@ -4,7 +4,7 @@
 // from manualContent.tsx (the bilingual source of truth). Language follows the
 // app-wide toggle (useT), with its own EN/JA switch in the header for quick
 // flipping while reading.
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CornerDownRight } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
@@ -41,9 +41,10 @@ const NOTE_TONES = {
   warn: { bar: 'border-ochre/50', bg: 'bg-ochre-soft/50', tag: 'text-ochre', label: { en: 'Heads-up', ja: '注意' } },
 } as const
 
-export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => void }): JSX.Element | null {
+export function ManualPanel({ open, onClose, ownerFeatures = false }: { open: boolean; onClose: () => void; ownerFeatures?: boolean }): JSX.Element | null {
   const { lang, setLang } = useT()
   const L = useCallback((b: Bi) => b[lang], [lang])
+  const sections = useMemo(() => MANUAL_SECTIONS.filter(s => !s.ownerOnly || ownerFeatures), [ownerFeatures])
 
   const [active, setActive] = useState(MANUAL_SECTIONS[0].id)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -64,12 +65,12 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
     if (!sc) return
     const top = sc.scrollTop
     let cur = MANUAL_SECTIONS[0].id
-    for (const s of MANUAL_SECTIONS) {
+    for (const s of sections) {
       const el = secRefs.current[s.id]
       if (el && el.offsetTop - 96 <= top) cur = s.id
     }
     setActive(cur)
-  }, [])
+  }, [sections])
 
   const go = useCallback((id: string) => {
     const el = secRefs.current[id]
@@ -236,7 +237,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
       <div className="flex min-h-0 flex-1">
         {/* Table of contents */}
         <nav className="no-scrollbar hidden w-[236px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-line p-3 md:flex">
-          {MANUAL_SECTIONS.map((s) => {
+          {sections.map((s) => {
             const on = active === s.id
             return (
               <button
@@ -259,7 +260,7 @@ export function ManualPanel({ open, onClose }: { open: boolean; onClose: () => v
         {/* Content */}
         <div ref={scrollRef} onScroll={onScroll} className="relative min-w-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[760px] px-6 py-10 md:px-12">
-            {MANUAL_SECTIONS.map(renderSection)}
+            {sections.map(renderSection)}
             <footer className="mt-2 flex items-center gap-1.5 border-t border-line-soft pt-6 text-meta text-ink-faint">
               <CornerDownRight size={12} strokeWidth={1.75} className="shrink-0" />
               <span>
@@ -301,7 +302,7 @@ function LayersDiagram({ lang }: { lang: 'en' | 'ja' }): JSX.Element {
       <div>
         <div className="label-cap mb-2 text-ink-faint">{lang === 'ja' ? 'レイヤー2 · プロジェクト' : 'Layer 2 · the project'}</div>
         <div className="flex flex-wrap gap-2">
-          {['Board', 'Canvas', 'Terminal'].map((t) => (
+          {['Board', 'Terminal', 'Swarm'].map((t) => (
             <div key={t} className="rounded-[2px] border border-line bg-bg-card px-3 py-1.5 text-ui text-ink shadow-card">
               {t}
             </div>

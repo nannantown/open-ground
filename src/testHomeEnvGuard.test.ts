@@ -1323,32 +1323,15 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'read-only',
     why: 'the PreToolUse guard: COMPARES paths against ~/.claude containers to allow/deny. Plain JS run by Claude Code out of ~/.openground/guard/, structurally unable to import the fence — same limit as electron/lockdown.js in the sweep above',
   },
-  // ── read-only, PROSE (they name the path to the owner, and touch nothing) ──
-  // Not a loophole: the machine claim on this tier is "zero fs-mutation calls in
-  // the file", which is what makes it checkable, and these two satisfy it by a
-  // wide margin — one is a string catalogue, the other pins that catalogue.
-  // Declaring them is also the point of the sentence they carry: the persona
-  // privacy note has to SAY that a conversation records its working folder as
-  // trusted in ~/.claude.json, because it does, and a disclosure that quietly
-  // dropped the path to avoid tripping a guard would be the guard causing the
-  // lie it exists to prevent.
-  'src/i18n/messages/persona.ts': {
-    tier: 'read-only',
-    why: "owner-facing copy: the persona privacy note names ~/.claude.json as somewhere a conversation leaves a trusted-folder record. A string catalogue — no fs of any kind, read or write",
-  },
-  'src/components/canvas/modules/PersonaConversation.test.tsx': {
-    tier: 'read-only',
-    why: 'pins that privacy copy word-for-word (softening it has to be a red test, not a review finding), so it quotes the same path. Renders components in jsdom; touches no filesystem',
-  },
 
   // ── writes-elsewhere ──
+  'e2e/fixtures/manager-claude.mjs': {
+    tier: 'writes-elsewhere',
+    why: 'Offline SDK CLI fixture: the caller pins HOME and capture to mkdtemp directories, and the fixture rejects canonical paths outside temporary roots before writing transcripts or captures.',
+  },
   'src/testHomeEnvGuard.test.ts': {
     tier: 'writes-elsewhere',
     why: "this scanner: quotes ~/.claude paths in the table above and in its own prose, and reads sources to check them. Its ONLY mutations are the repo-root listing fence's teeth — a mkdtemp under REPO_PROBE_PREFIX at the repo root, removed in a finally — so nothing it writes is under any home. Declared rather than exempted: the raw-write rule runs on this tier too, so it still cannot grow a write aimed at the real Claude home",
-  },
-  'src/lib/server/youCorpus.ts': {
-    tier: 'writes-elsewhere',
-    why: 'autoMemoryDirFor() is pure path computation, read at every call site; its one mutation (the .corrupt rename) is on the corpus file under openGroundHome(), i.e. behind the choke point',
   },
   'scripts/sandbox-probe.ts': {
     tier: 'writes-elsewhere',
@@ -1390,17 +1373,9 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'writes-elsewhere',
     why: 'pins $HOME (og-claude-home temp) + CLAUDE_CONFIG_PATH (<og-orch-home>/.claude.json temp) to test the manager subagent-activity mtime signal (card 7517e4b1); every write lands under a mkdtemp temp, never the real ~/.claude',
   },
-  'src/lib/server/youCorpus.test.ts': {
-    tier: 'writes-elsewhere',
-    why: 'builds auto-memory fixtures under a fakeHome',
-  },
   'server/routes/__tests__/projectSkills.test.ts': {
     tier: 'writes-elsewhere',
     why: 'seeds SKILL.md fixtures under a fakeHome for the global-skills route',
-  },
-  'src/lib/server/swarmLensReview.test.ts': {
-    tier: 'writes-elsewhere',
-    why: 'pins CLAUDE_CONFIG_PATH at <tmp>/.claude.json so the lens panel cannot reach the real OAuth file — one of the four files the 2026-07-19 claudeTrust fence caught red-handed (§3)',
   },
   'playwright.config.ts': {
     tier: 'writes-elsewhere',
@@ -1426,10 +1401,6 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
   'src/components/canvas/Toolbar.tsx': {
     tier: 'read-only',
     why: 'JSX comment naming ~/.claude/skills next to the button that opens the global-skills panel',
-  },
-  'src/components/canvas/ProjectPanel.tsx': {
-    tier: 'read-only',
-    why: 'JSX comment naming the project-local .claude/skills/ next to the same button',
   },
   'src/components/canvas/manual/manualContent.tsx': {
     tier: 'read-only',
@@ -1961,7 +1932,7 @@ describe("repo guard — every ~/.claude anchor is declared and its claim still 
     // The one that mattered most: the first cut demanded mutation and home on a
     // single line, and this repo wraps long calls 42 times over. Merely letting
     // the formatter do its job walked straight past the guard.
-    const rel = 'src/lib/server/youCorpus.ts'
+    const rel = 'src/lib/server/swarmOrchestrator.ts'
     const p = claudeAnchorProblems([
       {
         rel,

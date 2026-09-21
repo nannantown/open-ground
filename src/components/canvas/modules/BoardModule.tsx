@@ -9,6 +9,7 @@ import { buildReviewPrompt } from '@/lib/reviewPrompt'
 import {
   CLAUDE_EFFORTS,
   TASK_PRIORITIES,
+  TASK_TIERS,
   type ActiveTerminalsResponse,
   type BoardColumn,
   type ClaudeBeaconStatus,
@@ -47,6 +48,7 @@ import { engineWorkerKey } from './useSwarmEngine'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
 import { dependencyCandidates, dependencyCycleIds } from '@/lib/boardDeps'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
+import { cardTierSource, resolveCardTier } from '@/lib/cardTier'
 
 /** Result of a task-terminal launch attempt (ProjectPanel.launchTaskTerminal).
  *  `reason` is set only on failure: 'claudeMissing' = the `claude` CLI isn't
@@ -883,6 +885,11 @@ export const BoardModule = ({
     //
     // The terminal path stays for swarm-OFF: without a commander to integrate,
     // "merge it back yourself" is the only flow that finishes.
+    //
+    // ⚠ So on this arm the card's run.model / run.effort are NOT used: the
+    // worker's model comes from the execution mode + the card's difficulty
+    // `tier` (swarmLaunch.ts TIER_MODEL_EFFORT). The drawer's Model/Effort
+    // selects only take effect with the swarm OFF.
     if (swarmVisible) {
       void dispatchAsWorker(task, runTitle, content)
       return
@@ -923,7 +930,8 @@ export const BoardModule = ({
       const res = await fetch('/api/swarm/worker', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path: project.path, taskId: task.id, title, notes }),
+        // Null clears a previous override even before the autosave reaches disk.
+        body: JSON.stringify({ path: project.path, taskId: task.id, title, notes, tier: task.tier ?? null }),
       })
       if (res.ok || res.status === 409) return
       const body = (await res.json().catch(() => ({}))) as {
@@ -1806,6 +1814,61 @@ export const BoardModule = ({
           })}
         </div>
       </div>
+      {/* Difficulty tier (2026-09-18) — how capable a swarm worker this card
+          gets in Optimize mode. The supply officer writes it after reading the
+          code; the owner can override it here. 「自動」 = no tier stored (the
+          server's keyword estimator decides). Model names are deliberately NOT
+          shown: the tier → model table lives server-side in one place
+          (swarmLaunch.ts TIER_MODEL_EFFORT) and changes with the roster. A
+          safety-sensitive card never runs below 設計, whatever is picked here —
+          the hint says so. Selected = fill + contrasting text together
+          (ui-interactive-states); hover / active / focus-visible / disabled as
+          the priority pills above. */}
+      {swarmVisible && (
+      <div className="shrink-0">
+        <label
+          className="mb-1 block label-cap text-ink-faint"
+          title={t('board.detail.tierHint')}
+        >
+          {t('board.detail.tierLabel')}
+        </label>
+        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label={t('board.detail.tierLabel')}>
+          {([undefined, ...TASK_TIERS] as const).map(tier => {
+            const active = task.tier === tier
+            return (
+              <button
+                key={tier ?? 'auto'}
+                type="button"
+                aria-pressed={active}
+                title={t(tier ? `board.detail.tier.${tier}.hint` : 'board.detail.tier.auto.hint')}
+                onClick={() => patchTask(task, { tier })}
+                className={[
+                  'shrink-0 rounded-sm border px-2.5 py-1 text-meta transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40',
+                  active
+                    ? 'border-ink-muted bg-ink-muted text-bg-card hover:border-ink hover:bg-ink active:bg-ink'
+                    : 'border-line text-ink-muted hover:bg-plane hover:text-ink active:bg-plane active:text-ink',
+                ].join(' ')}
+              >
+                {t(tier ? `board.detail.tier.${tier}` : 'board.detail.tier.auto')}
+              </button>
+            )
+          })}
+        </div>
+        {/* What the card will ACTUALLY run at — the same resolveCardTier the
+            engine uses (src/lib/cardTier.ts), so a 軽微 pick on an auth card
+            says it runs as 設計, and 自動 says what it resolves to. */}
+        {(() => {
+          const source = cardTierSource(task)
+          if (!source) return null
+          const label = t(`board.detail.tier.${resolveCardTier(task)}`)
+          return (
+            <p className="mt-1 text-meta text-ink-muted" aria-live="polite">
+              {t(source === 'floored' ? 'board.detail.tierFloored' : 'board.detail.tierEstimated', { tier: label })}
+            </p>
+          )
+        })()}
+      </div>
+      )}
         </div>
       )}
     </>
@@ -2142,6 +2205,7 @@ export const BoardModule = ({
             onCreateTask={handleCreateTask}
             projectMissing={project.missing}
             hasGit={project.hasGit}
+            showRunDefaults={!swarmVisible}
             projectId={project.id}
             // Merged-branch detection (B018): the poll needs the project path.
             projectPath={project.path}

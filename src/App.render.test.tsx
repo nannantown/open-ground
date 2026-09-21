@@ -20,7 +20,7 @@ import App from './App'
 import { I18nProvider } from '@/i18n/I18nContext'
 import { AuthProvider } from '@/lib/auth/AuthContext'
 import { RealtimeProvider } from '@/lib/collab/RealtimeContext'
-import type { GroundLampRow, ProjectMeta } from '@/lib/types'
+import type { GroundLampRow, ProjectMeta, ProjectData } from '@/lib/types'
 
 // InfiniteCanvas observes its viewport with a ResizeObserver — absent in jsdom.
 class ROStub {
@@ -63,6 +63,8 @@ const urlOf = (input: unknown): string =>
 
 interface MockOpts {
   projects?: ProjectMeta[]
+  projectData?: ProjectData
+  feedbackEnabled?: boolean
   aiActiveJobs?: number
   /** Non-2xx status for POST /api/settings, to exercise the save-failure path. */
   settingsPostStatus?: number
@@ -90,6 +92,8 @@ function installFetch(opts: MockOpts = {}) {
     if (url.includes('/api/settings')) return reply(200, { ...SETTINGS, suggestedDisplayName: null })
     if (url.includes('/api/projects'))
       return reply(200, { settings: SETTINGS, projects, canvas: EMPTY_CANVAS })
+    if (url.includes('/api/project?') && opts.projectData) return reply(200, opts.projectData)
+    if (url.includes('/api/feedback/config')) return reply(200, { enabled: !!opts.feedbackEnabled })
     if (url.includes('/api/experiments'))
       return reply(
         200,
@@ -103,7 +107,7 @@ function installFetch(opts: MockOpts = {}) {
     if (url.includes('/api/ground/lamps')) return reply(200, { lamps: opts.lamps ?? [] })
     if (url.includes('/api/auth/session')) return reply(503, {}) // signed-out (default build)
     if (url.includes('/api/collab/config')) return reply(200, { enabled: false })
-    // Everything else (feedback/config, module-submissions, notifications,
+    // Everything else (feedback/config, notifications,
     // auth/config, usage, …) reads optionally — an empty object collapses to
     // the default (disabled) build, which is what we render here.
     return reply(200, {})
@@ -135,6 +139,59 @@ afterEach(() => {
 })
 
 describe('App — whole-render integration', () => {
+  it('keeps the generated language pair visible on Ground after a project refresh', async () => {
+    vi.useFakeTimers()
+    try {
+      const summary = 'A retained bilingual project description'
+      const opts: MockOpts = {
+        projects: [projectMeta({ description: summary })],
+        projectData: { description: '', descriptionEn: summary, tasks: [], notes: '', updatedAt: '2026-09-21T00:00:00.000Z' },
+      }
+      installFetch(opts)
+      localStorage.setItem('openground:onboarded', '1')
+      localStorage.setItem('openground.view', JSON.stringify({ projectId: 'id', panelTab: 'board' }))
+      await act(async () => { renderApp() })
+      expect(screen.getAllByText(summary)).toHaveLength(2)
+      opts.projectData = { ...opts.projectData!, notes: 'External edit', updatedAt: '2026-09-21T00:00:01.000Z' }
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      expect(screen.getAllByText(summary)).toHaveLength(2)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('keeps feedback on Ground without duplicating its entry in Settings', async () => {
+    installFetch({ feedbackEnabled: true })
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp() })
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(screen.queryByRole('button', { name: 'Send feedback' })).toBeNull()
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Settings' })).getByRole('button', { name: 'Close' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Feedback' }))
+    expect(screen.getByRole('dialog', { name: 'Send feedback' })).toBeTruthy()
+  })
+  it('lets the owner preview public surfaces without saving settings or changing their role', async () => {
+    const fetchMock = installFetch({ experiments: { eligible: true, flags: { swarm: true, sandbox: true } } })
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp() })
+    expect(screen.getByRole('button', { name: 'Skills' })).toBeTruthy()
+    const writes = () => fetchMock.mock.calls.filter(([input, init]) => methodOf(input, init) !== 'GET')
+    const before = writes().length
+    fireEvent.click(screen.getByRole('button', { name: 'Public view' }))
+    expect(screen.queryByRole('button', { name: 'Skills' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(screen.queryByText('WordPress', { exact: true })).toBeNull()
+    expect(writes()).toHaveLength(before)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.click(screen.getByRole('button', { name: 'Owner view' }))
+    expect(screen.getByRole('button', { name: 'Skills' })).toBeTruthy()
+    expect(writes()).toHaveLength(before)
+  })
+
+  it('never exposes the preview switch or global skills to a public user', async () => {
+    installFetch()
+    await act(async () => { renderApp() })
+    expect(screen.queryByRole('button', { name: 'Public view' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Skills' })).toBeNull()
+  })
   it('mounts the full provider tree and shows the first-run empty state when no projects exist', async () => {
     installFetch({ projects: [] })
     await act(async () => {
@@ -271,118 +328,29 @@ describe('App — whole-render integration', () => {
   })
 })
 
-// ─── The Ground Persona entry (2026-08-14) ──────────────────────────────────
-//
-// The Persona surface is about the OWNER, not a repo (its notes live in
-// ~/.openground/ and are identical on every project), so it left the per-project
-// tab row for the Ground toolbar beside Settings / Manual / Skills. It stays
-// owner-only and hidden: App passes `onOpenPersona` ONLY when the persona
-// experiment (its own flag) is open, and an undefined handler is what makes the
-// Toolbar render nothing at all. (Until 2026-08-20 a swarm flag also opened it;
-// persona is now its own beta and that coupling was dropped — see gate.ts.)
-//
-// Asserted through the WHOLE app rather than the Toolbar in isolation, because
-// what has to hold is the wiring: /api/experiments → useExperiments →
-// isPersonaOpen → the prop → a button that actually opens the panel. A Toolbar
-// unit test cannot tell a closed gate from a forgotten prop.
-const gateFlags = (open: Partial<Record<string, boolean>> = {}) => ({
-  eligible: true,
-  flags: { swarm: false, sandbox: false, persona: false, ...open },
+describe('App - retired Persona', () => {
+  it('keeps Persona absent even when an old experiment response enables it', async () => {
+    installFetch({ projects: [], experiments: { eligible: true, flags: { swarm: true, sandbox: true, persona: true } } })
+    await act(async () => { renderApp() })
+    await screen.findByText('Begin your atlas.')
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Persona' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })) })
+    await screen.findByRole('textbox', { name: 'Display name' })
+    expect(screen.queryByText('Persona', { exact: false })).not.toBeInTheDocument()
+  })
 })
 
-describe('App — Ground Persona entry gate', () => {
-  it('draws NO persona entry on the default build (every experiment closed)', async () => {
-    installFetch({ projects: [] })
-    await act(async () => {
-      renderApp()
-    })
+describe('App - retired tab submissions', () => {
+  it('does not load or poll the removed review queue', async () => {
+    const calls = installFetch()
+    await act(async () => { renderApp() })
     await screen.findByText('Begin your atlas.')
-    // Anchor on a control that IS always there, so "nothing found" cannot be a
-    // toolbar that failed to render at all.
-    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Persona' })).not.toBeInTheDocument()
-    expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
-  })
-
-  it('draws the entry when the persona experiment is open, and it opens the panel', async () => {
-    installFetch({ projects: [], experiments: gateFlags({ persona: true }) })
-    await act(async () => {
-      renderApp()
-    })
-    const entry = await screen.findByRole('button', { name: 'Persona' })
-    // Closed until asked for — the toolbar entry is a door, not a panel.
-    expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
-    await act(async () => {
-      fireEvent.click(entry)
-    })
-    const panel = await screen.findByTestId('persona-panel')
-    // Full-bleed, but it keeps a Ground panel's explicit way out — and since
-    // 2026-08-15 that way out is the SHARED one every other panel uses (owner:
-    // 「戻るボタンも他の画面と共通化して踏襲させて」), top-left, not a Close in
-    // the corner. Pinned by name so a silent revert to a bespoke control here
-    // fails rather than merely looking different.
-    const back = within(panel).getByRole('button', { name: 'Back to Ground' })
-    expect(back).toBeInTheDocument()
-    // ⚠ AND IT LOOKS LIKE THE OTHER ONES. Sharing the component was not enough:
-    // it sat inside a bordered, shadowed chip here and bare everywhere else, so
-    // it still read as a different control (owner, 2026-08-16: 「groundに戻るの
-    // デザインも他のところと違うよね なぜ同じにしない?」). The chip existed to fix a
-    // real contrast problem — `ink-muted` is ~1.5:1 on the non-inverting stage —
-    // which is now fixed in the INK (`tone="onDeep"`) where it belongs. Both
-    // halves are pinned, because dropping the chip without the tone swap trades
-    // a visible inconsistency for an invisible one.
-    expect((back.parentElement as HTMLElement).className).not.toMatch(
-      /\bborder\b|\bbg-bg-card\b|\bshadow-card\b/,
-    )
-    expect(back.className).toMatch(/text-ink-onDeep/)
-    expect(back.className).not.toMatch(/text-ink-muted/)
-    await act(async () => {
-      fireEvent.click(back)
-    })
-    expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
-  })
-
-  it('Escape closes the panel — the other affordance every Ground panel has', async () => {
-    // Asserted on the DOM, not on the wiring: the surface is edge-to-edge with a
-    // canvas that takes its own pointer/keyboard gestures, so "the shared Overlay
-    // handles Esc" is exactly the kind of claim that is true right up until a
-    // child swallows the key.
-    installFetch({ projects: [], experiments: gateFlags({ persona: true }) })
-    await act(async () => {
-      renderApp()
-    })
-    await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'Persona' }))
-    })
-    await screen.findByTestId('persona-panel')
-    await act(async () => {
-      fireEvent.keyDown(window, { key: 'Escape' })
-    })
-    expect(screen.queryByTestId('persona-panel')).not.toBeInTheDocument()
-  })
-
-  it('⚠ does NOT draw the entry for a swarm-only account (the 0.11.94 leak, fixed)', async () => {
-    // Persona was promoted to its own beta (2026-08-20): the swarm↔persona
-    // any-of gate was dropped, so a `flags.swarm` account no longer sees the
-    // personal-corpus screen. The owner's own "swarm on ⇒ persona visible"
-    // coupling now lives server-side in flags.persona, so it never reaches the
-    // client as a bare swarm flag.
-    installFetch({ projects: [], experiments: gateFlags({ swarm: true }) })
-    await act(async () => {
-      renderApp()
-    })
-    await screen.findByText('Begin your atlas.')
-    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Persona' })).not.toBeInTheDocument()
-  })
-
-  it('stays hidden when only an unrelated experiment is open', async () => {
-    installFetch({ projects: [], experiments: gateFlags({ sandbox: true }) })
-    await act(async () => {
-      renderApp()
-    })
-    await screen.findByText('Begin your atlas.')
-    expect(screen.queryByRole('button', { name: 'Persona' })).not.toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Settings' })) })
+    await screen.findByRole('textbox', { name: 'Display name' })
+    expect(calls.mock.calls.map(c => urlOf(c[0])).filter(url => url.includes('/api/module-submissions'))).toEqual([])
+    expect(screen.queryByText('Tab submissions')).not.toBeInTheDocument()
   })
 })
 

@@ -179,7 +179,7 @@ export const recordSwarmSession = async (
  *  its session was worthless, a LATER launch may already have recorded a good
  *  one over it, and clearing that would strand a healthy desk.
  *
- *  The one caller is the dead-on-arrival watch (swarmManager.watchDeskForDeathOnArrival),
+ *  The one caller is the dead-on-arrival watch (swarmManager.watchSdkDeskForDeathOnArrival),
  *  and ONLY for a FRESH desk that died quoting a quota refusal: its transcript
  *  contains nothing but that refusal, and leaving the record pointing at it would
  *  make the NEXT commander `--resume` a one-line conversation about being out of

@@ -15,7 +15,6 @@ import {
   pruneOldAttachments,
   pruneOldRunFiles,
   sweepCrossRepoResidue,
-  sweepPersonaScratch,
   RAW_RETENTION_DAYS,
 } from '@/lib/server/retention'
 import { pruneResolvedEscalations, ESCALATION_RETENTION_DAYS } from '@/lib/server/swarmEscalations'
@@ -32,6 +31,7 @@ import { startTerminalSweepLoop } from '@/lib/server/terminal'
 import { startDailyFuelReportLoop } from '@/lib/server/dailyFuelReport'
 import { startBlogPublishLoop } from '@/lib/server/blogPublish'
 import { startOwnerDeskLimitLoop } from '@/lib/server/ownerDeskLimit'
+import { startSupplyContextCapLoop } from '@/lib/server/supplyContextCap'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
 import { installSwarmTooling } from '@/lib/server/swarmToolingInstall'
@@ -146,17 +146,6 @@ void (async () => {
       console.log(
         `[openground:hono] retention(${RAW_RETENTION_DAYS}d): pruned ${removedRuns} run files, ${removedFiles} attachments; ` +
           `escalations(${ESCALATION_RETENTION_DAYS}d): pruned ${removedEscalations} resolved`,
-      )
-    }
-    // Persona conversation scratch dirs + their ~/.claude.json trust entries.
-    // Nothing in production ends a conversation (there is no moment that means
-    // "the owner is finished talking"), so without this sweep every conversation
-    // ever held leaves a directory AND a line in the user's own claude config,
-    // forever. Boot is the honest lifecycle event.
-    const scratch = await sweepPersonaScratch().catch(() => null)
-    if (scratch?.removed) {
-      console.log(
-        `[openground:hono] persona scratch: removed ${scratch.removed} stale conversation dir(s) + trust entries`,
       )
     }
     // Cross-repo residue sweep — ghost heartbeats / orphan central worktrees /
@@ -407,6 +396,14 @@ if (process.env.OPENGROUND_FUEL_REPORT !== '0') {
 if (process.env.OPENGROUND_DESK_LIMIT_WATCH !== '0') {
   startOwnerDeskLimitLoop()
 }
+
+// The resident-desk context cap, supply half (supplyContextCap.ts, owner
+// decision 2026-09-18): once a live supply desk's context passes
+// Settings.deskContextCapTokens it is sent one /compact while idle (the three
+// live-desk write refusals apply). The commander half runs at its spawn
+// (swarmManager.ts), not here. Same boot-loop shape; this entry only.
+// Kill-switch: Settings.deskContextCapTokens = 0.
+startSupplyContextCapLoop()
 
 // Listen errors (chiefly EADDRINUSE on the fixed port) are a TRUE fatal: the
 // single-instance contract says we must fail loudly, never silently shift

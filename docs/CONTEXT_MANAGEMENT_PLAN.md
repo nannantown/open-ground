@@ -277,6 +277,9 @@ OG が足すのは **「Board のカードが終わった」という native に
 
 - **恒久保証はソース走査の歯**(`autoCompactGuard.test.ts`): OG のどのモジュールも
   `autoCompactEnabled` / `DISABLE_AUTO_COMPACT` を書かない・`/compact` を PTY に送らないことを機械的に固定。
+  **例外(2026-09-18 オーナー決定)**: 補給官の卓だけは文脈が `Settings.deskContextCapTokens` を超えたら
+  OG が `/compact` を1回送る(`supplyContextCap.ts`)。native を止めも置き換えもしない「早めの1回」で、
+  自動の送り手がこれ1つであることも同じテストが固定する。背景と実測は docs/commander/05 §10.6。
   挙動テストでは捕まえられない(切っても「圧縮されないだけ」で見た目に壊れない)ため構造で縛る。
 - **`autoCompactGuard.ts` は読むだけで直さない**。ノブ自体が公式ドキュメント未確認(§2-A1・信頼度 LOW)で、
   未確認のキーをユーザの `settings.json` に書き込むのは筋が悪い。加えて既定 ON なのだから

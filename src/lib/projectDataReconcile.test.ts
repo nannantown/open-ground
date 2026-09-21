@@ -19,6 +19,24 @@ const data = (tasks: ProjectTask[], updatedAt: string): ProjectData =>
   ({ tasks, updatedAt } as ProjectData)
 
 describe('reconcileExternalData — dual-writer adoption policy', () => {
+  it('ignores a delayed read after a newer description has been adopted', () => {
+    const old = data([], 'U0')
+    const current = { ...old, description: 'Generated summary', updatedAt: 'U1' }
+    expect(reconcileExternalData({
+      current, lastSavedJson: JSON.stringify(current),
+      requestedFromJson: JSON.stringify(old), fetched: old,
+    }).kind).toBe('stale')
+  })
+
+  it('still adopts a restored backup when the read starts from the current snapshot', () => {
+    const current = data([], 'U1')
+    const lastSavedJson = JSON.stringify(current)
+    expect(reconcileExternalData({
+      current, lastSavedJson, requestedFromJson: lastSavedJson,
+      fetched: { ...current, description: 'Restored summary', updatedAt: 'U0' },
+    }).kind).toBe('adopt')
+  })
+
   it('ADOPTS an external boardColumn change (the swarm-board.sh move case)', () => {
     const loaded = data([card('x', 'doing')], 'U0')
     const lastSavedJson = JSON.stringify(loaded)

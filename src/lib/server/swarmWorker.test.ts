@@ -224,7 +224,7 @@ describe('WORKER_ORDER_RULES decision routing (2026-07-18 — WHO decides)', () 
   // swarmDecisionRouting.test.ts — here we only pin that every spawn carries it.
   it('appends the routing rules verbatim (every /order gets the addressing gate)', () => {
     expect(WORKER_ORDER_RULES).toContain(DECISION_ROUTING_RULES)
-    expect(WORKER_ORDER_RULES).toContain('【判断の宛先・厳守】')
+    expect(WORKER_ORDER_RULES).toContain('Decision authority:')
   })
 
   it('keeps the routing clause on the SAME single line as the rest of the order', () => {
@@ -416,4 +416,3 @@ describe('WORKER_RESUME_INJECTION (card 4 — the resume prompt)', () => {
     expect(WORKER_RESUME_INJECTION).toContain('git push')
   })
 })
-

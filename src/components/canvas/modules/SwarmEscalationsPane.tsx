@@ -11,9 +11,8 @@ import type {
 
 // The Escalations inbox panel (C1 — docs/OVERSEER_DESIGN.md §8, Q5): the HUMAN
 // VALVE of the unmanned swarm. Lists the OPEN questions the swarm raised to the
-// owner — {question, stakes, the proxy's provisional answer, the worker's screen
-// at the time} — and lets the owner answer (→ injected into the blocked worker /
-// queued for its next dispatch, and written back to you-corpus memory) or
+// owner, with context and captured evidence, and lets the owner answer
+// (delivered to the blocked worker or queued for its next dispatch) or
 // dismiss. It used to be PINNED ABOVE the Swarm tab strip (a banner that stacked
 // up over every sub-view); it now renders INSIDE the Overseer tab
 // (SwarmOverseerPane) — read where the owner chooses to look, like the commander
@@ -127,9 +126,7 @@ export const SwarmEscalationsPane = ({
                 ? 'projectPanel.swarm.esc.deliveryQueued'
                 : 'projectPanel.swarm.esc.deliverySkipped'
           setNotice(
-            [t(deliveryKey), data.memoryWritten ? t('projectPanel.swarm.esc.memoryWritten') : '']
-              .filter(Boolean)
-              .join(' '),
+            t(deliveryKey),
           )
           setDrafts((d) => {
             const next = { ...d }
@@ -258,40 +255,6 @@ export const SwarmEscalationsPane = ({
                     {e.context}
                   </p>
                 </>
-              )}
-
-              {e.proxyDraft && (
-                <div className="rounded-[2px] border border-line bg-bg-inset px-2.5 py-2">
-                  <div className="flex items-center gap-2">
-                    <span className="label-cap text-ink-faint">
-                      {t('projectPanel.swarm.esc.proxyDraft', {
-                        confidence: e.proxyDraft.confidence,
-                      })}
-                    </span>
-                    {!e.proxyDraft.isAbstention && e.proxyDraft.answer.trim() !== '' && (
-                      <Btn
-                        variant="subtle"
-                        size="xs"
-                        disabled={busy}
-                        className="enabled:active:scale-[0.99]"
-                        onClick={() =>
-                          setDrafts((d) => ({ ...d, [e.id]: e.proxyDraft?.answer ?? '' }))
-                        }
-                      >
-                        {t('projectPanel.swarm.esc.useDraft')}
-                      </Btn>
-                    )}
-                  </div>
-                  {e.proxyDraft.isAbstention ? (
-                    <p className="mt-1 text-meta leading-relaxed text-ink-faint">
-                      {t('projectPanel.swarm.esc.abstention')}
-                    </p>
-                  ) : (
-                    <p className="mt-1 whitespace-pre-wrap break-words text-ui leading-relaxed text-ink-muted">
-                      {e.proxyDraft.answer}
-                    </p>
-                  )}
-                </div>
               )}
 
               {e.screenshot && (

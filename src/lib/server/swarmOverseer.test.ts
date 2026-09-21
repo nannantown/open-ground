@@ -26,27 +26,20 @@ import {
   type OverseerRuntime,
   type OverseerDeps,
 } from './swarmOverseer'
-import type { OwnerAnswer } from './swarmOverseerBrain'
 import type { EscalationView, OrchestratorAnomaly, ProjectTask } from '../types'
 
 // ── Fakes ────────────────────────────────────────────────────────────────────
 
 interface Calls {
-  answerAsOwner: { question: string }[]
   openEscalation: import('./swarmEscalations').OpenEscalationInput[]
-  injectAnswer: { terminalId: string; text: string }[]
   notifyInfo: { event: string; detail: string }[]
   janitor: number
-  canInject: number
 }
 
 const makeCalls = (): Calls => ({
-  answerAsOwner: [],
   openEscalation: [],
-  injectAnswer: [],
   notifyInfo: [],
   janitor: 0,
-  canInject: 0,
 })
 
 /** A controllable clock the pass reads through deps.now(). */
@@ -62,24 +55,12 @@ const makeDeps = (
   now: () => 1_000_000_000_000,
   isAlive: () => true,
   readHeartbeat: async () => null,
-  answerAsOwner: async (q) => {
-    calls.answerAsOwner.push({ question: q.question })
-    return { kind: 'answer', text: 'デフォルトの回答', confidence: 'high' }
-  },
   openEscalation: async (input) => {
     calls.openEscalation.push(input)
     return {
       escalation: { id: `esc-${calls.openEscalation.length}`, status: 'open' } as never,
       deduped: false,
     }
-  },
-  canInjectInto: async () => {
-    calls.canInject += 1
-    return true
-  },
-  injectAnswer: async (terminalId, text) => {
-    calls.injectAnswer.push({ terminalId, text })
-    return true
   },
   notifyInfo: async (n) => {
     calls.notifyInfo.push({ event: n.event, detail: n.detail })
@@ -124,9 +105,38 @@ const worker = (terminalId = 'term-1', branch = 'swarm/x', taskId = 'card-1') =>
   taskTitle: 'あるカード',
 })
 
-// Flush the microtask + macrotask queue so a fire-and-forget brain's `.then/.finally`
-// (which run AFTER the awaited pass returns) settle before we assert on the mailbox.
-const flush = () => new Promise((r) => setTimeout(r, 0))
+describe('owner questions without Persona', () => {
+  it.each([null, 20, 85, 100])('delivers directly at usage %s and deduplicates later ticks', async (usage) => {
+    const calls = makeCalls()
+    const engine = makeEngine({ workers: [{ ...worker(), runtime: 'sdk', terminalId: '', sdkSessionId: 'sdk-owner-question' }] })
+    const deps = makeDeps(calls, {
+      peekUsagePct: () => usage,
+      readHeartbeat: async () => ({ ready: false, blocked: true, blockers: 'May I publish this release?' }),
+    })
+    await runOverseerPass(engine, [], () => {}, deps)
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(calls.openEscalation).toHaveLength(1)
+    expect(calls.openEscalation[0]).toMatchObject({
+      question: 'May I publish this release?',
+      runtime: 'sdk',
+      sdkSessionId: 'sdk-owner-question',
+    })
+    expect(calls.openEscalation[0]).not.toHaveProperty('proxyDraft')
+  })
+
+  it('retries a failed inbox write without losing the question', async () => {
+    const calls = makeCalls()
+    const engine = makeEngine({ workers: [worker()] })
+    const deps = makeDeps(calls, {
+      readHeartbeat: async () => ({ ready: false, blocked: true, blockers: 'May I publish this release?' }),
+    })
+    await runOverseerPass(engine, [], () => {}, { ...deps, openEscalation: async () => { throw new Error('disk unavailable') } })
+    expect(engine.overseer.seen.has('S4:term-1')).toBe(false)
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(calls.openEscalation).toHaveLength(1)
+    expect(calls.openEscalation[0].question).toBe('May I publish this release?')
+  })
+})
 
 // ── OFF by default (D1) ────────────────────────────────────────────────────────
 
@@ -134,11 +144,8 @@ describe('overseer — armed/disarmed (D1)', () => {
   it('initOverseerRuntime is OFF and empty (default OFF, in-memory)', () => {
     const ov = initOverseerRuntime()
     expect(ov.enabled).toBe(false)
-    expect(ov.assessInFlight).toBe(false)
-    expect(ov.brainResults).toEqual([])
     expect(ov.seen.size).toBe(0)
     expect(ov.watch.size).toBe(0)
-    expect(ov.brainCallsToday).toBe(0)
   })
 
   it('a DISABLED overseer does nothing — touches no dep, returns ran:false', async () => {
@@ -151,7 +158,6 @@ describe('overseer — armed/disarmed (D1)', () => {
     const out = await runOverseerPass(engine, [], () => {}, makeDeps(calls))
     expect(out.ran).toBe(false)
     expect(calls.openEscalation).toHaveLength(0)
-    expect(calls.answerAsOwner).toHaveLength(0)
     expect(calls.janitor).toBe(0)
   })
 })
@@ -235,252 +241,6 @@ describe('overseer — S2 all-workers-down', () => {
   })
 })
 
-// ── S4 — worker free-text question → the proxy brain (T1) ───────────────────────
-
-describe('overseer — S4 worker question (brain ignition)', () => {
-  const blockedQuestion = (blockers: string) => async () => ({
-    ready: false,
-    blocked: true,
-    blockers,
-  })
-
-  it('wakes the brain fire-and-forget, then injects a confident answer next pass', async () => {
-    const calls = makeCalls()
-    const engine = makeEngine({ workers: [worker()] })
-    const deps = makeDeps(calls, {
-      readHeartbeat: blockedQuestion('どのDBを使うべきですか？'),
-      answerAsOwner: async (q) => {
-        calls.answerAsOwner.push({ question: q.question })
-        return { kind: 'answer', text: 'Postgres を使ってください', confidence: 'high' } as OwnerAnswer
-      },
-    })
-
-    // Pass 1: launches the brain (fire-and-forget). The result is routed on the NEXT
-    // pass's mailbox drain, so pass 1 injects nothing. (An INSTANT-resolving fake
-    // settles during this pass's own awaits — the "brain stays in flight" property is
-    // proved separately with a never-resolving brain; here we only need the routing.)
-    const out1 = await runOverseerPass(engine, [], () => {}, deps)
-    expect(out1.fired).toContain('S4')
-    expect(calls.answerAsOwner).toHaveLength(1)
-    expect(calls.injectAnswer).toHaveLength(0)
-
-    await flush() // let the detached brain settle → its result lands in the mailbox
-    expect(engine.overseer.assessInFlight).toBe(false)
-    expect(engine.overseer.brainResults).toHaveLength(1)
-
-    // Pass 2: drains the mailbox → injects the answer into the live worker (W16).
-    await runOverseerPass(engine, [], () => {}, deps)
-    expect(calls.injectAnswer).toHaveLength(1)
-    expect(calls.injectAnswer[0].terminalId).toBe('term-1')
-    expect(calls.injectAnswer[0].text).toContain('Postgres')
-    expect(calls.openEscalation).toHaveLength(0) // answered, not escalated
-  })
-
-  it('routes an ABSTENTION to the inbox with a proxy draft (the E2E path)', async () => {
-    const calls = makeCalls()
-    const engine = makeEngine({ workers: [worker()] })
-    const deps = makeDeps(calls, {
-      readHeartbeat: blockedQuestion('この機能の価格はいくらにすべき？'),
-      // `abstained: true` is what the real brain emits for a considered abstention
-      // (swarmOverseerBrain answerAsOwner, the ONLY site that sets it). Without it
-      // this fixture was a failure-lane result wearing an abstention's label.
-      answerAsOwner: async () =>
-        ({
-          kind: 'escalate',
-          why: 'insufficient-info',
-          reason: 'コーパスに価格判断の記録が薄い',
-          abstained: true,
-        }) as OwnerAnswer,
-    })
-
-    await runOverseerPass(engine, [], () => {}, deps) // launch
-    await flush()
-    await runOverseerPass(engine, [], () => {}, deps) // drain → escalate
-
-    expect(calls.injectAnswer).toHaveLength(0)
-    expect(calls.openEscalation).toHaveLength(1)
-    const esc = calls.openEscalation[0]
-    expect(esc.whyEscalated).toBe('insufficient-info')
-    expect(esc.proxyDraft?.isAbstention).toBe(true)
-    expect(esc.taskId).toBe('card-1')
-  })
-
-  // 2026-07-18 owner design: an ABSTENTION means the corpus doesn't ground this —
-  // i.e. the area is NOT on the involvement map. Don't guess the addressee: ask the
-  // ONE routing question first, and let the answer (which already flows into
-  // you-corpus) grow the map.
-  it('wraps an ABSTENTION in the plain routing question — the unclassified lane', async () => {
-    const calls = makeCalls()
-    const engine = makeEngine({ workers: [worker()] })
-    const deps = makeDeps(calls, {
-      readHeartbeat: blockedQuestion('この機能の価格はいくらにすべき？'),
-      // `abstained: true` = what answerAsOwner's step 4 emits: the brain RAN, read
-      // the corpus, and found no grounding. Only this shape gets the wrapper.
-      answerAsOwner: async () =>
-        ({
-          kind: 'escalate',
-          why: 'insufficient-info',
-          reason: 'コーパスが薄い',
-          abstained: true,
-        }) as OwnerAnswer,
-    })
-
-    await runOverseerPass(engine, [], () => {}, deps)
-    await flush()
-    await runOverseerPass(engine, [], () => {}, deps)
-
-    const esc = calls.openEscalation[0]
-    expect(esc.plainQuestion).toContain('「あなたが決めたい種類の話」かどうかだけ')
-    // Choices are WORDS, not A/B letters — a bare letter re-binds to whatever
-    // option list sits next to it downstream (see swarmDecisionRouting's
-    // ROUTING_CHOICE_* and the misattribution pins in swarmEscalations.test.ts).
-    expect(esc.plainQuestion).toContain('「まかせる」と書く')
-    expect(esc.plainQuestion).toContain('「自分で決める」と書く')
-    // The worker's own question is the SUBJECT of the routing question…
-    expect(esc.plainQuestion).toContain('この機能の価格はいくらにすべき？')
-    // …and the technical original still rides `question` untouched (§2.2's contract:
-    // the plain text is added, never a replacement — no technical detail is lost).
-    expect(esc.question).toBe('この機能の価格はいくらにすべき？')
-  })
-
-  // M1 — the routing question asserts a FINDING ("the map doesn't cover this") and
-  // promises future silence. Both are false when the brain never ran: a crash, a
-  // timeout, every model tier off (NoAllowedModelTierError), an unparseable verdict
-  // and the watchdog's synthesized null ALL report why='insufficient-info' too.
-  // Worse, offering the "まかせる" choice there invites blanket delegation for a
-  // question whose reversibility nothing judged — the keyword pre-gate is
-  // best-effort, and the brain's own ESCALATE is the layer that is missing.
-  it.each([
-    ['brain crashed / every tier off', { kind: 'escalate', why: 'insufficient-info', reason: 'proxy brain failed: no allowed model tier' }],
-    ['unparseable verdict', { kind: 'escalate', why: 'insufficient-info', reason: 'proxy brain returned no parseable verdict' }],
-  ] as const)('does NOT ask who owns it when the brain never consulted the map (%s)', async (_label, answer) => {
-    const calls = makeCalls()
-    const engine = makeEngine({ workers: [worker()] })
-    const deps = makeDeps(calls, {
-      readHeartbeat: blockedQuestion('本番データを全部消してよいですか？'),
-      answerAsOwner: async () => answer as OwnerAnswer,
-    })
-
-    await runOverseerPass(engine, [], () => {}, deps)
-    await flush()
-    await runOverseerPass(engine, [], () => {}, deps)
-
-    const esc = calls.openEscalation[0]
-    expect(esc.whyEscalated).toBe('insufficient-info')
-    expect(esc.plainQuestion).toBeUndefined() // raises BARE — the worker's own text stands
-    expect(esc.question).toBe('本番データを全部消してよいですか？')
-    // …and it must not WEAR an abstention's label either. `isAbstention` drives the
-    // inbox card: true swaps the real reason for the generic 「コーパスが薄い」 line, so
-    // a crashed brain would read as a considered judgment and hide "proxy brain
-    // failed: …" — the one string naming the true cause.
-    expect(esc.proxyDraft?.isAbstention).toBe(false)
-    expect(esc.proxyDraft?.answer).toBe(answer.reason)
-  })
-
-  it('does NOT ask who owns it when the watchdog synthesizes a null result (hung brain)', async () => {
-    const calls = makeCalls()
-    const engine = makeEngine({ workers: [worker()] })
-    // A brain that never settles → the 5-min watchdog force-releases the flight and
-    // pushes {answer: null} into the mailbox.
-    const deps = makeDeps(calls, {
-      readHeartbeat: blockedQuestion('この設定を本番へ反映してよいですか？'),
-      answerAsOwner: () => new Promise<OwnerAnswer>(() => {}),
-    })
-
-    await runOverseerPass(engine, [], () => {}, deps)
-    engine.overseer.brainResults.push({ ...engine.overseer.brainInFlight!, answer: null })
-    engine.overseer.brainInFlight = undefined
-    await runOverseerPass(engine, [], () => {}, deps)
-
-    const esc = calls.openEscalation[0]
-    expect(esc.whyEscalated).toBe('insufficient-info')
-    expect(esc.plainQuestion).toBeUndefined()
-    expect(esc.proxyDraft?.isAbstention).toBe(false) // a hang is not a judgment
-  })
-
-  it('does NOT ask who owns an IRREVERSIBLE question — that is already correctly addressed', async () => {
-    const calls = makeCalls()
-    const engine = makeEngine({ workers: [worker()] })
-    const deps = makeDeps(calls, {
-      readHeartbeat: blockedQuestion('この変更を公開してよいですか？'),
-      answerAsOwner: async () =>
-        ({ kind: 'escalate', why: 'irreversible', reason: '公開は不可逆' }) as OwnerAnswer,
-    })
-
-    await runOverseerPass(engine, [], () => {}, deps)
-    await flush()
-    await runOverseerPass(engine, [], () => {}, deps)
-
-    const esc = calls.openEscalation[0]
-    expect(esc.whyEscalated).toBe('irreversible')
-    expect(esc.plainQuestion).toBeUndefined()
-  })
-
-  it('does NOT wake the brain for a mechanical (non-question) blocker', async () => {
-    const calls = makeCalls()
-    const engine = makeEngine({ workers: [worker()] })
-    const deps = makeDeps(calls, { readHeartbeat: blockedQuestion('依存パッケージのインストール待ち') })
-    const out = await runOverseerPass(engine, [], () => {}, deps)
-    expect(out.fired).not.toContain('S4')
-    expect(calls.answerAsOwner).toHaveLength(0)
-  })
-})
-
-// ── Budget (L7) — throttle, day cap, single-flight ─────────────────────────────
-
-describe('overseer — brain budget (L7)', () => {
-  const blocked = async () => ({ ready: false, blocked: true, blockers: 'どうすればいい？' })
-
-  it('THROTTLE: a second question inside brainMinIntervalMs is skipped', async () => {
-    const calls = makeCalls()
-    const c = clock()
-    const engine = makeEngine({ workers: [worker('term-a', 'swarm/a', 'card-a')] })
-    const deps = makeDeps(calls, { now: c.now, readHeartbeat: blocked })
-
-    await runOverseerPass(engine, [], () => {}, deps)
-    await flush()
-    expect(calls.answerAsOwner).toHaveLength(1)
-
-    // A DIFFERENT worker asks just under the throttle window → skipped.
-    engine.workers = [worker('term-b', 'swarm/b', 'card-b')]
-    c.advance(OVERSEER_THRESHOLDS.brainMinIntervalMs - 1)
-    await runOverseerPass(engine, [], () => {}, deps)
-    await flush()
-    expect(calls.answerAsOwner).toHaveLength(1) // still 1 — throttled
-
-    // Past the window → fires.
-    c.advance(2)
-    await runOverseerPass(engine, [], () => {}, deps)
-    await flush()
-    expect(calls.answerAsOwner).toHaveLength(2)
-  })
-
-  it('DAY CAP: no brain once brainCallsToday hits the cap', async () => {
-    const calls = makeCalls()
-    const engine = makeEngine({
-      workers: [worker()],
-      overseer: armed({ brainCallsToday: OVERSEER_THRESHOLDS.brainMaxPerDay, dayKey: new Date(1_000_000_000_000).toISOString().slice(0, 10) }),
-    })
-    const deps = makeDeps(calls, { readHeartbeat: blocked })
-    const out = await runOverseerPass(engine, [], () => {}, deps)
-    expect(out.fired).not.toContain('S4')
-    expect(calls.answerAsOwner).toHaveLength(0)
-  })
-
-  it('SINGLE-FLIGHT: an in-flight brain blocks a second launch', async () => {
-    const calls = makeCalls()
-    // lastBrainAt = now (a RECENT launch) so the stuck-brain watchdog does NOT fire —
-    // we are testing the healthy single-flight hold, not the force-release.
-    const engine = makeEngine({
-      workers: [worker()],
-      overseer: armed({ assessInFlight: true, lastBrainAt: 1_000_000_000_000 }),
-    })
-    const deps = makeDeps(calls, { readHeartbeat: blocked })
-    await runOverseerPass(engine, [], () => {}, deps)
-    expect(calls.answerAsOwner).toHaveLength(0)
-  })
-})
-
 // ── S9 — usage-over THROTTLE (S4 degrades to a bare raise) ──────────────────────
 
 describe('overseer — S9 THROTTLED degradation', () => {
@@ -499,9 +259,8 @@ describe('overseer — S9 THROTTLED degradation', () => {
     expect(out1.throttled).toBe(true)
     expect(out1.fired).toEqual(expect.arrayContaining(['S9', 'S4']))
     expect(calls.notifyInfo.filter((n) => n.event === 'overseer-throttled')).toHaveLength(1)
-    expect(calls.answerAsOwner).toHaveLength(0) // brain paused
     expect(calls.openEscalation).toHaveLength(1) // bare question raised
-    expect(calls.openEscalation[0].proxyDraft).toBeUndefined()
+    expect(calls.openEscalation[0]).not.toHaveProperty('proxyDraft')
 
     // Pass 2 still over → no duplicate throttle notice (edge-triggered).
     await runOverseerPass(engine, [], () => {}, deps)
@@ -519,203 +278,6 @@ describe('overseer — S9 THROTTLED degradation', () => {
     const engine = makeEngine()
     const out = await runOverseerPass(engine, [], () => {}, makeDeps(calls, { peekUsagePct: () => null }))
     expect(out.throttled).toBe(false)
-  })
-})
-
-// ── Fire-and-forget (D2) — the tick is never blocked ───────────────────────────
-
-describe('overseer — fire-and-forget (D2)', () => {
-  it('an in-flight brain that never resolves neither blocks the pass nor launches a second', async () => {
-    const calls = makeCalls()
-    const engine = makeEngine({ workers: [worker()] })
-    let launches = 0
-    const deps = makeDeps(calls, {
-      readHeartbeat: async () => ({ ready: false, blocked: true, blockers: 'どっち？' }),
-      answerAsOwner: () => {
-        launches += 1
-        return new Promise<OwnerAnswer>(() => {}) // never resolves
-      },
-    })
-
-    // The pass MUST resolve promptly even though the brain hangs forever.
-    const out1 = await runOverseerPass(engine, [], () => {}, deps)
-    expect(out1.assessInFlight).toBe(true)
-    expect(launches).toBe(1)
-
-    // A second pass while the brain is still in flight launches NOTHING (single-flight).
-    const out2 = await runOverseerPass(engine, [], () => {}, deps)
-    expect(launches).toBe(1)
-    expect(out2.assessInFlight).toBe(true)
-  })
-
-  it('WATCHDOG force-releases a brain stuck past timeout+slack (S4 never goes permanently silent)', async () => {
-    const calls = makeCalls()
-    const c = clock()
-    // Seed a runtime that looks like a brain launched long ago and never settled.
-    const engine = makeEngine({
-      workers: [worker()],
-      overseer: armed({ assessInFlight: true, lastBrainAt: c.now() }),
-    })
-    const logs: string[] = []
-    const deps = makeDeps(calls, {
-      now: c.now,
-      readHeartbeat: async () => ({ ready: false, blocked: true, blockers: 'どうする？' }),
-    })
-
-    // Just under the deadline+slack → still held (single-flight), no new brain.
-    c.advance(OVERSEER_THRESHOLDS.brainTimeoutMs + OVERSEER_THRESHOLDS.brainStuckSlackMs - 1_000)
-    await runOverseerPass(engine, [], (_l, m) => logs.push(m), deps)
-    expect(engine.overseer.assessInFlight).toBe(true)
-    expect(calls.answerAsOwner).toHaveLength(0)
-
-    // Well past the deadline+slack AND the 10-min throttle (the watchdog force-releases
-    // but does NOT reset lastBrainAt, so the throttle must also have elapsed for the
-    // pending S4 to wake a fresh brain).
-    c.advance(OVERSEER_THRESHOLDS.brainMinIntervalMs)
-    await runOverseerPass(engine, [], (_l, m) => logs.push(m), deps)
-    expect(logs.some((m) => m.includes('force-released'))).toBe(true)
-    expect(calls.answerAsOwner).toHaveLength(1) // no longer silenced
-  })
-
-  it('a STALE brain settling after a watchdog force-release does not clobber the NEW brain', async () => {
-    const calls = makeCalls()
-    const c = clock()
-    const engine = makeEngine({ workers: [worker('term-1', 'swarm/a', 'card-a')] })
-    // Controllable brains: each launch parks a resolver so the test settles them
-    // OUT OF ORDER (the stale one after the new one launched).
-    const resolvers: Array<(a: OwnerAnswer) => void> = []
-    const deps = makeDeps(calls, {
-      now: c.now,
-      readHeartbeat: async () => ({ ready: false, blocked: true, blockers: 'どっちにする？' }),
-      answerAsOwner: (q) => {
-        calls.answerAsOwner.push({ question: q.question })
-        return new Promise<OwnerAnswer>((resolve) => {
-          resolvers.push(resolve)
-        })
-      },
-    })
-
-    // Pass 1: brain #1 launches and HANGS.
-    await runOverseerPass(engine, [], () => {}, deps)
-    expect(calls.answerAsOwner).toHaveLength(1)
-    expect(engine.overseer.assessInFlight).toBe(true)
-
-    // Past timeout+slack AND the throttle: the watchdog force-releases, and the
-    // SAME pass wakes brain #2 for a DIFFERENT worker's question.
-    engine.workers = [worker('term-2', 'swarm/b', 'card-b')]
-    c.advance(
-      OVERSEER_THRESHOLDS.brainTimeoutMs +
-        OVERSEER_THRESHOLDS.brainStuckSlackMs +
-        OVERSEER_THRESHOLDS.brainMinIntervalMs,
-    )
-    const logs: string[] = []
-    await runOverseerPass(engine, [], (_l, m) => logs.push(m), deps)
-    expect(logs.some((m) => m.includes('force-released'))).toBe(true)
-    expect(calls.answerAsOwner).toHaveLength(2) // brain #2 in flight
-    expect(engine.overseer.assessInFlight).toBe(true)
-    const abort2 = engine.overseer.brainAbort
-    expect(abort2).toBeDefined()
-
-    // NOW the stale brain #1 settles. Its .finally must NOT release brain #2's
-    // single-flight or abort handle (the clobber this guards against).
-    resolvers[0]({ kind: 'answer', text: '古い回答', confidence: 'low' })
-    await flush()
-    expect(engine.overseer.assessInFlight).toBe(true) // #2 still holds the flight
-    expect(engine.overseer.brainAbort).toBe(abort2) // #2's abort handle intact
-
-    // Brain #2 settles normally → released by ITS OWN finally (the ownership
-    // check never blocks the healthy path).
-    resolvers[1]({ kind: 'answer', text: '新しい回答', confidence: 'high' })
-    await flush()
-    expect(engine.overseer.assessInFlight).toBe(false)
-    expect(engine.overseer.brainAbort).toBeUndefined()
-  })
-
-  it('after a stale settle, the NEW brain is still watchdog-managed (abortable, never orphaned)', async () => {
-    const calls = makeCalls()
-    const c = clock()
-    const engine = makeEngine({ workers: [worker('term-1', 'swarm/a', 'card-a')] })
-    const resolvers: Array<(a: OwnerAnswer) => void> = []
-    const deps = makeDeps(calls, {
-      now: c.now,
-      readHeartbeat: async () => ({ ready: false, blocked: true, blockers: 'どっちにする？' }),
-      answerAsOwner: (q) => {
-        calls.answerAsOwner.push({ question: q.question })
-        return new Promise<OwnerAnswer>((resolve) => {
-          resolvers.push(resolve)
-        })
-      },
-    })
-
-    // Brain #1 hangs → watchdog force-release → brain #2 (same shape as above).
-    await runOverseerPass(engine, [], () => {}, deps)
-    engine.workers = [worker('term-2', 'swarm/b', 'card-b')]
-    c.advance(
-      OVERSEER_THRESHOLDS.brainTimeoutMs +
-        OVERSEER_THRESHOLDS.brainStuckSlackMs +
-        OVERSEER_THRESHOLDS.brainMinIntervalMs,
-    )
-    await runOverseerPass(engine, [], () => {}, deps)
-    expect(calls.answerAsOwner).toHaveLength(2)
-    const abort2 = engine.overseer.brainAbort
-    resolvers[0]({ kind: 'answer', text: '古い回答', confidence: 'low' }) // stale settle
-    await flush()
-
-    // Brain #2 now hangs past timeout+slack itself. Because the stale settle did
-    // NOT clear assessInFlight, the watchdog still SEES #2 and force-releases it —
-    // aborting through the intact handle. (The clobber orphaned exactly this: with
-    // assessInFlight wiped, the watchdog went blind and #2 could never be aborted.)
-    engine.workers = []
-    c.advance(OVERSEER_THRESHOLDS.brainTimeoutMs + OVERSEER_THRESHOLDS.brainStuckSlackMs + 1)
-    const logs: string[] = []
-    await runOverseerPass(engine, [], (_l, m) => logs.push(m), deps)
-    expect(logs.some((m) => m.includes('force-released'))).toBe(true)
-    expect(abort2?.signal.aborted).toBe(true) // #2 was actually aborted, not orphaned
-    expect(engine.overseer.assessInFlight).toBe(false)
-
-    // The released #2 settling later is itself a stale settle now — a no-op.
-    resolvers[1]({ kind: 'answer', text: '遅い回答', confidence: 'low' })
-    await flush()
-    expect(engine.overseer.assessInFlight).toBe(false)
-    expect(engine.overseer.brainAbort).toBeUndefined()
-  })
-
-  it('a never-settling LAUNCHED brain is not a silent drop: the watchdog synthesizes its mailbox result so the question reaches the inbox', async () => {
-    const calls = makeCalls()
-    const c = clock()
-    const engine = makeEngine({ workers: [worker()] })
-    const logs: string[] = []
-    const deps = makeDeps(calls, {
-      now: c.now,
-      readHeartbeat: async () => ({ ready: false, blocked: true, blockers: 'どうする？' }),
-      answerAsOwner: (q) => {
-        calls.answerAsOwner.push({ question: q.question })
-        return new Promise<OwnerAnswer>(() => {}) // never settles
-      },
-    })
-
-    // Pass 1: the brain launches THROUGH detectWorkerQuestions — unlike the seeded
-    // watchdog test above, seen[S4:term-1] is now SET. That is what made the pre-fix
-    // drop SILENT: no .then/.finally ever ran (mailbox stayed empty), and the same
-    // question read as "already handled" forever — never answered, never escalated.
-    await runOverseerPass(engine, [], () => {}, deps)
-    expect(engine.overseer.assessInFlight).toBe(true)
-    expect(calls.answerAsOwner).toHaveLength(1)
-
-    // Past timeout+slack: the watchdog force-releases AND synthesizes the null
-    // result; the SAME pass's mailbox drain routes it to the inbox (fail-closed).
-    c.advance(OVERSEER_THRESHOLDS.brainTimeoutMs + OVERSEER_THRESHOLDS.brainStuckSlackMs + 1)
-    await runOverseerPass(engine, [], (_l, m) => logs.push(m), deps)
-    expect(logs.some((m) => m.includes('force-released'))).toBe(true)
-    expect(calls.openEscalation).toHaveLength(1)
-    expect(calls.openEscalation[0].whyEscalated).toBe('insufficient-info')
-    expect(calls.openEscalation[0].question).toBe('どうする？')
-    expect(calls.openEscalation[0].terminalId).toBe('term-1')
-    // The SAME question does NOT relaunch the brain (seen holds — the question was
-    // escalated, not lost), and the runtime is fully released for the next flight.
-    expect(calls.answerAsOwner).toHaveLength(1)
-    expect(engine.overseer.assessInFlight).toBe(false)
-    expect(engine.overseer.brainInFlight).toBeUndefined()
   })
 })
 
@@ -1389,13 +951,11 @@ describe('overseer — never throws', () => {
 describe('overseer — threshold table + helpers', () => {
   it('OVERSEER_SIGNALS covers S1-S5, S7-S11 and NOT S6 (§11 Q4)', () => {
     const ids = OVERSEER_SIGNALS.map((s) => s.id)
-    expect(ids).toEqual(['S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S8', 'S9', 'S10', 'S11'])
+    expect(ids).toEqual(['S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S9', 'S10', 'S11'])
     expect(ids).not.toContain('S6')
   })
 
   it('OVERSEER_THRESHOLDS pins the documented numbers (single source)', () => {
-    expect(OVERSEER_THRESHOLDS.brainMinIntervalMs).toBe(10 * 60_000)
-    expect(OVERSEER_THRESHOLDS.brainMaxPerDay).toBe(24)
     expect(OVERSEER_THRESHOLDS.blockedStuckMs).toBe(30 * 60_000)
     expect(OVERSEER_THRESHOLDS.inboxStaleMs).toBe(6 * 60 * 60_000)
     // The S3/S10 fatal window: only fatals this fresh may open an escalation.
@@ -1407,14 +967,6 @@ describe('overseer — threshold table + helpers', () => {
     expect(looksLikeQuestion('Which database should I use?')).toBe(true)
     expect(looksLikeQuestion('waiting on the build to finish')).toBe(false)
     expect(looksLikeQuestion('')).toBe(false)
-  })
-
-  it('defaultOverseerDeps wires the real seams (smoke — shape only)', () => {
-    const deps = defaultOverseerDeps({ isAlive: () => true, readHeartbeat: async () => null })
-    expect(typeof deps.openEscalation).toBe('function')
-    expect(typeof deps.answerAsOwner).toBe('function')
-    expect(typeof deps.peekUsagePct).toBe('function')
-    expect(typeof deps.runJanitor).toBe('function')
   })
 
   it('defaultOverseerDeps.recentFatals honours sinceMs against the REAL store (isolated HOME)', async () => {
@@ -1435,29 +987,6 @@ describe('overseer — threshold table + helpers', () => {
     // The pairing carries the store timestamp (the occurrence's identity).
     const hit = got.find((t) => t.fatal.detail === '新しいfatal(窓内)')
     expect(hit?.createdAt).toBe(now - 60_000)
-  })
-})
-
-// ── S8 — usage warn halves the day cap (a real S4 fires at the reduced cap) ─────
-
-describe('overseer — S8 usage warn halves the brain cap', () => {
-  it('at a warn %, the brain is capped at floor(max/2)', async () => {
-    const calls = makeCalls()
-    const halfCap = Math.floor(OVERSEER_THRESHOLDS.brainMaxPerDay / 2)
-    const engine = makeEngine({
-      workers: [worker()],
-      overseer: armed({
-        brainCallsToday: halfCap, // already at the HALVED cap
-        dayKey: new Date(1_000_000_000_000).toISOString().slice(0, 10),
-      }),
-    })
-    const deps = makeDeps(calls, {
-      peekUsagePct: () => 85, // warn (80-100)
-      readHeartbeat: async () => ({ ready: false, blocked: true, blockers: 'どう進める？' }),
-    })
-    const out = await runOverseerPass(engine, [], () => {}, deps)
-    expect(out.fired).not.toContain('S4') // halved cap already reached
-    expect(calls.answerAsOwner).toHaveLength(0)
   })
 })
 

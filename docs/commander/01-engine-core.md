@@ -1,5 +1,11 @@
 # 01 — エンジン中枢(tick / pass / dispatch / monitor)
 
+## Current Contract (2026-09-19)
+
+The self-supply scan and its persisted enable/budget fields no longer exist. Dispatch, monitoring, stop, salvage, desk restoration and commander wakeups remain.
+See [SIMPLIFICATION.md](SIMPLIFICATION.md) for the current entry points and verification.
+Any descriptions of the retired paths below are historical, not operating instructions.
+
 **対象コミット: `cc7c60e`**(cc7c60e 自体が「二重 dispatch 封鎖(両方向)」のコミット)。本文中の `file:line` は全てこのコミットの行番号。無印の行番号は `src/lib/server/swarmOrchestrator.ts`(6349 行 — エンジンの全てがこの 1 ファイルにある)。
 > **部分更新(2026-07-10)**: その後 `3129a58`/`0d1f7f0` が swarmOrchestrator.ts を 6730 行に変えた(:355 以降 +38〜+381 シフト — 00-INDEX 冒頭)。**特に `0d1f7f0` は本章の TL;DR#3 と §6(integrate による monitor 飢餓)を機構ごと過去にした** — 該当箇所に注記済み。現行の tick/integrate 構造の正典は 03 章 §2.1/§2.4。
 **読者**: 司令塔(og-manage / manage セッション)。in-app swarm エンジン(自律 drain ループ)の心臓部 — tick の回り方・1 pass の中身・dispatch の選抜規則・monitor の全分岐 — をコード根拠付きで示す。
@@ -21,7 +27,7 @@
 | 責務 | 場所 |
 |---|---|
 | エンジン本体(state・tick・dispatch・monitor・integrate・anomaly・制御 API) | `src/lib/server/swarmOrchestrator.ts`(この章の主題) |
-| 起動モデル/エフォート解決(実行モード × カード重み × quota × mask) | `src/lib/server/swarmLaunch.ts` — `SWARM_LAUNCH_MODEL='fable'`(:52) / `resolveSwarmModelEffort`(:257) / `execModeMaxWorkers`(:272) |
+| 起動モデル/エフォート解決(実行モード × カードの難易度 tier(安全床込み — 判定は `src/lib/cardTier.ts`)× quota × mask) | `src/lib/server/swarmLaunch.ts` — `SWARM_LAUNCH_MODEL='fable'`(:52) / `resolveSwarmModelEffort`(:257) / `execModeMaxWorkers`(:272) |
 | tier 冷却テーブル([Quota] 層) | `src/lib/server/swarmQuota.ts` — `MODEL_TIER_LADDER` / `markRateLimited` / `spawnBlock`(詳細は 04 章) |
 | tier ON/OFF mask([Allowed] 層) | `src/lib/server/swarmAllowedModels.ts`(詳細は 04 章) |
 | worker spawn の実体(worktree + claude PTY + /order 注入) | `src/lib/server/swarmWorker.ts` — `spawnSwarmWorker`(:455)(詳細は 02 章) |

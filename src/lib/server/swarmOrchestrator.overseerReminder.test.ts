@@ -101,7 +101,7 @@ afterEach(async () => {
  *  in swarmOrchestrator.resumeEngines.test.ts, so nothing is lost by keeping the
  *  cheap path here. */
 const runningWithRememberedOverseer = async () => {
-  await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: true })
+  await writeEngineIntent(proj, { desiredRunning: true, overseer: true })
   await startOrchestrator(proj, safeDeps())
   return getOrchestratorState(proj, safeDeps())
 }
@@ -109,7 +109,7 @@ const runningWithRememberedOverseer = async () => {
 /** The real thing: a BOOT RESUME of a project whose engine.json remembers both the
  *  drain and the overseer. Used only where the boot path itself is the subject. */
 const bootResumeWithRememberedOverseer = async () => {
-  await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: true })
+  await writeEngineIntent(proj, { desiredRunning: true, overseer: true })
   await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
   return getOrchestratorState(proj, safeDeps())
 }
@@ -131,7 +131,7 @@ describe('overseerRemembered — surfacing the restart asymmetry (完了条件1)
     // on disk is still the owner's last intent. The banner must still appear —
     // reading it only off a live engine would lose exactly this case.
     preflightMock.ok = false
-    await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: true })
+    await writeEngineIntent(proj, { desiredRunning: true, overseer: true })
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
     const state = await getOrchestratorState(proj, safeDeps())
     expect(state.running).toBe(false)
@@ -139,7 +139,7 @@ describe('overseerRemembered — surfacing the restart asymmetry (完了条件1)
   })
 
   it('stays false for a project that never armed the overseer (no false banner)', async () => {
-    await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: false })
+    await writeEngineIntent(proj, { desiredRunning: true, overseer: false })
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
     const state = await getOrchestratorState(proj, safeDeps())
     expect(state.overseerRemembered).toBe(false)
@@ -176,7 +176,7 @@ describe('[戻す] really arms — the one click has to do the thing (完了条�
     // is untouched by this card), and the reminder must survive the refusal — a
     // banner that vanished on a refused click would strand the owner.
     preflightMock.ok = false
-    await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: true })
+    await writeEngineIntent(proj, { desiredRunning: true, overseer: true })
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
 
     const refused = await setOverseer(proj, true, safeDeps())
@@ -219,23 +219,23 @@ describe('[×] dismiss is NOT a no-op (完了条件2 — the d1d6d704 trap, one 
   })
 
   it('dismissing does not stop the engine or touch any OTHER intent — declining a banner is not a shutdown', async () => {
-    await writeEngineIntent(proj, { desiredRunning: true, selfSupply: true, overseer: true })
+    await writeEngineIntent(proj, { desiredRunning: true, overseer: true })
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
 
     const after = await dismissOverseerReminder(proj, safeDeps())
 
     expect(after.running).toBe(true)
-    expect(after.selfSupply).toBe(true)
+    expect(after).not.toHaveProperty('selfSupply')
     // The neighbouring fields on disk are untouched — patch, not a full write.
     const intent = await readEngineIntent(proj)
     expect(intent.desiredRunning).toBe(true)
-    expect(intent.selfSupply).toBe(true)
+    expect(intent).not.toHaveProperty('selfSupply')
     expect(intent.overseer).toBe(false)
   })
 
   it('works with NO in-memory engine (the common post-restart case) and is idempotent', async () => {
     preflightMock.ok = false
-    await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: true })
+    await writeEngineIntent(proj, { desiredRunning: true, overseer: true })
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
 
     const first = await dismissOverseerReminder(proj, safeDeps())
@@ -257,7 +257,7 @@ describe('the record survives long enough to be pressed', () => {
     // startOrchestrator ⇒ red (a full write derives `overseer` from this fresh
     // engine's in-memory false and wipes the record before it can be used).
     preflightMock.ok = false
-    await writeEngineIntent(proj, { desiredRunning: true, selfSupply: false, overseer: true })
+    await writeEngineIntent(proj, { desiredRunning: true, overseer: true })
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
     expect((await getOrchestratorState(proj, safeDeps())).running).toBe(false) // resume suppressed
     preflightMock.ok = true // the owner fixed the environment, then pressed ON

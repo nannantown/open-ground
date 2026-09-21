@@ -25,7 +25,7 @@ export const getPromptLang = async (): Promise<PromptLang> =>
  *  heartbeat `blocker` questions, escalation/plainQuestion text, status
  *  reports — follows Settings.language. `lang` is a REQUIRED parameter on
  *  every builder that composes a launch prompt (buildOrderInjection/
- *  workerLaunchOpts, managerLaunchOpts, supplyLaunchOpts, sdkWorkerLaunchPlan,
+ *  supplyLaunchOpts, sdkManagerLaunchPlan, sdkWorkerLaunchPlan,
  *  sdkManagerLaunchPlan) — deliberately, not an opt-in: a production call site
  *  that forgets to thread a resolved `lang` through fails `tsc`, not silently
  *  ships an unconnected desk (2026-08-13 rework — an adversarial mutation pass

@@ -19,7 +19,6 @@ import { useAuth } from '@/lib/auth/AuthContext'
 import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
 import { OpenGroundWordmark } from '@/components/canvas/OpenGroundWordmark'
 import { IconButton } from '@/components/canvas/IconButton'
-import { PersonaMark } from '@/components/canvas/PersonaMark'
 import { NotificationBell } from '@/components/canvas/NotificationBell'
 import type { AppNotification } from '@/lib/types'
 
@@ -29,17 +28,9 @@ interface Props {
   onOpenSettings: () => void
   /** Opens the full-screen in-app manual (the "?" entry). Always available. */
   onOpenManual: () => void
-  /** Opens the global skills panel (the user's own ~/.claude/skills — view +
-   *  create). Always available. */
-  onOpenSkills: () => void
-  /** Opens the Persona surface — what the owner's stand-in knows about how they
-   *  decide things. A GROUND-level entry because the surface describes the
-   *  OWNER, not a repo: its data lives in ~/.openground/ and is identical on
-   *  every project, so it belongs beside Settings / Manual / Skills rather than
-   *  in the per-project tab row where it used to sit. Provided ONLY when the
-   *  persona OR swarm experiment is open (src/lib/persona/gate.ts) — undefined
-   *  hides the entry, so a non-owner build never renders it. */
-  onOpenPersona?: () => void
+  /** Owner-only entry; existing skill files remain available to the CLI. */
+  onOpenSkills?: () => void
+  viewModeControl?: React.ReactNode
   /** Opens the "Shared with me" join dialog (paste an invite code or link →
    *  join a collaborator's project). Provided ONLY when realtime collab is
    *  enabled — undefined hides the entry, so the default build shows nothing.
@@ -86,7 +77,6 @@ export const Toolbar = ({
   onOpenSettings,
   onOpenManual,
   onOpenSkills,
-  onOpenPersona,
   onOpenShared,
   onFeedback,
   onAccount,
@@ -97,11 +87,13 @@ export const Toolbar = ({
   projectCount,
   unreadFeedback = 0,
   usage,
+  viewModeControl,
 }: Props) => {
   const { t } = useT()
   return (
-    <div className="pointer-events-none absolute top-0 left-0 right-0 z-10 flex items-start justify-between gap-3 p-5">
+    <div className="pointer-events-none absolute top-0 left-0 right-0 z-10 flex flex-wrap items-start justify-between gap-3 p-5">
       {/* Top-left wordmark */}
+      <div className="flex min-w-0 max-w-full flex-col items-start gap-2">
       <div className="pointer-events-auto flex min-w-0 items-center gap-3.5 overflow-hidden bg-bg-card/95 backdrop-blur border border-line rounded-[3px] pl-3 pr-4 py-2 shadow-card">
         {/* Mark + wordmark are their own items-center group with a tighter gap so
             they read as one lockup; the tagline keeps its baseline relationship
@@ -135,8 +127,10 @@ export const Toolbar = ({
           </>
         )}
       </div>
+        {viewModeControl}
+      </div>
 
-      <div className="pointer-events-auto flex shrink-0 items-center gap-3">
+      <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-3">
         {/* The gauge is the widest single item in the bar (~200px). It is ambient
             information, not a control, so it is the first thing to go. */}
         {usage && <div className="hidden xl:flex items-center">{usage}</div>}
@@ -182,36 +176,9 @@ export const Toolbar = ({
           )}
           {/* Skills (the user's own ~/.claude/skills). "Sparkles" implied AI/magic;
               a "Skills" label + the modular Blocks glyph say what it opens. */}
-          <IconButton onClick={onOpenSkills} title={t('toolbar.skills')} label={t('toolbar.skills')}>
+          {onOpenSkills && <IconButton onClick={onOpenSkills} title={t('toolbar.skills')} label={t('toolbar.skills')}>
             <Blocks size={13} strokeWidth={1.75} />
-          </IconButton>
-          {/* PERSONA — deliberately NOT another 13px glyph in this row.
-              Ground-level because it is about the OWNER rather than any one
-              project (its notes live in ~/.openground/, identical on every
-              card), and it is the one entry here that opens a place the owner
-              BUILDS over time rather than a panel they consult. So it is set
-              apart: a hairline divider, its own accent-tinted chip, and a
-              figure-of-points mark at 18px instead of 13 (owner, 2026-08-15:
-              もっと目立たせる).
-
-              The mark is the screen it opens, in miniature — a person drawn by
-              the points known about them. The old Fingerprint said identity in
-              the passport sense: a fixed thing on file. This surface is the
-              opposite, something that accumulates. */}
-          {onOpenPersona && (
-            <>
-              <span className="mx-1 h-4 w-px shrink-0 bg-line-soft" aria-hidden />
-              <button
-                type="button"
-                onClick={onOpenPersona}
-                title={t('toolbar.personaTooltip')}
-                className="flex shrink-0 items-center gap-1.5 rounded-[3px] border border-accent/35 bg-accent/10 px-2 py-1 text-accent transition-colors hover:border-accent/60 hover:bg-accent/[0.16] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              >
-                <PersonaMark size={18} />
-                <span className="label-cap whitespace-nowrap">{t('toolbar.persona')}</span>
-              </button>
-            </>
-          )}
+          </IconButton>}
           <IconButton onClick={onOpenManual} title={t('toolbar.manual')}>
             <HelpCircle size={14} strokeWidth={1.75} />
           </IconButton>
@@ -447,4 +414,3 @@ const MenuItem = ({
     {label}
   </button>
 )
-

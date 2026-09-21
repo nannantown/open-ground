@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, Store, Trash2, Check, X, Eye, EyeOff } from 'lucide-react'
+import { Plus, Trash2, Check, X, Eye, EyeOff } from 'lucide-react'
 import { Overlay } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type { CustomModuleDef, CustomTabRole } from '@/lib/types'
@@ -45,6 +45,7 @@ export const moduleRemoveKind = (
 
 export const CustomTabPickerDialog = ({
   modules,
+  showCustomTabs = true,
   role,
   attachedIds,
   natives = [],
@@ -52,12 +53,12 @@ export const CustomTabPickerDialog = ({
   onToggleNative,
   onAttach,
   onCreateNew,
-  onBrowseMarket,
   onDelete,
   onClose,
 }: {
   /** The caller's full library (useCustomModules order). */
   modules: CustomModuleDef[]
+  showCustomTabs?: boolean
   role: CustomTabRole
   /** Module ids already attached to the current project. */
   attachedIds: ReadonlySet<string>
@@ -73,11 +74,8 @@ export const CustomTabPickerDialog = ({
   /** Attach to the current project — the parent persists, switches the view
    *  to the new tab and closes the picker. */
   onAttach: (moduleId: string) => void
-  /** Open the create dialog (owner only; the parent closes the picker). */
+  /** Open the create dialog (owner/tester; the parent closes the picker). */
   onCreateNew?: () => void
-  /** Browse the marketplace (owner|tester; the parent closes the picker and
-   *  opens the marketplace dialog). undefined hides the command. */
-  onBrowseMarket?: () => void
   /** Library-level delete/uninstall, AFTER the in-dialog confirm: server
    *  DELETE + killEmbeddedTerminals + list refresh live in the parent. */
   onDelete: (moduleId: string) => Promise<void> | void
@@ -100,7 +98,7 @@ export const CustomTabPickerDialog = ({
     }
   }
 
-  // The 「新規タブを作成」 command (owner only) — accent text + plus, sitting in
+  // The 「新規タブを作成」 command (owner/tester) — accent text + plus, sitting in
   // the footer outside the ruling (not a dashed box).
   const createButton = onCreateNew && (
     <button
@@ -111,22 +109,6 @@ export const CustomTabPickerDialog = ({
       <Plus size={14} strokeWidth={1.75} className="shrink-0" />
       <span className="underline-offset-2 group-hover/create:underline">
         {t('customTabs.pickerCreateNew')}
-      </span>
-    </button>
-  )
-
-  // 「マーケットで探す」 — owner|tester. Sits beside create in the footer; same
-  // shape with a storefront glyph, muted so create stays the accent. The tab
-  // row no longer carries a bare "Market" text entry, so this is its home.
-  const marketButton = onBrowseMarket && (
-    <button
-      type="button"
-      onClick={onBrowseMarket}
-      className="group/market inline-flex items-center gap-[7px] rounded-[3px] px-0.5 py-1 text-ui font-medium text-ink-muted transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-    >
-      <Store size={14} strokeWidth={1.75} className="shrink-0" />
-      <span className="underline-offset-2 group-hover/market:underline">
-        {t('customTabs.marketBrowse')}
       </span>
     </button>
   )
@@ -162,9 +144,9 @@ export const CustomTabPickerDialog = ({
           <h2 className="font-display text-head font-medium leading-[1.12] tracking-tightest text-ink">
             {t('customTabs.pickerTitle')}
           </h2>
-          <p className="mt-[9px] max-w-[42ch] text-ui leading-[1.55] text-ink-muted">
+          {showCustomTabs && <p className="mt-[9px] max-w-[42ch] text-ui leading-[1.55] text-ink-muted">
             {t('customTabs.pickerExplain')}
-          </p>
+          </p>}
         </header>
 
         <div className="rule-double" aria-hidden />
@@ -263,7 +245,7 @@ export const CustomTabPickerDialog = ({
           </>
         )}
 
-        {modules.length === 0 ? (
+        {!showCustomTabs ? null : modules.length === 0 ? (
           // Empty state — a single ledger line with the T·— serial.
           <div className="flex items-baseline gap-3 px-[30px] py-7">
             <span className="font-mono text-micro uppercase tracking-[0.06em] text-line-strong">
@@ -465,7 +447,6 @@ export const CustomTabPickerDialog = ({
         <footer className="flex items-center justify-between gap-4 px-[30px] pb-[17px] pt-[15px]">
           <div className="flex items-center gap-5">
             {createButton}
-            {marketButton}
           </div>
           <button
             type="button"

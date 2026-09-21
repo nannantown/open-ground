@@ -7,7 +7,7 @@
 // in-process (no external proxy / OS sandbox — that is a separate concern):
 //
 //   LAYER 1 — feature gates. Every feature that talks to the internet
-//   (auto-update check, release notes, feedback, marketplace, Supabase auth,
+//   (auto-update check, release notes, feedback, Supabase auth,
 //   collab) consults isLockdownEnabled() (store.ts) at its route/config seam
 //   and reports itself unavailable, so the UI hides its entry points and the
 //   code path that would fetch is never reached. Observable per feature.

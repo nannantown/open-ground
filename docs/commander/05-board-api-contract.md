@@ -1,5 +1,11 @@
 # 05 — Board 列ライフサイクルと /api/project・/api/swarm API 契約
 
+## Current Contract (2026-09-19)
+
+The self-supply enable/approve endpoints are removed (404). Human escalation APIs remain; answer responses no longer contain memoryWritten and new records have no proxyDraft.
+See [SIMPLIFICATION.md](SIMPLIFICATION.md) for the current entry points and verification.
+Any descriptions of the retired paths below are historical, not operating instructions.
+
 > **対象コミット: `cc7c60e`** (origin/main tip, 2026-07-10 —
 > "fix(swarm): 手動 dispatch とエンジンの二重 dispatch 窓を両方向とも塞ぐ")。
 > 行番号は原則このコミット時点。読者 = 将来の司令塔(og-manage / manage セッション)。
@@ -296,7 +302,6 @@ owner gate なし = 同一マシンから誰でも叩ける(local single-user to
 | GET `/api/project/active-branches` | `?path=` | branch+worktree 注釈 | `:307` |
 | POST `/api/project/merged-branches` | `{path, branches(≤50), targetBranch?}` | 各 branch が trunk 入りか(純 git ancestry・500 にならず 'unknown') | `:318` |
 | POST `/api/project/pr-info` | `{path, prUrl}` | PR 状態。失敗は常に `{available:false}` | `:343` |
-| GET/POST/PUT `/api/project/open` | `{path, app}` 等 | フォルダを外部 app で開く/一覧/保存 | `:353,:357,:393` |
 | POST `/api/project/review-worktree` | `{path, branch}` | 中央 worktree にレビュー checkout を用意し絶対パス返却 | `:419` |
 | GET `/api/project/worktrees` | `?path=` | 中央 worktrees 一覧(main tree は載らない) | `:449` |
 | POST `/api/project/worktrees/clean` | `{path}` | clean な中央 worktree を削除(`{removed, skippedDirty}` — dirty は常に skip) | `:458` |
@@ -333,7 +338,7 @@ settings.json 手編集 `swarmLocalOwner:true` — 業務モード用、docs/SEC
 
 | Method Path | 主要入力 | 返り値 / 特記 | 行 |
 |---|---|---|---|
-| POST `/api/swarm/worker` | `{path, taskId?\|title?, notes?, hint?, worktree?, cols?, rows?}` | `SpawnSwarmWorkerResponse {terminalId, agentSessionId, worktree, branch, model?}`(`types.ts:939-950`)。taskId 有 = claim 先行 CAS(§5)。409=already dispatched、404=task not found、503=claude 未準備、400=goal 空/8KiB 超(`swarm.ts:113`) | `swarm.ts:241` |
+| POST `/api/swarm/worker` | `{path, taskId?\|title?, notes?, tier?, hint?, worktree?, cols?, rows?}` | `SpawnSwarmWorkerResponse {terminalId, agentSessionId, worktree, branch, model?}`(`types.ts:939-950`)。taskId 有 = claim 先行 CAS(§5)。409=already dispatched、404=task not found、503=claude 未準備、400=goal 空/8KiB 超(`swarm.ts:113`) | `swarm.ts:241` |
 | POST `/api/swarm/supply` | `{path, cols?, rows?, fresh?}` | 補給官 PTY(primary checkout・worktree なし)。`{terminalId, agentSessionId, resumed}` — **既定で前回の会話を resume**(§10)。`fresh:true` で新規会話 | `:381` |
 | POST `/api/swarm/manager` | `{path, cols?, rows?, fresh?}` | 司令官 PTY(primary checkout・worktree なし)。同上 — **resume 時は Board を読み直してから喋る**(§10) | `:430` |
 | POST `/api/swarm/worktree/remove` | `{path, worktree, force?}` | `{removed, reason?, selfUpdate?}` — dirty は force なしで拒否。**非 force の撤去成功時は司令官統合の検知結果 `selfUpdate:{detected,requested}` が付く**(branch tip が trunk 到達済みなら self-update トリガ発火 — selfUpdateOnIntegrate.ts、TARGET-STATE §5) | `:468` |
@@ -356,6 +361,17 @@ settings.json 手編集 `swarmLocalOwner:true` — 業務モード用、docs/SEC
 | GET `/api/swarm/quota` | — | `SwarmQuotaResponse {now, tiers, launchTier, allCoolingUntil}`(`types.ts:2228-2244`)。path 不要(subscription 全体の話) | `:897` |
 | POST `/api/swarm/quota/cool` | `{tier, untilMs\|minutes}` | tier を手動冷却(上限 `MAX_MANUAL_COOLING_MS`) | `:911` |
 | POST `/api/swarm/quota/uncool` | `{tier}` | 冷却解除(冪等) | `:943` |
+
+#### Live difficulty at manual dispatch (2026-09-18)
+
+`POST /api/swarm/worker` accepts `tier: "touch" | "standard" | "design" | "ultra" | null`.
+With `taskId`, a valid live value overrides the saved card; `null` explicitly resets
+to Auto even before the drawer's autosave completes. Omission or an invalid value
+preserves the saved tier. The saved card's safety floor still applies, and worker
+routing also checks the live goal. Title-only launches accept the same valid tiers.
+This is a launch override, not a Board update; the normal Board persistence path
+saves the selection. Guards: `swarmWorkerLiveGoal.test.ts`,
+`BoardModule.runRouting.test.tsx`, and `e2e/board-tier.spec.ts`.
 
 ### 6.3 id の掟
 
@@ -637,3 +653,54 @@ curl -s -X POST "$API/api/swarm/manager" -H 'content-type: application/json' \
 継ぎ直した**正当な続き**かもしれない(勝手に kill/差し戻ししない)。逆に worktree が消えていた・既に
 ready だった worker は resume されず reclaim 経路に乗る。どちらも「状況」で Board と roster を読み直せば
 判る — 現物が正、という §10.2 の原則は不変。
+
+### 10.6 Desk context cap — resumes are no longer unconditional (2026-09-18)
+
+**Why.** The 5-hour window drained in ~2h. Measured from `~/.claude/projects/*.jsonl`
+(2026-09-18): 992 input / 139,761 output / **50,850,276 cache-read** tokens — a desk
+carrying a huge context and talking often. The resident desks are 1M-context sessions
+resumed forever (§10.1), and native auto-compact fires only near ~950k (seen on the
+supply desk: 965,390 → 170,458). Every turn below that re-reads the whole, growing
+conversation. Commander b6963523 sat at 346,076 with zero compactions.
+
+**What changed (owner decision: the means differ by role).** One setting,
+`Settings.deskContextCapTokens` (default **300,000**, `0` = off, POST /api/settings
+allowlisted — tune it without a UI). The fill is `sessionContextTokens`
+(`claudeUsage.ts`, the number `/context` prints).
+
+| Desk | At the cap | Where | Log line (engine log, next to `consumption:`) |
+|---|---|---|---|
+| Commander | **Recycle at spawn**: a resumable conversation at/over the cap is NOT `--resume`d; a fresh session opens, still booted on `MANAGER_RESUME_INJECTION` (it re-reads Board / workers / engine through the API and git) and the NEW id is recorded, so the next boot resumes the small one | `deskContextCap.recycleDeskSessionIfOverCap` called from `swarmManager.launchNewDesk` (both runtimes) | `司令官の卓を作り直した(文脈 N → 0)` |
+| Supply officer | **Compact while alive**: a boot loop (60s) types one `/compact` into the live supply PTY once idle | `supplyContextCap.ts` (`startSupplyContextCapLoop`, wired in `server/index.ts`) | `補給官の卓を圧縮した(文脈 N → M)` |
+
+- **Commander only at spawn.** A live commander is not interrupted; the cap applies at
+  its next spawn (app restart = every release, the engine's resuscitation, the 司令官
+  button). The response of `POST /api/swarm/manager` carries `recycledFromTokens`
+  when it happened (`resumed:false`).
+- **Supply writes obey the three live-desk refusals** — `noticeDeliverable` reused
+  verbatim (not generating / input box read AND empty / no menu). Refused ⇒ next pass.
+  After a send the desk is `pending` until its fill drops under the cap; a send that
+  never lands is retried after 20 min, never every pass.
+- **Measured before building** (`scripts/probe-desk-compact.mts`, throwaway desks,
+  haiku): `/compact` is accepted on **both** runtimes — PTY 40,237 → 9,845
+  (`compact_boundary`, trigger manual) and SDK via `pushSdkInput` 27,245 → 1,502. The
+  supply desk is PTY-only, so only the PTY arm is wired.
+- **`sessionContextTokens` now reads a compaction.** A `compact_boundary` newer than
+  the last reply returns its `postTokens` (previously the stale pre-compaction number
+  until the next turn — which would have re-sent `/compact` every pass, and made the
+  gauge show a full desk that was not).
+- **Fail-open:** unreadable fill or setting ⇒ resume / do nothing, exactly as before.
+  Native auto-compact is untouched (`autoCompactGuard.test.ts` still pins that nobody
+  disables it, and now pins that the ONLY automatic slash caller is the supply cap).
+- Guards: `swarmManagerContextCap.test.ts` / `supplyContextCap.test.ts` /
+  `deskContextCap.test.ts` / `deskContextCapSetting.test.ts` / `claudeUsage.test.ts`
+  (all measured red with the fix reverted).
+- **Real-machine check (2026-09-18, `scripts/verify-desk-recycle.mts`, isolated
+  OPENGROUND_HOME + scratch project, SDK commander).** Seeded with a copy of the real
+  OPEN GROUND commander conversation (409,418 tokens, all about ANOTHER project):
+  ① spawn answered `resumed:false, recycledFromTokens:409418` with a new session id,
+  and the record now names it; ② fill 409,418 → 56,052 after the first report;
+  ③ the desk's 「状況」 matched the scratch project exactly (2 cards blocked/done, no
+  workers, engine off, git state) and echoed nothing from the copied memory — the
+  memory loss did no harm, so no hand-off note is needed. Engine journal:
+  `司令官の卓を作り直した(文脈 409,418 → 0)…`.

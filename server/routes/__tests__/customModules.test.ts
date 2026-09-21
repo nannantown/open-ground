@@ -1,18 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtemp, rm, stat } from 'fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { app } from '../../app'
 import { writeSession, clearSession } from '@/lib/server/authStore'
-import { customModuleDir } from '@/lib/server/paths'
+import { customModuleDir, customModuleSourceFile, customModulesIndexFile } from '@/lib/server/paths'
 import type { TerminalInfo } from '@/lib/server/terminal'
 import type { CustomModuleDef } from '@/lib/types'
-
-// Route-level contract for the custom-tab module API
-// (server/routes/customModules.ts, docs/CUSTOM_TABS_PLAN.md): server-side role
-// gating (403 { error: 'forbidden' }), uuid-validated ids (404 before any
-// filesystem touch), and env-gated Supabase publish/marketplace (503 when
-// unconfigured, fetch mocked when configured — never a real Supabase).
 
 const OWNER = 'owner@example.com'
 const TESTER = 'tester@example.com'
@@ -76,6 +70,20 @@ const fakeClaudePty = (id: string, cwd: string, kills: string[]): FakePtySession
   exitListeners: new Set(),
 })
 
+// Legacy installations must remain usable without the retired install endpoint.
+const seedInstalledTab = async (): Promise<CustomModuleDef> => {
+  const id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  const def: CustomModuleDef = {
+    id, label: 'Installed', description: '', framework: 'react', origin: 'installed',
+    createdAt: '2026-06-12T00:00:00Z', updatedAt: '2026-06-12T00:00:00Z',
+    remoteId: '11111111-2222-4333-8444-555555555555', version: 1,
+  }
+  await mkdir(customModuleDir(id), { recursive: true })
+  await writeFile(customModulesIndexFile(), JSON.stringify([def]))
+  await writeFile(customModuleSourceFile(id), 'export default () => null\n')
+  return def
+}
+
 let home: string
 const prevHome = process.env.OPENGROUND_HOME
 
@@ -99,8 +107,7 @@ describe('GET /api/custom-modules — role + list for any caller', () => {
   it('signed out → role none, empty list', async () => {
     const res = await app.request('/api/custom-modules')
     expect(res.status).toBe(200)
-    // marketAvailable: true is the default (work mode / lockdown off).
-    expect(await res.json()).toEqual({ role: 'none', modules: [], marketAvailable: true })
+    expect(await res.json()).toEqual({ role: 'none', modules: [] })
   })
 
   it('owner sees role owner and the created modules', async () => {
@@ -212,34 +219,14 @@ describe('PUT /api/custom-modules/:id — owner any; tester local-only', () => {
   })
 
   it('a tester may NOT edit an installed module (someone else’s artifact)', async () => {
-    // Install a marketplace row (origin 'installed') the same way the DELETE
-    // tests do — anon fetch mocked, never a real Supabase.
-    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
-    vi.stubEnv('SUPABASE_ANON_KEY', 'anon-key')
-    const row = {
-      id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-      name: 'M',
-      description: '',
-      framework: 'react',
-      source: 'export default () => null\n',
-      version: 1,
-      published_at: '2026-06-12T00:00:00Z',
-    }
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(new Response(JSON.stringify([row]), { status: 200 })),
-    )
+    const installed = await seedInstalledTab()
     await signInAs(TESTER)
-    const installed: CustomModuleDef = await (
-      await app.request('/api/marketplace/install', json('POST', { remoteId: row.id }))
-    ).json()
-    expect(installed.origin).toBe('installed')
-
     const res = await app.request(
       `/api/custom-modules/${installed.id}`,
-      json('PUT', { label: 'Hijack' }),
+      json('PUT', { label: 'Hijack', source: 'changed' }),
     )
     expect(res.status).toBe(403)
+    expect(await readFile(customModuleSourceFile(installed.id), 'utf8')).toBe('export default () => null\n')
   })
 
   it('owner patches meta + source', async () => {
@@ -292,28 +279,8 @@ describe('DELETE /api/custom-modules/:id — owner; tester for installed only', 
   })
 
   it('tester MAY delete an installed module', async () => {
-    // Install via the marketplace route (anon fetch mocked).
-    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
-    vi.stubEnv('SUPABASE_ANON_KEY', 'anon-key')
-    const row = {
-      id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-      name: 'M',
-      description: '',
-      framework: 'react',
-      source: 'export default () => null\n',
-      version: 1,
-      published_at: '2026-06-12T00:00:00Z',
-    }
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(new Response(JSON.stringify([row]), { status: 200 })),
-    )
+    const installed = await seedInstalledTab()
     await signInAs(TESTER)
-    const installed: CustomModuleDef = await (
-      await app.request('/api/marketplace/install', json('POST', { remoteId: row.id }))
-    ).json()
-    expect(installed.origin).toBe('installed')
-
     const res = await app.request(`/api/custom-modules/${installed.id}`, { method: 'DELETE' })
     expect(res.status).toBe(200)
   })
@@ -334,239 +301,5 @@ describe('DELETE /api/custom-modules/:id — owner; tester for installed only', 
         })
       ).status,
     ).toBe(404)
-  })
-})
-
-describe('POST /api/custom-modules/:id/publish', () => {
-  it('403 for non-owner (checked before the env gate)', async () => {
-    await signInAs(TESTER)
-    const res = await app.request(
-      '/api/custom-modules/123e4567-e89b-42d3-a456-426614174000/publish',
-      { method: 'POST' },
-    )
-    expect(res.status).toBe(403)
-  })
-
-  it('a tester may NOT publish even their OWN local module (publish stays owner-only)', async () => {
-    // Authoring opened to testers, but publishing official modules did not: a
-    // tester who created a local tab still gets 403 on publish (role gate fires
-    // before the env/module checks, so no Supabase env is needed here).
-    await signInAs(TESTER)
-    const def: CustomModuleDef = await (
-      await app.request('/api/custom-modules', json('POST', { label: 'Mine' }))
-    ).json()
-    const res = await app.request(`/api/custom-modules/${def.id}/publish`, { method: 'POST' })
-    expect(res.status).toBe(403)
-  })
-
-  it('503 publishUnavailable when the service-role env is missing', async () => {
-    const def = await createAsOwner()
-    const res = await app.request(`/api/custom-modules/${def.id}/publish`, { method: 'POST' })
-    expect(res.status).toBe(503)
-    expect((await res.json()).publishUnavailable).toBe(true)
-  })
-
-  it('first publish INSERTs with the SERVICE key and stamps remoteId/version', async () => {
-    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co/')
-    vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', 'service-role-key')
-    const def = await createAsOwner('Pub', 'd')
-    const returned = [
-      {
-        id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-        name: 'Pub',
-        description: 'd',
-        framework: 'react',
-        version: 1,
-        published_at: '2026-06-12T00:00:00Z',
-      },
-    ]
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(new Response(JSON.stringify(returned), { status: 201 }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    const res = await app.request(`/api/custom-modules/${def.id}/publish`, { method: 'POST' })
-    expect(res.status).toBe(200)
-    const body = await res.json()
-    expect(body.remoteId).toBe('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
-    expect(body.version).toBe(1)
-
-    // Default table og_custom_modules; service key in both headers; source rides
-    // the row body.
-    const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('https://example.supabase.co/rest/v1/og_custom_modules')
-    expect(init.method).toBe('POST')
-    expect(init.headers.apikey).toBe('service-role-key')
-    expect(init.headers.Authorization).toBe('Bearer service-role-key')
-    const sent = JSON.parse(init.body)
-    expect(sent.name).toBe('Pub')
-    expect(sent.source).toContain('export default function')
-    // No author identity rides the row — the published table carries nothing
-    // that names the publisher (author_email was dropped, see the plan).
-    expect('author_email' in sent).toBe(false)
-  })
-
-  it('re-publish UPDATEs by remoteId with version+1', async () => {
-    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
-    vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', 'service-role-key')
-    const def = await createAsOwner('Pub2')
-    const remoteId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
-
-    // First publish (INSERT) to stamp remoteId/version on the local def.
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify([
-            { id: remoteId, version: 1, published_at: '2026-06-12T00:00:00Z' },
-          ]),
-          { status: 201 },
-        ),
-      ),
-    )
-    await app.request(`/api/custom-modules/${def.id}/publish`, { method: 'POST' })
-
-    // Second publish must PATCH ?id=eq.<remoteId> with version 2.
-    const patchMock = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify([{ id: remoteId, version: 2, published_at: '2026-06-12T00:00:00Z' }]),
-        { status: 200 },
-      ),
-    )
-    vi.stubGlobal('fetch', patchMock)
-    const res = await app.request(`/api/custom-modules/${def.id}/publish`, { method: 'POST' })
-    expect(res.status).toBe(200)
-    expect((await res.json()).version).toBe(2)
-    const [url, init] = patchMock.mock.calls[0]
-    expect(url).toContain(`?id=eq.${remoteId}`)
-    expect(init.method).toBe('PATCH')
-    expect(JSON.parse(init.body).version).toBe(2)
-  })
-
-  it('502 (generic, no url/key leak) when Supabase rejects', async () => {
-    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
-    vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', 'service-role-key')
-    const def = await createAsOwner()
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(new Response('rls says no', { status: 401 })),
-    )
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    const res = await app.request(`/api/custom-modules/${def.id}/publish`, { method: 'POST' })
-    expect(res.status).toBe(502)
-    const body = await res.json()
-    expect(body.error).toMatch(/responded 401/)
-    expect(JSON.stringify(body)).not.toContain('service-role-key')
-  })
-})
-
-describe('GET /api/marketplace', () => {
-  it('403 for role none', async () => {
-    expect((await app.request('/api/marketplace')).status).toBe(403)
-  })
-
-  it('503 when the anon env is missing (owner or tester)', async () => {
-    await signInAs(TESTER)
-    expect((await app.request('/api/marketplace')).status).toBe(503)
-  })
-
-  it('tester lists published modules via the ANON key', async () => {
-    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
-    vi.stubEnv('SUPABASE_ANON_KEY', 'anon-key')
-    const rows = [
-      {
-        id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-        name: 'M',
-        description: 'd',
-        framework: 'react',
-        version: 2,
-        published_at: '2026-06-12T00:00:00Z',
-      },
-    ]
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(new Response(JSON.stringify(rows), { status: 200 }))
-    vi.stubGlobal('fetch', fetchMock)
-    await signInAs(TESTER)
-    const res = await app.request('/api/marketplace')
-    expect(res.status).toBe(200)
-    expect((await res.json()).items).toEqual([
-      {
-        remoteId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-        name: 'M',
-        description: 'd',
-        framework: 'react',
-        version: 2,
-        publishedAt: '2026-06-12T00:00:00Z',
-      },
-    ])
-    const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toContain('/rest/v1/og_custom_modules?')
-    expect(init.headers.apikey).toBe('anon-key')
-  })
-})
-
-describe('POST /api/marketplace/install', () => {
-  it('403 for role none; 400 without remoteId; 404 when the row is missing', async () => {
-    expect(
-      (await app.request('/api/marketplace/install', json('POST', { remoteId: 'x' }))).status,
-    ).toBe(403)
-
-    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
-    vi.stubEnv('SUPABASE_ANON_KEY', 'anon-key')
-    await signInAs(TESTER)
-    expect(
-      (await app.request('/api/marketplace/install', json('POST', {}))).status,
-    ).toBe(400)
-
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(new Response('[]', { status: 200 })),
-    )
-    expect(
-      (await app.request('/api/marketplace/install', json('POST', { remoteId: 'nope' })))
-        .status,
-    ).toBe(404)
-  })
-
-  it('installs a row locally and re-install updates in place', async () => {
-    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co')
-    vi.stubEnv('SUPABASE_ANON_KEY', 'anon-key')
-    const row = {
-      id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-      name: 'Installed',
-      description: 'd',
-      framework: 'react',
-      source: 'export default () => null\n',
-      version: 1,
-      published_at: '2026-06-12T00:00:00Z',
-    }
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(new Response(JSON.stringify([row]), { status: 200 })),
-    )
-    await signInAs(TESTER)
-    const first: CustomModuleDef = await (
-      await app.request('/api/marketplace/install', json('POST', { remoteId: row.id }))
-    ).json()
-    expect(first.origin).toBe('installed')
-    expect(first.remoteId).toBe(row.id)
-
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          new Response(JSON.stringify([{ ...row, version: 2 }]), { status: 200 }),
-        ),
-    )
-    const second: CustomModuleDef = await (
-      await app.request('/api/marketplace/install', json('POST', { remoteId: row.id }))
-    ).json()
-    expect(second.id).toBe(first.id)
-    expect(second.version).toBe(2)
-
-    const list = await (await app.request('/api/custom-modules')).json()
-    expect(list.modules).toHaveLength(1)
   })
 })

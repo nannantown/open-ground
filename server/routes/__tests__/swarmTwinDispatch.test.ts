@@ -32,7 +32,6 @@ import {
   selectDispatch,
 } from '@/lib/server/swarmOrchestrator'
 import type { OrchestratorDeps, ProjectEngine } from '@/lib/server/swarmOrchestrator'
-import { initSelfSupplyRuntime } from '@/lib/server/swarmSelfSupply'
 import { initOverseerRuntime } from '@/lib/server/swarmOverseer'
 import { readProjectData, mutateProjectData } from '@/lib/server/projectData'
 import type { ProjectTask, SpawnSwarmWorkerResponse } from '@/lib/types'
@@ -315,7 +314,6 @@ const newEngine = (path: string): ProjectEngine => ({
   nudges: new Map(),
   log: [],
   anomalies: [],
-  selfSupply: initSelfSupplyRuntime(),
   overseer: initOverseerRuntime(),
   notified: new Set(),
   pendingFatal: [],

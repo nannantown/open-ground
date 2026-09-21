@@ -237,44 +237,30 @@ describe('lockdown ON — collab config reports disabled; every other collab rou
 
 // ─── Marketplace + module submissions (Supabase egress) ───────────────────────
 
-describe('lockdown ON — marketplace refuses; LOCAL custom-module CRUD stays available', () => {
-  it('GET /api/custom-modules still 200 (local list), with marketAvailable:false', async () => {
+describe('lockdown ON — retired distribution stays absent; LOCAL custom-module CRUD stays available', () => {
+  it('local custom modules remain listed without distribution capability', async () => {
     await lockdownOn()
     const res = await app.request('/api/custom-modules')
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.marketAvailable).toBe(false)
+    expect(body).not.toHaveProperty('marketAvailable')
     expect(Array.isArray(body.modules)).toBe(true)
   })
 
-  it('marketplace list / install / publish → 503, no fetch', async () => {
+  it('retired marketplace routes stay 404 without fetch', async () => {
     await lockdownOn()
     const spy = trapFetch()
-    expect((await app.request('/api/marketplace')).status).toBe(503)
+    expect((await app.request('/api/marketplace')).status).toBe(404)
     expect(
       (await app.request('/api/marketplace/install', json({ remoteId: 'x' }))).status,
-    ).toBe(503)
+    ).toBe(404)
     expect(
       (await app.request('/api/custom-modules/some-id/publish', { method: 'POST' })).status,
-    ).toBe(503)
+    ).toBe(404)
     expect(spy).not.toHaveBeenCalled()
   })
 
-  it('module-submissions: config reports disabled; submit/list 503', async () => {
-    await lockdownOn()
-    const spy = trapFetch()
-    const config = await app.request('/api/module-submissions/config')
-    expect(config.status).toBe(200)
-    expect(await config.json()).toEqual({ enabled: false, canReview: false })
 
-    const submit = await app.request(
-      '/api/module-submissions',
-      json({ name: 'x', framework: 'react', source: 'export default 1' }),
-    )
-    expect(submit.status).toBe(503)
-    expect((await app.request('/api/module-submissions')).status).toBe(503)
-    expect(spy).not.toHaveBeenCalled()
-  })
 })
 
 // ─── The round trip (OFF restores everything) ─────────────────────────────────
@@ -323,12 +309,7 @@ describe('lockdown round trip — turning it OFF restores every gate', () => {
     expect(project.status).toBe(200)
   })
 
-  it('marketplace availability returns after OFF', async () => {
-    await lockdownOn()
-    expect((await (await app.request('/api/custom-modules')).json()).marketAvailable).toBe(false)
-    await lockdownOff()
-    expect((await (await app.request('/api/custom-modules')).json()).marketAvailable).toBe(true)
-  })
+
 })
 
 // ─── The Anthropic path is deliberately OUTSIDE the switch ────────────────────

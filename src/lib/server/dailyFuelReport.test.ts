@@ -27,6 +27,9 @@ import {
 } from './dailyFuelReport'
 import type { SessionTokenAudit } from './swarmTokenAudit'
 import type { ProjectData } from '../types'
+import { getCustomTabRole } from './roles'
+
+vi.mock('./roles', () => ({ getCustomTabRole: vi.fn(async () => 'owner') }))
 
 // ── Fixture language ────────────────────────────────────────────────────────
 // Everything runs in an isolated OPENGROUND_HOME + an isolated fake
@@ -129,6 +132,7 @@ describe('dailyFuelReport', () => {
   let osHome = ''
 
   beforeEach(async () => {
+    vi.mocked(getCustomTabRole).mockResolvedValue('owner')
     // The once-a-day guard and the tick re-entrancy flag live on globalThis on
     // purpose (a `tsx watch` reload must not drop them) — which also means
     // they outlive a test. Reset both, or one test's "already reported today"
@@ -682,6 +686,31 @@ describe('dailyFuelReport', () => {
     }
     return false
   }
+
+  it.each(['none', 'tester'] as const)('pauses automatic reports for %s without altering saved data, then resumes as owner', async role => {
+    withClockAt(10)
+    const lastAt = NOW - 86_400_000 - QUIET_MS - 60_000
+    for (const n of [0, 1]) {
+      await writeSession(workerDir(UUID, n), `s${n}.jsonl`, sessionLines({ turns: 5, lastAtMs: lastAt, toolsPerTurn: 1 }), lastAt)
+    }
+    const old = await runDailyFuelReport({ now: NOW - 86_400_000, claudeRoot })
+    expect(old.proposalOutcome).toBe('filed')
+    const sentinelBefore = await readFile(join(home, 'daily-fuel-report.json'), 'utf8')
+    const notificationsBefore = await readNotifications()
+    const boardBefore = await readBoard()
+    vi.mocked(getCustomTabRole).mockResolvedValue(role)
+    startDailyFuelReportLoop(60 * 60 * 1000)
+    expect(await waitFor(async () => globalThis.__openground_fuel_tick_inflight === false)).toBe(true)
+    expect(await readNotifications()).toEqual(notificationsBefore)
+    expect(await readBoard()).toEqual(boardBefore)
+    expect(await readFile(join(home, 'daily-fuel-report.json'), 'utf8')).toBe(sentinelBefore)
+
+    vi.mocked(getCustomTabRole).mockResolvedValue('owner')
+    startDailyFuelReportLoop(60 * 60 * 1000)
+    expect(await waitFor(async () => globalThis.__openground_fuel_tick_inflight === false)).toBe(true)
+    expect((await readNotifications()).length).toBeGreaterThan(notificationsBefore.length)
+    expect(await readBoard()).toEqual(boardBefore)
+  })
 
   it('loop boot tick honours the in-process guard even with no sentinel file', async () => {
     // Guard says "already reported today", disk says nothing — the boot

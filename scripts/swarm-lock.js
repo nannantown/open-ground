@@ -1,19 +1,7 @@
 #!/usr/bin/env node
-// scripts/swarm-lock.js — CLI for the tmux 司令塔 side of the cross-process
-// integration lock (0706 二重司令塔事故フォロー). Lets a human-driven `claude`
-// session (tmux commander) hold the SAME repo-scoped lock file the in-app
-// swarm engine checks before every rebase/push onto the trunk
-// (src/lib/server/swarmIntegrationLock.ts) — so the two can never integrate
-// the same repo at once.
-//
-// This script is delivered INTO THE REPO (scripts/) because ~/.claude/ is not
-// writable by a worker — the tmux toolkit (swarm-lib.sh etc.) must invoke this
-// file directly; it is not itself installed under ~/.claude/.
-//
-// File format + repo-key derivation are IDENTICAL to swarmIntegrationLock.ts
-// and swarmJanitor.ts's swarmRepoKey (basename(parent) + sha1(git-common-dir
-// realpath)[:8]) and to swarm-lib.sh's `sw_repokey` — same key, same file, so
-// all three readers/writers agree on one lock.
+// Cross-process integration lock for commander sessions. The engine no longer
+// integrates branches, but manual commanders must still exclude one another.
+// Repo-key derivation matches swarmJanitor.ts and openground-swarm-lib.sh.
 //
 // IMPORTANT — the pid stored in the lock is NOT this script's own pid (a
 // one-shot CLI invocation exits immediately, which would make the lock look
@@ -118,7 +106,7 @@ function acquire() {
   for (let attempt = 0; attempt < 2; attempt++) {
     const holder = { pid, acquiredAt: new Date().toISOString(), label }
     // Write to a private tmp file first, then atomically claim the real path
-    // via linkSync (EEXIST if already taken) — mirrors swarmIntegrationLock.ts
+    // via linkSync (EEXIST if already taken)
     // so the lock file is NEVER observably empty to a concurrent reader (a
     // plain exclusive create-then-write leaves a 0-byte window a competitor
     // could misread as "vanished").

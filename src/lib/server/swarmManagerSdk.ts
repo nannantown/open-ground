@@ -1,10 +1,7 @@
 // swarmManagerSdk — the COMMANDER-shaped glue for the Agent SDK runtime.
 //
-// `managerLaunchOpts` (swarmManager.ts) is the PTY commander's launch contract;
-// this is its SDK counterpart. The engine, the Board, the integration protocol
-// and the owner's vocabulary («状況 / マージ / 掃除») are identical either way, so
-// anything that differs here is a behaviour difference the rest of the system
-// does not know about. Parity, item by item:
+// The sole launch plan for new manager desks. Supply remains on a PTY, while
+// manager runtime addressing also retains compatibility for in-flight old PTYs.
 //
 //   • THE SKILL. `/og-manage` IS the commander — every guarantee it carries
 //     (never force-push, only `swarm/*`, adversarial review before merge) lives
@@ -83,6 +80,9 @@ export interface SdkManagerOptsInput {
   /** The claude conversation id (`sessionId` fresh / `resume` continuing). */
   agentSessionId: string
   resume?: boolean
+  /** Fresh conversation replacing one recycled over the desk context cap — see
+   *  deskContextCap.ts. Only changes the initial prompt. */
+  recycled?: boolean
   /** Mode-resolved model/effort. REQUIRED since 2026-09-16 — the old optional
    *  fell back to the TOP tier (fable), so forgetting it spent the scarcest
    *  quota silently. */
@@ -154,7 +154,8 @@ export const sdkManagerLaunchPlan = (opts: SdkManagerOptsInput): SdkManagerLaunc
   return {
     options,
     initialPrompt:
-      (opts.resume ? MANAGER_RESUME_INJECTION : MANAGER_INJECTION) + languageDirective(opts.lang),
+      (opts.resume || opts.recycled ? MANAGER_RESUME_INJECTION : MANAGER_INJECTION) +
+      languageDirective(opts.lang),
     warnings,
   }
 }

@@ -57,7 +57,6 @@ const engineState = (over: Partial<SwarmOrchestratorState> = {}): SwarmOrchestra
   running: true,
   manualStop: false,
   manualStopPersisted: false,
-  selfSupply: false,
   overseer: false,
   workers: [],
   reviews: [],

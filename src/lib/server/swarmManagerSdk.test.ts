@@ -47,7 +47,7 @@ describe('sdkManagerLaunchPlan', () => {
     expect(plan().options.hooks).toBeUndefined()
   })
 
-  it('runs bypass and loads no MCP servers (parity with managerLaunchOpts)', () => {
+  it('runs bypass and loads no MCP servers', () => {
     const o = plan().options
     expect(o.permissionMode).toBe('bypassPermissions')
     expect(o.strictMcpConfig).toBe(true)

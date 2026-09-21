@@ -1,10 +1,8 @@
 // Client-side mirror of the server's experiment gate (src/lib/server/
 // experiments.ts). ONE GET /api/experiments returns both `eligible` (may this
 // user toggle experiments at all — owner) and the resolved per-experiment
-// `flags` (owner && the settings toggle). The client never computes the owner
-// check itself: a signed-out / non-owner user gets eligible:false + all-false
-// flags from the server, so experimental surfaces stay invisible regardless of
-// any settings.json they forge.
+// `flags` (including Swarm's independent public/local unlock). The client never
+// infers owner access from an open Swarm flag: only `eligible` opens owner UI.
 //
 // Owned by App, which passes `eligible` to the Settings panel (to reveal the
 // owner-only toggle) and `flags` to the project panel (to gate which modules
@@ -16,7 +14,7 @@ import type { ExperimentFlags, ExperimentsResponse } from '@/lib/types'
 
 // Fail-closed defaults: nothing eligible, every flag off. Matches the shipped /
 // signed-out / non-owner state until the first fetch resolves.
-const NO_FLAGS: ExperimentFlags = { swarm: false, sandbox: false, persona: false }
+const NO_FLAGS: ExperimentFlags = { swarm: false, sandbox: false }
 
 /** The PUBLIC swarm opt-in state (all users). Fail-closed until first fetch. */
 const NO_OPT_IN = { available: false, enabled: false }
@@ -24,24 +22,22 @@ const NO_OPT_IN = { available: false, enabled: false }
 export interface ExperimentsState {
   /** The user may toggle experiments at all (owner). Gates the settings toggle. */
   eligible: boolean
-  /** Resolved per-experiment open state (owner && the settings toggle). */
+  /** Resolved per-experiment open state, including Swarm's public/local unlock. */
   flags: ExperimentFlags
   /** The public swarm opt-in: `available` (this machine — macOS) gates the
    *  Settings toggle's visibility for ALL users; `enabled` reflects the choice. */
   swarmOptIn: { available: boolean; enabled: boolean }
-  /** The public persona opt-in: `available` is true on every platform;
-   *  `enabled` reflects the choice. */
-  personaOptIn: { available: boolean; enabled: boolean }
   /** True once a fetch has succeeded at least once. */
   loaded: boolean
   refresh: () => Promise<void>
 }
 
-export function useExperiments(): ExperimentsState {
+export function useExperiments(sessionId?: string): ExperimentsState {
+  const [resolvedSession, setResolvedSession] = useState<string | undefined>(sessionId)
+  const requestSeq = useRef(0)
   const [eligible, setEligible] = useState(false)
   const [flags, setFlags] = useState<ExperimentFlags>(NO_FLAGS)
   const [swarmOptIn, setSwarmOptIn] = useState(NO_OPT_IN)
-  const [personaOptIn, setPersonaOptIn] = useState(NO_OPT_IN)
   const [loaded, setLoaded] = useState(false)
   // Guards setState-after-unmount from a slow in-flight fetch.
   const aliveRef = useRef(true)
@@ -63,18 +59,19 @@ export function useExperiments(): ExperimentsState {
   flagsRef.current = flags
 
   const refresh = useCallback(async () => {
+    const seq = ++requestSeq.current
     try {
       const r = await fetch('/api/experiments', { cache: 'no-store' })
       if (!r.ok) return // route missing / server error — keep what we have
       const body = (await r.json()) as ExperimentsResponse
-      if (!aliveRef.current) return
+      if (!aliveRef.current || seq !== requestSeq.current) return
+      setResolvedSession(sessionId)
       setEligible(!!body.eligible)
       // Take only known flag keys, coerced to booleans — never trust the wire to
       // be exactly NO_FLAGS' shape.
       const next: ExperimentFlags = {
         swarm: body.flags?.swarm === true,
         sandbox: body.flags?.sandbox === true,
-        persona: body.flags?.persona === true,
       }
       const prev = flagsRef.current
       const unchanged = (Object.keys(next) as (keyof ExperimentFlags)[]).every(
@@ -85,15 +82,11 @@ export function useExperiments(): ExperimentsState {
         available: body.swarmOptIn?.available === true,
         enabled: body.swarmOptIn?.enabled === true,
       })
-      setPersonaOptIn({
-        available: body.personaOptIn?.available === true,
-        enabled: body.personaOptIn?.enabled === true,
-      })
       setLoaded(true)
     } catch {
       // Offline / server restarting — keep the last-known gate quietly.
     }
-  }, [])
+  }, [sessionId])
 
   useEffect(() => {
     void refresh()
@@ -115,5 +108,12 @@ export function useExperiments(): ExperimentsState {
     return () => window.removeEventListener('focus', onFocus)
   }, [refresh])
 
-  return { eligible, flags, swarmOptIn, personaOptIn, loaded, refresh }
+  const currentSession = resolvedSession === sessionId
+  return {
+    eligible: currentSession && eligible,
+    flags: currentSession ? flags : NO_FLAGS,
+    swarmOptIn: currentSession ? swarmOptIn : NO_OPT_IN,
+    loaded: currentSession && loaded,
+    refresh,
+  }
 }

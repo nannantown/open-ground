@@ -1036,9 +1036,6 @@ export interface UseSwarmEngine {
   busy: boolean
   /** Last engine-action failure, already localized. */
   error: string | null
-  /** The overseer was armed WITHOUT the sandbox experiment (L3) — the manager pane
-   *  shows a reduced-containment note. False whenever the overseer is off. */
-  sandboxWarning: boolean
   /** Unmet git/shell prerequisites for spawning a swarm session in this project
    *  (GET /api/swarm/preflight — swarmEnvPreflight, the same gate the worker/
    *  supply/manager spawn routes enforce). Empty when everything checks out or
@@ -1103,7 +1100,6 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   // L3: the overseer was armed WITHOUT the sandbox experiment — the UI shows a
   // reduced-containment note. Set from the overseer toggle response; cleared when the
   // overseer is off. Advisory only (the structural READ-ONLY design + budget hold).
-  const [sandboxWarning, setSandboxWarning] = useState(false)
   // Unmet git/shell prerequisites (GET /api/swarm/preflight), polled alongside
   // the engine state below (one interval, one more endpoint).
   const [envIssues, setEnvIssues] = useState<SwarmEnvIssue[]>([])
@@ -1428,9 +1424,8 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
           const body = (await res.json().catch(() => ({}))) as { error?: string }
           throw new Error(body?.error || `HTTP ${res.status}`)
         }
-        const raw = (await res.json()) as { sandboxWarning?: boolean }
+        const raw: unknown = await res.json()
         setEngine(sanitizeEngineState(raw))
-        setSandboxWarning(next && raw.sandboxWarning === true)
         setAvailable(true)
       } catch (e) {
         setEngine((s) => ({ ...s, overseer: !next }))
@@ -1537,7 +1532,6 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     available,
     busy,
     error,
-    sandboxWarning,
     envIssues,
     refreshEnvPreflight,
     toggleAutonomy: (next) => void toggleAutonomy(next),

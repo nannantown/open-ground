@@ -54,9 +54,9 @@ export interface SandboxProfileInput {
    *  egress-proxy pattern (docs/SANDBOX_EXPERIMENT.md follow-up): the confined
    *  claude reaches Anthropic exclusively through a host-side allowlist CONNECT
    *  proxy on 127.0.0.1 (HTTPS_PROXY), so what leaves the machine is decided
-   *  OUTSIDE the sandbox. The overseer brain uses this — it holds the private
-   *  you-corpus, so its direct egress is structurally closed, not permission-
-   *  layer-closed. (Verified on the real kernel: remote-ip localhost allows,
+   *  OUTSIDE the sandbox. The manual sandbox probe exercises this profile;
+   *  there is no longer a Persona caller. (Verified on the real kernel:
+   *  remote-ip localhost allows,
    *  1.1.1.1:443 EPERMs, DNS still resolves via mDNSResponder mach IPC.) */
   network?: 'all' | 'loopback'
 }
@@ -133,8 +133,8 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
   // broader than claude's own token: on a normal machine that set includes
   // `Chrome Safe Storage`, the master key to the browser password vault. Denying
   // the login family would not have closed that either — it only broke login: true
-  // secret isolation needs the egress-proxy follow-up (docs/SANDBOX_EXPERIMENT.md),
-  // which the overseer brain already runs. What IS closed here is the vault's other
+  // secret isolation needs an egress restriction (docs/SANDBOX_EXPERIMENT.md).
+  // What IS closed here is the vault's other
   // half — the browser credential DBs, denied by regex below — so the key alone no
   // longer opens anything locally.
   const denyReadSubpaths = [
@@ -378,8 +378,7 @@ export const buildSandboxProfile = (input: SandboxProfileInput): string => {
   //      above, so the key no longer unlocks anything reachable — but the items
   //      themselves are still readable, and that is what stays open. Closed
   //      structurally only by `network:'loopback'` + the allowlist egress proxy (no
-  //      destination to exfil to) — which is why the brain runs that way and
-  //      extending it to workers is the follow-up.
+  //      destination to exfil to). Workers still use the default outbound policy.
   //   2. MUTATION of claude's own credential store — tamper, or outright deletion
   //      of `login.keychain-db` AND its legacy twin `login.keychain` (both are in
   //      the write-allowed family, and the legacy file is real: 265 KB, 2016, still

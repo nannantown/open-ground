@@ -1,37 +1,5 @@
 // @vitest-environment node
-//
-// spawnSwarmManager's SINGLETON GUARD under CONCURRENCY — the check-then-act window.
-//
-// swarmManager.test.ts pins the pure launch contract and
-// swarmSessions.integration.test.ts drives the SEQUENTIAL guard through real PTYs
-// (spawn, then spawn again → `reused:true`). Neither can reach the case this file
-// exists for: two callers inside the SAME check-then-act window.
-//
-// The window is real and its two callers are independent BY CONSTRUCTION — the
-// engine's resuscitation reflex (swarmOrchestrator, on its own timer) and the
-// owner's 司令官 button (POST /api/swarm/manager) — running in ONE Node process.
-// Between `listLiveDesksIn` (the check) and `launchClaude` (the act) sit four
-// awaits, the tier probe alone spending seconds; both callers read "no desk" and
-// both spawn. That is the 2026-07-19 eleven-desk incident's shape (two desks
-// integrating one trunk = the 2026-07-15 concurrent-integration hazard), minus the
-// five-minute spacing that made the pool read alone sufficient.
-//
-// Everything with a side effect is mocked, so no PTY is spawned, no `claude` runs,
-// and nothing is written outside the suite's tmp home:
-//   • launchClaude          — would spawn a real PTY. The mock REGISTERS the desk in
-//                             a fake pool, so listLiveDesksIn behaves like the real
-//                             one: a desk exists exactly once its launch happened.
-//   • listLiveDesksIn       — reads that fake pool, filtering by (cwd, deskLabel)
-//                             the way the real one does (resolve()-compared cwd).
-//   • installOgManageSkill  — writes into ~/.claude/skills/ (HOME-anchored, which
-//                             the suite does NOT isolate). Mocked, never run.
-//   • resolveSwarmModelEffortProbed — the slow step: it may spawn headless probe
-//                             children. Mocked, and its GATE is what holds the
-//                             critical section open long enough to race into.
-//   • resolveSwarmSession / recordSwarmSession — store reads/writes.
-// `./store` is deliberately NOT mocked: getExecutionMode/getAllowedModelTiers are
-// plain reads against the suite's isolated OPENGROUND_HOME, and their values are
-// irrelevant here because the resolver that consumes them is mocked.
+// SDK manager singleton, restart and legacy in-flight PTY adoption.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { resolve } from 'path'
@@ -54,18 +22,7 @@ const mocks = vi.hoisted(() => ({
   installOgManageSkill: vi.fn(async () => ({ outcome: 'installed' as const, path: '/tmp/skill' })),
   resolveSwarmModelEffortProbed: vi.fn(),
   resolveSwarmRemoteName: vi.fn(async () => 'manager'),
-  // ── the SDK commander's spawn, faked at the SAME depth as the PTY one ──
-  // `launchClaude` is mocked so the PTY race can run without a claude; these are
-  // its SDK counterparts, so the race can run on THAT runtime too. Everything
-  // below them is real — including `spawnSdkSession` and the pool the singleton
-  // guard reads, which is the part under test.
-  getManagerRuntimeDial: vi.fn(async () => ({ mode: 'pty' as 'pty' | 'sdk' })),
-  // ⚠ ONLY the preflight is faked, because only the preflight probes the SYSTEM
-  // (it looks for a claude binary and reads its version). `sdkManagerLaunchPlan`
-  // is PURE — verified — so it runs for real: a hand-rolled stand-in for it
-  // would be one more thing that can drift from the shape production returns,
-  // and this file has already been bitten by exactly that (a fake plan with no
-  // `warnings` threw inside launchSdkDesk).
+  // Only the binary preflight is faked; the launch plan and SDK pool are real.
   sdkManagerPreflight: vi.fn(),
 }))
 
@@ -88,10 +45,6 @@ vi.mock('./swarmSessions', () => ({
   forgetSwarmSessionIf: mocks.forgetSwarmSessionIf,
 }))
 vi.mock('./ogManageSkill', () => ({ installOgManageSkill: mocks.installOgManageSkill }))
-vi.mock('./store', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./store')>()),
-  getManagerRuntimeDial: mocks.getManagerRuntimeDial,
-}))
 vi.mock('./swarmManagerSdk', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./swarmManagerSdk')>()),
   sdkManagerPreflight: mocks.sdkManagerPreflight,
@@ -165,75 +118,52 @@ const outcomeOf = <T>(p: Promise<T>): Promise<T | Error> =>
     (e) => (e instanceof Error ? e : new Error(String(e))),
   )
 
-/** The fake PTY pool: launchClaude adds to it, listLiveDesksIn reads it. */
+
 let pool: OwnerDeskTerminal[] = []
-let launchN = 0
+
+/** A passing preflight, built from the REAL return type so a field added to it
+ *  fails compilation here rather than throwing deep inside launchSdkDesk. */
+const okPreflight = (): SdkPreflightResult => ({
+  ok: true,
+  claudeBin: '/bin/claude',
+  cliVersion: '2.1.220',
+  problems: [],
+})
+
+/** A live SDK desk that never produces a message — alive, and nothing else. */
+const idle = () => ({
+  async *[Symbol.asyncIterator]() {
+    await new Promise(() => {})
+    yield undefined
+  },
+})
+
+
+const deskCount = (cwd = PROJ) =>
+  listSdkSessions().filter((s) => s.role === 'manager' && resolve(s.cwd) === resolve(cwd) && !s.reaped).length
 
 beforeEach(() => {
   vi.clearAllMocks()
   pool = []
-  launchN = 0
-
   mocks.listLiveDesksIn.mockImplementation((cwd: string, label: string) =>
     pool.filter((d) => d.deskLabel === label && resolve(d.cwd) === resolve(cwd)),
   )
-  mocks.launchClaude.mockImplementation((o: { cwd: string; agentSessionId: string }) => {
-    const id = `term-${++launchN}`
-    pool.push({
-      id,
-      cwd: o.cwd,
-      agentSessionId: o.agentSessionId,
-      deskLabel: MANAGER_DESK_LABEL,
-      startedAtMs: 1,
-    })
-    return { terminalId: id }
-  })
-  mocks.resolveSwarmSession.mockImplementation(async (_p: string) => ({
-    agentSessionId: `sid-${launchN + 1}`,
-    resume: false,
-  }))
+  mocks.isTerminalProcessAlive.mockReturnValue(true)
+  mocks.launchClaude.mockImplementation(() => { throw new Error('Manager PTY launch is retired') })
+  mocks.resolveSwarmSession.mockResolvedValue({ agentSessionId: 'sid-new', resume: false })
   mocks.resolveSwarmModelEffortProbed.mockResolvedValue({ model: 'opus', effort: 'max' })
+  mocks.sdkManagerPreflight.mockReturnValue(okPreflight())
+  __resetSdkSessionsForTests()
+  __setDefaultQueryFnForTests(() => idle())
 })
 
 afterEach(() => {
   vi.useRealTimers()
+  __setDefaultQueryFnForTests(null)
+  __resetSdkSessionsForTests()
 })
 
-describe('spawnSwarmManager — the check-then-act is a critical section (one desk per project)', () => {
-  it('TWO TRULY SIMULTANEOUS calls open ONE desk — the second is handed the first (reused)', async () => {
-    // The bare race, with no test-only choreography: both calls are started in the
-    // same tick, exactly as the engine's reflex and the owner's button can land.
-    // Every mocked await yields the microtask queue, so without a lock the second
-    // caller's `listLiveDesksIn` runs BEFORE the first caller's `launchClaude` —
-    // both read "no desk" and both spawn (verified by removing the lock: two
-    // launches, two terminal ids).
-    const [a, b] = await Promise.all([
-      spawnSwarmManager({ projectPath: PROJ }),
-      spawnSwarmManager({ projectPath: PROJ }),
-    ])
-
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
-    expect(pool).toHaveLength(1)
-    expect(b.terminalId).toBe(a.terminalId)
-    // Exactly one caller spawned; the other adopted the desk that now exists.
-    expect([a.reused === true, b.reused === true].filter(Boolean)).toHaveLength(1)
-  })
-
-  it('THREE simultaneous calls still open ONE desk (the loser of a wake-up re-tests, never spawns)', async () => {
-    // Several waiters wake together when the holder releases; only one can win the
-    // compare-and-set, and the others must re-test the POOL rather than fall
-    // through. Three callers is the engine reflex + the owner's button + a retry.
-    const all = await Promise.all([
-      spawnSwarmManager({ projectPath: PROJ }),
-      spawnSwarmManager({ projectPath: PROJ }),
-      spawnSwarmManager({ projectPath: PROJ }),
-    ])
-
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
-    expect(new Set(all.map((r) => r.terminalId)).size).toBe(1)
-    expect(all.filter((r) => r.reused === true)).toHaveLength(2)
-  })
-
+describe('spawn lock and legacy adoption', () => {
   it('the SECOND caller answers from the POOL, not from the first caller’s result', async () => {
     // Serialised, not coalesced: the follower re-runs the check and reports what it
     // FINDS (reused:true naming the live desk), which is also why it reconciles the
@@ -248,19 +178,20 @@ describe('spawnSwarmManager — the check-then-act is a critical section (one de
 
     // The follower is parked on the lock — it has NOT launched anything yet, even
     // though the holder is demonstrably deep inside the critical section.
-    expect(mocks.launchClaude).not.toHaveBeenCalled()
+    expect(listSdkSessions()).toHaveLength(0)
 
     gate.resolve({ model: 'opus', effort: 'max' })
     const a = await first
     const b = await second
 
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
+    expect(listSdkSessions()).toHaveLength(1)
     expect(a.reused).toBeUndefined() // it spawned
     expect(b).toEqual({
-      terminalId: a.terminalId,
+      terminalId: '',
+      sdkSessionId: a.sdkSessionId,
       // Adoption reports the runtime of the desk it FOUND — the loser must not
       // be told 'pty' just because that is the default dial.
-      runtime: 'pty',
+      runtime: 'sdk',
       agentSessionId: a.agentSessionId,
       resumed: false,
       reused: true,
@@ -281,12 +212,12 @@ describe('spawnSwarmManager — the check-then-act is a critical section (one de
     await until(() => atTheGate(), 'the PROJ spawn to reach its gate')
     // PROJ is mid-spawn and parked. OTHER must complete on its own.
     const other = await spawnSwarmManager({ projectPath: OTHER })
-    expect(other.terminalId).toBeTruthy()
+    expect(other.sdkSessionId).toBeTruthy()
     expect(other.reused).toBeUndefined()
 
     gate.resolve({ model: 'opus', effort: 'max' })
     await stuck
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(2) // one desk per project
+    expect(listSdkSessions()).toHaveLength(2) // one desk per project
   })
 
   it('the lock keys on the RESOLVED path — `/repo/alpha/` and `/repo/alpha` are one project', async () => {
@@ -296,8 +227,8 @@ describe('spawnSwarmManager — the check-then-act is a critical section (one de
       spawnSwarmManager({ projectPath: PROJ }),
       spawnSwarmManager({ projectPath: `${PROJ}/` }),
     ])
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
-    expect(b.terminalId).toBe(a.terminalId)
+    expect(listSdkSessions()).toHaveLength(1)
+    expect(b.sdkSessionId).toBe(a.sdkSessionId)
   })
 
   it('`fresh:true` does NOT bypass the guard — it picks a conversation, not a second desk', async () => {
@@ -305,8 +236,8 @@ describe('spawnSwarmManager — the check-then-act is a critical section (one de
       spawnSwarmManager({ projectPath: PROJ }),
       spawnSwarmManager({ projectPath: PROJ, fresh: true }),
     ])
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
-    expect(b.terminalId).toBe(a.terminalId)
+    expect(listSdkSessions()).toHaveLength(1)
+    expect(b.sdkSessionId).toBe(a.sdkSessionId)
   })
 
   it('a FAILED spawn releases the lock and does not poison the caller behind it', async () => {
@@ -327,8 +258,8 @@ describe('spawnSwarmManager — the check-then-act is a critical section (one de
 
     const ok = await behind
     expect(ok.reused).toBeUndefined() // it really spawned — not a twin, there was none
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
-    expect(pool).toHaveLength(1)
+    expect(listSdkSessions()).toHaveLength(1)
+    expect(deskCount()).toBe(1)
   })
 
   it('the pre-existing SEQUENTIAL guard is unchanged: a live desk is reused, nothing launches', async () => {
@@ -372,11 +303,12 @@ describe('spawnSwarmManager — the check-then-act is a critical section (one de
 
     const r = await spawnSwarmManager({ projectPath: PROJ })
 
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1) // spawned fresh, did not adopt the corpse
+    expect(deskCount()).toBe(1) // spawned fresh, did not adopt the corpse
     expect(r.terminalId).not.toBe('dead-but-listed')
     expect(r.reused).toBeUndefined()
   })
 })
+
 
 describe('spawnSwarmManager — waiting out a holder that never settles', () => {
   it('ADOPTS the desk when the wedged holder already launched one (never a twin)', async () => {
@@ -386,7 +318,7 @@ describe('spawnSwarmManager — waiting out a holder that never settles', () => 
     mocks.recordSwarmSession.mockImplementationOnce(() => gate.promise)
 
     const wedged = outcomeOf(spawnSwarmManager({ projectPath: PROJ }))
-    await until(() => pool.length === 1, 'the wedged holder to launch its desk')
+    await until(() => deskCount() === 1, 'the wedged holder to launch its desk')
 
     // Only NOW switch to fake timers: from here the waiter touches nothing but the
     // lock's own setTimeout and the (mocked) pool, so the 120s wait is instant.
@@ -396,8 +328,8 @@ describe('spawnSwarmManager — waiting out a holder that never settles', () => 
 
     const r = await waiter
     expect(r.reused).toBe(true)
-    expect(r.terminalId).toBe('term-1')
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
+    expect(r.sdkSessionId).toBe(listSdkSessions()[0].id)
+    expect(listSdkSessions()).toHaveLength(1)
 
     vi.useRealTimers()
     gate.resolve()
@@ -424,79 +356,11 @@ describe('spawnSwarmManager — waiting out a holder that never settles', () => 
     vi.useRealTimers()
     gate.resolve({ model: 'opus', effort: 'max' })
     await wedged
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
+    expect(listSdkSessions()).toHaveLength(1)
   })
 })
 
-describe('spawnSwarmManager — wires session.resume through to the DOA watch (pins the must-fix, not just the unit)', () => {
-  // swarmManager.test.ts pins watchDeskForDeathOnArrival's OWN resume/fresh branch
-  // in isolation, calling it directly. That proves the function is correct but
-  // NOT that launchNewDesk actually hands it the resolver's real `resume` value —
-  // a refactor of that call site (argument reorder, destructuring change) could
-  // silently drop it and every existing test would stay green, because none of
-  // them go through spawnSwarmManager's real wiring end to end. These do: they
-  // drive a real spawn, capture the exit callback launchNewDesk registers via
-  // onTerminalExit, fire it as a quota-refusal death, and assert on
-  // forgetSwarmSessionIf — the one observable side effect resume/fresh actually
-  // changes.
-  const FABLE_NOTICE =
-    "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
 
-  /** Capture the exit callback launchNewDesk registers for the desk it just
-   *  spawned, so the test can fire a DOA death itself. Restored after each test
-   *  so this describe's choreography can never leak into a sibling test. */
-  const captureExitCallback = () => {
-    let cb: (() => void) | null = null
-    mocks.onTerminalExit.mockImplementationOnce((_id: string, onExit: () => void) => {
-      cb = onExit
-      return () => {}
-    })
-    return () => {
-      if (!cb) throw new Error('onTerminalExit was never called — no watch was armed')
-      cb()
-    }
-  }
-
-  afterEach(() => {
-    mocks.onTerminalExit.mockImplementation(() => () => {})
-    mocks.getTerminalScreen.mockReturnValue(null)
-  })
-
-  it('a RESUMED desk (session.resume=true) that dies of quota does NOT forget its session — the must-fix, driven through the real spawn path', async () => {
-    mocks.resolveSwarmSession.mockResolvedValueOnce({
-      agentSessionId: 'sid-days-of-history',
-      resume: true,
-    })
-    mocks.getTerminalScreen.mockReturnValueOnce(FABLE_NOTICE)
-    const fireDeath = captureExitCallback()
-
-    await spawnSwarmManager({ projectPath: PROJ })
-    fireDeath()
-
-    expect(mocks.forgetSwarmSessionIf).not.toHaveBeenCalled()
-  })
-
-  it('a FRESH desk (session.resume=false) that dies of quota DOES forget its (refusal-only) session — driven through the real spawn path', async () => {
-    mocks.resolveSwarmSession.mockResolvedValueOnce({
-      agentSessionId: 'sid-refusal-only',
-      resume: false,
-    })
-    mocks.getTerminalScreen.mockReturnValueOnce(FABLE_NOTICE)
-    const fireDeath = captureExitCallback()
-
-    await spawnSwarmManager({ projectPath: PROJ })
-    fireDeath()
-
-    expect(mocks.forgetSwarmSessionIf).toHaveBeenCalledWith(PROJ, 'manager', 'sid-refusal-only')
-  })
-})
-
-// ── the SECOND pool (stage 3) ────────────────────────────────────────────────
-// A commander can now live on the Agent SDK runtime, in a pool the PTY check
-// knows nothing about. If the singleton guard only asked the PTY pool, a project
-// whose commander is an SDK desk would read "no desk" — and the engine's reflex
-// would seat a replacement EVERY pass. That is the eleven-desk incident again,
-// this time built in rather than raced into.
 describe('one desk per project spans BOTH pools', () => {
   beforeEach(() => {
     __resetSdkSessionsForTests()
@@ -547,7 +411,7 @@ describe('one desk per project spans BOTH pools', () => {
     mocks.listLiveDesksIn.mockReturnValue([])
     seatSdkCommander(resolve('/tmp/some-other-project'))
     await spawnSwarmManager({ projectPath: PROJ })
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
+    expect(deskCount()).toBe(1)
   })
 
   it('an SDK WORKER in this project is not mistaken for a commander', async () => {
@@ -568,70 +432,12 @@ describe('one desk per project spans BOTH pools', () => {
       }),
     })
     await spawnSwarmManager({ projectPath: PROJ })
-    expect(mocks.launchClaude).toHaveBeenCalledTimes(1)
+    expect(deskCount()).toBe(1)
   })
 })
 
-// ── the race, on the runtime that is becoming the default ────────────────────
-//
-// WHY THIS BLOCK EXISTS, AND WHY THE DEFAULT WAITED FOR IT.
-//
-// Every test above that pins the check-then-act critical section — "TWO/THREE
-// truly simultaneous calls open ONE desk", "a failed spawn releases the lock" —
-// drives the PTY path, because this file fakes `launchClaude` and reads a fake
-// PTY pool. The SDK tests it grew later cover ADOPTION (a desk that already
-// exists is found) and cross-project isolation. Neither is the race.
-//
-// The race is the 2026-07-19 incident: two callers both read "no desk" and both
-// spawn, and a project ends up with eleven commanders talking over each other.
-// A default that puts the commander on the runtime whose race is untested is
-// that trade made deliberately, so `getManagerRuntimeDial` kept returning 'pty'
-// for the absent case until this block was green.
-//
-// Everything below the two fakes is REAL: `spawnSdkSession`, the pool, and the
-// singleton guard that reads it. What is faked is exactly what `launchClaude` is
-// faked for on the other side — the thing that would need a live claude.
-/** A passing preflight, built from the REAL return type so a field added to it
- *  fails compilation here rather than throwing deep inside launchSdkDesk. */
-const okPreflight = (): SdkPreflightResult => ({
-  ok: true,
-  claudeBin: '/bin/claude',
-  cliVersion: '2.1.220',
-  problems: [],
-})
-
-/** A live SDK desk that never produces a message — alive, and nothing else. */
-const idle = () => ({
-  async *[Symbol.asyncIterator]() {
-    await new Promise(() => {})
-    yield undefined
-  },
-})
 
 describe('the critical section holds on the SDK runtime too', () => {
-
-  beforeEach(() => {
-    __resetSdkSessionsForTests()
-    mocks.getManagerRuntimeDial.mockResolvedValue({ mode: 'sdk' })
-    mocks.sdkManagerPreflight.mockReturnValue(okPreflight())
-    // ⚠ Replace ANTHROPIC'S `query` — nothing of ours. Without this these tests
-    // spawn a REAL Agent SDK session on a machine with no `claude`; it dies and
-    // the desk lands in the pool as failed/reaped. Measured 2026-08-02: two of
-    // the race tests passed anyway, because at the moment they counted the desk
-    // it had not finished dying yet. `vi.mock` cannot reach it — the require
-    // happens at call time through a CJS hop — hence the seam in sdkSession.
-    __setDefaultQueryFnForTests(() => idle())
-  })
-  afterEach(() => {
-    __setDefaultQueryFnForTests(null)
-    __resetSdkSessionsForTests()
-    mocks.getManagerRuntimeDial.mockResolvedValue({ mode: 'pty' })
-  })
-
-  /** How many SDK commander desks this project actually has, read from the REAL
-   *  pool — not from what a caller was handed back. */
-  const deskCount = (cwd = PROJ) =>
-    listSdkSessions().filter((s) => s.role === 'manager' && s.cwd === cwd && !s.reaped).length
 
   it('TWO TRULY SIMULTANEOUS calls open ONE desk', async () => {
     const [a, b] = await Promise.all([
@@ -760,31 +566,8 @@ describe('the critical section holds on the SDK runtime too', () => {
 
 })
 
-// ── the commander's MEMORY, on the runtime that is now the default ───────────
-//
-// `swarmSessions.integration.test.ts` proves "boot → restart → resumes the SAME
-// conversation" by reading a real PTY's command line for `--resume`. An SDK
-// commander has no command line: the resume travels as a field on the launch
-// plan. So the property is the same and the evidence cannot be, and when the
-// commander default flipped that file had to name PTY explicitly — which would
-// have left the DEFAULT runtime's memory untested if this block did not exist.
-//
-// What is asserted is the handoff: whatever `resolveSwarmSession` decided about
-// resuming reaches the plan the SDK session is built from. Whether the CLI then
-// honours it is the CLI's contract, not ours.
-describe('the SDK commander carries its conversation across a restart', () => {
-  beforeEach(() => {
-    __resetSdkSessionsForTests()
-    mocks.getManagerRuntimeDial.mockResolvedValue({ mode: 'sdk' })
-    mocks.sdkManagerPreflight.mockReturnValue(okPreflight())
-    __setDefaultQueryFnForTests(() => idle())
-  })
-  afterEach(() => {
-    __setDefaultQueryFnForTests(null)
-    __resetSdkSessionsForTests()
-    mocks.getManagerRuntimeDial.mockResolvedValue({ mode: 'pty' })
-  })
 
+describe('the SDK commander carries its conversation across a restart', () => {
   it('a RESUMED session reaches the launch plan (the desk keeps its memory)', async () => {
     mocks.resolveSwarmSession.mockResolvedValue({ agentSessionId: 'sid-old', resume: true })
     const r = await spawnSwarmManager({ projectPath: PROJ })

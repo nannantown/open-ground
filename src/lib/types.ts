@@ -129,30 +129,7 @@ export interface Settings {
    * `swarmWorkerRuntime` key in an existing settings.json is IGNORED, never an
    * error: settings.json has no schema validation, readJson is tolerant, and
    * POST /api/settings silently drops the key (it left USER_SETTINGS_KEYS). */
-  /** WHICH RUNTIME the COMMANDER desk (司令官) launches on — dialled because it
-   *  spends something a worker never did: the owner's phone window.
-   *
-   *  `'pty'` (and any unrecognised value) ⇒ the commander is an interactive
-   *  `claude` PTY, exactly as before, reachable from a phone through
-   *  `--remote-control`. ABSENT ⇒ `'sdk'` since 2026-08-02. `'sdk'` ⇒ it
-   *  runs on the Agent SDK: structured transcript, liveness that is a fact
-   *  rather than an inference, and notices that no longer have to ERASE the
-   *  owner's half-typed input to be delivered — but NO Remote Control, because
-   *  the flag does nothing outside an interactive REPL.
-   *
-   *  That is why this is its own switch, and why its default moved LAST (a day
-   *  after the worker's): defaulting to SDK is only safe once the SUPPLY desk
-   *  (which stays on a PTY) can answer 「状況」 as well as take orders, since the
-   *  commander then stops being the owner's phone window. That window was moved
-   *  first, which is what the ordering of stage 3 was for.
-   *  See docs/SDK_CLIENT_INVESTIGATION.md §13 and skills/supply/SKILL.md.
-   *
-   *  Flipping it back does not disturb a desk already running; it decides what
-   *  the NEXT spawn builds, and the one-desk-per-project guard spans both pools
-   *  so a project can never end up with one of each. */
-  swarmManagerRuntime?: {
-    mode: 'pty' | 'sdk'
-  }
+  // Managers and workers are SDK-only. Legacy runtime keys remain inert on disk.
   /** The owner's chosen left-to-right order of the Swarm tab's sub-view strip
    *  ({@link SWARM_PANE_IDS} — 補給官 / 司令官 / ワーカー / 監督). PERSONAL UI
    *  state, kept central in `~/.openground/settings.json` (never the user's
@@ -165,6 +142,18 @@ export interface Settings {
    *  a stale value can never strand a pane. The FIRST id opens by default.
    *  User-settable (narrowed to the known pane ids by `setUserSettings`). */
   swarmPaneOrder?: SwarmPaneId[]
+  /** DESK CONTEXT CAP (2026-09-18, owner decision): the context fill, in tokens,
+   *  past which a RESIDENT desk is cut back — the commander by opening a FRESH
+   *  conversation at its next spawn instead of resuming, the supply officer by
+   *  being sent one `/compact` once it is idle (deskContextCap.ts /
+   *  supplyContextCap.ts). Why: native auto-compact on a 1M-context desk fires
+   *  near ~950k, and every turn until then re-reads the whole growing context —
+   *  measured as the main burn on the 5-hour window. This fires EARLIER; it does
+   *  not change native auto-compact.
+   *  Absent ⇒ {@link DEFAULT_DESK_CONTEXT_CAP_TOKENS}. `0` ⇒ OFF (desks resume and
+   *  grow as before). User-settable through POST /api/settings (narrowed to a
+   *  non-negative integer there), so it can be tuned without a UI. */
+  deskContextCapTokens?: number
   /** UI + prompt language. OPEN GROUND is English-first: unset means English.
    *  'ja' switches the UI strings AND the prompts sent to the spawned Claude
    *  (so its summaries/replies come back in Japanese). Persisted from the UI
@@ -214,7 +203,7 @@ export interface Settings {
    *  ~/.openground/settings.json (or env OPENGROUND_LOCAL_OWNER=1). Safe
    *  because the swarm owner gate is a feature-visibility flag, not a security
    *  boundary (POST /api/terminal is already ungated locally — swarmGate.ts).
-   *  Scope: swarm only — marketplace/custom-tab roles ignore it. */
+   *  Scope: swarm only — custom-tab roles ignore it. */
   swarmLocalOwner?: boolean
   /** User opt-in for the SWARM control plane, for ALL users (not just the
    *  owner) — the public "turn it on if you want it" switch (default off).
@@ -229,16 +218,6 @@ export interface Settings {
    *  is already ungated locally — swarmGate.ts / docs/SECURITY.md); the
    *  in-app warning discloses subscription cost + permission-bypass claude. */
   swarmOptIn?: boolean
-  /** The PUBLIC persona opt-in (all users, not just the owner). Like
-   *  {@link swarmOptIn} but for the Persona surface — user-settable via
-   *  POST /api/settings, narrowed to a literal boolean on save (store.ts).
-   *  ALL PLATFORMS (unlike swarmOptIn's macOS gate): a persona turn is a
-   *  single marker-scraped `claude` run with a deny-list (no Bash/Task/writes
-   *  outside a scratch dir — personaChat.ts), NOT an unattended worker, so it
-   *  carries no PreToolUse-guard / OS-sandbox dependency. Safe to expose:
-   *  loopback-only routes over the user's OWN corpus in ~/.openground/ (no
-   *  cross-user data); the in-app warning discloses subscription cost +
-   *  that a persona turn runs claude with permission prompts skipped. */
   /** WordPress publishing target for research reports (blogPublish.ts) — the
    *  owner's own self-hosted WP site. Configuring it IS the opt-in: absent ⇒
    *  the publish sweep does nothing. `appPassword` is a WordPress APPLICATION
@@ -252,10 +231,9 @@ export interface Settings {
    *  file never holds null — readers therefore see an object or undefined,
    *  and `settings.wordpress?.baseUrl` handles the whole union. */
   wordpress?: WordPressSettings | null
-  personaOptIn?: boolean
   /** Work mode (lockdown) — the one-toggle kill switch for every NON-Anthropic
    *  external egress, for running OPEN GROUND on a confidential work machine.
-   *  ON ⇒ auto-update checks, the in-app release check, feedback, marketplace,
+   *  ON ⇒ auto-update checks, the in-app release check, feedback,
    *  Supabase login/refresh, and collab are all disabled server-side (each
    *  surface reports itself unavailable), and the server process refuses any
    *  other external fetch (src/lib/server/lockdown.ts). The claude CLI —
@@ -271,11 +249,8 @@ export interface Settings {
  *  `sandbox` = wrap OPEN GROUND-launched `claude` in a macOS Seatbelt sandbox
  *  (cwd-confined writes + credential read-denies) and run it prompt-free
  *  (permission bypass) — the OS sandbox is the safety net (macOS only; see
- *  src/lib/server/sandbox.ts + docs/SANDBOX_EXPERIMENT.md);
- *  `persona` = the Persona tab, where the owner reads and corrects the
- *  you-corpus that the overseer runs on (src/components/canvas/modules/
- *  PersonaModule.tsx + src/lib/server/youCorpus.ts). */
-export type ExperimentId = 'swarm' | 'sandbox' | 'persona'
+ *  src/lib/server/sandbox.ts + docs/SANDBOX_EXPERIMENT.md). */
+export type ExperimentId = 'swarm' | 'sandbox'
 
 /** Resolved open/closed state for every experiment, keyed by id. TRUE only when
  *  the user is the owner AND has turned that experiment on. */
@@ -295,46 +270,12 @@ export interface ExperimentsResponse {
    *  effective. When `available` is false the Settings toggle is hidden; the
    *  owner path (eligible + experiments.swarm) is unaffected. */
   swarmOptIn: { available: boolean; enabled: boolean }
-  /** The PUBLIC persona opt-in (all users — Settings.personaOptIn). `available`
-   *  is true on every platform (persona has no unattended-worker guard, unlike
-   *  swarm); `enabled` = the user opted in. The owner path (eligible +
-   *  experiments.persona) is unaffected. */
-  personaOptIn: { available: boolean; enabled: boolean }
 }
 
-/** The runtime the commander dial RESOLVES TO on this machine right now,
- *  computed by the server and served read-only on {@link SettingsResponse}.
- *
- *  ⚠ THE PANEL MUST DRAW THIS, NOT DERIVE ITS OWN. The Swarm tab used to read
- *  the raw dial keys off the same response and re-implement the server's rule
- *  client-side. That copy produced TWO display-vs-truth defects on 2026-08-02
- *  alone — an absent dial drawn ON while dispatch ran PTY, and a broken
- *  settings.json drawn ON while the commander fell to the kill switch —
- *  because a raw key cannot distinguish "never written" from "the file is
- *  unreadable", and a copied rule does not move when the rule does. This field
- *  comes from the very reader desk launch consults
- *  (`store.getManagerRuntimeDial`), so the toggle and the server cannot
- *  disagree by construction.
- *
- *  NOT a settings key: it is computed per request and must never appear in
- *  `USER_SETTINGS_KEYS`.
- *
- *  (Until 2026-08-13 this also carried `worker` + `workerCap` for the worker
- *  dial. Workers are SDK-only now — the worker dial and its slot cap were
- *  deleted, so the shape narrowed to the one surviving switch. Client and
- *  server ship as one Electron bundle, so the break lands in a single release.) */
-export type RuntimeDialsEffective = {
-  manager: 'pty' | 'sdk'
-}
-
-/** GET /api/settings response: the persisted {@link Settings} plus a
- *  NON-persisted display-name suggestion (`git config --global user.name`,
- *  null when git is missing or user.name is unset) and the server's own
- *  {@link RuntimeDialsEffective}. The client shows the suggestion only as the
- *  input placeholder — neither field is ever written into settings.json. */
+/** GET /api/settings adds a read-only display-name suggestion, used only as
+ *  the input placeholder. It is never persisted in settings.json. */
 export type SettingsResponse = Settings & {
   suggestedDisplayName: string | null
-  runtimeDialsEffective: RuntimeDialsEffective
 }
 
 /** One published release of the distribution repo (GET /api/release-notes).
@@ -1239,14 +1180,8 @@ export interface SpawnSwarmSupplyResponse {
   reused?: boolean
 }
 
-/** POST /api/swarm/manager — a spawned in-app COMMANDER (司令官) CONVERSATION
- *  session: the claude PTY id + its session id. Like the supply officer (and
- *  unlike a worker) it has NO worktree — it runs in the project's PRIMARY checkout
- *  cwd, running the /og-manage skill so the owner can talk to the commander
- *  (status / merge / advise) interactively. It complements the AUTONOMOUS engine
- *  (the orchestrator behind /api/swarm/orchestrator): the engine is the unattended
- *  drain+integrate loop, this is the human-in-the-loop conversational counterpart.
- *  Stopping it is a plain PTY kill (no worktree). */
+/** POST /api/swarm/manager: new managers are SDK sessions in the primary
+ *  checkout. A reused response can adopt an already-running legacy PTY desk. */
 export interface SpawnSwarmManagerResponse {
   /** PTY commander ⇒ its terminal id. SDK commander ⇒ EMPTY — the identity
    *  invariant is pty ⇔ terminalId, sdk ⇔ sdkSessionId, never both (the same
@@ -1259,11 +1194,6 @@ export interface SpawnSwarmManagerResponse {
   /** Present only for an SDK commander: its {@link SdkSessionInfo} id, the
    *  handle /api/sdk-session/* is addressed by. */
   sdkSessionId?: string
-  /* NOTE (2026-08-13): `fellBackBecause` was DELETED from this response with
-   * the runtime auto-fallback. An SDK dial now either seats an SDK desk or the
-   * POST fails with the reason in the error body — a desk can no longer come
-   * back on a different runtime than the dial chose, so there is nothing to
-   * explain on the success path. */
   agentSessionId: string
   /** true ⇒ this is the project's PREVIOUS commander conversation, resumed
    *  (`claude --resume`) — see SpawnSwarmSupplyResponse.resumed. NOTE the asymmetry
@@ -1272,8 +1202,11 @@ export interface SpawnSwarmManagerResponse {
    *  NOT. That is why a resumed commander is ordered to re-read the Board and the
    *  worker list before it says anything (swarmManager.MANAGER_RESUME_INJECTION). */
   resumed: boolean
+  /** Set when the persisted conversation was over the desk context cap and a
+   *  FRESH one was opened instead (deskContextCap.ts): its fill in tokens. */
+  recycledFromTokens?: number
   /** true ⇒ NOTHING was spawned: a commander desk was already live in this
-   *  project, so `terminalId` names THAT desk. The one-desk-per-project invariant
+   *  project; its runtime-specific handle names THAT desk. The one-desk-per-project invariant
    *  (swarmManager.spawnSwarmManager) — a project may never hold two commanders,
    *  because two desks integrating one trunk is the 2026-07-15
    *  concurrent-integration hazard, and eleven of them accumulated on 2026-07-19.
@@ -1830,19 +1763,9 @@ export interface SwarmOrchestratorState {
    *  (`manualStop` true via the in-memory flag) from the durable record. A
    *  record only — it never auto-resumes (or auto-stops) anything by itself. */
   manualStopPersisted: boolean
-  /** True while SELF-SUPPLY (card b3fbbfba) is armed: the engine proposes its own
-   *  improvement cards (discovered from tsc/lint/test/anomalies/TODOs) into todo.
-   *  A SEPARATE switch from `running`, default OFF (in-memory, so a
-   *  restart re-arms OFF — fail-safe). Even when ON, a proposed card is
-   *  approval-gated: it never dispatches until the owner approves it.
-   *  (The old `autoMerge` field — the separate auto-wake-the-commander toggle —
-   *  was RETIRED 2026-07-16: the wake reflex is always armed while `running`.) */
-  selfSupply: boolean
-  /** True while the OVERSEER (EPIC C / C-core) is armed: the autonomous proxy-you
-   *  brainstem watches the swarm and, on judgment edges, wakes a one-off brain or
-   *  raises to the human inbox. The THIRD toggle, default OFF, in-memory (a restart
-   *  re-arms OFF). ASYMMETRIC to selfSupply: an explicit autonomy OFF
-   *  CLEARS it (the owner re-arms it every session — no persisted reminder). */
+  /** True while deterministic monitoring is armed. Questions go to the human
+   *  inbox, never a proxy model. Stop/restart clears the in-memory flag; persisted
+   *  intent only offers a reminder, never automatic re-arming. */
   overseer: boolean
   /** Workers the engine dispatched and still counts as live (≤ maxWorkers). */
   workers: OrchestratorWorker[]
@@ -2031,6 +1954,19 @@ export interface ProjectTask {
    *  read→write round-trip — the collab layer (ydoc.ts) is field-agnostic, so it
    *  needs no change.) */
   priority?: TaskPriority
+  /** In-app swarm DIFFICULTY tier — decides the worker's model/effort in
+   *  `optimize` mode (owner decision 2026-09-18: 「文字数ではなくて難易度」).
+   *  Written by the supply officer AFTER reading the code the card touches;
+   *  the owner can override it in the Board drawer. The card names a
+   *  DIFFICULTY, never a model — the model roster changed three times in two
+   *  weeks, and a model name baked into a card rots. The one tier→(model,
+   *  effort) table is TIER_MODEL_EFFORT in swarmLaunch.ts. Absent ⇒ the static
+   *  keyword estimator decides (resolveCardTier). A card whose text trips the
+   *  safety keywords (auth / delete / billing / migration …) never runs BELOW
+   *  `design`, whatever is written here — the safety floor. Shared data.
+   *  (Schema 3-point set: this field + ProjectTaskSchema (schemas.ts) with
+   *  `.catch(undefined)`, so a junk value drops the FIELD, never the card.) */
+  tier?: TaskTier
   /** The pull request opened for this task (completionFlow 'pr'): claude
    *  records it via POST /api/project/tasks {setPrUrl} when it opens the PR.
    *  Rendered as a link on the card and in the detail drawer. Shared data. */
@@ -2089,20 +2025,9 @@ export interface ProjectTask {
    *  Shared data. (3点セット: types.ts / schemas.ts ProjectTaskSchema / the
    *  server's setter in server/routes/project.ts.) */
   abandoned?: boolean
-  /** Set by the commander engine's SELF-SUPPLY stage (card b3fbbfba) when the
-   *  engine proposed this card on its own (a discovered improvement point — a
-   *  type/lint error, a failed test, a state anomaly, a TODO). Its presence both
-   *  marks provenance AND carries the STABLE dedup key (so the engine never
-   *  re-proposes the same finding while an open card for it exists). A card with
-   *  this set is GATED: selectDispatch skips it until `selfSupplyApproved` is
-   *  true. Shared data. (3点セット: types.ts / schemas.ts ProjectTaskSchema /
-   *  here.) */
+  /** Legacy automatic proposal marker. Keep unapproved saved cards out of dispatch. */
   selfSupplyKey?: string
-  /** Owner approval for a self-supplied card (the per-card dispatch gate, the
-   *  primary runaway defense): false/absent ⇒ selectDispatch holds it as an inert
-   *  proposal; true ⇒ the engine may dispatch it like any todo card. Set only by
-   *  the owner-gated POST /api/swarm/orchestrator/selfsupply/approve. Meaningless
-   *  without `selfSupplyKey`. Shared data. */
+  /** Legacy approval only; retirement never silently approves an existing proposal. */
   selfSupplyApproved?: boolean
   /** 差し戻し(review→doing)ループガードのカウンタ — POST /api/project/tasks
    *  {rework:[{id}]} が review→doing に移す度+1し、maxReworks(既定3)を超えたら
@@ -2134,6 +2059,23 @@ export type TaskPriority = 'urgent' | 'high' | 'normal' | 'low'
 
 export const TASK_PRIORITIES: readonly TaskPriority[] = ['urgent', 'high', 'normal', 'low']
 
+/** Board card DIFFICULTY tier (in-app swarm, owner decision 2026-09-18). Listed
+ *  cheapest-first — the order the drawer picker renders AND the rank the safety
+ *  floor compares. `touch` = small, well-understood change (typo / copy /
+ *  rename); `standard` = ordinary feature work (what an unmarked card gets);
+ *  `design` = structural / judgment-heavy work, and the FLOOR for any card that
+ *  trips the safety keywords; `ultra` = the only tier that desires the top model
+ *  at max effort. What each tier launches on is decided in ONE place
+ *  (swarmLaunch.ts TIER_MODEL_EFFORT) — never spelled on the card. */
+export type TaskTier = 'touch' | 'standard' | 'design' | 'ultra'
+
+export const TASK_TIERS: readonly TaskTier[] = ['touch', 'standard', 'design', 'ultra']
+
+/** Narrow an untrusted value (request body, hand-edited card) to a TaskTier —
+ *  anything else is `undefined`, i.e. "no tier written" (the estimator decides). */
+export const asTaskTier = (v: unknown): TaskTier | undefined =>
+  typeof v === 'string' && (TASK_TIERS as readonly string[]).includes(v) ? (v as TaskTier) : undefined
+
 /** Claude CLI effort levels (`claude --effort <level>`). */
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
@@ -2146,14 +2088,18 @@ export const CLAUDE_EFFORTS: readonly ClaudeEffort[] = [
 ]
 
 /** Swarm execution mode — one toggle that trades capability ↔ weekly budget
- *  (card 68d8e00f). `max` = every role opus/max (peak quality, peak spend);
- *  `economy` = sonnet + low/medium effort + fewer parallel workers (minimise the
- *  subscription burn); `optimize` = per-card weight decides (heavy → opus, chores
- *  → sonnet) — the smart default. The model/effort/parallelism resolution lives in
+ *  (card 68d8e00f). `max` = every role on the top tier / max (peak quality, peak
+ *  spend); `economy` = sonnet + low/medium effort + fewer parallel workers
+ *  (minimise the subscription burn); `optimize` = the card's difficulty
+ *  {@link TaskTier} picks the worker's row (touch → sonnet … ultra → top tier)
+ *  while the always-on desks sit on opus — the smart default. The model/effort/parallelism resolution lives in
  *  `swarmLaunch.ts`; this is the shared contract the client toggle + settings use. */
 export type ExecutionMode = 'max' | 'economy' | 'optimize'
 export const EXECUTION_MODES: readonly ExecutionMode[] = ['max', 'economy', 'optimize']
 export const DEFAULT_EXECUTION_MODE: ExecutionMode = 'optimize'
+
+/** Default for {@link Settings.deskContextCapTokens} (owner decision 2026-09-18). */
+export const DEFAULT_DESK_CONTEXT_CAP_TOKENS = 300_000
 
 /** The four faces of the Swarm tab's sub-view strip — 補給官 (supply) / 司令官
  *  (manager) / ワーカー (workers) / 監督 (overseer) — as reorderable pane ids.
@@ -2910,34 +2856,16 @@ export interface AppNotificationsResponse {
 
 // ─── Escalations inbox (C1 — docs/OVERSEER_DESIGN.md §8) ────────────────────
 
-/** Why an escalation was raised to the REAL user instead of being auto-answered
- *  by the proxy (the K6/K7 valves):
- *   • 'irreversible'      — the act can't be undone (billing / publish / delete /
- *                            deploy / credentials), so it goes up REGARDLESS of
- *                            the proxy's confidence.
- *   • 'insufficient-info' — the proxy's corpus is too thin to answer (calibrated
- *                            abstention — declared up front, never confabulated).
- *   • 'policy'            — an explicit rule says a human decides this. */
+/** Why a question needs human approval. Values are stable for saved records. */
 export type EscalationWhy = 'irreversible' | 'insufficient-info' | 'policy'
 
 /** Escalation lifecycle. 'open' → (owner answers) → 'answered' → (the answer is
  *  delivered into the blocked worker's PTY) → 'injected'; or 'open' →
  *  'dismissed' (the owner closes it without answering — nothing is injected,
- *  nothing is written to memory). There is NO transition out of 'open' the
+ *  no answer is recorded). There is NO transition out of 'open' the
  *  system takes on its own: an unanswered escalation stays open forever
  *  (fail-closed — the whole point of the inbox). */
 export type EscalationStatus = 'open' | 'answered' | 'injected' | 'dismissed'
-
-/** The proxy's provisional answer (C2), shown next to the question so the owner
- *  confirms-or-corrects instead of composing from scratch. Absent when the
- *  proxy was skipped (e.g. the overseer's THROTTLED direct-to-inbox path). */
-export interface EscalationProxyDraft {
-  answer: string
-  confidence: 'high' | 'medium' | 'low'
-  /** The proxy declared "the corpus is too thin here" UP FRONT (calibrated
-   *  abstention, K7) rather than guessing. */
-  isAbstention: boolean
-}
 
 /** One record of the Escalations inbox (~/.openground/escalations.json —
  *  machine-wide; the project rides in `projectPath`): a question the swarm could
@@ -3001,8 +2929,6 @@ export interface Escalation {
    *  which left every SDK escalation with no evidence at all — the field name is
    *  kept for the records already on disk. */
   screenshotRef?: string
-  /** The proxy's provisional answer + confidence (C2), when it ran. */
-  proxyDraft?: EscalationProxyDraft
   /** Which valve raised this — see {@link EscalationWhy}. */
   whyEscalated: EscalationWhy
   /** WHAT THE DECLINE OPTION MEANS, declared by whoever raised the question.
@@ -3016,8 +2942,7 @@ export interface Escalation {
    *  raiser knows which question it asked; the reader must not guess. */
   declineEffect?: 'park' | 'drop-integration'
   status: EscalationStatus
-  /** The owner's actual answer (set on 'answered'; the ONLY text that is ever
-   *  written back to you-corpus memory). */
+  /** The owner's actual answer, persisted before attempting delivery. */
   answer?: string
   answeredAt?: string
   /** Set when the answer was successfully delivered into the worker's PTY. */
@@ -3055,17 +2980,13 @@ export interface EscalationOpenResponse {
  *                  dispatch (rides the same learning-loop slot as rework
  *                  reasons, so the fresh worker's /order carries it).
  *   • 'skipped'  — nothing to deliver to (no live PTY and no card), or this
- *                  call changed nothing (idempotent re-answer). The record —
- *                  and the memory write-back — still stand. */
+ *                  call changed nothing (idempotent re-answer). The answer remains persisted. */
 export type EscalationDelivery = 'injected' | 'queued' | 'skipped'
 
-/** POST /api/swarm/escalations/answer {id, answer}. `memoryWritten` reports the
- *  you-corpus write-back (owner Q→A only) — best-effort: a memory failure never
- *  blocks unblocking the worker. */
+/** POST /api/swarm/escalations/answer {id, answer}. Persists before delivery. */
 export interface EscalationAnswerResponse {
   escalation: Escalation
   delivery: EscalationDelivery
-  memoryWritten: boolean
 }
 
 /** POST /api/swarm/escalations/dismiss {id}. */
@@ -3359,10 +3280,10 @@ export interface CustomModuleDef {
   origin: CustomModuleOrigin
   createdAt: string
   updatedAt: string
-  /** Marketplace row id — set after first publish (local) or on install. */
+  /** Legacy distribution metadata, retained for existing local installations. */
   remoteId?: string
   publishedAt?: string
-  /** Published version counter (bumped on each re-publish). */
+  /** Last saved published version; no longer updated by the application. */
   version?: number
 }
 
@@ -3370,10 +3291,6 @@ export interface CustomModuleDef {
 export interface CustomModulesResponse {
   role: CustomTabRole
   modules: CustomModuleDef[]
-  /** False while work mode (lockdown) is on — the marketplace routes 503, so
-   *  the client hides its "Browse marketplace" entries. Local module CRUD is
-   *  unaffected (it never leaves the machine). */
-  marketAvailable: boolean
 }
 
 /** GET /api/custom-modules/:id/source — feeds the sandboxed iframe and the
@@ -3381,324 +3298,6 @@ export interface CustomModulesResponse {
 export interface CustomModuleSourceResponse {
   source: string
   mtimeMs: number
-}
-
-/** One published row as listed by GET /api/marketplace (anon read). */
-export interface MarketplaceModule {
-  remoteId: string
-  name: string
-  description: string
-  framework: CustomModuleFramework
-  version: number
-  publishedAt: string
-}
-
-/** GET /api/marketplace */
-export interface MarketplaceListResponse {
-  items: MarketplaceModule[]
-}
-
-// ─── Module submissions (tester → owner review queue) ────────────────────────
-// docs/CUSTOM_TABS_PLAN.md (submit → review → publish). A tester builds a custom
-// tab locally and SUBMITS its source to the owner; the owner reads this PRIVATE
-// queue (service-role) and approve copies the source into og_custom_modules (the
-// PUBLIC marketplace) or reject drops it. Mirrors the feedback inbox: anon may
-// INSERT a pending row only, the owner reads with the service-role key.
-
-/** POST /api/module-submissions — a tester's submission of a built tab. */
-export interface SubmitModuleRequest {
-  name: string
-  description: string
-  framework: CustomModuleFramework
-  source: string
-}
-
-/** GET /api/module-submissions/config — gates the submit + review surfaces.
- *  - `enabled`: anon key configured, so a tester can submit.
- *  - `canReview`: the server also has a SERVICE-ROLE key AND the signed-in
- *    account is an admin (MODULE_ADMIN_EMAILS, falling back to
- *    FEEDBACK_ADMIN_EMAILS) — the owner review inbox shows. False on the public
- *    build (no service key shipped); never echoes keys. */
-export interface ModuleSubmissionsConfigResponse {
-  enabled: boolean
-  canReview: boolean
-  /** Stable, non-secret id (hash of the Supabase url+table), emitted only when
-   *  canReview, so the client scopes its "last seen" unread marker per source. */
-  sourceId?: string
-}
-
-/** One row of the review queue, read back via the service-role key (owner only,
- *  GET /api/module-submissions). `source` is present on the single-row fetch
- *  (the review preview/diff) and omitted from the list payload to keep it light. */
-export interface ModuleSubmissionItem {
-  id: string
-  created_at: string
-  /** Display-only (client-supplied at submit, like feedback.email); not trusted. */
-  submitter_email: string | null
-  name: string
-  description: string
-  framework: CustomModuleFramework
-  status: 'pending' | 'approved' | 'rejected'
-  /** The published og_custom_modules row id, set when approved. */
-  published_remote_id: string | null
-  /** The submitted component source — included only on the single-row fetch. */
-  source?: string
-}
-
-/** GET /api/module-submissions — owner inbox payload (newest first). `truncated`
- *  is true when more than the cap (200) of rows exist. */
-export interface ModuleSubmissionsResponse {
-  items: ModuleSubmissionItem[]
-  truncated: boolean
-}
-
-/** POST /api/module-submissions/:id/approve — the new published marketplace id. */
-export interface ApproveSubmissionResponse {
-  remoteId: string
-}
-
-// ─── Proxy judgment corpus ("you-corpus") ────────────────────────────────────
-// The autonomous-overseer proxy's externalised JUDGMENT AXIS (Phase 0). A single
-// injectable file assembled from CONCEPT.md + the OPEN GROUND auto-memory +
-// hand-added judgments. PERSONAL data — lives only under ~/.openground, never
-// git-shared. Engine: src/lib/server/youCorpus.ts; routes: server/routes/youCorpus.ts.
-
-/** One hand-added judgment — the growing, "new decision" source of the corpus.
- *  Stored as a JSON array in ~/.openground/you-corpus-additions.json and rendered
- *  into the single you-corpus.md. */
-export interface ManualJudgment {
-  id: string
-  text: string
-  tags?: string[]
-  context?: string
-  addedAt: string
-  /** Set when this judgment CORRECTS an earlier one: that judgment's `id`.
-   *  `context` carries a human-readable quote of the corrected note (what the
-   *  owner and the overseer actually read), but a quote is capped and can
-   *  repeat — this is the exact link, so the chain stays followable no matter
-   *  how the prose is worded. Absent on a plain note, and on every correction
-   *  written before this field existed. */
-  correctsId?: string
-  /** ⚠ THE OWNER'S OWN WORDS THIS LINE WAS DISTILLED FROM, verbatim.
-   *
-   *  Most lines in this file were not typed by him: a model read what he wrote
-   *  and produced a sentence ABOUT him. That sentence is the useful form and the
-   *  unfalsifiable one — 「説明が要る画面は、画面のほうが悪い」 is either a fair
-   *  reading of what he said or a small invention, and until now there was no
-   *  way to tell which. `source` is what makes it checkable.
-   *
-   *  ⚠ NOT `context`. That field says WHERE a line came from (「この会話 ・ 08月16
-   *  日」) — a label. This is the material itself.
-   *
-   *  Absent on everything written before this field existed, and on lines whose
-   *  origin genuinely was not recorded. Absent is NOT empty: the screen says
-   *  「元の言葉は残っていません」 rather than showing a blank quote. */
-  source?: string
-  /** ⚠ A TOMBSTONE, NOT A BELIEF. Set on a record whose only job is to say
-   *  「これは取り消した」 about another one: that judgment's `id`. The retired line
-   *  itself is NEVER touched — this file is append-only, and a record the owner
-   *  took back is still a record of what he once said. Readers drop both (the
-   *  target and this marker); the list screen shows the target in its own
-   *  greyed group, dated by this record's `addedAt`.
-   *
-   *  A record carrying this (or `restoredId`) is bookkeeping and must never be
-   *  rendered as something the owner believes. */
-  retiredId?: string
-  /** The opposite marker: 「やっぱり戻す」. Same target id, appended later.
-   *
-   *  ⚠ TWO FIELDS RATHER THAN ONE TOGGLE, and that is the whole design. A single
-   *  field flipped on each append would make a double-click (or two windows)
-   *  cancel itself out and RESURRECT a line the owner deliberately took back.
-   *  Two self-describing events are idempotent: retire twice is retired, restore
-   *  twice is live, and the log still reads in order. */
-  restoredId?: string
-}
-
-/** Lightweight result of assembling/appending (POST /api/you-corpus/rebuild and
- *  the meta half of POST /api/you-corpus/append). */
-export interface YouCorpusMeta {
-  /** Absolute path of the assembled file (~/.openground/you-corpus.md). */
-  path: string
-  assembledAt: string
-  sizeBytes: number
-  /** Count of auto-memory notes ingested (excludes the MEMORY.md index). */
-  memoryCount: number
-  manualCount: number
-  conceptIncluded: boolean
-  businessVisionIncluded: boolean
-  /** true when assembly REFUSED to overwrite the existing corpus because no
-   *  mechanical source (auto-memory / CONCEPT.md) resolved while the existing
-   *  file was built with them — a source-resolution failure, not real emptiness.
-   *  The on-disk corpus is untouched; the other fields describe it. */
-  skipped?: boolean
-  /** Human-readable reason accompanying `skipped` (also logged server-side). */
-  warning?: string
-}
-
-/** GET /api/you-corpus — status of the assembled corpus + which sources are
- *  currently available (so the UI/CLI can show what would feed a rebuild). */
-export interface YouCorpusStatus {
-  path: string
-  exists: boolean
-  sizeBytes: number
-  /** mtime of the assembled file, or null when it has never been assembled. */
-  assembledAt: string | null
-  manualCount: number
-  /** Resolved auto-memory dir (null when it could not be resolved). */
-  memoryDir: string | null
-  memoryDirExists: boolean
-  memoryCount: number
-  conceptPath: string | null
-  conceptExists: boolean
-  businessVisionExists: boolean
-}
-
-/** POST /api/you-corpus/append — the stored judgment + the refreshed meta. */
-export interface YouCorpusAppendResponse {
-  judgment: ManualJudgment
-  meta: YouCorpusMeta
-}
-
-/** GET /api/you-corpus/judgments — the hand-added judgments as STRUCTURED
- *  records, newest first. The assembled you-corpus.md renders the same set as
- *  prose for the proxy to read; this is the shape a UI needs to show them one
- *  per card (date, tags, and the note a correction carries) and is why the
- *  Persona tab does not have to parse the rendered markdown back apart. */
-export interface YouCorpusJudgmentsResponse {
-  judgments: ManualJudgment[]
-  /** ⚠ NEVER MERGED INTO `judgments`. These are the lines the owner TOOK BACK:
-   *  the stand-in does not read them, they are not counted as 「わかっていること」,
-   *  and they do not sit on the body. They are returned because a record you
-   *  cannot see is a record you cannot get back — the list screen shows them in
-   *  their own greyed group, and pressing one offers 「戻す」. */
-  retired: RetiredJudgment[]
-}
-
-/** One line the owner took back, paired with WHEN he took it back. The pair is
- *  built server-side because only the reader can see the tombstone that carries
- *  the date; the client is handed the fact, never the bookkeeping. */
-export interface RetiredJudgment {
-  judgment: ManualJudgment
-  retiredAt: string
-}
-
-// ─── The interview loop (ペルソナタブの「今日の1問」) ─────────────────────────
-// One question a day, generated FROM the owner's own recorded work — never a
-// personality quiz. Engine: src/lib/server/personaInterview.ts.
-
-/** Which observation produced a question. Every kind names a concrete, DURABLE
- *  fact (an escalation's timestamps, a card's column/rework counter) — there is
- *  no generic/"about you" kind, and adding one would defeat the point of the
- *  loop. Recorded on the question so an answer lands in the corpus tagged with
- *  what prompted it. */
-export type PersonaQuestionKind =
-  | 'decision-speed-contrast'
-  | 'escalation-answer-rule'
-  | 'escalation-dismissed'
-  | 'escalation-long-open'
-  | 'corpus-gap'
-  | 'card-rework'
-  | 'card-approved'
-  | 'card-stale-blocked'
-  | 'todo-passed-over'
-
-/** The question asked on one local day.
- *
- *  The rendered TEXT is stored, not an i18n key plus slots: this is an artifact
- *  with a lifetime (asked → answered → written into the corpus), so its wording
- *  must be frozen at generation time. Re-rendering later through a since-edited
- *  template would misquote what the owner was actually asked — the same reason
- *  `Escalation.question` is a stored string. */
-export interface PersonaQuestion {
-  id: string
-  /** Local 'YYYY-MM-DD' this question belongs to (the once-a-day key). */
-  date: string
-  kind: PersonaQuestionKind
-  /** Stable key for the OBSERVATION behind the question (not the wording), so
-   *  the same situation is never asked about twice even across restarts. */
-  subjectKey: string
-  /** THE SETTING, one sentence, shown ABOVE the question (2026-08-15). Says
-   *  when it happened and what kind of moment it was, so the quoted fragments
-   *  in `text*` land in a scene instead of arriving naked. Frozen at generation
-   *  for the same reason the question is. Optional ONLY so questions written by
-   *  an older build stay renderable — every new one carries it. */
-  contextJa?: string
-  contextEn?: string
-  /** The question, frozen at generation. JA is what reaches the corpus — the
-   *  corpus is the owner's own, and the escalation write-back is Japanese too. */
-  textJa: string
-  textEn: string
-  createdAt: string
-  status: 'open' | 'answered' | 'skipped'
-  /** Set when answered or skipped. The ANSWER TEXT is deliberately not stored
-   *  here — it goes to the corpus via appendJudgment, which stays its one home. */
-  resolvedAt?: string
-}
-
-/** 「どれが自分ではないか」 — three lines, one of which is not his.
- *
- *  ⚠ THE ANSWER IS NOT IN THIS SHAPE, and that is deliberate: sending it to the
- *  browser would put the answer in the page the question is asked on. This is a
- *  tool for finding out something true about yourself, so the one reader who
- *  must not be able to peek is the owner. */
-export interface PersonaTellApartCheck {
-  id: string
-  options: { id: string; text: string }[]
-}
-
-/** What answering it was. ⚠ NO SCORE, EVER. Getting one wrong does not make a
- *  line false — it means the line reads like something anyone would say, which
- *  is a fact about the sentence and fixable by rewriting or withdrawing it. */
-export interface PersonaTellApartResult {
-  correct: boolean
-  /** The line he mistook for a stranger's, when he did. */
-  mistookText?: string
-  /** The stranger's own words, so a wrong answer ends by showing what a
-   *  fits-anyone sentence looks like beside his own. */
-  strangerText: string
-}
-
-/** POST /api/you-corpus/tell-apart — the open check, or null when none is due.
- *  Null is the ordinary answer: the check is offered once the record has grown
- *  by ten lines, not on a schedule. */
-export interface PersonaTellApartResponse {
-  check: PersonaTellApartCheck | null
-}
-
-/** POST /api/you-corpus/tell-apart/answer. */
-export type PersonaTellApartAnswerResponse = PersonaTellApartResult
-
-/** ~/.openground/persona-interview.json — the persisted once-a-day state. */
-export interface PersonaInterviewState {
-  version: 1
-  /** Local 'YYYY-MM-DD' of the last day a question was generated. Bumped even
-   *  when generation found NO material, so a barren day is not retried all day. */
-  lastAskedDate: string
-  /** The question for `lastAskedDate`, or null when that day yielded none. */
-  today: PersonaQuestion | null
-  /** subjectKeys already asked about, newest last, capped. The dedup memory. */
-  askedSubjects: string[]
-}
-
-/** GET/POST /api/you-corpus/interview — today's question, if there is one.
- *
- *  `reason` explains a null question so the tab can say something true instead
- *  of implying the loop is broken:
- *  - 'no-material' — the day WAS swept and the owner's records held nothing to
- *    ask about (the honest empty state).
- *  - 'not-generated' — the day has not been swept yet. Only the read-only GET
- *    can report this; the POST sweeps before answering. The two must stay
- *    distinct: reporting "nothing to ask" for a day nobody looked at is the
- *    same false claim `questionLoaded` and `showNotes` exist to prevent. */
-export interface PersonaInterviewResponse {
-  question: PersonaQuestion | null
-  reason?: 'no-material' | 'not-generated'
-  /** Set on the ANSWER path when the judgment was saved but the file the
-   *  stand-in actually reads could not be rebuilt (YouCorpusMeta.skipped). The
-   *  tab must not say "your stand-in has this now" in that case — the note form
-   *  already tells the truth here (persona.meta.stale) and this carries the same
-   *  signal for the question. */
-  corpusStale?: boolean
 }
 
 // ── Research channels (Settings → Research channels; docs/RESEARCH_REACH_NOTES.md) ──
@@ -3889,357 +3488,5 @@ export interface ResearchJobStateResponse {
   file: string
   status: 'running' | 'done' | 'error'
   startedAt: string
-  error?: string
-}
-
-// ─── Persona regions (the five parts of the figure) ─────────────────────────
-// The figure is an armature: four BODY regions plus one halo around it. This
-// union lives here rather than beside the drawing code because it crosses the
-// wire (PersonaCoursesResponse below) and rides in corpus tags (`region:<id>`,
-// src/lib/persona/regions.ts REGION_TAG).
-//
-// It is deliberately a NARROW union rather than a string: every runtime record
-// keyed by it (labels, course seating, question seating) is an exhaustive
-// `Record<PersonaRegion, …>`, so adding or removing a region fails the BUILD
-// instead of quietly seating a note nowhere. The predecessor of this type was a
-// wire-level `zone: string` with a silent `asZone()` fallback to 'mind' — a
-// dropped region produced a wrong-but-plausible figure and never an error.
-//
-//   head   — how you think          chest  — what you hold to
-//   arms   — how you work           legs   — how you keep going
-//   people — the people around you (the HALO, off the body: see
-//            PERSONA_BODY_REGIONS for why nothing lands there without evidence)
-export type PersonaRegion = 'head' | 'chest' | 'arms' | 'legs' | 'people'
-
-// ─── Persona courses (Persona tab の診断コース) ──────────────────────────────
-// Items + scoring live in src/lib/persona/instruments.ts (pure); the store and
-// routes in src/lib/server/personaCourses.ts + server/routes/persona.ts.
-
-export type PersonaCourseId = 'big5' | 'type' | 'values' | 'work'
-
-/** One line of a result sheet. `bars` rows carry pct/note; `rank` rows carry
- *  rank/score. Both shapes ride in one type so the sheet renders from one list. */
-export interface PersonaResultRow {
-  key: string
-  name: string
-  desc: string
-  /** bars only: 0..100 fill. For a BIPOLAR axis the fill is toward the second
-   *  pole, so 50 reads as "half and half" against the mid-line. */
-  pct?: number
-  /** bars only: 高め / ほぼ半々 … — the honest confidence word. */
-  note?: string
-  bipolar?: boolean
-  /** rank only. */
-  rank?: number
-  score?: string
-}
-
-/** What a finished course contributes to the corpus: one node each. */
-export interface PersonaFinding {
-  text: string
-  /** Provenance shown under the node — instrument + the number it came from. */
-  detail: string
-}
-
-export interface PersonaResult {
-  courseId: PersonaCourseId
-  courseName: string
-  /** Printed verbatim on the sheet (licensing/provenance promise). */
-  source: string
-  itemCount: number
-  kind: 'bars' | 'rank'
-  rows: PersonaResultRow[]
-  findings: PersonaFinding[]
-  headline: string
-  /** type course only: the four letters. */
-  badge?: string
-}
-
-/** A stored, dated result. */
-export interface PersonaCourseRecord {
-  result: PersonaResult
-  takenAt: string
-  /** Raw answers, kept so a re-scoring after an instrument fix is possible. */
-  answers: number[]
-}
-
-/** GET /api/persona/courses — every course's catalogue entry + last result. */
-export interface PersonaCoursesResponse {
-  courses: {
-    id: PersonaCourseId
-    name: string
-    sub: string
-    /** Which region of the figure this course grows. NARROW on purpose — the
-     *  client seats the course's findings by it, and a plain string let an
-     *  unknown value fall through a silent default. */
-    region: PersonaRegion
-    itemCount: number
-    source: string
-    lastTakenAt: string | null
-    headline: string | null
-    /** The result's short name, when the instrument produces one — the 16-type
-     *  course's four letters (ENTP). null for the courses whose result is a
-     *  profile rather than a label (big5 / values / work), and null for a course
-     *  never taken. On the LIST payload, not just the sheet, because the panel
-     *  shows a taken course's result inline (owner, 2026-08-16: 「NBTIだったら、
-     *  ENTPとかあるじゃん。そういうの」). */
-    badge: string | null
-  }[]
-}
-
-/** POST /api/persona/courses/:id/submit — body: the full answer vector. */
-export interface SubmitPersonaCourseRequest {
-  answers: number[]
-}
-
-/** POST result: the scored sheet + how many corpus nodes it minted. */
-export interface SubmitPersonaCourseResponse {
-  record: PersonaCourseRecord
-  minted: number
-}
-
-/** One composed line of the persona portrait — a glance-level statement that
- *  always carries the instrument and number it came from. */
-export interface PersonaPortraitLine {
-  text: string
-  detail: string
-  courseId: PersonaCourseId
-  takenAt: string
-  /** Age of the evidence in days (absent when the stamp is unparseable). */
-  ageDays?: number
-}
-
-/** GET /api/persona/portrait — the "who am I, roughly" digest + the counts the
- *  screen shows beside it. `lines` is EMPTY when nothing is evidenced yet. */
-export interface PersonaPortrait {
-  lines: PersonaPortraitLine[]
-  /** How much the stand-in holds. ⚠ OPTIONAL, and the option is the point:
-   *  `undefined` means THE CORPUS COULD NOT BE READ, which is not the same
-   *  claim as 0. The corpus reader fails CLOSED on EACCES/EIO (an append must
-   *  never overwrite judgments it merely failed to see), so a read failure is a
-   *  real and recurring state — and a screen that renders it as `0 known` tells
-   *  the owner their record is empty when it may be entirely intact. Same
-   *  three-valued rule the ledger and the escalation counts follow: absent is
-   *  not zero, and only a read that landed may print a number. */
-  nodeCount?: number
-  /** …and how many of those arrived in the last 7 days. Absent for the same
-   *  reason, plus one more: a server too old to count is not a quiet week. */
-  recentCount?: number
-  takenCount: number
-  courseCount: number
-}
-
-/** GET /api/persona/courses/:id/history — every stored take of one course,
- *  NEWEST FIRST (the last result is the first entry). */
-export interface PersonaCourseHistoryResponse {
-  courseId: PersonaCourseId
-  takes: PersonaCourseRecord[]
-}
-
-// ─── Persona DECISION LEDGER (what the stand-in actually did) ────────────────
-//
-// The courses above are SELF-REPORT; this is the record of the proxy acting
-// against real work. Store + writer: src/lib/server/personaLedger.ts.
-
-/** What the stand-in did with one question.
- *  - `answered`  — it answered AS the owner (the proxy spoke for them).
- *  - `asked`     — it refused to speak and handed the question to the owner
- *                  (irreversible, or an area the owner decides).
- *  - `abstained` — it declared it could not faithfully answer (thin corpus, or a
- *                  brain that never produced a usable verdict). */
-export type PersonaLedgerVerdict = 'answered' | 'asked' | 'abstained'
-
-/** WHY the stand-in declined to speak — the reason CLASS, never the free text.
- *  Mirrors `OwnerAnswer`'s escalate `why` (swarmOverseerBrain.ts), which is where
- *  every value comes from.
- *
- *  A UNION, not `string`, ON PURPOSE. The screen turns each member into words; a
- *  member with no wording renders as nothing, which is a SILENT gap — the failure
- *  mode this repo's canon says to convert into a loud one. As a union, adding a
- *  fourth class upstream fails the build at the exhaustive `Record<PersonaLedgerWhy,
- *  …>` in PersonaLedgerBlock instead of quietly dropping the reason on screen.
- *  ⚠ Narrowing the TYPE is only honest because the READER narrows too: the ledger's
- *  sanitizer drops a `why` it does not recognise (a hand-edited or newer-build file
- *  can hold anything), so what the type promises is what reaches the wire. */
-export type PersonaLedgerWhy = 'irreversible' | 'insufficient-info' | 'policy'
-
-/** ONE proxy-you decision. Free text (`question`) is TRUNCATED at the store's
- *  cap — this is a record of decisions, not a transcript. */
-export interface PersonaLedgerEntry {
-  id: string
-  /** ISO timestamp the decision SETTLED. */
-  at: string
-  projectPath: string
-  verdict: PersonaLedgerVerdict
-  /** The escalate `why` / abstain reason CLASS — never the free-text reason.
-   *  Absent on a plain answer. */
-  why?: PersonaLedgerWhy
-  /** The question the stand-in faced, truncated (see MAX_LEDGER_QUESTION). */
-  question: string
-  /** How well the corpus grounded the answer. Present only on `answered`. */
-  confidence?: 'high' | 'medium' | 'low'
-  /** Correlation key (project + normalized question prefix) used to stamp
-   *  `answered` when the owner later answers the escalation this entry raised.
-   *  Opaque — never rendered. */
-  key?: string
-  /** Stamped when the OWNER themselves answered the escalation this decision
-   *  raised: the proxy asked, the human decided. The highest-value signal here —
-   *  it is the correction the stand-in can be measured against. */
-  answered?: { at: string; byOwner: true }
-}
-
-/** Verdict tallies over one window. */
-export interface PersonaLedgerCounts {
-  answered: number
-  asked: number
-  abstained: number
-}
-
-/** The counts the Persona screen reads ("this week it answered 3 and asked you 2").
- *  `week` is the trailing 7 days; `total` is everything the (capped) ledger holds. */
-export interface PersonaLedgerSummary {
-  week: PersonaLedgerCounts
-  total: PersonaLedgerCounts
-  /** ISO stamp of the most recent decision, or null when nothing is recorded. */
-  lastAt: string | null
-}
-
-/** GET /api/persona/ledger — the counts plus the newest entries. LOOPBACK-ONLY:
- *  `recent` carries free text from the owner's own local work. */
-export interface PersonaLedgerResponse {
-  summary: PersonaLedgerSummary
-  /** Newest first, capped (see LEDGER_RECENT_LIMIT). */
-  recent: PersonaLedgerEntry[]
-}
-
-// ─── Persona conversation (話しかけると溜まる) ───────────────────────────────
-// Talking to the persona IS how the corpus grows: one turn = one `claude` run
-// that both REPLIES and distils what the owner said into kept lines. Engine:
-// src/lib/server/personaChat.ts (+ personaImport.ts for a claude.ai export);
-// routes: server/routes/personaChat.ts.
-//
-// TWO INVARIANTS RIDE IN THESE TYPES, so read them before changing a field:
-//  1. ONLY THE OWNER'S WORDS ARE EVER LEARNED. `reply` and `kept` are separate
-//     fields for a reason — the writer that appends to the corpus takes the kept
-//     lines and NOTHING else (personaChat.ts appendKeptLines). Merging them into
-//     one "turn text" would put the stand-in's own sentences into the axis it is
-//     supposed to be judged against.
-//  2. NOTHING IS WRITTEN INVISIBLY. Every write comes BACK as a full
-//     PersonaKeptWrite carrying the stored judgment, so the screen can show each
-//     kept line under the message it came from and open a correction on it with
-//     no second round-trip. An absent chip must never mean "we saved something
-//     you cannot see".
-
-/** One line the distiller decided to keep — AS IT WAS ACTUALLY WRITTEN.
- *
- *  The FULL `judgment` (not just its id) rides back so the chip under the reply
- *  is pressable immediately: the correction composer needs the stored text, the
- *  stamp and the id, and re-fetching /judgments to find a row we just wrote is a
- *  race against the corpus reassembly. */
-export interface PersonaKeptWrite {
-  judgment: ManualJudgment
-  /** Where it was seated on the figure. Written as an explicit `region:<id>`
-   *  tag (regions.ts REGION_TAG) so the seating rule's tier 1 reads it back. */
-  region: PersonaRegion
-  /** The judgment WAS saved, but you-corpus.md could not be rebuilt — so the
-   *  file the stand-in actually reads is stale (YouCorpusMeta.skipped). Same
-   *  signal, same wording family as PersonaInterviewResponse.corpusStale. */
-  corpusStale?: true
-}
-
-export type PersonaChatTurnState = 'running' | 'done' | 'failed'
-
-/** One exchange. `text` is the owner's words EXACTLY as typed — a failed turn
- *  keeps them so the screen can re-offer them rather than swallowing what they
- *  wrote (a React value reset is not undoable). */
-export interface PersonaChatTurn {
-  id: string
-  askedAt: string
-  text: string
-  state: PersonaChatTurnState
-  /** Set on 'done'. The stand-in's answer — NEVER learned (invariant 1). */
-  reply?: string
-  /** Set on 'done'. What reached the corpus, in the order it was written. An
-   *  EMPTY array is a real answer ("nothing was kept this time") and must be
-   *  rendered as one; `undefined` only means the turn has not finished. */
-  kept?: PersonaKeptWrite[]
-  /** Kept lines the distiller emitted that could not be READ (no region token,
-   *  or one that is not a region we know). Dropped rather than guessed at — but
-   *  reported, because a count that hides its own losses is the failure this
-   *  screen keeps re-hitting. */
-  keptUnreadable?: number
-  /** Set on 'failed'. */
-  error?: string
-}
-
-/** GET /api/persona/chat — the thread so far, so re-opening the panel does not
- *  lose it. IN-MEMORY on the server: a restart empties this (the kept lines
- *  themselves are in the corpus and survive). `live` = a turn is in flight. */
-export interface PersonaChatStateResponse {
-  turns: PersonaChatTurn[]
-  live: boolean
-}
-
-/** POST /api/persona/chat → 202. The turn runs as a JOB, not on this
- *  connection: closing the panel mid-turn must not orphan a `claude`. */
-export interface PersonaChatStartResponse {
-  turnId: string
-}
-
-/** GET /api/persona/chat/turn/:id — polled at ~500ms while `state` is running.
- *  `elapsedMs` is REAL elapsed time: a turn is a whole cold `claude` start
- *  (tens of seconds), and a fake typing animation over that is a lie. */
-export interface PersonaChatTurnResponse {
-  state: PersonaChatTurnState
-  elapsedMs: number
-  reply?: string
-  kept?: PersonaKeptWrite[]
-  keptUnreadable?: number
-  error?: string
-}
-
-export interface PersonaChatCancelResponse {
-  cancelled: boolean
-}
-
-/** What PARSING a claude.ai export found, before anything is distilled. Every
- *  field is reported — including the ones that are losses — because the numbers
- *  have to add up on screen: `ownerMessages = considered + notConsidered`, and
- *  `droppedNonOwner` is the stand-in's half that rule 1 of claudeExport.ts drops. */
-export interface PersonaImportCounts {
-  conversations: number
-  ownerMessages: number
-  /** Rows that could not be read as a conversation or a message. */
-  unreadable: number
-  droppedNonOwner: number
-  /** How many of the owner's messages the distiller actually SAW (capped). */
-  considered: number
-  /** ownerMessages - considered. MANDATORY, even at 0. */
-  notConsidered: number
-}
-
-export interface PersonaImportResult extends PersonaImportCounts {
-  kept: PersonaKeptWrite[]
-  /** Kept lines that already existed word-for-word in the corpus and were NOT
-   *  written a second time. */
-  duplicatesSkipped: number
-  keptUnreadable: number
-}
-
-/** POST /api/persona/import → 202, or 409 when this exact file was imported
- *  before (ManualJudgment has no idempotency key, so a second run of the same
- *  bytes would double both the node count and the lit points). */
-export interface PersonaImportStartResponse {
-  importId: string
-}
-
-/** GET /api/persona/import/:id. `counts` lands as soon as PARSING finishes —
- *  before the distillation does — so the screen can show what arrived while it
- *  is still reading. `result` only exists on 'done'. */
-export interface PersonaImportJobResponse {
-  state: PersonaChatTurnState
-  elapsedMs: number
-  counts?: PersonaImportCounts
-  result?: PersonaImportResult
   error?: string
 }

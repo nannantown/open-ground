@@ -1,14 +1,6 @@
-// swarmEscalations — the Escalations inbox (C1 of the overseer EPIC; spec:
-// docs/OVERSEER_DESIGN.md §8). The HUMAN VALVE of the unmanned swarm: when the
-// overseer (or, until C-core lands, a manual API caller) hits a question that is
-// IRREVERSIBLE or beyond the proxy's knowledge, it lands here instead of being
-// auto-answered — {question, context/stakes, the proxy's provisional answer,
-// why it was raised, the blocked worker's ADDRESS, an evidence tail} — and the
-// REAL user answers it. The answer is (1) delivered into the blocked worker on
-// ITS OWN RUNTIME so it resumes (bracketed paste + Enter for a PTY, one queued
-// turn for an SDK session — deliverAnswerToWorker), or queued for the card's
-// next dispatch when the worker is gone, and (2) written back to you-corpus
-// memory (owner Q→A only) — the proxy-you training pipeline.
+// Human questions are persisted until explicitly answered or dismissed.
+// Answers are persisted before delivery to a live worker or its next-dispatch queue.
+// No Persona training or proxy answer is involved.
 //
 // ⚠ THE ADDRESS IS TWO FIELDS, NOT ONE. `runtime` + the single handle it names
 // (pty ⇔ terminalId, sdk ⇔ sdkSessionId — workerRuntime.ts). A record built from
@@ -25,12 +17,9 @@
 //     exists, re-raising is a no-op returning the existing record — an overseer
 //     restart (edge-dedup reset, §6) can never grow the inbox or re-toast.
 //  3. Appends are single-flight; a corrupt file is preserved aside as
-//     `.corrupt-<ts>` (same contract as you-corpus additions — never silently
-//     clobbered), and the inbox is NOT capped (unlike swarm-notifications.json:
+//     `.corrupt-<ts>` (never silently clobbered), and the inbox is NOT capped (unlike swarm-notifications.json:
 //     losing an unanswered irreversible decision would violate K6).
-//  4. Memory write-back is the OWNER's answered Q→A only — never the proxy's
-//     auto-answer, never worker-derived text (one-way mislearning guard).
-//  5. Notification delivery is best-effort and never a correctness precondition
+//  4. Notification delivery is best-effort and never a correctness precondition
 //     — the persisted record is the source of truth (§8 invariant 7).
 
 import { mkdir, readFile, rename, unlink, writeFile } from 'fs/promises'
@@ -48,15 +37,12 @@ import {
   type WorkerRuntimeKind,
 } from './workerRuntime'
 import { bracketedPaste } from './pastePrompt'
-import { appendJudgment } from './youCorpus'
-import { ledgerMatchKey, markEscalationAnswered } from './personaLedger'
 import { createSwarmInfoNotification } from './swarmNotifications'
 import { isValidProjectPath, projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
 import type {
   Escalation,
   EscalationDelivery,
-  EscalationProxyDraft,
   EscalationStatus,
   EscalationView,
   EscalationWhy,
@@ -212,7 +198,7 @@ const readForWrite = async (): Promise<EscalationsForWrite> => {
 }
 
 // Serialise every read-modify-write through a single-flight chain (mirrors
-// swarmNotifications / youCorpus): two concurrent opens/answers can't lose each
+// swarmNotifications): two concurrent opens/answers can't lose each
 // other. Keeps advancing even if one write throws.
 let chain: Promise<unknown> = Promise.resolve()
 const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
@@ -416,7 +402,6 @@ export interface OpenEscalationInput {
   runtime?: WorkerRuntimeKind
   terminalId?: string
   sdkSessionId?: string
-  proxyDraft?: EscalationProxyDraft
 }
 
 export interface OpenEscalationDeps {
@@ -593,13 +578,6 @@ export const openEscalation = async (
         /* best-effort */
       }
     }
-
-    // Clamp the short/loosely-validated fields too (the routes 400 oversizes,
-    // but this module is also called in-process): the inbox is uncapped, so
-    // nothing unbounded may enter it.
-    const proxyDraft = input.proxyDraft
-      ? { ...input.proxyDraft, answer: input.proxyDraft.answer.slice(0, MAX_ESCALATION_ANSWER) }
-      : undefined
     const escalation: Escalation = {
       id,
       receiptKey: receiptKey.slice(0, MAX_ESCALATION_SHORT_FIELD),
@@ -614,7 +592,6 @@ export const openEscalation = async (
       context,
       ...(plainQuestion ? { plainQuestion } : {}),
       ...(screenshotRef ? { screenshotRef } : {}),
-      ...(proxyDraft ? { proxyDraft } : {}),
       whyEscalated: input.whyEscalated,
       // Narrowed, not trusted: an unknown value degrades to the safe default
       // ('park' = leave the card alone), never to the acting one.
@@ -651,33 +628,10 @@ export const openEscalation = async (
   return result
 }
 
-// ─── Answer (the owner's decision → worker → memory) ─────────────────────────
+// Owner answer persistence and delivery.
 
-/** The text pasted into the blocked worker's PTY when the owner answers. Pure +
- *  exported so the byte contract is unit-testable; C3 (free-text question
- *  detection) reuses this same helper — W16 is implemented ONCE, here.
- *
- *  `plainQuestion` — MISATTRIBUTION GUARD, load-bearing. An answer only means
- *  something next to the question it answered, and when a raiser supplied a
- *  plainQuestion THAT is what the owner read (the UI folds the technical
- *  `question` into a details pane). Pairing their reply with the technical
- *  original instead lets the worker re-bind it to its own wording: the routing
- *  lane makes this concrete — the worker asks an A/B technical menu, the owner is
- *  shown the routing question, and a reply meant for the routing question would
- *  land under the technical menu as if it picked an option there. So when a
- *  plainQuestion exists BOTH texts go in, explicitly labelled, and the answer
- *  hangs off the one the owner actually saw. (The word-not-letter choice tokens
- *  in swarmDecisionRouting are the other half of this fix; this side is the one
- *  that holds even when the owner answers in free text.) Same precedence the
- *  corpus write-back and the toast already use — this was the odd surface out.
- *
- *  NOTE (deliberate): the overseer's PROXY answers reuse this helper too
- *  (swarmOverseer's brain-result drain, swarmQuestions), so they also render
- *  `オーナーの回答:`. That is not a new claim — the 【本人からの回答】 header has always
- *  framed a proxy answer that way, and it matches the proxy's contract
- *  (`answerAsOwner`: answer AS the owner when the corpus grounds it, escalate
- *  otherwise). The line that must NOT blur is the corpus write-back, and that one
- *  is reached only from the owner-gated answer route — §8 invariant 6 holds. */
+/** Deliver the actual human answer with the question they saw. When a plain
+ *  question exists, include both versions so the reply cannot be misattributed. */
 export const buildAnswerInjection = (
   question: string,
   answer: string,
@@ -884,15 +838,6 @@ export interface DeliverAnswerDeps {
  * delivery in one call, so no caller has to know that the two runtimes need
  * different bytes.
  *
- * WHY THIS EXISTS. Every path that answers a blocked worker — the owner's inbox
- * answer ({@link deliverAnswer}) and the overseer's proxy answer (swarmOverseer's
- * brain-result drain) — was written as `canInjectInto(terminalId) &&
- * injectAnswerIntoWorker(terminalId)`. An SDK worker's terminalId is EMPTY by the
- * identity invariant (workerRuntime.ts), so for those workers both calls were a
- * silent no-op: the proxy's answer was reported as "injection failed" and thrown
- * back at the owner on EVERY pass, and an answer the owner actually typed reached
- * the worker never. Not a degraded path — a path that could not fire once.
- *
  * The two deliveries are genuinely different mechanisms, and that is the whole
  * reason this is a seam rather than a shared string:
  *  • PTY — bracketed paste, a settle delay, a submitting CR, then a bounded
@@ -944,8 +889,6 @@ export interface AnswerEscalationDeps {
    *  compile. Declaring it makes the contract the callers already use the one the
    *  type states. */
   readScreen?: (id: string) => string | null
-  /** DI for tests: the you-corpus write-back (default appendJudgment). */
-  appendMemory?: (input: { text: string; tags?: string[]; context?: string }) => Promise<unknown>
   /** DI for tests: the worker-gone fallback (default: the engine's rework-reason
    *  slot via a lazy import — lazy so swarmOrchestrator can import THIS module
    *  later (C-core, T3) without a static cycle). */
@@ -1084,8 +1027,7 @@ const deliverAnswer = async (
 
 /**
  * The owner answers an escalation. Ordered for crash-safety: (1) persist the
- * answer ('answered') FIRST, (2) write the Q→A back to you-corpus memory
- * (owner answers only — best-effort, never blocks the unblock), (3) deliver
+ * answer ('answered') FIRST, then deliver
  * (see {@link deliverAnswer}). Lifecycle edges: answering a DISMISSED record is
  * a state error; re-answering an INJECTED record is an idempotent no-op; and
  * re-answering an ANSWERED (not yet injected) record retries the DELIVERY leg
@@ -1096,16 +1038,16 @@ export const answerEscalation = async (
   id: string,
   answer: string,
   deps?: AnswerEscalationDeps,
-): Promise<{ escalation: Escalation; delivery: EscalationDelivery; memoryWritten: boolean }> => {
+): Promise<{ escalation: Escalation; delivery: EscalationDelivery }> => {
   const text = (answer ?? '').trim().slice(0, MAX_ESCALATION_ANSWER)
   if (!text) throw new Error('answer is required')
 
-  // PHASE 1 — under the chain (L1): validate + persist + learn. File
+  // PHASE 1 — under the chain (L1): validate + persist. File
   // read-modify-write ONLY; nothing here may reach the orchestrator (L2).
   // Returns either a finished answer, or the record that still needs delivering.
   const staged = await enqueue(async (): Promise<
-    | { done: true; escalation: Escalation; delivery: EscalationDelivery; memoryWritten: boolean }
-    | { done: false; record: Escalation; memoryWritten: boolean }
+    | { done: true; escalation: Escalation; delivery: EscalationDelivery }
+    | { done: false; record: Escalation }
   > => {
     await ensureOpenGroundHome()
     const { all, known } = await readForWrite()
@@ -1117,14 +1059,14 @@ export const answerEscalation = async (
     if (record.status === 'injected') {
       // Fully delivered — nothing to redo (the first answer is already inside
       // the worker's context).
-      return { done: true, escalation: record, delivery: 'skipped' as const, memoryWritten: false }
+      return { done: true, escalation: record, delivery: 'skipped' as const }
     }
     if (record.status === 'answered') {
-      // RE-DELIVERY: the decision is already recorded (and learned); a re-POST
+      // RE-DELIVERY: the decision is already recorded; a re-POST
       // retries only the delivery leg. Without this escape hatch an 'answered'
       // record whose delivery was lost (crash / dead PTY at first attempt)
       // would be a permanent dead end behind the idempotent no-op.
-      return { done: false, record, memoryWritten: false }
+      return { done: false, record }
     }
 
     // (1) Persist the answer FIRST — a crash below never loses the decision.
@@ -1133,67 +1075,13 @@ export const answerEscalation = async (
     record.status = 'answered'
     await persist(all)
 
-    // (2) Memory write-back — the proxy-you training pipeline. OWNER answers
-    // only (this function is reached only via the owner-gated route / the
-    // owner's UI). Best-effort: a corpus failure must not block the worker.
-    let memoryWritten = false
-    try {
-      const appendMemory = deps?.appendMemory ?? appendJudgment
-      // Learn the question the owner ACTUALLY ANSWERED. When a raiser supplied a
-      // plainQuestion it is what the UI shows as the primary text (the technical
-      // `question` is folded into a details pane), so pairing their answer with
-      // the technical original would MISATTRIBUTE it. The routing question makes
-      // the hazard concrete: it asks "is this yours to decide?", and if its choices
-      // were bare letters (they are not — swarmDecisionRouting uses WORDS precisely
-      // for this reason) an "A" recorded against "which library should we use?"
-      // would read to the next brain as the owner picking library A — the exact
-      // inversion this routing layer exists to prevent. The technical text is not lost:
-      // it stays verbatim on the escalation record (and in the injection the
-      // worker receives, which correctly keeps the technical wording).
-      await appendMemory({
-        // `→ オーナーの回答:` not `→ A:` — same reason as the injection above. This
-        // is the surface the BRAIN reads back live, so an answer sitting under an
-        // `A:` prefix next to the question's own `A: …` option is the misreading
-        // this card exists to prevent, one level further downstream.
-        text: `Q: ${record.plainQuestion || record.question}\n→ オーナーの回答: ${text}`,
-        tags: ['escalation', record.whyEscalated],
-        ...(record.branch || record.taskId
-          ? { context: `swarm escalation (${record.branch ?? record.taskId})` }
-          : { context: 'swarm escalation' }),
-      })
-      memoryWritten = true
-    } catch {
-      /* best-effort — reported via memoryWritten */
-    }
-
-    // (3) DECISION LEDGER stamp — the other half of the same lesson. The corpus
-    // write above teaches the proxy WHAT the owner decided; this records THAT the
-    // owner had to decide at all, against the ledger row where the stand-in
-    // declined to speak for them (personaLedger.ts). The proxy asked, the human
-    // answered: the single highest-value pairing in the system, and the only way
-    // the Persona screen can ever show a said-vs-did gap.
-    //
-    // Matched on the ledger's own correlation key (project + normalized question
-    // prefix) because that is all this seam has: the ledger row is written when the
-    // brain settles, long before an escalation id exists. A MISS is the ordinary
-    // case — most escalations are template raises (S1/S2/S3/S5/S10) the proxy never
-    // saw — and costs nothing. Never throws (markEscalationAnswered swallows), and
-    // deliberately inside phase 1: it is a file read-modify-write on ITS OWN chain
-    // (no lock inversion with L1/L2), and it must not run for the re-delivery /
-    // already-injected early returns above, which are not fresh owner decisions.
-    await markEscalationAnswered(
-      { key: ledgerMatchKey({ projectPath: record.projectPath, question: record.question }) },
-      { at: record.answeredAt },
-    )
-
-    return { done: false, record, memoryWritten }
+    return { done: false, record }
   })
 
   if (staged.done) {
     return {
       escalation: staged.escalation,
       delivery: staged.delivery,
-      memoryWritten: staged.memoryWritten,
     }
   }
 
@@ -1201,7 +1089,7 @@ export const answerEscalation = async (
   // orchestrator (L2). The answer is already durable on disk, so a crash here
   // loses nothing: the record sits at 'answered' and the re-delivery escape
   // hatch above retries this leg.
-  const { record, memoryWritten } = staged
+  const { record } = staged
 
   // PHASE 2a — EXECUTE THE DECLARED DECLINE, before (and independently of)
   // delivery. If the raiser said B means 「この作業は見送る」 and the owner chose
@@ -1234,7 +1122,7 @@ export const answerEscalation = async (
   if (deliveringIds.has(record.id)) {
     // A delivery for this very record is in flight; a second bracketed paste
     // would interleave inside the same worker's prompt. The first one stands.
-    return { escalation: record, delivery: 'skipped' as const, memoryWritten }
+    return { escalation: record, delivery: 'skipped' as const }
   }
   deliveringIds.add(record.id)
   let delivery: EscalationDelivery
@@ -1248,13 +1136,13 @@ export const answerEscalation = async (
   if (delivery === 'injected' && record.injectedAt) {
     await markInjected(record.id, record.injectedAt).catch(() => {})
   }
-  return { escalation: record, delivery, memoryWritten }
+  return { escalation: record, delivery }
 }
 
 // ─── Dismiss (close unanswered) ───────────────────────────────────────────────
 
 /** The owner closes an OPEN question without answering: nothing is injected,
- *  nothing is learned. Idempotent on already-resolved records (returned as-is —
+ *  no other state is changed. Idempotent on already-resolved records (returned as-is —
  *  an answered record is NOT retroactively dismissed). */
 export const dismissEscalation = async (
   id: string,

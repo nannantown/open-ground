@@ -22,7 +22,7 @@ const ids = (mods: ReadonlyArray<{ id: string }>) => mods.map((m) => m.id)
 // The all-closed gate, written once. Spread-and-override in each case so adding
 // a future ExperimentId doesn't mean editing every literal in this file (and so
 // a new flag defaults to CLOSED here, matching the shipped state).
-const ALL_CLOSED: ExperimentFlags = { swarm: false, sandbox: false, persona: false }
+const ALL_CLOSED: ExperimentFlags = { swarm: false, sandbox: false }
 const flags = (open: Partial<ExperimentFlags> = {}): ExperimentFlags => ({
   ...ALL_CLOSED,
   ...open,
@@ -48,16 +48,16 @@ describe('moduleRegistry experiment gate', () => {
     // a BUILD error before it is a test failure, and this case is the runtime
     // half (the registry-derived surfaces below take plain strings).
     expect(ids(MODULES).includes('persona')).toBe(false)
-    const bothOpen = gateFromFlags(flags({ persona: true, swarm: true }))
+    const bothOpen = gateFromFlags(flags({ sandbox: true, swarm: true }))
     expect(ids(enabledModules(bothOpen))).not.toContain('persona')
     expect(ids(nativeDescriptors(bothOpen))).not.toContain('persona')
     expect(isModuleIdVisible('persona', bothOpen)).toBe(false)
   })
 
   it('hides gated modules by default (no gate) — the shipped/non-owner state', () => {
-    expect(ids(enabledModules())).toEqual(['board', 'canvas', 'terminal', 'research'])
+    expect(ids(enabledModules())).toEqual(['board', 'terminal'])
     // The "+" picker draws from the same gated source — no leak there either.
-    expect(ids(nativeDescriptors())).toEqual(['board', 'canvas', 'terminal', 'research'])
+    expect(ids(nativeDescriptors())).toEqual(['board', 'terminal'])
   })
 
   it('reveals a gated module only when one of its experiments is open', () => {
@@ -66,9 +66,7 @@ describe('moduleRegistry experiment gate', () => {
     expect(ids(nativeDescriptors(gate))).toContain('swarm')
     expect(ids(enabledModules(gate))).toEqual([
       'board',
-      'canvas',
       'terminal',
-      'research',
       'swarm',
     ])
   })
@@ -76,8 +74,8 @@ describe('moduleRegistry experiment gate', () => {
   it('an unrelated open flag reveals nothing', () => {
     // The persona experiment still exists (it opens the GROUND entry), but it
     // must not drag a tab back into the row on its way past.
-    const gate = gateFromFlags(flags({ persona: true }))
-    expect(ids(enabledModules(gate))).toEqual(['board', 'canvas', 'terminal', 'research'])
+    const gate = gateFromFlags(flags({ sandbox: true }))
+    expect(ids(enabledModules(gate))).toEqual(['board', 'terminal'])
   })
 
   it('a closed flag keeps the module hidden', () => {
@@ -89,9 +87,7 @@ describe('moduleRegistry experiment gate', () => {
     // a module — so the enabled set is identical to the all-off default.
     expect(ids(enabledModules(gateFromFlags(flags({ sandbox: true }))))).toEqual([
       'board',
-      'canvas',
       'terminal',
-      'research',
     ])
   })
 
@@ -103,7 +99,7 @@ describe('moduleRegistry experiment gate', () => {
     expect(isModuleEnabled(swarm, gateFromFlags(flags({ swarm: true })))).toBe(true)
     // A module only opens on an experiment it actually LISTS — an unrelated open
     // flag is not a way in.
-    expect(isModuleEnabled(swarm, gateFromFlags(flags({ persona: true })))).toBe(false)
+    expect(isModuleEnabled(swarm, gateFromFlags(flags({ sandbox: true })))).toBe(false)
   })
 
   // `experiments` is an ARRAY with any-of semantics, and that is live machinery
@@ -115,10 +111,10 @@ describe('moduleRegistry experiment gate', () => {
   it('isModuleEnabled: ANY of the listed experiments opens a module (not all of them)', () => {
     const twoWaysIn: ModuleDef = {
       ...MODULES.find((m) => m.id === 'swarm')!,
-      experiments: ['persona', 'swarm'],
+      experiments: ['sandbox', 'swarm'],
     }
     expect(isModuleEnabled(twoWaysIn, gateFromFlags(ALL_CLOSED))).toBe(false)
-    expect(isModuleEnabled(twoWaysIn, gateFromFlags(flags({ persona: true })))).toBe(true)
+    expect(isModuleEnabled(twoWaysIn, gateFromFlags(flags({ sandbox: true })))).toBe(true)
     expect(isModuleEnabled(twoWaysIn, gateFromFlags(flags({ swarm: true })))).toBe(true)
   })
 
@@ -132,8 +128,8 @@ describe('moduleRegistry experiment gate', () => {
       for (const gate of [
         gateFromFlags(ALL_CLOSED),
         gateFromFlags(flags({ swarm: true })),
-        gateFromFlags(flags({ persona: true })),
-        gateFromFlags(flags({ swarm: true, persona: true })),
+        gateFromFlags(flags({ sandbox: true })),
+        gateFromFlags(flags({ swarm: true, sandbox: true })),
       ]) {
         const shown = new Set(ids(enabledModules(gate)))
         for (const m of MODULES) {
@@ -145,13 +141,13 @@ describe('moduleRegistry experiment gate', () => {
     it('fails closed: no gate hides the experiments, an unknown id is never visible', () => {
       expect(isModuleIdVisible('swarm')).toBe(false)
       expect(isModuleIdVisible('board')).toBe(true)
-      expect(isModuleIdVisible('nope', gateFromFlags(flags({ swarm: true, persona: true })))).toBe(
+      expect(isModuleIdVisible('nope', gateFromFlags(flags({ swarm: true, sandbox: true })))).toBe(
         false,
       )
       // A RETIRED id is just an unknown one here — the registry is the only
       // thing that decides what a render branch may mount, so 'persona' cannot
       // come back as a tab body by way of a stale localStorage view.
-      expect(isModuleIdVisible('persona', gateFromFlags(flags({ swarm: true, persona: true })))).toBe(
+      expect(isModuleIdVisible('persona', gateFromFlags(flags({ swarm: true, sandbox: true })))).toBe(
         false,
       )
     })
@@ -188,7 +184,24 @@ describe('tabLabel', () => {
     expect(research.labelKey).toBe('research.tabLabel')
     // …and it survives into the "+" picker's descriptor, so both surfaces show
     // the SAME name.
-    const descriptor = nativeDescriptors(gateFromFlags(flags())).find((d) => d.id === 'research')!
+    const descriptor = nativeDescriptors(gateFromFlags(flags(), true)).find((d) => d.id === 'research')!
     expect(descriptor.labelKey).toBe('research.tabLabel')
+  })
+})
+
+describe('owner product surfaces', () => {
+  it('keeps owner tabs registered for saved data but hides them even with public Swarm on', () => {
+    const publicGate = gateFromFlags(flags({ swarm: true }))
+    for (const id of ['canvas', 'research']) {
+      expect(ids(MODULES)).toContain(id)
+      expect(isModuleIdVisible(id, publicGate)).toBe(false)
+      expect(ids(nativeDescriptors(publicGate))).not.toContain(id)
+    }
+  })
+
+  it('shows owner tabs independently of the Swarm toggle', () => {
+    expect(ids(enabledModules(gateFromFlags(ALL_CLOSED, true)))).toEqual([
+      'board', 'canvas', 'terminal', 'research',
+    ])
   })
 })

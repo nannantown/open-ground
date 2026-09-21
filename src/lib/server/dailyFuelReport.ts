@@ -4,6 +4,7 @@ import type { ProjectTask } from '../types'
 import { atomicWriteJson } from './atomicWrite'
 import { dailyFuelReportFile, ensureOpenGroundHome } from './paths'
 import { getSettings } from './store'
+import { getCustomTabRole } from './roles'
 import { mutateProjectData, readProjectData } from './projectData'
 import { createSwarmInfoNotification } from './swarmNotifications'
 import {
@@ -699,6 +700,9 @@ const fuelReportTick = async (): Promise<void> => {
   if (globalThis.__openground_fuel_tick_inflight) return
   globalThis.__openground_fuel_tick_inflight = true
   try {
+    // Reporting/proposals are owner-only; meters and quota safety are separate.
+    // Re-check each tick so a sign-out pauses without touching the old sentinel.
+    if (await getCustomTabRole().catch(() => 'none') !== 'owner') return
     const now = Date.now()
     const sentinel = await effectiveFuelSentinel()
     if (shouldReportNow(sentinel, now)) {
