@@ -280,13 +280,18 @@ const HostedFrame = ({
   // again without an extra click. Skipped on the FIRST visible render (ref
   // starts null) so a brand-new frame's initial-open behaviour is unchanged —
   // only a real hidden→visible transition should steal focus.
-  const wasVisibleRef = useRef<boolean | null>(null)
+  const previousVisibility = useRef<{ visible: boolean; covered: boolean } | null>(null)
   useEffect(() => {
-    if (wasVisibleRef.current === false && visible) {
-      elRef.current?.focus()
+    const previous = previousVisibility.current
+    if (previous?.visible === false && visible) {
+      // A closing dialog may have deliberately restored focus to its trigger.
+      // Only keep-alive navigation, or an unclaimed focus, should refocus Songs.
+      if (!previous.covered || document.activeElement === document.body) {
+        elRef.current?.focus()
+      }
     }
-    wasVisibleRef.current = visible
-  }, [visible])
+    previousVisibility.current = { visible, covered }
+  }, [visible, covered])
 
   if (frame.srcDoc === null) return null
   return (

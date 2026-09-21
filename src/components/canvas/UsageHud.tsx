@@ -40,7 +40,7 @@ const REASON_KEY: Record<'signed-out' | 'not-installed' | 'scrape-failed', strin
   'scrape-failed': 'misc.usage.reason.scrapeFailed',
 }
 
-export const UsageHud = () => {
+export const UsageHud = ({ compact = false }: { compact?: boolean }) => {
   const { t } = useT()
   const [usage, setUsage] = useState<ClaudeUsage | null>(null)
   const [open, setOpen] = useState(false)
@@ -141,7 +141,13 @@ export const UsageHud = () => {
       if (popRef.current?.contains(target)) return
       if (ref.current && !ref.current.contains(target)) setOpen(false)
     }
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.isComposing || e.defaultPrevented) return
+      // Consume Escape before the project-level navigation handler sees it.
+      e.preventDefault()
+      setOpen(false)
+      btnRef.current?.focus()
+    }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
     return () => {
@@ -229,10 +235,10 @@ export const UsageHud = () => {
         // 案C `.gauge`: a WELL of its own (the darkest face), 8px radius,
         // 8/14px padding, mono. It used to be a transparent 3px-radius strip, so
         // the instrument read as loose text rather than a gauge.
-        className="mx-2 flex items-center gap-2.5 whitespace-nowrap rounded-lg bg-bg-inset px-3.5 py-2 font-mono text-meta tabular-nums text-ink-muted select-none transition-colors hover:bg-plane focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        className={`flex items-center whitespace-nowrap bg-bg-inset font-mono text-meta tabular-nums text-ink-muted select-none transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${compact ? 'h-8 gap-1.5 rounded px-2' : 'mx-2 gap-2.5 rounded-lg px-3.5 py-2'}`}
       >
-        {model && <span className="hidden md:inline text-ink">{model}</span>}
-        <div className="relative h-1.5 w-24 rounded-full bg-line-soft overflow-hidden">
+        {model && <span className={compact ? 'hidden xl:inline text-ink' : 'hidden md:inline text-ink'}>{model}</span>}
+        <div className={`relative h-1.5 rounded-full bg-line-soft overflow-hidden ${compact ? 'w-6 sm:w-12' : 'w-24'}`}>
           <div
             className={`absolute inset-y-0 left-0 ${fillTone} transition-[width] duration-500 ease-out`}
             style={{ width: `${pct != null ? Math.max(2, ratio * 100) : 0}%` }}
@@ -248,14 +254,14 @@ export const UsageHud = () => {
              chip hides this badge too rather than flash a lone week % the popover
              can't corroborate. Hidden on narrow widths regardless. */
           <span
-            className={`hidden md:inline-flex items-center gap-1 whitespace-nowrap ${TEXT[weekLevel]}`}
+            className={`${compact ? 'hidden xl:inline-flex' : 'hidden md:inline-flex'} items-center gap-1 whitespace-nowrap ${TEXT[weekLevel]}`}
             title={t('misc.usage.week')}
           >
             <span className="text-ink-faint">{t('misc.usage.weekShort')}</span>
             {weekPct}%
           </span>
         )}
-        {chipReset && (
+        {chipReset && !compact && (
           /* Narrow window: drop the reset clock from the chip (still in the
              tooltip and the popover) so the gauge + % always fit. */
           <span className="hidden sm:inline-flex items-center gap-1 whitespace-nowrap text-ink-subtle">

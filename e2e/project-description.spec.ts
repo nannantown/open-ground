@@ -10,6 +10,7 @@ test('generated descriptions survive a delayed old read, Ground navigation and r
     localStorage.setItem('openground.view', JSON.stringify({ projectId: id, panelTab: 'board' }))
   }, project.id)
   await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await page.getByRole('button', { name: 'Project details', exact: true }).click()
   const generate = page.getByRole('button', { name: 'Generate description', exact: true })
   await expect(generate).toBeVisible()
 
@@ -43,6 +44,7 @@ test('generated descriptions survive a delayed old read, Ground navigation and r
     await oldReadFinished
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
     await expect(page.getByText(summary, { exact: true }).last()).toBeVisible()
+    await page.keyboard.press('Escape')
     await page.getByRole('button', { name: 'Back to Ground', exact: true }).click()
     await expect(page.getByText(summary, { exact: true })).toBeVisible()
     await page.reload({ waitUntil: 'domcontentloaded' })

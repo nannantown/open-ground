@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
+  ArrowLeft,
   Archive,
   ChevronDown,
   EyeOff,
@@ -21,7 +22,7 @@ import {
 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { BackLink } from '@/components/ui/BackLink'
-import { Overlay, DialogHeader } from '@/components/ui/overlay'
+import { Overlay, DialogCard, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type {
   BranchChangesResponse,
@@ -108,7 +109,6 @@ import {
 import { killEmbeddedTerminals } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { CustomTabCreateDialog } from '@/components/canvas/modules/CustomTabCreateDialog'
 import { CustomTabPickerDialog } from '@/components/canvas/modules/CustomTabPickerDialog'
-import { capTrackingClass } from '@/lib/labelScript'
 
 // The per-project tabs are declared once in the module registry
 // (moduleRegistry.tsx) — plus the user's custom tabs (`custom:<uuid>`,
@@ -307,6 +307,16 @@ const OwnedProjectBody = ({
   // Per-tab contextual feedback: opening the modal here tags the submission
   // with the active tab (source + display label) so the report says which
   const [data, setData] = useState<ProjectData | null>(null)
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const detailsButtonRef = useRef<HTMLButtonElement>(null)
+  const detailsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { setDetailsOpen(false) }, [project?.path])
+  useEffect(() => {
+    if (!detailsOpen) return
+    const trigger = detailsButtonRef.current
+    detailsRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    return () => trigger?.focus()
+  }, [detailsOpen])
   // Which project path the currently-held `data` was loaded for. `data` itself
   // carries no path, and a project switch keeps the old data on screen until the
   // new fetch resolves — so the "open on the first tab" logic must wait until
@@ -404,7 +414,7 @@ const OwnedProjectBody = ({
       return
     }
     const r = editorBtnRef.current?.getBoundingClientRect()
-    if (r) setEditorMenuPos({ left: r.left, top: r.bottom + 4 })
+    if (r) setEditorMenuPos({ left: Math.max(8, Math.min(r.left, window.innerWidth - 248)), top: r.bottom + 4 })
   }, [editorMenuOpen])
   useEffect(() => {
     fetch('/api/project/editors')
@@ -532,6 +542,12 @@ const OwnedProjectBody = ({
   const [branchInfo, setBranchInfo] = useState<BranchChangesResponse | null>(null)
   const [branchModalOpen, setBranchModalOpen] = useState(false)
   const [branchMenuOpen, setBranchMenuOpen] = useState(false)
+  useEffect(() => {
+    if (!detailsOpen) {
+      setEditorMenuOpen(false)
+      setBranchMenuOpen(false)
+    }
+  }, [detailsOpen])
   const [activeBranches, setActiveBranches] =
     useState<ActiveBranchesResponse | null>(null)
   const [skillsOpen, setSkillsOpen] = useState(false)
@@ -548,7 +564,7 @@ const OwnedProjectBody = ({
       return
     }
     const r = branchBtnRef.current?.getBoundingClientRect()
-    if (r) setBranchMenuPos({ left: r.left, top: r.bottom + 4 })
+    if (r) setBranchMenuPos({ left: Math.max(8, Math.min(r.left, window.innerWidth - 296)), top: r.bottom + 4 })
   }, [branchMenuOpen])
   useEffect(() => {
     setBranchInfo(null)
@@ -1867,373 +1883,406 @@ const OwnedProjectBody = ({
     // — the board's wells, the cards and the ground all measured from the wrong
     // zero, so the 「面の明度差のみ」 language had nothing to differ from.
     <Overlay position="fixed" layer="panel" backdrop="paper" placement="fill" escOverlay={false}>
-      {/* flex-wrap: when the window is too narrow to fit the title column and
-          the controls cluster side by side, the controls drop to their own row
-          below instead of crushing the title / overflowing the viewport. */}
-      {/* 罫線なし・面の明度差のみ — the double rule is not in the language. */}
-      <header className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2 px-7 pb-0 pt-5">
-        {/* flex-1 so this column has a definite width: the description box caps
-            at max-w-[560px] in BOTH read and edit modes. Without it the column
-            shrank to its content, so swapping the wide <p> for a <textarea>
-            (narrow intrinsic width) collapsed the whole box to ~190px.
-            basis-[280px] is the width the title block defends before the
-            controls cluster wraps below it. */}
-        <div className="min-w-0 flex-1 basis-[280px]">
-          <BackLink label={t('projectPanel.backToGround')} onClick={onClose} />
-          <div className="flex min-w-0 items-center gap-2.5">
-            <EditableTitle
-              name={project.name}
-              size="fullscreen"
-              onRename={onRename ? (next) => onRename(project, next) : undefined}
-            />
-            {/* Frequently used, so it's a standalone one-click button next to the
-                title rather than buried in the ⋯ menu. Label/tooltip follows the
-                host OS (Finder / Explorer / file manager). */}
+      <header data-testid="project-header" className="flex h-12 min-w-0 shrink-0 items-center gap-1 px-2 sm:gap-3 sm:px-4">
+        <div className="flex min-w-0 shrink-0 items-center gap-1">
+          <IconButton title={t('projectPanel.backToGround')} onClick={onClose}>
+            <ArrowLeft size={16} strokeWidth={1.75} />
+          </IconButton>
+          <h2 className="min-w-0">
             <button
-              onClick={revealInFinder}
-              disabled={project.missing}
-              title={t(revealLabelKey())}
-              aria-label={t(revealLabelKey())}
-              className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
-            >
-              <FolderOpen size={16} strokeWidth={1.75} />
-            </button>
-            {/* Open the folder in an editor — a single button. Clicking it opens
-                the chooser menu (editors installed on this machine — open any, or
-                star one as the new default); with nothing to choose it launches
-                directly via CLI auto-detection. mousedown stops at the container
-                so the outside-click closer only fires for clicks truly outside. */}
-            <div
-              className="relative flex shrink-0 items-center"
-              onMouseDown={(e) => e.stopPropagation()}
-            >
-              <button
-                ref={editorBtnRef}
-                onClick={handleEditorButton}
-                disabled={project.missing}
-                title={t('projectPanel.openInEditor')}
-                aria-label={t('projectPanel.openInEditor')}
-                aria-haspopup={canChooseEditor ? 'menu' : undefined}
-                aria-expanded={canChooseEditor ? editorMenuOpen : undefined}
-                className={`flex shrink-0 items-center gap-0.5 rounded-sm p-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint ${
-                  editorMenuOpen
-                    ? 'bg-bg-inset text-ink-muted'
-                    : 'text-ink-faint hover:bg-plane hover:text-ink-muted active:bg-plane active:text-ink-muted'
-                }`}
-              >
-                <SquareCode size={16} strokeWidth={1.75} />
-                {canChooseEditor && (
-                  <ChevronDown
-                    size={12}
-                    strokeWidth={2}
-                    className={`shrink-0 transition-transform ${editorMenuOpen ? 'rotate-180' : ''}`}
-                  />
-                )}
-              </button>
-              {editorMenuOpen && editorMenuPos && createPortal(
-                // Body portal at overlay-modal z — must beat a hosted custom-
-                // tab iframe (z 45), which any in-panel z cannot (the panel is
-                // one z-40 stacking context). stopPropagation keeps inside
-                // clicks from reaching the window outside-click closer.
-                <div
-                  role="menu"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  style={{ left: editorMenuPos.left, top: editorMenuPos.top }}
-                  className="fixed z-overlay-modal w-60 overflow-hidden rounded-md border border-line bg-bg-card py-1 shadow-lg"
-                >
-                  <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
-                    {t('projectPanel.openInEditor')}
-                  </div>
-                  {installedEditors.length === 0 && (
-                    <div className="px-3 py-1.5 text-ui text-ink-faint">
-                      {t('projectPanel.editorNoneFound')}
-                    </div>
-                  )}
-                  {installedEditors.map((ed) => {
-                    const isDefault = defaultEditor?.name === ed.name
-                    return (
-                      <div key={ed.name} className="group flex items-center gap-1 px-1">
-                        <button
-                          role="menuitem"
-                          onClick={() => void openInEditorWith(ed)}
-                          className="min-w-0 flex-1 truncate rounded-sm px-2 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
-                        >
-                          {ed.name}
-                        </button>
-                        <button
-                          onClick={() => void saveDefaultEditor(isDefault ? null : ed)}
-                          title={
-                            isDefault
-                              ? t('projectPanel.editorClearDefault')
-                              : t('projectPanel.editorSetDefault')
-                          }
-                          aria-label={
-                            isDefault
-                              ? t('projectPanel.editorClearDefault')
-                              : t('projectPanel.editorSetDefault')
-                          }
-                          aria-pressed={isDefault}
-                          className={`shrink-0 rounded-sm p-1.5 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent ${
-                            isDefault
-                              ? 'text-accent'
-                              : 'text-ink-faint opacity-0 hover:text-ink-muted focus-visible:opacity-100 group-hover:opacity-100'
-                          }`}
-                        >
-                          <Star size={14} strokeWidth={2} className={isDefault ? 'fill-current' : ''} />
-                        </button>
-                      </div>
-                    )
-                  })}
-                  {(canPickEditor || defaultEditor) && (
-                    <div className="my-1 border-t border-line" />
-                  )}
-                  {canPickEditor && (
-                    <button
-                      role="menuitem"
-                      onClick={() => void pickEditor()}
-                      className="block w-full px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
-                    >
-                      {t('projectPanel.editorPickOther')}
-                    </button>
-                  )}
-                  {defaultEditor && (
-                    <button
-                      role="menuitem"
-                      onClick={() => void saveDefaultEditor(null)}
-                      className="block w-full px-3 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:bg-bg-inset focus-visible:text-ink-muted focus-visible:outline-none"
-                    >
-                      {t('projectPanel.editorClearDefault')}
-                    </button>
-                  )}
-                </div>,
-                document.body,
-              )}
-            </div>
-            {/* Branch chip — only for git projects: current branch, a dot when
-                the working tree is dirty; opens the Branch changes modal. */}
-            {branchInfo?.isGit && (
-              <div
-                className="relative flex shrink-0 items-center"
-                onMouseDown={(e) => e.stopPropagation()}
-              >
-                <button
-                  ref={branchBtnRef}
-                  onClick={() => setBranchMenuOpen((v) => !v)}
-                  disabled={project.missing}
-                  title={t('projectPanel.branchMenuTitle')}
-                  aria-label={t('projectPanel.branchMenuTitle')}
-                  aria-haspopup="menu"
-                  aria-expanded={branchMenuOpen}
-                  className={`flex min-w-0 shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-meta transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted ${
-                    branchMenuOpen
-                      ? 'border-line bg-bg-inset text-ink'
-                      : 'border-line text-ink-muted hover:bg-plane hover:text-ink active:bg-plane active:text-ink'
-                  }`}
-                >
-                  <GitBranch size={11} strokeWidth={2} className="shrink-0" />
-                  <span className="max-w-[180px] truncate font-mono">
-                    {branchInfo.branch ?? 'HEAD'}
-                  </span>
-                  {branchInfo.working.length > 0 && (
-                    <span
-                      aria-hidden
-                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-ochre"
-                    />
-                  )}
-                  <ChevronDown
-                    size={11}
-                    strokeWidth={2}
-                    className={`shrink-0 transition-transform ${
-                      branchMenuOpen ? 'rotate-180' : ''
-                    }`}
-                  />
-                </button>
-                {branchMenuOpen && branchMenuPos && createPortal(
-                  // Body portal at overlay-modal z — same hosted custom-tab
-                  // iframe stacking reason as the editor menu above.
-                  <div
-                    role="menu"
-                    onMouseDown={(e) => e.stopPropagation()}
-                    style={{ left: branchMenuPos.left, top: branchMenuPos.top }}
-                    className="fixed z-overlay-modal max-h-[60vh] w-72 overflow-y-auto rounded-md border border-line bg-bg-card py-1 shadow-lg"
-                  >
-                    <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
-                      {t('projectPanel.branchMenuTitle')}
-                    </div>
-                    {activeBranches === null ? (
-                      <div className="flex items-center gap-2 px-3 py-2 text-ui text-ink-faint">
-                        <Loader2 size={12} className="animate-spin" />
-                      </div>
-                    ) : activeBranches.branches.length === 0 ? (
-                      <div className="px-3 py-1.5 text-ui text-ink-faint">
-                        {t('projectPanel.branchMenuEmpty')}
-                      </div>
-                    ) : (
-                      activeBranches.branches.map((b) => (
-                        <div
-                          key={b.name}
-                          role="menuitem"
-                          className="flex items-start gap-2 px-3 py-1.5"
-                        >
-                          <GitBranch
-                            size={12}
-                            strokeWidth={2}
-                            className={`mt-0.5 shrink-0 ${
-                              b.current ? 'text-accent' : 'text-ink-faint'
-                            }`}
-                          />
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              <span
-                                className={`truncate font-mono text-ui ${
-                                  b.current ? 'text-ink' : 'text-ink-muted'
-                                }`}
-                                title={b.name}
-                              >
-                                {b.name}
-                              </span>
-                              {b.current && (
-                                <span className="shrink-0 rounded-sm bg-bg-inset px-1 py-px text-plate uppercase tracking-wide text-ink-faint">
-                                  {t('projectPanel.branchMenuCurrent')}
-                                </span>
-                              )}
-                            </div>
-                            {b.worktreePath && (
-                              <div
-                                className="truncate text-meta text-ink-faint"
-                                title={b.worktreePath}
-                              >
-                                {b.worktreePath}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ))
-                    )}
-                    <div className="my-1 border-t border-line" />
-                    <button
-                      role="menuitem"
-                      onClick={() => {
-                        setBranchMenuOpen(false)
-                        setBranchModalOpen(true)
-                      }}
-                      className="block w-full px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
-                    >
-                      {t('projectPanel.branchChangesTitle')}
-                    </button>
-                  </div>,
-                  document.body,
-                )}
-              </div>
-            )}
-          </div>
-          {data && (
-            descriptionForLang(data, lang) ? (
-              /* ── Filled state: refresh button LEFT, then the generated text.
-                    The description is generate-only (no manual editing) — the
-                    text swaps in when claude finishes, persisted server-side. ── */
-              <div className="mt-1 flex max-w-[560px] items-start gap-1.5">
-                {/* Refresh button — spins while claude works */}
-                <button
-                  onClick={regenerateDescription}
-                  disabled={project.missing}
-                  title={
-                    describing
-                      ? t('projectPanel.cancelDescription')
-                      : t('projectPanel.regenerateDescription')
-                  }
-                  aria-label={
-                    describing
-                      ? t('projectPanel.cancelDescription')
-                      : t('projectPanel.regenerateDescription')
-                  }
-                  className="mt-0.5 shrink-0 rounded-sm p-0.5 text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
-                >
-                  {describing ? (
-                    <Loader2 size={11} className="animate-spin" />
-                  ) : (
-                    <RotateCw size={11} />
-                  )}
-                </button>
-                <p className="min-w-0 flex-1 truncate text-ui leading-snug text-ink-muted">
-                  {descriptionForLang(data, lang)}
-                </p>
-              </div>
-            ) : (
-              /* ── Empty state: a plain text-only generate button (no icon) ── */
-              <div className="mt-1">
-                <button
-                  onClick={regenerateDescription}
-                  disabled={project.missing}
-                  title={
-                    describing
-                      ? t('projectPanel.cancelDescription')
-                      : t('projectPanel.generateDescription')
-                  }
-                  aria-label={
-                    describing
-                      ? t('projectPanel.cancelDescription')
-                      : t('projectPanel.generateDescription')
-                  }
-                  className="rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
-                >
-                  {describing
-                    ? t('projectPanel.generating')
-                    : t('projectPanel.generateDescription')}
-                </button>
-              </div>
-            )
-          )}
-        </div>
-        {/* ml-auto keeps the cluster right-aligned even when flex-wrap moves
-            it onto its own row; inner flex-wrap lets the share strip / HUD /
-            feedback button flow onto further rows on very narrow windows. */}
-        <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-x-3 gap-y-1.5">
-          {viewModeControl}
-          {/* Owner UI only; the CLI can still read the project's skill files. */}
-          {ownerFeatures && <button
-            type="button"
-            onClick={() => setSkillsOpen(true)}
-            disabled={project.missing}
-            title={t('projectPanel.skillsButtonHint')}
-            aria-label={t('projectPanel.skillsButton')}
-            className="flex shrink-0 items-center gap-1 rounded-sm px-1 py-1 text-meta text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-faint"
-          >
-            <Sparkles size={12} strokeWidth={1.75} className="shrink-0" />
-            {t('projectPanel.skillsButton')}
-          </button>}
-          {/* Realtime-collab invite — a quiet text button, only when collab is
-              enabled (default build: hidden, no collab UI at all). */}
-          {collabEnabled && !project.missing && (
-            <button
+              ref={detailsButtonRef}
               type="button"
-              onClick={() => setCollabInviteOpen(true)}
-              title={t('projectPanel.collabEntryTitle')}
-              className="shrink-0 rounded-sm px-1 py-1 text-meta text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              onClick={() => setDetailsOpen(true)}
+              aria-label={t('projectPanel.projectDetails')}
+              aria-haspopup="dialog"
+              aria-expanded={detailsOpen}
+              title={`${project.name}\n${t('projectPanel.projectDetails')}`}
+              className="flex h-8 max-w-[80px] items-center gap-1 rounded-sm px-1.5 font-display text-title font-semibold tracking-normal text-ink transition-colors hover:bg-plane active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-[360px]:max-w-[100px] sm:max-w-[200px]"
             >
-              {t('projectPanel.collabEntry')}
+              <span className="truncate">{project.name}</span>
+              {describing ? <Loader2 size={12} className="shrink-0 animate-spin" /> : <ChevronDown size={12} className="shrink-0" />}
             </button>
-          )}
-          {/* Mirrors the Ground's top-right usage strip — model + token gauge,
-              kept visible while working inside a project so the user always
-              knows how close they are to the rate-limit cap. */}
-          <UsageHud />
-          {/* Text-diet 2026-08-03: feedback had THREE permanent entries (Ground
-              toolbar pill, this header button, the Settings section). The
-              toolbar + Settings pair covers reach; this duplicate is cut. */}
-          <div className="flex items-center gap-0.5">
-            <MoreMenu
-              onProjectSettings={() => setProjectSettingsOpen(true)}
-              projectSettingsDisabled={!data}
-              onRemove={() => onRemove(project)}
-              onDelete={() => setConfirmingDelete(true)}
-            />
+          </h2>
+        </div>
+        <ViewTabs
+          view={view}
+          onChange={setView}
+          order={tabOrder}
+          onReorder={ownerFeatures ? reorderTabs : undefined}
+          terminalInfo={terminalInfo}
+          gate={moduleGate}
+          customTabs={customModules.map(customModuleTabDef)}
+          onAddTab={ownerFeatures ? () => setPickerOpen(true) : undefined}
+          rowMenu={ownerFeatures ? { actionFor: tabRowAction } : undefined}
+          badges={{ board: data?.tasks.filter(t => !t.done && t.boardColumn === 'review').length ?? 0 }}
+        />
+        <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
+          <UsageHud compact />
+          <MoreMenu
+            onProjectSettings={() => setProjectSettingsOpen(true)}
+            projectSettingsDisabled={!data}
+            onRemove={() => onRemove(project)}
+            onDelete={() => setConfirmingDelete(true)}
+          />
+          <span className="hidden sm:flex">
             <IconButton title={t('common.close')} onClick={onClose}>
               <X size={15} strokeWidth={1.75} />
             </IconButton>
-          </div>
+          </span>
         </div>
       </header>
+
+      {/* Metadata is on demand, outside the panel stacking context so hosted
+          custom tabs cannot cover it. Hiding chrome never changes saved data. */}
+      {detailsOpen && createPortal(
+        <Overlay onClose={() => setDetailsOpen(false)}>
+          <DialogCard className="w-full max-w-[640px] max-h-[85vh]" ariaLabel={t('projectPanel.projectDetails')}>
+            <div ref={detailsRef} className="min-h-0 overflow-y-auto" onScroll={() => { setEditorMenuOpen(false); setBranchMenuOpen(false) }} onKeyDown={e => {
+              if (e.key !== 'Tab' || editorMenuOpen || branchMenuOpen) return
+              const controls = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]'))
+              const first = controls[0], last = controls[controls.length - 1]
+              if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus() }
+              else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus() }
+            }}>
+              <DialogHeader density="bar" separator="line" title={t('projectPanel.projectDetails')} titleClassName="text-ui font-semibold text-ink" onClose={() => setDetailsOpen(false)} closeLabel={t('common.close')} />
+              <div className="min-w-0 px-5 py-4">
+                <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+                  <EditableTitle
+                    name={project.name}
+                    size="fullscreen"
+                    onRename={onRename ? (next) => onRename(project, next) : undefined}
+                  />
+                  {/* Frequently used, so it's a standalone one-click button next to the
+                      title rather than buried in the ⋯ menu. Label/tooltip follows the
+                      host OS (Finder / Explorer / file manager). */}
+                  <button
+                    onClick={revealInFinder}
+                    disabled={project.missing}
+                    title={t(revealLabelKey())}
+                    aria-label={t(revealLabelKey())}
+                    className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+                  >
+                    <FolderOpen size={16} strokeWidth={1.75} />
+                  </button>
+                  {/* Open the folder in an editor — a single button. Clicking it opens
+                      the chooser menu (editors installed on this machine — open any, or
+                      star one as the new default); with nothing to choose it launches
+                      directly via CLI auto-detection. mousedown stops at the container
+                      so the outside-click closer only fires for clicks truly outside. */}
+                  <div
+                    className="relative flex shrink-0 items-center"
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      ref={editorBtnRef}
+                      onClick={handleEditorButton}
+                      disabled={project.missing}
+                      title={t('projectPanel.openInEditor')}
+                      aria-label={t('projectPanel.openInEditor')}
+                      aria-haspopup={canChooseEditor ? 'menu' : undefined}
+                      aria-expanded={canChooseEditor ? editorMenuOpen : undefined}
+                      className={`flex shrink-0 items-center gap-0.5 rounded-sm p-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint ${
+                        editorMenuOpen
+                          ? 'bg-bg-inset text-ink-muted'
+                          : 'text-ink-faint hover:bg-plane hover:text-ink-muted active:bg-plane active:text-ink-muted'
+                      }`}
+                    >
+                      <SquareCode size={16} strokeWidth={1.75} />
+                      {canChooseEditor && (
+                        <ChevronDown
+                          size={12}
+                          strokeWidth={2}
+                          className={`shrink-0 transition-transform ${editorMenuOpen ? 'rotate-180' : ''}`}
+                        />
+                      )}
+                    </button>
+                    {editorMenuOpen && editorMenuPos && createPortal(
+                      // Body portal at overlay-modal z — must beat a hosted custom-
+                      // tab iframe (z 45), which any in-panel z cannot (the panel is
+                      // one z-40 stacking context). stopPropagation keeps inside
+                      // clicks from reaching the window outside-click closer.
+                      <div
+                        role="menu"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        style={{ left: editorMenuPos.left, top: editorMenuPos.top, maxHeight: `calc(100vh - ${editorMenuPos.top + 8}px)` }}
+                        className="fixed z-overlay-modal w-60 overflow-y-auto rounded-md border border-line bg-bg-card py-1 shadow-lg"
+                      >
+                        <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
+                          {t('projectPanel.openInEditor')}
+                        </div>
+                        {installedEditors.length === 0 && (
+                          <div className="px-3 py-1.5 text-ui text-ink-faint">
+                            {t('projectPanel.editorNoneFound')}
+                          </div>
+                        )}
+                        {installedEditors.map((ed) => {
+                          const isDefault = defaultEditor?.name === ed.name
+                          return (
+                            <div key={ed.name} className="group flex items-center gap-1 px-1">
+                              <button
+                                role="menuitem"
+                                onClick={() => void openInEditorWith(ed)}
+                                className="min-w-0 flex-1 truncate rounded-sm px-2 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                              >
+                                {ed.name}
+                              </button>
+                              <button
+                                onClick={() => void saveDefaultEditor(isDefault ? null : ed)}
+                                title={
+                                  isDefault
+                                    ? t('projectPanel.editorClearDefault')
+                                    : t('projectPanel.editorSetDefault')
+                                }
+                                aria-label={
+                                  isDefault
+                                    ? t('projectPanel.editorClearDefault')
+                                    : t('projectPanel.editorSetDefault')
+                                }
+                                aria-pressed={isDefault}
+                                className={`shrink-0 rounded-sm p-1.5 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent ${
+                                  isDefault
+                                    ? 'text-accent'
+                                    : 'text-ink-faint opacity-0 hover:text-ink-muted focus-visible:opacity-100 group-hover:opacity-100'
+                                }`}
+                              >
+                                <Star size={14} strokeWidth={2} className={isDefault ? 'fill-current' : ''} />
+                              </button>
+                            </div>
+                          )
+                        })}
+                        {(canPickEditor || defaultEditor) && (
+                          <div className="my-1 border-t border-line" />
+                        )}
+                        {canPickEditor && (
+                          <button
+                            role="menuitem"
+                            onClick={() => void pickEditor()}
+                            className="block w-full px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                          >
+                            {t('projectPanel.editorPickOther')}
+                          </button>
+                        )}
+                        {defaultEditor && (
+                          <button
+                            role="menuitem"
+                            onClick={() => void saveDefaultEditor(null)}
+                            className="block w-full px-3 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:bg-bg-inset focus-visible:text-ink-muted focus-visible:outline-none"
+                          >
+                            {t('projectPanel.editorClearDefault')}
+                          </button>
+                        )}
+                      </div>,
+                      document.body,
+                    )}
+                  </div>
+                  {/* Branch chip — only for git projects: current branch, a dot when
+                      the working tree is dirty; opens the Branch changes modal. */}
+                  {branchInfo?.isGit && (
+                    <div
+                      className="relative flex shrink-0 items-center"
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        ref={branchBtnRef}
+                        onClick={() => setBranchMenuOpen((v) => !v)}
+                        disabled={project.missing}
+                        title={t('projectPanel.branchMenuTitle')}
+                        aria-label={t('projectPanel.branchMenuTitle')}
+                        aria-haspopup="menu"
+                        aria-expanded={branchMenuOpen}
+                        className={`flex min-w-0 shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-meta transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted ${
+                          branchMenuOpen
+                            ? 'border-line bg-bg-inset text-ink'
+                            : 'border-line text-ink-muted hover:bg-plane hover:text-ink active:bg-plane active:text-ink'
+                        }`}
+                      >
+                        <GitBranch size={11} strokeWidth={2} className="shrink-0" />
+                        <span className="max-w-[180px] truncate font-mono">
+                          {branchInfo.branch ?? 'HEAD'}
+                        </span>
+                        {branchInfo.working.length > 0 && (
+                          <span
+                            aria-hidden
+                            className="h-1.5 w-1.5 shrink-0 rounded-full bg-ochre"
+                          />
+                        )}
+                        <ChevronDown
+                          size={11}
+                          strokeWidth={2}
+                          className={`shrink-0 transition-transform ${
+                            branchMenuOpen ? 'rotate-180' : ''
+                          }`}
+                        />
+                      </button>
+                      {branchMenuOpen && branchMenuPos && createPortal(
+                        // Body portal at overlay-modal z — same hosted custom-tab
+                        // iframe stacking reason as the editor menu above.
+                        <div
+                          role="menu"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          style={{ left: branchMenuPos.left, top: branchMenuPos.top, maxHeight: `min(60vh, calc(100vh - ${branchMenuPos.top + 8}px))` }}
+                          className="fixed z-overlay-modal max-h-[60vh] w-72 overflow-y-auto rounded-md border border-line bg-bg-card py-1 shadow-lg"
+                        >
+                          <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
+                            {t('projectPanel.branchMenuTitle')}
+                          </div>
+                          {activeBranches === null ? (
+                            <div className="flex items-center gap-2 px-3 py-2 text-ui text-ink-faint">
+                              <Loader2 size={12} className="animate-spin" />
+                            </div>
+                          ) : activeBranches.branches.length === 0 ? (
+                            <div className="px-3 py-1.5 text-ui text-ink-faint">
+                              {t('projectPanel.branchMenuEmpty')}
+                            </div>
+                          ) : (
+                            activeBranches.branches.map((b) => (
+                              <div
+                                key={b.name}
+                                role="menuitem"
+                                className="flex items-start gap-2 px-3 py-1.5"
+                              >
+                                <GitBranch
+                                  size={12}
+                                  strokeWidth={2}
+                                  className={`mt-0.5 shrink-0 ${
+                                    b.current ? 'text-accent' : 'text-ink-faint'
+                                  }`}
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span
+                                      className={`truncate font-mono text-ui ${
+                                        b.current ? 'text-ink' : 'text-ink-muted'
+                                      }`}
+                                      title={b.name}
+                                    >
+                                      {b.name}
+                                    </span>
+                                    {b.current && (
+                                      <span className="shrink-0 rounded-sm bg-bg-inset px-1 py-px text-plate uppercase tracking-wide text-ink-faint">
+                                        {t('projectPanel.branchMenuCurrent')}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {b.worktreePath && (
+                                    <div
+                                      className="truncate text-meta text-ink-faint"
+                                      title={b.worktreePath}
+                                    >
+                                      {b.worktreePath}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            ))
+                          )}
+                          <div className="my-1 border-t border-line" />
+                          <button
+                            role="menuitem"
+                            onClick={() => {
+                              setBranchMenuOpen(false)
+                              setDetailsOpen(false)
+                              setBranchModalOpen(true)
+                            }}
+                            className="block w-full px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                          >
+                            {t('projectPanel.branchChangesTitle')}
+                          </button>
+                        </div>,
+                        document.body,
+                      )}
+                    </div>
+                  )}
+                </div>
+                {data && (
+                  descriptionForLang(data, lang) ? (
+                    /* ── Filled state: refresh button LEFT, then the generated text.
+                          The description is generate-only (no manual editing) — the
+                          text swaps in when claude finishes, persisted server-side. ── */
+                    <div className="mt-3 flex items-start gap-1.5">
+                      {/* Refresh button — spins while claude works */}
+                      <button
+                        onClick={regenerateDescription}
+                        disabled={project.missing}
+                        title={
+                          describing
+                            ? t('projectPanel.cancelDescription')
+                            : t('projectPanel.regenerateDescription')
+                        }
+                        aria-label={
+                          describing
+                            ? t('projectPanel.cancelDescription')
+                            : t('projectPanel.regenerateDescription')
+                        }
+                        className="mt-0.5 shrink-0 rounded-sm p-0.5 text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+                      >
+                        {describing ? (
+                          <Loader2 size={11} className="animate-spin" />
+                        ) : (
+                          <RotateCw size={11} />
+                        )}
+                      </button>
+                      <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ui leading-relaxed text-ink-muted">
+                        {descriptionForLang(data, lang)}
+                      </p>
+                    </div>
+                  ) : (
+                    /* ── Empty state: a plain text-only generate button (no icon) ── */
+                    <div className="mt-1">
+                      <button
+                        onClick={regenerateDescription}
+                        disabled={project.missing}
+                        title={
+                          describing
+                            ? t('projectPanel.cancelDescription')
+                            : t('projectPanel.generateDescription')
+                        }
+                        aria-label={
+                          describing
+                            ? t('projectPanel.cancelDescription')
+                            : t('projectPanel.generateDescription')
+                        }
+                        className="rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+                      >
+                        {describing
+                          ? t('projectPanel.generating')
+                          : t('projectPanel.generateDescription')}
+                      </button>
+                    </div>
+                  )
+                )}
+              </div>
+              <div className="flex min-w-0 flex-wrap items-center gap-3 border-t border-line px-5 py-3">
+                {viewModeControl}
+                {/* Owner UI only; the CLI can still read the project's skill files. */}
+                {ownerFeatures && <button
+                  type="button"
+                  onClick={() => { setDetailsOpen(false); setSkillsOpen(true) }}
+                  disabled={project.missing}
+                  title={t('projectPanel.skillsButtonHint')}
+                  aria-label={t('projectPanel.skillsButton')}
+                  className="flex shrink-0 items-center gap-1 rounded-sm px-1 py-1 text-meta text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-faint"
+                >
+                  <Sparkles size={12} strokeWidth={1.75} className="shrink-0" />
+                  {t('projectPanel.skillsButton')}
+                </button>}
+                {/* Realtime-collab invite — a quiet text button, only when collab is
+                    enabled (default build: hidden, no collab UI at all). */}
+                {collabEnabled && !project.missing && (
+                  <button
+                    type="button"
+                    onClick={() => { setDetailsOpen(false); setCollabInviteOpen(true) }}
+                    title={t('projectPanel.collabEntryTitle')}
+                    className="shrink-0 rounded-sm px-1 py-1 text-meta text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  >
+                    {t('projectPanel.collabEntry')}
+                  </button>
+                )}
+              </div>
+            </div>
+          </DialogCard>
+        </Overlay>, document.body,
+      )}
 
       {project.missing && (
         <div className="flex items-start gap-2 border-b border-accent/30 bg-accent/5 px-8 py-2.5">
@@ -2255,32 +2304,6 @@ const OwnedProjectBody = ({
           </div>
         </div>
       )}
-
-      <ViewTabs
-        view={view}
-        onChange={setView}
-        order={tabOrder}
-        onReorder={ownerFeatures ? reorderTabs : undefined}
-        terminalInfo={terminalInfo}
-        // Same gate as `order` was built from, so the row can resolve a gated
-        // module's icon/label; without it an open experiment's tab would have an
-        // id in `order` but no metadata and silently fail to render.
-        gate={moduleGate}
-        // Custom tabs (label from the fetched def, fixed Puzzle icon) — the
-        // row renders them wherever `order` puts them; `order` only ever
-        // contains tabs ATTACHED to this project (allTabIds above).
-        customTabs={customModules.map(customModuleTabDef)}
-        // Only owner view offers layout editing and the custom-tab library.
-        onAddTab={ownerFeatures ? () => setPickerOpen(true) : undefined}
-        // Right-click menu on a tab: detach a custom (non-destructive — library
-        // delete lives in the picker) or hide a built-in from this project.
-        rowMenu={ownerFeatures ? { actionFor: tabRowAction } : undefined}
-        // Cards waiting in Review — the reviewer's pull signal (F066).
-        badges={{
-          board:
-            data?.tasks.filter(t => !t.done && t.boardColumn === 'review').length ?? 0,
-        }}
-      />
 
       {/* Content + assistant. The assistant is either the bottom dock (a child
           at the end of the content column) or a right sidebar (a push panel
@@ -3235,6 +3258,25 @@ const ViewTabs = ({
   // so a state change that revokes it (e.g. the tab became the last one) closes
   // the menu rather than leaving a stale item.
   const menuAction = tabMenu ? rowMenu?.actionFor(tabMenu.id) ?? null : null
+  const stripRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    // Keep the selected tab reachable after Ctrl+Tab or a saved-view restore,
+    // without scrolling the project body or its embedded app.
+    const strip = stripRef.current
+    if (!strip) return
+    const revealSelected = () => {
+      const selected = strip.querySelector<HTMLButtonElement>('[aria-current="page"]')
+      if (!selected) return
+      const bounds = strip.getBoundingClientRect(), tab = selected.getBoundingClientRect()
+      if (tab.left < bounds.left) strip.scrollLeft -= bounds.left - tab.left
+      else if (tab.right > bounds.right) strip.scrollLeft += tab.right - bounds.right
+    }
+    revealSelected()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(revealSelected)
+    observer.observe(strip)
+    return () => observer.disconnect()
+  }, [view, order])
 
   return (
     // 計器盤 language. The tab strip carries no rule of its own — separation is
@@ -3251,7 +3293,7 @@ const ViewTabs = ({
     // low contrast and colour-blindness in a way a recolour does not. It also
     // suits the instrument panel better than a filled lozenge — a gauge marks its
     // reading with a line, not by inverting the dial.
-    <div className="no-scrollbar flex shrink-0 items-center gap-1 overflow-x-auto px-7 pb-0 pt-[18px]">
+    <div ref={stripRef} data-testid="project-tabs" className="no-scrollbar flex h-full min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
       {tabs.map((m, i) => {
         const active = m.id === view
         const dimmed = dragFrom === i
@@ -3297,6 +3339,7 @@ const ViewTabs = ({
             }}
             onDragEnd={endDrag}
             onClick={() => onChange(m.id)}
+            aria-current={active ? 'page' : undefined}
             onContextMenu={e => {
               // Only when this tab offers an action (detach a custom / hide a
               // built-in); the resolver returns null otherwise (last tab, etc.).
@@ -3305,13 +3348,13 @@ const ViewTabs = ({
               setTabMenu({ id: m.id, x: e.clientX, y: e.clientY })
             }}
             onKeyDown={e => onTabKeyDown(e, i)}
-            title={onReorder ? t('projectPanel.dragToReorder') : undefined}
+            title={onReorder ? `${tabLabel(m, t)}\n${t('projectPanel.dragToReorder')}` : tabLabel(m, t)}
             className={[
               // No negative margin: the strip is `overflow-x-auto` (it scrolls
               // when custom tabs pile up), and overflow clips on BOTH axes — a
               // `-mb-px` put the underscore 1px outside the scroll box and it
               // vanished. Measured: tab bottom 199 against parent 198.
-              'relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[3px] px-2.5 pb-2 pt-1.5 label-cap transition-colors',
+              'relative flex h-9 min-w-0 max-w-full shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[3px] px-2 text-meta font-medium uppercase tracking-normal transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
               // The width is unconditional so the row never reflows; the COLOUR
               // is set in exactly one place. Naming `border-transparent` here
               // and `border-ink` in the active branch put two border-color
@@ -3321,12 +3364,9 @@ const ViewTabs = ({
               // (Same shape as the `tracking-[…]` utilities that never applied,
               // fixed earlier today. Do not re-introduce a competing base.)
               'border-b-2',
-              // A tab label is either t() ('BOARD') or a name the user typed
-              // ('メモ帳'). Ask the string, not the UI language.
-              capTrackingClass(tabLabel(m, t)),
               active
-                ? 'border-ink text-ink'
-                : 'border-transparent text-ink-muted hover:border-line-strong hover:text-ink active:text-ink',
+                ? 'border-ink bg-bg-inset text-ink hover:bg-plane active:bg-plane'
+                : 'border-transparent text-ink-muted hover:border-line-strong hover:bg-plane hover:text-ink active:bg-bg-inset active:text-ink',
               dimmed ? 'opacity-40' : '',
               !onReorder ? 'cursor-pointer' : dragFrom !== null ? 'cursor-grabbing' : 'cursor-grab',
             ].join(' ')}
@@ -3334,14 +3374,12 @@ const ViewTabs = ({
             {barBefore && (
               <span className="pointer-events-none absolute -left-2 top-1 bottom-1 w-0.5 bg-accent" />
             )}
-            {m.icon}
-            <span>{tabLabel(m, t)}</span>
+            <span className="shrink-0">{m.icon}</span>
+            <span className="truncate">{tabLabel(m, t)}</span>
             {tabPlayback && (
               <span
                 title={tabPlayback.title ?? 'Playing'}
-                // On the active inverse pill the accent would sink into the ink
-                // surface — flip to the inverse text colour there.
-                className={active ? 'text-ink-inverse' : 'text-accent'}
+                className="shrink-0 text-accent"
               >
                 <PlaybackEq size={9} />
               </span>
@@ -3350,10 +3388,7 @@ const ViewTabs = ({
               <span
                 title={t('projectPanel.reviewWaitingTitle')}
                 className={[
-                  'rounded-full border px-1.5 text-plate font-medium leading-[14px]',
-                  active
-                    ? 'border-ink-inverse/40 text-ink-inverse'
-                    : 'border-ochre/60 text-[var(--beacon-waiting)]',
+                  'shrink-0 rounded-full border border-ochre/60 px-1.5 text-plate font-medium leading-[14px] text-[var(--beacon-waiting)]',
                 ].join(' ')}
               >
                 {badges![m.id]}
@@ -3550,14 +3585,10 @@ const MoreMenu = ({
 // omitted — e.g. the member side, which can't rename a shared project.
 const TITLE_CSS = {
   fullscreen: {
-    // min-w-0 + break-words: a long folder name wraps inside the header
-    // column instead of widening it past the viewport.
-    // 案C `h1`: 30px / 600 / letter-spacing 0.005em / line-height 1.1. The old
-    // `tracking-tightest` (-0.04em) pulled the letters ~1.2px tighter at this
-    // size, which is the single most visible difference in the wordmark.
-    text: 'mt-1.5 min-w-0 break-words font-display text-hero font-semibold leading-[1.1] tracking-[0.005em] text-ink',
-    style: { fontVariationSettings: "'opsz' 30, 'SOFT' 40, 'wght' 600" } as React.CSSProperties,
-    input: 'mt-1.5 font-display text-hero font-semibold leading-[1.1] tracking-[0.005em]',
+    // Long names wrap inside the compact details dialog, never widen it.
+    text: 'min-w-0 break-words font-display text-head font-semibold leading-tight tracking-normal text-ink',
+    style: { fontVariationSettings: "'opsz' 26, 'SOFT' 40, 'wght' 600" } as React.CSSProperties,
+    input: 'font-display text-head font-semibold leading-tight tracking-normal',
   },
   sidebar: {
     text: 'font-display text-head text-ink leading-[1.05] tracking-tightest truncate',

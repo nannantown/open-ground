@@ -132,8 +132,16 @@ describe('UsageHud popover — it must escape the project panel, not sit inside 
   it('closes on Escape, and leaves nothing behind in the body', async () => {
     const { popover } = await openPopover()
     expect(document.body.contains(popover)).toBe(true)
-    fireEvent.keyDown(document, { key: 'Escape' })
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    fireEvent(document, escape)
     await waitFor(() => expect(screen.queryByText('misc.usage.heading')).toBeNull())
     expect(document.body.contains(popover)).toBe(false)
+    expect(escape.defaultPrevented).toBe(true)
+  })
+
+  it('does not dismiss during IME composition', async () => {
+    const { popover } = await openPopover()
+    fireEvent.keyDown(document, { key: 'Escape', isComposing: true })
+    expect(document.body.contains(popover)).toBe(true)
   })
 })

@@ -65,14 +65,15 @@ preferences are retained.
 
 Description refreshes discard reads whose saved baseline changed while they
 were in flight; a late pre-generation poll cannot replace the generated text.
-Ground and the project header use the same language fallback, including when
+Ground and the project details use the same language fallback, including when
 only a generated language field survives. This does not prevent deliberate
 backup restoration or change the stored description format.
 
 ## Owner Preview
 
-The owner-only Owner view / Public view switch appears on Ground and local
-project headers (`OwnerViewSwitch.tsx`). App derives visible capabilities from
+The owner-only Owner view / Public view switch appears on Ground and in local
+project details, opened from the project name in the single-row header
+(`OwnerViewSwitch.tsx`). App derives visible capabilities from
 the real role plus this window-local choice. Public preview hides owner tabs,
 Skills, owner settings, manual chapters and the feedback inbox; Swarm follows
 the public macOS opt-in, not the owner's experimental/local unlock.
@@ -172,3 +173,28 @@ and a newly packaged GUI release still require release acceptance testing.
   labels/selects; the final browser run and inspected screenshots pass. The
   first browser attempt also required correcting its label locator to use the
   combobox's accessible name. No user data or installed application was changed.
+
+### Compact Project Header (2026-09-21)
+
+- Local project headers now occupy one 48px row. Tabs scroll horizontally;
+  long names truncate in the bar and remain available in project details.
+  Description generation, rename, folder/editor/branch actions, Skills, and
+  owner/public display switching remain available from the project name.
+- Description and layout data are unchanged. Usage details stay available
+  from the compact meter; Escape closes that popover without closing the
+  project. Hosted custom tabs preserve their document state when details open
+  and respect the dialog's restored focus when it closes.
+- Full Vitest: 7,248 passed, 2 skipped across 416 files. TypeScript and build
+  passed; ESLint: 0 errors, 196 warnings. Run Vitest separately from Playwright:
+  recreating `test-results/` during Vitest trips the repository-root fence.
+  On this Mac, prefer Node 22 and Homebrew Git 2.34; the older `/usr/local/bin`
+  Git 2.28 does not support the identity test's `GIT_CONFIG_COUNT` fixture.
+- Playwright: 12 passed, including 320/390/1280/1600px header and iframe
+  bounds, menu bounds, description retention, owner/public switching and
+  saved-data readback. Desktop/mobile screenshots were inspected; the actual
+  NENE Songs tab was also checked against the running installed API through
+  a separate Vite preview, without restarting the installed app or workers.
+- Negative controls: the old ProjectPanel renders the description in the
+  workspace bar and fails the new metadata test. The previous hosted-frame
+  focus behavior fails the new dialog-focus test. Both pass after restoration.
+  No release was published or installed for this change.

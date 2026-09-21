@@ -17,8 +17,11 @@
 
 ## 0. 契約と骨格 — 全変更の起点
 - Current local handoff/backlog audit (2026-09-21):
-  `commander/PRODUCT-HANDOFF-2026-09-21.md`. Records the combined unshipped
-  branch, verified behavior and all seven existing open OPEN GROUND cards.
+  `commander/PRODUCT-HANDOFF-2026-09-21.md`. Records release 0.11.115,
+  installed-app/data verification, live Claude acknowledgement and the Board
+  audit. Two delivered cards are now done; the owner subsequently started the
+  two remaining implementation workers and asked to leave them running.
+  The earlier unshipped/stopped snapshot is historical; check live state.
 - Public/owner surface contract: `docs/PUBLIC_PRODUCT_SCOPE.md`. Public Board,
   Terminal and opt-in Swarm; owner-only per-project Canvas, Research, custom tabs
   and WordPress/Skills UI. Owner display preview: `OwnerViewSwitch.tsx` +
@@ -32,6 +35,14 @@
   another save/load; `App.tsx` and `ProjectPanel.tsx` share `descriptionForLang`.
   Regressions: `ProjectPanel.description.test.tsx`, `App.render.test.tsx`, and
   `e2e/project-description.spec.ts` (generation, late read, navigation/reload).
+- Project header: `ProjectPanel.tsx` keeps project name, scrollable tabs,
+  compact `UsageHud`, and navigation in one 48px row. The project-name button
+  opens details (description/generation, rename, folder/editor/branches,
+  owner/public display switch and Skills); no saved data is removed.
+  `CustomFrameHost.tsx` respects focus restored by a closing dialog while
+  retaining playback and keep-alive navigation. Regressions:
+  `e2e/project-header.spec.ts` (320/390/1280/1600px, iframe geometry and state,
+  dialogs/menus, focus, data preservation) and `CustomFrameHost.test.tsx`.
 - `src/lib/types.ts` — client/server 唯一の共有契約。API payload を変えたら必ずここ
 - `src/lib/schemas.ts` — 永続データの zod スキーマ(ProjectTaskSchema ほか)。カードの
   フィールド追加は types + schemas の両方(片方忘れると保存時に黙って消える)

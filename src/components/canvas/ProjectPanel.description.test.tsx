@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectData, ProjectMeta } from '@/lib/types'
 import { ProjectPanel } from './ProjectPanel'
@@ -38,8 +38,30 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
 describe('description response ordering', () => {
+  it('keeps metadata out of the workspace bar and restores it through project details', async () => {
+    h.get.mockImplementation(async () => response(generated))
+    const close = vi.fn()
+    await act(async () => { render(<ProjectPanel project={project} onClose={close} onRemove={() => {}} frameLabel={null} />) })
+    expect(screen.queryByText(generated.description)).toBeNull()
+    const header = screen.getByTestId('project-header')
+    expect(within(header).getByRole('button', { name: 'Board' })).toBeTruthy()
+    expect(within(header).getByRole('button', { name: 'misc.usage.heading' })).toBeTruthy()
+    const details = within(header).getByRole('button', { name: 'projectPanel.projectDetails' })
+    fireEvent.click(details)
+    expect(screen.getByRole('dialog', { name: 'projectPanel.projectDetails' })).toBeTruthy()
+    expect(screen.getByText(generated.description)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'projectPanel.regenerateDescription' })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'projectPanel.projectDetails' })).toBeNull()
+    expect(document.activeElement).toBe(details)
+    expect(close).not.toHaveBeenCalled()
+    fireEvent.click(details)
+    expect(screen.getByText(generated.description)).toBeTruthy()
+    expect(h.describe).not.toHaveBeenCalled()
+  })
   it('does not erase a newly generated description when an older board poll finishes late', async () => {
     await act(async () => { render(<ProjectPanel project={project} onClose={() => {}} onRemove={() => {}} frameLabel={null} />) })
+    fireEvent.click(screen.getByRole('button', { name: 'projectPanel.projectDetails' }))
     let finishOld!: (r: Response) => void
     h.get.mockImplementationOnce(() => new Promise<Response>(resolve => { finishOld = resolve }))
     await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
@@ -54,6 +76,7 @@ describe('description response ordering', () => {
 
   it('ignores a delayed job refresh when the normal poll already adopted a newer description', async () => {
     await act(async () => { render(<ProjectPanel project={project} onClose={() => {}} onRemove={() => {}} frameLabel={null} />) })
+    fireEvent.click(screen.getByRole('button', { name: 'projectPanel.projectDetails' }))
     let finishJobRead!: (r: Response) => void
     h.get.mockImplementationOnce(() => new Promise<Response>(resolve => { finishJobRead = resolve }))
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'projectPanel.generateDescription' })) })

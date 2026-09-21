@@ -151,6 +151,7 @@ describe('App — whole-render integration', () => {
       localStorage.setItem('openground:onboarded', '1')
       localStorage.setItem('openground.view', JSON.stringify({ projectId: 'id', panelTab: 'board' }))
       await act(async () => { renderApp() })
+      fireEvent.click(screen.getByRole('button', { name: 'Project details' }))
       expect(screen.getAllByText(summary)).toHaveLength(2)
       opts.projectData = { ...opts.projectData!, notes: 'External edit', updatedAt: '2026-09-21T00:00:01.000Z' }
       await act(async () => { await vi.advanceTimersByTimeAsync(5000) })

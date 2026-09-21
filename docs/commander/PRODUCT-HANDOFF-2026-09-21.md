@@ -9,6 +9,62 @@ authorized, followed by a read-only Claude handoff. Automatic worker dispatch
 and engine restart remain outside scope. The snapshot below describes the
 pre-release state; confirm the installed version and upstream refs before resuming.
 
+## Current Status: Released, Installed and Acknowledged
+
+- [OPEN GROUND 0.11.115](https://github.com/nannantown/open-ground/releases/tag/v0.11.115)
+  was published on 2026-09-21 at 08:39 UTC. The release source is `13d9103c`
+  on private `origin/main`; the public snapshot/tag is `87c3f0b7`. Their trees
+  were identical before publication. All pushes were fast-forward, and public
+  snapshot metadata uses the GitHub noreply identity.
+- Final private CI (`35577830516`), public CI (`35577912860`) and both release
+  platform builds (`35577946947`) passed. The build was deliberately held as a
+  draft until the signed macOS artifact passed acceptance, then published.
+- The downloaded arm64 DMG's own app reported 0.11.115 and passed signature and
+  Gatekeeper notarization checks. Its bundled Electron executable and server
+  ran the real SDK against an offline CLI in isolated public/owner homes:
+  legacy history resume, singleton reuse, input delivery, stop/reap and data
+  retention passed. This is packaged-runtime evidence, not live-model Swarm
+  work or Windows hardware QA.
+- The owner's installed app now reports 0.11.115 from `/api/health`, started at
+  08:45:07 UTC. The first update attempt returned to 0.11.114: the registered
+  app-specific ShipIt service had zero runs. Starting that existing service
+  and repeating the normal update completed installation and relaunch. No
+  security policy was bypassed and no data was deleted. This was an operational
+  recovery; it does not establish or fix the underlying service-start cause.
+- Before/after API comparison preserved all 45 registered projects and the
+  complete OPEN GROUND project document (337 cards). Hash comparison preserved
+  all 13 files captured under the Persona/you-corpus, custom-module and Ground
+  canvas paths. Private before/after snapshots are retained outside Git.
+- After that comparison, the context-cap and difficulty cards were moved from
+  review to done: both worker commits are now ancestors of `origin/main`.
+  The Board contains 331 done, 2 todo and 4 blocked cards. Original notes,
+  dependencies, other cards and old worker worktrees remain. The old fuel
+  proposal is still awaiting the owner's retirement decision.
+- A live Claude conversation, launched through the updated app's ordinary
+  Terminal, read all four handoff/scope/release documents and the actual Board.
+  Its reply confirmed the scope, remaining tasks, preserved data and waiting
+  for the owner, ending with `HANDOFF_ACK_011115`. That reply is saved in the
+  blocked handoff card `fba3b9e5-9218-4bab-a743-3a786319a7f6`. The Board was
+  unchanged by Claude; only the operator then appended this receipt.
+- At handoff verification (08:52 UTC), the OPEN GROUND project's engine was
+  stopped, with no manager or supply desk. The handoff dispatched no workers.
+  Other projects' pre-existing restart intents were not modified. The ordinary
+  handoff conversation was left idle.
+
+**Later owner action:** at 08:56 UTC the engine was enabled briefly and dispatched
+the consumption-attribution and difficulty-template cards, then was stopped.
+The owner explicitly confirmed starting this work and instructed that the two
+workers be left running. Their cards are now doing; do not stop them or restore
+the earlier todo snapshot. The release/handoff operator did not start them.
+Re-read live state before intervening; stopping dispatch does not stop workers.
+
+The two real-world verification cards remain blocked. The four polish proposals
+remain unapproved. All sections from **Pre-Release Snapshot** onward record
+the earlier audit: statements there about unshipped work or pending delivery
+are historical and superseded by this section. Re-read live state before work.
+
+## Release Verification
+
 Release 0.11.115 local preflight: 7,245 tests passed, 2 skipped (416 files);
 typecheck and production build passed; lint has zero errors and 196 warnings;
 21 Playwright checks passed, including public/owner views, description retention,
@@ -16,8 +72,8 @@ retired features, local tabs and Swarm controls. The PII guard first detected a
 machine-specific home path in this handoff; the path was removed and the guard
 passed. Git 2.34 was used for the full passing run: the older Git 2.28 on the
 default PATH ignores the identity-isolation settings required by one test.
-Publication, installation and live-Claude acknowledgement still need their own
-observed evidence; local checks alone do not claim them.
+Publication, installation and live-Claude acknowledgement were verified
+separately afterward, as recorded above; local checks alone do not claim them.
 
 The first Linux CI run passed unit tests but exposed five browser-fixture
 failures: public opt-in was incorrectly expected on every OS, and the synthetic
@@ -27,7 +83,9 @@ fixture for layout-only coverage. Production access policy is unchanged. The
 full local browser suite passed all 34 checks after this correction; the earlier
 unpublished installer build was cancelled before any assets were uploaded.
 
-## Start Here
+## Pre-Release Snapshot
+
+### Start Here
 
 - Checkout: the registered OPEN GROUND project directory (resolve its actual
   path from the local registry; do not publish machine-specific home paths).

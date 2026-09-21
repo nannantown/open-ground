@@ -244,6 +244,28 @@ describe('CustomFrameHost keep-alive', () => {
 })
 
 describe('overlay coverage (MF1)', () => {
+  it('preserves focus restored by a dialog when its frame becomes visible again', async () => {
+    const { container, unmount } = render(<CustomFrameHost />)
+    act(() => {
+      attachFrameAnchor(MODULE_ID, anchor, 'Songs', PROJ)
+      setFrameSource(MODULE_ID, '<html>x</html>', 'Songs')
+    })
+    const trigger = document.createElement('button')
+    document.body.appendChild(trigger)
+    const overlay = document.createElement('div')
+    overlay.setAttribute('data-esc-overlay', '')
+    await act(async () => { document.body.appendChild(overlay) })
+    expect(container.querySelector('iframe')!.style.display).toBe('none')
+    await act(async () => {
+      overlay.remove()
+      trigger.focus()
+    })
+    expect(container.querySelector('iframe')!.style.display).not.toBe('none')
+    expect(document.activeElement).toBe(trigger)
+    trigger.remove()
+    unmount()
+  })
+
   it('hides a visible frame while any [data-esc-overlay] surface is open', async () => {
     const { container, unmount } = render(<CustomFrameHost />)
     act(() => {

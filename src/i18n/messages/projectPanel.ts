@@ -4,6 +4,7 @@ export const projectPanel = {
   en: {
     // Header
     'projectPanel.backToGround': 'Back to Ground',
+    'projectPanel.projectDetails': 'Project details',
     'projectPanel.claudeNotFound': 'claude CLI not found — install Claude Code, then restart OPEN GROUND',
     'projectPanel.generating': 'Generating…',
     'projectPanel.cancelDescription': 'Stop generating',
@@ -745,6 +746,7 @@ export const projectPanel = {
   ja: {
     // Header
     'projectPanel.backToGround': 'Ground に戻る',
+    'projectPanel.projectDetails': 'プロジェクトの詳細',
     'projectPanel.claudeNotFound': 'claude CLI が見つかりません — Claude Code をインストールして OPEN GROUND を再起動してください',
     'projectPanel.generating': '生成中…',
     'projectPanel.cancelDescription': '生成を停止',
