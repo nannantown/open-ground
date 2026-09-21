@@ -149,9 +149,11 @@ for (const width of [1280, 390]) {
   })
 }
 
-test('public Swarm opt-in still works while owner settings stay hidden', async ({ page, request }) => {
+test('public Swarm opt-in follows the platform gate while owner settings stay hidden', async ({ page, request }) => {
+  const available = process.platform === 'darwin'
   const project = await createAndImportProject(request, 'public-swarm')
   await request.post('/api/settings', { data: { swarmOptIn: false } })
+  await expect.poll(async () => (await (await request.get('/api/experiments')).json()).swarmOptIn.available).toBe(available)
   await page.addInitScript(id => {
     localStorage.setItem('openground:onboarded', '1')
     localStorage.setItem('openground.view', JSON.stringify({ projectId: id, panelTab: 'board' }))
@@ -163,11 +165,19 @@ test('public Swarm opt-in still works while owner settings stay hidden', async (
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await expect(page.getByText('WordPress', { exact: true })).toHaveCount(0)
   await page.getByText('Advanced', { exact: true }).click()
-  const group = page.getByRole('group').filter({ has: page.getByRole('button', { name: 'On', exact: true }) }).last()
-  await group.getByRole('button', { name: 'On', exact: true }).click()
+  const group = page.getByRole('group', { name: 'Enable the Swarm tab', exact: true })
+  if (available) {
+    await group.getByRole('button', { name: 'On', exact: true }).click()
+  } else {
+    await expect(group).toHaveCount(0)
+    // A saved opt-in cannot bypass the non-macOS server gate.
+    await request.post('/api/settings', { data: { swarmOptIn: true } })
+  }
   await expect.poll(async () => (await (await request.get('/api/settings')).json()).swarmOptIn).toBe(true)
+  await expect.poll(async () => (await (await request.get('/api/experiments')).json()).swarmOptIn.enabled).toBe(available)
   await page.reload({ waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('button', { name: 'Swarm', exact: true })).toBeVisible()
+  if (available) await expect(page.getByRole('button', { name: 'Swarm', exact: true })).toBeVisible()
+  else await expect(page.getByRole('button', { name: 'Swarm', exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Canvas', exact: true })).toHaveCount(0)
   await request.post('/api/settings', { data: { swarmOptIn: false } })
 })

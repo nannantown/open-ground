@@ -19,6 +19,14 @@ default PATH ignores the identity-isolation settings required by one test.
 Publication, installation and live-Claude acknowledgement still need their own
 observed evidence; local checks alone do not claim them.
 
+The first Linux CI run passed unit tests but exposed five browser-fixture
+failures: public opt-in was incorrectly expected on every OS, and the synthetic
+manager dashboard inherited a real 403 response. The browser checks now assert
+the real platform gate in both directions and use an explicit successful engine
+fixture for layout-only coverage. Production access policy is unchanged. The
+full local browser suite passed all 34 checks after this correction; the earlier
+unpublished installer build was cancelled before any assets were uploaded.
+
 ## Start Here
 
 - Checkout: the registered OPEN GROUND project directory (resolve its actual

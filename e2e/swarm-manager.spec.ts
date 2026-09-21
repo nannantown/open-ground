@@ -15,11 +15,11 @@ for (const width of [1280, 390]) {
         const response = await route.fetch()
         await route.fulfill({ response, json: { ...await response.json(), swarmManagerRuntime: { mode: 'pty' } } })
       })
-      // Render the active dashboard without starting a real engine or model.
-      await page.route('**/api/swarm/orchestrator?*', async route => {
-        const response = await route.fetch()
-        await route.fulfill({ response, json: { ...await response.json(), running: true } })
-      })
+      // This is a dashboard fixture, independent of the host's public opt-in
+      // gate. Inheriting a real 403 makes the synthetic dashboard unavailable.
+      await page.route('**/api/swarm/orchestrator?*', route => route.fulfill({
+        status: 200, json: { running: true, workers: [], managerDesk: null, supplyDesk: null },
+      }))
       await page.addInitScript(id => {
         localStorage.setItem('openground:onboarded', '1')
         localStorage.setItem('openground.view', JSON.stringify({ projectId: id, panelTab: 'board' }))
