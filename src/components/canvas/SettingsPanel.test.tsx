@@ -79,6 +79,74 @@ describe('SettingsPanel autosave', () => {
     expect(onSave.mock.calls.at(-1)?.[0].swarmOptIn).toBe(false)
   })
 
+  // ── the worker-directive trial toggle (Settings.workerTrials.thinkInCode) ──
+  // It exists because the alternative was telling a non-programmer to POST JSON
+  // with curl. Three properties are worth guarding, and the third is the one a
+  // careless edit breaks.
+  it('is hidden until the swarm is actually on for this user', () => {
+    // A switch that changes nothing visible is worse than an absent one.
+    render(<SettingsPanel open settings={baseSettings} onClose={() => {}} onSave={vi.fn()} />)
+    fireEvent.click(screen.getByText('settings.advanced'))
+    expect(screen.queryByText('settings.workerTrial.heading')).toBeNull()
+  })
+
+  it('appears and persists once the swarm is on', () => {
+    const onSave = vi.fn()
+    render(
+      <SettingsPanel
+        open
+        settings={{ ...baseSettings, swarmOptIn: true }}
+        swarmOptInAvailable
+        swarmOptInEnabled
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    )
+    fireEvent.click(screen.getByText('settings.advanced'))
+    const group = screen.getByRole('group', { name: 'settings.workerTrial.thinkInCode' })
+    fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.on' }))
+    expect(onSave.mock.calls.at(-1)?.[0].workerTrials).toEqual({ thinkInCode: true })
+    fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.off' }))
+    expect(onSave.mock.calls.at(-1)?.[0].workerTrials).toEqual({ thinkInCode: false })
+  })
+
+  it('does NOT clear another arm when this one is flipped', () => {
+    // `workerTrials` is ONE settings key and the save MERGES by key, so writing
+    // a fresh object here would silently turn `brevity` off — a switch quietly
+    // undoing a different switch, which no one would look for.
+    const onSave = vi.fn()
+    render(
+      <SettingsPanel
+        open
+        settings={{ ...baseSettings, swarmOptIn: true, workerTrials: { brevity: true } }}
+        swarmOptInAvailable
+        swarmOptInEnabled
+        onClose={() => {}}
+        onSave={onSave}
+      />,
+    )
+    fireEvent.click(screen.getByText('settings.advanced'))
+    const group = screen.getByRole('group', { name: 'settings.workerTrial.thinkInCode' })
+    fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.on' }))
+    expect(onSave.mock.calls.at(-1)?.[0].workerTrials).toEqual({ brevity: true, thinkInCode: true })
+  })
+
+  it('shows the state that is actually stored, not a default', () => {
+    render(
+      <SettingsPanel
+        open
+        settings={{ ...baseSettings, swarmOptIn: true, workerTrials: { thinkInCode: true } }}
+        swarmOptInAvailable
+        swarmOptInEnabled
+        onClose={() => {}}
+        onSave={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByText('settings.advanced'))
+    const group = screen.getByRole('group', { name: 'settings.workerTrial.thinkInCode' })
+    expect(within(group).getByRole('button', { name: 'settings.experiments.on' }).getAttribute('aria-pressed')).toBe('true')
+  })
+
   it('still exposes saved WordPress settings to the owner', () => {
     render(<SettingsPanel open experimentsEligible settings={baseSettings} onClose={() => {}} onSave={vi.fn()} />)
     expect(screen.getByText('settings.wordpress.heading')).toBeTruthy()

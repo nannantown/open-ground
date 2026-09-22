@@ -29,6 +29,17 @@ export const settings = {
     'settings.swarmOptIn.label': 'Enable the Swarm tab',
     'settings.swarmOptIn.warning':
       'Swarm runs autonomous Claude workers for you. Before turning it on, know: it uses your own Claude subscription and can run several sessions at once, so it may consume your quota heavily; workers run Claude with tool-permission prompts skipped, inside isolated copies of your project; and its notifications are currently in Japanese only. It is still being tuned and is not covered by support.',
+    // Worker-directive TRIALS (Settings.workerTrials) — docs/trending/TRIALS.md.
+    // Owner-facing wording deliberately states that the effect is UNPROVEN: the
+    // measurement so far (-7.6% cost) sat inside the baseline's own 22% spread,
+    // and a switch that oversells itself is how an unmeasured change becomes
+    // permanent.
+    'settings.workerTrial.heading': 'Swarm worker trials (measuring)',
+    'settings.workerTrial.hint':
+      'Settings whose effect is still being measured. Off by default, and turning one off restores the previous behaviour exactly — nothing else changes.',
+    'settings.workerTrial.thinkInCode': 'Tell workers to narrow before opening files',
+    'settings.workerTrial.thinkInCodeNote':
+      'A worker searches once for the lines it needs instead of opening file after file, and reads only that output. Whether it actually saves anything is NOT yet established: across 6 measured runs it cost 7.6% less, which is inside the 22% spread of the unchanged setting itself. Turn it on, run about six cards, then decide. Only cards started after you turn it on are affected.',
     // Completion chime (settings.soundOnDone / soundOnDoneVolume)
     'settings.wordpress.heading': 'Blog publishing (WordPress)',
     'settings.wordpress.hint':
@@ -172,6 +183,12 @@ export const settings = {
     'settings.swarmOptIn.label': 'Swarm タブを有効にする',
     'settings.swarmOptIn.warning':
       'Swarm はあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。通知は当面日本語のみです。まだ調整中で、サポート対象外です。',
+    'settings.workerTrial.heading': 'Swarm worker の試験(計測中)',
+    'settings.workerTrial.hint':
+      '効果をまだ測っている途中の設定です。既定はオフ。オフに戻すと元の動きに完全に戻ります(ほかには何も変わりません)。',
+    'settings.workerTrial.thinkInCode': 'worker に「開く前に絞る」を指示する',
+    'settings.workerTrial.thinkInCodeNote':
+      'ファイルを次々に開く代わりに、まず1回の検索で必要な行だけ出させて、その出力だけを読ませます。効果があるかは、まだ確認できていません: 6回の計測では費用が 7.6% 安くなりましたが、オフのままでも 22% ばらつくので、差とは言えません。オンにしてカードを6枚ほど流してから決めてください。効くのはオンにした後に始めたカードだけです。',
     'settings.wordpress.heading': 'ブログ投稿 (WordPress)',
     'settings.wordpress.hint':
       'レポート画面で「ブログへ」を押した調査レポートだけを、自分の WordPress サイトへ下書きとして送ります。公開は WordPress 側であなたが押します。送ったレポートを書き直すと同じ下書きが更新されます。WordPress 側で編集・削除した下書きには二度と触りません。対象は自分でインストールした WordPress のみ（管理画面が 自分のドメイン/wp-admin にあるタイプ）。wordpress.com のサイトは対象外です。',

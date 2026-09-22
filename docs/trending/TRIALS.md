@@ -492,6 +492,77 @@ cards before looking.
 
 ---
 
+---
+
+## Trial 5 — the two order-text arms, measured against real `claude` runs
+
+Run 2026-09-22 because the owner asked for both remaining items measured. This
+is the first trial here that spent subscription quota: **15 `claude -p` runs,
+$2.65 total**, reported by the CLI itself rather than estimated.
+
+### Method, and two contaminations that had to be fixed first
+
+Three questions, each naming a symbol and asking for its definition site and all
+its call sites — a worker-shaped task. Same question, arms differing only by one
+prepended clause. Two attempts were thrown away before the numbers below:
+
+1. **Every `claude -p` joined the caller's session.** `CLAUDE_CODE_SESSION_ID` is
+   set in this container's environment, so the second question answered "as
+   already established" and the token counts included the whole parent
+   conversation. Fixed by unsetting it and passing a fresh `--session-id`.
+2. **The answers were in my own documents.** The first question set used
+   `classifyWorker`, `buildMockSrcdoc` and `setUserSettings` — all three written
+   into this very file and into OG-CANDIDATES.md earlier the same day, with their
+   file and line. The agent could answer by grepping `docs/`, not the code. Fixed
+   by picking symbols that appear in **no** markdown at all (`writeSession`,
+   `readCanvasFile`, `__resetSdkSessionsForTests` — 85-104 mentions each in code,
+   zero in docs), selected mechanically with `comm`.
+
+Metric: the aggregate `usage` block, not `usage.iterations` — `iterations`
+carries only the last message, which under-counted a 2-turn run by half.
+
+### Result
+
+| Arm | n | cost | input tokens | output tokens | turns |
+|---|---:|---:|---:|---:|---:|
+| off (baseline) | 6 | 0.1817 | 127,505 | 3,455 | 2.2 |
+| `thinkInCode` 「開く前に絞る」 | 6 | **0.1679 (−7.6%)** | 116,631 (−8.5%) | 2,362 (−31.6%) | 2.0 (−7.7%) |
+| `symbolLookup` 「定義だけ引く」 | 3 | 0.1834 (+0.9%) | **209,823 (+64.6%)** | 2,411 (−30.2%) | **3.7 (+69.2%)** |
+
+**`symbolLookup` — REMOVED, by its own measurement.** Its pre-flight number was
+real and irrelevant: a declaration-anchored grep returned 60-116 bytes where the
+bare name returned 1,567-10,033 (26-104× less text). Run against a live agent it
+made things **worse** — 69% more turns, 65% more input. The cause is visible in
+its own transcript: the `^` anchor misses an **indented** definition (one test
+file declares a local `writeSession`), so the agent spent extra turns discovering
+that the grep had lied to it. The arm's code, flag, type and tests are deleted;
+this paragraph is what remains.
+
+**Two lessons worth more than the arm was.** First, **bytes of command output is
+not tokens per task.** The fixed session overhead is ~60,000 tokens (system
+prompt, CLAUDE.md, tool schemas); 7 KB of grep output is noise against it, which
+is why the input tokens barely moved in the arm that was supposed to halve them.
+Second, **a clause that is confidently wrong costs more than no clause** — the
+agent pays to discover the error.
+
+**`thinkInCode` — NOT PROVEN, direction favourable, keep the flag off.** −7.6% on
+cost sits **inside the baseline's own 22% spread** (0.1650-0.2019 across six runs
+of the same three questions), so it cannot be called a win. What points the same
+way: it was cheaper in 5 of 6 paired runs, used 7.7% fewer turns, and wrote 31.6%
+fewer output tokens.
+
+⚠ **The output-token drop is NOT evidence for this clause.** `symbolLookup` cut
+output by 30.2% as well, while being harmful on every other axis. Adding *any*
+directive appears to make the model terser, so a 30% output reduction is what the
+act of adding a clause buys, not what either technique buys.
+
+**What would settle it, and it is the thing this test structurally cannot do.**
+Every run here was 2-4 turns on a bounded question, where fixed overhead
+dominates. A real swarm worker runs for many turns and exploration is a much
+larger share of its total, which is exactly where the clause could pay. That
+needs the six cards per arm on a live machine — the measurement this trial was
+always going to hand back.
+
 ## Log
 
 Each entry: date, what was run, the number, and the decision. An entry with no
@@ -501,5 +572,6 @@ number is not finished.
 |---|---|---|---|
 | 2026-09-22 | 2 · codebase-memory-mcp `cli` | 3,191 bytes vs 9,768 blind grep. **Re-measured after the owner asked why a binary is needed:** MAP.md-first is 9,653 (no better), and a 30 ms grep-built symbol index is **2,261 — cheaper than the binary**. | **REVERSED: do not install.** The goal holds, this implementation does not. Next card is the in-repo index, with 2,261 bytes to beat. |
 | 2026-09-22 | 1 · open-code-review delegation | Delegation mode free and real (722 + 3,406 bytes, no LLM). Its review spec is a generic JS/TS/React checklist, not OG's invariants, and no custom rule set is accepted. Excludes tests and markdown by default. | **採らない** for the swarm's review. Their 1/9 figure is for generic review of source, a different job. |
-| 2026-09-22 | 4 · order-text directives | Switch built, both arms off, order text byte-identical when off (8 mutants red). | **Built, not yet measured** — needs 6 cards per arm on the owner's machine. |
+| 2026-09-22 | 4 · order-text directives | Switch built, both arms off, order text byte-identical when off (8 mutants red). Clause overhead measured: 249 chars = 7.0% of the order text. | **Built, off.** |
+| 2026-09-22 | 5 · the arms vs real `claude` runs | 15 runs, $2.65. `thinkInCode` −7.6% cost / −7.7% turns, inside a 22% baseline spread. `symbolLookup` **+69% turns, +65% input** — its `^` anchor misses indented definitions. | **`symbolLookup` REMOVED** by its own number. `thinkInCode` not proven; still needs live cards. |
 | 2026-09-22 | 3 · archify into Canvas | Archify's own 811 KB example rendered in a real OG Canvas mock element: **470,885 px² of svg, 0 console errors**, same standalone and in-app. Its complete-document output needs no extraction. | **Passes — keep.** No OG change needed. Whether a diagram of OUR engine is legible is still unjudged. |

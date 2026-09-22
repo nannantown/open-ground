@@ -277,9 +277,31 @@ export const TIER_DIRECTIVE: Readonly<Record<TaskTier, string>> = {
 //                 OPPOSITE (benchmark degradation from aggressive brevity), which
 //                 is exactly why this one is a flag and not a rewrite, and why it
 //                 is withheld from design/ultra where review depth is the point.
+// A THIRD arm, `symbolLookup`, existed here for about an hour on 2026-09-22 and
+// was REMOVED by its own measurement — recorded because the shape of the mistake
+// is reusable. It told the worker to find a definition by grepping DECLARATION
+// lines (`^(export )?(const|function|…) <name>`) rather than the bare name,
+// which on this repository returned 60-116 bytes where the bare name returned
+// 1,567-10,033: 26-104x less text. That figure was real and irrelevant. Measured
+// against real `claude -p` runs (6 baseline, 3 with the clause) it made things
+// WORSE: +69% turns and +65% input tokens, because the `^` anchor misses an
+// INDENTED definition — one of the test files declares a local `writeSession` —
+// so the agent spent extra turns discovering the grep had lied to it. Two
+// lessons: bytes-of-command-output is not tokens-per-task (the task's cost is
+// ~60k of fixed session overhead, against which 7 KB of grep output is noise),
+// and a clause that is confidently wrong costs more than no clause.
+// (docs/trending/TRIALS.md §Trial 5.)
 //   thinkInCode — mksglu/context-mode's "think in code" (Elastic-2.0; the IDEA
 //                 only). Changes how a worker GATHERS, not how it writes, so it
 //                 carries none of brevity's quality risk.
+//                 ⚠ Its Japanese label read 「読むより数える」 until 2026-09-22,
+//                 when the owner called it odd — correctly. "Counting" came from
+//                 context-mode's EXAMPLE (counting functions), not from the rule,
+//                 which is "narrow with one command before opening files". The
+//                 label is now 「開く前に絞る」. The KEY stays `thinkInCode`: it is
+//                 an identifier and the upstream idea's name, not owner-facing
+//                 text, and renaming it would strand any settings.json that
+//                 already carries it.
 //
 // The revert path is the flag: with both off, `buildOrderInjection` returns text
 // byte-identical to the pre-trial text. That property is pinned by a test — it is
@@ -293,7 +315,7 @@ export const WORKER_TRIAL_DIRECTIVE: Readonly<Record<keyof WorkerTrialFlags, str
   brevity:
     '【試行: 説明は短く】報告と説明の文章は短くする(前置き・謝辞・言い換えを書かない)。ただし短くしてよいのは説明文だけで、コード・コマンド・パス・エラー全文・差分は一字も縮めない。危険な操作の確認とオーナーへの質問は平易な普通の文で書く。判断の理由は削らない。',
   thinkInCode:
-    '【試行: 読むより数える】多数のファイルを調べるときは Read を並べず、1つのコマンド(grep / rg / node -e など)で必要な行だけを出力し、その出力だけを読む。ファイル全体を読むのは、実際に書き換える対象に絞る。',
+    '【試行: 開く前に絞る】多数のファイルを調べるときは Read を並べず、1つのコマンド(grep / rg / node -e など)で必要な行だけを出力し、その出力だけを読む。ファイル全体を読むのは、実際に書き換える対象に絞る。',
 }
 
 /** The enabled trial clauses for this dispatch, in a FIXED order, or '' when

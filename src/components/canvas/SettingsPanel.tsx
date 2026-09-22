@@ -146,6 +146,17 @@ export const SettingsPanel = ({
   // Public swarm opt-in (all users). Seeded from the resolved server state
   // (swarmOptInEnabled prop), persisted immediately like the toggles above.
   const [swarmOptIn, setSwarmOptInState] = useState(swarmOptInEnabled)
+  // Worker-directive trial (Settings.workerTrials.thinkInCode) — same
+  // instant-feedback + persist-immediately pattern. Read `=== true` because the
+  // whole object is absent until the first opt-in.
+  //
+  // ⚠ The RE-SEED below (in the open effect) is what actually drives what the
+  // switch shows — measured 2026-09-22: replacing this initializer with `false`
+  // left every test GREEN, while breaking the re-seed turned one RED. This line
+  // only avoids a wrong-state flash on the first render. Do not "simplify" the
+  // re-seed away on the theory that the initializer covers it; it is the other
+  // way round.
+  const [thinkInCode, setThinkInCodeState] = useState(settings.workerTrials?.thinkInCode === true)
   // Work mode (lockdown) — the non-Anthropic egress kill switch. Same
   // instant-feedback + persist-immediately pattern as the experiment toggles.
   const [lockdown, setLockdownState] = useState(settings.lockdownMode === true)
@@ -220,6 +231,7 @@ export const SettingsPanel = ({
     setSwarmExp(settings.experiments?.swarm === true)
     setSandboxExp(settings.experiments?.sandbox === true)
     setSwarmOptInState(settings.swarmOptIn === true)
+    setThinkInCodeState(settings.workerTrials?.thinkInCode === true)
     setLockdownState(settings.lockdownMode === true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
@@ -265,6 +277,26 @@ export const SettingsPanel = ({
       defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
       displayName: latest.current.displayName.trim(),
       swarmOptIn: next,
+    })
+  }
+
+  // Flip the worker trial and persist immediately. The server reads
+  // Settings.workerTrials at every worker SPAWN (getWorkerTrials, store.ts) and
+  // settings are re-read from disk on each request, so no restart is needed —
+  // but a worker already running keeps the text it launched with.
+  //
+  // ⚠ `workerTrials` is ONE key and setSettings MERGES by key, so the object is
+  // replaced wholesale. Spread the current value rather than writing a fresh
+  // object, or turning this arm on would silently clear any other arm.
+  const setThinkInCode = (next: boolean) => {
+    if (next === thinkInCode) return
+    setThinkInCodeState(next)
+    const s = settingsRef.current
+    onSaveRef.current({
+      ...s,
+      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
+      displayName: latest.current.displayName.trim(),
+      workerTrials: { ...s.workerTrials, thinkInCode: next },
     })
   }
 
@@ -682,6 +714,21 @@ export const SettingsPanel = ({
                         {t('settings.swarmOptIn.warning')}
                       </p>
                     </div>
+                  </Section>
+                )}
+                {(swarmOptIn || swarmExp) && (
+                  <Section
+                    heading={t('settings.workerTrial.heading')}
+                    hint={t('settings.workerTrial.hint')}
+                  >
+                    <ExperimentToggle
+                      label={t('settings.workerTrial.thinkInCode')}
+                      hint={t('settings.workerTrial.thinkInCodeNote')}
+                      value={thinkInCode}
+                      onChange={setThinkInCode}
+                      offLabel={t('settings.experiments.off')}
+                      onLabel={t('settings.experiments.on')}
+                    />
                   </Section>
                 )}
 
