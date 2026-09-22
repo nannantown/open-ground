@@ -44,6 +44,7 @@ import {
 } from '@/lib/server/registry'
 import { ensureShareEvacuated, evacuateImportedProject } from '@/lib/server/shareEvac'
 import { collectClaudeUsage, collectUsageBreakdown } from '@/lib/server/claudeUsage'
+import { readDeskSessionMap } from '@/lib/server/swarmDeskLedger'
 import { claudeDirName } from '@/lib/server/claudeProjectDir'
 import {
   fetchClaudeUsageCli,
@@ -521,7 +522,10 @@ export const miscRoutes = new Hono()
     try {
       const settings = await getSettings()
       const projectDirs = (settings.projects ?? []).map((p) => claudeDirName(p.path))
-      const body = await collectUsageBreakdown({ days, now, projectDirs })
+      // Desk attribution by session id (swarmDeskLedger.ts) — read once per
+      // scan; an unreadable ledger simply attributes nothing to the desks.
+      const deskSessions = await readDeskSessionMap().catch(() => new Map<string, 'manager' | 'supply'>())
+      const body = await collectUsageBreakdown({ days, now, projectDirs, deskSessions })
       usageBreakdownCache = { days, at: now, body }
       return c.json(body)
     } catch (err) {

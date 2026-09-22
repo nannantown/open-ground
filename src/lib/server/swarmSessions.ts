@@ -37,6 +37,7 @@ import { randomUUID } from 'crypto'
 import { mkdir, readFile } from 'fs/promises'
 import { dirname } from 'path'
 import { atomicWriteJson } from './atomicWrite'
+import { recordDeskSession } from './swarmDeskLedger'
 import { claudeDirName } from './claudeProjectDir'
 import { projectDataFile } from './projectDataPath'
 import { isTranscriptLoadable } from './swarmTranscriptProof'
@@ -163,6 +164,10 @@ export const recordSwarmSession = async (
   now: Date = new Date(),
 ): Promise<void> => {
   const file = await projectDataFile(projectPath, SWARM_SESSIONS_FILE)
+  // The attribution ledger (swarmDeskLedger.ts): "this id is a desk". Awaited
+  // so a caller that records-then-reads sees it, but never allowed to fail the
+  // launch — recordDeskSession swallows its own errors and answers false.
+  await recordDeskSession(role, sessionId, projectPath, { now })
   return serialise(file, async () => {
     const current = await readSwarmSessions(projectPath)
     const next: SwarmSessionsFile = {

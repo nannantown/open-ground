@@ -153,6 +153,20 @@ Report = committed file (card names placement; default
 `【資料取得できず】` for unreachable sources. Heartbeat/no-push/completion
 gate rules unchanged.
 
+## Difficulty directive (swarm-dispatched workers, 2026-09-22)
+A swarm dispatch appends one `【難易度: <tier>】` clause after the goal
+(TIER_DIRECTIVE in swarmWorker.ts, keyed by the card's EFFECTIVE tier —
+safety floor applied). **It overrides this skill's default of max-effort
+team fan-out + adversarial majority vote** for that card:
+- `touch` — no sub-agents, no adversarial review; re-read your own diff once.
+- `standard` — at most ONE research sub-agent; adversarial review optional.
+- `design` — at most TWO research sub-agents; ONE adversarial review is
+  mandatory before the completion gate.
+- `ultra` — everything in this skill, as written.
+What the directive never relaxes: the completion gate (tsc / test / lint),
+the commit-before-ready rule, heartbeats, the push ban (§6). No clause ⇒
+this skill's default applies (an interactive `/order`, or an older caller).
+
 ## Guardrails
 Never push directly to protected branches, PR+CI always. Stick to
 observable goals - vague criteria loop forever. Small batches, cut by

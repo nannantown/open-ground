@@ -62,6 +62,16 @@ const {
   writePendingInstall,
   checkPendingInstall,
 } = require('./updaterLog')
+// The OS installer's launchd job — logged at boot and before every install,
+// and consulted BEFORE the app tears itself down (electron/shipIt.js).
+const {
+  shipItLabel,
+  launchdDomain,
+  parseDisabledFlag,
+  parseServicePrint,
+  decideInstallPreflight,
+  describeShipItState,
+} = require('./shipIt')
 // Our own updater lines. Mirrors to the console too, so a Terminal-launched
 // diagnosis still streams; the file is what survives a packaged launch.
 const ulog = makeUpdaterLogger({ path: updaterLogPath(), tag: 'updater' })
@@ -1872,6 +1882,9 @@ async function start() {
   // versions — is the first moment the app can know. Before initAutoUpdater so
   // the answer is on screen before the same "downloaded" dialog could reappear.
   reportFailedInstallOnBoot()
+  // …and what launchd thinks of the installer job right now — the line that
+  // was missing from every diagnosis before 2026-09-21. Fire-and-forget.
+  void probeShipIt('boot').catch(() => {})
 
   // Auto-update wiring (Fix #14). Only ever runs in a packaged build — in dev
   // (isPackaged=false) electron-updater would hit GitHub and log spurious
@@ -2150,6 +2163,106 @@ function reportInstallNotReady(version) {
     .catch(() => {})
 }
 
+/** The bundle id Squirrel.Mac derives the ShipIt label from. electron-builder
+ *  ships package.json inside the app, so this reads the same `build.appId` the
+ *  build was stamped with; the literal is the fallback for a stripped tree. */
+function shipItAppId() {
+  try {
+    const id = require('../package.json').build.appId
+    if (typeof id === 'string' && id) return id
+  } catch {
+    /* fall through */
+  }
+  return 'local.openground.app'
+}
+
+/** `launchctl <args>`, best-effort: the combined stdout+stderr text, or null
+ *  when it could not run at all (not macOS, no binary, timeout). A non-zero
+ *  exit still yields its text — `launchctl print` of a job that is not loaded
+ *  exits 113 with "Could not find service", and that IS the answer. */
+async function launchctl(args) {
+  if (process.platform !== 'darwin') return null
+  try {
+    const { execFile } = require('child_process')
+    const { promisify } = require('util')
+    const { stdout, stderr } = await promisify(execFile)('launchctl', args, {
+      timeout: 3000,
+      maxBuffer: 256 * 1024,
+    })
+    return `${stdout || ''}${stderr || ''}`
+  } catch (err) {
+    if (err && (typeof err.stdout === 'string' || typeof err.stderr === 'string')) {
+      return `${err.stdout || ''}${err.stderr || ''}`
+    }
+    return null
+  }
+}
+
+/**
+ * What launchd currently says about the ShipIt job — logged, never thrown.
+ * `stage` names the moment ('boot' / 'pre-install' / 'after-enable') so the
+ * log reads as a story. Resolves null off macOS or when launchctl is unusable.
+ * @param {string} stage
+ */
+async function probeShipIt(stage) {
+  if (process.platform !== 'darwin' || typeof process.getuid !== 'function') return null
+  const label = shipItLabel(shipItAppId())
+  const domain = launchdDomain(process.getuid())
+  const disabledOut = await launchctl(['print-disabled', domain])
+  const printOut = await launchctl(['print', `${domain}/${label}`])
+  const disabled = disabledOut === null ? 'unknown' : parseDisabledFlag(disabledOut, label)
+  const service = printOut === null ? null : parseServicePrint(printOut)
+  ulog.info(`ShipIt (${stage}): ${describeShipItState({ label, disabled, service })}`)
+  return { label, domain, disabled, service }
+}
+
+/**
+ * The pre-install gate. A disabled ShipIt job means quitting installs NOTHING
+ * (the 2026-09-21 "zero runs" finding), so: try to enable it, re-read, and only
+ * then decide. 'proceed' on anything short of a confirmed still-disabled job —
+ * uncertainty must never hold an update hostage; the boot check reports a
+ * failure with the log if it comes to that.
+ * @returns {Promise<{ decision: 'proceed'|'block', label: string | null }>}
+ */
+async function shipItPreflight() {
+  let probe = null
+  try {
+    probe = await probeShipIt('pre-install')
+  } catch {
+    probe = null
+  }
+  if (!probe) return { decision: 'proceed', label: null }
+  if (probe.disabled !== 'disabled') return { decision: 'proceed', label: probe.label }
+  const out = await launchctl(['enable', `${probe.domain}/${probe.label}`])
+  ulog.warn(`ShipIt job is DISABLED under Background Items — tried \`launchctl enable\`: ${out === null ? 'could not run' : (out.trim() || 'ok')}`)
+  let after = null
+  try {
+    after = await probeShipIt('after-enable')
+  } catch {
+    after = null
+  }
+  const decision = decideInstallPreflight({
+    disabledBefore: probe.disabled,
+    disabledAfterEnable: after ? after.disabled : 'unknown',
+  })
+  return { decision, label: probe.label }
+}
+
+/** The macOS Login Items & Extensions pane (the "Allow in the Background" list). */
+const LOGIN_ITEMS_SETTINGS_URL = 'x-apple.systempreferences:com.apple.LoginItems-Settings.extension'
+
+/** launchd will not run the install — say so BEFORE quitting into nothing. */
+function reportInstallBlocked(version, label) {
+  ulog.error(`install blocked: the ShipIt job (${label}) stays disabled — not quitting`)
+  setUpdateDockProgress(-1)
+  showUpdateDialog('install-blocked', { version, label })
+    .then((res) => {
+      if (res.response === 0) void shell.openExternal(LOGIN_ITEMS_SETTINGS_URL).catch(() => {})
+      else if (res.response === 1) void shell.openExternal(RELEASE_NOTES_URL).catch(() => {})
+    })
+    .catch(() => {})
+}
+
 /**
  * Apply a downloaded update — but only once the OS installer can actually quit
  * into it. THE ONLY route to applyDownloadedUpdate; both doors (the dialog's
@@ -2168,6 +2281,16 @@ async function applyUpdateWhenStaged(version) {
     return
   }
   applyInFlight = true
+  // Will launchd even run the installer? Asked FIRST, before any wait and long
+  // before the teardown: a blocked answer costs nothing (the app is untouched),
+  // and a proceed answer leaves a dated launchd snapshot in the log for the
+  // day the install still fails.
+  const preflight = await shipItPreflight()
+  if (preflight.decision === 'block') {
+    applyInFlight = false
+    reportInstallBlocked(version, preflight.label)
+    return
+  }
   // Only WAIT when we can actually observe staging. A darwin build whose native
   // handle failed to wire would otherwise sit out the whole timeout on an update
   // that may well be ready — so fall through to the old behaviour (+ watchdog)

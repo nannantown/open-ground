@@ -103,6 +103,7 @@ export type UpdateDialogKind =
   | 'install-stuck'
   | 'install-not-ready'
   | 'install-failed'
+  | 'install-blocked'
 
 export interface UpdateDialogText {
   message: string
@@ -120,5 +121,11 @@ export interface UpdateDialogText {
 export declare function updateDialogText(
   lang: 'en' | 'ja',
   kind: UpdateDialogKind,
-  opts?: { version?: string | null; error?: string | null; from?: string | null; logTail?: string | null },
+  opts?: {
+    version?: string | null
+    error?: string | null
+    from?: string | null
+    logTail?: string | null
+    label?: string | null
+  },
 ): UpdateDialogText

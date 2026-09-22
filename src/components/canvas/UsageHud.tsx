@@ -442,6 +442,8 @@ const parseCliReset = (label: string): string | null => {
  *  the list says so — see collectUsageBreakdown. */
 const SOURCE_KEY: Record<UsageSourceKind, MessageKey> = {
   'swarm-worker': 'misc.usage.breakdown.worker',
+  manager: 'misc.usage.breakdown.manager',
+  supply: 'misc.usage.breakdown.supply',
   project: 'misc.usage.breakdown.project',
   other: 'misc.usage.breakdown.other',
 }

@@ -21,7 +21,7 @@ npm run dev:server # Hono API only (:47776, tsx watch)
 npm run build      # vite build → dist-web/  +  esbuild → server/dist/index.cjs
 npm run start      # prod: Hono on :47776 serving dist-web + /api (one origin)
 npm run lint       # eslint . --ext .ts,.tsx
-npm test           # vitest (~4100 tests)
+npm test           # vitest (~7,200 tests / ~420 files)
 npm run test:e2e   # playwright smoke (builds + boots Hono prod, then hits :47776)
 ```
 
@@ -268,23 +268,44 @@ running in that project.
 It is not a deployed web app — server code reads and writes the user's filesystem
 and spawns `claude` as a child process, so it must run locally.
 
+**Current product scope (2026-09-19 → 21, owner decisions).** Read
+`docs/PUBLIC_PRODUCT_SCOPE.md` and `docs/commander/SIMPLIFICATION.md` before
+following any older plan: Persona and its proxy answers, the automatic
+self-supply scanner, the engine's dormant integration pipeline (verify /
+adversarial panel / auto-rebase-push) and custom-tab distribution are
+**removed** (existing local data is kept, never migrated or deleted); all
+new Swarm managers and workers are **SDK-only** (no PTY manager, no runtime
+selector — the supply desk and ordinary terminals stay PTY); public users get
+Ground / Board / Terminal / optional Swarm, the owner additionally gets
+Canvas / Research / local custom tabs / WordPress / Skills management /
+automatic fuel reports. Descriptions of the retired paths that survive in
+older docs are historical, not operating instructions.
+
 **Two-layer canvas** (see `CONCEPT.md` for the full vision):
 
 - **Layer 1 — Ground (portfolio canvas)** is OPEN GROUND's face: every
   project as a card, the core experience is *overview*, and Claude
   terminals launch from here. Card position carries no system meaning
   (free workspace).
-- **Layer 2 — per-project tabs**: **Terminal / Canvas / Board** (see
+- **Layer 2 — per-project tabs**: **Board / Terminal** for everyone, plus
+  **Canvas / Research** for the app owner only (see
   `src/components/canvas/moduleRegistry.tsx` — the single source of truth
-  for the tab set), plus a **hidden-by-default `Swarm` tab** (gated by
+  for the tab set; each native module declares its `audience`, and
+  `docs/PUBLIC_PRODUCT_SCOPE.md` (owner decision 2026-09-21) is the canon
+  for what is public vs owner-only — public tabs have a fixed order, tab
+  add/hide/reorder and Skills management are owner-view controls, and the
+  owner can preview the public view without changing role or data), plus a
+  **hidden-by-default `Swarm` tab** (gated by
   `experiment: 'swarm'` — owner via `experiments.swarm`, OR the login-free
   `swarmLocalOwner` unlock, OR since 0.11.94 a PUBLIC macOS opt-in
   `Settings.swarmOptIn` any user can turn on in Settings behind a "still
   being tuned" warning; Windows stays owner-only until the guard has a
   real-Windows pass — `isSwarmOptInEnabled`/`isSwarmOptInAvailable` in
   swarmGate.ts. See the Swarm section) and any
-  **user-installed custom tabs** (`server/routes/customModules.ts`,
-  `~/.openground/custom-modules/`). Terminal is tiled `claude` PTY panes;
+  **locally installed custom tabs** (`server/routes/customModules.ts`,
+  `~/.openground/custom-modules/` — owner view; the marketplace /
+  submission / review distribution was removed 2026-09-20, local tabs and
+  their files remain). Terminal is tiled `claude` PTY panes;
   Board is a kanban. Opening a card NO LONGER auto-launches anything (the drawer
   auto-launch died 2026-06-12, `BoardModule.tsx`); a task's `claude`
   session starts ONLY when the user clicks the card drawer's explicit
@@ -319,7 +340,7 @@ port (47776). `@/*` maps to `src/*`.
   Electron forks in prod.
 - **`server/routes/`**: health, project, canvas, canvasAi, misc, terminal,
   sse, auth, collab, customModules, feedback, swarm,
-  ticket, research. `server/middleware/projectPath.ts` adapts
+  ticket, research, sdkSession. `server/middleware/projectPath.ts` adapts
   `validateProjectPath` to Hono. `server/routes/_shared.ts` holds
   cross-route helpers (e.g. `validateName`).
 

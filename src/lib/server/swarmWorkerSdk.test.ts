@@ -108,6 +108,23 @@ describe('sdkWorkerLaunchPlan — the worker launch contract (SDK-only since 202
     )
   })
 
+  it('hands the worker the difficulty DIRECTIVE for its EFFECTIVE tier (card 1c5f66e3, 2026-09-22)', () => {
+    // Stored tier → its policy clause in the /order text.
+    expect(plan({ tier: 'touch' }).initialPrompt).toContain('【難易度: touch')
+    expect(plan({ tier: 'ultra' }).initialPrompt).toContain('【難易度: ultra')
+    // No stored tier ⇒ the estimator's tier (an ordinary title is 'standard') —
+    // every SDK worker gets a directive, never the skill's silent max-effort default.
+    expect(plan().initialPrompt).toContain('【難易度: standard')
+    // The SAFETY FLOOR applies to the directive too: a touch card that names a
+    // heavy concern is told the design policy (one mandatory adversarial review),
+    // matching the model/effort the same floor would have raised it to.
+    expect(plan({ title: 'delete the auth token migration', tier: 'touch' }).initialPrompt).toContain('【難易度: design')
+    expect(plan({ title: 'delete the auth token migration', tier: 'touch' }).initialPrompt).not.toContain('【難易度: touch')
+    // A RESUMED worker re-reads its original goal (directive included) from
+    // history; the resume injection carries none.
+    expect(plan({ tier: 'touch', resume: true }).initialPrompt).not.toContain('難易度')
+  })
+
   it('threads Settings.language into the SDK initial prompt (opts.lang, literal marker)', () => {
     expect(plan({ lang: 'en' }).initialPrompt).toContain('[Reply language]')
     expect(plan({ lang: 'en' }).initialPrompt).not.toContain('【返答言語】')

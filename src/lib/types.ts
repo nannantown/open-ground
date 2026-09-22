@@ -3371,7 +3371,14 @@ export type ResearchBlogState = 'draft' | 'edited-on-wp' | 'deleted-on-wp' | 'fa
  *  'project' bucket is COARSE by construction: a swarm desk and the owner's own
  *  `claude` in that repo share a cwd and the transcript does not separate them,
  *  so the UI labels it as both rather than guessing. */
-export type UsageSourceKind = 'swarm-worker' | 'project' | 'other'
+/** Where a session's tokens came from, for the 7-day breakdown.
+ *  'manager' / 'supply' are the two resident desks, attributed by session id
+ *  through the desk ledger (swarmDeskLedger.ts — 2026-09-22); 'project' is a
+ *  session in a registered project's dir that the ledger does NOT name — the
+ *  owner's own work, OR a desk from before the ledger existed. That ambiguity
+ *  is deliberate and the UI label says so: unmatched is never called
+ *  "personal" (owner card 5a11ac62). */
+export type UsageSourceKind = 'swarm-worker' | 'manager' | 'supply' | 'project' | 'other'
 
 export interface UsageBreakdownRow {
   /** Raw model id as the transcript recorded it (e.g. 'claude-fable-5-1'). */

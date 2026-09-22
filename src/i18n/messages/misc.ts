@@ -27,7 +27,9 @@ export const misc = {
     'misc.usage.breakdown.loading': 'Reading the last 7 days…',
     'misc.usage.breakdown.empty': 'No recorded usage in the last 7 days.',
     'misc.usage.breakdown.worker': 'swarm workers',
-    'misc.usage.breakdown.project': 'your projects',
+    'misc.usage.breakdown.manager': 'swarm commander desk',
+    'misc.usage.breakdown.supply': 'swarm supply desk',
+    'misc.usage.breakdown.project': 'your projects (you, or a desk from before the ledger)',
     'misc.usage.breakdown.other': 'elsewhere',
     'misc.usage.breakdown.note':
       '“your projects” covers both the swarm desks and your own claude sessions in those repos — the transcript does not separate them.',
@@ -86,7 +88,9 @@ export const misc = {
     'misc.usage.breakdown.loading': '直近7日を集計しています…',
     'misc.usage.breakdown.empty': '直近7日に記録された使用量はありません。',
     'misc.usage.breakdown.worker': 'swarm のワーカー',
-    'misc.usage.breakdown.project': '自分のプロジェクト',
+    'misc.usage.breakdown.manager': 'swarm の司令官',
+    'misc.usage.breakdown.supply': 'swarm の補給官',
+    'misc.usage.breakdown.project': '自分のプロジェクト(自分の作業、または記録前の卓)',
     'misc.usage.breakdown.other': 'その他',
     'misc.usage.breakdown.note':
       '「自分のプロジェクト」には swarm の卓と、そのリポジトリでのあなた自身の claude の両方が入ります(記録からは区別できません)。',

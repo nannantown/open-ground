@@ -238,11 +238,45 @@ export const WORKER_ORDER_RULES =
  *  too (pass `undefined` explicitly) so `lang` can occupy the 4th slot
  *  without TS's "required parameter after optional" rule forcing a reorder
  *  that would break every existing call site's argument order. */
+/**
+ * The per-difficulty WORK POLICY a worker is handed (owner card 1c5f66e3,
+ * 2026-09-22). The tier already picks the model and effort (TIER_MODEL_EFFORT);
+ * until now the /order skill's own default — max-effort team fan-out with an
+ * adversarial majority vote — applied to EVERY card regardless, so a `touch`
+ * card paid for a review panel it did not need. This bounds team size and the
+ * review strategy per tier. What it never touches: the completion gate
+ * (tsc / test / lint), the commit-before-ready rule, the heartbeat, the push
+ * ban — those are safety, not effort, and stay in WORKER_ORDER_RULES.
+ * One line each (the /order delivery contract), keyed by TaskTier so a new
+ * tier is a type error here, not a silent max-effort default.
+ */
+export const TIER_DIRECTIVE: Readonly<Record<TaskTier, string>> = {
+  touch:
+    '【難易度: touch — この方針は /order 既定の最大努力より優先】小さく確実な修正。サブエージェント(Task)は起動しない。敵対レビューは省略し、実装後に自分で差分を一度読み直すだけにする。完了ゲート(tsc / test / lint)・ready 前コミット・心拍は省略しない。',
+  standard:
+    '【難易度: standard — この方針は /order 既定の最大努力より優先】通常の作業。サブエージェントは調査用に最大1体まで(実装と判断は自分で)。実装後に自分で差分を読み直す。敵対レビューは省略してよい。完了ゲート・ready 前コミット・心拍は省略しない。',
+  design:
+    '【難易度: design — この方針は /order 既定の最大努力より優先】設計判断を伴う作業。サブエージェントは調査用に最大2体まで。実装後に別エージェント1体の敵対レビューを必ず一度受け、指摘を反映してから完了ゲートに入る。完了ゲート・ready 前コミット・心拍は省略しない。',
+  ultra:
+    '【難易度: ultra】/order の全機能(フェーズごとのチーム編成・敵対レビューの多数決・ループ)を使ってよい。完了ゲート・ready 前コミット・心拍は省略しない。',
+}
+
+/** The directive clause for `tier`, or '' when the dispatch carries no tier
+ *  (an older caller / a fixture) — so the injection is byte-for-byte unchanged
+ *  for them, and a tier the table does not know is a type error, never a
+ *  silent fall-through to max effort. Pure. */
+export const tierDirective = (tier: TaskTier | undefined): string =>
+  tier ? ` ${TIER_DIRECTIVE[tier]}` : ''
+
 export const buildOrderInjection = (
   title: string,
   notes: string | undefined,
   priorFailure: string | undefined,
   lang: PromptLang,
+  /** The card's EFFECTIVE difficulty (resolveCardTier — floor applied), which
+   *  selects the work policy above. Optional so older callers keep their exact
+   *  output; the SDK launch builder always passes it (2026-09-22). */
+  tier?: TaskTier,
 ): string => {
   const t = flattenOneLine(title || '')
   const n = flattenOneLine(notes || '')
@@ -251,7 +285,7 @@ export const buildOrderInjection = (
   const learn = pf
     ? ` 【前回の差し戻し理由・同じ失敗を繰り返さないこと】${pf}`
     : ''
-  return ORDER_PREFIX + goal + learn + WORKER_ORDER_RULES + languageDirective(lang)
+  return ORDER_PREFIX + goal + learn + tierDirective(tier) + WORKER_ORDER_RULES + languageDirective(lang)
 }
 
 // NOTE on delivery: the /order goal is handed to claude as its POSITIONAL
@@ -862,6 +896,8 @@ export const spawnSwarmWorker = async (
     title: opts.title,
     notes: opts.notes,
     priorFailure: opts.priorFailure,
+    // The stored tier; the plan resolves the effective one for the directive.
+    tier: opts.tier,
     resume: !!opts.resumeSessionId,
     me,
     claudeBin: pre.claudeBin,

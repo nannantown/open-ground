@@ -810,6 +810,19 @@ effort)の変換表は `TIER_MODEL_EFFORT`(swarmLaunch.ts)の1箇所だけ。
 あり、swarmLaunch.ts はそれを re-export するだけ(判定は1箇所)。Board のドロワーは同じ
 `resolveCardTier` で**実効の型**を出す(「実際は: 設計(安全のため引き上げ)」「自動 → 標準」)。
 型のピッカーは swarm が見えるときだけ出る(swarm を使わない利用者には効かない操作なので)。
+
+**追記(2026-09-22・型は「働き方」も決める — カード 1c5f66e3)**: 型が決めていたのは
+モデルと effort だけで、`/order` スキル自身の既定(フェーズごとのチーム編成+敵対レビューの
+多数決=最大努力)は**全カードに一律**に効いていた — `touch` のカードもレビュー班の分を
+払っていた。いまは SDK 起動計画が**実効の型**(安全床込み・`resolveCardTier`)を
+`buildOrderInjection` に渡し、`/order ゴール: …` の直後に `【難易度: <型>】` の1文
+(`TIER_DIRECTIVE`、swarmWorker.ts)を付ける: `touch` = サブエージェント無し・敵対レビュー無し /
+`standard` = 調査サブエージェント最大1・敵対レビュー任意 / `design` = 調査最大2・敵対レビュー
+1回必須 / `ultra` = スキル既定のまま。**緩めないもの**: 完了ゲート(tsc/test/lint)・ready 前
+コミット・心拍・push 禁止。resume 注入には付かない(元の /order 文が履歴に残っている)。
+番人: `swarmWorker.test.ts`「tierDirective」+ `swarmWorkerSdk.test.ts`(安全床が directive にも
+効くこと・型なしでも推定型の directive が付くこと)。スキル側の記述は
+`skills/order/SKILL.md`「Difficulty directive」。
 型が書かれていないカードは `resolveCardTier` のキーワード推定: 軽い語(typo/rename/文言…)
 かつ 400 字未満 → `touch`、それ以外 → `standard`、安全語 → 床で `design`。
 **`title+notes > 1200 字 ⇒ heavy(fable/max)` の規則は削除した** — 補給官スキルは完了条件を

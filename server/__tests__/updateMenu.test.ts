@@ -312,6 +312,7 @@ describe('updateDialogText', () => {
     'install-stuck',
     'install-not-ready',
     'install-failed',
+    'install-blocked',
   ] as const
 
   it('every kind has non-empty copy in BOTH languages', () => {
@@ -357,13 +358,19 @@ describe('updateDialogText', () => {
       expect(installFailed.buttons).toHaveLength(3)
       expect(installFailed.defaultId).toBe(0)
       expect(installFailed.cancelId).toBe(2)
+      // Pre-flight block: the setting is the point, so it is the default.
+      const blocked = updateDialogText(lang, 'install-blocked', { version: '0.11.117', label: 'local.openground.app.ShipIt' })
+      expect(blocked.buttons).toHaveLength(3)
+      expect(blocked.defaultId).toBe(0)
+      expect(blocked.cancelId).toBe(2)
       for (const kind of KINDS.filter(
         (k) =>
           k !== 'downloaded' &&
           k !== 'download-failed' &&
           k !== 'install-stuck' &&
           k !== 'install-not-ready' &&
-          k !== 'install-failed',
+          k !== 'install-failed' &&
+          k !== 'install-blocked',
       )) {
         expect(updateDialogText(lang, kind).buttons, `${lang}/${kind}`).toBeUndefined()
       }
@@ -426,6 +433,18 @@ describe('updateDialogText', () => {
     expect(ja.detail).toContain('ERR line')
     // No tail ⇒ no dangling header.
     expect(updateDialogText('en', 'install-failed', { version: '0.11.110' }).detail).not.toContain('log tail')
+  })
+
+  it('"install-blocked" names the setting, the label, and says the app did NOT quit', () => {
+    const en = updateDialogText('en', 'install-blocked', { version: '0.11.117', label: 'local.openground.app.ShipIt' })
+    expect(en.detail).toContain('Allow in the Background')
+    expect(en.detail).toContain('launchctl enable gui/$(id -u)/local.openground.app.ShipIt')
+    expect(en.detail).toMatch(/stopped before quitting/i)
+    const ja = updateDialogText('ja', 'install-blocked', { version: '0.11.117', label: 'local.openground.app.ShipIt' })
+    expect(ja.detail).toContain('バックグラウンドでの実行を許可')
+    expect(ja.detail).toContain('local.openground.app.ShipIt')
+    // No label ⇒ no dangling terminal hint.
+    expect(updateDialogText('en', 'install-blocked', { version: '0.11.117' }).detail).not.toContain('launchctl')
   })
 
   it('surfaces the real error text, and still says what to do when there is none', () => {

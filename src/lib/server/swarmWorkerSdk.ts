@@ -28,9 +28,10 @@ import { execFileSync } from 'child_process'
 import { resolvedClaudeBin, absoluteClaudeOnPath } from './claudeConnection'
 import { makeSdkGuardHook, verifySdkGuard, type GuardEvaluate } from './sdkGuardHook'
 import { buildOrderInjection, WORKER_RESUME_INJECTION } from './swarmWorker'
+import { resolveCardTier } from '../cardTier'
 import { swarmLaunchDefaults } from './swarmLaunch'
 import { languageDirective, type PromptLang } from './promptLang'
-import type { ClaudeEffort } from '../types'
+import type { ClaudeEffort, TaskTier } from '../types'
 
 /** The oldest CLI whose stream-json contract this integration was measured
  *  against (2026-07-30). Older CLIs are refused rather than driven on
@@ -168,6 +169,13 @@ export interface SdkWorkerOptsInput {
   title: string
   notes?: string
   priorFailure?: string
+  /** The card's STORED difficulty (ProjectTask.tier) — the launch plan resolves
+   *  the EFFECTIVE tier (safety floor applied, estimator when unset) and hands
+   *  the matching work policy to the worker in its /order text
+   *  (TIER_DIRECTIVE, swarmWorker.ts — card 1c5f66e3, 2026-09-22). Optional:
+   *  an absent tier still resolves (to the estimate), so every SDK worker gets a
+   *  directive; the model/effort in `me` were already resolved from the same. */
+  tier?: TaskTier
   /** Continue the recorded conversation instead of starting a fresh one. */
   resume?: boolean
   /** Mode-resolved model/effort. REQUIRED since 2026-09-16 — the old optional
@@ -253,7 +261,15 @@ export const sdkWorkerLaunchPlan = (opts: SdkWorkerOptsInput): SdkWorkerLaunchPl
     options,
     initialPrompt: opts.resume
       ? WORKER_RESUME_INJECTION + languageDirective(opts.lang)
-      : buildOrderInjection(opts.title, opts.notes, opts.priorFailure, opts.lang),
+      : buildOrderInjection(
+          opts.title,
+          opts.notes,
+          opts.priorFailure,
+          opts.lang,
+          // The EFFECTIVE tier — the same resolution that picked `me` (floor
+          // applied), so the policy the worker is told matches the model it got.
+          resolveCardTier({ title: opts.title, notes: opts.notes, tier: opts.tier }),
+        ),
     warnings,
   }
 }

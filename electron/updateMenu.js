@@ -231,8 +231,8 @@ function manualCheckOutcome(args) {
  *
  * @param {'en' | 'ja'} lang
  * @param {'dev' | 'lockdown' | 'busy' | 'starting' | 'unavailable' | 'up-to-date' | 'downloading' | 'error' | 'downloaded' | 'download-failed' | 'install-stuck' |
- *   'install-not-ready' | 'install-failed'} kind
- * @param {{ version?: string | null, error?: string | null, from?: string | null, logTail?: string | null }} [opts]
+ *   'install-not-ready' | 'install-failed' | 'install-blocked'} kind
+ * @param {{ version?: string | null, error?: string | null, from?: string | null, logTail?: string | null, label?: string | null }} [opts]
  * @returns {{ message: string, detail: string, buttons?: string[], defaultId?: number, cancelId?: number }}
  */
 function updateDialogText(lang, kind, opts) {
@@ -241,6 +241,7 @@ function updateDialogText(lang, kind, opts) {
   const err = (opts && opts.error) || ''
   const from = (opts && opts.from) || ''
   const logTail = (opts && opts.logTail) || ''
+  const label = (opts && opts.label) || ''
   const named = v ? `OPEN GROUND ${v}` : ja ? '新しいバージョン' : 'A new version of OPEN GROUND'
 
   switch (kind) {
@@ -337,6 +338,39 @@ function updateDialogText(lang, kind, opts) {
             buttons: ['Restart now', 'Later'],
             defaultId: 1,
             cancelId: 1,
+          }
+    case 'install-blocked':
+      // Pre-flight, BEFORE the app tears itself down (electron/shipIt.js): the
+      // launchd job that performs the install is disabled under macOS's
+      // "Allow in the Background", and enabling it from here did not take.
+      // Quitting now would install nothing — the exact 2026-09-13/09-21 shape
+      // ("zero runs") — so say what is wrong and where the switch is.
+      return ja
+        ? {
+            message: `${named} を入れる前に、macOS 側の設定が必要です。`,
+            detail:
+              '更新の入れ替えを行う macOS のプログラム（OPEN GROUND の ShipIt）が、バックグラウンドでの実行を止められています。' +
+              'このまま再起動しても何も入らないので、先に止めています。\n\n' +
+              'システム設定 → 一般 → ログイン項目と機能拡張 →「バックグラウンドでの実行を許可」で OPEN GROUND をオンにしてから、' +
+              'もう一度「再起動」を選んでください。' +
+              (label ? `\n\n（ターミナルなら: launchctl enable gui/$(id -u)/${label}）` : '') +
+              '\n\n急ぐならリリースページからインストーラを入れてください。',
+            buttons: ['システム設定を開く', 'リリースページを開く', '閉じる'],
+            defaultId: 0,
+            cancelId: 2,
+          }
+        : {
+            message: `${named} needs a macOS setting first.`,
+            detail:
+              "The macOS helper that swaps the app in (OPEN GROUND's ShipIt) is not allowed to run in the background, " +
+              'so restarting now would install nothing — the app stopped before quitting.\n\n' +
+              'Turn OPEN GROUND on under System Settings → General → Login Items & Extensions → "Allow in the Background", ' +
+              'then choose Restart again.' +
+              (label ? `\n\n(Terminal: launchctl enable gui/$(id -u)/${label})` : '') +
+              '\n\nTo move on now, install from the release page.',
+            buttons: ['Open System Settings', 'Open release page', 'Close'],
+            defaultId: 0,
+            cancelId: 2,
           }
     case 'install-failed':
       // Reached on BOOT, not on a click (electron/updaterLog.js checkPendingInstall):

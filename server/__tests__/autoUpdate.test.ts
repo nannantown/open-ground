@@ -552,3 +552,50 @@ describe('electron/main.js wiring — the updater has a memory (2026-09-13)', ()
     expect(code).toContain('downloadedUpdate.version !== version) squirrelStaged = false')
   })
 })
+
+describe('electron/main.js wiring — the ShipIt pre-flight (2026-09-21 "zero runs")', () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+  const main = readFileSync(join(repoRoot, 'electron/main.js'), 'utf8')
+  const code = main
+    .split('\n')
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+    .join('\n')
+
+  it('asks launchd BEFORE the staging wait and the teardown, and stops on "block"', () => {
+    const fn = code.slice(code.indexOf('async function applyUpdateWhenStaged'))
+    const pre = fn.indexOf('await shipItPreflight()')
+    const wait = fn.indexOf('waitForInstallStaged(')
+    const apply = fn.indexOf('applyDownloadedUpdate({')
+    expect(pre).toBeGreaterThan(-1)
+    expect(pre).toBeLessThan(wait)
+    expect(pre).toBeLessThan(apply)
+    expect(fn.slice(pre, wait)).toContain("preflight.decision === 'block'")
+    expect(fn.slice(pre, wait)).toContain('reportInstallBlocked(')
+    expect(code).toContain("showUpdateDialog('install-blocked'")
+  })
+
+  it('a disabled job is enabled and RE-READ before the decision — never decided on the first read alone', () => {
+    const fn = code.slice(code.indexOf('async function shipItPreflight'))
+    const enable = fn.indexOf("launchctl(['enable'")
+    const again = fn.indexOf("probeShipIt('after-enable')")
+    const decide = fn.indexOf('decideInstallPreflight(')
+    expect(enable).toBeGreaterThan(-1)
+    expect(again).toBeGreaterThan(enable)
+    expect(decide).toBeGreaterThan(again)
+  })
+
+  it("logs the job's state at boot, right after the pending-install verdict", () => {
+    const boot = code.indexOf('reportFailedInstallOnBoot()')
+    const probe = code.indexOf("probeShipIt('boot')")
+    const init = code.indexOf('initAutoUpdater()')
+    expect(probe).toBeGreaterThan(boot)
+    expect(probe).toBeLessThan(init)
+  })
+
+  it('launchctl is best-effort and bounded — a non-zero exit still yields its text', () => {
+    const fn = code.slice(code.indexOf('async function launchctl'), code.indexOf('async function probeShipIt'))
+    expect(fn).toContain("if (process.platform !== 'darwin') return null")
+    expect(fn).toMatch(/timeout:\s*\d+/)
+    expect(fn).toContain('err.stdout')
+  })
+})

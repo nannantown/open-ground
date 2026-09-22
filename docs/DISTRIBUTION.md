@@ -476,6 +476,30 @@ On macOS that was both wrong and load-bearing — see the next box.)
 > a Terminal launch (`"/Applications/OPEN GROUND.app/Contents/MacOS/OPEN GROUND"`)
 > still works — the logger mirrors to the console.
 
+> **The install is a launchd job, and launchd can decline to run it (0.11.117).**
+> The 2026-09-21 release operator found the cause behind the 2026-09-13 report:
+> after "Restart now" the app quit and came back on the OLD version because
+> *the registered app-specific ShipIt service had zero runs* — Squirrel.Mac had
+> submitted its launchd agent (`local.openground.app.ShipIt`) and launchd never
+> ran it; starting the service by hand and repeating the update worked
+> (`docs/commander/PRODUCT-HANDOFF-2026-09-21.md`). macOS 13+ leaves a
+> submitted launch agent in exactly that state when it is switched off under
+> System Settings → General → Login Items & Extensions → *Allow in the
+> Background*. The app cannot watch the install (it is gone by then), but it
+> can read launchd: `electron/shipIt.js` parses `launchctl print-disabled
+> gui/<uid>` (the Background Items override) and `launchctl print
+> gui/<uid>/<label>` (loaded? runs? last exit?), `main.js` logs that line to
+> `updater.log` at **boot** and **immediately before every install**, and
+> `applyUpdateWhenStaged` runs a **pre-flight**: a disabled label gets one
+> `launchctl enable`, is re-read, and if still disabled the app shows the
+> `install-blocked` dialog (with the System Settings deep link and the
+> one-line terminal fix) **instead of tearing itself down into nothing**.
+> Uncertainty never blocks — off-macOS, a missing `launchctl`, a timeout or an
+> unparseable answer all read as "proceed"; the boot check still reports a
+> failed install afterwards. ⚠ Not yet verified on a real Mac in the disabled
+> state — the parsers are pinned against launchctl's documented output shapes;
+> the first real occurrence lands in `updater.log` either way.
+
 > **Never let an install fail silently.** Both sightings of this defect
 > (2026-06-25, 2026-09-11) presented identically to the user: a button that did
 > nothing. `applyDownloadedUpdate` therefore arms a **watchdog before** calling

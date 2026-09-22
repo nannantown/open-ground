@@ -5,6 +5,7 @@ import {
   swarmWorktreeDirName,
   pickBaseRef,
   buildOrderInjection,
+  tierDirective,
   SWARM_BASE_REF_PREFERENCE,
   WORKER_ORDER_RULES,
   WORKER_RESUME_INJECTION,
@@ -256,6 +257,72 @@ describe('WORKER_ORDER_RULES specialist review (2026-07-19 — HOW it is decided
   })
 })
 
+describe('tierDirective — the per-difficulty work policy (card 1c5f66e3, 2026-09-22)', () => {
+  // The tier already picks model/effort; this bounds TEAM SIZE and REVIEW. The
+  // /order skill's default (max-effort fan-out + adversarial majority vote) used
+  // to apply to every card, so a touch card paid for a panel it did not need.
+  it('touch: no sub-agents, no adversarial review — but the completion gate stays', () => {
+    const d = tierDirective('touch')
+    expect(d).toContain('難易度: touch')
+    expect(d).toContain('サブエージェント(Task)は起動しない')
+    expect(d).toContain('敵対レビューは省略')
+    expect(d).toContain('完了ゲート(tsc / test / lint)・ready 前コミット・心拍は省略しない')
+  })
+  it('standard: at most ONE research sub-agent, adversarial review optional', () => {
+    const d = tierDirective('standard')
+    expect(d).toContain('最大1体')
+    expect(d).toContain('敵対レビューは省略してよい')
+  })
+  it('design: at most TWO research sub-agents and ONE mandatory adversarial review', () => {
+    const d = tierDirective('design')
+    expect(d).toContain('最大2体')
+    expect(d).toContain('敵対レビューを必ず一度受け')
+  })
+  it('ultra: the full /order machinery', () => {
+    expect(tierDirective('ultra')).toContain('全機能')
+  })
+  it('every tier keeps the safety rules and says it overrides the /order default (except ultra, which IS the default)', () => {
+    for (const tier of ['touch', 'standard', 'design', 'ultra'] as const) {
+      const d = tierDirective(tier)
+      expect(d).toContain('省略しない')
+      expect(d.startsWith(' 【難易度: ')).toBe(true)
+      expect(d).not.toMatch(/[\n\r\t]/)
+    }
+    for (const tier of ['touch', 'standard', 'design'] as const) {
+      expect(tierDirective(tier)).toContain('/order 既定の最大努力より優先')
+    }
+  })
+  it('no tier ⇒ no clause (older callers get byte-identical output)', () => {
+    expect(tierDirective(undefined)).toBe('')
+  })
+})
+
+describe('buildOrderInjection + tier', () => {
+  it('places the directive AFTER the goal (and the prior-failure clause) and BEFORE the worker rules', () => {
+    const out = buildOrderInjection('Add a logout button', 'top-right', 'tests were red', 'en', 'touch')
+    const goal = out.indexOf('Add a logout button — top-right')
+    const learn = out.indexOf('【前回の差し戻し理由')
+    const tier = out.indexOf('【難易度: touch')
+    const rules = out.indexOf(WORKER_ORDER_RULES)
+    expect(goal).toBeGreaterThan(-1)
+    expect(learn).toBeGreaterThan(goal)
+    expect(tier).toBeGreaterThan(learn)
+    expect(rules).toBeGreaterThan(tier)
+    expect(out).toBe(
+      '/order ゴール: Add a logout button — top-right 【前回の差し戻し理由・同じ失敗を繰り返さないこと】tests were red' +
+        tierDirective('touch') +
+        WORKER_ORDER_RULES +
+        languageDirective('en'),
+    )
+  })
+  it('without a tier the output is exactly what it was before', () => {
+    expect(buildOrderInjection('X', undefined, undefined, 'en')).toBe(
+      buildOrderInjection('X', undefined, undefined, 'en', undefined),
+    )
+    expect(buildOrderInjection('X', undefined, undefined, 'en')).not.toContain('難易度')
+  })
+})
+
 describe('buildOrderInjection', () => {
   // `lang` is a REQUIRED 4th argument (2026-08-13 rework — see the function's
   // doc comment). Every fixture below fixes it to 'en' so these assertions
@@ -414,5 +481,19 @@ describe('WORKER_RESUME_INJECTION (card 4 — the resume prompt)', () => {
     // re-read the Board + re-beat before continuing
     expect(WORKER_RESUME_INJECTION).toContain('swarm-beat.sh')
     expect(WORKER_RESUME_INJECTION).toContain('git push')
+  })
+})
+
+describe('wiring — spawnSwarmWorker hands the card tier to the SDK launch plan (source pin)', () => {
+  it('the sdkWorkerLaunchPlan call carries `tier: opts.tier`', async () => {
+    // sdkWorkerLaunchPlan resolves the EFFECTIVE tier for the directive; if the
+    // spawn site forgets to pass the stored tier, every worker gets the
+    // estimator's guess instead of the owner's choice — silently. Pinned here
+    // because spawnSwarmWorker needs a real SDK + claude to run end to end.
+    const { readFileSync } = await import('fs')
+    const src = readFileSync(new URL('./swarmWorker.ts', import.meta.url), 'utf8')
+    const call = src.slice(src.indexOf('const built = sdkWorkerLaunchPlan({'))
+    const body = call.slice(0, call.indexOf('})'))
+    expect(body).toContain('tier: opts.tier')
   })
 })

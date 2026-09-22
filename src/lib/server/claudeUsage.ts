@@ -340,6 +340,12 @@ export const collectUsageBreakdown = async (opts: {
   days?: number
   now?: number
   projectDirs?: readonly string[]
+  /** session id → desk role, from the desk ledger (swarmDeskLedger.ts). A
+   *  transcript whose file name (its session id) is in here is that desk's,
+   *  wherever it lives — desks run in the project's own dir, so the directory
+   *  alone cannot tell a commander turn from the owner's. Absent ⇒ no desk
+   *  attribution (every project-dir session stays 'project'). */
+  deskSessions?: ReadonlyMap<string, 'manager' | 'supply'>
 } = {}): Promise<UsageBreakdown> => {
   const root = opts.projectsDir ?? claudeProjectsDir()
   const days = opts.days && opts.days > 0 ? opts.days : 7
@@ -372,11 +378,19 @@ export const collectUsageBreakdown = async (opts: {
       continue
     }
     const dirName = basename(join(file, '..'))
+    // Desk first, by session id: a commander/supply transcript sits in the
+    // project's dir, exactly where the owner's own sessions sit. Only the
+    // ledger can tell them apart; a session it does not name is 'project'
+    // (the owner's, or a desk from before the ledger — the UI label says so).
+    const sessionId = basename(file, '.jsonl')
+    const desk = opts.deskSessions?.get(sessionId)
     const source: UsageSourceKind = isSwarmWorktreeDirName(dirName)
       ? 'swarm-worker'
-      : projectDirs.has(dirName)
-        ? 'project'
-        : 'other'
+      : desk
+        ? desk
+        : projectDirs.has(dirName)
+          ? 'project'
+          : 'other'
     for (const line of raw.split('\n')) {
       const parsed = parseLine(line)
       if (!parsed) continue

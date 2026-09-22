@@ -59,6 +59,9 @@ const BREAKDOWN = {
     { model: 'claude-fable-5-1', source: 'project', tokens: 120 },
     { model: 'claude-fable-5-1', source: 'swarm-worker', tokens: 60 },
     { model: 'claude-opus-5', source: 'other', tokens: 20 },
+    // Desk rows (2026-09-22): attributed by the desk ledger, labelled as desks.
+    { model: 'claude-opus-5', source: 'manager', tokens: 15 },
+    { model: 'claude-opus-5', source: 'supply', tokens: 5 },
   ],
 }
 
