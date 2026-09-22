@@ -730,7 +730,7 @@ describe('electron/main.js wiring — the ShipIt pre-flight (2026-09-21 "zero ru
       code.indexOf('function relaunchUnarmedStagedInstall'),
       code.indexOf('function kickstartShipItBeforeExit'),
     )
-    const gate = fn.indexOf('if (!staged || staged === app.getVersion()) return')
+    const gate = fn.indexOf('if (!decideUnarmedStagedRelaunch(')
     const write = fn.indexOf('stateRelaunchForInstall(')
     expect(fn).toContain('const staged = stagedShipItVersion()')
     expect(gate).toBeGreaterThan(-1)
@@ -754,9 +754,14 @@ describe('electron/main.js wiring — the ShipIt pre-flight (2026-09-21 "zero ru
       code.indexOf('function relaunchUnarmedStagedInstall'),
       code.indexOf('function kickstartShipItBeforeExit'),
     )
-    // The staged version is COMPARED, not merely tested for truthiness.
+    // The staged version is COMPARED against the running one, not merely
+    // tested for truthiness. The comparison itself (equal ⇒ no, OLDER ⇒ no,
+    // newer ⇒ yes) is pure and pinned behaviourally in shipIt.test.ts; this
+    // only pins that main.js routes through it and bails on false.
     expect(fn).toMatch(/const staged = stagedShipItVersion\(\)/)
-    expect(fn).toMatch(/staged === app\.getVersion\(\)[\s\S]*return/)
+    expect(fn).toMatch(
+      /if \(!decideUnarmedStagedRelaunch\(\{ stagedVersion: staged, runningVersion: app\.getVersion\(\) \}\)\) return/,
+    )
     expect(fn).not.toMatch(/if \(!stagedShipItVersion\(\)\) return/)
   })
 

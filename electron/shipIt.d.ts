@@ -27,6 +27,10 @@ export function decideArmedRecoveryAtQuit(input: {
   runningVersion: string
   installedVersion: string | null
 }): boolean
+export function decideUnarmedStagedRelaunch(input: {
+  stagedVersion: string | null
+  runningVersion: string | null
+}): boolean
 export function versionFromPlistJson(json: string): string | null
 export function describeShipItState(s: { label: string; disabled: string; service: ServicePrint | null }): string
 export function ensureRelaunchAfterInstall(io: {

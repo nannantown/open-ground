@@ -215,6 +215,45 @@ function decideArmedRecoveryAtQuit(input) {
 }
 
 /**
+ * Pure decision for an UNARMED quit (electron/main.js
+ * `relaunchUnarmedStagedInstall`): does the staged request deserve the
+ * "reopen the app afterwards" flag?
+ *
+ * Only when the staged version is strictly NEWER than the one running.
+ *  • EQUAL ⇒ litter. Both the request and the `update.*` bundle survive a
+ *    successful install, so a readable staged bundle of the running version is
+ *    the steady state of any Mac that has ever updated (measured on the owner's
+ *    machine, 2026-09-22) — writing there would arm every future quit.
+ *  • OLDER ⇒ a DOWNGRADE, and litter of a different shape. The arrangement
+ *    that explains it: the job was submitted, launchd sat on it, and the owner
+ *    installed a newer build by hand in the meantime. Blessing that with a relaunch turns a
+ *    silent stale install into a visible one. (`allowDowngrade` is never set
+ *    here, and electron-updater 6.8.3 defaults it to false — AppUpdater.js:138 —
+ *    so no legitimate flow stages an older version.)
+ *  • UNPARSEABLE on either side ⇒ false, like every other decision on this path:
+ *    "not sure" must mean "leave it alone".
+ * @param {{ stagedVersion: string | null, runningVersion: string | null }} input
+ */
+function decideUnarmedStagedRelaunch(input) {
+  if (!input) return false
+  const staged = parseTriple(input.stagedVersion)
+  const running = parseTriple(input.runningVersion)
+  if (!staged || !running) return false
+  for (let i = 0; i < 3; i++) {
+    if (staged[i] !== running[i]) return staged[i] > running[i]
+  }
+  return false // equal
+}
+
+/** `[major, minor, patch]`, or null for anything that is not a plain x.y.z.
+ *  Deliberately strict: a version this cannot read is undecidable, and every
+ *  caller on this path treats undecidable as "do nothing". */
+function parseTriple(v) {
+  const m = typeof v === 'string' && /^(\d+)\.(\d+)\.(\d+)$/.exec(v)
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+}
+
+/**
  * The pending ShipIt request, out of the contents of
  * `~/Library/Caches/<label>/ShipItState.plist`.
  *
@@ -451,6 +490,7 @@ module.exports = {
   decideInstallPreflight,
   decideBootRecovery,
   decideArmedRecoveryAtQuit,
+  decideUnarmedStagedRelaunch,
   versionFromPlistJson,
   describeShipItState,
   shipItRequestIO,

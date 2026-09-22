@@ -70,6 +70,7 @@ const {
   shipItLabel,
   decideBootRecovery,
   decideArmedRecoveryAtQuit,
+  decideUnarmedStagedRelaunch,
   parseShipItRequest,
   shipItRequestIO,
   ensureRelaunchAfterInstall,
@@ -2610,26 +2611,33 @@ function stateRelaunchForInstall(why, version) {
  * "Is there an install for this quit to reopen at all?" — three conditions:
  *  • `stagedShipItVersion()` reads — the pending request parses AND the bundle
  *    it points at is a readable app bundle carrying a version;
- *  • that version is NOT the one we are running. This is the LITTER GATE, and
- *    it is the reason a bare truthiness check is wrong: the request AND the
+ *  • that version is STRICTLY NEWER than the one we are running
+ *    (`decideUnarmedStagedRelaunch`). This is the LITTER GATE, and it is the
+ *    reason a bare truthiness check is wrong: the request AND the
  *    `update.*` bundle both SURVIVE a successful install (see
  *    `pendingShipItRequest` above), so on any Mac that has ever updated, the
  *    steady state is a readable staged bundle of the version already installed.
  *    Measured on the owner's machine, 2026-09-22: `ShipItState.plist` holds
  *    `launchAfterInstallation:false` for a staged 0.11.121 while /Applications
  *    and the running process are also 0.11.121 — leftovers, nothing pending.
- *    Writing YES there would happen on every single quit from then on;
+ *    Writing YES there would happen on every single quit from then on. An
+ *    OLDER staged version is litter of a second shape — explained by a job
+ *    launchd sat on while the owner installed a newer build by hand — and
+ *    blessing it would reopen the app onto a downgrade, so it is refused too;
  *  • `targetBundleURL` is present — checked inside `ensureRelaunchAfterInstall`,
  *    because the flag means "reopen the target" and a missing one is a relaunch
  *    with no subject.
  * Any of them unanswerable ⇒ write nothing, i.e. exactly the behaviour before
  * this change.
  *
- * ⚠ CEILING of the litter gate: it cannot tell leftovers apart from a staged
- * REINSTALL of the running version. That request would be skipped, and the
- * install (if one happens) would not reopen the app. Accepted: same-version
- * re-staging is not a shape this updater produces, and the alternative is
- * writing into litter on every quit forever.
+ * ⚠ CEILING of the litter gate: only a STRICTLY NEWER staged version passes,
+ * so a staged REINSTALL of the running version is skipped, a staged OLDER
+ * version is skipped, and so is any version string not readable as a plain
+ * x.y.z (a prerelease tag, a leading `v`) — undecidable reads as "do nothing".
+ * In each case the install, if one happens, would not reopen the app. Accepted:
+ * same-version and downgrade staging are not shapes this updater produces
+ * (`allowDowngrade` is never set, and electron-updater 6.8.3 defaults it to
+ * false), and the alternative is writing into litter on every quit forever.
  *
  * And no new write path: this routes through the same
  * `stateRelaunchForInstall` the armed install uses, so that one reviewed write
@@ -2638,9 +2646,11 @@ function stateRelaunchForInstall(why, version) {
 function relaunchUnarmedStagedInstall() {
   if (process.platform !== 'darwin' || !app.isPackaged) return
   const staged = stagedShipItVersion()
-  // Unreadable, or the version we are already running ⇒ leftovers from a past
-  // install, not something this quit is about to apply. Write nothing.
-  if (!staged || staged === app.getVersion()) return
+  // Unreadable, the version we are already running, or OLDER than it ⇒
+  // leftovers from a past install, not something this quit is about to apply.
+  // Write nothing. (The older-than case is a stale job the owner has since
+  // overtaken by installing by hand — see decideUnarmedStagedRelaunch.)
+  if (!decideUnarmedStagedRelaunch({ stagedVersion: staged, runningVersion: app.getVersion() })) return
   stateRelaunchForInstall(`update applying on an ordinary quit (staged ${staged})`, undefined)
 }
 

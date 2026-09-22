@@ -607,8 +607,10 @@ On macOS that was both wrong and load-bearing — see the next box.)
 > of `kickstartShipItBeforeExit`, routing through the SAME single write site
 > (`stateRelaunchForInstall` → `ensureRelaunchAfterInstall`) — no second write
 > path was added. Three conditions: the pending request parses AND the bundle it
-> points at yields a version (`stagedShipItVersion()`); that version is **not
-> the one we are running**; `targetBundleURL` is present. Any of them
+> points at yields a version (`stagedShipItVersion()`); that version is
+> **strictly newer than the one we are running** (originally written as "not the
+> one we are running" — widened to a comparison the same day, see the box 15
+> lines below); `targetBundleURL` is present. Any of them
 > unanswerable ⇒ it writes nothing, i.e. the behaviour that preceded the
 > decision. ⚠ It does **not** kickstart: an unarmed quit still never pokes
 > launchd, which stays the arm gate's job. Logged as
@@ -625,6 +627,27 @@ On macOS that was both wrong and load-bearing — see the next box.)
 > every quit from then on. Its ceiling: a staged REINSTALL of the running
 > version is skipped too (accepted — this updater does not re-stage the same
 > version, and the alternative writes into litter forever).
+>
+> ⚠ **The gate is a comparison, not an equality test** (2026-09-22, second
+> pass): only a staged version STRICTLY NEWER than the running one is blessed.
+> An OLDER one is litter of a second shape. The arrangement that explains it:
+> the job was submitted, launchd sat on it, and in the meantime the owner
+> installed a newer build by hand from the release page. That stale request would otherwise pass an equality-only gate
+> and turn a silent downgrade into "replaced with an older version, and
+> reopened". Nothing legitimate is lost: `allowDowngrade` is never set here and
+> electron-updater 6.8.3 defaults it to false (`out/AppUpdater.js:138`), so no
+> normal flow stages an older version. Its own ceiling: a version string that
+> is not a plain `x.y.z` (a prerelease tag, a leading `v`) is undecidable and
+> therefore also skipped — fail-closed, same as an unreadable request. The
+> decision is the pure `decideUnarmedStagedRelaunch` in `electron/shipIt.js`,
+> pinned behaviourally by `server/__tests__/shipIt.test.ts`
+> ("only a NEWER staged build earns the relaunch" — newer / equal / older /
+> fail-closed), with `autoUpdate.test.ts` pinning that `main.js` routes through
+> it before the write. **Measured red against broken production**, 2026-09-22:
+> restoring the old `staged !== running` semantics reddened the downgrade case;
+> `return false` reddened the newer case; `return true` on the equal branch
+> reddened the litter case; bypassing the call in `main.js` reddened the two
+> main.js wiring guards in `autoUpdate.test.ts`.
 > Guards: `server/__tests__/autoUpdate.test.ts` — "AN ORDINARY QUIT that applies
 > a staged update also writes the relaunch — but never kicks" and "…and it
 > stands down when the staged install cannot be read". Both were **measured red

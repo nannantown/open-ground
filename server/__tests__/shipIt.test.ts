@@ -11,6 +11,7 @@ import {
   decideInstallPreflight,
   decideBootRecovery,
   decideArmedRecoveryAtQuit,
+  decideUnarmedStagedRelaunch,
   versionFromPlistJson,
   describeShipItState,
   shipItRequestIO,
@@ -170,6 +171,37 @@ describe('decideArmedRecoveryAtQuit — never write an older build over a newer 
   // early return in main.js kickstartShipItBeforeExit is the arm gate, and
   // autoUpdate.test.ts pins that line. Taking `armed` as an argument here too
   // was a second, always-true copy of a decision made elsewhere.
+})
+
+describe('decideUnarmedStagedRelaunch — only a NEWER staged build earns the relaunch', () => {
+  it('writes when the staged build is newer than the one running', () => {
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: '0.11.123', runningVersion: '0.11.122' })).toBe(true)
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: '0.12.0', runningVersion: '0.11.122' })).toBe(true)
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: '1.0.0', runningVersion: '0.99.99' })).toBe(true)
+  })
+  it('THE LITTER GATE: the staged build is the version we are running ⇒ leftovers, write nothing', () => {
+    // Measured on the owner's Mac, 2026-09-22: a staged 0.11.121 sat in
+    // ShipItState.plist while /Applications and the process were 0.11.121 too.
+    // The request and the update.* bundle both survive a successful install.
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: '0.11.121', runningVersion: '0.11.121' })).toBe(false)
+  })
+  it('THE DOWNGRADE IT PREVENTS: a stale job the owner already overtook by hand', () => {
+    // Submitted but never run by launchd; meanwhile the owner installed a newer
+    // build from the release page. Blessing that request with a relaunch turns
+    // a silent stale install into "replaced with an older version, and reopened".
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: '0.11.121', runningVersion: '0.11.122' })).toBe(false)
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: '0.9.130', runningVersion: '0.11.0' })).toBe(false)
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: '0.11.99', runningVersion: '0.11.122' })).toBe(false)
+  })
+  it('FAIL-CLOSED: anything unreadable as x.y.z decides nothing', () => {
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: null, runningVersion: '0.11.122' })).toBe(false)
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: '0.11.123', runningVersion: null })).toBe(false)
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: '0.11.123-beta.1', runningVersion: '0.11.122' })).toBe(false)
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: 'v0.11.123', runningVersion: '0.11.122' })).toBe(false)
+    expect(decideUnarmedStagedRelaunch({ stagedVersion: '', runningVersion: '0.11.122' })).toBe(false)
+    // @ts-expect-error — a caller with no input at all still decides nothing.
+    expect(decideUnarmedStagedRelaunch(undefined)).toBe(false)
+  })
 })
 
 describe('parseShipItRequest — ask the REQUEST, never the directory', () => {
