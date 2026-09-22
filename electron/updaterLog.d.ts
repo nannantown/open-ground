@@ -6,6 +6,7 @@ export const UPDATER_LOG_MAX_BYTES: number
 export function updaterHome(env?: NodeJS.ProcessEnv): string
 export function updaterLogPath(env?: NodeJS.ProcessEnv): string
 export function pendingInstallPath(env?: NodeJS.ProcessEnv): string
+export function recoveryMarkerPath(env?: NodeJS.ProcessEnv): string
 export function formatArgs(args: unknown[]): string
 export function appendUpdaterLog(
   line: string,

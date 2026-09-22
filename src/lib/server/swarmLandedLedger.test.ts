@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtemp, mkdir, rm, writeFile, readFile, realpath } from 'fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, chmod } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
@@ -23,6 +23,7 @@ import {
   type AnomalyDeps,
 } from './swarmOrchestrator'
 import { initOverseerRuntime } from './swarmOverseer'
+import { peekSupplyNotices, resetSupplyNoticeState } from './supplyNotice'
 import { settingsFile, projectCentralDir } from './paths'
 import type { ProjectTask, OrchestratorWorker } from '../types'
 
@@ -331,5 +332,77 @@ describe('wiring — runDispatchPass writes the landed ledger', () => {
     entries = await readLandedLedger(projDir)
     expect(entries).toHaveLength(1)
     expect(entries[0].landedAt).toBe(new Date(now2).toISOString())
+  })
+})
+
+// ─── the SUPPLY-DESK notice a land raises (owner decision 2026-09-22) ─────────
+// Landing on the trunk is one of the four things the owner is told about
+// through the supply desk instead of having to go and look (supplyNotice.ts).
+// It is raised by sweepLanded itself so that landing and reporting cannot come
+// apart — these assert the NOTICE EXISTS AND SAYS THE RIGHT THING, not that a
+// function was reachable.
+//
+// RED MEASURED 2026-09-22 (reverted after): deleting the queueSupplyNotice call
+// from sweepLanded → the first test below fails (no notice is queued).
+describe('sweepLanded → the supply desk hears about it', () => {
+  beforeEach(() => resetSupplyNoticeState())
+
+  it('queues ONE plain-language line naming how many landed', async () => {
+    await recordPromoted(projDir, { taskId: 'c1', title: 'fix A', branch: 'swarm/a' })
+    await recordPromoted(projDir, { taskId: 'c2', title: 'fix B', branch: 'swarm/b' })
+    await sweepLanded(projDir, [
+      { id: 'c1', boardColumn: 'done' },
+      { id: 'c2', boardColumn: 'done' },
+    ] as ProjectTask[])
+
+    const line = peekSupplyNotices().get(projDir)
+    expect(line).toBeTruthy()
+    expect(line).toContain('2 件')
+    expect(line).toContain('本体に取り込まれました')
+  })
+
+  // The line goes into the OWNER'S conversation, so it must not carry the
+  // vocabulary the supply officer is required to keep out of it.
+  it('never names a branch or a card id', async () => {
+    await recordPromoted(projDir, { taskId: 'c1', title: 'fix A', branch: 'swarm/a' })
+    await sweepLanded(projDir, [{ id: 'c1', boardColumn: 'done' }] as ProjectTask[])
+
+    const line = peekSupplyNotices().get(projDir) ?? ''
+    expect(line).not.toContain('swarm/a')
+    expect(line).not.toContain('c1')
+  })
+
+  it('stays silent when nothing landed — the desk is not poked for a no-op', async () => {
+    await recordPromoted(projDir, { taskId: 'c1', title: 'fix A', branch: 'swarm/a' })
+    await sweepLanded(projDir, [{ id: 'c1', boardColumn: 'doing' }] as ProjectTask[])
+    expect(peekSupplyNotices().size).toBe(0)
+  })
+})
+
+// The land is reported only once the record PERSISTED. A fail-open write that
+// silently did nothing would otherwise re-stamp the same cards on the next
+// dispatch pass (3s) and queue the same line again, forever — an unbounded
+// self-feeding conversation on the owner's fattest desk (adversarial review
+// 2026-09-22).
+//
+// RED MEASURED (reverted after): gating on `stamped > 0` alone → the notice is
+// queued even though nothing was written.
+describe('a land that did not persist is not announced', () => {
+  it('stays silent when the ledger write fails, and re-announces once it succeeds', async () => {
+    resetSupplyNoticeState()
+    await recordPromoted(projDir, { taskId: 'c1', title: 'fix A', branch: 'swarm/a' })
+
+    // Make the central data dir unwritable so atomicWriteJson cannot land.
+    const dir = projectCentralDir(uuid)
+    await chmod(dir, 0o500)
+    try {
+      await sweepLanded(projDir, [{ id: 'c1', boardColumn: 'done' }] as ProjectTask[])
+      expect(peekSupplyNotices().size).toBe(0)
+    } finally {
+      await chmod(dir, 0o700)
+    }
+
+    await sweepLanded(projDir, [{ id: 'c1', boardColumn: 'done' }] as ProjectTask[])
+    expect(peekSupplyNotices().get(projDir)).toContain('1 件')
   })
 })

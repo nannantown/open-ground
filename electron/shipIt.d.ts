@@ -13,8 +13,19 @@ export interface ServicePrint {
   pid: number | null
 }
 export function parseServicePrint(output: string): ServicePrint | null
+export function parseShipItRequest(raw: string): { bundlePath: string; relaunchesAfterInstall: boolean } | null
 export function decideInstallPreflight(input: {
   disabledBefore: DisabledFlag
   disabledAfterEnable?: DisabledFlag
 }): 'proceed' | 'block'
+export function decideBootRecovery(input: {
+  verdict: { kind: string; from?: string; to?: string }
+  lastRecovery: { from: string; to: string } | null
+  stagedVersion: string | null
+}): boolean
+export function decideArmedRecoveryAtQuit(input: {
+  runningVersion: string
+  installedVersion: string | null
+}): boolean
+export function versionFromPlistJson(json: string): string | null
 export function describeShipItState(s: { label: string; disabled: string; service: ServicePrint | null }): string

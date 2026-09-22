@@ -69,12 +69,9 @@ import { createHash } from 'crypto'
 import { canonicalize } from './canonicalize'
 import { atomicWriteJson } from './atomicWrite'
 // The SCREEN model — read-only, client-safe, and shared with the ctx gauge's manual
-// compact button (claudeSlash.ts). `isGenerating` is what lets the NOTICE channel be
-// fast without being destructive; `readInputBoxText` is what replaces its ESC.
-import { isGenerating, readInputBoxText } from '@/lib/claudeScreen'
 // The numbered-option chooser detector the terminal pool already uses for `menuOpen`.
 // While a menu is up, keystrokes are SELECTION — a notice would pick an option.
-import { detectMenu } from '@/lib/claudeMenu'
+import { noticeDeliverable } from './deskDeliverable'
 import { openGroundHome } from './paths'
 import {
   claudeSessionActivity,
@@ -4360,38 +4357,12 @@ export const managerNoticeText = (branches: readonly string[], total: number): s
   )
 }
 
-/** MAY a notice be typed into this screen right now? The load-bearing safety property
- *  of the whole channel, kept PURE so it is assertable against a frame literal.
- *
- *  Three refusals, and together they are what stands in for the nudge's ESC:
- *
- *    1. NOT GENERATING — {@link isGenerating}, the same probe the ctx gauge's manual
- *       compact button already gates on in production (claudeSlash.ts). A pure
- *       negative: an unreadable or unfamiliar footer degrades to "not busy", so the
- *       worst case is the keystroke the owner would have typed themselves, never a
- *       sensor that goes quiet. Verified against a LIVE commander desk before this was
- *       written (2026-07-27): waiting ⇒ false, mid-turn ⇒ true, Japanese sitting unsent
- *       in the box ⇒ false — including when the box wraps to three rows, and when the
- *       literal footer phrase is typed into the box.
- *    2. INPUT BOX EMPTY — and empty as a POSITIVE reading, `=== ''`, never `null`.
- *       A desk holding half-typed text would otherwise have our line CONCATENATED onto
- *       it and the two submitted together — exactly the damage the nudge's ESC exists
- *       to pre-empt, and exactly what this channel promises not to do. `null` means no
- *       input box could be found on the frame at all (a desk still booting, or one
- *       caught mid-repaint), and writing into that lands the text in a shell prompt or
- *       in claude's own launch line. No box read ⇒ no evidence ⇒ do not write.
- *    3. NO MENU OPEN — {@link detectMenu}, the same numbered-option detector the pool
- *       already runs to drive a pane's `menuOpen` status (terminal.ts). While a chooser
- *       is up (`/model`, a theme picker, a trust dialog) the TUI reads keystrokes as
- *       SELECTION, so our line-plus-CR would not be a message at all — it would pick
- *       whatever option the cursor sits on and confirm it. That is the one way this
- *       channel could still do damage while satisfying (1) and (2), and it is not
- *       hypothetical: a menu frame has no reason to also lack an input box.
- *
- *  All three refusals mean the SAME thing to the caller — "not now" — and none loses the
- *  notice: it stays queued and the next tick (15s) asks again. */
-export const noticeDeliverable = (screen: string | null | undefined): boolean =>
-  !isGenerating(screen) && readInputBoxText(screen ?? '') === '' && detectMenu(screen ?? '') === null
+/** Re-exported from `./deskDeliverable` — the definition MOVED there on
+ *  2026-09-22 so the supply desk's notice channel (supplyNotice.ts, called from
+ *  swarmNotifications.ts, which this file imports) can share the one safety rule
+ *  without an import cycle. Every caller and test that reads it from here still
+ *  works; see deskDeliverable.ts for the three refusals and why they replace ESC. */
+export { noticeDeliverable }
 
 /** TELL the live commander desk that a worker just finished — the delivery channel B
  *  (2026-07-27), and the reason the 38-minute lag existed at all.
@@ -7308,6 +7279,9 @@ export const runDispatchPass = async (
   //     shows done (the commander's merge + markDone is a Board write the engine
   //     only ever OBSERVES — there is no land event to hook since 2026-07-15).
   //     Never throws by contract; one small readFile when nothing is pending.
+  //     A land is also one of the four things the owner hears about through the
+  //     supply desk; sweepLanded itself raises that notice (supplyNotice.ts), so
+  //     the news cannot be lost by a caller that forgets to pass it on.
   await sweepLanded(engine.path, tasks, new Date(now).toISOString())
 
   // 2. Monitor existing workers: advance stages, promote the done ones

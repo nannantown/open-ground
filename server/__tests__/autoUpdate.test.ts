@@ -553,6 +553,15 @@ describe('electron/main.js wiring — the updater has a memory (2026-09-13)', ()
   })
 })
 
+// ⚠ CEILING OF THIS BLOCK, READ BEFORE TRUSTING IT (rework, 2026-09-22).
+// Everything below greps electron/main.js as TEXT. It cannot run Electron, so
+// it pins that the right calls exist in the right ORDER in the source — never
+// that they execute. A wiring change that keeps the text and moves it somewhere
+// unreachable (e.g. the `will-quit` registration sliding inside the
+// `if (!gotLock)` branch, or behind an early return) leaves every assertion
+// here GREEN while the feature is dead. The only thing that catches that class
+// is the packaged-app pass in docs/VERIFICATION.md §4.1 — which is why the
+// updater.log line formats are part of this card's handover, not an extra.
 describe('electron/main.js wiring — the ShipIt pre-flight (2026-09-21 "zero runs")', () => {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
   const main = readFileSync(join(repoRoot, 'electron/main.js'), 'utf8')
@@ -582,6 +591,90 @@ describe('electron/main.js wiring — the ShipIt pre-flight (2026-09-21 "zero ru
     expect(enable).toBeGreaterThan(-1)
     expect(again).toBeGreaterThan(enable)
     expect(decide).toBeGreaterThan(again)
+  })
+
+  it('the pre-flight NEVER kickstarts — too early for the job, too early for the relaunch flag', () => {
+    // 2026-09-22 rework, against Squirrel.Mac's source: the request is written
+    // and the job submitted in -prepareUpdateForInstallation: at STAGING time
+    // (SQRLUpdater.m:1070-1089, from :526), and the pre-flight below runs
+    // BEFORE this file waits for staging — so the job may not exist yet. And
+    // `launchAfterInstallation` is only set to YES inside quitAndInstall
+    // (:1092-1110), so a kick from here would swap the app WITHOUT relaunching
+    // it: the user quits into a version that never comes back up.
+    const fn = code.slice(code.indexOf('async function shipItPreflight'), code.indexOf('const LOGIN_ITEMS_SETTINGS_URL'))
+    expect(fn).not.toContain('kickstart')
+    // The ordering that makes (a) true: the pre-flight precedes the staging wait.
+    const apply = code.slice(code.indexOf('async function applyUpdateWhenStaged'))
+    // Both must EXIST before the ordering means anything: `indexOf` returning
+    // -1 for a deleted pre-flight would otherwise satisfy `-1 < n` silently.
+    const preIdx = apply.indexOf('await shipItPreflight()')
+    const waitIdx = apply.indexOf('waitForInstallStaged(')
+    expect(preIdx).toBeGreaterThan(-1)
+    expect(waitIdx).toBeGreaterThan(-1)
+    expect(preIdx).toBeLessThan(waitIdx)
+  })
+
+  it('the kickstart is SYNCHRONOUS, bounded, and never carries -k', () => {
+    const fn = code.slice(code.indexOf('function kickstartShipItSync'), code.indexOf('async function shipItPreflight'))
+    expect(fn).toContain("'kickstart'")
+    // -k kills a ShipIt that may be mid-install: the one destructive move here.
+    expect(fn).not.toContain('-k')
+    // will-quit has no event loop left, so an async call would never return.
+    expect(fn).toContain('execFileSync')
+    expect(fn).toMatch(/timeout:\s*\d+/)
+  })
+
+  it('the ONLY kickstart call site is will-quit, and it re-checks the installed version first', () => {
+    // The armed flag is set in two places and consumed in exactly one.
+    expect(code.match(/kickstartShipItSync\(/g)).toHaveLength(2) // definition + the one call
+    const quit = code.slice(code.indexOf('function kickstartShipItBeforeExit'))
+    const check = quit.indexOf('decideArmedRecoveryAtQuit(')
+    const kick = quit.indexOf('kickstartShipItSync(')
+    expect(check).toBeGreaterThan(-1)
+    expect(kick).toBeGreaterThan(check)
+    // Armed exactly twice: the install we are quitting for, and a self-repair.
+    expect(code.match(/armedKickstart = \{ why:/g)).toHaveLength(2)
+    expect(code).toContain("app.on('will-quit'")
+    expect(code).toContain('kickstartShipItBeforeExit()')
+    // THE ARM GATE. Without this early return every ordinary ⌘Q kickstarts the
+    // installer; it is the one line standing between "self-repair" and "pokes
+    // the OS installer on every quit forever".
+    expect(quit.slice(0, kick)).toContain('if (!armedKickstart) return')
+    // Only the SELF-REPAIR arm re-verifies the relaunch flag. The install arm
+    // must not, or an unreadable request would disable the whole fix.
+    expect(code).toContain('verifyRelaunch: true')
+    expect(code).toContain('verifyRelaunch: false')
+    const verify = quit.indexOf('if (verifyRelaunch)')
+    expect(verify).toBeGreaterThan(-1)
+    expect(verify).toBeLessThan(kick)
+    expect(quit.slice(verify, kick)).toContain('relaunchesAfterInstall')
+  })
+
+  it('boot self-repair ARMS rather than fires, at most once per from→to, marker written BEFORE arming', () => {
+    const fn = code.slice(code.indexOf('function armInstallSelfRepair'), code.indexOf('function kickstartShipItBeforeExit'))
+    expect(fn).toContain('decideBootRecovery(')
+    // The staged VERSION (a leftover update.* dir survives a successful
+    // install — measured on a real Mac, 2026-09-22), read from the REQUEST
+    // ShipIt actually replays.
+    expect(fn).toContain('stagedShipItVersion()')
+    const staged = code.slice(code.indexOf('function pendingShipItRequest'), code.indexOf('function armInstallSelfRepair'))
+    expect(staged).toContain('ShipItState.plist')
+    expect(staged).toContain('parseShipItRequest(')
+    // Never a directory walk: readdir order could name a build the request does
+    // not point at, and a deeper nesting would read as "nothing staged".
+    expect(staged).not.toContain('readdirSync')
+    // Never starts ShipIt here: a parked ShipIt installs on whatever quit comes
+    // next, including one after the user hand-installed a NEWER build.
+    expect(fn).not.toContain('kickstartShipItSync(')
+    const write = fn.indexOf('writePendingInstall({ path: marker')
+    const arm = fn.indexOf('armedKickstart = {')
+    expect(write).toBeGreaterThan(-1)
+    expect(arm).toBeGreaterThan(write)
+    // Packaged macOS only — dev builds have no ShipIt job to kick.
+    expect(fn).toContain("process.platform !== 'darwin' || !app.isPackaged")
+    // And it only ever arms off a 'failed' verdict.
+    const boot = code.slice(code.indexOf('function reportFailedInstallOnBoot'))
+    expect(boot.indexOf('armInstallSelfRepair(')).toBeGreaterThan(boot.indexOf("verdict.kind !== 'failed'"))
   })
 
   it("logs the job's state at boot, right after the pending-install verdict", () => {

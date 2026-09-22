@@ -144,6 +144,34 @@ export const markSwarmNotificationHandled = async (
   return run
 }
 
+/**
+ * Hand the notification to the project's SUPPLY desk (supplyNotice.ts) — an
+ * ADDITIONAL route alongside the bell and the OS toast, so the owner hears the
+ * four things that need their judgement from the one seat they already talk to
+ * (owner decision 2026-09-22).
+ *
+ * ⚠ THE IMPORT IS LAZY ON PURPOSE, and it is not a style choice. supplyNotice
+ * types into a live PTY, so it names the desk pool at module scope; this file is
+ * imported by half the server (homeIntegrity, dailyFuelReport, ownerDeskLimit,
+ * swarmManager, …). A STATIC import therefore made every one of those modules
+ * pull `./terminal` in at link time, and three existing tests that partially
+ * mock `./terminal` died at IMPORT with "No writeInput export is defined on the
+ * mock" — a failure with nothing to do with notifications (measured
+ * 2026-09-22). Deferring it keeps the pool out of the load graph until a
+ * notification is actually delivered, which is the only moment it is needed.
+ *
+ * Silent by contract: a desk channel that throws must never take a bell
+ * notification down with it.
+ */
+const deliverToSupplyDesk = async (app: AppNotification): Promise<void> => {
+  try {
+    const { noticeToSupply } = await import('./supplyNotice')
+    noticeToSupply(app)
+  } catch {
+    /* no desk, no pool, no matter — the bell and the toast already carry it */
+  }
+}
+
 /** A short, operator-facing English label per event (the OS toast title; matches
  *  the style of electron's existing notifyRollback). The Japanese specifics ride
  *  in `detail`, which the engine log already phrases. */
@@ -225,6 +253,12 @@ export const createSwarmFatalNotification = async (
   const app = buildFatalAppNotification(n, createdAt)
   await appendSwarmNotification(app)
   if (opts?.os !== false) sendOsNotification(formatFatalNotification(n))
+  // …and tell the project's SUPPLY desk, so the owner hears it from the one seat
+  // they already talk to instead of having to go and look (supplyNotice.ts). An
+  // ADDITIONAL route, never a replacement: the bell and the toast above are
+  // untouched. Best-effort and silent — a desk that is busy keeps the notice for
+  // the supply loop's next pass, and a project with no desk never collects one.
+  await deliverToSupplyDesk(app)
   return app
 }
 
@@ -294,6 +328,10 @@ export const createSwarmInfoNotification = async (
   const app = buildInfoAppNotification(n, createdAt)
   await appendSwarmNotification(app)
   if (opts?.os !== false) sendOsNotification(formatInfoNotification(n))
+  // Same supply-desk route as the fatal path — but filtered: only the info
+  // events on SUPPLY_NOTICE_INFO_EVENTS get through, because most of this lane
+  // is routine and the supply desk is the owner's own (and fattest) context.
+  await deliverToSupplyDesk(app)
   return app
 }
 

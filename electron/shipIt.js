@@ -24,6 +24,50 @@
 // disabled it tries `launchctl enable`, and if it is still disabled it says so
 // and points at the setting, instead of quitting into nothing.
 //
+// ⚠ AND THE SECOND SHAPE (2026-09-22, 0.11.118 did not apply). The same failure
+// happened with the label ENABLED, so the disabled-only gate above waved it
+// through: `updater.log`'s pre-flight line read `loaded: state=not running,
+// runs=0, last exit=(never exited); background-items flag=enabled`, the app
+// quit, and the next boot logged `pending install 0.11.117 → 0.11.118 —
+// failed`. ShipIt's own stderr log had not one line for the attempt and
+// `log show --predicate 'process == "ShipIt"'` was empty: launchd held a
+// submitted job and never started it, with no override to explain it. It is
+// INTERMITTENT (five failures across 0.11.112–0.11.118; 0.11.117 succeeded).
+// The mechanism is upstream: the job dict Squirrel.Mac submits carries NO
+// `RunAtLoad` (SQRLShipItLauncher.m), so it is purely on-demand — Squirrel
+// itself pokes it over XPC right after submitting (SQRLShipItLauncher.m:165),
+// and what we observe is that poke NOT resulting in a launch. `launchctl
+// kickstart` runs a service regardless of its launch conditions, which is why
+// the release operator's manual fix works where the XPC trigger did not.
+//
+// ⚠⚠ WHERE THE NUDGE GOES, AND WHY NOT AT PRE-FLIGHT. Squirrel writes the
+// request and submits the job in `-prepareUpdateForInstallation:`
+// (SQRLUpdater.m:1070-1089), which runs at DOWNLOAD/STAGE time — called from
+// `-downloadAndPrepareUpdate:` (:526), before `update-downloaded` is emitted —
+// and the launcher is memoised for the session (shipItSubmitted:400-424), so
+// there is exactly ONE submission per session. `quitAndInstall` then only runs
+// `-relaunchToInstallUpdate` (:1092-1110): re-read the request, set
+// `launchAfterInstallation = YES`, write it back, terminate. Two consequences
+// decide the placement:
+//   (a) `applyUpdateWhenStaged` calls the pre-flight BEFORE it waits for
+//       staging (electron/main.js), so at pre-flight the job may genuinely not
+//       exist yet — there is nothing to kick and nothing to conclude from.
+//   (b) `launchAfterInstallation` is only flipped to YES inside
+//       `quitAndInstall`. Kicking at pre-flight would therefore run an install
+//       that swaps the app and then does NOT relaunch it — the user quits into
+//       a version that never comes back up.
+// So the pre-flight gate stays exactly what it was: a DISABLED-label check.
+//
+// THE ONE MOMENT THAT WORKS is `will-quit`: `quitAndInstall` has by then
+// written `launchAfterInstallation = YES`, the job has been submitted since
+// staging, and this process is about to exit. Kicking THERE starts the right
+// job with the right request (a kickstart on an already-running job is a
+// no-op, so racing Squirrel's own XPC trigger is harmless). Recovery from a
+// PAST failure rides the same rail: the boot check arms it, and it fires at
+// the next `will-quit` — never while the app is alive, because a ShipIt parked
+// mid-session installs its staged version over whatever the user does next
+// (including a newer build they installed by hand).
+//
 // Everything here is pure: main.js runs `launchctl` and feeds the text in.
 
 'use strict'
@@ -104,6 +148,13 @@ function parseServicePrint(output) {
  *               never blocks an update; the boot check reports a failure).
  *   'block'   — it WAS disabled, an enable was attempted, and it is STILL
  *               disabled: quitting now would install nothing. Say so instead.
+ *
+ * ⚠ Deliberately NOT extended to "the job has never run". See the header: the
+ * pre-flight runs before staging is awaited, so the job may not exist yet, and
+ * `launchAfterInstallation` is not set until `quitAndInstall` — a kick from
+ * here would install without relaunching. Its run count therefore cannot
+ * justify refusing an update that was going to work. The remedy for the
+ * never-run shape is the `will-quit` kickstart, not a refusal.
  * @param {{ disabledBefore: 'disabled'|'enabled'|'unknown', disabledAfterEnable?: 'disabled'|'enabled'|'unknown' }} input
  * @returns {'proceed' | 'block'}
  */
@@ -111,6 +162,114 @@ function decideInstallPreflight(input) {
   if (input.disabledBefore !== 'disabled') return 'proceed'
   if (input.disabledAfterEnable === 'disabled') return 'block'
   return 'proceed'
+}
+
+/**
+ * Pure decision: the previous quit installed NOTHING — should this run ARM a
+ * self-repair kickstart for its own next quit?
+ *
+ * Preconditions, all three required:
+ *  • the boot verdict is 'failed' (we came back as the version we quit FROM);
+ *  • `stagedVersion` — the version actually unpacked under
+ *    `~/Library/Caches/<label>/update.*` — is still the one we failed to
+ *    install. ShipIt abandons an install whose bundle is gone, and that bundle
+ *    (and the state file) SURVIVE a successful install, so mere existence is a
+ *    measured false positive: the version has to match;
+ *  • we have not already spent this pair's one attempt.
+ * That last rule is what keeps a permanently broken launchd from turning every
+ * single launch into another attempt. ⚠ The marker remembers only the MOST
+ * RECENT pair, so A→B, then A→C, then A→B again does get a second attempt for
+ * A→B — deliberate: reaching it requires B to have been downloaded and staged
+ * afresh, which is a new situation, not the loop this guards against.
+ * @param {{ verdict: { kind: string, from?: string, to?: string }, lastRecovery: { from: string, to: string } | null, stagedVersion: string | null }} input
+ */
+function decideBootRecovery(input) {
+  const v = input && input.verdict
+  if (!v || v.kind !== 'failed' || !v.to) return false
+  if (!input.stagedVersion || input.stagedVersion !== v.to) return false
+  const last = input.lastRecovery
+  if (last && last.from === v.from && last.to === v.to) return false
+  return true
+}
+
+/**
+ * Pure decision at `will-quit`: fire the armed self-repair kickstart, or drop it?
+ *
+ * Only reached once `armedKickstartReason` is set — that flag IS the "armed?"
+ * gate (electron/main.js `kickstartShipItBeforeExit`, pinned by
+ * autoUpdate.test.ts), so it is deliberately not re-taken as an argument here.
+ *
+ * Dropped when the app bundle on disk is no longer the version WE are running:
+ * something replaced it since boot — almost certainly the user taking the
+ * `install-failed` dialog's "open the release page" route and installing by
+ * hand. Kicking ShipIt then would write the older staged build over their
+ * newer one, which is worse than the failure being recovered from.
+ * @param {{ runningVersion: string, installedVersion: string | null }} input
+ */
+function decideArmedRecoveryAtQuit(input) {
+  if (!input) return false
+  // Unreadable ⇒ do nothing: this path replaces the user's application bundle,
+  // so "not sure" must mean "leave it alone".
+  if (!input.installedVersion) return false
+  return input.installedVersion === input.runningVersion
+}
+
+/**
+ * The pending ShipIt request, out of the contents of
+ * `~/Library/Caches/<label>/ShipItState.plist`.
+ *
+ * That file is named `.plist` but Squirrel writes JSON into it
+ * (SQRLShipItRequest.m:184-200 — Mantle → NSJSONSerialization; the keys are
+ * `updateBundleURL` / `targetBundleURL` / `launchAfterInstallation`, :63-70).
+ * A kicked ShipIt replays exactly THIS request, so it — not a walk of the
+ * `update.*` directories — is the only thing that answers both "what would a
+ * kickstart install?" and "would it bring the app back?".
+ *
+ * `relaunchesAfterInstall` matters because `launchAfterInstallation` is only
+ * YES between `quitAndInstall` and the next `-prepareUpdateForInstallation:`:
+ * a fresh download mid-session rewrites the request with it back to NO
+ * (SQRLUpdater.m), which would turn an armed self-repair kick into an install
+ * that never reopens the app — exactly what the armed dialog promises it will.
+ *
+ * `null` for absent / truncated / non-JSON / no usable bundle URL: every
+ * caller reads that as "do nothing", which is the safe side of a path that
+ * replaces the user's application.
+ * @param {string} raw
+ * @returns {{ bundlePath: string, relaunchesAfterInstall: boolean } | null} a filesystem path, never a URL
+ */
+function parseShipItRequest(raw) {
+  try {
+    const request = JSON.parse(raw)
+    if (!request || typeof request !== 'object' || Array.isArray(request)) return null
+    const url = request.updateBundleURL
+    if (typeof url !== 'string' || !url) return null
+    const path = url.startsWith('file://') ? decodeURIComponent(new URL(url).pathname) : url
+    // Only an absolute local path can be a bundle we are able to read.
+    if (!path.startsWith('/')) return null
+    return {
+      bundlePath: path.replace(/\/+$/, ''),
+      // Anything but a literal true reads as "will not relaunch" — this gates a
+      // promise made to the user, so it may not be inferred from a missing key.
+      relaunchesAfterInstall: request.launchAfterInstallation === true,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * `CFBundleShortVersionString` out of `plutil -convert json -o - Info.plist`.
+ * `null` for anything unparseable — every caller treats that as "do nothing".
+ * @param {string} json
+ */
+function versionFromPlistJson(json) {
+  try {
+    const parsed = JSON.parse(json)
+    const v = parsed && parsed.CFBundleShortVersionString
+    return typeof v === 'string' && v ? v : null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -132,6 +291,10 @@ module.exports = {
   launchdDomain,
   parseDisabledFlag,
   parseServicePrint,
+  parseShipItRequest,
   decideInstallPreflight,
+  decideBootRecovery,
+  decideArmedRecoveryAtQuit,
+  versionFromPlistJson,
   describeShipItState,
 }

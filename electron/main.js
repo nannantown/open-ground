@@ -57,15 +57,21 @@ const {
 const {
   updaterLogPath,
   pendingInstallPath,
+  recoveryMarkerPath,
   makeUpdaterLogger,
   tailUpdaterLog,
   writePendingInstall,
+  readPendingInstall,
   checkPendingInstall,
 } = require('./updaterLog')
 // The OS installer's launchd job — logged at boot and before every install,
 // and consulted BEFORE the app tears itself down (electron/shipIt.js).
 const {
   shipItLabel,
+  decideBootRecovery,
+  decideArmedRecoveryAtQuit,
+  parseShipItRequest,
+  versionFromPlistJson,
   launchdDomain,
   parseDisabledFlag,
   parseServicePrint,
@@ -461,6 +467,18 @@ if (!gotLock) {
       mainWindow.loadURL(MODE === 'dev' ? DEV_URL : BASE_URL)
     } else {
       focusExistingWindow()
+    }
+  })
+
+  // The very last thing this process does — after before-quit has reaped the
+  // children. Nothing async can survive here, and nothing else may run between
+  // the nudge and exit, which is exactly what makes it the right place to start
+  // the OS installer's launchd job by hand (kickstartShipItBeforeExit).
+  app.on('will-quit', () => {
+    try {
+      kickstartShipItBeforeExit()
+    } catch (err) {
+      console.error('[openground] ShipIt kickstart skipped:', err && err.message ? err.message : err)
     }
   })
 
@@ -2217,11 +2235,51 @@ async function probeShipIt(stage) {
 }
 
 /**
+ * Start the ShipIt job by hand, SYNCHRONOUSLY — this only ever runs from
+ * `will-quit`, where the event loop is about to stop and an async call would
+ * simply never come back. `launchctl kickstart gui/<uid>/<label>` is the
+ * release operator's manual fix (2026-09-21) turned into code.
+ *
+ * Deliberately WITHOUT `-k`: killing a ShipIt that IS mid-install would be the
+ * one way to make this path destructive, and a kickstart on an already-running
+ * job is a harmless no-op — which is exactly why racing Squirrel's own Mach
+ * trigger for the same job costs nothing. Bounded and best-effort: a launchctl
+ * that hangs must not hold the quit open (the install watchdog is waiting).
+ * @param {string} why
+ */
+function kickstartShipItSync(why) {
+  if (process.platform !== 'darwin' || typeof process.getuid !== 'function') return
+  const label = shipItLabel(shipItAppId())
+  const target = `${launchdDomain(process.getuid())}/${label}`
+  try {
+    const out = require('child_process').execFileSync('launchctl', ['kickstart', target], {
+      timeout: 2000,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    ulog.warn(`ShipIt kickstart (${why}): ${String(out || '').trim() || 'ok'}`)
+  } catch (err) {
+    // Non-zero exit is an ANSWER, not a crash ("Could not find service" when
+    // Squirrel never submitted one). Either way the install is Squirrel's to
+    // perform; we only ever added a nudge.
+    const text = err && (err.stderr || err.stdout) ? String(err.stderr || err.stdout).trim() : err && err.message
+    ulog.warn(`ShipIt kickstart (${why}) did not run: ${text || 'unknown error'}`)
+  }
+}
+
+/**
  * The pre-install gate. A disabled ShipIt job means quitting installs NOTHING
  * (the 2026-09-21 "zero runs" finding), so: try to enable it, re-read, and only
  * then decide. 'proceed' on anything short of a confirmed still-disabled job —
  * uncertainty must never hold an update hostage; the boot check reports a
  * failure with the log if it comes to that.
+ *
+ * ⚠ It deliberately does NOT act on "the job has never run", even though that
+ * is the 2026-09-22 failure shape. The job readable here is the PREVIOUS
+ * cycle's submission — `quitAndInstall` removes it and submits a fresh one —
+ * so kicking it would start an OLD install request alongside Squirrel's new
+ * one, with two ShipIts moving /Applications at once. The nudge belongs at
+ * `will-quit`, after the right job exists. (electron/shipIt.js header.)
  * @returns {Promise<{ decision: 'proceed'|'block', label: string | null }>}
  */
 async function shipItPreflight() {
@@ -2234,7 +2292,7 @@ async function shipItPreflight() {
   if (!probe) return { decision: 'proceed', label: null }
   if (probe.disabled !== 'disabled') return { decision: 'proceed', label: probe.label }
   const out = await launchctl(['enable', `${probe.domain}/${probe.label}`])
-  ulog.warn(`ShipIt job is DISABLED under Background Items — tried \`launchctl enable\`: ${out === null ? 'could not run' : (out.trim() || 'ok')}`)
+  ulog.warn(`ShipIt job is DISABLED under Background Items — tried \`launchctl enable\`: ${out === null ? 'could not run' : out.trim() || 'ok'}`)
   let after = null
   try {
     after = await probeShipIt('after-enable')
@@ -2251,7 +2309,10 @@ async function shipItPreflight() {
 /** The macOS Login Items & Extensions pane (the "Allow in the Background" list). */
 const LOGIN_ITEMS_SETTINGS_URL = 'x-apple.systempreferences:com.apple.LoginItems-Settings.extension'
 
-/** launchd will not run the install — say so BEFORE quitting into nothing. */
+/** launchd will not run the install — say so BEFORE quitting into nothing.
+ *  One reason only: the label is switched off under Background Items and
+ *  `launchctl enable` did not take. "The job never runs" is deliberately NOT a
+ *  block (electron/shipIt.js header) — its remedy is the will-quit kickstart. */
 function reportInstallBlocked(version, label) {
   ulog.error(`install blocked: the ShipIt job (${label}) stays disabled — not quitting`)
   setUpdateDockProgress(-1)
@@ -2333,8 +2394,163 @@ async function applyUpdateWhenStaged(version) {
     beforeInstall: () => {
       ulog.info(`quitting to install ${version || '(unknown version)'} (running ${app.getVersion()})`)
       writePendingInstall({ path: pendingInstallPath(), from: app.getVersion(), to: version || '' })
+      // quitAndInstall is about to write Squirrel's request and submit a FRESH
+      // ShipIt job — which carries no RunAtLoad and is therefore the job launchd
+      // can sit on forever (the 2026-09-22 failure). Arm the nudge for will-quit,
+      // the first moment that job exists and the last moment we run.
+      armedKickstart = { why: `install of ${version || 'the downloaded update'}`, verifyRelaunch: false }
     },
   }).catch(() => {})
+}
+
+/** Whether the next `will-quit` should kick the ShipIt job, and why — `null`
+ *  for not at all. Two arming sites: `beforeInstall` (this quit IS an install)
+ *  and the boot check (the LAST quit installed nothing and the same update is
+ *  still staged); only the latter sets `verifyRelaunch`, because only it can go
+ *  stale between arming and the quit. Never armed while the app merely runs —
+ *  see the shipIt.js header on why a ShipIt parked mid-session is dangerous.
+ *  @type {{ why: string, verifyRelaunch: boolean } | null} */
+let armedKickstart = null
+
+/** `CFBundleShortVersionString` of an app bundle on disk, or null when it cannot
+ *  be read. `plutil` because a packaged Info.plist may be binary; bounded, and
+ *  a failure always reads as "unknown", which every caller treats as "do
+ *  nothing" rather than "go ahead". */
+function bundleVersionAt(appPath) {
+  try {
+    const json = require('child_process').execFileSync(
+      'plutil',
+      ['-convert', 'json', '-o', '-', path.join(appPath, 'Contents', 'Info.plist')],
+      { timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    )
+    return versionFromPlistJson(json)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The version ShipIt still has unpacked, or null.
+ *
+ * ⚠ Existence alone is NOT the question (adversarial review, 2026-09-22 —
+ * measured on a real Mac): both `ShipItState.plist` and the `update.*` bundle
+ * SURVIVE a successful install, and other Squirrel apps on the same machine
+ * were holding `update.*` dirs two months stale. Only the staged VERSION can
+ * tell "still pending" from "already installed, litter left behind".
+ *
+ * ⚠ And it must come from the REQUEST, not from scanning `update.*` (rework,
+ * 2026-09-22). A kicked ShipIt replays `ShipItState.plist` and nothing else, so
+ * a directory walk answers a different question than the one that matters:
+ * with several `update.*` dirs present — which the doc itself says happens — a
+ * readdir-order match on the target version can name a build the request does
+ * not point at, and a bundle nested one level deeper than expected reads as
+ * "nothing staged", disabling self-repair on a real machine while the tests
+ * stay green. The file is named `.plist` but Squirrel writes JSON into it
+ * (SQRLShipItRequest.m:184-200, Mantle → NSJSONSerialization; the keys are at
+ * :63-70), so it is one `JSON.parse` away.
+ */
+function pendingShipItRequest() {
+  try {
+    const statePath = path.join(app.getPath('cache'), shipItLabel(shipItAppId()), 'ShipItState.plist')
+    return parseShipItRequest(require('fs').readFileSync(statePath, 'utf8'))
+  } catch {
+    /* absent, unreadable, not JSON, no such key — all the same answer: do nothing */
+    return null
+  }
+}
+
+/** The version that request would install, or null. */
+function stagedShipItVersion() {
+  const request = pendingShipItRequest()
+  return request ? bundleVersionAt(request.bundlePath) : null
+}
+
+/**
+ * Self-repair, ARMED once per from→to pair: the previous quit installed
+ * nothing, so the next quit kicks the launchd job by hand — the release
+ * operator's manual fix (2026-09-21) that the app can now perform for itself.
+ *
+ * ⚠ Armed, not fired. ShipIt blocks until every instance of the app has quit
+ * before touching anything (`-waitForTermination`, Squirrel.Mac
+ * SQRLTerminationListener.m:51), so kicking it HERE would park a process that then installs
+ * its staged version on whatever quit comes next — including one that follows
+ * the user taking this same boot's `install-failed` dialog to the release page
+ * and installing a NEWER build by hand. That would be a silent downgrade
+ * undoing the user's own action. Deferring to `will-quit`, where the installed
+ * version is re-checked, removes the window entirely.
+ * @param {{ kind: string, from?: string, to?: string }} verdict
+ */
+function armInstallSelfRepair(verdict) {
+  if (process.platform !== 'darwin' || !app.isPackaged) return
+  const marker = recoveryMarkerPath()
+  const stagedVersion = stagedShipItVersion()
+  if (!decideBootRecovery({ verdict, lastRecovery: readPendingInstall(marker), stagedVersion })) {
+    ulog.info(
+      `boot: no self-repair for ${verdict.from} → ${verdict.to} ` +
+        `(staged=${stagedVersion || 'none'}; already tried once, or nothing matching is staged)`,
+    )
+    return
+  }
+  // Written BEFORE the attempt is armed: a run that dies before quitting must
+  // not hand the same attempt to every launch from here on.
+  writePendingInstall({ path: marker, from: verdict.from || '', to: verdict.to || '' })
+  armedKickstart = { why: `self-repair of the failed ${verdict.from} → ${verdict.to} install`, verifyRelaunch: true }
+  ulog.info(`boot: self-repair ARMED — ${verdict.to} is still staged; the next quit will start ShipIt by hand`)
+}
+
+/**
+ * `will-quit`: the last moment this process runs, and the ONLY one at which
+ * kicking ShipIt is both correct and safe.
+ *
+ * By now `quitAndInstall` (if this is an install) has set
+ * `launchAfterInstallation = YES` on the request Squirrel already wrote and
+ * submitted at staging time — so the install this kick produces also RELAUNCHES
+ * the app, which a pre-flight kick would not (electron/shipIt.js header (b)).
+ * And nothing can come between the kick and this process exiting, so ShipIt
+ * cannot sit parked over an app the user goes on using.
+ *
+ * ⚠ `app.exit()` bypasses this handler entirely (main.js's fatal-startup exits
+ * use it). A crash-exit therefore spends the pair's one recovery ticket without
+ * trying — accepted: the ticket is written at ARM time on purpose, so that a
+ * run which dies before quitting cannot hand the same attempt to every launch
+ * that follows. Losing one retry beats an unbounded retry loop.
+ */
+function kickstartShipItBeforeExit() {
+  // THE arm gate: an ordinary ⌘Q must never touch the installer. Removing this
+  // line means every quit kickstarts ShipIt — autoUpdate.test.ts pins it.
+  if (!armedKickstart) return
+  const { why, verifyRelaunch } = armedKickstart
+  armedKickstart = null // one shot, whatever happens below
+  if (
+    !decideArmedRecoveryAtQuit({
+      runningVersion: app.getVersion(),
+      // The bundle we are executing from — if it is no longer OUR version,
+      // someone replaced the app since boot and the staged build is older.
+      installedVersion: bundleVersionAt(path.resolve(path.dirname(app.getPath('exe')), '..', '..')),
+    })
+  ) {
+    ulog.warn(`ShipIt kickstart skipped (${why}): the app on disk is no longer the version this process is running`)
+    return
+  }
+  // SELF-REPAIR ONLY. The request was armed at boot, and a download that landed
+  // since then rewrote it with `launchAfterInstallation` back to NO
+  // (-prepareUpdateForInstallation:). Kicking now would install and NOT reopen
+  // the app — while the dialog that sent the user here promised it would. Let
+  // the ordinary "Restart now" flow handle that newer update instead; it sets
+  // the flag itself. NOT applied to an install we are actively quitting for:
+  // quitAndInstall has just set the flag, so a failed read there would only
+  // disable the fix this whole card exists to deliver.
+  if (verifyRelaunch) {
+    const request = pendingShipItRequest()
+    if (!request || !request.relaunchesAfterInstall) {
+      ulog.warn(
+        `ShipIt kickstart skipped (${why}): the pending request would install without relaunching` +
+          ` (launchAfterInstallation=${request ? 'false' : 'unreadable'})`,
+      )
+      return
+    }
+  }
+  kickstartShipItSync(why)
 }
 
 /**
@@ -2350,10 +2566,18 @@ function reportFailedInstallOnBoot() {
     if (verdict.kind === 'none') return
     ulog.info(`boot: pending install ${verdict.from} → ${verdict.to} (${verdict.at || '?'}) — ${verdict.kind}`)
     if (verdict.kind !== 'failed') return
+    // Arm the self-repair for THIS run's own quit (never sooner — see
+    // armInstallSelfRepair). Synchronous, so it cannot still be running when
+    // initAutoUpdater starts an install of its own.
+    armInstallSelfRepair(verdict)
     void showUpdateDialog('install-failed', {
       version: verdict.to,
       from: verdict.from,
       logTail: tailUpdaterLog(updaterLogPath(), 25),
+      // Armed just above: quitting is now the fix, so the dialog says that
+      // rather than sending the user to the release page — a hand-install
+      // while a retry is armed is exactly the case will-quit has to skip.
+      retryArmed: armedKickstart !== null,
     })
       .then((res) => {
         if (res.response === 0) void shell.openPath(updaterLogPath()).catch(() => {})

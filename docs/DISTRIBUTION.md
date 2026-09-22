@@ -500,6 +500,106 @@ On macOS that was both wrong and load-bearing — see the next box.)
 > state — the parsers are pinned against launchctl's documented output shapes;
 > the first real occurrence lands in `updater.log` either way.
 
+> **…and it declines with the label ENABLED too, so the app starts the job
+> itself (0.11.119).** 2026-09-22, 0.11.118 did not apply: the pre-flight line
+> above read `loaded: state=not running, runs=0, last exit=(never exited);
+> background-items flag=enabled`, the app quit, and the next boot logged
+> `pending install 0.11.117 → 0.11.118 — failed`. ShipIt's own stderr log had
+> **no line for the attempt** and `log show --predicate 'process == "ShipIt"'`
+> was empty — launchd held the job and never started it, with no override to
+> blame. Five failures across 0.11.112–0.11.118 (0.11.117 succeeded): it is
+> **intermittent**, and the mechanism is in Squirrel.Mac itself — the job dict
+> `SQRLShipItLauncher.m` submits carries **no `RunAtLoad`**, so it runs only
+> when its Mach service is messaged. Who does the messaging, and what actually
+> goes wrong, is spelled out in the next paragraph — read it before forming a
+> model from this one.
+>
+> Note the mechanism precisely, because a plausible-sounding wrong version of it
+> survived a full review round. Squirrel writes the request and submits the job
+> in `-prepareUpdateForInstallation:` (`SQRLUpdater.m:1070-1089`) at
+> **download/stage** time — from `-downloadAndPrepareUpdate:` (`:526`), before
+> `update-downloaded` — and memoises the launcher for the session
+> (`shipItSubmitted:400-424`), so there is exactly **one** submission per
+> session. `quitAndInstall` runs only `-relaunchToInstallUpdate` (`:1092-1110`):
+> re-read the request, set `launchAfterInstallation = YES`, write it back,
+> terminate. It does **not** re-submit. And the job is not un-triggered — the
+> submitted dict has no `RunAtLoad`, so Squirrel pokes its Mach service over XPC
+> itself (`SQRLShipItLauncher.m:165`); what we observe is that poke **not
+> producing a launch**.
+>
+> **Why the nudge is not at pre-flight.** Two reasons, both structural:
+> (a) `applyUpdateWhenStaged` calls the pre-flight *before* it waits for
+> staging, so at that moment the job may genuinely not exist yet — nothing to
+> kick, nothing to conclude; and (b) `launchAfterInstallation` is only set to
+> YES inside `quitAndInstall`, so a pre-flight kick would run an install that
+> swaps the app and then **does not relaunch it** — the user quits into a
+> version that never comes back up. So the pre-flight gate stays a
+> disabled-label check and nothing more (`decideInstallPreflight`, unchanged).
+>
+> **The nudge lives at `will-quit`** (`kickstartShipItBeforeExit` →
+> `kickstartShipItSync`): the job has been submitted since staging,
+> `launchAfterInstallation` is now YES, and this process is about to exit — so
+> the install both happens and relaunches, and nothing can come between. It is
+> `execFileSync` (no event loop left) with a 2 s timeout, and deliberately
+> **without `-k`** — killing a ShipIt that IS mid-install is the one destructive
+> move here, and a kickstart on an already-running job is a harmless no-op,
+> which is exactly why racing Squirrel's own XPC trigger costs nothing.
+> ⚠ `app.exit()` bypasses `will-quit`, so a fatal-startup exit spends the pair's
+> one recovery ticket without trying; accepted, because the ticket is written at
+> ARM time precisely so a run that dies cannot re-arm forever.
+>
+> **Boot self-repair ARMS that same rail** (`armInstallSelfRepair`): a `failed`
+> verdict arms the next quit's kickstart when the version the pending request
+> points at is the one we failed to install. The version is read from
+> **`ShipItState.plist` → `updateBundleURL`** (`parseShipItRequest`) —
+> that file is named `.plist` but holds JSON (`SQRLShipItRequest.m:184-200`,
+> Mantle → `NSJSONSerialization`; keys at `:63-70`), and it is the exact request
+> a kicked ShipIt replays. NOT a walk of `update.*`: several of those can be
+> present (other Squirrel apps on the owner's Mac held two-month-old ones), so
+> readdir order could name a build the request does not point at, and a bundle
+> nested one level deeper would read as "nothing staged" — disabling self-repair
+> on a real machine while every test stayed green. It
+> deliberately does **not** start ShipIt there: ShipIt blocks until every
+> instance of the app has quit (`-waitForTermination`,
+> `Squirrel/SQRLTerminationListener.m:51`), so a mid-session kick parks a
+> process that then installs its
+> staged build on whatever quit comes next — including one right after the user
+> took the `install-failed` dialog's release-page route and installed something
+> **newer** by hand. And because `launchAfterInstallation` is YES only between
+> `quitAndInstall` and the next `-prepareUpdateForInstallation:`, a download
+> landing *after* the arm rewrites the request with it back to NO — so the
+> self-repair arm (and only that arm) re-reads the request at `will-quit` and
+> stands down unless it still relaunches; otherwise the kick would install
+> without reopening the app, which is the opposite of what its dialog promised.
+> `decideArmedRecoveryAtQuit` closes the other half: at `will-quit`
+> the bundle's own `CFBundleShortVersionString` must still equal the running
+> version, or the kick stands down. While a retry is armed the `install-failed`
+> dialog says so — "quitting the app finishes the install" — instead of pointing
+> at the release page.
+>
+> Armed at most **once per `from`→`to` pair**, remembered in
+> `~/.openground/update-recovery.json` (written before arming, never cleared on
+> boot). Every decision is pure and pinned in `server/__tests__/shipIt.test.ts`
+> (`decideBootRecovery` / `decideArmedRecoveryAtQuit` / `parseShipItRequest` / `versionFromPlistJson`),
+> the wiring is source-pinned in `server/__tests__/autoUpdate.test.ts`, and
+> `launchctl` only ever runs from `main.js`. ⚠ Unverified on a real Mac — the
+> failure is intermittent by nature; the next occurrence lands in `updater.log`
+> with its kickstart line either way, and a packaged-app pass belongs in an
+> owner-attended acceptance check (`docs/VERIFICATION.md` §4.1).
+>
+> 【一次資料】 `man launchctl` (macOS 26.5.1 / Darwin 25.5.0) — `kickstart [-kp]
+> gui/<uid>/<label>` "run the specified service immediately, regardless of its
+> configured launch conditions", `-k` kills a running instance first;
+> `github.com/Squirrel/Squirrel.Mac@master` (read 2026-09-22) —
+> `SQRLShipItLauncher.m` (`SMJobSubmit`, `<bundle id>.ShipIt`, no `RunAtLoad`,
+> XPC trigger at `:165`, launcher memoised `:400-424`), `SQRLUpdater.m`
+> (`-prepareUpdateForInstallation:` `:1070-1089` called from `:526` at stage
+> time; `-relaunchToInstallUpdate` `:1092-1110` only sets
+> `launchAfterInstallation`), `SQRLShipItRequest.m` (JSON body `:184-200`, keys
+> `:63-70`), `SQRLDirectoryManager.m` (`ShipItState.plist` path),
+> `SQRLTerminationListener.m:51` (`-waitForTermination` — ShipIt blocks until
+> every instance of the target bundle has quit).
+
 > **Never let an install fail silently.** Both sightings of this defect
 > (2026-06-25, 2026-09-11) presented identically to the user: a button that did
 > nothing. `applyDownloadedUpdate` therefore arms a **watchdog before** calling

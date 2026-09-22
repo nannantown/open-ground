@@ -46,6 +46,11 @@ const PTY_BY_DESIGN = [
   'src/lib/server/swarmSupply.ts', //        the supply desk is PTY-ONLY BY DESIGN
   //                                          (Remote Control lives on the PTY runtime;
   //                                          stopSwarmSupplyDesks kills by desk label)
+  'src/lib/server/supplyNotice.ts', //       types the engine's notices into the SUPPLY
+  //                                          desk (PTY-only, below): lists owner PTY
+  //                                          desks by the supply label, reads a screen,
+  //                                          writes one line. No SDK counterpart exists
+  //                                          because the desk itself has none.
   'src/lib/server/supplyContextCap.ts', //   compacts the SUPPLY desk (PTY-only, above):
   //                                          lists owner PTY desks by the supply label,
   //                                          reads a screen, types /compact into it

@@ -47,6 +47,7 @@ import { projectDataFile } from './projectDataPath'
 // Inlined at build time (resolveJsonModule / esbuild) — cwd-independent, same
 // pattern the health route uses for APP_VERSION.
 import { name as APP_PACKAGE_NAME } from '../../../package.json'
+import { queueSupplyNotice } from './supplyNotice'
 import type { ProjectTask } from '../types'
 
 // ─── Shape ────────────────────────────────────────────────────────────────────
@@ -185,7 +186,26 @@ export const sweepLanded = async (
         stamped++
       }
     }
-    if (stamped > 0) await writeLandedLedger(projectPath, entries)
+    // GATED ON THE WRITE LANDING, not on the stamp. writeLandedLedger is
+    // fail-open by design, so a full disk / EPERM leaves every entry without
+    // `landedAt` — the next dispatch pass (3s) re-stamps the same cards and
+    // would queue the same line again, forever, turning the owner's desk into a
+    // self-feeding loop on the app's fattest context. If the record did not
+    // persist, stay quiet: the next successful write reports it.
+    if (stamped > 0 && (await writeLandedLedger(projectPath, entries))) {
+      // Tell the project's SUPPLY desk — one of the four events the owner is
+      // told about without having to go and look (supplyNotice.ts, owner
+      // decision 2026-09-22). It is raised HERE rather than at the dispatch
+      // pass's call site so that landing the work and reporting it cannot come
+      // apart: every caller of sweepLanded reports, none has to remember to.
+      //
+      // Deliberately a COUNT and no card titles. This line is typed into the
+      // owner's own conversation, and a title is one paste away from a branch
+      // name or a card id — exactly the technical noise the supply officer is
+      // required to keep out of it. If the owner wants to know WHICH, they ask,
+      // and the supply officer reads the Board.
+      queueSupplyNotice(projectPath, `お願いされていた作業が ${stamped} 件、本体に取り込まれました。`)
+    }
     return stamped
   } catch {
     return 0

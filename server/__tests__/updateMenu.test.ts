@@ -447,6 +447,28 @@ describe('updateDialogText', () => {
     expect(updateDialogText('en', 'install-blocked', { version: '0.11.117' }).detail).not.toContain('launchctl')
   })
 
+  it('"install-failed" with a retry ARMED asks for the one thing that fixes it — quitting', () => {
+    // 2026-09-22: the boot check can arm a self-repair that fires at will-quit
+    // (electron/main.js armInstallSelfRepair). While it is armed, sending the
+    // user to the release page is the WRONG advice — a hand-install makes the
+    // armed kickstart stand down, so the update they were promised never lands.
+    for (const lang of ['en', 'ja'] as const) {
+      const armed = updateDialogText(lang, 'install-failed', { version: '0.11.118', from: '0.11.117', retryArmed: true })
+      const plain = updateDialogText(lang, 'install-failed', { version: '0.11.118', from: '0.11.117' })
+      expect(armed.detail).not.toBe(plain.detail)
+      expect(armed.detail).toMatch(/QUITTING|終了/)
+      // The plain copy leads with the log; the armed one must not bury the ask.
+      expect(armed.detail).toMatch(lang === 'ja' ? /もう一度試します/ : /try the .* swap once more/)
+      // …and it must NOT tell them to reopen it themselves: the replayed
+      // request carries launchAfterInstallation = YES (SQRLUpdater.m:1092-1110),
+      // so ShipIt relaunches the app on success.
+      expect(armed.detail).toMatch(lang === 'ja' ? /自動で開き直ります/ : /reopens by itself/)
+      expect(armed.detail).not.toMatch(lang === 'ja' ? /もう一度アプリを開いてください/ : /open the app again/)
+    }
+    // The unarmed copy is unchanged — still the log-first message.
+    expect(updateDialogText('en', 'install-failed', { version: '0.11.118' }).detail).toContain('~/.openground/updater.log')
+  })
+
   it('surfaces the real error text, and still says what to do when there is none', () => {
     expect(updateDialogText('en', 'error', { error: 'ENOTFOUND api.github.com' }).detail).toContain(
       'ENOTFOUND api.github.com',

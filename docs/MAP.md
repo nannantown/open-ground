@@ -590,6 +590,22 @@
   (macOS がシステム言語で描く About/Services/Edit と混ざるため)、**ダイアログだけ
   settings.language に追随**。既定メニューを置き換えるので `role: 'editMenu'` 等を落とすと
   ⌘C/⌘V が消える — テストが見張る(`server/__tests__/updateMenu.test.ts`)
+- 「更新が終了したのに入らない」: `electron/updaterLog.js`(全更新ログ → `~/.openground/updater.log`・
+  pending marker `update-pending.json` を次回 boot で照合・自己修復の1回券 `update-recovery.json`)+
+  `electron/shipIt.js`(macOS の入れ替え係 = Squirrel.Mac の launchd ジョブ `<appId>.ShipIt` の
+  読み取りと判定はすべて純関数)。main.js 側は `probeShipIt` / `shipItPreflight` /
+  `armInstallSelfRepair` / `kickstartShipItBeforeExit` だけ = `launchctl` はここでしか動かない。
+  罠: ジョブは **disabled でなくても走らない**ことがある(submit した dict に RunAtLoad が無く、
+  Squirrel 自身の XPC トリガーが空振りする)。⚠ **pre-flight で kickstart しないこと** — ①
+  pre-flight は staging 待ちより前に走るのでジョブがまだ無いことがある ②
+  `launchAfterInstallation=YES` は `quitAndInstall` の中でしか付かないので、ここで起こすと
+  「入れ替わるが再起動しない」インストールになる。起こすのは `will-quit` の1箇所だけ。
+  boot の自己修復も「その場で起こす」のではなく **次の終了に予約**する
+  (稼働中に起こすと ShipIt が待機し、手動で入れた新しい版を古い staged で上書きし得る)。
+  staged 版の判定は **`ShipItState.plist`(中身は JSON)の `updateBundleURL`** から取る —
+  `update.*` の走査は別ビルドを掴む/取りこぼす。
+  **判定は必ず「現状維持へ倒す」**(終了して何も入らないより、入れ替えを諦める方が安全)。
+  経緯の正典は `docs/DISTRIBUTION.md`
 - ビルド: `scripts/build-server.js`(esbuild → `server/dist/index.cjs`)/ vite → `dist-web/`。
   署名: `scripts/sign-and-notarize.sh` / `verify-dmg.sh`
   ⚠ **CJS バンドルには `import.meta` が存在しない**(esbuild が `{}` に置換)。dev(tsx/ESM)と

@@ -818,6 +818,12 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     ptyFns: ['listOwnerDeskTerminals', 'isTerminalProcessAlive', 'getTerminalScreen', 'writeInput'],
   },
 
+  'src/lib/server/supplyNotice.ts': {
+    tier: 'pty-only-by-design',
+    why: "The engine's notice channel INTO the supply desk (owner decision 2026-09-22): the four events the owner must judge or know about are typed into that project's pane instead of only ringing the bell. Same pool reads as supplyContextCap.ts directly above — own PTY desks by the supply label, the rendered screen for the three write refusals (noticeDeliverable), one writeInput. The supply desk is PTY-only by design (swarmSupply.ts above), so there is no SDK desk to address and no worker here to dispatch on.",
+    ptyFns: ['listOwnerDeskTerminals', 'isTerminalProcessAlive', 'getTerminalScreen', 'writeInput'],
+  },
+
   // ── one-off utility PTYs: each spawns its own claude, reads it, kills it ──
   'src/lib/server/claudeTerminal.ts': {
     tier: 'pty-only-by-design',

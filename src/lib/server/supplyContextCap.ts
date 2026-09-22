@@ -27,7 +27,7 @@
 //
 // Native auto-compact is untouched; this only fires earlier than it would.
 
-import { noticeDeliverable } from './swarmOrchestrator'
+import { noticeDeliverable } from './deskDeliverable'
 import { SUPPLY_DESK_LABEL } from './swarmSupply'
 import { listOwnerDeskTerminals, isTerminalProcessAlive, getTerminalScreen, writeInput } from './terminal'
 import { sendClaudeSlash } from './claudeSlash'
@@ -35,6 +35,7 @@ import { sessionContextTokens } from './claudeUsage'
 import { getDeskContextCapTokens } from './store'
 import { logToEngine } from './engineLogSink'
 import { deskCompactedLogLine } from './deskContextCap'
+import { flushSupplyNotices } from './supplyNotice'
 import type { OrchestratorLogLine } from '../types'
 
 /** How often the loop measures. A desk grows by one turn at a time, so a minute
@@ -163,6 +164,12 @@ export const startSupplyContextCapLoop = (intervalMs: number = SUPPLY_CONTEXT_CA
     clearInterval(globalThis.__openground_supply_context_cap_timer)
   }
   const timer = setInterval(() => {
+    // Re-offer any notice a busy desk refused (supplyNotice.ts). It rides THIS
+    // loop rather than starting one of its own: the owner decision that asked
+    // for the channel also forbade adding polling, and this is already the pass
+    // that walks every live supply desk. Delivery on the happy path happened
+    // inline at queue time; this is only the retry.
+    flushSupplyNotices()
     void runSupplyContextCapPass().catch(() => {})
   }, intervalMs)
   ;(timer as { unref?: () => void }).unref?.()

@@ -127,5 +127,8 @@ export declare function updateDialogText(
     from?: string | null
     logTail?: string | null
     label?: string | null
+    /** 'install-failed' only: this run armed its own retry, so quitting the app
+     *  finishes the install — say that instead of "we are stuck". */
+    retryArmed?: boolean
   },
 ): UpdateDialogText

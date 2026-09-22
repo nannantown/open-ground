@@ -510,6 +510,45 @@ the owner's machine, read back from the 7-day usage breakdown. Enable ONE arm at
 time — `thinkInCode` first, since it is the low-risk one — and leave it for six
 cards before looking.
 
+#### The in-app protocol (0.11.120 onward, no terminal)
+
+Until 0.11.120 the breakdown showed only a SHARE, and a share cannot be
+subtracted — which is why the first instruction handed to the owner was
+`npm run swarm:audit` in a terminal, inside an app that exists so a terminal is
+not needed. Each row now carries its token count, so the whole measurement is
+reading one number four times.
+
+**Both arms have to be measured, and the baseline comes first.** An earlier
+version of this note described only the switched-ON half, which would have
+produced a number with nothing to compare it against.
+
+| # | Do | Record |
+|---|---|---|
+| 1 | Switch **off**. Open the usage panel, find the `worker` row | `A` = its token figure |
+| 2 | Run **6 cards** | — |
+| 3 | Open the panel again | `B` |
+| 4 | Switch **on** (Settings → 詳細設定) | — |
+| 5 | Run **6 cards** | — |
+| 6 | Open the panel again | `C` |
+
+Baseline per card = `(B − A) / 6`. Trial per card = `(C − B) / 6`.
+
+**Two traps in that arithmetic, both worth stating before the number is
+believed:**
+- **The window is 7 days and it MOVES.** If the twelve cards span more than a
+  week, `A` is already ageing out of the window while the later cards are added,
+  and the subtraction silently understates. Run the twelve inside a few days, or
+  the comparison is not one.
+- **Other work lands in the same row.** The `worker` row counts every swarm
+  worker, so a card dispatched for something unrelated in between joins the
+  total. Either keep the two blocks of six clean, or expect the difference to be
+  noisy in the direction of "no effect".
+
+If `(C − B)` is not clearly smaller than `(B − A)`, the honest reading is *no
+effect measured* — switch it off and record the number. The one-shot test
+already put the effect inside the noise (§Trial 5); this protocol exists to see
+whether a many-turn worker behaves differently, not to confirm a hope.
+
 ---
 
 ---

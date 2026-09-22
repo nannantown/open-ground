@@ -55,7 +55,8 @@ Any descriptions of the retired paths below are historical, not operating instru
 | 大脳(brain) | `src/lib/server/swarmOverseerBrain.ts` | S4 でだけ起きる one-off `claude` PTY(proxy-you)。fire-and-forget — パスは絶対に await しない(`swarmOverseer.ts:14-18`) |
 | 記憶 | `~/.openground/you-corpus.md` (`src/lib/server/paths.ts:45`) | 大脳の判断根拠。書き戻すのは owner の回答だけ(`swarmOverseer.ts:19-20`、`swarmEscalations.ts:24-25`) |
 | 受信箱(C1) | `src/lib/server/swarmEscalations.ts` | escalations.json の CRUD + PTY 注入(W16)+ you-corpus 書き戻し |
-| 通知(bell/toast) | `src/lib/server/swarmNotifications.ts` | swarm-notifications.json(fatal/info)+ OS toast |
+| 通知(bell/toast) | `src/lib/server/swarmNotifications.ts` | swarm-notifications.json(fatal/info)+ OS toast + **補給官の卓**(§1.4) |
+| 補給官への配達 | `src/lib/server/supplyNotice.ts` | 上の通知のうち**オーナーの判断/認知が要る4種だけ**を、そのプロジェクトの補給官の卓に1行打つ |
 | 可逆性ゲート(C4) | `src/lib/server/swarmReversibility.ts` | 大脳の前後で question/answer を構造チェック(`swarmOverseerBrain.ts:48-53` import) |
 | ルート | `server/routes/swarm.ts` | `/api/swarm/escalations*`(`:740,761,833,858`)、overseer トグル(`:688`)、通知(`:535`)。**全ルート swarm owner gate**(swarmGate.ts — owner ログイン or ローカル解錠、§7 前提) |
 
@@ -84,6 +85,42 @@ Any descriptions of the retired paths below are historical, not operating instru
   レスポンスに `sandboxWarning:true` が付く(`server/routes/swarm.ts:705`)。
 - 現在値の確認: `GET /api/swarm/orchestrator?path=…` の `overseer` フィールド
   (`swarmOrchestrator.ts:1933`)。
+
+### 1.4 補給官への配達(2026-09-22・オーナー決定)
+
+**なぜ在るか。** 司令官→補給官の経路が存在しなかった。`POST /api/swarm/manager/say` は
+補給官→司令官の片方向だけで、逆向きが無い。実測(2026-09-22): escalation 27537000
+(高リスク統合の許可待ち、08:53)はベルにも OS 通知にも出たのに補給官は最後まで気づかず、
+オーナーが自分で質問箱を開いて回答した(09:03)。補給官スキルは "Never self-initiate" なので、
+**誰かが知らせない限り永久に気づかない**。司令官側の同型欠陥(カード 715dd79f、worker 完了が
+最大 40 分届かなかった)を閉じた通知スロットと**同じ形**を補給官にも引いたもの。
+
+| 性質 | 実体 |
+|---|---|
+| 枠 | プロジェクトごとに**1枠**。新着が上書き(キューにしない — 静かな卓に溜めて後でまとめて貼ると、古い知らせの壁になる) |
+| クリア | 届いた瞬間 |
+| 断り方 | 卓が生成中 / 入力途中 / メニュー表示中なら**書かずに諦める**(`noticeDeliverable` — 3つの拒否は司令官の通知路と1バイト違わず共有。ESC も Ctrl-U も**絶対に送らない**) |
+| 再送 | 既存の補給官ループ(`supplyContextCap.ts`、60s)に相乗り。**専用のポーリングは足していない**(オーナー決定の明示条件) |
+| 即時性 | queue 時にその場で1回配達を試みる。空いている卓なら即着 |
+
+**届く4種だけ**(`SUPPLY_NOTICE_INFO_EVENTS` + fatal 全部):
+① escalation が open になった / ② 高リスク force-hold で統合が止まった(fatal `high-risk-hold`)/
+③ カードが本体に入った(`sweepLanded` が自分で上げる — **件数のみ・カード名もブランチ名も出さない**。
+オーナーの会話に技術語を流さないため)/ ④ fatal 通知(swarm-fatal 全イベント)。
+これ以外(dispatch・心拍・review 遷移・`manager-woke`・`daily-fuel-report` など)は**送らない** —
+補給官の卓は枠消費の 38.3%(実測・カード vs-49)で最も太る席なので、1行送るたびに二重に払う。
+`projectPath` を持たない通知は宛先が無いので配達されない(ベルと OS 通知には従来どおり出る)。
+⚠ これは**イベント種別ではなく1件ごとの payload で決まる** — `engine-resume-suppressed` は
+5つの発火点のうち3つ(`swarmOrchestrator.ts:10399/10408/10432`)が `projectPath` を積むので、
+その3つは配達される。`data-integrity` は常に持たない。
+
+**ベル/OS 通知の置き換えではない** — 併存する。補給官は「見に行かなくて済む」ための**追加の**経路。
+
+**番人**: `supplyNotice.test.ts`(チャンネル単体)/ `supplyNoticeWiring.test.ts`(**本番の入口
+`createSwarmFatal|InfoNotification` から卓のキーストロークまで**)/ `swarmLandedLedger.test.ts`(③)。
+9つの経路切断変異で赤を実測済み。⚠ 最初に書いた単体テストだけでは、`noticeToSupply(app)` を
+**両方の create 関数から消しても 28 件が全緑**だった(自分の処方箋しか見ない番人 — 掟 §1)。
+配線テストは必ず本番の入口から始めること。
 
 ## 2. 信号表 S1〜S11(S6 欠番)
 

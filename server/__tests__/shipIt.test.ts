@@ -4,7 +4,11 @@ import {
   launchdDomain,
   parseDisabledFlag,
   parseServicePrint,
+  parseShipItRequest,
   decideInstallPreflight,
+  decideBootRecovery,
+  decideArmedRecoveryAtQuit,
+  versionFromPlistJson,
   describeShipItState,
 } from '../../electron/shipIt'
 
@@ -85,6 +89,14 @@ describe('parseServicePrint — loaded / never ran / running / not loaded', () =
   })
 })
 
+// ── The 2026-09-22 shape: ENABLED, and launchd still never ran it ────────────
+// 0.11.118 failed to apply with `background-items flag=enabled`, so the
+// disabled-only gate waved it through and the app quit into nothing. Squirrel's
+// submitted job carries NO RunAtLoad (SQRLShipItLauncher.m), so it is on-demand
+// only; Squirrel pokes it over XPC after submitting (:165) and what we observe
+// is that poke not producing a launch. The remedy is a `will-quit` kickstart,
+// NOT a refusal at pre-flight — the pre-flight decision below is unchanged.
+
 describe('decideInstallPreflight — never quit into nothing', () => {
   it('proceeds when the job is enabled, not overridden, or simply unknown (uncertainty never blocks)', () => {
     expect(decideInstallPreflight({ disabledBefore: 'enabled' })).toBe('proceed')
@@ -97,6 +109,132 @@ describe('decideInstallPreflight — never quit into nothing', () => {
     expect(decideInstallPreflight({ disabledBefore: 'disabled', disabledAfterEnable: 'enabled' })).toBe('proceed')
     expect(decideInstallPreflight({ disabledBefore: 'disabled', disabledAfterEnable: 'unknown' })).toBe('proceed')
     expect(decideInstallPreflight({ disabledBefore: 'disabled' })).toBe('proceed')
+  })
+})
+
+describe('decideBootRecovery — arm the self-repair once, never a loop', () => {
+  const failed = { kind: 'failed', from: '0.11.117', to: '0.11.118' }
+
+  it('arms when the version we failed to install is the one still staged', () => {
+    expect(decideBootRecovery({ verdict: failed, lastRecovery: null, stagedVersion: '0.11.118' })).toBe(true)
+  })
+  it('THE MEASURED FALSE POSITIVE: a leftover staged bundle of ANOTHER version never arms', () => {
+    // ShipItState.plist and update.*/ survive a SUCCESSFUL install (verified on
+    // a real Mac, 2026-09-22), so "some update dir exists" is not evidence of a
+    // pending install — only the version is.
+    expect(decideBootRecovery({ verdict: failed, lastRecovery: null, stagedVersion: '0.11.115' })).toBe(false)
+    expect(decideBootRecovery({ verdict: failed, lastRecovery: null, stagedVersion: null })).toBe(false)
+  })
+  it('NEVER twice for the same from→to — a permanently broken launchd must not retry every launch', () => {
+    expect(
+      decideBootRecovery({ verdict: failed, lastRecovery: { from: '0.11.117', to: '0.11.118' }, stagedVersion: '0.11.118' }),
+    ).toBe(false)
+  })
+  it('but a DIFFERENT pair gets its own single attempt', () => {
+    expect(
+      decideBootRecovery({ verdict: failed, lastRecovery: { from: '0.11.117', to: '0.11.119' }, stagedVersion: '0.11.118' }),
+    ).toBe(true)
+    expect(
+      decideBootRecovery({ verdict: failed, lastRecovery: { from: '0.11.116', to: '0.11.118' }, stagedVersion: '0.11.118' }),
+    ).toBe(true)
+  })
+  it('only "failed" arms — an install that worked, or never happened, is left alone', () => {
+    for (const kind of ['installed', 'stale', 'none']) {
+      expect(decideBootRecovery({ verdict: { ...failed, kind }, lastRecovery: null, stagedVersion: '0.11.118' })).toBe(false)
+    }
+    expect(decideBootRecovery({ verdict: { kind: 'failed', from: '0.11.117' }, lastRecovery: null, stagedVersion: '0.11.118' })).toBe(
+      false,
+    )
+  })
+})
+
+describe('decideArmedRecoveryAtQuit — never write an older build over a newer one', () => {
+  it('fires when the app on disk is still the version this process is running', () => {
+    expect(decideArmedRecoveryAtQuit({ runningVersion: '0.11.117', installedVersion: '0.11.117' })).toBe(true)
+  })
+  it('THE DOWNGRADE IT PREVENTS: the user hand-installed a newer build since boot', () => {
+    // The install-failed dialog offers the release page. Taking it and then
+    // quitting would otherwise let the armed kickstart put the older staged
+    // build over the newer one the user just installed.
+    expect(decideArmedRecoveryAtQuit({ runningVersion: '0.11.117', installedVersion: '0.11.120' })).toBe(false)
+  })
+  it('an unreadable bundle means DO NOTHING — this path replaces the user\'s application', () => {
+    expect(decideArmedRecoveryAtQuit({ runningVersion: '0.11.117', installedVersion: null })).toBe(false)
+  })
+  // "Is it armed at all?" is NOT this function's job — `armedKickstartReason`'s
+  // early return in main.js kickstartShipItBeforeExit is the arm gate, and
+  // autoUpdate.test.ts pins that line. Taking `armed` as an argument here too
+  // was a second, always-true copy of a decision made elsewhere.
+})
+
+describe('parseShipItRequest — ask the REQUEST, never the directory', () => {
+  // A kicked ShipIt replays ShipItState.plist and nothing else. The file is
+  // named .plist but Squirrel writes JSON into it (SQRLShipItRequest.m:184-200,
+  // Mantle → NSJSONSerialization; keys at :63-70).
+  const REAL = JSON.stringify({
+    updateBundleURL: 'file:///Users/me/Library/Caches/local.openground.app.ShipIt/update.oJJWrU6/OPEN%20GROUND.app/',
+    targetBundleURL: 'file:///Applications/OPEN%20GROUND.app/',
+    launchAfterInstallation: true,
+  })
+
+  it('names the bundle the request points at — percent-decoded, no trailing slash, not a URL', () => {
+    expect(parseShipItRequest(REAL)?.bundlePath).toBe(
+      '/Users/me/Library/Caches/local.openground.app.ShipIt/update.oJJWrU6/OPEN GROUND.app',
+    )
+  })
+
+  it('THE BUG IT REPLACES: it must not be satisfiable by "some update.* dir exists"', () => {
+    // The request is what gets replayed, so a state file that names NOTHING is
+    // "nothing staged" however many update.* directories are lying around.
+    expect(parseShipItRequest(JSON.stringify({ targetBundleURL: 'file:///Applications/OPEN%20GROUND.app/' }))).toBeNull()
+  })
+
+  it('absent / truncated / non-JSON / wrong shape ⇒ null, and NEVER throws', () => {
+    for (const raw of ['', '   ', 'not json', '<?xml version="1.0"?><plist/>', 'null', '[]', '{"updateBundleURL":123}', '{"updateBundleURL":""}']) {
+      expect(() => parseShipItRequest(raw)).not.toThrow()
+      expect(parseShipItRequest(raw), raw).toBeNull()
+    }
+  })
+
+  it('a relative or non-file URL is not a bundle we can read ⇒ null', () => {
+    expect(parseShipItRequest('{"updateBundleURL":"https://example.com/OPEN GROUND.app"}')).toBeNull()
+    expect(parseShipItRequest('{"updateBundleURL":"update.X/OPEN GROUND.app"}')).toBeNull()
+  })
+
+  it('accepts a bare absolute path too — the request is Squirrel\'s to format, not ours', () => {
+    expect(parseShipItRequest('{"updateBundleURL":"/tmp/update.X/OPEN GROUND.app/"}')?.bundlePath).toBe(
+      '/tmp/update.X/OPEN GROUND.app',
+    )
+  })
+
+  it('reports whether the install would RELAUNCH — only a literal true counts', () => {
+    // `launchAfterInstallation` is YES only between quitAndInstall and the next
+    // -prepareUpdateForInstallation:. A download landing after the self-repair
+    // was armed rewrites it to NO, and kicking then installs WITHOUT reopening
+    // the app — while the armed dialog promised it would reopen. Inferring the
+    // flag from a missing key would break exactly that promise silently.
+    expect(parseShipItRequest(REAL)?.relaunchesAfterInstall).toBe(true)
+    for (const v of ['false', '0', '"true"', 'null']) {
+      expect(
+        parseShipItRequest(`{"updateBundleURL":"/tmp/x.app","launchAfterInstallation":${v}}`)?.relaunchesAfterInstall,
+        v,
+      ).toBe(false)
+    }
+    // Key absent entirely ⇒ false, never "probably yes".
+    expect(parseShipItRequest('{"updateBundleURL":"/tmp/x.app"}')?.relaunchesAfterInstall).toBe(false)
+  })
+})
+
+describe('versionFromPlistJson — the one fact read out of a bundle', () => {
+  it('reads CFBundleShortVersionString out of plutil JSON', () => {
+    expect(versionFromPlistJson('{"CFBundleShortVersionString":"0.11.118","CFBundleVersion":"0.11.118"}')).toBe('0.11.118')
+  })
+  it('anything else is null — every caller reads null as "do nothing"', () => {
+    expect(versionFromPlistJson('{"CFBundleVersion":"0.11.118"}')).toBeNull()
+    expect(versionFromPlistJson('{"CFBundleShortVersionString":""}')).toBeNull()
+    expect(versionFromPlistJson('{"CFBundleShortVersionString":123}')).toBeNull()
+    expect(versionFromPlistJson('not json')).toBeNull()
+    expect(versionFromPlistJson('null')).toBeNull()
   })
 })
 

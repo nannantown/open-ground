@@ -232,7 +232,8 @@ function manualCheckOutcome(args) {
  * @param {'en' | 'ja'} lang
  * @param {'dev' | 'lockdown' | 'busy' | 'starting' | 'unavailable' | 'up-to-date' | 'downloading' | 'error' | 'downloaded' | 'download-failed' | 'install-stuck' |
  *   'install-not-ready' | 'install-failed' | 'install-blocked'} kind
- * @param {{ version?: string | null, error?: string | null, from?: string | null, logTail?: string | null, label?: string | null }} [opts]
+ * @param {{ version?: string | null, error?: string | null, from?: string | null, logTail?: string | null, label?: string | null,
+ *   retryArmed?: boolean }} [opts]
  * @returns {{ message: string, detail: string, buttons?: string[], defaultId?: number, cancelId?: number }}
  */
 function updateDialogText(lang, kind, opts) {
@@ -242,6 +243,11 @@ function updateDialogText(lang, kind, opts) {
   const from = (opts && opts.from) || ''
   const logTail = (opts && opts.logTail) || ''
   const label = (opts && opts.label) || ''
+  // The boot failure dialog has TWO truths to tell depending on whether this
+  // run armed its own retry (electron/main.js armInstallSelfRepair): with it
+  // armed, quitting normally finishes the install, and saying so is the whole
+  // difference between "we are stuck" and "do this one thing".
+  const retryArmed = Boolean(opts && opts.retryArmed)
   const named = v ? `OPEN GROUND ${v}` : ja ? '新しいバージョン' : 'A new version of OPEN GROUND'
 
   switch (kind) {
@@ -386,7 +392,11 @@ function updateDialogText(lang, kind, opts) {
             detail:
               `前回「今すぐ再起動」で入れ替えを始めましたが、起動してみると ${from ? `v${from}` : '前の版'} のままでした。` +
               '入れ替えは macOS 側の処理で、その途中で止まっています。\n\n' +
-              '「ログを開く」で記録（~/.openground/updater.log）が見られます。急ぐならリリースページからインストーラを入れてください。' +
+              (retryArmed
+                ? `新しい版はまだ手元に残っているので、このアプリをいったん終了するだけで ${named} の入れ替えをもう一度試します。` +
+                  'うまくいけば、入れ替えたあとアプリが自動で開き直ります（こちらで開く必要はありません）。\n\n' +
+                  'しばらく待っても開き直らなければ、リリースページからインストーラを入れてください。\n\n'
+                : '「ログを開く」で記録（~/.openground/updater.log）が見られます。急ぐならリリースページからインストーラを入れてください。') +
               (logTail ? `\n\n— 記録の末尾 —\n${logTail}` : ''),
             buttons: ['ログを開く', 'リリースページを開く', '閉じる'],
             defaultId: 0,
@@ -397,7 +407,11 @@ function updateDialogText(lang, kind, opts) {
             detail:
               `The last run quit to install it, but this run came back as ${from ? `v${from}` : 'the previous version'}. ` +
               'The swap is done by macOS after the app exits, and it did not complete.\n\n' +
-              '"Open log" shows the record (~/.openground/updater.log). To move on now, install from the release page.' +
+              (retryArmed
+                ? `The new version is still here, so simply QUITTING this app will make it try the ${named} swap ` +
+                  'once more. If it works, the app reopens by itself afterwards — you do not have to start it.\n\n' +
+                  'If it does not come back after a little while, install from the release page.\n\n'
+                : '"Open log" shows the record (~/.openground/updater.log). To move on now, install from the release page.') +
               (logTail ? `\n\n— log tail —\n${logTail}` : ''),
             buttons: ['Open log', 'Open release page', 'Close'],
             defaultId: 0,

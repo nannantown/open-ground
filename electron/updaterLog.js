@@ -55,6 +55,15 @@ function pendingInstallPath(env = process.env) {
   return join(updaterHome(env), 'update-pending.json')
 }
 
+/** "We already tried to rescue THIS from→to once." Same `{from, to, at}` shape
+ *  as the pending marker (written by writePendingInstall, read by
+ *  readPendingInstall) — but it is NOT cleared on boot: it is the memory that
+ *  stops a permanently broken launchd from turning every launch into another
+ *  recovery attempt (electron/shipIt.js decideBootRecovery). */
+function recoveryMarkerPath(env = process.env) {
+  return join(updaterHome(env), 'update-recovery.json')
+}
+
 /** Format like console does: strings verbatim, Errors by message, the rest JSON. */
 function formatArgs(args) {
   return args
@@ -215,6 +224,7 @@ module.exports = {
   updaterHome,
   updaterLogPath,
   pendingInstallPath,
+  recoveryMarkerPath,
   formatArgs,
   appendUpdaterLog,
   makeUpdaterLogger,
