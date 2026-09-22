@@ -473,6 +473,26 @@ and `ultra` exist because review depth is the point there.
 threaded into `buildOrderInjection` exactly as `tier` already is. Flag off ⇒ the
 order text is byte-identical to today, which is the property to pin with a test.
 
+**Turning it on, 2026-09-22: a Settings switch, not a `curl` command.** The
+first instruction handed to the owner was a `curl -X POST /api/settings`
+one-liner; they asked for something clearer, correctly. Settings → 詳細設定 →
+「Swarm worker の試験(計測中)」 now carries the toggle, hidden unless Swarm is on
+for that user (a switch that changes nothing visible is worse than an absent
+one). Shipped in 0.11.119. Verified in the running app, not just in unit tests —
+[screenshot](./assets/trial4-switch-in-settings.png) — by booting OG through the
+e2e harness, opening Settings in Japanese, pressing the switch and reading the
+value back from `GET /api/settings`.
+
+Two things that verification caught which the unit tests had not:
+- **OFF is stored as the key being ABSENT**, not as `false` —
+  `normalizeWorkerTrials` keeps only `=== true`. The first in-app assertion
+  expected `false` and failed against correct behaviour.
+- The switch's displayed state is driven by the **re-seed on open**, not by the
+  `useState` initializer: replacing the initializer with `false` left every test
+  green, while breaking the re-seed turned one red. A comment at the site now
+  says which line is load-bearing, so the next reader does not "simplify" the
+  wrong one.
+
 **Status 2026-09-22: built, off, and waiting for cards.** `Settings.workerTrials`
 (`{ brevity?, thinkInCode? }`) is implemented and every flag is off, so the order
 text is byte-identical to before the trials existed — pinned by a test and

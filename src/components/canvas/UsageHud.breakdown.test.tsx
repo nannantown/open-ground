@@ -28,7 +28,7 @@ vi.mock('@/i18n/I18nContext', () => ({
   }),
 }))
 
-import { UsageHud } from './UsageHud'
+import { UsageHud, compactTokens } from './UsageHud'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -104,6 +104,47 @@ describe('UsageHud — what used the budget (7 days)', () => {
     expect(text).toContain('10%') // 20 / 200
     // The honesty line about the coarse 'project' bucket travels with the list.
     expect(text).toContain('misc.usage.breakdown.note')
+  })
+
+  // ── the absolute number, added 2026-09-22 ──────────────────────────────────
+  // A share cannot be SUBTRACTED. Asked to measure whether a worker directive
+  // saves fuel, the only method this panel supported was "open a terminal and
+  // run npm run swarm:audit", because two percentages a day apart say nothing
+  // about what was spent in between. The owner pushed back on that — correctly,
+  // in a tool whose purpose is to not need a terminal. So each row now carries
+  // the token count as well, and this pins it: note the worker row, run cards,
+  // note it again, subtract.
+  it('shows each row as a NUMBER, not only as a share', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) =>
+        String(input).includes('/api/usage/breakdown')
+          ? ({ ok: true, json: async () => BREAKDOWN } as unknown as Response)
+          : ({ ok: true, json: async () => USAGE } as unknown as Response),
+      ),
+    )
+    render(<UsageHud />)
+    await screen.findByText('Fable 5.1')
+    fireEvent.click(screen.getByLabelText('misc.usage.heading'))
+    await screen.findByText('misc.usage.breakdown.heading')
+    const text = document.body.textContent ?? ''
+    // The fixture's rows are 120 / 60 / 20 / 15 / 5 tokens. Under 1,000 they are
+    // printed verbatim, so the exact figures must be on screen — a row that
+    // showed only "60%" would pass the older assertions and fail this one.
+    expect(text).toContain('120')
+    expect(text).toContain('60')
+    expect(text).toContain('20')
+    // and the share is still there, because both are useful at a glance
+    expect(text).toContain('60%')
+  })
+
+  it('formats large counts so a row stays one line', () => {
+    // Read to compare two observations, not to audit — hence rounding.
+    expect(compactTokens(900)).toBe('900')
+    expect(compactTokens(1_500)).toBe('2k')
+    expect(compactTokens(340_000)).toBe('340k')
+    expect(compactTokens(1_250_000)).toBe('1.3M')
+    expect(compactTokens(12_000_000)).toBe('12M')
   })
 
   it('a failed scan shows the empty state, never a fabricated zero-row table', async () => {

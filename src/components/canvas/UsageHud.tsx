@@ -353,7 +353,19 @@ export const UsageHud = ({ compact = false }: { compact?: boolean }) => {
                           {shortModel(r.model)}
                           <span className="text-ink-faint"> · {t(SOURCE_KEY[r.source])}</span>
                         </span>
-                        <span className="shrink-0 text-meta tabular-nums text-ink">{share}%</span>
+                        {/* The ABSOLUTE token count, not only the share (2026-09-22).
+                            A share cannot be subtracted: asked to measure whether a
+                            worker directive saves fuel, the only method this panel
+                            supported was "run a terminal command", because two
+                            percentages a day apart say nothing about what was spent
+                            in between. With a number, the measurement is note-it,
+                            run cards, note-it-again — inside the app, which is the
+                            whole point of the app. `compactTokens` keeps the row
+                            one line. */}
+                        <span className="shrink-0 text-meta tabular-nums text-ink">
+                          {compactTokens(r.tokens)}
+                          <span className="text-ink-faint"> · {share}%</span>
+                        </span>
                       </li>
                     )
                   })}
@@ -448,7 +460,10 @@ const SOURCE_KEY: Record<UsageSourceKind, MessageKey> = {
   other: 'misc.usage.breakdown.other',
 }
 
-const compactTokens = (n: number): string => {
+/** Tokens as a short figure: 1.2M / 340k / 900. Already used by the headline
+ *  total; since 2026-09-22 the breakdown rows use it too, so a row can be read
+ *  as a NUMBER and not only as a share. Exported for the guard test. */
+export const compactTokens = (n: number): string => {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`
   return String(Math.round(n))
