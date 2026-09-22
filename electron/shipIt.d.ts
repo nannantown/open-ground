@@ -29,3 +29,16 @@ export function decideArmedRecoveryAtQuit(input: {
 }): boolean
 export function versionFromPlistJson(json: string): string | null
 export function describeShipItState(s: { label: string; disabled: string; service: ServicePrint | null }): string
+export function ensureRelaunchAfterInstall(io: {
+  read: () => string
+  write: (text: string) => void
+}): 'set' | 'already-set' | 'unusable' | 'write-failed'
+export function shipItRequestIO(
+  statePath: string,
+  fsImpl?: {
+    readFileSync: (p: string, enc: string) => string
+    writeFileSync: (p: string, text: string) => void
+    renameSync: (from: string, to: string) => void
+    unlinkSync: (p: string) => void
+  },
+): { read: () => string; write: (text: string) => void }

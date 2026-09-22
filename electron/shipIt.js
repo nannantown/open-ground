@@ -285,6 +285,162 @@ function describeShipItState(s) {
   return `${s.label} — ${svc}; background-items flag=${s.disabled}`
 }
 
+/**
+ * The IO pair `ensureRelaunchAfterInstall` needs for a REAL request file.
+ *
+ * It lives here, not in main.js, for two reasons: the write is the part with
+ * teeth (a truncating `writeFileSync` that dies halfway leaves ShipIt a request
+ * it cannot parse — no install AND no relaunch, on a quit that has already told
+ * the next boot it was installing), and a closure defined inside Electron code
+ * can only ever be pinned by grepping its source. Here the production closure
+ * itself is what the tests and `scripts/probe-shipit-relaunch.mts` run.
+ *
+ * Write = tmp file + rename, atomic on APFS: on any failure Squirrel's request
+ * is still the one on disk, untouched. ANY failure — a tmp write that dies on
+ * ENOSPC as much as a rename that fails — takes the tmp file with it (ShipIt's
+ * own directory is not ours to litter), and the error is rethrown so the caller
+ * reports `write-failed` and stands down.
+ * @param {string} statePath
+ * @param {{ readFileSync: Function, writeFileSync: Function, renameSync: Function, unlinkSync: Function }} [fsImpl]
+ */
+function shipItRequestIO(statePath, fsImpl) {
+  const fs = fsImpl || require('fs')
+  const tmp = `${statePath}.og-tmp`
+  return {
+    read: () => fs.readFileSync(statePath, 'utf8'),
+    write: (text) => {
+      try {
+        fs.writeFileSync(tmp, text)
+        fs.renameSync(tmp, statePath)
+      } catch (err) {
+        // Covers the half-written tmp too: a writeFileSync that dies partway
+        // still leaves a file behind, and it is no more ours to keep than the
+        // one a failed rename leaves.
+        try {
+          fs.unlinkSync(tmp)
+        } catch {
+          /* best effort — the write already failed, this is only tidying */
+        }
+        throw err
+      }
+    },
+  }
+}
+
+
+/**
+ * Make the pending ShipIt request RELAUNCH the app after it installs — by
+ * WRITING that instruction, not by trusting that someone else already did.
+ *
+ * ⚠ WHAT IS AND IS NOT CLAIMED HERE (owner report + commander's re-measurement,
+ * 2026-09-22). `launchAfterInstallation` is NO in every request Squirrel writes
+ * at stage time (`-prepareUpdateForInstallation:`, SQRLUpdater.m:1082-1083) and
+ * is flipped to YES in exactly one place: `-relaunchToInstallUpdate`
+ * (:1092-1111), i.e. inside `quitAndInstall`. So ANY install that reaches ShipIt
+ * without that call installs the new version and leaves the app closed.
+ *
+ * Two different quits can reach it, and they are NOT the same case:
+ *   (a) a quit THIS APP started to install an update ("Restart now", or the
+ *       hands-free auto-apply). That is what this function is for: the app
+ *       promised to come back, so the relaunch is ours to state.
+ *   (b) a quit the app did not start — an ordinary ⌘Q with an update staged.
+ *       Squirrel installs it on termination anyway, with NO. **Owner decision,
+ *       2026-09-22: that install should reopen the app as well**, so this
+ *       function is called for (b) too — from `relaunchUnarmedStagedInstall`
+ *       (electron/main.js), at the arm gate, when the staged bundle reads AND
+ *       its version differs from the running one (same version ⇒ leftovers of a
+ *       past install, which survive it — measured on the owner's Mac).
+ *       (The earlier policy here was the opposite — "the user closed the app,
+ *       so it stays closed". It was a pending owner question; it is decided,
+ *       and docs/DISTRIBUTION.md records the decision.) What (b) still does
+ *       NOT do is kickstart launchd: an unarmed quit writes the request and
+ *       nothing more.
+ *
+ * The owner's 2026-09-22 install is NOT classified here, because the logs do
+ * not support a classification. What IS measured about it is a negative: there
+ * is NO `quitting to install 0.11.120` line in `~/.openground/updater.log`, and
+ * that line is written only by `beforeInstall` — so nothing armed whatever
+ * applied it. (Nor would the 2026-09-22 unarmed-quit change have altered it:
+ * that one writes from `will-quit`, and the `auto-apply deferred` counter below
+ * shows the running process never quit.) Everything else is unexplained — and
+ * mind the CLOCKS, because the two logs disagree: ShipIt writes LOCAL time,
+ * `updater.log` writes UTC, so every time below is given as JST (= Z + 9).
+ * The same process's `auto-apply deferred (unfocused Nmin)` counter rises
+ * straight THROUGH the install (…24min at 10:22 JST, 29min at 10:27 JST)
+ * instead of resetting, and there is no `boot:` line between 07:22 and 10:35
+ * JST — i.e. the app neither quit nor started, yet ShipIt completed an install
+ * at 10:25 JST (= 01:25Z). That is NOT safely called an upstream bug:
+ * `-waitForTermination` waits only for processes whose `bundleURL` matches
+ * `targetBundleURL` (the `filter:` in SQRLTerminationListener.m), so a live
+ * process running from a DIFFERENT bundle is documented behaviour, not a
+ * violation. What the follow-up card should establish first is which bundle
+ * that running process was executing from.
+ * Do not repeat the earlier mistake of naming the incident (a) or (b) —
+ * measured, it is neither.
+ *
+ * (a) is nonetheless reachable with a NO request, which is why writing beats
+ * assuming: `beforeInstall` arms the kickstart and only then calls
+ * `quitAndInstall`, which on macOS can return WITHOUT quitting (MacUpdater.js
+ * :236-252 — the `squirrelDownloadedUpdate === false` branch). That path is
+ * real, not yet observed in a log here, and the arm is dropped when the install
+ * watchdog fires precisely so it cannot ride a later, unrelated quit.
+ *
+ * Two properties make the write safe where it happens:
+ *   • ShipIt re-reads the request AFTER the app has terminated (ShipIt-main.m
+ *     subscribes `readRequestSignal` twice — :121 before
+ *     `waitForTerminationIfNecessary`, :126 after — and `+readUsingURL:` is not
+ *     cached), so a write from the dying process still lands in time;
+ *   • every caller gates on being able to READ what it is blessing — the armed
+ *     one on the staged version matching what it quit for, the unarmed one on
+ *     the staged bundle being readable at all — and this function refuses any
+ *     request it cannot recognise, so "unsure" always means "write nothing".
+ *
+ * IO is injected so this is testable against a real file without Electron.
+ * Every failure is a return value, never a throw: this runs with the event loop
+ * already ending, where an exception would take the kickstart down with it.
+ * @param {{ read: () => string, write: (text: string) => void }} io
+ * @returns {'set' | 'already-set' | 'unusable' | 'write-failed'}
+ */
+function ensureRelaunchAfterInstall(io) {
+  let raw = null
+  try {
+    raw = io.read()
+  } catch {
+    return 'unusable'
+  }
+  let request = null
+  try {
+    request = JSON.parse(raw)
+  } catch {
+    return 'unusable'
+  }
+  // A file we cannot recognise as a ShipIt request is one we must not write:
+  // the same conservatism as parseShipItRequest, for the same reason (this path
+  // ends in replacing the user's application bundle).
+  if (!request || typeof request !== 'object' || Array.isArray(request)) return 'unusable'
+  if (typeof request.updateBundleURL !== 'string' || !request.updateBundleURL) return 'unusable'
+  // AND the target, as a PRESENCE CHECK only: `launchAfterInstallation` means
+  // "reopen targetBundleURL" (ShipIt-main.m launches the TARGET, not the staged
+  // copy), so a request without one is a relaunch with no subject. It does NOT
+  // check that the target is the app we are running, deliberately — Squirrel
+  // owns that string, and a stricter comparison would reject legitimate
+  // installs (a relocated bundle, a differently-encoded URL) to guard against
+  // something never observed. Checked here rather than plumbed through
+  // parseShipItRequest, which answers a different question ("what would a
+  // kickstart install?") and has its own callers.
+  if (typeof request.targetBundleURL !== 'string' || !request.targetBundleURL) return 'unusable'
+  if (request.launchAfterInstallation === true) return 'already-set'
+  try {
+    // Spread, so every other key Squirrel put there (targetBundleURL,
+    // bundleIdentifier, useUpdateBundleName) survives verbatim — ShipIt needs
+    // them all, and we only have an opinion about one.
+    io.write(JSON.stringify({ ...request, launchAfterInstallation: true }))
+  } catch {
+    return 'write-failed'
+  }
+  return 'set'
+}
+
 module.exports = {
   SHIPIT_LABEL_SUFFIX,
   shipItLabel,
@@ -297,4 +453,6 @@ module.exports = {
   decideArmedRecoveryAtQuit,
   versionFromPlistJson,
   describeShipItState,
+  shipItRequestIO,
+  ensureRelaunchAfterInstall,
 }

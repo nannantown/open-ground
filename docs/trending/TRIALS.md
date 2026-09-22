@@ -510,6 +510,36 @@ the owner's machine, read back from the 7-day usage breakdown. Enable ONE arm at
 time — `thinkInCode` first, since it is the low-risk one — and leave it for six
 cards before looking.
 
+#### If the owner says 「燃料の測定を始めて」 — start here
+
+That exact Japanese phrase is the owner's way of asking for this trial to be
+run, and it is written here verbatim so a `grep 燃料の測定` from a fresh session
+in this repository lands on the procedure. (It was NOT findable on 2026-09-22:
+「燃料の測定」 appeared nowhere, 「燃料」 only in a UI string file and one release
+note, and neither `CLAUDE.md` nor `docs/MAP.md` mentioned any of it. A procedure
+nobody can find is a procedure that gets re-invented.)
+
+Related phrasings that mean the same request: 「燃料」「トークンの測定」「試験の計測」
+「thinkInCode を測って」.
+
+What to do, in order:
+
+1. Check the switch's current state — `GET /api/settings` on `127.0.0.1:47776`,
+   field `workerTrials.thinkInCode`. It must be OFF to start, because the
+   baseline half comes first.
+2. Take the first reading: `npx tsx scripts/fuel-mark.ts --label A-off --append <file>`.
+   ⚠ This only works ON THE OWNER'S MACHINE — a cloud session cannot reach the
+   app's loopback port at all.
+3. Tell the owner to run six cards, and stop. Do not dispatch cards yourself:
+   they are real work on real repositories and that is the owner's call.
+4. After six: `--label B-off`, then turn the switch ON (Settings, or
+   `POST /api/settings` with `{"workerTrials":{"thinkInCode":true}}`), then
+   `--label C-on` immediately, six more cards, then `--label D-on`.
+5. `npx tsx scripts/fuel-mark.ts --compare <file> --cards 6` twice — B−A and
+   D−C — and read `perCard['swarm-worker']`. Heed `windowRisk`.
+6. Write the numbers into the Log table at the bottom of this file, whichever
+   way they came out, and turn the switch off if there was no effect.
+
 #### The in-app protocol (0.11.120 onward, no terminal)
 
 Until 0.11.120 the breakdown showed only a SHARE, and a share cannot be

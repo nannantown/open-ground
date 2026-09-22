@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import {
   shipItLabel,
   launchdDomain,
@@ -10,6 +13,8 @@ import {
   decideArmedRecoveryAtQuit,
   versionFromPlistJson,
   describeShipItState,
+  shipItRequestIO,
+  ensureRelaunchAfterInstall,
 } from '../../electron/shipIt'
 
 // The 2026-09-21 finding (docs/commander/PRODUCT-HANDOFF-2026-09-21.md): after
@@ -247,5 +252,195 @@ describe('describeShipItState — one log line that tells the three cases apart'
       `${LABEL} — loaded: state=not running, runs=0, last exit=(never exited); background-items flag=disabled`,
     )
     expect(describeShipItState({ label: LABEL, disabled: 'enabled', service: parseServicePrint(RUNNING) })).toContain('pid=64585')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ensureRelaunchAfterInstall — the relaunch instruction, WRITTEN not assumed
+//
+// The owner's 2026-09-22 report: an update installed and the app never came
+// back. Measured cause (ShipIt_stderr.log + ~/.openground/updater.log): the
+// install ran against a request whose `launchAfterInstallation` was still NO,
+// and ShipIt's launch phase is gated on that one key.
+//
+// These run the REAL function against a REAL file in a temp dir and then read
+// the result back with the PRODUCTION reader (parseShipItRequest) — "the write
+// landed and the app's own reader now sees a relaunch", not "the function was
+// called". Break the writer (make it skip the write, or drop the key) and they
+// go red; that was measured before this block was kept.
+// ---------------------------------------------------------------------------
+describe('ensureRelaunchAfterInstall — states the relaunch instead of hoping for it', () => {
+  // Byte-for-byte what Squirrel wrote on the owner's machine at the moment the
+  // failure was diagnosed (2026-09-22 19:37 JST) — the file this must handle.
+  const STAGED_NO_RELAUNCH = JSON.stringify({
+    launchAfterInstallation: false,
+    updateBundleURL: 'file:///Users/me/Library/Caches/local.openground.app.ShipIt/update.1ZMXW0I/OPEN%20GROUND.app/',
+    useUpdateBundleName: true,
+    bundleIdentifier: 'local.openground.app',
+    targetBundleURL: 'file:///Applications/OPEN%20GROUND.app/',
+  })
+
+  let dir: string
+  let statePath: string
+  const io = () => ({
+    read: () => readFileSync(statePath, 'utf8'),
+    write: (text: string) => writeFileSync(statePath, text),
+  })
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'og-shipit-'))
+    statePath = join(dir, 'ShipItState.plist')
+  })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  it("the app's OWN reader sees a relaunch afterwards — on the real staged request", () => {
+    writeFileSync(statePath, STAGED_NO_RELAUNCH)
+    // Precondition, stated so a future reader knows the test starts from the failure.
+    expect(parseShipItRequest(readFileSync(statePath, 'utf8'))?.relaunchesAfterInstall).toBe(false)
+
+    expect(ensureRelaunchAfterInstall(io())).toBe('set')
+
+    expect(parseShipItRequest(readFileSync(statePath, 'utf8'))?.relaunchesAfterInstall).toBe(true)
+  })
+
+  it('keeps every other key ShipIt needs — we only have an opinion about one', () => {
+    writeFileSync(statePath, STAGED_NO_RELAUNCH)
+    ensureRelaunchAfterInstall(io())
+    expect(JSON.parse(readFileSync(statePath, 'utf8'))).toEqual({
+      ...JSON.parse(STAGED_NO_RELAUNCH),
+      launchAfterInstallation: true,
+    })
+  })
+
+  it('already YES ⇒ reports it and leaves the file completely alone', () => {
+    const already = JSON.stringify({ updateBundleURL: '/tmp/x.app', targetBundleURL: '/Applications/x.app', launchAfterInstallation: true })
+    writeFileSync(statePath, already)
+    expect(ensureRelaunchAfterInstall(io())).toBe('already-set')
+    expect(readFileSync(statePath, 'utf8')).toBe(already) // byte-identical: nothing rewritten
+  })
+
+  it('a file that is not a ShipIt request is NEVER written — this path replaces an app bundle', () => {
+    for (const raw of ['', 'not json', 'null', '[]', '{}', '{"updateBundleURL":""}', '{"updateBundleURL":123}']) {
+      writeFileSync(statePath, raw)
+      expect(ensureRelaunchAfterInstall(io()), raw).toBe('unusable')
+      expect(readFileSync(statePath, 'utf8'), raw).toBe(raw)
+    }
+  })
+
+  it('an absent file is "unusable", and is not conjured into existence', () => {
+    expect(ensureRelaunchAfterInstall(io())).toBe('unusable')
+    expect(existsSync(statePath)).toBe(false)
+  })
+
+  it('NEVER throws — it runs at will-quit, where an exception takes the kickstart with it', () => {
+    writeFileSync(statePath, STAGED_NO_RELAUNCH)
+    const exploding = {
+      read: () => readFileSync(statePath, 'utf8'),
+      write: () => {
+        throw new Error('read-only volume')
+      },
+    }
+    expect(() => ensureRelaunchAfterInstall(exploding)).not.toThrow()
+    expect(ensureRelaunchAfterInstall(exploding)).toBe('write-failed')
+    expect(() => ensureRelaunchAfterInstall({ read: () => { throw new Error('gone') }, write: () => {} })).not.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// shipItRequestIO — the PRODUCTION write closure, exercised for real
+//
+// It lives in shipIt.js precisely so these run the object main.js passes, not a
+// stand-in: a closure defined inside Electron code can only be pinned by
+// grepping its source, and a grep does not notice a rename that never happens.
+// ---------------------------------------------------------------------------
+describe('shipItRequestIO — atomic, and it does not litter ShipIt\'s directory', () => {
+  let dir: string
+  let statePath: string
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'og-shipit-io-'))
+    statePath = join(dir, 'ShipItState.plist')
+  })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  const REQUEST = JSON.stringify({
+    updateBundleURL: 'file:///tmp/update.X/OPEN%20GROUND.app/',
+    targetBundleURL: 'file:///Applications/OPEN%20GROUND.app/',
+    launchAfterInstallation: false,
+  })
+
+  it('end to end: the real pair turns a staged NO into a YES, leaving no tmp file', () => {
+    writeFileSync(statePath, REQUEST)
+    expect(ensureRelaunchAfterInstall(shipItRequestIO(statePath))).toBe('set')
+    expect(parseShipItRequest(readFileSync(statePath, 'utf8'))?.relaunchesAfterInstall).toBe(true)
+    expect(existsSync(`${statePath}.og-tmp`)).toBe(false)
+  })
+
+  it('the request is never TRUNCATED in place — the new bytes arrive by rename', () => {
+    writeFileSync(statePath, REQUEST)
+    const seen: string[] = []
+    const fs = require('fs')
+    ensureRelaunchAfterInstall(
+      shipItRequestIO(statePath, {
+        readFileSync: fs.readFileSync,
+        writeFileSync: (p: string, text: string) => {
+          seen.push(p)
+          fs.writeFileSync(p, text)
+        },
+        renameSync: fs.renameSync,
+        unlinkSync: fs.unlinkSync,
+      }),
+    )
+    // Every write went to the tmp path; the live request was only ever renamed
+    // over. An ENOSPC mid-write therefore cannot leave ShipIt a half file.
+    expect(seen).toEqual([`${statePath}.og-tmp`])
+  })
+
+  it('a FAILED rename leaves Squirrel\'s request intact, removes the tmp file, and reports write-failed', () => {
+    writeFileSync(statePath, REQUEST)
+    const fs = require('fs')
+    const outcome = ensureRelaunchAfterInstall(
+      shipItRequestIO(statePath, {
+        readFileSync: fs.readFileSync,
+        writeFileSync: fs.writeFileSync,
+        renameSync: () => {
+          throw new Error('EXDEV')
+        },
+        unlinkSync: fs.unlinkSync,
+      }),
+    )
+    expect(outcome).toBe('write-failed')
+    expect(readFileSync(statePath, 'utf8')).toBe(REQUEST) // byte-identical
+    expect(existsSync(`${statePath}.og-tmp`)).toBe(false) // and nothing left behind
+  })
+
+
+  it('a FAILED tmp write also leaves nothing behind — the half file is not ours to keep', () => {
+    writeFileSync(statePath, REQUEST)
+    const fs = require('fs')
+    const outcome = ensureRelaunchAfterInstall(
+      shipItRequestIO(statePath, {
+        readFileSync: fs.readFileSync,
+        writeFileSync: (p: string) => {
+          fs.writeFileSync(p, '{"half') // the ENOSPC shape: something got written, then it died
+          throw new Error('ENOSPC')
+        },
+        renameSync: fs.renameSync,
+        unlinkSync: fs.unlinkSync,
+      }),
+    )
+    expect(outcome).toBe('write-failed')
+    expect(readFileSync(statePath, 'utf8')).toBe(REQUEST)
+    expect(existsSync(`${statePath}.og-tmp`)).toBe(false)
+  })
+  it('a request with no targetBundleURL is unusable — a relaunch needs something to reopen', () => {
+    // ShipIt launches the TARGET bundle, so "relaunch" without one is a promise
+    // with no subject.
+    writeFileSync(statePath, JSON.stringify({ updateBundleURL: 'file:///tmp/u/OPEN%20GROUND.app/' }))
+    expect(ensureRelaunchAfterInstall(shipItRequestIO(statePath))).toBe('unusable')
+    expect(existsSync(`${statePath}.og-tmp`)).toBe(false)
+    for (const bad of ['', 123, null]) {
+      writeFileSync(statePath, JSON.stringify({ updateBundleURL: 'file:///tmp/u/x.app/', targetBundleURL: bad }))
+      expect(ensureRelaunchAfterInstall(shipItRequestIO(statePath)), String(bad)).toBe('unusable')
+    }
   })
 })

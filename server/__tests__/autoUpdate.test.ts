@@ -638,8 +638,11 @@ describe('electron/main.js wiring — the ShipIt pre-flight (2026-09-21 "zero ru
     expect(code).toContain('kickstartShipItBeforeExit()')
     // THE ARM GATE. Without this early return every ordinary ⌘Q kickstarts the
     // installer; it is the one line standing between "self-repair" and "pokes
-    // the OS installer on every quit forever".
-    expect(quit.slice(0, kick)).toContain('if (!armedKickstart) return')
+    // the OS installer on every quit forever". Since 2026-09-22 it returns the
+    // unarmed-quit RELAUNCH WRITE — which is not a kick; the guard that the
+    // unarmed path never kicks is the `kickstartShipItSync(` count above plus
+    // the dedicated test below.
+    expect(quit.slice(0, kick)).toContain('if (!armedKickstart) return relaunchUnarmedStagedInstall()')
     // Only the SELF-REPAIR arm re-verifies the relaunch flag. The install arm
     // must not, or an unreadable request would disable the whole fix.
     expect(code).toContain('verifyRelaunch: true')
@@ -650,6 +653,126 @@ describe('electron/main.js wiring — the ShipIt pre-flight (2026-09-21 "zero ru
     expect(quit.slice(verify, kick)).toContain('relaunchesAfterInstall')
   })
 
+
+
+  it('an install we are quitting for WRITES the relaunch instruction — armed branch only, before the kick', () => {
+    // 2026-09-22: an install ran with `launchAfterInstallation` still NO and
+    // the app never reopened. The flag is Squirrel's to write only inside
+    // quitAndInstall, which on macOS can return without quitting — so for a
+    // quit we own, the app states the relaunch itself.
+    const quit = code.slice(code.indexOf('function kickstartShipItBeforeExit'))
+    const gate = quit.indexOf('if (!armedKickstart) return')
+    const branch = quit.indexOf('} else if (!stateRelaunchForInstall(')
+    const kick = quit.indexOf('kickstartShipItSync(')
+    expect(gate).toBeGreaterThan(-1)
+    // THE BRANCH, not just the ordering: the write must live in the `else` of
+    // `if (verifyRelaunch)`. Hoisted out of it (measured: the ordering-only
+    // version of this test stayed green) it would also force a relaunch for the
+    // SELF-REPAIR arm, which can fire on a quit the user chose — the ⌘Q bug.
+    expect(branch).toBeGreaterThan(-1)
+    expect(branch).toBeGreaterThan(gate)
+    expect(branch).toBeLessThan(kick)
+    // A refusal must STOP the kick, never fall through to it.
+    expect(quit.slice(branch, kick)).toContain('return')
+    const fn = code.slice(code.indexOf('function stateRelaunchForInstall'), code.indexOf('function kickstartShipItBeforeExit'))
+    expect(code.match(/ensureRelaunchAfterInstall\(/g)).toHaveLength(1)
+    // It really writes — and atomically. A truncating writeFileSync that dies
+    // halfway leaves ShipIt a request it cannot parse: no install AND no
+    // relaunch, on a quit that already told the next boot it was installing.
+    // The IO pair is the SHARED one (electron/shipIt.js), whose atomic write +
+    // tmp cleanup is exercised for real in shipIt.test.ts. main.js must not
+    // grow a second, unexercised copy of it.
+    expect(fn).toContain('ensureRelaunchAfterInstall(shipItRequestIO(shipItStatePath()))')
+    expect(fn).not.toContain('writeFileSync(')
+    // Never bless a request that installs something else (a relaunched
+    // downgrade is worse than no relaunch), and never kick an install whose
+    // reopen we could not write.
+    expect(fn).toContain('stagedShipItVersion()')
+    expect(fn).toMatch(/staged !== version[\s\S]*return false/)
+    expect(fn).toMatch(/'already-set'[\s\S]*return true/)
+    // SELF-REPAIR stays read-only for the same ⌘Q reason.
+    const selfRepair = quit.slice(quit.indexOf('if (verifyRelaunch)'), branch)
+    expect(selfRepair).not.toContain('stateRelaunchForInstall(')
+    expect(selfRepair).toContain('relaunchesAfterInstall')
+  })
+
+  it('AN ORDINARY QUIT that applies a staged update also writes the relaunch — but never kicks', () => {
+    // Owner decision, 2026-09-22: an update that lands on a plain ⌘Q should
+    // reopen the app too. Squirrel's staged request says NO, so somebody has to
+    // write it, and the only process that can is this one, on its way out.
+    const quit = code.slice(code.indexOf('function kickstartShipItBeforeExit'))
+    expect(quit).toContain('if (!armedKickstart) return relaunchUnarmedStagedInstall()')
+    const fn = code.slice(
+      code.indexOf('function relaunchUnarmedStagedInstall'),
+      code.indexOf('function kickstartShipItBeforeExit'),
+    )
+    expect(fn).toContain('stateRelaunchForInstall(')
+    // NOT a kick. An unarmed quit still never pokes launchd — that half of the
+    // arm gate is the whole reason this is a separate function and not a
+    // widened branch. (`kickstartShipItSync(` appearing exactly twice in the
+    // file, pinned above, is the same claim counted globally.)
+    expect(fn).not.toContain('kickstart')
+    // NO SECOND WRITE PATH: it reuses the one reviewed write site, so the three
+    // refusals in stateRelaunchForInstall / ensureRelaunchAfterInstall (an
+    // unrecognisable request, a missing targetBundleURL, a failed write) cover
+    // this caller unchanged.
+    expect(fn).not.toContain('ensureRelaunchAfterInstall(')
+    expect(fn).not.toContain('writeFileSync(')
+  })
+
+  it('…and it stands down when the staged install cannot be read — silence beats a wrong promise', () => {
+    // The unarmed quit has no version it quit FOR, so the armed path's version
+    // gate has no input here. What stands in is "can we read what is about to
+    // be installed at all": the request must parse and the bundle it points at
+    // must yield a version. If not, write nothing — the behaviour before this
+    // change, which is the safe side of a path that replaces an app bundle.
+    const fn = code.slice(
+      code.indexOf('function relaunchUnarmedStagedInstall'),
+      code.indexOf('function kickstartShipItBeforeExit'),
+    )
+    const gate = fn.indexOf('if (!staged || staged === app.getVersion()) return')
+    const write = fn.indexOf('stateRelaunchForInstall(')
+    expect(fn).toContain('const staged = stagedShipItVersion()')
+    expect(gate).toBeGreaterThan(-1)
+    expect(write).toBeGreaterThan(gate) // the check must PRECEDE the write
+    // And it is macOS-and-packaged only: ShipIt exists nowhere else, and a dev
+    // run has no request to bless.
+    expect(fn).toMatch(/process\.platform !== 'darwin' \|\| !app\.isPackaged[\s\S]*return/)
+    expect(fn.indexOf("process.platform !== 'darwin'")).toBeLessThan(gate)
+  })
+
+  it('THE LITTER GATE: a staged bundle of the version we are RUNNING is leftovers — never written to', () => {
+    // Rework, 2026-09-22, measured on the owner's Mac: ShipItState.plist held
+    // `launchAfterInstallation:false` for a staged 0.11.121 while /Applications
+    // AND the running process were also 0.11.121 — the request and the
+    // `update.*` bundle both SURVIVE a successful install, so "a staged bundle
+    // reads" is the steady state of any Mac that has ever updated, not a
+    // pending install. A truthiness-only gate writes YES into that litter on
+    // every quit forever; only the VERSION tells the two apart (the same fact
+    // `pendingShipItRequest`'s comment already states).
+    const fn = code.slice(
+      code.indexOf('function relaunchUnarmedStagedInstall'),
+      code.indexOf('function kickstartShipItBeforeExit'),
+    )
+    // The staged version is COMPARED, not merely tested for truthiness.
+    expect(fn).toMatch(/const staged = stagedShipItVersion\(\)/)
+    expect(fn).toMatch(/staged === app\.getVersion\(\)[\s\S]*return/)
+    expect(fn).not.toMatch(/if \(!stagedShipItVersion\(\)\) return/)
+  })
+
+  it('a quitAndInstall that never quit DISARMS the kickstart — or a later ⌘Q would reopen the app', () => {
+    // The arm is made for the quit that is happening now. The install watchdog
+    // firing proves that quit did not happen (MacUpdater can return without
+    // quitting), and the arm must not ride the user's next, deliberate quit.
+    const apply = code.slice(code.indexOf('async function applyUpdateWhenStaged'))
+    const stuck = apply.indexOf('onStuck: ()')
+    const arm = apply.indexOf('armedKickstart = { why:')
+    expect(stuck).toBeGreaterThan(-1)
+    expect(arm).toBeGreaterThan(-1)
+    expect(apply.slice(stuck, arm)).toContain('armedKickstart = null')
+    // The version we quit to install rides along, so will-quit can check it.
+    expect(apply.slice(arm, arm + 200)).toContain('verifyRelaunch: false, version')
+  })
   it('boot self-repair ARMS rather than fires, at most once per from→to, marker written BEFORE arming', () => {
     const fn = code.slice(code.indexOf('function armInstallSelfRepair'), code.indexOf('function kickstartShipItBeforeExit'))
     expect(fn).toContain('decideBootRecovery(')
@@ -658,7 +781,11 @@ describe('electron/main.js wiring — the ShipIt pre-flight (2026-09-21 "zero ru
     // ShipIt actually replays.
     expect(fn).toContain('stagedShipItVersion()')
     const staged = code.slice(code.indexOf('function pendingShipItRequest'), code.indexOf('function armInstallSelfRepair'))
-    expect(staged).toContain('ShipItState.plist')
+    // The path literal moved into the helper both sides share; pin it there and
+    // pin that the reader still goes through the helper (otherwise "contains
+    // ShipItState.plist" would be satisfied by the helper alone).
+    expect(code).toContain("shipItLabel(shipItAppId()), 'ShipItState.plist')")
+    expect(staged).toContain('shipItStatePath()')
     expect(staged).toContain('parseShipItRequest(')
     // Never a directory walk: readdir order could name a build the request does
     // not point at, and a deeper nesting would read as "nothing staged".

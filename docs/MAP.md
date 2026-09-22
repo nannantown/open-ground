@@ -594,7 +594,9 @@
   pending marker `update-pending.json` を次回 boot で照合・自己修復の1回券 `update-recovery.json`)+
   `electron/shipIt.js`(macOS の入れ替え係 = Squirrel.Mac の launchd ジョブ `<appId>.ShipIt` の
   読み取りと判定はすべて純関数)。main.js 側は `probeShipIt` / `shipItPreflight` /
-  `armInstallSelfRepair` / `kickstartShipItBeforeExit` だけ = `launchctl` はここでしか動かない。
+  `armInstallSelfRepair` / `kickstartShipItBeforeExit` / `relaunchUnarmedStagedInstall` だけ =
+  `launchctl` はここでしか動かない(ただし `relaunchUnarmedStagedInstall` は launchctl を叩かない —
+  普通の ⌘Q で当たる更新にも「終わったら開き直す」指示だけ書く。オーナー決定 2026-09-22)。
   罠: ジョブは **disabled でなくても走らない**ことがある(submit した dict に RunAtLoad が無く、
   Squirrel 自身の XPC トリガーが空振りする)。⚠ **pre-flight で kickstart しないこと** — ①
   pre-flight は staging 待ちより前に走るのでジョブがまだ無いことがある ②
@@ -602,6 +604,15 @@
   「入れ替わるが再起動しない」インストールになる。起こすのは `will-quit` の1箇所だけ。
   boot の自己修復も「その場で起こす」のではなく **次の終了に予約**する
   (稼働中に起こすと ShipIt が待機し、手動で入れた新しい版を古い staged で上書きし得る)。
+  ⚠ ただし**その待機は保証されない**(0922 実測)。終了待ちは `SQRLTerminationListener` が
+  起動の一瞬だけ running-app 一覧を1回引くだけの判定で、そこで外すと**稼働中のアプリの
+  バンドルをそのまま入れ替える**。唯一の安全網(`SQRLInstallerErrorAppStillRunning`)も
+  同じ判定式なので同時に空振りする。しかも ShipIt を起こすのは staging
+  (=`quitAndInstall` ではない)で、launchd はその submit から**遅れて**ジョブを走らせ得る
+  (0922 実測で 11分11秒後・kickstart なし)。実測と一次資料は
+  `docs/SHIPIT_LIVE_SWAP_0922.md`。
+  ⚠ この2ログは**タイムゾーンが違う** — `ShipIt_stderr.log` はローカル(JST)、
+  `updater.log` は UTC(`…Z`)。並べて読むときは必ず9時間ずらす。
   staged 版の判定は **`ShipItState.plist`(中身は JSON)の `updateBundleURL`** から取る —
   `update.*` の走査は別ビルドを掴む/取りこぼす。
   **判定は必ず「現状維持へ倒す」**(終了して何も入らないより、入れ替えを諦める方が安全)。
@@ -686,6 +697,9 @@
 - deep link: `src/lib/deepLink.ts` + `useJoinDeepLink.ts`(招待リンク)
 - playback: `src/lib/playback/playbackStore.ts` + `src/components/canvas/PlaybackEq.tsx`
 - onboarding: `src/components/Onboarding.tsx`
+- **燃料の測定**(トークン消費の前後比較): `scripts/fuel-mark.ts`(読み取り専用・要ローカル起動)
+  + 手順は `docs/trending/TRIALS.md` の「燃料の測定を始めて」節。オーナーがこの言葉で頼む。
+  スイッチは `Settings.workerTrials`(設定→詳細設定)。テスト: `server/__tests__/fuelMark.test.ts`
 - trending 取り込み: `scripts/trending-intake.ts` → `docs/trending/INDEX.md` / `DETAILS.md`
   (+ `scripts/trending-cost-scan.ts` → `signals.json`: ライセンスと課金の実測。**無料のみ** = オーナー決定 2026-09-22)
   (**生成物・手で直さない**)+ `docs/trending/OG-CANDIDATES.md`(手書きの採否判断)—

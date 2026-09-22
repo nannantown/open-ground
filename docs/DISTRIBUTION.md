@@ -538,8 +538,9 @@ On macOS that was both wrong and load-bearing — see the next box.)
 >
 > **The nudge lives at `will-quit`** (`kickstartShipItBeforeExit` →
 > `kickstartShipItSync`): the job has been submitted since staging,
-> `launchAfterInstallation` is now YES, and this process is about to exit — so
-> the install both happens and relaunches, and nothing can come between. It is
+> `launchAfterInstallation` is YES by then — the app writes it itself, see the
+> next block — and this process is about to exit, so the install both happens
+> and relaunches with nothing able to come between. It is
 > `execFileSync` (no event loop left) with a 2 s timeout, and deliberately
 > **without `-k`** — killing a ShipIt that IS mid-install is the one destructive
 > move here, and a kickstart on an already-running job is a harmless no-op,
@@ -547,6 +548,161 @@ On macOS that was both wrong and load-bearing — see the next box.)
 > ⚠ `app.exit()` bypasses `will-quit`, so a fatal-startup exit spends the pair's
 > one recovery ticket without trying; accepted, because the ticket is written at
 > ARM time precisely so a run that dies cannot re-arm forever.
+>
+> **And the relaunch instruction is WRITTEN there, not assumed (2026-09-22).**
+> `launchAfterInstallation` is NO in every request Squirrel writes at stage time
+> (`SQRLUpdater.m:1082-1083`) and is set to YES in exactly one place,
+> `-relaunchToInstallUpdate` (`:1092-1111`), i.e. inside `quitAndInstall`. So any
+> install that reaches ShipIt without that call swaps the app and leaves it
+> closed. **Two different quits can do that, and they are not the same case:**
+>
+> - **(a) a quit the app started to install an update** — "Restart now", or the
+>   hands-free auto-apply. The app promised to come back, so the relaunch is
+>   ours to state. **This is what the change below fixes.**
+> - **(b) a quit the app did not start** — an ordinary ⌘Q with an update staged.
+>   Squirrel installs it on termination anyway, with NO. The policy here used to
+>   be "the user closed the app, so it stays closed"; **owner decision
+>   2026-09-22 reversed it** — this quit now gets the relaunch write too (but
+>   still no kickstart). See the decided block further down.
+>
+> **What the 2026-09-22 incident does and does not tell us.** One thing about it
+> is measured, and it is a negative: `~/.openground/updater.log` has **no
+> `quitting to install 0.11.120` line at all** (`grep -o "quitting to install
+> [0-9.]*"` lists .112 ×2 / .114 ×2 / .115 ×2 / .116 / .118 / .121), and that
+> line is written only by `beforeInstall`. **Nothing armed whatever applied that
+> update.** Nor would the 2026-09-22 unarmed-quit path (which now runs AT that
+> same arm gate) have altered its outcome: that path writes from `will-quit`,
+> and the running process's `auto-apply deferred (unfocused N min)` counter
+> climbs monotonically 4 → 29 min straight through the install, i.e. it never
+> quit.
+>
+> ⚠ **The rest of it is UNEXPLAINED and belongs to a separate card.** Mind the
+> clocks first: **ShipIt logs LOCAL time, `~/.openground/updater.log` logs UTC**
+> (measured: updater.log's last line reads `11:46:04Z` for an mtime of 20:46
+> JST; ShipIt's last line reads `10:25:31` for an mtime of 10:25). Every time
+> below is JST (= Z + 9). It was not an ordinary quit either: the same process's
+> `auto-apply deferred (unfocused N min)` counter climbs straight THROUGH the
+> install — 4 min at 10:02, 9, 14, 19, 24 at 10:22, **29 at 10:27** — instead of
+> resetting to 0 as it does on a real restart (10:35:36 is an example), and there
+> is no `boot:` or `ShipIt (boot):` line anywhere between 07:22:27 and 10:35:34.
+> The app neither quit nor started, yet ShipIt logged `Beginning installation` at
+> **10:25:27 JST (= 01:25:27Z)** and `Installation completed successfully` at
+> **10:25:31 JST (= 01:25:31Z)**. **Do not read that as an
+> upstream bug**: `-waitForTermination` waits only for processes whose
+> `bundleURL` (standardized) matches `targetBundleURL` — see the `filter:` in
+> `SQRLTerminationListener.m`, and `waitForTerminationIfNecessary` returns an
+> empty signal when `bundleIdentifier` is nil (`ShipIt-main.m:92-97`); the
+> request itself is written with `URLByResolvingSymlinksInPath`
+> (`SQRLUpdater.m:1076`) while the comparison standardizes, so a mismatch can be
+> legitimate. **The first thing the follow-up card should establish is which
+> bundle the running process was executing from.** It is a defect in its
+> own right only in the sense that it is unexplained — do not fold it into
+> either case above, and do not call it explained.
+>
+> ✅ **OWNER DECISION, 2026-09-22 — DECIDED** (a general policy answer, not a
+> conclusion about the incident above): *an update that lands on a quit the app
+> did not start **should reopen the app** afterwards.* Case (b) therefore now
+> writes the relaunch flag too. Implementation:
+> `relaunchUnarmedStagedInstall` in `electron/main.js`, called from the arm gate
+> of `kickstartShipItBeforeExit`, routing through the SAME single write site
+> (`stateRelaunchForInstall` → `ensureRelaunchAfterInstall`) — no second write
+> path was added. Three conditions: the pending request parses AND the bundle it
+> points at yields a version (`stagedShipItVersion()`); that version is **not
+> the one we are running**; `targetBundleURL` is present. Any of them
+> unanswerable ⇒ it writes nothing, i.e. the behaviour that preceded the
+> decision. ⚠ It does **not** kickstart: an unarmed quit still never pokes
+> launchd, which stays the arm gate's job. Logged as
+> `relaunch after install (update applying on an ordinary quit (staged X)): set`.
+>
+> ⚠ **The version comparison is not optional — it is THE litter gate** (rework,
+> 2026-09-22). Both the request and the `update.*` bundle **survive a successful
+> install**, so a readable staged bundle is the STEADY STATE of any Mac that has
+> ever updated, not a sign that something is pending. Measured on the owner's
+> machine that same day: `~/Library/Caches/local.openground.app.ShipIt/ShipItState.plist`
+> (mtime 19:37) held `launchAfterInstallation:false` for a staged **0.11.121**
+> while `/Applications` and the running process were **also 0.11.121** — pure
+> leftovers. A truthiness-only gate would have written YES into that file on
+> every quit from then on. Its ceiling: a staged REINSTALL of the running
+> version is skipped too (accepted — this updater does not re-stage the same
+> version, and the alternative writes into litter forever).
+> Guards: `server/__tests__/autoUpdate.test.ts` — "AN ORDINARY QUIT that applies
+> a staged update also writes the relaunch — but never kicks" and "…and it
+> stands down when the staged install cannot be read". Both were **measured red
+> against broken production** (arm gate reverted to a bare `return`; the
+> `stagedShipItVersion()` check deleted; a kickstart call added to the unarmed
+> path; the armed `else if` hoisted out of its branch — 2 / 1 / 3 / 1 failures
+> respectively).
+>
+> Case (a) can nevertheless reach ShipIt with a NO request, which is why writing
+> beats assuming: `beforeInstall` arms the kickstart and *then* calls
+> `quitAndInstall`, which on macOS can return **without quitting at all**
+> (electron-updater 6.8.3 `out/MacUpdater.js:236-252` — the
+> `squirrelDownloadedUpdate === false` branch). That branch is real (verified in
+> the installed dependency), though no log here has caught it yet.
+>
+> So `kickstartShipItBeforeExit` now **writes** the flag for the arm it owns
+> (`ensureRelaunchAfterInstall`, `electron/shipIt.js`): read the request, set
+> `launchAfterInstallation: true`, keep every other key verbatim, write it back
+> synchronously, log the outcome (`relaunch after install (<why>): set` /
+> `already-set` / `unusable` / `write-failed`). Safe there because ShipIt
+> **re-reads** the request after the app terminates (`ShipIt-main.m` subscribes
+> `readRequestSignal` twice — `:121` before `waitForTerminationIfNecessary`,
+> `:126` after — and `+readUsingURL:` is uncached, so a write from the dying
+> process still lands). Since the 2026-09-22 decision above an ordinary ⌘Q gets
+> the same write (via `relaunchUnarmedStagedInstall`), while the **kickstart**
+> stays behind the arm gate. The self-repair arm keeps its read-only stand-down:
+> it may not FORCE a relaunch, because its stand-down is what stops it kicking
+> an install that would not reopen the app — the promise the `install-failed`
+> dialog made. (It no longer stands for "an app the user closed stays closed";
+> the 2026-09-22 decision retired that reading.)
+>
+> Their one interaction, stated because the flag is shared: a YES written by an
+> earlier unarmed quit can satisfy `verifyRelaunch`'s check on a later boot.
+> That is bounded to the intended case — `decideBootRecovery` only arms when
+> `stagedVersion === verdict.to`, i.e. the very install the self-repair is for,
+> and under the new policy that install SHOULD reopen the app.
+>
+> **Three refusals and one disarm** (adversarial review, 2026-09-22 — each one
+> a way the first cut could have produced a WORSE outcome than the bug):
+> `stateRelaunchForInstall` stands down, writing nothing and skipping the kick,
+> when the pending request installs a different version than the one we quit for
+> (blessing it could relaunch a downgrade), when the file is not a readable
+> ShipIt request, or when the write fails. The write is tmp-file + `renameSync`,
+> atomic on APFS, so a failure leaves Squirrel's request intact instead of
+> handing ShipIt a truncated one — no install AND no relaunch would be the worst
+> ending, on a quit that has already told the next boot it was installing.
+> And the arm is **taken back when the install watchdog fires**
+> (`onStuck` → `armedKickstart = null`): `quitAndInstall` can return without
+> quitting, and an arm left standing would ride the user's NEXT quit — a
+> deliberate ⌘Q an hour later that would then install and reopen the app they
+> had just closed. Within the watchdog's 90 s the arm does still hold, which is
+> correct: a quit in that window is the restart the user asked for seconds ago.
+> ⚠ Disarming stops the KICKSTART and the ARMED write, not the install:
+> Squirrel's job was submitted at stage time and still installs on whatever quit
+> comes next, without the app having asked for it — case (b). Since the
+> 2026-09-22 decision that quit does get the unarmed relaunch write, so the app
+> is expected to reopen; what it still does not get is a kickstart, so a launchd
+> that sits on the job leaves the install pending until a later quit. That is
+> the honest ceiling of this fix.
+>
+> **Verifying it on the next update** (this is the one part no test can reach —
+> it needs a real install). With an update staged:
+>
+> ```bash
+> npx tsx scripts/probe-shipit-relaunch.mts \
+>   "$HOME/Library/Caches/local.openground.app.ShipIt/ShipItState.plist"
+> ```
+>
+> — it copies that file, runs the production writer on the COPY and prints the
+> before/after flag (the live file is never touched; the path is an argument
+> because the repo allows exactly one home resolver). Then apply the update and
+> read both logs:
+> `~/.openground/updater.log` must carry `relaunch after install (install of
+> X): set` (or `already-set`), and
+> `~/Library/Caches/local.openground.app.ShipIt/ShipIt_stderr.log` must end with
+> `Successfully launched application at file:///Applications/OPEN%20GROUND.app/`.
+> A ⌘Q with an update staged is the counter-check: it may install, and it must
+> NOT produce that launch line.
 >
 > **Boot self-repair ARMS that same rail** (`armInstallSelfRepair`): a `failed`
 > verdict arms the next quit's kickstart when the version the pending request

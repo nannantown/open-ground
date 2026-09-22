@@ -71,6 +71,8 @@ const {
   decideBootRecovery,
   decideArmedRecoveryAtQuit,
   parseShipItRequest,
+  shipItRequestIO,
+  ensureRelaunchAfterInstall,
   versionFromPlistJson,
   launchdDomain,
   parseDisabledFlag,
@@ -2387,7 +2389,20 @@ async function applyUpdateWhenStaged(version) {
     // server child has already been torn down, so doing NOTHING would leave the
     // user staring at a live window backed by a dead server.
     quitAndInstall: () => (autoUpdaterHandle ? autoUpdaterHandle.quitAndInstall() : app.quit()),
-    onStuck: () => reportInstallStuck(version),
+    // ⚠ AND IT DISARMS. `quitAndInstall` can return WITHOUT quitting on macOS
+    // (electron-updater's MacUpdater, `squirrelDownloadedUpdate === false`),
+    // and the arm below was made for THIS quit. Left standing it would ride the
+    // next quit instead — a deliberate ⌘Q an hour later, which would then
+    // KICKSTART launchd on a quit nobody asked to install on (adversarial
+    // review, 2026-09-22). Since the owner's 2026-09-22 decision the relaunch
+    // itself is no longer what disarming prevents — an unarmed quit writes it
+    // anyway (`relaunchUnarmedStagedInstall`); the kick is.
+    // The watchdog firing IS the proof this quit never happened,
+    // so it is the honest place to take the arm back.
+    onStuck: () => {
+      armedKickstart = null
+      reportInstallStuck(version)
+    },
     // "We are quitting to install X, running Y." The next boot reads this and,
     // if it wakes up as Y, says the install failed — with the log's tail —
     // instead of re-showing the "downloaded" dialog as if nothing happened.
@@ -2398,7 +2413,7 @@ async function applyUpdateWhenStaged(version) {
       // ShipIt job — which carries no RunAtLoad and is therefore the job launchd
       // can sit on forever (the 2026-09-22 failure). Arm the nudge for will-quit,
       // the first moment that job exists and the last moment we run.
-      armedKickstart = { why: `install of ${version || 'the downloaded update'}`, verifyRelaunch: false }
+      armedKickstart = { why: `install of ${version || 'the downloaded update'}`, verifyRelaunch: false, version }
     },
   }).catch(() => {})
 }
@@ -2409,7 +2424,9 @@ async function applyUpdateWhenStaged(version) {
  *  still staged); only the latter sets `verifyRelaunch`, because only it can go
  *  stale between arming and the quit. Never armed while the app merely runs —
  *  see the shipIt.js header on why a ShipIt parked mid-session is dangerous.
- *  @type {{ why: string, verifyRelaunch: boolean } | null} */
+ *  `version` rides along on the install arm only: at will-quit it is what the
+ *  pending request must be pointing at before we bless it with a relaunch.
+ *  @type {{ why: string, verifyRelaunch: boolean, version?: string } | null} */
 let armedKickstart = null
 
 /** `CFBundleShortVersionString` of an app bundle on disk, or null when it cannot
@@ -2427,6 +2444,13 @@ function bundleVersionAt(appPath) {
   } catch {
     return null
   }
+}
+
+/** Squirrel's request file: `~/Library/Caches/<bundle id>.ShipIt/ShipItState.plist`
+ *  (SQRLDirectoryManager.m). Named here once — the boot check READS it and the
+ *  will-quit relaunch fix WRITES it, and those two must never drift apart. */
+function shipItStatePath() {
+  return path.join(app.getPath('cache'), shipItLabel(shipItAppId()), 'ShipItState.plist')
 }
 
 /**
@@ -2451,8 +2475,7 @@ function bundleVersionAt(appPath) {
  */
 function pendingShipItRequest() {
   try {
-    const statePath = path.join(app.getPath('cache'), shipItLabel(shipItAppId()), 'ShipItState.plist')
-    return parseShipItRequest(require('fs').readFileSync(statePath, 'utf8'))
+    return parseShipItRequest(require('fs').readFileSync(shipItStatePath(), 'utf8'))
   } catch {
     /* absent, unreadable, not JSON, no such key — all the same answer: do nothing */
     return null
@@ -2502,12 +2525,14 @@ function armInstallSelfRepair(verdict) {
  * `will-quit`: the last moment this process runs, and the ONLY one at which
  * kicking ShipIt is both correct and safe.
  *
- * By now `quitAndInstall` (if this is an install) has set
- * `launchAfterInstallation = YES` on the request Squirrel already wrote and
- * submitted at staging time — so the install this kick produces also RELAUNCHES
- * the app, which a pre-flight kick would not (electron/shipIt.js header (b)).
- * And nothing can come between the kick and this process exiting, so ShipIt
- * cannot sit parked over an app the user goes on using.
+ * The request Squirrel wrote and submitted at staging time says
+ * `launchAfterInstallation = NO`, and `quitAndInstall` is the only thing that
+ * ever flips it — when it quits at all. So for an install WE are quitting for
+ * this writes the flag itself (`stateRelaunchForInstall`) rather than assume;
+ * the install this kick produces then also RELAUNCHES the app, which a
+ * pre-flight kick would not (electron/shipIt.js header (b)). And nothing can
+ * come between the kick and this process exiting, so ShipIt cannot sit parked
+ * over an app the user goes on using.
  *
  * ⚠ `app.exit()` bypasses this handler entirely (main.js's fatal-startup exits
  * use it). A crash-exit therefore spends the pair's one recovery ticket without
@@ -2515,11 +2540,118 @@ function armInstallSelfRepair(verdict) {
  * run which dies before quitting cannot hand the same attempt to every launch
  * that follows. Losing one retry beats an unbounded retry loop.
  */
+/**
+ * Tell the installer to reopen the app — by WRITING that into Squirrel's
+ * pending request — for the install THIS quit is performing. Returns whether
+ * the kickstart may go ahead.
+ *
+ * Three refusals, all of them "do not nudge an install we cannot promise to
+ * reopen" (the adversarial review's downgrade + corruption cases):
+ *  • the request points at a DIFFERENT version than the one we quit to install
+ *    — blessing it would relaunch a build the user never chose, possibly older;
+ *  • the file is not a readable ShipIt request — we do not write into something
+ *    we cannot recognise, and there is nothing to kick either;
+ *  • the write failed — Squirrel's own request survives (the write is
+ *    tmp-file + rename, atomic on APFS), so the worst case stays "no install
+ *    now", never "a request ShipIt cannot parse".
+ * @param {string} why
+ * @param {string | undefined} version — the version beforeInstall quit to install
+ * @returns {boolean}
+ */
+function stateRelaunchForInstall(why, version) {
+  // ⚠ COST AT `will-quit`, counted exactly (it runs while the app is exiting):
+  // one bounded `plutil` subprocess (stagedShipItVersion → bundleVersionAt, 2 s
+  // timeout) plus FOUR synchronous filesystem operations — the staged bundle's
+  // Info.plist read, the request read, the tmp write, the rename. Worst case is
+  // therefore the plutil timeout plus four small local I/Os, ≈2 s, inside the
+  // install watchdog's 90 s and far under macOS's quit grace.
+  //
+  // The version gate is deliberately one-sided: it only STOPS a write when both
+  // versions are known AND differ. An unknown version (a download that never
+  // reported one) or an unreadable staged bundle (plutil failed) lets the write
+  // through, because the alternative — standing down whenever we are unsure —
+  // would disable the fix on exactly the machines where reading things fails.
+  // The downgrade case it exists for is a KNOWN mismatch, and that it still
+  // catches.
+  //
+  // Read LAZILY: the unarmed-quit caller passes no version (it has nothing to
+  // compare against) and has already established that the staged bundle reads,
+  // so a second `plutil` there would only spend quit time on a comparison that
+  // cannot happen.
+  const staged = version ? stagedShipItVersion() : null
+  if (version && staged && staged !== version) {
+    ulog.warn(`ShipIt kickstart skipped (${why}): the pending request installs ${staged}, not ${version}`)
+    return false
+  }
+  // The read/write pair is the one in electron/shipIt.js (tmp + rename, and it
+  // cleans its tmp file up), so the production closure is the same object the
+  // unit tests and scripts/probe-shipit-relaunch.mts exercise.
+  const outcome = ensureRelaunchAfterInstall(shipItRequestIO(shipItStatePath()))
+  const line = `relaunch after install (${why}): ${outcome}`
+  if (outcome === 'set' || outcome === 'already-set') {
+    ulog.info(line)
+    return true
+  }
+  ulog.warn(`${line} — this install would not reopen the app`)
+  return false
+}
+
+/**
+ * An ordinary quit — ⌘Q, the menu, a logout — with an update already staged.
+ * Squirrel installs it on termination anyway, and the request it wrote at stage
+ * time says `launchAfterInstallation = NO`, so the app is swapped and stays
+ * closed. **Owner decision, 2026-09-22: it should come back up.** (Until then
+ * this was deliberately left alone, on the opposite reading — "the user closed
+ * the app, so it stays closed".)
+ *
+ * ⚠ This writes the relaunch instruction and NOTHING ELSE. The kickstart stays
+ * behind the arm gate below: an unarmed quit must still never poke launchd.
+ *
+ * "Is there an install for this quit to reopen at all?" — three conditions:
+ *  • `stagedShipItVersion()` reads — the pending request parses AND the bundle
+ *    it points at is a readable app bundle carrying a version;
+ *  • that version is NOT the one we are running. This is the LITTER GATE, and
+ *    it is the reason a bare truthiness check is wrong: the request AND the
+ *    `update.*` bundle both SURVIVE a successful install (see
+ *    `pendingShipItRequest` above), so on any Mac that has ever updated, the
+ *    steady state is a readable staged bundle of the version already installed.
+ *    Measured on the owner's machine, 2026-09-22: `ShipItState.plist` holds
+ *    `launchAfterInstallation:false` for a staged 0.11.121 while /Applications
+ *    and the running process are also 0.11.121 — leftovers, nothing pending.
+ *    Writing YES there would happen on every single quit from then on;
+ *  • `targetBundleURL` is present — checked inside `ensureRelaunchAfterInstall`,
+ *    because the flag means "reopen the target" and a missing one is a relaunch
+ *    with no subject.
+ * Any of them unanswerable ⇒ write nothing, i.e. exactly the behaviour before
+ * this change.
+ *
+ * ⚠ CEILING of the litter gate: it cannot tell leftovers apart from a staged
+ * REINSTALL of the running version. That request would be skipped, and the
+ * install (if one happens) would not reopen the app. Accepted: same-version
+ * re-staging is not a shape this updater produces, and the alternative is
+ * writing into litter on every quit forever.
+ *
+ * And no new write path: this routes through the same
+ * `stateRelaunchForInstall` the armed install uses, so that one reviewed write
+ * site still covers it.
+ */
+function relaunchUnarmedStagedInstall() {
+  if (process.platform !== 'darwin' || !app.isPackaged) return
+  const staged = stagedShipItVersion()
+  // Unreadable, or the version we are already running ⇒ leftovers from a past
+  // install, not something this quit is about to apply. Write nothing.
+  if (!staged || staged === app.getVersion()) return
+  stateRelaunchForInstall(`update applying on an ordinary quit (staged ${staged})`, undefined)
+}
+
 function kickstartShipItBeforeExit() {
-  // THE arm gate: an ordinary ⌘Q must never touch the installer. Removing this
-  // line means every quit kickstarts ShipIt — autoUpdate.test.ts pins it.
-  if (!armedKickstart) return
-  const { why, verifyRelaunch } = armedKickstart
+  // THE arm gate: an ordinary ⌘Q must never KICKSTART the installer. Removing
+  // this line means every quit pokes launchd — autoUpdate.test.ts pins it. An
+  // update Squirrel applies on that quit by itself still gets its relaunch
+  // instruction (owner decision, 2026-09-22) — that, and only that, is what
+  // the call below does.
+  if (!armedKickstart) return relaunchUnarmedStagedInstall()
+  const { why, verifyRelaunch, version } = armedKickstart
   armedKickstart = null // one shot, whatever happens below
   if (
     !decideArmedRecoveryAtQuit({
@@ -2532,14 +2664,35 @@ function kickstartShipItBeforeExit() {
     ulog.warn(`ShipIt kickstart skipped (${why}): the app on disk is no longer the version this process is running`)
     return
   }
-  // SELF-REPAIR ONLY. The request was armed at boot, and a download that landed
-  // since then rewrote it with `launchAfterInstallation` back to NO
+  // SELF-REPAIR: VERIFY. The request was armed at boot, and a download that
+  // landed since then rewrote it with `launchAfterInstallation` back to NO
   // (-prepareUpdateForInstallation:). Kicking now would install and NOT reopen
   // the app — while the dialog that sent the user here promised it would. Let
-  // the ordinary "Restart now" flow handle that newer update instead; it sets
-  // the flag itself. NOT applied to an install we are actively quitting for:
-  // quitAndInstall has just set the flag, so a failed read there would only
-  // disable the fix this whole card exists to deliver.
+  // the ordinary "Restart now" flow handle that newer update instead; it comes
+  // through the branch below.
+  //
+  // AN INSTALL WE ARE QUITTING FOR: WRITE IT. This used to ASSUME
+  // `quitAndInstall` had just flipped the flag to YES. Assuming is the wrong
+  // shape: `quitAndInstall` can return without quitting at all on macOS
+  // (MacUpdater.js:236-252), and only a write makes the promise this quit made
+  // to the user ("restarting to install") true no matter how it got here.
+  //
+  // ⚠ SCOPE, stated because it is narrower than it looks — and because the
+  // owner's 2026-09-22 install is NOT evidence for this path. The only thing
+  // measured about that one is a negative: no `quitting to install 0.11.120`
+  // line, and only `beforeInstall` writes that line, so nothing armed it. Nor
+  // does the unarmed-quit path reach it: the same process's `auto-apply
+  // deferred (unfocused Nmin)` counter rises monotonically straight THROUGH the
+  // install (4 → 29 min), so that process never quit at all. What
+  // DID apply it is unexplained (the app neither quit nor started in that
+  // window, yet ShipIt completed an install) and is a separate card. What this
+  // fixes is the armed case — "Restart now" and the hands-free auto-apply,
+  // where the app promised to come back.
+  //
+  // An update that lands on an UNARMED quit is handled before this point, at
+  // the arm gate (`relaunchUnarmedStagedInstall`) — owner decision 2026-09-22:
+  // it reopens the app too. What stays behind the arm gate is the KICK, not the
+  // relaunch instruction. See electron/shipIt.js and docs/DISTRIBUTION.md.
   if (verifyRelaunch) {
     const request = pendingShipItRequest()
     if (!request || !request.relaunchesAfterInstall) {
@@ -2549,6 +2702,8 @@ function kickstartShipItBeforeExit() {
       )
       return
     }
+  } else if (!stateRelaunchForInstall(why, version)) {
+    return
   }
   kickstartShipItSync(why)
 }
