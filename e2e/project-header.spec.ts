@@ -72,6 +72,8 @@ for (const width of [1600, 1280, 390, 320]) {
     const iframeBox = (await page.locator('iframe[title="Songs"]').boundingBox())!
     expect(iframeBox.y).toBe(box.y + box.height)
     expect(iframeBox.height).toBeGreaterThanOrEqual(height - 50)
+    expect(iframeBox.width).toBeGreaterThanOrEqual(width - 2)
+    await expect(page.getByTitle('Open Terminal', { exact: true })).toHaveCount(0)
     for (const label of ['Back to Ground', 'Project details', 'Claude usage', 'More actions']) {
       await expectInsideViewport(header.getByRole('button', { name: label, exact: true }), width, 48)
     }

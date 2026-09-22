@@ -933,11 +933,6 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     why: 'The supply desk tile, and the supply desk is deliberately PTY-only (see swarmSupply.ts).',
     ptyFns: [],
   },
-  'src/components/canvas/modules/CustomModuleView.tsx': {
-    tier: 'pty-only-by-design',
-    why: 'A user-installed custom tab may host a terminal pane; it is given a PTY id and nothing else. Custom tabs cannot spawn SDK sessions.',
-    ptyFns: [],
-  },
 
   // ── declared holes ──
   'src/lib/server/ownerDeskLimit.ts': {
@@ -1618,11 +1613,6 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
     tier: 'pty-only-by-design',
     count: 2,
     why: 'The node-pty pool indexing ITS OWN sessions map. The id is the handle it minted; an SDK session is not in this map and never will be.',
-  },
-  'src/components/canvas/modules/CustomModuleView.tsx::interpolated': {
-    tier: 'pty-only-by-design',
-    count: 1,
-    why: 'Builds the /api/terminal/:id/paste-custom-module URL for a custom tab, which is a PTY terminal pane by construction — there is no SDK equivalent of a custom module desk.',
   },
   'src/components/canvas/modules/BoardSupplyDock.tsx::map-keyed': {
     tier: 'pty-only-by-design',

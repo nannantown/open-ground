@@ -1031,16 +1031,12 @@ const OwnedProjectBody = ({
     const first = tabOrder[0] ?? 'board'
     setView(first)
   }, [project?.path, project?.id, data, customModulesLoaded, tabOrder, accessLoaded, ownerFeatures])
-  // Custom-tab management is an app-owner surface. The post-create setup records the
-  // freshly created module's id, which makes its CustomModuleView auto-open
-  // the sidebar, launch claude and paste the brush-up prompt (unsent).
-  // Consumed once.
+  // Custom-tab management is an app-owner surface; creation opens the preview only.
   const [pickerOpen, setPickerOpen] = useState(false)
   useEffect(() => {
     if (!ownerFeatures) setPickerOpen(false)
   }, [ownerFeatures])
   const [customCreateOpen, setCustomCreateOpen] = useState(false)
-  const [customSetupId, setCustomSetupId] = useState<string | null>(null)
   // Attach a library module to THIS project (ProjectData.customTabs — the
   // same persist path tabOrder rides) and land on its tab. Reads through
   // dataRef so the async create/install flows can't persist a stale draft.
@@ -1058,9 +1054,8 @@ const OwnedProjectBody = ({
       setCustomCreateOpen(false)
       await refreshCustomModules()
       // Auto-attach to the CURRENT project — creation alone surfaces nothing
-      // (per-project attachment), and the setup flow needs the tab visible.
+      // (per-project attachment).
       attachTabToProject(def.id)
-      setCustomSetupId(def.id)
     },
     [refreshCustomModules, attachTabToProject],
   )
@@ -2529,9 +2524,6 @@ const OwnedProjectBody = ({
             key={activeCustomModule.id}
             module={activeCustomModule}
             projectPath={project.path}
-            role={customRole}
-            setup={customSetupId === activeCustomModule.id}
-            onSetupConsumed={() => setCustomSetupId(null)}
           />
         ) : (
           // List still loading (or the module vanished — the fallback effect

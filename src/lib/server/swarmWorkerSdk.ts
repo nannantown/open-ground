@@ -31,7 +31,7 @@ import { buildOrderInjection, WORKER_RESUME_INJECTION } from './swarmWorker'
 import { resolveCardTier } from '../cardTier'
 import { swarmLaunchDefaults } from './swarmLaunch'
 import { languageDirective, type PromptLang } from './promptLang'
-import type { ClaudeEffort, TaskTier } from '../types'
+import type { ClaudeEffort, TaskTier, WorkerTrialFlags } from '../types'
 
 /** The oldest CLI whose stream-json contract this integration was measured
  *  against (2026-07-30). Older CLIs are refused rather than driven on
@@ -176,6 +176,10 @@ export interface SdkWorkerOptsInput {
    *  an absent tier still resolves (to the estimate), so every SDK worker gets a
    *  directive; the model/effort in `me` were already resolved from the same. */
   tier?: TaskTier
+  /** Off-by-default worker-directive trials (Settings.workerTrials), read by the
+   *  caller at the spawn site. Absent / all-off ⇒ the /order text is
+   *  byte-identical to the pre-trial text (docs/trending/TRIALS.md §Trial 4). */
+  trials?: WorkerTrialFlags
   /** Continue the recorded conversation instead of starting a fresh one. */
   resume?: boolean
   /** Mode-resolved model/effort. REQUIRED since 2026-09-16 — the old optional
@@ -269,6 +273,7 @@ export const sdkWorkerLaunchPlan = (opts: SdkWorkerOptsInput): SdkWorkerLaunchPl
           // The EFFECTIVE tier — the same resolution that picked `me` (floor
           // applied), so the policy the worker is told matches the model it got.
           resolveCardTier({ title: opts.title, notes: opts.notes, tier: opts.tier }),
+          opts.trials,
         ),
     warnings,
   }

@@ -1,26 +1,28 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import type {
   CustomModuleDef,
   CustomModuleSourceResponse,
-  CustomTabRole,
 } from '@/lib/types'
 import { buildScreenSrcdoc } from '@/lib/screenSrcdoc'
 import { useClientLockdown } from '@/lib/lockdownClient'
-import { TerminalDock } from '@/components/canvas/EmbeddedClaudeTerminal'
+import { localAppUrl } from '@/lib/localAppFrame'
 import {
   attachFrameAnchor,
   detachFrameAnchor,
   setFrameSource,
   useCustomFrames,
+  getCustomFramesSnapshot,
 } from '@/components/canvas/modules/CustomFrameHost'
 
 // Renders a custom tab (docs/CUSTOM_TABS_PLAN.md): the module's source.tsx /
 // source.html runs inside the SAME sandboxed-iframe pipeline a Canvas screen
 // uses (buildScreenSrcdoc — Babel transpile, design tokens, lucide shim,
 // sandbox="allow-scripts" so the component can't reach the host page). While
-// visible we poll the source's mtime and rebuild the srcDoc on change — that's
-// the hot-reload loop the dock's claude session drives by saving source.tsx.
+// visible we poll the source's mtime and rebuild srcDoc when it changes.
+// Editing happens outside the tab preview.
+// The explicit NENE capability instead loads a fixed cross-origin document;
+// an opaque srcDoc cannot request microphone permission (see localAppFrame).
 //
 // The iframe itself is NOT rendered here: it lives in CustomFrameHost (mounted
 // once at App level) and is drawn over the anchor div this view provides, so a
@@ -30,72 +32,31 @@ import {
 // runs ONLY while the tab is visible: a hidden keep-alive frame keeps its last
 // srcDoc untouched (a rebuild would reload the iframe and cut the audio).
 //
-// Editing lives in the right-edge TerminalDock — the collapsed rail expands
-// into tabbed claude PTYs. (Canvas and Board mounted the same dock until
-// 2026-08-15; this is now its only mount.) Its sessions are
-// cwd'd at the MODULE dir (server-resolved from the moduleId, so the
-// validateProjectPath boundary stays untouched) and they auto-spawn: the dock's
-// whole point here is "claude inside this tab". Distribution controls are gone;
-// local editing and the sandboxed preview remain.
+// The preview owns the full tab width. No side terminal mounts or auto-spawns,
+// including when an older version saved an open dock in localStorage.
 
 const POLL_MS = 1500
 
-// claude reads bracketed-paste only once its line editor is up; pasting in the
-// same tick as a fresh spawn can land in the boot noise. Same reasoning as the
-// Board flow, where a human click naturally provides this gap.
-const PASTE_AFTER_LAUNCH_MS = 1500
-
-/** localStorage identity for a module's dock + PTY bindings — the module is
- *  global, so the same dock follows it across projects. ProjectPanel's delete
- *  flow tears this namespace down via killEmbeddedTerminals. */
+/** Legacy identity retained only for explicit module-deletion cleanup. */
 export const customModuleStorageId = (moduleId: string) =>
   `custom-module:${moduleId}`
 
 export const CustomModuleView = ({
   module,
   projectPath,
-  role,
-  setup,
-  onSetupConsumed,
 }: {
   module: CustomModuleDef
   /** The project whose tab row hosts this view — stamped onto the hosted
    *  frame so letting go of the project (delete / remove / bulk) can tear
    *  down exactly the frames it owns (destroyFramesForProject). */
   projectPath: string
-  role: CustomTabRole
-  /** True right after this module was created: open the dock, spawn claude
-   *  and paste the brush-up prompt (unsent). Consumed once. */
-  setup?: boolean
-  onSetupConsumed?: () => void
 }) => {
   const { t } = useT()
-  const canAuthor = role !== 'none'
   const [src, setSrc] = useState<CustomModuleSourceResponse | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
-  const onSetupConsumedRef = useRef(onSetupConsumed)
-  onSetupConsumedRef.current = onSetupConsumed
   // Live mirror for the poll's failure branch (an updater must stay pure).
   const srcRef = useRef(src)
   srcRef.current = src
-  // The create flow's one-shot brush-up paste: armed while `setup`, fired by
-  // the dock's first ACTUAL spawn, then never again (a ref so StrictMode's
-  // doubled effects and re-renders can't re-arm it).
-  const pastePendingRef = useRef(canAuthor && !!setup)
-  const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // Tell the parent the one-shot setup flag was adopted, so a later remount
-  // of this tab opens plain.
-  useEffect(() => {
-    if (setup) onSetupConsumedRef.current?.()
-    // Consume exactly once, on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-  useEffect(
-    () => () => {
-      if (pasteTimerRef.current) clearTimeout(pasteTimerRef.current)
-    },
-    [],
-  )
 
   // Source fetch + hot-reload poll: while the tab is visible, re-read every
   // POLL_MS (skipping hidden windows) and adopt the body only when mtimeMs
@@ -138,6 +99,23 @@ export const CustomModuleView = ({
   // Work mode: a custom tab is exactly the third-party-code surface lockdown
   // must contain — swap in the explicit placeholder while it is on.
   const lockdown = useClientLockdown()
+  const localUrl = lockdown ? null : localAppUrl(module, window.location.origin)
+  const [localReady, setLocalReady] = useState(() => !!getCustomFramesSnapshot().get(module.id)?.localAppUrl)
+  // Keep the existing launcher while the local server is down. Once connected,
+  // transient health failures must not replace an active recording document.
+  useEffect(() => {
+    if (!localUrl || localReady) return
+    let cancelled = false
+    const check = async () => {
+      try {
+        const r = await fetch(`${localUrl}songs-data.js`, { method: 'HEAD', signal: AbortSignal.timeout(3000) })
+        if (!cancelled && r.ok) setLocalReady(true)
+      } catch { /* The sandboxed launcher remains available. */ }
+    }
+    void check()
+    const timer = window.setInterval(() => void check(), 3000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [localUrl, localReady])
   const srcDoc = useMemo(
     () =>
       src === null
@@ -163,57 +141,13 @@ export const CustomModuleView = ({
   // no-ops in the store, so re-opening an unchanged tab never reloads the
   // iframe — only an actual source edit does.
   useEffect(() => {
-    if (srcDoc !== null) setFrameSource(module.id, srcDoc, module.label)
-  }, [srcDoc, module.id, module.label])
+    if (srcDoc !== null) setFrameSource(module.id, srcDoc, module.label, localReady ? localUrl : null)
+  }, [srcDoc, module.id, module.label, localUrl, localReady])
 
   // Whether the hosted frame is already rendering content — if so, skip the
   // loading placeholder entirely (e.g. re-entering a tab that kept playing).
   const hostedFrames = useCustomFrames()
   const frameLive = hostedFrames.get(module.id)?.srcDoc != null
-
-  // Spawner the dock uses instead of claude-in-project: the server resolves
-  // the cwd from the moduleId (POST /api/terminal/custom-module) — no path
-  // ever leaves the client.
-  const launchModuleTerminal = useCallback(async (): Promise<string> => {
-    const r = await fetch('/api/terminal/custom-module', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ moduleId: module.id }),
-    })
-    if (!r.ok) {
-      const body = (await r.json().catch(() => ({}))) as {
-        claudeMissing?: boolean
-        error?: string
-      }
-      throw new Error(
-        body.claudeMissing
-          ? t('customTabs.claudeNotFound')
-          : body.error || t('customTabs.launchFailed'),
-      )
-    }
-    const info = (await r.json()) as { id?: string }
-    if (!info?.id) throw new Error(t('customTabs.launchFailed'))
-    return info.id
-  }, [module.id, t])
-
-  // First create only: once the dock's spawn lands, inject the brush-up
-  // prompt UNSENT (bracketed paste — the user reviews and presses Enter).
-  const onDockLaunched = useCallback(
-    (terminalId: string) => {
-      if (!pastePendingRef.current) return
-      pastePendingRef.current = false
-      pasteTimerRef.current = setTimeout(() => {
-        void fetch(`/api/terminal/${terminalId}/paste-custom-module`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ moduleId: module.id }),
-        }).catch(() => {
-          // Paste is a convenience — the user can always type; stay quiet.
-        })
-      }, PASTE_AFTER_LAUNCH_MS)
-    },
-    [module.id],
-  )
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -232,19 +166,6 @@ export const CustomModuleView = ({
           </div>
         </div>
       </div>
-      {canAuthor && (
-        <TerminalDock
-          key={`dock-custom-${module.id}`}
-          projectPath=""
-          storageId={customModuleStorageId(module.id)}
-          context="custom"
-          hint={t('customTabs.sidebarHint')}
-          launchOverride={launchModuleTerminal}
-          autoLaunch
-          onLaunched={onDockLaunched}
-          initialOpen={!!setup}
-        />
-      )}
     </div>
   )
 }

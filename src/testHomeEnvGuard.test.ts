@@ -856,6 +856,32 @@ describe('repo guard — source sweep for repo-root writes (best-effort; see sco
   // green.
   const ANCHOR_SEEDS = /REPO_ROOT|repoRoot|process\.cwd\(\)|import\.meta\.url|__dirname/
 
+  // ── deliberate GENERATORS, which are not tests ──────────────────────────────
+  //
+  // The sweep's subject is a TEST that dirties the working tree. A doc generator
+  // is the opposite case: writing TRACKED files into the repo is its entire job,
+  // and regenerating shows up as a DIFF, never as untracked residue. It still has
+  // to be declared here rather than waved through, because the sweep reads source
+  // and cannot tell the two apart — `scripts/trending-intake.ts` matched on
+  // `import.meta.url` in ANCHOR_SEEDS, which is correct detection of the wrong
+  // subject.
+  //
+  // Declared as a COUNT, like the home-var sweep's "sanctioned for N site(s)"
+  // above, so the exemption covers exactly the writes reviewed and a NEW write in
+  // the same file is still red. Drift in either direction fails: a site added
+  // without review, and a rename that leaves a stale key policing nothing.
+  const GENERATOR_SITES: Record<string, number> = {
+    // mkdirSync(outDir) + writeFileSync(INDEX.md) + writeFileSync(DETAILS.md),
+    // all inside the `isMain` branch — importing the module (as
+    // server/__tests__/trendingIntake.test.ts does) writes nothing.
+    'scripts/trending-intake.ts': 3,
+    // mkdirSync(outDir) + writeFileSync(signals.json), inside `main()`, which
+    // only `isMain` calls — trendingCostScan.test.ts imports the classifier and
+    // writes nothing. This entry was added because the sweep caught the file
+    // undeclared on its first full run, which is the behaviour being kept.
+    'scripts/trending-cost-scan.ts': 2,
+  }
+
   it('the probe prefix itself is covered by .gitignore', () => {
     // The rule below ("route through REPO_PROBE_PREFIX") is only worth enforcing
     // while that prefix is actually ignored — otherwise it standardises the leak.
@@ -1040,8 +1066,19 @@ describe('repo guard — source sweep for repo-root writes (best-effort; see sco
 
     const offenders: string[] = []
     let sanctionedSites = 0
+    // A declared generator whose file vanished would be checked by nothing, so
+    // pin the keys against the enumeration before using them (same reasoning as
+    // the SWEPT_DIRS existence precheck).
+    const staleKeys = Object.keys(GENERATOR_SITES).filter((k) => !files.includes(k))
+    expect(
+      staleKeys,
+      `GENERATOR_SITES names ${staleKeys.join(', ')}, which the sweep does not enumerate ` +
+        `(renamed? moved out of SWEPT_DIRS?). A stale key is an exemption that polices nothing.`,
+    ).toEqual([])
     for (const rel of files) {
       const original = readFileSync(join(repoRoot, rel), 'utf8')
+      // Per-file, so a declared generator can be reconciled against its count.
+      const hits: string[] = []
       const lines = original.split('\n')
       // Everything below reads the MASKED text — same offsets, no prose, no
       // string data — and reports out of `lines`, the real thing.
@@ -1083,11 +1120,22 @@ describe('repo guard — source sweep for repo-root writes (best-effort; see sco
             sanctionedSites++
             continue
           }
-          offenders.push(`${rel}:${lineNo} — ${t}`)
+          hits.push(`${rel}:${lineNo} — ${t}`)
         }
       }
       for (const fn of CREATE_FNS) scan(fn, 0)
       for (const fn of CREATE_FNS_2ND) scan(fn, 1)
+      const allowed = GENERATOR_SITES[rel]
+      if (allowed === undefined) {
+        offenders.push(...hits)
+        continue
+      }
+      if (hits.length !== allowed) {
+        offenders.push(
+          `${rel} — declared generator, sanctioned for ${allowed} write site(s), found ` +
+            `${hits.length}. Review the new site (or fix the count):\n  ${hits.join('\n  ')}`,
+        )
+      }
     }
 
     expect(

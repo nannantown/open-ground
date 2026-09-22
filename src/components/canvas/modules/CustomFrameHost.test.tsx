@@ -68,6 +68,36 @@ const playingMsg = (playing: boolean) => ({
 })
 
 describe('CustomFrameHost keep-alive', () => {
+  it('grants microphone only to the fixed local app and revokes it on fallback', () => {
+    const { container } = render(<CustomFrameHost />)
+    act(() => {
+      attachFrameAnchor(MODULE_ID, anchor, 'Songs', PROJ)
+      setFrameSource(MODULE_ID, '<html>launcher</html>', 'Songs', 'http://127.0.0.1:8899/')
+    })
+    const iframe = container.querySelector('iframe')!
+    expect(iframe.getAttribute('src')).toBe('http://127.0.0.1:8899/')
+    expect(iframe.getAttribute('srcdoc')).toBeNull()
+    expect(iframe.getAttribute('allow')).toContain('microphone http://127.0.0.1:8899')
+    expect(iframe.getAttribute('sandbox')).toContain('allow-same-origin')
+    act(() => setFrameSource(MODULE_ID, '<html>restricted</html>', 'Songs'))
+    expect(iframe.getAttribute('src')).toBeNull()
+    expect(iframe.getAttribute('allow')).toBeNull()
+    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts')
+    expect(iframe.getAttribute('srcdoc')).toBe('<html>restricted</html>')
+  })
+
+  it.each(['https://example.com/', 'http://localhost:8899/', 'http://127.0.0.1:8899/other', 'http://127.0.0.1:8899.evil/'])('never grants local permissions to %s', url => {
+    const { container } = render(<CustomFrameHost />)
+    act(() => {
+      attachFrameAnchor(MODULE_ID, anchor, 'Custom', PROJ)
+      setFrameSource(MODULE_ID, '<html>custom</html>', 'Custom', url)
+    })
+    const iframe = container.querySelector('iframe')!
+    expect(iframe.getAttribute('src')).toBeNull()
+    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts')
+    expect(iframe.getAttribute('allow')).toBeNull()
+  })
+
   it('stops background playback when owner surfaces close and does not resurrect it', () => {
     const { container, rerender } = render(<CustomFrameHost enabled />)
     act(() => {

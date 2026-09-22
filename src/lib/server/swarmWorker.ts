@@ -38,14 +38,19 @@ import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { ensureGuardWiring } from './hooksInstall'
 import { createSwarmFatalNotification } from './swarmNotifications'
 import { snapshotWorktreeBranch, fireSelfUpdateIfIntegrated } from './selfUpdateOnIntegrate'
-import { getExecutionMode, getAllowedModelTiers } from './store'
+import { getExecutionMode, getAllowedModelTiers, getWorkerTrials } from './store'
 import { sdkWorkerLaunchPlan, sdkWorkerPreflight, SdkWorkerUnavailableError } from './swarmWorkerSdk'
 import { spawnSdkSession, preloadSdk } from './sdkSession'
 import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
 import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
 import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
 import { researchWorkerEnv } from './researchAuth'
-import type { RemoveSwarmWorktreeResponse, SpawnSwarmWorkerResponse, TaskTier } from '../types'
+import type {
+  RemoveSwarmWorktreeResponse,
+  SpawnSwarmWorkerResponse,
+  TaskTier,
+  WorkerTrialFlags,
+} from '../types'
 
 const execFile = promisify(execFileCb)
 
@@ -261,6 +266,51 @@ export const TIER_DIRECTIVE: Readonly<Record<TaskTier, string>> = {
     '【難易度: ultra】/order の全機能(フェーズごとのチーム編成・敵対レビューの多数決・ループ)を使ってよい。完了ゲート・ready 前コミット・心拍は省略しない。',
 }
 
+// ── worker-directive TRIALS (docs/trending/TRIALS.md §Trial 4) ───────────────
+//
+// Two ideas taken from the 2026-09 GitHub-Trending intake, each as ONE clause,
+// each behind an off-by-default Settings flag (Settings.workerTrials):
+//
+//   brevity     — JuliusBrussee/caveman (MIT skill; the IDEA only, no code).
+//                 Its cited measurements say quality holds (JetBrains, 86 tasks;
+//                 an Adobe paper, 1.4-2.4x cost). mksglu/context-mode cites the
+//                 OPPOSITE (benchmark degradation from aggressive brevity), which
+//                 is exactly why this one is a flag and not a rewrite, and why it
+//                 is withheld from design/ultra where review depth is the point.
+//   thinkInCode — mksglu/context-mode's "think in code" (Elastic-2.0; the IDEA
+//                 only). Changes how a worker GATHERS, not how it writes, so it
+//                 carries none of brevity's quality risk.
+//
+// The revert path is the flag: with both off, `buildOrderInjection` returns text
+// byte-identical to the pre-trial text. That property is pinned by a test — it is
+// what makes "put it back" a switch rather than a code change.
+//
+// ⚠ Neither clause may touch the non-negotiables. The completion gate, commit-
+// before-ready, heartbeats, the push ban and the plain-language obligation for
+// questions live in WORKER_ORDER_RULES, and both clauses below re-state the
+// exemptions rather than relying on ordering.
+export const WORKER_TRIAL_DIRECTIVE: Readonly<Record<keyof WorkerTrialFlags, string>> = {
+  brevity:
+    '【試行: 説明は短く】報告と説明の文章は短くする(前置き・謝辞・言い換えを書かない)。ただし短くしてよいのは説明文だけで、コード・コマンド・パス・エラー全文・差分は一字も縮めない。危険な操作の確認とオーナーへの質問は平易な普通の文で書く。判断の理由は削らない。',
+  thinkInCode:
+    '【試行: 読むより数える】多数のファイルを調べるときは Read を並べず、1つのコマンド(grep / rg / node -e など)で必要な行だけを出力し、その出力だけを読む。ファイル全体を読むのは、実際に書き換える対象に絞る。',
+}
+
+/** The enabled trial clauses for this dispatch, in a FIXED order, or '' when
+ *  none is on. `brevity` is withheld from design/ultra on purpose (see above),
+ *  so the tier is required to resolve it. Pure. */
+export const trialDirectives = (
+  trials: WorkerTrialFlags | undefined,
+  tier: TaskTier | undefined,
+): string => {
+  if (!trials) return ''
+  const out: string[] = []
+  const brevityAllowed = tier === 'touch' || tier === 'standard'
+  if (trials.brevity && brevityAllowed) out.push(WORKER_TRIAL_DIRECTIVE.brevity)
+  if (trials.thinkInCode) out.push(WORKER_TRIAL_DIRECTIVE.thinkInCode)
+  return out.map((d) => ` ${d}`).join('')
+}
+
 /** The directive clause for `tier`, or '' when the dispatch carries no tier
  *  (an older caller / a fixture) — so the injection is byte-for-byte unchanged
  *  for them, and a tier the table does not know is a type error, never a
@@ -277,6 +327,10 @@ export const buildOrderInjection = (
    *  selects the work policy above. Optional so older callers keep their exact
    *  output; the SDK launch builder always passes it (2026-09-22). */
   tier?: TaskTier,
+  /** Off-by-default trial flags (Settings.workerTrials). Absent / all-off ⇒ the
+   *  returned text is byte-identical to the pre-trial text, which is the revert
+   *  path (docs/trending/TRIALS.md §Trial 4). */
+  trials?: WorkerTrialFlags,
 ): string => {
   const t = flattenOneLine(title || '')
   const n = flattenOneLine(notes || '')
@@ -285,7 +339,15 @@ export const buildOrderInjection = (
   const learn = pf
     ? ` 【前回の差し戻し理由・同じ失敗を繰り返さないこと】${pf}`
     : ''
-  return ORDER_PREFIX + goal + learn + tierDirective(tier) + WORKER_ORDER_RULES + languageDirective(lang)
+  return (
+    ORDER_PREFIX +
+    goal +
+    learn +
+    tierDirective(tier) +
+    trialDirectives(trials, tier) +
+    WORKER_ORDER_RULES +
+    languageDirective(lang)
+  )
 }
 
 // NOTE on delivery: the /order goal is handed to claude as its POSITIONAL
@@ -898,6 +960,10 @@ export const spawnSwarmWorker = async (
     priorFailure: opts.priorFailure,
     // The stored tier; the plan resolves the effective one for the directive.
     tier: opts.tier,
+    // Off-by-default trial flags (docs/trending/TRIALS.md §Trial 4). Read here,
+    // at the one spawn site, so a trial is turned on and off from Settings
+    // without a release — and so all-off produces byte-identical order text.
+    trials: await getWorkerTrials(),
     resume: !!opts.resumeSessionId,
     me,
     claudeBin: pre.claudeBin,

@@ -9,7 +9,15 @@ import {
   setAllowedModelTiersCache,
 } from './swarmAllowedModels'
 import { setLockdownCache } from './lockdown'
-import type { Settings, CanvasState, ExecutionMode, SwarmAllowedModels, SwarmPaneId, WordPressSettings } from '../types'
+import type {
+  Settings,
+  CanvasState,
+  ExecutionMode,
+  SwarmAllowedModels,
+  SwarmPaneId,
+  WordPressSettings,
+  WorkerTrialFlags,
+} from '../types'
 import { SWARM_PANE_IDS, DEFAULT_DESK_CONTEXT_CAP_TOKENS } from '../types'
 
 const DEFAULT_SETTINGS: Settings = {
@@ -322,6 +330,10 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   // key silently dropped here — the required back-compat — and a stale key in
   // an existing settings.json is simply never read (readJson is tolerant).
   'lockdownMode',
+  // The worker-directive TRIAL flags (docs/trending/TRIALS.md §Trial 4).
+  // Request-settable so the owner can turn a trial on and off without a release;
+  // narrowed to real booleans below, and every flag is OFF unless present.
+  'workerTrials',
   // The PUBLIC swarm opt-in (all users). Request-settable BY DESIGN — the swarm
   // gate is feature-visibility, not a security boundary (swarmGate.ts). Narrowed
   // to a literal boolean below; resolved to macOS-only at read time
@@ -428,6 +440,12 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   // read time (isSwarmOptInEnabled), not here, so the stored value stays honest.
   if (Object.prototype.hasOwnProperty.call(safe, 'swarmOptIn')) {
     safe.swarmOptIn = safe.swarmOptIn === true
+  }
+  // Trial flags: REAL booleans, and only the keys we know. A forged truthy
+  // string must not turn a trial on, and an unknown key must not be persisted —
+  // a dead flag in settings.json would otherwise outlive the trial that owned it.
+  if (Object.prototype.hasOwnProperty.call(safe, 'workerTrials')) {
+    safe.workerTrials = normalizeWorkerTrials(safe.workerTrials)
   }
   // Desk context cap: a finite, non-negative number is stored floored (0 = off);
   // anything else is REFUSED — key dropped, previous value survives — so a
@@ -591,6 +609,23 @@ export const isSwarmManualStopPersisted = async (key: string): Promise<boolean> 
 // A hand-corrupted / absent value degrades to the smart default via asExecutionMode.
 export const getExecutionMode = async (): Promise<ExecutionMode> =>
   asExecutionMode((await getSettings()).executionMode)
+
+// ─── Worker-directive trials (Settings.workerTrials) ─────────────────────────
+// docs/trending/TRIALS.md §Trial 4. The ONE reader the SDK worker spawn consults.
+// Absent / hand-corrupted ⇒ every trial off, which is the state in which the
+// worker's /order text is byte-identical to the pre-trial text.
+
+/** Keep only the known keys, as real booleans. Exported for the guard test. */
+export const normalizeWorkerTrials = (v: unknown): WorkerTrialFlags => {
+  const src = v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+  const out: WorkerTrialFlags = {}
+  if (src.brevity === true) out.brevity = true
+  if (src.thinkInCode === true) out.thinkInCode = true
+  return out
+}
+
+export const getWorkerTrials = async (): Promise<WorkerTrialFlags> =>
+  normalizeWorkerTrials((await getSettings()).workerTrials)
 
 // ─── Resident-desk context cap (Settings.deskContextCapTokens) ────────────────
 // The one reader the commander spawn and the supply compaction loop consult.

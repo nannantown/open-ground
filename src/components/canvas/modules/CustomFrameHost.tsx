@@ -8,6 +8,7 @@ import {
   usePlayback,
 } from '@/lib/playback/playbackStore'
 import { PlaybackEq } from '@/components/canvas/PlaybackEq'
+import { NENE_ORIGIN } from '@/lib/localAppFrame'
 
 // ─── Persistent host for custom-tab iframes ─────────────────────────────────
 // A custom tab's sandboxed iframe used to live INSIDE CustomModuleView, so
@@ -45,6 +46,8 @@ export interface HostedCustomFrame {
   /** Built srcDoc (null until CustomModuleView's first source fetch lands —
    *  the host renders nothing for a srcDoc-less frame). */
   srcDoc: string | null
+  /** Only the fixed-origin local integration, never an arbitrary source URL. */
+  localAppUrl?: string | null
   /** The tab body placeholder to draw over; null = keep-alive (hidden). */
   anchor: HTMLElement | null
   /** When this frame went hidden (anchor dropped) — null while visible. Drives
@@ -123,12 +126,14 @@ export const setFrameSource = (
   moduleId: string,
   srcDoc: string,
   label: string,
+  localAppUrl: string | null = null,
 ): void => {
   const cur = frames.get(moduleId)
   if (!cur) return // detached before the fetch landed — nothing to feed
-  if (cur.srcDoc === srcDoc && cur.label === label) return
+  if (localAppUrl !== `${NENE_ORIGIN}/` || window.location.origin === NENE_ORIGIN) localAppUrl = null
+  if (cur.srcDoc === srcDoc && cur.label === label && (cur.localAppUrl ?? null) === localAppUrl) return
   const next = new Map(frames)
-  next.set(moduleId, { ...cur, srcDoc, label })
+  next.set(moduleId, { ...cur, srcDoc, label, localAppUrl })
   frames = next
   notifyFrames()
 }
@@ -271,6 +276,20 @@ const HostedFrame = ({
 
   const visible = anchor !== null && rect !== null && !covered
 
+  useEffect(() => {
+    if (!visible || !frame.localAppUrl) return
+    const forward = (event: KeyboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null
+      if (event.defaultPrevented || event.repeat || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
+      if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"]')) return
+      if (event.code !== 'Space' && event.code !== 'Enter') return
+      event.preventDefault()
+      elRef.current?.contentWindow?.postMessage({ type: 'nene-key', code: event.code }, NENE_ORIGIN)
+    }
+    window.addEventListener('keydown', forward)
+    return () => window.removeEventListener('keydown', forward)
+  }, [visible, frame.localAppUrl])
+
   // Redisplay after keep-alive (hidden → visible): the embedded app's own
   // keydown forwarder (Songs tab's source.tsx) only wires up once ITS window
   // gets a 'focus' event — but going display:none→visible again never fires
@@ -302,10 +321,13 @@ const HostedFrame = ({
         else frameElements.delete(frame.moduleId)
       }}
       title={frame.label}
-      // Same sandbox as before the host existed (and as Canvas screens/mocks):
-      // scripts only, no same-origin — the custom component can't reach us.
-      sandbox="allow-scripts"
-      srcDoc={frame.srcDoc}
+      // Arbitrary custom sources retain an opaque origin. Only the fixed,
+      // cross-origin NENE integration can request microphone permission.
+      sandbox={frame.localAppUrl ? 'allow-scripts allow-same-origin allow-downloads' : 'allow-scripts'}
+      allow={frame.localAppUrl ? 'microphone http://127.0.0.1:8899; autoplay' : undefined}
+      src={frame.localAppUrl ?? undefined}
+      srcDoc={frame.localAppUrl ? undefined : frame.srcDoc}
+      onLoad={() => { if (visible && frame.localAppUrl) elRef.current?.focus() }}
       // z sits between the project panel (40) and app modals (50) — see
       // tailwind.config.ts zIndex scale — so the frame covers the tab body it
       // is anchored to, while panel popups (portaled to body at modal z) and

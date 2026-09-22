@@ -21,7 +21,7 @@ npm run dev:server # Hono API only (:47776, tsx watch)
 npm run build      # vite build → dist-web/  +  esbuild → server/dist/index.cjs
 npm run start      # prod: Hono on :47776 serving dist-web + /api (one origin)
 npm run lint       # eslint . --ext .ts,.tsx
-npm test           # vitest (~7,200 tests / ~420 files)
+npm test           # vitest (~7,300 tests / ~420 files)
 npm run test:e2e   # playwright smoke (builds + boots Hono prod, then hits :47776)
 ```
 

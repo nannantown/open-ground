@@ -1,16 +1,9 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { StrictMode } from 'react'
-import { render, act } from '@testing-library/react'
+import { render, act, screen } from '@testing-library/react'
 
-// StrictMode contract for the custom tab's TerminalDock plumbing
-// (docs/CUSTOM_TABS_PLAN.md Goal #3): dev runs every mount effect
-// setup → cleanup → setup, so the dock's auto-spawn must single-flight the
-// POST (no twin PTYs) and the create flow's brush-up paste must still fire
-// EXACTLY once. Plus the delete-flow teardown (killEmbeddedTerminals): kill
-// every PTY bound under the module's storage identity and drop the dock
-// state, which no later sweep could reach once the module is gone. The
-// xterm-bearing pane is irrelevant here — mocked.
+// Retired side docks must neither render nor revive saved sessions.
 
 vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k }) }))
 vi.mock('@/components/canvas/ClaudeTerminalPane', () => ({
@@ -31,8 +24,7 @@ const MODULE: CustomModuleDef = {
   createdAt: '2026-06-12T00:00:00.000Z',
   updatedAt: '2026-06-12T00:00:00.000Z',
 }
-// Mirrors PASTE_AFTER_LAUNCH_MS in CustomModuleView.tsx (the paste is delayed
-// after a fresh spawn so claude's line editor is up before the bytes land).
+// Cover the retired delayed paste as well as the remaining source poll.
 const PASTE_DELAY_MS = 1500
 
 interface Call {
@@ -84,86 +76,27 @@ const spawns = () =>
 const pastes = () =>
   calls.filter(c => c.url.endsWith('/paste-custom-module') && c.method === 'POST')
 
-describe('custom tab TerminalDock (StrictMode)', () => {
-  it('create flow: dock opens, ONE spawn, ONE delayed unsent paste', async () => {
+describe('custom tabs without side terminals', () => {
+  it.each(['owner', 'tester', 'none'] as const)('does not render or launch a dock for %s, even with saved open state', async role => {
+    const key = `openground.dockterm.${customModuleStorageId(MODULE_ID)}:custom`
+    const saved = JSON.stringify({ open: true, tabs: ['1'], activeId: '1' })
+    localStorage.setItem(key, saved)
     await act(async () => {
+      // Old create-flow props deliberately exercise the retired entry point.
       render(
         <StrictMode>
-          <CustomModuleView
-            module={MODULE}
-            projectPath="/tmp/proj"
-            role="owner"
-            setup
-          />
+          <CustomModuleView module={MODULE} projectPath="/tmp/proj" {...{ role, setup: true }} />
         </StrictMode>,
       )
     })
-    // Doubled mount effects must have joined a single in-flight spawn.
-    expect(spawns()).toHaveLength(1)
-    expect(pastes()).toHaveLength(0)
-    // The brush-up paste lands once, after the post-spawn grace.
-    await act(async () => {
-      vi.advanceTimersByTime(PASTE_DELAY_MS)
-    })
-    expect(pastes()).toHaveLength(1)
-    // …and never again.
-    await act(async () => {
-      vi.advanceTimersByTime(PASTE_DELAY_MS * 2)
-    })
-    expect(pastes()).toHaveLength(1)
-    // The PTY binding landed under the module's storage identity.
-    const stored = Object.keys(localStorage).filter(k =>
-      k.startsWith(`openground.embterm.${customModuleStorageId(MODULE_ID)}:`),
-    )
-    expect(stored).toHaveLength(1)
-  })
-
-  it('plain open (no setup): dock stays collapsed — no spawn, no paste', async () => {
-    await act(async () => {
-      render(
-        <StrictMode>
-          <CustomModuleView module={MODULE} projectPath="/tmp/proj" role="owner" />
-        </StrictMode>,
-      )
-    })
-    await act(async () => {
-      vi.advanceTimersByTime(PASTE_DELAY_MS * 2)
-    })
+    await act(async () => { vi.advanceTimersByTime(PASTE_DELAY_MS * 3) })
+    expect(screen.queryByTitle('projectPanel.dockOpen')).toBeNull()
+    expect(screen.queryByTitle('projectPanel.dockClose')).toBeNull()
     expect(spawns()).toHaveLength(0)
     expect(pastes()).toHaveLength(0)
-  })
-
-  it('role "none": no dock at all — no spawn', async () => {
-    // Authoring opened to testers (P4), but 'none' still only renders the tab
-    // read-only: no dock, no spawn.
-    await act(async () => {
-      render(
-        <StrictMode>
-          <CustomModuleView module={MODULE} projectPath="/tmp/proj" role="none" setup />
-        </StrictMode>,
-      )
-    })
-    await act(async () => {
-      vi.advanceTimersByTime(PASTE_DELAY_MS * 2)
-    })
-    expect(spawns()).toHaveLength(0)
-  })
-
-  it('tester: authoring is open — dock opens, ONE spawn + ONE paste (like owner)', async () => {
-    // A tester builds a tab locally before submitting it for review, so the
-    // sidebar claude dock + brush-up paste fire exactly as for an owner.
-    await act(async () => {
-      render(
-        <StrictMode>
-          <CustomModuleView module={MODULE} projectPath="/tmp/proj" role="tester" setup />
-        </StrictMode>,
-      )
-    })
-    expect(spawns()).toHaveLength(1)
-    await act(async () => {
-      vi.advanceTimersByTime(PASTE_DELAY_MS)
-    })
-    expect(pastes()).toHaveLength(1)
+    expect(calls.filter(c => c.method === 'DELETE')).toHaveLength(0)
+    expect(localStorage.getItem(key)).toBe(saved)
+    expect(calls.some(c => c.url.endsWith('/source'))).toBe(true)
   })
 })
 

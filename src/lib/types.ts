@@ -218,6 +218,12 @@ export interface Settings {
    *  is already ungated locally — swarmGate.ts / docs/SECURITY.md); the
    *  in-app warning discloses subscription cost + permission-bypass claude. */
   swarmOptIn?: boolean
+  /** Off-by-default worker-directive TRIALS (docs/trending/TRIALS.md §Trial 4,
+   *  owner decision 2026-09-22: "try it, measure it, and have a way to put it
+   *  back"). Each flag appends exactly ONE clause to the worker's /order text and
+   *  changes nothing else, so clearing it restores BYTE-IDENTICAL order text —
+   *  that is the revert path, and `swarmWorker.test.ts` pins it. */
+  workerTrials?: WorkerTrialFlags
   /** WordPress publishing target for research reports (blogPublish.ts) — the
    *  owner's own self-hosted WP site. Configuring it IS the opt-in: absent ⇒
    *  the publish sweep does nothing. `appPassword` is a WordPress APPLICATION
@@ -2067,6 +2073,19 @@ export const TASK_PRIORITIES: readonly TaskPriority[] = ['urgent', 'high', 'norm
  *  trips the safety keywords; `ultra` = the only tier that desires the top model
  *  at max effort. What each tier launches on is decided in ONE place
  *  (swarmLaunch.ts TIER_MODEL_EFFORT) — never spelled on the card. */
+/** The worker-directive trials. Keys are stable identifiers: a trial that is
+ *  kept becomes unconditional text and its key is removed; a trial that is
+ *  reverted has its key removed too, so an old settings.json carrying a dead key
+ *  is simply never read. */
+export type WorkerTrialFlags = {
+  /** Terse PROSE from the worker — never terse code, commands, paths, error
+   *  text or escalation questions. touch / standard tiers only: design and ultra
+   *  exist because depth is the point there. */
+  brevity?: boolean
+  /** Gather by scripting one query instead of reading many files. */
+  thinkInCode?: boolean
+}
+
 export type TaskTier = 'touch' | 'standard' | 'design' | 'ultra'
 
 export const TASK_TIERS: readonly TaskTier[] = ['touch', 'standard', 'design', 'ultra']
@@ -3280,6 +3299,9 @@ export interface CustomModuleDef {
   origin: CustomModuleOrigin
   createdAt: string
   updatedAt: string
+  /** Explicit owner opt-in to the bundled, fixed-origin local Songs integration.
+   *  Arbitrary custom source never inherits its media permissions. */
+  localApp?: 'nene-songs'
   /** Legacy distribution metadata, retained for existing local installations. */
   remoteId?: string
   publishedAt?: string

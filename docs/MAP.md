@@ -16,6 +16,9 @@
 ---
 
 ## 0. 契約と骨格 — 全変更の起点
+- Songs/NENE development handoff (2026-09-22): `docs/SONGS-HANDOFF-2026-09-22.md`.
+  Two local repository branches, delivered UI/recording changes, verification,
+  preserved owner data and remaining hardware/packaged-app acceptance checks.
 - Current local handoff/backlog audit (2026-09-21):
   `commander/PRODUCT-HANDOFF-2026-09-21.md`. Records release 0.11.115,
   installed-app/data verification, live Claude acknowledgement and the Board
@@ -143,7 +146,8 @@
   (この機能が7回差し戻された原因・commander/04 §3.7 が正典)
 - route: `server/routes/terminal.ts` / `sse.ts`(出力ストリーム)
 - UI: `src/components/canvas/` の `TerminalPane.tsx`(xterm 描画)/ `ClaudeTerminalPane.tsx` /
-  `EmbeddedClaudeTerminal.tsx` / `TaskTerminal.tsx`
+  `TaskTerminal.tsx`. `EmbeddedClaudeTerminal.tsx` retains legacy binding cleanup
+  only; all right-edge terminal docks and their auto-launch UI are removed.
 - テスト: `terminal.test.ts` / `claudeTerminal.test.ts` / `routes/__tests__/paste*.test.ts` / `runTaskLaunch.test.ts`
 - 罠: **正典 = `claudeTerminal.ts` 冒頭「THE TWO RULES」**(8つの launcher が全部ここを指す)。
   **①subscription-only**(API key 経路を作らない・提案しない)と**②PTY-only**(`claude -p` を
@@ -634,7 +638,14 @@
 - client: `src/components/canvas/moduleRegistry.tsx` — **タブセットの single source of truth** /
   `src/lib/modules/`(descriptor / ids / tabOrder / customTabAttach / useCustomModules / useExperiments)
 - UI: `modules/CustomFrameHost.tsx`(sandbox iframe host)/ `CustomTabPickerDialog` /
-  `CustomTabCreateDialog` / `CustomModuleView` / `TerminalDock` (`EmbeddedClaudeTerminal.tsx`)
+  `CustomTabCreateDialog` / `CustomModuleView` (full-width preview, no terminal dock).
+  Creation no longer launches or pastes into a side terminal. Existing terminal
+  bindings are left untouched except by explicit module-deletion cleanup.
+- NENE input recording: `src/lib/localAppFrame.ts` resolves the explicit
+  `localApp: 'nene-songs'` capability to a fixed, separate loopback origin.
+  Only that direct frame receives microphone permission; arbitrary sources
+  remain opaque. Tests: `localAppFrame.test.ts`, `CustomFrameHost.test.tsx`,
+  `e2e/nene-recording-frame.spec.ts` (real getUserMedia with fake input only).
 - 設計: `docs/CUSTOM_TABS_PLAN.md` (current local-only contract)
 - テスト: `customModules*.test.ts` / `routes/__tests__/customModules` ・ `retiredMarketplace.routes` ・ `customModuleTerminal`
 - 罠: hot-reload はタブ hidden 中は停止する仕様。編集ロールは Supabase og_roles(§7)。
@@ -659,9 +670,16 @@
 - deep link: `src/lib/deepLink.ts` + `useJoinDeepLink.ts`(招待リンク)
 - playback: `src/lib/playback/playbackStore.ts` + `src/components/canvas/PlaybackEq.tsx`
 - onboarding: `src/components/Onboarding.tsx`
+- trending 取り込み: `scripts/trending-intake.ts` → `docs/trending/INDEX.md` / `DETAILS.md`
+  (+ `scripts/trending-cost-scan.ts` → `signals.json`: ライセンスと課金の実測。**無料のみ** = オーナー決定 2026-09-22)
+  (**生成物・手で直さない**)+ `docs/trending/OG-CANDIDATES.md`(手書きの採否判断)—
+  sns-hub の毎朝の GitHub Trending 投稿(`nannantown/github-trending-video`)の git 履歴から
+  紹介済み 298 リポジトリを復元した索引。OG に入れるか迷ったらまず OG-CANDIDATES を読む
+  (既存オーナー決定と衝突する候補・有料の候補が理由付きで却下済み)。
+  テスト: `server/__tests__/trendingIntake.test.ts` / `trendingCostScan.test.ts`
 
 ## 12. テストと完了ゲート
-- unit/integration: vitest(`npm test`・約4100)。同名 `*.test.ts(x)` 同居 +
+- unit/integration: vitest(`npm test`・約7300)。同名 `*.test.ts(x)` 同居 +
   `server/routes/__tests__/`(route 面)+ `server/__tests__/`(electron 面)
 - **HOME 隔離(fail-closed・2026-07-19 根治)**: fence 本体 = `src/lib/server/testHomeGuard.ts`
   (`assertTestHomeIsolated`)。choke point = `paths.ts` `openGroundHome()` — テスト中に解決先が

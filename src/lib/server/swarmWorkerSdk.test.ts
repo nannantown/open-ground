@@ -6,6 +6,7 @@ import {
   SDK_WORKER_MIN_CLI_VERSION,
 } from './swarmWorkerSdk'
 import type { GuardEvaluate } from './sdkGuardHook'
+import { WORKER_TRIAL_DIRECTIVE } from './swarmWorker'
 
 const WT = '/Users/tester/.openground/projects/uuid1/worktrees/wt1'
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -258,5 +259,47 @@ describe('sdkWorkerPreflight — fails CLOSED', () => {
       evaluateFn: () => ({ decision: 'allow' }),
     })
     expect(r.problems.length).toBeGreaterThan(1)
+  })
+})
+
+// ── the trial flags reach the worker, and only when set ──────────────────────
+//
+// The flags are read at the SPAWN site (swarmWorker.ts) and handed in here.
+// A launch plan that accepted them and dropped them would leave the owner
+// toggling a Settings switch that changes nothing — the failure mode that makes
+// a trial unmeasurable rather than merely ineffective, so it is asserted on the
+// initialPrompt (what the worker actually receives), not on the options object.
+describe('sdkWorkerLaunchPlan — worker-directive trials', () => {
+  it('omits every trial clause when no flags are passed', () => {
+    const p = plan({ title: 'small fix', tier: 'touch' })
+    expect(p.initialPrompt).not.toContain(WORKER_TRIAL_DIRECTIVE.brevity)
+    expect(p.initialPrompt).not.toContain(WORKER_TRIAL_DIRECTIVE.thinkInCode)
+  })
+
+  it('is byte-identical with trials absent and with an empty object', () => {
+    const a = plan({ title: 'small fix', tier: 'touch' }).initialPrompt
+    const b = plan({ title: 'small fix', tier: 'touch', trials: {} }).initialPrompt
+    expect(b).toBe(a)
+  })
+
+  it('carries the clauses through when the flags are on', () => {
+    const p = plan({ title: 'small fix', tier: 'touch', trials: { brevity: true, thinkInCode: true } })
+    expect(p.initialPrompt).toContain(WORKER_TRIAL_DIRECTIVE.brevity)
+    expect(p.initialPrompt).toContain(WORKER_TRIAL_DIRECTIVE.thinkInCode)
+  })
+
+  it('resolves brevity against the EFFECTIVE tier, so the safety floor still wins', () => {
+    // A card whose text trips the floor resolves to `design`, where brevity is
+    // withheld — reading the STORED tier instead would hand it a brevity clause
+    // the policy refuses.
+    const p = plan({
+      // 認証 is a HEAVY_SIGNALS keyword (cardTier.ts), so the floor raises this
+      // card from the stored `touch` to `design`.
+      title: '認証の経路を作り直す',
+      tier: 'touch',
+      trials: { brevity: true, thinkInCode: true },
+    })
+    expect(p.initialPrompt).toContain(WORKER_TRIAL_DIRECTIVE.thinkInCode)
+    expect(p.initialPrompt).not.toContain(WORKER_TRIAL_DIRECTIVE.brevity)
   })
 })

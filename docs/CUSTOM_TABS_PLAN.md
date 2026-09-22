@@ -11,9 +11,11 @@ marketplace roadmap. No release or migration is implied by this source change.
   Detaching a tab does not delete its source or library entry.
 - Sandboxed iframe rendering through `CustomFrameHost` and its global host.
   Source changes hot-reload; polling pauses while the tab is hidden.
-- A Claude editing terminal through `CustomModuleView` and the
-  `TerminalDock` in `EmbeddedClaudeTerminal.tsx`.
-  Terminal creation and reuse retain their existing role checks and cleanup.
+- Full-width custom-tab previews. Right-edge terminal docks and post-create
+  terminal launch/paste were removed on 2026-09-22. The regular Terminal tab,
+  Board task sessions and Swarm are unchanged. Existing dock bindings are not
+  resumed or deleted just by opening a tab; explicit module deletion retains
+  its existing terminal cleanup.
 
 ## Storage and Permissions
 
@@ -36,6 +38,33 @@ Existing `origin: 'installed'`, `remoteId`, `publishedAt` and `version` values
 remain valid legacy metadata. Existing files are not migrated or deleted.
 
 ## Local API
+
+### NENE Microphone Capability (2026-09-22)
+
+An owner-configured library entry may carry `localApp: 'nene-songs'`. This is
+not accepted by the general create/update APIs and is not inferred from a tab
+label or source text. `localAppFrame.ts` resolves it only to
+`http://127.0.0.1:8899/`, never to a caller-provided URL or the host's own origin.
+`CustomFrameHost` independently validates that exact URL. The frame receives
+`allow-scripts allow-same-origin allow-downloads` and microphone delegation for
+that origin. Ordinary custom sources keep `sandbox="allow-scripts"` with no
+microphone delegation. Work mode disables the direct integration too.
+
+This is a trusted local app integration, not a relaxation of arbitrary source
+sandboxing. Browser/OS microphone permission is still required. A nested opaque
+sandbox cannot support getUserMedia, even with an inner `allow` attribute.
+The existing source remains the startup launcher until NENE answers its probe.
+Once connected, transient probe failures do not reload or destroy the document.
+Visible direct frames also receive Space/Enter from non-editable host focus.
+Existing playback heartbeats keep active recordings and pending saves alive.
+
+NENE's one-track editor, original takes and edit metadata live in the separate
+NENE repository. This OPEN GROUND change does not migrate or delete user audio.
+`e2e/nene-recording-frame.spec.ts` intercepts every NENE request and uses a fake
+browser input; it does not capture the owner's microphone. Actual interface
+channel mapping/latency and packaged Electron permissions need a hardware pass.
+
+### Endpoints
 
 - `GET /api/custom-modules`: `{ role, modules }`.
 - `POST /api/custom-modules`: create from label, description and framework.
@@ -62,7 +91,9 @@ untouched. Removing these clients is not a remote-data deletion operation.
 - `server/routes/__tests__/customModules.test.ts` and
   `src/lib/server/customModules.test.ts`: local CRUD, validation and role rules.
 - `server/routes/__tests__/customModuleTerminal.test.ts`: editing-terminal paths.
-- `CustomModuleDock.test.tsx` / `CustomTabPickerDialog.test.tsx`: retained UI.
+- `CustomModuleDock.test.tsx`: no dock, launch or paste, including legacy saved
+  open docks; explicit deletion still cleans only that module's bindings.
+- `CustomTabPickerDialog.test.tsx`: retained library UI.
 - `src/App.render.test.tsx`: no submission polling or review settings.
 - `server/routes/__tests__/lockdown.test.ts`: local tabs remain available under
   Work mode; the shared network restrictions are unchanged.
@@ -74,6 +105,16 @@ untouched. Removing these clients is not a remote-data deletion operation.
 
 - Full suite: 7,269 passed, 2 skipped across 417 files. TypeScript and build passed.
 - ESLint: zero errors, 202 warnings.
+
+### NENE Integration Results (2026-09-22)
+
+- Full suite: 7,287 passed, 2 skipped across 419 files. TypeScript/build passed.
+- ESLint: zero errors, 196 existing warnings.
+- Real browser: ordinary local tab tests at 1280/390px and fixed-origin NENE
+  fake-input permission/keyboard test passed. Previous host fails the new
+  direct-frame regression, then the restored implementation passes.
+- Development NENE UI/sidecar routes were installed with song, memo and setlist
+  hashes unchanged. No published OPEN GROUND release was created by this work.
 - Browser checks: 7 passed, including local-tab flows, startup and card difficulty.
 - Red baseline: 12 new retirement checks failed against the old implementation;
   after removal the focused suite passed all 128 checks.

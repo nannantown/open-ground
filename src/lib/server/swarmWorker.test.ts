@@ -1,3 +1,4 @@
+import type { TaskTier, WorkerTrialFlags } from '../types'
 import { SWARM_LAUNCH_MODEL } from './swarmLaunch'
 import { describe, it, expect } from 'vitest'
 import {
@@ -9,6 +10,9 @@ import {
   SWARM_BASE_REF_PREFERENCE,
   WORKER_ORDER_RULES,
   WORKER_RESUME_INJECTION,
+  WORKER_TRIAL_DIRECTIVE,
+  trialDirectives,
+  TIER_DIRECTIVE,
 } from './swarmWorker'
 import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
 import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
@@ -495,5 +499,84 @@ describe('wiring — spawnSwarmWorker hands the card tier to the SDK launch plan
     const call = src.slice(src.indexOf('const built = sdkWorkerLaunchPlan({'))
     const body = call.slice(0, call.indexOf('})'))
     expect(body).toContain('tier: opts.tier')
+  })
+})
+
+// ── worker-directive TRIALS (docs/trending/TRIALS.md §Trial 4) ───────────────
+//
+// The owner's rule for adopting anything from the trending intake: "try it,
+// measure it, and have a way to put it back" (2026-09-22). The way back is the
+// flag, so the load-bearing property is not what a clause SAYS — it is that with
+// the flags off the order text is BYTE-IDENTICAL to the text before the trials
+// existed. A clause that leaks in when the flag is off is a change nobody can
+// revert from Settings, which is the whole promise.
+describe('trialDirectives / buildOrderInjection — the revert path', () => {
+  const order = (tier?: TaskTier, trials?: WorkerTrialFlags) =>
+    buildOrderInjection('t', 'n', undefined, 'ja', tier, trials)
+
+  it('is byte-identical with no trials, undefined trials, or an empty object', () => {
+    const base = buildOrderInjection('t', 'n', undefined, 'ja', 'standard')
+    expect(order('standard', undefined)).toBe(base)
+    expect(order('standard', {})).toBe(base)
+    // and explicitly-false flags are the same as absent
+    expect(order('standard', { brevity: false, thinkInCode: false })).toBe(base)
+  })
+
+  it('adds nothing for any tier when the flags are off', () => {
+    for (const tier of ['touch', 'standard', 'design', 'ultra'] as const) {
+      expect(order(tier, {})).toBe(buildOrderInjection('t', 'n', undefined, 'ja', tier))
+    }
+  })
+
+  it('adds the brevity clause on touch and standard', () => {
+    for (const tier of ['touch', 'standard'] as const) {
+      expect(order(tier, { brevity: true })).toContain(WORKER_TRIAL_DIRECTIVE.brevity)
+    }
+  })
+
+  it('WITHHOLDS brevity from design and ultra — depth is the point there', () => {
+    for (const tier of ['design', 'ultra'] as const) {
+      const text = order(tier, { brevity: true })
+      expect(text).not.toContain(WORKER_TRIAL_DIRECTIVE.brevity)
+      // and withholding it leaves the text exactly as if the flag were off
+      expect(text).toBe(buildOrderInjection('t', 'n', undefined, 'ja', tier))
+    }
+  })
+
+  it('adds think-in-code on every tier, including design and ultra', () => {
+    for (const tier of ['touch', 'standard', 'design', 'ultra'] as const) {
+      expect(order(tier, { thinkInCode: true })).toContain(WORKER_TRIAL_DIRECTIVE.thinkInCode)
+    }
+  })
+
+  it('keeps both clauses in a fixed order, after the tier directive', () => {
+    const text = order('standard', { brevity: true, thinkInCode: true })
+    const tierAt = text.indexOf(TIER_DIRECTIVE.standard)
+    const brevityAt = text.indexOf(WORKER_TRIAL_DIRECTIVE.brevity)
+    const thinkAt = text.indexOf(WORKER_TRIAL_DIRECTIVE.thinkInCode)
+    expect(tierAt).toBeGreaterThan(-1)
+    expect(tierAt).toBeLessThan(brevityAt)
+    expect(brevityAt).toBeLessThan(thinkAt)
+  })
+
+  it('never relaxes a non-negotiable: the rules block still follows the clauses', () => {
+    const text = order('touch', { brevity: true, thinkInCode: true })
+    expect(text).toContain(WORKER_ORDER_RULES)
+    expect(text.indexOf(WORKER_TRIAL_DIRECTIVE.thinkInCode)).toBeLessThan(text.indexOf(WORKER_ORDER_RULES))
+  })
+
+  it('states the exemptions inside the brevity clause itself, not by ordering', () => {
+    // A worker reads one line. If the clause did not re-state that code, errors
+    // and owner questions are exempt, "be terse" would be the last word it saw
+    // on the subject.
+    for (const must of ['コード', 'エラー', '質問', '理由']) {
+      expect(WORKER_TRIAL_DIRECTIVE.brevity).toContain(must)
+    }
+  })
+
+  it('trialDirectives alone returns empty string for the off states', () => {
+    expect(trialDirectives(undefined, 'standard')).toBe('')
+    expect(trialDirectives({}, 'standard')).toBe('')
+    expect(trialDirectives({ brevity: true }, 'design')).toBe('')
   })
 })
