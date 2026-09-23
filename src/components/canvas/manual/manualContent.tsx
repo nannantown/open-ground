@@ -545,6 +545,14 @@ export const MANUAL_SECTIONS: Section[] = [
           { en: 'Advanced — default workspace, and a Claude CLI re-check.', ja: '詳細 —— 既定ワークスペースと、Claude CLI の再チェック。' },
         ],
       },
+      { kind: 'subhead', text: { en: 'Automatic updates', ja: '自動アップデート' } },
+      {
+        kind: 'p',
+        text: {
+          en: 'With Settings → Automatic updates on (the default), a new version installs itself and the app reopens on its own, usually within about an hour of the release. It does not wait for Claude to finish: the commander and — with Swarm autopilot on — Swarm workers pick up where they left off after the restart (a worker keeps its uncommitted changes and redoes only the step it was in). If the president was cut off mid-reply, it checks the Board once it is back and answers your last message again — doing the request if it was not done yet, without filing it twice. With autopilot off, a worker’s changes stay where they are but it does not restart by itself. It waits only while you are using the app (3 minutes without typing or moving the mouse in it is enough), and while a terminal you opened yourself has something running in it — until 30 minutes after the update arrived, because your own terminals come back as empty shells. A version that failed to install is never retried by itself; you will be told, and “Restart now” still works. Turn it off and nothing changes behind your back: you get the “Restart now / Later” dialog instead.',
+          ja: '設定 → 自動アップデート がオン（既定）なら、新しい版は自動で入り、アプリも自動で開き直します。目安はリリースから1時間程度です。Claude の作業が終わるのは待ちません —— 司令官と、自動運転オンなら Swarm のワーカーも、開き直したあと続きから動きます（ワーカーのコミット前の変更は残り、やりかけの1手だけがやり直しになります）。社長が返事の途中で切れた場合は、戻ってから Board を確かめ、あなたの直前の発言に答え直します —— 依頼がまだ済んでいなければ実行し、済んでいれば二重には積みません。自動運転オフのときは、ワーカーの変更はそのまま残りますが、自分では動き出しません。待つのは、あなたがアプリを操作している最中（3分間キーもマウスも触らなければ十分）と、あなた自身が開いたターミナルで何かが動いているときだけ —— こちらは更新が届いてから最長30分です。あなたのターミナルは開き直すと空のシェルに戻るためです。一度インストールに失敗した版を勝手に入れ直すことはしません（お知らせが出て、「今すぐ再起動」は使えます）。オフにすると勝手には入れ替わらず、「今すぐ再起動 / あとで」のダイアログが出ます。',
+        },
+      },
       { kind: 'subhead', text: { en: 'Work mode (lockdown)', ja: '業務モード（ロックダウン）' } },
       {
         kind: 'p',

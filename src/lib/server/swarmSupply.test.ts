@@ -146,6 +146,12 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
       expect(SUPPLY_RESUME_INJECTION).toMatch(/^\/supply /)
       expect(SUPPLY_RESUME_INJECTION).toContain('Board')
       expect(SUPPLY_RESUME_INJECTION).toContain('todo/doing/review')
+      // Review 292ed010 B2: a restart can cut the desk mid-reply to the owner
+      // (hands-free updates no longer wait for generation). The resumed desk
+      // must answer the unanswered owner message, not just report and wait —
+      // and check the Board first so it neither drops nor double-files it.
+      expect(SUPPLY_RESUME_INJECTION).toContain('オーナーから届いた発言にまだ答え終えていなければ')
+      expect(SUPPLY_RESUME_INJECTION).toContain('二重に積まず')
     })
 
     it('keeps the injection to ONE line (the slash-command delivery contract)', () => {

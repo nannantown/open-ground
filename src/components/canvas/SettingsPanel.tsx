@@ -492,9 +492,10 @@ export const SettingsPanel = ({
             />
           </Section>
 
-          {/* Hands-free updates — default OFF (the shipped behaviour: download +
-              explicit restart dialog). ON removes the dialog: the update applies
-              itself only when the user is away AND nothing unrecoverable runs
+          {/* Hands-free updates — default ON since 2026-08-15. ON removes the
+              dialog: the update applies itself once the owner is not typing,
+              even while Claude is generating (desks/workers resume); only a
+              busy owner-opened terminal holds it, for a bounded grace
               (electron/autoUpdatePolicy.js + GET /api/update/restart-safety),
               plus on any normal quit. Same instant-persist toggle idiom as
               lockdown/experiments. */}

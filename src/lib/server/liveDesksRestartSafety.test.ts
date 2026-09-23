@@ -234,3 +234,14 @@ describe('A PARKED CLAUDE PANE no longer blocks the update (2026-08-15)', () => 
     expect(r.safe).toBe(false)
   })
 })
+
+// 2026-09-23: the hands-free policy stopped waiting on `generating` and waits
+// only on `userPtys`. A hidden one-off claude run (research build, titling) has
+// no resume machinery, so it must land in `userPtys` while generating — or the
+// update would cut it with nothing to bring it back.
+describe('userPtys carries hidden one-off runs mid-generation', () => {
+  it('hidden + generating counts; hidden at rest does not', () => {
+    expect(computeRestartSafety([pty({ hidden: true, claudeWorking: true })], [], NOW).userPtys).toBe(1)
+    expect(computeRestartSafety([pty({ hidden: true })], [], NOW).userPtys).toBe(0)
+  })
+})

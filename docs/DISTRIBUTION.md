@@ -401,6 +401,43 @@ update is an explicit user action. This whole path is gated on
 (`autoInstallOnAppQuit` used to be described as "disabled for the same reason".
 On macOS that was both wrong and load-bearing — see the next box.)
 
+> **Hands-free apply does not wait for Claude (owner decision 2026-09-23).**
+> With `settings.autoUpdate` on, `electron/autoUpdatePolicy.js`
+> `decideAutoApply` (evaluated every 5 min by `maybeAutoApplyUpdate` in
+> `main.js`) applies a downloaded update when: (1) the owner has not used the
+> window — no key, mouse or wheel input — for 3 min (`lastUserInputAt`,
+> stamped by `input-event` + `before-input-event`; working in another app never
+> holds it), (2) the restart-safety probe answers at all (unreachable = fail
+> closed), and (3) nothing without resume machinery is busy (`userPtys === 0`:
+> an owner-opened terminal that is not abandoned, or a hidden one-off claude
+> run mid-generation) **or** that has already held the update for 30 min
+> (`USER_TERMINAL_GRACE_MS`, aged from the FIRST update that started waiting,
+> so back-to-back releases cannot keep restarting it). **`generating` and `safe` are not read.** Why: on
+> 2026-09-22 0.11.125 stayed installed while 0.11.126–130 sat downloaded,
+> because the probe said `{safe:false, generating:2}` all day — with Swarm on,
+> something always generates — and the old "unfocused ≥30 min" gate never
+> opened for an owner who keeps the app in front. Interrupted work resumes by
+> the existing boot path: supply/commander desks via `supplyDesired` /
+> `managerDesired`, in-progress SDK workers via `adoptResumeCandidates` in the
+> same worktree + session when the project's autopilot is on
+> (docs/commander/00-INDEX §2.1). The turn in flight is lost and redone — for
+> the president that means `SUPPLY_RESUME_INJECTION` (swarmSupply.ts) tells it
+> to answer an unanswered owner message after checking the Board, since the
+> owner may be on the phone where the input check cannot see them; a
+> multi-step operation cut halfway (e.g. a release between push and tag) is
+> left for the resumed desk to notice from state on disk. Owner terminals have
+> no resume machinery (fresh shell after restart) — hence the bounded grace
+> rather than none (counted from the download, not from when the pane got
+> busy). Two more rules (review 292ed010): `lastUserInputAt` is seeded with
+> launch time, and a version the boot verdict found FAILED
+> (`reportFailedInstallOnBoot` → `failedInstallVersion` → `failedBefore`) is
+> never retried hands-free — otherwise relaunch → re-download → apply → fail
+> loops every few minutes and trips the swarm crash-loop breaker. And the
+> decision is re-evaluated after the OS installer's staging wait (up to 5 min)
+> right before the teardown (`applyUpdateWhenStaged` `opts.recheck`). autoUpdate OFF is unchanged (dialog, no auto-apply). Guards:
+> `server/__tests__/autoUpdatePolicy.test.ts` "AI at work is not a reason to
+> wait" + the main.js input pin (both measured red).
+
 > **Restart-now ordering invariant (regression-guarded).** "Restart now" must
 > tear the forked Hono server child down **before** calling `quitAndInstall()`.
 > The `before-quit` handler reaps that child by `event.preventDefault()`-ing the

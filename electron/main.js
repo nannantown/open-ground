@@ -673,17 +673,20 @@ function createWindow() {
     mainWindow?.webContents.setZoomLevel(0)
   }
   mainWindow.webContents.on('did-finish-load', lockZoom)
+  // Hands-free updates: "is the owner using the window right now"
+  // (autoUpdatePolicy.js). Keys AND mouse/wheel — someone dragging on the
+  // Canvas or scrolling a diff is as present as someone typing. `input-event`
+  // (Electron ≥22 — PR #35531 / breaking-changes 22.0; electron.d.ts 31.7.7:
+  // "Emitted when an input event is sent to the WebContents") covers both; the keyboard hook below stamps too, belt and
+  // braces, since it is the one that already exists for every key.
+  mainWindow.webContents.on('input-event', () => {
+    lastUserInputAt = Date.now()
+  })
   mainWindow.webContents.on('before-input-event', (event, input) => {
+    lastUserInputAt = Date.now()
     if ((input.control || input.meta) && ['=', '+', '-', '0'].includes(input.key)) {
       event.preventDefault()
     }
-  })
-
-  // Hands-free updates: the auto-apply policy needs "how long has the user
-  // been away" — track the last blur. Focus resets nothing (the policy reads
-  // isFocused() live); blur just stamps when away-time started.
-  mainWindow.on('blur', () => {
-    lastBlurAt = Date.now()
   })
 
   mainWindow.on('closed', () => {
@@ -1965,8 +1968,11 @@ async function start() {
 //
 // EXCEPTION (2026-08-03, settings.autoUpdate — default OFF): with the
 // hands-free toggle on, the dialog is skipped and the update applies ITSELF,
-// but only when the user is away (unfocused ≥30min) AND the forked server's
-// restart-safety probe proves nothing unrecoverable is running — plus, on
+// as soon as the owner is not using the window (no key/mouse input for 3 min,
+// re-checked right before the teardown) and nothing without resume machinery
+// is busy (bounded grace), and never twice for a version that failed to install.
+// Claude generating does NOT hold it since 2026-09-23 — desks and workers
+// resume after the restart; see autoUpdatePolicy.js for why — plus, on
 // WINDOWS/LINUX only, on any normal quit (autoInstallOnAppQuit).
 // Policy: electron/autoUpdatePolicy.js.
 //
@@ -2051,11 +2057,17 @@ function setUpdateDockProgress(ratio) {
 }
 
 // ── Hands-free updates (settings.autoUpdate, electron/autoUpdatePolicy.js) ──
-// When the window last lost focus (epoch ms), or null while focused. Fed by the
-// blur/focus listeners installed in start(); the policy needs "how long has the
-// user been away", and a window that has NEVER focused (launched to the
-// background) counts as away since launch.
-let lastBlurAt = Date.now()
+// The owner's last key/mouse input in the window (epoch ms). Stamped by the
+// input listeners in createWindow — they only see input sent to THIS window, so
+// working in another app never holds an update. Seeded with LAUNCH time, not 0:
+// 0 read as "idle for ever" the moment the app started, so an update that
+// finished downloading a minute after launch applied before the owner had even
+// clicked in (review 292ed010 A/B). Launch counts as the owner arriving.
+let lastUserInputAt = Date.now()
+// The version whose install this boot found FAILED (reportFailedInstallOnBoot),
+// '' when the marker did not name one, null when nothing failed. The hands-free
+// loop never retries it (autoUpdatePolicy `failedBefore`).
+let failedInstallVersion = null
 // The polling timer that re-evaluates the auto-apply decision while an update
 // sits downloaded. One at a time; cleared when it fires the apply.
 let autoApplyTimer = null
@@ -2086,19 +2098,30 @@ async function fetchRestartSafety() {
   }
 }
 
-/** One policy evaluation. Applies the update (same ordered teardown as the
- *  dialog path) when every condition holds; otherwise just logs why not. */
-async function maybeAutoApplyUpdate() {
-  const focused = mainWindow ? mainWindow.isFocused() : false
-  const unfocusedMs = focused ? 0 : Date.now() - lastBlurAt
-  const decision = decideAutoApply({
+/** The hands-free decision from the inputs as they are RIGHT NOW. Called for
+ *  the tick, and again after the OS installer's staging wait (up to 5 min), so
+ *  an owner who came back during that wait is not restarted under their hands. */
+async function evaluateAutoApply() {
+  const now = Date.now()
+  return decideAutoApply({
     enabled: autoUpdateEnabled(),
     lockdown: isLockdownEnabled(),
     hasDownloaded: !!downloadedUpdate,
-    unfocusedMs,
-    asap: asapWindowActive({ armedAt: asapArmedAt, now: Date.now() }),
+    failedBefore:
+      failedInstallVersion !== null &&
+      !!downloadedUpdate &&
+      (failedInstallVersion === '' || failedInstallVersion === downloadedUpdate.version),
+    inputIdleMs: now - lastUserInputAt,
+    heldMs: now - downloadedUpdateAt,
+    asap: asapWindowActive({ armedAt: asapArmedAt, now }),
     safety: downloadedUpdate ? await fetchRestartSafety() : null,
   })
+}
+
+/** One policy evaluation. Applies the update (same ordered teardown as the
+ *  dialog path) when every condition holds; otherwise just logs why not. */
+async function maybeAutoApplyUpdate() {
+  const decision = await evaluateAutoApply()
   if (!decision.apply) {
     ulog.info(`auto-apply deferred: ${decision.reason}`)
     return
@@ -2108,7 +2131,7 @@ async function maybeAutoApplyUpdate() {
     clearInterval(autoApplyTimer)
     autoApplyTimer = null
   }
-  await applyUpdateWhenStaged(downloadedUpdate && downloadedUpdate.version)
+  await applyUpdateWhenStaged(downloadedUpdate && downloadedUpdate.version, { recheck: evaluateAutoApply })
 }
 
 /** Arm the recurring evaluation after a download lands (idempotent). */
@@ -2338,7 +2361,11 @@ function reportInstallBlocked(version, label) {
  * as unpacking took. Waiting costs nothing: during the wait the app is WHOLE —
  * server alive, window usable — and it quits the instant staging lands.
  */
-async function applyUpdateWhenStaged(version) {
+/** @param {string|undefined} version
+ *  @param {{ recheck?: () => Promise<{ apply: boolean, reason: string }> }} [opts]
+ *  `recheck` = this apply was decided by the hands-free loop, not a person:
+ *  ask again after the staging wait, right before the teardown. */
+async function applyUpdateWhenStaged(version, opts = {}) {
   if (applyInFlight) {
     // A second press is not a second install; it is "did you hear me?".
     notifyPreparingInstall(version)
@@ -2379,6 +2406,19 @@ async function applyUpdateWhenStaged(version) {
       applyInFlight = false
       reportInstallNotReady(version)
       return
+    }
+    // The hands-free decision is up to STAGE_WAIT_MS old by now. Ask again
+    // (review 292ed010 A3): an owner who sat down and started typing during the
+    // wait must not be restarted mid-sentence. A person's "Restart now" has no
+    // recheck — they are the one asking.
+    if (opts.recheck) {
+      const again = await opts.recheck()
+      if (!again.apply) {
+        applyInFlight = false
+        ulog.info(`auto-apply called off after staging: ${again.reason}`)
+        armAutoApplyLoop()
+        return
+      }
     }
   }
   await applyDownloadedUpdate({
@@ -2731,6 +2771,9 @@ function reportFailedInstallOnBoot() {
     if (verdict.kind === 'none') return
     ulog.info(`boot: pending install ${verdict.from} → ${verdict.to} (${verdict.at || '?'}) — ${verdict.kind}`)
     if (verdict.kind !== 'failed') return
+    // Remembered for THIS process: the hands-free loop must not retry it
+    // (autoUpdatePolicy `failedBefore`). The marker itself is already cleared.
+    failedInstallVersion = verdict.to || ''
     // Arm the self-repair for THIS run's own quit (never sooner — see
     // armInstallSelfRepair). Synchronous, so it cannot still be running when
     // initAutoUpdater starts an install of its own.
@@ -2990,9 +3033,14 @@ function initAutoUpdater() {
     // keeps its staged flag: Squirrel refuses a second check while it is
     // awaiting relaunch, so a reset here would never be undone and "Restart
     // now" would sit out the whole staging wait for an update that is ready.
-    if (!downloadedUpdate || downloadedUpdate.version !== version) squirrelStaged = false
+    const isNewVersion = !downloadedUpdate || downloadedUpdate.version !== version
+    if (isNewVersion) squirrelStaged = false
+    // The owner-terminal grace (autoUpdatePolicy.USER_TERMINAL_GRACE_MS) ages
+    // from the FIRST update that started waiting — neither the hourly
+    // re-announce of the same file nor a newer version arriving on top may
+    // restart it, or a day of back-to-back releases would hold it forever.
+    if (!downloadedUpdate) downloadedUpdateAt = Date.now()
     downloadedUpdate = { version }
-    // When it landed — the escalation below and the poll loop both age from this.
     // WHAT HANDS-FREE MEANS, and what it used to mean by accident.
     //
     // This branch used to `return` after arming the loop, so turning the setting
@@ -3007,7 +3055,6 @@ function initAutoUpdater() {
     // Hands-free still means "nothing interrupts you"; it never means "you are
     // not told". The notice escalates the longer the update waits, and every
     // form of it restarts in one click.
-    downloadedUpdateAt = Date.now()
     const action = decideDownloadedAction({
       enabled: autoUpdateEnabled(),
       lockdown: isLockdownEnabled(),

@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 // Plain-CJS main-process module (no Electron runtime needed) — same import
 // style as updateMenu.test.ts / autoUpdate.test.ts.
 import {
-  AUTO_APPLY_UNFOCUSED_MIN_MS,
+  AUTO_APPLY_INPUT_QUIET_MS,
   AUTO_APPLY_POLL_MS,
+  USER_TERMINAL_GRACE_MS,
   NUDGE_MIN_GAP_MS,
   ASAP_WINDOW_MS,
   asapWindowActive,
@@ -23,7 +26,8 @@ const base = {
   enabled: true,
   lockdown: false,
   hasDownloaded: true,
-  unfocusedMs: AUTO_APPLY_UNFOCUSED_MIN_MS,
+  inputIdleMs: AUTO_APPLY_INPUT_QUIET_MS,
+  heldMs: 0,
   safety: { safe: true, generating: 0, userPtys: 0 },
 }
 
@@ -56,17 +60,59 @@ describe('decideAutoApply', () => {
   it('defers with nothing downloaded', () => {
     expect(decideAutoApply({ ...base, hasDownloaded: false }).apply).toBe(false)
   })
-  it('defers while the user is (recently) at the window', () => {
-    expect(decideAutoApply({ ...base, unfocusedMs: 0 }).apply).toBe(false)
-    expect(decideAutoApply({ ...base, unfocusedMs: AUTO_APPLY_UNFOCUSED_MIN_MS - 1 }).apply).toBe(false)
+  it('defers while the owner is typing into the window', () => {
+    expect(decideAutoApply({ ...base, inputIdleMs: 0 }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, inputIdleMs: AUTO_APPLY_INPUT_QUIET_MS - 1 }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, inputIdleMs: NaN }).apply, 'NaN reads as typing').toBe(false)
   })
   it('defers when the safety probe is unreachable (fail closed)', () => {
     expect(decideAutoApply({ ...base, safety: null }).apply).toBe(false)
   })
-  it('defers when the server reports busy', () => {
-    expect(
-      decideAutoApply({ ...base, safety: { safe: false, generating: 1, userPtys: 0 } }).apply,
-    ).toBe(false)
+})
+
+// ─── CLAUDE GENERATING NEVER HOLDS THE UPDATE (owner decision 2026-09-23) ───
+//
+// 「自動アップデートが ON なら、作業途中でもアップデートするようにしよう」. Measured
+// the day before: 0.11.125 stayed installed while 0.11.126–130 sat downloaded,
+// because restart-safety answered {safe:false, generating:2} all day — with
+// Swarm on, something is always generating. And the old ≥30-min-unfocused gate
+// never opened for an owner who keeps the app in front. Both are gone; desks
+// and workers resume after the restart. Put either gate back and this is red.
+describe('decideAutoApply — AI at work is not a reason to wait', () => {
+  it('applies while Claude is generating (safe:false only because of generating)', () => {
+    const r = decideAutoApply({ ...base, safety: { safe: false, generating: 2, userPtys: 0 } })
+    expect(r.apply).toBe(true)
+    expect(r.reason).toContain('generating=2')
+  })
+
+  it('applies with the window in front all day, once the owner stops typing', () => {
+    // The window has never lost focus; the only thing that matters is the
+    // last keystroke.
+    expect(decideAutoApply({ ...base, inputIdleMs: AUTO_APPLY_INPUT_QUIET_MS }).apply).toBe(true)
+    expect(AUTO_APPLY_INPUT_QUIET_MS).toBeLessThanOrEqual(5 * 60 * 1000)
+  })
+
+  it("the owner's own busy terminal holds it — but only for a bounded grace", () => {
+    const busy = { safe: false, generating: 0, userPtys: 1 }
+    expect(decideAutoApply({ ...base, safety: busy, heldMs: 0 }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, safety: busy, heldMs: USER_TERMINAL_GRACE_MS - 1 }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, safety: busy, heldMs: USER_TERMINAL_GRACE_MS }).apply).toBe(true)
+    // "within about an hour of release": ≤1h discovery poll + this grace must
+    // not turn into a day.
+    expect(USER_TERMINAL_GRACE_MS).toBeLessThanOrEqual(60 * 60 * 1000)
+  })
+
+  it('an unreadable terminal count reads as busy (fail closed within the grace)', () => {
+    for (const safety of [{ safe: true }, { safe: true, userPtys: Number.NaN }]) {
+      expect(decideAutoApply({ ...base, safety, heldMs: 0 }).apply).toBe(false)
+    }
+    expect(decideAutoApply({ ...base, heldMs: NaN, safety: { userPtys: 2 } }).apply).toBe(false)
+  })
+
+  it('autoUpdate OFF is unchanged: never applies, whatever the probe says', () => {
+    for (const safety of [base.safety, { safe: false, generating: 2, userPtys: 0 }]) {
+      expect(decideAutoApply({ ...base, enabled: false, safety }).apply).toBe(false)
+    }
   })
 })
 
@@ -160,19 +206,20 @@ describe('shouldNudgeCheck', () => {
 })
 
 // {apply:'asap'} — the user COMMANDED this update. The command waives exactly
-// one gate (the 30-min away-timer) and nothing else. The dangerous direction is
-// a command that silently overrides the safety probe or work mode: "update now"
-// must never become "destroy the claude that is mid-generation now".
+// one gate (the typing check) and nothing else. The dangerous direction is
+// a command that silently overrides work mode or the owner-terminal hold.
+// (Claude mid-generation no longer holds ANY apply — see the block above.)
 describe('decideAutoApply with asap', () => {
   const focusedBase = {
     enabled: true,
     lockdown: false,
     hasDownloaded: true,
-    unfocusedMs: 0, // window focused RIGHT NOW — the case the away-timer blocks
+    inputIdleMs: 0, // typing RIGHT NOW — the case the typing check blocks
+    heldMs: 0,
     safety: { safe: true, generating: 0, userPtys: 0 },
   }
 
-  it('waives the away-timer: focused window + asap applies', () => {
+  it('waives the typing check: typing + asap applies', () => {
     expect(decideAutoApply({ ...focusedBase }).apply).toBe(false) // without asap
     const r = decideAutoApply({ ...focusedBase, asap: true })
     expect(r.apply).toBe(true)
@@ -188,7 +235,7 @@ describe('decideAutoApply with asap', () => {
       decideAutoApply({
         ...focusedBase,
         asap: true,
-        safety: { safe: false, generating: 1, userPtys: 0 },
+        safety: { safe: false, generating: 0, userPtys: 1 },
       }).apply,
     ).toBe(false)
   })
@@ -241,5 +288,54 @@ describe('the DEFAULT is ON — an unset setting means hands-free (2026-08-15)',
     expect(autoUpdateFromSettingsRaw('{ not json')).toBe(false)
     expect(autoUpdateFromSettingsRaw('[]')).toBe(false)
     expect(autoUpdateFromSettingsRaw('null')).toBe(false)
+  })
+})
+
+// main.js wiring. The pure decision fails CLOSED on a missing input
+// (`inputIdleMs: undefined` reads as "typing"), so a main.js that kept passing
+// the old `unfocusedMs` would defer forever with every test above still green.
+describe('main.js feeds the policy the inputs it reads', () => {
+  const main = readFileSync(join(__dirname, '../../electron/main.js'), 'utf8')
+  it('stamps the last keystroke and passes typing-idle + held time', () => {
+    expect(main).toMatch(/before-input-event[\s\S]{0,300}lastUserInputAt = Date\.now\(\)/)
+    // Mouse/wheel counts as presence too (dragging on the Canvas, scrolling).
+    expect(main).toMatch(/'input-event'[\s\S]{0,120}lastUserInputAt = Date\.now\(\)/)
+    expect(main).toContain('inputIdleMs: now - lastUserInputAt')
+    expect(main).toContain('heldMs: now - downloadedUpdateAt')
+    expect(main).not.toContain('unfocusedMs')
+  })
+})
+
+// Review 292ed010 B1: a version whose install already FAILED (the boot verdict
+// found the app still on the old version) must not be retried by the
+// hands-free loop — relaunch → re-download → apply → fail every few minutes
+// cuts every desk each lap and trips the swarm crash-loop breaker.
+describe('a failed install is never retried hands-free', () => {
+  it('defers the failed version, even under asap', () => {
+    expect(decideAutoApply({ ...base, failedBefore: true }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, failedBefore: true, asap: true, inputIdleMs: 0 }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, failedBefore: false }).apply).toBe(true)
+  })
+})
+
+describe('main.js: launch is presence, failures are remembered, staging is re-checked', () => {
+  const main = readFileSync(join(__dirname, '../../electron/main.js'), 'utf8')
+  it('seeds the last input with launch time (0 read as idle-forever at boot)', () => {
+    expect(main).toContain('let lastUserInputAt = Date.now()')
+  })
+  it('the boot verdict feeds failedBefore', () => {
+    const boot = main.slice(main.indexOf('function reportFailedInstallOnBoot'))
+    expect(boot.slice(0, 1500)).toMatch(/kind !== 'failed'\) return[\s\S]{0,300}failedInstallVersion = verdict\.to/)
+    expect(main).toMatch(/failedBefore:\s*\n?\s*failedInstallVersion !== null/)
+  })
+  it('re-evaluates after the staging wait and before the teardown (review A3)', () => {
+    const fn = main.slice(main.indexOf('async function applyUpdateWhenStaged'))
+    const wait = fn.indexOf('await waitForInstallStaged')
+    const recheck = fn.indexOf('await opts.recheck()')
+    const teardown = fn.indexOf('await applyDownloadedUpdate(')
+    expect(wait).toBeGreaterThan(-1)
+    expect(recheck).toBeGreaterThan(wait)
+    expect(teardown).toBeGreaterThan(recheck)
+    expect(main).toContain('applyUpdateWhenStaged(downloadedUpdate && downloadedUpdate.version, { recheck: evaluateAutoApply })')
   })
 })

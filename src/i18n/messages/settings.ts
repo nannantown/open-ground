@@ -69,7 +69,7 @@ export const settings = {
     // than OFF. And it promised to wait "while a terminal pane is open", which
     // is why it waited forever: an empty shell counted as work.
     'settings.autoUpdate.hint':
-      'New versions install themselves while you are away — nothing interrupts you, and you are still told an update is waiting so you can take it now. It waits for real work: Claude generating, and any terminal pane with something running in it. A pane sitting empty at the prompt does not hold it up. Quitting the app also applies a waiting update.',
+      'New versions install themselves and the app reopens on its own — nothing asks you first, and you are still told an update is waiting so you can take it now. It does not wait for Claude: the commander and Swarm workers on autopilot pick up where they left off after the restart, and if the president was cut off mid-reply it answers your last message again once it is back. It only waits while you are using the app (3 minutes without keys or mouse is enough), and while a terminal you opened yourself has something running in it — until 30 minutes after the update arrived, because those terminals come back empty. It never retries by itself a version that failed to install. Quitting the app also applies a waiting update.',
     // Work mode (lockdown) — the non-Anthropic egress kill switch
     'settings.lockdown.heading': 'Work mode',
     'settings.lockdown.label': 'Block non-Anthropic connections',
@@ -210,7 +210,7 @@ export const settings = {
     'settings.autoUpdate.heading': '自動アップデート',
     'settings.autoUpdate.label': '新しい版を自動で適用する',
     'settings.autoUpdate.hint':
-      '席を外しているあいだに、新しい版へ自動で入れ替えます。作業は邪魔しませんが、更新が待っていることはお知らせするので、今すぐ入れることもできます。待つのは本当に作業がある場合だけ — Claude が生成中のときと、中で何かが走っているターミナルです。プロンプトのまま放置しているターミナルは、待つ理由になりません。アプリを閉じたときにも適用されます。',
+      '新しい版へ自動で入れ替え、アプリも自動で開き直します。確認は求めませんが、更新が待っていることはお知らせするので、今すぐ入れることもできます。Claude の作業中でも待ちません —— 司令官と自動運転中の Swarm ワーカーは開き直したあと続きから動き、社長は返事の途中で切れた場合、戻ってからあなたの直前の発言に答え直します。待つのは、あなたがアプリを操作している最中(3分間キーもマウスも触らなければ十分)と、あなた自身が開いたターミナルで何かが動いているときだけです(ターミナルは開き直すと空に戻るため。ただし更新が届いてから最長30分まで)。一度インストールに失敗した版を、勝手に何度も入れ直すことはしません。アプリを閉じたときにも適用されます。',
     'settings.lockdown.heading': '業務モード',
     'settings.lockdown.label': 'Anthropic 以外の外部通信を遮断',
     'settings.lockdown.hint':

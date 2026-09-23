@@ -204,6 +204,9 @@ export const stopAllDesksInDirAndWait = async (
 //   BLOCKS:  claude mid-generation in either pool (the in-flight turn is
 //            unrecoverable), and any visible user PTY pane (a user terminal —
 //            claude or plain shell — is user state with no resume machinery).
+//   ⚠ 2026-09-23: `safe` is now only the MANUAL answer. The hands-free policy
+//   (electron/autoUpdatePolicy.js) ignores `safe`/`generating` — desks and
+//   workers resume — and waits only on `userPtys`, for at most 30 min.
 //   ALLOWS:  resting desks (補給官/司令官 — conversation resume by design),
 //            swarm workers at rest in the central worktrees area (roster
 //            recovery + conversation resume, and their edits live on disk),
@@ -350,7 +353,9 @@ export const computeRestartSafety = (
    *    2. no TUI menu is open — a permission prompt is the human's turn, and no
    *       amount of silence makes discarding it acceptable,
    *    3. it has been silent for {@link IDLE_PANE_MS}.
-   *  `menuOpen === undefined` (a caller that did not look) fails closed. */
+   *  `menuOpen === undefined` (a caller that did not look) fails closed.
+   *  (Since 2026-09-23 the hands-free policy waits on a held pane for at most
+   *  30 min — USER_TERMINAL_GRACE_MS — so "no amount of silence" is bounded.) */
   const parkedClaude = (p: {
     claudePane?: boolean
     claudeWorking?: boolean
@@ -373,7 +378,14 @@ export const computeRestartSafety = (
     claudeWorking?: boolean
     menuOpen?: boolean
   }): boolean => abandonedShell(p) || parkedClaude(p)
-  const userPtys = ptys.filter((p) => !p.desk && !p.hidden && !p.engine && !abandoned(p)).length
+  // `userPtys` = busy work with NO resume machinery — what the hands-free
+  // policy still waits for (bounded) now that `generating` no longer holds it
+  // (2026-09-23): a visible owner pane that is not abandoned, OR a hidden
+  // one-off claude run (research build, titling) mid-generation. Desks and
+  // engine worktrees resume, so neither counts.
+  const userPtys = ptys.filter(
+    (p) => !p.desk && !p.engine && (p.hidden ? p.claudeWorking : !abandoned(p)),
+  ).length
   return { safe: generating === 0 && userPtys === 0, generating, userPtys }
 }
 

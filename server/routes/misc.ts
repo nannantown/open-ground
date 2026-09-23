@@ -435,8 +435,8 @@ export const miscRoutes = new Hono()
   // path input → no validateProjectPath needed.
   //
   // Optional body `{"apply":"asap"}` = the user commanded this update: main
-  // waives the 30-minute away-timer (10-minute window) and restarts as soon as
-  // the safety probe agrees. Body is optional and anything else is ignored, so
+  // waives the 3-minute "owner is using the window" check (10-minute window);
+  // the owner-terminal hold still applies (autoUpdatePolicy.decideAutoApply). Body is optional and anything else is ignored, so
   // the bare release-runbook curl keeps its gentle default.
   .post('/api/update/check-now', async (c) => {
     const body = await c.req.json().catch(() => null)

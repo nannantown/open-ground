@@ -32,11 +32,10 @@ export interface UpdateNudgeResult {
  * `no-electron-parent` when there is no IPC channel — i.e. we are not the engine
  * forked by electron/main.js (dev/tsx/vitest/bare node).
  *
- * `{apply:'asap'}` marks this ring as a USER COMMAND: main waives the 30-minute
- * away-timer for whatever this check downloads (10-minute window) and restarts
- * as soon as the server safety probe agrees nothing running would be destroyed.
- * The setting (`settings.autoUpdate`), work mode, and the safety probe itself
- * are NOT waived — see autoUpdatePolicy.decideAutoApply.
+ * `{apply:'asap'}` marks this ring as a USER COMMAND: main waives the
+ * 3-minute "owner is using the window" check for whatever this check downloads
+ * (10-minute window). The setting (`settings.autoUpdate`), work mode, and the
+ * owner-terminal hold from the safety probe are NOT waived — see autoUpdatePolicy.decideAutoApply.
  */
 export function requestUpdateCheck(opts?: { apply?: 'asap' }): UpdateNudgeResult {
   const asap = opts?.apply === 'asap'

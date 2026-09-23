@@ -4,12 +4,22 @@
 // updateMenu.js). server/__tests__/autoUpdatePolicy.test.ts locks it.
 //
 // WHAT THIS DECIDES. With settings.autoUpdate on, the app applies a downloaded
-// update BY ITSELF instead of showing the restart dialog — but only at a moment
-// that provably destroys nothing:
-//   1. the user is AWAY: the window has been unfocused for ≥30 minutes, and
-//   2. the SERVER says it is safe (GET /api/update/restart-safety — no claude
-//      mid-generation in either pool, no open user terminal panes; resting
-//      desks and swarm workers resume by design, see liveDesks.ts).
+// update BY ITSELF instead of showing the restart dialog, as soon as:
+//   1. the owner is not using the window right now (no key/mouse input for
+//      AUTO_APPLY_INPUT_QUIET_MS), and
+//   2. the SERVER answers the safety probe (GET /api/update/restart-safety), and
+//      nothing WITHOUT resume machinery is busy (a terminal the owner opened,
+//      a hidden one-off claude run — the probe's `userPtys`) — or that has
+//      already held this update for USER_TERMINAL_GRACE_MS.
+// AI work in progress is NOT a reason to wait (owner decision 2026-09-23:
+// 「自動アップデートが ON なら、作業途中でもアップデートするようにしよう」).
+// Measured the day before: 0.11.125 stayed installed while 0.11.126–130 sat
+// downloaded, because the probe answered {safe:false, generating:2} all day —
+// with Swarm on, SOMETHING is always generating, so "wait for a quiet moment"
+// meant "never". Desks and swarm workers resume after a restart by design
+// (liveDesks.ts, swarm recovery), so an interrupted generation is a pause, not
+// a loss. The old "window unfocused ≥30 min" gate went with it: the owner keeps
+// the app in front all day, so that gate also meant "never".
 // The decision itself is pure; main.js supplies the inputs and performs the
 // teardown-then-quitAndInstall side effect (electron/autoUpdate.js ordering).
 //
@@ -21,8 +31,17 @@
 
 'use strict'
 
-/** The user must have been away this long before an unattended restart. */
-const AUTO_APPLY_UNFOCUSED_MIN_MS = 30 * 60 * 1000
+/** Key/mouse input in the window this recently means the owner is using it
+ *  right now — don't restart under their fingers. Long enough to span the pause
+ *  between two sentences, short enough that someone who works in the app all
+ *  day still leaves gaps (they wait on Claude often). */
+const AUTO_APPLY_INPUT_QUIET_MS = 3 * 60 * 1000
+
+/** How long a terminal the OWNER opened (not a desk, not a swarm worker) may
+ *  hold a downloaded update while something runs in it. It is their own work,
+ *  which nothing restores, so it gets a grace — but a bounded one: a dev server
+ *  left running all day must not become "never update" again. */
+const USER_TERMINAL_GRACE_MS = 30 * 60 * 1000
 
 /** Re-evaluate this often while an update sits downloaded. */
 const AUTO_APPLY_POLL_MS = 5 * 60 * 1000
@@ -70,9 +89,11 @@ function autoUpdateFromSettingsRaw(raw) {
  *   enabled: boolean,             // settings.autoUpdate (already narrowed)
  *   lockdown: boolean,            // work mode suppresses ALL updater activity
  *   hasDownloaded: boolean,       // an update is on disk waiting
- *   unfocusedMs: number,          // ms since the window lost focus (0 = focused)
- *   asap?: boolean,               // live user command (bell {apply:'asap'}) — waives ONLY the away-timer
- *   safety: { safe: boolean, generating?: number, userPtys?: number } | null, // server probe; null = unreachable
+ *   failedBefore?: boolean,       // THIS version's install already failed (boot verdict) — manual only
+ *   inputIdleMs: number,          // ms since the last key/mouse input in the window
+ *   heldMs: number,               // ms since the first waiting update finished downloading
+ *   asap?: boolean,               // live user command (bell {apply:'asap'}) — waives ONLY the typing check
+ *   safety: { safe?: boolean, generating?: number, userPtys?: number } | null, // server probe; null = unreachable
  * }} input
  * @returns {{ apply: boolean, reason: string }}
  */
@@ -80,20 +101,38 @@ function decideAutoApply(input) {
   if (!input.enabled) return { apply: false, reason: 'autoUpdate off' }
   if (input.lockdown) return { apply: false, reason: 'work mode (lockdown) on' }
   if (!input.hasDownloaded) return { apply: false, reason: 'nothing downloaded' }
-  // `asap` waives ONLY the away-timer: it means the user COMMANDED this update
-  // (bell rung with {apply:'asap'}), so "don't restart while they're using it"
-  // no longer applies — they're using it to ask for the restart. Every other
-  // gate stays: the setting, work mode, and above all the server safety probe —
-  // a command to update is not a command to destroy running work.
-  if (!input.asap && input.unfocusedMs < AUTO_APPLY_UNFOCUSED_MIN_MS)
-    return { apply: false, reason: `window in use (unfocused ${Math.round(input.unfocusedMs / 60000)}min)` }
+  // THE FAILED-INSTALL LOOP (review 292ed010 B1). The app woke up still on the
+  // old version after quitting to install THIS one. Retrying by itself would
+  // be: relaunch → re-download → apply → fail, every few minutes, cutting every
+  // desk and worker each lap — and three boots of one version in 10 min trips
+  // the swarm crash-loop breaker, after which not even the desks come back.
+  // So a version that failed once waits for a human: the boot's install-failed
+  // dialog, or "Restart now" (which does not come through here). Not waived by
+  // `asap` either — a bell is a script, not someone watching the result.
+  if (input.failedBefore)
+    return { apply: false, reason: 'this version failed to install last time — manual restart only' }
+  // `asap` waives ONLY the typing check: the user COMMANDED this update (bell
+  // rung with {apply:'asap'}), so "don't restart under their fingers" no longer
+  // applies. Every other gate stays.
+  if (!input.asap && !(input.inputIdleMs >= AUTO_APPLY_INPUT_QUIET_MS))
+    return { apply: false, reason: `owner active (last input ${Math.round(input.inputIdleMs / 1000)}s ago)` }
+  // A dead server means mid-boot or mid-teardown — wrong moments to restart on
+  // top of. Fail closed; the next tick asks again.
   if (!input.safety) return { apply: false, reason: 'safety probe unreachable (fail closed)' }
-  if (!input.safety.safe)
+  // ⚠ `safety.safe` and `safety.generating` are deliberately NOT read: both
+  // count Claude generating, and that must never hold the update (see the
+  // header). Only the owner's own terminals do, for a bounded grace. A missing
+  // or non-numeric count cannot be told apart from "busy", so it holds too.
+  const userPtys = input.safety.userPtys
+  const userBusy = !(typeof userPtys === 'number' && userPtys === 0)
+  if (userBusy && !(input.heldMs >= USER_TERMINAL_GRACE_MS))
     return {
       apply: false,
-      reason: `server reports busy (generating=${input.safety.generating ?? '?'} userPtys=${input.safety.userPtys ?? '?'})`,
+      reason: `owner terminal busy (userPtys=${userPtys ?? '?'}, held ${Math.round(input.heldMs / 60000)}min)`,
     }
-  return { apply: true, reason: input.asap ? 'commanded (asap) + server safe' : 'idle + server safe' }
+  const why = input.asap ? 'commanded (asap)' : 'owner idle'
+  const note = `generating=${input.safety.generating ?? '?'} userPtys=${userPtys ?? '?'}`
+  return { apply: true, reason: `${why}; ${note}` }
 }
 
 /**
@@ -164,7 +203,8 @@ function shouldNudgeCheck(input) {
 }
 
 module.exports = {
-  AUTO_APPLY_UNFOCUSED_MIN_MS,
+  AUTO_APPLY_INPUT_QUIET_MS,
+  USER_TERMINAL_GRACE_MS,
   AUTO_APPLY_POLL_MS,
   SAFETY_FETCH_TIMEOUT_MS,
   NUDGE_MIN_GAP_MS,

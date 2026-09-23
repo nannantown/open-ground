@@ -173,10 +173,11 @@ export interface Settings {
    *  first ask produced this feature, defaulted OFF, and it consequently never
    *  ran for them.) Off = the conservative flow: auto-download + an explicit
    *  restart dialog. On removes the dialog: the update downloads silently
-   *  and is APPLIED automatically, but only at a provably safe moment — the
-   *  window has been unfocused ≥30min AND the server's restart-safety probe
-   *  (GET /api/update/restart-safety) reports no claude generating and no open
-   *  user terminal panes. Any app quit also applies it (autoInstallOnAppQuit).
+   *  and is APPLIED automatically once the owner has not used the window for
+   *  3 min — EVEN WHILE CLAUDE IS GENERATING (2026-09-23 owner decision; desks
+   *  and workers resume after the restart). Only busy work with no resume
+   *  machinery (restart-safety `userPtys`) holds it, for at most 30 min.
+   *  Any app quit also applies it (autoInstallOnAppQuit).
    *  Read by the Electron MAIN process straight from settings.json per tick
    *  (electron/autoUpdatePolicy.js — the lockdown.js pattern), so toggling
    *  takes effect without a restart. Stored as a REAL boolean (narrowed). */
@@ -2344,9 +2345,12 @@ export interface GroundLampsResponse {
  *  desk pools (liveDesks.updateRestartSafety). `safe` is the verdict; the
  *  counts are the explanation (surfaced in main-process logs).
  *  - `generating`: claude sessions mid-generation (either pool) — cutting one
- *    loses the in-flight turn, so any > 0 blocks.
- *  - `userPtys`: visible non-desk, non-engine PTY panes (user terminals,
- *    including plain shells) — user state with no resume machinery, blocks.
+ *    loses the in-flight turn. Folded into `safe`, but since 2026-09-23 the
+ *    hands-free policy does NOT wait for it (desks/workers resume).
+ *  - `userPtys`: busy work with no resume machinery — visible non-desk,
+ *    non-engine PTY panes not abandoned (user terminals, incl. plain shells),
+ *    plus hidden one-off claude runs mid-generation. The one count the
+ *    hands-free policy still waits for (bounded grace).
  *  Resting desks (補給官/司令官) and swarm workers do NOT block: they resume by
  *  design (conversation --resume + roster recovery). */
 export interface UpdateRestartSafetyResponse {

@@ -80,12 +80,21 @@ export const SUPPLY_INJECTION = '/supply'
  *  house rule for this role (積む前に必ず現状調査): a supply officer working from
  *  stale memory files duplicates of work that already shipped.
  *
+ *  THE OWNER'S LAST MESSAGE (review 292ed010 B2). Since 2026-09-23 a
+ *  hands-free update restarts the app even while this desk is mid-reply, and
+ *  the owner may be talking to it from the phone (invisible to the app's
+ *  "is the owner using the window" check). A resume that only "reports and
+ *  waits" would silently drop that request — 「OK、積んで」 cut before the Board
+ *  PUT, and the owner believes it was done. So the resumed desk answers any
+ *  unanswered owner message first, checking the Board so it neither loses nor
+ *  double-files the order.
+ *
  *  ONE LINE, on purpose — the same hard-won delivery contract buildOrderInjection
  *  (swarmWorker.ts) documents: the whole thing must land as a SINGLE slash-command
  *  argument. A multi-line positional risks being split, or collapsed into a
  *  `[Pasted text]` chip where `/supply` is never parsed as a command at all. */
 export const SUPPLY_RESUME_INJECTION =
-  '/supply セッション再開: アプリ再起動をまたいで前回の会話を復元した。あなたの記憶は古い — 前回以降に司令官が配車・統合・完了させたカードがある。新しいカードを積む前に、まず Board の現状(todo/doing/review)を API で読み直し、既に実装済み・重複・前提が変わったタスクを積まないこと。読み直した結果を1行で報告してから待機する。'
+  '/supply セッション再開: アプリ再起動をまたいで前回の会話を復元した。あなたの記憶は古い — 前回以降に司令官が配車・統合・完了させたカードがある。新しいカードを積む前に、まず Board の現状(todo/doing/review)を API で読み直し、既に実装済み・重複・前提が変わったタスクを積まないこと。読み直した結果を1行で報告する。再起動の直前にオーナーから届いた発言にまだ答え終えていなければ、続けてそれに答える — 依頼(カードを積む等)が既に Board に反映済みかを今読んだ現状で確かめ、未反映なら実行し、反映済みなら二重に積まずにそう伝える。それから待機する。'
 
 export interface SpawnSwarmSupplyOpts {
   /** The registered project to feed — the supply PTY's cwd (its primary

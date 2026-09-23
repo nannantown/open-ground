@@ -549,7 +549,13 @@ describe('electron/main.js wiring — the updater has a memory (2026-09-13)', ()
     expect(code).toMatch(/nativeUpdaterHandle\.on\('error'/)
     // The desync: resetting squirrelStaged on every electron-updater
     // 'update-downloaded' forgot a staging Squirrel will not repeat.
-    expect(code).toContain('downloadedUpdate.version !== version) squirrelStaged = false')
+    expect(code).toContain('const isNewVersion = !downloadedUpdate || downloadedUpdate.version !== version')
+    expect(code).toContain('if (isNewVersion) squirrelStaged = false')
+    // Neither the same re-announce NOR a newer version on top may restart the
+    // hands-free owner-terminal grace (USER_TERMINAL_GRACE_MS ages from
+    // downloadedUpdateAt) — back-to-back releases would hold it all day.
+    expect(code).toContain('if (!downloadedUpdate) downloadedUpdateAt = Date.now()')
+    expect(code).not.toContain('if (isNewVersion) downloadedUpdateAt')
   })
 })
 
