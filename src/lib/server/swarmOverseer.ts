@@ -286,6 +286,8 @@ const raiseToInbox = async (
     plainQuestion?: string
     whyEscalated: OpenEscalationInput['whyEscalated']
     receiptKey: string
+    /** A worker's own question → the commander lane first (commanderQuestions.ts). */
+    askCommanderFirst?: boolean
     taskId?: string
     branch?: string
     /** The blocked worker's ADDRESS, carried WHOLE — never `terminalId` alone.
@@ -313,6 +315,7 @@ const raiseToInbox = async (
       ...(input.plainQuestion ? { plainQuestion: input.plainQuestion } : {}),
       whyEscalated: input.whyEscalated,
       receiptKey: input.receiptKey,
+      ...(input.askCommanderFirst ? { askCommanderFirst: true } : {}),
       ...(input.taskId ? { taskId: input.taskId } : {}),
       ...(input.branch ? { branch: input.branch } : {}),
       // The WHOLE address (runtime + the single handle it names). `runtime` is
@@ -403,7 +406,7 @@ export const runOverseerPass = async (
     await detectStateAnomalies(engine, ov, log, deps, now, fired, activeSeen)
     if (doSubcycle) await detectEdgeFatals(engine, ov, log, deps, now, config, fired, activeSeen)
 
-    // 3. Questions always go directly to the owner, regardless of usage.
+    // 3. Worker questions: commander lane first, owner for boundaries — regardless of usage.
     await detectWorkerQuestions(engine, ov, log, deps, now, fired, activeSeen)
 
     // 4. Dwell signals over the tick's task snapshot (S5 blocked / S7 review-idle).
@@ -464,7 +467,9 @@ export const runOverseerPass = async (
   return { ran: true, fired, throttled: ov.throttled }
 }
 
-// S4: worker questions go directly to the owner.
+// S4: worker questions go to the commander first (commanderQuestions.ts); the
+// owner hears only boundary questions, ones the commander hands on, and ones it
+// does not settle within COMMANDER_ANSWER_WINDOW_MS.
 
 const detectWorkerQuestions = async (
   engine: OverseerEngine,
@@ -516,11 +521,15 @@ const detectWorkerQuestions = async (
       taskId: w.taskId,
       branch: w.branch,
       target: w,
+      // Settled inside the company first — the commander answers or hands on
+      // (owner decision 2026-09-23). Boundary questions still go straight to
+      // the owner (openEscalation's needsOwnerDirectly).
+      askCommanderFirst: true,
     })
     if (ok) {
       ov.seen.set(signalKey, fp)
       fired.push('S4')
-      log('info', `overseer: S4 question → owner inbox: ${w.branch} (${shorten(blockerText)})`)
+      log('info', `overseer: S4 question → inbox (commander first): ${w.branch} (${shorten(blockerText)})`)
     }
   }
 }

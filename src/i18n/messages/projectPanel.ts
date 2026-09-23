@@ -209,17 +209,17 @@ export const projectPanel = {
     // Supply officer (タスク窓口) — the conversation desk that turns the user's
     // requests into Board:todo cards. Writes the Board only; never edits code.
     'projectPanel.swarm.workersTab': 'Workers',
-    'projectPanel.swarm.supply.tab': 'Supply',
-    'projectPanel.swarm.supply.badge': 'Supply officer',
-    'projectPanel.swarm.supply.title': 'Turn requests into to-do cards',
+    'projectPanel.swarm.supply.tab': 'President',
+    'projectPanel.swarm.supply.badge': 'President',
+    'projectPanel.swarm.supply.title': 'The one person you talk to',
     'projectPanel.swarm.supply.empty':
-      'Turns vague requests into Board cards. Board only — never code.',
-    'projectPanel.swarm.supply.launch': 'Start supply officer',
+      'Hears what you want, turns it into work, and reports progress and deliveries back to you.',
+    'projectPanel.swarm.supply.launch': 'Call the president',
     'projectPanel.swarm.supply.launching': 'Starting…',
-    'projectPanel.swarm.supply.launchFailed': "Couldn't start the supply officer: {error}",
-    'projectPanel.swarm.supply.identity': 'Supply · files to-do',
+    'projectPanel.swarm.supply.launchFailed': "Couldn't start the president: {error}",
+    'projectPanel.swarm.supply.identity': 'President · your one contact',
     'projectPanel.swarm.supply.hint':
-      'The supply officer files your requests as Board to-do cards — it never edits code or dispatches workers.',
+      'The president hears your requests, files them as work, and tells you about progress, questions and finished work. The commander and workers stay behind the scenes.',
     'projectPanel.swarm.supply.stop': 'Stop',
     'projectPanel.swarm.supply.stopping': 'Stopping…',
     // Manager (マネージャー) dashboard — the third Swarm view: the worker-monitor +
@@ -933,17 +933,17 @@ export const projectPanel = {
     // Supply officer (タスク窓口) — 要望を Board:todo カードに積む対話デスク。
     // Board に書くだけで、コードは編集しない。
     'projectPanel.swarm.workersTab': 'ワーカー',
-    'projectPanel.swarm.supply.tab': 'タスク窓口',
-    'projectPanel.swarm.supply.badge': 'タスク窓口（PM）',
-    'projectPanel.swarm.supply.title': '要望を todo カードに変える',
+    'projectPanel.swarm.supply.tab': '社長',
+    'projectPanel.swarm.supply.badge': '社長',
+    'projectPanel.swarm.supply.title': 'あなたが話すのは社長だけ',
     'projectPanel.swarm.supply.empty':
-      'あいまいな要望を Board の todo カードに整えます。書くのは Board だけ — コードは触りません。',
-    'projectPanel.swarm.supply.launch': 'タスク窓口を起動',
+      'あなたの要望をヒアリングして仕事にし、進み具合・質問・完成品を報告します。',
+    'projectPanel.swarm.supply.launch': '社長を呼ぶ',
     'projectPanel.swarm.supply.launching': '起動中…',
-    'projectPanel.swarm.supply.launchFailed': 'タスク窓口を起動できませんでした: {error}',
-    'projectPanel.swarm.supply.identity': 'タスク窓口 · todo に供給',
+    'projectPanel.swarm.supply.launchFailed': '社長を呼べませんでした: {error}',
+    'projectPanel.swarm.supply.identity': '社長 · あなたの窓口',
     'projectPanel.swarm.supply.hint':
-      'タスク窓口は要望を Board の todo カードに積みます（コードの編集や worker への割り当てはしません）。',
+      '社長があなたの要望を聞いて仕事にし、進み具合・質問・完成品をあなたに伝えます。司令官やワーカーは裏で動きます。',
     'projectPanel.swarm.supply.stop': '停止',
     'projectPanel.swarm.supply.stopping': '停止中…',
     // マネージャー（manager）ダッシュボード — Swarm の3つ目のビュー。worker 監視＋統合

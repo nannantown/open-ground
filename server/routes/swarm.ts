@@ -67,6 +67,7 @@ import { spawnSwarmSupply, stopSwarmSupplyDesks } from '@/lib/server/swarmSupply
 import { patchEngineIntent } from '@/lib/server/swarmEnginePersistence'
 import { spawnSwarmManager } from '@/lib/server/swarmManager'
 import { queueSupplyReply } from '@/lib/server/supplyNotice'
+import { relayToCommander } from '@/lib/server/commanderRelay'
 import { listManagerDesks, sayToManagerDesk, stopManagerDesks } from '@/lib/server/swarmManagerRuntime'
 
 /** Cap on one relayed message to the commander. Sized like the escalation answer
@@ -91,6 +92,7 @@ import {
   listEscalations,
   openEscalation,
   answerEscalation,
+  raiseEscalationToOwner,
   dismissEscalation,
   EscalationNotFoundError,
   EscalationStateError,
@@ -719,57 +721,20 @@ export const swarmRoutes = new Hono()
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     if (!text) return c.json({ error: 'text is required' }, 400)
     if (text.length > MAX_MANAGER_SAY) return c.json({ error: 'text too large' }, 400)
-    // A desk asked to stop is CLOSED — it refuses every push — so speaking to it
-    // is not "held, try later", it is nobody home. Filtering here makes the
-    // phone窓口 answer 404 (「司令官の卓が立っていません」) instead of telling the
-    // owner their message is queued behind a busy desk that will never read it
-    // (cycle-3 finding; same list, same question as adoption).
-    const liveDesk = () => listManagerDesks(path).find((d) => !d.stopping) ?? null
-    let desk = liveDesk()
-    let woke = false
-    if (!desk && body?.wake !== false) {
-      // Same two preflights the explicit spawn route runs, and for the same
-      // reason: an unavailable/signed-out CLI or a missing git must fail as
-      // "could not wake", never as a half-started desk. Their messages are
-      // passed through so the desk can tell the owner WHY nobody could be
-      // woken instead of 「いません」.
-      const pre = await claudeRunPreflight()
-      if (!pre.ok) return c.json({ ...pre.body, delivered: false, woke: false }, 503)
-      const envPre = await swarmEnvPreflight(path, { force: true, requireGitRepo: false })
-      if (!envPre.ok) {
-        return c.json(
-          {
-            error: envPre.issues.map((i) => i.message).join(' '),
-            envIssues: envPre.issues.map((i) => i.id),
-            delivered: false,
-            woke: false,
-          },
-          503,
-        )
-      }
-      try {
-        await spawnSwarmManager({ projectPath: path })
-        desk = liveDesk()
-        woke = desk !== null
-      } catch (e: any) {
-        return c.json(
-          { error: `failed to wake the commander: ${e?.message ?? e}`, delivered: false, woke: false },
-          503,
-        )
-      }
-    }
-    if (!desk) return c.json({ error: 'no commander desk is running in this project' }, 404)
-    const res = sayToManagerDesk(desk, text, { deliverable: noticeDeliverable })
+    // The wake/preflight/closed-desk/held logic lives in commanderRelay.ts so the
+    // commander question lane (commanderQuestions.ts) takes the SAME path.
+    const res = await relayToCommander(path, text, { wake: body?.wake !== false })
+    if (!res.ok) return c.json(res.body, res.status)
     // held ≠ failed: a PTY desk mid-generation (or with a half-typed draft) is
     // asked again later rather than clobbered, and the caller is TOLD which it
     // was so it can say "届けました" or "今は取り込み中なので後で" honestly.
     return c.json({
-      delivered: res.ok,
-      runtime: desk.runtime,
+      delivered: res.delivered,
+      runtime: res.runtime,
       // So the desk can say 「司令官を起こして伝えました」 rather than implying it
       // was already there — a woken commander's first turn is a cold read of the
       // Board, so the owner should expect the answer to take longer.
-      ...(woke ? { woke: true } : {}),
+      ...(res.woke ? { woke: true } : {}),
       ...(res.heldBecause ? { heldBecause: res.heldBecause } : {}),
     })
   })
@@ -1086,10 +1051,15 @@ export const swarmRoutes = new Hono()
     }
     const statuses = ['open', 'answered', 'injected', 'dismissed'] as const
     const status = statuses.find((s) => s === c.req.query('status'))
+    // ?lane=owner — only what waits on the owner (the supply desk's view);
+    // ?lane=commander — only questions the commander is settling.
+    const lanes = ['owner', 'commander'] as const
+    const lane = lanes.find((l) => l === c.req.query('lane'))
     return c.json<EscalationsResponse>({
       escalations: await listEscalations({
         ...(path ? { projectPath: path } : {}),
         ...(status ? { status } : {}),
+        ...(lane ? { lane } : {}),
       }),
     })
   })
@@ -1206,13 +1176,43 @@ export const swarmRoutes = new Hono()
     if (!id) return c.json({ error: 'id is required' }, 400)
     if (!answer) return c.json({ error: 'answer is required' }, 400)
     if (answer.length > MAX_ESCALATION_ANSWER) return c.json({ error: 'answer too large' }, 400)
+    // `by:'commander'` — the commander settling a question in ITS lane
+    // (commanderQuestions.ts). answerEscalation refuses it (409) for anything
+    // waiting on the owner, so this field cannot widen what the commander decides.
+    const by = body?.by === 'commander' ? 'commander' : 'owner'
     try {
-      const res = await answerEscalation(id, answer)
+      const res = await answerEscalation(id, answer, undefined, { by })
       return c.json<EscalationAnswerResponse>(res)
     } catch (e: any) {
       if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
       if (e instanceof EscalationStateError) return c.json({ error: e.message }, 409)
       return c.json({ error: `failed to answer escalation: ${e?.message ?? e}` }, 500)
+    }
+  })
+  // --- POST /api/swarm/escalations/raise — the commander hands a question on --
+  // Body: { id, plainQuestion? }. A worker's question held in the commander lane
+  // (commanderQuestions.ts) moves to the OWNER's lane: bell, toast and the supply
+  // desk hear of it now. Idempotent — a record already with the owner, or no
+  // longer open, is returned with raised:false and rings nothing.
+  .post('/api/swarm/escalations/raise', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const id = typeof body?.id === 'string' ? body.id : ''
+    if (!id) return c.json({ error: 'id is required' }, 400)
+    const plainQuestion = typeof body?.plainQuestion === 'string' ? body.plainQuestion : undefined
+    if (plainQuestion && plainQuestion.length > MAX_ESCALATION_PLAIN_QUESTION) {
+      return c.json({ error: 'plainQuestion too large' }, 400)
+    }
+    try {
+      return c.json(await raiseEscalationToOwner(id, { plainQuestion }))
+    } catch (e: any) {
+      if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
+      return c.json({ error: `failed to raise escalation: ${e?.message ?? e}` }, 500)
     }
   })
   // --- POST /api/swarm/escalations/dismiss — close unanswered -----------------

@@ -11,8 +11,12 @@
 //
 // INVARIANTS this module owns (§8; the tests pin them):
 //  1. FAIL-CLOSED: there is NO code path that moves a record out of 'open'
-//     except the owner's explicit answer/dismiss. An unanswered irreversible
-//     question stays open forever (the retention sweep never touches 'open').
+//     except an explicit answer/dismiss — the owner's, or (for a record in the
+//     COMMANDER lane only, `routedTo:'commander'`) the commander's answer. An
+//     owner-lane question can never be answered by the commander, and an
+//     unanswered question stays open forever (the retention sweep never
+//     touches 'open'; the commander lane's timeout PROMOTES to the owner, it
+//     never closes).
 //  2. receiptKey idempotency: while an 'open' record with the same receiptKey
 //     exists, re-raising is a no-op returning the existing record — an overseer
 //     restart (edge-dedup reset, §6) can never grow the inbox or re-toast.
@@ -38,6 +42,7 @@ import {
 } from './workerRuntime'
 import { bracketedPaste } from './pastePrompt'
 import { createSwarmInfoNotification } from './swarmNotifications'
+import { needsOwnerDirectly } from './swarmDecisionRouting'
 import { isValidProjectPath, projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
 import type {
@@ -299,6 +304,8 @@ export const countOpenEscalationsByProject = async (): Promise<Map<string, numbe
     const out = new Map<string, number>()
     for (const e of items.filter(isEscalation)) {
       if (e.status !== 'open') continue
+      // Held inside the company (commander lane) — not the owner's turn yet.
+      if (e.routedTo === 'commander') continue
       out.set(e.projectPath, (out.get(e.projectPath) ?? 0) + 1)
     }
     return out
@@ -316,8 +323,13 @@ export const countOpenEscalationsByProject = async (): Promise<Map<string, numbe
 export const listEscalations = async (opts?: {
   projectPath?: string
   status?: EscalationStatus
+  /** 'owner' = what waits on the owner (every record not in the commander
+   *  lane); 'commander' = only the commander lane. Absent = both. */
+  lane?: 'owner' | 'commander'
 }): Promise<EscalationView[]> => {
   let items = await readTolerant()
+  if (opts?.lane === 'commander') items = items.filter((e) => e.routedTo === 'commander')
+  else if (opts?.lane === 'owner') items = items.filter((e) => e.routedTo !== 'commander')
   if (opts?.projectPath) {
     const canon = await canonicalize(opts.projectPath)
     items = items.filter((e) => e.projectPath === canon)
@@ -402,6 +414,11 @@ export interface OpenEscalationInput {
   runtime?: WorkerRuntimeKind
   terminalId?: string
   sdkSessionId?: string
+  /** A WORKER'S OWN question (owner decision 2026-09-23): hold it inside the
+   *  company — the commander answers it or hands it on — instead of ringing the
+   *  owner. Ignored (owner lane) when the text touches a standing owner
+   *  boundary ({@link needsOwnerDirectly}). Template raises never set it. */
+  askCommanderFirst?: boolean
 }
 
 export interface OpenEscalationDeps {
@@ -507,6 +524,9 @@ export const openEscalation = async (
   const receiptKey =
     (input.receiptKey ?? '').trim() ||
     defaultReceiptKey({ projectPath, taskId: input.taskId, question })
+  // The commander lane: a worker's question, unless it touches an owner boundary.
+  const commanderLane =
+    input.askCommanderFirst === true && !needsOwnerDirectly(`${question}\n${plainQuestion}\n${context}`)
 
   const result = await enqueue(async (): Promise<{ escalation: Escalation; deduped: boolean }> => {
     await ensureOpenGroundHome()
@@ -593,6 +613,7 @@ export const openEscalation = async (
       ...(plainQuestion ? { plainQuestion } : {}),
       ...(screenshotRef ? { screenshotRef } : {}),
       whyEscalated: input.whyEscalated,
+      ...(commanderLane ? { routedTo: 'commander' as const } : {}),
       // Narrowed, not trusted: an unknown value degrades to the safe default
       // ('park' = leave the card alone), never to the acting one.
       ...(input.declineEffect === 'drop-integration'
@@ -605,27 +626,77 @@ export const openEscalation = async (
     return { escalation, deduped: false }
   })
 
-  if (!result.deduped) {
-    // Fire AFTER the record is durably persisted; failure to notify is not
-    // failure to escalate (the record IS the escalation).
-    try {
-      const notify = deps?.notify ?? createSwarmInfoNotification
-      // The toast is an OWNER surface — lead with the plain-language text when
-      // the raiser supplied one (same precedence as the inbox UI).
-      const teaser = plainQuestion || question
-      await notify({
-        event: 'escalation-open',
-        detail: `質問が届いています: ${teaser.length > 120 ? `${teaser.slice(0, 120)}…` : teaser}`,
-        projectPath,
-        ...(input.taskId ? { taskId: input.taskId } : {}),
-        ...(input.branch ? { branch: input.branch } : {}),
-        escalationId: result.escalation.id,
-      })
-    } catch {
-      /* best-effort — §8 invariant 7 */
-    }
+  // Fire AFTER the record is durably persisted; failure to notify is not
+  // failure to escalate (the record IS the escalation). A commander-lane record
+  // rings NOTHING here: the owner hears of it only if it is handed on
+  // ({@link raiseEscalationToOwner}).
+  if (!result.deduped && result.escalation.routedTo !== 'commander') {
+    await notifyOwnerOfQuestion(result.escalation, deps)
   }
   return result
+}
+
+/** The owner-facing "a question is waiting" bell + toast (+ the supply desk,
+ *  through swarmNotifications). Best-effort — §8 invariant 7. */
+const notifyOwnerOfQuestion = async (e: Escalation, deps?: OpenEscalationDeps): Promise<void> => {
+  try {
+    const notify = deps?.notify ?? createSwarmInfoNotification
+    // The toast is an OWNER surface — lead with the plain-language text when
+    // the raiser supplied one (same precedence as the inbox UI).
+    const teaser = e.plainQuestion || e.question
+    await notify({
+      event: 'escalation-open',
+      detail: `質問が届いています: ${teaser.length > 120 ? `${teaser.slice(0, 120)}…` : teaser}`,
+      projectPath: e.projectPath,
+      ...(e.taskId ? { taskId: e.taskId } : {}),
+      ...(e.branch ? { branch: e.branch } : {}),
+      escalationId: e.id,
+    })
+  } catch {
+    /* best-effort — §8 invariant 7 */
+  }
+}
+
+// ─── The commander lane (owner decision 2026-09-23 — 「社長だけと話す」) ─────────
+
+/** Stamp that a commander-lane question was handed to a commander desk, so the
+ *  sweep says it once. No-op unless the record is still open in that lane. */
+export const markCommanderTold = async (id: string, at: string): Promise<void> =>
+  enqueue(async () => {
+    const { all, known } = await readForWrite()
+    const e = known.find((r) => r.id === id)
+    if (!e || e.status !== 'open' || e.routedTo !== 'commander' || e.commanderToldAt) return
+    e.commanderToldAt = at
+    await persist(all)
+  })
+
+/**
+ * Hand a commander-lane question on to the OWNER: the commander decided the owner
+ * must answer it, or the commander did not settle it in time. Idempotent — a
+ * record already in the owner's lane (or no longer open) is returned untouched
+ * and rings nothing. The commander may attach a plain-language rendering, which
+ * is what the owner then reads first.
+ */
+export const raiseEscalationToOwner = async (
+  id: string,
+  opts?: { plainQuestion?: string; now?: () => Date },
+  deps?: OpenEscalationDeps,
+): Promise<{ escalation: Escalation; raised: boolean }> => {
+  const res = await enqueue(async () => {
+    await ensureOpenGroundHome()
+    const { all, known } = await readForWrite()
+    const e = known.find((r) => r.id === id)
+    if (!e) throw new EscalationNotFoundError(id)
+    if (e.status !== 'open' || e.routedTo !== 'commander') return { escalation: e, raised: false }
+    e.routedTo = 'owner'
+    e.raisedToOwnerAt = (opts?.now?.() ?? new Date()).toISOString()
+    const plain = (opts?.plainQuestion ?? '').trim().slice(0, MAX_ESCALATION_PLAIN_QUESTION)
+    if (plain) e.plainQuestion = plain
+    await persist(all)
+    return { escalation: e, raised: true }
+  })
+  if (res.raised) await notifyOwnerOfQuestion(res.escalation, deps)
+  return res
 }
 
 // Owner answer persistence and delivery.
@@ -636,8 +707,18 @@ export const buildAnswerInjection = (
   question: string,
   answer: string,
   plainQuestion?: string,
+  by: 'owner' | 'commander' = 'owner',
 ): string =>
-  [
+  by === 'commander'
+    ? [
+        // A DIFFERENT marker, on purpose: the commander's call must never read to
+        // the worker as the owner's word (the Persona removal's whole point).
+        '【司令官からの回答】あなたの質問に司令官が答えました(オーナーではありません)。',
+        `Q: ${question}`,
+        `司令官の回答: ${answer}`,
+        'この回答を前提に、ブロックされていた作業を再開してください。オーナーの承認が必要な事項(リリース・削除・費用など)はこの回答で許可されたことになりません。',
+      ].join('\n')
+    : [
     '【本人からの回答】エスカレーションした質問に、本人（オーナー）が回答しました。',
     ...(plainQuestion
       ? [
@@ -962,7 +1043,7 @@ const deliverAnswer = async (
     await deliverAnswerToWorker(
       target,
       record.projectPath,
-      buildAnswerInjection(record.question, answer, record.plainQuestion),
+      buildAnswerInjection(record.question, answer, record.plainQuestion, record.answeredBy ?? 'owner'),
       deps,
     )
   ) {
@@ -1005,7 +1086,9 @@ const deliverAnswer = async (
     await queue(
       record.projectPath,
       record.taskId,
-      record.plainQuestion
+      record.answeredBy === 'commander'
+        ? `Q: ${brief(record.question, 600)} → 司令官の回答(オーナーではない): ${brief(answer, 900)} — この回答を前提に再開すること`
+        : record.plainQuestion
         ? `オーナーに表示された質問(回答はこれに対するもの): ${brief(record.plainQuestion, 400)} / あなたが出した元の質問: ${brief(record.question, 300)} → オーナーの回答: ${brief(answer, 600)} — この回答を前提に再開すること`
         : // `オーナーの回答:` here too — and this branch needs it MOST. It is the lane
           // that carries worker-authored questions (which always bring their own A/B
@@ -1038,7 +1121,9 @@ export const answerEscalation = async (
   id: string,
   answer: string,
   deps?: AnswerEscalationDeps,
+  opts?: { by?: 'owner' | 'commander' },
 ): Promise<{ escalation: Escalation; delivery: EscalationDelivery }> => {
+  const by = opts?.by === 'commander' ? 'commander' : 'owner'
   const text = (answer ?? '').trim().slice(0, MAX_ESCALATION_ANSWER)
   if (!text) throw new Error('answer is required')
 
@@ -1069,7 +1154,14 @@ export const answerEscalation = async (
       return { done: false, record }
     }
 
+    // The commander may answer ONLY what is still in its own lane. An owner-lane
+    // question (a boundary, a template raise, or one it already handed on) is
+    // the owner's to answer — refused here, structurally, not by the skill.
+    if (by === 'commander' && record.routedTo !== 'commander') {
+      throw new EscalationStateError('this question is waiting on the owner — the commander cannot answer it')
+    }
     // (1) Persist the answer FIRST — a crash below never loses the decision.
+    if (by === 'commander') record.answeredBy = 'commander'
     record.answer = text
     record.answeredAt = (deps?.now?.() ?? new Date()).toISOString()
     record.status = 'answered'

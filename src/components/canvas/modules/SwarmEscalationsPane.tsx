@@ -68,7 +68,9 @@ export const SwarmEscalationsPane = ({
       if (!res.ok) return // signed-out / non-owner → panel simply stays empty
       const data = (await res.json()) as EscalationsResponse
       if (alive.current) {
-        setItems(data.escalations ?? [])
+        // Questions the commander is still settling are not the owner's to
+        // answer yet (commanderQuestions.ts); they appear here if handed on.
+        setItems((data.escalations ?? []).filter((e) => e.routedTo !== 'commander'))
         setLoaded(true)
       }
     } catch {

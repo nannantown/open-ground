@@ -36,6 +36,11 @@ import {
   peekSupplyReplies,
   SUPPLY_REPLY_PREFIX,
   SUPPLY_REPLY_CAP,
+  SUPPLY_NOTICE_CAP,
+  SUPPLY_PROGRESS_MAX_ITEMS,
+  peekSupplyImportant,
+  peekSupplyProgress,
+  queueSupplyProgress,
 } from './supplyNotice'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -112,17 +117,25 @@ describe('supplyNoticeFor — WHICH events are worth the owner\'s conversation',
   // "deliver everything" implementation would silently break.
   it.each<SwarmInfoEvent>([
     'manager-woke',
-    'review-idle',
     'daily-fuel-report',
     'engine-resumed',
-    'escalation-reminder',
     'overseer-throttled',
     'session-limit',
     'stuck-processes',
-    'ready-without-work',
+    // Said by sweepLanded's own line — delivering the bell copy too would say it twice.
+    'work-landed',
   ])('does NOT deliver routine event %s', (event) => {
     expect(supplyNoticeFor(info(event, 'routine'))).toBeNull()
   })
+
+  // STALLS and a still-unanswered question DO reach the desk (2026-09-23): the
+  // owner asked to be told when something stops, by the 社長, without looking.
+  it.each<SwarmInfoEvent>(['review-idle', 'ready-without-work', 'escalation-reminder'])(
+    'delivers stall / reminder event %s',
+    (event) => {
+      expect(supplyNoticeFor(info(event, '止まっている'))).toContain('止まっている')
+    },
+  )
 
   it('ignores notifications that are not swarm events at all', () => {
     expect(supplyNoticeFor({ id: 'x', kind: 'collab-invite', createdAt: 1 } as AppNotification)).toBeNull()
@@ -133,7 +146,7 @@ describe('supplyNoticeLine — what is actually typed', () => {
   it('carries the prefix the supply skill matches on, and the retell instruction', () => {
     const line = supplyNoticeLine('質問が1件届いた')
     expect(line.startsWith(SUPPLY_NOTICE_PREFIX)).toBe(true)
-    expect(line).toContain('平易な言葉で1〜3行')
+    expect(line).toContain('平易に1〜3行')
   })
 
   it('never contains a bare CR — one notice is ONE turn, not two', () => {
@@ -216,18 +229,38 @@ describe('the three refusals — a held notice is kept, never forced', () => {
   })
 })
 
-describe('ONE slot per project — newest overwrites', () => {
-  it('a desk that was busy for two events hears only the newest', () => {
+// Was 「ONE slot per project — newest overwrites」 until 2026-09-23. MEASURED
+// defect of that shape: a question that opened while the desk was mid-turn was
+// replaced by the next event and never reached the owner, while the worker sat
+// waiting. Important news now QUEUES.
+describe('IMPORTANT news queues per project — nothing erases a question', () => {
+  it('a desk that was busy for two events hears BOTH, oldest first, one per pass', () => {
     const busy = harness(BUSY)
-    noticeToSupply(fatal('古い知らせ'), busy.deps)
+    noticeToSupply(info('escalation-open', '質問: どちらにしますか'), busy.deps)
     noticeToSupply(fatal('新しい知らせ'), busy.deps)
-    expect(peekSupplyNotices().size).toBe(1)
+    expect(peekSupplyImportant().get(PROJECT)).toHaveLength(2)
 
     const free = harness(IDLE)
     flushSupplyNotices(free.deps)
-    expect(free.writes).toHaveLength(1)
-    expect(free.writes[0]![1]).toContain('新しい知らせ')
-    expect(free.writes[0]![1]).not.toContain('古い知らせ')
+    flushSupplyNotices(free.deps)
+    expect(free.writes).toHaveLength(2)
+    expect(free.writes[0]![1]).toContain('どちらにしますか')
+    expect(free.writes[1]![1]).toContain('新しい知らせ')
+  })
+
+  it('the same line queued twice is said once', () => {
+    const busy = harness(BUSY)
+    noticeToSupply(fatal('同じ知らせ'), busy.deps)
+    noticeToSupply(fatal('同じ知らせ'), busy.deps)
+    expect(peekSupplyImportant().get(PROJECT)).toHaveLength(1)
+  })
+
+  it('over the cap the OLDEST goes (the bell still holds it)', () => {
+    const busy = harness(BUSY)
+    for (let i = 0; i < SUPPLY_NOTICE_CAP + 2; i++) noticeToSupply(fatal(`知らせ${i}`), busy.deps)
+    const q = peekSupplyImportant().get(PROJECT) ?? []
+    expect(q).toHaveLength(SUPPLY_NOTICE_CAP)
+    expect(q[0]).toContain('知らせ2')
   })
 
   it('two projects keep independent slots', () => {
@@ -494,5 +527,45 @@ describe('the desks’ skills match the code-matched strings they depend on', ()
   it('skills/og-manage/SKILL.md names the route it is obliged to answer on', () => {
     const text = read('og-manage', 'SKILL.md')
     expect(text).toContain('/api/swarm/supply/say')
+  })
+})
+
+// ─── PROGRESS — accumulated into ONE line, and never ahead of a question ──────
+describe('progress digest (2026-09-23)', () => {
+  it('accumulates items while the desk is busy and types them as ONE line', () => {
+    const busy = harness(BUSY)
+    queueSupplyProgress(PROJECT, '「A」に取りかかりました', busy.deps)
+    queueSupplyProgress(PROJECT, '「B」ができて、確認中です', busy.deps)
+    queueSupplyProgress(PROJECT, '「A」に取りかかりました', busy.deps) // repeated: said once
+    expect(busy.writes).toEqual([])
+    const free = harness(IDLE)
+    flushSupplyNotices(free.deps)
+    expect(free.writes).toHaveLength(1)
+    const line = free.writes[0]![1]
+    expect(line.startsWith(SUPPLY_NOTICE_PREFIX)).toBe(true)
+    expect(line).toContain('進捗')
+    expect(line).toContain('「A」に取りかかりました')
+    expect(line).toContain('「B」ができて、確認中です')
+    expect(line.split('「A」').length - 1).toBe(1)
+    expect(peekSupplyProgress().size).toBe(0) // cleared once delivered
+  })
+
+  it('an important notice goes BEFORE the progress digest', () => {
+    const busy = harness(BUSY)
+    queueSupplyProgress(PROJECT, '「A」に取りかかりました', busy.deps)
+    noticeToSupply(info('escalation-open', 'どちらにしますか'), busy.deps)
+    const free = harness(IDLE)
+    flushSupplyNotices(free.deps)
+    expect(free.writes[0]![1]).toContain('どちらにしますか')
+    flushSupplyNotices(free.deps)
+    expect(free.writes[1]![1]).toContain('進捗')
+  })
+
+  it('keeps at most SUPPLY_PROGRESS_MAX_ITEMS items, dropping the oldest', () => {
+    const busy = harness(BUSY)
+    for (let i = 0; i < SUPPLY_PROGRESS_MAX_ITEMS + 3; i++) queueSupplyProgress(PROJECT, `item${i}`, busy.deps)
+    const items = peekSupplyProgress().get(PROJECT) ?? []
+    expect(items).toHaveLength(SUPPLY_PROGRESS_MAX_ITEMS)
+    expect(items[0]).toBe('item3')
   })
 })

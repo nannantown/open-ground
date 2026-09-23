@@ -60,6 +60,8 @@
 // /api/swarm/*. By the time a call reaches this module the caller is the owner
 // and the path is a registered project.
 
+import { observeBoardProgress } from './supplyProgress'
+import { kickCommanderQuestionSweep } from './commanderQuestions'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { readFile, readdir, stat, lstat, unlink, mkdir } from 'fs/promises'
@@ -6679,6 +6681,8 @@ const monitorWorkers = async (
                 ...(w.runtime ? { runtime: w.runtime } : {}),
                 terminalId: w.terminalId,
                 ...(w.sdkSessionId ? { sdkSessionId: w.sdkSessionId } : {}),
+                // The commander answers first (commanderQuestions.ts).
+                askCommanderFirst: true,
               })
               logLine(
                 engine,
@@ -7283,6 +7287,9 @@ export const runDispatchPass = async (
   //     supply desk; sweepLanded itself raises that notice (supplyNotice.ts), so
   //     the news cannot be lost by a caller that forgets to pass it on.
   await sweepLanded(engine.path, tasks, new Date(now).toISOString())
+  // 1c. Progress for the supply desk (社長): column moves since the last pass,
+  //     as one accumulated plain-language digest. Deterministic, no model.
+  observeBoardProgress(engine.path, tasks)
 
   // 2. Monitor existing workers: advance stages, promote the done ones
   //    doing→review, recover crashed AND stalled ones, and prune dead/finished
@@ -9147,6 +9154,14 @@ export const runEnginePass = async (
         (level, message) => logLine(engine, level, message, 'routine'),
         defaultOverseerDeps({ isAlive: deps.isAlive, readHeartbeat: deps.readHeartbeat }),
       ).catch((e) => logLine(engine, 'warn', `overseer: pass errored — ${errMsg(e)}`))
+      // Hand workers' questions to the commander / promote overdue ones to the
+      // owner. Throttled + off-tick inside (waking a commander must not hold
+      // the pass); a no-op when nothing sits in the commander lane.
+      try {
+        kickCommanderQuestionSweep(engine.path)
+      } catch {
+        /* never let the question lane break a pass */
+      }
     }
   } finally {
     engine.passInFlight = false

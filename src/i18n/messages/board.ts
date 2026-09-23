@@ -69,10 +69,10 @@ export const board = {
     // ── The Board's front-desk seat (the supply officer, in a bottom dock) ──
     // The SAME desk the Swarm tab shows, never a second one: one server-side
     // desk, one stored record, one shared hook (useSupplyDesk).
-    'board.supply.title': 'Front desk',
-    'board.supply.open': 'Open the front desk',
+    'board.supply.title': 'President',
+    'board.supply.open': 'Talk to the president',
     'board.supply.opening': 'Opening…',
-    'board.supply.closed': 'The front desk is closed',
+    'board.supply.closed': 'The president is not here right now',
     // The monitor half, rolled up. Counts only — the detail is one click away.
     // ONE STRING PER CLAUSE, joined only for the ones we can evidence — a
     // single three-slot template forced a number where there was none.
@@ -81,11 +81,11 @@ export const board = {
     'board.supply.rollupWaiting': '{n} waiting on you',
     'board.supply.rollupUnknown': 'Checking…',
     'board.supply.workersUnknown': 'Not checked yet — the engine has not answered.',
-    'board.supply.expand': 'Open the front desk panel',
-    'board.supply.collapse': 'Close the front desk panel',
-    'board.supply.stop': 'Close the desk',
+    'board.supply.expand': 'Open the president panel',
+    'board.supply.collapse': 'Close the president panel',
+    'board.supply.stop': 'Dismiss the president',
     'board.supply.stopping': 'Closing…',
-    'board.supply.resize': 'Drag to resize the front desk panel',
+    'board.supply.resize': 'Drag to resize the president panel',
     'board.supply.workers': 'Workers',
     // A worker the engine cannot tie to a card gets NO card link — never a
     // guessed one. Same rule as the honesty line above.
@@ -322,21 +322,21 @@ export const board = {
     // ── ボードのタスク窓口（補給官を下段ドックに座らせたもの）──
     // Swarm タブと同じ卓であって、二人目ではない。卓もレコードも1つ、
     // 駆動するフック（useSupplyDesk）も1つ。
-    'board.supply.title': 'タスク窓口',
-    'board.supply.open': 'タスク窓口をひらく',
+    'board.supply.title': '社長',
+    'board.supply.open': '社長と話す',
     'board.supply.opening': 'ひらいています…',
-    'board.supply.closed': 'タスク窓口はいま閉じています',
+    'board.supply.closed': '社長はいま席を外しています',
     // 監視側の要約。数だけ — 中身はワンクリック先にある。
     'board.supply.rollupWorking': '稼働{n}',
     'board.supply.rollupReview': 'レビュー{n}',
     'board.supply.rollupWaiting': '判断待ち{n}',
     'board.supply.rollupUnknown': '確認中…',
     'board.supply.workersUnknown': 'まだ確認できていません(エンジンから返事がありません)。',
-    'board.supply.expand': 'タスク窓口をひらく',
-    'board.supply.collapse': 'タスク窓口をとじる',
-    'board.supply.stop': '窓口を閉じる',
+    'board.supply.expand': '社長の席をひらく',
+    'board.supply.collapse': '社長の席をとじる',
+    'board.supply.stop': '社長の席を閉じる',
     'board.supply.stopping': '閉じています…',
-    'board.supply.resize': 'ドラッグでタスク窓口の幅を変える',
+    'board.supply.resize': 'ドラッグで社長の席の幅を変える',
     'board.supply.workers': 'ワーカー',
     // どのカードの担当か分からない worker にはカード名を出さない（推測で結び付けない）。
     'board.supply.workerNoCard': 'カード未特定',

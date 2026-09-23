@@ -199,12 +199,26 @@ export const sweepLanded = async (
       // pass's call site so that landing the work and reporting it cannot come
       // apart: every caller of sweepLanded reports, none has to remember to.
       //
-      // Deliberately a COUNT and no card titles. This line is typed into the
-      // owner's own conversation, and a title is one paste away from a branch
-      // name or a card id — exactly the technical noise the supply officer is
-      // required to keep out of it. If the owner wants to know WHICH, they ask,
-      // and the supply officer reads the Board.
-      queueSupplyNotice(projectPath, `お願いされていた作業が ${stamped} 件、本体に取り込まれました。`)
+      // The count AND up to three titles (2026-09-23 — the 「社長」 reports a
+      // delivery by name: 「〇〇ができました」). Titles are written by the supply
+      // desk in the owner's words; any branch name / id / path a title might
+      // carry is redacted by sanitizeSupplyNotice before it is typed.
+      const landedNow = entries.filter((e) => e.landedAt === nowIso && doneIds.has(e.taskId))
+      const names = landedNow
+        .slice(0, 3)
+        .map((e) => `「${e.title.replace(/\s+/g, ' ').trim().slice(0, 40)}」`)
+        .join('')
+      const more = landedNow.length > 3 ? ` ほか${landedNow.length - 3}件` : ''
+      const detail = `お願いされていた作業が ${stamped} 件、本体に取り込まれました${names ? `: ${names}${more}` : ''}。`
+      queueSupplyNotice(projectPath, detail)
+      // The 納品 also rings the bell / OS toast (the owner's 3-tier rule: a
+      // delivery is worth a sound). Lazy + fire-and-forget: a failed bell write
+      // must not undo a landing that is already recorded.
+      void import('./swarmNotifications')
+        .then(({ createSwarmInfoNotification }) =>
+          createSwarmInfoNotification({ event: 'work-landed', detail, projectPath }),
+        )
+        .catch(() => {})
     }
     return stamped
   } catch {

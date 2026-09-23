@@ -113,7 +113,7 @@ describe('swarmLaunch (shared swarm launch defaults)', () => {
 
 // Remote Control 名の識別化(オーナー直接フィードバック 2026-07-18): スマホ一覧に
 // 「manager/worker」が同名で大量に並ぶ問題への対処。役割語はオーナー確定語彙
-// (JA=マネージャー/ワーカー/タスク窓口、EN=Manager/Worker/Supply officer)、言語は
+// (JA=マネージャー/ワーカー/社長、EN=Manager/Worker/President)、言語は
 // Settings.language、プロジェクト名は registry の表示名(displayName || フォルダ名)。
 // 名前制約は実測済み(CLI 2.1.214): 日本語/スペース/コロン/長名すべて受理・一覧表示。
 describe('swarmRemoteControlName (識別可能なリモコン名 — pure)', () => {
@@ -121,15 +121,15 @@ describe('swarmRemoteControlName (識別可能なリモコン名 — pure)', () 
     expect(swarmRemoteControlName('manager', 'ja', 'OPEN GROUND')).toBe(
       'マネージャー OPEN GROUND',
     )
-    expect(swarmRemoteControlName('supply', 'ja', 'OPEN GROUND')).toBe('タスク窓口 OPEN GROUND')
+    expect(swarmRemoteControlName('supply', 'ja', 'OPEN GROUND')).toBe('社長 OPEN GROUND')
     expect(swarmRemoteControlName('worker', 'ja', 'OPEN GROUND', '検品可視化')).toBe(
       'ワーカー OPEN GROUND: 検品可視化',
     )
   })
 
-  it('EN: Manager / Worker / Supply officer(既存 i18n EN 訳と整合)', () => {
+  it('EN: Manager / Worker / President(既存 i18n EN 訳と整合)', () => {
     expect(swarmRemoteControlName('manager', 'en', 'myapp')).toBe('Manager myapp')
-    expect(swarmRemoteControlName('supply', 'en', 'myapp')).toBe('Supply officer myapp')
+    expect(swarmRemoteControlName('supply', 'en', 'myapp')).toBe('President myapp')
     expect(swarmRemoteControlName('worker', 'en', 'myapp', 'Fix login bug')).toBe(
       'Worker myapp: Fix login bug',
     )
@@ -221,7 +221,7 @@ describe('resolveSwarmRemoteName (spawn 時解決 — HOME 隔離統合)', () =>
   })
 
   it('言語未設定は English-first・displayName 無しはフォルダ名(git リポ名ではない)', async () => {
-    expect(await resolveSwarmRemoteName('supply', proj)).toBe('Supply officer proj')
+    expect(await resolveSwarmRemoteName('supply', proj)).toBe('President proj')
     expect(await resolveSwarmRemoteName('worker', proj, 'Fix bug')).toBe('Worker proj: Fix bug')
   })
 

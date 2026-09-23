@@ -288,6 +288,7 @@ const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
   // for the whole TTL). Titled as the answer itself, not as a delivery failure:
   // what the owner wants off this toast is the reply.
   'commander-reply': 'Swarm — the commander answered your question',
+  'work-landed': 'Your requested work is done',
 }
 
 /** The OS toast (title + body) for an info event — same shape as the fatal one. */

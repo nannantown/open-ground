@@ -359,6 +359,18 @@ describe('sweepLanded → the supply desk hears about it', () => {
     expect(line).toBeTruthy()
     expect(line).toContain('2 件')
     expect(line).toContain('本体に取り込まれました')
+    // The 納品 names WHAT landed (2026-09-23), in the owner's own card titles.
+    expect(line).toContain('「fix A」')
+    expect(line).toContain('「fix B」')
+  })
+
+  it('a title carrying a branch name or id is redacted before it is typed', async () => {
+    await recordPromoted(projDir, { taskId: 'c1', title: 'swarm/a 0123abcd を直す', branch: 'swarm/a' })
+    await sweepLanded(projDir, [{ id: 'c1', boardColumn: 'done' }] as ProjectTask[])
+    const line = peekSupplyNotices().get(projDir) ?? ''
+    expect(line).toContain('を直す')
+    expect(line).not.toContain('swarm/a')
+    expect(line).not.toContain('0123abcd')
   })
 
   // The line goes into the OWNER'S conversation, so it must not carry the

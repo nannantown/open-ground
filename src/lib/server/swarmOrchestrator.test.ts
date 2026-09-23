@@ -3237,6 +3237,8 @@ describe('runDispatchPass — every tier switched OFF (none-allowed hold)', () =
     expect(deps.raised[0].projectPath).toBe(engine.path)
     expect(deps.raised[0].whyEscalated).toBe('policy')
     expect(deps.raised[0].question).toContain('switched OFF')
+    // A template raise about the owner's own settings stays in the owner lane.
+    expect(deps.raised[0].askCommanderFirst).toBeUndefined()
     // 平易文 rides the template raise (non-programmer owner surface): A/B + 影響.
     expect(deps.raised[0].plainQuestion).toContain('すべてオフになっています')
     expect(deps.raised[0].plainQuestion).toContain('A: ')
@@ -5378,6 +5380,8 @@ describe('runDispatchPass — monitor: free-text question (C3)', () => {
     expect(deps.raised[0].sdkSessionId).toBe('sdk-a-1')
     expect(deps.raised[0].branch).toBe('swarm/a')
     expect(deps.raised[0].taskId).toBe('a')
+    // A worker's own question tries the commander lane first (2026-09-23).
+    expect(deps.raised[0].askCommanderFirst).toBe(true)
     expect(engine.questionRaised?.has('sdk-a-1')).toBe(true)
     const log = engine.log.find((l) => l.message.startsWith('worker asked a free-text question'))
     expect(log?.level).toBe('warn')
@@ -10120,5 +10124,22 @@ describe('OFFLINE HOLD — the manager reflex holds its voice offline and spends
     await passAt(engine, deps, T0)
     expect(deps.nudged).toEqual([engine.path])
     expect(engine.managerResume?.offlineHold ?? false).toBe(false)
+  })
+})
+
+// ── The president's progress lane is fed by the dispatch pass (2026-09-23) ──────
+describe('runDispatchPass → supply desk progress', () => {
+  it('a card the pass sees move reaches the desk queues; the first pass is only a baseline', async () => {
+    const { resetSupplyNoticeState, peekSupplyImportant } = await import('./supplyNotice')
+    const { resetSupplyProgressState } = await import('./supplyProgress')
+    resetSupplyNoticeState()
+    resetSupplyProgressState()
+    const engine = newEngine({ path: '/proj-progress' })
+    const deps = makeDeps({ cards: [card('p', { title: '決済画面', boardColumn: 'review' })] })
+    await runDispatchPass(engine, deps)
+    expect(peekSupplyImportant().size).toBe(0)
+    deps.board.set('p', { ...deps.board.get('p')!, boardColumn: 'blocked' })
+    await runDispatchPass(engine, deps)
+    expect((peekSupplyImportant().get('/proj-progress') ?? [])[0]).toContain('「決済画面」が途中で止まり')
   })
 })

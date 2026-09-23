@@ -2821,6 +2821,11 @@ export type SwarmInfoEvent =
    *  first sight so finished-but-invisible work is never a silent stall again
    *  (2026-09-13 — swarmOrchestrator.ts classifyWorker / READY_WITHOUT_WORK_GRACE_MS). */
   | 'ready-without-work'
+  /** Work the owner asked for landed on the trunk — the 「納品」 (2026-09-23).
+   *  Bell + toast only: the supply desk hears it through its own line from
+   *  swarmLandedLedger.sweepLanded, so this is deliberately NOT on
+   *  SUPPLY_NOTICE_INFO_EVENTS (it would be said twice). */
+  | 'work-landed'
 
 /** The payload of a 'swarm-info' notification — the info-grade sibling of
  *  {@link SwarmFatalNotification}: same persisted-bell + OS-toast plumbing,
@@ -2974,6 +2979,25 @@ export interface Escalation {
   injectedAt?: string
   /** Set when the owner dismissed the question unanswered. */
   dismissedAt?: string
+  /** WHO the question is waiting on (owner decision 2026-09-23 — 「社長だけと話す」).
+   *   • absent / 'owner' — the owner's inbox (every record written before this
+   *     field existed, and every template raise, keeps meaning exactly that);
+   *   • 'commander' — a worker's own question, held INSIDE the company first:
+   *     the commander answers it from the card's brief or raises it to the owner
+   *     (commanderQuestions.ts). No bell, no toast, no desk notice while it sits
+   *     here — and it is promoted to 'owner' automatically when the commander
+   *     does not settle it within COMMANDER_ANSWER_WINDOW_MS, so a question can
+   *     never stall in silence. */
+  routedTo?: 'commander' | 'owner'
+  /** When the question was actually handed to a commander desk (commander lane
+   *  only) — the sweep's "already told" stamp, so it is said once, not per pass. */
+  commanderToldAt?: string
+  /** When a commander-lane question was handed on to the owner (by the commander,
+   *  or by the timeout). Absent on records that started in the owner's lane. */
+  raisedToOwnerAt?: string
+  /** Who wrote {@link answer}. Absent ⇒ 'owner' (every older record). The worker
+   *  is told which, in words — a commander's call must never read as the owner's. */
+  answeredBy?: 'owner' | 'commander'
 }
 
 /** One inbox row as served by GET /api/swarm/escalations: the record plus the
@@ -3008,7 +3032,8 @@ export interface EscalationOpenResponse {
  *                  call changed nothing (idempotent re-answer). The answer remains persisted. */
 export type EscalationDelivery = 'injected' | 'queued' | 'skipped'
 
-/** POST /api/swarm/escalations/answer {id, answer}. Persists before delivery. */
+/** POST /api/swarm/escalations/answer {id, answer, by?}. Persists before delivery.
+ *  `by:'commander'` is accepted only for a record in the commander lane. */
 export interface EscalationAnswerResponse {
   escalation: Escalation
   delivery: EscalationDelivery

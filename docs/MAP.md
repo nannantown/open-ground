@@ -422,6 +422,16 @@
   (`【本人からの回答(escalation)】` を騙れる — payload の `【】` は `REDACTIONS` で除去)。
   司令官側の義務は `skills/og-manage/SKILL.md`「補給官から中継された件には同ターンで返す」。
   正典は `docs/commander/06-overseer-escalations.md` §1.5。
+- **社長モデル(2026-09-23 オーナー決定「僕が喋るのは社長さんだけ」)**: 補給官の画面名は
+  「社長 / President」(i18n と Remote Control 名のみ — 卓の識別キー `SUPPLY_DESK_LABEL='補給官'`
+  は**変えない**)。① ワーカーの質問は **司令官レーン**(`Escalation.routedTo:'commander'`)
+  — `commanderQuestions.ts` が司令官へ渡し(`commanderRelay.ts` = manager/say と同じ起床経路)、
+  司令官は `escalations/answer {by:'commander'}` か `escalations/raise` で決着、10分で自動的に
+  オーナーへ。境界語(`swarmDecisionRouting.needsOwnerDirectly`)は最初からオーナー行き。
+  ② `supplyNotice.ts` は3レーン(返事 → 重要 FIFO → 進捗ダイジェスト)。**重要は上書きしない**
+  (旧1スロット上書きで質問が消えていた)。③ 進捗は `supplyProgress.ts` が Board の列移動を
+  毎パス差分して作る(モデル不使用)。④ 納品は `sweepLanded` がカード名入りで重要レーン +
+  ベル `work-landed`。正典は 06 章 §1.6。
   実測(0731): SDK セッションでも `/og-manage` は解決する(slash commands 95本に在る・実際に読み込む)。
   ただし **Claude Code の system prompt は付かない** ので app-context カードは
   `systemPrompt.append` で明示注入する(`scripts/probe-sdk-skill-resolution.mts` /

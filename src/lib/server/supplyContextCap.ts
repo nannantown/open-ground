@@ -36,6 +36,7 @@ import { getDeskContextCapTokens } from './store'
 import { logToEngine } from './engineLogSink'
 import { deskCompactedLogLine } from './deskContextCap'
 import { flushSupplyNotices } from './supplyNotice'
+import { kickAllCommanderQuestionSweeps } from './commanderQuestions'
 import type { OrchestratorLogLine } from '../types'
 
 /** How often the loop measures. A desk grows by one turn at a time, so a minute
@@ -170,6 +171,10 @@ export const startSupplyContextCapLoop = (intervalMs: number = SUPPLY_CONTEXT_CA
     // that walks every live supply desk. Delivery on the happy path happened
     // inline at queue time; this is only the retry.
     flushSupplyNotices()
+    // Backstop for the commander question lane (commanderQuestions.ts): a
+    // question held inside the company must reach someone even with no engine
+    // running to carry its sweep.
+    void kickAllCommanderQuestionSweeps()
     void runSupplyContextCapPass().catch(() => {})
   }, intervalMs)
   ;(timer as { unref?: () => void }).unref?.()

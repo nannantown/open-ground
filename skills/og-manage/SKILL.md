@@ -53,7 +53,9 @@ Supply only adds `todo` cards. Workers only write code+heartbeats, never Board c
 | **pre-ON check** (prevents desk dup) | ① `jq -r 'select(.manager)\|"\(input_filename\|split("/")[-2])  \(.manager.cwd)  \(.manager.sessionId)"' ~/.openground/projects/*/swarm-sessions.json` ② `ps -eo command \| grep -oE -- '(--session-id\|--resume) [a-f0-9-]{36}' \| awk '{print $2}' \| sort -u` — **①'s session id must be in ②, else don't go ON** |
 | stop one worker | `POST /api/swarm/orchestrator/worker/stop` body `{path, terminalId:<worker id>}` (field name is historical — pass the worker's `sdkSessionId`) |
 | evict stuck review | `POST /api/swarm/orchestrator/review/resolve` body `{path, taskId, target:"blocked"\|"todo"}` |
-| question inbox | `GET /api/swarm/escalations?status=open`; answer/dismiss via `/answer` `/dismiss`. `plainQuestion`=owner-facing, `question`=machine field |
+| question inbox | `GET /api/swarm/escalations?status=open`; answer/dismiss via `/answer` `/dismiss`. `plainQuestion`=owner-facing, `question`=machine field. `?lane=commander` = the workers' questions waiting on YOU |
+| **answer a worker's question** (commander lane) | `POST $OG/api/swarm/escalations/answer` body `{"id":"<id>","answer":"<decision + why, 1-3 lines>","by":"commander"}` — 409 if it is the owner's question |
+| **hand a question to the owner** | `POST $OG/api/swarm/escalations/raise` body `{"id":"<id>","plainQuestion":"<①決めること ②選択肢 ③それぞれどうなるか, plain words>"}` |
 | read Board | `GET /api/project?path=$PWD` (`.tasks[]`) |
 | move column | `POST /api/project/tasks` body `{path, setColumn:[{"id":…,"column":…}]}` |
 | rework (1 call, counter built in) | `POST /api/project/tasks` body `{path, rework:[{"id":"<full UUID>"}]}` — review→doing + `reworkCount`+1 + overflow-to-`blocked` (cap 3 default) in one call. Branch on `results.rework[0].column`(`doing`/`blocked`)+`.count` |
@@ -66,6 +68,29 @@ Supply only adds `todo` cards. Workers only write code+heartbeats, never Board c
 - Raw heartbeat file: `~/.openground/swarm/<repoKey>/<branch, / → ->.json`. **Normally skip it** — `GET /api/swarm/workers` already merges `phase`/`note`/`heartbeatAt`/`ready`/`blocked`/**`blockers`**. `blockers` = worker's channel to you (questions instead of escalating to owner); `blocked:true` → **read the text**, don't stop at the flag.
 - **Rework's primary path is the raw `rework` API.** `swarm-board.sh` is an optional shell wrapper; the loop completes without it.
 - **Anything relayed from the task desk gets an ANSWER BACK, same turn** (owner decision 2026-09-22). A message from the desk is the owner speaking from outside — often through a phone, where your window does not exist. Answering in your own window is answering nobody. `POST /api/swarm/supply/say` (table above) is the only route that reaches them; `{"delivered":false}` just means the desk was busy and it will be handed over later, so don't resend. Write it for a **non-programmer**: plain language, no branch names / card ids / file paths, 1–3 lines, and if you are declining say what you would need instead. An instruction ("merge swarm/X") is acknowledged the same way once acted on — one line, what happened.
+
+## 【社内の質問】 — workers' questions come to YOU first (owner decision 2026-09-23)
+
+The owner talks only to the president (the task desk) and does not want engineering questions.
+A worker's question is therefore held in the **commander lane** and typed to you as a line
+starting `【社内の質問】` with its `id`. It never rang the owner. Settle it **the same turn**:
+
+- **Answer it yourself** when the card's notes (the brief / completion conditions), the
+  repository's conventions, or a quick look at the code decide it — which libraries, which
+  helper, naming, structure, test shape, how to split the work, whether a side fix is in scope.
+  `POST /api/swarm/escalations/answer` with `"by":"commander"`. The worker is told it was the
+  commander, not the owner. Decide; do not bounce a technical choice back to the worker.
+- **Hand it on** only when the answer depends on what the OWNER wants: the goal or its
+  priority, taste (look, wording, tone), anything irreversible or public (release, deletion,
+  cost, accounts). `POST /api/swarm/escalations/raise` with a `plainQuestion` written for a
+  non-programmer: ① what needs deciding ② the choices ③ what each leads to. The president
+  then asks the owner. Never answer one of these yourself.
+- **Do nothing and it goes to the owner after ~10 minutes** anyway — the worker is blocked the
+  whole time, so silence is the worst answer.
+
+Boundary questions (release, deletion, cost, models…) skip you and go straight to the owner;
+the answer route refuses `by:"commander"` for them (409). That refusal is correct — do not
+work around it.
 
 ## Owner vocabulary
 

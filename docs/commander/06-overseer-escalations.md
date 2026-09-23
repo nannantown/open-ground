@@ -2,6 +2,12 @@
 
 ## Current Contract (2026-09-19)
 
+**Update 2026-09-23 (§1.6 below):** S4 and the engine's free-text worker questions now enter
+the **commander lane** first (`routedTo:'commander'`, no bell/toast/desk notice); the commander
+answers (`by:'commander'`) or raises them, and they are promoted to the owner automatically after
+`COMMANDER_ANSWER_WINDOW_MS` (10 min). Boundary questions skip the lane. The sentence below
+("S4 questions always reach the human inbox") is superseded by that.
+
 Monitoring is deterministic. S4 questions always reach the human inbox; there is no brain, corpus learning, proxy draft, T1 auto-answer, model budget or sandbox-warning response. Existing stop/re-arm, notifications, deduplication, receipt checks and human answer delivery remain.
 See [SIMPLIFICATION.md](SIMPLIFICATION.md) for the current entry points and verification.
 Any descriptions of the retired paths below are historical, not operating instructions.
@@ -986,3 +992,36 @@ ls ~/.openground/overseer-scratch/ 2>/dev/null          # 大脳 one-off の scr
 
 *関連文書: `docs/OVERSEER_DESIGN.md`(設計正典・§6 信号表 / §8 受信箱の原典)、
 `docs/commander/05-board-api-contract.md`(Board 列ライフサイクル — S1/S5 の列セマンティクスの前提)。*
+
+
+## §1.6 — The commander lane and the president's three notice lanes (2026-09-23)
+
+Owner decision: 「僕が喋るのは社長さんだけ」 — the owner talks only to the supply desk (now shown
+as 「社長 / President」), sets goals and judges deliveries; engineering questions stay inside.
+
+**Commander lane** (`src/lib/server/commanderQuestions.ts`):
+- Raise sites: overseer S4 (`detectWorkerQuestions`) and the engine's SDK free-text question
+  arm (`monitorWorkers` → `deps.raiseQuestion`) pass `askCommanderFirst:true`.
+- `openEscalation` sets `routedTo:'commander'` unless `needsOwnerDirectly(question+plain+context)`
+  (`swarmDecisionRouting.ts`, a deliberate over-approximation), and then fires NO owner
+  notification. Owner surfaces exclude the lane: `countOpenEscalationsByProject` (Ground lamp),
+  `indexEscalationsByTask` (Board badge), `SwarmEscalationsPane`, `GET …/escalations?lane=owner`.
+- `sweepCommanderQuestions` (engine pass via `kickCommanderQuestionSweep`, 20s throttle, off-tick;
+  backstop from the supply loop via `kickAllCommanderQuestionSweeps`, 60s, engine-independent):
+  untold → `relayToCommander` (wakes a desk) → `commanderToldAt`; age ≥ window → `raiseEscalationToOwner`.
+- `answerEscalation(id, a, deps, {by:'commander'})` is refused (`EscalationStateError`, 409) for
+  anything not in the commander lane. The worker receives `【司令官からの回答】…(オーナーではありません)`;
+  the queued (next-dispatch) line says `司令官の回答(オーナーではない)`. `ESCALATION_ANSWER_MARKER`
+  is unchanged (frozen) and still prefixes the queued line.
+- `POST /api/swarm/escalations/raise {id, plainQuestion?}` → owner lane + `raisedToOwnerAt` + bell/toast/desk.
+
+**Supply desk lanes** (`supplyNotice.ts`): replies (FIFO 5) → important (FIFO `SUPPLY_NOTICE_CAP`=8,
+dedup, never overwritten — the old single overwrite slot silently dropped a question when a second
+event arrived while the desk was busy) → progress digest (accumulated items, cap 6, one line, no bell).
+Allowlist gained `escalation-reminder`, `review-idle`, `ready-without-work`. Progress comes from
+`supplyProgress.observeBoardProgress` (column diff per pass; first pass = baseline; →blocked from
+doing/review is important). Landing: `sweepLanded` names up to 3 titles (redacted) and also fires
+info `work-landed` (bell/toast only; not on the desk allowlist, to avoid saying it twice).
+
+Verification: `commanderQuestions.test.ts`, `supplyProgress.test.ts`, `supplyNotice.test.ts`
+(lane tests), `swarmLandedLedger.test.ts` (titles).

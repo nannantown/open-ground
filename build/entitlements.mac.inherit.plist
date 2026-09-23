@@ -16,6 +16,11 @@
                                                        Apple-signed
     com.apple.security.cs.allow-dyld-environment-variables
                                                      — nvm's PATH munging
+    com.apple.security.device.audio-input           — microphone for the
+                                                       Songs tab recorder;
+                                                       without it hardened
+                                                       runtime makes tccd
+                                                       refuse with no prompt
     com.apple.security.inherit                       — child processes
                                                        inherit the same
                                                        entitlement set
@@ -33,6 +38,8 @@
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
   <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <key>com.apple.security.device.audio-input</key>
   <true/>
   <key>com.apple.security.inherit</key>
   <true/>

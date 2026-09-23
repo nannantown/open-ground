@@ -124,6 +124,19 @@ describe('owner questions without Persona', () => {
     expect(calls.openEscalation[0]).not.toHaveProperty('proxyDraft')
   })
 
+  // 2026-09-23: a worker's own question asks for the COMMANDER lane (openEscalation
+  // then decides, by the boundary word list, whether the owner must see it at once).
+  it('raises a worker question with askCommanderFirst', async () => {
+    const calls = makeCalls()
+    const engine = makeEngine({ workers: [worker()] })
+    const deps = makeDeps(calls, {
+      readHeartbeat: async () => ({ ready: false, blocked: true, blockers: 'formatDate を使う？それとも新規？' }),
+    })
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(calls.openEscalation).toHaveLength(1)
+    expect(calls.openEscalation[0]).toMatchObject({ askCommanderFirst: true })
+  })
+
   it('retries a failed inbox write without losing the question', async () => {
     const calls = makeCalls()
     const engine = makeEngine({ workers: [worker()] })

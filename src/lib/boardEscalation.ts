@@ -50,6 +50,9 @@ export const indexEscalationsByTask = (
   const createdAtByTask = new Map<string, number>()
   let unattributed = 0
   for (const e of list) {
+    // A worker's question still being settled by the commander is not the
+    // owner's turn (commanderQuestions.ts) — it gets no "needs you" badge.
+    if (e?.routedTo === 'commander') continue
     const taskId = typeof e?.taskId === 'string' ? e.taskId.trim() : ''
     if (!taskId) {
       unattributed++

@@ -188,7 +188,9 @@ export type SwarmRemoteRole = 'manager' | 'worker' | 'supply'
 const REMOTE_ROLE_LABEL: Record<SwarmRemoteRole, { en: string; ja: string }> = {
   manager: { en: 'Manager', ja: 'マネージャー' },
   worker: { en: 'Worker', ja: 'ワーカー' },
-  supply: { en: 'Supply officer', ja: 'タスク窓口' },
+  // Renamed 2026-09-23 (owner: 「社長として動いてほしい」) — the name on the
+  // phone's Remote Control list. Display only: nothing matches on it.
+  supply: { en: 'President', ja: '社長' },
 }
 
 /** 一覧での可読性上限(code point 数)。実測ではもっと長くても通るが、モバイル一覧は

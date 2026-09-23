@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.11.124",
+  "version": "0.11.125",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -145,7 +145,8 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "extendInfo": {
-        "NSAppleEventsUsageDescription": "OPEN GROUND raises its own window and coordinates the local Claude Code session."
+        "NSAppleEventsUsageDescription": "OPEN GROUND raises its own window and coordinates the local Claude Code session.",
+        "NSMicrophoneUsageDescription": "OPEN GROUND uses the microphone only while you record in the Songs tab."
       }
     },
     "win": {

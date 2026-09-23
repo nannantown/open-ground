@@ -11,11 +11,21 @@
 // at 09:03. The supply skill is deliberately "Never self-initiate", so it will
 // never find such a thing by itself — something has to TELL it.
 //
-// THE SAME SHAPE AS THE COMMANDER'S NOTICE SLOT (swarmOrchestrator's
-// managerNotice / defaultNotifyManagerReady — card 715dd79f, which closed the
-// identical defect on the commander side):
-//   • ONE slot per project, newest overwrites — a queue would let a quiet desk
-//     accumulate a backlog and then paste a wall of stale news at the owner;
+// THREE LANES PER PROJECT (reworked 2026-09-23 — 「社長」). Originally ONE slot,
+// newest-overwrites, borrowed from the commander's notice slot. That was right
+// for a status ping and WRONG for what this channel carries: a question that
+// opened while the desk was mid-turn was silently replaced by the next event
+// (a landing, a fatal), the desk never heard of it, and the worker sat waiting
+// while the owner believed nothing needed them. Now:
+//   • REPLIES — the commander's answers (FIFO, cap {@link SUPPLY_REPLY_CAP});
+//   • IMPORTANT — questions, holds, fatals, stalls, deliveries (FIFO, cap
+//     {@link SUPPLY_NOTICE_CAP}): each one is something the owner must judge or
+//     know, so none may erase another;
+//   • PROGRESS — "started X", "X is being checked", "X went back for rework":
+//     ACCUMULATED into one digest line until the desk is free, so ten
+//     transitions cost the owner's conversation one turn, not ten. No bell and no
+//     toast — progress is conversation-only (the owner's 3-tier rule).
+//   Delivered in that order, one line per desk per pass;
 //   • CLEARED the moment it is delivered;
 //   • HELD, never forced, when the desk is generating / half-typed / showing a
 //     menu ({@link noticeDeliverable} — the same three refusals, byte for byte).
@@ -53,6 +63,13 @@ import type { AppNotification, SwarmInfoEvent } from '../types'
 export const SUPPLY_NOTICE_INFO_EVENTS: ReadonlySet<SwarmInfoEvent> = new Set<SwarmInfoEvent>([
   // A question landed in the inbox and the owner's answer is what unblocks it.
   'escalation-open',
+  // The same question, still unanswered hours later.
+  'escalation-reminder',
+  // STALLS — the owner asked to be told when something stops (2026-09-23):
+  // finished work is piling up un-reviewed, or a worker says it is done with
+  // nothing to show for it. Both mean "nothing is moving" in plain terms.
+  'review-idle',
+  'ready-without-work',
   // The app is about to replace itself with a build carrying the merged work —
   // the closest thing the engine has to "it was released".
   'self-update-requested',
@@ -117,12 +134,28 @@ export const SUPPLY_NOTICE_PREFIX = '【エンジンからの知らせ】'
  *  RETELL it to the owner, who is not a programmer — so the obligation travels
  *  with the notice rather than living only in the skill file, which a compacted
  *  desk may no longer have in view. */
-const SUPPLY_NOTICE_TAIL =
-  'この知らせをオーナーに平易な言葉で1〜3行で伝えてください(専門用語・ブランチ名・IDは書かない)。'
+const SUPPLY_NOTICE_TAIL = '(自動の知らせ。オーナーに平易に1〜3行で。専門用語・ID不可)'
+
+/** Progress digest tail — shorter still: it is news, not a decision, and the
+ *  owner asked not to be asked anything about it. */
+const SUPPLY_PROGRESS_TAIL = '(自動の進捗。オーナーに1〜2行で短く。質問しない)'
 
 /** Wrap a plain summary into the line that gets typed. Pure. */
 export const supplyNoticeLine = (summary: string): string =>
   `${SUPPLY_NOTICE_PREFIX}${sanitizeSupplyNotice(summary)} ${SUPPLY_NOTICE_TAIL}`
+
+/** The progress digest's line. Same frozen prefix (the skill matches one engine
+ *  prefix); the content starts with 「進捗:」 so the desk can tell it is news. Pure. */
+export const supplyProgressLine = (items: readonly string[]): string =>
+  `${SUPPLY_NOTICE_PREFIX}${sanitizeSupplyNotice(`進捗: ${items.join(' / ')}`)} ${SUPPLY_PROGRESS_TAIL}`
+
+/** How many undelivered IMPORTANT notices a project may hold. Past it the
+ *  OLDEST is dropped — the bell already holds every one of them. */
+export const SUPPLY_NOTICE_CAP = 8
+
+/** How many distinct items one progress digest carries. Past it the oldest
+ *  item drops (the Board still shows everything). */
+export const SUPPLY_PROGRESS_MAX_ITEMS = 6
 
 /** The prefix a COMMANDER REPLY carries (owner decision 2026-09-22 — 「社長と話す」).
  *  Deliberately distinct from {@link SUPPLY_NOTICE_PREFIX}: the desk relayed the
@@ -279,16 +312,22 @@ interface PendingNotice {
   at: number
 }
 
-/** The ONE pending notice per project. On `globalThis` so it survives `tsx watch`
- *  reloads in dev, like every other in-memory server map here. */
+/** The IMPORTANT queue per project. On `globalThis` so it survives `tsx watch`
+ *  reloads in dev, like every other in-memory server map here. (A new global
+ *  name: the old one held a single-slot shape a reloaded module must not read.) */
 declare global {
   // eslint-disable-next-line no-var
-  var __openground_supply_notice: Map<string, PendingNotice> | undefined
+  var __openground_supply_notice_q: Map<string, PendingNotice[]> | undefined
   // eslint-disable-next-line no-var
   var __openground_supply_reply: Map<string, PendingNotice[]> | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_progress: Map<string, { items: string[]; at: number }> | undefined
 }
-const pending: Map<string, PendingNotice> =
-  globalThis.__openground_supply_notice ?? (globalThis.__openground_supply_notice = new Map())
+const pending: Map<string, PendingNotice[]> =
+  globalThis.__openground_supply_notice_q ?? (globalThis.__openground_supply_notice_q = new Map())
+/** The PROGRESS digest per project — accumulated, not queued. */
+const progress: Map<string, { items: string[]; at: number }> =
+  globalThis.__openground_supply_progress ?? (globalThis.__openground_supply_progress = new Map())
 /** The reply QUEUE per project — see {@link SUPPLY_REPLY_CAP} for why replies
  *  are not allowed to share the news slot. */
 const replies: Map<string, PendingNotice[]> =
@@ -297,11 +336,25 @@ const replies: Map<string, PendingNotice[]> =
 export const resetSupplyNoticeState = (): void => {
   pending.clear()
   replies.clear()
+  progress.clear()
 }
 
-/** What is waiting for each project right now — for tests and diagnostics. */
-export const peekSupplyNotices = (): ReadonlyMap<string, string> =>
-  new Map(Array.from(pending, ([k, v]) => [k, v.line] as const))
+/** The NEXT news line each project would hear (important first, else the
+ *  progress digest) — for tests and diagnostics. */
+export const peekSupplyNotices = (): ReadonlyMap<string, string> => {
+  const out = new Map<string, string>()
+  for (const [k, q] of Array.from(pending)) if (q[0]) out.set(k, q[0].line)
+  for (const [k, p] of Array.from(progress)) if (!out.has(k) && p.items.length) out.set(k, supplyProgressLine(p.items))
+  return out
+}
+
+/** Every queued IMPORTANT line per project, oldest first — for tests. */
+export const peekSupplyImportant = (): ReadonlyMap<string, readonly string[]> =>
+  new Map(Array.from(pending, ([k, v]) => [k, v.map((n) => n.line)] as const))
+
+/** The accumulated progress items per project — for tests. */
+export const peekSupplyProgress = (): ReadonlyMap<string, readonly string[]> =>
+  new Map(Array.from(progress, ([k, v]) => [k, [...v.items]] as const))
 
 /** The queued replies per project, oldest first — for tests and diagnostics. */
 export const peekSupplyReplies = (): ReadonlyMap<string, readonly string[]> =>
@@ -319,13 +372,18 @@ export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): str
   // BOTH lanes, or the pass bails before it ever looks at the replies — which
   // it did, and the reply tests caught it: with no news queued, a commander's
   // answer sat in the queue until some unrelated notice happened to arrive.
-  if (pending.size === 0 && replies.size === 0) return delivered
+  if (pending.size === 0 && replies.size === 0 && progress.size === 0) return delivered
   const now = deps.now()
   // Stale news is dropped rather than delivered late — see SUPPLY_NOTICE_TTL_MS.
   // Done over the whole map, not just the desks seen this pass, so a project that
   // never grows a desk cannot accumulate entries forever.
-  for (const [key, p] of Array.from(pending)) {
-    if (now - p.at > SUPPLY_NOTICE_TTL_MS) pending.delete(key)
+  for (const [key, q] of Array.from(pending)) {
+    const live = q.filter((p) => now - p.at <= SUPPLY_NOTICE_TTL_MS)
+    if (live.length === 0) pending.delete(key)
+    else pending.set(key, live)
+  }
+  for (const [key, p] of Array.from(progress)) {
+    if (now - p.at > SUPPLY_NOTICE_TTL_MS) progress.delete(key)
   }
   // Replies age out on the same clock, but they are HANDED ON rather than
   // dropped (see SupplyNoticeDeps.onReplyExpired) — an answer the owner is
@@ -362,15 +420,22 @@ export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): str
       // is the one that ends.
       const queue = replies.get(key)
       const reply = queue?.[0] ?? null
-      const line = reply?.line ?? pending.get(key)?.line ?? null
+      const important = reply ? null : (pending.get(key)?.[0] ?? null)
+      const digest = reply || important ? null : progress.get(key)
+      const line =
+        reply?.line ?? important?.line ?? (digest && digest.items.length ? supplyProgressLine(digest.items) : null)
       if (!line) continue
       if (!noticeDeliverable(deps.screen(desk.id))) continue // busy / half-typed / menu — next pass
       if (!deps.write(desk.id, `${line}\r`)) continue
       if (reply && queue) {
         queue.shift()
         if (queue.length === 0) replies.delete(key)
+      } else if (important) {
+        const q = pending.get(key)
+        q?.shift()
+        if (!q || q.length === 0) pending.delete(key)
       } else {
-        pending.delete(key)
+        progress.delete(key)
       }
       delivered.push(key)
     } catch {
@@ -380,11 +445,19 @@ export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): str
   return delivered
 }
 
+/** Append to a project's IMPORTANT queue (dedup on identical line, cap). */
+const pushImportant = (key: string, line: string, at: number): void => {
+  const q = pending.get(key) ?? []
+  if (!q.some((p) => p.line === line)) q.push({ line, at })
+  while (q.length > SUPPLY_NOTICE_CAP) q.shift()
+  pending.set(key, q)
+}
+
 /**
- * Put ONE line on the project's supply desk. Newest overwrites — see the file
- * header for why this is a slot and not a queue. Tries to deliver immediately so
- * an idle desk hears it at once; anything held is re-offered by
- * {@link flushSupplyNotices} on the supply loop's next pass.
+ * Put ONE important line on the project's supply desk — queued behind any
+ * other important line, never overwriting one (see the file header). Tries to
+ * deliver immediately so an idle desk hears it at once; anything held is
+ * re-offered by {@link flushSupplyNotices} on the supply loop's next pass.
  *
  * `projectPath` must be the canonical project path (what a desk's `cwd` reads
  * as) — notification payloads already carry it canonicalized.
@@ -396,7 +469,28 @@ export const queueSupplyNotice = (
 ): void => {
   const line = supplyNoticeLine(summary)
   if (!projectPath || line.length === 0) return
-  pending.set(deskKey(projectPath), { line, at: (deps.now ?? Date.now)() })
+  pushImportant(deskKey(projectPath), line, (deps.now ?? Date.now)())
+  flushSupplyNotices(deps)
+}
+
+/**
+ * Add ONE progress item ("「X」に取りかかりました") to the project's digest. Items
+ * accumulate until the desk is free and go out as ONE line; progress never rings
+ * the bell. An identical item is not repeated.
+ */
+export const queueSupplyProgress = (
+  projectPath: string,
+  item: string,
+  deps: Partial<SupplyNoticeDeps> = {},
+): void => {
+  const text = sanitizeSupplyNotice(item)
+  if (!projectPath || !text) return
+  const key = deskKey(projectPath)
+  const cur = progress.get(key) ?? { items: [], at: (deps.now ?? Date.now)() }
+  if (!cur.items.includes(text)) cur.items.push(text)
+  while (cur.items.length > SUPPLY_PROGRESS_MAX_ITEMS) cur.items.shift()
+  cur.at = (deps.now ?? Date.now)()
+  progress.set(key, cur)
   flushSupplyNotices(deps)
 }
 
@@ -456,6 +550,6 @@ export const noticeToSupply = (n: AppNotification, deps: Partial<SupplyNoticeDep
   const project = noticeProject(n)
   const line = supplyNoticeFor(n)
   if (!project || !line) return
-  pending.set(deskKey(project), { line, at: (deps.now ?? Date.now)() })
+  pushImportant(deskKey(project), line, (deps.now ?? Date.now)())
   flushSupplyNotices(deps)
 }
