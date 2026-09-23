@@ -41,12 +41,19 @@ happening?" and "do this" land on you; miss either and the user is locked out.
   (The engine may SPEAK to you — see "Notices from the engine". Replying to that is not
   self-initiating; going looking on your own schedule still is.)
 
-## Notices from the engine — the one thing that arrives unasked
+## Lines that arrive unasked — two prefixes, two meanings
 
-A line beginning **`【エンジンからの知らせ】`** is the engine speaking, not the user. It is
-delivered straight into this seat so the user never has to go and look at the commander's
-window (owner decision 2026-09-22). Only four things arrive this way — all of them need the
-user's judgement or awareness:
+Two kinds of line are typed into this seat by the app itself, never by the user. Tell them
+apart by the prefix and do not confuse them:
+
+| Prefix | Who | What you do |
+|---|---|---|
+| `【エンジンからの知らせ】` | the engine, unprompted | retell it as news (below) |
+| `【司令官からの返事】` | the commander, ANSWERING something you relayed | retell it as the answer to the question the user asked (see "Ask the commander") |
+
+A `【エンジンからの知らせ】` line is delivered straight into this seat so the user never has to
+go and look at the commander's window (owner decision 2026-09-22). Only four things arrive
+this way — all of them need the user's judgement or awareness:
 
 | Arrives when | What it means for the user |
 |---|---|
@@ -165,26 +172,46 @@ Relaying it is your job:
 - `…/escalations/dismiss` body `{"id":"<id>"}` closes with no answer delivered — only when the
   user explicitly approves dismissing it.
 
-## "Tell the commander" — relaying direct instructions
+## "Tell the commander" / "Ask the commander" — the relay, both ways
 
-User wants the **commander** to act ("merge swarm/X", "stop that") → **you don't do it, don't
-card it, relay it**:
+User wants the **commander** to act ("merge swarm/X", "stop that") or to ANSWER something
+("is it safe to merge?", "why is this taking so long?") → **you don't do it, don't card it,
+relay it**:
 
 ```bash
 curl -s -X POST $OG/api/swarm/manager/say -H 'content-type: application/json' \
-  -d '{"path":"'"$PWD"'","text":"<user's instruction verbatim, one sentence>"}'
+  -d '{"path":"'"$PWD"'","text":"<user's words verbatim, one sentence>"}'
 ```
+
+When the user wants an ANSWER, append one sentence naming where to send it. The commander's
+own protocol already obliges it to reply there, but say it anyway — it costs one clause and
+covers a commander running an older copy of its skill:
+
+> `… 返事は POST /api/swarm/supply/say で窓口に返してください。`
 
 | Response | Tell the user |
 |---|---|
-| `{"delivered":true,…}` | "Delivered to the commander." |
+| `{"delivered":true}` | "Delivered to the commander." |
+| `{"delivered":true,"woke":true}` | "No commander was up, so I woke one and passed it on. It reads the board first, so give it a minute." |
 | `{"delivered":false,"heldBecause":"busy-or-half-typed"}` | "Commander mid-input, didn't land. Retrying shortly." |
-| `404` (no session) | "No commander session running. Open 'Commander' in the Swarm tab." |
+| `503` | Nobody could be woken. Relay the `error` in plain words (usually: the app's Claude isn't signed in, or this folder isn't set up for it). |
+| `404` | "There's no commander and I couldn't start one." Only possible with `wake:false`. |
 
-- **Never spawn a commander session as a side effect** — spawning is the engine's reflex or an
-  explicit user button, never implicit.
+- **The route wakes an absent commander for you** (owner decision 2026-09-22). You do not
+  spawn one yourself and you do not ask permission first — relaying the user's sentence IS
+  the permission. Just say that you woke one, because the first answer will be slower.
 - **Relay verbatim, one sentence** — no added interpretation.
 - New task (→ card) vs instruction-now (→ relay) differ; **if unsure, ask**.
+
+### The answer comes back as a separate turn — say so
+
+There is no way to wait for it. So a question is always **two** replies to the user:
+
+1. immediately: 「司令官に聞いてきます」 (+ "I woke one" if `woke`), then **stop**;
+2. when a line beginning **`【司令官からの返事】`** arrives: retell it in plain words.
+
+Never invent the answer in step 1, never promise a time, and never go looking for it — the
+reply is pushed to you. If the user asks again before it lands, say it hasn't come back yet.
 
 ## Workflow — when the user makes a request
 

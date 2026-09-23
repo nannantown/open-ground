@@ -284,6 +284,10 @@ const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
   // (stuckProcessWatch.ts). Titled for what the owner sees, not the subsystem.
   'stuck-processes': 'Machine — stuck processes are piling up (restart clears them)',
   'ready-without-work': 'Swarm — a worker says done, but no commits were found (check where the work is)',
+  // The answer the owner asked for could not reach their desk (closed, or busy
+  // for the whole TTL). Titled as the answer itself, not as a delivery failure:
+  // what the owner wants off this toast is the reply.
+  'commander-reply': 'Swarm — the commander answered your question',
 }
 
 /** The OS toast (title + body) for an info event — same shape as the fatal one. */

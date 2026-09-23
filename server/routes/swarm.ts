@@ -66,6 +66,7 @@ import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
 import { spawnSwarmSupply, stopSwarmSupplyDesks } from '@/lib/server/swarmSupply'
 import { patchEngineIntent } from '@/lib/server/swarmEnginePersistence'
 import { spawnSwarmManager } from '@/lib/server/swarmManager'
+import { queueSupplyReply } from '@/lib/server/supplyNotice'
 import { listManagerDesks, sayToManagerDesk, stopManagerDesks } from '@/lib/server/swarmManagerRuntime'
 
 /** Cap on one relayed message to the commander. Sized like the escalation answer
@@ -543,6 +544,52 @@ export const swarmRoutes = new Hono()
     await patchEngineIntent(path, { supplyDesired: false }).catch(() => {})
     return c.json({ ok: true, stopped })
   })
+  // --- POST /api/swarm/supply/say — the COMMANDER answers the supply desk ----
+  // Body: { path, text }. The return leg of `/api/swarm/manager/say`, and the
+  // reason it exists is that the round trip had only one leg.
+  //
+  // The desk could already relay the owner's sentence to the commander and had
+  // no way to hear the answer: the commander replied in its own window, which
+  // nobody reads. So 「入れて」 worked and 「入れて大丈夫か聞いて」 did not — the
+  // owner had to go and look at the commander themselves, which is the exact
+  // thing the supply desk exists to spare them (owner decision 2026-09-22,
+  // 「タスク窓口が社長」). One endpoint, one slot discipline
+  // (supplyNotice.queueSupplyReply), and the commander never learns whether a
+  // desk was even listening.
+  //
+  // NO SPEAKER FIELD, deliberately. The prefix is fixed
+  // (SUPPLY_REPLY_PREFIX) and composed server-side. A caller-supplied 「who is
+  // speaking」 would be a forgery surface into the owner's own conversation —
+  // the app's other marker is 【本人からの回答(escalation)】, i.e. THE OWNER — and
+  // the payload has its brackets stripped for the same reason (REDACTIONS).
+  //
+  // Owner-gated + path-validated like every /api/swarm/* write. Queued, not
+  // guaranteed: a desk that is generating / half-typed / showing a menu keeps
+  // the reply for the supply loop's next pass, and one that never takes it
+  // inside the TTL hands it to the bell. The response says which happened so
+  // the commander can tell a delivered answer from a parked one.
+  .post('/api/swarm/supply/say', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid body' }, 400)
+    }
+    const path = typeof body?.path === 'string' ? body.path : ''
+    const text = typeof body?.text === 'string' ? body.text.trim() : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    if (!text) return c.json({ error: 'text is required' }, 400)
+    if (text.length > MAX_MANAGER_SAY) return c.json({ error: 'text too large' }, 400)
+    // `delivered` comes from the queue's own state, not from the call
+    // succeeding: the reply is gone from the queue IFF a desk actually took it.
+    // Reporting the call's success would say "delivered" for a reply that is
+    // merely parked — the dishonesty `heldBecause` was added to avoid on the
+    // outbound side.
+    const waiting = queueSupplyReply(path, text)
+    return c.json({ queued: true, delivered: waiting === 0 })
+  })
   // Managers launch through the SDK with /og-manage in the primary checkout.
   // Supply keeps its interactive PTY. Both preserve conversation IDs on restart.
   .post('/api/swarm/manager', async (c) => {
@@ -638,10 +685,26 @@ export const swarmRoutes = new Hono()
   // for. One endpoint, one seam (swarmManagerRuntime.sayToManagerDesk), and the
   // caller never learns which runtime answered.
   //
-  // Owner-gated + path-validated like every /api/swarm/* write. Never spawns:
-  // "there is no commander desk" is reported (404), not fixed — waking a desk is
-  // a decision with a model cost, and it belongs to the engine's reflex or the
-  // owner's button, not to a relayed sentence.
+  // Owner-gated + path-validated like every /api/swarm/* write.
+  //
+  // WAKES AN ABSENT COMMANDER (owner decision 2026-09-22 — 「いいよ。おこして。」).
+  // This route used to report "there is no commander desk" (404) and stop, on the
+  // grounds that waking a desk costs a model launch and belongs to the engine's
+  // reflex or the owner's button. That reasoning was right about the cost and
+  // wrong about who decides: the commander is woken by the engine only when
+  // there are cards ready to integrate, so for most of the day it is simply not
+  // there — and a relayed sentence IS the owner's button, just pressed from a
+  // phone. With the reply leg in place the owner can now ask the commander
+  // questions, and 「司令官がいません」 would be the answer to almost all of them.
+  //
+  // `wake:false` opts OUT, for a caller whose sentence is not worth a launch.
+  // The default is ON because this route has exactly one purpose — carrying the
+  // owner's own words — and they have decided those are worth it.
+  //
+  // Waking does NOT set `managerDesired`: that flag means "the owner wants a
+  // commander desk standing", which the explicit button says. A question is a
+  // transient act, so the woken desk lives until it is stopped or the app
+  // restarts, and the next question wakes it again.
   .post('/api/swarm/manager/say', async (c) => {
     if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
@@ -661,7 +724,40 @@ export const swarmRoutes = new Hono()
     // phone窓口 answer 404 (「司令官の卓が立っていません」) instead of telling the
     // owner their message is queued behind a busy desk that will never read it
     // (cycle-3 finding; same list, same question as adoption).
-    const desk = listManagerDesks(path).find((d) => !d.stopping) ?? null
+    const liveDesk = () => listManagerDesks(path).find((d) => !d.stopping) ?? null
+    let desk = liveDesk()
+    let woke = false
+    if (!desk && body?.wake !== false) {
+      // Same two preflights the explicit spawn route runs, and for the same
+      // reason: an unavailable/signed-out CLI or a missing git must fail as
+      // "could not wake", never as a half-started desk. Their messages are
+      // passed through so the desk can tell the owner WHY nobody could be
+      // woken instead of 「いません」.
+      const pre = await claudeRunPreflight()
+      if (!pre.ok) return c.json({ ...pre.body, delivered: false, woke: false }, 503)
+      const envPre = await swarmEnvPreflight(path, { force: true, requireGitRepo: false })
+      if (!envPre.ok) {
+        return c.json(
+          {
+            error: envPre.issues.map((i) => i.message).join(' '),
+            envIssues: envPre.issues.map((i) => i.id),
+            delivered: false,
+            woke: false,
+          },
+          503,
+        )
+      }
+      try {
+        await spawnSwarmManager({ projectPath: path })
+        desk = liveDesk()
+        woke = desk !== null
+      } catch (e: any) {
+        return c.json(
+          { error: `failed to wake the commander: ${e?.message ?? e}`, delivered: false, woke: false },
+          503,
+        )
+      }
+    }
     if (!desk) return c.json({ error: 'no commander desk is running in this project' }, 404)
     const res = sayToManagerDesk(desk, text, { deliverable: noticeDeliverable })
     // held ≠ failed: a PTY desk mid-generation (or with a half-typed draft) is
@@ -670,6 +766,10 @@ export const swarmRoutes = new Hono()
     return c.json({
       delivered: res.ok,
       runtime: desk.runtime,
+      // So the desk can say 「司令官を起こして伝えました」 rather than implying it
+      // was already there — a woken commander's first turn is a cold read of the
+      // Board, so the owner should expect the answer to take longer.
+      ...(woke ? { woke: true } : {}),
       ...(res.heldBecause ? { heldBecause: res.heldBecause } : {}),
     })
   })

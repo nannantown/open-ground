@@ -30,6 +30,8 @@ Owner-facing text (chat, escalation questions, status reports) follows the launc
 
 ```
 owner → supply(/supply) → Board:todo → commander(here) → workers
+              ↑ ↓ relay: supply→you /api/swarm/manager/say
+                         you→supply /api/swarm/supply/say  (ALWAYS answer)
   launch POST /api/swarm/worker · watch GET .../workers+heartbeats
   merge git FF/rebase → done · autopilot orchestrator engine
 ```
@@ -57,11 +59,13 @@ Supply only adds `todo` cards. Workers only write code+heartbeats, never Board c
 | rework (1 call, counter built in) | `POST /api/project/tasks` body `{path, rework:[{"id":"<full UUID>"}]}` — review→doing + `reworkCount`+1 + overflow-to-`blocked` (cap 3 default) in one call. Branch on `results.rework[0].column`(`doing`/`blocked`)+`.count` |
 | add card | `POST /api/project/tasks` body `{path, add:["Title"]}` |
 | **your heartbeat** (once/stage integrating) | `POST $OG/api/swarm/manager/beat` body `{"path":…,"phase":"<merge/review/status>","note":"<1 line>"}` |
+| **answer the task desk** (whenever it relayed something) | `POST $OG/api/swarm/supply/say` body `{"path":…,"text":"<plain-language answer, 1-3 lines>"}` |
 
 - **Pre-ON check always**: revival reflex trusts only the `manager` record in `swarm-sessions.json` (written solely by "司令官" button). Mismatched/stale record → engine sees "absent", spawns a 2nd desk beside you if reviews pending. Fix: reopen via "司令官" or correct the record first.
 - **Beat so the engine can revive you**: manager-only integration means engine revives a stalled commander (`spawnSwarmManager`) on ON+reviews-pending. Beat once/stage while integrating — long silence→revival (recovers desks wedged by context overflow/API errors). Liveness = 3-state presence, not staleness: live PTY holding the session, and beat fresh **OR** PTY recently rendered **OR** session JSONL updated (stale beat alone never revives; pure staleness once killed a healthy desk — don't repeat that). Beating isn't required for survival but is the best signal (UI "検品中" reads it). **Nudge sends ESC first** (clears an in-flight draft), then a JP prompt+Enter — ESC also interrupts an in-flight generation, so don't leave a half-typed draft sitting: send it or clear it before stepping away. 5min grace after revival suppresses nudges. Prefer delegating large-diff review to sub-agents over relying on revival. 3 revivals in a row → engine gives up, fatal notification — rebuild manually.
 - Raw heartbeat file: `~/.openground/swarm/<repoKey>/<branch, / → ->.json`. **Normally skip it** — `GET /api/swarm/workers` already merges `phase`/`note`/`heartbeatAt`/`ready`/`blocked`/**`blockers`**. `blockers` = worker's channel to you (questions instead of escalating to owner); `blocked:true` → **read the text**, don't stop at the flag.
 - **Rework's primary path is the raw `rework` API.** `swarm-board.sh` is an optional shell wrapper; the loop completes without it.
+- **Anything relayed from the task desk gets an ANSWER BACK, same turn** (owner decision 2026-09-22). A message from the desk is the owner speaking from outside — often through a phone, where your window does not exist. Answering in your own window is answering nobody. `POST /api/swarm/supply/say` (table above) is the only route that reaches them; `{"delivered":false}` just means the desk was busy and it will be handed over later, so don't resend. Write it for a **non-programmer**: plain language, no branch names / card ids / file paths, 1–3 lines, and if you are declining say what you would need instead. An instruction ("merge swarm/X") is acknowledged the same way once acted on — one line, what happened.
 
 ## Owner vocabulary
 

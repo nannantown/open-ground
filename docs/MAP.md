@@ -414,6 +414,14 @@
   ⚠ **リモコンは消える**(`--remote-control` は REPL 外で無効)。外からの窓口は **PTY のまま残す
   補給官**(`skills/supply/SKILL.md` の「状況」「質問に答える」「司令官に伝えて」)。ここが
   スマホからの状況確認と司令官への指示中継は引き続き補給官が担当する。
+- **補給官 ⇄ 司令官の往復**(2026-09-22 オーナー決定「タスク窓口が社長」): 行き
+  `POST /api/swarm/manager/say`(**卓が無ければ起こす** — `wake:false` で従来の 404)、帰り
+  `POST /api/swarm/supply/say` → `supplyNotice.ts` の `queueSupplyReply`(知らせとは別レーン・
+  FIFO cap 5・返事が知らせより先・落ちた分はベル info `commander-reply`)。印は
+  `SUPPLY_REPLY_PREFIX='【司令官からの返事】'`(凍結)。**話者は body で指定させない**
+  (`【本人からの回答(escalation)】` を騙れる — payload の `【】` は `REDACTIONS` で除去)。
+  司令官側の義務は `skills/og-manage/SKILL.md`「補給官から中継された件には同ターンで返す」。
+  正典は `docs/commander/06-overseer-escalations.md` §1.5。
   実測(0731): SDK セッションでも `/og-manage` は解決する(slash commands 95本に在る・実際に読み込む)。
   ただし **Claude Code の system prompt は付かない** ので app-context カードは
   `systemPrompt.append` で明示注入する(`scripts/probe-sdk-skill-resolution.mts` /

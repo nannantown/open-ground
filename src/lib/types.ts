@@ -2809,6 +2809,12 @@ export type SwarmInfoEvent =
   /** Not a swarm event either (cf. 'session-limit'): the MACHINE has accumulated
    *  orphaned, un-killable processes. See stuckProcessWatch.ts + 07 章 §7. */
   | 'stuck-processes'
+  /** A commander reply to the supply desk expired or overflowed before the desk
+   *  could receive it (supplyNotice.ts — SUPPLY_REPLY_CAP / the TTL sweep). Kept
+   *  on the bell so an answer the owner is waiting for is never simply dropped.
+   *  Deliberately NOT on SUPPLY_NOTICE_INFO_EVENTS: re-offering it to the very
+   *  desk that could not take it is the loop this fallback exists to break. */
+  | 'commander-reply'
   /** A worker declared ready while no commits exist anywhere the engine can see
    *  (parent branch AND nested repos). Not promoted (a declaration is not a
    *  proof), held un-nudged for a short grace, then parked in 'blocked'. Told at
