@@ -6,11 +6,11 @@
 // chrome around it. The worker PTY is spawned by SwarmModule via the B API
 // (POST /api/swarm/worker); this pane only attaches to the returned terminalId.
 
-import { Power, Trash2, AlertTriangle, Gauge } from 'lucide-react'
+import { Power, Trash2, AlertTriangle } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
-import { SwarmSprite } from '@/components/canvas/SwarmSprite'
 import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
+import { SwarmSeatHeader } from './SwarmSeatHeader'
 
 /** Display state of a worker, derived by SwarmModule from the active-terminal
  *  poll + the pane's own exit signal:
@@ -61,17 +61,6 @@ interface Props {
   onForceRemove?: () => void
 }
 
-// Status dot colour — the SAME beacon vocabulary as the Ground/Board cards
-// (ProjectCard.tsx, BoardTab.tsx): moss = busy, ochre = waiting for input.
-// starting/exited use ink-faint (not line-strong) so the inert grey dot clears
-// the 3:1 graphic-contrast floor on the paper header (CLAUDE.md contrast rule).
-const DOT: Record<WorkerStatus, string> = {
-  working: 'bg-moss',
-  waiting: 'bg-ochre',
-  starting: 'bg-ink-faint',
-  exited: 'bg-ink-faint',
-}
-
 export const SwarmWorkerPane = ({
   terminalId,
   branch,
@@ -88,7 +77,7 @@ export const SwarmWorkerPane = ({
   const { t } = useT()
   // Engine-owned workers are read-only here: the autonomous orchestrator owns
   // their teardown, so terminating from this tile would fight the engine. We show
-  // the live screen + a small "Engine" badge instead of the terminate control.
+  // the live screen without the terminate control.
   const isEngine = source === 'engine'
   const statusLabel: string = {
     working: t('projectPanel.swarm.statusWorking'),
@@ -99,44 +88,16 @@ export const SwarmWorkerPane = ({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[#1a1a1a]">
-      {/* Header: status dot+label · branch (+ task title in tooltip) · terminate */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-2.5 py-1.5">
-        {/* The role's figure, at actual size. `exited` draws none (BEACON_SPRITE
-            maps it to null): every state in the set says somebody is there, and
-            a dimmed animal for a process that has gone is a picture of a worker
-            who does not exist. The dot still says "off" without pretending. */}
-        {BEACON_SPRITE[status] ? (
-          <SwarmSprite
-            role="worker"
-            state={BEACON_SPRITE[status]!}
-            label={statusLabel}
-            className="shrink-0"
-          />
-        ) : (
-          <span className={`h-[6px] w-[6px] shrink-0 rounded-full ${DOT[status]}`} aria-hidden />
-        )}
-        <span
-          className={`label-cap shrink-0 ${status === 'waiting' ? 'text-[var(--beacon-waiting)]' : 'text-ink-faint'}`}
-        >
-          {statusLabel}
-        </span>
-        <span
-          className="min-w-0 flex-1 truncate font-mono text-micro text-ink-muted"
-          title={taskTitle ? `${branch} — ${taskTitle}` : branch}
-        >
-          {branch}
-        </span>
-        {isEngine ? (
-          // Read-only badge: the engine owns this worker's lifecycle. A static
-          // chip (not a button) so it can't be mistaken for a terminate control.
-          <span
-            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-faint"
-            title={t('projectPanel.swarm.engineOwnedHint')}
-          >
-            <Gauge size={10} strokeWidth={2.25} aria-hidden />
-            {t('projectPanel.swarm.engineOwned')}
-          </span>
-        ) : (
+      {/* The seat's nameplate (role tint · rabbit · status · task) + terminate. */}
+      <SwarmSeatHeader
+        role="worker"
+        sprite={BEACON_SPRITE[status]}
+        statusLabel={statusLabel}
+        waiting={status === 'waiting'}
+        detail={taskTitle || branch}
+        detailTitle={taskTitle ? `${taskTitle} — ${branch}` : branch}
+      >
+        {isEngine ? null : (
           <button
             type="button"
             onClick={onTerminate}
@@ -148,7 +109,7 @@ export const SwarmWorkerPane = ({
             {busy ? t('projectPanel.swarm.terminating') : t('projectPanel.swarm.terminate')}
           </button>
         )}
-      </div>
+      </SwarmSeatHeader>
 
       {/* Retained-worktree strip: a soft terminate kept a dirty/locked tree so
           the worker's uncommitted work isn't lost. Offer an explicit force.

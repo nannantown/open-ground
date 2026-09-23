@@ -141,15 +141,20 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-const openWorkerTab = async () => {
+const openSwarm = async () => {
   render(<SwarmModule project={project} />)
-  await userEvent.click(await screen.findByRole('tab', { name: /workersTab/ }))
+  // One screen (2026-09-23): no tab to click — wait for a REAL worker seat
+  // (the vacant placeholder gone), i.e. the roster poll has landed.
+  await waitFor(() => {
+    expect(screen.getAllByText('projectPanel.swarm.seat.worker').length).toBeGreaterThan(0)
+    expect(screen.queryByText('projectPanel.swarm.seat.vacant')).toBeNull()
+  })
 }
 
 describe('terminating a manual SDK worker from the worker tab', () => {
   it('stops the SDK SESSION (not a nonexistent PTY) before removing the worktree', async () => {
     const { reqs } = harness({ removed: true })
-    await openWorkerTab()
+    await openSwarm()
 
     await userEvent.click(await screen.findByTitle('projectPanel.swarm.terminate'))
 
@@ -176,7 +181,7 @@ describe('terminating a manual SDK worker from the worker tab', () => {
 
   it('offers force-remove on the SDK tile when a soft terminate keeps a dirty tree', async () => {
     const { reqs } = harness({ removed: false, reason: 'worktree is dirty' })
-    await openWorkerTab()
+    await openSwarm()
 
     await userEvent.click(await screen.findByTitle('projectPanel.swarm.terminate'))
 

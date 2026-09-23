@@ -13,8 +13,10 @@
 // See docs/SDK_WORKER_MIGRATION_PLAN.md §3.6.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Square, CornerDownLeft, Power, Trash2, AlertTriangle, Gauge, RotateCcw } from 'lucide-react'
+import { Square, CornerDownLeft, Power, Trash2, AlertTriangle, RotateCcw, X } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
+import type { SpriteState } from '@/lib/swarm/sprites'
+import { SwarmSeatHeader } from './SwarmSeatHeader'
 import type { SdkEvent, SdkSessionStatus } from '@/lib/server/sdkEvents'
 import {
   groupSdkFrames,
@@ -130,6 +132,14 @@ interface Props {
    *  boxes, which read as scattered chrome, not one desk. The transcript,
    *  question banner, ended-strip and restart affordance all stay. */
   embedded?: boolean
+  /** Fold this unfolded worker seat back to its summary (SwarmWorkerSeat) —
+   *  the Swarm tab keeps at most ONE worker transcript open (6-connection cap). */
+  onCollapse?: () => void
+  /** The open question, when the HOST already polls the inbox (the Swarm tab's
+   *  fleet poll). Provided (even null) ⇒ this pane does not poll on its own. */
+  question?: string | null
+  /** Where to answer, in this host's terms (defaults to the Board-drawer wording). */
+  questionHint?: string
   /** Relaunch this worker once its session is finished — REUSES the same
    *  worktree, so the swarm/* branch and its in-progress work survive (the same
    *  contract SwarmWorkerPane's Restart has). Manual workers only.
@@ -143,16 +153,17 @@ interface Props {
   onRestart?: () => void
 }
 
-// The SAME beacon vocabulary as SwarmWorkerPane / the Ground + Board cards:
-// moss = busy, ochre = waiting for input. Inert states use ink-faint so the
-// grey dot still clears the 3:1 graphic-contrast floor on the paper header.
-const DOT: Record<SdkSessionStatus, string> = {
-  starting: 'bg-ink-faint',
-  working: 'bg-moss',
-  waiting: 'bg-ochre',
-  'quota-parked': 'bg-ochre',
-  exited: 'bg-ink-faint',
-  failed: 'bg-ink-faint',
+// The worker's figure per session state (sprites.ts). `exited`/`failed` draw
+// NO figure — nobody is there any more — and the nameplate shows a grey dot.
+// 'quota-parked' is the waiting lamp: to the owner it is a worker waiting on
+// something it cannot supply itself.
+const SDK_SPRITE: Record<SdkSessionStatus, SpriteState | null> = {
+  starting: 'starting',
+  working: 'working',
+  waiting: 'waiting',
+  'quota-parked': 'waiting',
+  exited: null,
+  failed: null,
 }
 
 export const SdkWorkerPane = ({
@@ -169,6 +180,9 @@ export const SdkWorkerPane = ({
   onForceRemove,
   onRestart,
   embedded = false,
+  onCollapse,
+  question,
+  questionHint,
 }: Props) => {
   const { t } = useT()
   const [frames, setFrames] = useState<Frame[]>([])
@@ -216,24 +230,35 @@ export const SdkWorkerPane = ({
   // Self-contained polling (10s) rather than prop-threading: this pane has two
   // unrelated hosts (the Board drawer and the Manager stage) and both would
   // have to grow the same plumbing.
-  const [openQuestion, setOpenQuestion] = useState<string | null>(null)
+  const [polledQuestion, setOpenQuestion] = useState<string | null>(null)
+  const hostPolls = question !== undefined
+  const openQuestion = finished ? null : hostPolls ? question : polledQuestion
   useEffect(() => {
-    if (finished) {
+    if (finished || hostPolls) {
       setOpenQuestion(null)
       return
     }
     let stopped = false
     const read = async () => {
       try {
-        const r = await fetch(`/api/swarm/escalations?path=${encodeURIComponent(projectPath)}`)
+        const r = await fetch(
+          `/api/swarm/escalations?path=${encodeURIComponent(projectPath)}&status=open`,
+        )
         if (!r.ok || stopped) return
         const d = (await r.json()) as {
-          escalations?: { status?: string; sdkSessionId?: string; question?: string; createdAt?: string }[]
+          escalations?: {
+            status?: string
+            sdkSessionId?: string
+            question?: string
+            plainQuestion?: string
+            createdAt?: string
+          }[]
         }
         const mine = (d.escalations ?? [])
-          .filter((e) => e.status === 'open' && e.sdkSessionId === sdkSessionId && e.question)
+          .filter((e) => e.status === 'open' && e.sdkSessionId === sdkSessionId && (e.plainQuestion || e.question))
           .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
-        if (!stopped) setOpenQuestion(mine[0]?.question ?? null)
+        // Plain wording first (Escalation.plainQuestion), technical as fallback.
+        if (!stopped) setOpenQuestion(mine[0] ? (mine[0].plainQuestion || mine[0].question)! : null)
       } catch {
         /* keep the last known state — a fetch hiccup must not flap the banner */
       }
@@ -244,7 +269,7 @@ export const SdkWorkerPane = ({
       stopped = true
       clearInterval(timer)
     }
-  }, [projectPath, sdkSessionId, finished])
+  }, [projectPath, sdkSessionId, finished, hostPolls])
   const [posting, setPosting] = useState(false)
   // The last refused action, in the server's own words. Null = nothing to say.
   const [actionError, setActionError] = useState<string | null>(null)
@@ -500,6 +525,9 @@ export const SdkWorkerPane = ({
   }[status]
   // 「待機中」 is technically true and practically useless while a question sits
   // in the inbox — the owner's next action is ANSWERING, so the label says so.
+  // An open question outranks every other state (spriteStateFor's rule) —
+  // it is the one state that is a claim on the owner.
+  const sprite = SDK_SPRITE[status] && openQuestion ? 'asking' : SDK_SPRITE[status]
   const statusLabel =
     openQuestion && status === 'waiting' ? t('projectPanel.swarm.sdk.statusQuestion') : baseStatusLabel
 
@@ -513,37 +541,15 @@ export const SdkWorkerPane = ({
       {/* Header — same shape and vocabulary as SwarmWorkerPane. Hidden when
           embedded: the parent (manager pane) wears the one desk header. */}
       {embedded ? null : (
-      <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-2.5 py-1.5">
-        <span className={`h-[6px] w-[6px] shrink-0 rounded-full ${DOT[status]}`} aria-hidden />
-        <span
-          className={`label-cap shrink-0 ${status === 'waiting' || status === 'quota-parked' ? 'text-[var(--beacon-waiting)]' : 'text-ink-faint'}`}
-        >
-          {statusLabel}
-        </span>
-        <span
-          className="min-w-0 flex-1 truncate font-mono text-micro text-ink-muted"
-          title={taskTitle ? `${branch} — ${taskTitle}` : branch}
-        >
-          {branch}
-        </span>
-        <span
-          className="shrink-0 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-faint"
-          title={t('projectPanel.swarm.sdk.badgeHint')}
-        >
-          SDK
-        </span>
-        {isEngine ? (
-          // Read-only chip, same as SwarmWorkerPane's: the engine owns this
-          // worker's lifecycle. Without it, an engine tile just looks like a
-          // tile whose buttons went missing.
-          <span
-            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-faint"
-            title={t('projectPanel.swarm.engineOwnedHint')}
-          >
-            <Gauge size={10} strokeWidth={2.25} aria-hidden />
-            {t('projectPanel.swarm.engineOwned')}
-          </span>
-        ) : (
+      <SwarmSeatHeader
+        role="worker"
+        sprite={sprite}
+        statusLabel={statusLabel}
+        waiting={status === 'waiting' || status === 'quota-parked'}
+        detail={taskTitle || branch}
+        detailTitle={taskTitle ? `${taskTitle} — ${branch}` : branch}
+      >
+        {isEngine ? null : (
           <>
             {accepting ? (
               // Offered while the pool still ACCEPTS an interrupt — not while
@@ -575,7 +581,18 @@ export const SdkWorkerPane = ({
             ) : null}
           </>
         )}
-      </div>
+        {onCollapse ? (
+          <button
+            type="button"
+            onClick={onCollapse}
+            title={t('projectPanel.swarm.seat.closeLog')}
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+          >
+            <X size={11} strokeWidth={2.25} />
+            {t('projectPanel.swarm.seat.closeLog')}
+          </button>
+        ) : null}
+      </SwarmSeatHeader>
       )}
 
       {openQuestion ? (
@@ -596,7 +613,7 @@ export const SdkWorkerPane = ({
                 {openQuestion}
               </div>
               <div className="mt-1 text-micro text-ink-muted">
-                {t('projectPanel.swarm.sdk.questionBannerHint')}
+                {questionHint ?? t('projectPanel.swarm.sdk.questionBannerHint')}
               </div>
             </div>
           </div>

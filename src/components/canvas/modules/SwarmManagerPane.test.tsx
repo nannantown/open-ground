@@ -139,41 +139,43 @@ describe('managerSdkStatus', () => {
 })
 
 describe('the commander beacon follows the SDK desk (②)', () => {
-  const beacon = (getByRole: ReturnType<typeof mount>['getByRole']) =>
-    (getByRole('img') as HTMLElement).getAttribute('aria-label')
+  // The seat nameplate's status WORD — the figure is decoration and is absent
+  // once the desk has exited, the word never is.
+  const beacon = (getByText: ReturnType<typeof mount>['getByText']) =>
+    getByText(/^projectPanel\.swarm\.status/).textContent
 
   it('starts at "starting" — not at a fabricated "working"', () => {
-    const { getByRole } = mount(sdkSession('sdk-mgr'))
-    expect(beacon(getByRole)).toBe('projectPanel.swarm.statusStarting')
+    const { getByText } = mount(sdkSession('sdk-mgr'))
+    expect(beacon(getByText)).toBe('projectPanel.swarm.statusStarting')
   })
 
   it('reads WAITING when the desk says it is waiting for an answer', () => {
-    const { getByRole } = mount(sdkSession('sdk-mgr'))
+    const { getByText } = mount(sdkSession('sdk-mgr'))
     act(() => {
       FakeEventSource.last.emit('frame', { seq: 1, ev: { kind: 'status', status: 'waiting' } })
     })
-    expect(beacon(getByRole)).toBe('projectPanel.swarm.statusWaiting')
+    expect(beacon(getByText)).toBe('projectPanel.swarm.statusWaiting')
   })
 
   it('reads EXITED when the desk ends — the state a constant could never show', () => {
-    const { getByRole } = mount(sdkSession('sdk-mgr'))
+    const { getByText } = mount(sdkSession('sdk-mgr'))
     act(() => {
       FakeEventSource.last.emit('end', { session: { status: 'exited', reaped: true } })
     })
-    expect(beacon(getByRole)).toBe('projectPanel.swarm.statusExited')
+    expect(beacon(getByText)).toBe('projectPanel.swarm.statusExited')
   })
 
   it('still uses the PTY poll for a PTY commander', () => {
-    const { getByRole } = mount({ terminalId: 'pty-mgr', runtime: 'pty', status: 'waiting' })
-    expect(beacon(getByRole)).toBe('projectPanel.swarm.statusWaiting')
+    const { getByText } = mount({ terminalId: 'pty-mgr', runtime: 'pty', status: 'waiting' })
+    expect(beacon(getByText)).toBe('projectPanel.swarm.statusWaiting')
   })
 
   it('does not inherit the dead desk’s last word after a relaunch', () => {
-    const { getByRole, rerender } = mount(sdkSession('sdk-old'))
+    const { getByText, rerender } = mount(sdkSession('sdk-old'))
     act(() => {
       FakeEventSource.last.emit('frame', { seq: 1, ev: { kind: 'status', status: 'working' } })
     })
-    expect(beacon(getByRole)).toBe('projectPanel.swarm.statusWorking')
+    expect(beacon(getByText)).toBe('projectPanel.swarm.statusWorking')
 
     rerender(
       <SwarmManagerPane
@@ -191,7 +193,7 @@ describe('the commander beacon follows the SDK desk (②)', () => {
         onToggleOverseer={() => {}}
       />,
     )
-    expect(beacon(getByRole)).toBe('projectPanel.swarm.statusStarting')
+    expect(beacon(getByText)).toBe('projectPanel.swarm.statusStarting')
   })
 })
 

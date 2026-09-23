@@ -211,7 +211,9 @@
   **テキストのドット絵**で持つ — カワウソ=補給係 / フクロウ=司令官 / ウサギ=作業者。
   1枚の絵に状態ごとのパレットを塗る)+ `src/components/canvas/SwarmSprite.tsx`(canvas 描画・
   状態ごとに**動き方が違う**・`prefers-reduced-motion` は静止1枚・rAF は unmount で cancel)。
-  出る場所: BoardCard の worker/commander 帯・`SwarmSupplyPane`・`SwarmWorkerPane`。
+  出る場所: BoardCard の worker/commander 帯・Swarm タブの各席の名札 `SwarmSeatHeader`
+  (社長/マネージャー/ワーカー全席・役ごとの背景色トークン `--og-seat-*` は globals.css 両パレット、
+  文字コントラストは `themePalette.test.ts` の SURFACES で監査)。
   罠(**いない相手は描かない**): 状態はどれも「そこに居る」という主張なので、`exited` と
   司令官の `off` は図を出さず点のまま(`BEACON_SPRITE` / `MANAGER_SPRITE` が `null` を返す)。
   罠(**動きは読み上げに届かない**): aria-label は必ず「役 状態」。worker は未回答の質問が
@@ -432,8 +434,15 @@
   (旧1スロット上書きで質問が消えていた)。③ 進捗は `supplyProgress.ts` が Board の列移動を
   毎パス差分して作る(モデル不使用)。④ 納品は `sweepLanded` がカード名入りで重要レーン +
   ベル `work-landed`。正典は 06 章 §1.6。
-  ⑤ **監督タブは撤去済み(2026-09-23)**: Swarm のタブは 社長/司令官/ワーカー の3つ
-  (`SWARM_PANE_IDS`)。質問への回答は社長経由(`escalations/answer`)、ベル/OS通知は従来どおり。
+  ⑤ **監督タブは撤去済み(2026-09-23)**。続けて**サブタブ自体も廃止**(同日・1画面化):
+  Swarm タブは 社長/マネージャー/ワーカー×N の席を1列に横並び(`SwarmModule` の seats row・
+  狭い幅は横スクロールで統一)。`SwarmPaneId`/`SWARM_PANE_IDS`/`Settings.swarmPaneOrder` は削除
+  (古い settings.json のキーは不活性・POST は黙って捨てる)。スクショ = `docs/screenshots/swarm-one-screen-20260923/`。
+  罠(**接続6本の上限**): 生きた作業記録は1席につき EventSource 1本、サーバは HTTP/1.1 の同一ホスト
+  = Chromium 上限6本。社長+マネージャー+ワーカー4席を全部流すと他の fetch が全部詰まった(レビュー実測)。
+  だからワーカー席は既定で**畳んだ要約** `SwarmWorkerSeat`(状態は `/api/terminal/active` の両プール poll、
+  質問は escalations poll 1本)で、作業記録を開けるのは**同時に1席だけ**(`openWorktree`)。
+  番人 = `SwarmModule.workerRestart.test.tsx` の "keeps worker streams bounded"。質問への回答は社長経由(`escalations/answer`)、ベル/OS通知は従来どおり。
   重要レーンは TTL なし(社長不在中は保持・遅配は「約N時間前の知らせ」付き)・
   `~/.openground/supply-notice-queue.json` に永続(再起動でも消えない)・溜まった分は
   「(N件まとめて)」の1行で伝える。回答/却下で

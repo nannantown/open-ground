@@ -55,6 +55,10 @@ const SURFACES = [
   'bg-inset',
   'plane',
   'bg-card-hover',
+  // Swarm seat nameplates (SwarmSeatHeader) carry the role + status words.
+  'seat-supply',
+  'seat-manager',
+  'seat-worker',
 ] as const
 const TEXTS = ['ink', 'ink-muted', 'ink-subtle', 'ink-faint'] as const
 

@@ -1039,6 +1039,10 @@ with its client-only fatal-notification poll (`useSwarmEngine` no longer reads
 driven by the president (`skills/supply/SKILL.md` "Answer a question"); the bell and the OS toast
 still show every question (unchanged).
 
+Card ② (same day) then removed the sub-tab strip altogether: the Swarm tab is one screen of
+side-by-side seats (president · manager · one per worker), so `SwarmPaneId`, `SWARM_PANE_IDS` and
+`Settings.swarmPaneOrder` are gone (a stale key on disk is inert; POST /api/settings drops it).
+
 What changed in `supplyNotice.ts`, because the desk is now the ONLY retelling:
 - **The important lane has no TTL.** A notice raised while no desk is open waits for the next
   desk (bounded by `SUPPLY_NOTICE_CAP`=30, oldest dropped — the bell keeps it). One line per desk
@@ -1064,16 +1068,28 @@ What changed in `supplyNotice.ts`, because the desk is now the ONLY retelling:
     heard; what was delivered is removed from the file, so a restart does not retell it.
   - **Bundled.** One delivery takes the oldest notice plus as many as fit in
     `SUPPLY_NOTICE_LINE_MAX` — the WHOLE line (prefix, count, ages, tail) is kept within the longest
-    single notice (445 chars; a longer line is unmeasured in a PTY and a bundle counts as told once
-    written, so an Enter dropped on it would lose it). What does not fit waits for the next bundle.
+    single notice WITHOUT an age label (445 chars; a longer line is unmeasured in a PTY and a bundle
+    counts as told once written, so an Enter dropped on it would lose it). A single late notice is not
+    held to it — its 「(約N時間前の知らせ) 」 label adds ~15 chars. What does not fit waits for the next
+    bundle. The bundle tail keeps 「質問は選択肢と影響も」 (dropped in rework 2, restored after review).
   - **Rework 2 — the saved queue is never overwritten unread.** `ensureLoaded`: ENOENT = empty;
     a read error (EIO/EMFILE/EACCES…) leaves it NOT loaded (retried next call) and `savePending`
-    writes nothing until it is read — what was queued meanwhile is merged in (answered questions are
-    not revived); an unparseable file is moved aside to `supply-notice-queue.json.corrupt-<ts>`
-    (never deleted) and the queue starts fresh. Writes use a unique tmp name, fsync and mode 0600
-    (the atomicWrite.ts discipline, synchronous) and never create the home dir. A catch-up read that
+    writes nothing until it is read — what was queued meanwhile is merged in; an unparseable file is
+    moved aside to `supply-notice-queue.json.corrupt-<ts>` (never deleted) and the queue starts
+    fresh. Writes use a unique tmp name, fsync of the data AND the directory, mode 0600 (the
+    atomicWrite.ts discipline, synchronous) and never create the home dir. A catch-up read that
     keeps failing is logged once per desk (`[supplyNotice] …`). Pinned by
-    `supplyNoticeAbsence.test.ts` "DAMAGED saved queue" / "TRANSIENT read failure" (red measured).
+    `supplyNoticeAbsence.test.ts` "DAMAGED saved queue" / "TRANSIENT read failure" (red measured;
+    since the follow-up the unreadable state is mode 000 — readable-no, replaceable-yes — so removing
+    the `savePending` guard turns it red; the earlier directory-at-the-path setup made the write fail
+    too and stayed green without the guard).
+  - **Follow-up (2026-09-23) — questions are never restored from the saved file.** The load skips
+    every entry carrying an `escalationId`; the store is their authority and each desk is caught up
+    from its owner-lane open list. Restoring them told a question twice (file unreadable at start,
+    store readable → the catch-up told it, the later merge re-queued it; delivery does not consult
+    `toldTo`) and retold answered ones (answered while the file was unreadable → the withdrawal could
+    not be written → retold after a restart). Pinned by the two "…while the saved queue was
+    unreadable…" tests (red measured with the old merge restored).
     Dev caveat: two processes on one home (dev beside the app) each load once and write through —
     they can duplicate or drop each other's queued notices; the packaged app is single-instance.
   - **Strict catch-up read.** `listOpenOwnerQuestionsStrict` (only ENOENT = none; anything else

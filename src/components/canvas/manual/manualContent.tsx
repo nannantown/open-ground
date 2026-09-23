@@ -620,13 +620,21 @@ export const MANUAL_SECTIONS: Section[] = [
           ja: 'Swarm は既定では非表示です。設定 → 実験的機能 → Swarm オーケストレーション で有効化してください。これは Swarm タブと操作を可視化するだけで、それ自体では何も自動実行されません。中の自律的な操作はすべて、あなたが個別に明示オンにするまで動きません。一度オンにすると、worker 起動はアプリの再起動をまたいで生き残るようになりました —— 具体的に何がどうなるかは次の節で説明します。',
         },
       },
+      { kind: 'subhead', text: { en: 'One screen, every seat', ja: '1画面に全員の席' } },
+      {
+        kind: 'p',
+        text: {
+          en: 'The Swarm tab is one screen with no sub-tabs: the president (the one you talk to), the manager, and one seat per worker sit side by side, each with its own character and a slightly different background colour per role. Each seat’s top line says who it is, what state it is in (working, waiting, needs an answer, stopped) and, for a worker, which job it is on. A worker’s seat shows just that summary and any question it is waiting on you for; press “Watch the work” to open its live log (one worker at a time). When the seats no longer fit the width, the row scrolls sideways.',
+          ja: 'Swarm タブはサブタブの無い1画面です。社長（あなたが話す相手）・マネージャー・ワーカー1人につき1席が横に並び、役ごとにキャラクターと少し違う背景色が付いています。各席の一番上の行に、誰か・いまの状態（作業中・待機中・回答待ち・停止中）・ワーカーならどの仕事をしているかが出ます。ワーカーの席はその要約と、あなたへの質問があればそれだけを出します。「作業の様子を見る」を押すと、その作業の記録を開けます（一度に1人ずつ）。席が横幅に収まらなくなると、列が横にスクロールします。',
+        },
+      },
       { kind: 'subhead', text: { en: 'What starts on its own — and what never does', ja: 'ひとりでに始まるもの、絶対に始まらないもの' } },
       {
         kind: 'bullets',
         items: [
           {
-            en: 'Worker dispatch (drain): starts only when you press the engine’s start switch in the Manager tab. It stops immediately on stop, and stays stopped across a restart — it never auto-resumes. (That "never auto-resumes" is about a project you explicitly stopped — it still applies. A project you had left switched ON is different: it now resumes automatically after a restart, with no action from you, unless you had stopped it or the app itself has been restarting repeatedly, in which case it stays off and you get a notification.)',
-            ja: 'worker 起動（drain）：マネージャータブのエンジン起動スイッチを押したときだけ始まります。停止を押せば即座に止まり、再起動後も停止したままです —— 自動では再開しません。（この「自動では再開しません」は、あなたが明示的に停止していたプロジェクトについての話で、これは今も変わりません。一方、オンにしたままだったプロジェクトは話が別です —— アプリの再起動後、あなたが何もしなくても自動的に再開するようになりました。停止していた場合や、アプリ自体が短時間に繰り返し再起動している場合は例外で、その場合はオフのままになり通知が届きます。）',
+            en: 'Worker dispatch (drain): starts only when you press the Start switch at the top of the Swarm tab. It stops immediately on stop, and stays stopped across a restart — it never auto-resumes. (That "never auto-resumes" is about a project you explicitly stopped — it still applies. A project you had left switched ON is different: it now resumes automatically after a restart, with no action from you, unless you had stopped it or the app itself has been restarting repeatedly, in which case it stays off and you get a notification.)',
+            ja: 'worker 起動（drain）：Swarm タブ上端の開始スイッチを押したときだけ始まります。停止を押せば即座に止まり、再起動後も停止したままです —— 自動では再開しません。（この「自動では再開しません」は、あなたが明示的に停止していたプロジェクトについての話で、これは今も変わりません。一方、オンにしたままだったプロジェクトは話が別です —— アプリの再起動後、あなたが何もしなくても自動的に再開するようになりました。停止していた場合や、アプリ自体が短時間に繰り返し再起動している場合は例外で、その場合はオフのままになり通知が届きます。）',
           },
           {
             en: 'Integration (landing finished work on your trunk): the engine itself never pushes — it has no code path that moves your trunk, and regression tests pin that. The one thing it does on its own while running: when a worker finishes and its card reaches review, it wakes the manager — a `claude` session you can watch in the Swarm tab — if none is alive. Waking moves nothing by itself. Your trunk changes only when that manager session reviews the branch and lands it with a plain push (never `--force`); a conflicting push is aborted and nothing lands, and cards titled `[hold]` or touching high-risk paths are always held for your explicit approval.',
@@ -650,8 +658,8 @@ export const MANUAL_SECTIONS: Section[] = [
         kind: 'note',
         tone: 'info',
         text: {
-          en: 'The engine’s start switch lives in the Manager tab. It is the single master switch, and stopping it is symmetric: worker dispatch and manager wake-ups stop together, and pressing stop always sticks — even across a restart, nothing you stopped comes back on by itself. What changed: the switch itself is no longer reset to off by an app restart. If you left it ON, it comes back ON by itself after a restart, with no action from you — you do not need to re-arm it every session anymore. (An app that keeps restarting in a short window is treated as suspect and held off instead, with a notification, so a broken update can’t spin up workers unattended forever.) (The separate auto-integrate switch is gone — the engine no longer has an integration path to arm.)',
-          ja: 'エンジンの起動スイッチはマネージャータブにあります。これが唯一のマスタースイッチで、停止は対称です：worker 起動もマネージャーの自動起こしも一緒に止まり、一度停止を押せば——再起動をまたいでも——あなたが止めたものが勝手に戻ることはありません。変わったのはここです：このスイッチ自体は、もうアプリの再起動でオフに戻されなくなりました。オンにしたままにしていた場合、再起動後にあなたが何もしなくても自動的にオンへ戻ります —— 毎セッション再びオンにする必要はもう無くなりました。（短時間にアプリが繰り返し再起動している場合は「怪しい」とみなされ、通知とともに自動再開が見送られます —— 壊れた更新が無人のまま worker を延々と立ち上げ続けることがないように。）（かつての「自動統合」の別スイッチは廃止されました —— エンジンには arm すべき統合経路そのものがもう在りません。）',
+          en: 'The engine’s start switch sits at the top of the Swarm tab. It is the single master switch, and stopping it is symmetric: worker dispatch and manager wake-ups stop together, and pressing stop always sticks — even across a restart, nothing you stopped comes back on by itself. What changed: the switch itself is no longer reset to off by an app restart. If you left it ON, it comes back ON by itself after a restart, with no action from you — you do not need to re-arm it every session anymore. (An app that keeps restarting in a short window is treated as suspect and held off instead, with a notification, so a broken update can’t spin up workers unattended forever.) (The separate auto-integrate switch is gone — the engine no longer has an integration path to arm.)',
+          ja: 'エンジンの起動スイッチは Swarm タブの上端にあります。これが唯一のマスタースイッチで、停止は対称です：worker 起動もマネージャーの自動起こしも一緒に止まり、一度停止を押せば——再起動をまたいでも——あなたが止めたものが勝手に戻ることはありません。変わったのはここです：このスイッチ自体は、もうアプリの再起動でオフに戻されなくなりました。オンにしたままにしていた場合、再起動後にあなたが何もしなくても自動的にオンへ戻ります —— 毎セッション再びオンにする必要はもう無くなりました。（短時間にアプリが繰り返し再起動している場合は「怪しい」とみなされ、通知とともに自動再開が見送られます —— 壊れた更新が無人のまま worker を延々と立ち上げ続けることがないように。）（かつての「自動統合」の別スイッチは廃止されました —— エンジンには arm すべき統合経路そのものがもう在りません。）',
         },
       },
     ],

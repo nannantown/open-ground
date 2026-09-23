@@ -245,18 +245,23 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-const openWorkerTab = async () => {
+const openSwarm = async () => {
   render(<SwarmModule project={project} />)
-  await userEvent.click(await screen.findByRole('tab', { name: /workersTab/ }))
+  // One screen (2026-09-23): no tab to click — wait for a REAL worker seat
+  // (the vacant placeholder gone), i.e. the roster poll has landed.
+  await waitFor(() => {
+    expect(screen.getAllByText('projectPanel.swarm.seat.worker').length).toBeGreaterThan(0)
+    expect(screen.queryByText('projectPanel.swarm.seat.vacant')).toBeNull()
+  })
 }
 
 describe('an SDK worker arriving over the real poll', () => {
   it('renders as the SDK tile — NOT an ended session with a Restart button', async () => {
     harness({ roster: [liveSdkWorker] })
-    await openWorkerTab()
+    await openSwarm()
 
     // The SDK badge is the tile's own marker (SdkWorkerPane).
-    expect(await screen.findByTitle('projectPanel.swarm.sdk.badgeHint')).toBeTruthy()
+    expect(await screen.findByText('projectPanel.swarm.seat.openLog')).toBeTruthy()
     // …and none of the PTY tile's dead-session chrome. Offering "Restart" over a
     // working worker is not a cosmetic slip: pressing it puts a SECOND claude
     // into that worktree.
@@ -280,7 +285,7 @@ describe('restarting a dead worker that comes back on the SDK runtime', () => {
         branch: 'swarm/card-3',
       },
     })
-    await openWorkerTab()
+    await openSwarm()
 
     await userEvent.click(await screen.findByText('projectPanel.swarm.restart'))
 
@@ -289,7 +294,7 @@ describe('restarting a dead worker that comes back on the SDK runtime', () => {
     )
     // The fresh worker is an SDK one, so its tile must be the SDK tile — right
     // now, not after the next poll. The roster STILL reports the dead worker.
-    expect(await screen.findByTitle('projectPanel.swarm.sdk.badgeHint')).toBeTruthy()
+    expect(await screen.findByText('projectPanel.swarm.seat.openLog')).toBeTruthy()
     // And the button that would spawn the twin is gone.
     expect(screen.queryByText('projectPanel.swarm.restart')).toBeNull()
     expect(screen.queryByText('projectPanel.swarm.sessionEnded')).toBeNull()
@@ -306,7 +311,7 @@ describe('restarting a dead worker that comes back on the SDK runtime', () => {
       roster: [deadWorker],
       spawnError: "the user's claude CLI could not be located",
     })
-    await openWorkerTab()
+    await openSwarm()
 
     await userEvent.click(await screen.findByText('projectPanel.swarm.restart'))
 
@@ -314,7 +319,7 @@ describe('restarting a dead worker that comes back on the SDK runtime', () => {
     expect(line.textContent).toContain('claude CLI could not be located')
     // No worker came up, so nothing may be overlaid: the tile still shows the
     // dead worker, Restart still offered — NOT a phantom fresh session.
-    expect(screen.queryByTitle('projectPanel.swarm.sdk.badgeHint')).toBeNull()
+    expect(screen.queryByText('projectPanel.swarm.seat.openLog')).toBeNull()
     expect(screen.queryByText('projectPanel.swarm.restart')).toBeTruthy()
   })
 })
@@ -341,8 +346,10 @@ describe('restarting a worker whose desk is an SDK session', () => {
    *  PTY tile follows (offering it over a live worker puts a twin `claude` into
    *  that worktree). Bring the live SDK worker to that state. */
   const openFinishedSdkTile = async (id: string) => {
-    await openWorkerTab()
-    await screen.findByTitle('projectPanel.swarm.sdk.badgeHint')
+    await openSwarm()
+    // The seat is folded (no stream) until unfolded — unfold it so its live
+    // transcript, and with it the session's end, reaches the tile.
+    await userEvent.click(await screen.findByText('projectPanel.swarm.seat.openLog'))
     await endSdkSession(id)
     return screen.findByText('projectPanel.swarm.restart')
   }
@@ -417,7 +424,8 @@ describe('restarting a worker whose desk is an SDK session', () => {
     )
     // Nothing was overlaid, so the tile still shows what the server last said —
     // stale for one poll, but never a lie.
-    expect(screen.getByTitle('projectPanel.swarm.sdk.badgeHint')).toBeTruthy()
+    // (Still the unfolded SDK tile — its Close control — not a dead PTY tile.)
+    expect(screen.getByText('projectPanel.swarm.seat.closeLog')).toBeTruthy()
     expect(screen.queryByText('projectPanel.swarm.sessionEnded')).toBeTruthy()
   })
 })
@@ -427,9 +435,42 @@ describe('every label the worker tab renders exists in BOTH locales', () => {
     // Two tiles, distinct worktrees (the React key) — one of each renderer, so
     // both tiles' labels are swept.
     harness({ roster: [liveSdkWorker, { ...deadWorker, worktree: `${WORKTREE}-dead` }] })
-    await openWorkerTab()
-    await screen.findByTitle('projectPanel.swarm.sdk.badgeHint')
+    await openSwarm()
+    // The folded seat's labels, then the unfolded tile's.
+    await userEvent.click(await screen.findByText('projectPanel.swarm.seat.openLog'))
     await endSdkSession('sdk-3')
     expect(Array.from(missingKeys).sort()).toEqual([])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The connection budget (2026-09-23 review). Every seat is on screen at once
+// now, and each live transcript holds one EventSource over HTTP/1.1 to one
+// loopback host — Chromium's 6-connection cap. Supply + manager + 4 streaming
+// workers froze every other request. So worker seats open FOLDED (no stream)
+// and at most ONE unfolds into a live transcript.
+describe('the one-screen Swarm tab keeps worker streams bounded', () => {
+  const openSdkStreams = () =>
+    FakeEventSource.instances.filter((s) => !s.closed && s.url.includes('/api/sdk-session/'))
+
+  it('opens NO worker stream until a seat is unfolded, and never more than one', async () => {
+    const fleet = [1, 2, 3, 4].map((n) => ({
+      ...liveSdkWorker,
+      worktree: `${WORKTREE}-${n}`,
+      branch: `swarm/card-${n}`,
+      sdkSessionId: `sdk-f${n}`,
+    }))
+    harness({ roster: fleet })
+    await openSwarm()
+    const opens = await screen.findAllByText('projectPanel.swarm.seat.openLog')
+    expect(opens).toHaveLength(4)
+    expect(openSdkStreams()).toHaveLength(0)
+
+    await userEvent.click(opens[0])
+    await waitFor(() => expect(openSdkStreams()).toHaveLength(1))
+    // Unfolding a second seat folds the first: still exactly one stream.
+    await userEvent.click(screen.getAllByText('projectPanel.swarm.seat.openLog')[0])
+    await waitFor(() => expect(openSdkStreams()).toHaveLength(1))
+    expect(screen.getAllByText('projectPanel.swarm.seat.openLog')).toHaveLength(3)
   })
 })

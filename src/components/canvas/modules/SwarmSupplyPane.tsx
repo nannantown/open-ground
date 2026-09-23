@@ -8,12 +8,12 @@
 // checkout, running /supply); this pane only attaches to the returned terminalId
 // and reports its close. Stopping it is a plain PTY kill (no worktree to remove).
 
-import { Power, Inbox } from 'lucide-react'
+import { Power } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
-import { SwarmSprite } from '@/components/canvas/SwarmSprite'
 import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
+import { SwarmSeatHeader } from './SwarmSeatHeader'
 
 interface Props {
   /** PTY id the supply route assigned when it launched `claude` in the cwd. */
@@ -32,17 +32,6 @@ interface Props {
   onRestart: () => void
 }
 
-// Status dot colour — the SAME beacon vocabulary as the worker tiles
-// (SwarmWorkerPane) and the Ground/Board cards: moss = busy, ochre = waiting.
-// starting/exited use ink-faint so the inert grey dot clears the 3:1 graphic
-// floor on the paper header (line-strong ≈ 2.1:1 was near-invisible).
-const DOT: Record<WorkerStatus, string> = {
-  working: 'bg-moss',
-  waiting: 'bg-ochre',
-  starting: 'bg-ink-faint',
-  exited: 'bg-ink-faint',
-}
-
 export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRestart }: Props) => {
   const { t } = useT()
   const statusLabel: string = {
@@ -54,35 +43,14 @@ export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRe
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[#1a1a1a]">
-      {/* Header: status dot+label · supply identity · stop. Mirrors the worker
-          pane header so the two surfaces read as siblings. */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-2.5 py-1.5">
-        {/* The role's figure, at actual size. `exited` draws none (BEACON_SPRITE
-            maps it to null): every state in the set says somebody is there, and
-            a dimmed animal for a process that has gone is a picture of a worker
-            who does not exist. The dot still says "off" without pretending. */}
-        {BEACON_SPRITE[status] ? (
-          <SwarmSprite
-            role="supply"
-            state={BEACON_SPRITE[status]!}
-            label={statusLabel}
-            className="shrink-0"
-          />
-        ) : (
-          <span className={`h-[6px] w-[6px] shrink-0 rounded-full ${DOT[status]}`} aria-hidden />
-        )}
-        <span
-          className={`label-cap shrink-0 ${status === 'waiting' ? 'text-[var(--beacon-waiting)]' : 'text-ink-faint'}`}
-        >
-          {statusLabel}
-        </span>
-        <span
-          className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-meta text-ink-muted"
-          title={t('projectPanel.swarm.supply.hint')}
-        >
-          <Inbox size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
-          {/* Text-diet: the active tab is already labelled タスク窓口. */}
-        </span>
+      {/* The seat's nameplate (role tint · otter · status) + stop. */}
+      <SwarmSeatHeader
+        role="supply"
+        sprite={BEACON_SPRITE[status]}
+        statusLabel={statusLabel}
+        waiting={status === 'waiting'}
+        detailTitle={t('projectPanel.swarm.supply.hint')}
+      >
         <button
           type="button"
           onClick={onStop}
@@ -93,7 +61,7 @@ export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRe
           <Power size={10} strokeWidth={2.25} />
           {busy ? t('projectPanel.swarm.supply.stopping') : t('projectPanel.swarm.supply.stop')}
         </button>
-      </div>
+      </SwarmSeatHeader>
 
       {/* The PTY itself — reused verbatim. onExit bubbles the close up so the
           module flips the session to 'exited' (our header shows it). */}

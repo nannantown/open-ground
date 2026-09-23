@@ -174,14 +174,9 @@ export const projectPanel = {
     'projectPanel.swarm.retained': 'Worktree kept — it has uncommitted changes.',
     'projectPanel.swarm.forceRemove': 'Force remove',
     'projectPanel.swarm.forceFailed': "Couldn't remove the worktree: {reason}. Remove it by hand if needed.",
-    'projectPanel.swarm.engineOwned': 'Engine',
-    'projectPanel.swarm.engineOwnedHint':
-      'The autonomous engine spawned and owns this worker — manage it from the Manager tab.',
     // Agent SDK worker tile (docs/SDK_WORKER_MIGRATION_PLAN.md). A worker running
     // on the SDK runtime has no terminal screen — the tile renders its distilled
     // event stream instead.
-    'projectPanel.swarm.sdk.badgeHint':
-      'This worker runs on the Agent SDK runtime, not a terminal. Its transcript is shown instead of a screen.',
     'projectPanel.swarm.sdk.statusQuotaParked': 'Quota wait',
     // Question banner (2026-08-03): the worker asked the OWNER something and is
     // waiting. Shown in the pane the owner is actually looking at, with the
@@ -209,6 +204,14 @@ export const projectPanel = {
     // Supply officer (タスク窓口) — the conversation desk that turns the user's
     // requests into Board:todo cards. Writes the Board only; never edits code.
     'projectPanel.swarm.workersTab': 'Workers',
+    'projectPanel.swarm.seat.worker': 'Worker',
+    'projectPanel.swarm.seat.vacant': 'No one yet',
+    'projectPanel.swarm.seat.openLog': 'Watch the work',
+    'projectPanel.swarm.seat.closeLog': 'Close',
+    // The question hint INSIDE the Swarm tab, where the president sits in the
+    // seat on the left (the Board drawer keeps sdk.questionBannerHint).
+    'projectPanel.swarm.seat.questionHint':
+      'Tell the president your answer in the President seat on the left (if it is stopped, press “Call the president” first). The worker resumes on your reply.',
     'projectPanel.swarm.supply.tab': 'President',
     'projectPanel.swarm.supply.badge': 'President',
     'projectPanel.swarm.supply.title': 'The one person you talk to',
@@ -813,13 +816,8 @@ export const projectPanel = {
     'projectPanel.swarm.retained': 'worktree を残しました — 未コミットの変更があります。',
     'projectPanel.swarm.forceRemove': '強制撤去',
     'projectPanel.swarm.forceFailed': 'worktree を撤去できませんでした: {reason}。必要なら手動で削除してください。',
-    'projectPanel.swarm.engineOwned': 'エンジン',
-    'projectPanel.swarm.engineOwnedHint':
-      '自律エンジンが起動・管理している worker です — 操作はマネージャータブから行ってください。',
     // Agent SDK worker のタイル(docs/SDK_WORKER_MIGRATION_PLAN.md)。SDK ランタイムで
     // 動く worker には端末画面が無いので、蒸留したイベント列を表示する。
-    'projectPanel.swarm.sdk.badgeHint':
-      'この worker は端末ではなく Agent SDK ランタイムで動いています。画面の代わりに会話の記録を表示します。',
     'projectPanel.swarm.sdk.statusQuotaParked': '上限待ち',
     'projectPanel.swarm.sdk.statusQuestion': '回答待ち',
     'projectPanel.swarm.sdk.jumpLatest': '最新へ',
@@ -843,6 +841,12 @@ export const projectPanel = {
     // Supply officer (タスク窓口) — 要望を Board:todo カードに積む対話デスク。
     // Board に書くだけで、コードは編集しない。
     'projectPanel.swarm.workersTab': 'ワーカー',
+    'projectPanel.swarm.seat.worker': 'ワーカー',
+    'projectPanel.swarm.seat.vacant': 'まだいません',
+    'projectPanel.swarm.seat.openLog': '作業の様子を見る',
+    'projectPanel.swarm.seat.closeLog': '閉じる',
+    'projectPanel.swarm.seat.questionHint':
+      '答えは左の「社長」の席で社長に伝えてください(社長が止まっていたら先に「社長を呼ぶ」)。答えるとこのワーカーはそのまま再開します。',
     'projectPanel.swarm.supply.tab': '社長',
     'projectPanel.swarm.supply.badge': '社長',
     'projectPanel.swarm.supply.title': 'あなたが話すのは社長だけ',

@@ -458,9 +458,8 @@ describe('SdkWorkerPane — a manual worker can be torn down (③)', () => {
     expect(getByText('projectPanel.swarm.forceRemove').closest('button')).toBeDisabled()
   })
 
-  it('shows the engine chip and NO teardown control for an engine-owned worker', () => {
-    const { queryByTitle, getByText } = mount({ source: 'engine' })
-    expect(getByText('projectPanel.swarm.engineOwned')).toBeTruthy()
+  it('shows NO teardown control for an engine-owned worker', () => {
+    const { queryByTitle } = mount({ source: 'engine' })
     expect(queryByTitle('projectPanel.swarm.terminate')).toBeNull()
     // The engine also owns the turn — no interrupt from here either.
     expect(queryByTitle('projectPanel.swarm.sdk.interrupt')).toBeNull()

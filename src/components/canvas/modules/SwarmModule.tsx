@@ -33,12 +33,10 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
-import { Network, Inbox, Boxes, Gauge, X, Power, Eye, type LucideIcon } from 'lucide-react'
+import { X, Power, Eye } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -52,14 +50,13 @@ import type {
   RemoveSwarmWorktreeResponse,
   SpawnSwarmManagerResponse,
   SpawnSwarmWorkerResponse,
-  SwarmPaneId,
   SwarmWorkerRecord,
 } from '@/lib/types'
-import { SWARM_PANE_IDS } from '@/lib/types'
-import { effectiveTabOrder, moveTab } from '@/lib/modules/tabOrder'
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
+import { SwarmSeatHeader } from './SwarmSeatHeader'
+import { SwarmWorkerSeat } from './SwarmWorkerSeat'
 import { useSupplyDesk } from './useSupplyDesk'
 import { SwarmManagerPane } from './SwarmManagerPane'
 import { useLandedKpi } from './useLandedKpi'
@@ -76,20 +73,18 @@ import type { SwarmEnvIssueId } from './useSwarmEngine'
 import { workerBeaconStatus } from '@/lib/workerBeacon'
 import { SwarmErrorBanner } from '@/components/canvas/modules/SwarmErrorBanner'
 
-// Worker tiles lay out as a single horizontally-scrolling row. Each tile grows
-// to fill the area when there are few (1 worker → full width) but never shrinks
-// below MIN_TILE_WIDTH, so the embedded terminal always stays readable; once the
-// tiles together exceed the area width the row scrolls horizontally so EVERY
-// worker — including the engine's, past the manual cap — stays reachable.
-// (Replaces the old N-column grid, which squished every tile thinner as the
-// count grew and could clip a pane off-screen with no way to scroll to it.)
-const MIN_TILE_WIDTH = 360
-// Vertical counterpart of MIN_TILE_WIDTH: a tile never shrinks below this height
-// either, so a short viewport scrolls the row VERTICALLY (overflow-y-auto)
-// instead of crushing the terminal to a couple of rows. 220 matches the old
-// grid's per-row minimum (minmax(220px, 1fr)), so this restores the exact
-// short-window escape hatch the grid had — symmetric with the horizontal one.
-const MIN_TILE_HEIGHT = 220
+// Seats (社長 / manager / each worker) lay out as ONE horizontally-scrolling
+// row. Each seat grows to fill the area when there are few but never shrinks
+// below 360px wide (the embedded terminal / transcript stays readable) nor
+// 220px tall (a short window scrolls vertically instead of crushing the seat);
+// the explicit min-width also overrides flex's min-width:auto so a wide xterm
+// can't stretch its seat. Past the width, the row scrolls — every seat stays
+// reachable. Narrow windows therefore always SCROLL, never wrap.
+const SEAT_STYLE = { flex: '1 0 360px', minWidth: 360, minHeight: 220 } as const
+const SEAT_CLASS = 'h-full overflow-hidden'
+// A FOLDED worker seat (SwarmWorkerSeat) carries a nameplate and a few lines,
+// so it can be narrower — more of the fleet fits on one screen.
+const WORKER_SEAT_STYLE = { flex: '1 0 240px', minWidth: 240, minHeight: 220 } as const
 
 // The single commander (司令官) CONVERSATION session, remembered client-side —
 // the exact same shape + lifecycle as the supply session (no worktree; it runs
@@ -228,11 +223,7 @@ const saveManager = (projectId: string, manager: SwarmManager | null) => {
 // keeps those while the desk is closed and tells them when it opens; the bell
 // and the OS toast still carry them too. The old todo rail and Flow tab were
 // removed earlier.)
-//
-// The id list + type is canonical in types.ts (SWARM_PANE_IDS) so the persisted
-// Settings.swarmPaneOrder and the reorder helpers share one source of truth; the
-// local alias keeps the many existing `MainView` references unchanged.
-type MainView = SwarmPaneId
+
 
 /** The env-preflight banner's i18n key for "what still works" (2026-07-22
  *  review, nit6): a non-git PROJECT (`notAGitRepo`) only blocks starting new
@@ -280,34 +271,53 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // poll agrees the worktree is really gone.
   const [removedWorktrees, setRemovedWorktrees] = useState<ReadonlySet<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
-
-  // Which face of the main area is shown. Supply is the conversational entry
-  // point, so the main area opens on it. (The supply desk's own state lives in
-  // useSupplyDesk below — shared with the Board's front-desk seat, which drives
-  // the SAME desk through the SAME stored record.)
-  const [mainView, setMainView] = useState<MainView>(SWARM_PANE_IDS[0])
-
-  // ── Sub-tab order (条件1/2/3) ───────────────────────────────────────────────
-  // The owner's saved left-to-right order of the four sub-tabs, loaded ONCE from
-  // /api/settings (Settings.swarmPaneOrder — GLOBAL: the four roles are identical
-  // across projects, so one order serves them all, sitting beside executionMode /
-  // swarmAllowedModels which the same header edits). `order` reconciles the saved
-  // list against the canonical id set so a stale/garbage save can never strand a
-  // pane, and its FIRST id is the default view. `userPickedRef` stops the async
-  // settings load from overriding a tab the user clicked while it was in flight;
-  // the reset effect re-lands on the first tab on every project switch.
-  const [paneOrder, setPaneOrder] = useState<readonly string[] | undefined>(undefined)
-  const order = useMemo(
-    () => effectiveTabOrder<MainView>(paneOrder, SWARM_PANE_IDS),
-    [paneOrder],
-  )
-  const paneOrderRef = useRef(paneOrder)
-  paneOrderRef.current = paneOrder
-  const userPickedRef = useRef(false)
-  // Drag-to-reorder state (mirrors ProjectPanel's TabRow): `dragFrom` = the pane
-  // being dragged, `dropAt` = the insertion slot it would land in (0..order.length).
-  const [dragFrom, setDragFrom] = useState<number | null>(null)
-  const [dropAt, setDropAt] = useState<number | null>(null)
+  // The ONE worker seat unfolded into its live transcript (by worktree), or
+  // null. One at a time on purpose — see SwarmWorkerSeat.
+  const [openWorktree, setOpenWorktree] = useState<string | null>(null)
+  // sdkSessionId → the newest OPEN question that worker asked the owner. One
+  // poll for the whole fleet (a folded seat opens no stream of its own).
+  const [questionBySdk, setQuestionBySdk] = useState<ReadonlyMap<string, string>>(new Map())
+  useEffect(() => {
+    let stopped = false
+    const read = async () => {
+      // Same courtesy as the terminal/active poll: a hidden window asks nothing.
+      if (document.hidden) return
+      try {
+        // ?status=open — resolved history (and its expanded captures) must not
+        // ride every 10 s poll (server/routes/swarm.ts, GET escalations).
+        const r = await fetch(
+          `/api/swarm/escalations?path=${encodeURIComponent(project.path)}&status=open`,
+        )
+        if (!r.ok || stopped) return
+        const d = (await r.json()) as {
+          escalations?: {
+            status?: string
+            sdkSessionId?: string
+            question?: string
+            plainQuestion?: string
+            createdAt?: string
+          }[]
+        }
+        const next = new Map<string, string>()
+        const open = (d.escalations ?? [])
+          .filter((e) => e.status === 'open' && e.sdkSessionId && (e.plainQuestion || e.question))
+          .sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''))
+        // Oldest first, so the newest question per worker is the one that stays.
+        // The owner reads the PLAIN wording when the raiser wrote one
+        // (Escalation.plainQuestion); the technical one is the fallback.
+        for (const e of open) next.set(e.sdkSessionId!, (e.plainQuestion || e.question)!)
+        if (!stopped) setQuestionBySdk(next)
+      } catch {
+        /* keep the last known state — a fetch hiccup must not flap the banner */
+      }
+    }
+    void read()
+    const timer = setInterval(() => void read(), 10_000)
+    return () => {
+      stopped = true
+      clearInterval(timer)
+    }
+  }, [project.path])
 
   // The single commander (司令官) CONVERSATION session + its in-flight flag,
   // owned here exactly like the supply session and passed down to
@@ -317,7 +327,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const [managerBusy, setManagerBusy] = useState(false)
 
   // The autonomous engine's state — polled ONCE here (the shared hook) so BOTH
-  // the worker tab and the manager dashboard read the same snapshot. `realWorkers`
+  // the worker seats and the manager dashboard read the same snapshot. `realWorkers`
   // is the SERVER-TRUTH worker list (GET /api/swarm/workers): live PTYs + the
   // engine's own roster + heartbeat files, already unified server-side — see
   // src/lib/server/swarmWorkerRegistry.ts. This replaces the old localStorage
@@ -429,55 +439,20 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   useEffect(() => {
     setManager(loadManager(project.id))
     setManagerBusy(false)
-    // Land on the FIRST sub-tab of the (global) saved order (条件3). Read the
-    // latest order via the ref, NOT a dep: a reorder changes paneOrder but not
-    // project.id, so keying this on project.id keeps a reorder from re-firing
-    // here and yanking the active tab back to the first one.
-    userPickedRef.current = false
-    setMainView(effectiveTabOrder<MainView>(paneOrderRef.current, SWARM_PANE_IDS)[0])
-    setDragFrom(null)
-    setDropAt(null)
     setExitedIds(new Set())
     setRetainedByWorktree(new Map())
     setError(null)
     setBusyWorktrees(new Set())
     setPendingRestarts(new Map())
     setRemovedWorktrees(new Set())
+    setOpenWorktree(null)
+    setQuestionBySdk(new Map())
     setDismissedEnvIssuesKey(null)
     setGitInitBusy(false)
     setGitInitDone(false)
     setGitInitError(null)
     seenRef.current = new Set()
   }, [project.id])
-
-  // Load the saved sub-tab order ONCE (Settings.swarmPaneOrder is GLOBAL, like
-  // executionMode which the same header's mode menu reads over /api/settings). On
-  // arrival, land on the saved FIRST tab (条件3) unless the user already picked
-  // one while it was in flight (userPickedRef). A missing/garbage value degrades
-  // to the shipped order via effectiveTabOrder, and a reorder's fire-and-forget
-  // persist self-heals here on the next mount's GET.
-  useEffect(() => {
-    let alive = true
-    fetch('/api/settings')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((s) => {
-        if (!alive || !s) return
-        const raw = (s as { swarmPaneOrder?: unknown }).swarmPaneOrder
-        const saved = Array.isArray(raw)
-          ? raw.filter((x): x is string => typeof x === 'string')
-          : undefined
-        setPaneOrder(saved)
-        if (!userPickedRef.current) {
-          setMainView(effectiveTabOrder<MainView>(saved, SWARM_PANE_IDS)[0])
-        }
-      })
-      .catch(() => {
-        /* offline / server not up — the strip still works, defaults to supply */
-      })
-    return () => {
-      alive = false
-    }
-  }, [])
 
   // Reconcile the optimistic restart/terminate overlays against the latest
   // server-truth poll: once GET /api/swarm/workers confirms a restart's new
@@ -1046,74 +1021,12 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // surface with the central onboarding (条件1/5) so a first-time owner sees the
   // three roles + the work-flow + what Start does BEFORE pressing it. The header
   // row stays above it (its Start, and the onboarding's, run the SAME powerSwarm
-  // composition). The moment anything comes up, the normal tabs return.
-  // (Open questions and fatal alerts used to keep the tabs up so the overseer
+  // composition). The moment anything comes up, the seats return.
+  // (Open questions and fatal alerts used to keep the seats up so the overseer
   // tab could show them. That tab is gone (2026-09-23): Start opens the
   // president's desk, which is then told every open question and every notice
   // held while it was closed — supplyNotice.catchUpSupplyDesks.)
   const swarmIdle = !engine.running && !supply && !manager && allWorkers.length === 0
-
-  // Persist a drag/keyboard reorder to Settings.swarmPaneOrder (条件2). moveTab
-  // (shared with the per-project tab row) computes the new order; the POST is
-  // optimistic + fire-and-forget (the strip updates at once; a failed persist
-  // self-heals on the next mount's GET). The server narrows the body to the known
-  // pane ids, so a bad index/order can never poison the stored value.
-  const reorderPanes = useCallback(
-    (from: number, to: number) => {
-      const next = moveTab(order, from, to)
-      if (next.every((id, i) => id === order[i])) return
-      setPaneOrder(next)
-      void fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ swarmPaneOrder: next }),
-      }).catch(() => {
-        /* fire-and-forget; the next mount's GET re-reads the persisted order */
-      })
-    },
-    [order],
-  )
-  const endPaneDrag = () => {
-    setDragFrom(null)
-    setDropAt(null)
-  }
-  const commitPaneDrop = () => {
-    if (dragFrom !== null && dropAt !== null) reorderPanes(dragFrom, dropAt)
-    endPaneDrag()
-  }
-  // Alt+←/→ keyboard reorder — the accessible alternative to dragging (same idiom
-  // as ProjectPanel's tab row). A move drops the focused pane one slot over.
-  const onPaneKeyDown = (e: ReactKeyboardEvent, i: number) => {
-    if (!e.altKey) return
-    if (e.key === 'ArrowLeft') {
-      e.preventDefault()
-      reorderPanes(i, i - 1)
-    } else if (e.key === 'ArrowRight') {
-      e.preventDefault()
-      reorderPanes(i, i + 2)
-    }
-  }
-
-  // The sub-view tab strip — per-pane metadata keyed by id (so the strip renders
-  // in the reconciled `order`), with the two badges (live workers / open
-  // questions) kept declarative. It renders ON the header row (one line instead
-  // of the old three stacked strips: power bar + mode row + tab row). 条件5: with
-  // no saved order `order` === SWARM_PANE_IDS, so `orderedTabs` is byte-for-byte
-  // the old hardcoded strip.
-  const paneMeta: Record<
-    MainView,
-    { icon: LucideIcon; label: string; badge?: number; badgeTone?: 'accent' | 'line' }
-  > = {
-    supply: { icon: Inbox, label: t('projectPanel.swarm.supply.tab') },
-    manager: { icon: Gauge, label: t('projectPanel.swarm.manager.tab') },
-    workers: {
-      icon: Boxes,
-      label: t('projectPanel.swarm.workersTab'),
-      badge: allWorkers.length > 0 ? allWorkers.length : undefined,
-      badgeTone: 'line',
-    },
-  }
-  const orderedTabs = order.map((view) => ({ view, ...paneMeta[view] }))
 
   return (
     // Right-pane-centric layout (条件4): the old left "to-do rail + dispatch"
@@ -1121,14 +1034,13 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     // workers are started by the autonomous engine (the master power switch on
     // the header row) or the commander session, NOT by a per-card hand "dispatch"
     // here (条件1/2/3). This wrapper is a vertical stack: ONE header row (status ·
-    // sub-view tabs · mode menu · master switch) + an error banner + the
-    // full-height tab surface below.
+    // mode menu · master switch) + an error banner + the
+    // full-height row of seats below.
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {/* ── The ONE header row ──────────────────────────────────────────────
           Everything the old three stacked strips carried, on a single fixed-
           height line so the terminal area below gets the vertical space back:
-          the live status pill (running/stopped · N workers), the sub-view tabs
-          (hidden while the pre-start onboarding is the surface), the execution-
+          the live status pill (running/stopped · N workers), the execution-
           mode dropdown (rare operation → an options menu, not an always-on
           row), and the master Stop|Start switch (条件1 — ON starts the engine +
           launches commander & supply, idempotent; OFF halts new dispatch only). */}
@@ -1141,105 +1053,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           workerCount={allWorkers.length}
         />
         </div>
-        {swarmIdle ? (
-          <div className="min-w-0 flex-1" aria-hidden />
-        ) : (
-          <div
-            role="tablist"
-            aria-label={t('projectPanel.swarm.title')}
-            className="order-last flex min-w-0 basis-full items-center gap-1.5 self-stretch overflow-x-auto md:order-none md:flex-1 md:basis-0"
-          >
-            {orderedTabs.map(({ view, icon: Icon, label, badge, badgeTone }, i) => {
-              const active = mainView === view
-              // The dragged pane dims; the cursor reads grab / grabbing.
-              const dimmed = dragFrom === i
-              // Accent insertion bar at the LEADING edge of the pane a drop would
-              // land before (or the trailing edge of the last pane for an
-              // end-drop). Suppressed where moveTab is a no-op (dropping onto self
-              // or just after self). Bars sit at the pane's inner edge (left-0 /
-              // right-0), NOT floating in the gap like ProjectPanel's — this strip
-              // is an overflow-x-auto container, which would clip an outside bar.
-              const barBefore =
-                dragFrom !== null && dropAt === i && dropAt !== dragFrom && dropAt !== dragFrom + 1
-              const barAfter =
-                dragFrom !== null &&
-                i === orderedTabs.length - 1 &&
-                dropAt === orderedTabs.length &&
-                dropAt !== dragFrom + 1
-              return (
-              <button
-                key={view}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.effectAllowed = 'move'
-                  // Firefox needs a payload for the drag to fire; we read state.
-                  e.dataTransfer.setData('text/plain', String(i))
-                  setDragFrom(i)
-                }}
-                onDragOver={(e) => {
-                  if (dragFrom === null) return
-                  e.preventDefault()
-                  e.dataTransfer.dropEffect = 'move'
-                  const r = e.currentTarget.getBoundingClientRect()
-                  const past = e.clientX > r.left + r.width / 2
-                  setDropAt(i + (past ? 1 : 0))
-                }}
-                onDrop={(e) => {
-                  e.preventDefault()
-                  commitPaneDrop()
-                }}
-                onDragEnd={endPaneDrag}
-                onClick={() => {
-                  // Mark an explicit pick so the async settings load can't override
-                  // it, then switch. (Reordering does NOT change the active tab.)
-                  userPickedRef.current = true
-                  setMainView(view)
-                }}
-                onKeyDown={(e) => onPaneKeyDown(e, i)}
-                title={t('projectPanel.dragToReorder')}
-                className={[
-                  // 計器盤 language: same inverse-pill idiom as the panel's
-                  // main tab strip (ProjectPanel) — no underline, bg+text
-                  // change together.
-                  'relative my-1.5 flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 label-cap transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
-                  active
-                    ? 'bg-ink text-ink-inverse'
-                    : 'text-ink-muted hover:bg-plane hover:text-ink active:bg-plane',
-                  dimmed ? 'opacity-40' : '',
-                  dragFrom !== null ? 'cursor-grabbing' : 'cursor-grab',
-                ].join(' ')}
-              >
-                {barBefore && (
-                  <span className="pointer-events-none absolute left-0 top-1 bottom-1 w-0.5 bg-accent" />
-                )}
-                <Icon size={12} strokeWidth={2} />
-                {label}
-                {badge !== undefined && (
-                  <span
-                    className={
-                      badgeTone === 'accent'
-                        ? 'rounded-full bg-accent-soft px-1.5 text-plate font-medium leading-[14px] text-accent'
-                        : active
-                          // On the active inverse pill the faint/line pair
-                          // would sink into the ink surface — flip to inverse.
-                          ? 'rounded-full border border-ink-inverse/40 px-1.5 text-plate font-medium leading-[14px] text-ink-inverse'
-                          : 'rounded-full border border-line px-1.5 text-plate font-medium leading-[14px] text-ink-faint'
-                    }
-                  >
-                    {badge}
-                  </span>
-                )}
-                {barAfter && (
-                  <span className="pointer-events-none absolute right-0 top-1 bottom-1 w-0.5 bg-accent" />
-                )}
-              </button>
-              )
-            })}
-          </div>
-        )}
+        <div className="min-w-0 flex-1" aria-hidden />
         <ExecutionModeMenu />
         <SwarmPowerSwitch
           running={engine.running}
@@ -1442,19 +1256,11 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         </div>
       )}
 
-      {/* ── Tab surface: supply desk ⇆ commander ⇆ worker tiles ───────────── */}
-      {/* No bg on this wrapper: the empty/CTA states below are PAPER surfaces
-          (bg-bg) so the paper ink tokens keep 4.5:1+ contrast. The dark terminal
-          bg (#1a1a1a) is scoped to the pane branches only, where
-          ClaudeTerminalPane's own light-on-dark xterm lives — putting it here
-          would bury the empty states' dark ink on a dark ground. */}
-      {/* min-w-0 is load-bearing: without it this flex item's min-width:auto
-          would grow to the worker grid's intrinsic width and push the whole
-          tile area off-screen — the bug this layout fixes. */}
+      {/* ── Seats: president · manager · workers, side by side ───────────── */}
       {/* OFF / first-run → the central onboarding (条件1/5): the three roles, the
           work-flow, and what Start does, shown BEFORE pressing it. Its Start fires
           the SAME powerSwarm composition as the bar above. Otherwise → the normal
-          supply ⇆ commander ⇆ workers tab surface. */}
+          row of seats. */}
       {swarmIdle && (!onboardingSeen || showOnboarding) ? (
         <SwarmOnboarding
           onStart={() => {
@@ -1494,127 +1300,114 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           </div>
         </div>
       ) : (
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {mainView === 'supply' ? (
-          supply ? (
-            // The live supply session — a single reused ClaudeTerminalPane.
-            <div className="min-h-0 flex-1">
-              <SwarmSupplyPane
-                terminalId={supply.terminalId}
-                status={statusOfPty(supply.terminalId)}
-                busy={supplyBusy}
-                onExit={() => supply && handleExit(supply.terminalId)}
-                onStop={() => void stopSupply()}
-                onRestart={() => void restartSupply()}
-              />
-            </div>
+      // ONE screen (2026-09-23, owner): every seat side by side — 社長, the
+      // manager, then one seat per worker — in a single row that scrolls
+      // horizontally once the seats outgrow the width (never squeezes a seat
+      // below SEAT_STYLE's minimum). No sub-tabs, no reordering: who is doing
+      // what is readable at a glance, each seat's nameplate tinted by role.
+      // min-w-0 is load-bearing: without it this flex item would grow to the
+      // row's intrinsic width and push the seats off-screen.
+      <div className="flex min-h-0 min-w-0 flex-1 gap-px overflow-x-auto overflow-y-auto bg-line-strong">
+        <div className={SEAT_CLASS} style={SEAT_STYLE}>
+          {supply ? (
+            // The live president's desk — the owner's one conversation.
+          <SwarmSupplyPane
+            terminalId={supply.terminalId}
+            status={statusOfPty(supply.terminalId)}
+            busy={supplyBusy}
+            onExit={() => supply && handleExit(supply.terminalId)}
+            onStop={() => void stopSupply()}
+            onRestart={() => void restartSupply()}
+          />
           ) : (
-            // Launch CTA — the conversation desk that turns requests into cards.
-            <div className="flex flex-1 items-center justify-center bg-bg px-8 text-center">
-              <div className="max-w-sm">
-                <div className="mx-auto mb-4 inline-flex h-11 w-11 items-center justify-center rounded-[3px] border border-line bg-bg-inset text-ink-muted">
-                  <Inbox size={20} strokeWidth={1.75} />
+            <div className="flex h-full min-h-0 flex-col bg-bg">
+              <SwarmSeatHeader role="supply" sprite={null} statusLabel={t('projectPanel.swarm.power.stopped')} />
+              <div className="flex flex-1 items-center justify-center px-6 text-center">
+                <div className="max-w-xs">
+                  <p className="mb-4 text-ui leading-relaxed text-ink-subtle">
+                    {t('projectPanel.swarm.supply.empty')}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void launchSupply()}
+                    disabled={supplyBusy}
+                    className="inline-flex items-center gap-1.5 rounded-[3px] border border-line bg-bg-card px-3 py-1.5 text-ui text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                  >
+                    <Power size={13} strokeWidth={2} />
+                    {supplyBusy
+                      ? t('projectPanel.swarm.supply.launching')
+                      : t('projectPanel.swarm.supply.launch')}
+                  </button>
                 </div>
-                <p className="label-cap mb-2 text-ink-faint">{t('projectPanel.swarm.supply.badge')}</p>
-                <h2 className="mb-2 text-read font-medium text-ink">
-                  {t('projectPanel.swarm.supply.title')}
-                </h2>
-                <p className="mb-4 text-ui leading-relaxed text-ink-subtle">
-                  {t('projectPanel.swarm.supply.empty')}
-                </p>
-                <button
-                  type="button"
-                  onClick={() => void launchSupply()}
-                  disabled={supplyBusy}
-                  className="inline-flex items-center gap-1.5 rounded-[3px] border border-line bg-bg-card px-3 py-1.5 text-ui text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
-                >
-                  <Inbox size={13} strokeWidth={2} />
-                  {supplyBusy
-                    ? t('projectPanel.swarm.supply.launching')
-                    : t('projectPanel.swarm.supply.launch')}
-                </button>
               </div>
             </div>
-          )
-        ) : mainView === 'manager' ? (
-          // Commander (司令官) dashboard: the conversation stage + the engine
-          // controls (Autonomy status / Overseer). Its engine state comes from the
-          // shared useSwarmEngine hook above — no own fetch. Live worker screens
-          // live on the worker tab; the Board pipeline tallies on the Board tab.
-          <div className="min-h-0 flex-1">
-            <SwarmManagerPane
-              projectPath={project.path}
-              session={
-                manager
-                  ? {
-                      terminalId: manager.terminalId,
-                      // The PTY poll cannot see an SDK desk, so `status` is sent
-                      // ONLY for a PTY one. It used to be sent for both, with the
-                      // constant 'working' standing in for the SDK case — so the
-                      // commander's beacon said 作業中 forever: never waiting on
-                      // a question, never quota-parked, never exited. A status
-                      // that cannot be wrong is not a status. The SDK desk
-                      // reports its own on its event stream (SwarmManagerPane
-                      // reads it there); nothing here may guess it.
-                      ...(manager.runtime === 'sdk' && manager.sdkSessionId
-                        ? { runtime: 'sdk' as const, sdkSessionId: manager.sdkSessionId }
-                        : {
-                            runtime: 'pty' as const,
-                            status: statusOfPty(manager.terminalId),
-                          }),
-                    }
-                  : null
+          )}
+        </div>
+        {/* The manager's seat — its own nameplate carries start/stop. */}
+        <div className={SEAT_CLASS} style={SEAT_STYLE}>
+          <SwarmManagerPane
+            projectPath={project.path}
+            session={
+              manager
+                ? {
+                    terminalId: manager.terminalId,
+                    // The PTY poll cannot see an SDK desk, so `status` is sent
+                    // ONLY for a PTY one. It used to be sent for both, with the
+                    // constant 'working' standing in for the SDK case — so the
+                    // commander's beacon said 作業中 forever: never waiting on
+                    // a question, never quota-parked, never exited. A status
+                    // that cannot be wrong is not a status. The SDK desk
+                    // reports its own on its event stream (SwarmManagerPane
+                    // reads it there); nothing here may guess it.
+                    ...(manager.runtime === 'sdk' && manager.sdkSessionId
+                      ? { runtime: 'sdk' as const, sdkSessionId: manager.sdkSessionId }
+                      : {
+                          runtime: 'pty' as const,
+                          status: statusOfPty(manager.terminalId),
+                        }),
+                  }
+                : null
+            }
+            sessionBusy={managerBusy}
+            onLaunchSession={() => void launchManager()}
+            onStopSession={() => void stopManager()}
+            onSessionExit={() => {
+              if (!manager) return
+              if (manager.runtime === 'sdk') {
+                // An SDK desk has no terminalId, so the PTY bookkeeping below
+                // would mark the EMPTY STRING exited — a no-op — while the
+                // manager state (whose status is deliberately pinned 'working'
+                // for SDK) kept rendering a live desk. The session is gone;
+                // clear the desk so the pane honestly shows the launch CTA.
+                setManager(null)
+                saveManager(project.id, null)
+                return
               }
-              sessionBusy={managerBusy}
-              onLaunchSession={() => void launchManager()}
-              onStopSession={() => void stopManager()}
-              onSessionExit={() => {
-                if (!manager) return
-                if (manager.runtime === 'sdk') {
-                  // An SDK desk has no terminalId, so the PTY bookkeeping below
-                  // would mark the EMPTY STRING exited — a no-op — while the
-                  // manager state (whose status is deliberately pinned 'working'
-                  // for SDK) kept rendering a live desk. The session is gone;
-                  // clear the desk so the pane honestly shows the launch CTA.
-                  setManager(null)
-                  saveManager(project.id, null)
-                  return
-                }
-                handleExit(manager.terminalId)
-              }}
-              onRestartSession={() => void restartManager()}
-              engine={engine}
-              available={engineAvailable}
-              busy={engineBusy}
-              error={engineError}
-              onToggleOverseer={toggleOverseer}
-              landed={landed}
-            />
-          </div>
-        ) : allWorkers.length === 0 ? (
-          <div className="flex flex-1 items-center justify-center bg-bg px-8 text-center">
-            <div className="max-w-sm">
-              <div className="mx-auto mb-4 inline-flex h-11 w-11 items-center justify-center rounded-[3px] border border-line bg-bg-inset text-ink-muted">
-                <Network size={20} strokeWidth={1.75} />
+              handleExit(manager.terminalId)
+            }}
+            onRestartSession={() => void restartManager()}
+            engine={engine}
+            available={engineAvailable}
+            busy={engineBusy}
+            error={engineError}
+            onToggleOverseer={toggleOverseer}
+            landed={landed}
+          />
+        </div>
+        {allWorkers.length === 0 ? (
+          // A vacant worker seat, so all three roles are always on the screen.
+          <div className={SEAT_CLASS} style={SEAT_STYLE}>
+            <div className="flex h-full min-h-0 flex-col bg-bg">
+              <SwarmSeatHeader role="worker" sprite={null} statusLabel={t('projectPanel.swarm.seat.vacant')} />
+              <div className="flex flex-1 items-center justify-center px-6 text-center">
+                <p className="max-w-xs text-ui leading-relaxed text-ink-subtle">
+                  {t('projectPanel.swarm.workersEmpty')}
+                </p>
               </div>
-              <p className="label-cap mb-2 text-ink-faint">{t('projectPanel.swarm.badge')}</p>
-              <h2 className="mb-2 text-read font-medium text-ink">
-                {t('projectPanel.swarm.title')}
-              </h2>
-              <p className="text-ui leading-relaxed text-ink-subtle">
-                {t('projectPanel.swarm.workersEmpty')}
-              </p>
             </div>
           </div>
         ) : (
-          // Single horizontally-scrolling row of worker tiles (see MIN_TILE_WIDTH).
-          // min-w-0 keeps this flex item from growing to the row's intrinsic
-          // (scrollable) width; overflow-x-auto provides the horizontal scrollbar
-          // that makes every worker reachable once the tiles overflow the area,
-          // and overflow-y-auto provides the vertical one for a short viewport
-          // (see MIN_TILE_HEIGHT) — in a normal-height area neither tile reaches
-          // its minimum so only the horizontal bar ever shows.
-          <div className="flex min-h-0 min-w-0 flex-1 gap-px overflow-x-auto overflow-y-auto bg-line-strong">
+          <>
             {allWorkers.map((w) => {
               // Engine-tracked workers (stage present — see swarmWorkerRegistry.ts)
               // are read-only here (the orchestrator owns their lifecycle); every
@@ -1622,25 +1415,40 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               // restart — is terminable/restartable, matching the old
               // 'manual'/'engine' distinction but keyed off server truth now.
               const isEngine = w.stage !== undefined
+              const sdkId = w.runtime === 'sdk' ? w.sdkSessionId : undefined
+              // Folded unless this is THE one unfolded seat (see SwarmWorkerSeat
+              // for why at most one worker transcript streams at a time).
+              if (sdkId && openWorktree !== w.worktree) {
+                return (
+                  <div key={w.worktree} className={SEAT_CLASS} style={WORKER_SEAT_STYLE}>
+                    <SwarmWorkerSeat
+                      branch={w.branch}
+                      taskTitle={w.taskTitle ?? w.note ?? ''}
+                      status={statusOfPty(sdkId)}
+                      question={questionBySdk.get(sdkId) ?? null}
+                      busy={!isEngine ? busyWorktrees.has(w.worktree) : false}
+                      retainedReason={!isEngine ? retainedByWorktree.get(w.worktree) : undefined}
+                      onOpenLog={() => setOpenWorktree(w.worktree)}
+                      onTerminate={!isEngine ? () => void terminate(w) : undefined}
+                      onForceRemove={!isEngine ? () => void terminate(w, { force: true }) : undefined}
+                      onRestart={!isEngine ? () => void restartWorker(w) : undefined}
+                    />
+                  </div>
+                )
+              }
               return (
-                <div
-                  key={w.worktree}
-                  className="h-full overflow-hidden"
-                  // Grow to fill when few, but never shrink below MIN_TILE_WIDTH ×
-                  // MIN_TILE_HEIGHT; the explicit min-width also overrides flex's
-                  // default min-width:auto so a wide xterm can't stretch the tile.
-                  style={{
-                    flex: `1 0 ${MIN_TILE_WIDTH}px`,
-                    minWidth: MIN_TILE_WIDTH,
-                    minHeight: MIN_TILE_HEIGHT,
-                  }}
-                >
-                  {w.runtime === 'sdk' && w.sdkSessionId ? (
+                <div key={w.worktree} className={SEAT_CLASS} style={SEAT_STYLE}>
+                  {sdkId ? (
                     // An SDK worker has no terminal to render — its tile shows
                     // the distilled event stream instead. Same header vocabulary,
                     // so a mixed fleet still reads as one fleet.
                     <SdkWorkerPane
-                      sdkSessionId={w.sdkSessionId}
+                      sdkSessionId={sdkId}
+                      onCollapse={() => setOpenWorktree(null)}
+                      // The fleet poll above already knows this seat's question —
+                      // hand it down so the unfolded pane does not poll again.
+                      question={questionBySdk.get(sdkId) ?? null}
+                      questionHint={t('projectPanel.swarm.seat.questionHint')}
                       projectPath={project.path}
                       branch={w.branch}
                       taskTitle={w.taskTitle ?? w.note ?? ''}
@@ -1679,7 +1487,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
                 </div>
               )
             })}
-          </div>
+          </>
         )}
       </div>
       )}

@@ -130,19 +130,9 @@ export interface Settings {
    * error: settings.json has no schema validation, readJson is tolerant, and
    * POST /api/settings silently drops the key (it left USER_SETTINGS_KEYS). */
   // Managers and workers are SDK-only. Legacy runtime keys remain inert on disk.
-  /** The owner's chosen left-to-right order of the Swarm tab's sub-view strip
-   *  ({@link SWARM_PANE_IDS} — 補給官 / 司令官 / ワーカー — the 監督 pane was retired 2026-09-23; a saved
-   *  'overseer' id is dropped on read). PERSONAL UI
-   *  state, kept central in `~/.openground/settings.json` (never the user's
-   *  repo), exactly like the per-project `ProjectData.tabOrder` but GLOBAL: the
-   *  four roles are identical across every project, so one order serves them all
-   *  — hence it sits beside {@link executionMode} / {@link swarmAllowedModels},
-   *  the sibling swarm settings edited from the SAME header row over
-   *  POST /api/settings. Absent / partial ⇒ the shipped order (supply first);
-   *  unknown/duplicate ids are reconciled away on read (`effectiveTabOrder`), so
-   *  a stale value can never strand a pane. The FIRST id opens by default.
-   *  User-settable (narrowed to the known pane ids by `setUserSettings`). */
-  swarmPaneOrder?: SwarmPaneId[]
+  // `swarmPaneOrder` (the Swarm tab's sub-tab order) was removed 2026-09-23 with
+  // the sub-tab strip itself — the tab is one screen of side-by-side seats now.
+  // A stale key in an existing settings.json is inert (never read, POST drops it).
   /** DESK CONTEXT CAP (2026-09-18, owner decision): the context fill, in tokens,
    *  past which a RESIDENT desk is cut back — the commander by opening a FRESH
    *  conversation at its next spawn instead of resuming, the supply officer by
@@ -2120,17 +2110,6 @@ export const DEFAULT_EXECUTION_MODE: ExecutionMode = 'optimize'
 
 /** Default for {@link Settings.deskContextCapTokens} (owner decision 2026-09-18). */
 export const DEFAULT_DESK_CONTEXT_CAP_TOKENS = 300_000
-
-/** The four faces of the Swarm tab's sub-view strip — 補給官 (supply) / 司令官
- *  (manager) / ワーカー (workers) / 監督 (overseer) — as reorderable pane ids.
- *  The ARRAY ORDER is the shipped default left-to-right order (supply first, the
- *  conversational entry point) AND the canonical id set the UI reconciles a
- *  saved {@link Settings.swarmPaneOrder} against (via `effectiveTabOrder`, shared
- *  with the per-project tab row: it drops unknown/retired/duplicate ids and
- *  appends any missing pane in this order). The FIRST id of the reconciled order
- *  is the tab that opens by default. Keep in sync with SwarmModule's `MainView`. */
-export type SwarmPaneId = 'supply' | 'manager' | 'workers'
-export const SWARM_PANE_IDS: readonly SwarmPaneId[] = ['supply', 'manager', 'workers']
 
 /** Per-card overrides for the drawer's 実行 button. Each key falls back to
  *  the board defaults when absent: flow → config.completionFlow,

@@ -116,6 +116,14 @@
   --og-ochre-soft: 233 223 196;  /* #E9DFC4 */
   --og-invite: 94 74 135;        /* #5E4A87 */
   --og-invite-soft: 228 220 239; /* #E4DCEF */
+  /* Swarm seat nameplates — one quiet tint per role (2026-09-23, the one-screen
+     Swarm tab): warm apricot = 社長 (otter), cool slate = manager (owl), mint =
+     worker (rabbit). Low chroma on purpose — the status lamps (moss / ochre /
+     vermillion) must stay the loudest colour on a seat. Text-bearing surfaces:
+     themePalette.test.ts holds every ink on them to 4.5:1. */
+  --og-seat-supply: 240 226 208;  /* #F0E2D0 */
+  --og-seat-manager: 225 228 234; /* #E1E4EA */
+  --og-seat-worker: 222 233 226;  /* #DEE9E2 */
   /* shadow ink for box-shadows (tailwind.config.ts boxShadow) */
   --og-shadow: 42 31 26;
   /* paper grain: multiply sinks the grain into the light paper */
@@ -205,6 +213,9 @@ html[data-theme='dark'] {
   --og-verm: 224 106 90;         /* #E06A5A — the 高 chip's fill */
   --og-invite: 172 152 216;      /* #AC98D8 */
   --og-invite-soft: 58 49 73;    /* #3A3149 */
+  --og-seat-supply: 72 50 40;     /* #483228 */
+  --og-seat-manager: 48 48 60;    /* #30303C */
+  --og-seat-worker: 40 56 50;     /* #283832 */
   --og-shadow: 0 0 0;
   /* multiply would vanish on dark — plain low-opacity grain instead
      (measured on the mock: stdev 1.7 → 2.8 keeps the texture visible) */

@@ -511,7 +511,20 @@ const ensureLoaded = (): void => {
     return
   }
   // Merge: what was on disk comes first (it is older), then anything queued in
-  // memory while the read was failing. An answered question is not revived.
+  // memory while the read was failing.
+  //
+  // QUESTIONS on disk are NOT restored — the escalation store is their
+  // authority, and every desk this process sees is caught up from it
+  // ({@link catchUpSupplyDesks}: the owner-lane OPEN list — exactly the questions
+  // that ever reach a desk). Restoring them as well told a question twice or
+  // told a dead one (review 2026-09-23):
+  //   • the file read fails at start, the store read does not → the catch-up
+  //     tells the question, and the later merge queued it AGAIN (delivery does
+  //     not consult toldTo);
+  //   • a question answered while the file was unreadable stays on disk (the
+  //     withdrawal could not be written) → after a restart it was retold as open.
+  // Dropping them here = filtering the disk by the store's open list, with the
+  // store read where it already happens (async, strict, retried per desk).
   const memory = new Map(pending)
   pending.clear()
   for (const entry of entries) {
@@ -519,9 +532,8 @@ const ensureLoaded = (): void => {
     const q: PendingNotice[] = []
     for (const it of entry[1] as Record<string, unknown>[]) {
       if (!it || typeof it.text !== 'string' || typeof it.at !== 'number') continue
-      const escalationId = typeof it.escalationId === 'string' && it.escalationId ? it.escalationId : undefined
-      if (escalationId && resolvedQuestions.has(escalationId)) continue
-      addUnique(q, { text: it.text, line: supplyNoticeLine(it.text), at: it.at, ...(escalationId ? { escalationId } : {}) })
+      if (typeof it.escalationId === 'string' && it.escalationId) continue // a question — see above
+      addUnique(q, { text: it.text, line: supplyNoticeLine(it.text), at: it.at })
     }
     if (q.length) pending.set(entry[0], q)
   }
@@ -535,6 +547,22 @@ const ensureLoaded = (): void => {
 }
 
 let tmpSeq = 0
+
+/** fsync the directory so the rename's new entry is itself durable — the
+ *  synchronous twin of atomicWrite.ts's fsyncDir (same best effort, same
+ *  Windows skip: a directory cannot be opened for fsync there). */
+const fsyncDirSync = (dir: string): void => {
+  if (process.platform === 'win32') return
+  let fd: number | null = null
+  try {
+    fd = openSync(dir, 'r')
+    fsyncSync(fd)
+  } catch {
+    /* best effort */
+  } finally {
+    if (fd !== null) closeSync(fd)
+  }
+}
 
 /** Write the important queue through — the repo's atomic-write discipline
  *  (atomicWrite.ts) in a synchronous form, because every caller is a synchronous
@@ -563,6 +591,7 @@ const savePending = (): void => {
     }
     renameSync(tmp, file)
     tmp = null
+    fsyncDirSync(dirname(file))
   } catch {
     /* best effort */
   } finally {
@@ -734,13 +763,15 @@ const pushImportant = (key: string, summary: string, at: number, escalationId?: 
   savePending()
 }
 
-/** The longest WHOLE line a bundle may be: the longest single notice (prefix +
- *  a {@link SUPPLY_NOTICE_MAX} summary + tail) — the size already typed into
- *  desks; a longer line risks its Enter being dropped, and a bundle is counted
- *  as told once written. A notice that does not fit waits for the next bundle. */
+/** The longest WHOLE line a bundle may be: the longest single notice WITHOUT an
+ *  age label (prefix + a {@link SUPPLY_NOTICE_MAX} summary + tail = 445) — the
+ *  size already typed into desks; a longer line risks its Enter being dropped,
+ *  and a bundle is counted as told once written. A notice that does not fit
+ *  waits for the next bundle. (A single LATE notice is not held to this: its
+ *  「(約N時間前の知らせ) 」 label runs ~15 chars past it, as it always has.) */
 export const SUPPLY_NOTICE_LINE_MAX = SUPPLY_NOTICE_PREFIX.length + SUPPLY_NOTICE_MAX + 1 + SUPPLY_NOTICE_TAIL.length
 
-const SUPPLY_BUNDLE_TAIL = '(自動の知らせ・まとめ。件ごとに平易に短く。専門用語・ID不可)'
+const SUPPLY_BUNDLE_TAIL = '(自動の知らせ・まとめ。件ごとに平易に短く。専門用語・ID不可。質問は選択肢と影響も)'
 
 /** The next line for a queue: its oldest notice, plus as many following ones as
  *  fit in {@link SUPPLY_NOTICE_LINE_MAX} — so a backlog (a desk opening after a

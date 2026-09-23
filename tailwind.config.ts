@@ -91,6 +91,12 @@ const config: Config = {
          *  invert at night, which is why `hover:bg-bg-inset` made dark-mode
          *  hovers sink into a hole. */
         plane: 'rgb(var(--og-plane) / <alpha-value>)',
+        /** Swarm seat nameplates, one tint per role (SwarmSeatHeader). */
+        seat: {
+          supply: 'rgb(var(--og-seat-supply) / <alpha-value>)',
+          manager: 'rgb(var(--og-seat-manager) / <alpha-value>)',
+          worker: 'rgb(var(--og-seat-worker) / <alpha-value>)',
+        },
         /** Vermillion FILL (the 高 chip). Never used as text, so it carries no
          *  text-contrast obligation — that is what `accent` is for. */
         verm: 'rgb(var(--og-verm) / <alpha-value>)',

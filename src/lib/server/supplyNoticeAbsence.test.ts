@@ -40,7 +40,7 @@ vi.mock('./terminal', () => ({
 import { createSwarmFatalNotification } from './swarmNotifications'
 import { openEscalation, answerEscalation } from './swarmEscalations'
 import { resetSupplyNoticeState, queueSupplyNotice, catchUpSupplyDesks, SUPPLY_NOTICE_TTL_MS } from './supplyNotice'
-import { readFile, writeFile, readdir, rename, mkdir as mkdirp, rm as rmp } from 'fs/promises'
+import { readFile, writeFile, readdir, chmod } from 'fs/promises'
 import { startSupplyContextCapLoop, stopSupplyContextCapLoop } from './supplyContextCap'
 
 let home: string
@@ -188,22 +188,62 @@ describe('a question opened while the president is closed', () => {
     expect(await readFile(file, 'utf8')).toContain('新しい知らせ')
   })
 
-  it('a TRANSIENT read failure keeps the saved notices; they arrive once it is readable', async () => {
+  // The file must be UNREADABLE BUT REPLACEABLE (mode 000: read → EACCES, while
+  // the rename over it still succeeds — the directory is writable). An earlier
+  // version put a DIRECTORY at the path, which also made the write fail, so the
+  // "never write before reading" guard in savePending could be deleted with the
+  // test staying green. RED MEASURED 2026-09-23 (reverted after): the
+  // `if (!diskState.loaded) return` guard in savePending removed → this test
+  // fails (the write-through replaces the file and 保存されていた停止 is lost).
+  // Skipped as root / on Windows, where mode 000 does not stop a read.
+  const canMakeUnreadable = process.platform !== 'win32' && process.getuid?.() !== 0
+
+  it.skipIf(!canMakeUnreadable)('a TRANSIENT read failure keeps the saved notices; they arrive once it is readable', async () => {
     const file = join(home, 'supply-notice-queue.json')
     await createSwarmFatalNotification({ event: 'high-risk-hold', detail: '保存されていた停止', projectPath: project }, { os: false })
     resetSupplyNoticeState({ keepDisk: true }) // restart
-    // The saved file becomes unreadable for a while (EISDIR stands in for EIO).
-    await rename(file, `${file}.real`)
-    await mkdirp(file)
+    await chmod(file, 0o000)
     queueSupplyNotice(project, '失敗中に来た知らせ')
 
-    await rmp(file, { recursive: true })
-    await rename(`${file}.real`, file)
+    await chmod(file, 0o600)
     openDesk('desk-1')
     await runLoopUntil(() => {
       expect(told()).toContain('保存されていた停止')
       expect(told()).toContain('失敗中に来た知らせ')
     })
+  })
+
+  // Review 2026-09-23 (S2). RED MEASURED (reverted after): the disk load
+  // restoring questions again (the `continue` on escalationId removed) → the
+  // question is typed into desk-1 twice.
+  it.skipIf(!canMakeUnreadable)('a question caught up while the saved queue was unreadable is not told again when it becomes readable', async () => {
+    const file = join(home, 'supply-notice-queue.json')
+    await ask('一度だけ聞きたい質問') // no desk → saved in the queue file
+    resetSupplyNoticeState({ keepDisk: true }) // restart
+    await chmod(file, 0o000)
+
+    openDesk('desk-1')
+    await runLoopUntil(() => expect(told()).toContain('一度だけ聞きたい質問')) // from the store
+    await chmod(file, 0o600)
+    await runLoopFor(300) // the file is now read and merged
+    expect(told().split('一度だけ聞きたい質問')).toHaveLength(2)
+  })
+
+  // Review 2026-09-23 (S3). RED MEASURED (reverted after): same revert → the
+  // answered question is retold after the restart.
+  it.skipIf(!canMakeUnreadable)('a question answered while the saved queue was unreadable is not retold after a restart', async () => {
+    const file = join(home, 'supply-notice-queue.json')
+    const { escalation } = await ask('読めない間に答えた質問')
+    resetSupplyNoticeState({ keepDisk: true }) // restart
+    await chmod(file, 0o000)
+    await answerEscalation(escalation.id, 'A') // its withdrawal cannot be written
+    await chmod(file, 0o600)
+    expect(await readFile(file, 'utf8')).toContain('読めない間に答えた質問') // still on disk
+
+    resetSupplyNoticeState({ keepDisk: true }) // restart
+    openDesk('desk-1')
+    await runLoopFor(300)
+    expect(told()).not.toContain('読めない間に答えた質問')
   })
 
   it('an answered question is not retold', async () => {

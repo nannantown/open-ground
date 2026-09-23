@@ -44,7 +44,7 @@
 // extra gating is needed here; the server /api/swarm/* routes are owner-only too.
 
 import { useCallback, useRef, useState } from 'react'
-import { Activity, AlertTriangle, BarChart3, ChevronRight, ClipboardCheck, Cpu, Gauge, MessageSquare, Power, Send, TrendingUp } from 'lucide-react'
+import { Activity, AlertTriangle, BarChart3, ChevronRight, ClipboardCheck, Cpu, Gauge, Power, Send, TrendingUp } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { useT } from '@/i18n/I18nContext'
@@ -52,6 +52,8 @@ import type { MessageKey } from '@/i18n/messages'
 import type { SdkSessionStatus } from '@/lib/server/sdkEvents'
 import type { SwarmLandedKpi } from '@/lib/types'
 import type { WorkerStatus } from './SwarmWorkerPane'
+import { SwarmSeatHeader } from './SwarmSeatHeader'
+import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import {
   commanderPresence,
   engineWorkerKey,
@@ -120,16 +122,6 @@ interface Props {
    *  loading / server silent → the section doesn't render. Optional so every
    *  existing caller and test keeps compiling. */
   landed?: SwarmLandedKpi | null
-}
-
-// Commander-session status dot — the SAME beacon vocabulary as the supply tile
-// (SwarmSupplyPane): moss = working, ochre = waiting, ink-faint = starting/exited
-// (the inert grey, ≥3:1 on paper unlike the near-invisible line-strong).
-const SESSION_DOT: Record<WorkerStatus, string> = {
-  working: 'bg-moss',
-  waiting: 'bg-ochre',
-  starting: 'bg-ink-faint',
-  exited: 'bg-ink-faint',
 }
 
 // The word that goes with the colour — the SAME four the worker tiles use.
@@ -467,53 +459,37 @@ export const SwarmManagerPane = ({
     consumption.activeWorkers > 0 ? formatDuration(consumption.activeRunMs) : '—'
 
   return (
-    // Stack on narrow screens so the dashboard cannot squeeze out the conversation.
-    <div className="flex h-full min-h-0 w-full flex-col overflow-y-auto md:flex-row md:overflow-hidden">
+    // Always stacked: this pane is ONE seat of the Swarm tab's side-by-side row
+    // (2026-09-23), so the dashboard sits under the desk, never beside it.
+    <div className="flex h-full min-h-0 w-full flex-col overflow-y-auto">
       {/* ── STAGE ──────────────────────────────────────────────────────────── */}
-      <div className="flex min-h-[320px] min-w-0 shrink-0 flex-col bg-bg md:min-h-0 md:flex-1">
+      {/* With a desk, the conversation takes the seat's remaining height (and
+          scrolls inside itself); without one, the dashboard well fills it. */}
+      <div className={`flex min-w-0 flex-col bg-bg ${session ? 'min-h-[320px] flex-1' : 'shrink-0'}`}>
+        {/* The seat's nameplate — always there, so the commander's seat is
+            visible (owl · status) even while it is off; start/stop stay small. */}
+        <SwarmSeatHeader
+          role="commander"
+          sprite={session ? BEACON_SPRITE[deskStatus] : null}
+          statusLabel={t(session ? SESSION_STATUS_LABEL_KEY[deskStatus] : 'projectPanel.swarm.power.stopped')}
+          waiting={session ? deskStatus === 'waiting' : false}
+          detailTitle={t('projectPanel.swarm.manager.conversationHint')}
+        >
+          <button
+            type="button"
+            onClick={session ? onStopSession : onLaunchSession}
+            disabled={sessionBusy}
+            title={t(session ? 'projectPanel.swarm.manager.stop' : 'projectPanel.swarm.manager.launch')}
+            className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+          >
+            <Power size={10} strokeWidth={2.25} />
+            {session
+              ? sessionBusy ? t('projectPanel.swarm.manager.stopping') : t('projectPanel.swarm.manager.stop')
+              : sessionBusy ? t('projectPanel.swarm.manager.launching') : t('projectPanel.swarm.manager.launch')}
+          </button>
+        </SwarmSeatHeader>
         {session ? (
           <>
-            {/* Commander conversation header — identity + status + stop. */}
-            <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-bg-card px-3 py-1.5">
-              {/* The beacon. Named, not colour-only: the dot is 6px and colour
-                  alone carries the whole state, so it gets a role+label a screen
-                  reader (and a test) can read. */}
-              <span
-                role="img"
-                aria-label={t(SESSION_STATUS_LABEL_KEY[deskStatus])}
-                title={t(SESSION_STATUS_LABEL_KEY[deskStatus])}
-                className={`h-[6px] w-[6px] shrink-0 rounded-full ${SESSION_DOT[deskStatus]}`}
-              />
-              <span
-                className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-meta text-ink-muted"
-                title={t('projectPanel.swarm.manager.conversationHint')}
-              >
-                <MessageSquare size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
-                {/* The desk's ONE header (2026-08-03): the embedded SDK tile no
-                    longer draws its own, so the status word lives here — beside
-                    the lamp, instrument style. The tab strip still owns the
-                    identity word (マネージャー). */}
-                <span className="truncate">{t(SESSION_STATUS_LABEL_KEY[deskStatus])}</span>
-              </span>
-              {session.runtime === 'sdk' ? (
-                <span
-                  className="shrink-0 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-faint"
-                  title={t('projectPanel.swarm.sdk.badgeHint')}
-                >
-                  SDK
-                </span>
-              ) : null}
-              <button
-                type="button"
-                onClick={onStopSession}
-                disabled={sessionBusy}
-                title={t('projectPanel.swarm.manager.stop')}
-                className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-              >
-                <Power size={10} strokeWidth={2.25} />
-                {sessionBusy ? t('projectPanel.swarm.manager.stopping') : t('projectPanel.swarm.manager.stop')}
-              </button>
-            </div>
             {/* The commander's claude — reused verbatim. Typing into it IS the
                 dialogue input (text in, Enter sends). onExit bubbles the close
                 up so SwarmModule drops back to the launch CTA. */}
@@ -566,35 +542,7 @@ export const SwarmManagerPane = ({
               t={t}
             />
           </>
-        ) : (
-          // Launch CTA — the commander you talk to (status / merge / advise),
-          // running /manage in the primary checkout (no worktree, like supply).
-          <div className="flex flex-1 items-center justify-center bg-bg px-8 text-center">
-            <div className="max-w-sm">
-              <div className="mx-auto mb-4 inline-flex h-11 w-11 items-center justify-center rounded-[3px] border border-line bg-bg-inset text-ink-muted">
-                <MessageSquare size={20} strokeWidth={1.75} />
-              </div>
-              <p className="label-cap mb-2 text-ink-faint">{t('projectPanel.swarm.manager.badge')}</p>
-              <h2 className="mb-2 text-read font-medium text-ink">
-                {t('projectPanel.swarm.manager.conversationTitle')}
-              </h2>
-              <p className="mb-4 text-ui leading-relaxed text-ink-subtle">
-                {t('projectPanel.swarm.manager.conversationEmpty')}
-              </p>
-              <button
-                type="button"
-                onClick={onLaunchSession}
-                disabled={sessionBusy}
-                className="inline-flex items-center gap-1.5 rounded-[3px] border border-line bg-bg-card px-3 py-1.5 text-ui text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
-              >
-                <MessageSquare size={13} strokeWidth={2} />
-                {sessionBusy
-                  ? t('projectPanel.swarm.manager.launching')
-                  : t('projectPanel.swarm.manager.launch')}
-              </button>
-            </div>
-          </div>
-        )}
+        ) : null}
       </div>
 
       {/* ── DASHBOARD sidebar: engine controls ONLY ────────────────────────── */}
@@ -610,7 +558,7 @@ export const SwarmManagerPane = ({
           空いています）」 is 20 full-width chars = 240px, against 236px of inner
           width — 4px short, so it folded on EVERY window size, and a scrollbar
           made it worse. The labels are what they are; the column was wrong. */}
-      <aside className="flex w-full shrink-0 flex-col bg-bg-inset md:w-[320px] md:overflow-y-auto">
+      <aside className={`flex w-full shrink-0 flex-col bg-bg-inset ${session ? '' : 'grow'}`}>
         {/* ⚙ 設定 — collapsed disclosure. Settings are set once; a dashboard
             that always shows them is wallpaper (the warnings included — they
             show when the owner is actually AT the dials). */}
