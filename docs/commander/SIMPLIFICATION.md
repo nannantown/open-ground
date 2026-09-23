@@ -20,7 +20,8 @@ source change, and no user data migration or deletion is performed.
 ## Preserved
 
 - Human questions and actual answers: `swarmEscalations.ts`, `swarmQuestions.ts`,
-  `server/routes/swarm.ts`, `SwarmEscalationsPane.tsx`. The answer is persisted
+  `server/routes/swarm.ts` (the `SwarmEscalationsPane.tsx` UI was removed with the
+  監督 tab on 2026-09-23 — answers go through the president; 06 §1.7). The answer is persisted
   before delivery. SDK/PTY addressing, pending-answer retries, next-dispatch
   delivery, explicit dismiss, unanswered-record retention and path checks remain.
 - Deterministic monitoring: `swarmOverseer.ts`. S4 heartbeat questions go directly

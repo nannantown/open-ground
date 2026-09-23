@@ -217,7 +217,7 @@ tier の意味(`swarmOverseer.ts:146`): **T3** = 受信箱(escalations.json)へ�
   書かせる** — `WORKER_ORDER_RULES`(`swarmWorker.ts`)の「【質問は平易文で・厳守】」が全
   spawn プロンプトに焼き込まれる(心拍 blocker・画面質問の両方をカバー。契約は
   `swarmWorker.test.ts` がピン)。
-- **UI(SwarmEscalationsPane)**: `plainQuestion` があればそれが既定表示になり、`question` +
+- **UI(SwarmEscalationsPane — 2026-09-23 に 監督タブごと撤去、§1.7。以下は当時の記録)**: `plainQuestion` があればそれが既定表示になり、`question` +
   `context` は「技術的な詳細」`<details>` 折りたたみへ。無い record(旧レコード・worker 由来)
   は従来どおり `question` 主表示 + `context` 表示 — 後方互換で消えるものはない
   (`isEscalation` は必須フィールドのみ検証・optional は素通し)。
@@ -1005,7 +1005,8 @@ as 「社長 / President」), sets goals and judges deliveries; engineering ques
 - `openEscalation` sets `routedTo:'commander'` unless `needsOwnerDirectly(question+plain+context)`
   (`swarmDecisionRouting.ts`, a deliberate over-approximation), and then fires NO owner
   notification. Owner surfaces exclude the lane: `countOpenEscalationsByProject` (Ground lamp),
-  `indexEscalationsByTask` (Board badge), `SwarmEscalationsPane`, `GET …/escalations?lane=owner`.
+  `indexEscalationsByTask` (Board badge), `GET …/escalations?lane=owner` (and the former
+  `SwarmEscalationsPane`, removed with the 監督 tab — §1.7).
 - `sweepCommanderQuestions` (engine pass via `kickCommanderQuestionSweep`, 20s throttle, off-tick;
   backstop from the supply loop via `kickAllCommanderQuestionSweeps`, 60s, engine-independent):
   untold → `relayToCommander` (wakes a desk) → `commanderToldAt`; age ≥ window → `raiseEscalationToOwner`.
@@ -1015,7 +1016,7 @@ as 「社長 / President」), sets goals and judges deliveries; engineering ques
   is unchanged (frozen) and still prefixes the queued line.
 - `POST /api/swarm/escalations/raise {id, plainQuestion?}` → owner lane + `raisedToOwnerAt` + bell/toast/desk.
 
-**Supply desk lanes** (`supplyNotice.ts`): replies (FIFO 5) → important (FIFO `SUPPLY_NOTICE_CAP`=8,
+**Supply desk lanes** (`supplyNotice.ts`): replies (FIFO 5) → important (FIFO `SUPPLY_NOTICE_CAP` — 30 since §1.7,
 dedup, never overwritten — the old single overwrite slot silently dropped a question when a second
 event arrived while the desk was busy) → progress digest (accumulated items, cap 6, one line, no bell).
 Allowlist gained `escalation-reminder`, `review-idle`, `ready-without-work`. Progress comes from
@@ -1025,3 +1026,81 @@ info `work-landed` (bell/toast only; not on the desk allowlist, to avoid saying 
 
 Verification: `commanderQuestions.test.ts`, `supplyProgress.test.ts`, `supplyNotice.test.ts`
 (lane tests), `swarmLandedLedger.test.ts` (titles).
+
+## §1.7 — The 監督 tab is gone; the president hears what was said while it was closed (2026-09-23)
+
+Owner decision (card ① of three: remove 監督 → one screen → shrink the commander): the Swarm
+tab's overseer pane (`SwarmOverseerPane` = question inbox `SwarmEscalationsPane` + needs-attention
+feed `swarmOverseerFeed`) duplicated what `supplyNotice.ts` tells the president, and was removed
+with its client-only fatal-notification poll (`useSwarmEngine` no longer reads
+`/api/swarm/notifications`; the server routes, incl. `notifications/handled`, are unchanged).
+`SwarmPaneId` is now `'supply' | 'manager' | 'workers'`; a saved `'overseer'` in
+`Settings.swarmPaneOrder` is dropped on read. Answering is `POST /api/swarm/escalations/answer`,
+driven by the president (`skills/supply/SKILL.md` "Answer a question"); the bell and the OS toast
+still show every question (unchanged).
+
+What changed in `supplyNotice.ts`, because the desk is now the ONLY retelling:
+- **The important lane has no TTL.** A notice raised while no desk is open waits for the next
+  desk (bounded by `SUPPLY_NOTICE_CAP`=30, oldest dropped — the bell keeps it). One line per desk
+  per pass, FIFO, never overwritten. Delivered ≥10 min late it carries 「(約N分/時間前の知らせ)」
+  (`noticeAgeLabel`). Replies and progress keep the 30-min TTL.
+- **Questions are withdrawn when they stop being true.** Lines from `escalation-open` /
+  `-reminder` carry `escalationId`; `answerEscalation` / `dismissEscalation` call
+  `forgetSupplyQuestion(id)` after persisting. A reminder never queues behind its own question.
+- **A new desk is caught up from the store** (`catchUpSupplyDesks`, run by the 60s supply loop
+  instead of a bare `flushSupplyNotices`): for each desk terminal id not seen before, every open
+  owner-lane escalation of that project (`listOpenOwnerQuestionsStrict` since rework 1,
+  oldest first, text = `ownerQuestionDetail` — the same one-liner the bell shows) is queued,
+  skipping ids already typed into that desk (`toldTo`). This is what survives an app restart
+  (the store is authoritative for questions; the rest of the queue is persisted — rework 1). A re-adopted live desk (same id) hears nothing
+  twice; a restarted desk (new id, fresh conversation) hears the open questions again.
+  (The first cut read through `readTolerant`, so an unreadable store looked empty and the desk was
+  marked caught up for good — fixed in rework 1 below.)
+- Held notices are flushed synchronously first, so a slow store read never delays them.
+- Rework 1 (commander review, same day):
+  - **Persisted.** The important lane is written through to `~/.openground/supply-notice-queue.json`
+    (tmp+rename, synchronous, best effort) and read back once per process — a restart (self-update
+    right after a delivery, above all) loses no fatal / hold / delivery / question the desk had not
+    heard; what was delivered is removed from the file, so a restart does not retell it.
+  - **Bundled.** One delivery takes the oldest notice plus as many as fit in
+    `SUPPLY_NOTICE_LINE_MAX` — the WHOLE line (prefix, count, ages, tail) is kept within the longest
+    single notice (445 chars; a longer line is unmeasured in a PTY and a bundle counts as told once
+    written, so an Enter dropped on it would lose it). What does not fit waits for the next bundle.
+  - **Rework 2 — the saved queue is never overwritten unread.** `ensureLoaded`: ENOENT = empty;
+    a read error (EIO/EMFILE/EACCES…) leaves it NOT loaded (retried next call) and `savePending`
+    writes nothing until it is read — what was queued meanwhile is merged in (answered questions are
+    not revived); an unparseable file is moved aside to `supply-notice-queue.json.corrupt-<ts>`
+    (never deleted) and the queue starts fresh. Writes use a unique tmp name, fsync and mode 0600
+    (the atomicWrite.ts discipline, synchronous) and never create the home dir. A catch-up read that
+    keeps failing is logged once per desk (`[supplyNotice] …`). Pinned by
+    `supplyNoticeAbsence.test.ts` "DAMAGED saved queue" / "TRANSIENT read failure" (red measured).
+    Dev caveat: two processes on one home (dev beside the app) each load once and write through —
+    they can duplicate or drop each other's queued notices; the packaged app is single-instance.
+  - **Strict catch-up read.** `listOpenOwnerQuestionsStrict` (only ENOENT = none; anything else
+    throws → the desk is un-marked and retried next pass). Stamped `raisedToOwnerAt ?? createdAt`.
+  - **Question dedup is by id** when both lines are questions (two identical words ≠ one question).
+  - App-wide fatals are taken before the project's own queue.
+- **Intended behaviour change — S11 reminder**: it now reads `lane:'owner'` only (a commander-lane
+  question is not the owner's to be reminded of) and its bell/toast/desk text names the question
+  (「答えを待っている質問が N 時間そのままです: …」 — was 「受信箱の未回答が…放置されています。」; the
+  inbox screen it pointed at is gone). Pinned by `swarmOverseer.test.ts` "reminds only of OWNER-lane
+  questions".
+- **Engine anomalies are no longer on any screen.** The 監督 feed was their only renderer; the kinds
+  without a fatal twin — orphan-doing, unowned-doing, worktree-missing, worker-stale, no-heartbeat,
+  move-stuck (incl. recover-review) — are now read by the commander and by the president on a status
+  request (`GET /api/swarm/orchestrator` → `anomalies`; og-manage / supply skills), not pushed to the
+  owner. Owner decision: the owner talks only to the president; engineering state stays inside.
+- Review fixes (same day): only the NEWEST live desk of a project takes lines (an older orphan
+  never swallows one while the newest is busy); over the cap, news is evicted before questions;
+  `forgetSupplyQuestion` also remembers the id (bounded set) so a store read racing an answer
+  cannot re-queue it; a caught-up question is stamped with its `createdAt` (told as old); a
+  project-less FATAL (rollback / canary-failed / engine-resume-suppressed / data-integrity) rides
+  an app-wide lane and is told once to the first desk that can take it; the S11 reminder reads
+  `lane:'owner'` only and names the question.
+
+Verification: `supplyNoticeAbsence.test.ts` (real store + real notification seam + real supply
+loop; only the PTY pool mocked — desk closed → question/fatal/landing → desk opens → all three
+typed, question in plain words, answered question not retold, restart survived, new desk re-told),
+`supplyNotice.test.ts` ("waits for the next desk", catch-up unit cases). Red measured for: TTL
+restored on the important lane, `forgetSupplyQuestion` made a no-op, catch-up emptied, the
+`toldTo` skip removed, the loop reverted to `flushSupplyNotices`.

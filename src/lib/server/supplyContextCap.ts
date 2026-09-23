@@ -35,7 +35,7 @@ import { sessionContextTokens } from './claudeUsage'
 import { getDeskContextCapTokens } from './store'
 import { logToEngine } from './engineLogSink'
 import { deskCompactedLogLine } from './deskContextCap'
-import { flushSupplyNotices } from './supplyNotice'
+import { catchUpSupplyDesks } from './supplyNotice'
 import { kickAllCommanderQuestionSweeps } from './commanderQuestions'
 import type { OrchestratorLogLine } from '../types'
 
@@ -165,12 +165,13 @@ export const startSupplyContextCapLoop = (intervalMs: number = SUPPLY_CONTEXT_CA
     clearInterval(globalThis.__openground_supply_context_cap_timer)
   }
   const timer = setInterval(() => {
-    // Re-offer any notice a busy desk refused (supplyNotice.ts). It rides THIS
+    // Catch a newly opened desk up on the questions waiting for the owner, then
+    // re-offer any notice a busy / closed desk could not take (supplyNotice.ts). It rides THIS
     // loop rather than starting one of its own: the owner decision that asked
     // for the channel also forbade adding polling, and this is already the pass
     // that walks every live supply desk. Delivery on the happy path happened
     // inline at queue time; this is only the retry.
-    flushSupplyNotices()
+    void catchUpSupplyDesks().catch(() => {})
     // Backstop for the commander question lane (commanderQuestions.ts): a
     // question held inside the company must reach someone even with no engine
     // running to carry its sweep.

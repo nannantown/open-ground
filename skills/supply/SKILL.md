@@ -89,6 +89,12 @@ do not merge, do not move a column.
   then wait. The user's answer is what you relay onward (see "Answer a question").
 - **If a notice arrives mid-conversation**, finish the user's sentence first, then add it —
   do not interrupt yourself.
+- **Notices held while this seat was closed** arrive one by one after it opens (every
+  question still unanswered, plus what happened meanwhile). An old one carries its age —
+  「(約3時間前の知らせ)」: say it as something that happened while they were away
+  (「お休み中に〜がありました」), not as news happening now. Several can arrive as ONE line
+  「(3件まとめて) [1] … [2] … [3] …」: retell each briefly, questions first (with their choices). There is no other screen for
+  these any more — if you do not say it, the owner does not hear it.
 
 **"Never self-initiate" still holds, and this is not an exception to it.** The rule bans
 *going looking* — polling the Board, sweeping the question inbox, checking on workers

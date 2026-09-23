@@ -88,9 +88,10 @@ const NotificationRow = ({
 
   // Info-grade swarm event (the overseer/escalation lane, C1) — same durable-
   // record role as swarm-fatal, calmer presentation (ink icon, not the alert
-  // accent): nothing broke, a question is waiting. The Escalations inbox panel
-  // in the project's Swarm tab is where the answer happens; this row is the
-  // machine-wide "something is waiting" pointer.
+  // accent): nothing broke, a question is waiting. The answer is given
+  // through the project's president (社長) desk, which is told every open
+  // question — including ones raised while it was closed (supplyNotice.ts);
+  // this row is the machine-wide "something is waiting" pointer.
   if (n.kind === 'swarm-info' && n.swarmInfo) {
     const i = n.swarmInfo
     const ctx = [i.taskTitle ? `「${i.taskTitle}」` : '', i.branch].filter(Boolean).join(' · ')

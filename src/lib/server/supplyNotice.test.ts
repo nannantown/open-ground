@@ -41,6 +41,9 @@ import {
   peekSupplyImportant,
   peekSupplyProgress,
   queueSupplyProgress,
+  forgetSupplyQuestion,
+  catchUpSupplyDesks,
+  SUPPLY_NOTICE_LINE_MAX,
 } from './supplyNotice'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -187,11 +190,67 @@ describe('delivery — the line REACHES the desk', () => {
     expect(h.writes.map(([id]) => id)).toEqual([DESK])
   })
 
-  it('drops an event with no project — there is no desk to address', () => {
-    const h = harness(IDLE)
+  // Review 2026-09-23: with the 監督 feed gone, an app-wide fatal (no project)
+  // reached only the bell. RED MEASURED: reverting noticeToSupply's
+  // project-less branch to `return` → this test fails.
+  it('an APP-WIDE fatal (no project) is told once, to whichever desk can take it', () => {
+    const h = harness(IDLE, [
+      { id: 'a', cwd: '/repo/alpha' },
+      { id: 'b', cwd: '/repo/beta' },
+    ])
     noticeToSupply(fatal('ホームのデータが壊れた', null), h.deps)
+    flushSupplyNotices(h.deps)
+    expect(h.writes).toHaveLength(1)
+    expect(h.writes[0]![1]).toContain('ホームのデータが壊れた')
+  })
+
+  it('an app-wide INFO event (no project) stays bell-only', () => {
+    const h = harness(IDLE)
+    noticeToSupply(buildInfoAppNotification({ event: 'review-idle', detail: 'どこかの件' }, 1_000), h.deps)
     expect(h.writes).toEqual([])
-    expect(peekSupplyNotices().size).toBe(0)
+  })
+})
+
+// Review 2026-09-23 — RED MEASURED for each (reverted after):
+//   • the `served` one-desk-per-project skip removed → orphan test fails
+//   • pushImportant's resolved-question refusal removed → late-read test fails
+//   • eviction back to plain shift() → flood test fails
+describe('review fixes (2026-09-23)', () => {
+  it('an older ORPHAN desk of the same project never takes the line while the newest is busy', () => {
+    const writes: [string, string][] = []
+    const deps = {
+      desks: () => [
+        { id: 'newest', cwd: PROJECT },
+        { id: 'orphan', cwd: PROJECT },
+      ],
+      screen: (id: string) => (id === 'newest' ? BUSY : IDLE),
+      write: (id: string, d: string) => (writes.push([id, d]), true),
+    }
+    queueSupplyNotice(PROJECT, '大事な知らせ', deps)
+    expect(writes).toEqual([])
+    expect(peekSupplyImportant().get(PROJECT)).toHaveLength(1)
+  })
+
+  it('a question answered while its line was being read from the store is not queued', () => {
+    forgetSupplyQuestion('q9')
+    noticeToSupply(buildInfoAppNotification({ event: 'escalation-reminder', detail: '答えた質問', projectPath: PROJECT, escalationId: 'q9' }, 1_000), harness(BUSY).deps)
+    expect(peekSupplyImportant().get(PROJECT) ?? []).toHaveLength(0)
+  })
+
+  it('a flood of news never pushes out a queued question', () => {
+    const busy = harness(BUSY)
+    noticeToSupply(buildInfoAppNotification({ event: 'escalation-open', detail: '残るべき質問', projectPath: PROJECT, escalationId: 'q1' }, 1_000), busy.deps)
+    for (let i = 0; i < SUPPLY_NOTICE_CAP + 5; i++) noticeToSupply(fatal(`知らせ${i}`), busy.deps)
+    const q = peekSupplyImportant().get(PROJECT) ?? []
+    expect(q).toHaveLength(SUPPLY_NOTICE_CAP)
+    expect(q[0]).toContain('残るべき質問')
+  })
+
+  it('a caught-up question is stamped with when it was ASKED (told as old)', async () => {
+    const h = harness(IDLE)
+    const now = 10 * 60 * 60 * 1000
+    await catchUpSupplyDesks({ ...h.deps, now: () => now, openQuestions: async () => [{ id: 'q1', detail: '昨日の質問', at: now - 5 * 60 * 60 * 1000 }] })
+    expect(h.writes[0]![1]).toContain('約5時間前の知らせ')
   })
 })
 
@@ -234,7 +293,9 @@ describe('the three refusals — a held notice is kept, never forced', () => {
 // replaced by the next event and never reached the owner, while the worker sat
 // waiting. Important news now QUEUES.
 describe('IMPORTANT news queues per project — nothing erases a question', () => {
-  it('a desk that was busy for two events hears BOTH, oldest first, one per pass', () => {
+  // Review 2026-09-23 (S2): a backlog is told in ONE turn, not one per notice.
+  // RED MEASURED: takeBundle limited to one item → this test sees 2 writes.
+  it('a desk that was busy for two events hears BOTH, oldest first, in ONE line', () => {
     const busy = harness(BUSY)
     noticeToSupply(info('escalation-open', '質問: どちらにしますか'), busy.deps)
     noticeToSupply(fatal('新しい知らせ'), busy.deps)
@@ -243,9 +304,40 @@ describe('IMPORTANT news queues per project — nothing erases a question', () =
     const free = harness(IDLE)
     flushSupplyNotices(free.deps)
     flushSupplyNotices(free.deps)
-    expect(free.writes).toHaveLength(2)
-    expect(free.writes[0]![1]).toContain('どちらにしますか')
-    expect(free.writes[1]![1]).toContain('新しい知らせ')
+    expect(free.writes).toHaveLength(1)
+    const l = free.writes[0]![1]
+    expect(l).toContain('(2件まとめて)')
+    expect(l.indexOf('どちらにしますか')).toBeLessThan(l.indexOf('新しい知らせ'))
+    expect(l.split('\r')).toHaveLength(2) // still exactly one submit
+    expect(peekSupplyImportant().get(PROJECT)).toBeUndefined()
+  })
+
+  // Review rework 2 (R2): the WHOLE bundled line — prefix, count, ages, tail —
+  // never exceeds the longest single notice. RED MEASURED: budgeting only the
+  // body (the rework-1 rule) → a bundle line over the limit.
+  it('a bundled line never exceeds the longest single notice; the rest waits', () => {
+    let now = 1_000_000
+    const busy = harness(BUSY)
+    for (let i = 0; i < 8; i++) noticeToSupply(fatal(`知らせ${i} ${'あ'.repeat(90 + i * 7)}`), { ...busy.deps, now: () => now })
+    now += 5 * 60 * 60 * 1000 // every item carries an age label too
+    const lines: string[] = []
+    for (let pass = 0; pass < 8 && (peekSupplyImportant().get(PROJECT) ?? []).length; pass++) {
+      const free = harness(IDLE)
+      flushSupplyNotices({ ...free.deps, now: () => now })
+      lines.push(...free.writes.map(([, l]) => l.replace(/\r$/, '')))
+    }
+    expect(lines.some((l) => l.includes('件まとめて'))).toBe(true)
+    for (const l of lines.filter((x) => x.includes('件まとめて'))) expect(l.length).toBeLessThanOrEqual(SUPPLY_NOTICE_LINE_MAX)
+    expect(lines.join(' ')).toContain('知らせ7') // nothing lost — it waited
+  })
+
+  // Review 2026-09-23 (S3). RED MEASURED: line-only dedup → one of the two is lost.
+  it('two DIFFERENT questions with identical words are both kept', () => {
+    const busy = harness(BUSY)
+    noticeToSupply(buildInfoAppNotification({ event: 'escalation-open', detail: '同じ文の質問', projectPath: PROJECT, escalationId: 'qa' }, 1_000), busy.deps)
+    noticeToSupply(buildInfoAppNotification({ event: 'escalation-open', detail: '同じ文の質問', projectPath: PROJECT, escalationId: 'qb' }, 1_000), busy.deps)
+    forgetSupplyQuestion('qa')
+    expect(peekSupplyImportant().get(PROJECT)).toHaveLength(1)
   })
 
   it('the same line queued twice is said once', () => {
@@ -289,52 +381,75 @@ describe('queueSupplyNotice — the direct path (event ③, work landing)', () =
   })
 })
 
-// ─── stale news is DROPPED, not delivered late (adversarial review 0922) ────
-// Without a clock a notice for a project with no supply desk waits for the life
-// of the process and is typed the instant a desk first appears — greeting the
-// owner at 17:00 with a question they answered from the inbox at 09:05. The
-// bell still holds the event, so expiring one is not losing it.
+// ─── IMPORTANT news waits for the president (owner decision 2026-09-23) ─────
+// It used to expire after 30 minutes («greeting the owner at 17:00 with a
+// question answered at 09:05»). With the 監督 tab gone the desk is the ONLY
+// retelling, so it now waits — and the staleness is solved where it arises: an
+// answered question is withdrawn, and a late notice carries its age.
 //
-// RED MEASURED 2026-09-22 (reverted after): removing the TTL sweep from
-// flushSupplyNotices → the first test delivers the stale line.
-describe('a notice expires rather than arriving hours late', () => {
-  it('is dropped once it is older than the TTL, even when a desk finally appears', () => {
+// RED MEASURED 2026-09-23 (reverted after): restoring the TTL sweep on the
+// important lane → the first test delivers nothing; removing the filter body of
+// forgetSupplyQuestion → the second delivers the answered question.
+describe('an important notice waits for the next desk', () => {
+  it('is delivered hours later, labelled with its age', () => {
     let now = 1_000_000
-    const busy = harness(BUSY)
-    queueSupplyNotice(PROJECT, '朝の質問', { ...busy.deps, now: () => now })
-    expect(peekSupplyNotices().size).toBe(1)
-
-    now += SUPPLY_NOTICE_TTL_MS + 1
-    const free = harness(IDLE)
-    flushSupplyNotices({ ...free.deps, now: () => now })
-    expect(free.writes).toEqual([])
-    expect(peekSupplyNotices().size).toBe(0) // and it does not linger either
-  })
-
-  it('still delivers one that is merely a slow turn old', () => {
-    let now = 1_000_000
-    const busy = harness(BUSY)
-    queueSupplyNotice(PROJECT, '直前の質問', { ...busy.deps, now: () => now })
-
-    now += SUPPLY_NOTICE_TTL_MS - 1
+    queueSupplyNotice(PROJECT, '朝の知らせ', { ...harness(BUSY).deps, now: () => now })
+    now += 3 * 60 * 60 * 1000
     const free = harness(IDLE)
     flushSupplyNotices({ ...free.deps, now: () => now })
     expect(free.writes).toHaveLength(1)
+    expect(free.writes[0]![1]).toContain('約3時間前の知らせ')
+    expect(free.writes[0]![1]).toContain('朝の知らせ')
   })
 
-  it('expires an undeliverable project so the slot map cannot grow forever', () => {
-    let now = 1_000_000
-    queueSupplyNotice('/repo/no-desk-ever', 'どこにも届かない', {
-      desks: () => [],
-      screen: () => IDLE,
-      write: () => true,
-      now: () => now,
-    })
-    expect(peekSupplyNotices().size).toBe(1)
+  it('a fresh one carries no age label', () => {
+    const h = harness(IDLE)
+    queueSupplyNotice(PROJECT, 'いまの知らせ', h.deps)
+    expect(h.writes[0]![1]).not.toContain('前の知らせ')
+  })
 
-    now += SUPPLY_NOTICE_TTL_MS + 1
-    queueSupplyNotice(PROJECT, '別件', { ...harness(IDLE).deps, now: () => now })
-    expect(peekSupplyNotices().has('/repo/no-desk-ever')).toBe(false)
+  it('an answered question is withdrawn, and only that one', () => {
+    const busy = harness(BUSY)
+    noticeToSupply(buildInfoAppNotification({ event: 'escalation-open', detail: '答えた質問', projectPath: PROJECT, escalationId: 'q1' }, 1_000), busy.deps)
+    noticeToSupply(buildInfoAppNotification({ event: 'escalation-open', detail: 'まだの質問', projectPath: PROJECT, escalationId: 'q2' }, 1_000), busy.deps)
+    forgetSupplyQuestion('q1')
+    const q = peekSupplyImportant().get(PROJECT) ?? []
+    expect(q).toHaveLength(1)
+    expect(q[0]).toContain('まだの質問')
+  })
+
+  it('a reminder does not queue behind its own unsaid question', () => {
+    const busy = harness(BUSY)
+    noticeToSupply(buildInfoAppNotification({ event: 'escalation-open', detail: '質問', projectPath: PROJECT, escalationId: 'q1' }, 1_000), busy.deps)
+    noticeToSupply(buildInfoAppNotification({ event: 'escalation-reminder', detail: '放置されています', projectPath: PROJECT, escalationId: 'q1' }, 1_000), busy.deps)
+    expect(peekSupplyImportant().get(PROJECT)).toHaveLength(1)
+  })
+})
+
+describe('catchUpSupplyDesks — a newly opened desk hears the open questions', () => {
+  const qs = [{ id: 'q1', detail: '質問が届いています: AとBどちら' }]
+
+  it('tells a new desk once, and not again on the next pass', async () => {
+    const h = harness(IDLE)
+    await catchUpSupplyDesks({ ...h.deps, openQuestions: async () => qs })
+    await catchUpSupplyDesks({ ...h.deps, openQuestions: async () => qs })
+    expect(h.writes).toHaveLength(1)
+    expect(h.writes[0]![1]).toContain('AとBどちら')
+  })
+
+  it('does not retell a question the desk already heard at queue time', async () => {
+    const h = harness(IDLE)
+    noticeToSupply(buildInfoAppNotification({ event: 'escalation-open', detail: '質問が届いています: AとBどちら', projectPath: PROJECT, escalationId: 'q1' }, 1_000), h.deps)
+    await catchUpSupplyDesks({ ...h.deps, openQuestions: async () => qs })
+    expect(h.writes).toHaveLength(1)
+  })
+
+  it('retries on the next pass when the store could not be read', async () => {
+    const h = harness(IDLE)
+    await catchUpSupplyDesks({ ...h.deps, openQuestions: async () => { throw new Error('EIO') } })
+    expect(h.writes).toEqual([])
+    await catchUpSupplyDesks({ ...h.deps, openQuestions: async () => qs })
+    expect(h.writes).toHaveLength(1)
   })
 })
 

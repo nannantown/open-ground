@@ -284,6 +284,9 @@ cd - >/dev/null && rmdir .scratch/og-esm-probe .scratch 2>/dev/null || true
 構造での止め方（今回採用）: **許可リストを撤去**して「空でなければ描画・未登録は生の名前」にし、
 **ラベルの網羅だけ**を `types.ts` の union を**パースして**突き合わせる番人に持たせた
 (`swarmOverseerFatalLabels.test.ts`)。落ちるのはテストで、**欠けている名前を本文に出す**。
+(2026-09-23: この表示面 — 監督タブの要注意フィード — とその番人は撤去済み。現在の網羅は
+`swarmNotifications.ts` の `EVENT_LABEL: Record<SwarmFatalEvent,string>` を tsc が強制する形 =
+同じ「過大近似でビルドが落ちる」側。この節は型①の記録として残す。)
 ⚠ パーサ自身が空振りすると番人が空になるので、**メンバー数の下限**と既知メンバー2つを
 先に検査すること（この自己検査が無い棚卸し番人は「1件も見つからない＝合格」になる）。
 

@@ -432,6 +432,13 @@
   (旧1スロット上書きで質問が消えていた)。③ 進捗は `supplyProgress.ts` が Board の列移動を
   毎パス差分して作る(モデル不使用)。④ 納品は `sweepLanded` がカード名入りで重要レーン +
   ベル `work-landed`。正典は 06 章 §1.6。
+  ⑤ **監督タブは撤去済み(2026-09-23)**: Swarm のタブは 社長/司令官/ワーカー の3つ
+  (`SWARM_PANE_IDS`)。質問への回答は社長経由(`escalations/answer`)、ベル/OS通知は従来どおり。
+  重要レーンは TTL なし(社長不在中は保持・遅配は「約N時間前の知らせ」付き)・
+  `~/.openground/supply-notice-queue.json` に永続(再起動でも消えない)・溜まった分は
+  「(N件まとめて)」の1行で伝える。回答/却下で
+  `forgetSupplyQuestion`、新しい卓は `catchUpSupplyDesks` が質問ストアから未回答を読み直す
+  (再起動でも消えない)。正典は 06 章 §1.7、番人は `supplyNoticeAbsence.test.ts`。
   実測(0731): SDK セッションでも `/og-manage` は解決する(slash commands 95本に在る・実際に読み込む)。
   ただし **Claude Code の system prompt は付かない** ので app-context カードは
   `systemPrompt.append` で明示注入する(`scripts/probe-sdk-skill-resolution.mts` /

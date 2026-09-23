@@ -199,7 +199,11 @@ export interface OverseerDeps {
   /** M11/S11 — the escalations inbox (open-record staleness). TOLERANT read
    *  (failure ≈ empty) — fine for the info-grade reminder, NOT for the S3/S10
    *  receipt check below. */
-  listEscalations: (opts?: { projectPath?: string; status?: EscalationStatus }) => Promise<EscalationView[]>
+  listEscalations: (opts?: {
+    projectPath?: string
+    status?: EscalationStatus
+    lane?: 'owner' | 'commander'
+  }) => Promise<EscalationView[]>
   /** S3/S10 persistent-receipt check — every receiptKey ever persisted for the
    *  project, any status. The contract is STRICT: only ENOENT reads as an empty
    *  set; a corrupt/unreadable ledger must THROW (never fold to empty) so the
@@ -885,7 +889,8 @@ const detectInboxStale = async (
 ): Promise<void> => {
   let open: EscalationView[]
   try {
-    open = await deps.listEscalations({ projectPath: engine.path, status: 'open' })
+    // Owner lane only: a commander-lane question is not the owner's to be reminded of.
+    open = await deps.listEscalations({ projectPath: engine.path, status: 'open', lane: 'owner' })
   } catch {
     // Inbox read FAILED — indistinguishable from 'all resolved' if we let the
     // every-pass prune drop S11 keys, so a transient blip would re-notify inside the
@@ -909,7 +914,9 @@ const detectInboxStale = async (
     await deps
       .notifyInfo({
         event: 'escalation-reminder',
-        detail: `受信箱の未回答が ${Math.round((now - created) / 3_600_000)} 時間放置されています。`,
+        // Names the question: the president's desk retells this line, and since
+        // the 監督 tab is gone (2026-09-23) there is no inbox screen to point at.
+        detail: `答えを待っている質問が ${Math.round((now - created) / 3_600_000)} 時間そのままです: ${(e.plainQuestion || e.question || '').slice(0, 80)}`,
         projectPath: engine.path,
         escalationId: e.id,
       })

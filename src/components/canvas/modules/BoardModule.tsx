@@ -476,7 +476,7 @@ export const BoardModule = ({
   // READ-ONLY, and the badge is read-only too: answering declares a
   // `declineEffect` (「保留」 and 「見送る」 are different acts — one parks a card,
   // the other cancels an integration), which must not ride on one tap on a
-  // 166px card. Answering stays in the Swarm tab's escalation pane.
+  // 166px card. Answering goes through the president (社長) desk.
   //
   // 15s, not the 5s the two polls above use: this route expands `screenshotRef`
   // with one readFile per returned record. The Swarm tab's own pane polls 10s

@@ -15,13 +15,13 @@ const DEFAULT = [...SWARM_PANE_IDS]
 describe('swarm pane order derivation', () => {
   it('defaults to the shipped order (supply first) when nothing is saved — existing users unchanged (条件3/5)', () => {
     const order = effectiveTabOrder<SwarmPaneId>(undefined, SWARM_PANE_IDS)
-    expect(order).toEqual(['supply', 'manager', 'workers', 'overseer'])
+    expect(order).toEqual(['supply', 'manager', 'workers'])
     // The FIRST id is the tab that opens by default.
     expect(order[0]).toBe('supply')
   })
 
   it('honours a fully-specified saved order and opens its first tab (条件2/3)', () => {
-    const saved = ['manager', 'overseer', 'supply', 'workers']
+    const saved = ['manager', 'supply', 'workers']
     const order = effectiveTabOrder<SwarmPaneId>(saved, SWARM_PANE_IDS)
     expect(order).toEqual(saved)
     // Reordering the front changes which tab opens next time.
@@ -29,27 +29,23 @@ describe('swarm pane order derivation', () => {
   })
 
   it('moveTab drags a pane to the front, changing the default open tab (条件1/3)', () => {
-    // Drag "overseer" (index 3) to the very front.
-    const next = moveTab(DEFAULT, 3, 0)
-    expect(next).toEqual(['overseer', 'supply', 'manager', 'workers'])
-    expect(next[0]).toBe('overseer')
+    // Drag "workers" (index 2) to the very front.
+    const next = moveTab(DEFAULT, 2, 0)
+    expect(next).toEqual(['workers', 'supply', 'manager'])
+    expect(next[0]).toBe('workers')
   })
 
   it('moveTab reorders in the middle without disturbing the rest', () => {
     // Drag "workers" (index 2) to slot 1 (before "manager").
-    expect(moveTab(DEFAULT, 2, 1)).toEqual(['supply', 'workers', 'manager', 'overseer'])
+    expect(moveTab(DEFAULT, 2, 1)).toEqual(['supply', 'workers', 'manager'])
   })
 
   it('reconciles a stale saved order: drops unknown ids, appends missing panes in canonical order', () => {
-    // A retired id ("flow") lingers, and "overseer" predates the saved order
-    // (added in a later version) — it must come back, never be stranded.
-    const saved = ['manager', 'flow', 'supply', 'workers']
-    expect(effectiveTabOrder<SwarmPaneId>(saved, SWARM_PANE_IDS)).toEqual([
-      'manager',
-      'supply',
-      'workers',
-      'overseer',
-    ])
+    // Retired ids ("flow", and "overseer" — the 監督 tab, removed 2026-09-23)
+    // linger in an old saved order and must be dropped; "workers" predates the
+    // saved order here — it must come back, never be stranded.
+    const saved = ['manager', 'flow', 'overseer', 'supply']
+    expect(effectiveTabOrder<SwarmPaneId>(saved, SWARM_PANE_IDS)).toEqual(['manager', 'supply', 'workers'])
   })
 
   it('dedupes a corrupted saved order', () => {
@@ -58,7 +54,6 @@ describe('swarm pane order derivation', () => {
       'workers',
       'supply',
       'manager',
-      'overseer',
     ])
   })
 })

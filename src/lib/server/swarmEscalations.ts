@@ -42,6 +42,7 @@ import {
 } from './workerRuntime'
 import { bracketedPaste } from './pastePrompt'
 import { createSwarmInfoNotification } from './swarmNotifications'
+import { forgetSupplyQuestion } from './supplyNotice'
 import { needsOwnerDirectly } from './swarmDecisionRouting'
 import { isValidProjectPath, projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
@@ -349,6 +350,32 @@ export const listEscalations = async (opts?: {
   )
 }
 
+/**
+ * The questions waiting on the OWNER in one project (open, not in the commander
+ * lane), OLDEST first — the president's catch-up (supplyNotice.catchUpSupplyDesks).
+ * STRICT, unlike {@link listEscalations}: only ENOENT means "none"; any other
+ * failure (EIO/EMFILE, a torn or corrupt file) THROWS, so the caller retries on
+ * its next pass instead of concluding "nothing waiting". Pure read — a corrupt
+ * file is left in place for the write path's quarantine.
+ */
+export const listOpenOwnerQuestionsStrict = async (projectPath: string): Promise<Escalation[]> => {
+  await ensureOpenGroundHome()
+  let raw: string
+  try {
+    raw = await readFile(escalationsFile(), 'utf8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return []
+    throw e
+  }
+  const items = (JSON.parse(raw) as Partial<EscalationsState> | null)?.items
+  if (!Array.isArray(items)) throw new Error('escalations file is not {items: []}')
+  const canon = await canonicalize(projectPath)
+  return items
+    .filter(isEscalation)
+    .filter((e) => e.status === 'open' && e.routedTo !== 'commander' && e.projectPath === canon)
+    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))
+}
+
 /** STRICT receipt read for the overseer's S3/S10 fatal check: every receiptKey
  *  ever persisted for one project, whatever the record's status (open records
  *  would dedup anyway; answered/DISMISSED are exactly the ones whose receipt
@@ -638,15 +665,21 @@ export const openEscalation = async (
 
 /** The owner-facing "a question is waiting" bell + toast (+ the supply desk,
  *  through swarmNotifications). Best-effort — §8 invariant 7. */
+/** The owner-facing one-liner for an open question — the bell/toast detail, and
+ *  what the president's desk is told when it opens with the question still
+ *  waiting (supplyNotice.catchUpSupplyDesks). Leads with the plain-language text
+ *  when the raiser supplied one. Pure. */
+export const ownerQuestionDetail = (e: Pick<Escalation, 'plainQuestion' | 'question'>): string => {
+  const teaser = e.plainQuestion || e.question
+  return `質問が届いています: ${teaser.length > 120 ? `${teaser.slice(0, 120)}…` : teaser}`
+}
+
 const notifyOwnerOfQuestion = async (e: Escalation, deps?: OpenEscalationDeps): Promise<void> => {
   try {
     const notify = deps?.notify ?? createSwarmInfoNotification
-    // The toast is an OWNER surface — lead with the plain-language text when
-    // the raiser supplied one (same precedence as the inbox UI).
-    const teaser = e.plainQuestion || e.question
     await notify({
       event: 'escalation-open',
-      detail: `質問が届いています: ${teaser.length > 120 ? `${teaser.slice(0, 120)}…` : teaser}`,
+      detail: ownerQuestionDetail(e),
       projectPath: e.projectPath,
       ...(e.taskId ? { taskId: e.taskId } : {}),
       ...(e.branch ? { branch: e.branch } : {}),
@@ -1166,6 +1199,8 @@ export const answerEscalation = async (
     record.answeredAt = (deps?.now?.() ?? new Date()).toISOString()
     record.status = 'answered'
     await persist(all)
+    // No longer true → the president's desk must not retell it.
+    forgetSupplyQuestion(record.id)
 
     return { done: false, record }
   })
@@ -1249,6 +1284,7 @@ export const dismissEscalation = async (
     record.status = 'dismissed'
     record.dismissedAt = (deps?.now?.() ?? new Date()).toISOString()
     await persist(all)
+    forgetSupplyQuestion(record.id)
     return record
   })
 }

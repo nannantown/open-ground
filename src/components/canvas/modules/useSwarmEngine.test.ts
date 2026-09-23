@@ -13,7 +13,6 @@ import {
   sanitizeEngineState,
   sanitizeKpis,
   sanitizeConsumption,
-  sanitizeFatalNotifications,
   sanitizeEnvIssues,
   planSwarmPower,
   commanderPresence,
@@ -393,124 +392,6 @@ describe('planSwarmPower — the master Start/Stop switch contract', () => {
       launchSupply: false,
       launchManager: false,
     })
-  })
-})
-
-// The fatal-notifications sanitizer guards the flow pane's "needs attention" banner
-// (条件3) against an untrusted on-disk notifications file — the same defensive
-// discipline as sanitizeEngineState.
-describe('sanitizeFatalNotifications — the fatal-event source (条件3)', () => {
-  const wrap = (notifications: unknown) => ({ notifications })
-
-  it('keeps swarm-fatal rows with a known event, mapping the fields', () => {
-    const out = sanitizeFatalNotifications(
-      wrap([
-        {
-          id: 'swarm-fatal:all-workers-down:x:1',
-          kind: 'swarm-fatal',
-          createdAt: 1000,
-          swarmFatal: {
-            event: 'all-workers-down',
-            detail: '全ワーカー停止',
-            branch: 'swarm/w5',
-            projectPath: '/proj',
-          },
-        },
-      ]),
-    )
-    expect(out).toHaveLength(1)
-    expect(out[0]).toMatchObject({
-      id: 'swarm-fatal:all-workers-down:x:1',
-      event: 'all-workers-down',
-      detail: '全ワーカー停止',
-      branch: 'swarm/w5',
-      projectPath: '/proj',
-      createdAt: 1000,
-    })
-  })
-
-  it('drops non-swarm-fatal kinds and malformed rows', () => {
-    const out = sanitizeFatalNotifications(
-      wrap([
-        { id: 'a', kind: 'collab-invite', collabInvite: {} }, // wrong kind
-        { id: 'c', kind: 'swarm-fatal' }, // no swarmFatal payload
-        { id: 'd', kind: 'swarm-fatal', swarmFatal: { event: '   ' } }, // no event name
-        null,
-        'nope',
-      ]),
-    )
-    expect(out).toEqual([])
-  })
-
-  it('KEEPS an event this build has no label for — dropping it is how a real alert vanished', () => {
-    // ⚠ THIS TEST CHANGED SIDES (2026-08-04). It used to assert that an
-    // unrecognised event is DROPPED. That allowlist held 7 names while the
-    // server's SwarmFatalEvent union has 11 and no compile-time link joins
-    // them, so four live alerts were discarded in silence — including
-    // `guard-unwired`, which means the deny veto could not be verified and NO
-    // worker can spawn at all. The pane then drew its "all quiet, nothing for
-    // you to do" state. A registration list fails by silence; this channel is
-    // the owner's only notice of a swarm failure, so the unknown row is kept
-    // (the pane labels it with its raw name). Malformed rows are still dropped
-    // — the test above keeps that half.
-    const out = sanitizeFatalNotifications(
-      wrap([{ id: 'b', kind: 'swarm-fatal', swarmFatal: { event: 'guard-unwired', detail: 'x' } }]),
-    )
-    expect(out).toHaveLength(1)
-    expect(out[0].event).toBe('guard-unwired')
-  })
-
-  it('carries every display field through the coercion, for any event', () => {
-    // This used to be "accepts every one of the five known events", which after
-    // the allowlist removal was satisfied by a sanitizer that returned every row
-    // unconditionally — a green that proved nothing. What is still worth pinning
-    // is the FIELD MAPPING: each of these is a line the owner reads, and a typo
-    // in one key would blank it with no other symptom.
-    const out = sanitizeFatalNotifications(
-      wrap([
-        {
-          id: 'n1',
-          kind: 'swarm-fatal',
-          createdAt: 1_700_000_000_000,
-          handledAt: 1_700_000_050_000,
-          swarmFatal: {
-            event: 'guard-unwired',
-            detail: '拒否ベトを確認できませんでした',
-            branch: 'swarm/w3',
-            taskTitle: 'カードの題',
-            taskId: 'card-3',
-            logHint: 'engine log の dispatch 行',
-            projectPath: '/proj',
-          },
-        },
-      ]),
-    )
-    expect(out).toEqual([
-      {
-        id: 'n1',
-        event: 'guard-unwired',
-        detail: '拒否ベトを確認できませんでした',
-        branch: 'swarm/w3',
-        taskTitle: 'カードの題',
-        taskId: 'card-3',
-        logHint: 'engine log の dispatch 行',
-        projectPath: '/proj',
-        createdAt: 1_700_000_000_000,
-        handled: true,
-      },
-    ])
-  })
-
-  it('sorts newest-first and tolerates a non-array / non-object input', () => {
-    const out = sanitizeFatalNotifications(
-      wrap([
-        { id: 'old', kind: 'swarm-fatal', createdAt: 100, swarmFatal: { event: 'rollback' } },
-        { id: 'new', kind: 'swarm-fatal', createdAt: 900, swarmFatal: { event: 'exec-timeout' } },
-      ]),
-    )
-    expect(out.map((n) => n.id)).toEqual(['new', 'old'])
-    expect(sanitizeFatalNotifications(null)).toEqual([])
-    expect(sanitizeFatalNotifications({ notifications: 'nope' })).toEqual([])
   })
 })
 

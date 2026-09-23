@@ -190,7 +190,7 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.jumpLatest': 'Latest',
     'projectPanel.swarm.sdk.questionBanner': 'This worker asked you a question',
     'projectPanel.swarm.sdk.questionBannerHint':
-      'Answer it from the Overseer tab (SWARM → Overseer) — the worker resumes on your reply.',
+      'Tell the president your answer — from the President panel on the Board tab (“Talk to the president”). The worker resumes on your reply.',
     'projectPanel.swarm.sdk.statusFailed': 'Failed',
     'projectPanel.swarm.sdk.interrupt': 'Stop the current turn (the session stays open)',
     'projectPanel.swarm.sdk.send': 'Send',
@@ -270,22 +270,6 @@ export const projectPanel = {
     'projectPanel.swarm.manager.logKindConflict': 'Conflict',
     'projectPanel.swarm.manager.logKindCleanup': 'Cleanup',
     'projectPanel.swarm.manager.logKindCrash': 'Crash',
-    // Anomalies (条件2) — state inconsistencies the engine detected.
-    'projectPanel.swarm.manager.anomaliesHeading': 'Inconsistencies',
-    'projectPanel.swarm.manager.anomalyOrphanDoing': 'Card stuck in Doing — its worker is gone',
-    'projectPanel.swarm.overseer.anomalyUnownedDoing':
-      'Card stuck in Doing — nobody is driving it, but its worktree is still there',
-    'projectPanel.swarm.manager.anomalyWorktreeMissing': "Worker's worktree is missing",
-    'projectPanel.swarm.manager.anomalyWorkerStale': 'Worker silent — possibly stuck',
-    'projectPanel.swarm.manager.anomalyStaleFor': 'no heartbeat for {min} min',
-    // Move-stuck anomaly (anti-zombie): a Board column move kept failing past the
-    // retry budget, so the card couldn't follow its work. The intent names the
-    // exact zombie on the detail line.
-    'projectPanel.swarm.manager.anomalyMoveStuck': "Card can't follow its work — its board move keeps failing",
-    'projectPanel.swarm.manager.moveStuckReview': 'worker finished, stuck in Doing',
-    'projectPanel.swarm.manager.moveStuckDone': 'landed on the trunk, stuck in Review',
-    'projectPanel.swarm.manager.moveStuckRecover': 'lost worker, stuck in Doing',
-    'projectPanel.swarm.manager.moveStuckRecoverReview': 'finished worker stopped, could not return to Review',
     // Review resolution — take a stuck (conflict / failing-verify) card out of review.
     'projectPanel.swarm.manager.resolvePrompt': 'Resolve:',
     'projectPanel.swarm.manager.resolvePark': 'Park',
@@ -375,80 +359,6 @@ export const projectPanel = {
     'projectPanel.swarm.manager.conversationHint':
       'The manager monitors workers and integrates finished branches — talk to it here.',
     'projectPanel.swarm.manager.backToCommander': 'Back to manager',
-    // Overseer tab (監督) — where the swarm's messages to the owner live: the
-    // escalation inbox (esc.* below) + the needs-attention feed (fatal events +
-    // engine anomalies, carried over from the removed Flow tab). Read when
-    // opened — never pinned over the other sub-views; the tab badge carries the
-    // open-question count. Anomaly labels REUSE the manager.* keys above.
-    'projectPanel.swarm.overseer.tab': 'Overseer',
-    'projectPanel.swarm.overseer.alertsHeading': 'Needs attention',
-    'projectPanel.swarm.overseer.emptyTitle': 'Nothing needs you',
-    'projectPanel.swarm.overseer.emptyBody':
-      "Questions and fatal events from the swarm land here.",
-    'projectPanel.swarm.overseer.ago': '{age} ago',
-    'projectPanel.swarm.overseer.inboxUnknownTitle': 'Cannot read the inbox right now',
-    'projectPanel.swarm.overseer.inboxUnknownBody':
-      'This is not the same as "nothing to do" — the list could not be loaded, so there may be questions waiting. It retries on its own; if it keeps saying this, reopen the app.',
-    'projectPanel.swarm.overseer.markHandled': 'Handled',
-    'projectPanel.swarm.overseer.markHandledHint':
-      'Hide this alert from the list. It stays in the bell history; nothing is deleted.',
-    'projectPanel.swarm.overseer.anomalyReworkExhausted': 'Card retried too many times — parked in Needs decision',
-    'projectPanel.swarm.overseer.anomalyNoHeartbeat': 'Worker active but has never sent a heartbeat — protocol violation',
-    'projectPanel.swarm.overseer.anomalyReviewPanelFailed': 'Review panel indecisive — merge withheld, needs a human',
-    'projectPanel.swarm.overseer.anomalyHighRiskHold': 'High-risk paths touched — auto-merge withheld, merge manually',
-    // Fatal-event labels — the escalation events the safety valve
-    // (card 6fe48c1f) persists. The engine-side ones plus two from the
-    // Electron self-update cycle. The server `detail` (Japanese) rides as a
-    // secondary line; these label WHAT fired in the UI language.
-    'projectPanel.swarm.overseer.fatalReworkExhausted': 'Card parked · rework limit',
-    'projectPanel.swarm.overseer.fatalAllWorkersDown': 'All workers stopped',
-    'projectPanel.swarm.overseer.fatalExecTimeout': 'Worker hit time limit',
-    'projectPanel.swarm.overseer.fatalRollback': 'Self-update rolled back',
-    'projectPanel.swarm.overseer.fatalCanaryFailed': 'Self-update canary failed',
-    'projectPanel.swarm.overseer.fatalReviewPanelFailed': 'Review panel failed · merge withheld',
-    'projectPanel.swarm.overseer.fatalHighRiskHold': 'High-risk paths · awaiting manual merge',
-    'projectPanel.swarm.overseer.anomalyAllWorkersDown':
-      'Every worker has stopped · cards are still waiting',
-    'projectPanel.swarm.overseer.anomalyManagerUnrevivable':
-      'The commander desk will not come back · merging is stopped',
-    'projectPanel.swarm.overseer.fatalGuardUnwired': 'Safety guard unverified · workers cannot start',
-    'projectPanel.swarm.overseer.fatalWorkerSpawnFailed': 'Workers cannot start · dispatch held, retrying on a backoff',
-    'projectPanel.swarm.overseer.fatalManagerUnrevivable': 'Commander desk will not come back',
-    'projectPanel.swarm.overseer.fatalManagerUnresponsive':
-      'Commander desk is up but stuck · review work is waiting',
-    'projectPanel.swarm.overseer.fatalEngineResumeSuppressed': 'Auto-resume held back after repeated restarts',
-    'projectPanel.swarm.overseer.fatalDataIntegrity': 'App data damaged · backups available',
-    // Escalations inbox (C1) — questions the swarm raised to YOU, waiting for
-    // your answer. Fail-closed: nothing proceeds until you decide.
-    'projectPanel.swarm.esc.title': 'Escalations — waiting for your answer',
-    'projectPanel.swarm.esc.whyIrreversible': 'Irreversible',
-    'projectPanel.swarm.esc.whyInsufficientInfo': 'Needs your knowledge',
-    // Same reason as the ja string: name what is being ASKED OF the reader, not the
-    // internal classification. This badge marks "your area, your call".
-    'projectPanel.swarm.esc.whyPolicy': 'Your call',
-    'projectPanel.swarm.esc.techDetails': 'Technical details',
-    'projectPanel.swarm.esc.screenshot': "Worker's screen at the time",
-    'projectPanel.swarm.esc.answerPlaceholder': 'Your answer…',
-    'projectPanel.swarm.esc.answerSend': 'Answer & resume',
-    // ⚠ NOT "見送る"/"Decline" — that is what option B of some questions SAYS,
-    // and this button does something else entirely: it closes the question
-    // without answering, permanently (the same question is never re-raised).
-    // An owner who read B as 「この作業は見送る」 and pressed the button beside it
-    // got "stop asking" recorded instead of their decision.
-    'projectPanel.swarm.esc.dismiss': 'Close without answering',
-    'projectPanel.swarm.esc.dismissHint':
-      'Closes this question for good without recording a decision. It will not be asked again. To decline the work itself, answer the question with B.',
-    'projectPanel.swarm.esc.deliveryInjected': 'Answer injected into the live worker — it resumes now.',
-    // ⚠ Do NOT promise a re-dispatch here (2026-08-04). The card is very often
-    // PARKED after this — a branch that already holds commits, or an unreadable
-    // commit count, or a question nobody's worker asked, all keep it in 保留 —
-    // and a parked card is never dispatched. The old wording ("the card's next
-    // dispatch carries this answer") read as "work resumes now", so an owner who
-    // chose "try again" watched nothing happen and had no way to learn why.
-    'projectPanel.swarm.esc.deliveryQueued':
-      'Recorded. The worker that asked has already been stood down, so nothing restarts right away: if the card can go back to the queue it will carry your answer, and if its work is already saved on a branch the commander picks it up from there.',
-    'projectPanel.swarm.esc.deliverySkipped': 'Recorded. Nothing live to deliver to.',
-    'projectPanel.swarm.esc.actionFailed': 'Escalation action failed: {error}',
     // Sidebar resizer
     // Chat header
     // Delete confirm
@@ -915,7 +825,7 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.jumpLatest': '最新へ',
     'projectPanel.swarm.sdk.questionBanner': 'この作業者から質問が届いています',
     'projectPanel.swarm.sdk.questionBannerHint':
-      '回答は SWARM タブ →「監督」からできます — 答えると作業者はそのまま再開します。',
+      '答えは社長に伝えてください(Board タブの「社長」の欄 →「社長と話す」)。答えると作業者はそのまま再開します。',
     'projectPanel.swarm.sdk.statusFailed': '失敗',
     'projectPanel.swarm.sdk.interrupt': '今のターンを止める(セッションは続きます)',
     'projectPanel.swarm.sdk.send': '送信',
@@ -994,21 +904,6 @@ export const projectPanel = {
     'projectPanel.swarm.manager.logKindConflict': '衝突',
     'projectPanel.swarm.manager.logKindCleanup': '掃除',
     'projectPanel.swarm.manager.logKindCrash': '異常終了',
-    // 不整合（条件2）— エンジンが検出した状態の食い違い。
-    'projectPanel.swarm.manager.anomaliesHeading': '不整合',
-    'projectPanel.swarm.manager.anomalyOrphanDoing': 'doing のまま放置 — 担当 worker が消失',
-    'projectPanel.swarm.overseer.anomalyUnownedDoing':
-      'doing のまま放置 — 動かしている worker が居ません(作業フォルダは残っています)',
-    'projectPanel.swarm.manager.anomalyWorktreeMissing': 'worker の worktree が消失',
-    'projectPanel.swarm.manager.anomalyWorkerStale': 'worker が無応答 — 停滞の可能性',
-    'projectPanel.swarm.manager.anomalyStaleFor': '{min}分 心拍なし',
-    // Move-stuck anomaly（ゾンビ防止）: 列移動が予算超で失敗し続け、カードが作業に
-    // 追従できない状態。intent が詳細行で具体的なゾンビを示す。
-    'projectPanel.swarm.manager.anomalyMoveStuck': 'カードが作業に追従できず — 列移動が失敗し続けています',
-    'projectPanel.swarm.manager.moveStuckReview': 'worker 完了済みだが doing で滞留',
-    'projectPanel.swarm.manager.moveStuckDone': 'trunk へ統合済みだが review で滞留',
-    'projectPanel.swarm.manager.moveStuckRecover': 'worker 消失だが doing で滞留',
-    'projectPanel.swarm.manager.moveStuckRecoverReview': '完了済み worker を停止したが review へ戻せず滞留',
     // Review 解決 — 滞留した（衝突／検証失敗）カードを review から退避させる。
     'projectPanel.swarm.manager.resolvePrompt': '解決:',
     'projectPanel.swarm.manager.resolvePark': '保留',
@@ -1094,67 +989,6 @@ export const projectPanel = {
     'projectPanel.swarm.manager.conversationHint':
       'マネージャーは worker を監視し、完了ブランチを統合します。ここで対話してください。',
     'projectPanel.swarm.manager.backToCommander': 'マネージャーに戻る',
-    // 監督タブ — swarm からあなたへのメッセージが集まる場所: エスカレーション
-    // 受信箱（下の esc.*）＋要注意フィード（致命イベント＋エンジン anomaly —
-    // 削除した Flow タブから移設）。開いた時に読む — 他のサブビューには
-    // 覆い被せず、タブバッジが未回答数を運ぶ。anomaly ラベルは上の
-    // manager.* キーを再利用。
-    'projectPanel.swarm.overseer.tab': '監督',
-    'projectPanel.swarm.overseer.alertsHeading': '要注意',
-    'projectPanel.swarm.overseer.emptyTitle': 'いま対応が要るものはありません',
-    'projectPanel.swarm.overseer.emptyBody':
-      'swarm からの質問と致命イベントがここに届きます。',
-    'projectPanel.swarm.overseer.ago': '{age} 前',
-    'projectPanel.swarm.overseer.inboxUnknownTitle': 'いま受信箱を読めていません',
-    'projectPanel.swarm.overseer.inboxUnknownBody':
-      '「対応が要るものはありません」とは違います — 一覧を読み込めなかっただけで、質問が待っているかもしれません。自動でやり直します。これが続くときはアプリを開き直してください。',
-    'projectPanel.swarm.overseer.markHandled': '対応済み',
-    'projectPanel.swarm.overseer.markHandledHint':
-      'この通知を一覧から隠します。お知らせの履歴には残り、消えるわけではありません。',
-    'projectPanel.swarm.overseer.anomalyReworkExhausted': 'リトライ上限超過 — 判断待ちに退避',
-    'projectPanel.swarm.overseer.anomalyNoHeartbeat': '稼働中なのに心拍ゼロ — worker 規律違反の疑い',
-    'projectPanel.swarm.overseer.anomalyReviewPanelFailed': 'レビューパネル決着せず — 統合保留・人間の確認待ち',
-    'projectPanel.swarm.overseer.anomalyHighRiskHold': '高リスクパスに接触 — 自動統合を保留・手動マージ待ち',
-    // 致命イベントのラベル — 安全弁（カード 6fe48c1f）が永続化する
-    // エスカレーションイベント。エンジン由来のものと、Electron 自己更新
-    // サイクル由来の2つ。サーバの detail（日本語）は副行に出し、ここでは何が起きたかを
-    // UI 言語で示す。
-    'projectPanel.swarm.overseer.fatalReworkExhausted': 'カード退避 · 差し戻し上限',
-    'projectPanel.swarm.overseer.fatalAllWorkersDown': '全ワーカー停止',
-    'projectPanel.swarm.overseer.fatalExecTimeout': 'ワーカーが時間上限に到達',
-    'projectPanel.swarm.overseer.fatalRollback': '自己更新をロールバック',
-    'projectPanel.swarm.overseer.fatalCanaryFailed': '自己更新カナリア失敗',
-    'projectPanel.swarm.overseer.fatalReviewPanelFailed': 'レビューパネル不成立 · 統合保留',
-    'projectPanel.swarm.overseer.fatalHighRiskHold': '高リスクパス · 手動マージ待ち',
-    'projectPanel.swarm.overseer.anomalyAllWorkersDown': 'ワーカーが全部止まっています · 待っているカードがあります',
-    'projectPanel.swarm.overseer.anomalyManagerUnrevivable': '司令官の卓が戻りません · 統合が止まっています',
-    'projectPanel.swarm.overseer.fatalGuardUnwired': '安全装置を確認できず · ワーカーを起動できません',
-    'projectPanel.swarm.overseer.fatalWorkerSpawnFailed': 'ワーカーを起動できません · 配車を一時停止し、間隔を空けて自動再試行します',
-    'projectPanel.swarm.overseer.fatalManagerUnrevivable': '司令官の卓が復帰しません',
-    'projectPanel.swarm.overseer.fatalManagerUnresponsive': '司令官の卓は動いていますが統合が止まっています',
-    'projectPanel.swarm.overseer.fatalEngineResumeSuppressed': '再起動が続いたため自動再開を見合わせました',
-    'projectPanel.swarm.overseer.fatalDataIntegrity': 'アプリのデータが壊れました · バックアップあり',
-    // エスカレーション受信箱（C1）— swarm があなたに上げた質問の回答待ち。
-    // fail-closed: あなたが決めるまで何も先に進まない。
-    'projectPanel.swarm.esc.title': 'エスカレーション — あなたの回答待ち',
-    'projectPanel.swarm.esc.whyIrreversible': '不可逆',
-    'projectPanel.swarm.esc.whyInsufficientInfo': '情報不足',
-    // 「ポリシー」は非エンジニアのオーナーには何のことか伝わらない。この why が付くのは
-    // 「あなたの領域だから、あなたが決める」ケース(ESCALATE OWNER のルーティング判定と
-    // 恒久境界)なので、分類名ではなく“何を求められているか”を出す。
-    'projectPanel.swarm.esc.whyPolicy': 'あなたが決めること',
-    'projectPanel.swarm.esc.techDetails': '技術的な詳細',
-    'projectPanel.swarm.esc.screenshot': 'その時の worker 画面',
-    'projectPanel.swarm.esc.answerPlaceholder': '回答を入力…',
-    'projectPanel.swarm.esc.answerSend': '回答して再開',
-    'projectPanel.swarm.esc.dismiss': '答えずに閉じる',
-    'projectPanel.swarm.esc.dismissHint':
-      'この質問を、答えないまま閉じます。同じ質問は二度と出ません。作業そのものを見送るときは、質問に B と答えてください。',
-    'projectPanel.swarm.esc.deliveryInjected': '回答を実行中の worker に注入しました — 作業が再開します。',
-    'projectPanel.swarm.esc.deliveryQueued':
-      '回答を記録しました。質問した担当はすでに降りているので、すぐに作業が再開するとは限りません — このカードが順番待ちに戻せる状態なら次に呼ばれたときに回答が渡り、作業がすでにブランチに保存されている場合は司令官がそこから引き継ぎます。',
-    'projectPanel.swarm.esc.deliverySkipped': '記録しました（配達先の worker/カードなし）。',
-    'projectPanel.swarm.esc.actionFailed': 'エスカレーション操作に失敗: {error}',
     // Sidebar resizer
     // Chat header
     // Delete confirm

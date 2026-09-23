@@ -306,6 +306,29 @@ describe('overseer — S11 inbox stale (sub-cycle dedup survives every-pass prun
       createdAt: new Date(c.now() - OVERSEER_THRESHOLDS.inboxStaleMs - 60_000).toISOString(),
     }) as EscalationView
 
+  // INTENDED CHANGE 2026-09-23 (06 §1.7): the reminder asks the store for the
+  // OWNER lane only (a commander-lane question is not the owner's to be reminded
+  // of) and names the question (the president retells it; there is no inbox
+  // screen to point at any more). RED MEASURED: dropping `lane: 'owner'` from
+  // the call → the commander question is reminded too.
+  it('reminds only of OWNER-lane questions, and names the question', async () => {
+    const calls = makeCalls()
+    const c = clock()
+    const old = new Date(c.now() - OVERSEER_THRESHOLDS.inboxStaleMs - 60_000).toISOString()
+    const all = [
+      { id: 'esc-owner', status: 'open', createdAt: old, question: 'raw', plainQuestion: 'AとBどちらで進めますか' },
+      { id: 'esc-cmd', status: 'open', createdAt: old, question: '司令官向け', routedTo: 'commander' },
+    ] as EscalationView[]
+    const deps = makeDeps(calls, {
+      now: c.now,
+      listEscalations: async (opts) => (opts?.lane === 'owner' ? all.filter((e) => e.routedTo !== 'commander') : all),
+    })
+    await runOverseerPass(makeEngine(), [], () => {}, deps)
+    const reminders = calls.notifyInfo.filter((n) => n.event === 'escalation-reminder')
+    expect(reminders).toHaveLength(1) // not the commander-lane one
+    expect(reminders[0]!.detail).toContain('AとBどちらで進めますか')
+  })
+
   it('re-notifies ONCE per 6h bucket — not once per sub-cycle (crossing ≥2 boundaries)', async () => {
     const calls = makeCalls()
     const c = clock()

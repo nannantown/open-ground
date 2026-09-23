@@ -20,8 +20,8 @@ import userEvent from '@testing-library/user-event'
 import { messages } from '@/i18n/messages'
 import type { ProjectMeta, SwarmOrchestratorState } from '@/lib/types'
 
-// Translate to the KEY, so these assertions are locale-independent (the sibling
-// SwarmEscalationsPane.test.tsx pattern). The actual JA/EN copy is pinned by its
+// Translate to the KEY, so these assertions are locale-independent (the pattern the
+// retired SwarmEscalationsPane test used). The actual JA/EN copy is pinned by its
 // own describe block at the bottom — where a wording check belongs.
 vi.mock('@/i18n/I18nContext', () => ({
   useT: () => ({

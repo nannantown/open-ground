@@ -88,7 +88,6 @@ const flush = async () => {
 const sortedUrls = (calls: PendingCall[]) => calls.map((c) => c.url).sort()
 
 const ROUTES_P1 = [
-  '/api/swarm/notifications',
   '/api/swarm/orchestrator/drain-tick',
   '/api/swarm/orchestrator?path=%2Fp1',
   '/api/swarm/preflight?path=%2Fp1',
@@ -101,8 +100,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('useSwarmEngine poll — the four route reads run in parallel', () => {
-  it('fires all four reads without waiting for the first one to resolve', async () => {
+describe('useSwarmEngine poll — the route reads run in parallel', () => {
+  it('fires every read without waiting for the first one to resolve', async () => {
     const { calls } = harness()
     renderHook(() => useSwarmEngine('/p1'), { wrapper })
 
@@ -126,17 +125,15 @@ describe('useSwarmEngine poll — the four route reads run in parallel', () => {
     await act(async () => {
       for (const c of calls) {
         if (c.url.startsWith('/api/swarm/orchestrator?')) c.settle({}, false) // 500 → not available
-        else if (c.url === '/api/swarm/notifications') c.settle({}, false) // 403/404 → empty
         else if (c.url.startsWith('/api/swarm/workers')) c.settle({ workers: [{ worktree: '/wt/a', branch: 'swarm/a' }] })
         else c.settle({})
       }
       await flush()
     })
 
-    // The dead engine + notifications routes degraded exactly as before, and the
+    // The dead engine route degraded exactly as before, and the
     // healthy workers route still landed its snapshot.
     expect(result.current.available).toBe(false)
-    expect(result.current.fatalNotifications).toEqual([])
     expect(result.current.realWorkers).toEqual([{ worktree: '/wt/a', branch: 'swarm/a' }])
   })
 })
@@ -150,7 +147,7 @@ describe('useSwarmEngine poll — one lap at a time (in-flight guard)', () => {
     await act(async () => {
       await flush()
     })
-    expect(calls).toHaveLength(5) // lap 1 is out, and stays unresolved
+    expect(calls).toHaveLength(4) // lap 1 is out, and stays unresolved
 
     // Three whole poll periods elapse while lap 1 is still in flight — exactly
     // the swarm-load case (a lap slower than ENGINE_POLL_MS). No lap may stack.
@@ -158,7 +155,7 @@ describe('useSwarmEngine poll — one lap at a time (in-flight guard)', () => {
       vi.advanceTimersByTime(ENGINE_POLL_MS * 3)
       await flush()
     })
-    expect(calls).toHaveLength(5)
+    expect(calls).toHaveLength(4)
 
     // Once lap 1 lands the slot frees up and the next tick polls normally —
     // the guard must skip a tick, not wedge the loop shut.
@@ -170,7 +167,7 @@ describe('useSwarmEngine poll — one lap at a time (in-flight guard)', () => {
       vi.advanceTimersByTime(ENGINE_POLL_MS)
       await flush()
     })
-    expect(calls).toHaveLength(10)
+    expect(calls).toHaveLength(8)
   })
 
   it('drops a focus-triggered poll mid-lap too', async () => {
@@ -180,13 +177,13 @@ describe('useSwarmEngine poll — one lap at a time (in-flight guard)', () => {
     await act(async () => {
       await flush()
     })
-    expect(calls).toHaveLength(5)
+    expect(calls).toHaveLength(4)
 
     await act(async () => {
       window.dispatchEvent(new Event('focus'))
       await flush()
     })
-    expect(calls).toHaveLength(5)
+    expect(calls).toHaveLength(4)
   })
 })
 
@@ -205,7 +202,7 @@ describe('useSwarmEngine poll — a stale lap never overwrites a newer one', () 
       await flush()
     })
     const lapA = calls.splice(0) // the SLOW lap — left unresolved on purpose
-    expect(lapA).toHaveLength(5)
+    expect(lapA).toHaveLength(4)
 
     // A newer lap starts (the hook moves to another project — the same
     // generation bump a `busy` flip or a re-run causes).
@@ -214,7 +211,7 @@ describe('useSwarmEngine poll — a stale lap never overwrites a newer one', () 
       await flush()
     })
     const lapB = calls.splice(0)
-    expect(lapB).toHaveLength(5) // the cleanup freed the in-flight slot
+    expect(lapB).toHaveLength(4) // the cleanup freed the in-flight slot
 
     // Newer lap B lands FIRST…
     await act(async () => {

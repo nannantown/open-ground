@@ -131,7 +131,8 @@ export interface Settings {
    * POST /api/settings silently drops the key (it left USER_SETTINGS_KEYS). */
   // Managers and workers are SDK-only. Legacy runtime keys remain inert on disk.
   /** The owner's chosen left-to-right order of the Swarm tab's sub-view strip
-   *  ({@link SWARM_PANE_IDS} — 補給官 / 司令官 / ワーカー / 監督). PERSONAL UI
+   *  ({@link SWARM_PANE_IDS} — 補給官 / 司令官 / ワーカー — the 監督 pane was retired 2026-09-23; a saved
+   *  'overseer' id is dropped on read). PERSONAL UI
    *  state, kept central in `~/.openground/settings.json` (never the user's
    *  repo), exactly like the per-project `ProjectData.tabOrder` but GLOBAL: the
    *  four roles are identical across every project, so one order serves them all
@@ -2128,13 +2129,8 @@ export const DEFAULT_DESK_CONTEXT_CAP_TOKENS = 300_000
  *  with the per-project tab row: it drops unknown/retired/duplicate ids and
  *  appends any missing pane in this order). The FIRST id of the reconciled order
  *  is the tab that opens by default. Keep in sync with SwarmModule's `MainView`. */
-export type SwarmPaneId = 'supply' | 'manager' | 'workers' | 'overseer'
-export const SWARM_PANE_IDS: readonly SwarmPaneId[] = [
-  'supply',
-  'manager',
-  'workers',
-  'overseer',
-]
+export type SwarmPaneId = 'supply' | 'manager' | 'workers'
+export const SWARM_PANE_IDS: readonly SwarmPaneId[] = ['supply', 'manager', 'workers']
 
 /** Per-card overrides for the drawer's 実行 button. Each key falls back to
  *  the board defaults when absent: flow → config.completionFlow,

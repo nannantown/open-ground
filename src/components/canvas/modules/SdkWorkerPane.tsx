@@ -210,8 +210,8 @@ export const SdkWorkerPane = ({
   // ── The open-question banner (2026-08-03, owner-requested) ─────────────────
   // The 0.11.52 acceptance put the owner in front of this exact pane while
   // their worker sat waiting on a question — and the pane said only 「待機中」.
-  // The question lived in a DIFFERENT tab (監督) with nothing here pointing at
-  // it. So the pane itself asks the inbox "is one of these mine?" and puts the
+  // The question lived in a DIFFERENT tab (監督 — since removed; answers now go
+  // through the president) with nothing here pointing at it. So the pane itself asks the inbox "is one of these mine?" and puts the
   // question — and where to answer it — right where the owner is looking.
   // Self-contained polling (10s) rather than prop-threading: this pane has two
   // unrelated hosts (the Board drawer and the Manager stage) and both would

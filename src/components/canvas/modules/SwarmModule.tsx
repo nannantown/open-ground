@@ -38,7 +38,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
-import { Network, Inbox, Boxes, Gauge, ShieldCheck, X, Power, Eye, type LucideIcon } from 'lucide-react'
+import { Network, Inbox, Boxes, Gauge, X, Power, Eye, type LucideIcon } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -63,8 +63,6 @@ import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { useSupplyDesk } from './useSupplyDesk'
 import { SwarmManagerPane } from './SwarmManagerPane'
 import { useLandedKpi } from './useLandedKpi'
-import { SwarmOverseerPane } from './SwarmOverseerPane'
-import { deriveOverseerAlerts } from './swarmOverseerFeed'
 import { SwarmPowerStatus, SwarmPowerSwitch } from './SwarmPowerBar'
 import { ExecutionModeMenu } from './ExecutionModeToggle'
 import { SwarmOnboarding } from './SwarmOnboarding'
@@ -222,13 +220,14 @@ const saveManager = (projectId: string, manager: SwarmManager | null) => {
   }
 }
 
-// The four faces of the main area, switched by the tab row: the supply
-// conversation desk, the commander (司令官) dashboard that drives the autonomous
-// engine, the worker tiles, and the overseer (監督) inbox — the swarm's
-// questions + needs-attention feed, read when opened (never pinned over the
-// other views). (The old todo rail was removed — todos live on the Board tab
-// now; the old Flow visualization tab was removed too — its needs-attention
-// content lives on the overseer tab.)
+// The three faces of the main area, switched by the tab row: the supply
+// conversation desk (the president — the one seat the owner talks to), the
+// commander (司令官) dashboard that drives the autonomous engine, and the worker
+// tiles. (The overseer (監督) tab was removed 2026-09-23: its questions +
+// needs-attention feed duplicated what the president is told — supplyNotice.ts
+// keeps those while the desk is closed and tells them when it opens; the bell
+// and the OS toast still carry them too. The old todo rail and Flow tab were
+// removed earlier.)
 //
 // The id list + type is canonical in types.ts (SWARM_PANE_IDS) so the persisted
 // Settings.swarmPaneOrder and the reorder helpers share one source of truth; the
@@ -317,12 +316,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const [manager, setManager] = useState<SwarmManager | null>(() => loadManager(project.id))
   const [managerBusy, setManagerBusy] = useState(false)
 
-  // OPEN escalation count, reported up by the overseer pane's inbox poll (the
-  // pane stays mounted-but-hidden while another view is active, so this stays
-  // live). Drives the overseer tab badge AND keeps the pre-start onboarding from
-  // hiding a leftover question (see swarmIdle below).
-  const [escCount, setEscCount] = useState(0)
-
   // The autonomous engine's state — polled ONCE here (the shared hook) so BOTH
   // the worker tab and the manager dashboard read the same snapshot. `realWorkers`
   // is the SERVER-TRUTH worker list (GET /api/swarm/workers): live PTYs + the
@@ -332,9 +325,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // `POST /api/swarm/worker` (curl/SDK) outside both of those name-based sources.
   const {
     engine,
-    fatalNotifications,
-    handledFatalIds,
-    markFatalHandled,
     realWorkers,
     available: engineAvailable,
     busy: engineBusy,
@@ -453,7 +443,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setBusyWorktrees(new Set())
     setPendingRestarts(new Map())
     setRemovedWorktrees(new Set())
-    setEscCount(0)
     setDismissedEnvIssuesKey(null)
     setGitInitBusy(false)
     setGitInitDone(false)
@@ -1052,51 +1041,17 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       return { ...w, runtime: 'sdk' as const, sdkSessionId: pending.sdkSessionId, terminalId: undefined }
     })
 
-  // OFF / first-run: the swarm is FULLY idle — the engine isn't running, no
-  // supply / commander / worker session exists, AND no escalation is awaiting an
-  // answer. In that state we replace the tab surface with the central onboarding
-  // (条件1/5) so a first-time owner sees the three roles + the work-flow + what
-  // Start does BEFORE pressing it. The header row stays above it (its Start, and
-  // the onboarding's, run the SAME powerSwarm composition). The moment anything
-  // comes up, the normal tabs return. escCount is part of the guard because a
-  // LEFTOVER question from the last run must not hide behind the onboarding —
-  // the tab surface (with the overseer badge) must win.
-  // An UNDISMISSED alert also wins over the onboarding (2026-08-04). Several
-  // fatal events fire precisely when nothing is up — 'engine-resume-suppressed'
-  // means the engine did NOT come back at boot, so `running` is false, there are
-  // no desks and no workers — and the onboarding replaced the whole tab surface,
-  // including the needs-attention feed that carries the explanation. The alert
-  // existed only in the Ground bell, on the one screen the owner opens to ask
-  // "why is nothing running?".
-  //
-  // …but only a THIS-PROJECT alert may do so (2026-08-04, second pass). Several
-  // fatal events carry no projectPath at all — the Electron self-update's
-  // rollback / canary-failed, the boot-time data-integrity check, and the two
-  // app-wide resume suppressions — and `useSwarmEngine` shows a project-less
-  // notification on EVERY project by design (they concern the whole app). Left in
-  // this term, one undismissed rollback replaced the first-run onboarding with an
-  // empty tab surface on every project the owner had never touched swarm in, and
-  // it never self-clears. The feed still shows those rows; they just do not
-  // hijack a screen that is trying to explain what swarm IS.
-  //
-  // ⚠ SHIPPED WITHOUT A GUARD, deliberately. I could not build a jsdom case that
-  // goes red with this filter removed — the mounted-but-hidden overseer pane puts
-  // the alert row in the document either way, and the onboarding kept rendering
-  // in the un-filtered build too, so every assertion I tried passed both ways. A
-  // test that cannot fail is worse than none (CLAUDE.md §1), so there is none;
-  // this comment is the record. The reachability argument is concrete: those
-  // events carry no projectPath, useSwarmEngine shows a project-less
-  // notification on every project, and none of them self-clears.
-  const pendingAlerts = deriveOverseerAlerts(engine, fatalNotifications, handledFatalIds).filter(
-    (a) => a.source !== 'fatal' || a.fatal?.projectPath === project.path,
-  ).length
-  const swarmIdle =
-    !engine.running &&
-    !supply &&
-    !manager &&
-    allWorkers.length === 0 &&
-    escCount === 0 &&
-    pendingAlerts === 0
+  // OFF / first-run: the swarm is FULLY idle — the engine isn't running and no
+  // supply / commander / worker session exists. In that state we replace the tab
+  // surface with the central onboarding (条件1/5) so a first-time owner sees the
+  // three roles + the work-flow + what Start does BEFORE pressing it. The header
+  // row stays above it (its Start, and the onboarding's, run the SAME powerSwarm
+  // composition). The moment anything comes up, the normal tabs return.
+  // (Open questions and fatal alerts used to keep the tabs up so the overseer
+  // tab could show them. That tab is gone (2026-09-23): Start opens the
+  // president's desk, which is then told every open question and every notice
+  // held while it was closed — supplyNotice.catchUpSupplyDesks.)
+  const swarmIdle = !engine.running && !supply && !manager && allWorkers.length === 0
 
   // Persist a drag/keyboard reorder to Settings.swarmPaneOrder (条件2). moveTab
   // (shared with the per-project tab row) computes the new order; the POST is
@@ -1156,14 +1111,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       label: t('projectPanel.swarm.workersTab'),
       badge: allWorkers.length > 0 ? allWorkers.length : undefined,
       badgeTone: 'line',
-    },
-    overseer: {
-      icon: ShieldCheck,
-      label: t('projectPanel.swarm.overseer.tab'),
-      // An open question needs the OWNER's action — the accent badge is what
-      // makes it noticeable now that the inbox is no longer pinned over the tabs.
-      badge: escCount > 0 ? escCount : undefined,
-      badgeTone: 'accent',
     },
   }
   const orderedTabs = order.map((view) => ({ view, ...paneMeta[view] }))
@@ -1495,31 +1442,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         </div>
       )}
 
-      {/* ── Overseer pane (C1): the swarm's questions + needs-attention feed. ──
-          ALWAYS mounted (hidden unless its tab is active): its inbox poll feeds
-          the overseer tab badge AND the swarmIdle escape above — a leftover
-          question from the last run must not hide behind the onboarding. The
-          old pinned-above-the-tabs banner is gone: like the commander and
-          worker views, this is read when its tab is opened. Fail-closed lives
-          server-side; visibility lives here. */}
-      <div
-        className={
-          !swarmIdle && mainView === 'overseer'
-            ? 'flex min-h-0 min-w-0 flex-1 flex-col'
-            : 'hidden'
-        }
-      >
-        <SwarmOverseerPane
-          projectPath={project.path}
-          engine={engine}
-          fatalNotifications={fatalNotifications}
-          handledFatalIds={handledFatalIds}
-          onMarkFatalHandled={markFatalHandled}
-          openCount={escCount}
-          onOpenCountChange={setEscCount}
-        />
-      </div>
-
       {/* ── Tab surface: supply desk ⇆ commander ⇆ worker tiles ───────────── */}
       {/* No bg on this wrapper: the empty/CTA states below are PAPER surfaces
           (bg-bg) so the paper ink tokens keep 4.5:1+ contrast. The dark terminal
@@ -1571,7 +1493,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
             {engineError ? <p className="mt-3 text-meta text-accent">{engineError}</p> : null}
           </div>
         </div>
-      ) : mainView === 'overseer' ? null : (
+      ) : (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {mainView === 'supply' ? (
           supply ? (

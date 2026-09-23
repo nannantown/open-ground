@@ -27,6 +27,25 @@
 //     toast — progress is conversation-only (the owner's 3-tier rule).
 //   Delivered in that order, one line per desk per pass;
 //   • CLEARED the moment it is delivered;
+//   • KEPT while the president's desk is closed (owner decision 2026-09-23 —
+//     the 監督 tab is gone, so the desk is the ONLY place these are retold). An
+//     important notice has no TTL: it waits for the next desk and is told then,
+//     with its age attached. A QUESTION is kept only while it is still open —
+//     answering/dismissing it removes its line ({@link forgetSupplyQuestion}),
+//     and a NEW desk (a fresh conversation) is re-told every question still
+//     waiting on the owner, read from the escalation store itself
+//     ({@link catchUpSupplyDesks});
+//   • PERSISTED (the important lane only) to `~/.openground/supply-notice-queue.json`,
+//     so an app restart — a self-update right after a delivery, above all —
+//     loses neither a question nor a fatal, hold or delivery that the desk had
+//     not heard yet. What was delivered is removed from the file, so a restart
+//     does not retell it either;
+//   • BUNDLED: several queued important notices go out as ONE line (one desk
+//     turn), the WHOLE line kept within {@link SUPPLY_NOTICE_LINE_MAX} — the
+//     longest single notice, i.e. what is known to type cleanly into a desk.
+//   (Replies and the progress digest are still memory-only: a restart loses a
+//   commander reply queued for a closed desk — the bell keeps it via
+//   onReplyExpired only when it ages out in-process.)
 //   • HELD, never forced, when the desk is generating / half-typed / showing a
 //     menu ({@link noticeDeliverable} — the same three refusals, byte for byte).
 //     A held notice is simply re-offered on the next pass. Missing is free.
@@ -49,7 +68,9 @@
 // destructiveness is what the commander's NUDGE is for, and the reason it needs
 // four conservative gates in front of it while this needs none.
 
-import { resolve } from 'path'
+import { basename, dirname, join, resolve } from 'path'
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'fs'
+import { openGroundHome } from './paths'
 import { noticeDeliverable } from './deskDeliverable'
 import { SUPPLY_DESK_LABEL } from './swarmSupply'
 import { listOwnerDeskTerminals, isTerminalProcessAlive, getTerminalScreen, writeInput } from './terminal'
@@ -149,9 +170,22 @@ export const supplyNoticeLine = (summary: string): string =>
 export const supplyProgressLine = (items: readonly string[]): string =>
   `${SUPPLY_NOTICE_PREFIX}${sanitizeSupplyNotice(`進捗: ${items.join(' / ')}`)} ${SUPPLY_PROGRESS_TAIL}`
 
-/** How many undelivered IMPORTANT notices a project may hold. Past it the
- *  OLDEST is dropped — the bell already holds every one of them. */
-export const SUPPLY_NOTICE_CAP = 8
+/** How many undelivered IMPORTANT notices a project may hold. Sized for a whole
+ *  absence (the desk may stay closed for a day): past it the OLDEST is dropped —
+ *  the bell still holds it, and an open question is re-read from the store when
+ *  the next desk opens ({@link catchUpSupplyDesks}), so the loss is bounded to
+ *  news. */
+export const SUPPLY_NOTICE_CAP = 30
+
+/** A notice delivered at least this long after it was raised says so — 「約2時間前」
+ *  — so a desk opened in the evening does not retell a morning event as news. */
+export const SUPPLY_NOTICE_AGE_LABEL_MS = 10 * 60 * 1000
+
+/** Plain-Japanese age, e.g. 「約15分前」「約3時間前」. Pure. */
+export const noticeAgeLabel = (ms: number): string => {
+  const min = Math.round(ms / 60_000)
+  return min < 60 ? `約${min}分前` : `約${Math.round(min / 60)}時間前`
+}
 
 /** How many distinct items one progress digest carries. Past it the oldest
  *  item drops (the Board still shows everything). */
@@ -200,9 +234,15 @@ export const SUPPLY_REPLY_CAP = 5
  * the first time a fire site was reworded.
  */
 export const supplyNoticeFor = (n: AppNotification): string | null => {
-  if (n.kind === 'swarm-fatal' && n.swarmFatal) return supplyNoticeLine(n.swarmFatal.detail)
+  const text = supplyNoticeText(n)
+  return text === null ? null : supplyNoticeLine(text)
+}
+
+/** The raw summary {@link supplyNoticeFor} wraps, or null. Pure. */
+const supplyNoticeText = (n: AppNotification): string | null => {
+  if (n.kind === 'swarm-fatal' && n.swarmFatal) return n.swarmFatal.detail
   if (n.kind === 'swarm-info' && n.swarmInfo && SUPPLY_NOTICE_INFO_EVENTS.has(n.swarmInfo.event)) {
-    return supplyNoticeLine(n.swarmInfo.detail)
+    return n.swarmInfo.detail
   }
   return null
 }
@@ -227,6 +267,10 @@ export interface SupplyNoticeDeps {
    *  reply is the answer to a question the OWNER asked, so dropping it silently
    *  leaves them waiting forever for something that already arrived. */
   onReplyExpired: (projectPath: string, line: string) => void
+  /** The questions currently waiting on the OWNER in this project (open, owner
+   *  lane), as {escalation id, owner-facing detail}. Read by
+   *  {@link catchUpSupplyDesks} when a new desk appears. */
+  openQuestions: (projectPath: string) => Promise<{ id: string; detail: string; at?: number }[]>
 }
 
 const defaultDeps: SupplyNoticeDeps = {
@@ -246,7 +290,7 @@ const defaultDeps: SupplyNoticeDeps = {
       .map((d) => ({ id: d.id, cwd: d.cwd })),
   screen: getTerminalScreen,
   write: writeInput,
-  now: Date.now,
+  now: () => Date.now(),
   // Lazy + dynamic on purpose: swarmNotifications imports THIS module (it calls
   // noticeToSupply for every notification it creates), so a static import back
   // would close a cycle at module-init time. Fire-and-forget — a failed bell
@@ -261,6 +305,18 @@ const defaultDeps: SupplyNoticeDeps = {
         }),
       )
       .catch(() => {})
+  },
+  // Dynamic for the same reason: swarmEscalations imports THIS module (to drop
+  // an answered question's line), so a static import back would be a cycle.
+  openQuestions: async (projectPath) => {
+    const { listOpenOwnerQuestionsStrict, ownerQuestionDetail } = await import('./swarmEscalations')
+    const open = await listOpenOwnerQuestionsStrict(projectPath)
+    return open.map((e) => {
+      // When it became the OWNER's question (a commander-lane one handed on
+      // later is told by that time, not by when a worker first asked it).
+      const at = Date.parse(e.raisedToOwnerAt ?? e.createdAt)
+      return { id: e.id, detail: ownerQuestionDetail(e), ...(Number.isFinite(at) ? { at } : {}) }
+    })
   },
 }
 
@@ -287,10 +343,13 @@ const deskKey = (p: string): string => {
 }
 
 /**
- * How long an undelivered notice stays worth saying. Past this it is DROPPED,
- * not delivered late.
+ * How long an undelivered PROGRESS digest or commander REPLY stays worth saying.
+ * Past this progress is DROPPED and a reply is handed to the bell. IMPORTANT
+ * notices no longer expire (2026-09-23 — the desk is now their only retelling;
+ * see the file header): the staleness below is solved for them by withdrawing
+ * an answered question ({@link forgetSupplyQuestion}) and by the age label.
  *
- * WHY IT EXPIRES AT ALL. The commander's twin slot lives on
+ * WHY IT EXPIRES AT ALL (the original reasoning, still true of progress). The commander's twin slot lives on
  * `ProjectEngine.managerNotice` and is recomputed from live state every pass, so
  * it cannot go stale. This one is a fire-and-forget push, so without a clock a
  * notice for a project with no supply desk waits for the LIFE OF THE PROCESS and
@@ -308,8 +367,15 @@ export const SUPPLY_NOTICE_TTL_MS = 30 * 60 * 1000
 
 interface PendingNotice {
   line: string
-  /** When it was raised — the input to {@link SUPPLY_NOTICE_TTL_MS}. */
+  /** The sanitized summary (IMPORTANT lane) — what a bundle is built from and
+   *  what is persisted. */
+  text?: string
+  /** When it was raised — the input to {@link SUPPLY_NOTICE_TTL_MS} (replies,
+   *  progress) and to the age label (important). */
   at: number
+  /** The question this line retells — set on escalation-open/-reminder, so the
+   *  line can be withdrawn once the question is answered. */
+  escalationId?: string
 }
 
 /** The IMPORTANT queue per project. On `globalThis` so it survives `tsx watch`
@@ -322,6 +388,14 @@ declare global {
   var __openground_supply_reply: Map<string, PendingNotice[]> | undefined
   // eslint-disable-next-line no-var
   var __openground_supply_progress: Map<string, { items: string[]; at: number }> | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_seen_desks: Set<string> | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_told: Map<string, Set<string>> | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_resolved: Set<string> | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_q_loaded: { loaded: boolean } | undefined
 }
 const pending: Map<string, PendingNotice[]> =
   globalThis.__openground_supply_notice_q ?? (globalThis.__openground_supply_notice_q = new Map())
@@ -333,15 +407,199 @@ const progress: Map<string, { items: string[]; at: number }> =
 const replies: Map<string, PendingNotice[]> =
   globalThis.__openground_supply_reply ?? (globalThis.__openground_supply_reply = new Map())
 
-export const resetSupplyNoticeState = (): void => {
+/** Desk terminal ids already caught up ({@link catchUpSupplyDesks}). */
+const seenDesks: Set<string> =
+  globalThis.__openground_supply_seen_desks ?? (globalThis.__openground_supply_seen_desks = new Set())
+
+/** Per desk terminal id: the questions (escalation ids) already typed into it,
+ *  so the catch-up never retells one this conversation has already heard. */
+const toldTo: Map<string, Set<string>> =
+  globalThis.__openground_supply_told ?? (globalThis.__openground_supply_told = new Map())
+
+/** Questions answered/dismissed recently — refused by pushImportant. */
+const resolvedQuestions: Set<string> =
+  globalThis.__openground_supply_resolved ?? (globalThis.__openground_supply_resolved = new Set())
+const RESOLVED_QUESTIONS_MAX = 500
+
+/** The queue key for a fatal that names no project (app-wide: self-update
+ *  rollback / canary-failed, engine-resume-suppressed, data-integrity). Told once,
+ *  to whichever president desk can take it first. Not a path, so never deskKey'd. */
+const APP_WIDE = '*app-wide*'
+
+/** Whether the persisted important queue has been read into `pending` in this
+ *  process (globalThis — a tsx reload keeps both the map and the flag). */
+const diskState: { loaded: boolean } =
+  globalThis.__openground_supply_q_loaded ?? (globalThis.__openground_supply_q_loaded = { loaded: false })
+
+const queueFile = (): string => join(openGroundHome(), 'supply-notice-queue.json')
+
+/** Warn ONCE per distinct message, so a failure that repeats every pass (a
+ *  store that stays unreadable) is visible in the log without flooding it. */
+const warned: Set<string> = new Set()
+const warnOnce = (key: string, msg: string): void => {
+  if (warned.has(key)) return
+  warned.add(key)
+  console.warn(`[supplyNotice] ${msg}`)
+}
+
+/** Append without duplicating (two QUESTIONS are the same only if they are the
+ *  same question; other notices dedup on their text), then cap — evicting news
+ *  before questions. Shared by the push path and the disk merge. */
+const addUnique = (q: PendingNotice[], n: PendingNotice): void => {
+  const dup = q.some((p) =>
+    n.escalationId !== undefined && p.escalationId !== undefined ? p.escalationId === n.escalationId : p.line === n.line,
+  )
+  if (!dup) q.push(n)
+  // Over the cap, news goes before questions: a question dropped here would not
+  // be re-read for a desk that was already caught up.
+  while (q.length > SUPPLY_NOTICE_CAP) {
+    const news = q.findIndex((p) => !p.escalationId)
+    q.splice(news >= 0 ? news : 0, 1)
+  }
+}
+
+/**
+ * Read the persisted important queue into memory — once per process, and ONLY
+ * once it has actually been read. The same rule as the strict escalation read
+ * (S1), for the same reason: a tolerant "any error = empty" load followed by the
+ * next write-through would OVERWRITE the file with an empty queue and destroy
+ * every held fatal / hold / delivery on one transient error.
+ *   • ENOENT → genuinely empty (first run); loaded.
+ *   • a read error (EIO, EMFILE, EACCES …) → NOT loaded: retried on the next
+ *     call, and {@link savePending} writes nothing meanwhile (what is queued in
+ *     memory is merged in when the read finally succeeds).
+ *   • unparseable / wrong shape → the file is MOVED ASIDE to `.corrupt-<ts>`
+ *     (kept for inspection, never deleted) and the queue starts fresh; loaded.
+ */
+const ensureLoaded = (): void => {
+  if (diskState.loaded) return
+  let file: string
+  let raw: string
+  try {
+    file = queueFile()
+    raw = readFileSync(file, 'utf8')
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code
+    if (code === 'ENOENT') {
+      diskState.loaded = true
+      return
+    }
+    // No pinned home (tests) has no code and nothing to protect — treat as
+    // empty so the rest of the channel works.
+    if (!code) {
+      diskState.loaded = true
+      return
+    }
+    warnOnce(`load:${code}`, `could not read the saved notice queue (${code}); will retry, not overwriting it`)
+    return
+  }
+  let entries: unknown[]
+  try {
+    const parsed = JSON.parse(raw) as { queues?: unknown }
+    if (!Array.isArray(parsed?.queues)) throw new Error('not {queues: []}')
+    entries = parsed.queues
+  } catch (e) {
+    try {
+      renameSync(file, `${file}.corrupt-${Date.now()}`)
+    } catch {
+      // Could not move it aside — do NOT overwrite it; try again next time.
+      warnOnce('load:corrupt-stuck', `saved notice queue is damaged and could not be moved aside: ${String(e)}`)
+      return
+    }
+    warnOnce('load:corrupt', `saved notice queue was damaged; moved aside and starting fresh`)
+    diskState.loaded = true
+    return
+  }
+  // Merge: what was on disk comes first (it is older), then anything queued in
+  // memory while the read was failing. An answered question is not revived.
+  const memory = new Map(pending)
+  pending.clear()
+  for (const entry of entries) {
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) continue
+    const q: PendingNotice[] = []
+    for (const it of entry[1] as Record<string, unknown>[]) {
+      if (!it || typeof it.text !== 'string' || typeof it.at !== 'number') continue
+      const escalationId = typeof it.escalationId === 'string' && it.escalationId ? it.escalationId : undefined
+      if (escalationId && resolvedQuestions.has(escalationId)) continue
+      addUnique(q, { text: it.text, line: supplyNoticeLine(it.text), at: it.at, ...(escalationId ? { escalationId } : {}) })
+    }
+    if (q.length) pending.set(entry[0], q)
+  }
+  for (const [k, mq] of Array.from(memory)) {
+    const q = pending.get(k) ?? []
+    for (const n of mq) addUnique(q, n)
+    if (q.length) pending.set(k, q)
+  }
+  diskState.loaded = true
+  if (memory.size) savePending()
+}
+
+let tmpSeq = 0
+
+/** Write the important queue through — the repo's atomic-write discipline
+ *  (atomicWrite.ts) in a synchronous form, because every caller is a synchronous
+ *  pass: a UNIQUE temp name (two processes on one home — dev beside the app —
+ *  never share one), data fsync'd before the rename (a power cut cannot publish
+ *  an empty file), owner-only mode (it holds question text). Never while the
+ *  file has not been read ({@link ensureLoaded}) — that is how a write-through
+ *  would erase what it never saw. Does not create the home dir (the home
+ *  migration owns that). Best effort. */
+const savePending = (): void => {
+  if (!diskState.loaded) return
+  let tmp: string | null = null
+  try {
+    const file = queueFile()
+    const queues = Array.from(pending, ([k, q]) => [
+      k,
+      q.map((p) => ({ text: p.text ?? '', at: p.at, ...(p.escalationId ? { escalationId: p.escalationId } : {}) })),
+    ])
+    tmp = join(dirname(file), `.${basename(file)}.tmp-${process.pid}-${tmpSeq++}`)
+    const fd = openSync(tmp, 'w', 0o600)
+    try {
+      writeSync(fd, JSON.stringify({ version: 1, queues }))
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+    renameSync(tmp, file)
+    tmp = null
+  } catch {
+    /* best effort */
+  } finally {
+    if (tmp) {
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/** Tests only. `keepDisk:true` = what an app RESTART does: the in-memory state is
+ *  gone, the persisted important queue is read back on next use. */
+export const resetSupplyNoticeState = (opts: { keepDisk?: boolean } = {}): void => {
+  diskState.loaded = false
+  warned.clear()
+  if (!opts.keepDisk) {
+    try {
+      rmSync(queueFile(), { force: true })
+    } catch {
+      /* no pinned home — nothing persisted */
+    }
+  }
+  toldTo.clear()
+  resolvedQuestions.clear()
   pending.clear()
   replies.clear()
   progress.clear()
+  seenDesks.clear()
 }
 
 /** The NEXT news line each project would hear (important first, else the
  *  progress digest) — for tests and diagnostics. */
 export const peekSupplyNotices = (): ReadonlyMap<string, string> => {
+  ensureLoaded()
   const out = new Map<string, string>()
   for (const [k, q] of Array.from(pending)) if (q[0]) out.set(k, q[0].line)
   for (const [k, p] of Array.from(progress)) if (!out.has(k) && p.items.length) out.set(k, supplyProgressLine(p.items))
@@ -349,8 +607,10 @@ export const peekSupplyNotices = (): ReadonlyMap<string, string> => {
 }
 
 /** Every queued IMPORTANT line per project, oldest first — for tests. */
-export const peekSupplyImportant = (): ReadonlyMap<string, readonly string[]> =>
-  new Map(Array.from(pending, ([k, v]) => [k, v.map((n) => n.line)] as const))
+export const peekSupplyImportant = (): ReadonlyMap<string, readonly string[]> => {
+  ensureLoaded()
+  return new Map(Array.from(pending, ([k, v]) => [k, v.map((n) => n.line)] as const))
+}
 
 /** The accumulated progress items per project — for tests. */
 export const peekSupplyProgress = (): ReadonlyMap<string, readonly string[]> =>
@@ -369,19 +629,15 @@ export const peekSupplyReplies = (): ReadonlyMap<string, readonly string[]> =>
 export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): string[] => {
   const deps = { ...defaultDeps, ...partial }
   const delivered: string[] = []
+  ensureLoaded()
   // BOTH lanes, or the pass bails before it ever looks at the replies — which
   // it did, and the reply tests caught it: with no news queued, a commander's
   // answer sat in the queue until some unrelated notice happened to arrive.
   if (pending.size === 0 && replies.size === 0 && progress.size === 0) return delivered
   const now = deps.now()
-  // Stale news is dropped rather than delivered late — see SUPPLY_NOTICE_TTL_MS.
-  // Done over the whole map, not just the desks seen this pass, so a project that
-  // never grows a desk cannot accumulate entries forever.
-  for (const [key, q] of Array.from(pending)) {
-    const live = q.filter((p) => now - p.at <= SUPPLY_NOTICE_TTL_MS)
-    if (live.length === 0) pending.delete(key)
-    else pending.set(key, live)
-  }
+  // Stale PROGRESS is dropped rather than delivered late — see
+  // SUPPLY_NOTICE_TTL_MS. IMPORTANT notices are NOT: they wait for the next desk
+  // (file header), bounded by SUPPLY_NOTICE_CAP.
   for (const [key, p] of Array.from(progress)) {
     if (now - p.at > SUPPLY_NOTICE_TTL_MS) progress.delete(key)
   }
@@ -407,11 +663,19 @@ export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): str
   } catch {
     return delivered // no desk list, nothing to do; everything stays queued
   }
+  // ONE desk per project: the first (= newest, see defaultDeps.desks) desk of a
+  // project is "the" president. An older orphan desk in the same project must
+  // not take a line just because the newest one is busy — the owner is looking
+  // at the newest one and would never hear it.
+  const served = new Set<string>()
+  // Project-less fatals (APP_WIDE) go to the first desk that can take them.
   for (const desk of desks) {
     // PER DESK, not around the loop: one throwing screen()/write() must not
     // abort delivery for every project after it in the list.
     try {
       const key = deskKey(desk.cwd)
+      if (served.has(key)) continue
+      served.add(key)
       // ONE line per desk per pass, and a REPLY goes before news. The order is
       // not a preference: the owner is sitting there having been told
       // 「聞いてきます」, and the desk starts generating the moment it receives a
@@ -420,20 +684,29 @@ export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): str
       // is the one that ends.
       const queue = replies.get(key)
       const reply = queue?.[0] ?? null
-      const important = reply ? null : (pending.get(key)?.[0] ?? null)
+      // App-wide fatals first: they are rare and concern the whole app.
+      const importantKey = reply ? null : pending.get(APP_WIDE)?.length ? APP_WIDE : pending.get(key)?.length ? key : null
+      const bundle = importantKey ? takeBundle(pending.get(importantKey) ?? [], now) : null
+      const important = bundle ? bundle.items[0] : null
       const digest = reply || important ? null : progress.get(key)
+      const importantLine = bundle?.line
       const line =
-        reply?.line ?? important?.line ?? (digest && digest.items.length ? supplyProgressLine(digest.items) : null)
+        reply?.line ?? importantLine ?? (digest && digest.items.length ? supplyProgressLine(digest.items) : null)
       if (!line) continue
       if (!noticeDeliverable(deps.screen(desk.id))) continue // busy / half-typed / menu — next pass
       if (!deps.write(desk.id, `${line}\r`)) continue
       if (reply && queue) {
         queue.shift()
         if (queue.length === 0) replies.delete(key)
-      } else if (important) {
-        const q = pending.get(key)
-        q?.shift()
-        if (!q || q.length === 0) pending.delete(key)
+      } else if (bundle) {
+        const told = toldTo.get(desk.id) ?? new Set<string>()
+        for (const it of bundle.items) if (it.escalationId) told.add(it.escalationId)
+        toldTo.set(desk.id, told)
+        const ik = importantKey ?? key
+        const q = pending.get(ik)
+        q?.splice(0, bundle.items.length)
+        if (!q || q.length === 0) pending.delete(ik)
+        savePending()
       } else {
         progress.delete(key)
       }
@@ -445,12 +718,54 @@ export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): str
   return delivered
 }
 
-/** Append to a project's IMPORTANT queue (dedup on identical line, cap). */
-const pushImportant = (key: string, line: string, at: number): void => {
+/** Append to a project's IMPORTANT queue (dedup on identical line or on the
+ *  same question — a reminder never queues behind its own unsaid question; cap). */
+const pushImportant = (key: string, summary: string, at: number, escalationId?: string): void => {
+  ensureLoaded()
+  // A question answered while its line was being composed (catch-up and the S11
+  // reminder both read the store, then await) must not be queued afterwards.
+  if (escalationId && resolvedQuestions.has(escalationId)) return
+  const text = sanitizeSupplyNotice(summary)
+  if (!text) return
+  const line = supplyNoticeLine(text)
   const q = pending.get(key) ?? []
-  if (!q.some((p) => p.line === line)) q.push({ line, at })
-  while (q.length > SUPPLY_NOTICE_CAP) q.shift()
+  addUnique(q, { line, text, at, ...(escalationId ? { escalationId } : {}) })
   pending.set(key, q)
+  savePending()
+}
+
+/** The longest WHOLE line a bundle may be: the longest single notice (prefix +
+ *  a {@link SUPPLY_NOTICE_MAX} summary + tail) — the size already typed into
+ *  desks; a longer line risks its Enter being dropped, and a bundle is counted
+ *  as told once written. A notice that does not fit waits for the next bundle. */
+export const SUPPLY_NOTICE_LINE_MAX = SUPPLY_NOTICE_PREFIX.length + SUPPLY_NOTICE_MAX + 1 + SUPPLY_NOTICE_TAIL.length
+
+const SUPPLY_BUNDLE_TAIL = '(自動の知らせ・まとめ。件ごとに平易に短く。専門用語・ID不可)'
+
+/** The next line for a queue: its oldest notice, plus as many following ones as
+ *  fit in {@link SUPPLY_NOTICE_LINE_MAX} — so a backlog (a desk opening after a
+ *  day away) costs a few turns of the owner's conversation, not one per notice.
+ *  Each item carries its own age. Pure. */
+const takeBundle = (q: readonly PendingNotice[], now: number): { items: PendingNotice[]; line: string } | null => {
+  const first = q[0]
+  if (!first) return null
+  const aged = (p: PendingNotice) =>
+    `${now - p.at >= SUPPLY_NOTICE_AGE_LABEL_MS ? `(${noticeAgeLabel(now - p.at)}) ` : ''}${p.text ?? sanitizeSupplyNotice(p.line)}`
+  const bundleLine = (its: readonly PendingNotice[]) =>
+    `${SUPPLY_NOTICE_PREFIX}(${its.length}件まとめて) ${its.map((p, i) => `[${i + 1}] ${aged(p)}`).join(' ')} ${SUPPLY_BUNDLE_TAIL}`
+  const items = [first]
+  for (const p of q.slice(1)) {
+    if (bundleLine([...items, p]).length > SUPPLY_NOTICE_LINE_MAX) break
+    items.push(p)
+  }
+  if (items.length === 1) {
+    const line =
+      now - first.at >= SUPPLY_NOTICE_AGE_LABEL_MS
+        ? first.line.replace(SUPPLY_NOTICE_PREFIX, `${SUPPLY_NOTICE_PREFIX}(${noticeAgeLabel(now - first.at)}の知らせ) `)
+        : first.line
+    return { items, line }
+  }
+  return { items, line: bundleLine(items) }
 }
 
 /**
@@ -467,9 +782,8 @@ export const queueSupplyNotice = (
   summary: string,
   deps: Partial<SupplyNoticeDeps> = {},
 ): void => {
-  const line = supplyNoticeLine(summary)
-  if (!projectPath || line.length === 0) return
-  pushImportant(deskKey(projectPath), line, (deps.now ?? Date.now)())
+  if (!projectPath) return
+  pushImportant(deskKey(projectPath), summary, (deps.now ?? Date.now)())
   flushSupplyNotices(deps)
 }
 
@@ -548,8 +862,91 @@ export const queueSupplyReply = (
  */
 export const noticeToSupply = (n: AppNotification, deps: Partial<SupplyNoticeDeps> = {}): void => {
   const project = noticeProject(n)
-  const line = supplyNoticeFor(n)
-  if (!project || !line) return
-  pushImportant(deskKey(project), line, (deps.now ?? Date.now)())
+  const text = supplyNoticeText(n)
+  if (text === null) return
+  // A project-less FATAL still has to reach the owner (the 監督 feed that used to
+  // show it on every project is gone) — it rides the app-wide lane. Project-less
+  // info events stay bell-only.
+  if (!project && n.kind !== 'swarm-fatal') return
+  const escalationId = n.kind === 'swarm-info' ? n.swarmInfo?.escalationId : undefined
+  pushImportant(project ? deskKey(project) : APP_WIDE, text, (deps.now ?? Date.now)(), escalationId || undefined)
   flushSupplyNotices(deps)
+}
+
+/**
+ * Withdraw every queued line that retells this question. Called when it is
+ * answered or dismissed (swarmEscalations.ts) — this is what makes it safe for
+ * questions to have no TTL: an undelivered question can wait for a closed desk
+ * as long as it takes, and can never be told after it stopped being true.
+ */
+export const forgetSupplyQuestion = (escalationId: string): void => {
+  resolvedQuestions.add(escalationId)
+  // Bounded: only the race window (one store read) needs the memory.
+  while (resolvedQuestions.size > RESOLVED_QUESTIONS_MAX) {
+    const oldest = resolvedQuestions.values().next().value
+    if (oldest === undefined) break
+    resolvedQuestions.delete(oldest)
+  }
+  ensureLoaded()
+  let changed = false
+  for (const [key, q] of Array.from(pending)) {
+    const live = q.filter((p) => p.escalationId !== escalationId)
+    if (live.length === q.length) continue
+    changed = true
+    if (live.length === 0) pending.delete(key)
+    else pending.set(key, live)
+  }
+  if (changed) savePending()
+}
+
+/**
+ * The president's desk just OPENED (or was replaced): tell it every question
+ * still waiting on the owner, then deliver as usual. Rides the supply loop
+ * (60s). A desk is caught up once per terminal id — a reloaded browser tab
+ * re-adopting the same live desk is not a new conversation and hears nothing
+ * twice; a restarted desk is, and hears them again (it has no memory of them).
+ *
+ * Read from the escalation STORE as well as this module's (persisted) queue: the
+ * store is where an unanswered question actually lives, and a question already
+ * told to an EARLIER desk must be told to this new conversation again. Strict
+ * read — an unreadable store throws, the desk is un-marked, and the next pass
+ * retries (a tolerant read would look empty and mark it caught up for good).
+ * A question already queued is not queued twice.
+ */
+export const catchUpSupplyDesks = async (partial: Partial<SupplyNoticeDeps> = {}): Promise<void> => {
+  const deps = { ...defaultDeps, ...partial }
+  // Held notices first, synchronously — a slow or failing store read must not
+  // delay what is already queued.
+  flushSupplyNotices(partial)
+  let desks: { id: string; cwd: string }[] = []
+  try {
+    desks = deps.desks()
+  } catch {
+    return
+  }
+  const live = new Set(desks.map((d) => d.id))
+  for (const id of Array.from(seenDesks)) if (!live.has(id)) seenDesks.delete(id)
+  for (const id of Array.from(toldTo.keys())) if (!live.has(id)) toldTo.delete(id)
+  let added = false
+  for (const desk of desks) {
+    if (seenDesks.has(desk.id)) continue
+    // Marked BEFORE the await so an overlapping pass cannot catch it up twice;
+    // unmarked on failure so the next pass retries.
+    seenDesks.add(desk.id)
+    try {
+      const at = deps.now()
+      for (const qn of await deps.openQuestions(desk.cwd)) {
+        if (toldTo.get(desk.id)?.has(qn.id)) continue // heard it at queue time
+        // Stamped with when it was ASKED, so an old question is told as old.
+        pushImportant(deskKey(desk.cwd), qn.detail, qn.at ?? at, qn.id)
+        added = true
+      }
+    } catch (e) {
+      seenDesks.delete(desk.id)
+      // Retried every pass; say so once, so a store that STAYS unreadable (the
+      // president then never hears the open questions) is diagnosable.
+      warnOnce(`catchup:${desk.id}`, `catch-up read failed for a president desk; retrying each pass: ${String(e)}`)
+    }
+  }
+  if (added) flushSupplyNotices(partial)
 }
