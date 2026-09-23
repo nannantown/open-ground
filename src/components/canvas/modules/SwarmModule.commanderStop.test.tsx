@@ -162,14 +162,14 @@ describe('closing the commander desk', () => {
     localStorage.setItem('og-swarm-onboarding-seen-v1', '1')
     render(<SwarmModule project={project} />)
 
-    // The module opens on the supply tab; the commander lives on its own.
+    // One screen: the commander's seat is always there — its nameplate names it.
     await userEvent.click(await screen.findByText('projectPanel.swarm.manager.tab'))
-    await userEvent.click(await screen.findByText('projectPanel.swarm.manager.launch'))
+    await userEvent.click(await screen.findByRole('button', { name: 'projectPanel.swarm.manager.launch' }))
     await waitFor(() =>
       expect(reqs.some((r) => r.url === '/api/swarm/manager' && r.method === 'POST')).toBe(true),
     )
 
-    await userEvent.click(await screen.findByTitle('projectPanel.swarm.manager.stop'))
+    await userEvent.click(await screen.findByText('projectPanel.swarm.manager.stop'))
 
     await waitFor(() =>
       expect(

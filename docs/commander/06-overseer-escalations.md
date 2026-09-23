@@ -1034,14 +1034,41 @@ tab's overseer pane (`SwarmOverseerPane` = question inbox `SwarmEscalationsPane`
 feed `swarmOverseerFeed`) duplicated what `supplyNotice.ts` tells the president, and was removed
 with its client-only fatal-notification poll (`useSwarmEngine` no longer reads
 `/api/swarm/notifications`; the server routes, incl. `notifications/handled`, are unchanged).
-`SwarmPaneId` is now `'supply' | 'manager' | 'workers'`; a saved `'overseer'` in
-`Settings.swarmPaneOrder` is dropped on read. Answering is `POST /api/swarm/escalations/answer`,
+(`SwarmPaneId` briefly narrowed to `'supply' | 'manager' | 'workers'` — card ② below then
+removed it outright.) Answering is `POST /api/swarm/escalations/answer`,
 driven by the president (`skills/supply/SKILL.md` "Answer a question"); the bell and the OS toast
 still show every question (unchanged).
 
 Card ② (same day) then removed the sub-tab strip altogether: the Swarm tab is one screen of
 side-by-side seats (president · manager · one per worker), so `SwarmPaneId`, `SWARM_PANE_IDS` and
 `Settings.swarmPaneOrder` are gone (a stale key on disk is inert; POST /api/settings drops it).
+
+Card ③ (same day) shrank the manager's seat to a nameplate: status in three words (running /
+stopped / not there) plus a quiet start/stop. Its conversation stream, command bar (状況 /
+マージ / 掃除) and dashboard (KPIs, landed per week, consumption, presence line) were removed
+from the UI — the server routes (`/api/swarm/kpi/landed`, `orchestrator/worker/stop`,
+`review/resolve`, …) are unchanged; the commander skill uses the latter two, and the landed
+per-week figure is now read by the president on request (`skills/supply/SKILL.md` 「状況」 ④ —
+the owner asks 社長 「着地は?」, which is how `docs/OUTWARD_TRIAL.md` reads its weekly number;
+`scripts/verify-landed-panel.mjs` reads the same route, its old screenshot mode is gone). The
+high-risk hold's owner hint now says to tell the president 「マージして」 (the マージ button it
+named is gone). Three words mean a **waiting** manager (a question pending, or parked on a usage
+limit) also reads 「動いている」 — by the owner's decision; those states reach the owner through
+Monitoring / the bell / the president, not through the seat. The **Monitoring (overseer) switch moved to the Swarm tab's top bar**
+(`SwarmMonitorToggle`) — same endpoint, same "off on every stop/restart, re-arm by hand" rule,
+still disabled while the engine is stopped. The seat's status comes from the both-pools
+active-desk poll (the stream that used to notice a death is no longer rendered): a desk the poll
+saw and then lost counts as gone, and one it has not seen yet (a stored record from before a
+restart, a desk that refused on arrival) is probed every 5 s until seen — only a 404/403 or a
+reaped session counts as gone, never a 5xx. Either way the existing reconcile clears the record, so
+the top bar's Start relaunches the manager. The engine's over-budget flag
+(`consumption.overLimit`, a soft nudge) moved from the dashboard to a one-line notice under the
+top bar. Every client question
+poll (the fleet poll and `SdkWorkerPane`'s own) now asks `?status=open&lane=owner`, so a question
+the commander is still settling is never shown as waiting on the owner; `SdkWorkerPane` also skips
+its poll while the window is hidden. Guards: `SwarmModule.seats.test.tsx`,
+`SwarmManagerPane.test.tsx`, `SdkWorkerPane.test.tsx` (open-question banner) — red measured by
+reverting each behaviour.
 
 What changed in `supplyNotice.ts`, because the desk is now the ONLY retelling:
 - **The important lane has no TTL.** A notice raised while no desk is open waits for the next

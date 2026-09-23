@@ -543,9 +543,10 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
 - **表示面(2026-07-17・検品可視化)**: 同じ manager.json を `GET /api/swarm/orchestrator` が
   `manager` フィールド(`SwarmManagerHeartbeat` — phase/note/updatedAt + **サーバ時計**の
   ageMs/fresh、fresh = 10分窓は `MANAGER_HEARTBEAT_STALE_MS` と同値)として read-only で運び、
-  Swarm タブ司令官ペインの「検品」セクションが描画する — worker 完了後の「静かな数分」が
-  「司令官が動いています + 直近 note + 検品待ち N 件(= `reviews` の件数)」として見える
-  (2026-07-17 の「worker が止まったのに何も起きていない」誤認への手当)。読み手は
+  Swarm タブ司令官ペインの「検品」セクションが描画していた — worker 完了後の「静かな数分」が
+  「司令官が動いています + 直近 note + 検品待ち N 件(= `reviews` の件数)」として見えた
+  (2026-07-17 の「worker が止まったのに何も起きていない」誤認への手当)。**2026-09-23 に撤去**
+  (オーナーは社長とだけ話す — 司令官の席は名札のみ、06 §1.7)。`manager` フィールド自体は API に残る。読み手は
   `readManagerHeartbeatInfo`(**表示専用・whole-or-null**)で、蘇生反射の
   `defaultManagerPresence` / `isManagerHeartbeatFresh`(**null=fresh の fail-open**)とは判定系統を
   完全分離 — 表示は absent/破損で「待機中(次の完了で自動で起きます)」に劣化するだけ(fail-safe)。

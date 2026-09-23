@@ -577,8 +577,8 @@ export const QUESTION_GRACE_MS = Math.min(
 
 /** CONSUMPTION BUDGET — the per-session dispatch ceiling the UNATTENDED loop
  *  WARNS at (card 3f0fd4fa). Once the engine has dispatched this many workers
- *  since boot, the consumption snapshot flags `overLimit` and the commander pane
- *  warns the owner to check the loop. A SOFT nudge, never a hard stop: the engine
+ *  since boot, the consumption snapshot flags `overLimit` and the Swarm tab shows
+ *  the owner a one-line notice to check the loop. A SOFT nudge, never a hard stop: the engine
  *  keeps draining (per-worker wall-clock is already bounded by MAX_EXEC_MS, and
  *  the concurrency cap bounds parallelism — this only surfaces "the unattended
  *  loop has been busy a while, look at it"). Each dispatch is one `claude` session
@@ -1156,8 +1156,8 @@ const emptyConsumption = (): SwarmConsumption => ({
 
 /** What a worker's heartbeat file (`swarm-beat.sh`) tells the monitor. `ready` /
  *  `blocked` DRIVE the conservative DONE judgement (classifyWorker); `phase` /
- *  `note` / `at` are DISPLAY-ONLY passthrough the commander pane renders so each
- *  worker's current phase + one-liner + freshness are legible (条件3). */
+ *  `note` / `at` are DISPLAY-ONLY passthrough (the commander reads them through
+ *  GET /api/swarm/orchestrator; no Swarm-tab pane renders them since 2026-09-23). */
 export interface HeartbeatSign {
   /** It declared itself integration-ready (readyToMerge). */
   ready: boolean
@@ -9049,7 +9049,7 @@ export const fireFatalNotifications = (
       branch: a.branch,
       taskTitle: a.taskTitle,
       logHint:
-        '差分を確認し、問題なければ手動統合(マネージャーの「マージ」)で取り込んでください。エンジンはこのカードを自動では統合しません。',
+        '差分を確認し、問題なければ社長に「マージして」と伝えてください(社長がマネージャーに手動統合を頼みます)。エンジンはこのカードを自動では統合しません。',
     })
   }
 

@@ -531,4 +531,55 @@ describe('SdkWorkerPane — the open-question banner (2026-08-03)', () => {
     expect(queryByText('projectPanel.swarm.sdk.questionBanner')).toBeNull()
     expect(queryByText('他人の質問')).toBeNull()
   })
+
+  const escalationPolls = () => fetchCalls.filter((c) => c.url.includes('/api/swarm/escalations'))
+
+  it('asks only for OPEN questions in the OWNER lane', async () => {
+    inbox([])
+    mount()
+    await waitFor(() => expect(escalationPolls().length).toBeGreaterThan(0))
+    const q = new URL(escalationPolls()[0].url, 'http://x').searchParams
+    expect(q.get('status')).toBe('open')
+    expect(q.get('lane')).toBe('owner')
+  })
+
+  it('prefers the plain wording over the technical one', async () => {
+    inbox([
+      {
+        id: 'e-mine',
+        status: 'open',
+        sdkSessionId: 'sdk-1',
+        question: 'merge conflict in a.ts — ours or theirs?',
+        plainQuestion: 'どちらの直し方を残しますか？',
+        createdAt: '2026-09-23T00:00:10Z',
+      },
+    ])
+    const { findByText, queryByText } = mount()
+    await findByText('どちらの直し方を残しますか？')
+    expect(queryByText('merge conflict in a.ts — ours or theirs?')).toBeNull()
+  })
+
+  it('does NOT poll when the host hands the question down (the Swarm tab polls once)', async () => {
+    inbox([])
+    const { getByText } = mount({ question: 'ホストが渡した質問' })
+    getByText('ホストが渡した質問')
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(escalationPolls()).toEqual([])
+  })
+
+  it('asks nothing while the window is hidden', async () => {
+    inbox([])
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    try {
+      mount()
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(escalationPolls()).toEqual([])
+    } finally {
+      hidden.mockRestore()
+    }
+  })
 })

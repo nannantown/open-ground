@@ -44,8 +44,8 @@ interface Props {
   available: boolean
   /** Last engine-action failure, already localized (null when none). Surfaced
    *  next to the Start CTA so a failed start isn't silent — without it the engine
-   *  error would be unreachable here (its usual home, SwarmManagerPane, isn't
-   *  mounted while the onboarding is showing). */
+   *  error would be unreachable here (its usual home, the banner above the
+   *  seats, stays quiet while the onboarding is showing). */
   error?: string | null
 }
 

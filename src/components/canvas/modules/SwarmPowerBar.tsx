@@ -10,8 +10,11 @@
 // conversations together — all idempotent, so flipping it on when something is
 // already up never double-launches. Turning it OFF only halts NEW dispatch: the
 // orchestrator stops handing out work, but workers already running finish on
-// their own and their worktrees/branches are kept (teardown is the worker tab's
-// / commander's job, never this switch's).
+// their own and their worktrees/branches are kept (teardown is the worker
+// seats' / commander's job, never this switch's).
+//
+// The Monitoring switch (SwarmMonitorToggle, below) sits beside it: it used to
+// live in the manager's dashboard, which the owner no longer sees (2026-09-23).
 //
 // PURELY PRESENTATIONAL: the power composition (start engine + launch commander
 // + launch supply, each idempotent) lives in SwarmModule, which owns those
@@ -135,5 +138,50 @@ export const SwarmPowerSwitch = ({ running, available, busy, onToggle }: SwitchP
         )
       })}
     </div>
+  )
+}
+
+interface MonitorProps {
+  /** The overseer (状況の監視) is armed. */
+  on: boolean
+  /** The engine is running — arming needs it (the server refuses otherwise). */
+  running: boolean
+  /** The orchestrator route answered. */
+  available: boolean
+  /** An engine round-trip is in flight. */
+  busy: boolean
+  onToggle: (next: boolean) => void
+}
+
+/** The Monitoring (overseer) switch — questions, stalled work and usage alerts.
+ *  One pressed/unpressed button beside the master switch. It turns off on every
+ *  stop / restart by design (the owner re-arms it), and it is disabled while the
+ *  engine is stopped so a click can never silently no-op. The full explanation
+ *  rides the tooltip. */
+export const SwarmMonitorToggle = ({ on, running, available, busy, onToggle }: MonitorProps) => {
+  const { t } = useT()
+  const disabled = busy || !available || !running
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      disabled={disabled}
+      onClick={() => onToggle(!on)}
+      title={t('projectPanel.swarm.manager.overseerHint')}
+      className={[
+        'inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[3px] border px-2 text-meta font-medium transition-all duration-150 enabled:active:scale-[0.98]',
+        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+        'disabled:cursor-not-allowed disabled:opacity-40',
+        on
+          ? 'border-moss bg-moss-soft text-ink enabled:hover:bg-moss enabled:hover:text-bg-card'
+          : 'border-line bg-transparent text-ink-muted enabled:hover:border-line-strong enabled:hover:bg-plane enabled:hover:text-ink',
+      ].join(' ')}
+    >
+      <span
+        className={`h-[6px] w-[6px] shrink-0 rounded-full ${on ? 'bg-moss' : 'bg-ink-faint'}`}
+        aria-hidden
+      />
+      {t('projectPanel.swarm.manager.overseer')}
+    </button>
   )
 }

@@ -144,6 +144,7 @@ Read live, **never from memory** (commander may have acted since last look). GET
 | ① Live workers | `curl -s -G "$OG/api/swarm/workers" --data-urlencode "path=$PWD"` |
 | ② Engine + commander heartbeat (`manager` field) | `curl -s -G "$OG/api/swarm/orchestrator" --data-urlencode "path=$PWD"` |
 | ③ Board (columns/counts) | `curl -s -G "$OG/api/project" --data-urlencode "path=$PWD"` |
+| ④ "着地は?" — landed work per week, only when asked (all projects; `external` = not OG itself) | `curl -s "$OG/api/swarm/kpi/landed"` |
 
 Report the commander too — ②'s `manager` (`phase`/`note`/`ageMs`/`fresh`) is its only
 self-reported window, same whether SDK (no screen) or PTY.

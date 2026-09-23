@@ -83,8 +83,10 @@ public UI without changing roles or pausing jobs; see `docs/PUBLIC_PRODUCT_SCOPE
   goes through the supply desk; the SDK manager has no Remote Control session.
 - Sub-tab ordering and Swarm's public opt-in are unchanged. No data migration,
   release, push or installation is part of this change.
-- On narrow screens the sub-tabs get their own row and the manager dashboard
-  stacks below the conversation. Desktop keeps the existing two-column layout.
+- (Superseded 2026-09-23.) The sub-tabs and the manager dashboard are gone:
+  the Swarm tab is one screen of seats, and the manager's seat is a nameplate
+  (running / stopped / not there + a quiet start/stop). Monitoring moved to the
+  top bar. See 06 §1.7.
 
 ### SDK-only Verification
 
@@ -101,6 +103,31 @@ public UI without changing roles or pausing jobs; see `docs/PUBLIC_PRODUCT_SCOPE
   project data, delivered a message, reused the singleton and stopped it.
 - The local fixture preview was restarted at the same URL. No live model call,
   newly packaged GUI, release, push or installation was performed.
+
+## Follow-up: Swarm Screen Inventory (2026-09-23, card ③)
+
+The owner talks only to the president. The test for each item was: does the owner need to see it,
+and is it used in the current model (president as the front desk, SDK-only, this document and
+`docs/PUBLIC_PRODUCT_SCOPE.md`)? Server routes and local data were not removed. Details are in
+06 §1.7.
+
+| Screen element | Decision | Reason |
+|---|---|---|
+| Manager conversation stream (SDK transcript / PTY terminal) | Remove | The owner talks only to the president |
+| Manager command box (状況 / マージ / 掃除 + free text) | Remove | Same; the president relays (`/api/swarm/manager/say`) |
+| KPI panel (lead time, success / rework / conflict rates) | Remove | The owner does not need to read it |
+| Landed-per-week chart (and `useLandedKpi`) | Remove | The owner asks the president 「着地は?」 and the president reads `GET /api/swarm/kpi/landed` (supply skill 「状況」 ④). The ledger and route stay, and `docs/OUTWARD_TRIAL.md` reads its weekly number that way |
+| Consumption panel | Remove | Only the over-budget notice mattered, so it moved to one line under the top bar |
+| Manager presence line + review-queue count | Remove | The seat's three-word status is enough |
+| Monitoring (overseer) switch | Move (top bar) | Needed to turn on question / stall / usage notices |
+| Monitoring re-arm reminder, restart-resume notices | Keep | Decisions the owner makes after a restart |
+| Top bar status, Start/Stop, execution mode | Keep | The owner's main controls |
+| Setup banner (git missing etc.), error banner | Keep | Explains why nothing can start. Engine errors now also show above the seats |
+| First-run explainer | Keep | For first-time users |
+| President seat, worker seats | Keep | As built by card ② |
+| Manager-only parts of the worker pane (`embedded`, `onStatus`) | Remove | Only the manager seat used them |
+| Unused client functions (`stopWorker`, `resolveReview`) | Remove | No callers. The server routes stay because the commander skill uses them |
+| 77 unused UI strings | Remove | No code references them |
 
 ## Local Compatibility
 

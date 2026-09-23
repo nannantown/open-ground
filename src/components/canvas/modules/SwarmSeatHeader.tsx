@@ -65,17 +65,25 @@ export const SwarmSeatHeader = ({
         <span aria-hidden className="h-[6px] w-[6px] shrink-0 rounded-full bg-ink-faint" />
       )}
       <span className="shrink-0 text-meta font-medium text-ink">{roleLabel}</span>
+      {/* With a detail line the status word keeps its size and the detail
+          truncates; without one the status word takes the free space (and
+          truncates last) so the controls stay flush right. No empty detail
+          span: it cost two gaps, which is what clipped the manager's only
+          button in its narrow seat. */}
       <span
-        className={`label-cap shrink-0 ${waiting ? 'text-[var(--beacon-waiting)]' : 'text-ink-faint'}`}
+        className={`label-cap min-w-0 truncate ${detail ? 'shrink-0' : 'flex-1'} ${waiting ? 'text-[var(--beacon-waiting)]' : 'text-ink-faint'}`}
+        title={detail ? undefined : detailTitle}
       >
         {statusLabel}
       </span>
-      <span
-        className="min-w-0 flex-1 truncate text-meta text-ink-muted"
-        title={detailTitle ?? detail}
-      >
-        {detail}
-      </span>
+      {detail ? (
+        <span
+          className="min-w-0 flex-1 truncate text-meta text-ink-muted"
+          title={detailTitle ?? detail}
+        >
+          {detail}
+        </span>
+      ) : null}
       {children}
     </div>
   )

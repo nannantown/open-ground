@@ -106,11 +106,6 @@ interface Props {
   /** Engine-owned workers are read-only here, exactly as in SwarmWorkerPane. */
   source?: 'manual' | 'engine'
   onExit?: () => void
-  /** This desk's status, every time it changes — the ONLY way anything outside
-   *  this tile can learn it. The PTY poll (GET /api/terminal/active) is blind to
-   *  the SDK pool, so a parent that needs a beacon (the commander header) has no
-   *  other source and, lacking this, fabricated a constant. */
-  onStatus?: (status: SdkSessionStatus) => void
   /** A terminate / force-remove is in flight for this worker (SwarmModule owns
    *  the flag, keyed by worktree). Same prop, same meaning, as SwarmWorkerPane. */
   busy?: boolean
@@ -126,12 +121,6 @@ interface Props {
   onTerminate?: () => void
   /** Remove the worktree with --force (the dirty/abandon case). Manual only. */
   onForceRemove?: () => void
-  /** Rendered inside a parent that provides its OWN header and composer (the
-   *  manager pane, 2026-08-03). Hides this tile's duplicates — the owner's
-   *  screenshot showed the desk wearing TWO stacked headers and TWO input
-   *  boxes, which read as scattered chrome, not one desk. The transcript,
-   *  question banner, ended-strip and restart affordance all stay. */
-  embedded?: boolean
   /** Fold this unfolded worker seat back to its summary (SwarmWorkerSeat) —
    *  the Swarm tab keeps at most ONE worker transcript open (6-connection cap). */
   onCollapse?: () => void
@@ -173,13 +162,11 @@ export const SdkWorkerPane = ({
   taskTitle,
   source = 'manual',
   onExit,
-  onStatus,
   busy = false,
   retainedReason,
   onTerminate,
   onForceRemove,
   onRestart,
-  embedded = false,
   onCollapse,
   question,
   questionHint,
@@ -227,9 +214,11 @@ export const SdkWorkerPane = ({
   // The question lived in a DIFFERENT tab (監督 — since removed; answers now go
   // through the president) with nothing here pointing at it. So the pane itself asks the inbox "is one of these mine?" and puts the
   // question — and where to answer it — right where the owner is looking.
-  // Self-contained polling (10s) rather than prop-threading: this pane has two
-  // unrelated hosts (the Board drawer and the Manager stage) and both would
-  // have to grow the same plumbing.
+  // Self-contained polling (10s) only when the host does not hand the question
+  // down: the Swarm tab polls once for its whole fleet and passes `question`;
+  // the Board drawer does not. Like every other poll here, a hidden window asks
+  // nothing, and only the owner's lane counts (a question the manager is still
+  // settling is not one the owner is waiting on).
   const [polledQuestion, setOpenQuestion] = useState<string | null>(null)
   const hostPolls = question !== undefined
   const openQuestion = finished ? null : hostPolls ? question : polledQuestion
@@ -240,9 +229,10 @@ export const SdkWorkerPane = ({
     }
     let stopped = false
     const read = async () => {
+      if (document.hidden) return
       try {
         const r = await fetch(
-          `/api/swarm/escalations?path=${encodeURIComponent(projectPath)}&status=open`,
+          `/api/swarm/escalations?path=${encodeURIComponent(projectPath)}&status=open&lane=owner`,
         )
         if (!r.ok || stopped) return
         const d = (await r.json()) as {
@@ -279,11 +269,6 @@ export const SdkWorkerPane = ({
   // Latest onExit, without making the subscription depend on its identity.
   const onExitRef = useRef(onExit)
   onExitRef.current = onExit
-  // Same treatment for onStatus, and for the same reason: every caller passes an
-  // inline arrow, so its identity changes on every parent render (and the
-  // parents re-render on a 5 s poll).
-  const onStatusRef = useRef(onStatus)
-  onStatusRef.current = onStatus
   const isEngine = source === 'engine'
 
   const qs = useMemo(
@@ -422,7 +407,7 @@ export const SdkWorkerPane = ({
       void lastSeq
     }
     // `onExit` is deliberately NOT a dependency. Callers pass an inline arrow
-    // (SwarmModule / SwarmManagerPane / BoardModule all do), so a new identity
+    // (SwarmModule / BoardModule both do), so a new identity
     // arrives on EVERY parent render — and the parents re-render on a 5 s poll.
     // Including it tore down and re-opened this EventSource every 5 seconds:
     // the transcript restarted from `from=0`, the server replayed the whole ring
@@ -430,13 +415,6 @@ export const SdkWorkerPane = ({
     // the latest callback without making the subscription depend on its identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sdkSessionId, qs])
-
-  // Report the status outward. In an effect (not inline in the listeners) so it
-  // fires exactly once per DISTINCT status, whichever of the four paths above
-  // wrote it, and never during another component's render.
-  useEffect(() => {
-    onStatusRef.current?.(status)
-  }, [status])
 
   // Follow the newest line — 3-state model (research: TanStack/Roo-Code, and
   // claude-code#76350 the other way round). `drifted` is set by the READER's
@@ -538,9 +516,7 @@ export const SdkWorkerPane = ({
     // question, rendered dark-on-dark). An SDK worker's feed is a transcript,
     // not a screen; it gets the same reading surface as every other dashboard.
     <div className="flex h-full min-h-0 flex-col bg-bg">
-      {/* Header — same shape and vocabulary as SwarmWorkerPane. Hidden when
-          embedded: the parent (manager pane) wears the one desk header. */}
-      {embedded ? null : (
+      {/* Header — same shape and vocabulary as SwarmWorkerPane. */}
       <SwarmSeatHeader
         role="worker"
         sprite={sprite}
@@ -593,7 +569,6 @@ export const SdkWorkerPane = ({
           </button>
         ) : null}
       </SwarmSeatHeader>
-      )}
 
       {openQuestion ? (
         // The worker is waiting on the OWNER — say so where they are looking,
@@ -722,7 +697,7 @@ export const SdkWorkerPane = ({
           Gated on `accepting` — the pool's own answer to "will this be taken?"
           — never on liveness: a desk that was asked to stop is still ALIVE for
           a while, and it refuses every word of it. */}
-      {accepting && !embedded ? (
+      {accepting ? (
         <div className="flex shrink-0 items-center gap-1.5 border-t border-line-soft bg-bg-card px-2 py-1.5">
           <input
             value={draft}

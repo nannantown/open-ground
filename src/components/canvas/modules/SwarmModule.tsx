@@ -53,14 +53,13 @@ import type {
   SwarmWorkerRecord,
 } from '@/lib/types'
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
-import { SdkWorkerPane } from './SdkWorkerPane'
+import { SdkWorkerPane, blipVerdict, type SdkSessionProbe } from './SdkWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 import { SwarmWorkerSeat } from './SwarmWorkerSeat'
 import { useSupplyDesk } from './useSupplyDesk'
 import { SwarmManagerPane } from './SwarmManagerPane'
-import { useLandedKpi } from './useLandedKpi'
-import { SwarmPowerStatus, SwarmPowerSwitch } from './SwarmPowerBar'
+import { SwarmMonitorToggle, SwarmPowerStatus, SwarmPowerSwitch } from './SwarmPowerBar'
 import { ExecutionModeMenu } from './ExecutionModeToggle'
 import { SwarmOnboarding } from './SwarmOnboarding'
 import {
@@ -85,6 +84,9 @@ const SEAT_CLASS = 'h-full overflow-hidden'
 // A FOLDED worker seat (SwarmWorkerSeat) carries a nameplate and a few lines,
 // so it can be narrower — more of the fleet fits on one screen.
 const WORKER_SEAT_STYLE = { flex: '1 0 240px', minWidth: 240, minHeight: 220 } as const
+// The manager's seat is a nameplate only — it never grows into the space the
+// president and the workers use.
+const MANAGER_SEAT_STYLE = { flex: '0 0 280px', minWidth: 280, minHeight: 220 } as const
 
 // The single commander (司令官) CONVERSATION session, remembered client-side —
 // the exact same shape + lifecycle as the supply session (no worktree; it runs
@@ -285,8 +287,10 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       try {
         // ?status=open — resolved history (and its expanded captures) must not
         // ride every 10 s poll (server/routes/swarm.ts, GET escalations).
+        // ?lane=owner — a question the manager is still settling is not one
+        // the owner is waiting on; showing it here would say it was.
         const r = await fetch(
-          `/api/swarm/escalations?path=${encodeURIComponent(project.path)}&status=open`,
+          `/api/swarm/escalations?path=${encodeURIComponent(project.path)}&status=open&lane=owner`,
         )
         if (!r.ok || stopped) return
         const d = (await r.json()) as {
@@ -327,7 +331,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   const [managerBusy, setManagerBusy] = useState(false)
 
   // The autonomous engine's state — polled ONCE here (the shared hook) so BOTH
-  // the worker seats and the manager dashboard read the same snapshot. `realWorkers`
+  // every seat reads the same snapshot. `realWorkers`
   // is the SERVER-TRUTH worker list (GET /api/swarm/workers): live PTYs + the
   // engine's own roster + heartbeat files, already unified server-side — see
   // src/lib/server/swarmWorkerRegistry.ts. This replaces the old localStorage
@@ -346,11 +350,6 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     envIssues,
     refreshEnvPreflight,
   } = useSwarmEngine(project.path)
-
-  // The durable 「外向き着地/週」 KPI (GET /api/swarm/kpi/landed) — cross-project
-  // by design, fetched ONCE here and threaded into the manager dashboard (the
-  // pane never fetches — its stated contract).
-  const landed = useLandedKpi()
 
   // The "autonomy was restored by the restart" notice (card 2b) is dismissed LOCALLY
   // — unlike the two banners below it, there is no server marker to clear here. The
@@ -553,6 +552,22 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setExitedIds((prev) => (prev.has(terminalId) ? prev : new Set(prev).add(terminalId)))
   }, [])
 
+  // The manager desk's ONE handle — its seat status, the liveness probe and the
+  // reconcile's "confirmed dead" all key on it, so the three cannot disagree.
+  // Its status is the active-desk poll's (both pools). A desk that poll saw and
+  // then lost is as dead as one whose stream said so: nothing renders its
+  // stream any more, and without this the record stayed, so the top bar's Start
+  // (planSwarmPower's hasManager) would not relaunch it.
+  const managerHandle = manager
+    ? manager.runtime === 'sdk'
+      ? (manager.sdkSessionId ?? '')
+      : manager.terminalId
+    : ''
+  const managerIsSdk = manager?.runtime === 'sdk'
+  const managerStatus: WorkerStatus | null = managerHandle ? statusOfPty(managerHandle) : null
+  const managerDead = managerStatus === 'exited'
+  const managerUnseen = managerStatus === 'starting'
+
   // ── COMMANDER desk reconcile (2026-08-03 — the post-restart dead-screen fix) ─
   // Every engine poll carries the LIVE desk handle (managerDesk, a both-pools
   // read). Follow it: ADOPT an engine-woken desk the stored record does not name
@@ -580,7 +595,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       engine.managerDesk,
       {
         busy: managerBusy,
-        storedDead: !!manager && exitedIds.has(manager.terminalId || manager.sdkSessionId || ''),
+        storedDead: managerDead,
       },
     )
     if (mv.kind === 'adopt') {
@@ -591,7 +606,44 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       saveManager(project.id, null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setters/savers are stable; keyed on the data
-  }, [engine.managerDesk, manager, managerBusy, exitedIds, project.id])
+  }, [engine.managerDesk, manager, managerBusy, managerDead, project.id])
+
+  // COMMANDER liveness probe. The manager's seat no longer renders the desk's
+  // stream or terminal (owner decision 2026-09-23 — the owner talks only to the
+  // president), and that stream used to be what noticed a desk that died before
+  // the active poll ever saw it — a stored record whose desk died while the app
+  // was closed, or a desk that refused on arrival (swarmManager.ts
+  // watchSdkDeskForDeathOnArrival). Unseen, it reads 'starting' — 「動いている」 —
+  // forever. So while the desk is still unseen, ask it directly (every 5 s, like
+  // the poll); a "gone" answer feeds the SAME exit bookkeeping the stream fed,
+  // so the reconcile above clears the record. Only an answer that SAYS gone
+  // counts — a 5xx (the dev proxy while the server restarts) says nothing.
+  useEffect(() => {
+    if (!managerHandle || !managerUnseen) return
+    let cancelled = false
+    const url = managerIsSdk
+      ? `/api/sdk-session/${encodeURIComponent(managerHandle)}?path=${encodeURIComponent(project.path)}`
+      : `/api/terminal/${encodeURIComponent(managerHandle)}`
+    const probe = () => {
+      if (document.hidden) return
+      fetch(url)
+        .then(async (r) => {
+          const gone = r.status === 404 || r.status === 403
+          const body = r.ok ? ((await r.json().catch(() => null)) as SdkSessionProbe) : null
+          const reaped = managerIsSdk && r.ok && blipVerdict(true, body).close
+          if (!cancelled && (gone || reaped)) handleExit(managerHandle)
+        })
+        .catch(() => {
+          /* server unreachable — the next probe / poll decides */
+        })
+    }
+    probe()
+    const timer = window.setInterval(probe, 5_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [managerHandle, managerIsSdk, managerUnseen, project.path, handleExit])
 
   // Terminate a worker: kill the PTY, then tear the worktree down. A soft
   // attempt keeps a dirty/locked tree (removed:false) so uncommitted work isn't
@@ -1054,6 +1106,13 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         />
         </div>
         <div className="min-w-0 flex-1" aria-hidden />
+        <SwarmMonitorToggle
+          on={engine.overseer}
+          running={engine.running}
+          available={engineAvailable}
+          busy={engineBusy}
+          onToggle={toggleOverseer}
+        />
         <ExecutionModeMenu />
         <SwarmPowerSwitch
           running={engine.running}
@@ -1144,7 +1203,26 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       {/* A transient action error (worker terminate / restart, supply・commander
           launch). The old to-do rail hosted this; with the rail gone it banners
           across the top of the pane so a failure is never lost. */}
-      <SwarmErrorBanner error={error} supplyError={supplyError} />
+      {/* An engine action's failure (power, Monitoring) joins it once the
+          seats are up — the idle views below print their own. */}
+      <SwarmErrorBanner
+        error={error ?? (swarmIdle ? null : engineError)}
+        supplyError={supplyError}
+      />
+      {/* The unattended loop passed its dispatch budget (DISPATCH_BUDGET — a
+          soft nudge, the engine keeps going). It used to sit in the manager's
+          dashboard; it is about spend, so the owner still hears it here. */}
+      {engine.consumption.overLimit && (
+        <p
+          role="status"
+          className="shrink-0 border-b border-line-soft bg-bg px-3 py-2 text-meta leading-relaxed text-ochre-deep"
+        >
+          {t('projectPanel.swarm.overLimit', {
+            dispatched: engine.consumption.dispatched,
+            limit: engine.consumption.limit,
+          })}
+        </p>
+      )}
 
       {/* Restart notice (autonomyResumed, card 2b) — the OTHER half of the reminder
           below. Since card 2 a restart RESTORES the drain by itself, so the "resume?"
@@ -1343,55 +1421,17 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
             </div>
           )}
         </div>
-        {/* The manager's seat — its own nameplate carries start/stop. */}
-        <div className={SEAT_CLASS} style={SEAT_STYLE}>
+        {/* The manager's seat — nameplate + a quiet start/stop, nothing else
+            (the owner talks only to the president). Its status comes from the
+            active-desk poll, which sees both pools; a desk that died is cleared
+            by the reconcile above. */}
+        <div className={SEAT_CLASS} style={MANAGER_SEAT_STYLE} data-seat="manager">
           <SwarmManagerPane
-            projectPath={project.path}
-            session={
-              manager
-                ? {
-                    terminalId: manager.terminalId,
-                    // The PTY poll cannot see an SDK desk, so `status` is sent
-                    // ONLY for a PTY one. It used to be sent for both, with the
-                    // constant 'working' standing in for the SDK case — so the
-                    // commander's beacon said 作業中 forever: never waiting on
-                    // a question, never quota-parked, never exited. A status
-                    // that cannot be wrong is not a status. The SDK desk
-                    // reports its own on its event stream (SwarmManagerPane
-                    // reads it there); nothing here may guess it.
-                    ...(manager.runtime === 'sdk' && manager.sdkSessionId
-                      ? { runtime: 'sdk' as const, sdkSessionId: manager.sdkSessionId }
-                      : {
-                          runtime: 'pty' as const,
-                          status: statusOfPty(manager.terminalId),
-                        }),
-                  }
-                : null
-            }
-            sessionBusy={managerBusy}
-            onLaunchSession={() => void launchManager()}
-            onStopSession={() => void stopManager()}
-            onSessionExit={() => {
-              if (!manager) return
-              if (manager.runtime === 'sdk') {
-                // An SDK desk has no terminalId, so the PTY bookkeeping below
-                // would mark the EMPTY STRING exited — a no-op — while the
-                // manager state (whose status is deliberately pinned 'working'
-                // for SDK) kept rendering a live desk. The session is gone;
-                // clear the desk so the pane honestly shows the launch CTA.
-                setManager(null)
-                saveManager(project.id, null)
-                return
-              }
-              handleExit(manager.terminalId)
-            }}
-            onRestartSession={() => void restartManager()}
-            engine={engine}
-            available={engineAvailable}
-            busy={engineBusy}
-            error={engineError}
-            onToggleOverseer={toggleOverseer}
-            landed={landed}
+            status={manager ? managerStatus : null}
+            busy={managerBusy}
+            onLaunch={() => void launchManager()}
+            onStop={() => void stopManager()}
+            onRestart={() => void restartManager()}
           />
         </div>
         {allWorkers.length === 0 ? (

@@ -443,6 +443,14 @@
   だからワーカー席は既定で**畳んだ要約** `SwarmWorkerSeat`(状態は `/api/terminal/active` の両プール poll、
   質問は escalations poll 1本)で、作業記録を開けるのは**同時に1席だけ**(`openWorktree`)。
   番人 = `SwarmModule.workerRestart.test.tsx` の "keeps worker streams bounded"。質問への回答は社長経由(`escalations/answer`)、ベル/OS通知は従来どおり。
+  ⑥ **マネージャー席は名札だけ(2026-09-23・カード③)**: `SwarmManagerPane` = 状態3語(動いている/止まっている/いない)
+  +控えめな起動・停止のみ。会話ストリーム・命令バー・計器盤(KPI/着地/週/消費/在席)は撤去、`useLandedKpi` も削除
+  (`GET /api/swarm/kpi/landed` と台帳は残置 — 社長が「着地は?」で読む=`skills/supply/SKILL.md` 状況④、
+  `docs/OUTWARD_TRIAL.md` の週次計測はこの経路)。棚卸し表 = `commander/SIMPLIFICATION.md`。「状況の監視」スイッチは上部バー
+  `SwarmMonitorToggle`(`SwarmPowerBar.tsx`)へ移設、予算超過(`consumption.overLimit`)は上部バー下の1行へ。
+  席の状態は `/api/terminal/active`(両プール)。見えていて消えた卓=死亡、まだ見えない卓は5秒ごとの生存 probe
+  (404/403/reaped のみ死亡・5xx は無視)→ どちらも reconcile が記録を消す(上部 Start で再起動できる)。質問 poll は `&status=open&lane=owner`(司令官が処理中の質問は出さない)。
+  番人 = `SwarmModule.seats.test.tsx` / `SwarmManagerPane.test.tsx` / `SdkWorkerPane.test.tsx`(open-question banner)。
   重要レーンは TTL なし(社長不在中は保持・遅配は「約N時間前の知らせ」付き)・
   `~/.openground/supply-notice-queue.json` に永続(再起動でも消えない)・溜まった分は
   「(N件まとめて)」の1行で伝える。回答/却下で

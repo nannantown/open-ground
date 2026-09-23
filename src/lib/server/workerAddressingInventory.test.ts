@@ -904,11 +904,6 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     why: 'Carries its own keyOf(w) mirroring workerKey, so the client addresses a worker by whichever handle its runtime names.',
     ptyFns: [],
   },
-  'src/components/canvas/modules/SwarmManagerPane.tsx': {
-    tier: 'runtime-dispatched',
-    why: 'The commander tile renders whichever desk the runtime dial seated; the terminalId it reads is present only on a PTY desk.',
-    ptyFns: [],
-  },
   'src/components/canvas/modules/BoardModule.tsx': {
     tier: 'runtime-dispatched',
     why: "The card drawer's 実行 launch records whichever handle came back, and pane matching compares handles rather than assuming a PTY.",
@@ -1153,6 +1148,11 @@ const statusLivenessIn = (rel: string, codeWithStrings: string, sdkAware: boolea
 
 /** Per-file declarations for the status-literal comparisons above. */
 const STATUS_SITES: Record<string, Decl & { count: number }> = {
+  'src/components/canvas/modules/SwarmModule.tsx': {
+    tier: 'display-only',
+    count: 1,
+    why: "`managerStatus === 'exited'` reads the BEACON word workerBeaconStatus derived from GET /api/terminal/active, not an SDK session status: 'exited' there means the desk was listed and no longer is, and the server lists an SDK desk only while isSdkSessionLive (liveDesks.ts beaconStatusOfSdk) — so the liveness question was already answered by reaped, server-side. It only lets the stored manager record be forgotten once the server also names no live desk (reconcileDesk); the desk itself is never touched.",
+  },
   'src/components/canvas/modules/SdkWorkerPane.tsx': {
     tier: 'display-only',
     count: 4,
@@ -1637,8 +1637,8 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
   },
   'src/components/canvas/modules/SwarmModule.tsx::map-keyed': {
     tier: 'pty-only-by-design',
-    count: 5,
-    why: "statusOfPty's own three maps (exitedIds / statusByPty / seenRef). The name says the scope: an SDK desk's status comes from the SDK pane's own stream, and feeding '' in here would read the PTY map's absent entry as 'starting' forever. 0803 (+2): the desk-reconcile effect asks exitedIds whether the STORED desk is confirmed dead before clearing it — the manager probe uses `terminalId || sdkSessionId` (both-runtime, the empty-string invariant makes the fallback correct). 0815 (6 → 5): the SUPPLY probe left with the desk itself — its state moved into useSupplyDesk so the Board's front-desk seat and this tab drive ONE record, and its declaration moved with it.",
+    count: 4,
+    why: "statusOfPty's own three maps (exitedIds / statusByPty / seenRef). Despite the name they are keyed by whatever handle GET /api/terminal/active lists — which since liveDesks.listAllActiveDesks is BOTH pools (a PTY id or an SDK session id), so the folded worker seats and the manager seat feed their SDK handle in on purpose. What must never go in is '' (an SDK record's terminalId): it would read an absent entry as 'starting' forever — hence the manager's runtime-dispatched `managerHandle`. 0803 (+2): the desk-reconcile effect asks exitedIds whether the STORED desk is confirmed dead before clearing it — the manager probe uses `terminalId || sdkSessionId` (both-runtime, the empty-string invariant makes the fallback correct). 0815 (6 → 5): the SUPPLY probe left with the desk itself — its state moved into useSupplyDesk so the Board's front-desk seat and this tab drive ONE record, and its declaration moved with it. 0923 (5 → 4): the manager reconcile now reads `managerStatus` (statusOfPty on the runtime-dispatched `managerHandle`), not exitedIds directly.",
   },
   'server/routes/swarm.ts::interpolated': {
     tier: 'runtime-dispatched',

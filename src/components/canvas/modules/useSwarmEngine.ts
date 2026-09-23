@@ -1,13 +1,11 @@
 // useSwarmEngine — the SINGLE source of the commander engine's state for the
 // Swarm surface. It owns the one orchestrator poll + the start/stop
 // actions, and polls the SERVER-TRUTH worker list (`realWorkers`, from
-// GET /api/swarm/workers) that both Swarm sub-views render.
+// GET /api/swarm/workers) the Swarm tab's worker seats render.
 //
-// WHY this lives here, not inside SwarmManagerPane: both Swarm sub-views need the
-// workers — the manager dashboard (its monitor) AND the worker tab (its tiles).
-// Polling in the manager pane left the worker tab blind to engine-spawned
-// workers, so the poll is hoisted to SwarmModule (which calls this hook ONCE) and
-// the list passed down to BOTH views — a single source of truth, no second poll.
+// WHY this lives here: SwarmModule calls this hook ONCE and every seat on the
+// one-screen Swarm tab (president · manager · workers) reads the same snapshot
+// — a single source of truth, no second poll.
 // The list is unified SERVER-side (src/lib/server/swarmWorkerRegistry.ts: live
 // PTYs + the engine roster + heartbeat files), so a worker started ANY way shows
 // up — the client-side manual-registry merge this hook used to own is gone.
@@ -902,7 +900,7 @@ export interface UseSwarmEngine {
   /** Latest engine state (DEFAULT_ENGINE until the route answers). */
   engine: SwarmEngineState
   /** The SERVER-TRUTH worker list (GET /api/swarm/workers, polled on the same
-   *  cadence) — the single source the Swarm worker tab renders, so a worker
+   *  cadence) — the single source the Swarm tab's worker seats render, so a worker
    *  started ANY way (engine dispatch, the Board 実行 button, or a direct
    *  `POST /api/swarm/worker`) shows up. Empty until the route answers. */
   realWorkers: SwarmWorkerRecord[]
@@ -940,35 +938,22 @@ export interface UseSwarmEngine {
    *  (the overseer is already disarmed, so nothing is written and the banner
    *  returns on the next poll — the d1d6d704 trap). */
   dismissOverseerReminder: () => void
-  /** Stop ONE engine-dispatched worker by its PTY id: the server tears down its
-   *  worktree + PTY and parks its card in 'blocked', then this adopts the fresh
-   *  state. A no-op while another engine round-trip is in flight. */
-  stopWorker: (terminalId: string) => void
-  /** Resolve a STUCK review card the engine can't auto-land (a real conflict /
-   *  repeatedly-failing verification): the server moves it OUT of review ('blocked'
-   *  to park for manual resolution, 'todo' to requeue a fresh worker), clears its
-   *  conflict flag + memos, and this adopts the fresh state. A no-op while another
-   *  engine round-trip is in flight. */
-  resolveReview: (taskId: string, target: 'blocked' | 'todo') => void
 }
 
 /** Own the commander engine's state for one project: one poll, the two switches,
- *  and the available/busy/error bookkeeping. Called ONCE by SwarmModule so the
- *  worker tab and the manager dashboard share a single snapshot. */
+ *  and the available/busy/error bookkeeping. Called ONCE by SwarmModule so
+ *  every seat shares a single snapshot. */
 export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
   const { t } = useT()
 
   const [engine, setEngine] = useState<SwarmEngineState>(DEFAULT_ENGINE)
   // The server-truth worker list, polled alongside the engine state (one
-  // interval, three endpoints) so the worker tab never needs a second poll.
+  // interval, three endpoints) so the worker seats never need a second poll.
   const [realWorkers, setRealWorkers] = useState<SwarmWorkerRecord[]>([])
   const [available, setAvailable] = useState(false)
   // A start/stop or overseer round-trip is in flight — disables the switches.
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // L3: the overseer was armed WITHOUT the sandbox experiment — the UI shows a
-  // reduced-containment note. Set from the overseer toggle response; cleared when the
-  // overseer is off. Advisory only (the structural READ-ONLY design + budget hold).
   // Unmet git/shell prerequisites (GET /api/swarm/preflight), polled alongside
   // the engine state below (one interval, one more endpoint).
   const [envIssues, setEnvIssues] = useState<SwarmEnvIssue[]>([])
@@ -1039,8 +1024,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
       const readWorkers = async (): Promise<() => void> => {
         // 2) The SERVER-TRUTH worker list (GET /api/swarm/workers) — same
         //    owner-gated / non-ok-degrades-to-empty contract. Polled here (not a
-        //    second interval) so the worker tab and the manager dashboard share
-        //    this one snapshot too.
+        //    second interval) so every seat shares this one snapshot too.
         try {
           const res = await fetch(`/api/swarm/workers?path=${encodeURIComponent(projectPath)}`)
           const next = res.ok ? sanitizeSwarmWorkers(await res.json()) : []
@@ -1287,69 +1271,6 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     [busy, engine.overseer, projectPath, t],
   )
 
-  // Stop ONE engine worker (the owner clicked "stop" on its row). No optimistic
-  // flip — the worker simply drops out of the authoritative state the POST
-  // returns. Same busy/error bookkeeping as the switches so the dashboard disables
-  // during the round-trip; a 404 (old server) surfaces the engine-failure note.
-  const stopWorker = useCallback(
-    async (terminalId: string) => {
-      if (busy) return
-      setBusy(true)
-      setError(null)
-      try {
-        const res = await fetch('/api/swarm/orchestrator/worker/stop', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ path: projectPath, terminalId }),
-        })
-        if (!res.ok) {
-          const body = (await res.json().catch(() => ({}))) as { error?: string }
-          throw new Error(body?.error || `HTTP ${res.status}`)
-        }
-        setEngine(sanitizeEngineState(await res.json()))
-        setAvailable(true)
-      } catch (e) {
-        setError(
-          t('projectPanel.swarm.manager.engineFailed', { error: e instanceof Error ? e.message : String(e) }),
-        )
-      } finally {
-        setBusy(false)
-      }
-    },
-    [busy, projectPath, t],
-  )
-
-  // Resolve a stuck review card (the owner clicked "park" / "requeue" on a card the
-  // engine can't auto-land). Same busy/error bookkeeping + authoritative-state
-  // adoption as stopWorker; a 404 (old server) surfaces the engine-failure note.
-  const resolveReview = useCallback(
-    async (taskId: string, target: 'blocked' | 'todo') => {
-      if (busy) return
-      setBusy(true)
-      setError(null)
-      try {
-        const res = await fetch('/api/swarm/orchestrator/review/resolve', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ path: projectPath, taskId, target }),
-        })
-        if (!res.ok) {
-          const body = (await res.json().catch(() => ({}))) as { error?: string }
-          throw new Error(body?.error || `HTTP ${res.status}`)
-        }
-        setEngine(sanitizeEngineState(await res.json()))
-        setAvailable(true)
-      } catch (e) {
-        setError(
-          t('projectPanel.swarm.manager.engineFailed', { error: e instanceof Error ? e.message : String(e) }),
-        )
-      } finally {
-        setBusy(false)
-      }
-    },
-    [busy, projectPath, t],
-  )
-
   return {
     engine,
     realWorkers,
@@ -1362,8 +1283,6 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     dismissAutonomyReminder: () => void dismissAutonomyReminder(),
     toggleOverseer: (next) => void toggleOverseer(next),
     dismissOverseerReminder: () => void dismissOverseerReminder(),
-    stopWorker: (terminalId) => void stopWorker(terminalId),
-    resolveReview: (taskId, target) => void resolveReview(taskId, target),
   }
 }
 
