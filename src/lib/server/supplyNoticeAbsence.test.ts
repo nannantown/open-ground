@@ -25,21 +25,34 @@ const RULE = '─'.repeat(40)
 const IDLE_SCREEN = ['⏺ done.', '', RULE, '❯ ', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')
 
 const writes: [string, string][] = []
+const enters: string[] = []
+const typedBox = new Map<string, string>()
+const IDLE_BOX = (text: string) =>
+  ['⏺ done.', '', '─'.repeat(40), `❯ ${text}`, '─'.repeat(40), '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')
 const pool: { id: string; cwd: string; deskLabel: string; startedAtMs: number }[] = []
 
 vi.mock('./terminal', () => ({
   listOwnerDeskTerminals: () => pool,
   isTerminalProcessAlive: () => true,
-  getTerminalScreen: () => IDLE_SCREEN,
+  // Like a real desk: a paste shows in the box, the Enter clears it.
+  getTerminalScreen: (id: string) => (typedBox.has(id) ? IDLE_BOX(typedBox.get(id)!) : IDLE_SCREEN),
+  // Lines only: the submitting Enter is a separate bare-CR write (after the
+  // paste), counted in `enters`.
   writeInput: (id: string, data: string) => {
-    writes.push([id, data])
+    if (data === '\r') {
+      enters.push(id)
+      typedBox.delete(id)
+    } else {
+      writes.push([id, data])
+      typedBox.set(id, data.replace('\x1b[200~', '').replace('\x1b[201~', ''))
+    }
     return true
   },
 }))
 
 import { createSwarmFatalNotification } from './swarmNotifications'
 import { openEscalation, answerEscalation } from './swarmEscalations'
-import { resetSupplyNoticeState, queueSupplyNotice, catchUpSupplyDesks, SUPPLY_NOTICE_TTL_MS } from './supplyNotice'
+import { resetSupplyNoticeState, queueSupplyNotice, catchUpSupplyDesks, peekSupplyImportant, SUPPLY_NOTICE_TTL_MS } from './supplyNotice'
 import { readFile, writeFile, readdir, chmod } from 'fs/promises'
 import { startSupplyContextCapLoop, stopSupplyContextCapLoop } from './supplyContextCap'
 
@@ -53,6 +66,8 @@ beforeEach(async () => {
   project = join(home, 'proj')
   await mkdir(project)
   writes.length = 0
+  enters.length = 0
+  typedBox.clear()
   pool.length = 0
   resetSupplyNoticeState()
 })
@@ -142,6 +157,8 @@ describe('a question opened while the president is closed', () => {
       expect(told()).toContain('本体に取り込まれました')
     })
     expect(told().split('再起動の前に聞いた質問')).toHaveLength(2)
+    // Dequeued (and the saved queue rewritten) only once the Enter landed.
+    await vi.waitFor(() => expect(peekSupplyImportant().size).toBe(0), { timeout: 10_000 })
 
     // …and what was told is not retold after ANOTHER restart (the new desk
     // hears the still-open question again, since it is a new conversation).

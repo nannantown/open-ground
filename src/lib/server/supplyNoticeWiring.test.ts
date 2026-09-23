@@ -47,6 +47,10 @@ const IDLE_SCREEN = [
 ].join('\n')
 
 const writes: [string, string][] = []
+const enters: string[] = []
+const typedBox = new Map<string, string>()
+const IDLE_BOX = (text: string) =>
+  ['⏺ done.', '', '─'.repeat(40), `❯ ${text}`, '─'.repeat(40), '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')
 
 // The PTY pool, mocked at the module boundary — so supplyNotice's own
 // `defaultDeps` (the arrangement production actually runs) is what gets
@@ -65,9 +69,18 @@ vi.mock('./terminal', () => ({
     { id: DESK, cwd: PROJECT, deskLabel: '補給官', startedAtMs: 5_000 },
   ],
   isTerminalProcessAlive: (id: string) => id !== 'term-supply-dead',
-  getTerminalScreen: () => IDLE_SCREEN,
+  // Like a real desk: a paste shows in the box, the Enter clears it.
+  getTerminalScreen: (id: string) => (typedBox.has(id) ? IDLE_BOX(typedBox.get(id)!) : IDLE_SCREEN),
+  // Lines only: the submitting Enter is a separate bare-CR write (after the
+  // paste), counted in `enters`.
   writeInput: (id: string, data: string) => {
-    writes.push([id, data])
+    if (data === '\r') {
+      enters.push(id)
+      typedBox.delete(id)
+    } else {
+      writes.push([id, data])
+      typedBox.set(id, data.replace('\x1b[200~', '').replace('\x1b[201~', ''))
+    }
     return true
   },
 }))
@@ -91,6 +104,8 @@ beforeEach(async () => {
   home = await realpath(await mkdtemp(join(tmpdir(), 'og-supplynotice-')))
   process.env.OPENGROUND_HOME = home
   writes.length = 0
+  enters.length = 0
+  typedBox.clear()
   resetSupplyNoticeState()
 })
 
@@ -107,10 +122,13 @@ describe('the engine actually reaches the supply desk', () => {
       { event: 'escalation-open', detail: '統合の可否を確認したい', projectPath: PROJECT },
       { os: false },
     )
+    await vi.waitFor(() => expect(writes.length).toBeGreaterThan(0), { timeout: 10_000 })
     expect(writes).toHaveLength(1)
     expect(writes[0]![0]).toBe(DESK)
     expect(writes[0]![1]).toContain('統合の可否を確認したい')
-    expect(writes[0]![1].endsWith('\r')).toBe(true)
+    // Submitted by a SEPARATE Enter, after the paste (owner report 0923).
+    expect(writes[0]![1]).not.toContain('\r')
+    await vi.waitFor(() => expect(enters).toEqual([DESK]), { timeout: 10_000 })
   })
 
   it('a high-risk force-hold (②) and any other fatal (④) are typed in too', async () => {
@@ -118,6 +136,7 @@ describe('the engine actually reaches the supply desk', () => {
       { event: 'high-risk-hold', detail: '高リスクの変更なので統合を止めた', projectPath: PROJECT },
       { os: false },
     )
+    await vi.waitFor(() => expect(writes.length).toBeGreaterThan(0), { timeout: 10_000 })
     expect(writes).toHaveLength(1)
     expect(writes[0]![1]).toContain('統合を止めた')
   })
@@ -176,6 +195,7 @@ describe('a held notice is re-offered by the existing supply loop', () => {
       startSupplyContextCapLoop(1_000)
       await vi.advanceTimersByTimeAsync(1_000)
       stopSupplyContextCapLoop()
+      await vi.advanceTimersByTimeAsync(3_000) // paste → Enter → landing check
 
       expect(writes).toHaveLength(1)
       expect(writes[0]![1]).toContain('\u5224\u65ad\u304c\u307b\u3057\u3044')
@@ -203,6 +223,7 @@ describe('the notice reaches the RIGHT desk, and only it', () => {
       { event: 'high-risk-hold', detail: '統合を止めた', projectPath: PROJECT },
       { os: false },
     )
+    await vi.waitFor(() => expect(writes.length).toBeGreaterThan(0), { timeout: 10_000 })
     expect(writes.map(([id]) => id)).toEqual([DESK])
   })
 })
@@ -227,6 +248,7 @@ describe("operator vocabulary never reaches the owner's window", () => {
       },
       { os: false },
     )
+    await vi.waitFor(() => expect(writes.length).toBeGreaterThan(0), { timeout: 10_000 })
     const line = writes[0]![1]
     expect(line).not.toContain('swarm/fix-ci')
     expect(line).not.toContain('release.yml')
@@ -248,6 +270,7 @@ describe('the desk is found through a different spelling of the same path', () =
       { event: 'high-risk-hold', detail: '統合を止めた', projectPath: `${PROJECT}/` },
       { os: false },
     )
+    await vi.waitFor(() => expect(writes.length).toBeGreaterThan(0), { timeout: 10_000 })
     expect(writes).toHaveLength(1)
   })
 
@@ -256,6 +279,7 @@ describe('the desk is found through a different spelling of the same path', () =
       { event: 'high-risk-hold', detail: '統合を止めた', projectPath: '/repo/./alpha' },
       { os: false },
     )
+    await vi.waitFor(() => expect(writes.length).toBeGreaterThan(0), { timeout: 10_000 })
     expect(writes).toHaveLength(1)
   })
 })

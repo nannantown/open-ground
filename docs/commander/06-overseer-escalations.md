@@ -1196,3 +1196,38 @@ typed, question in plain words, answered question not retold, restart survived, 
 `supplyNotice.test.ts` ("waits for the next desk", catch-up unit cases). Red measured for: TTL
 restored on the important lane, `forgetSupplyQuestion` made a no-op, catch-up emptied, the
 `toldTo` skip removed, the loop reverted to `flushSupplyNotices`.
+
+## §1.9 — How a line is typed into the president's box (2026-09-23)
+
+Owner report: 「【司令官からの返事】…」 sat typed in the president's input box and never sent.
+Cause: `flushSupplyNotices` wrote `${line}\r` as ONE write. Claude Code reads a long block as a
+paste, so the CR inside it became a newline; and the queue dropped the line on write success.
+
+Now every president line (reply / important / progress) goes through the shared PTY helper
+`injectAnswerIntoWorker` (`swarmEscalations.ts`): bracketed paste → `ESCALATION_ENTER_DELAY_MS`
+→ a bare `\r` as its own write → landing check (re-send the Enter up to `ENTER_RETRY_MAX`).
+- A line leaves its queue **only once the box is confirmed clear** (or the desk is generating).
+- Enter never took ⇒ the line stays queued and the desk is remembered as holding it (`unsent`).
+  The next pass sends **only the Enter** (`submitPastedInput`) — never the text again. If the
+  box is already clear (the owner pressed Enter or cleared it), the line is dequeued, not retyped.
+- One delivery per desk at a time (`inFlight`); an app-wide line is not typed into a second desk
+  while one is in flight or unsent.
+- `queueSupplyReply` now resolves after the landing check, so `supply/say`'s `delivered` means
+  "submitted", not "typed".
+
+**Rework 1 (review 848e75f0).** Every CR into the president's box — the first one after the
+paste too — is pressed only when `onlyOurPasteInBox` holds on a frame read right before it: not
+generating (footer-scoped `isGenerating`), no menu (`detectMenu`), and the box equal to our line
+(whitespace-normalised). Anything else — the owner typed after it, a menu, no frame — presses
+nothing (`submitPastedInput` `guardEnter`). "Landed" then needs positive evidence (generating, or
+the box read as `''`); no frame is not evidence. The re-send pass claims the desk before its first
+await; `commit` is once-only; `inFlight`/`unsent` live on `globalThis`. After
+`SUPPLY_UNSENT_MAX_PASSES` (5) passes an unsent line is dequeued and handed to the bell
+(`onReplyExpired`). The landing check uses `isGenerating` for workers too (was the phrase anywhere
+on screen). Red measured per guard (see `supplyNotice.test.ts`).
+
+Commander desks are SDK-only (a pushed turn has no input box), so `sayToManagerDesk`'s legacy
+PTY branch is unchanged. `seedPrompt` (the other `text + '\r'` writer) had no callers and was
+deleted. Guards: `supplyNotice.test.ts` "dequeued only once it left the box" + the harness
+asserting every line is a bracketed paste with a separate Enter. Red measured: the old one-write
+form → 31 red; dequeue-on-write → 3 red.

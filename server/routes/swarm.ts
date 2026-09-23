@@ -589,7 +589,7 @@ export const swarmRoutes = new Hono()
     // Reporting the call's success would say "delivered" for a reply that is
     // merely parked — the dishonesty `heldBecause` was added to avoid on the
     // outbound side.
-    const waiting = queueSupplyReply(path, text)
+    const waiting = await queueSupplyReply(path, text)
     return c.json({ queued: true, delivered: waiting === 0 })
   })
   // Managers launch through the SDK with /og-manage in the primary checkout.

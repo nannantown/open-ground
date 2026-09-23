@@ -1096,7 +1096,7 @@ const SITES: Record<string, Decl & { count: number }> = {
   },
   'src/lib/server/claudeTerminal.ts::writeInput': {
     tier: 'pty-only-by-design',
-    count: 2,
+    count: 1, // seedPrompt (text + '\r' in one write, no callers) deleted 2026-09-23
     why: 'launchClaude writing the initial prompt / an interrupt into the PTY it just created. The handle cannot be anything else.',
   },
   'src/lib/server/claudeTerminal.ts::killTerminal': {

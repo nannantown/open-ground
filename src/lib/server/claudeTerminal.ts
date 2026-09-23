@@ -626,14 +626,6 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   }
 }
 
-// Type a follow-up prompt into a still-running claude PTY (the user's claude
-// session is alive and at the input prompt). Used for resume-in-place where
-// we don't want to spin up a new PTY just to add another turn.
-export const seedPrompt = (terminalId: string, text: string): boolean => {
-  // `\r` is the Enter key in xterm/PTY; Claude's TUI submits on it.
-  return writeInput(terminalId, text + '\r')
-}
-
 // Send Ctrl-C to a claude PTY — first-press cancel. Claude's TUI handles it
 // as a soft interrupt (cancels current generation, leaves the session up).
 // For a hard kill, escalate to killTerminal().

@@ -262,6 +262,9 @@ export interface SupplyNoticeDeps {
   write: (terminalId: string, data: string) => boolean
   /** Injectable clock — {@link SUPPLY_NOTICE_TTL_MS} is measured against it. */
   now: () => number
+  /** Injectable wait between the paste and its Enter (and between Enter
+   *  re-sends) — tests pass an instant one. */
+  sleep: (ms: number) => Promise<void>
   /** Where a REPLY goes when it expired undelivered ({@link queueSupplyReply}).
    *  A news item that ages out is simply dropped — the bell already holds it. A
    *  reply is the answer to a question the OWNER asked, so dropping it silently
@@ -291,6 +294,7 @@ const defaultDeps: SupplyNoticeDeps = {
   screen: getTerminalScreen,
   write: writeInput,
   now: () => Date.now(),
+  sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
   // Lazy + dynamic on purpose: swarmNotifications imports THIS module (it calls
   // noticeToSupply for every notification it creates), so a static import back
   // would close a cycle at module-init time. Fire-and-forget — a failed bell
@@ -396,6 +400,20 @@ declare global {
   var __openground_supply_resolved: Set<string> | undefined
   // eslint-disable-next-line no-var
   var __openground_supply_q_loaded: { loaded: boolean } | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_inflight: Map<string, object> | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_unsent: Map<string, UnsentLine> | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_gen: { n: number } | undefined
+}
+
+interface UnsentLine {
+  line: string
+  commit: () => void
+  appWide: boolean
+  /** Later passes that could not press its Enter. */
+  passes: number
 }
 const pending: Map<string, PendingNotice[]> =
   globalThis.__openground_supply_notice_q ?? (globalThis.__openground_supply_notice_q = new Map())
@@ -415,6 +433,35 @@ const seenDesks: Set<string> =
  *  so the catch-up never retells one this conversation has already heard. */
 const toldTo: Map<string, Set<string>> =
   globalThis.__openground_supply_told ?? (globalThis.__openground_supply_told = new Map())
+
+/** Desks a pass is typing into right now (and APP_WIDE while an app-wide line
+ *  is in flight) — a concurrent pass must not type a second line there. */
+const inFlight: Map<string, object> =
+  globalThis.__openground_supply_inflight ?? (globalThis.__openground_supply_inflight = new Map())
+/** Mark `k` in flight; the returned release clears only THIS claim (a pass that
+ *  outlived a state reset must not free a newer pass's desk). */
+const claim = (k: string): (() => void) => {
+  const token = {}
+  inFlight.set(k, token)
+  return () => {
+    if (inFlight.get(k) === token) inFlight.delete(k)
+  }
+}
+
+/** Per desk: a line pasted into the box whose Enter did not take. The next pass
+ *  re-sends only the Enter; `commit` dequeues what the line carried. */
+const unsent: Map<string, UnsentLine> =
+  globalThis.__openground_supply_unsent ?? (globalThis.__openground_supply_unsent = new Map())
+
+/** Bumped by {@link resetSupplyNoticeState}: a delivery that was awaiting across
+ *  a reset must not write its outcome into the fresh state. */
+const generation: { n: number } =
+  globalThis.__openground_supply_gen ?? (globalThis.__openground_supply_gen = { n: 0 })
+
+/** Passes an unsent line gets for its Enter before it is given up: dequeued and
+ *  handed to the bell, so a wedged box neither holds the desk's other lines back
+ *  nor collects Enters forever. */
+export const SUPPLY_UNSENT_MAX_PASSES = 5
 
 /** Questions answered/dismissed recently — refused by pushImportant. */
 const resolvedQuestions: Set<string> =
@@ -623,6 +670,9 @@ export const resetSupplyNoticeState = (opts: { keepDisk?: boolean } = {}): void 
   replies.clear()
   progress.clear()
   seenDesks.clear()
+  inFlight.clear()
+  unsent.clear()
+  generation.n++
 }
 
 /** The NEXT news line each project would hear (important first, else the
@@ -655,7 +705,7 @@ export const peekSupplyReplies = (): ReadonlyMap<string, readonly string[]> =>
  * immediately. Returns the project paths delivered this pass. Never throws — a
  * failed pass must not kill the loop that calls it.
  */
-export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): string[] => {
+export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}): Promise<string[]> => {
   const deps = { ...defaultDeps, ...partial }
   const delivered: string[] = []
   ensureLoaded()
@@ -705,6 +755,49 @@ export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): str
       const key = deskKey(desk.cwd)
       if (served.has(key)) continue
       served.add(key)
+      if (inFlight.has(desk.id)) continue // an earlier pass is still typing here
+      const screen = deps.screen(desk.id)
+      const left = unsent.get(desk.id)
+      if (left) {
+        // Our own line from an earlier pass. Only its Enter is ever re-sent —
+        // never the text — and only on a frame where the box holds EXACTLY that
+        // line, no menu is open and the desk is not generating (guardEnter): an
+        // Enter must never submit the owner's own typing or confirm a menu.
+        // Claimed BEFORE the first await so a concurrent pass cannot press too.
+        const release = claim(desk.id)
+        try {
+          const { sanitizeForPaste, submitPastedInput } = await import('./swarmEscalations')
+          // Read AFTER the claim and the import. The box read as EMPTY (a
+          // positive reading, on an idle menu-less frame) ⇒ the line left it:
+          // the owner pressed Enter or cleared it — dequeued, never retyped.
+          // No frame / a menu / anything else ⇒ not evidence either way.
+          const fresh = deps.screen(desk.id)
+          const gen = generation.n
+          const landed =
+            (fresh !== null && noticeDeliverable(fresh)) ||
+            (await submitPastedInput(desk.id, sanitizeForPaste(left.line), {
+              write: deps.write,
+              sleep: deps.sleep,
+              readScreen: deps.screen,
+              guardEnter: true,
+            }))
+          if (gen !== generation.n) continue // state was reset meanwhile
+          if (landed) {
+            unsent.delete(desk.id)
+            left.commit()
+            delivered.push(key)
+          } else if (++left.passes >= SUPPLY_UNSENT_MAX_PASSES) {
+            // Given up: out of the queue, onto the bell (the same sink an
+            // expired reply uses) — never silently.
+            unsent.delete(desk.id)
+            left.commit()
+            deps.onReplyExpired(key, left.line)
+          }
+        } finally {
+          release()
+        }
+        continue
+      }
       // ONE line per desk per pass, and a REPLY goes before news. The order is
       // not a preference: the owner is sitting there having been told
       // 「聞いてきます」, and the desk starts generating the moment it receives a
@@ -714,7 +807,14 @@ export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): str
       const queue = replies.get(key)
       const reply = queue?.[0] ?? null
       // App-wide fatals first: they are rare and concern the whole app.
-      const importantKey = reply ? null : pending.get(APP_WIDE)?.length ? APP_WIDE : pending.get(key)?.length ? key : null
+      const appWideFree = !inFlight.has(APP_WIDE) && !Array.from(unsent.values()).some((u) => u.appWide)
+      const importantKey = reply
+        ? null
+        : appWideFree && pending.get(APP_WIDE)?.length
+          ? APP_WIDE
+          : pending.get(key)?.length
+            ? key
+            : null
       const bundle = importantKey ? takeBundle(pending.get(importantKey) ?? [], now) : null
       const important = bundle ? bundle.items[0] : null
       const digest = reply || important ? null : progress.get(key)
@@ -722,24 +822,64 @@ export const flushSupplyNotices = (partial: Partial<SupplyNoticeDeps> = {}): str
       const line =
         reply?.line ?? importantLine ?? (digest && digest.items.length ? supplyProgressLine(digest.items) : null)
       if (!line) continue
-      if (!noticeDeliverable(deps.screen(desk.id))) continue // busy / half-typed / menu — next pass
-      if (!deps.write(desk.id, `${line}\r`)) continue
-      if (reply && queue) {
-        queue.shift()
-        if (queue.length === 0) replies.delete(key)
-      } else if (bundle) {
-        const told = toldTo.get(desk.id) ?? new Set<string>()
-        for (const it of bundle.items) if (it.escalationId) told.add(it.escalationId)
-        toldTo.set(desk.id, told)
-        const ik = importantKey ?? key
-        const q = pending.get(ik)
-        q?.splice(0, bundle.items.length)
-        if (!q || q.length === 0) pending.delete(ik)
-        savePending()
-      } else {
-        progress.delete(key)
+      if (!noticeDeliverable(screen)) continue // busy / half-typed / menu — next pass
+      // Only what was delivered is removed — by identity, since the queues may
+      // have moved while this pass awaited the landing check.
+      const nItems = digest?.items.length ?? 0
+      let committed = false
+      const commit = (): void => {
+        if (committed) return // once: a second call would splice undelivered progress
+        committed = true
+        if (reply) {
+          const q = replies.get(key)
+          const i = q ? q.indexOf(reply) : -1
+          if (q && i >= 0) q.splice(i, 1)
+          if (q && q.length === 0) replies.delete(key)
+        } else if (bundle) {
+          const told = toldTo.get(desk.id) ?? new Set<string>()
+          for (const it of bundle.items) if (it.escalationId) told.add(it.escalationId)
+          toldTo.set(desk.id, told)
+          const ik = importantKey ?? key
+          const q = pending.get(ik)
+          if (q) for (const it of bundle.items) if (q.includes(it)) q.splice(q.indexOf(it), 1)
+          if (!q || q.length === 0) pending.delete(ik)
+          savePending()
+        } else if (digest && progress.get(key) === digest) {
+          digest.items.splice(0, nItems)
+          if (digest.items.length === 0) progress.delete(key)
+        }
       }
-      delivered.push(key)
+      // Paste, THEN Enter as a separate write, then confirm the box emptied
+      // (the shared helper). One `${line}\r` write is read by Claude Code as a
+      // paste, the \r becomes a newline, and the line sat unsent in the box —
+      // while the queue had already dropped it (owner report 2026-09-23).
+      let typed = false
+      const trackedWrite = (id: string, data: string): boolean => {
+        const ok = deps.write(id, data)
+        if (ok) typed = true
+        return ok
+      }
+      const appWide = importantKey === APP_WIDE
+      const releaseDesk = claim(desk.id)
+      const releaseAppWide = appWide ? claim(APP_WIDE) : () => {}
+      try {
+        const { injectAnswerIntoWorker } = await import('./swarmEscalations')
+        const opts = { write: trackedWrite, sleep: deps.sleep, readScreen: deps.screen, guardEnter: true }
+        const gen = generation.n
+        const ok = await injectAnswerIntoWorker(desk.id, line, opts)
+        if (gen !== generation.n) continue // state was reset meanwhile
+        if (ok) {
+          commit()
+          delivered.push(key)
+        } else if (typed) {
+          // The text is in the box but the Enter did not take: the next pass
+          // re-sends ONLY the Enter (never the text — no double line).
+          unsent.set(desk.id, { line, commit, appWide, passes: 0 })
+        }
+      } finally {
+        releaseDesk()
+        releaseAppWide()
+      }
     } catch {
       /* best effort — a notice that missed stays queued for the next pass */
     }
@@ -812,10 +952,10 @@ export const queueSupplyNotice = (
   projectPath: string,
   summary: string,
   deps: Partial<SupplyNoticeDeps> = {},
-): void => {
-  if (!projectPath) return
+): Promise<unknown> => {
+  if (!projectPath) return Promise.resolve()
   pushImportant(deskKey(projectPath), summary, (deps.now ?? Date.now)())
-  flushSupplyNotices(deps)
+  return flushSupplyNotices(deps).catch(() => [])
 }
 
 /**
@@ -827,16 +967,16 @@ export const queueSupplyProgress = (
   projectPath: string,
   item: string,
   deps: Partial<SupplyNoticeDeps> = {},
-): void => {
+): Promise<unknown> => {
   const text = sanitizeSupplyNotice(item)
-  if (!projectPath || !text) return
+  if (!projectPath || !text) return Promise.resolve()
   const key = deskKey(projectPath)
   const cur = progress.get(key) ?? { items: [], at: (deps.now ?? Date.now)() }
   if (!cur.items.includes(text)) cur.items.push(text)
   while (cur.items.length > SUPPLY_PROGRESS_MAX_ITEMS) cur.items.shift()
   cur.at = (deps.now ?? Date.now)()
   progress.set(key, cur)
-  flushSupplyNotices(deps)
+  return flushSupplyNotices(deps).catch(() => [])
 }
 
 /**
@@ -856,16 +996,16 @@ export const queueSupplyProgress = (
  *
  * Returns how many replies are still WAITING for this project afterwards, so a
  * caller can say 「届けました」 or 「今は取り込み中なので後で」 honestly. 0 means the
- * queue drained, i.e. this line was typed. (Not a bare boolean: with an earlier
+ * queue drained, i.e. this line was typed AND submitted (the landing check). (Not a bare boolean: with an earlier
  * reply still queued, the delivery this call triggers is of the OLDER one, and
  * "delivered: true" would then be a lie about the line the caller just handed
  * over.)
  */
-export const queueSupplyReply = (
+export const queueSupplyReply = async (
   projectPath: string,
   summary: string,
   deps: Partial<SupplyNoticeDeps> = {},
-): number => {
+): Promise<number> => {
   const line = supplyReplyLine(summary)
   if (!projectPath || line.length === 0) return 0
   const key = deskKey(projectPath)
@@ -882,7 +1022,7 @@ export const queueSupplyReply = (
     }
   }
   replies.set(key, q)
-  flushSupplyNotices(deps)
+  await flushSupplyNotices(deps).catch(() => [])
   return replies.get(key)?.length ?? 0
 }
 
@@ -891,17 +1031,17 @@ export const queueSupplyReply = (
  * it to the project's supply desk IF it is one the owner must judge or know
  * about. A no-op for everything else, and for anything with no project.
  */
-export const noticeToSupply = (n: AppNotification, deps: Partial<SupplyNoticeDeps> = {}): void => {
+export const noticeToSupply = (n: AppNotification, deps: Partial<SupplyNoticeDeps> = {}): Promise<unknown> => {
   const project = noticeProject(n)
   const text = supplyNoticeText(n)
-  if (text === null) return
+  if (text === null) return Promise.resolve()
   // A project-less FATAL still has to reach the owner (the 監督 feed that used to
   // show it on every project is gone) — it rides the app-wide lane. Project-less
   // info events stay bell-only.
-  if (!project && n.kind !== 'swarm-fatal') return
+  if (!project && n.kind !== 'swarm-fatal') return Promise.resolve()
   const escalationId = n.kind === 'swarm-info' ? n.swarmInfo?.escalationId : undefined
   pushImportant(project ? deskKey(project) : APP_WIDE, text, (deps.now ?? Date.now)(), escalationId || undefined)
-  flushSupplyNotices(deps)
+  return flushSupplyNotices(deps).catch(() => [])
 }
 
 /**
@@ -946,9 +1086,9 @@ export const forgetSupplyQuestion = (escalationId: string): void => {
  */
 export const catchUpSupplyDesks = async (partial: Partial<SupplyNoticeDeps> = {}): Promise<void> => {
   const deps = { ...defaultDeps, ...partial }
-  // Held notices first, synchronously — a slow or failing store read must not
-  // delay what is already queued.
-  flushSupplyNotices(partial)
+  // Held notices first — a slow or failing store read must not delay what is
+  // already queued.
+  await flushSupplyNotices(partial)
   let desks: { id: string; cwd: string }[] = []
   try {
     desks = deps.desks()
@@ -958,6 +1098,7 @@ export const catchUpSupplyDesks = async (partial: Partial<SupplyNoticeDeps> = {}
   const live = new Set(desks.map((d) => d.id))
   for (const id of Array.from(seenDesks)) if (!live.has(id)) seenDesks.delete(id)
   for (const id of Array.from(toldTo.keys())) if (!live.has(id)) toldTo.delete(id)
+  for (const id of Array.from(unsent.keys())) if (!live.has(id)) unsent.delete(id) // still queued
   let added = false
   for (const desk of desks) {
     if (seenDesks.has(desk.id)) continue
@@ -979,5 +1120,5 @@ export const catchUpSupplyDesks = async (partial: Partial<SupplyNoticeDeps> = {}
       warnOnce(`catchup:${desk.id}`, `catch-up read failed for a president desk; retrying each pass: ${String(e)}`)
     }
   }
-  if (added) flushSupplyNotices(partial)
+  if (added) await flushSupplyNotices(partial)
 }

@@ -33,6 +33,10 @@ const IDLE = frame('', false)
 const BUSY = frame('', true)
 
 const writes: [string, string][] = []
+const enters: string[] = []
+const typedBox = new Map<string, string>()
+const IDLE_BOX = (text: string) =>
+  ['⏺ done.', '', '─'.repeat(40), `❯ ${text}`, '─'.repeat(40), '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')
 /** The desk's cwd, set per test to the registered tmp project (the pool is
  *  consulted lazily, so a `let` read inside the mock is correct). */
 let deskCwd = ''
@@ -44,9 +48,18 @@ vi.mock('@/lib/server/terminal', async (orig) => {
     ...actual,
     listOwnerDeskTerminals: () => [{ id: DESK, cwd: deskCwd, deskLabel: '補給官', startedAtMs: 5_000 }],
     isTerminalProcessAlive: () => true,
-    getTerminalScreen: () => screen,
+    // Like a real desk: a paste shows in the box, the Enter clears it.
+    getTerminalScreen: (id: string) => (typedBox.has(id) ? IDLE_BOX(typedBox.get(id)!) : screen),
     writeInput: (id: string, data: string) => {
-      writes.push([id, data])
+      // The line goes out as a bracketed paste (recorded unwrapped); its Enter
+      // is a separate bare-CR write, counted in `enters`.
+      if (data === '\r') {
+        enters.push(id)
+        typedBox.delete(id)
+      } else {
+        writes.push([id, data.replace('\x1b[200~', '').replace('\x1b[201~', '')])
+        typedBox.set(id, data.replace('\x1b[200~', '').replace('\x1b[201~', ''))
+      }
       return true
     },
   }
@@ -82,6 +95,8 @@ beforeEach(async () => {
   deskCwd = project
   screen = IDLE
   writes.length = 0
+  enters.length = 0
+  typedBox.clear()
   resetSupplyNoticeState()
   await writeSession({
     user: { id: 'test-user', email: OWNER, provider: 'google' },
@@ -115,7 +130,7 @@ describe('POST /api/swarm/supply/say — the commander answering the task desk',
     expect(writes[0]![0]).toBe(DESK)
     expect(writes[0]![1].startsWith(SUPPLY_REPLY_PREFIX)).toBe(true)
     expect(writes[0]![1]).toContain('入れて大丈夫です')
-    expect(writes[0]![1].endsWith('\r')).toBe(true)
+    expect(enters).toEqual([DESK]) // submitted by its own Enter, after the paste
   })
 
   it('reports delivered:false — not a lie — when the desk is mid-turn', async () => {

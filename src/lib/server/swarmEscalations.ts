@@ -29,7 +29,8 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'fs/promises'
 import { join, resolve, sep } from 'path'
 import { createHash, randomUUID } from 'crypto'
-import { WORKING_FOOTER_RE } from '@/lib/claudeScreen'
+import { isGenerating, readInputBoxText } from '@/lib/claudeScreen'
+import { detectMenu } from '@/lib/claudeMenu'
 import { ensureOpenGroundHome, escalationsFile, escalationShotsDir } from './paths'
 import { atomicWriteJson } from './atomicWrite'
 import { getTerminal, getTerminalScreen, writeInput } from './terminal'
@@ -869,29 +870,89 @@ export const injectAnswerIntoWorker = async (
     sleep?: (ms: number) => Promise<void>
     /** DI for tests: the landing-check scrape (default getTerminalScreen). */
     readScreen?: (id: string) => string | null
+    /** Owner-desk mode — see {@link submitPastedInput}. */
+    guardEnter?: boolean
+  },
+): Promise<boolean> => {
+  const write = deps?.write ?? writeInput
+  const sleep =
+    deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const payload = sanitizeForPaste(text)
+  if (!write(terminalId, bracketedPaste(payload))) return false
+  await sleep(ESCALATION_ENTER_DELAY_MS)
+  return submitPastedInput(terminalId, payload, deps)
+}
+
+/** Whitespace-free form — TUI wrapping inserts newlines + indent. */
+const squash = (t: string): string => t.replace(/\s+/g, '')
+
+/** May a bare CR be pressed on this frame WITHOUT touching anything but our own
+ *  pasted text? Not generating, no menu (a CR would confirm an option nobody
+ *  chose), and the input box holds EXACTLY our payload (a CR would otherwise
+ *  submit whatever the owner typed with it). No frame ⇒ no evidence ⇒ false. */
+export const onlyOurPasteInBox = (screen: string | null, payload: string): boolean => {
+  if (screen === null || isGenerating(screen) || detectMenu(screen) !== null) return false
+  const box = readInputBoxText(screen)
+  return box !== null && squash(box) === squash(payload) && squash(payload) !== ''
+}
+
+/**
+ * The second half of {@link injectAnswerIntoWorker}: send the submitting CR for
+ * text ALREADY sitting in the input box, then confirm it left the box (re-send
+ * the CR up to {@link ENTER_RETRY_MAX} times). Exported on its own for a caller
+ * that finds its earlier paste still unsent on a later pass — it must re-send
+ * only the Enter, never the text again (supplyNotice.ts).
+ *
+ * `guardEnter` (the owner's own desk): every CR — the first one too — is pressed
+ * only when {@link onlyOurPasteInBox} holds on a frame read right before it, and
+ * "landed" needs POSITIVE evidence (generating, or the box read as empty). No
+ * frame, a menu, or anything else in the box ⇒ nothing is pressed and the
+ * result is false (the caller keeps the line and asks again later).
+ */
+export const submitPastedInput = async (
+  terminalId: string,
+  payload: string,
+  deps?: {
+    write?: typeof writeInput
+    sleep?: (ms: number) => Promise<void>
+    readScreen?: (id: string) => string | null
+    guardEnter?: boolean
   },
 ): Promise<boolean> => {
   const write = deps?.write ?? writeInput
   const sleep =
     deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const readScreen = deps?.readScreen ?? getTerminalScreen
-  const payload = sanitizeForPaste(text)
-  if (!write(terminalId, bracketedPaste(payload))) return false
-  await sleep(ESCALATION_ENTER_DELAY_MS)
-  if (!write(terminalId, '\r')) return false
+  const guard = deps?.guardEnter === true
+  const read = (): string | null => {
+    try {
+      return readScreen(terminalId)
+    } catch {
+      return null
+    }
+  }
+  const landed = (screen: string | null): boolean => {
+    // Footer-scoped (isGenerating), not the phrase anywhere on screen — the
+    // phrase also appears in conversation text and tool output.
+    if (screen === null) return !guard // worker contract: both writes landed
+    if (isGenerating(screen)) return true
+    return guard ? readInputBoxText(screen) === '' : !pasteStillInInputBox(screen, payload)
+  }
+  const press = (): boolean => {
+    if (guard) {
+      const screen = read()
+      if (!onlyOurPasteInBox(screen, payload)) return false
+    }
+    return write(terminalId, '\r')
+  }
+  // Refused ⇒ nothing pressed, nothing proven: the caller keeps the line.
+  if (!press()) return false
   for (let attempt = 0; ; attempt++) {
     await sleep(ENTER_RETRY_INTERVAL_MS)
-    let screen: string | null = null
-    try {
-      screen = readScreen(terminalId)
-    } catch {
-      screen = null
-    }
-    if (screen === null) return true // no frame to judge by — both writes landed
-    if (WORKING_FOOTER_RE.test(screen)) return true // generating ⇒ landed
-    if (!pasteStillInInputBox(screen, payload)) return true // box clear ⇒ landed
+    const screen = read()
+    if (landed(screen)) return true
     if (attempt >= ENTER_RETRY_MAX) return false // still pending after N resends
-    if (!write(terminalId, '\r')) return false // PTY died mid-retry
+    if (!press()) return false // PTY died, or the box no longer holds only our line
   }
 }
 
