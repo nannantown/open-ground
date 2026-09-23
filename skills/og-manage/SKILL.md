@@ -16,8 +16,8 @@ Owner-facing text (chat, escalation questions, status reports) follows the launc
 
 - **Resumes across restarts, memory doesn't.** Session resumes via `claude --resume` (id in `~/.openground/projects/<uuid>/swarm-sessions.json`); engine in-memory state (roster, reviews, quota cooldown, autopilot) is wiped every restart, and a restart is usually a release so code may differ too. **First action after resume: run "状況" from scratch** — never act on "I said this before"; API/git state is truth.
 - cwd = target project's primary checkout (`<repo>`). `$OG` = injected context card's `http://127.0.0.1:<port>` (usually 47776).
-- Once at start: `curl -s $OG/api/health` must return `{"app":"openground",…}`; else state "app not running" and stop.
-- swarm APIs need **owner login** — 403 = tell user to sign in, don't work around it.
+- Once at start: `curl -s $OG/api/health` must return `{"app":"openground",…}`; else stop — nothing you write can reach the owner without the app, so don't keep retrying; the app's own restart brings you back (then run "状況").
+- swarm APIs need **owner login** — 403 `forbidden` = not signed in: **stop**, write the reason in your own window only, and don't try to deliver it — every `/api/swarm/*` route (`supply/say` and `escalations/open` included) sits behind the same gate, so nothing can reach the owner. Don't work around it. (403 `path not allowed` is different: the `path` is wrong, not the sign-in — fix the path.)
 - **Diagnosis canon**: if `docs/commander/` exists, read `00-INDEX.md` before diagnosing anomalies (symptom→chapter map, verify commands, trusted displays); gap-to-ideal canon = `TARGET-STATE.md`. Swarm-core changes must update the matching chapter (TARGET-STATE §6).
 - **Freshness check** (00-INDEX §6-1, once/session): if `docs/commander/` exists, before diagnosing:
   ```bash
@@ -92,9 +92,88 @@ Boundary questions (release, deletion, cost, models…) skip you and go straight
 the answer route refuses `by:"commander"` for them (409). That refusal is correct — do not
 work around it.
 
+## Where reports go (owner decision 2026-09-23)
+
+Your window is no longer on the owner's screen — the owner talks only to the president.
+Text you print in your own window reaches **nobody**. Every "report" / "tell the user" /
+"ask the user" in this file means one of these two routes, picked by one question —
+**does the owner have to decide something?**
+
+| kind | route | body |
+|---|---|---|
+| **result, no decision** — landed / sent back / stopped and why / worker launched / anything the president relayed (incl. a "注文" while the engine is ON) | `POST $OG/api/swarm/supply/say` (the president retells it) | `{"path":…,"text":"<plain words, 1-3 lines>"}` |
+| **owner must decide** — high-risk hold, rework cap → `blocked` (the `rework` call opens this one for you — see below), real conflict, review impossible (fail-CLOSED stop), moving a card to `blocked` | `POST $OG/api/swarm/escalations/open` (question inbox) | `{"path":…,"question":"<1 line, technical ok>","context":"<what you saw>","plainQuestion":"<決めること / A: … B: … / それぞれどうなるか>","whyEscalated":"policy"\|"irreversible"\|"insufficient-info","taskId":"<full UUID>","branch":"swarm/…","receiptKey":"commander:<reason>:<taskId>:<HEAD sha>"}` (rework-cap: `commander:rework-cap:<taskId>:<reworkCount>:<branch\|none>:<HEAD 12 hex\|none>`, opened by the `rework` call — see below) |
+
+- `plainQuestion` is **required in practice** (the route accepts it missing, then the owner
+  sees your machine-facing `question`). Write it for a non-programmer; branch names / file
+  paths go at the end in parentheses, never first. Label the choices `A:` / `B:` — the engine
+  reads only a leading `A`/`B` on an answer with a `taskId` (a `C:` choice is yours to carry
+  out; the engine ignores it). On an `A`-style "resume" answer to a `blocked` card whose branch
+  is 0 commits ahead, the engine itself moves it `blocked`→`todo` — finding it already in
+  `todo` is expected, not a bug.
+- **Always send `receiptKey` = `commander:<reason>:<taskId>:<HEAD sha>`**, `<reason>` one of
+  `high-risk` / `conflict` / `review-failed` / `blocked`, `<HEAD sha>` =
+  `git -C <repo> rev-parse --verify <branch>` (works with or without a worktree; the literal
+  `none` when the branch is gone too). It binds the question to *this* occasion (the same card comes
+  back to the same spot on the same branch after a rework) and marks it as yours — rows with
+  `terminalId`/`sdkSessionId`, or without the `commander:` prefix, are workers' questions.
+- **`rework-cap` is NOT yours to open.** The `rework` call (`POST $OG/api/project/tasks
+  {"rework":[{"id":…}]}`) that parks the card in `blocked` opens the owner question itself, in
+  the same request, keyed `commander:rework-cap:<taskId>:<reworkCount>:<card branch|none>:<HEAD|none>`
+  (`<HEAD>` = first 12 hex of `git -C <repo> rev-parse --verify <branch>`). The count restarts
+  when a card goes back to `todo`, and an ordinary redo returns to the **same** branch, so the
+  HEAD is what separates occasions: the worker commits again before the next cap. Ceiling: a card
+  that caps again at the same HEAD (sent back 3 times with no new commit) lands on the same key —
+  then the newest row wins. Read `results.rework[i]`: `questionOpened:true` → done, don't open another.
+  `questionOpened:false` (the inbox write failed; the card is still parked) → open it yourself
+  with **the returned `receiptKey`** (it dedups while open).
+- **Every other reason is yours to raise** — nothing else opens high-risk / conflict /
+  review-failed / blocked questions for you. The check below only prevents duplicates.
+- Before opening, `GET $OG/api/swarm/escalations?path=<repo>&lane=owner` (no `status` filter —
+  every status comes back) and look only at the **newest** row (by `createdAt`) with the
+  **exact** `receiptKey`: `open` → don't open a second; `answered` → follow that answer;
+  `dismissed` → "not approved", don't re-ask for that HEAD. A different HEAD is a new occasion →
+  **ask again, but only while the card is still held where the question left it** (still held in
+  `review` / still `blocked`); a card that has moved on (landed, `done`, branch gone = `none`)
+  needs no question. An old answer never covers new commits.
+- Don't follow up with `supply/say` — the app already tells the president a question arrived.
+
+### Answers come back only when you look (read them first)
+
+Nothing wakes you when the owner answers a question you opened (it has no worker address, so it
+stays `answered` — no delivery, no nudge; a real wake needs a code change and is out of scope).
+The president still tells the owner "answer delivered". So **at the start of "状況" and of
+"マージ"**:
+1. `GET $OG/api/swarm/escalations?path=<repo>&lane=owner` (**no `status` filter** — you need
+   `open` and `dismissed` rows too), keep only yours (`receiptKey` starts with `commander:`).
+2. **Look only at the newest row** (by `createdAt`) per key — and branch on its status. Act on it **only if its
+   occasion is still the current one**:
+   - `high-risk` / `conflict` / `review-failed` / `blocked`: the `<HEAD sha>` in the key equals the
+     branch's current `git -C <repo> rev-parse --verify <branch>` **and** the row is `answered` **and** the card still sits where the question
+     left it (e.g. still held in `review` and the answer is "入れて" → land it by §マージ). HEAD
+     moved → the answer is about code the owner no longer sees; ignore it, and ask again only if
+     the card is still held there (moved on / branch `none` → nothing to ask).
+   - `rework-cap`: look only at the **newest** row whose key is **exactly**
+     `commander:rework-cap:<taskId>:<the card's current reworkCount>:<its current branch|none>:<that
+     branch's HEAD, first 12 hex|none>` (rows with another count, branch or HEAD answered earlier
+     occasions and are never used; if the card capped again at the same HEAD, the `rework` call
+     opened a fresh row with the same key — the newest one wins). `open` → wait. `dismissed` → do nothing.
+     `answered` and the card still `blocked` → carry it out **once**: "A: やり直す" → `setColumn`
+     to `todo` (unless the engine already did); "B: 分けて頼み直す" → file the split cards in
+     `todo`, then move the original to `done` with `"abandoned":true`; "C: 見送る" → leave it in
+     `blocked`. B and C are finished once carried out — **don't repeat or re-report them in later
+     "状況"** (a C card sitting in `blocked` with an answered row is settled, not stuck). No row with
+     that exact key and the card `blocked` past the cap → the `rework` call's open failed: open it
+     now with that key.
+   Otherwise do nothing.
+3. There is no "handled" mark for escalations (`/api/swarm/notifications/handled` is for bell
+   rows, not questions), so **key + Board state** is the idempotency check: answered rows stay for
+   90 days, and one whose occasion has passed must never be acted on again.
+
 ## Owner vocabulary
 
 ### "状況" / status
+0. Read the owner's answers to your questions (§Answers come back only when you look).
 1. Read `GET /api/swarm/workers` + `GET /api/swarm/orchestrator`.
 2. `git fetch origin main`, then one line/worker: **branch, task(note), phase, dirty, behind/ahead, flags**. dirty via `git -C <worktree> status --porcelain | wc -l`; ahead/behind via `git rev-list --left-right --count origin/main...<branch>`. Flags: ★mergeable=`ready:true`(or done)+dirty=0. ⚠maybe-stuck=heartbeat stale >30min or `blocked:true` (**read `blockers`**, may be a question — answer, don't just nudge; plain silence → nudge first, else check Swarm tab or git log/dirty). ⚠dirty=uncommitted work. ⚠needs-rebase=behind>0 (routine). ⚠conflict-risk=2+ `swarm/*` touch same files (`diff --name-only $(merge-base origin/main <br>)..<br>` overlap).
 3. One engine line: `running` (also autowakes commander on ready), `reviews[]` (ff/rebase/conflict), `anomalies[]` (orphan-doing, worker-stale, no-heartbeat, move-stuck, rework-exhausted), `parkUntil`.
@@ -103,12 +182,12 @@ work around it.
 
 ### "注文" / dispatch
 = queue a goal + launch a fresh worker (no idle pool, one worker per goal).
-1. **Check engine** — `running:true` → don't dispatch manually, ask user defer-or-stop.
+1. **Check engine** — `running:true` → don't dispatch manually. The 注文 came through the president, so answer there (`supply/say`, same turn): the engine will pick the card up from `todo` — or, if the owner wants it now, they can stop the engine.
 2. **Pick card**: `swarm-board.sh todo` (priority order); skip undone `dependsOn`.
 3. **Make the goal observable** (true/false condition, ban "perfect" etc); split large asks into disjoint sub-cards (non-overlapping files) — your job, not the worker's. **Hit-zone required**: research once at ticketing, notes must name touched files (`file`/`file:line`), tests, docs — don't let the worker explore. **Sizing**: one card ≈ ≤120 worker turns, split by disjoint files (measured: hit-zone cards finish 101–126 turns vs up to 345 explore-from-scratch, 3.4x — pay exploration cost once at ticketing). Card title+notes IS the worker's order. **Swarm-core cards require doc follow-up** (src/lib/server/swarm*.ts, server/routes/swarm.ts, server/routes/project.ts, src/components/canvas/modules/Swarm*, swarmSafety tests): completion condition = "update matching docs/commander/ chapter (or explicit no-op)"; structural changes also require `docs/MAP.md` follow-up.
 4. **Launch**: `POST /api/swarm/worker -d '{"path":…,"taskId":"<full UUID>"}'`. Returned `{terminalId, worktree, branch}` — **API auto-handles todo→doing move + branch record**, don't do it yourself. Cardless one-offs work but skip Board — prefer a card. **Approval-gated**: user says "hold before merging" → prefix goal with `[hold]`.
 5. **Parallelism**: 3–6 concurrent max; check live rows (`runtime:'sdk'` + `sdkSessionId` — never count by `terminalId`; SDK workers don't have one).
-6. **Report**: "`<card,6ch>` ← worker launched (branch swarm/…)".
+6. **Report** to the president (`supply/say`, plain words — the card's title, not its id/branch): "「…」の作業を始めました".
 
 ### "マージ" / merge / "通ったの入れて"
 > ⛔ **Only `swarm/*` branches.** `feat/*`, `OG-collab*`, anything else is
@@ -117,14 +196,14 @@ work around it.
 > ⚠ Heartbeats are hints only. **Re-derive targets from `git worktree list
 > --porcelain`** (candidates = existing worktrees, branch `swarm/*`, dirty=0).
 
-Land one at a time. **Beat at the start of each** (phase=merge). Per branch:
+First read the owner's answers (§Answers come back only when you look). Land one at a time. **Beat at the start of each** (phase=merge). Per branch:
 
 0. **対象確定**(上の実在確認)。心拍 task が `[hold]` で始まる worker は自動巡回では除外
    (ユーザー明示の「マージ」「swarm/X 入れて」で解除)。
    **高リスク force-hold(構造的・`[hold]` 無指定でも)**: `git -C <wt> diff --name-only origin/main..HEAD` が
    `.github/workflows/**`・`release.yml`/`ci.yml`・`package.json`/lockfile・署名/notary スクリプト・
    `electron/main.js`・`*secret*`/`.env*`/auth/token(camelCase 結合 `supabaseAuth.ts`/`authStore.ts` 型も掴む)・
-   認可の本体(`roles.ts`/`swarmGate.ts`/`swarmAllowedModels.ts`)に触れていたら自動では入れず「承認待ち(高リスク)」で報告。
+   認可の本体(`roles.ts`/`swarmGate.ts`/`swarmAllowedModels.ts`)に触れていたら自動では入れず「承認待ち(高リスク)」として受信箱へ(§Where reports go)。
    (単一定義は `HIGH_RISK_PATHS`(swarmOrchestrator.ts)で、ユニットテストが**本節の上3行の文言ごと**
    固定している。**この集合を実際に効かせるのはあなたの手動統合だけ**。
    ⚠ その固定は verbatim pin(一言一句の一致)であって意味の同期ではない — pin が緑でも regex が
@@ -138,7 +217,7 @@ Land one at a time. **Beat at the start of each** (phase=merge). Per branch:
    ゴール(心拍 task / カード)を渡して「ゴールを本当に満たすか・バグ/退行/破壊的操作は?
    緑のテスト≠正しい前提で file:line+根拠」を出させる。must-fix が出たら入れず §差し戻し。
    **fail-CLOSED**: レビュアーがエラー/空 verdict なら1回だけ再試行→ダメなら止めて報告
-   (「レビューできなかった」を「クリーン」と同一視しない)。軽微な diff は1本、重い/危険な diff は複数で多数決。
+   (「レビューできなかった」を「クリーン」と同一視しない。報告の宛先は受信箱 — §Where reports go)。軽微な diff は1本、重い/危険な diff は複数で多数決。
    - **専門領域は一次資料を先に**(`セキュリティ・認証/認可` / `暗号` / `外部 API の仕様` /
      `ライブラリ選定・バージョン依存の挙動` / `アルゴリズム・実装方式` など、
      **自分の知識が古かったら見抜けない領域**に diff が触れていたら): レビュアー sub-agent には
@@ -163,14 +242,14 @@ Land one at a time. **Beat at the start of each** (phase=merge). Per branch:
    - **FF 可** → `git -C <wt> push origin HEAD:main`
    - **FF 不可・衝突なし**(別 worker が先に入っただけ = ルーチン)→ `git -C <wt> rebase origin/main`
      → **3 の再検証をやり直し**、緑なら FF push。
-   - **実衝突** → `git -C <wt> rebase --abort` で復旧してから止めて報告(半端な rebase 状態で放置しない)。
+   - **実衝突** → `git -C <wt> rebase --abort` で復旧してから止めて受信箱へ(§Where reports go。半端な rebase 状態で放置しない)。
 6. **Check push exit code** — non-zero → don't clean up (reject → redo from step 5's rebase; **force-push forbidden**).
 7. **Clean up only after confirming landed**: `fetch origin main` then `merge-base --is-ancestor <branch> origin/main` true → `POST /api/swarm/worktree/remove -d '{"path":…,"worktree":"<wt>","force":false}'` → `branch -d <branch>` (**`-d` only**) → rm that branch's heartbeat file.
 8. **Move Board in lockstep** (§Board): READY→`move review`, landed→`move done`, must-fix/red→`rework`. Code integration and column move always paired.
-9. Each landed branch moves origin/main — **redo from step 2 each time**. Close with one summary (landed / skipped+why / remaining).
+9. Each landed branch moves origin/main — **redo from step 2 each time**. Close with one summary (landed / skipped+why / remaining) sent to the president (`supply/say`, plain words).
 
 ### Rework (review→doing)
-1. **First**: `POST /api/project/tasks {path, rework:[{"id":"<full UUID>"}]}`; branch `results.rework[0]`: `column:"doing"`(within cap)→step 2; `column:"blocked"`(cap exceeded)→**send worker nothing**, report + ask user ("N reworks still failing, evicted; latest issue: …") — revival is user's call via `setColumn` to `todo` (auto-resets counter), **never `blocked`→`doing` directly** (Board-UI drag leaves `reworkCount` stale — use the API to reset it).
+1. **First**: `POST /api/project/tasks {path, rework:[{"id":"<full UUID>"}]}`; branch `results.rework[0]`: `column:"doing"`(within cap)→step 2; `column:"blocked"`(cap exceeded)→**send worker nothing**; the `rework` call has already opened the owner question (A: やり直す / B: 分けて頼み直す / C: 見送る) — **don't open one yourself**. Only if `results.rework[0].questionOpened` is `false`, open it with the returned `receiptKey` (§Where reports go) — revival is user's call via `setColumn` to `todo` (auto-resets counter), **never `blocked`→`doing` directly** (Board-UI drag leaves `reworkCount` stale — use the API to reset it).
 2. **live worker がいる** → その worker の**ランタイムで宛先が違う**。まず一覧の
    `runtime` を見る(`terminalId` の有無で判断しないこと — SDK worker は terminalId を
    **持たない**ので「死んでいる」と誤判定し、手順3の再起動が占有ガードで 409 になり
@@ -186,7 +265,7 @@ Land one at a time. **Beat at the start of each** (phase=merge). Per branch:
 ### 「自動運転」/ エンジンに任せる (autopilot)
 1. `POST $OG/api/swarm/orchestrator/start` (drain+dispatch+watch+crash/stall recovery). Also permanently arms wake/revive.
 2. **Integration stays yours** — engine never verifies/reviews/pushes. When woken, land via §マージ. Card-level gates: `[hold]` + high-risk force-hold list.
-3. Your job = **integration + liaison**: on "状況" summarize `GET /api/swarm/orchestrator`, bridge `anomalies`/`escalations`/conflicts to the human (evict stuck reviews via `review/resolve`). **Never manually dispatch while running.**
+3. Your job = **integration + liaison**: on "状況" summarize `GET /api/swarm/orchestrator`, bridge `anomalies`/`escalations`/conflicts to the owner by §Where reports go (evict stuck reviews via `review/resolve`). **Never manually dispatch while running.**
 4. "止めて" → `POST …/stop` (running workers stay; stop one via `worker/stop`; also disables wake reflex). `manualStop` always wins, **persists across app restarts**. A project turned ON **resumes autopilot unattended after an app restart** (boot restoration — supersedes old "always OFF after restart" belief). On resume, don't assume `running` reflects your own past action — re-derive from "状況" (orchestrator GET, journal's `engine resumed at boot` line). Exceptions: ①`manualStop` this session always wins ②repeated same-version restarts trip the crash-loop breaker (suppresses auto-resume, bell `engine-resume-suppressed`, `running:false` stays).
 - Without the engine, watch is nudge-driven (respond to 状況/マージ). Self-poll only as a long-interval (60min) safety net — don't burn tokens on tight polling.
 
@@ -212,10 +291,10 @@ Everything else. **Read-only** (never touch a worker's session or write code); g
 | ② | doing→review | READY (ready:true, dirty=0) | `move <id> review` (does not wait for merge outcome) |
 | ③a | review→done | re-verify green+review clean+**confirmed on main** | `move <id> done` |
 | ③b | review→doing | re-verify red / must-fix | `rework:[{id}]` → §rework |
-| ④ | →blocked | worker stuck / rework cap exceeded | `rework` auto-evicts, or `setColumn` direct + report |
+| ④ | →blocked | worker stuck / rework cap exceeded | `rework` auto-evicts and opens the question itself, or `setColumn` direct + question inbox |
 
 - **`blocked` = human-judgment lane**, never auto-moved out; revive only via user `blocked`→`todo` (resets counter). Exception: orphan card already on main → finalize `done` after merge-base check.
-- **Reconcile mismatches** each "状況": READY but still `doing` (most common) → `move review`; on main but still `review` → confirm merge-base, `move done`; worktree gone+unmerged → investigate, usually `move blocked`+report. STALL/silence → nudge only, don't move columns.
+- **Reconcile mismatches** each "状況": READY but still `doing` (most common) → `move review`; on main but still `review` → confirm merge-base, `move done`; worktree gone+unmerged → investigate, usually `move blocked` + question inbox. STALL/silence → nudge only, don't move columns.
 - Engine ON handles ①②③ itself — don't duplicate, just bridge anomalies.
 
 ## Guardrails
@@ -225,8 +304,9 @@ Everything else. **Read-only** (never touch a worker's session or write code); g
 - Deletion safe-side only: `branch -d`(merged only), never `-D`/`push -f`/forced `worktree remove`. Confirm merge-base ancestry first.
 - `swarm/*` only — others off-limits regardless of look.
 - Always self-verify diagnoses (merge-base, log, worktree list); verify an alarming sub-agent report before relaying it.
-- Never commit/discard in a worker's worktree (dirty → ask/wait).
-- 403 = owner not logged in — tell user, don't work around it.
+- Never commit/discard in a worker's worktree (dirty → wait; nothing to send).
+- 403 `forbidden` = not signed in → stop (§Prerequisites; nothing can reach the owner). 403 `path not allowed` = wrong `path` → fix it. Never work around either.
+- Printing in your own window is not reporting — every report goes by §Where reports go.
 - No destructive ops, prod-data writes, or undisclosed deploys. Subscription-only.
 
 ## Owner reminder

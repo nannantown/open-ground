@@ -73,7 +73,9 @@ import type {
   ProjectSkillsResponse,
   CreateSkillResponse,
   OpenApp,
+  ProjectTaskReworkOutcome,
 } from '@/lib/types'
+import { openEscalation } from '@/lib/server/swarmEscalations'
 import { listProjectSkills, listGlobalSkills } from '@/lib/server/projectSkills'
 import {
   createGlobalSkill,
@@ -105,6 +107,24 @@ import {
 } from '@/lib/server/boundaryClear'
 
 const execFileAsync = promisify(execFileCb)
+
+/** First 12 hex of `branch`'s HEAD in the project's primary checkout, or
+ *  'none' (no branch / not a repo / branch gone / git failed or timed out). */
+const branchHeadShort = async (projectPath: string, branch: string | undefined): Promise<string> => {
+  // Never spawn git outside a repo root (orphaned U-state git — gitRepoGuard.ts).
+  if (!branch || !isGitRepoRoot(projectPath)) return 'none'
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['rev-parse', '--verify', '--quiet', '--end-of-options', `${branch}^{commit}`],
+      { cwd: projectPath, timeout: 5000 },
+    )
+    const sha = stdout.trim()
+    return /^[0-9a-f]{12,}$/.test(sha) ? sha.slice(0, 12) : 'none'
+  } catch {
+    return 'none'
+  }
+}
 
 // ── Module-level helpers (hoisted above the chain) ───────────────────────────
 // In the prior statement style these sat interleaved between route
@@ -264,12 +284,7 @@ interface TaskMutationResult {
  *  caller needs to branch on (mirroring swarm-board.sh rework's stdout: "→
  *  doing" vs "→ blocked"), so it doesn't have to re-read the card to find out
  *  whether the round-trip limit was hit. */
-interface ReworkResult extends TaskMutationResult {
-  /** Column the card landed in ('doing' normally, 'blocked' past maxReworks). */
-  column?: 'doing' | 'blocked'
-  /** reworkCount AFTER this call's increment. */
-  count?: number
-}
+type ReworkResult = TaskMutationResult & ProjectTaskReworkOutcome
 
 // ── The chain ────────────────────────────────────────────────────────────────
 // All routes are method-chained off the router instance so hc<AppType> on the
@@ -875,6 +890,9 @@ export const projectRoutes = new Hono()
   // no longer sees.
   let enteredDone: string[] = []
   let leftDone: string[] = []
+  // Cards parked in 'blocked' by the rework cap in this request — each gets its
+  // owner question opened after the save (reassigned per attempt, like above).
+  let reworkCapped: { id: string; title: string; branch?: string; count: number }[] = []
 
   try {
     const saved = await mutateProjectData(body.path, (data) => {
@@ -882,6 +900,8 @@ export const projectRoutes = new Hono()
       // assignment and not a push.
       enteredDone = []
       leftDone = []
+      reworkCapped = []
+      reworkResults.length = 0
       // Snapshot the pre-mutation column of every card so the `done` crossings
       // can be read off at the end regardless of which batch (setColumn,
       // markDone, rework) moved them.
@@ -1062,6 +1082,9 @@ export const projectRoutes = new Hono()
             : t,
         )
         reworkResults.push({ id, ok: true, column, count })
+        if (column === 'blocked') {
+          reworkCapped.push({ id, title: task.title, branch: task.branch, count })
+        }
       }
 
       // One place to read the crossings off, after every batch has had its say —
@@ -1088,6 +1111,52 @@ export const projectRoutes = new Hono()
     for (const id of leftDone) cancelBoundaryClear(id)
     for (const id of enteredDone) requestBoundaryClear(id)
     if (enteredDone.length) startBoundaryClearLoop()
+
+    // The rework cap's owner question, opened in THIS request right after the
+    // park is durably saved — never left to a second commander call. With the
+    // two moves split, a failed/dead commander between them left the card
+    // `blocked` with the PREVIOUS occasion's 「A: やり直す」 still the newest row,
+    // which the next 状況 then replayed onto an occasion the owner never saw.
+    // Key = <taskId>:<reworkCount>:<branch|none>:<branch HEAD, 12 hex|none>.
+    // The count alone repeats (a done/todo landing resets it), and so does the
+    // branch: an ordinary redo after 「A: やり直す」 re-enters the SAME branch
+    // (setColumn todo keeps card.branch; dispatch goes through
+    // resolveReusableWork → ensureSwarmWorktreeForBranch). What separates the
+    // occasions is the branch HEAD — the worker commits again before the next
+    // cap. Ceiling: a card that caps again at the same HEAD (sent back 3 times
+    // with no new commit) lands on the same key; then the newest row wins, and
+    // only a failed open on that occasion would let the old answer through. A
+    // repeat of the same occasion dedups while its row is open. Best-effort:
+    // the rework itself already landed; questionOpened:false (+ receiptKey)
+    // tells the caller to open it with that key.
+    for (const cap of reworkCapped) {
+      const r = reworkResults.find((x) => x.id === cap.id && x.count === cap.count)
+      if (!r) continue
+      const head = await branchHeadShort(body.path, cap.branch)
+      const receiptKey = `commander:rework-cap:${cap.id}:${cap.count}:${cap.branch || 'none'}:${head}`
+      r.receiptKey = receiptKey
+      try {
+        const { escalation } = await openEscalation({
+          projectPath: body.path,
+          taskId: cap.id,
+          ...(cap.branch ? { branch: cap.branch } : {}),
+          receiptKey,
+          whyEscalated: 'policy',
+          question: `Rework cap exceeded (${cap.count} rounds) — card parked in blocked. Retry, split, or drop?`,
+          context: `The card was sent back from review ${cap.count} times, so it was moved to blocked instead of doing.`,
+          plainQuestion:
+            `「${cap.title}」は${cap.count}回直しても通らず、保留にしました。どうしますか?\n` +
+            'A: やり直す(もう一度同じ内容で作業させます)\n' +
+            'B: 分けて頼み直す(小さい作業に分けて出し直します)\n' +
+            'C: 見送る(保留のままにして、何もしません)',
+        })
+        r.questionOpened = true
+        r.escalationId = escalation.id
+      } catch (e) {
+        console.warn('[project/tasks] rework-cap question failed to open', cap.id, e)
+        r.questionOpened = false
+      }
+    }
 
     const results: Record<string, TaskMutationResult[]> = {}
     if (body.setColumn) results.setColumn = setColumnResults

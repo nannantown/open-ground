@@ -387,7 +387,7 @@ describe('POST /api/project/tasks — rework (差し戻し loop-guard)', () => {
     // The 4th round-trip (count=4) exceeds the default max of 3 → evacuate to blocked.
     const res = await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id }] }))
     const body = await res.json()
-    expect(body.results.rework).toEqual([{ id: task.id, ok: true, column: 'blocked', count: 4 }])
+    expect(body.results.rework).toMatchObject([{ id: task.id, ok: true, column: 'blocked', count: 4, questionOpened: true }])
     const after = await getTask(dir, task.id)
     expect(after?.boardColumn).toBe('blocked')
     expect(after?.reworkCount).toBe(4)
@@ -402,7 +402,7 @@ describe('POST /api/project/tasks — rework (差し戻し loop-guard)', () => {
       json({ path: dir, rework: [{ id: task.id, maxReworks: 1 }] }),
     )
     const body = await res.json()
-    expect(body.results.rework).toEqual([{ id: task.id, ok: true, column: 'blocked', count: 2 }])
+    expect(body.results.rework).toMatchObject([{ id: task.id, ok: true, column: 'blocked', count: 2, questionOpened: true }])
   })
 
   it('landing on done or todo resets the counter (fresh reuse is not pre-tripped)', async () => {

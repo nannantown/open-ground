@@ -1919,6 +1919,23 @@ export interface TaskAttachment {
   mime: string
 }
 
+/** Per-item extra of POST /api/project/tasks `results.rework[i]` (beside id/ok/error). */
+export interface ProjectTaskReworkOutcome {
+  /** Column the card landed in ('doing' normally, 'blocked' past maxReworks). */
+  column?: 'doing' | 'blocked'
+  /** reworkCount AFTER this call's increment. */
+  count?: number
+  /** Only on a 'blocked' landing: whether the owner's rework-cap question
+   *  opened in the same request. false = parked, but the inbox write failed —
+   *  the caller must open it with {@link receiptKey} (it dedups while open). */
+  questionOpened?: boolean
+  /** Only on a 'blocked' landing: the question's key,
+   *  `commander:rework-cap:<taskId>:<count>:<branch|none>:<branch HEAD 12 hex|none>`. */
+  receiptKey?: string
+  /** The opened (or already-open, deduped) escalation's id when questionOpened. */
+  escalationId?: string
+}
+
 /** A task is a Board card — the only task kind that exists. (The old
  *  'chat'/'assistant' kinds are gone; legacy items of those kinds are silently
  *  dropped on read — see readProjectData.) */

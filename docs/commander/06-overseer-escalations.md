@@ -159,6 +159,55 @@ Any descriptions of the retired paths below are historical, not operating instru
 `if (pending.size === 0) return` が返事レーンの**前**にあり、知らせが1件も無いと答えが配達されなかった。
 番人が先に書かれていたので出た(掟 §1)。
 
+### 1.8 Where the commander's own reports go (2026-09-23, owner decision)
+
+The commander's window is no longer on screen (Swarm single-screen, step ③) — the owner
+talks only to the president. So text the commander prints in its own window reaches nobody,
+and "stop and report" in `skills/og-manage/SKILL.md` had no destination. The skill now splits
+every report by one question — does the owner have to decide? **No** (landed / sent back /
+stopped and why / worker launched / anything the president relayed, incl. a 注文 while the
+engine is ON) → `POST /api/swarm/supply/say` (§1.5, plain 1–3 lines). **Yes** (high-risk hold,
+rework cap → `blocked`, real conflict, review impossible = fail-CLOSED stop) →
+`POST /api/swarm/escalations/open` with `plainQuestion` (decision, `A:`/`B:` choices, what each
+leads to). **Rework cap is opened by the server, not the commander** (2026-09-23): the
+`POST /api/project/tasks {rework}` call that parks the card in `blocked` opens the owner question
+in the same request (`server/routes/project.ts`, after the save), keyed
+`commander:rework-cap:<taskId>:<reworkCount>:<branch|none>:<branch HEAD 12 hex|none>` (the count
+restarts on a todo/done landing and an ordinary redo re-enters the same branch —
+`resolveReusableWork` → `ensureSwarmWorktreeForBranch` — so the HEAD, read from the primary
+checkout, separates occasions: the worker commits again before the next cap; ceiling: a recap at
+the same HEAD, i.e. sent back 3 times with no new commit, repeats the key, and then the newest row
+wins) with `whyEscalated:'policy'` and an A (やり直す) /
+B (分けて頼み直す) / C (見送る) `plainQuestion`. The result row carries `questionOpened`,
+`receiptKey` and `escalationId`; an inbox failure never fails the rework (`questionOpened:false` →
+the commander opens it with the returned `receiptKey`). This replaced a two-call split whose gap — the open failing or the
+commander dying between the park and the open — left the previous occasion's 「A: やり直す」 as the
+newest row, which the next 状況 replayed onto an occasion the owner never saw (four review rounds
+of wording fixes kept reproducing it; guard: `server/routes/__tests__/reworkCapQuestion.test.ts`).
+The other reasons (high-risk / conflict / review-failed / blocked) are still raised by the
+commander alone — S1 no longer fires in practice, because nothing adds to `engine.reworks` any more
+(`swarmOrchestrator.ts:318-319`). Before raising, it reads `?path=<repo>&lane=owner` **without a
+status filter** (an `answered`-only list cannot contain a newer `open` or `dismissed` row, so an
+older answer would pass as newest) and looks only at the newest row with the exact key.
+**Ceiling:** a commander-raised question has no worker address, so the owner's answer stays
+`answered` and nothing wakes the commander; the commander picks it up at the start of its next
+状況 / マージ. Those raises carry `receiptKey` = `commander:<reason>:<taskId>:<HEAD sha>`: the
+prefix tells the commander's rows from workers', and an answer is used only while the branch HEAD
+still matches (a reworked branch returns to the same Board spot, so Board state alone would let an
+old 「入れて」 land a high-risk diff the owner never saw). A HEAD change means "ask again" only while
+the card is still held where the question left it — a card that landed / is `done` / whose branch
+is gone (`none`) needs no new question. `rework-cap` answers are read from the newest row whose key
+matches the card's **current** `reworkCount`, branch and branch HEAD exactly (`open` → wait, `dismissed` → leave the card
+held, `answered` + still `blocked` → carry it out once; B and C are not repeated in later 状況).
+Every other reason: only the newest row for the exact key counts, and a `dismissed` one means "not
+approved" — no re-ask at that HEAD. `<HEAD sha>` comes from
+`git -C <repo> rev-parse --verify <branch>` (`none` when the branch is gone). Escalations have no "handled" mark. With a `taskId`, the
+engine also stores the owner's answer (`recordEscalationAnswerForNextDispatch` →
+`reworkReasons`), so it rides the card's next dispatch after a rework, and on a leading `A`
+("resume") it moves a `blocked` card with 0 commits ahead to `todo` itself. A real wake needs a code change. A 403
+`forbidden` stops the commander outright: every `/api/swarm/*` route shares the owner gate, so
+`supply/say` cannot carry it either. Canon = SKILL.md §Where reports go.
+
 ## 2. 信号表 S1〜S11(S6 欠番)
 
 tier の意味(`swarmOverseer.ts:146`): **T3** = 受信箱(escalations.json)へ直行 /
