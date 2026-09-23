@@ -72,6 +72,8 @@ import { basename, dirname, join, resolve } from 'path'
 import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'fs'
 import { openGroundHome } from './paths'
 import { noticeDeliverable } from './deskDeliverable'
+import { isGenerating, readInputBoxText } from '@/lib/claudeScreen'
+import { detectMenu } from '@/lib/claudeMenu'
 import { SUPPLY_DESK_LABEL } from './swarmSupply'
 import { listOwnerDeskTerminals, isTerminalProcessAlive, getTerminalScreen, writeInput } from './terminal'
 import type { AppNotification, SwarmInfoEvent } from '../types'
@@ -270,6 +272,11 @@ export interface SupplyNoticeDeps {
    *  reply is the answer to a question the OWNER asked, so dropping it silently
    *  leaves them waiting forever for something that already arrived. */
   onReplyExpired: (projectPath: string, line: string) => void
+  /** Where an IMPORTANT or PROGRESS line goes when its unsent line is given up
+   *  ({@link SUPPLY_UNSENT_MAX_PASSES} / TTL). Its own bell kind — it is news,
+   *  not the commander's answer. Progress rings too: not for its content but
+   *  because the line left in the box now blocks that desk. */
+  onNoticeGivenUp: (projectPath: string, line: string) => void
   /** The questions currently waiting on the OWNER in this project (open, owner
    *  lane), as {escalation id, owner-facing detail}. Read by
    *  {@link catchUpSupplyDesks} when a new desk appears. */
@@ -307,6 +314,13 @@ const defaultDeps: SupplyNoticeDeps = {
           detail: line,
           projectPath,
         }),
+      )
+      .catch(() => {})
+  },
+  onNoticeGivenUp: (projectPath, line) => {
+    void import('./swarmNotifications')
+      .then(({ createSwarmInfoNotification }) =>
+        createSwarmInfoNotification({ event: 'supply-notice-unsent', detail: line, projectPath }),
       )
       .catch(() => {})
   },
@@ -412,8 +426,16 @@ interface UnsentLine {
   line: string
   commit: () => void
   appWide: boolean
-  /** Later passes that could not press its Enter. */
+  /** What the line carries — picks the bell a given-up line rings. */
+  kind: 'reply' | 'important' | 'progress'
+  /** Later passes that could not press its Enter ON A QUIET FRAME (readable, not
+   *  generating, no menu). A busy desk is not counted: it is the owner working,
+   *  not a wedged box, and counting it gave up in 1–2 minutes of a busy swarm. */
   passes: number
+  /** When it was left unsent. Past {@link SUPPLY_NOTICE_TTL_MS} it is given up
+   *  whatever the frame shows — a desk that never goes quiet must not hold it
+   *  forever (an app-wide one would block the app-wide lane for every desk). */
+  since: number
 }
 const pending: Map<string, PendingNotice[]> =
   globalThis.__openground_supply_notice_q ?? (globalThis.__openground_supply_notice_q = new Map())
@@ -458,9 +480,11 @@ const unsent: Map<string, UnsentLine> =
 const generation: { n: number } =
   globalThis.__openground_supply_gen ?? (globalThis.__openground_supply_gen = { n: 0 })
 
-/** Passes an unsent line gets for its Enter before it is given up: dequeued and
- *  handed to the bell, so a wedged box neither holds the desk's other lines back
- *  nor collects Enters forever. */
+/** QUIET passes (see UnsentLine.passes) an unsent line gets for its Enter
+ *  before it is given up: dequeued and handed to the bell, so a wedged box
+ *  neither holds the desk's other lines back nor collects Enters forever. The
+ *  line itself stays in the box — nothing is ever erased from the owner's desk —
+ *  so that desk takes no further line until the owner sends or clears it. */
 export const SUPPLY_UNSENT_MAX_PASSES = 5
 
 /** Questions answered/dismissed recently — refused by pushImportant. */
@@ -712,7 +736,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
   // BOTH lanes, or the pass bails before it ever looks at the replies — which
   // it did, and the reply tests caught it: with no news queued, a commander's
   // answer sat in the queue until some unrelated notice happened to arrive.
-  if (pending.size === 0 && replies.size === 0 && progress.size === 0) return delivered
+  if (pending.size === 0 && replies.size === 0 && progress.size === 0 && unsent.size === 0) return delivered
   const now = deps.now()
   // Stale PROGRESS is dropped rather than delivered late — see
   // SUPPLY_NOTICE_TTL_MS. IMPORTANT notices are NOT: they wait for the next desk
@@ -772,6 +796,13 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
           // the owner pressed Enter or cleared it — dequeued, never retyped.
           // No frame / a menu / anything else ⇒ not evidence either way.
           const fresh = deps.screen(desk.id)
+          // Only a quiet frame is evidence the box is wedged; a busy / menu /
+          // unreadable one is the owner working and is not counted.
+          const quiet =
+            fresh !== null &&
+            !isGenerating(fresh) &&
+            detectMenu(fresh) === null &&
+            readInputBoxText(fresh) !== null
           const gen = generation.n
           const landed =
             (fresh !== null && noticeDeliverable(fresh)) ||
@@ -786,12 +817,16 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
             unsent.delete(desk.id)
             left.commit()
             delivered.push(key)
-          } else if (++left.passes >= SUPPLY_UNSENT_MAX_PASSES) {
-            // Given up: out of the queue, onto the bell (the same sink an
-            // expired reply uses) — never silently.
+          } else if ((quiet && ++left.passes >= SUPPLY_UNSENT_MAX_PASSES) || now - left.since > SUPPLY_NOTICE_TTL_MS) {
+            // Given up: out of the queue, onto the bell — never silently. A
+            // reply rings as the answer (unless the TTL sweep already rang it);
+            // anything else rings "a notice is waiting unsent" — even progress,
+            // because the line left in the box now blocks this desk.
+            const replyStillQueued = replies.get(key)?.some((r) => r.line === left.line) ?? false
             unsent.delete(desk.id)
             left.commit()
-            deps.onReplyExpired(key, left.line)
+            if (left.kind !== 'reply') deps.onNoticeGivenUp(key, left.line)
+            else if (replyStillQueued) deps.onReplyExpired(key, left.line)
           }
         } finally {
           release()
@@ -874,7 +909,8 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         } else if (typed) {
           // The text is in the box but the Enter did not take: the next pass
           // re-sends ONLY the Enter (never the text — no double line).
-          unsent.set(desk.id, { line, commit, appWide, passes: 0 })
+          const kind = reply ? 'reply' : bundle ? 'important' : 'progress'
+          unsent.set(desk.id, { line, commit, appWide, kind, passes: 0, since: now })
         }
       } finally {
         releaseDesk()
@@ -910,6 +946,14 @@ const pushImportant = (key: string, summary: string, at: number, escalationId?: 
  *  waits for the next bundle. (A single LATE notice is not held to this: its
  *  「(約N時間前の知らせ) 」 label runs ~15 chars past it, as it always has.) */
 export const SUPPLY_NOTICE_LINE_MAX = SUPPLY_NOTICE_PREFIX.length + SUPPLY_NOTICE_MAX + 1 + SUPPLY_NOTICE_TAIL.length
+
+/** The longest paste MEASURED to show verbatim in the box (a reply at the cap,
+ *  real claude, 2026-09-23 — docs/commander/06 §1.9); ~1,420 folded to
+ *  「[Pasted text #1]」, which the Enter guard can never match. Every lane's
+ *  longest line must stay at or under it (pinned in supplyNotice.test.ts).
+ *  Counted in UTF-16 units (`.length`); `sanitizeSupplyNotice` caps CODE POINTS,
+ *  so an emoji-heavy summary can run up to ~2x longer in UTF-16 than measured. */
+export const SUPPLY_PASTE_MEASURED_UNFOLDED = 473
 
 const SUPPLY_BUNDLE_TAIL = '(自動の知らせ・まとめ。件ごとに平易に短く。専門用語・ID不可。質問は選択肢と影響も)'
 

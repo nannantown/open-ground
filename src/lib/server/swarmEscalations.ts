@@ -945,6 +945,18 @@ export const submitPastedInput = async (
     }
     return write(terminalId, '\r')
   }
+  // Guarded FIRST press only: a long paste may not be painted yet 200ms after
+  // it was written, so the box still reads EMPTY on a quiet frame. Wait a few
+  // short intervals for it to appear instead of refusing and leaving the line
+  // to the next pass a minute later. Anything else in the box ⇒ refuse at once.
+  if (guard) {
+    for (let wait = 0; wait < ENTER_RETRY_MAX; wait++) {
+      const screen = read()
+      if (screen === null || isGenerating(screen) || detectMenu(screen) !== null) break
+      if (readInputBoxText(screen) !== '') break
+      await sleep(ENTER_RETRY_INTERVAL_MS)
+    }
+  }
   // Refused ⇒ nothing pressed, nothing proven: the caller keeps the line.
   if (!press()) return false
   for (let attempt = 0; ; attempt++) {

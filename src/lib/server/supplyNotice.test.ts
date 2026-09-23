@@ -45,6 +45,9 @@ import {
   catchUpSupplyDesks,
   SUPPLY_NOTICE_LINE_MAX,
   SUPPLY_UNSENT_MAX_PASSES,
+  SUPPLY_PASTE_MEASURED_UNFOLDED,
+  supplyReplyLine,
+  supplyProgressLine,
 } from './supplyNotice'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -853,5 +856,220 @@ describe('an unsent line: Enter only on a box that holds exactly our line', () =
     await queueSupplyReply(PROJECT, '入れて大丈夫です', sneaky)
     expect(d.enters()).toBe(0)
     expect(peekSupplyReplies().get(PROJECT)).toHaveLength(1)
+  })
+})
+
+// Finishing touches on the president's notices (2026-09-23 review follow-up).
+// RED MEASURED 2026-09-23 (reverted after): the quiet-frame condition dropped
+// from the pass count → the busy-desk test fails; the empty-box wait removed
+// from submitPastedInput → the slow-paint test fails; claim() moved after the
+// dynamic import (either path) → the concurrent-pass tests fail;
+// `unsent.delete` dropped from the landed branch → the commit-once test fails;
+// the give-up bell hard-wired to onReplyExpired → the bell-kind test fails.
+describe('the president desk: patient with a busy desk, sure with a long paste', () => {
+  const desk = () => {
+    const writes: string[] = []
+    const d = {
+      box: '',
+      /** A paste appears in the box only after this many sleeps (slow paint). */
+      paintAfter: 0,
+      painted: null as string | null,
+      footer: FOOTER_IDLE,
+      override: null as (() => string | null) | null,
+      acceptEnter: false,
+      writes,
+      replyBell: [] as string[],
+      noticeBell: [] as string[],
+      enters: () => writes.filter((w) => w === '\r').length,
+      pastes: () => writes.filter((w) => w !== '\r'),
+    }
+    let sleeps = 0
+    const deps = {
+      desks: () => [{ id: DESK, cwd: PROJECT }],
+      screen: () => (d.override ? d.override() : frame(d.box, d.footer)),
+      write: (_id: string, w: string) => {
+        writes.push(w)
+        if (w === '\r') {
+          if (d.acceptEnter && d.box !== '') d.box = ''
+        } else {
+          const text = w.replace(PASTE_OPEN, '').replace(PASTE_CLOSE, '')
+          if (d.paintAfter > 0) {
+            d.painted = text
+            sleeps = 0
+          } else d.box = text
+        }
+        return true
+      },
+      sleep: async () => {
+        if (d.painted !== null && ++sleeps >= d.paintAfter) {
+          d.box = d.painted
+          d.painted = null
+        }
+      },
+      onReplyExpired: (_p: string, l: string) => void d.replyBell.push(l),
+      onNoticeGivenUp: (_p: string, l: string) => void d.noticeBell.push(l),
+    }
+    return { d, deps }
+  }
+
+  it('busy / menu / unreadable passes are not counted toward giving up', async () => {
+    const { d, deps } = desk()
+    await queueSupplyReply(PROJECT, '入れて大丈夫です', deps)
+    const busy = [BUSY, MENU, null]
+    for (let i = 0; i < SUPPLY_UNSENT_MAX_PASSES * 3; i++) {
+      const f = busy[i % busy.length]
+      d.override = () => f
+      await flushSupplyNotices(deps)
+    }
+    expect(peekSupplyReplies().get(PROJECT)).toHaveLength(1)
+    expect(d.replyBell).toHaveLength(0)
+    // The owner sent it by hand meanwhile: box empty on a quiet frame ⇒ done, no bell.
+    d.override = null
+    d.box = ''
+    await flushSupplyNotices(deps)
+    expect(peekSupplyReplies().get(PROJECT)).toBeUndefined()
+    expect(d.replyBell).toHaveLength(0)
+  })
+
+  it('a paste painted late still gets its first Enter in the same pass', async () => {
+    const { d, deps } = desk()
+    d.paintAfter = 2 // not there after the 200ms settle, there one interval later
+    d.acceptEnter = true
+    await queueSupplyReply(PROJECT, '入れて大丈夫です', deps)
+    expect(d.enters()).toBe(1)
+    expect(peekSupplyReplies().get(PROJECT)).toBeUndefined()
+  })
+
+  it('two concurrent passes type a fresh line once', async () => {
+    const { d, deps } = desk()
+    d.acceptEnter = true
+    d.override = () => BUSY
+    await queueSupplyReply(PROJECT, '入れて大丈夫です', deps)
+    d.override = null
+    await Promise.all([flushSupplyNotices(deps), flushSupplyNotices(deps)])
+    expect(d.pastes()).toHaveLength(1)
+  })
+
+  it('two concurrent passes over an unsent line deliver it once', async () => {
+    const { d, deps } = desk()
+    await queueSupplyReply(PROJECT, '入れて大丈夫です', deps) // Enter swallowed ⇒ unsent
+    d.acceptEnter = true
+    const [a, b] = await Promise.all([flushSupplyNotices(deps), flushSupplyNotices(deps)])
+    expect([...a, ...b].filter((k) => k === PROJECT)).toHaveLength(1)
+  })
+
+  it('a line landed through the unsent lane dequeues exactly its own items, once', async () => {
+    const { d, deps } = desk()
+    await queueSupplyProgress(PROJECT, '「A」に取りかかりました', deps) // unsent
+    d.override = () => BUSY
+    await queueSupplyProgress(PROJECT, '「B」に取りかかりました', deps)
+    d.override = null
+    d.acceptEnter = true
+    const landed = await flushSupplyNotices(deps) // A's Enter takes
+    expect(landed).toEqual([PROJECT])
+    expect(peekSupplyProgress().get(PROJECT)).toEqual(['「B」に取りかかりました'])
+    const next = await flushSupplyNotices(deps) // B goes out as its own line
+    expect(next).toEqual([PROJECT])
+    expect(d.pastes()).toHaveLength(2)
+    expect(d.pastes()[1]).toContain('「B」')
+    expect(await flushSupplyNotices(deps)).toEqual([])
+  })
+
+  it('a given-up line rings the bell that matches what it carried', async () => {
+    const give = async (queue: (deps: ReturnType<typeof desk>['deps']) => Promise<unknown>) => {
+      resetSupplyNoticeState()
+      const { d, deps } = desk()
+      await queue(deps)
+      for (let i = 0; i < SUPPLY_UNSENT_MAX_PASSES; i++) await flushSupplyNotices(deps)
+      return d
+    }
+    const n = await give((deps) => queueSupplyNotice(PROJECT, '大事な知らせ', deps))
+    expect(n.noticeBell).toHaveLength(1)
+    expect(n.replyBell).toHaveLength(0)
+    const r = await give((deps) => queueSupplyReply(PROJECT, '入れて大丈夫です', deps))
+    expect(r.replyBell).toHaveLength(1)
+    expect(r.noticeBell).toHaveLength(0)
+    // Progress rings too — not for its news but because the box now blocks the desk.
+    const p = await give((deps) => queueSupplyProgress(PROJECT, '「A」に取りかかりました', deps))
+    expect(p.replyBell).toHaveLength(0)
+    expect(p.noticeBell).toHaveLength(1)
+    expect(peekSupplyProgress().get(PROJECT)).toBeUndefined()
+  })
+})
+
+// Rework 2 of the above (review e1d24c6d). RED MEASURED 2026-09-23 (reverted
+// after): the TTL clause dropped from the give-up condition → the app-wide test
+// fails; the "still queued" check dropped from the reply bell → the ring-once
+// test fails; SUPPLY_NOTICE_MAX raised to 450 → the length pin fails.
+describe('an unsent line is also bounded by time', () => {
+  it('a desk that never goes quiet gives its app-wide line up at the TTL, then the next app-wide line reaches another desk', async () => {
+    let now = 1_000_000
+    const boxes: Record<string, string> = { a: '', b: '' }
+    const busy = { a: false }
+    const writes: [string, string][] = []
+    const noticeBell: string[] = []
+    const deps = {
+      desks: () => [
+        { id: 'a', cwd: '/repo/alpha' },
+        { id: 'b', cwd: '/repo/beta' },
+      ],
+      screen: (id: string) => frame(boxes[id]!, id === 'a' && busy.a ? FOOTER_BUSY : FOOTER_IDLE),
+      write: (id: string, w: string) => {
+        writes.push([id, w])
+        if (w === '\r') {
+          if (id === 'b') boxes[id] = '' // desk a swallows every Enter
+        } else boxes[id] = w.replace(PASTE_OPEN, '').replace(PASTE_CLOSE, '')
+        return true
+      },
+      sleep: instant,
+      now: () => now,
+      onReplyExpired: () => {},
+      onNoticeGivenUp: (_p: string, l: string) => void noticeBell.push(l),
+    }
+    await noticeToSupply(fatal('ホームのデータが壊れた', null), deps) // pasted into a, Enter swallowed
+    busy.a = true // and desk a never goes quiet again
+    await noticeToSupply(fatal('設定ファイルが読めない', null), deps)
+    for (let i = 0; i < SUPPLY_UNSENT_MAX_PASSES * 2; i++) await flushSupplyNotices(deps)
+    const toB = () => writes.filter(([id, w]) => id === 'b' && w !== '\r').map(([, w]) => w)
+    expect(toB()).toEqual([]) // held behind a's unsent app-wide line
+    expect(noticeBell).toEqual([])
+    now += SUPPLY_NOTICE_TTL_MS + 1
+    await flushSupplyNotices(deps)
+    expect(noticeBell).toHaveLength(1)
+    expect(noticeBell[0]).toContain('ホームのデータが壊れた')
+    expect(toB()).toHaveLength(1)
+    expect(toB()[0]).toContain('設定ファイルが読めない')
+  })
+
+  it('a held reply rings its bell once — the TTL sweep and the give-up do not both ring', async () => {
+    let now = 1_000_000
+    let box = ''
+    const replyBell: string[] = []
+    const deps = {
+      desks: () => [{ id: DESK, cwd: PROJECT }],
+      screen: () => frame(box, box ? FOOTER_BUSY : FOOTER_IDLE),
+      write: (_id: string, w: string) => {
+        if (w !== '\r') box = w.replace(PASTE_OPEN, '').replace(PASTE_CLOSE, '')
+        return true
+      },
+      sleep: instant,
+      now: () => now,
+      onReplyExpired: (_p: string, l: string) => void replyBell.push(l),
+      onNoticeGivenUp: () => {},
+    }
+    await queueSupplyReply(PROJECT, '入れて大丈夫です', deps) // stays in the box, desk then busy
+    now += SUPPLY_NOTICE_TTL_MS + 1
+    await flushSupplyNotices(deps)
+    await flushSupplyNotices(deps)
+    expect(replyBell).toHaveLength(1)
+  })
+
+  it("every lane's longest line fits the length measured not to fold", () => {
+    const big = 'あ'.repeat(2000)
+    const lateLabel = '(約9999時間前の知らせ) '.length
+    expect(supplyReplyLine(big).length).toBeLessThanOrEqual(SUPPLY_PASTE_MEASURED_UNFOLDED)
+    expect(supplyProgressLine([big]).length).toBeLessThanOrEqual(SUPPLY_PASTE_MEASURED_UNFOLDED)
+    expect(supplyNoticeLine(big).length).toBeLessThanOrEqual(SUPPLY_PASTE_MEASURED_UNFOLDED)
+    expect(SUPPLY_NOTICE_LINE_MAX + lateLabel).toBeLessThanOrEqual(SUPPLY_PASTE_MEASURED_UNFOLDED)
   })
 })

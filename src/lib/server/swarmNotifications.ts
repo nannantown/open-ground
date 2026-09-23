@@ -288,6 +288,8 @@ const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
   // for the whole TTL). Titled as the answer itself, not as a delivery failure:
   // what the owner wants off this toast is the reply.
   'commander-reply': 'Swarm — the commander answered your question',
+  // A notice sits typed but unsent in the president's box (owner may send it).
+  'supply-notice-unsent': 'Swarm — a notice is waiting unsent in the President window',
   'work-landed': 'Your requested work is done',
 }
 

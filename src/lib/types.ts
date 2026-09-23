@@ -2807,6 +2807,11 @@ export type SwarmInfoEvent =
    *  Deliberately NOT on SUPPLY_NOTICE_INFO_EVENTS: re-offering it to the very
    *  desk that could not take it is the loop this fallback exists to break. */
   | 'commander-reply'
+  /** An IMPORTANT supply-desk notice was pasted into the desk but its Enter
+   *  never took on a quiet frame (supplyNotice.ts — SUPPLY_UNSENT_MAX_PASSES).
+   *  The line stays in the box; the bell keeps it seen. NOT on
+   *  SUPPLY_NOTICE_INFO_EVENTS for the same loop reason as 'commander-reply'. */
+  | 'supply-notice-unsent'
   /** A worker declared ready while no commits exist anywhere the engine can see
    *  (parent branch AND nested repos). Not promoted (a declaration is not a
    *  proof), held un-nudged for a short grace, then parked in 'blocked'. Told at

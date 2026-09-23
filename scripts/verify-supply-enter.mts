@@ -18,7 +18,7 @@ for (const k of Object.keys(process.env)) {
 process.env.OPENGROUND_HOME = mkdtempSync(join(tmpdir(), 'og-verify-supply-'))
 
 const [cwd, mode] = process.argv.slice(2)
-if (!cwd || (mode !== 'new' && mode !== 'old')) throw new Error('usage: verify-supply-enter.mts <projectDir> new|old')
+if (!cwd || !['new', 'old', 'peek'].includes(mode)) throw new Error('usage: verify-supply-enter.mts <projectDir> new|old|peek [long|xlong]')
 
 const { launchClaude } = await import('../src/lib/server/claudeTerminal')
 const { getTerminalScreen, writeInput, killTerminal } = await import('../src/lib/server/terminal')
@@ -42,13 +42,21 @@ try {
     'はい、確認しました。いま進めている2件のうち、1件目は検品が終わって本体に取り込み済みです。' +
     '2件目はテストが1か所だけ通っていないので、作業者に直してもらっています。直り次第お知らせします。' +
     'ご判断いただくことは今のところありません。この返事への返答は不要なので「了解」とだけ返してください。'+
-    (process.argv[4] === 'long'
-      ? '補足です。検品では画面の表示と保存の両方を確かめ、スマホからの操作でも同じ結果になることを見ています。'.repeat(3)
+    (process.argv[4] === 'long' || process.argv[4] === 'xlong'
+      ? '補足です。検品では画面の表示と保存の両方を確かめ、スマホからの操作でも同じ結果になることを見ています。'.repeat(6) // past SUPPLY_NOTICE_MAX: the longest line the lane can type (~471)
       : '')
   const line = supplyReplyLine(text)
   console.log(`[mode=${mode}] line length ${line.length}`)
   let waiting: number | null = null
-  if (mode === 'old') writeInput(id, `${line}\r`)
+  if (mode === 'peek') {
+    // Paste only (no Enter) and show how the box renders it — does Claude Code
+    // fold it into 「[Pasted text …]」? `xlong` pastes ~3x the lane's maximum.
+    const { bracketedPaste } = await import('../src/lib/server/pastePrompt')
+    writeInput(id, bracketedPaste(process.argv[4] === 'xlong' ? line.repeat(3) : line))
+    await wait(1500)
+    console.log('input box after paste:', JSON.stringify(readInputBoxText(screen())))
+    process.exitCode = 0
+  } else if (mode === 'old') writeInput(id, `${line}\r`)
   else waiting = await queueSupplyReply(cwd, text, { desks: () => [{ id, cwd }] })
   await wait(4000)
   const after = screen()

@@ -1223,7 +1223,7 @@ nothing (`submitPastedInput` `guardEnter`). "Landed" then needs positive evidenc
 the box read as `''`); no frame is not evidence. The re-send pass claims the desk before its first
 await; `commit` is once-only; `inFlight`/`unsent` live on `globalThis`. After
 `SUPPLY_UNSENT_MAX_PASSES` (5) passes an unsent line is dequeued and handed to the bell
-(`onReplyExpired`). The landing check uses `isGenerating` for workers too (was the phrase anywhere
+(see "Rework 2 (review follow-up of 536813ef)" below for which passes count and which bell). The landing check uses `isGenerating` for workers too (was the phrase anywhere
 on screen). Red measured per guard (see `supplyNotice.test.ts`).
 
 Commander desks are SDK-only (a pushed turn has no input box), so `sayToManagerDesk`'s legacy
@@ -1231,3 +1231,54 @@ PTY branch is unchanged. `seedPrompt` (the other `text + '\r'` writer) had no ca
 deleted. Guards: `supplyNotice.test.ts` "dequeued only once it left the box" + the harness
 asserting every line is a bracketed paste with a separate Enter. Red measured: the old one-write
 form → 31 red; dequeue-on-write → 3 red.
+
+**Rework 2 (review follow-up of 536813ef).**
+- **Only quiet passes count toward giving up.** A pass counts only when the frame is readable, not
+  generating, shows no menu and has a readable box — i.e. the box is quiet and still does not
+  clear. Busy / menu / unreadable passes are the owner working, not a wedged box; counting them
+  gave up within 1–2 minutes of a busy swarm and rang the bell even for a line the owner had just
+  sent by hand. **Plus a time bound:** a line left unsent longer than `SUPPLY_NOTICE_TTL_MS`
+  (30 min) is given up whatever the frame shows — otherwise a desk that never goes quiet held it
+  forever, and an app-wide line held that way blocked the app-wide lane (`appWideFree`) for every
+  other desk. The pass also runs while only an unsent line is left (the early return counts
+  `unsent`).
+- **A slow paste gets its first Enter in the same pass.** A long paste may not be painted 200 ms
+  after the write, so the guarded first press saw an empty box and refused, leaving the line to
+  the next pass a minute later. `submitPastedInput` (guard mode) now waits up to
+  `ENTER_RETRY_MAX` × `ENTER_RETRY_INTERVAL_MS` while the box reads `''` on a quiet frame, then
+  applies the usual `onlyOurPasteInBox` check. Anything else in the box ⇒ refuse at once.
+- **A given-up line stays in the box.** Nothing is ever erased from the owner's desk (no ESC, no
+  Ctrl-U). So after a give-up the line is still typed there, and **that desk receives no further
+  line until the owner sends it or clears it** (`noticeDeliverable` needs an empty box).
+- **The bell matches the line.** Reply → `commander-reply` (`onReplyExpired`; not again if the TTL
+  sweep already rang it); important notice **and progress** → `supply-notice-unsent`
+  (`onNoticeGivenUp`, new info event, not on `SUPPLY_NOTICE_INFO_EVENTS` for the same loop reason).
+  Progress rings not for its content but because the line left in the box blocks the desk.
+- **Guards added** (`supplyNotice.test.ts` "patient with a busy desk…"), each red measured by
+  reverting production: quiet-frame condition dropped; empty-box wait removed; `claim()` moved
+  after the dynamic import (re-send path and fresh-line path separately — the concurrent-pass
+  tests); `unsent.delete` dropped from the landed branch (commit-once test); give-up bell
+  hard-wired to `onReplyExpired`.
+  Review e1d24c6d added (each red measured the same way): TTL clause dropped → the "never goes
+  quiet, app-wide line reaches another desk" test; the reply "still queued" check dropped → the
+  ring-once test; progress give-up without a bell → the bell-kind test; `SUPPLY_NOTICE_MAX`
+  raised to 450 → the length pin. (The `committed` flag has no guard: no path calls `commit`
+  twice today — it is defensive only.)
+
+**Real-claude measurement (2026-09-23, `scripts/verify-supply-enter.mts`, haiku desk in a test
+project).** The longest line the lanes type is a reply at the `SUPPLY_NOTICE_MAX` cap:
+- `new long` — **473 chars**: pasted, rendered verbatim (wrapped over rows), Enter pressed by the
+  guard, box empty + generating ⇒ `RESULT: SENT`, queue 0.
+- `peek long` (paste only) — the 473-char paste shows as its own text in the box (not folded).
+- `peek xlong` — a ~1,420-char paste is **folded to `[Pasted text #1]`**.
+
+`SUPPLY_PASTE_MEASURED_UNFOLDED` (473) records the measurement, and a test pins every lane's
+longest line (reply 473, notice/bundle 445, late single notice ~460, progress 439) at or under it.
+Lengths are UTF-16 units; the summary cap is in code points, so an emoji-heavy summary can exceed
+it — measure again before relying on that case.
+Folding therefore does not happen within the lanes' caps (`SUPPLY_NOTICE_LINE_MAX` 445, a late
+single notice ~460, a reply ~473). If a future change lets a line grow into the folding range, the
+box no longer equals our line, so `onlyOurPasteInBox` refuses every Enter: nothing is submitted
+blindly, the quiet passes count up, and after 5 the line is given up to the bell while
+`[Pasted text …]` stays in the box for the owner to send or clear. Keep lines under the cap
+rather than teaching the guard to accept a folded box (it cannot tell our fold from the owner's).
