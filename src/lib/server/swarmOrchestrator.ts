@@ -4824,14 +4824,14 @@ const branchWorktreeDir = async (projectPath: string, branch: string): Promise<s
 const defaultDeskOccupies = async (projectPath: string, branch: string): Promise<boolean> =>
   !branch || (await branchWorktreeDir(projectPath, branch).then((d) => liveDeskOccupies(d)).catch(() => true))
 /** Build {@link AnomalyDeps.deskAttended}: is a desk in the branch's worktree
- *  still MOVING the card — mid-turn, or active within STALE_HEARTBEAT_MS
+ *  still MOVING the card — mid-turn (event within MAX_EXEC_MS), or active within STALE_HEARTBEAT_MS
  *  ({@link deskRecentlyActiveIn})? A merely-alive idle desk (an SDK worker parked
  *  'waiting' after a turn that delivered nothing, a forgotten shell) does not
  *  attend: it would keep the alarm muted forever. Fails toward false ("nobody
  *  there"). Exported with injectable sources for the guard tests. */
 export const deskAttendedWith =
   (
-    src: Parameters<typeof deskRecentlyActiveIn>[3] & {
+    src: Parameters<typeof deskRecentlyActiveIn>[4] & {
       dirOf?: (projectPath: string, branch: string) => Promise<string>
       now?: () => number
     } = {},
@@ -4840,7 +4840,7 @@ export const deskAttendedWith =
     if (!branch) return false
     try {
       const dir = await (src.dirOf ?? branchWorktreeDir)(projectPath, branch)
-      return await deskRecentlyActiveIn(dir, (src.now ?? Date.now)(), STALE_HEARTBEAT_MS, src)
+      return await deskRecentlyActiveIn(dir, (src.now ?? Date.now)(), STALE_HEARTBEAT_MS, MAX_EXEC_MS, src)
     } catch {
       return false
     }

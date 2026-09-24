@@ -8928,7 +8928,8 @@ describe('detectAnomalies — state inconsistency detection', () => {
       const WT = '/wt/fix'
       let clock = BOOT
       type Sdk = { cwd: string; status: SdkSessionStatus; lastEventAt: number; reaped?: boolean }
-      const withDesks = (sdks: Sdk[], ptys: Array<{ cwd: string; lastOutputAt: number }> = []) => ({
+      type Pty = { cwd: string; lastOutputAt: number; claudePane: boolean; foreground: string }
+      const withDesks = (sdks: Sdk[], ptys: Pty[] = []) => ({
         ...depsWith(tree, new Set()),
         deskAttended: deskAttendedWith({
           dirOf: async () => WT,
@@ -8952,7 +8953,7 @@ describe('detectAnomalies — state inconsistency detection', () => {
       })
 
       it('GUARD: a shell left open in the tree, silent past STALE_HEARTBEAT_MS ⇒ the alarm fires', async () => {
-        const deps = withDesks([], [{ cwd: WT, lastOutputAt: BOOT }])
+        const deps = withDesks([], [{ cwd: WT, lastOutputAt: BOOT, claudePane: true, foreground: 'claude' }])
         expect(await ringsAfterIdle(deps)).toEqual(['all-workers-down'])
       })
 
@@ -8969,8 +8970,63 @@ describe('detectAnomalies — state inconsistency detection', () => {
         expect(await ringsAfterIdle(working)).toEqual([])
         const justAnswered = withDesks([{ cwd: WT, status: 'waiting', lastEventAt: BOOT + STALE_HEARTBEAT_MS - 60_000 }])
         expect(await ringsAfterIdle(justAnswered)).toEqual([])
-        const typing = withDesks([], [{ cwd: WT, lastOutputAt: BOOT + STALE_HEARTBEAT_MS - 60_000 }])
+        const typing = withDesks([], [
+          { cwd: WT, lastOutputAt: BOOT + STALE_HEARTBEAT_MS - 60_000, claudePane: true, foreground: 'claude' },
+        ])
         expect(await ringsAfterIdle(typing)).toEqual([])
+      })
+
+      // R1 (commander 2026-09-24): a turn that never ends — git wedged in U state, a
+      // CLI that never emits its first message — must not keep the alarm muted forever.
+      it('GUARD: an SDK desk stuck "working"/"starting" with no event for MAX_EXEC_MS ⇒ the alarm fires', async () => {
+        const stuckAt = BOOT + STALE_HEARTBEAT_MS - MAX_EXEC_MS - 1
+        for (const status of ['working', 'starting'] as const) {
+          const deps = withDesks([{ cwd: WT, status, lastEventAt: stuckAt }])
+          expect(await ringsAfterIdle(deps), status).toEqual(['all-workers-down'])
+        }
+      })
+
+      // R4: pin 'starting' and 'quota-parked' explicitly.
+      it('GUARD: "starting" attends while young, even with no event since spawn', async () => {
+        const deps = withDesks([{ cwd: WT, status: 'starting', lastEventAt: BOOT }]) // 30m36s silent, < MAX_EXEC_MS
+        expect(await ringsAfterIdle(deps)).toEqual([])
+      })
+
+      it('GUARD: "quota-parked" attends only while its last event is recent', async () => {
+        const fresh = withDesks([{ cwd: WT, status: 'quota-parked', lastEventAt: BOOT + STALE_HEARTBEAT_MS - 60_000 }])
+        expect(await ringsAfterIdle(fresh)).toEqual([])
+        const stale = withDesks([{ cwd: WT, status: 'quota-parked', lastEventAt: BOOT }])
+        expect(await ringsAfterIdle(stale)).toEqual(['all-workers-down'])
+      })
+
+      // R3: a pane that merely keeps printing (dev server, tail -f, watch, a clock in
+      // the prompt) is not somebody continuing the card.
+      it('GUARD: a non-claude pane that keeps painting output does not attend ⇒ the alarm fires', async () => {
+        for (const foreground of ['node', 'tail', 'watch', 'zsh']) {
+          const deps = {
+            ...depsWith(tree, new Set()),
+            deskAttended: deskAttendedWith({
+              dirOf: async () => WT,
+              canon: async (p) => p,
+              now: () => clock,
+              sdks: () => [],
+              ptys: () => [{ cwd: WT, lastOutputAt: clock - 1_000, claudePane: false, foreground }],
+            }),
+          }
+          expect(await ringsAfterIdle(deps), foreground).toEqual(['all-workers-down'])
+        }
+      })
+
+      // Rework 1: the foreground name of a real claude is its version (native
+      // installer, measured '2.1.281') or 'node' (npm) — never 'claude'. Only an
+      // app-launched claude pane (claudePane) attends; a hand-typed one rings.
+      it('GUARD: a busy non-pane claude (real foreground names "2.1.281" / "node") does not attend ⇒ the alarm fires', async () => {
+        for (const foreground of ['2.1.281', 'node']) {
+          const deps = withDesks([], [
+            { cwd: WT, lastOutputAt: BOOT + STALE_HEARTBEAT_MS - 60_000, claudePane: false, foreground },
+          ])
+          expect(await ringsAfterIdle(deps), foreground).toEqual(['all-workers-down'])
+        }
       })
     })
 

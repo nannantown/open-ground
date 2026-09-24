@@ -115,36 +115,54 @@ export const liveDeskOccupies = async (
  *  forgotten zsh in the tree never finishes. Counting those as attending muted
  *  the all-workers-down alarm for good (commander review, 2026-09-24).
  *
- *  Attending = an SDK session mid-turn ('working' / 'starting'), or any live desk
- *  whose last event (SDK) / last painted byte (PTY) is younger than `withinMs`.
+ *  Attending = an SDK session mid-turn ('working' / 'starting') whose last event
+ *  is younger than `midTurnWithinMs`, or a live SDK desk / claude pane whose last
+ *  event (SDK) / last painted byte (PTY) is younger than `withinMs`.
  *  'quota-parked' and 'waiting' count only while recent: parked on a usage wall
  *  is not progress, and the unowned-doing sweep reclaims an unowned parked desk
- *  on its own. 'exited' / 'failed' never count, reaped or not. Sources are
- *  injectable so the rule is testable without a pool. */
+ *  on its own. 'exited' / 'failed' never count, reaped or not.
+ *
+ *  Mid-turn is capped too (`midTurnWithinMs`, the caller passes MAX_EXEC_MS): a
+ *  turn that never ends — git wedged in U state, a CLI that never emits its first
+ *  message — stays 'working'/'starting' forever, and the mid-task sweep also
+ *  reads that desk as alive, so without a cap nobody would ever hear of it.
+ *
+ *  A PTY counts only when it is an app-launched claude pane (tag 'claude' →
+ *  `claudePane`). Output recency alone is not attendance: a dev server,
+ *  `tail -f`, `watch` or a clock in the prompt paints forever while nobody moves
+ *  the card, and those long-runners ARE running commands, so "any running
+ *  command" cannot be the rule. The foreground NAME is useless for spotting a
+ *  hand-typed claude (measured 2026-09-24: macOS p_comm is the version, e.g.
+ *  `2.1.281`, for the native installer and `node` for npm — and `node` is also
+ *  every vite/dev server), so a claude typed into a plain shell does not attend.
+ *  That errs toward ringing (after 30m36s), never toward muting — a known limit
+ *  in docs/commander/06.
+ *
+ *  Sources are injectable so the rule is testable without a pool. */
 export const deskRecentlyActiveIn = async (
   dir: string,
   now: number,
   withinMs: number,
+  midTurnWithinMs: number,
   src: {
-    ptys?: () => ReadonlyArray<{ cwd: string; lastOutputAt: number }>
+    ptys?: () => ReadonlyArray<{ cwd: string; lastOutputAt: number; claudePane: boolean }>
     sdks?: () => ReadonlyArray<{ cwd: string; status: SdkSessionStatus; lastEventAt: number; reaped?: boolean }>
     canon?: (p: string) => Promise<string>
   } = {},
 ): Promise<boolean> => {
   const canon = src.canon ?? canonicalize
-  const recent = (at: number): boolean => now - at < withinMs
+  const within = (at: number, ms: number): boolean => now - at < ms
   const cwds = [
     ...(src.ptys ?? listPtySafetyViews)()
-      .filter((p) => recent(p.lastOutputAt))
+      .filter((p) => p.claudePane && within(p.lastOutputAt, withinMs))
       .map((p) => p.cwd),
     ...(src.sdks ?? listSdkSessions)()
-      .filter(
-        (s) =>
-          isSdkSessionLive(s) &&
-          (s.status === 'working' ||
-            s.status === 'starting' ||
-            ((s.status === 'waiting' || s.status === 'quota-parked') && recent(s.lastEventAt))),
-      )
+      .filter((s) => {
+        if (!isSdkSessionLive(s)) return false
+        if (s.status === 'working' || s.status === 'starting') return within(s.lastEventAt, midTurnWithinMs)
+        if (s.status === 'waiting' || s.status === 'quota-parked') return within(s.lastEventAt, withinMs)
+        return false // 'exited' / 'failed' never attend
+      })
       .map((s) => s.cwd),
   ]
   return isDirOccupied(await Promise.all(cwds.map((c) => canon(c))), await canon(dir))
