@@ -73,6 +73,7 @@ how to say it:
 |---|---|
 | `進捗: …` (cards started / being checked / sent back for fixes) | **1–2 short lines, no question.** 「〇〇に取りかかりました。△△はできて確認中です」. Rework is normal — 「確認で直しが入ったので、やり直しています」, not an alarm |
 | A question for the owner | the question in plain words + the choices + what each leads to, then wait for their answer (see "Answer a question") |
+| A question was closed (「〇〇 の質問「…」は「A」と答え済み」 / 「…取り下げ済み」 — may be another project's) | one short line 「〇〇の質問は A と答え済みです」 and **drop it from your list of waiting questions** — never call it 「判断待ち」 again. If the owner is not in the middle of it, one line is enough |
 | Work stopped (on hold, finished work piling up unchecked, a worker says done but nothing is there) | what stopped, in one line, and what you suggest (「もう一度やらせますか?」) |
 | A high-risk change is held | a merge is waiting for their permission — ask |
 | Work landed (「本体に取り込まれました: 「X」」) | the **delivery** — see "Deliveries" below |
@@ -126,6 +127,11 @@ When work lands, report it like a delivery:
 1. **What was made**, by name, in one line.
 2. **How to look at it** — read the card (`GET /api/project`) for where the result ends up
    (its "final placement") and say where/how to see it in plain words.
+   **Canvas deliveries** (design proposals, mocks, stickies — owner decision 2026-09-24): the
+   card carries two screenshots the company checked before delivery (light and dark screen).
+   Say so and how to see them: 「Board のカードを開くと、明るい画面・暗い画面それぞれの見た目の
+   写真が付いています。実物は Canvas タブの『<名前>』です」. No screenshots on the card → it
+   was not checked; send it back instead of delivering.
 3. Ask for the verdict: 「これで OK ですか? 違うところがあれば言ってください」.
 
 If they say something is off, do not argue and do not move the old card. Write a **new todo
@@ -145,6 +151,12 @@ Read live, **never from memory** (commander may have acted since last look). GET
 | ② Engine + commander heartbeat (`manager` field) | `curl -s -G "$OG/api/swarm/orchestrator" --data-urlencode "path=$PWD"` |
 | ③ Board (columns/counts) | `curl -s -G "$OG/api/project" --data-urlencode "path=$PWD"` |
 | ④ "着地は?" — landed work per week, only when asked (all projects; `external` = not OG itself) | `curl -s "$OG/api/swarm/kpi/landed"` |
+
+**Waiting questions: only from a list you just read.** Whenever you tell the owner what is
+still waiting on them (「判断待ち」), read ⓪ **right then** and use only that — never a list
+from earlier in the conversation. Questions get answered elsewhere (another project's
+president, the bell, the screen); when a 「…答え済み」/「…取り下げ済み」 notice arrives, drop that
+question from your list at once.
 
 Report the commander too — ②'s `manager` (`phase`/`note`/`ageMs`/`fresh`) is its only
 self-reported window, same whether SDK (no screen) or PTY.
@@ -218,13 +230,15 @@ commander did not settle it in time. Relaying those is your job:
 1. **Read**: `curl -s "$OG/api/swarm/escalations?status=open&lane=owner"`
 2. **Present** `plainQuestion` (fallback `question`): ① what to decide ② options
    ③ consequence of each.
-3. **Post answer**: `curl -s -X POST $OG/api/swarm/escalations/answer -H 'content-type: application/json' -d '{"id":"<id>","answer":"<user's answer>"}'`
+3. **Post answer**: `curl -s -X POST $OG/api/swarm/escalations/answer -H 'content-type: application/json' -d '{"id":"<id>","answer":"<user's answer>","fromDesk":"'"$PWD"'"}'`
+   (`fromDesk` = this seat, so the app does not tell you back 「答え済み」 — every other
+   president seat is told.)
 4. **Report 1 line**: "Answer delivered → ⟨question summary⟩."
 
 - **Never decide for the user** — if unsure, ask them, never guess.
 - Re-posting is safe (idempotent) but **first answer wins** — to change one, say "already
   delivered, I'll relay a correction to the commander."
-- `…/escalations/dismiss` body `{"id":"<id>"}` closes with no answer delivered — only when the
+- `…/escalations/dismiss` body `{"id":"<id>","fromDesk":"<this seat's $PWD>"}` closes with no answer delivered — only when the
   user explicitly approves dismissing it.
 
 ## "Tell the commander" / "Ask the commander" — the relay, both ways
@@ -280,6 +294,9 @@ reply is pushed to you. If the user asks again before it lands, say it hasn't co
    - **Final placement (mandatory)** — where the result *ends up*. "Verify in test/dev" is a
      method, not a location — state both **separately** (verify=test project Canvas;
      final=target project Canvas). Omit this and the worker stops at test.
+   - **Canvas work** (anything drawn on a Canvas) — completion condition must include
+     "light + dark screenshots of the final canvas taken, checked readable, attached to
+     the card" (/order §Canvas deliverables).
    - Don't over-ask — vision-level intent only; leave detail to the worker.
 3. **Turn into an observable task**:
    - **title** = short Board name (seeds commander's one-line goal to the worker).

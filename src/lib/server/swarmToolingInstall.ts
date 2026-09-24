@@ -34,6 +34,7 @@ export const SWARM_BEAT_MARKER = 'managed-by: openground'
 export const SWARM_LIB_MARKER = 'managed-by: openground'
 export const RESEARCH_SKILL_MARKER = 'managed-by: openground'
 export const RESEARCH_DOCTOR_MARKER = 'managed-by: openground'
+export const CANVAS_SHOT_MARKER = 'managed-by: openground'
 
 /** Basename of the shared shell helper, in BOTH places it lives: the shipped
  *  source (`scripts/<basename>`) and the install target (`~/.claude/<basename>`).
@@ -65,6 +66,12 @@ export const SWARM_LIB_BASENAME = 'openground-swarm-lib.sh'
  *  between clobbering and stranding (the 2026-07 swarm-lib.sh collision
  *  lesson). The /research skill invokes it by this exact installed path. */
 export const RESEARCH_DOCTOR_BASENAME = 'openground-research-doctor.sh'
+
+/** Basename of the Canvas screenshot CLI (light + dark shots of one project
+ *  Canvas as the running app draws it — owner decision 2026-09-24: Canvas
+ *  deliverables are checked by screenshot before delivery). openground-prefixed
+ *  like the doctor; the /order and /og-manage skills invoke it by this path. */
+export const CANVAS_SHOT_BASENAME = 'openground-canvas-shot.mjs'
 
 /** SHA-256 of the PRE-MARKER `~/.claude/skills/order/SKILL.md` — the tmux-era
  *  copy that existing machines received by hand, before 19e19e0f (2026-07-22)
@@ -127,6 +134,7 @@ const TOOLING_FILES: ToolingFile[] = [
   // Brand-new names — no pre-marker vintages exist, so no adoptDigests.
   { name: 'research', sourceRel: ['skills', 'research', 'SKILL.md'], targetRel: ['.claude', 'skills', 'research', 'SKILL.md'], marker: RESEARCH_SKILL_MARKER },
   { name: RESEARCH_DOCTOR_BASENAME, sourceRel: ['scripts', RESEARCH_DOCTOR_BASENAME], targetRel: ['.claude', RESEARCH_DOCTOR_BASENAME], marker: RESEARCH_DOCTOR_MARKER, mode: 0o755 },
+  { name: CANVAS_SHOT_BASENAME, sourceRel: ['scripts', CANVAS_SHOT_BASENAME], targetRel: ['.claude', CANVAS_SHOT_BASENAME], marker: CANVAS_SHOT_MARKER, mode: 0o755 },
 ]
 
 export interface SwarmToolingInstallResult {

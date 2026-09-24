@@ -160,6 +160,13 @@ const quotaSnapshot = (now: number, allowed: SwarmAllowedModels): SwarmQuotaResp
   allCoolingUntil: allCoolingUntil(now),
 })
 
+/** Optional `fromDesk` on escalation answer/dismiss: the project path of the
+ *  president desk that closed the question, so that desk is not told again
+ *  (supplyNotice.noticeQuestionClosed). Used only to SKIP a desk — never trusted
+ *  for access. */
+const fromDeskOf = (body: any): { fromDesk?: string } =>
+  typeof body?.fromDesk === 'string' && body.fromDesk && body.fromDesk.length <= 4096 ? { fromDesk: body.fromDesk } : {}
+
 /** The board column a card sits in, with the pre-Board back-compat default. */
 const columnOf = (card: { boardColumn?: string; done?: boolean }): string =>
   card.boardColumn ?? (card.done ? 'done' : 'todo')
@@ -1181,7 +1188,7 @@ export const swarmRoutes = new Hono()
     // waiting on the owner, so this field cannot widen what the commander decides.
     const by = body?.by === 'commander' ? 'commander' : 'owner'
     try {
-      const res = await answerEscalation(id, answer, undefined, { by })
+      const res = await answerEscalation(id, answer, undefined, { by, ...fromDeskOf(body) })
       return c.json<EscalationAnswerResponse>(res)
     } catch (e: any) {
       if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
@@ -1229,7 +1236,7 @@ export const swarmRoutes = new Hono()
     const id = typeof body?.id === 'string' ? body.id : ''
     if (!id) return c.json({ error: 'id is required' }, 400)
     try {
-      return c.json<EscalationDismissResponse>({ escalation: await dismissEscalation(id) })
+      return c.json<EscalationDismissResponse>({ escalation: await dismissEscalation(id, fromDeskOf(body)) })
     } catch (e: any) {
       if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
       return c.json({ error: `failed to dismiss escalation: ${e?.message ?? e}` }, 500)

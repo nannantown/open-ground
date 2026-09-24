@@ -16,7 +16,8 @@ import { parseGradient } from './canvasGradient'
 import { resolveFrameStyle, resolveStickyFill } from './canvasFillStyle'
 import { resolveShapeStyle } from './canvasShape'
 import { resolveOpacity } from './canvasTransform'
-import { DEFAULT_TEXT_COLOR } from './canvasTextStyle'
+import { DEFAULT_TEXT_COLOR, resolveTextStyle } from './canvasTextStyle'
+import { textBox, textSizingOf, textVAlignOf } from './canvasTextSizing'
 import { containmentDepth } from './canvasContainment'
 
 type RGB = [number, number, number]
@@ -162,16 +163,71 @@ function paintOf(el: CanvasElement): string | undefined | typeof UNKNOWN {
   return fill !== undefined && !parseColor(fill) ? UNKNOWN : fill
 }
 
-// ponytail: a hug-sized text has no stored width/height — its box is taken as
-// 1×1 at its origin; measure the rendered box if that misjudges long labels.
-const overlaps = (a: CanvasElement, b: CanvasElement): boolean => {
-  const aw = Math.max(a.width ?? 1, 1)
-  const ah = Math.max(a.height ?? 1, 1)
-  return (
-    b.width !== undefined &&
-    b.height !== undefined &&
-    a.x < b.x + b.width && b.x < a.x + aw && a.y < b.y + b.height && b.y < a.y + ah
-  )
+// Where a text's ink actually is: the centre of its ESTIMATED glyph run. A
+// text box is often wider than its glyphs, and text is left-aligned by default:
+//  - "any overlap" flipped a label to cream when only the box's empty right
+//    edge grazed a dark frame (1.06:1, review 4);
+//  - the box centre missed the mirror case — a short label at the left of a
+//    wide box whose glyphs are all on a frame the box centre is off (1.10:1,
+//    review 5).
+// Run: align (left/center/right) + vertical align (fixed mode) within the
+// padded box; width = longest line's chars × fontSize, capped at the box.
+// ponytail: estimate, not layout — CJK/full-width counts 1em, the rest 0.55em,
+// wrapping by whole-line width, not word breaks (capped at the box); measure the DOM if it misjudges.
+const PAD_X = 6 // ElementView TEXT_PAD px-1.5
+const PAD_Y = 2 // py-0.5
+function glyphCentre(el: CanvasElement): [number, number] {
+  const { w, h } = textBox(el)
+  const { fontSize, textAlign, lineHeight } = resolveTextStyle(el)
+  const lineEms = (el.text ?? '').split('\n').map((l) => Array.from(l).reduce((s, c) => s + (c.codePointAt(0)! >= 0x2e80 ? 1 : 0.55), 0))
+  const ems = lineEms.reduce((a, b) => Math.max(a, b), 0) // no spread: huge texts overflow the arg list
+  const innerW = Math.max(w - 2 * PAD_X, 0)
+  const innerH = Math.max(h - 2 * PAD_Y, 0)
+  const gw = Math.min(ems * fontSize, innerW)
+  // Soft wrapping: each line takes ceil(width / innerW) rows (review 6 — an
+  // auto-height paragraph judged by its first row only turned cream).
+  const rows = lineEms.reduce((s, e) => s + Math.max(1, innerW > 0 ? Math.ceil((e * fontSize) / innerW) : 1), 0)
+  const gh = Math.min(rows * fontSize * lineHeight, innerH)
+  // auto-width hugs its glyphs and draws them from x (align has no room to act)
+  const align = textSizingOf(el) === 'auto-width' ? 'left' : textAlign
+  const slackX = align === 'center' ? (innerW - gw) / 2 : align === 'right' ? innerW - gw : 0
+  const v = textSizingOf(el) === 'fixed' ? textVAlignOf(el) : 'top'
+  const slackY = v === 'middle' ? (innerH - gh) / 2 : v === 'bottom' ? innerH - gh : 0
+  return [el.x + PAD_X + slackX + gw / 2, el.y + PAD_Y + slackY + gh / 2]
+}
+
+// Is point (cx, cy) inside b's box?
+const contains = (b: CanvasElement, cx: number, cy: number): boolean =>
+  b.width !== undefined &&
+  b.height !== undefined &&
+  cx >= b.x && cx < b.x + b.width && cy >= b.y && cy < b.y + b.height
+
+// Uniform bucket grid over boxes, so a text only tests the layers near its
+// centre (the resolver reruns on every drag frame; a full scan per text was
+// 115–200 ms at 1500 elements). Values are positions in `boxes`, ascending.
+const CELL = 512
+const MAX_CELLS = 1024 // a box spanning more cells goes to `wide` (always tested)
+const cellKey = (gx: number, gy: number) => `${gx},${gy}`
+function gridOf(boxes: readonly CanvasElement[]) {
+  const cells = new Map<string, number[]>()
+  const wide: number[] = []
+  boxes.forEach((b, n) => {
+    if (b.width === undefined || b.height === undefined) return
+    const x0 = Math.floor(b.x / CELL), x1 = Math.floor((b.x + b.width) / CELL)
+    const y0 = Math.floor(b.y / CELL), y1 = Math.floor((b.y + b.height) / CELL)
+    if (!((x1 - x0 + 1) * (y1 - y0 + 1) <= MAX_CELLS)) return void wide.push(n) // also catches NaN
+    for (let gx = x0; gx <= x1; gx++)
+      for (let gy = y0; gy <= y1; gy++) {
+        const k = cellKey(gx, gy)
+        const list = cells.get(k)
+        if (list) list.push(n)
+        else cells.set(k, [n])
+      }
+  })
+  return (cx: number, cy: number): number[] => {
+    const c = cells.get(cellKey(Math.floor(cx / CELL), Math.floor(cy / CELL))) ?? []
+    return wide.length ? [...c, ...wide].sort((a, b) => a - b) : c
+  }
 }
 
 const UNDER_TEXT = new Set<CanvasElement['type']>(['shape', 'sticky', 'mock', 'screen', 'image'])
@@ -180,11 +236,11 @@ const UNDER_TEXT = new Set<CanvasElement['type']>(['shape', 'sticky', 'mock', 's
  *  an element", sharing the element order and frame depths across calls.
  *  Stack, bottom to top — the same order InfiniteCanvas paints:
  *   1. the theme's canvas ground;
- *   2. FRAMES — every ancestor frame and, for a text, every frame its box
- *      overlaps (parent or not: frames are drawn beneath all other elements),
+ *   2. FRAMES — every ancestor frame and, for a text, every frame holding its glyph
+ *      centre (glyphCentre; parent or not: frames are drawn beneath all other elements),
  *      shallowest nesting first (containmentDepth), array order within a depth;
  *   3. other ancestors, and — for a text — every shape / sticky / mock /
- *      screen / image drawn before it that its box overlaps, in array order.
+ *      screen / image drawn before it that holds its glyph centre, in array order.
  *  Alpha and element opacity are honoured. Yields null when the top of the
  *  stack cannot be judged (image, auto-theme page, unparseable paint): the
  *  caller then falls back to the fixed default ink. */
@@ -194,27 +250,45 @@ export function makeBackdropResolver(
   hiddenViaGroup?: ReadonlySet<string>,
 ): (el: CanvasElement) => string | null {
   const byId = new Map(elements.map((e) => [e.id, e]))
-  const frameById = new Map(elements.filter((e) => e.type === 'frame').map((e) => [e.id, e]))
-  const frames = elements
-    .filter((e) => e.type === 'frame')
+  const indexOf = new Map(elements.map((e, i) => [e.id, i]))
+  const shown = (u: CanvasElement) => !u.hidden && !hiddenViaGroup?.has(u.id)
+  // Only SHOWN frames, for the depth too — InfiniteCanvas sorts its visible
+  // frames the same way, so a hidden container doesn't deepen its children.
+  const frameById = new Map(elements.filter((e) => e.type === 'frame' && shown(e)).map((e) => [e.id, e]))
+  const frames = Array.from(frameById.values())
     .map((f, i) => ({ f, i, d: containmentDepth(frameById, f.id) }))
     .sort((a, b) => a.d - b.d || a.i - b.i)
     .map((x) => x.f)
-  const shown = (u: CanvasElement) => !u.hidden && !hiddenViaGroup?.has(u.id)
+  const framePos = new Map(frames.map((f, p) => [f.id, p]))
+  const framesNear = gridOf(frames)
+  // Shown layers a text can sit on, in array (= z) order.
+  const under = elements.filter((u) => u.type !== 'frame' && shown(u) && UNDER_TEXT.has(u.type))
+  const underNear = gridOf(under)
   return (el) => {
     const ancestors = new Set<string>()
     for (let p = el.parentId ? byId.get(el.parentId) : undefined; p && !ancestors.has(p.id) && p.id !== el.id; p = p.parentId ? byId.get(p.parentId) : undefined)
       ancestors.add(p.id)
     const isText = el.type === 'text'
-    // ponytail: linear scan per text (O(texts × elements), memoised by the
-    // callers); index by position if canvases grow into the thousands.
-    const chain = frames.filter((f) => shown(f) && (ancestors.has(f.id) || (isText && overlaps(el, f))))
-    let before = true // array order = z-order: only what precedes `el` is under it
-    for (const u of elements) {
-      if (u.id === el.id) before = false
-      else if (u.type !== 'frame' && shown(u) && (ancestors.has(u.id) || (isText && before && UNDER_TEXT.has(u.type) && overlaps(el, u))))
-        chain.push(u)
+    const fp = new Set<number>()
+    const rest: CanvasElement[] = []
+    for (const id of Array.from(ancestors)) {
+      const u = byId.get(id)!
+      if (framePos.has(id)) fp.add(framePos.get(id)!)
+      else if (u.type !== 'frame' && shown(u)) rest.push(u)
     }
+    if (isText) {
+      const [cx, cy] = glyphCentre(el)
+      for (const p of framesNear(cx, cy)) if (contains(frames[p], cx, cy)) fp.add(p)
+      const at = indexOf.get(el.id) ?? elements.length
+      for (const n of underNear(cx, cy)) {
+        const u = under[n]
+        if (indexOf.get(u.id)! >= at) break // only what precedes `el` is under it
+        if (!ancestors.has(u.id) && contains(u, cx, cy)) rest.push(u)
+      }
+    }
+    rest.sort((a, b) => indexOf.get(a.id)! - indexOf.get(b.id)!)
+    const chain = Array.from(fp).sort((a, b) => a - b).map((p) => frames[p])
+    chain.push(...rest)
     return paintStack(chain, theme)
   }
 }

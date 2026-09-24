@@ -140,6 +140,25 @@ word-split with `${=VAR}`); verify after. Diagnose: `lsof -nP -iTCP
 -sTCP:LISTEN | grep -E ':(5174|47776)'` - nothing listening -> port lost,
 plain `npm run dev` reclaims it; green `tsc` rules out a code cause.
 
+## Canvas deliverables - look before you deliver (owner decision 2026-09-24)
+Your card puts stickies / text / frames / mocks on a project Canvas? Then
+before `done true` you MUST, on the FINAL canvas (the placement, not a
+scratch copy):
+1. Shoot it as the app draws it, light AND dark:
+   `node ~/.claude/openground-canvas-shot.mjs --path <project> --canvas
+   <name|id> --task <card id> [--out <dir>]` (run from your worktree so
+   Playwright resolves; the app must be running on :47776). Read-only;
+   `--task` attaches both PNGs to the Board card.
+2. Open BOTH PNGs yourself (Read tool) and check: every text readable
+   against the background it actually sits on, nothing cut off,
+   overlapping or empty (mock iframes mounted).
+3. Anything wrong -> fix -> shoot again. Repeat until both pass.
+Don't trust how you think the canvas renders - trust the two shots. Report:
+say the shots are on the card (or give the two paths) and what you fixed
+after looking. Tool fails (app on another port -> set `OG=`, no Chromium,
+etc.)? Put the error in the report / heartbeat blocker instead of going silent; never
+claim the check happened. No shots = not done.
+
 ## Research-shaped goals (deliverable = report, not code)
 Goal is information-gathering (competitor scan, SNS/community sentiment,
 video/article digest)? Before starting: run `bash

@@ -1074,6 +1074,17 @@ worker 面にも同じ境界がある: 規約の**末尾**(worker が最後に�
 防ぐことではなく、**カットオフ前の記憶からの断定が、確認済みの顔をして通ること**を防ぐこと。
 だからマーカーは固定文字列(transcript で grep できる・「だいたい合ってるはず」に薄められない)。
 
+### Canvas deliverables are inspected by screenshot (owner decision 2026-09-24)
+
+A design-proposal canvas was delivered unreadable because nobody had looked at
+the rendered result. Rule, stated in all three seats' skills: the worker shoots
+the final canvas in light + dark with `~/.claude/openground-canvas-shot.mjs`
+(shipped from `scripts/`, installed by `swarmToolingInstall.ts`), reads both
+PNGs, fixes, and attaches them to the card (`/order` §Canvas deliverables);
+the commander refuses to land Canvas work without the shots and looks at them
+(`og-manage` merge step 4b); the president tells the owner where the shots are
+(`supply` §Deliveries). Prose-only — no engine gate enforces it.
+
 ### この規約自身が開ける穴 — 間接プロンプト注入(2026-07-20 敵対レビュー must-fix)
 
 **この手順は、最も危険な分野で外部ページの取得を「必ず」にした**。それは陳腐化対策として正しいが、

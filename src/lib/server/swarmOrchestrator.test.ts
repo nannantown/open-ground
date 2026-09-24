@@ -48,6 +48,7 @@ import {
   defaultDeps,
   detectAnomalies,
   fireFatalNotifications,
+  BOOT_RESUME_GRACE_MS,
   pruneStuckMoves,
   pruneReworks,
   recoveryColumn,
@@ -9544,6 +9545,29 @@ describe('fireFatalNotifications — fatal events push, normal passes are silent
     const engine = newEngine({ running: false, workers: [] })
     const tasks = [card('a', { boardColumn: 'doing', branch: 'swarm/a' })]
     expect(run(engine, tasks, { alive: new Set() })).toEqual([])
+  })
+
+  // 2026-09-24: an auto-update restart killed every worker; the bell rang
+  // 「全員止まった」 10s after boot, 4s before the resume re-adopted them.
+  it('does NOT fire all-workers-down inside the boot-resume grace (update restart)', () => {
+    const BOOT = 1_000_000
+    const engine = newEngine({ running: true, workers: [], resumeGraceUntil: BOOT + BOOT_RESUME_GRACE_MS })
+    const tasks = [card('a', { boardColumn: 'doing', branch: 'swarm/a' })]
+    const fired: SwarmFatalNotification[] = []
+    fireFatalNotifications(engine, tasks, { isAlive: () => false, notify: (n) => fired.push(n) }, BOOT + 10_000)
+    expect(fired).toEqual([])
+    expect(engine.notified.has('all-workers-down')).toBe(false) // overseer S2 reads this
+  })
+
+  it('DOES fire all-workers-down once the grace is over and nobody came back', () => {
+    const BOOT = 1_000_000
+    const engine = newEngine({ running: true, workers: [], resumeGraceUntil: BOOT + BOOT_RESUME_GRACE_MS })
+    const tasks = [card('a', { boardColumn: 'doing', branch: 'swarm/a' })]
+    const fired: SwarmFatalNotification[] = []
+    const deps = { isAlive: () => false, notify: (n: SwarmFatalNotification) => fired.push(n) }
+    fireFatalNotifications(engine, tasks, deps, BOOT + 10_000) // in grace → quiet
+    fireFatalNotifications(engine, tasks, deps, BOOT + BOOT_RESUME_GRACE_MS + 1) // after → real
+    expect(fired.map((f) => f.event)).toEqual(['all-workers-down'])
   })
 
   it('drains a queued EDGE event (exec-timeout) exactly once', () => {

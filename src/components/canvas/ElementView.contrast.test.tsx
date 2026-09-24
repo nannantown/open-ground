@@ -157,9 +157,71 @@ describe('text over a frame that is not its parent (both themes)', () => {
       const t = label(20, 20)
       expect(contrastRatio(judge([t, white], t, theme), '#FFFFFF')!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
     })
-    it(`${theme}: label straddling the frame edge`, () => {
-      const t = label(340, 20)
+    // Review 4 (2026-09-24): a non-parent frame / shape counts only when the
+    // text box's CENTRE is inside it. Box width 120 → centre at x+60.
+    it(`${theme}: label straddling the frame edge, centre inside`, () => {
+      const t = label(320, 20) // centre 380 < 400
       expect(contrastRatio(judge([white, t], t, theme), '#FFFFFF')!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+    })
+    it(`${theme}: label straddling the frame edge, glyphs mostly outside → canvas`, () => {
+      const t = label(385, 20) // "Label" at 18px ≈ 50px of glyphs from x≈391 → centre ≈ 416 > 400
+      expect(contrastRatio(judge([white, t], t, theme), CANVAS_BACKDROP[theme])!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+    })
+    // Review 5 (2026-09-24): the mirror case. Text is left-aligned by default,
+    // so a short label in a wide box has its glyphs at the box's LEFT: box
+    // x=260 w=300 → box centre 410 is outside the 0–400 frame, but the glyphs
+    // (≈266–316) are all on it. Judged by the box centre this was 1.10:1.
+    const mirror = { id: 't', type: 'text', x: 260, y: 20, width: 300, height: 24, text: 'Label' } as CanvasElement
+    it(`${theme}: short left-aligned label in a wide box, glyphs on a white frame`, () => {
+      expect(contrastRatio(judge([white, mirror], mirror, theme), '#FFFFFF')!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+    })
+    it(`${theme}: short left-aligned label in a wide box, glyphs on a white shape`, () => {
+      const blob = { id: 's', type: 'shape', x: 0, y: 0, width: 400, height: 300, fill: '#FFFFFF' } as CanvasElement
+      expect(contrastRatio(judge([blob, mirror], mirror, theme), '#FFFFFF')!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+    })
+    it(`${theme}: short left-aligned label in a wide box, glyphs on a dark frame`, () => {
+      const dark = { ...white, fill: '#1B2A3A' } as CanvasElement
+      expect(contrastRatio(judge([dark, mirror], mirror, theme), '#1B2A3A')!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+    })
+    it(`${theme}: right-aligned label in a wide box: glyphs at the right, off the frame`, () => {
+      const r = { ...mirror, textAlign: 'right', textSizing: 'auto-height' } as CanvasElement // glyphs ≈ 504–554
+      expect(contrastRatio(judge([white, r], r, theme), CANVAS_BACKDROP[theme])!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+    })
+    it(`${theme}: wide label whose box grazes a dark frame by 10px reads on the canvas`, () => {
+      const dark = { ...white, fill: '#1B2A3A' } as CanvasElement
+      const t = { id: 't', type: 'text', x: 390, y: 20, width: 300, height: 24, text: 'Label' } as CanvasElement
+      expect(contrastRatio(judge([dark, t], t, theme), CANVAS_BACKDROP[theme])!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+    })
+    // Review 6 (2026-09-24): soft wrapping. An auto-height paragraph whose
+    // box top grazes a dark frame by 20px: counting only explicit '\n' lines
+    // put the judging point ~15px below the top — on the frame — and 95% of
+    // the paragraph turned cream on the light canvas.
+    it(`${theme}: wrapped paragraph whose top grazes a dark frame reads on the canvas`, () => {
+      const dark = { ...white, fill: '#1B2A3A' } as CanvasElement
+      const t = { id: 't', type: 'text', x: 20, y: 280, width: 300, height: 400, textSizing: 'auto-height', text: 'lorem ipsum '.repeat(60) } as CanvasElement
+      const ink = renderedColor(renderEl(t, backdropFor(t, new Map([dark, t].map((e) => [e.id, e])), theme)), t.text!)
+      expect(contrastRatio(ink, CANVAS_BACKDROP[theme])!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+    })
+    it(`${theme}: a shape grazed by the box edge does not count`, () => {
+      const blob = { id: 's', type: 'shape', x: 0, y: 0, width: 400, height: 300, fill: '#1B2A3A' } as CanvasElement
+      const t = { id: 't', type: 'text', x: 390, y: 20, width: 300, height: 24, text: 'Label' } as CanvasElement
+      expect(contrastRatio(judge([blob, t], t, theme), CANVAS_BACKDROP[theme])!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+    })
+    it(`${theme}: huge frames and negative coordinates still count (bucket grid)`, () => {
+      const huge = { ...white, id: 'h', x: -50000, y: -50000, width: 100000, height: 100000 } as CanvasElement
+      const neg = { ...white, id: 'n', fill: '#1B2A3A', x: -900, y: -700, width: 400, height: 300 } as CanvasElement
+      const t = label(-800, -600)
+      expect(contrastRatio(judge([huge, neg, t], t, theme), '#1B2A3A')!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+      const u = label(5000, 5000)
+      expect(contrastRatio(judge([huge, neg, u], u, theme), '#FFFFFF')!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
+    })
+    it(`${theme}: a hidden container frame does not deepen its child (render parity)`, () => {
+      // Rendered: H is hidden, so D and W are both top-level → array order,
+      // W (white) on top. Counting H would lift D above W.
+      const hidden = { ...white, id: 'h', hidden: true, fill: '#000000' } as CanvasElement
+      const d = { ...white, id: 'd', fill: '#1B2A3A', parentId: 'h' } as CanvasElement
+      const t = label(20, 20)
+      expect(contrastRatio(judge([d, white, hidden, t], t, theme), '#FFFFFF')!).toBeGreaterThanOrEqual(AA_TEXT_CONTRAST)
     })
     it(`${theme}: nested frames stack by depth, not array order`, () => {
       // Inner dark frame is listed BEFORE its white container; paint order is

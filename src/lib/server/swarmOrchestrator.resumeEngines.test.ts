@@ -6,10 +6,12 @@ import { randomUUID } from 'crypto'
 import {
   resumeEngines,
   getOrchestratorState,
+  startOrchestrator,
   stopOrchestrator,
   defaultDeps,
   resumeStartedAtMs,
   MAX_EXEC_MS,
+  TICK_MS,
   __resetOrchestratorForTests,
   type OrchestratorDeps,
   type IntegrationDeps,
@@ -612,6 +614,67 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
     expect(w?.sessionId).toBe(ENTRY.sessionId)
     expect(w?.branch).toBe(ENTRY.branch)
     expect(w?.reworkCount).toBe(ENTRY.reworkCount) // carried across the restart
+  })
+
+  it('update restart: NO all-workers-down bell on the first pass while the resume grace holds (2026-09-24)', async () => {
+    // Observed: auto-update restart → 10s later 「稼働中のワーカーが0になりました」 →
+    // 4s later the resume completed. The workers die with the old process by design;
+    // the first pass after resumeEngines sees running + nobody alive + a doing swarm
+    // card. TEETH: drop the two `engine.resumeGraceUntil = …` assignments in
+    // resumeEngines and this goes RED (measured 2026-09-24).
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+    const fetchAt: number[] = []
+    const bells: string[] = []
+    const deps = liveDeps({
+      isAlive: () => false, // nobody came back (yet)
+      notify: (n) => {
+        bells.push(n.event)
+      },
+      fetchTasks: async () => {
+        fetchAt.push(Date.now())
+        return [{ id: 'card-1', title: 'mid-update', boardColumn: 'doing', branch: 'swarm/resume-1' }] as never
+      },
+    })
+    await resumeEngines(deps, {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([]), // no survivor to adopt
+    })
+    // The first pass is over once the chain's NEXT pass starts (TICK_MS later).
+    await vi.waitFor(() => expect(fetchAt.some((t) => t - fetchAt[0] >= TICK_MS)).toBe(true), {
+      timeout: 20_000,
+      interval: 100,
+    })
+    expect(bells).not.toContain('all-workers-down')
+  })
+
+  it('update restart: an autopilot ON pressed while ALREADY running keeps the resume grace — still no all-workers-down bell (2026-09-24)', async () => {
+    // The commander skill's 「自動運転」 POSTs /api/swarm/orchestrator/start right after
+    // the boot resume already set the engine running. That redundant ON used to clear
+    // resumeGraceUntil, so the next pass rang the false bell. TEETH: move the clear in
+    // startOrchestrator back outside `if (!engine.running)` and this goes RED.
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+    const fetchAt: number[] = []
+    const bells: string[] = []
+    const deps = liveDeps({
+      isAlive: () => false, // nobody came back (yet)
+      notify: (n) => {
+        bells.push(n.event)
+      },
+      fetchTasks: async () => {
+        fetchAt.push(Date.now())
+        return [{ id: 'card-1', title: 'mid-update', boardColumn: 'doing', branch: 'swarm/resume-1' }] as never
+      },
+    })
+    await resumeEngines(deps, {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([]), // no survivor to adopt
+    })
+    await startOrchestrator(projA, deps) // already running ⇒ must keep the grace
+    // Wait until a pass that STARTED after the redundant ON has finished (the one
+    // after it has begun).
+    const base = fetchAt.length
+    await vi.waitFor(() => expect(fetchAt.length).toBeGreaterThan(base + 1), { timeout: 20_000, interval: 100 })
+    expect(bells).not.toContain('all-workers-down')
   })
 
   it('SAFETY FLOOR survives a restart: a danger word only in the NOTES still floors a touch card on --resume', async () => {

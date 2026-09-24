@@ -678,6 +678,7 @@ prune seen/watch                                      :617
   - STATE(毎 pass 再導出、`engine.notified` で rising-edge dedup)— `rework-exhausted`
     (`:5990-6001`)と `all-workers-down`(`:6004-6017`)。条件が消えると notified から外れ、
     **本物の再発は再通知される**(`:6019-6027`)。
+  - `all-workers-down` は**起動再開の猶予中は出さない**(2026-09-24): 自動更新の再起動で worker は全員いったん死ぬため、`resumeEngines` が `engine.resumeGraceUntil`(再開開始時と adopt 完了時に `now + BOOT_RESUME_GRACE_MS` = 3分。再開中の停止・電源スイッチ操作でクリア)を立て、`inBootResumeGrace` の間は通知・anomaly 行ともに抑える。遅らせるだけで握りつぶさない — 猶予後も0人なら次の pass で従来どおり発火(S2 も `engine.notified` 経由なので同じく抑止→発火)。実測の誤報: 再起動10秒後に発火・その4秒後に再開完了。**既に稼働中のエンジンへの ON(司令官の「自動運転」= `POST /api/swarm/orchestrator/start`)は猶予を消さない** — `startOrchestrator` がクリアするのは停止中からの ON のときだけ。
 - fatal イベントの全種は `SwarmFatalEvent`(`types.ts` — 現在 11 種)、info は `SwarmInfoEvent`。
   GET は `/api/swarm/notifications`(swarm owner gate、`server/routes/swarm.ts`)。
 - **表示側(Swarm タブ「要対応」)の契約 — 2026-08-04 に 2 つ直した**:
@@ -1075,6 +1076,19 @@ info `work-landed` (bell/toast only; not on the desk allowlist, to avoid saying 
 
 Verification: `commanderQuestions.test.ts`, `supplyProgress.test.ts`, `supplyNotice.test.ts`
 (lane tests), `swarmLandedLedger.test.ts` (titles).
+
+**Closed questions reach the president too (2026-09-24).** The desk used to hear only the OPEN
+side, so a president retold questions the owner had already answered elsewhere as 「まだ判断待ち」.
+`answerEscalation` (first transition to `answered`) and `dismissEscalation` now call
+`supplyNotice.noticeQuestionClosed`: it withdraws any undelivered line still asking it
+(`forgetSupplyQuestion`, as before) and queues 「<project> の質問「…」は「A」と答え済み / 取り下げ済み —
+もう判断待ちではありません」 on the important lane of **every live president desk** for an owner-lane
+question (a president lists owner questions across projects), or only the desks that were told
+for a commander-lane one. Optional `fromDesk` (project path) on `POST …/escalations/answer|dismiss`
+skips the desk that closed it; the supply skill sends `$PWD`. Several closes waiting on one desk
+ride the normal bundle as one line. There is no timed auto-close in the store — answer and dismiss
+are the only closing edges. Guard: `supplyQuestionClosed.test.ts` (both edges + withdraw + skip,
+red measured by disabling the push and the withdraw).
 
 ## §1.7 — The 監督 tab is gone; the president hears what was said while it was closed (2026-09-23)
 

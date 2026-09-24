@@ -281,6 +281,24 @@ export const MAX_LOG_LINES = 200
  *  judgement. A few tens of seconds matches a cold `claude` TUI start. */
 export const STARTUP_GRACE_MS = 25_000
 
+/** How long AFTER a boot resume finishes (roster reconciled + surviving workers
+ *  `--resume`-adopted) the engine keeps quiet about `all-workers-down` (2026-09-24).
+ *  An update restart kills every worker process by design; until the resume has
+ *  re-adopted them (or reclaimed their cards) the board genuinely reads "running,
+ *  nobody alive, doing work hanging" — observed as a false 「全員止まった」 bell
+ *  10s after an auto-update, 4s before the resume completed. 3 minutes covers a
+ *  resumed SDK worker's cold start (STARTUP_GRACE_MS) plus a reclaim→redispatch
+ *  tick cycle with margin, while a REAL all-down (resume failed, workers died
+ *  again) is still reported within minutes of boot — the grace only delays, it
+ *  never swallows: the condition is level-triggered, so it fires on the first pass
+ *  after the grace if it still holds. */
+export const BOOT_RESUME_GRACE_MS = 3 * 60_000
+
+/** True while a boot resume is in flight or inside {@link BOOT_RESUME_GRACE_MS}
+ *  after it — the window in which zero live workers is the restart itself. */
+export const inBootResumeGrace = (engine: Pick<ProjectEngine, 'resumeGraceUntil'>, now: number): boolean =>
+  (engine.resumeGraceUntil ?? 0) > now
+
 /** How many times the engine RE-QUEUES a card whose worker was LOST (its `claude`
  *  PTY died/was killed with no integrable commits and no completion sign) before
  *  parking it in 'blocked' for a human. 1 ⇒ a card is attempted at most twice
@@ -1841,6 +1859,11 @@ export interface ProjectEngine {
    *  the engine's state is theirs, not a restored one. Optional (absent ⇒ not a
    *  resumed engine), so every existing engine literal in the tests stays valid. */
   autonomyResumed?: boolean
+  /** Epoch ms until which `all-workers-down` is suppressed because this engine is
+   *  being brought back by a boot resume ({@link inBootResumeGrace}): resume start
+   *  + BOOT_RESUME_GRACE_MS, re-armed from adoption completion.
+   *  In-memory only; absent ⇒ no grace. */
+  resumeGraceUntil?: number
   /** True while a pass is mid-flight — the re-entrancy guard that GUARANTEES no two
    *  passes ever overlap (twin-dispatch defense). The setTimeout chain already
    *  serializes the SCHEDULED passes, but a stop→start within a slow pass's await
@@ -8922,7 +8945,8 @@ export const detectAnomalies = async (
     engine.running &&
     engine.workers.length > 0 &&
     liveNow.length === 0 &&
-    (engine.teardownRetries?.size ?? 0) === 0
+    (engine.teardownRetries?.size ?? 0) === 0 &&
+    !inBootResumeGrace(engine, now) // boot resume still re-adopting (see fireFatalNotifications)
   ) {
     // Same condition as the notification arm — engine running, nothing alive,
     // yet swarm cards still sitting in 'doing' (i.e. work is hanging, not done).
@@ -9049,7 +9073,7 @@ export const fireFatalNotifications = (
   // Only the two seams it actually uses (so the unit test needn't build the whole
   // dep set) — runEnginePass's full deps satisfy this. `notify` is optional.
   deps: Pick<OrchestratorDeps, 'isAlive'> & Pick<AnomalyDeps, 'notify'>,
-  _now: number,
+  now: number,
 ): void => {
   const notify = deps.notify
   const push = (n: SwarmFatalNotification): void => {
@@ -9136,7 +9160,9 @@ export const fireFatalNotifications = (
   // few seconds before it clears. The alarm is for workers that DIED, not for
   // ones we are still putting away.
   const tearingDown = (engine.teardownRetries?.size ?? 0) > 0
-  if (engine.running && liveWorkers.length === 0 && !tearingDown) {
+  // Same rule for an update/boot RESTART (2026-09-24): every worker died with the
+  // old process and the resume is still bringing them back — not a crash.
+  if (engine.running && liveWorkers.length === 0 && !tearingDown && !inBootResumeGrace(engine, now)) {
     const doing = tasks.filter(
       (t) => columnOf(t) === 'doing' && isSwarmBranch(typeof t.branch === 'string' ? t.branch : ''),
     )
@@ -9319,6 +9345,11 @@ export const startOrchestrator = async (
   const priorIntent = await readEngineIntent(projectPath)
   if (!engine.running) {
     engine.running = true
+    // Boot-resume grace no longer applies to a stopped→ON start. Cleared ONLY here:
+    // an ON pressed while the engine is ALREADY running (the commander's 「自動運転」
+    // right after a boot resume) must keep it, or the next pass rings a false
+    // all-workers-down before the resumed workers come back (2026-09-24).
+    engine.resumeGraceUntil = undefined
     // An explicit engine (re)start is the owner's hand on the machine: clear a
     // standing SDK spawn hold so the first fill attempts immediately instead of
     // sitting out the remainder of a rung (up to 15m) armed before the owner
@@ -9468,6 +9499,7 @@ export const stopOrchestrator = async (
   // The owner touched the power switch — clear the boot-resume marker (card 2b),
   // same reasoning as startOrchestrator: this state is theirs now.
   engine.autonomyResumed = false
+  engine.resumeGraceUntil = undefined // boot-resume grace no longer applies
   // card 2 — persist `desiredRunning:false` and the explicitly disarmed overseer.
   await persistEngineIntent(engine, projectPath)
   // autonomyRemembered:false — the marker was just cleared above; manualStopPersisted:
@@ -10561,6 +10593,11 @@ export const resumeEngines = async (
         engine.reviewSeenPersisted = reviewWaitingSignature(seeded)
       }
       engine.running = true
+      // Hold all-workers-down until the resume below has had its chance (the
+      // workers all died with the old process). Bounded from the start so an
+      // aborted / throwing resume can never leave the alarm muted; re-armed from
+      // the adoption's completion below.
+      engine.resumeGraceUntil = (opts?.now ?? Date.now()) + BOOT_RESUME_GRACE_MS
       // card 2b — mark this as a RESTORED engine (not an owner ON this session), so
       // the Swarm UI can say so. Card 2 made the old `!running` restart reminder
       // unreachable for a resumed project; this is what puts the fact back on screen.
@@ -10591,6 +10628,7 @@ export const resumeEngines = async (
       // clock, no reclaim). Checking again here costs one file read.
       if (await isSwarmManualStopPersisted(key)) {
         engine.running = false
+        engine.resumeGraceUntil = undefined // no resume ⇒ nothing to wait for
         engine.generation += 1 // any in-flight scheduleNext from this boot is void
         logLine(engine, 'info', 'boot resume aborted — owner stopped autonomy during reconcile')
         continue
@@ -10603,6 +10641,7 @@ export const resumeEngines = async (
       // still-live worker's card unless that card is already counted (its worker in
       // engine.workers). Awaited ⇒ this adoption is inside the spawn freeze too.
       await adoptResumeCandidates(engine, reconciled, deps, prove, now)
+      engine.resumeGraceUntil = (opts?.now ?? Date.now()) + BOOT_RESUME_GRACE_MS
       const gen = (engine.generation += 1)
       logLine(engine, 'info', `engine resumed at boot (v${appVersion})`)
       void runEnginePass(engine, deps)

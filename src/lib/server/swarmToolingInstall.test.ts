@@ -12,6 +12,8 @@ import {
   RESEARCH_SKILL_MARKER,
   RESEARCH_DOCTOR_MARKER,
   RESEARCH_DOCTOR_BASENAME,
+  CANVAS_SHOT_MARKER,
+  CANVAS_SHOT_BASENAME,
   SWARM_TOOLING_TARGET_PATHS,
 } from './swarmToolingInstall'
 import { __setHookSourceModuleDirForTests } from './hooksInstall'
@@ -34,7 +36,9 @@ const libText = `#!/usr/bin/env bash\n# ${SWARM_LIB_MARKER}\nsw_hbdir() { :; }\n
 const researchText = `---\nname: research\n---\n<!-- ${RESEARCH_SKILL_MARKER} -->\n\n# research\n`
 const doctorText = `#!/usr/bin/env bash\n# ${RESEARCH_DOCTOR_MARKER}\necho doctor\n`
 
-const ALL_TOOLING_NAMES = ['order', 'supply', 'research', 'swarm-beat.sh', SWARM_LIB_BASENAME, RESEARCH_DOCTOR_BASENAME]
+const shotText = `#!/usr/bin/env node\n// ${CANVAS_SHOT_MARKER}\nconsole.log('shot')\n`
+
+const ALL_TOOLING_NAMES = ['order', 'supply', 'research', 'swarm-beat.sh', SWARM_LIB_BASENAME, RESEARCH_DOCTOR_BASENAME, CANVAS_SHOT_BASENAME]
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'og-swarm-tooling-'))
@@ -50,6 +54,7 @@ beforeEach(async () => {
   await writeFile(join(root, 'scripts', 'swarm-beat.sh'), beatText, 'utf8')
   await writeFile(join(root, 'scripts', SWARM_LIB_BASENAME), libText, 'utf8')
   await writeFile(join(root, 'scripts', RESEARCH_DOCTOR_BASENAME), doctorText, 'utf8')
+  await writeFile(join(root, 'scripts', CANVAS_SHOT_BASENAME), shotText, 'utf8')
 })
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
@@ -58,7 +63,7 @@ afterEach(async () => {
 const run = () => installSwarmTooling({ sourceRoot: root, homeDir: home })
 
 describe('installSwarmTooling', () => {
-  it('installs all 6 files when targets are missing', async () => {
+  it('installs all 7 files when targets are missing', async () => {
     const results = await run()
     expect(results.map((r) => r.name).sort()).toEqual([...ALL_TOOLING_NAMES].sort())
     for (const { result: r } of results) expect(r.outcome).toBe('installed')
@@ -68,6 +73,7 @@ describe('installSwarmTooling', () => {
     expect(await readFile(join(home, '.claude', 'swarm-beat.sh'), 'utf8')).toBe(beatText)
     expect(await readFile(join(home, '.claude', SWARM_LIB_BASENAME), 'utf8')).toBe(libText)
     expect(await readFile(join(home, '.claude', RESEARCH_DOCTOR_BASENAME), 'utf8')).toBe(doctorText)
+    expect(await readFile(join(home, '.claude', CANVAS_SHOT_BASENAME), 'utf8')).toBe(shotText)
   })
 
   it('installs the scripts as executable (mode 0o755)', async () => {
@@ -178,6 +184,7 @@ describe('shipped tooling sources', () => {
   it('research skill + doctor carry the managed-by marker (contents pinned in researchSystem.test.ts)', async () => {
     expect(await readFile(join(process.cwd(), 'skills', 'research', 'SKILL.md'), 'utf8')).toContain(RESEARCH_SKILL_MARKER)
     expect(await readFile(join(process.cwd(), 'scripts', RESEARCH_DOCTOR_BASENAME), 'utf8')).toContain(RESEARCH_DOCTOR_MARKER)
+    expect(await readFile(join(process.cwd(), 'scripts', CANVAS_SHOT_BASENAME), 'utf8')).toContain(CANVAS_SHOT_MARKER)
   })
 
   it('swarm-beat.sh / the shell helper carry the managed-by marker and never mention tmux', async () => {

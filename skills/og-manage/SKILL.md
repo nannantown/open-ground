@@ -238,6 +238,13 @@ First read the owner's answers (§Answers come back only when you look). Land on
      (正典 = docs/commander/03-integration-review.md §5「専門レビュアー」。本項の文言は
      `SPECIALIST_REVIEW_MANAGER_CLAUSES`(swarmSpecialistReview.ts)がテストで固定 —
      **変えるときは SKILL.md と同モジュールを同じコミットで**。)
+4b. **Canvas deliverables — look at the screenshots (owner decision 2026-09-24).** If the
+   card put anything on a Canvas (stickies / text / frames / mocks), the card must carry the
+   worker's light + dark screenshots (/order §Canvas deliverables). Missing → rework. Present →
+   open both PNGs yourself — the card's `attachments[].id` lives at
+   `~/.openground/projects/<uuid>/task-assets/<id>` (or `GET /api/project/task-asset?path=…&id=<id>`) — (or re-shoot: `node ~/.claude/openground-canvas-shot.mjs --path
+   <project> --canvas <name>`) and confirm every text is readable and nothing is broken;
+   unreadable → rework, never "done". Tell the president the shots are attached to the card.
 5. `git -C <wt> merge-base --is-ancestor origin/main HEAD` で FF 可否:
    - **FF 可** → `git -C <wt> push origin HEAD:main`
    - **FF 不可・衝突なし**(別 worker が先に入っただけ = ルーチン)→ `git -C <wt> rebase origin/main`

@@ -530,7 +530,8 @@
   (`swarmWorker.ts`)に追記され、後者は `skills/og-manage/SKILL.md`「マージ」手順4 とも同一正典。
   テスト: 同名 `*.test.ts` + `ogManageSkill.test.ts`(出荷 SKILL.md への verbatim 照合)
 - worker/補給官の道具(`/order`・`/supply`・`/research` スキルと心拍 `swarm-beat.sh`+
-  `openground-swarm-lib.sh`+調査診断 `openground-research-doctor.sh`)は
+  `openground-swarm-lib.sh`+調査診断 `openground-research-doctor.sh`+Canvas 撮影
+  `openground-canvas-shot.mjs`(ライト/ダーク2枚・カード添付、2026-09-24))は
   `~/.claude/` へ boot 自動配備される: `managedFileInstall.ts`(og-manage/order/supply/script
   共通の idempotent installer — missing→install / marker+差分→refresh / marker無→kept-user)
   を `ogManageSkill.ts` と `swarmToolingInstall.ts` の両方が使う。正典テキストは repo の

@@ -43,7 +43,7 @@ import {
 } from './workerRuntime'
 import { bracketedPaste } from './pastePrompt'
 import { createSwarmInfoNotification } from './swarmNotifications'
-import { forgetSupplyQuestion } from './supplyNotice'
+import { noticeQuestionClosed } from './supplyNotice'
 import { needsOwnerDirectly } from './swarmDecisionRouting'
 import { isValidProjectPath, projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
@@ -1227,7 +1227,7 @@ export const answerEscalation = async (
   id: string,
   answer: string,
   deps?: AnswerEscalationDeps,
-  opts?: { by?: 'owner' | 'commander' },
+  opts?: { by?: 'owner' | 'commander'; fromDesk?: string },
 ): Promise<{ escalation: Escalation; delivery: EscalationDelivery }> => {
   const by = opts?.by === 'commander' ? 'commander' : 'owner'
   const text = (answer ?? '').trim().slice(0, MAX_ESCALATION_ANSWER)
@@ -1272,8 +1272,9 @@ export const answerEscalation = async (
     record.answeredAt = (deps?.now?.() ?? new Date()).toISOString()
     record.status = 'answered'
     await persist(all)
-    // No longer true → the president's desk must not retell it.
-    forgetSupplyQuestion(record.id)
+    // No longer true → withdraw its undelivered line and tell the president
+    // desks it is closed (supplyNotice.noticeQuestionClosed).
+    noticeQuestionClosed(closedQuestion(record, opts?.fromDesk))
 
     return { done: false, record }
   })
@@ -1339,6 +1340,17 @@ export const answerEscalation = async (
   return { escalation: record, delivery }
 }
 
+/** What the president desks are told when this record closes. */
+const closedQuestion = (e: Escalation, fromDesk?: string): Parameters<typeof noticeQuestionClosed>[0] => ({
+  id: e.id,
+  projectPath: e.projectPath,
+  ownerLane: e.routedTo !== 'commander',
+  subject: e.plainQuestion || e.question,
+  outcome: e.status === 'dismissed' ? 'dismissed' : 'answered',
+  ...(e.answer ? { answer: e.answer } : {}),
+  ...(fromDesk ? { fromDesk } : {}),
+})
+
 // ─── Dismiss (close unanswered) ───────────────────────────────────────────────
 
 /** The owner closes an OPEN question without answering: nothing is injected,
@@ -1346,7 +1358,7 @@ export const answerEscalation = async (
  *  an answered record is NOT retroactively dismissed). */
 export const dismissEscalation = async (
   id: string,
-  deps?: { now?: () => Date },
+  deps?: { now?: () => Date; fromDesk?: string },
 ): Promise<Escalation> => {
   return enqueue(async () => {
     await ensureOpenGroundHome()
@@ -1357,7 +1369,7 @@ export const dismissEscalation = async (
     record.status = 'dismissed'
     record.dismissedAt = (deps?.now?.() ?? new Date()).toISOString()
     await persist(all)
-    forgetSupplyQuestion(record.id)
+    noticeQuestionClosed(closedQuestion(record, deps?.fromDesk))
     return record
   })
 }

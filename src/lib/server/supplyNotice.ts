@@ -1147,6 +1147,65 @@ export const forgetSupplyQuestion = (escalationId: string): void => {
   if (changed) savePending()
 }
 
+/** A question that just stopped waiting — what {@link noticeQuestionClosed} says. */
+export interface ClosedQuestion {
+  id: string
+  projectPath: string
+  /** Waiting on the OWNER (not the commander lane) when it closed. */
+  ownerLane: boolean
+  /** What the owner was shown (plainQuestion, else the raw question). */
+  subject: string
+  outcome: 'answered' | 'dismissed'
+  answer?: string
+  /** The project path of the president desk that closed it, if it was one —
+   *  that desk already knows and is not told again. */
+  fromDesk?: string
+}
+
+const oneLine = (s: string, n: number): string => {
+  const t = s.replace(/\s+/g, ' ').trim()
+  return t.length > n ? `${t.slice(0, n)}…` : t
+}
+
+/** The line a president hears when a question closes. Pure. */
+export const questionClosedText = (c: ClosedQuestion): string => {
+  const q = `${basename(c.projectPath)} の質問「${oneLine(c.subject, 80)}」`
+  const what =
+    c.outcome === 'answered' && c.answer ? `は「${oneLine(c.answer, 60)}」と答え済み` : 'は回答なしで取り下げ済み'
+  return `${q}${what} — もう判断待ちではありません(判断待ちの一覧から外すこと)`
+}
+
+/**
+ * A question was answered or dismissed: withdraw any undelivered line that
+ * still asks it ({@link forgetSupplyQuestion}), then tell every president desk
+ * that may be holding it as open (owner decision 2026-09-24 — a president
+ * retold two already-answered questions as 「まだ判断待ち」 because it only ever
+ * heard the OPEN side). Owner-lane questions go to EVERY desk (a president
+ * lists owner questions across all projects); commander-lane ones only to the
+ * desks that were actually told. The closing desk itself is skipped. Several
+ * closes waiting on one desk ride the ordinary bundle as one line.
+ */
+export const noticeQuestionClosed = (c: ClosedQuestion, partial: Partial<SupplyNoticeDeps> = {}): void => {
+  forgetSupplyQuestion(c.id)
+  const deps = { ...defaultDeps, ...partial }
+  let desks: { id: string; cwd: string }[]
+  try {
+    desks = deps.desks()
+  } catch {
+    return
+  }
+  const targets = new Set<string>()
+  for (const d of desks) if (c.ownerLane || toldTo.get(d.id)?.has(c.id)) targets.add(deskKey(d.cwd))
+  if (c.fromDesk) targets.delete(deskKey(c.fromDesk))
+  if (targets.size === 0) return
+  const text = questionClosedText(c)
+  const at = deps.now()
+  for (const k of Array.from(targets)) pushImportant(k, text, at)
+  // Not awaited: the caller holds the escalation store's write chain, and a
+  // delivery pass must never be waited on from inside it (swarmEscalations L1/L2).
+  void flushSupplyNotices(partial).catch(() => [])
+}
+
 /**
  * The president's desk just OPENED (or was replaced): tell it every question
  * still waiting on the owner, then deliver as usual. Rides the supply loop
