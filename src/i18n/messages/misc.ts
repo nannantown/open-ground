@@ -45,6 +45,7 @@ export const misc = {
     'misc.ground.removeConfirm': 'Remove "{name}" from the Ground? The folder stays on disk.',
     'misc.ground.removeFailed': 'Remove failed: {error}',
     'misc.ground.importFailed': 'Import failed: {error}',
+    'misc.ground.placeHint': 'Click where you want "{name}" — Esc to let the app choose a free spot',
     'misc.ground.locateFailed': 'Locate failed: {error}',
     'misc.ground.saveSettingsFailed': 'Settings could not be saved: {error}',
     // Ground bootstrap failure (GET /api/projects non-2xx / unreachable). Shown
@@ -106,6 +107,7 @@ export const misc = {
     'misc.ground.removeConfirm': '「{name}」を Ground から外しますか？フォルダはディスクに残ります。',
     'misc.ground.removeFailed': 'Ground から外せませんでした: {error}',
     'misc.ground.importFailed': 'インポートに失敗しました: {error}',
+    'misc.ground.placeHint': '「{name}」を置きたい場所をクリック — Esc で空いている場所に自動で置きます',
     'misc.ground.locateFailed': 'フォルダの指定に失敗しました: {error}',
     'misc.ground.saveSettingsFailed': '設定を保存できませんでした: {error}',
     'misc.ground.loadFailed': 'プロジェクトを読み込めませんでした。',

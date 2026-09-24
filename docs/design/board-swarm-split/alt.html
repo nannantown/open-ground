@@ -1,0 +1,47 @@
+<meta charset="utf-8">
+<!-- Rejected alternatives (wireframe-level) for comparison. build.mjs sets CFG.kind = 'side' | 'overlay'. -->
+<style>
+#a{--bg:#F2EDDE;--card:#F8F4E8;--inset:#E6DEC6;--ink:#2A1F1A;--muted:#4C3D30;--faint:#705E4C;--line:#D6C9AC;--lstrong:#B8A988;--acc:#B23A2C;--moss:#5C6B3D;--sup:#F0E2D0;--man:#E1E4EA;--wrk:#DEE9E2}
+*{box-sizing:border-box}
+#a{position:absolute;inset:0;background:var(--bg);color:var(--ink);font:13px/1.5 "Hiragino Sans","Noto Sans JP",system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+.top{height:30px;flex:none;display:flex;align-items:center;padding:0 12px;border-bottom:1px solid var(--line);font-weight:600;gap:10px}
+.top small{font-weight:400;color:var(--faint)}
+.main{flex:1;min-height:0;display:flex;position:relative}
+.board{flex:1;min-width:0;display:flex;gap:6px;padding:10px}
+.col{flex:1;min-width:0;background:var(--inset);border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:5px}
+.col b{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card{background:var(--card);border-radius:6px;padding:6px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sw{display:flex;gap:1px;background:var(--lstrong);border-left:1px solid var(--lstrong)}
+.seat{background:var(--bg);display:flex;flex-direction:column;min-width:0}
+.seat .n{padding:5px 6px;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.seat .b{flex:1;padding:6px;font-size:11px;color:var(--faint);overflow:hidden}
+.term{flex:1;background:#1a1a1a;color:#ddd;font:11px/1.5 ui-monospace,Menlo,monospace;padding:6px;overflow:hidden;word-break:break-all}
+.panel{position:absolute;left:24px;right:24px;bottom:0;height:52%;background:var(--bg);border:1px solid var(--lstrong);border-bottom:0;border-radius:12px 12px 0 0;box-shadow:0 -12px 30px rgba(42,31,26,.28);display:flex;flex-direction:column;overflow:hidden}
+.panel .h{height:26px;flex:none;display:flex;align-items:center;justify-content:center}
+.panel .h i{width:40px;height:4px;border-radius:2px;background:var(--lstrong)}
+.panel .row{flex:1;display:flex;gap:1px;background:var(--lstrong)}
+.note{position:absolute;background:var(--acc);color:#fff;font-weight:600;font-size:12px;padding:4px 9px;border-radius:5px;box-shadow:0 2px 6px rgba(0,0,0,.2)}
+.ring{position:absolute;border:2px dashed var(--acc);border-radius:8px;pointer-events:none}
+</style>
+<div id="a"></div>
+<script>
+var CFG = /*CFG*/{"kind":"side"}/*CFG*/;
+(function(){
+  var cols=[['未着手',['スマホで Board を見やすく','設定画面の言葉をやさしく','付箋の色を増やす']],['実行中',['● Board と Swarm を1画面に','● お知らせの遅れを直す']],['レビュー待ち',['自動更新の失敗をくり返さない']],['完了',['リリース 0.11.132','ヘルプに目次']],['判断待ち',['● 料金ページを公開してよいか']]];
+  if(CFG.kind==='overlay'){cols[0][1].push('ログイン画面を直す','通知の設定を増やす','説明書を更新');cols[3][1].push('Canvas を速くする','起動を速くする','文字を大きく');cols[1][1].push('検索を直す');}
+  var board='<div class="board">'+cols.map(function(c){return '<div class="col"><b>'+c[0]+'</b>'+c[1].map(function(t){return '<div class="card">'+t+'</div>'}).join('')+'</div>'}).join('')+'</div>';
+  var term='<div class="term">› Board を開いたまま Swarm も見たい<br>● 承知しました。発注書にまとめました。Board に積んでよいですか？</div>';
+  var seats=function(w){return '<div class="seat" style="flex:'+w[0]+'"><div class="n" style="background:var(--sup)">社長</div>'+term+'</div><div class="seat" style="flex:'+w[1]+'"><div class="n" style="background:var(--man)">司令官</div><div class="b">仕事を割り振ります</div></div><div class="seat" style="flex:'+w[2]+'"><div class="n" style="background:var(--wrk)">ワーカー 1</div><div class="b">Board と Swarm を1画面に</div></div>'};
+  var a=document.getElementById('a');
+  if(CFG.kind==='side'){
+    a.innerHTML='<div class="top">代案A：左右に分ける <small>左 Board ／ 右 Swarm</small></div><div class="main">'+board+'<div class="sw" style="flex:0 0 46%">'+seats([2,1,1])+'</div>'
+      +'<div class="ring" style="left:6px;top:6px;width:52%;height:60%"></div><div class="note" style="left:60px;top:62%">カードの列が細くなり、題名が切れる</div>'
+      +'<div class="note" style="right:20px;bottom:18px">社長の画面も細く、長い返事が読みにくい</div></div>';
+  } else {
+    a.innerHTML='<div class="top">代案B：下から重ねて出す <small>いまの右の引き出しと同じ出し方を下に</small></div><div class="main">'+board
+      +'<div class="panel"><div class="h"><i></i></div><div class="row">'+seats([2,1,1])+'</div></div>'
+      +'<div class="note" style="left:48px;top:40%">下の方のカードがパネルの裏に隠れる</div>'
+      +'<div class="note" style="right:48px;top:40%">カードを動かすには、いったん閉じる必要がある</div></div>';
+  }
+})();
+</script>

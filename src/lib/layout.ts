@@ -58,3 +58,32 @@ export const frameLabelFor = (
   return label
 }
 
+
+// Where a freshly created/imported card lands when the user backs out of
+// click-to-place (Esc): the grid slot nearest `center` (the card's top-left if
+// it sat in the middle of the view) whose box clears every other card by a
+// gap. Rings outward on a card-sized grid, so the answer is always on screen
+// when the view has room. `occupied` are other cards' top-left corners.
+// ponytail: fixed 160px box height — real cards grow with long descriptions;
+// measure DOM heights if tall cards start touching.
+export const findFreeSpot = (
+  occupied: readonly { x: number; y: number }[],
+  center: { x: number; y: number },
+): { x: number; y: number } => {
+  const H = 160
+  const stepX = CARD_W + GAP
+  const stepY = H + GAP
+  const free = (x: number, y: number) =>
+    occupied.every((o) => Math.abs(o.x - x) >= stepX || Math.abs(o.y - y) >= stepY)
+  for (let r = 0; r < 60; r++) {
+    const ring: { x: number; y: number; d: number }[] = []
+    for (let i = -r; i <= r; i++)
+      for (let j = -r; j <= r; j++)
+        if (Math.max(Math.abs(i), Math.abs(j)) === r)
+          ring.push({ x: center.x + i * stepX, y: center.y + j * stepY, d: i * i + j * j })
+    ring.sort((a, b) => a.d - b.d)
+    const hit = ring.find((c) => free(c.x, c.y))
+    if (hit) return { x: hit.x, y: hit.y }
+  }
+  return center
+}

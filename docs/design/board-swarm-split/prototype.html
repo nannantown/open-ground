@@ -1,0 +1,315 @@
+<meta charset="utf-8">
+<!-- Board + Swarm split — clickable design mock (not product code).
+     Rendered inside an OPEN GROUND Canvas mock element (framework:'html').
+     build.mjs replaces the CFG line below per state. -->
+<style>
+#og{--bg:#F2EDDE;--elev:#EDE6D2;--card:#F8F4E8;--cardh:#F0EBDB;--inset:#E6DEC6;--deep:#2A1F1A;--glow:#FAF6EB;--plane:#E8E1D0;
+  --ink:#2A1F1A;--muted:#4C3D30;--subtle:#5F4F3F;--faint:#705E4C;--line:#D6C9AC;--lsoft:#E2D8BE;--lstrong:#B8A988;
+  --acc:#B23A2C;--acch:#9A2F22;--accs:#E8D5CE;--moss:#5C6B3D;--mosst:#4A5730;--mosss:#DCE0CC;--ochre:#9A6E20;--ochres:#E9DFC4;--verm:#B23A2C;
+  --sup:#F0E2D0;--man:#E1E4EA;--wrk:#DEE9E2;--term:#1a1a1a;--onacc:#fff}
+#og[data-theme=dark]{--bg:#2A1F1A;--elev:#33281F;--card:#362A22;--cardh:#3D3028;--inset:#1F1713;--deep:#14100C;--glow:#32251E;--plane:#413631;
+  --ink:#F8F4E8;--muted:#DDD8CC;--subtle:#D4C9B8;--faint:#C9BDAA;--line:#4A3A2E;--lsoft:#3E3025;--lstrong:#5F4C3C;
+  --acc:#F29580;--acch:#F7AD9B;--accs:#40251F;--moss:#9DB36B;--mosst:#A8BD7A;--mosss:#333926;--ochre:#DDAE58;--ochres:#3E3120;--verm:#E06A5A;
+  --sup:#483228;--man:#30303C;--wrk:#283832;--onacc:#2A1F1A}
+*{box-sizing:border-box}[hidden]{display:none!important}
+#og{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--bg);color:var(--ink);
+  font:14px/1.5 "Instrument Sans","Hiragino Sans","Hiragino Kaku Gothic ProN","Noto Sans JP",system-ui,sans-serif;overflow:hidden}
+button{font:inherit;color:inherit;cursor:pointer;transition:background-color .15s ease,color .15s ease,border-color .15s ease,box-shadow .15s ease}
+button:disabled{opacity:.4;cursor:not-allowed}
+button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.mono{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace}
+.cap{font-size:11px;font-weight:500;letter-spacing:.02em;color:var(--faint)}
+/* mock-only control bar (NOT part of the product UI) */
+.mbar{flex:none;height:26px;display:flex;align-items:center;gap:8px;padding:0 10px;font-size:11px;color:#555;
+  background:repeating-linear-gradient(135deg,#e9e9e9 0 8px,#f3f3f3 8px 16px);border-bottom:1px dashed #999}
+.mbar b{color:#222}.mbar .sp{flex:1}
+.mbar button{border:1px solid #aaa;background:#fff;border-radius:3px;padding:0 7px;height:18px;font-size:11px;color:#333}
+.mbar button:hover{background:#eee}.mbar button.on{background:#222;color:#fff;border-color:#222}
+/* project header */
+.ph{flex:none;height:48px;display:flex;align-items:center;gap:18px;padding:0 20px;border-bottom:1px solid var(--line);background:var(--bg)}
+.ph .nm{font:600 20px "Fraunces","Hiragino Mincho ProN",serif;white-space:nowrap}
+.tabs{display:flex;gap:4px;height:100%;align-items:flex-end}
+.tab{height:36px;padding:0 8px;border:0;border-bottom:2px solid transparent;background:none;border-radius:3px 3px 0 0;font-size:13px;font-weight:500;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:6px}
+.tab:hover:not(.on){background:var(--plane);border-bottom-color:var(--lstrong)}
+.tab.on{border-bottom-color:var(--ink);background:var(--inset);color:var(--ink)}
+.tab i{width:10px;height:10px;border:1.5px solid currentColor;border-radius:2px;display:inline-block}
+/* body split */
+.body{flex:1;min-height:0;display:flex;flex-direction:column;background:radial-gradient(1100px 640px at 28% -12%,var(--glow) 0%,var(--bg) 62%)}
+.board{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+.tb{flex:none;display:flex;align-items:center;justify-content:space-between;padding:12px 28px 10px}
+.tb .l{display:flex;gap:10px;align-items:center}.tb .r{display:flex;gap:8px;align-items:center}
+.chip{border:1px solid var(--line);border-radius:3px;padding:3px 10px;font-size:13px;background:none;color:var(--muted)}
+.chip:hover{background:var(--plane);color:var(--ink)}
+.av{width:22px;height:22px;border-radius:50%;background:var(--accs);color:var(--acc);font-size:11px;display:grid;place-items:center;font-weight:600}
+.quiet{border:0;background:none;color:var(--muted);font-size:13px;padding:3px 6px;border-radius:3px}.quiet:hover{background:var(--plane);color:var(--ink)}
+/* THE new button */
+.sw{position:relative;display:flex;align-items:center;gap:7px;height:28px;padding:0 11px;border:1px solid var(--lstrong);border-radius:5px;background:var(--card);color:var(--ink);font-size:13px;font-weight:500}
+.sw:hover:not(.on){background:var(--cardh);border-color:var(--muted)}
+.sw.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.sw.on:hover{background:var(--muted);border-color:var(--muted)}
+.sw:active{transform:translateY(1px)}
+.sw svg{width:15px;height:15px}
+.lamp{width:7px;height:7px;border-radius:50%;background:color-mix(in srgb,var(--ink) 18%,transparent);flex:none}
+.lamp.run{background:var(--moss);box-shadow:0 0 7px color-mix(in srgb,var(--moss) 55%,transparent)}
+.lamp.wait{background:var(--ochre);box-shadow:0 0 7px color-mix(in srgb,var(--ochre) 55%,transparent)}
+.badge{font-size:11px;font-weight:600;padding:0 6px;border-radius:9px;background:var(--ochre);color:var(--onacc);line-height:17px}
+#og[data-theme=dark] .badge{color:#2A1F1A}
+.hint{position:absolute;inset:-7px;border:2px dashed #555;border-radius:9px;pointer-events:none;animation:pulse 1.6s ease-in-out infinite}
+.hint span{position:absolute;top:50%;right:100%;margin-right:44px;transform:translateY(-50%);white-space:nowrap;background:repeating-linear-gradient(135deg,#333 0 8px,#3d3d3d 8px 16px);color:#fff;font-size:12px;font-weight:600;padding:3px 8px;border-radius:4px}
+@keyframes pulse{50%{opacity:.35}}
+.cols{flex:1;min-height:0;display:flex;gap:14px;padding:0 20px 20px;overflow:auto}
+.col{flex:1 0 166px;min-width:166px;border-radius:12px;background:var(--inset);padding:12px 10px 10px;display:flex;flex-direction:column;gap:8px;min-height:0;overflow:hidden}
+.ch{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:13px;font-weight:600;color:var(--muted);padding:0 3px}
+.ch .n{font-weight:400;color:var(--faint)}.ch .x{margin-left:auto;font-size:11px;font-weight:500;color:var(--mosst)}
+.col .hintline{font-size:12px;color:var(--faint);padding:0 3px;margin-top:-4px}
+.card{position:relative;border-radius:10px;padding:12px 13px;background:var(--card);box-shadow:0 1px 0 rgba(42,31,26,.04),0 1px 2px rgba(42,31,26,.06);overflow:hidden;flex:none}
+.card:hover{background:var(--cardh)}
+.card.run::before,.card.wt::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--moss)}.card.wt::before{background:var(--ochre)}
+.card .t{font-size:14px;line-height:1.55}.card .st{color:var(--mosst);font-weight:600}.card.wt .st{color:var(--ochre)}
+.card .w{margin-top:9px;font-size:12px;color:var(--faint);display:flex;gap:6px;white-space:nowrap;overflow:hidden}.card .w .m{margin-left:auto}
+.card .f{margin-top:8px;display:flex;gap:6px;flex-wrap:wrap}
+.pri{border-radius:99px;padding:1px 9px;font-size:12px;font-weight:600;background:var(--verm);color:#fff}
+#og[data-theme=dark] .pri:not(.lo){color:#1F1713}
+.pri.lo{background:var(--inset);border:1px solid var(--line);color:var(--muted)}
+.add{border:0;border-radius:10px;background:color-mix(in srgb,var(--ink) 4%,transparent);padding:10px;font-size:14px;color:var(--muted);flex:none}
+.add:hover{background:color-mix(in srgb,var(--ink) 8%,transparent);color:var(--ink)}
+/* divider */
+.dv{flex:none;height:9px;position:relative;cursor:row-resize;touch-action:none;background:var(--bg);border-top:1px solid var(--lstrong)}
+.dv .g{position:absolute;left:50%;top:2px;width:44px;height:4px;margin-left:-22px;border-radius:2px;background:var(--lstrong);transition:background-color .15s ease,width .15s ease}
+.dv:hover .g,.dv.drag .g{background:var(--acc);width:64px;margin-left:-32px}
+.dv:hover,.dv.drag{border-top-color:var(--acc)}
+.dv:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+.dv .tip{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);font-size:11px;background:var(--ink);color:var(--bg);padding:2px 8px;border-radius:4px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .15s}
+.dv:hover .tip{opacity:1}.dv.drag .tip{opacity:0}
+/* swarm pane */
+.swp{flex:none;display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.sh{flex:none;min-height:38px;display:flex;align-items:center;gap:8px;padding:0 8px 0 12px;border-bottom:1px solid var(--line)}
+.sh .ttl{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-right:4px}
+.pill{display:flex;align-items:center;gap:6px;border-radius:99px;padding:1px 9px;font-size:13px;background:var(--elev);color:var(--muted)}
+.pill.live{background:var(--mosss);color:var(--mosst)}
+.sh .sp{flex:1}
+.tg{height:24px;border:1px solid var(--line);border-radius:3px;padding:0 8px;font-size:12px;background:none;color:var(--muted);display:flex;align-items:center;gap:5px}
+.tg:hover{background:var(--plane);color:var(--ink)}.tg.on{background:var(--mosss);color:var(--mosst);border-color:transparent}
+.seg{display:flex;background:var(--inset);border-radius:5px;padding:2px}
+.seg button{border:0;background:none;border-radius:4px;padding:1px 10px;font-size:12px;color:var(--muted)}
+.seg button:hover:not(.on){background:var(--plane);color:var(--ink)}
+.seg button.on.go{background:var(--moss);color:#fff}.seg button.on.st{background:var(--ink);color:var(--bg)}
+#og[data-theme=dark] .seg button.on.go{color:#1F1713}
+.vr{width:1px;height:18px;background:var(--line)}
+.ib{width:26px;height:24px;border:0;border-radius:4px;background:none;color:var(--muted);display:grid;place-items:center;font-size:13px}
+.ib:hover{background:var(--plane);color:var(--ink)}
+.seats{flex:1;min-height:0;display:flex;gap:1px;background:var(--lstrong);overflow-x:auto}
+.seat{display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.seat.s{flex:1 0 360px}.seat.m{flex:0 0 260px}.seat.w{flex:0 0 240px}.seat.w.open{flex:0 0 380px}
+.np{flex:none;min-height:34px;display:flex;align-items:center;gap:7px;padding:6px 10px;font-size:13px}
+.np .who{font-weight:500}.np .sp{flex:1}
+.s .np{background:var(--sup)}.m .np{background:var(--man)}.w .np{background:var(--wrk)}
+.sb{border:1px solid var(--lstrong);border-radius:3px;padding:0 6px;font-size:12px;background:none;color:var(--muted);line-height:18px}
+.sb:hover{background:var(--plane);color:var(--ink)}
+.term{flex:1;min-height:0;background:var(--term);color:#e8e2d4;font:12.5px/1.6 "JetBrains Mono",ui-monospace,Menlo,monospace;padding:10px 12px;display:flex;flex-direction:column}
+.term .log{flex:1;min-height:0;overflow:auto;white-space:pre-wrap}
+.term .me{color:#9fc3ff}.term .ai{color:#e8e2d4}.term .ai b{color:#9DB36B;font-weight:400}.term .dim{color:#8d8577}
+.term form{display:flex;gap:8px;align-items:center;border-top:1px solid #333;padding-top:8px;margin-top:6px}
+.term input{flex:1;background:#262626;border:1px solid #444;border-radius:4px;color:#fff;font:inherit;padding:5px 8px;outline:0}
+.term input:focus{border-color:#F29580}
+.term input::placeholder{color:#8d8577}
+.send{border:0;border-radius:4px;background:#F29580;color:#2A1F1A;font-weight:600;font-size:12px;padding:5px 12px;font-family:inherit}
+.send:hover{background:#F7AD9B}
+.seatb{flex:1;min-height:0;overflow:auto;padding:10px 12px;font-size:13px;color:var(--muted);display:flex;flex-direction:column;gap:8px}
+.task{font-size:13px;color:var(--ink);line-height:1.5}
+.q{border:1px solid var(--ochre);background:var(--ochres);border-radius:6px;padding:7px 9px;font-size:12px;color:var(--ink)}
+.q b{color:var(--ochre)}
+.look{align-self:flex-start;border:1px solid var(--lstrong);border-radius:4px;background:var(--card);padding:3px 10px;font-size:12px}
+.look:hover{background:var(--cardh);border-color:var(--muted)}
+.tr{flex:1;min-height:0;overflow:auto;font-size:13px;color:var(--ink);display:flex;flex-direction:column;gap:6px}
+.tr .tool{font:12px "JetBrains Mono",monospace;color:var(--faint)}
+.wi{flex:none;display:flex;gap:6px;padding:8px 10px;background:var(--card);border-top:1px solid var(--line)}
+.wi input{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:4px 8px;font:inherit;font-size:13px;color:var(--ink);outline:0}
+.wi input:focus{border-color:var(--acc)}
+.wi button{border:0;border-radius:4px;background:var(--acc);color:var(--onacc);font-size:12px;padding:0 10px}
+.wi button:hover{background:var(--acch)}
+/* collapsed strip */
+.strip{flex:none;height:34px;display:flex;align-items:center;gap:10px;padding:0 12px;border-top:1px solid var(--lstrong);background:var(--elev);font-size:13px;color:var(--muted);cursor:pointer;width:100%;border-left:0;border-right:0;border-bottom:0;text-align:left}
+.strip:hover{background:var(--plane);color:var(--ink)}
+.strip .ttl{font-size:11px;font-weight:600;letter-spacing:.14em;color:var(--muted)}
+/* off state */
+.off{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+.offc{max-width:520px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:10px}
+.plate{font-size:11px;font-weight:600;letter-spacing:.1em;border:1px solid var(--ochre);color:var(--ochre);border-radius:3px;padding:0 6px}
+.offc h3{margin:0;font:600 20px "Fraunces","Hiragino Mincho ProN",serif}
+.offc p{margin:0;color:var(--muted)}
+.roles{display:flex;gap:8px;margin:4px 0}
+.role{border-radius:6px;padding:6px 10px;font-size:12px;color:var(--ink);text-align:left;width:150px}
+.role b{display:block;font-size:13px}
+.go{border:0;border-radius:5px;background:var(--acc);color:var(--onacc);font-weight:600;padding:8px 22px;font-size:14px}
+.go:hover{background:var(--acch);transform:translateY(-1px)}.go:active{transform:none}
+.link{border:0;background:none;color:var(--muted);text-decoration:underline;font-size:13px}.link:hover{color:var(--ink)}
+/* narrow */
+.stabs{display:none}
+#og.narrow .stabs{display:flex;flex:none;gap:4px;padding:6px 8px;border-bottom:1px solid var(--line)}
+.stabs button{flex:1;border:1px solid var(--line);border-radius:99px;background:none;padding:3px 0;font-size:13px;color:var(--muted);display:flex;justify-content:center;align-items:center;gap:6px}
+.stabs button:hover:not(.on){background:var(--plane);color:var(--ink)}
+.stabs button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+#og.narrow .seats{background:var(--bg)}
+#og.narrow .seat{display:none;flex:1 1 auto!important}
+#og.narrow .seat.vis{display:flex}
+.narrowonly{display:none}#og.narrow .narrowonly{display:inline-block}
+#og.predeploy .card .st,#og.predeploy .card .w,#og.predeploy .ch .x,#og.predeploy .card.wt,#og.predeploy .swon{display:none}#og.predeploy .card.run::before{display:none}
+.menuw{position:relative}.menu{position:absolute;right:0;top:28px;z-index:5;background:var(--card);border:1px solid var(--lstrong);border-radius:6px;padding:4px;display:flex;flex-direction:column;min-width:170px;box-shadow:0 6px 18px rgba(0,0,0,.18)}
+.menu button{border:0;background:none;text-align:left;padding:5px 8px;border-radius:4px;font-size:13px;color:var(--muted)}.menu button:hover{background:var(--plane);color:var(--ink)}.menu button.on{color:var(--mosst)}
+.flow{font-size:12px;color:var(--muted);background:var(--elev);border-radius:6px;padding:6px 10px}
+#og.narrow .wide,#og.narrow .card .w .m,#og.narrow .ch .x{display:none}
+#og.narrow .tb{padding:10px 14px}
+#og.narrow .cols{padding:0 12px 12px}
+#og.narrow .ph{gap:10px;padding:0 12px}
+#og.narrow .swlbl{display:none}
+.wkl{display:none}
+#og.narrow .wkl{display:flex;flex-direction:column;gap:1px;background:var(--lstrong)}
+</style>
+
+<div id="og" data-theme="light">
+  <div class="mbar"><b>見本の操作</b><span id="mstate"></span><span class="sp"></span>
+    テーマ <button data-th="light">ライト</button><button data-th="dark">ダーク</button>
+    <button id="reset">最初に戻す</button></div>
+  <div class="ph"><span class="nm">OPEN GROUND</span>
+    <nav class="tabs"><button class="tab on"><i></i>Board</button><button class="tab"><i></i>Canvas</button><button class="tab"><i></i>Terminal</button><button class="tab"><i></i>Research</button></nav></div>
+  <div class="body" id="body">
+    <section class="board">
+      <div class="tb"><div class="l"><span class="cap" style="letter-spacing:.02em">ボード · 9 カード</span><button class="chip wide">自分のみ</button></div>
+        <div class="r"><span class="av wide">K</span>
+          <button class="sw" id="swbtn" aria-pressed="false" title="Swarm を下に出す／しまう">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="2" width="13" height="12" rx="2"/><path d="M1.5 9.5h13"/></svg>
+            <span>Swarm</span><span class="lamp" id="swlamp"></span><span class="badge" id="swbadge">質問 2</span>
+            <span class="hint" id="hint" hidden><span>見本の説明：ここを押すと下に Swarm が出ます</span></span>
+          </button>
+          <button class="quiet">⚙ <span class="swlbl">設定</span></button></div></div>
+      <div class="cols">
+        <div class="col"><div class="ch">未着手 <span class="n">3</span></div>
+          <div class="card"><div class="t">スマホで Board を見やすくする</div><div class="f"><span class="pri">高</span></div></div>
+          <div class="card"><div class="t">設定画面の言葉をやさしくする</div></div>
+          <div class="card"><div class="t">付箋の色を増やす</div><div class="f"><span class="pri lo">低</span></div></div>
+          <button class="add">＋ カードを追加</button></div>
+        <div class="col"><div class="ch"><span class="lamp run swon"></span>実行中 <span class="n">2</span></div>
+          <div class="card run"><div class="t"><span class="st">● 稼働</span> Board と Swarm を1画面に</div><div class="w">ワーカー 1 <span>· 作っているところ</span></div></div>
+          <div class="card run"><div class="t"><span class="st">● 稼働</span> お知らせが遅れて届くのを直す</div><div class="w">ワーカー 2 <span>· 質問あり</span></div></div></div>
+        <div class="col"><div class="ch"><span class="lamp wait swon"></span>レビュー待ち <span class="n">1</span><span class="x">司令官 稼働中</span></div>
+          <div class="card"><div class="t">自動更新の失敗をくり返さない</div></div></div>
+        <div class="col"><div class="ch">完了 <span class="n">2</span></div>
+          <div class="card"><div class="t">リリース 0.11.132</div></div>
+          <div class="card"><div class="t">ヘルプに目次をつける</div></div></div>
+        <div class="col"><div class="ch"><span class="lamp wait swon"></span>判断待ち <span class="n" id="jn">1</span></div>
+          <div class="hintline">あなたの判断を待っています — 自動では動きません</div>
+          <div class="card wt"><div class="t"><span class="st">● 待ち</span> 料金ページを公開してよいか</div><div class="f"><span class="pri">高</span></div></div></div>
+      </div>
+    </section>
+
+    <div class="dv" id="dv" tabindex="0" role="separator" aria-orientation="horizontal" aria-label="Board と Swarm の境目"><span class="g"></span><span class="tip">上下にドラッグで大きさを変更 · ダブルクリックで元に戻す</span></div>
+
+    <section class="swp" id="swp">
+      <button class="strip" id="strip" hidden><span class="ttl">SWARM</span><span class="lamp" id="stlamp"></span><span id="stsum"></span><span style="margin-left:auto">▴ 広げる</span></button>
+      <div class="sh" id="sh"><span class="ttl">Swarm</span>
+        <span class="pill" id="pill"><span class="lamp" id="plamp"></span><span id="ptxt"></span></span>
+        <span class="sp"></span>
+        <button class="tg on wide deponly" id="watch">● 状況の監視</button><button class="tg wide deponly" id="mode">⚌ モード: 最適化</button>
+        <div class="seg deponly"><button class="st" id="bstop">停止</button><button class="go" id="bgo">開始</button></div>
+        <span class="menuw narrowonly deponly"><button class="ib" id="bmore" title="そのほかの操作">⋯</button>
+          <div class="menu" id="menu" hidden><button id="watch2">● 状況の監視</button><button id="mode2">⚌ モード: 最適化</button></div></span>
+        <span class="vr"></span>
+        <button class="ib" id="bclose" title="Swarm をしまう（Board だけにする）">✕</button>
+      </div>
+      <div class="stabs" id="stabs"><button data-s="s" class="on"><span class="lamp run"></span>社長</button><button data-s="m">司令官</button><button data-s="w">ワーカー（2人） <span class="badge">1</span></button></div>
+      <div class="off" id="off" hidden><div class="offc">
+        <span class="plate">調整中の機能</span><h3>Swarm はまだオフです</h3>
+        <p>要望を伝えるだけ。3つの役割の Claude が、チームで要望から完成まで運びます。</p>
+        <div class="roles"><div class="role" style="background:var(--sup)"><b>社長</b>あなたの話し相手</div><div class="role" style="background:var(--man)"><b>司令官</b>仕事を割り振る</div><div class="role" style="background:var(--wrk)"><b>ワーカー</b>実際に作る</div></div>
+        <div class="flow" id="flow" hidden>あなたが社長に話す → 社長が Board にカードを積む → 司令官がワーカーに渡す → ワーカーが作る → 確かめて完了</div>
+        <button class="go" id="bon">Swarm をオンにする</button><button class="link" id="bhow">仕組みを見る</button></div></div>
+      <div class="seats" id="seats">
+        <div class="seat s vis" data-s="s"><div class="np"><span class="lamp run"></span><span class="who">社長</span><span class="cap">稼働中</span><span class="sp"></span><button class="sb">席を閉じる</button></div>
+          <div class="term"><div class="log" id="log"><span class="dim">── 社長 · いつでも話しかけてください ──</span>
+<span class="me">› Board を開いたまま Swarm も見たい</span>
+<span class="ai"><b>●</b> 承知しました。発注書にまとめました。
+  ・Board の中に「Swarm」ボタン
+  ・上下に分けて、境目で大きさを変えられる
+  これで Board に積んでよいですか？(はい／直す)</span>
+<span class="me">› はい</span>
+<span class="ai"><b>●</b> 積みました。いまワーカー 1 が作っています。</span>
+<span class="ai"><b>●</b> あなたに聞きたいことが2つあります。
+  1) ワーカー 2 から：お知らせの音は残しますか？
+  2) 料金ページを公開してよいですか？
+  ここに書いて答えてください。</span></div>
+            <form id="f"><span style="color:#F29580">›</span><input id="in" placeholder="社長に話しかける…（Enter で送信）" autocomplete="off"><button class="send">送信</button></form></div></div>
+        <div class="seat m" data-s="m"><div class="np"><span class="lamp run"></span><span class="who">司令官</span><span class="cap">動いている</span></div>
+          <div class="seatb">社長が受けた仕事をワーカーに割り振り、仕上がりをまとめます。話しかける必要はありません。</div></div>
+        <div class="seat w" data-s="w"><div class="np"><span class="lamp wait"></span><span class="who">ワーカー 2</span><span class="cap" style="color:var(--ochre)">質問あり</span></div>
+          <div class="seatb"><div class="task">お知らせが遅れて届くのを直す</div><div class="q"><b>この作業者から質問が届いています</b><br>お知らせの音は残しますか？<br><span style="color:var(--faint)">→ 社長に答えれば伝わります</span></div><button class="look">作業の様子を見る</button></div></div>
+        <div class="seat w" data-s="w" id="w1"><div class="np"><span class="lamp run"></span><span class="who">ワーカー 1</span><span class="cap">作っているところ</span><span class="sp"></span><button class="sb" id="w1c" hidden>閉じる</button></div>
+          <div class="seatb" id="w1f"><div class="task">Board と Swarm を1画面に</div><button class="look" id="w1o">作業の様子を見る</button></div>
+          <div id="w1t" style="display:none;flex:1;min-height:0;flex-direction:column">
+            <div class="tr seatb"><div class="tool">（Board の画面の作りを読んでいます）</div><div>Board の上の並びを確認しました。右端の「設定」の左に Swarm ボタンを置きます。</div><div class="tool">（画面を上下に分ける枠を作っています）</div><div>上下に分ける枠を入れました。次に境目のドラッグを作ります。</div></div>
+            <div class="wi"><input placeholder="このワーカーに話しかける…"><button>送信</button></div></div></div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+var CFG = /*CFG*/{"state":"split","theme":"light","ratio":0.42,"hint":false,"label":""}/*CFG*/;
+(function(){
+  var og=document.getElementById('og'),body=document.getElementById('body'),swp=document.getElementById('swp'),dv=document.getElementById('dv');
+  var $=function(id){return document.getElementById(id)};
+  var MODES=['最適化','最大出力','節約'],S={};
+  function reset(){S={shown:CFG.state!=='hidden',dep:CFG.state!=='off',on:CFG.state!=='off',ratio:CFG.ratio||0.42,folded:false,w1open:!!CFG.w1open,tab:'s',menu:false,how:false,watch:true,mode:0};
+    og.dataset.theme=CFG.theme;$('mstate').textContent=CFG.label?' — '+CFG.label:'';$('hint').hidden=!CFG.hint;render();}
+  var MINS=150,MINB=110,STRIP=34;
+  function clampRatio(r){var bh=body.clientHeight;return Math.max(MINS/bh,Math.min(1-MINB/bh,r))}
+  function render(){
+    var bh=body.clientHeight;
+    og.classList.toggle('narrow',og.clientWidth<900);og.classList.toggle('predeploy',!S.dep);
+    $('swbtn').classList.toggle('on',S.shown&&!S.folded);$('swbtn').setAttribute('aria-pressed',S.shown&&!S.folded);
+    $('swlamp').className='lamp'+(S.on?' run':'');$('swlamp').hidden=!S.dep;$('swbadge').hidden=!S.dep;$('jn').textContent=S.dep?'1':'0';
+    dv.hidden=!S.shown||S.folded;swp.hidden=!S.shown;
+    if(S.shown)swp.style.height=(S.folded?STRIP:Math.round(bh*clampRatio(S.ratio)))+'px';
+    $('strip').hidden=!S.folded;
+    ['sh','stabs','seats','off'].forEach(function(k){$(k).style.display=S.folded?'none':''});
+    if(!S.folded){$('off').hidden=S.dep;$('seats').style.display=S.dep?'':'none';$('stabs').style.display=S.dep?'':'none';}
+    var st=!S.dep?'まだオフ':S.on?'稼働中 · ワーカー（2人）':'停止中（新しい仕事は配らない）';
+    $('pill').className='pill'+(S.on?' live':'');$('plamp').className='lamp'+(S.on?' run':'');$('ptxt').textContent=st;
+    $('stlamp').className='lamp'+(S.on?' run':'');$('stsum').textContent=S.dep?(S.on?'稼働中':'停止中')+' · ワーカー（2人） · 質問 2':'まだオフ';
+    document.querySelectorAll('.deponly').forEach(function(e){e.hidden=!S.dep});
+    $('bstop').classList.toggle('on',!S.on);$('bgo').classList.toggle('on',S.on);
+    ['watch','watch2'].forEach(function(k){$(k).disabled=!S.on;$(k).classList.toggle('on',S.on&&S.watch)});
+    ['mode','mode2'].forEach(function(k){$(k).textContent='⚌ モード: '+MODES[S.mode]});
+    $('menu').hidden=!S.menu;$('flow').hidden=!S.how;
+    $('w1').classList.toggle('open',S.w1open);$('w1f').style.display=S.w1open?'none':'';$('w1t').style.display=S.w1open?'flex':'none';$('w1c').hidden=!S.w1open;
+    document.querySelectorAll('.stabs button').forEach(function(b){b.classList.toggle('on',b.dataset.s===S.tab)});
+    document.querySelectorAll('.seat').forEach(function(s){s.classList.toggle('vis',s.dataset.s===S.tab)});
+    document.querySelectorAll('[data-th]').forEach(function(b){b.classList.toggle('on',b.dataset.th===og.dataset.theme)});
+  }
+  $('swbtn').onclick=function(){if(S.shown&&S.folded)S.folded=false;else S.shown=!S.shown;$('hint').hidden=true;render()};
+  $('bclose').onclick=function(){S.shown=false;render()};
+  $('strip').onclick=function(){S.folded=false;render()};
+  $('bstop').onclick=function(){S.on=false;render()};$('bgo').onclick=function(){S.on=true;render()};
+  $('bon').onclick=function(){S.dep=true;S.on=true;render()};$('bhow').onclick=function(){S.how=!S.how;render()};
+  $('watch').onclick=$('watch2').onclick=function(){S.watch=!S.watch;render()};
+  $('mode').onclick=$('mode2').onclick=function(){S.mode=(S.mode+1)%3;render()};
+  $('bmore').onclick=function(){S.menu=!S.menu;render()};
+  $('w1o').onclick=function(){S.w1open=true;render()};$('w1c').onclick=function(){S.w1open=false;render()};
+  document.querySelectorAll('.stabs button').forEach(function(b){b.onclick=function(){S.tab=b.dataset.s;render()}});
+  document.querySelectorAll('[data-th]').forEach(function(b){b.onclick=function(){og.dataset.theme=b.dataset.th;render()}});
+  $('reset').onclick=reset;
+  // divider: drag (clamped), drag below the minimum folds to the strip (size kept), double-click resets, arrow keys
+  var before=0;
+  dv.addEventListener('pointerdown',function(e){dv.setPointerCapture(e.pointerId);dv.classList.add('drag');before=S.ratio;e.preventDefault()});
+  dv.addEventListener('pointermove',function(e){if(!dv.classList.contains('drag'))return;var r=body.getBoundingClientRect(),h=r.bottom-e.clientY;
+    if(h<MINS*0.8){S.folded=true;S.ratio=before;dv.classList.remove('drag');}else S.ratio=clampRatio(h/r.height);render()});
+  dv.addEventListener('pointerup',function(){dv.classList.remove('drag')});
+  dv.addEventListener('dblclick',function(){S.ratio=0.42;render()});
+  dv.addEventListener('keydown',function(e){if(e.key==='ArrowUp'){S.ratio=clampRatio(S.ratio+.05);render()}if(e.key==='ArrowDown'){S.ratio=clampRatio(S.ratio-.05);render()}});
+  $('f').onsubmit=function(e){e.preventDefault();var v=$('in').value.trim();if(!v)return;var log=$('log');
+    log.insertAdjacentHTML('beforeend','\n<span class="me">› '+v.replace(/</g,'&lt;')+'</span>');$('in').value='';log.scrollTop=1e6;
+    setTimeout(function(){log.insertAdjacentHTML('beforeend','\n<span class="ai"><b>●</b> 承知しました。担当に伝えて、まとまったらここで報告します。</span>');log.scrollTop=1e6},600)};
+  window.addEventListener('resize',render);
+  reset();$('log').scrollTop=1e6;
+})();
+</script>

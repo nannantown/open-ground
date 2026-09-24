@@ -28,7 +28,8 @@ import { UsageHud } from '@/components/canvas/UsageHud'
 import { ManualPanel } from '@/components/canvas/manual/ManualPanel'
 import { groundLamp, type GroundLamp } from '@/lib/groundLamp'
 import { setClientLockdown } from '@/lib/lockdownClient'
-import { autoLayout, frameLabelFor } from '@/lib/layout'
+import { autoLayout, findFreeSpot, frameLabelFor } from '@/lib/layout'
+import { GHOST_H, GHOST_W, PlacementGhost } from '@/components/canvas/PlacementGhost'
 import { useCanvasHistory } from '@/lib/useCanvasHistory'
 import { newId } from '@/lib/ids'
 import { loadPersistedView, savePersistedView } from '@/lib/persistView'
@@ -268,6 +269,10 @@ export default function App() {
   // tab). Drives the global "Claude is designing" beacon below. 0 = none.
   const [aiActiveCount, setAiActiveCount] = useState(0)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
+  // A just-placed card is selected without opening its panel (see
+  // finishPlacing). Matched by array IDENTITY, so any later setSelectedIds —
+  // from whichever path — ends it without each path having to know.
+  const [quietSel, setQuietSel] = useState<string[] | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [tool, setTool] = useState<Tool>('select')
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -922,7 +927,10 @@ export default function App() {
       // clearing the selection IS the panel's close path; the panel's canvas
       // preventDefaults the Escapes it consumes before this bubble listener.
       if (
-        (visibleProjects.filter((p) => selectedIds.includes(p.id)).length === 1 ||
+        // Same test as `singleSelected`: a just-placed card's quiet selection
+        // (quietSel) has NO panel open, so Ground keys stay live.
+        ((selectedIds !== quietSel &&
+          visibleProjects.filter((p) => selectedIds.includes(p.id)).length === 1) ||
           !!openShared) &&
         !(mod && k === 'k') &&
         k !== 'escape'
@@ -1028,6 +1036,7 @@ export default function App() {
     visibleProjects,
     openShared,
     mutateCanvas,
+    quietSel,
   ])
 
   // Persist settings WITHOUT closing the panel — SettingsPanel autosaves
@@ -1086,8 +1095,92 @@ export default function App() {
     })
   }
 
-  // Import an existing folder: pick it natively, register it, then open + centre
-  // its new card.
+  // Click-to-place (owner ask 2026-09-24): a freshly created / imported card
+  // no longer drops into an auto grid slot where it gets buried — it rides the
+  // cursor as a translucent ghost (PlacementGhost) until the user clicks the
+  // Ground. The real card is hidden meanwhile; Esc auto-places it in the
+  // nearest free slot to the view centre and scrolls there. Either way it ends
+  // selected ON THE GROUND (quietSel: highlighted, panel NOT auto-opened, so
+  // the user sees where it landed); clicking it opens the panel as usual.
+  const [placingId, setPlacingId] = useState<string | null>(null)
+  // Mirror for the async create/import flows, whose closures predate the
+  // await and would read a stale placingId.
+  const placingRef = useRef<string | null>(null)
+  placingRef.current = placingId
+  const groundRef = useRef<HTMLDivElement>(null)
+  const finishPlacing = useCallback((id: string) => {
+    setPlacingId(null)
+    const sel = nextSelectionOnOpenOwned(id)
+    setOpenShared(sel.openShared)
+    // quietSel is this exact array: any later selection change (click, ⌘K,
+    // Esc, ⌘A, restore…) makes a new array and so ends the quiet state.
+    setQuietSel(sel.selectedIds)
+    setSelectedIds(sel.selectedIds)
+  }, [])
+  // Nearest free slot to the view centre; `scroll` also brings it to centre.
+  // One updater for position + viewport: a setState updater runs lazily, so
+  // the spot can't be read back out of it for a separate centerOnCard call.
+  const autoPlace = useCallback(
+    (id: string, scroll: boolean) =>
+      mutateCanvas((c) => {
+        const { x, y, zoom } = c.viewport
+        const cx = window.innerWidth / 2
+        const cy = window.innerHeight / 2
+        const center = { x: (cx - x) / zoom - GHOST_W / 2, y: (cy - y) / zoom - GHOST_H / 2 }
+        const others = Object.entries(c.positions)
+          .filter(([k]) => k !== id)
+          .map(([, p]) => p)
+        const spot = findFreeSpot(others, center)
+        const positions = { ...c.positions, [id]: spot }
+        if (!scroll) return { ...c, positions }
+        return {
+          ...c,
+          positions,
+          viewport: {
+            zoom,
+            x: cx - (spot.x + GHOST_W / 2) * zoom,
+            y: cy - (spot.y + GHOST_H / 2) * zoom,
+          },
+        }
+      }),
+    [mutateCanvas],
+  )
+  const startPlacing = (id: string) => {
+    // A second Create/Import while still placing: settle the first card like
+    // Esc would (free slot, not the buried auto-grid slot) — without moving
+    // the view out from under the new ghost.
+    const prev = placingRef.current
+    if (prev && prev !== id) autoPlace(prev, false)
+    setOpenShared(null)
+    setSelectedIds([])
+    setPlacingId(id)
+  }
+  const placeAt = useCallback(
+    (clientX: number, clientY: number) => {
+      const id = placingId
+      if (!id) return
+      const rect = groundRef.current?.firstElementChild?.getBoundingClientRect()
+      mutateCanvas((c) => {
+        const { x, y, zoom } = c.viewport
+        const pos = {
+          x: (clientX - (rect?.left ?? 0) - x) / zoom - GHOST_W / 2,
+          y: (clientY - (rect?.top ?? 0) - y) / zoom - GHOST_H / 2,
+        }
+        return { ...c, positions: { ...c.positions, [id]: pos } }
+      })
+      finishPlacing(id)
+    },
+    [placingId, mutateCanvas, finishPlacing],
+  )
+  const cancelPlacing = useCallback(() => {
+    const id = placingId
+    if (!id) return
+    autoPlace(id, true)
+    finishPlacing(id)
+  }, [placingId, autoPlace, finishPlacing])
+
+  // Import an existing folder: pick it natively, register it, then let the
+  // user place its new card (click-to-place above).
   const importProject = async () => {
     const picked = await pickFolder()
     if (picked.cancelled || !picked.path) {
@@ -1102,15 +1195,7 @@ export default function App() {
     }
     const loaded = await load()
     const created = loaded?.projects.find((p) => p.id === data.id)
-    if (created) {
-      // Opening the imported (owned) card clears any open shared panel so it
-      // doesn't stay stuck over the new project (see nextSelectionOnOpenOwned).
-      const sel = nextSelectionOnOpenOwned(created.id)
-      setOpenShared(sel.openShared)
-      setSelectedIds(sel.selectedIds)
-      const pos = loaded!.canvas.positions[created.id]
-      if (pos) centerOnCard(pos)
-    }
+    if (created) startPlacing(created.id)
   }
 
   // Re-point a missing project at the folder the user picks, KEEPING its uuid so
@@ -1165,7 +1250,10 @@ export default function App() {
     0,
   )
   const selectedProjects = visibleProjects.filter((p) => selectedIds.includes(p.id))
-  const singleSelected = selectedProjects.length === 1 ? selectedProjects[0] : null
+  const singleSelected =
+    selectedProjects.length === 1 && selectedIds !== quietSel
+      ? selectedProjects[0]
+      : null
   const selectedElement =
     selectedIds.length === 1
       ? canvas.elements.find((el) => el.id === selectedIds[0]) ?? null
@@ -1179,8 +1267,12 @@ export default function App() {
 
   return (
     <main className="h-screen w-screen overflow-hidden bg-bg relative">
+      {/* display:contents — no box of its own; only marks "the Ground" for
+          PlacementGhost's press test (the panel's canvases sit outside it). */}
+      <div ref={groundRef} className="contents">
       <InfiniteCanvas
-        projects={visibleProjects}
+        // The card being placed is hidden: its ghost stands in for it.
+        projects={placingId ? visibleProjects.filter((p) => p.id !== placingId) : visibleProjects}
         lamps={lampById}
         playbackByProject={playbackByProjectId}
         // Ground member flow: pass shared cards ONLY when collab is enabled, so
@@ -1201,6 +1293,16 @@ export default function App() {
         // drive this invisible surface. A shared-project panel covers it too.
         suspendKeys={!!singleSelected || !!openShared}
       />
+      </div>
+      {placingId && (
+        <PlacementGhost
+          name={visibleProjects.find((p) => p.id === placingId)?.name ?? ''}
+          zoom={canvas.viewport.zoom}
+          groundRef={groundRef}
+          onPlace={placeAt}
+          onCancel={cancelPlacing}
+        />
+      )}
       {showEmpty && (
         <EmptyState
           onCreateNew={() => setNewProjectOpen(true)}
@@ -1412,19 +1514,11 @@ export default function App() {
         onCreated={async (newId) => {
           setNewProjectOpen(false)
           const data = await load()
-          // Open the new project's panel and centre the canvas on its card.
+          // Let the user place the new card (click-to-place; it ends selected).
           // Match by stable id — the server canonicalizes the folder path, so a
           // path compare would miss when the workspace contains a symlink.
           const created = data?.projects.find((p) => p.id === newId)
-          if (created) {
-            // Opening the new (owned) card clears any open shared panel so it
-            // doesn't stay stuck over it (see nextSelectionOnOpenOwned).
-            const sel = nextSelectionOnOpenOwned(created.id)
-            setOpenShared(sel.openShared)
-            setSelectedIds(sel.selectedIds)
-            const pos = data!.canvas.positions[created.id]
-            if (pos) centerOnCard(pos)
-          }
+          if (created) startPlacing(created.id)
         }}
       />
       <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
