@@ -7887,7 +7887,7 @@ const escalateUnresponsiveManager = async (
     ...(ctx.branch ? { branch: ctx.branch } : {}),
     ...(ctx.taskTitle ? { taskTitle: ctx.taskTitle } : {}),
     detail: managerUnresponsiveDetail({ cause: ctx.cause, waitedMs: ctx.waitedMs, waiting: ctx.waiting }),
-    logHint: 'Swarm タブ → マネージャー / engine log の integrate 行',
+    logHint: 'Swarm のバー → マネージャー / engine log の integrate 行',
   })
 }
 
@@ -8421,7 +8421,7 @@ export const runIntegratePass = async (
           engine,
           'warn',
           `司令官の卓は起動しているが ${nudges} 回の声かけに応答しません — 卓が固まっている可能性。` +
-            `Swarm タブ → マネージャーで手動確認を(統合待ち ${swarmCards.length} 件)`,
+            `Swarm のバー → マネージャーで手動確認を(統合待ち ${swarmCards.length} 件)`,
           'integrate',
         )
       }
@@ -8464,7 +8464,7 @@ export const runIntegratePass = async (
           engine,
           'error',
           `司令官の卓に声をかけられません(${rs.unaddressable}回連続で書き込みに失敗) — ` +
-            `卓は動いているのに宛先が分からない状態です。Swarm タブ → マネージャーを開き直すと復旧します。` +
+            `卓は動いているのに宛先が分からない状態です。Swarm のバー → マネージャーを開き直すと復旧します。` +
             `統合待ち ${swarmCards.length} 件`,
           'integrate',
         )
@@ -8513,7 +8513,7 @@ export const runIntegratePass = async (
         engine,
         'error',
         `マネージャーが ${rs.attempts} 回連続で蘇生に失敗 — 統合が止まっています。手動でマネージャー卓を確認してください` +
-          `(Swarm タブ → マネージャー)。統合待ち ${swarmCards.length} 件`,
+          `(Swarm のバー → マネージャー)。統合待ち ${swarmCards.length} 件`,
         'integrate',
       )
       // Best-effort escalation (bell + OS toast) — never awaited, internal-catch so a
@@ -8524,7 +8524,7 @@ export const runIntegratePass = async (
         branch: swarmCards[0]?.branch,
         taskTitle: swarmCards[0]?.title || undefined,
         detail: `マネージャーが ${rs.attempts} 回連続で落ちています(統合待ち ${swarmCards.length} 件)。手動で確認を`,
-        logHint: 'Swarm タブ → マネージャー / engine log の integrate 行',
+        logHint: 'Swarm のバー → マネージャー / engine log の integrate 行',
       })
     }
     // GIVE UP THE LOOP, NOT RECOVERY (完了条件2, 2026-07-20). Returning here forever is
@@ -10530,7 +10530,7 @@ export const resumeEngines = async (
               projectPath,
               detail:
                 'claude をすぐに使えなかったため、司令官の卓を復帰できませんでした' +
-                `(${pre.body?.error ?? '理由不明'})。worker が動いていても、完了分を統合する司令官がいない状態です — Swarm タブから司令官を立て直してください。`,
+                `(${pre.body?.error ?? '理由不明'})。worker が動いていても、完了分を統合する司令官がいない状態です — 画面下の Swarm のバーから司令官を立て直してください。`,
             }).catch(() => {})
           }
         } catch (e) {
@@ -10539,7 +10539,7 @@ export const resumeEngines = async (
             projectPath,
             detail:
               `司令官の卓を復帰できませんでした(${e instanceof Error ? e.message : String(e)})。` +
-              'worker が動いていても、完了分を統合する司令官がいない状態です — Swarm タブから司令官を立て直してください。',
+              'worker が動いていても、完了分を統合する司令官がいない状態です — 画面下の Swarm のバーから司令官を立て直してください。',
           }).catch(() => {})
         }
       }
@@ -10563,7 +10563,7 @@ export const resumeEngines = async (
           projectPath,
           detail:
             'claude をすぐに使えなかったため、このプロジェクトの swarm 自動再開を見送りました' +
-            `(${pre.body?.error ?? '理由不明'})。Swarm タブから手動でオンにできます。`,
+            `(${pre.body?.error ?? '理由不明'})。画面下の Swarm のバーから手動でオンにできます。`,
         }).catch(() => {})
         continue
       }

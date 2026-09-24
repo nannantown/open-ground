@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Terminal, Palette, Columns3, Puzzle, Network, BookOpenText } from 'lucide-react'
+import { Terminal, Palette, Columns3, Puzzle, BookOpenText } from 'lucide-react'
 import { customTabId, type ModuleId } from '@/lib/modules/ids'
 import type { ModuleDescriptor } from '@/lib/modules/descriptor'
 import type { MessageKey } from '@/i18n/messages'
@@ -23,7 +23,7 @@ export interface TabDef {
    *  name (the tab row, the "+" picker) renders `t(labelKey)` and falls back to
    *  `label` only if the key is missing — so a tab's name is changed in ONE
    *  place, in both languages. Absent ⇒ `label` is shown verbatim, which is
-   *  what the product-noun built-ins (Board / Canvas / Terminal / Swarm) and
+   *  what the product-noun built-ins (Board / Canvas / Terminal) and
    *  every user-authored custom tab want. */
   labelKey?: MessageKey
 }
@@ -105,9 +105,6 @@ export const MODULES: ModuleDef[] = [
   // renaming the tab in both languages is a one-key edit in
   // src/i18n/messages/research.ts.
   { id: 'research', label: 'Research', labelKey: 'research.tabLabel', icon: <BookOpenText size={10} strokeWidth={2.25} />, kind: 'native', default: true, audience: 'owner' },
-  // Swarm retains its existing owner/local unlock and public macOS opt-in.
-  { id: 'swarm', label: 'Swarm', icon: <Network size={10} strokeWidth={2.25} />, kind: 'native', default: true, audience: 'public', experiments: ['swarm'] },
-
 ]
 
 // Whether a module is visible GLOBALLY for this user. A plain default module is
@@ -134,6 +131,16 @@ export const isModuleIdVisible = (id: string, gate: ModuleGate = NO_EXPERIMENTS)
   const m = MODULES.find((x) => x.id === id)
   return m ? isModuleEnabled(m, gate) : false
 }
+
+/** Is the Swarm surface open for this user? Swarm is no longer a tab
+ *  (retired 2026-09-24) — it is the bottom bar under every tab (SwarmBottomBar)
+ *  plus the Board's swarm vocabulary. Both ask THIS one predicate, so the bar
+ *  and the Board can never disagree. It is the experiment alone: the owner
+ *  unlock, the login-free local unlock and the public macOS opt-in all resolve
+ *  server-side into `experiments.swarm` (computeExperiments), and none of them
+ *  grants owner features. Fails closed on an omitted gate. */
+export const isSwarmVisible = (gate: ModuleGate = NO_EXPERIMENTS): boolean =>
+  gate.openExperiments.has('swarm')
 
 export const enabledModules = (gate: ModuleGate = NO_EXPERIMENTS): ModuleDef[] =>
   MODULES.filter((m) => isModuleEnabled(m, gate))

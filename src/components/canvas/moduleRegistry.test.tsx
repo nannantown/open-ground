@@ -5,11 +5,13 @@ import {
   nativeDescriptors,
   isModuleEnabled,
   isModuleIdVisible,
+  isSwarmVisible,
   gateFromFlags,
   tabLabel,
   type ModuleDef,
 } from '@/components/canvas/moduleRegistry'
 import type { ExperimentFlags } from '@/lib/types'
+import { MODULE_IDS } from '@/lib/modules/ids'
 
 // The experiment gate is the single visibility funnel: every surface (tab row,
 // "+" picker, Ctrl+Tab) derives from enabledModules()/nativeDescriptors(), so
@@ -29,10 +31,13 @@ const flags = (open: Partial<ExperimentFlags> = {}): ExperimentFlags => ({
 })
 
 describe('moduleRegistry experiment gate', () => {
-  it('registers swarm as an experiment-gated module', () => {
-    const swarm = MODULES.find((m) => m.id === 'swarm')
-    expect(swarm).toBeTruthy()
-    expect(swarm?.experiments).toEqual(['swarm'])
+  // The Swarm TAB is retired (owner decision 2026-09-24): Swarm is the bottom
+  // bar under every tab now (SwarmBottomBar). A 'swarm' id back in the tab set
+  // would put a second Swarm surface in the row — and MODULE_IDS membership is
+  // what lets a stale saved tab order / last-open view resurrect it.
+  it('swarm is not a tab any more', () => {
+    expect(ids(MODULES)).not.toContain('swarm')
+    expect(MODULE_IDS as readonly string[]).not.toContain('swarm')
   })
 
   // Persona is NOT a module any more (2026-08-14): the surface describes the
@@ -60,15 +65,19 @@ describe('moduleRegistry experiment gate', () => {
     expect(ids(nativeDescriptors())).toEqual(['board', 'terminal'])
   })
 
-  it('reveals a gated module only when one of its experiments is open', () => {
+  it('the swarm flag opens the Swarm bar, never a tab', () => {
     const gate = gateFromFlags(flags({ swarm: true }))
-    expect(ids(enabledModules(gate))).toContain('swarm')
-    expect(ids(nativeDescriptors(gate))).toContain('swarm')
-    expect(ids(enabledModules(gate))).toEqual([
-      'board',
-      'terminal',
-      'swarm',
-    ])
+    expect(isSwarmVisible(gate)).toBe(true)
+    expect(ids(enabledModules(gate))).toEqual(['board', 'terminal'])
+    expect(ids(nativeDescriptors(gate))).toEqual(['board', 'terminal'])
+  })
+
+  it('isSwarmVisible fails closed: no gate, a closed flag, or an unrelated flag hides the bar', () => {
+    expect(isSwarmVisible()).toBe(false)
+    expect(isSwarmVisible(gateFromFlags(ALL_CLOSED))).toBe(false)
+    expect(isSwarmVisible(gateFromFlags(flags({ sandbox: true })))).toBe(false)
+    // Owner features are not a way in — the owner's Swarm is the experiment too.
+    expect(isSwarmVisible(gateFromFlags(ALL_CLOSED, true))).toBe(false)
   })
 
   it('an unrelated open flag reveals nothing', () => {
@@ -76,10 +85,6 @@ describe('moduleRegistry experiment gate', () => {
     // must not drag a tab back into the row on its way past.
     const gate = gateFromFlags(flags({ sandbox: true }))
     expect(ids(enabledModules(gate))).toEqual(['board', 'terminal'])
-  })
-
-  it('a closed flag keeps the module hidden', () => {
-    expect(ids(enabledModules(gateFromFlags(ALL_CLOSED)))).not.toContain('swarm')
   })
 
   it('the sandbox experiment gates NO tab module (it only changes how claude spawns)', () => {
@@ -93,7 +98,9 @@ describe('moduleRegistry experiment gate', () => {
 
   it('isModuleEnabled: always-on modules ignore the gate, gated ones require it', () => {
     const board = MODULES.find((m) => m.id === 'board')!
-    const swarm = MODULES.find((m) => m.id === 'swarm')!
+    // No shipped tab is experiment-gated today; the machinery is pinned with a
+    // fixture so the next gated tab inherits a tested rule.
+    const swarm: ModuleDef = { ...board, experiments: ['swarm'] }
     expect(isModuleEnabled(board)).toBe(true)
     expect(isModuleEnabled(swarm)).toBe(false) // default gate is closed
     expect(isModuleEnabled(swarm, gateFromFlags(flags({ swarm: true })))).toBe(true)
@@ -110,7 +117,7 @@ describe('moduleRegistry experiment gate', () => {
   // caught here instead of by whichever module next needs two ways in.
   it('isModuleEnabled: ANY of the listed experiments opens a module (not all of them)', () => {
     const twoWaysIn: ModuleDef = {
-      ...MODULES.find((m) => m.id === 'swarm')!,
+      ...MODULES.find((m) => m.id === 'board')!,
       experiments: ['sandbox', 'swarm'],
     }
     expect(isModuleEnabled(twoWaysIn, gateFromFlags(ALL_CLOSED))).toBe(false)

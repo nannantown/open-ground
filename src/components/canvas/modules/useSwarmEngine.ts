@@ -943,7 +943,7 @@ export interface UseSwarmEngine {
 /** Own the commander engine's state for one project: one poll, the two switches,
  *  and the available/busy/error bookkeeping. Called ONCE by SwarmModule so
  *  every seat shares a single snapshot. */
-export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
+export const useSwarmEngine = (projectPath: string, pollMs: number = ENGINE_POLL_MS): UseSwarmEngine => {
   const { t } = useT()
 
   const [engine, setEngine] = useState<SwarmEngineState>(DEFAULT_ENGINE)
@@ -1086,7 +1086,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
     if (!busy) void poll()
     const id = window.setInterval(() => {
       if (!busy) void poll()
-    }, ENGINE_POLL_MS)
+    }, pollMs)
     const onFocus = () => {
       if (!busy) void poll()
     }
@@ -1105,7 +1105,7 @@ export const useSwarmEngine = (projectPath: string): UseSwarmEngine => {
       window.clearInterval(id)
       window.removeEventListener('focus', onFocus)
     }
-  }, [projectPath, busy])
+  }, [projectPath, busy, pollMs])
 
   // One-off env-preflight re-read with force=1 — the moment right after the
   // owner fixes a prerequisite through the UI (SwarmModule's one-click git

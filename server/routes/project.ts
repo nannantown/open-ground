@@ -746,7 +746,7 @@ export const projectRoutes = new Hono()
       {
         error:
           'a claude session is still running in this project and did not stop — nothing was ' +
-          'deleted. Wait for it to finish (or stop it from the Swarm tab) and try again.',
+          'deleted. Wait for it to finish (or stop it from the Swarm bar at the bottom of the project) and try again.',
       },
       409,
     )

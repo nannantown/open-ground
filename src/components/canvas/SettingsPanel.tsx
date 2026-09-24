@@ -267,7 +267,7 @@ export const SettingsPanel = ({
 
   // Flip the PUBLIC swarm opt-in and persist immediately. The server re-resolves
   // the gate on the settings save (App.saveSettings → experiments.refresh), so
-  // the Swarm tab appears/disappears right away. macOS-gated server-side.
+  // the Swarm bottom bar appears/disappears right away. macOS-gated server-side.
   const setSwarmOptIn = (next: boolean) => {
     if (next === swarmOptIn) return
     setSwarmOptInState(next)

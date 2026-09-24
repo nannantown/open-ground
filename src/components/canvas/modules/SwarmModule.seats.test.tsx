@@ -12,7 +12,7 @@
 //      while the app was closed is noticed without a rendered stream.
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, screen, waitFor, cleanup, within } from '@testing-library/react'
+import { render, screen, waitFor, cleanup, within, act } from '@testing-library/react'
 import type { ProjectMeta, SwarmOrchestratorState, SwarmWorkerRecord } from '@/lib/types'
 
 vi.mock('@/i18n/I18nContext', () => ({
@@ -94,19 +94,30 @@ const harness = (opts: {
   managerProbeBody?: () => unknown
   /** The engine reports the dispatch budget passed. */
   overLimit?: boolean
+  /** Fully idle swarm: engine stopped, no workers (the first-run state). */
+  idle?: boolean
 }) => {
   const urls: string[] = []
-  const json = (body: unknown, status = 200) =>
-    Promise.resolve(new Response(JSON.stringify(body), { status }))
+  const answered: string[] = []
+  let current = ''
+  const json = (body: unknown, status = 200) => {
+    const u = current
+    return Promise.resolve(new Response(JSON.stringify(body), { status })).then((r) => {
+      answered.push(u)
+      return r
+    })
+  }
   vi.stubGlobal('EventSource', FakeEventSource)
   vi.stubGlobal(
     'fetch',
     vi.fn((input: unknown) => {
       const url = typeof input === 'string' ? input : ((input as Request)?.url ?? String(input))
       urls.push(url)
+      current = url
       if (url.includes('/api/terminal/active')) return json({ claude: opts.active?.() ?? [] })
-      if (url.startsWith('/api/swarm/workers')) return json({ workers: [sdkWorker] })
-      if (url.startsWith('/api/swarm/orchestrator')) return json(engineState(opts.overLimit))
+      if (url.startsWith('/api/swarm/workers')) return json({ workers: opts.idle ? [] : [sdkWorker] })
+      if (url.startsWith('/api/swarm/orchestrator'))
+        return json(opts.idle ? { ...engineState(), running: false } : engineState(opts.overLimit))
       if (url.startsWith('/api/swarm/preflight')) return json({ issues: [] })
       if (url.startsWith('/api/swarm/escalations')) return json({ escalations: opts.escalations ?? [] })
       if (url.startsWith(`/api/sdk-session/${MANAGER_SDK_ID}`))
@@ -114,7 +125,7 @@ const harness = (opts: {
       return json({})
     }),
   )
-  return { urls }
+  return { urls, answered }
 }
 
 const storeManager = () =>
@@ -230,5 +241,73 @@ describe("the manager's seat is a nameplate (③)", () => {
     expect(
       await screen.findByText('projectPanel.swarm.manager.stateAbsent', {}, { timeout: 12_000 }),
     ).toBeTruthy()
+  })
+})
+
+// The bottom bar (owner decision 2026-09-24): SwarmModule is no longer a tab —
+// SwarmBottomBar renders it folded under every tab. Folded must mean ONE strip:
+// no seat mounted (so no stream opened), but the owner still sees at a glance
+// whether anyone is waiting on them.
+describe('folded into the bottom bar', () => {
+  it('mounts no seat while folded, and the same state unfolded does', async () => {
+    storeManager()
+    harness({ active: () => [{ id: MANAGER_SDK_ID, status: 'working' }] })
+    const onToggle = vi.fn()
+    const { rerender } = render(<SwarmModule project={project} collapsed onToggleCollapsed={onToggle} />)
+    const toggle = await screen.findByRole('button', { name: 'projectPanel.swarm.bar.expand' })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    // Give the polls a lap to land before claiming nothing mounted.
+    await waitFor(() => expect(screen.getByText(/projectPanel\.swarm\.power\.workers/)).toBeTruthy())
+    expect(document.querySelector('[data-seat]')).toBeNull()
+    toggle.click()
+    expect(onToggle).toHaveBeenCalledTimes(1)
+    rerender(<SwarmModule project={project} collapsed={false} onToggleCollapsed={onToggle} />)
+    await waitFor(() => expect(document.querySelector('[data-seat="manager"]')).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'projectPanel.swarm.bar.collapse' }).getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('counts every open owner question on the folded strip — and says nothing when there are none', async () => {
+    harness({
+      escalations: [
+        { status: 'open', sdkSessionId: 'sdk-w1', question: 'q1', createdAt: '2026-09-23T01:00:00.000Z' },
+        // No session id (an engine-raised question): still one the owner owes.
+        { status: 'open', question: 'q2', createdAt: '2026-09-23T02:00:00.000Z' },
+      ],
+    })
+    render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
+    expect(await screen.findByText('projectPanel.swarm.bar.questions:{"count":2}')).toBeTruthy()
+    cleanup()
+    const { urls, answered } = harness({ escalations: [] })
+    render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
+    // Wait for the inbox poll itself to have ANSWERED — silence before the
+    // read lands proves nothing.
+    await waitFor(() => expect(answered.some((u) => u.startsWith('/api/swarm/escalations'))).toBe(true))
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20))
+    })
+    expect(urls.some((u) => u.startsWith('/api/swarm/escalations'))).toBe(true)
+    expect(screen.queryByText(/projectPanel\.swarm\.bar\.questions/)).toBeNull()
+  })
+
+  it('first run: Start on the folded strip opens the explainer instead of starting blind', async () => {
+    const { urls } = harness({ idle: true })
+    const onToggle = vi.fn()
+    render(<SwarmModule project={project} collapsed onToggleCollapsed={onToggle} />)
+    const start = await screen.findByRole('button', { name: 'projectPanel.swarm.power.start' })
+    await waitFor(() => expect(start.hasAttribute('disabled')).toBe(false))
+    start.click()
+    expect(onToggle).toHaveBeenCalledTimes(1)
+    expect(urls.some((u) => u.includes('/api/swarm/orchestrator/start'))).toBe(false)
+  })
+
+  it('a notice that lives inside the bar puts one dot on the folded strip', async () => {
+    harness({ overLimit: true })
+    render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
+    expect(await screen.findByRole('status', { name: 'projectPanel.swarm.bar.attention' })).toBeTruthy()
+    cleanup()
+    harness({})
+    render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
+    await waitFor(() => expect(screen.getByText(/projectPanel\.swarm\.power\.workers/)).toBeTruthy())
+    expect(screen.queryByRole('status', { name: 'projectPanel.swarm.bar.attention' })).toBeNull()
   })
 })

@@ -19,14 +19,14 @@ export const settings = {
     'settings.experiments.hint': 'Early, owner-only features. Off by default; not covered by support.',
     'settings.experiments.swarm': 'Swarm orchestration',
     'settings.experiments.swarmHint':
-      'Reveals the Swarm tab and its controls for you only — nothing runs on its own. Worker dispatch and the overseer both default off and stay off until you explicitly arm them, and reset to off on every restart. See the manual’s Swarm chapter for the full disclosure.',
+      'Reveals the Swarm bar (along the bottom of every project) and its controls for you only — nothing runs on its own. Worker dispatch and the overseer both default off and stay off until you explicitly arm them, and reset to off on every restart. See the manual’s Swarm chapter for the full disclosure.',
     'settings.experiments.sandbox': 'Sandbox Claude (macOS)',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
     // Public swarm opt-in (all users, macOS only) — "still being tuned"
     'settings.swarmOptIn.heading': 'Swarm (experimental)',
     'settings.swarmOptIn.hint': 'Still being tuned. Off by default — turn it on only if you want it.',
-    'settings.swarmOptIn.label': 'Enable the Swarm tab',
+    'settings.swarmOptIn.label': 'Enable Swarm',
     'settings.swarmOptIn.warning':
       'Swarm runs autonomous Claude workers for you. Before turning it on, know: it uses your own Claude subscription and can run several sessions at once, so it may consume your quota heavily; workers run Claude with tool-permission prompts skipped, inside isolated copies of your project; and its notifications are currently in Japanese only. It is still being tuned and is not covered by support.',
     // Worker-directive TRIALS (Settings.workerTrials) — docs/trending/TRIALS.md.
@@ -174,13 +174,13 @@ export const settings = {
     'settings.experiments.hint': '初期段階のオーナー限定機能です。既定はオフで、サポート対象外です。',
     'settings.experiments.swarm': 'Swarm オーケストレーション',
     'settings.experiments.swarmHint':
-      'この端末で Swarm タブと操作を可視化するだけで、それ自体では何も自動実行されません。worker 起動・監督はどちらも既定オフで、あなたが個別に明示オンにするまで動かず、再起動のたびにオフへ戻ります。詳しくはマニュアルの Swarm 章を参照してください。',
+      'この端末で Swarm のバー(各プロジェクトの一番下)と操作を可視化するだけで、それ自体では何も自動実行されません。worker 起動・監督はどちらも既定オフで、あなたが個別に明示オンにするまで動かず、再起動のたびにオフへ戻ります。詳しくはマニュアルの Swarm 章を参照してください。',
     'settings.experiments.sandbox': 'Claude をサンドボックス化 (macOS)',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
     'settings.swarmOptIn.heading': 'Swarm(試験運用)',
     'settings.swarmOptIn.hint': 'まだ調整中です。既定はオフ — 使いたい場合だけオンにしてください。',
-    'settings.swarmOptIn.label': 'Swarm タブを有効にする',
+    'settings.swarmOptIn.label': 'Swarm を有効にする',
     'settings.swarmOptIn.warning':
       'Swarm はあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。通知は当面日本語のみです。まだ調整中で、サポート対象外です。',
     'settings.workerTrial.heading': 'Swarm worker の試験(計測中)',

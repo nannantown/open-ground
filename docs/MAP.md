@@ -26,7 +26,7 @@
   two remaining implementation workers and asked to leave them running.
   The earlier unshipped/stopped snapshot is historical; check live state.
 - Public/owner surface contract: `docs/PUBLIC_PRODUCT_SCOPE.md`. Public Board,
-  Terminal and opt-in Swarm; owner-only per-project Canvas, Research, custom tabs
+  Terminal and opt-in Swarm (a bottom bar under every tab, not a tab — see §5); owner-only per-project Canvas, Research, custom tabs
   and WordPress/Skills UI. Owner display preview: `OwnerViewSwitch.tsx` +
   `App.tsx`; Ground tools collapse in `ToolPalette.tsx`. Automatic fuel reports
   are owner-only (`dailyFuelReport.ts`); meters/safety remain public. Visibility
@@ -436,6 +436,33 @@
   着地してからキューを外す(未着は次パスで Enter だけ再送・06 章 §1.9)。**着地前に外すことは無い**
   (詰まった行はベル1回+保持・返事に TTL 無し)。入力欄の薄字の予測候補は `readScreen` が落とす(06 章 §1.10)。④ 納品は `sweepLanded` がカード名入りで重要レーン +
   ベル `work-landed`。正典は 06 章 §1.6。
+  ⑦ **Swarm はタブではなく下部バー(2026-09-24・オーナー決定)**: `src/components/canvas/SwarmBottomBar.tsx`
+  を `ProjectPanel` がタブ本体の三項演算の**外**(内容列の末尾)に置く = どのタブでも同じバー・タブ切替で
+  開閉状態も席も保たれる。既定は畳み(`SwarmModule collapsed` = 見出し1行だけ: 状態・人数・判断待ち数・
+  開始/停止。**席を1つもマウントしない = EventSource 0本**)。開くと上に広がり、上端ドラッグ/↑↓キーで高さ、
+  高さだけ `openground.swarmbar.<projectId>` に保存(開閉は保存しない=毎回畳みで始まる)。
+  Swarm タブ(`ModuleId 'swarm'`)は `MODULE_IDS` ごと撤去 — 保存済みタブ並び/最後のタブの `'swarm'` は
+  無害に捨てられる。ゲートは `isSwarmVisible(moduleGate)` 1本(Board の `swarmVisible` も同じ)。
+  Board の社長ドロワー `BoardSupplyDock` も削除 = 社長の席はバーの中の1つだけ(卓の二重起動防止は
+  `useSupplyDesk` のガード+サーバの `spawnSwarmSupply` 排他ロックで従来どおり)。
+  畳み中はエンジン poll を 15 秒に落とす(`FOLDED_ENGINE_POLL_MS` — 毎周サーバで git preflight が走る)。
+  初回(オンボーディング未読・完全停止)に畳んだ帯の「開始」を押すと、起動せずバーを開いて説明を出す。
+  バー内のお知らせ(予算超過・自動運転の再開/記憶・監視の記憶・環境バナー)は畳み中は帯の赤い点1つで知らせる。
+  **接続の予算 `src/lib/streamBudget.ts`**(差し戻し 2026-09-24): HTTP/1.1 は同一 origin 6本まで・SSE 1本が1本を
+  占有し、6本で後続 fetch(入力・poll・開始/停止)が永久に待つ。以前は Terminal タブと Swarm タブが排他だったが
+  今は同時に出る。そこで SSE を開く3部品(`TerminalPane` / `ClaudeTerminalPane` / `SdkWorkerPane`)が生存中
+  `holdStream(owner)` で枠を持ち、owner は `StreamOwnerContext`(バー内=`swarmBar`・他=`page`)。
+  `STREAM_BUDGET=5`(1本は fetch 用に空ける)。**ページ優先**: バーは `5 − page` の残りだけを 社長→展開中
+  ワーカー→旧PTYワーカー の順に使い、枠の無い席は要約表示+理由1行(「作業の様子を見る」も無効化+理由)。
+  ターミナルのペイン上限 `MAX_TERMINALS` も同じ `STREAM_BUDGET`(旧6 — 6枚だけで詰まっていた)。旧上限で保存された
+  6枚目以降は**消さず・シェルも殺さず**ストリームを開かない待機表示(`data-terminal-over-budget`)にし、他を閉じると
+  同じシェルに再接続して戻る(番人 `ProjectPanel.terminalBudget.test.tsx`)。枠を使うのは実際にストリームを開く席だけ。
+  番人 = `SwarmModule.streamBudget.test.tsx`(6接続プールの模型で fetch が答えるか・ペイン追加で枠を返すか・
+  部品が正しい側で枠を持ち離すか)。**新しく EventSource を開く部品は必ず holdStream すること。**
+  旧 `disabledModules: ['swarm']`(タブ単位の非表示)はもう効かない — バーを消す道は Swarm 自体をオフにすること。
+  スクショ = `docs/screenshots/swarm-bottom-bar-20260924/`。
+  番人 = `SwarmBottomBar.test.tsx` / `SwarmModule.seats.test.tsx`「folded into the bottom bar」/
+  `ProjectPanel.dock.test.tsx`(タブ切替で開いたまま・フラグ無しでバー無し)/ `moduleRegistry.test.tsx`。
   ⑤ **監督タブは撤去済み(2026-09-23)**。続けて**サブタブ自体も廃止**(同日・1画面化):
   Swarm タブは 社長/マネージャー/ワーカー×N の席を1列に横並び(`SwarmModule` の seats row・
   狭い幅は横スクロールで統一)。`SwarmPaneId`/`SWARM_PANE_IDS`/`Settings.swarmPaneOrder` は削除

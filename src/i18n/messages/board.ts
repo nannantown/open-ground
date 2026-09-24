@@ -66,31 +66,6 @@ export const board = {
     // Board-altitude honesty line: activity the engine cannot tie to any card.
     'board.swarm.unattributedWorkers': '{n} running, not tied to a card',
     'board.swarm.unattributedQuestions': '{n} waiting on you, not tied to a card',
-    // ── The Board's front-desk seat (the supply officer, in a bottom dock) ──
-    // The SAME desk the Swarm tab shows, never a second one: one server-side
-    // desk, one stored record, one shared hook (useSupplyDesk).
-    'board.supply.title': 'President',
-    'board.supply.open': 'Talk to the president',
-    'board.supply.opening': 'Opening…',
-    'board.supply.closed': 'The president is not here right now',
-    // The monitor half, rolled up. Counts only — the detail is one click away.
-    // ONE STRING PER CLAUSE, joined only for the ones we can evidence — a
-    // single three-slot template forced a number where there was none.
-    'board.supply.rollupWorking': '{n} working',
-    'board.supply.rollupReview': '{n} in review',
-    'board.supply.rollupWaiting': '{n} waiting on you',
-    'board.supply.rollupUnknown': 'Checking…',
-    'board.supply.workersUnknown': 'Not checked yet — the engine has not answered.',
-    'board.supply.expand': 'Open the president panel',
-    'board.supply.collapse': 'Close the president panel',
-    'board.supply.stop': 'Dismiss the president',
-    'board.supply.stopping': 'Closing…',
-    'board.supply.resize': 'Drag to resize the president panel',
-    'board.supply.workers': 'Workers',
-    // A worker the engine cannot tie to a card gets NO card link — never a
-    // guessed one. Same rule as the honesty line above.
-    'board.supply.workerNoCard': 'not tied to a card',
-    'board.supply.noWorkers': 'No workers are running right now',
     'board.card.phaseAudit': 'auditing',
     'board.card.phaseImplement': 'implementing',
     'board.card.phaseVerify': 'verifying',
@@ -98,7 +73,7 @@ export const board = {
     'board.card.phaseBlocked': 'stuck',
     'board.card.phaseDone': 'wrapping up',
     'board.review.managerWorkingTitle':
-      'The commander is on integration duty right now — no need to open the Swarm tab.',
+      'The commander is on integration duty right now — no need to open the Swarm bar.',
     'board.card.untitledParen': '(Untitled)',
     'board.card.duplicate': 'Duplicate card',
     'board.card.duplicateTitle':
@@ -319,28 +294,6 @@ export const board = {
     // 盤面の高さでしか言えない事実（どのカードにも結び付かない稼働・質問）。
     'board.swarm.unattributedWorkers': 'カードに結び付かない稼働が{n}件',
     'board.swarm.unattributedQuestions': 'カード外であなたの判断待ちが{n}件',
-    // ── ボードのタスク窓口（補給官を下段ドックに座らせたもの）──
-    // Swarm タブと同じ卓であって、二人目ではない。卓もレコードも1つ、
-    // 駆動するフック（useSupplyDesk）も1つ。
-    'board.supply.title': '社長',
-    'board.supply.open': '社長と話す',
-    'board.supply.opening': 'ひらいています…',
-    'board.supply.closed': '社長はいま席を外しています',
-    // 監視側の要約。数だけ — 中身はワンクリック先にある。
-    'board.supply.rollupWorking': '稼働{n}',
-    'board.supply.rollupReview': 'レビュー{n}',
-    'board.supply.rollupWaiting': '判断待ち{n}',
-    'board.supply.rollupUnknown': '確認中…',
-    'board.supply.workersUnknown': 'まだ確認できていません(エンジンから返事がありません)。',
-    'board.supply.expand': '社長の席をひらく',
-    'board.supply.collapse': '社長の席をとじる',
-    'board.supply.stop': '社長の席を閉じる',
-    'board.supply.stopping': '閉じています…',
-    'board.supply.resize': 'ドラッグで社長の席の幅を変える',
-    'board.supply.workers': 'ワーカー',
-    // どのカードの担当か分からない worker にはカード名を出さない（推測で結び付けない）。
-    'board.supply.workerNoCard': 'カード未特定',
-    'board.supply.noWorkers': 'いま動いているワーカーはありません',
     'board.card.phaseAudit': '調査中',
     'board.card.phaseImplement': '実装中',
     'board.card.phaseVerify': '検証中',
@@ -348,7 +301,7 @@ export const board = {
     'board.card.phaseBlocked': '停滞中',
     'board.card.phaseDone': '完了報告',
     'board.review.managerWorkingTitle':
-      '司令官がいま統合作業中です（Swarmタブを開かなくてもここで分かります）。',
+      '司令官がいま統合作業中です（Swarm のバーを開かなくてもここで分かります）。',
     'board.card.untitledParen': '（無題）',
     'board.card.duplicate': 'カードを複製',
     'board.card.duplicateTitle':

@@ -134,7 +134,9 @@ describe('preserveHiddenTabs', () => {
   it('retains hidden native and custom tabs when a public user reorders the visible row', () => {
     const saved = ['canvas', 'board', 'research', 'custom:saved', 'terminal', 'swarm']
     const result = preserveHiddenTabs(saved, ['terminal', 'board'])
-    expect(result).toEqual(['canvas', 'terminal', 'swarm', 'board', 'research', 'custom:saved'])
+    // 'swarm' is a RETIRED tab id (the Swarm tab became the bottom bar,
+    // 2026-09-24): a stale one in a saved order is dropped, never re-inserted.
+    expect(result).toEqual(['canvas', 'terminal', 'board', 'research', 'custom:saved'])
     expect(saved).toEqual(['canvas', 'board', 'research', 'custom:saved', 'terminal', 'swarm'])
   })
   // A drag performed before the custom-module list has loaded reorders the

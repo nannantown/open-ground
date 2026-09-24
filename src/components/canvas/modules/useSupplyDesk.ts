@@ -1,5 +1,8 @@
 // useSupplyDesk — the project's ONE supply desk (補給官 / タスク窓口), as a hook.
 //
+// (2026-09-24: the Board's front-desk seat is gone — the president sits only in
+// the Swarm bottom bar now — but the hook stays the ONE reconcile of the desk.)
+//
 // WHY THIS IS A HOOK AND NOT COPY-PASTE (2026-08-15). The Board grew a front-desk
 // seat so the owner can talk to the supply officer without leaving the kanban.
 // That makes TWO surfaces driving ONE desk, and the desk's identity is a single

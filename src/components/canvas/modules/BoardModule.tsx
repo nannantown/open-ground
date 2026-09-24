@@ -41,8 +41,6 @@ import {
   type BoardCardWorker,
 } from '@/lib/boardWorker'
 import { indexEscalationsByTask, type BoardCardAlert } from '@/lib/boardEscalation'
-import { BoardSupplyDock } from './BoardSupplyDock'
-import type { LiveDeskHandle } from '@/lib/deskReconcile'
 import { SdkWorkerPane } from './SdkWorkerPane'
 import { engineWorkerKey } from './useSwarmEngine'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
@@ -128,9 +126,9 @@ export interface BoardModuleProps {
    *  run opening a fresh OAuth tab. */
   onClaudeLogin?: () => void
   /** May THIS account see swarm surfaces at all? Fed from ProjectPanel as
-   *  `isModuleIdVisible('swarm', moduleGate)` — the SAME registry predicate that
-   *  decides whether the Swarm tab exists — so the Board's swarm surfaces and
-   *  the Swarm tab can never disagree about who may see them.
+   *  `isSwarmVisible(moduleGate)` — the SAME registry predicate that decides
+   *  whether the Swarm bottom bar exists — so the Board's swarm surfaces and
+   *  the Swarm bar can never disagree about who may see them.
    *
    *  ⚠ DEFAULTS TO FALSE (fail-closed): a host that forgets to pass this prop
    *  must land on "hidden", never on "shown".
@@ -275,20 +273,6 @@ export const BoardModule = ({
   // BOARD altitude (the honesty line). Inventing a card for them would be the
   // 差し戻し M2 fabrication in worker form.
   const [unattributedWorkers, setUnattributedWorkers] = useState(0)
-  // ── The front desk's two extra facts, off the SAME poll ───────────────────
-  // The Board's supply seat needs (a) the live supply-desk handle to attach to,
-  // and (b) the WHOLE worker list — not the by-card map above, because the
-  // monitor must show the workers that have no card too (they are real work; a
-  // monitor that dropped them would under-report the fleet, which is the same
-  // 差し戻し M2 fabrication read backwards).
-  //
-  // ⚠ `undefined` IS A THIRD VALUE HERE, not a missing one: "the server has not
-  // said" (no lap has landed yet, or an older build has no such field). Only a
-  // definite `null` means "we looked and there is no desk". Collapsing the two
-  // makes the dock announce 「タスク窓口はいま閉じています」 on every board open
-  // for the half-second before the first poll, and permanently on an old server.
-  const [supplyDesk, setSupplyDesk] = useState<LiveDeskHandle | null | undefined>(undefined)
-  const [allWorkers, setAllWorkers] = useState<readonly EngineWorker[]>([])
   /** The union-list row (GET /api/swarm/workers — live desks ∪ roster ∪
    *  heartbeats, the same source the Swarm tab renders) backing the drawer for
    *  a doing card the ENGINE does not own: a manual 実行 worker never enters
@@ -298,12 +282,6 @@ export const BoardModule = ({
   const [drawerUnionRow, setDrawerUnionRow] = useState<SwarmWorkerRecord | null | undefined>(
     undefined,
   )
-  /** Has an orchestrator lap ever LANDED? `undefined` = not yet (mount, a
-   *  restarting server, offline), `false` = 403 (not the owner), `true` = a 2xx
-   *  arrived. Three-valued for the same reason `supplyDesk` is: an empty
-   *  `allWorkers` at mount is NOT the fact "no workers are running", and a
-   *  monitor that says so while a worker is mid-task is lying. */
-  const [engineRead, setEngineRead] = useState<boolean | undefined>(undefined)
   useEffect(() => {
     // Clear the prior project's workers immediately on a project switch (or when
     // the folder is gone) so a stale worker strip never lingers on the new board
@@ -314,10 +292,6 @@ export const BoardModule = ({
     setReviewsByTask(new Map())
     setManagerPresence('unknown')
     setUnattributedWorkers(0)
-    setAllWorkers([])
-    setEngineRead(undefined)
-    // Back to "not told" — NOT to null. See the state declaration.
-    setSupplyDesk(undefined)
     // ⚠ THE CLIENT-SIDE SWARM GATE. Not an optimization: an account without
     // the swarm experiment must render NONE of this, and the server's owner
     // gate does not cover it (an owner with the experiment OFF is answered 200
@@ -349,16 +323,11 @@ export const BoardModule = ({
             setReviewsByTask(prev => (prev.size ? new Map() : prev))
             setManagerPresence('unknown')
             setUnattributedWorkers(0)
-            setAllWorkers([])
-            setEngineRead(false)
-            // May-not-read is not the same as no-desk: stay at "not told".
-            setSupplyDesk(undefined)
           }
           return
         }
         const state = sanitizeEngineState(await res.json())
         if (cancelled) return
-        setEngineRead(true)
         const { workers } = state
         const next = new Map<string, EngineWorker>()
         for (const w of workers) if (w.taskId) next.set(w.taskId, w)
@@ -367,41 +336,6 @@ export const BoardModule = ({
         // subtraction would report a phantom unattributed worker for each
         // collision — a number nobody could reconcile against anything.
         setUnattributedWorkers(workers.reduce((n, w) => (w.taskId ? n : n + 1), 0))
-        // Same identity etiquette as the maps below — a fresh array every 5s
-        // would re-render the dock's monitor for nothing. Compared on exactly
-        // the fields the monitor SHOWS (identity + branch + stage + phase +
-        // card link); note/heartbeat churn is invisible there, and including
-        // them would defeat the trick outright.
-        setAllWorkers(prev =>
-          prev.length === workers.length &&
-          workers.every((w, i) => {
-            const p = prev[i]
-            return (
-              !!p &&
-              p.terminalId === w.terminalId &&
-              p.sdkSessionId === w.sdkSessionId &&
-              p.branch === w.branch &&
-              p.stage === w.stage &&
-              p.phase === w.phase &&
-              p.taskId === w.taskId
-            )
-          })
-            ? prev
-            : workers,
-        )
-        // The desk handle: keep the previous OBJECT when it names the same desk,
-        // so a steady-state poll doesn't re-key the terminal pane every 5s.
-        // `undefined` and `null` are compared as the distinct values they are.
-        setSupplyDesk(prev =>
-          prev === state.supplyDesk ||
-          (!!prev &&
-            !!state.supplyDesk &&
-            prev.handleId === state.supplyDesk.handleId &&
-            prev.runtime === state.supplyDesk.runtime &&
-            prev.agentSessionId === state.supplyDesk.agentSessionId)
-            ? prev
-            : state.supplyDesk,
-        )
         const nowMs = Date.now()
         // Keep the previous Map identity when nothing the card shows changed, so
         // the board doesn't re-render every 5s (heartbeatAt/startedAt churn is
@@ -483,13 +417,6 @@ export const BoardModule = ({
   // while focused; the Board is a background surface, so it asks less often.
   const [alertsByTask, setAlertsByTask] = useState<ReadonlyMap<string, BoardCardAlert>>(new Map())
   const [unattributedQuestions, setUnattributedQuestions] = useState(0)
-  /** The companion flag THE FORBIDDEN SENTENCE below demands of anyone who
-   *  wants to say a number about escalations. `undefined` = no lap has
-   *  succeeded (including an older server 404ing this route), `false` = 403,
-   *  `true` = a 2xx landed. Any count derived from the map must be gated on
-   *  `=== true`; otherwise 0 means "we never looked" and reads as "you are
-   *  clear". */
-  const [alertsRead, setAlertsRead] = useState<boolean | undefined>(undefined)
   // ⚠ THE FORBIDDEN SENTENCE. Nothing on this surface may ever say "nothing is
   // waiting for you" / 「対応待ちはありません」. An empty map is indistinguishable
   // from a read that failed, and turning one into a reassurance is the exact
@@ -505,7 +432,6 @@ export const BoardModule = ({
   useEffect(() => {
     setAlertsByTask(new Map())
     setUnattributedQuestions(0)
-    setAlertsRead(undefined)
     if (!swarmVisible) return
     if (!project.path || project.missing) return
     let cancelled = false
@@ -527,7 +453,6 @@ export const BoardModule = ({
           if (res.status === 403) {
             setAlertsByTask(prev => (prev.size ? new Map() : prev))
             setUnattributedQuestions(0)
-            setAlertsRead(false)
           }
           return
         }
@@ -547,7 +472,6 @@ export const BoardModule = ({
             : byTask,
         )
         setUnattributedQuestions(unattributed)
-        setAlertsRead(true)
       } catch {
         /* server restarting / offline — keep the last map, and keep silent
            about whether anything is waiting (see THE FORBIDDEN SENTENCE) */
@@ -2144,22 +2068,8 @@ export const BoardModule = ({
     },
     [alertsByTask, swarmVisible],
   )
-  // The front desk's monitor names the card a worker is on. It resolves against
-  // the board's OWN cards, and returns null when there is no such card — the
-  // row then says 「カード未特定」 rather than borrowing a nearby title. Same
-  // no-fabrication stance as the three resolvers above, one altitude down.
-  const taskTitleById = useCallback(
-    (taskId: string): string | null => {
-      if (!swarmVisible || !taskId) return null
-      return data.tasks.find(t => t.id === taskId)?.title?.trim() || null
-    },
-    [data.tasks, swarmVisible],
-  )
 
   return (
-    // `relative`: BoardSupplyDock's OPEN state is a full-height drawer anchored
-    // to this root's right edge (absolute inset-y-0 right-0) — without a
-    // positioned ancestor here it would anchor to the page instead.
     <div className="relative flex min-h-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Board-altitude honesty line — swarm activity the engine CANNOT tie to
@@ -2226,31 +2136,6 @@ export const BoardModule = ({
             onOpenProjectSettings={onOpenProjectSettings}
           />
         </div>
-        {/* ── The front desk (the supply officer's seat) ────────────────────
-            Gated HERE, at the render site, not only at the poll — a forged
-            persisted view or state must never be able to reveal this surface.
-            A bottom SUMMARY STRIP that opens into a RIGHT drawer (owner,
-            2026-08-17 — see BoardSupplyDock's header for the history: it was
-            born a bottom dock because a permanent right rail squeezes the five
-            columns; the drawer is an overlay, so the columns still never
-            reflow). It never spawns on mount — it attaches to whatever the
-            shared useSupplyDesk hook resolved, so the Swarm tab and this seat
-            are always the SAME desk. */}
-        {swarmVisible && (
-          <BoardSupplyDock
-            projectId={project.id}
-            projectPath={project.path}
-            supplyDesk={supplyDesk}
-            workers={engineRead === true ? allWorkers : undefined}
-            taskTitle={taskTitleById}
-            reviewCount={engineRead === true ? reviewsByTask.size : undefined}
-            // Cards waiting on the owner PLUS the questions no card owns — the
-            // roll-up is a board-wide count, so dropping the unattributed ones
-            // would under-report exactly the questions easiest to lose.
-            waitingCount={alertsRead === true ? alertsByTask.size + unattributedQuestions : undefined}
-            claudeStatusByPty={claudeStatusByPty}
-          />
-        )}
       </div>
       {detailTask && (
         <aside

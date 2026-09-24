@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Square, CornerDownLeft, Power, Trash2, AlertTriangle, RotateCcw, X } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
+import { holdStream, useStreamOwner } from '@/lib/streamBudget'
 import type { SpriteState } from '@/lib/swarm/sprites'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 import type { SdkEvent, SdkSessionStatus } from '@/lib/server/sdkEvents'
@@ -172,6 +173,8 @@ export const SdkWorkerPane = ({
   questionHint,
 }: Props) => {
   const { t } = useT()
+  // Which side of the window this stream counts against (streamBudget.ts).
+  const streamOwnerRef = useRef(useStreamOwner())
   const [frames, setFrames] = useState<Frame[]>([])
   const [status, setStatus] = useState<SdkSessionStatus>('starting')
   // Is this desk FINISHED — i.e. can no further frame arrive? That is the
@@ -292,6 +295,8 @@ export const SdkWorkerPane = ({
     setStatus('starting')
     setTruncated(false)
     setFrames((prev) => (prev.length ? [] : prev))
+    // The connection slot this stream holds (streamBudget.ts).
+    const releaseStream = holdStream(streamOwnerRef.current)
     const es = new EventSource(
       `/api/sdk-session/${encodeURIComponent(sdkSessionId)}/stream?${qs}&from=0`,
     )
@@ -347,6 +352,7 @@ export const SdkWorkerPane = ({
       // making 'end' fire turned a leaked-open stream into a reconnect storm.
       stopped = true
       es.close()
+      releaseStream()
       setStatus(ended)
       // 'end' is the server saying "no further event can arrive on this stream",
       // which it only says for a session that is no longer live (reaped) — see
@@ -372,6 +378,7 @@ export const SdkWorkerPane = ({
         // The server SAID it — no probe needed, and retrying cannot help.
         stopped = true
         es.close()
+        releaseStream()
         setStatus('exited')
         setFinished(true)
         onExitRef.current?.()
@@ -393,6 +400,7 @@ export const SdkWorkerPane = ({
           if (!verdict.close) return // still live — let EventSource retry
           stopped = true
           es.close()
+          releaseStream()
           setStatus(verdict.status)
           setFinished(true)
           onExitRef.current?.()
@@ -404,6 +412,7 @@ export const SdkWorkerPane = ({
     return () => {
       stopped = true
       es.close()
+      releaseStream()
       void lastSeq
     }
     // `onExit` is deliberately NOT a dependency. Callers pass an inline arrow

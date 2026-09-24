@@ -8,14 +8,10 @@ export type ModuleId =
   | 'canvas'
   | 'board'
   | 'research'
-  // Owner-only experiment module (hidden by default; see `experiments` in
-  // moduleRegistry + ExperimentId in types). A KNOWN native id so persistence
-  // / tab-order code treats it like any other built-in — but the registry's
-  // gate keeps it out of every visible surface until its experiment is open.
-  // Listed here only so the type system knows it exists.
-  | 'swarm'
 
-// Retired IDs (including the removed Persona feature) are absent from this list.
+// Retired IDs (including the removed Persona feature, and 'swarm' — the Swarm
+// tab became the per-project bottom bar, SwarmBottomBar, on 2026-09-24) are
+// absent from this list.
 // That absence is load-bearing: persistView validates against MODULE_IDS,
 // so a user whose last-open tab was a retired one has that value DROPPED on
 // read and lands on the project's default tab — never on a blank panel with no
@@ -25,7 +21,6 @@ export const MODULE_IDS: readonly ModuleId[] = [
   'canvas',
   'board',
   'research',
-  'swarm',
 ]
 
 // ─── Custom tabs (user-built modules) ───────────────────────────────────────

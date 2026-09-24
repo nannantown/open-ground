@@ -154,6 +154,10 @@ describe('ProjectPanel — the Canvas/Board side terminal dock is gone', () => {
     fireEvent.contextMenu(board)
     expect(screen.queryByRole('menu')).toBeNull()
     expect(h.paths).not.toContain('project.$put')
+    // A stale 'swarm' in the saved order is ignored: Swarm is the bottom bar
+    // now (2026-09-24), never a tab — and the bar is there with the flag open.
+    expect(screen.queryByRole('button', { name: 'Swarm' })).toBeNull()
+    expect(screen.getByTestId('swarm-bottom-bar')).toBeTruthy()
   })
   it('hides project skills from public users and no longer fetches the retired app menu', async () => {
     const p = project('public-skills', '/tmp/public-skills')
@@ -175,6 +179,28 @@ describe('ProjectPanel — the Canvas/Board side terminal dock is gone', () => {
     expect(screen.queryByTestId('project-canvas')).toBeNull()
     expect(localStorage.getItem(VIEW_KEY)).toBe(savedView)
     expect(calls.filter(c => /\/api\/(research|custom-modules|project\/canvases)(\/|\?|$)/.test(c.url))).toEqual([])
+  })
+
+  it('the Swarm bar stays under every tab, and an opened bar stays open across a tab switch', async () => {
+    const p = project('swarm-bar', '/tmp/swarm-bar')
+    h.projectGet = () => Promise.resolve(new Response(JSON.stringify(VALID)))
+    render(<ProjectPanel project={p} experiments={{ swarm: true, sandbox: false }} onClose={noop} onRemove={noop} frameLabel={null} />)
+    await screen.findByTestId('board')
+    fireEvent.click(screen.getByRole('button', { name: 'projectPanel.swarm.bar.expand' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Terminal' }))
+    expect(screen.queryByTestId('board')).toBeNull()
+    expect(screen.getByTestId('swarm-bottom-bar')).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: 'projectPanel.swarm.bar.collapse' }).getAttribute('aria-expanded'),
+    ).toBe('true')
+  })
+
+  it('no Swarm bar without the swarm flag', async () => {
+    const p = project('no-swarm', '/tmp/no-swarm')
+    h.projectGet = () => Promise.resolve(new Response(JSON.stringify(VALID)))
+    render(<ProjectPanel project={p} experiments={{ swarm: false, sandbox: false }} onClose={noop} onRemove={noop} frameLabel={null} />)
+    await screen.findByTestId('board')
+    expect(screen.queryByTestId('swarm-bottom-bar')).toBeNull()
   })
 
   it('the Canvas view renders no terminal dock', async () => {

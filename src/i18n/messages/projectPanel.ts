@@ -44,6 +44,22 @@ export const projectPanel = {
     'projectPanel.swarm.power.manualStop': 'Stopped by hand',
     'projectPanel.swarm.power.offline': 'Not available yet',
     'projectPanel.swarm.power.workers': '{count} workers',
+    // The Swarm bottom bar (2026-09-24 — replaced the Swarm tab).
+    'projectPanel.swarm.bar.expand': 'Open Swarm',
+    'projectPanel.swarm.bar.collapse': 'Fold Swarm away',
+    'projectPanel.swarm.bar.resize': 'Drag to change the height of Swarm',
+    // "Questions", not "waiting on you": the Board's blocked column is called
+    // "Needs decision"/「判断待ち」 and counts something else — one word must
+    // never name two different numbers on the same screen.
+    'projectPanel.swarm.bar.questions': '{count} questions for you',
+    'projectPanel.swarm.bar.reviews': '{count} awaiting integration',
+    // A pane past the stream budget (a layout saved under the old cap of 6).
+    'projectPanel.terminalOverBudget':
+      'This pane is paused to keep the app responsive — too many live views are open. Its shell keeps running; close another pane to see it again.',
+    'projectPanel.swarm.bar.streamLimit':
+      'Too many live views are open at once, so some Swarm seats show a summary. Close a terminal pane or switch tabs to see them live.',
+    'projectPanel.swarm.bar.questionsHint': 'Open the bar and tell the president your answers.',
+    'projectPanel.swarm.bar.attention': 'There is a notice inside — open the bar to read it.',
     'projectPanel.swarm.power.hint':
       'Start the engine, manager, and supply officer together. Stop halts new dispatch only — running workers finish and their worktrees are kept.',
     // Restart reminder (autonomyRemembered) — autonomy is NEVER auto-resumed on
@@ -184,7 +200,7 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.jumpLatest': 'Latest',
     'projectPanel.swarm.sdk.questionBanner': 'This worker asked you a question',
     'projectPanel.swarm.sdk.questionBannerHint':
-      'Tell the president your answer — from the President panel on the Board tab (“Talk to the president”). The worker resumes on your reply.',
+      'Tell the president your answer — in the President seat of the Swarm bar at the bottom of the screen. The worker resumes on your reply.',
     'projectPanel.swarm.sdk.statusFailed': 'Failed',
     'projectPanel.swarm.sdk.interrupt': 'Stop the current turn (the session stays open)',
     'projectPanel.swarm.sdk.send': 'Send',
@@ -588,6 +604,19 @@ export const projectPanel = {
     'projectPanel.swarm.power.manualStop': '手動停止中',
     'projectPanel.swarm.power.offline': '未配備',
     'projectPanel.swarm.power.workers': 'ワーカー {count}',
+    // Swarm の下部バー(2026-09-24 — Swarm タブの置き換え)。
+    'projectPanel.swarm.bar.expand': 'Swarm をひらく',
+    'projectPanel.swarm.bar.collapse': 'Swarm をたたむ',
+    'projectPanel.swarm.bar.resize': 'ドラッグで Swarm の高さを変える',
+    // 「判断待ち」は Board の blocked 列の見出しで別の数 — 同じ言葉で別の数を指さない。
+    'projectPanel.swarm.bar.questions': 'あなたへの質問 {count}',
+    'projectPanel.swarm.bar.reviews': '統合待ち {count}',
+    'projectPanel.terminalOverBudget':
+      'アプリが固まらないよう、このペインの表示を止めています(同時に開ける接続の上限)。中のシェルは動いたままです。ほかのペインを閉じると、また表示されます。',
+    'projectPanel.swarm.bar.streamLimit':
+      '同時に開ける接続の上限に近いため、一部の席は要約表示にしています。ターミナルを1枚閉じるか、別のタブに移ると表示されます。',
+    'projectPanel.swarm.bar.questionsHint': 'バーをひらいて、社長に答えを伝えてください。',
+    'projectPanel.swarm.bar.attention': '中にお知らせがあります — バーをひらいて確認してください。',
     'projectPanel.swarm.power.hint':
       'エンジン・マネージャー・タスク窓口をまとめて起動します。停止は新規の振り分けを止めるだけで、走行中の worker は完走し worktree も残ります。',
     // 再起動リマインダー（autonomyRemembered）— 再起動で自律は自動再開しない。前回 ON
@@ -714,7 +743,7 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.jumpLatest': '最新へ',
     'projectPanel.swarm.sdk.questionBanner': 'この作業者から質問が届いています',
     'projectPanel.swarm.sdk.questionBannerHint':
-      '答えは社長に伝えてください(Board タブの「社長」の欄 →「社長と話す」)。答えると作業者はそのまま再開します。',
+      '答えは社長に伝えてください(画面の一番下の Swarm のバーをひらいて「社長」の席へ)。答えると作業者はそのまま再開します。',
     'projectPanel.swarm.sdk.statusFailed': '失敗',
     'projectPanel.swarm.sdk.interrupt': '今のターンを止める(セッションは続きます)',
     'projectPanel.swarm.sdk.send': '送信',

@@ -85,12 +85,14 @@ import {
   gateFromFlags,
   isModuleIdEnabled,
   isModuleIdVisible,
+  isSwarmVisible,
   nativeDescriptors,
   tabLabel,
   type ModuleGate,
   type TabDef,
 } from '@/components/canvas/moduleRegistry'
-import { SwarmModule } from '@/components/canvas/modules/SwarmModule'
+import { SwarmBottomBar } from '@/components/canvas/SwarmBottomBar'
+import { STREAM_BUDGET } from '@/lib/streamBudget'
 import { ResearchModule } from '@/components/canvas/modules/ResearchModule'
 import { customTabId, customModuleIdFromTab, isCustomTabId, type ModuleId } from '@/lib/modules/ids'
 import { usePlayback } from '@/lib/playback/playbackStore'
@@ -241,8 +243,11 @@ const saveTaskTerminals = (path: string, map: Record<string, string>) => {
 // into the horizontal scroll. No per-pane resize, nothing persisted — the
 // old drag-to-resize pinning fought the equal-split rule (a stale stored
 // width broke "press New → halves"). MAX caps how many PTYs one project can
-// spawn at once.
-const MAX_TERMINALS = 6
+// spawn at once. It is the window's STREAM budget, not a taste: each pane holds
+// one live SSE stream, and at six (Chromium's HTTP/1.1 per-host cap) every
+// later request — the pane's own input included — waits forever
+// (streamBudget.ts). Five panes leave one connection for everything else.
+const MAX_TERMINALS = STREAM_BUDGET
 // How often the Terminal tab re-reads each pane's context fuel gauge. Slower
 // than the Ground's 5s status beacon on purpose: the reading only moves once
 // per claude turn, and resolving it costs the server a transcript read per pane.
@@ -285,8 +290,8 @@ interface Props {
   shared?: { id: string; label: string }
 }
 
-// The owner body — the full project surface (Terminal / Canvas / Board / Swarm /
-// custom tabs, header chrome, settings, delete, share invite). Rendered by
+// The owner body — the full project surface (Terminal / Canvas / Board / custom
+// tabs + the Swarm bottom bar, header chrome, settings, delete, share invite). Rendered by
 // ProjectPanel for every NON-shared project. Unchanged from the pre-merge panel.
 const OwnedProjectBody = ({
   project,
@@ -2314,8 +2319,15 @@ const OwnedProjectBody = ({
             ref={terminalRowRef}
             className="min-h-0 min-w-0 flex-1 flex overflow-x-auto"
           >
-          {terminalSlots.map(slot => {
+          {terminalSlots.map((slot, slotIndex) => {
             const active = slot.id === activeTerminalSlot
+            // A layout saved under the old cap of six can still hold more
+            // panes than the stream budget allows. Those panes are NOT dropped
+            // and their shells are NOT killed (whatever runs in them is the
+            // owner's work): past MAX_TERMINALS a pane opens no stream and
+            // shows why; closing another pane brings it back live, reattached
+            // to the same shell (TerminalPane's cached session).
+            const overBudget = slotIndex >= MAX_TERMINALS
             const canClose = terminalSlots.length > 1
             const isDropTarget = termDragOverId === slot.id && termDragId !== slot.id
             // Live OSC title (what's running) wins over an auto-generated
@@ -2443,6 +2455,15 @@ const OwnedProjectBody = ({
                   )}
                 </div>
                 <div className="min-h-0 flex-1">
+                  {overBudget ? (
+                  <div
+                    role="status"
+                    data-terminal-over-budget={slot.id}
+                    className="flex h-full items-center justify-center px-4 text-center text-xs leading-relaxed text-[#9a9a9a]"
+                  >
+                    {t('projectPanel.terminalOverBudget')}
+                  </div>
+                  ) : (
                   <TerminalPane
                     key={slot.id}
                     ref={el => {
@@ -2479,6 +2500,7 @@ const OwnedProjectBody = ({
                       })
                     }
                   />
+                  )}
                 </div>
               </div>
             )
@@ -2512,9 +2534,6 @@ const OwnedProjectBody = ({
       ) : view === 'research' && isModuleIdVisible('research', moduleGate) ? (
         // Mount only for the app owner: opening this surface can start a digest.
         <ResearchModule project={project} />
-      ) : view === 'swarm' && isModuleIdVisible('swarm', moduleGate) ? (
-
-        <SwarmModule project={project} />
       ) : isCustomTabId(view) && ownerFeatures ? (
         // Custom tab: the module's component in a sandboxed iframe, plus the
         // owner's claude sidebar. Keyed by module id so switching between two
@@ -2558,12 +2577,12 @@ const OwnedProjectBody = ({
           persist={persist}
           // The Board's swarm surfaces (worker strip, commander strip,
           // needs-you badge, the board-wide honesty line) are the SAME
-          // owner-only experiment as the Swarm tab, so they ask the SAME
+          // experiment as the Swarm bar below, so they ask the SAME
           // registry predicate — one rule, in one place. Without it a
           // non-swarm account would see swarm vocabulary on its cards.
           // BoardModule re-checks this at every render site; the server's owner
           // gate on /api/swarm/* is a separate, outer wall.
-          swarmVisible={isModuleIdVisible('swarm', moduleGate)}
+          swarmVisible={isSwarmVisible(moduleGate)}
           detailId={boardDetailId}
           onOpenDetail={setBoardDetailId}
           // Surface Project Settings right on the Board toolbar (the ⋯ menu
@@ -2618,6 +2637,14 @@ const OwnedProjectBody = ({
         />
         </div>
       ) : null}
+      {/* The Swarm bottom bar (owner decision 2026-09-24 — replaced the Swarm
+          tab AND the Board's president drawer): one persistent strip under
+          EVERY tab, collapsed by default, opening upward into the seats. It
+          sits OUTSIDE the tab ternary so switching tabs keeps it mounted —
+          its open/closed state and live seats survive the switch. Keyed by
+          project so another project never inherits this one's seats. Gated
+          here by the same predicate the Board's swarm vocabulary uses. */}
+      {isSwarmVisible(moduleGate) && <SwarmBottomBar key={project.id} project={project} />}
       </div>
       </div>
 

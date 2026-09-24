@@ -1,15 +1,21 @@
-// SwarmModule — the owner-only "swarm" experiment surface.
+// SwarmModule — the "swarm" experiment surface.
 //
 // PURPOSE (project_inapp_swarm_port): watch this project's isolated `claude`
-// workers run, all from one tab — the in-app version of the tmux
+// workers run, all from one surface — the in-app version of the tmux
 // supply/manage/worker cockpit. Workers are started by the autonomous engine
 // (the master power switch in this module's header bar — SwarmPowerBar) or the
 // commander session — the old manual per-card "dispatch" rail was removed;
 // browsing todos lives on the Board tab.
 //
-// SECURITY: this component is mounted ONLY from ProjectPanel's render branch
-// `view === 'swarm' && experiments?.swarm` — itself behind the server-resolved
-// owner+toggle gate (gateFromFlags / computeExperiments). A non-owner or a
+// WHERE IT LIVES (owner decision 2026-09-24): not a tab any more. It is the
+// body of SwarmBottomBar — a strip under EVERY project tab. `collapsed` renders
+// just the one header row (status · open questions · master switch) and mounts
+// no seat, so a folded bar opens no EventSource (the 6-connection cap — see
+// the seats-row comment further down / SwarmWorkerSeat).
+//
+// SECURITY: this component is mounted ONLY from SwarmBottomBar, which
+// ProjectPanel renders behind `isSwarmVisible(moduleGate)` — itself the
+// server-resolved experiment gate (gateFromFlags / computeExperiments). A non-owner or a
 // flag-off user never mounts it, so every side effect here (the localStorage
 // worker registry, the polls, the spawns) is reached ONLY when the gate is open.
 // There is therefore nothing extra to gate INSIDE this file — the trace-zero
@@ -36,7 +42,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { X, Power, Eye } from 'lucide-react'
+import { X, Power, Eye, ChevronUp, ChevronDown, Network } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -71,6 +77,7 @@ import {
 import type { SwarmEnvIssueId } from './useSwarmEngine'
 import { workerBeaconStatus } from '@/lib/workerBeacon'
 import { SwarmErrorBanner } from '@/components/canvas/modules/SwarmErrorBanner'
+import { STREAM_BUDGET, useStreamCount } from '@/lib/streamBudget'
 
 // Seats (社長 / manager / each worker) lay out as ONE horizontally-scrolling
 // row. Each seat grows to fill the area when there are few but never shrinks
@@ -246,7 +253,19 @@ const envBannerFootnoteKey = (issues: readonly { id: SwarmEnvIssueId }[]): strin
   return null
 }
 
-export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
+/** The folded bar shows only running/workers/questions — it does not need the
+ *  5 s cadence (each engine lap also runs the server's git preflight). */
+const FOLDED_ENGINE_POLL_MS = 15_000
+
+interface SwarmModuleProps {
+  project: ProjectMeta
+  /** Folded into the bottom bar's single strip: header row only, no seats. */
+  collapsed?: boolean
+  /** Present ⇒ the header row carries the bar's open/close toggle. */
+  onToggleCollapsed?: () => void
+}
+
+export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: SwarmModuleProps) => {
   const { t } = useT()
 
   // PTY id → live status from GET /api/terminal/active (working|waiting).
@@ -279,6 +298,13 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // sdkSessionId → the newest OPEN question that worker asked the owner. One
   // poll for the whole fleet (a folded seat opens no stream of its own).
   const [questionBySdk, setQuestionBySdk] = useState<ReadonlyMap<string, string>>(new Map())
+  // How many questions wait on the owner, off the SAME poll — the folded bar's
+  // one-glance count. null = not read yet (or a failed read): the strip then
+  // says NOTHING, never "0" (an unread inbox must not look like a clear one).
+  const [ownerQuestionCount, setOwnerQuestionCount] = useState<number | null>(null)
+  // Long-lived streams the PAGE (the open tab's body) holds right now — the
+  // bar may only use what they leave of STREAM_BUDGET (streamBudget.ts).
+  const pageStreams = useStreamCount('page')
   useEffect(() => {
     let stopped = false
     const read = async () => {
@@ -303,6 +329,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           }[]
         }
         const next = new Map<string, string>()
+        const openCount = (d.escalations ?? []).filter((e) => e.status === 'open').length
         const open = (d.escalations ?? [])
           .filter((e) => e.status === 'open' && e.sdkSessionId && (e.plainQuestion || e.question))
           .sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''))
@@ -310,7 +337,10 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
         // The owner reads the PLAIN wording when the raiser wrote one
         // (Escalation.plainQuestion); the technical one is the fallback.
         for (const e of open) next.set(e.sdkSessionId!, (e.plainQuestion || e.question)!)
-        if (!stopped) setQuestionBySdk(next)
+        if (!stopped) {
+          setQuestionBySdk(next)
+          setOwnerQuestionCount(openCount)
+        }
       } catch {
         /* keep the last known state — a fetch hiccup must not flap the banner */
       }
@@ -349,7 +379,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     dismissOverseerReminder,
     envIssues,
     refreshEnvPreflight,
-  } = useSwarmEngine(project.path)
+  } = useSwarmEngine(project.path, collapsed ? FOLDED_ENGINE_POLL_MS : undefined)
 
   // The "autonomy was restored by the restart" notice (card 2b) is dismissed LOCALLY
   // — unlike the two banners below it, there is no server marker to clear here. The
@@ -446,6 +476,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     setRemovedWorktrees(new Set())
     setOpenWorktree(null)
     setQuestionBySdk(new Map())
+    setOwnerQuestionCount(null)
     setDismissedEnvIssuesKey(null)
     setGitInitBusy(false)
     setGitInitDone(false)
@@ -577,8 +608,8 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // (deskReconcile.ts — busy wins, old servers change nothing); this effect only
   // applies the verdict to state + localStorage.
   // ⚠ The SUPPLY half of this used to live here too. It now lives in
-  // useSupplyDesk, because the Board's front-desk seat drives the same desk and
-  // two copies of a reconcile would DISAGREE after a restart.
+  // useSupplyDesk (it was shared with the Board's front-desk seat, deleted
+  // 2026-09-24 — the hook stays the one place that reconciles the desk).
   useEffect(() => {
     // The stored records use OPTIONAL runtime ('pty' when absent — every old
     // record's shape); the reconcile input is the normalized strict form.
@@ -858,16 +889,15 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // session (条件: 二重起動しない). On failure we surface restartFailed and leave
   // the old (exited) id in place, so the overlay stays and the user can retry.
   // ── The supply desk (補給官 / タスク窓口) ──────────────────────────────────
-  // State + launch/stop/restart live in useSupplyDesk, NOT here, because the
-  // Board's front-desk seat drives the SAME desk through the SAME stored record
-  // (openground.swarm.supply.<projectId>) and the same server handle. Two
-  // hand-written copies would reconcile a post-restart record to two different
-  // verdicts, and whichever surface the owner opened last would win the write.
+  // State + launch/stop/restart live in useSupplyDesk (the one reconcile of
+  // the stored record openground.swarm.supply.<projectId> against the server
+  // handle). The president's seat exists in exactly ONE place — this bar; the
+  // Board's drawer copy was deleted 2026-09-24.
   // Names are destructured back to the historical ones so every reference below
   // — the pane, the CTA, the autopilot plan — reads exactly as it did.
-  // `enabled` is unconditionally true here: this component only mounts behind
-  // ProjectPanel's own `isModuleIdVisible('swarm', …)` check, which is the same
-  // predicate the Board seat passes through as `swarmVisible`.
+  // `enabled` is unconditionally true here: this component only mounts inside
+  // SwarmBottomBar, behind ProjectPanel's `isSwarmVisible(moduleGate)` — the
+  // same predicate the Board receives as `swarmVisible`.
   const {
     supply,
     busy: supplyBusy,
@@ -1079,6 +1109,43 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
   // president's desk, which is then told every open question and every notice
   // held while it was closed — supplyNotice.catchUpSupplyDesks.)
   const swarmIdle = !engine.running && !supply && !manager && allWorkers.length === 0
+  // ── Connection budget (streamBudget.ts) ──────────────────────────────────
+  // HTTP/1.1 gives this origin six connections; every live stream holds one.
+  // The PAGE (the open tab) always wins — the bar streams only in what it
+  // leaves of STREAM_BUDGET, in priority order: the president, then the one
+  // unfolded worker, then any legacy PTY worker. A seat that gets no slot shows
+  // its summary instead, and one line above the seats says why. Folded, the
+  // bar mounts no seat at all.
+  let barSlots = collapsed ? 0 : Math.max(0, STREAM_BUDGET - pageStreams)
+  const takeSlot = (): boolean => {
+    if (barSlots <= 0) return false
+    barSlots -= 1
+    return true
+  }
+  const supplyStreams = !!supply && takeSlot()
+  let streamLimited = !!supply && !supplyStreams
+  // May a folded worker be unfolded right now? (One slot left after the desk.)
+  const workerSlotFree = barSlots > 0
+  const streamingWorktrees = new Set<string>()
+  for (const w of allWorkers) {
+    // Only a seat that will actually OPEN a stream spends a slot: an SDK
+    // worker with a session id that is the unfolded one, or a PTY worker that
+    // has a terminal to attach to. (An id-less seat renders its summary.)
+    const wantsStream =
+      w.runtime === 'sdk' ? !!w.sdkSessionId && openWorktree === w.worktree : !!w.terminalId
+    if (!wantsStream) continue
+    if (takeSlot()) streamingWorktrees.add(w.worktree)
+    else streamLimited = true
+  }
+
+  // Notices that live INSIDE the bar (below the header). Folded, they are not
+  // drawn, so the strip carries one dot saying "there is something to read".
+  const foldedNotice =
+    showEnvBanner ||
+    engine.consumption.overLimit ||
+    (engine.autonomyResumed && engine.running && !restoredNoticeDismissed) ||
+    (engine.autonomyRemembered && !engine.running) ||
+    (engine.overseerRemembered && !engine.overseer)
 
   return (
     // Right-pane-centric layout (条件4): the old left "to-do rail + dispatch"
@@ -1088,7 +1155,7 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
     // here (条件1/2/3). This wrapper is a vertical stack: ONE header row (status ·
     // mode menu · master switch) + an error banner + the
     // full-height row of seats below.
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className={collapsed ? 'flex min-w-0 shrink-0 flex-col' : 'flex min-h-0 min-w-0 flex-1 flex-col'}>
       {/* ── The ONE header row ──────────────────────────────────────────────
           Everything the old three stacked strips carried, on a single fixed-
           height line so the terminal area below gets the vertical space back:
@@ -1096,7 +1163,35 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           mode dropdown (rare operation → an options menu, not an always-on
           row), and the master Stop|Start switch (条件1 — ON starts the engine +
           launches commander & supply, idempotent; OFF halts new dispatch only). */}
-      <div className="flex min-h-[38px] shrink-0 flex-wrap items-center gap-x-3 border-b border-line bg-bg pl-3 pr-2">
+      <div
+        className={[
+          // With the toggle, its own px-1.5 supplies the rest of the inset,
+          // so the label lines up with the seats below (no negative margin).
+          'flex min-h-[38px] shrink-0 flex-wrap items-center gap-x-3 gap-y-1 bg-bg py-1 pr-2',
+          onToggleCollapsed ? 'pl-1.5' : 'pl-3',
+          collapsed ? '' : 'border-b border-line',
+        ].join(' ')}
+      >
+        {onToggleCollapsed && (
+          // The bar's open/close toggle. The name "Swarm" rides it, so the
+          // folded strip says what it is and the whole left edge is the target.
+          <button
+            type="button"
+            onClick={onToggleCollapsed}
+            aria-expanded={!collapsed}
+            aria-label={t(collapsed ? 'projectPanel.swarm.bar.expand' : 'projectPanel.swarm.bar.collapse')}
+            title={t(collapsed ? 'projectPanel.swarm.bar.expand' : 'projectPanel.swarm.bar.collapse')}
+            className={[
+              'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-[4px] px-1.5 text-ui font-medium text-ink',
+              'transition-colors duration-150 hover:bg-plane active:bg-line-soft',
+              'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+            ].join(' ')}
+          >
+            {collapsed ? <ChevronUp size={14} aria-hidden /> : <ChevronDown size={14} aria-hidden />}
+            <Network size={12} strokeWidth={2.25} aria-hidden />
+            Swarm
+          </button>
+        )}
         <div className="min-w-0 flex-1 md:flex-none">
         <SwarmPowerStatus
           running={engine.running}
@@ -1105,27 +1200,64 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           workerCount={allWorkers.length}
         />
         </div>
+        {/* Questions waiting on the owner — said only when there ARE some and
+            the inbox was actually read (ownerQuestionCount's contract). */}
+        {collapsed && foldedNotice && (
+          <span
+            role="status"
+            title={t('projectPanel.swarm.bar.attention')}
+            aria-label={t('projectPanel.swarm.bar.attention')}
+            className="h-[7px] w-[7px] shrink-0 rounded-full bg-accent"
+          />
+        )}
+        {ownerQuestionCount ? (
+          <span
+            title={t('projectPanel.swarm.bar.questionsHint')}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-ochre-soft px-2 py-0.5 text-meta text-ink"
+          >
+            <span className="h-[6px] w-[6px] shrink-0 rounded-full bg-ochre" aria-hidden />
+            {t('projectPanel.swarm.bar.questions', { count: ownerQuestionCount })}
+          </span>
+        ) : null}
+        {engineAvailable && engine.reviews.length > 0 ? (
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-plane px-2 py-0.5 text-meta text-ink">
+            {t('projectPanel.swarm.bar.reviews', { count: engine.reviews.length })}
+          </span>
+        ) : null}
         <div className="min-w-0 flex-1" aria-hidden />
-        <SwarmMonitorToggle
-          on={engine.overseer}
-          running={engine.running}
-          available={engineAvailable}
-          busy={engineBusy}
-          onToggle={toggleOverseer}
-        />
-        <ExecutionModeMenu />
+        {!collapsed && (
+          <>
+            <SwarmMonitorToggle
+              on={engine.overseer}
+              running={engine.running}
+              available={engineAvailable}
+              busy={engineBusy}
+              onToggle={toggleOverseer}
+            />
+            <ExecutionModeMenu />
+          </>
+        )}
         <SwarmPowerSwitch
           running={engine.running}
           available={engineAvailable}
           busy={engineBusy}
-          onToggle={powerSwarm}
+          onToggle={(next) => {
+            // First run from the FOLDED strip: open the bar onto the
+            // onboarding (what Start does, before it does it) instead of
+            // starting blind. Its own Start then runs the same powerSwarm.
+            if (next && collapsed && onToggleCollapsed && swarmIdle && !onboardingSeen) {
+              onToggleCollapsed()
+              return
+            }
+            powerSwarm(next)
+          }}
         />
       </div>
       {/* Env preflight (git/shell) — ONE banner listing every unmet prerequisite
           (GET /api/swarm/preflight, the same gate the worker/supply/manager spawn
           routes enforce), so a missing git / non-repo project / missing shell is
           visible up front instead of only surfacing as a failed-launch error. */}
-      {showEnvBanner && (
+      {!collapsed && showEnvBanner && (
         <div className="flex shrink-0 items-start gap-3 border-b border-line-soft bg-bg px-3 py-2">
           <div className="min-w-0 flex-1">
             <p className="text-meta font-medium leading-relaxed text-accent">
@@ -1206,12 +1338,13 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       {/* An engine action's failure (power, Monitoring) joins it once the
           seats are up — the idle views below print their own. */}
       <SwarmErrorBanner
-        error={error ?? (swarmIdle ? null : engineError)}
+        error={error ?? (swarmIdle && !collapsed ? null : engineError)}
         supplyError={supplyError}
       />
       {/* The unattended loop passed its dispatch budget (DISPATCH_BUDGET — a
           soft nudge, the engine keeps going). It used to sit in the manager's
           dashboard; it is about spend, so the owner still hears it here. */}
+      {!collapsed && (<>
       {engine.consumption.overLimit && (
         <p
           role="status"
@@ -1385,9 +1518,30 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
       // what is readable at a glance, each seat's nameplate tinted by role.
       // min-w-0 is load-bearing: without it this flex item would grow to the
       // row's intrinsic width and push the seats off-screen.
+      <>
+      {streamLimited && (
+        <div role="status" className="shrink-0 border-b border-line-soft bg-bg px-3 py-1.5 text-meta text-ink-muted">
+          {t('projectPanel.swarm.bar.streamLimit')}
+        </div>
+      )}
       <div className="flex min-h-0 min-w-0 flex-1 gap-px overflow-x-auto overflow-y-auto bg-line-strong">
         <div className={SEAT_CLASS} style={SEAT_STYLE}>
-          {supply ? (
+          {supply && !supplyStreams ? (
+            // The desk is up but the connection budget is spent: its
+            // nameplate and why, instead of a stream that would starve fetches.
+            <div className="flex h-full min-h-0 flex-col bg-bg" data-seat="supply-summary">
+              <SwarmSeatHeader
+                role="supply"
+                sprite={null}
+                statusLabel={t('projectPanel.swarm.statusWorking')}
+              />
+              <div className="flex flex-1 items-center justify-center px-6 text-center">
+                <p className="max-w-xs text-ui leading-relaxed text-ink-subtle">
+                  {t('projectPanel.swarm.bar.streamLimit')}
+                </p>
+              </div>
+            </div>
+          ) : supply ? (
             // The live president's desk — the owner's one conversation.
           <SwarmSupplyPane
             terminalId={supply.terminalId}
@@ -1456,19 +1610,25 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
               // 'manual'/'engine' distinction but keyed off server truth now.
               const isEngine = w.stage !== undefined
               const sdkId = w.runtime === 'sdk' ? w.sdkSessionId : undefined
-              // Folded unless this is THE one unfolded seat (see SwarmWorkerSeat
-              // for why at most one worker transcript streams at a time).
-              if (sdkId && openWorktree !== w.worktree) {
+              // Folded unless the stream plan above gave this seat a slot — THE
+              // one unfolded SDK seat (see SwarmWorkerSeat for why at most one
+              // transcript streams at a time) or a legacy PTY worker, budget
+              // permitting. A seat with NO handle (a dead worker known only
+              // from its heartbeat) opens no stream either way and keeps its
+              // full tile, with Restart.
+              const handle = sdkId ?? w.terminalId
+              if (handle && !streamingWorktrees.has(w.worktree)) {
                 return (
                   <div key={w.worktree} className={SEAT_CLASS} style={WORKER_SEAT_STYLE}>
                     <SwarmWorkerSeat
                       branch={w.branch}
                       taskTitle={w.taskTitle ?? w.note ?? ''}
-                      status={statusOfPty(sdkId)}
-                      question={questionBySdk.get(sdkId) ?? null}
+                      status={statusOfPty(handle)}
+                      question={sdkId ? (questionBySdk.get(sdkId) ?? null) : null}
                       busy={!isEngine ? busyWorktrees.has(w.worktree) : false}
                       retainedReason={!isEngine ? retainedByWorktree.get(w.worktree) : undefined}
-                      onOpenLog={() => setOpenWorktree(w.worktree)}
+                      onOpenLog={sdkId && workerSlotFree ? () => setOpenWorktree(w.worktree) : undefined}
+                      openLogDisabledReason={t('projectPanel.swarm.bar.streamLimit')}
                       onTerminate={!isEngine ? () => void terminate(w) : undefined}
                       onForceRemove={!isEngine ? () => void terminate(w, { force: true }) : undefined}
                       onRestart={!isEngine ? () => void restartWorker(w) : undefined}
@@ -1530,7 +1690,9 @@ export const SwarmModule = ({ project }: { project: ProjectMeta }) => {
           </>
         )}
       </div>
+      </>
       )}
+      </>)}
     </div>
   )
 }

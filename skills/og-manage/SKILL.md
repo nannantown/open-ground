@@ -1,6 +1,6 @@
 ---
 name: og-manage
-description: Commander for OPEN GROUND's embedded terminal, launched by Swarm tab's "司令官" button (POST /api/swarm/manager). Drives worker launch/monitor/integrate/report via OPEN GROUND HTTP API + git only, no external multiplexers. Never writes feature code. Owner vocabulary: 状況(status), 注文(dispatch), マージ(merge), 自動運転(autopilot), 掃除(cleanup). Distinct from ~/.claude/skills/manage — inside OPEN GROUND always use this one.
+description: Commander for OPEN GROUND's embedded terminal, launched by the Swarm bar's "司令官" button (POST /api/swarm/manager). Drives worker launch/monitor/integrate/report via OPEN GROUND HTTP API + git only, no external multiplexers. Never writes feature code. Owner vocabulary: 状況(status), 注文(dispatch), マージ(merge), 自動運転(autopilot), 掃除(cleanup). Distinct from ~/.claude/skills/manage — inside OPEN GROUND always use this one.
 ---
 <!-- managed-by: openground — auto-deployed at launch, hand edits overwritten. Canonical: skills/og-manage/SKILL.md in the OPEN GROUND repo. Remove marker to opt out of auto-updates. -->
 
@@ -175,7 +175,7 @@ The president still tells the owner "answer delivered". So **at the start of "�
 ### "状況" / status
 0. Read the owner's answers to your questions (§Answers come back only when you look).
 1. Read `GET /api/swarm/workers` + `GET /api/swarm/orchestrator`.
-2. `git fetch origin main`, then one line/worker: **branch, task(note), phase, dirty, behind/ahead, flags**. dirty via `git -C <worktree> status --porcelain | wc -l`; ahead/behind via `git rev-list --left-right --count origin/main...<branch>`. Flags: ★mergeable=`ready:true`(or done)+dirty=0. ⚠maybe-stuck=heartbeat stale >30min or `blocked:true` (**read `blockers`**, may be a question — answer, don't just nudge; plain silence → nudge first, else check Swarm tab or git log/dirty). ⚠dirty=uncommitted work. ⚠needs-rebase=behind>0 (routine). ⚠conflict-risk=2+ `swarm/*` touch same files (`diff --name-only $(merge-base origin/main <br>)..<br>` overlap).
+2. `git fetch origin main`, then one line/worker: **branch, task(note), phase, dirty, behind/ahead, flags**. dirty via `git -C <worktree> status --porcelain | wc -l`; ahead/behind via `git rev-list --left-right --count origin/main...<branch>`. Flags: ★mergeable=`ready:true`(or done)+dirty=0. ⚠maybe-stuck=heartbeat stale >30min or `blocked:true` (**read `blockers`**, may be a question — answer, don't just nudge; plain silence → nudge first, else check the Swarm bar or git log/dirty). ⚠dirty=uncommitted work. ⚠needs-rebase=behind>0 (routine). ⚠conflict-risk=2+ `swarm/*` touch same files (`diff --name-only $(merge-base origin/main <br>)..<br>` overlap).
 3. One engine line: `running` (also autowakes commander on ready), `reviews[]` (ff/rebase/conflict), `anomalies[]` (orphan-doing, worker-stale, no-heartbeat, move-stuck, rework-exhausted), `parkUntil`.
 4. Reconcile Board column mismatches once if readable (§Board).
 5. Close with **"what to do now"**, 1–3 lines.
@@ -318,4 +318,4 @@ Everything else. **Read-only** (never touch a worker's session or write code); g
 
 ## Owner reminder
 
-Swarm tab: "補給官" turns requests into cards → tell commander "注文" or "自動運転". Day-to-day, only "状況" and "マージ" needed. Approval-gated tasks: "hold で".
+Swarm bar: "補給官" turns requests into cards → tell commander "注文" or "自動運転". Day-to-day, only "状況" and "マージ" needed. Approval-gated tasks: "hold で".

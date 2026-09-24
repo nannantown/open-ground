@@ -416,54 +416,6 @@ describe('honesty — activity the engine cannot tie to a card', () => {
     expect(stripHint(container)).toBe('swarm/w1 — wiring the reducer')
   })
 
-  it('the roll-up NEVER prints a waiting count it did not read (「判断待ち0」)', async () => {
-    // The defect the reviewer found: the roll-up was one three-slot template,
-    // so an unread inbox rendered `waiting: 0` — the very reassurance the card
-    // layer refuses to make. The card badge and the honesty line were correct;
-    // the roll-up was the only thing on the Board speaking about escalations,
-    // and it said you were clear.
-    fullSwarmState()
-    h.escalations = [escRec({ taskId: 'todo1' })]
-    h.escOk = false
-    h.escStatus = 404
-    const { container } = renderBoard(everyLane(), true)
-    await settle()
-    const text = container.textContent ?? ''
-    // The clause is OMITTED, not zeroed — in either rendering of the mock t().
-    expect(text).not.toContain('board.supply.rollupWaiting')
-    expect(text).not.toMatch(/判断待ち0|0 waiting on you/)
-    // …while the clauses we DID read are still said.
-    expect(text).toContain('board.supply.rollupWorking')
-  })
-
-  it('the roll-up drops the engine clauses too when no lap has landed', async () => {
-    // Same rule, other poll: `0 working` beside a running worker is the same
-    // kind of lie, just from the orchestrator side.
-    fullSwarmState()
-    h.orchOk = false
-    h.orchStatus = 500
-    const { container } = renderBoard(everyLane(), true)
-    await settle()
-    const text = container.textContent ?? ''
-    expect(text).not.toContain('board.supply.rollupWorking')
-    expect(text).not.toContain('board.supply.rollupReview')
-  })
-
-  it('the fleet list says NOT CHECKED, never "no workers", before a lap lands', async () => {
-    // "Not told" and "none" are different facts. Rendering the second while a
-    // worker is mid-task is a flat contradiction of the card strips beside it.
-    fullSwarmState()
-    // The fleet list only exists while the dock is expanded.
-    localStorage.setItem('openground.board.supplydock.p1', JSON.stringify({ open: true, h: 300 }))
-    h.orchOk = false
-    h.orchStatus = 500
-    const { container } = renderBoard(everyLane(), true)
-    await settle()
-    const text = container.textContent ?? ''
-    expect(text).not.toContain('board.supply.noWorkers')
-    expect(text).toContain('board.supply.workersUnknown')
-  })
-
   it('a 403 escalations route clears an already-shown badge (standing auth state)', async () => {
     h.escalations = [escRec({ taskId: 'todo1' })]
     const { getByText, queryByText } = renderBoard(everyLane(), true)

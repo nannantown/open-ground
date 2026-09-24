@@ -911,12 +911,7 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   },
   'src/components/canvas/modules/useSupplyDesk.ts': {
     tier: 'pty-only-by-design',
-    why: "The ONE supply desk's state + launch/stop/restart, shared by the Swarm tab and the Board's front-desk seat (two surfaces, one desk, one stored record). The supply desk is deliberately PTY-only — it is the outside phone line that must survive the commander moving to SDK, where remote control disappears — so terminalId IS its whole address here. It reaches no worker at all.",
-    ptyFns: [],
-  },
-  'src/components/canvas/modules/BoardSupplyDock.tsx': {
-    tier: 'pty-only-by-design',
-    why: "The Board's front-desk seat. The desk it attaches to is the SUPPLY desk, which is deliberately PTY-only (docs/commander/00-INDEX.md: it is the outside phone line that must survive the commander moving to SDK). Its WORKER monitor beside it never touches a handle directly — it addresses every worker through engineWorkerKey, which is total over both runtimes.",
+    why: "The ONE supply desk's state + launch/stop/restart, used by the Swarm bottom bar (the Board's front-desk seat was deleted 2026-09-24; one surface, one desk, one stored record). The supply desk is deliberately PTY-only — it is the outside phone line that must survive the commander moving to SDK, where remote control disappears — so terminalId IS its whole address here. It reaches no worker at all.",
     ptyFns: [],
   },
   'src/components/canvas/modules/SdkWorkerPane.tsx': {
@@ -1620,11 +1615,6 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
     count: 2,
     why: 'The node-pty pool indexing ITS OWN sessions map. The id is the handle it minted; an SDK session is not in this map and never will be.',
   },
-  'src/components/canvas/modules/BoardSupplyDock.tsx::map-keyed': {
-    tier: 'pty-only-by-design',
-    count: 3,
-    why: "The dock's own exitedIds set and the live-beacon map, keyed by the SUPPLY desk's terminalId. That desk is PTY-only by design, so there is no SDK handle this could ever have to carry; the fleet monitor in the same file addresses WORKERS through engineWorkerKey instead, which is total over both runtimes.",
-  },
   'src/components/canvas/modules/useSupplyDesk.ts::map-keyed': {
     tier: 'pty-only-by-design',
     count: 1,
@@ -1669,8 +1659,8 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
   },
   'src/components/canvas/modules/BoardModule.tsx::compared': {
     tier: 'runtime-dispatched',
-    count: 2,
-    why: "The board's re-render suppressor, comparing BOTH handles. With terminalId alone it answered `'' === ''` for every SDK worker, so a card whose worker was replaced by a new SDK session kept the stale record and the drawer addressed a dead id. 0815 (+1): the same suppressor for the published SUPPLY desk handle — that desk is PTY-only, and the comparison is on `handleId`, the runtime-neutral name the wire uses, with `runtime` compared beside it.",
+    count: 1,
+    why: "The board's re-render suppressor, comparing BOTH handles. With terminalId alone it answered `'' === ''` for every SDK worker, so a card whose worker was replaced by a new SDK session kept the stale record and the drawer addressed a dead id. (The 0815 +1 — the all-workers / supply-desk suppressor that fed the Board president drawer — left with that drawer on 2026-09-24.)",
   },
   'src/components/canvas/modules/BoardModule.tsx::map-keyed': {
     tier: 'display-only',

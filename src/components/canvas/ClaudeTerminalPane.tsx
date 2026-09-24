@@ -11,6 +11,7 @@ import {
   type SseInput,
 } from '@/lib/sseReconnect'
 import { useT } from '@/i18n/I18nContext'
+import { holdStream, useStreamOwner } from '@/lib/streamBudget'
 
 export interface TerminalInfo {
   id: string
@@ -66,6 +67,8 @@ const ACK_THRESHOLD = 65536
 //   - hides itself / signals exit when the PTY closes
 export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrome = true }: Props) => {
   const { t } = useT()
+  // Which side of the window this stream counts against (streamBudget.ts).
+  const streamOwnerRef = useRef(useStreamOwner())
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<any>(null)
   const fitRef = useRef<any>(null)
@@ -131,6 +134,8 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
     let fit: any = null
     let resizeObs: ResizeObserver | null = null
     let es: EventSource | null = null
+    // The connection slot this pane's stream holds (streamBudget.ts).
+    let releaseStream: (() => void) | null = null
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     // SSE connection state machine (pure logic in sseReconnect.ts). The pane owns
     // the side effects the reducer asks for: the two timers, es.close(), and
@@ -160,7 +165,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
         } else if (eff === 'clear-escalate') {
           if (escalateTimer) { clearTimeout(escalateTimer); escalateTimer = null }
         } else if (eff === 'close-stream') {
-          try { es?.close() } catch {}
+          try { es?.close() } catch {}; releaseStream?.()
         }
       }
     }
@@ -269,6 +274,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
       // exactly the pre-flow-control behavior.
       let streamId: string | null = null
       let ackPending = 0
+      releaseStream = holdStream(streamOwnerRef.current)
       es = new EventSource(`/api/terminal/${terminalId}/stream`)
       esRef.current = es
       es.addEventListener('init', (ev: MessageEvent) => {
@@ -331,7 +337,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
           setExited(inf)
           onExitRef.current?.(inf)
         } catch {}
-        try { es?.close() } catch {}
+        try { es?.close() } catch {}; releaseStream?.()
       })
       es.addEventListener('error', (ev: Event) => {
         // A server NAMED error carries data (terminal: the PTY is gone); a plain
@@ -461,7 +467,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
       if (debounceTimer) clearTimeout(debounceTimer)
       if (escalateTimer) clearTimeout(escalateTimer)
       try { resizeObs?.disconnect() } catch {}
-      try { es?.close() } catch {}
+      try { es?.close() } catch {}; releaseStream?.()
       try { (term as any)?._ogDropCleanup?.() } catch {}
       try { (term as any)?._ogContextCleanup?.() } catch {}
       try { (term as any)?._ogFocusCleanup?.() } catch {}

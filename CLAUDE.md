@@ -287,6 +287,20 @@ older docs are historical, not operating instructions.
   project as a card, the core experience is *overview*, and Claude
   terminals launch from here. Card position carries no system meaning
   (free workspace).
+- **Swarm is a bottom bar, not a tab** (owner decision 2026-09-24):
+  `src/components/canvas/SwarmBottomBar.tsx`, rendered by `ProjectPanel`
+  under EVERY Layer 2 tab, folded to one line by default (status · workers ·
+  questions waiting on the owner · Start/Stop) and opening upward into the
+  seats (president · manager · workers — `SwarmModule`); its height is
+  dragged and saved per project. It replaced both the Swarm tab and the
+  Board's president drawer (`BoardSupplyDock`, deleted). Hidden unless the
+  swarm experiment is open (`isSwarmVisible` in `moduleRegistry.tsx`) —
+  owner via `experiments.swarm`, OR the login-free `swarmLocalOwner`
+  unlock, OR since 0.11.94 a PUBLIC macOS opt-in `Settings.swarmOptIn` any
+  user can turn on in Settings behind a "still being tuned" warning;
+  Windows stays owner-only until the guard has a real-Windows pass —
+  `isSwarmOptInEnabled`/`isSwarmOptInAvailable` in swarmGate.ts. A stale
+  `'swarm'` in a saved tab order / last-open view is dropped harmlessly.
 - **Layer 2 — per-project tabs**: **Board / Terminal** for everyone, plus
   **Canvas / Research** for the app owner only (see
   `src/components/canvas/moduleRegistry.tsx` — the single source of truth
@@ -294,14 +308,8 @@ older docs are historical, not operating instructions.
   `docs/PUBLIC_PRODUCT_SCOPE.md` (owner decision 2026-09-21) is the canon
   for what is public vs owner-only — public tabs have a fixed order, tab
   add/hide/reorder and Skills management are owner-view controls, and the
-  owner can preview the public view without changing role or data), plus a
-  **hidden-by-default `Swarm` tab** (gated by
-  `experiment: 'swarm'` — owner via `experiments.swarm`, OR the login-free
-  `swarmLocalOwner` unlock, OR since 0.11.94 a PUBLIC macOS opt-in
-  `Settings.swarmOptIn` any user can turn on in Settings behind a "still
-  being tuned" warning; Windows stays owner-only until the guard has a
-  real-Windows pass — `isSwarmOptInEnabled`/`isSwarmOptInAvailable` in
-  swarmGate.ts. See the Swarm section) and any
+  owner can preview the public view without changing role or data), plus
+  any
   **locally installed custom tabs** (`server/routes/customModules.ts`,
   `~/.openground/custom-modules/` — owner view; the marketplace /
   submission / review distribution was removed 2026-09-20, local tabs and

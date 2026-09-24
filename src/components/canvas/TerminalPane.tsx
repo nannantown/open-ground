@@ -20,6 +20,7 @@ import {
   type SseInput,
 } from '@/lib/sseReconnect'
 import { useT } from '@/i18n/I18nContext'
+import { holdStream, useStreamOwner } from '@/lib/streamBudget'
 export interface TerminalPaneHandle {
   /** Kill the current PTY and start a fresh shell session. */
   restart: () => void
@@ -93,6 +94,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   ref,
 ) {
   const { t } = useT()
+  // Which side of the window this stream counts against (streamBudget.ts).
+  const streamOwnerRef = useRef(useStreamOwner())
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<any>(null)
   const fitRef = useRef<any>(null)
@@ -174,6 +177,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     let fit: any = null
     let resizeObs: ResizeObserver | null = null
     let es: EventSource | null = null
+    // The connection slot this pane's stream holds (streamBudget.ts).
+    let releaseStream: (() => void) | null = null
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     // SSE connection state machine (pure logic in sseReconnect.ts). The pane owns
     // the side effects the reducer asks for: the two timers, es.close(), and
@@ -203,7 +208,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
         } else if (eff === 'clear-escalate') {
           if (escalateTimer) { clearTimeout(escalateTimer); escalateTimer = null }
         } else if (eff === 'close-stream') {
-          try { es?.close() } catch {}
+          try { es?.close() } catch {}; releaseStream?.()
         }
       }
     }
@@ -310,6 +315,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       // exactly the pre-flow-control behavior.
       let streamId: string | null = null
       let ackPending = 0
+      releaseStream = holdStream(streamOwnerRef.current)
       es = new EventSource(`/api/terminal/${session.id}/stream`)
       esRef.current = es
       es.addEventListener('init', (ev: MessageEvent) => {
@@ -371,7 +377,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
           const inf = JSON.parse(ev.data) as TerminalInfo
           setExited(inf)
         } catch {}
-        try { es?.close() } catch {}
+        try { es?.close() } catch {}; releaseStream?.()
         // The session is dead — the header must not keep advertising what WAS
         // running, so drop its title.
         onTitleRef.current?.(null)
@@ -572,7 +578,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       if (debounceTimer) clearTimeout(debounceTimer)
       if (escalateTimer) clearTimeout(escalateTimer)
       try { resizeObs?.disconnect() } catch {}
-      try { es?.close() } catch {}
+      try { es?.close() } catch {}; releaseStream?.()
       try { (term as any)?._ogDropCleanup?.() } catch {}
       try { (term as any)?._ogContextCleanup?.() } catch {}
       try { (term as any)?._ogFocusCleanup?.() } catch {}

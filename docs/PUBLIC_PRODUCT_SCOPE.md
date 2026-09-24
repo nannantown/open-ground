@@ -8,7 +8,8 @@ is an explicit product decision after verification.
 
 - Public: Ground/project management, Board, Terminal, existing safety controls,
   settings, usage, stop/recovery and backups.
-- Public project tabs have a fixed order: Board, Terminal, then optional Swarm.
+- Public project tabs have a fixed order: Board, Terminal. Optional Swarm is
+  not a tab (2026-09-24): it is the folded bar along the bottom of every tab.
   Adding, hiding and reordering tabs are owner-view controls only. Generate
   description remains available to everyone. Feedback opens from Ground only;
   Settings retains the owner's incoming-feedback inbox, not a duplicate composer.

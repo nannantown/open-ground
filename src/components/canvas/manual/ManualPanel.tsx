@@ -302,11 +302,15 @@ function LayersDiagram({ lang }: { lang: 'en' | 'ja' }): JSX.Element {
       <div>
         <div className="label-cap mb-2 text-ink-faint">{lang === 'ja' ? 'レイヤー2 · プロジェクト' : 'Layer 2 · the project'}</div>
         <div className="flex flex-wrap gap-2">
-          {['Board', 'Terminal', 'Swarm'].map((t) => (
+          {['Board', 'Terminal'].map((t) => (
             <div key={t} className="rounded-[2px] border border-line bg-bg-card px-3 py-1.5 text-ui text-ink shadow-card">
               {t}
             </div>
           ))}
+        </div>
+        {/* Swarm is a bar under every tab, not a tab (2026-09-24). */}
+        <div className="mt-2 rounded-[2px] border border-line bg-bg-card px-3 py-1.5 text-meta text-ink-muted shadow-card">
+          {lang === 'ja' ? 'Swarm — どのタブでも一番下のバー' : 'Swarm — a bar along the bottom of every tab'}
         </div>
       </div>
     </div>

@@ -29,6 +29,7 @@ export const SwarmWorkerSeat = ({
   busy = false,
   retainedReason,
   onOpenLog,
+  openLogDisabledReason,
   onTerminate,
   onForceRemove,
   onRestart,
@@ -40,8 +41,10 @@ export const SwarmWorkerSeat = ({
   question: string | null
   busy?: boolean
   retainedReason?: string
-  /** Unfold this seat into the live transcript. */
-  onOpenLog: () => void
+  /** Unfold this seat into the live transcript. Absent ⇒ the button is shown
+   *  disabled with `openLogDisabledReason` (the stream budget is spent). */
+  onOpenLog?: () => void
+  openLogDisabledReason?: string
   /** Manual workers only — the engine owns an engine worker's lifecycle. */
   onTerminate?: () => void
   onForceRemove?: () => void
@@ -116,7 +119,13 @@ export const SwarmWorkerSeat = ({
           </div>
         ) : null}
         <div className="mt-auto flex flex-wrap items-center gap-2">
-          <button type="button" onClick={onOpenLog} className={SMALL_BTN}>
+          <button
+            type="button"
+            onClick={onOpenLog}
+            disabled={!onOpenLog}
+            title={onOpenLog ? undefined : openLogDisabledReason}
+            className={SMALL_BTN}
+          >
             <ScrollText size={11} strokeWidth={2} aria-hidden />
             {t('projectPanel.swarm.seat.openLog')}
           </button>
