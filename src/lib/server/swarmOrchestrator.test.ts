@@ -49,6 +49,8 @@ import {
   detectAnomalies,
   fireFatalNotifications,
   BOOT_RESUME_GRACE_MS,
+  UNATTENDED_DOING_ALARM_MS,
+  deskAttendedWith,
   pruneStuckMoves,
   pruneReworks,
   recoveryColumn,
@@ -106,7 +108,7 @@ import {
 import type { ManagerRuntimeKind } from './swarmManagerRuntime'
 import { matchesRateLimit, normalizeScreen } from './swarmRateLimitText'
 import { renderSdkTail, sdkRecentOutputHead, workerKey } from './workerRuntime'
-import type { SdkEvent } from './sdkEvents'
+import type { SdkEvent, SdkSessionStatus } from './sdkEvents'
 import { canonicalize } from './canonicalize'
 import {
   spawnSdkSession,
@@ -8649,6 +8651,7 @@ describe('detectAnomalies — state inconsistency detection', () => {
     isAlive: (w) => (alive ? alive.has(w.terminalId!) : true),
     worktreeExists: async (_p, branch) => treesPresent.has(branch),
     deskOccupies: async (_p, branch) => !(unoccupied?.has(branch) ?? false),
+    deskAttended: async (_p, branch) => !(unoccupied?.has(branch) ?? false),
   })
 
   const NOW = Date.parse('2026-06-24T12:00:00Z')
@@ -8765,7 +8768,12 @@ describe('detectAnomalies — state inconsistency detection', () => {
     const tasks = [card('z', { boardColumn: 'doing', branch: 'swarm/z' })]
     // Worktree PRESENT (so orphan-doing stays silent — that arm only fires when
     // the tree is gone) and the worker dead: exactly the blind spot.
-    const out = await detectAnomalies(engine, tasks, depsWith(new Set(['swarm/z']), new Set()), NOW)
+    // Nobody left in the tree either (the dead worker's desk went with it), for
+    // longer than the alarm window.
+    const deps = depsWith(new Set(['swarm/z']), new Set(), new Set(['swarm/z']))
+    // First sighting: not yet — the row waits the same window as the bell.
+    expect(await detectAnomalies(engine, tasks, deps, NOW - UNATTENDED_DOING_ALARM_MS)).toEqual([])
+    const out = await detectAnomalies(engine, tasks, deps, NOW)
     expect(out).toEqual([{ kind: 'all-workers-down', ref: 'engine', attempts: 1 }])
   })
 
@@ -8801,11 +8809,12 @@ describe('detectAnomalies — state inconsistency detection', () => {
     })
     engine.teardownRetries = new Map([['t', { tries: 1, reason: 'stall' as const }]]) // refused teardown, retrying
     const tasks = [card('t', { boardColumn: 'doing', branch: 'swarm/t' })]
-    const out = await detectAnomalies(engine, tasks, depsWith(new Set(['swarm/t']), new Set()), NOW)
+    const empty = depsWith(new Set(['swarm/t']), new Set(), new Set(['swarm/t'])) // dead + nobody in the tree
+    const out = await detectAnomalies(engine, tasks, empty, NOW)
     expect(out).toEqual([])
     // …and the moment the teardown finishes, the real condition is reported again.
     engine.teardownRetries?.clear()
-    const after = await detectAnomalies(engine, tasks, depsWith(new Set(['swarm/t']), new Set()), NOW)
+    const after = await detectAnomalies(engine, tasks, empty, NOW + UNATTENDED_DOING_ALARM_MS)
     expect(after.map((a) => a.kind)).toEqual(['all-workers-down'])
   })
 
@@ -8819,6 +8828,161 @@ describe('detectAnomalies — state inconsistency detection', () => {
     // rule the arm above follows.
     const noRoster = newEngine({ running: true, workers: [] })
     expect(await detectAnomalies(noRoster, tasks, depsWith(new Set(['swarm/s'])), NOW)).toEqual([])
+  })
+
+  // 2026-09-24, second false 「全員止まった」: 07:38:45 auto-update restart → the card's
+  // worker died with the old process → 07:41 the commander stood up a replacement by
+  // hand (POST /api/swarm/worker, never in engine.workers) → the boot grace ran out and
+  // the bell rang while that replacement was mid-fix. Drives the two stages the pass
+  // runs back to back (detectAnomalies derives who is on each card, then
+  // fireFatalNotifications rings) on a clock, like runEnginePass does.
+  describe('all-workers-down after an update restart — who is still on the card', () => {
+    const BOOT = NOW
+    const bells = (
+      engine: ProjectEngine,
+      tasks: ProjectTask[],
+      deps: OrchestratorDeps & AnomalyDeps,
+      at: number,
+    ): Promise<string[]> =>
+      detectAnomalies(engine, tasks, deps, at).then(() => {
+        const fired: string[] = []
+        fireFatalNotifications(engine, tasks, { ...deps, notify: (n) => fired.push(n.event) }, at)
+        return fired
+      })
+    const restarted = () =>
+      newEngine({ running: true, workers: [], resumeGraceUntil: BOOT + BOOT_RESUME_GRACE_MS })
+    const tasks = [card('fix', { boardColumn: 'doing', branch: 'swarm/fix' })]
+    const tree = new Set(['swarm/fix'])
+
+    it('the observed flow: a replacement the commander started (not engine-counted) keeps it quiet past the grace', async () => {
+      const engine = restarted()
+      const nobody = depsWith(tree, new Set(), new Set(['swarm/fix']))
+      const replacement = depsWith(tree, new Set()) // a live desk sits in the card's tree
+      expect(await bells(engine, tasks, nobody, BOOT + 10_000)).toEqual([]) // in grace
+      // 07:41 — the commander's replacement is at work in the tree; grace then runs out.
+      for (const at of [BOOT + 150_000, BOOT + BOOT_RESUME_GRACE_MS + 1, BOOT + 10 * 60_000]) {
+        expect(await bells(engine, tasks, replacement, at)).toEqual([])
+      }
+      expect(engine.notified.has('all-workers-down')).toBe(false) // overseer S2 stays quiet too
+      expect(engine.anomalies.some((a) => a.kind === 'all-workers-down')).toBe(false)
+    })
+
+    it('GUARD: nobody on the card after the grace — the alarm still rings, once the card has sat unattended', async () => {
+      const engine = restarted()
+      const nobody = depsWith(tree, new Set(), new Set(['swarm/fix']))
+      const t0 = BOOT + BOOT_RESUME_GRACE_MS + 1
+      expect(await bells(engine, tasks, nobody, t0)).toEqual([]) // just noticed — a spawn may be registering
+      expect(await bells(engine, tasks, nobody, t0 + UNATTENDED_DOING_ALARM_MS)).toEqual(['all-workers-down'])
+      expect(engine.notified.has('all-workers-down')).toBe(true)
+    })
+
+    it('GUARD: a desk that only flickered (manual claim before its session registers) restarts the clock, not skips the alarm', async () => {
+      const engine = newEngine({ running: true, workers: [] })
+      const nobody = depsWith(tree, new Set(), new Set(['swarm/fix']))
+      const someone = depsWith(tree, new Set())
+      expect(await bells(engine, tasks, nobody, BOOT)).toEqual([])
+      expect(await bells(engine, tasks, someone, BOOT + 20_000)).toEqual([]) // came up
+      expect(await bells(engine, tasks, nobody, BOOT + 40_000)).toEqual([]) // left: clock restarts
+      expect(await bells(engine, tasks, nobody, BOOT + 40_000 + UNATTENDED_DOING_ALARM_MS)).toEqual([
+        'all-workers-down',
+      ])
+    })
+
+    it('GUARD: a desk probe that throws counts as nobody there (never mutes the alarm)', async () => {
+      const engine = newEngine({ running: true, workers: [] })
+      const broken = {
+        ...depsWith(tree, new Set()),
+        deskAttended: async () => {
+          throw new Error('probe down')
+        },
+      }
+      await bells(engine, tasks, broken, BOOT)
+      expect(await bells(engine, tasks, broken, BOOT + UNATTENDED_DOING_ALARM_MS)).toEqual(['all-workers-down'])
+    })
+
+    it('GUARD: the PRODUCTION probe fails toward "nobody there" for the alarm (the row probe keeps its own direction)', async () => {
+      // Review 2026-09-24: the row's deskOccupies swallows failures to "occupied";
+      // reusing it here would have let a failing probe mute the alarm. An
+      // unregistered project makes the shared probe fail for real.
+      const d = defaultDeps() as OrchestratorDeps & AnomalyDeps
+      expect(await d.deskAttended!('/no/such/registered/project', 'swarm/fix')).toBe(false)
+      expect(await d.deskOccupies!('/no/such/registered/project', 'swarm/fix')).toBe(true)
+    })
+
+    it('GUARD: an orphan-process hold keeps the alarm quiet only for a while — a wedged orphan cannot mute it forever', async () => {
+      const engine = newEngine({ running: true, workers: [] })
+      engine.unownedOrphanHold = new Map([['fix', { since: BOOT }]])
+      const nobody = depsWith(tree, new Set(), new Set(['swarm/fix']))
+      expect(await bells(engine, tasks, nobody, BOOT + 10 * 60_000)).toEqual([]) // orphan still editing
+      const capped = BOOT + STALE_HEARTBEAT_MS
+      expect(await bells(engine, tasks, nobody, capped)).toEqual([]) // clock starts now
+      expect(await bells(engine, tasks, nobody, capped + UNATTENDED_DOING_ALARM_MS)).toEqual(['all-workers-down'])
+    })
+
+    // Commander review 2026-09-24 (MUST-FIX): "a desk is alive in the tree" is not
+    // "somebody continues the card". An SDK session is not reaped between turns, so
+    // a hand-started replacement that ended its turn without delivering sits
+    // 'waiting' forever; a forgotten shell never finishes. Driven through the REAL
+    // predicate (deskAttendedWith → deskRecentlyActiveIn) with injected pools.
+    describe('an idle desk does not attend the card forever', () => {
+      const WT = '/wt/fix'
+      let clock = BOOT
+      type Sdk = { cwd: string; status: SdkSessionStatus; lastEventAt: number; reaped?: boolean }
+      const withDesks = (sdks: Sdk[], ptys: Array<{ cwd: string; lastOutputAt: number }> = []) => ({
+        ...depsWith(tree, new Set()),
+        deskAttended: deskAttendedWith({
+          dirOf: async () => WT,
+          canon: async (p) => p,
+          now: () => clock,
+          sdks: () => sdks,
+          ptys: () => ptys,
+        }),
+      })
+      const ringsAfterIdle = async (deps: OrchestratorDeps & AnomalyDeps): Promise<string[]> => {
+        const engine = restarted()
+        clock = BOOT + STALE_HEARTBEAT_MS // grace long over; the desk has been silent 30 min
+        await bells(engine, tasks, deps, clock)
+        clock += UNATTENDED_DOING_ALARM_MS
+        return bells(engine, tasks, deps, clock)
+      }
+
+      it('GUARD: an SDK replacement parked "waiting" past STALE_HEARTBEAT_MS ⇒ the alarm fires', async () => {
+        const deps = withDesks([{ cwd: WT, status: 'waiting', lastEventAt: BOOT }])
+        expect(await ringsAfterIdle(deps)).toEqual(['all-workers-down'])
+      })
+
+      it('GUARD: a shell left open in the tree, silent past STALE_HEARTBEAT_MS ⇒ the alarm fires', async () => {
+        const deps = withDesks([], [{ cwd: WT, lastOutputAt: BOOT }])
+        expect(await ringsAfterIdle(deps)).toEqual(['all-workers-down'])
+      })
+
+      it('GUARD: exited / reaped sessions never attend, however recent', async () => {
+        const deps = withDesks([
+          { cwd: WT, status: 'exited', lastEventAt: BOOT + STALE_HEARTBEAT_MS },
+          { cwd: WT, status: 'working', lastEventAt: BOOT, reaped: true },
+        ])
+        expect(await ringsAfterIdle(deps)).toEqual(['all-workers-down'])
+      })
+
+      it('observed flow through the real predicate: a replacement mid-turn, or waiting but recent, keeps it quiet', async () => {
+        const working = withDesks([{ cwd: WT, status: 'working', lastEventAt: BOOT }])
+        expect(await ringsAfterIdle(working)).toEqual([])
+        const justAnswered = withDesks([{ cwd: WT, status: 'waiting', lastEventAt: BOOT + STALE_HEARTBEAT_MS - 60_000 }])
+        expect(await ringsAfterIdle(justAnswered)).toEqual([])
+        const typing = withDesks([], [{ cwd: WT, lastOutputAt: BOOT + STALE_HEARTBEAT_MS - 60_000 }])
+        expect(await ringsAfterIdle(typing)).toEqual([])
+      })
+    })
+
+    it('a stopped engine derives no unattended clock (time OFF is not time unattended)', async () => {
+      const engine = newEngine({ running: true, workers: [] })
+      const nobody = depsWith(tree, new Set(), new Set(['swarm/fix']))
+      await bells(engine, tasks, nobody, BOOT)
+      expect(engine.unattendedDoingSince?.has('fix')).toBe(true)
+      engine.running = false
+      await bells(engine, tasks, nobody, BOOT + 1_000) // a stopped engine derives nothing
+      expect(engine.unattendedDoingSince?.size ?? 0).toBe(0)
+    })
   })
 
   it('flags manager-unrevivable for as long as the commander cannot be raised', async () => {

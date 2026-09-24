@@ -768,6 +768,11 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       // manual worker is never in engine.workers, so "no counted worker" alone
       // describes a healthy one just as well as a stranded one.
       'liveDeskOccupies',
+      // 0924: the all-workers-down alarm asks BOTH pools whether a desk in a doing
+      // card's worktree is still MOVING it (SDK mid-turn / recent event, PTY recent
+      // output) — a manual replacement worker is never in engine.workers, and an
+      // idle-but-alive desk must not keep the alarm muted forever.
+      'deskRecentlyActiveIn',
       // 0901: collectUnownedDoing's default desk probe classifies what lives at
       // an unowned doing-card's worktree — a quota-parked SDK worker is the one
       // live shape the sweep may reclaim, and telling it apart from a working

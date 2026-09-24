@@ -106,6 +106,50 @@ export const liveDeskOccupies = async (
   return isDirOccupied(await canonicalLiveDeskCwds(opts), await canon(dir))
 }
 
+/** Is a desk in `dir` still MOVING the work — not merely alive?
+ *
+ *  {@link liveDeskOccupies} answers "is a process there?", which is right for a
+ *  spawn or a cleanup (never trample a live process) and wrong for "is somebody
+ *  continuing this card?": an SDK session is not reaped between turns, so a
+ *  worker that ended its turn without delivering sits 'waiting' forever, and a
+ *  forgotten zsh in the tree never finishes. Counting those as attending muted
+ *  the all-workers-down alarm for good (commander review, 2026-09-24).
+ *
+ *  Attending = an SDK session mid-turn ('working' / 'starting'), or any live desk
+ *  whose last event (SDK) / last painted byte (PTY) is younger than `withinMs`.
+ *  'quota-parked' and 'waiting' count only while recent: parked on a usage wall
+ *  is not progress, and the unowned-doing sweep reclaims an unowned parked desk
+ *  on its own. 'exited' / 'failed' never count, reaped or not. Sources are
+ *  injectable so the rule is testable without a pool. */
+export const deskRecentlyActiveIn = async (
+  dir: string,
+  now: number,
+  withinMs: number,
+  src: {
+    ptys?: () => ReadonlyArray<{ cwd: string; lastOutputAt: number }>
+    sdks?: () => ReadonlyArray<{ cwd: string; status: SdkSessionStatus; lastEventAt: number; reaped?: boolean }>
+    canon?: (p: string) => Promise<string>
+  } = {},
+): Promise<boolean> => {
+  const canon = src.canon ?? canonicalize
+  const recent = (at: number): boolean => now - at < withinMs
+  const cwds = [
+    ...(src.ptys ?? listPtySafetyViews)()
+      .filter((p) => recent(p.lastOutputAt))
+      .map((p) => p.cwd),
+    ...(src.sdks ?? listSdkSessions)()
+      .filter(
+        (s) =>
+          isSdkSessionLive(s) &&
+          (s.status === 'working' ||
+            s.status === 'starting' ||
+            ((s.status === 'waiting' || s.status === 'quota-parked') && recent(s.lastEventAt))),
+      )
+      .map((s) => s.cwd),
+  ]
+  return isDirOccupied(await Promise.all(cwds.map((c) => canon(c))), await canon(dir))
+}
+
 /** An SDK session's lifecycle status, as the Ground's two-state beacon.
  *
  *  'starting' counts as WORKING: the session is spawned and its first turn is

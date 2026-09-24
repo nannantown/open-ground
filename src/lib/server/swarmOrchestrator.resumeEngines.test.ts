@@ -12,6 +12,7 @@ import {
   resumeStartedAtMs,
   MAX_EXEC_MS,
   TICK_MS,
+  BOOT_RESUME_GRACE_MS,
   __resetOrchestratorForTests,
   type OrchestratorDeps,
   type IntegrationDeps,
@@ -674,6 +675,40 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
     // after it has begun).
     const base = fetchAt.length
     await vi.waitFor(() => expect(fetchAt.length).toBeGreaterThan(base + 1), { timeout: 20_000, interval: 100 })
+    expect(bells).not.toContain('all-workers-down')
+  })
+
+  it('update restart: a replacement worker the commander started keeps it quiet AFTER the grace ran out (2026-09-24, second fix)', async () => {
+    // Observed 07:38:45 restart → 07:41 the commander stood up a new worker on the
+    // card by hand (not in engine.workers) → the bell rang once the 3-minute grace
+    // ended. Resume "3 minutes ago" so the grace is already over on the first pass;
+    // the card's tree holds a live desk. TEETH: count every doing card again in the
+    // notification arm and this goes RED.
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+    const fetchAt: number[] = []
+    const bells: string[] = []
+    const deps = liveDeps({
+      isAlive: () => false, // the engine counts nobody
+      deskOccupies: async () => true, // …but the commander's replacement is in the tree
+      deskAttended: async () => true,
+      unownedDeskState: async () => ({ kind: 'live' }),
+      notify: (n) => {
+        bells.push(n.event)
+      },
+      fetchTasks: async () => {
+        fetchAt.push(Date.now())
+        return [{ id: 'card-1', title: 'e2e fix', boardColumn: 'doing', branch: 'swarm/resume-1' }] as never
+      },
+    })
+    await resumeEngines(deps, {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([]),
+      now: Date.now() - BOOT_RESUME_GRACE_MS - 1,
+    })
+    await vi.waitFor(() => expect(fetchAt.some((t) => t - fetchAt[0] >= TICK_MS)).toBe(true), {
+      timeout: 20_000,
+      interval: 100,
+    })
     expect(bells).not.toContain('all-workers-down')
   })
 

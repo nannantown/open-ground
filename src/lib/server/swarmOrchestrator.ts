@@ -176,7 +176,7 @@ import {
 } from './swarmWorker'
 import { SdkWorkerUnavailableError } from './swarmWorkerSdk'
 import { centralWorktreesDir } from './paths'
-import { liveDeskOccupies } from './liveDesks'
+import { liveDeskOccupies, deskRecentlyActiveIn } from './liveDesks'
 import { probeOnline } from './swarmConnectivity'
 import { projectUUIDFromPath } from './projectDataPath'
 import { appendEngineJournalLine } from './engineJournal'
@@ -1864,6 +1864,15 @@ export interface ProjectEngine {
    *  + BOOT_RESUME_GRACE_MS, re-armed from adoption completion.
    *  In-memory only; absent ⇒ no grace. */
   resumeGraceUntil?: number
+  /** 'doing' swarm cards NOBODY is working right now → epoch ms since they have
+   *  been continuously so (no alive counted worker, no desk in the worktree still
+   *  moving it — see AnomalyDeps.deskAttended,
+   *  no orphan-process hold). Re-derived by {@link detectAnomalies} each pass while
+   *  the engine runs with zero live workers (empty otherwise); read by
+   *  fireFatalNotifications so `all-workers-down` names only cards left with no
+   *  one on them ({@link UNATTENDED_DOING_ALARM_MS}). In-memory only; absent ⇒
+   *  never derived ⇒ every doing swarm card counts (the pre-2026-09-24 rule). */
+  unattendedDoingSince?: Map<string, number>
   /** True while a pass is mid-flight — the re-entrancy guard that GUARANTEES no two
    *  passes ever overlap (twin-dispatch defense). The setTimeout chain already
    *  serializes the SCHEDULED passes, but a stop→start within a slow pass's await
@@ -3329,6 +3338,14 @@ export interface AnomalyDeps {
    *  human still sees the card in `doing`); crying wolf on a live worker is not.
    *  Default (defaultDeps): liveDeskOccupies over the branch's worktree. */
   deskOccupies?: (projectPath: string, branch: string) => Promise<boolean>
+  /** The `all-workers-down` alarm's question — narrower than deskOccupies: is a
+   *  desk there still MOVING the card (mid-turn, or active within
+   *  STALE_HEARTBEAT_MS)? An idle-but-alive desk must not mute the alarm forever.
+   *  It also fails the OTHER way: a probe that cannot tell answers false ("nobody
+   *  there") so a broken probe can only ring the alarm, never mute it (2026-09-24). OPTIONAL:
+   *  absent ⇒ nobody is ever seen on a card ⇒ the pre-2026-09-24 alarm.
+   *  Default (defaultDeps): defaultDeskAttended. */
+  deskAttended?: (projectPath: string, branch: string) => Promise<boolean>
   /** Push a FATAL event to the human (the escalation safety valve): persist an
    *  in-app notification (the Ground bell) AND raise an OS toast. Called by
    *  fireFatalNotifications for the cases the unmanned loop can't self-heal
@@ -4802,16 +4819,33 @@ const defaultReadHeartbeat = async (
  *  {@link defaultWorktreeExists} does, then ask BOTH desk pools whether anything
  *  is live in it. Any failure answers TRUE (occupied): see the dep's doc for why
  *  the unknown direction is "somebody is there". */
-const defaultDeskOccupies = async (projectPath: string, branch: string): Promise<boolean> => {
-  if (!branch) return true
-  try {
-    const uuid = await projectUUIDFromPath(projectPath)
-    const dir = join(centralWorktreesDir(uuid), swarmWorktreeDirName(branch))
-    return await liveDeskOccupies(dir)
-  } catch {
-    return true
+const branchWorktreeDir = async (projectPath: string, branch: string): Promise<string> =>
+  join(centralWorktreesDir(await projectUUIDFromPath(projectPath)), swarmWorktreeDirName(branch))
+const defaultDeskOccupies = async (projectPath: string, branch: string): Promise<boolean> =>
+  !branch || (await branchWorktreeDir(projectPath, branch).then((d) => liveDeskOccupies(d)).catch(() => true))
+/** Build {@link AnomalyDeps.deskAttended}: is a desk in the branch's worktree
+ *  still MOVING the card — mid-turn, or active within STALE_HEARTBEAT_MS
+ *  ({@link deskRecentlyActiveIn})? A merely-alive idle desk (an SDK worker parked
+ *  'waiting' after a turn that delivered nothing, a forgotten shell) does not
+ *  attend: it would keep the alarm muted forever. Fails toward false ("nobody
+ *  there"). Exported with injectable sources for the guard tests. */
+export const deskAttendedWith =
+  (
+    src: Parameters<typeof deskRecentlyActiveIn>[3] & {
+      dirOf?: (projectPath: string, branch: string) => Promise<string>
+      now?: () => number
+    } = {},
+  ) =>
+  async (projectPath: string, branch: string): Promise<boolean> => {
+    if (!branch) return false
+    try {
+      const dir = await (src.dirOf ?? branchWorktreeDir)(projectPath, branch)
+      return await deskRecentlyActiveIn(dir, (src.now ?? Date.now)(), STALE_HEARTBEAT_MS, src)
+    } catch {
+      return false
+    }
   }
-}
+const defaultDeskAttended = deskAttendedWith()
 
 const defaultWorktreeExists = async (projectPath: string, branch: string): Promise<boolean> => {
   if (!branch) return false
@@ -5453,6 +5487,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   recycleManagerDesk: defaultRecycleManagerDesk,
   worktreeExists: defaultWorktreeExists,
   deskOccupies: defaultDeskOccupies,
+  deskAttended: defaultDeskAttended,
   // Auto-start preflight (card cf545637): the same claude readiness gate the manual ON
   // path uses, so the unattended background sweep never flips an engine `running` into a
   // spawn it knows will fail (no retry storm when claude is missing / logged out).
@@ -7148,6 +7183,21 @@ export type UnownedDeskState =
  *  engine's own todo→doing move can land a beat after the spawn — with two full
  *  passes to spare, while staying instant at human scale. */
 const UNOWNED_DOING_GRACE_MS = 30_000
+
+/** How long a 'doing' card must sit with NOBODY on it before `all-workers-down`
+ *  counts it (2026-09-24, second fix). The boot grace alone missed the observed
+ *  case: after an update restart the commander stood up a replacement worker via
+ *  the manual route, which never enters `engine.workers` — so once the 3-minute
+ *  grace ran out the engine counted zero workers and rang 「全員止まった」 while
+ *  that worker was mid-fix. The alarm now looks at the card's worktree (a live
+ *  desk there = work continues). The window covers the manual route claiming the
+ *  card a few seconds BEFORE its session registers, and is STRICTLY longer than
+ *  the unowned-doing sweep's grace: the sweep reads the board at the start of the
+ *  pass and the alarm after it, so their clocks can start one pass apart (a
+ *  review→doing send-back landing between the two reads). Two ticks of margin let
+ *  the sweep requeue a deskless card to todo first — the engine healing it is not
+ *  "everyone stopped". */
+export const UNATTENDED_DOING_ALARM_MS = UNOWNED_DOING_GRACE_MS + 2 * TICK_MS
 
 /** How long {@link collectUnownedDoing} keeps holding a card while every orphan
  *  probe answers "could not tell" (a failing ps). Past this, the reclaim goes
@@ -8933,6 +8983,34 @@ export const detectAnomalies = async (
   // notification stays as the one-shot wake-up (bell + OS toast); this is the
   // "still true right now" line beside it.
   const liveNow = engine.workers.filter((w) => deps.isAlive(w))
+  // WHO IS STILL ON EACH DOING CARD (2026-09-24). Zero live COUNTED workers is not
+  // "nobody works": a worker the commander stood up by hand (POST /api/swarm/worker
+  // — e.g. to redo a card after an update restart) never enters engine.workers, and
+  // an orphan `claude` the sweep is holding is still editing. Only a card with none
+  // of those on it is unattended — and "on it" means still MOVING it (deskAttended:
+  // mid-turn or active within STALE_HEARTBEAT_MS), not merely alive: an idle desk
+  // left in the tree would otherwise mute the alarm forever. The notification arm
+  // and the anomaly row both read this map. Probed only
+  // while the alarm could fire (running + zero live workers), so a healthy engine
+  // pays nothing. deskAttended fails to "nobody there" (and a throw is caught the
+  // same way) — a broken probe can only ring the alarm, never mute it. The orphan
+  // hold counts only for STALE_HEARTBEAT_MS: an orphan wedged forever (it has no
+  // time cap of its own) must not silence the alarm forever.
+  const unattended = new Map<string, number>()
+  if (engine.running && liveNow.length === 0) {
+    const prev = engine.unattendedDoingSince
+    for (const t of tasks) {
+      const branch = typeof t.branch === 'string' ? t.branch : ''
+      if (columnOf(t) !== 'doing' || !isSwarmBranch(branch)) continue
+      const hold = engine.unownedOrphanHold?.get(t.id)
+      if (hold && now - hold.since < STALE_HEARTBEAT_MS) continue
+      const occupied = deps.deskAttended
+        ? await deps.deskAttended(engine.path, branch).catch(() => false)
+        : false
+      if (!occupied) unattended.set(t.id, prev?.get(t.id) ?? now)
+    }
+  }
+  engine.unattendedDoingSince = unattended
   // `engine.workers.length > 0` is load-bearing: it means WE dispatched workers
   // and every one of them is now dead. With an empty roster the same board looks
   // identical to a card a MANUAL worker owns — the engine never counts those, and
@@ -8950,9 +9028,9 @@ export const detectAnomalies = async (
   ) {
     // Same condition as the notification arm — engine running, nothing alive,
     // yet swarm cards still sitting in 'doing' (i.e. work is hanging, not done).
-    const hanging = tasks.filter(
-      (t) => columnOf(t) === 'doing' && isSwarmBranch(typeof t.branch === 'string' ? t.branch : ''),
-    )
+    // doing, swarm, nobody on it for the SAME window the notification uses — so
+    // the row cannot flash for the few seconds a manual spawn takes to register.
+    const hanging = tasks.filter((t) => now - (unattended.get(t.id) ?? Infinity) >= UNATTENDED_DOING_ALARM_MS)
     // …but say it ONCE. 'orphan-doing' already names a hanging card individually
     // (it fires when the worktree is gone too); adding a second row for the same
     // cards would make the feed repeat itself, and a feed that repeats itself is
@@ -9163,8 +9241,16 @@ export const fireFatalNotifications = (
   // Same rule for an update/boot RESTART (2026-09-24): every worker died with the
   // old process and the resume is still bringing them back — not a crash.
   if (engine.running && liveWorkers.length === 0 && !tearingDown && !inBootResumeGrace(engine, now)) {
+    // …and only cards NOBODY has been on for UNATTENDED_DOING_ALARM_MS (2026-09-24):
+    // a desk the engine does not count (the commander's replacement worker after a
+    // restart, a Board 実行 worker) means the work goes on. detectAnomalies derives
+    // the map each pass; never derived ⇒ every doing swarm card counts.
+    const unattended = engine.unattendedDoingSince
     const doing = tasks.filter(
-      (t) => columnOf(t) === 'doing' && isSwarmBranch(typeof t.branch === 'string' ? t.branch : ''),
+      (t) =>
+        columnOf(t) === 'doing' &&
+        isSwarmBranch(typeof t.branch === 'string' ? t.branch : '') &&
+        (!unattended || now - (unattended.get(t.id) ?? Infinity) >= UNATTENDED_DOING_ALARM_MS),
     )
     if (doing.length > 0) {
       current.set('all-workers-down', {
@@ -9234,8 +9320,12 @@ export const runEnginePass = async (
         engine.anomalies = await detectAnomalies(engine, tasks, deps, Date.now())
       } catch {
         // A transient board read isn't itself an anomaly to surface — keep the last
-        // snapshot; the next pass refreshes it. (tasks stays null → state-derived
-        // escalation is skipped this pass, but EDGE events still drain below.)
+        // snapshot; the next pass refreshes it. If fetchTasks itself threw, tasks
+        // stays null → state-derived escalation is skipped this pass (EDGE events
+        // still drain below). If it was detectAnomalies (or a prune) that threw,
+        // tasks is the FRESH board while engine.anomalies / unattendedDoingSince
+        // are last pass's — escalation runs on that mix; both are re-derived next
+        // pass, and detectAnomalies' own probes each catch their errors.
       }
       // Escalation safety valve — the SINGLE choke point, run at the END of the pass
       // and fully guarded, so a notification fault can never disturb dispatch /
@@ -9500,6 +9590,7 @@ export const stopOrchestrator = async (
   // same reasoning as startOrchestrator: this state is theirs now.
   engine.autonomyResumed = false
   engine.resumeGraceUntil = undefined // boot-resume grace no longer applies
+  engine.unattendedDoingSince = undefined // time spent OFF is not "nobody on the card"
   // card 2 — persist `desiredRunning:false` and the explicitly disarmed overseer.
   await persistEngineIntent(engine, projectPath)
   // autonomyRemembered:false — the marker was just cleared above; manualStopPersisted:
