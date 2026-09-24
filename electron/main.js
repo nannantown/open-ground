@@ -92,6 +92,7 @@ const {
   decideDownloadedAction,
   shouldNudgeCheck,
   asapWindowActive,
+  isOwnerInputEvent,
 } = require('./autoUpdatePolicy')
 const { isLockdownEnabled, isRendererUrlAllowedUnderLockdown, settingsFilePath } = require('./lockdown')
 const { decideCrashResponse } = require('./crashRespawn')
@@ -679,11 +680,19 @@ function createWindow() {
   // (Electron ≥22 — PR #35531 / breaking-changes 22.0; electron.d.ts 31.7.7:
   // "Emitted when an input event is sent to the WebContents") covers both; the keyboard hook below stamps too, belt and
   // braces, since it is the one that already exists for every key.
-  mainWindow.webContents.on('input-event', () => {
+  // ONLY the owner acting counts (isOwnerInputEvent): a keep-awake mouse
+  // jiggler's 35-mouseMove burst every 300 s over a resting cursor held
+  // 0.11.136 as "owner active" for an hour (measured 2026-09-24,
+  // DISTRIBUTION.md "Only real input counts"). The type is kept so
+  // the deferral log line says WHAT counted as input.
+  mainWindow.webContents.on('input-event', (_event, input) => {
+    if (!isOwnerInputEvent(input && input.type)) return
     lastUserInputAt = Date.now()
+    lastUserInputType = input.type
   })
   mainWindow.webContents.on('before-input-event', (event, input) => {
     lastUserInputAt = Date.now()
+    lastUserInputType = input.type
     if ((input.control || input.meta) && ['=', '+', '-', '0'].includes(input.key)) {
       event.preventDefault()
     }
@@ -2064,6 +2073,11 @@ function setUpdateDockProgress(ratio) {
 // finished downloading a minute after launch applied before the owner had even
 // clicked in (review 292ed010 A/B). Launch counts as the owner arriving.
 let lastUserInputAt = Date.now()
+let lastUserInputType = 'launch'
+// A one-shot early re-check, armed only past the ceiling when the owner was
+// typing at the tick (decision.retryInMs) — so the update lands seconds after
+// they stop instead of a whole poll later.
+let autoApplyRetryTimer = null
 // The version whose install this boot found FAILED (reportFailedInstallOnBoot),
 // '' when the marker did not name one, null when nothing failed. The hands-free
 // loop never retries it (autoUpdatePolicy `failedBefore`).
@@ -2123,7 +2137,13 @@ async function evaluateAutoApply() {
 async function maybeAutoApplyUpdate() {
   const decision = await evaluateAutoApply()
   if (!decision.apply) {
-    ulog.info(`auto-apply deferred: ${decision.reason}`)
+    ulog.info(`auto-apply deferred: ${decision.reason} [last input: ${lastUserInputType}]`)
+    if (decision.retryInMs && !autoApplyRetryTimer) {
+      autoApplyRetryTimer = setTimeout(() => {
+        autoApplyRetryTimer = null
+        void maybeAutoApplyUpdate()
+      }, decision.retryInMs)
+    }
     return
   }
   ulog.info('auto-applying update', downloadedUpdate && downloadedUpdate.version)

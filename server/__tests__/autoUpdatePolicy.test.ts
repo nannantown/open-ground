@@ -6,6 +6,10 @@ import { join } from 'node:path'
 import {
   AUTO_APPLY_INPUT_QUIET_MS,
   AUTO_APPLY_POLL_MS,
+  AUTO_APPLY_MAX_DEFER_MS,
+  AUTO_APPLY_TYPING_GUARD_MS,
+  AUTO_APPLY_TYPING_RETRY_MS,
+  isOwnerInputEvent,
   USER_TERMINAL_GRACE_MS,
   NUDGE_MIN_GAP_MS,
   ASAP_WINDOW_MS,
@@ -337,5 +341,56 @@ describe('main.js: launch is presence, failures are remembered, staging is re-ch
     expect(recheck).toBeGreaterThan(wait)
     expect(teardown).toBeGreaterThan(recheck)
     expect(main).toContain('applyUpdateWhenStaged(downloadedUpdate && downloadedUpdate.version, { recheck: evaluateAutoApply })')
+  })
+})
+
+// ─── FALSE "OWNER ACTIVE" + THE CEILING (owner report 2026-09-24) ───
+//
+// 「自動で更新されないんだけど」: 0.11.136 sat downloaded 03:11→04:11Z while every
+// 5-min tick said "owner active (last input ~25s ago)". Pointer move/enter/
+// leave reach the window whenever the cursor rests over it, so they counted
+// as the owner working. Now only real input counts, and a downloaded update
+// that has waited AUTO_APPLY_MAX_DEFER_MS goes in unless the owner is typing
+// this second.
+describe('only real input is the owner; a ceiling bounds the wait', () => {
+  it('pointer hover/move/enter/leave is NOT owner input', () => {
+    for (const t of ['mouseMove', 'mouseEnter', 'mouseLeave', 'undefined', '', 'contextMenu'])
+      expect(isOwnerInputEvent(t), t).toBe(false)
+    expect(isOwnerInputEvent(undefined)).toBe(false)
+  })
+  it('keys, clicks, wheel/trackpad scroll and pinch ARE owner input', () => {
+    for (const t of ['keyDown', 'rawKeyDown', 'char', 'keyUp', 'mouseDown', 'mouseUp', 'mouseWheel', 'gestureScrollUpdate', 'gesturePinchUpdate'])
+      expect(isOwnerInputEvent(t), t).toBe(true)
+  })
+  it('a periodic stamp every 5 min cannot hold the update past the ceiling', () => {
+    // The measured shape: every tick sees input ~25s ago, forever.
+    const held = (min: number) => decideAutoApply({ ...base, inputIdleMs: 25_000, heldMs: min * 60_000 })
+    expect(held(5).apply, 'inside the ceiling the quiet window still holds').toBe(false)
+    expect(held(AUTO_APPLY_MAX_DEFER_MS / 60_000).apply, 'at the ceiling it goes in').toBe(true)
+    expect(held(AUTO_APPLY_MAX_DEFER_MS / 60_000).reason).toContain('ceiling')
+  })
+  it('the ceiling lands a publish within about an hour', () => {
+    // publish → download (a few min) + ceiling + at most one poll ≤ 60 min
+    expect(AUTO_APPLY_MAX_DEFER_MS + AUTO_APPLY_POLL_MS).toBeLessThanOrEqual(55 * 60_000)
+  })
+  it('past the ceiling, typing THIS SECOND still holds it — and asks again soon', () => {
+    const d = decideAutoApply({ ...base, inputIdleMs: 1_000, heldMs: AUTO_APPLY_MAX_DEFER_MS + 1 })
+    expect(d.apply).toBe(false)
+    expect(d.retryInMs).toBe(AUTO_APPLY_TYPING_RETRY_MS)
+    expect(AUTO_APPLY_TYPING_RETRY_MS).toBeLessThan(AUTO_APPLY_POLL_MS)
+    expect(decideAutoApply({ ...base, inputIdleMs: AUTO_APPLY_TYPING_GUARD_MS - 1, heldMs: AUTO_APPLY_MAX_DEFER_MS }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, inputIdleMs: NaN, heldMs: AUTO_APPLY_MAX_DEFER_MS }).apply, 'NaN reads as typing').toBe(false)
+  })
+  it('the ceiling waives only the quiet window — every other gate still blocks', () => {
+    const over = { ...base, inputIdleMs: 25_000, heldMs: AUTO_APPLY_MAX_DEFER_MS }
+    expect(decideAutoApply({ ...over, enabled: false }).apply).toBe(false)
+    expect(decideAutoApply({ ...over, lockdown: true }).apply).toBe(false)
+    expect(decideAutoApply({ ...over, failedBefore: true }).apply).toBe(false)
+    expect(decideAutoApply({ ...over, safety: null }).apply).toBe(false)
+  })
+  it('main.js filters input-event through isOwnerInputEvent and honours retryInMs', () => {
+    const main = readFileSync(join(__dirname, '../../electron/main.js'), 'utf8')
+    expect(main).toMatch(/'input-event',[\s\S]{0,80}if \(!isOwnerInputEvent\(input && input\.type\)\) return[\s\S]{0,40}lastUserInputAt = Date\.now\(\)/)
+    expect(main).toMatch(/decision\.retryInMs[\s\S]{0,200}setTimeout\([\s\S]{0,120}maybeAutoApplyUpdate\(\)[\s\S]{0,40}decision\.retryInMs\)/)
   })
 })

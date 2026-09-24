@@ -5,8 +5,10 @@
 //
 // WHAT THIS DECIDES. With settings.autoUpdate on, the app applies a downloaded
 // update BY ITSELF instead of showing the restart dialog, as soon as:
-//   1. the owner is not using the window right now (no key/mouse input for
-//      AUTO_APPLY_INPUT_QUIET_MS), and
+//   1. the owner is not using the window right now (no key/click/scroll input
+//      for AUTO_APPLY_INPUT_QUIET_MS — pointer moves do not count, see
+//      isOwnerInputEvent — or, once the update has waited
+//      AUTO_APPLY_MAX_DEFER_MS, simply not typing this second), and
 //   2. the SERVER answers the safety probe (GET /api/update/restart-safety), and
 //      nothing WITHOUT resume machinery is busy (a terminal the owner opened,
 //      a hidden one-off claude run — the probe's `userPtys`) — or that has
@@ -36,6 +38,44 @@
  *  between two sentences, short enough that someone who works in the app all
  *  day still leaves gaps (they wait on Claude often). */
 const AUTO_APPLY_INPUT_QUIET_MS = 3 * 60 * 1000
+
+/** The ceiling on "owner active". Once a downloaded update has waited this
+ *  long, the quiet window above shrinks to AUTO_APPLY_TYPING_GUARD_MS: the
+ *  update goes in unless the owner is typing THIS SECOND. Owner criterion
+ *  (2026-09-24): with auto-update on, a published version is running within
+ *  about an hour, even with the app in front all day. Publish → download is a
+ *  few minutes (release-bell nudge), then ≤45 min here, then ≤1 poll. */
+const AUTO_APPLY_MAX_DEFER_MS = 45 * 60 * 1000
+
+/** Past the ceiling, input this recent still holds the restart — never cut
+ *  the owner off mid-sentence. Short on purpose: a few seconds of silence. */
+const AUTO_APPLY_TYPING_GUARD_MS = 10 * 1000
+
+/** Past the ceiling and held only by the typing guard, look again this soon
+ *  instead of waiting a whole AUTO_APPLY_POLL_MS. */
+const AUTO_APPLY_TYPING_RETRY_MS = 30 * 1000
+
+/** Electron `input-event` types that are the OWNER acting: keys, clicks,
+ *  wheel/trackpad scroll, pinch, touch. Pointer move/enter/leave are NOT —
+ *  a keep-awake mouse jiggler nudging a cursor that rests over the window
+ *  (measured 2026-09-24: 35 mouseMove, no click/key, every 300 s) read as
+ *  "the owner is working" and held 0.11.136 for an hour (DISTRIBUTION.md
+ *  "Only real input counts"). An allowlist, so an unfamiliar
+ *  synthetic type can never hold updates forever again; every keyboard type —
+ *  the ones that protect a sentence being typed — is in it. */
+const OWNER_INPUT_TYPES = new Set([
+  'keyDown', 'rawKeyDown', 'keyUp', 'char',
+  'mouseDown', 'mouseUp', 'mouseWheel',
+  'gestureScrollBegin', 'gestureScrollUpdate', 'gestureFlingStart',
+  'gesturePinchBegin', 'gesturePinchUpdate',
+  'gestureTap', 'gestureTapDown', 'gestureLongPress',
+  'touchStart', 'touchMove', 'touchEnd',
+])
+
+/** @param {string | undefined} type  InputEvent.type (electron.d.ts) */
+function isOwnerInputEvent(type) {
+  return typeof type === 'string' && OWNER_INPUT_TYPES.has(type)
+}
 
 /** How long a terminal the OWNER opened (not a desk, not a swarm worker) may
  *  hold a downloaded update while something runs in it. It is their own work,
@@ -95,7 +135,8 @@ function autoUpdateFromSettingsRaw(raw) {
  *   asap?: boolean,               // live user command (bell {apply:'asap'}) — waives ONLY the typing check
  *   safety: { safe?: boolean, generating?: number, userPtys?: number } | null, // server probe; null = unreachable
  * }} input
- * @returns {{ apply: boolean, reason: string }}
+ * @returns {{ apply: boolean, reason: string, retryInMs?: number }}
+ *   retryInMs — look again this soon instead of at the next poll
  */
 function decideAutoApply(input) {
   if (!input.enabled) return { apply: false, reason: 'autoUpdate off' }
@@ -114,8 +155,17 @@ function decideAutoApply(input) {
   // `asap` waives ONLY the typing check: the user COMMANDED this update (bell
   // rung with {apply:'asap'}), so "don't restart under their fingers" no longer
   // applies. Every other gate stays.
-  if (!input.asap && !(input.inputIdleMs >= AUTO_APPLY_INPUT_QUIET_MS))
-    return { apply: false, reason: `owner active (last input ${Math.round(input.inputIdleMs / 1000)}s ago)` }
+  // THE CEILING. Past AUTO_APPLY_MAX_DEFER_MS the quiet window shrinks to "not
+  // typing this second", so no false (or endless real) "active" can hold a
+  // downloaded update much past an hour. Mid-keystroke is still protected.
+  const overdue = input.heldMs >= AUTO_APPLY_MAX_DEFER_MS
+  const quietMs = overdue ? AUTO_APPLY_TYPING_GUARD_MS : AUTO_APPLY_INPUT_QUIET_MS
+  if (!input.asap && !(input.inputIdleMs >= quietMs)) {
+    const ago = `last input ${Math.round(input.inputIdleMs / 1000)}s ago`
+    return overdue
+      ? { apply: false, reason: `owner typing (${ago}, past the ceiling)`, retryInMs: AUTO_APPLY_TYPING_RETRY_MS }
+      : { apply: false, reason: `owner active (${ago})` }
+  }
   // A dead server means mid-boot or mid-teardown — wrong moments to restart on
   // top of. Fail closed; the next tick asks again.
   if (!input.safety) return { apply: false, reason: 'safety probe unreachable (fail closed)' }
@@ -130,7 +180,7 @@ function decideAutoApply(input) {
       apply: false,
       reason: `owner terminal busy (userPtys=${userPtys ?? '?'}, held ${Math.round(input.heldMs / 60000)}min)`,
     }
-  const why = input.asap ? 'commanded (asap)' : 'owner idle'
+  const why = input.asap ? 'commanded (asap)' : overdue ? 'ceiling reached, not typing' : 'owner idle'
   const note = `generating=${input.safety.generating ?? '?'} userPtys=${userPtys ?? '?'}`
   return { apply: true, reason: `${why}; ${note}` }
 }
@@ -204,6 +254,10 @@ function shouldNudgeCheck(input) {
 
 module.exports = {
   AUTO_APPLY_INPUT_QUIET_MS,
+  AUTO_APPLY_MAX_DEFER_MS,
+  AUTO_APPLY_TYPING_GUARD_MS,
+  AUTO_APPLY_TYPING_RETRY_MS,
+  isOwnerInputEvent,
   USER_TERMINAL_GRACE_MS,
   AUTO_APPLY_POLL_MS,
   SAFETY_FETCH_TIMEOUT_MS,

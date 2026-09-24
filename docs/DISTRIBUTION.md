@@ -437,6 +437,32 @@ On macOS that was both wrong and load-bearing — see the next box.)
 > right before the teardown (`applyUpdateWhenStaged` `opts.recheck`). autoUpdate OFF is unchanged (dialog, no auto-apply). Guards:
 > `server/__tests__/autoUpdatePolicy.test.ts` "AI at work is not a reason to
 > wait" + the main.js input pin (both measured red).
+>
+> **Only real input counts, and the wait has a ceiling (2026-09-24).** Owner
+> report 「自動で更新されないんだけど」: 0.11.136 sat downloaded 03:11→04:11Z
+> while every 5-min tick logged `owner active (last input ~25s ago)`.
+> `input-event` also fires for pointer `mouseMove` / `mouseEnter` /
+> `mouseLeave`. Measured on the owner's running app (a temporary listener
+> logging `InputEvent.type`, 04:12–04:37Z): with nobody touching anything, a
+> burst of exactly 35 `mouseMove` — no click, no key — arrived every
+> 300.0–300.5 s (04:26:41 → 04:31:41.8 → 04:36:42.3), matching the updater
+> log's "last input" creeping down ~0.5 s per 5-min tick. The source is the
+> **Jiggler** menu-bar app (keep-awake mouse jiggler, `JiggleMasterSwitch=1`)
+> nudging the cursor that rests over the window. Any keep-awake tool, or a
+> cursor parked on the app while other windows change, does the same. Now
+> `isOwnerInputEvent` (autoUpdatePolicy.js) is an allowlist — keys, clicks,
+> wheel/trackpad scroll, pinch, touch — and every deferral line names the
+> type that last counted (`[last input: …]`). Wispr Flow dictation arrives as
+> a real ⌘V + Enter and still counts: that is the owner talking to the app.
+> Belt and braces, `AUTO_APPLY_MAX_DEFER_MS` (45 min, counted from the
+> download): past it the 3-min quiet window shrinks to
+> `AUTO_APPLY_TYPING_GUARD_MS` (10 s) — the update goes in unless the owner
+> is typing that second — and a typing-held tick re-checks after 30 s
+> (`retryInMs`) instead of a whole poll. Publish → download is minutes (the
+> release bell nudges a check), so a published version is running within
+> about an hour even with the app in front all day. Guards:
+> `autoUpdatePolicy.test.ts` "only real input is the owner; a ceiling bounds
+> the wait" (4 mutations measured red).
 
 > **Restart-now ordering invariant (regression-guarded).** "Restart now" must
 > tear the forked Hono server child down **before** calling `quitAndInstall()`.
