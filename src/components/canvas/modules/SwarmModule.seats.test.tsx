@@ -179,22 +179,27 @@ describe('the fleet question poll (①②)', () => {
   })
 })
 
-describe("the manager's seat is a nameplate (③)", () => {
-  it('shows RUNNING and nothing but status + stop', async () => {
+describe("the manager's seat (③, conversation since 2026-09-24)", () => {
+  it('shows RUNNING, stop, a folded send link and its polled conversation — no stream', async () => {
     storeManager()
-    harness({ active: () => [{ id: MANAGER_SDK_ID, status: 'working' }] })
+    const h = harness({ active: () => [{ id: MANAGER_SDK_ID, status: 'working' }] })
     render(<SwarmModule project={project} />)
     expect(await screen.findByText('projectPanel.swarm.manager.stateRunning')).toBeTruthy()
-    // The seat as SwarmModule mounts it: one control, no input, no stream —
-    // i.e. SwarmModule did not wrap anything else (a transcript, a command box,
-    // a dashboard) into the manager's seat.
+    // The seat as SwarmModule mounts it (2026-09-24): stop + the FOLDED
+    // send-a-word link, the desk's conversation polled from its tail — and
+    // still NO stream: a stream per seat is the six-connection freeze.
     const seat = document.querySelector('[data-seat="manager"]')!
     expect(seat).toBeTruthy()
     const buttons = within(seat as HTMLElement).getAllByRole('button')
-    expect(buttons).toHaveLength(1)
-    expect(buttons[0].getAttribute('aria-label')).toBe('projectPanel.swarm.manager.stopFull')
+    expect(buttons.map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual([
+      'projectPanel.swarm.manager.stopFull',
+      'projectPanel.swarm.say.open',
+    ])
     expect(seat.querySelector('textarea, input, aside')).toBeNull()
-    // No transcript stream is opened for the manager desk.
+    expect(seat.querySelector('[data-seat-feed]')).toBeTruthy()
+    await waitFor(() =>
+      expect(h.urls.some((u) => u.startsWith(`/api/sdk-session/${MANAGER_SDK_ID}/tail?`))).toBe(true),
+    )
     expect(
       (globalThis as { __esUrls?: string[] }).__esUrls?.some((u) => u.includes(MANAGER_SDK_ID)) ?? false,
     ).toBe(false)

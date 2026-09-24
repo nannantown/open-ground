@@ -89,10 +89,12 @@ const SEAT_STYLE = { flex: '1 0 360px', minWidth: 360, minHeight: 220 } as const
 const SEAT_CLASS = 'h-full overflow-hidden'
 // A FOLDED worker seat (SwarmWorkerSeat) carries a nameplate and a few lines,
 // so it can be narrower — more of the fleet fits on one screen.
-const WORKER_SEAT_STYLE = { flex: '1 0 240px', minWidth: 240, minHeight: 220 } as const
-// The manager's seat is a nameplate only — it never grows into the space the
-// president and the workers use.
-const MANAGER_SEAT_STYLE = { flex: '0 0 280px', minWidth: 280, minHeight: 220 } as const
+// 260 tall, not 220: a waiting worker with its question AND the opened send box
+// must still show the Send button (a short bar scrolls instead).
+const WORKER_SEAT_STYLE = { flex: '1 0 240px', minWidth: 240, minHeight: 260 } as const
+// The manager's seat shows its recent conversation (2026-09-24) — same shape
+// as a folded worker seat, a little wider for the start/stop button.
+const MANAGER_SEAT_STYLE = { flex: '1 0 280px', minWidth: 280, minHeight: 220 } as const
 
 // The single commander (司令官) CONVERSATION session, remembered client-side —
 // the exact same shape + lifecycle as the supply session (no worktree; it runs
@@ -1498,6 +1500,8 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             onLaunch={() => void launchManager()}
             onStop={() => void stopManager()}
             onRestart={() => void restartManager()}
+            sdkSessionId={managerIsSdk ? manager?.sdkSessionId : undefined}
+            projectPath={project.path}
           />
         </div>
         {allWorkers.length === 0 ? (
@@ -1533,6 +1537,8 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
                 return (
                   <div key={w.worktree} className={SEAT_CLASS} style={WORKER_SEAT_STYLE}>
                     <SwarmWorkerSeat
+                      sdkSessionId={sdkId}
+                      projectPath={project.path}
                       branch={w.branch}
                       taskTitle={w.taskTitle ?? w.note ?? ''}
                       status={statusOfPty(handle)}

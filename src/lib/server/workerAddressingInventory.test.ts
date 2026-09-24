@@ -890,7 +890,7 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     tier: 'sdk-live-predicate',
     why: 'The SDK SSE route. It ends the stream on isSdkSessionLive — the status-based test used to cut the last frame, the only one that says HOW a desk ended.',
     ptyFns: [],
-    sdkCalls: ['attachSdkListener', 'getSdkSession', 'interruptSdkSession', 'isSdkSessionLive', 'pushSdkInput', 'terminateSdkSession'],
+    sdkCalls: ['attachSdkListener', 'getSdkSession', 'interruptSdkSession', 'isSdkSessionLive', 'pushSdkInput', 'readSdkFrames', 'terminateSdkSession'],
   },
   'server/routes/swarm.ts': {
     tier: 'runtime-dispatched',
@@ -922,6 +922,21 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   'src/components/canvas/modules/SdkWorkerPane.tsx': {
     tier: 'sdk-live-predicate',
     why: "The SDK worker tile, and the CLIENT half of the reaped rule: blipVerdict closes only on the server's `reaped`, never on a terminal status, so a desk still unwinding is not drawn as gone while the Swarm list beside it still counts it live.",
+    ptyFns: [],
+  },
+  'src/components/canvas/modules/SwarmSeatTalk.tsx': {
+    tier: 'sdk-live-predicate',
+    why: "A seat's polled conversation + its send-a-word box. It addresses a worker ONLY by the sdkSessionId its seat hands it (tail / input), the manager only through /api/swarm/manager/say (runtime-agnostic, server-side). Its one liveness question — stop polling — is the server's `reaped`, never a status.",
+    ptyFns: [],
+  },
+  'src/components/canvas/modules/SwarmWorkerSeat.tsx': {
+    tier: 'display-only',
+    why: "A folded worker seat. It draws the beacon status it is handed and passes its sdkSessionId straight to SwarmSeatTalk; it decides no liveness of its own.",
+    ptyFns: [],
+  },
+  'src/components/canvas/modules/SwarmManagerPane.tsx': {
+    tier: 'display-only',
+    why: "The manager's seat. Draws the beacon status SwarmModule hands it and passes the desk's sdkSessionId to SwarmSeatTalk; start/stop are SwarmModule's callbacks.",
     ptyFns: [],
   },
   'src/components/canvas/modules/SwarmWorkerPane.tsx': {
@@ -1157,6 +1172,16 @@ const STATUS_SITES: Record<string, Decl & { count: number }> = {
     tier: 'display-only',
     count: 4,
     why: "Two uses, neither a liveness question. (a) Picks WHICH terminal label to draw ('failed' vs 'exited'). (b) Feeds `accepting` — will the POOL still take input — which is a question about `closed`, not about whether claude has gone; a terminal status is simply that same fact arriving one frame earlier than a re-read. It authorises nothing: the pane closing costs a redraw, not a worktree, and the liveness question one line above it is answered by the server's reaped flag.",
+  },
+  'src/components/canvas/modules/SwarmManagerPane.tsx': {
+    tier: 'display-only',
+    count: 1,
+    why: "`status === 'exited'` reads the BEACON word SwarmModule derives from GET /api/terminal/active (server-side liveness already answered by reaped — liveDesks.ts) and only picks the seat's three-word label and which button to draw.",
+  },
+  'src/components/canvas/modules/SwarmWorkerSeat.tsx': {
+    tier: 'display-only',
+    count: 1,
+    why: "`status !== 'exited'` reads the same BEACON word and only decides what to DRAW: the question banner, the Restart button and whether the send box shows. Sending is still refused by the pool itself (409) if the desk has closed.",
   },
   'src/lib/server/swarmWorker.ts': {
     tier: 'runtime-dispatched',

@@ -25,6 +25,7 @@ import {
   interruptSdkSession,
   isSdkSessionLive,
   pushSdkInput,
+  readSdkFrames,
   terminateSdkSession,
   type SdkStreamFrame,
 } from '@/lib/server/sdkSession'
@@ -235,6 +236,24 @@ export const sdkSessionRoutes = new Hono()
         resolveDone = res
       })
     })
+  })
+
+  // ── GET /api/sdk-session/:id/tail?after=<seq>&limit=<n> ────────────────────
+  // The newest frames after `after` (≤ limit, default 60, max 200) plus the
+  // session's seq/status/reaped. POLLED, not streamed: the Agent Team bar shows
+  // every seat's recent conversation at once, and one EventSource per seat is
+  // the six-connection freeze streamBudget.ts exists to prevent.
+  .get('/api/sdk-session/:id/tail', async (c) => {
+    const id = c.req.param('id')
+    const gate = await requireSession(c, id)
+    if (gate instanceof Response) return gate
+    const afterRaw = Number(c.req.query('after') ?? '0')
+    const after = Number.isFinite(afterRaw) && afterRaw > 0 ? Math.floor(afterRaw) : 0
+    const limitRaw = Number(c.req.query('limit') ?? '60')
+    const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, Math.floor(limitRaw))) : 60
+    const tail = readSdkFrames(id, after, limit)
+    if (!tail) return c.json({ error: 'no such sdk session' }, 404)
+    return c.json(tail)
   })
 
   // ── POST /api/sdk-session/:id/input ────────────────────────────────────────

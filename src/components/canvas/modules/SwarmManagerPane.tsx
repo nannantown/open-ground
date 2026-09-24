@@ -1,5 +1,11 @@
 // SwarmManagerPane — the commander's (司令官) seat on the one-screen Swarm tab.
 //
+// 2026-09-24 (owner): the seat now SHOWS the commander's recent conversation
+// (SwarmSeatFeed, polled — no stream) and carries a folded "send a word" box
+// that goes through POST /api/swarm/manager/say, the president's relay path.
+// The owner still normally talks only to the president; both are for looking
+// over the manager's shoulder. The history below explains what was removed.
+//
 // The owner talks only to the president (社長, owner decision 2026-09-23), so
 // this seat is deliberately almost invisible: the nameplate (figure · role ·
 // running / stopped / not there) and ONE quiet start/stop button. Nothing else.
@@ -20,6 +26,7 @@ import type { MessageKey } from '@/i18n/messages'
 import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import type { WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
+import { SwarmSeatFeed, SwarmSeatSay, sayToManager } from './SwarmSeatTalk'
 
 /** What the owner is told about the commander — three words, nothing finer. */
 export type CommanderSeatState = 'running' | 'stopped' | 'absent'
@@ -46,9 +53,21 @@ interface Props {
   onStop: () => void
   /** A stopped desk → start it again (via SwarmModule). */
   onRestart: () => void
+  /** The desk's SDK session id — its conversation is shown only for an SDK
+   *  desk (a legacy PTY commander has no transcript to poll). */
+  sdkSessionId?: string
+  projectPath: string
 }
 
-export const SwarmManagerPane = ({ status, busy, onLaunch, onStop, onRestart }: Props) => {
+export const SwarmManagerPane = ({
+  status,
+  busy,
+  onLaunch,
+  onStop,
+  onRestart,
+  sdkSessionId,
+  projectPath,
+}: Props) => {
   const { t } = useT()
   const state = commanderSeatState(status)
   const running = state === 'running'
@@ -80,10 +99,18 @@ export const SwarmManagerPane = ({ status, busy, onLaunch, onStop, onRestart }: 
           {t(label)}
         </button>
       </SwarmSeatHeader>
-      {/* One faint line, so an empty seat does not read as a broken one. */}
-      <p className="px-3 py-3 text-meta leading-relaxed text-ink-faint">
-        {t('projectPanel.swarm.manager.conversationHint')}
-      </p>
+      {status !== null && sdkSessionId ? (
+        <SwarmSeatFeed sdkSessionId={sdkSessionId} projectPath={projectPath} />
+      ) : (
+        // One faint line, so an empty seat does not read as a broken one.
+        <p className="min-h-0 flex-1 px-3 py-3 text-meta leading-relaxed text-ink-faint">
+          {t('projectPanel.swarm.manager.conversationHint')}
+        </p>
+      )}
+      <SwarmSeatSay
+        placeholder={t('projectPanel.swarm.say.managerPlaceholder')}
+        onSend={(text) => sayToManager(projectPath, text, t)}
+      />
     </div>
   )
 }

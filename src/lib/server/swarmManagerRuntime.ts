@@ -124,8 +124,9 @@ export const listManagerDesks = (
       // nothing yet would look like it "painted" at t=0 of its life. That is
       // exactly what the PTY side reports for a live-but-silent desk too
       // (startedAt with no lastOutputAt → null), so normalise: only count it as
-      // output once at least one event has been emitted.
-      lastOutputAt: s.seq > 0 ? s.lastEventAt : null,
+      // output once at least one event has been emitted — and an 'input' frame
+      // (a turn the desk was HANDED, e.g. its spawn prompt) is not output.
+      lastOutputAt: s.seq > (s.inputs ?? 0) ? s.lastEventAt : null,
       startedAt: s.startedAt,
       // Asked to stop (status flipped synchronously by terminateSdkSession)
       // but not yet reaped — see ManagerDeskHandle.stopping.

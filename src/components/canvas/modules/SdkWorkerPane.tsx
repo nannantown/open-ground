@@ -845,7 +845,7 @@ const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) =
 /** One tool call as ONE collapsed card — summary row (name + clamped args),
  *  the result attached as the elbow preview, click to expand. An ERROR result
  *  ships expanded and red (the research's one no-collapse rule). */
-const ToolCard = ({ item }: { item: Extract<SdkRenderItem, { kind: 'tool' }> }) => {
+export const ToolCard = ({ item }: { item: Extract<SdkRenderItem, { kind: 'tool' }> }) => {
   const isError = item.result !== null && !item.result.ok
   const [expanded, setExpanded] = useState(isError)
   const sub = item.use.fromSubagent
@@ -885,8 +885,19 @@ const ToolCard = ({ item }: { item: Extract<SdkRenderItem, { kind: 'tool' }> }) 
   )
 }
 
-const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
+export const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
   switch (ev.kind) {
+    case 'input':
+      // What the desk was told (dispatch order, rework note, the owner's word)
+      // — quoted and clamped: the answer below it is the story, not the order.
+      return (
+        <div className="my-2 rounded-[3px] border-l-2 border-accent/60 bg-bg-inset px-2 py-1 text-meta text-ink-muted">
+          <div className="text-micro text-ink-faint">{t('projectPanel.swarm.feed.input')}</div>
+          <div className="line-clamp-4 whitespace-pre-wrap break-words" title={ev.text}>
+            {ev.text}
+          </div>
+        </div>
+      )
     case 'text':
       // The worker's own words are the PRIMARY content of this transcript —
       // markdown blocks, full ink. Sub-agent text stays quieter.

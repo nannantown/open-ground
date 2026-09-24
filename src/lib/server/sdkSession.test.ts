@@ -8,6 +8,7 @@ import {
   attachSdkListener,
   isSdkSessionAlive,
   listSdkSessions,
+  readSdkFrames,
   removeSdkSession,
   SDK_SESSION_LINGER_MS,
   __resetSdkSessionsForTests,
@@ -137,6 +138,80 @@ describe('pushSdkInput', () => {
     attachSdkListener(info.id, 0, (f) => frames.push(f))!.replay.forEach((f) => frames.push(f))
     const texts = frames.filter((f) => f.ev.kind === 'text').map((f) => (f.ev as { text: string }).text)
     expect(texts).toContain('second')
+  })
+
+  it("records each turn the session TOOK as an 'input' frame, without faking output", async () => {
+    const info = spawnSdkSession({
+      cwd: '/tmp/w',
+      options: {},
+      initialPrompt: 'one',
+      queryFn: scriptedQuery([
+        [assistantText('first'), resultOk()],
+        [assistantText('second'), resultOk()],
+      ]),
+    })
+    await settle()
+    const before = getSdkSession(info.id)!.lastEventAt
+    await new Promise((r) => setTimeout(r, 5))
+    // Received, then answered — in that order, both on the transcript.
+    expect(pushSdkInput(info.id, 'two')).toBe(true)
+    await settle()
+    const tail = readSdkFrames(info.id, 0, 100)!
+    const said = tail.frames.map((f) =>
+      f.ev.kind === 'input' ? `> ${f.ev.text}` : f.ev.kind === 'text' ? f.ev.text : null,
+    ).filter(Boolean)
+    expect(said).toEqual(['> one', 'first', '> two', 'second'])
+
+    // The input frame alone must not move lastEventAt (the stall readers'
+    // "desk produced something"): a nudge pushed into a desk stuck MID-TURN
+    // (status stays 'working', so no status frame either) must leave it
+    // reading as silent.
+    const silent = spawnSdkSession({
+      cwd: '/tmp/w2',
+      options: {},
+      initialPrompt: 'hello',
+      // Takes every turn it is handed and never says a word.
+      queryFn: ({ prompt }) => ({
+        async *[Symbol.asyncIterator]() {
+          for await (const _m of prompt) void _m
+          yield* [] // emits nothing — the point of this fake
+        },
+        interrupt: async () => {},
+      }),
+    })
+    await settle()
+    // Not 'waiting' ⇒ the push below flips no status (no status frame).
+    expect(['starting', 'working']).toContain(getSdkSession(silent.id)!.status)
+    const stamp = getSdkSession(silent.id)!.lastEventAt
+    await new Promise((r) => setTimeout(r, 5))
+    expect(pushSdkInput(silent.id, 'nudge')).toBe(true)
+    await settle()
+    expect(before).toBeGreaterThan(0)
+    // It WAS taken (the frame is there)…
+    expect(readSdkFrames(silent.id, 0, 10)!.frames.some((f) => f.ev.kind === 'input')).toBe(true)
+    // …and it did not count as output: neither the clock nor the counter.
+    expect(getSdkSession(silent.id)!.lastEventAt).toBe(stamp)
+    const snap = getSdkSession(silent.id)!
+    expect(snap.inputs).toBe(2)
+    expect(snap.seq).toBe(2)
+  })
+
+  it('readSdkFrames serves only what is newer than `after`, newest `limit`, and null for unknown ids', async () => {
+    const info = spawnSdkSession({
+      cwd: '/tmp/w',
+      options: {},
+      initialPrompt: 'one',
+      queryFn: scriptedQuery([[assistantText('a'), assistantText('b'), assistantText('c'), resultOk()]]),
+    })
+    await settle()
+    const all = readSdkFrames(info.id, 0, 1000)!
+    expect(all.seq).toBe(all.frames[all.frames.length - 1].seq)
+    const last2 = readSdkFrames(info.id, 0, 2)!
+    expect(last2.frames.map((f) => f.seq)).toEqual(all.frames.slice(-2).map((f) => f.seq))
+    const after = all.frames[1].seq
+    expect(readSdkFrames(info.id, after, 1000)!.frames.every((f) => f.seq > after)).toBe(true)
+    expect(readSdkFrames(info.id, all.seq, 10)!.frames).toEqual([])
+    expect(readSdkFrames('nope', 0, 10)).toBeNull()
   })
 
   it('refuses input to a finished session instead of silently dropping it', async () => {

@@ -24,6 +24,7 @@ import {
   __setQuotaPrefixesForTests,
   getSdkSession,
   type SdkQueryFn,
+  type SdkStreamFrame,
 } from '@/lib/server/sdkSession'
 import { projectUUIDFromPath } from '@/lib/server/projectDataPath'
 import { centralWorktreesDir } from '@/lib/server/paths'
@@ -148,10 +149,29 @@ describe('/api/sdk-session/* — gates and lifecycle', () => {
         [`/api/sdk-session/${sessionId}/input?${q(otherPath)}`, postJson({ text: 'x' })],
         [`/api/sdk-session/${sessionId}/interrupt?${q(otherPath)}`, { method: 'POST' }],
         [`/api/sdk-session/${sessionId}?${q(otherPath)}`, { method: 'DELETE' }],
+        [`/api/sdk-session/${sessionId}/tail?${q(otherPath)}`, {}],
       ] as [string, RequestInit][]) {
         const res = await app.request(path, init)
         expect([403, 404]).toContain(res.status)
       }
+    })
+  })
+
+  describe('tail (the polled seat feed)', () => {
+    it("serves what the desk was told and what came after, from `after`, clamped by `limit`", async () => {
+      await app.request(`/api/sdk-session/${sessionId}/input?${q(projectPath)}`, postJson({ text: 'a word from the owner' }))
+      await settle()
+      const res = await app.request(`/api/sdk-session/${sessionId}/tail?${q(projectPath)}&after=0&limit=500`)
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { frames: SdkStreamFrame[]; seq: number; reaped: boolean }
+      const told = body.frames.filter((f) => f.ev.kind === 'input').map((f) => (f.ev as { text: string }).text)
+      // The word the owner sent is on the transcript — "received", observably.
+      expect(told).toEqual(['go', 'a word from the owner'])
+      expect(body.reaped).toBe(false)
+      const last = await app.request(`/api/sdk-session/${sessionId}/tail?${q(projectPath)}&after=0&limit=1`)
+      expect(((await last.json()) as { frames: SdkStreamFrame[] }).frames.map((f) => f.seq)).toEqual([body.seq])
+      const none = await app.request(`/api/sdk-session/${sessionId}/tail?${q(projectPath)}&after=${body.seq}`)
+      expect(((await none.json()) as { frames: SdkStreamFrame[] }).frames).toEqual([])
     })
   })
 

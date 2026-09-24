@@ -3,11 +3,12 @@ import { createAndImportProject } from './fixtures/helpers'
 
 // The manager's seat (card ③, 2026-09-23): a nameplate only — status + one
 // start/stop — in a narrow fixed-width seat. The seat clips its overflow, so
-// the one thing that must hold is that its only button sits INSIDE the seat, in
+// the one thing that must hold is that its buttons sit INSIDE the seat, in
 // both languages (the Japanese words are the wide ones) and both states (no desk
-// → Start, a live desk → Stop). Plus: no runtime selector for owner or public,
-// and no Monitoring switch on the screen at all (owner 2026-09-24 — the owner
-// asks the president instead).
+// → Start, a live desk → Stop). Since 86cd5e71 the seat also carries a folded
+// "Send a word" link whose box appears only when opened. Plus: no runtime
+// selector for owner or public, and no Monitoring switch on the screen at all
+// (owner 2026-09-24 — the owner asks the president instead).
 const WORDS = {
   en: {
     open: 'Open Agent Team',
@@ -17,6 +18,9 @@ const WORDS = {
     start: 'Start manager',
     stop: 'Stop manager',
     monitoring: 'Monitoring',
+    say: 'Send a word',
+    sayBox: 'A word to the manager (usually not needed)',
+    cancel: 'Cancel',
   },
   ja: {
     open: 'エージェントチームをひらく',
@@ -26,6 +30,9 @@ const WORDS = {
     start: 'マネージャーを起動',
     stop: 'マネージャーを停止',
     monitoring: '状況の監視',
+    say: '一言送る',
+    sayBox: 'マネージャーへの一言(ふだんは不要です)',
+    cancel: 'やめる',
   },
 } as const
 
@@ -84,19 +91,30 @@ for (const lang of ['en', 'ja'] as const) {
           await expect(seat.getByText(w.manager, { exact: true })).toBeVisible()
           await expect(seat.getByText(desk === 'running' ? w.running : w.absent, { exact: true })).toBeVisible()
           const button = seat.getByRole('button', { name: desk === 'running' ? w.stop : w.start, exact: true })
+          const say = seat.getByRole('button', { name: w.say, exact: true })
           await expect(button).toBeVisible()
-          // The seat's ONLY control, and it is not clipped by the seat.
-          await expect(seat.getByRole('button')).toHaveCount(1)
+          await expect(say).toBeVisible()
+          // The seat's only two controls — start/stop and the folded "Send a
+          // word" — and neither is clipped by the seat.
+          await expect(seat.getByRole('button')).toHaveCount(2)
           const seatBox = await seat.boundingBox()
-          const buttonBox = await button.boundingBox()
           expect(seatBox).not.toBeNull()
-          expect(buttonBox).not.toBeNull()
-          expect(buttonBox!.x).toBeGreaterThanOrEqual(seatBox!.x)
-          expect(buttonBox!.x + buttonBox!.width).toBeLessThanOrEqual(seatBox!.x + seatBox!.width)
           expect(seatBox!.x).toBeGreaterThanOrEqual(0)
           expect(seatBox!.x + seatBox!.width).toBeLessThanOrEqual(width)
-          // The retired dashboard / command bar stay retired.
+          for (const control of [button, say]) {
+            const box = await control.boundingBox()
+            expect(box).not.toBeNull()
+            expect(box!.x).toBeGreaterThanOrEqual(seatBox!.x)
+            expect(box!.x + box!.width).toBeLessThanOrEqual(seatBox!.x + seatBox!.width)
+          }
+          // Folded: no input at all; the retired dashboard stays retired.
           await expect(seat.locator('textarea, input, aside')).toHaveCount(0)
+          // Opened: exactly one box appears (nothing is sent). Cancel folds it.
+          await say.click()
+          await expect(seat.locator('textarea, input')).toHaveCount(1)
+          await expect(seat.getByRole('textbox', { name: w.sayBox, exact: true })).toBeVisible()
+          await seat.getByRole('button', { name: w.cancel, exact: true }).click()
+          await expect(seat.locator('textarea, input')).toHaveCount(0)
 
           // Monitoring left the screen (owner 2026-09-24).
           await expect(page.getByRole('button', { name: w.monitoring, exact: true })).toHaveCount(0)

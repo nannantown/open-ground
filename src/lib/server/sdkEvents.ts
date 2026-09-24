@@ -42,6 +42,13 @@ export type SdkEvent =
   | { kind: 'status'; status: SdkSessionStatus; detail?: string }
   /** Assistant prose. `fromSubagent` marks text forwarded from a sub-agent. */
   | { kind: 'text'; text: string; fromSubagent?: boolean }
+  /** A turn the session TOOK — emitted by the pool (sdkSession.ts) at the
+   *  moment the queued text is handed to the CLI, never by the distiller. The
+   *  dispatch order, the engine's rework notes, a line the owner typed into the
+   *  seat: the other half of the conversation, so the transcript shows what the
+   *  desk was told and that it was received. Clamped (a dispatch prompt runs
+   *  to ~10k chars). */
+  | { kind: 'input'; text: string }
   /** Thinking is COUNTED, never carried: the UI shows "thought N chars" and the
    *  engine does not reason about its content. */
   | { kind: 'thinking'; chars: number; fromSubagent?: boolean }

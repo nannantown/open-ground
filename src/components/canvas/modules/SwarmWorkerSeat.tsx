@@ -1,8 +1,10 @@
 // SwarmWorkerSeat — an SDK worker's seat on the one-screen Swarm tab, FOLDED:
-// who (rabbit · role tint), in what state, on which job, and the open question
-// if it is waiting on the owner. Nothing streams here — the status comes from
-// the module's GET /api/terminal/active poll (both pools, liveDesks.ts) and
-// the question from its one escalations poll.
+// who (rabbit · role tint), in what state, on which job, the open question if
+// it is waiting on the owner, and (2026-09-24, owner) its recent conversation
+// plus a folded "send a word" box (SwarmSeatTalk). Nothing STREAMS here — the
+// status comes from the module's GET /api/terminal/active poll (both pools,
+// liveDesks.ts), the question from its one escalations poll, the conversation
+// from a short tail poll that holds no connection.
 //
 // WHY folded by default (2026-09-23 review): every open seat that shows a live
 // transcript holds one EventSource, and the app talks to its server over
@@ -17,6 +19,7 @@ import { useT } from '@/i18n/I18nContext'
 import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import type { WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
+import { SwarmSeatFeed, SwarmSeatSay, sayToWorker } from './SwarmSeatTalk'
 
 const SMALL_BTN =
   'flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1'
@@ -33,7 +36,13 @@ export const SwarmWorkerSeat = ({
   onTerminate,
   onForceRemove,
   onRestart,
+  sdkSessionId,
+  projectPath,
 }: {
+  /** An SDK worker's session — its conversation shows and it can be sent a
+   *  word. Absent for a legacy PTY worker (no transcript to poll). */
+  sdkSessionId?: string
+  projectPath: string
   branch: string
   taskTitle: string
   status: WorkerStatus
@@ -100,9 +109,9 @@ export const SwarmWorkerSeat = ({
         </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 py-3">
-        {/* The job, in full — the nameplate above has no room for it. */}
-        <p className="text-ui leading-snug text-ink" title={branch}>
+      <div className="flex max-h-[35%] shrink-0 flex-col gap-2 overflow-y-auto px-3 pb-1 pt-2">
+        {/* The job — the nameplate above has no room for it. */}
+        <p className="line-clamp-2 text-ui leading-snug text-ink" title={`${job} — ${branch}`}>
           {job}
         </p>
         {asking ? (
@@ -118,7 +127,16 @@ export const SwarmWorkerSeat = ({
             </div>
           </div>
         ) : null}
-        <div className="mt-auto flex flex-wrap items-center gap-2">
+      </div>
+      {/* What the worker is saying and doing, newest at the bottom (polled —
+          no stream, so every seat can show it at once). A PTY worker has no
+          transcript to poll. */}
+      {sdkSessionId ? (
+        <SwarmSeatFeed sdkSessionId={sdkSessionId} projectPath={projectPath} />
+      ) : (
+        <div className="min-h-0 flex-1" />
+      )}
+      <div className="flex shrink-0 flex-wrap items-center gap-2 px-3 py-1.5">
           <button
             type="button"
             onClick={onOpenLog}
@@ -135,8 +153,13 @@ export const SwarmWorkerSeat = ({
               {busy ? t('projectPanel.swarm.restarting') : t('projectPanel.swarm.restart')}
             </button>
           ) : null}
-        </div>
       </div>
+      {live && sdkSessionId ? (
+        <SwarmSeatSay
+          placeholder={t('projectPanel.swarm.say.workerPlaceholder')}
+          onSend={(text) => sayToWorker(projectPath, sdkSessionId, text, t)}
+        />
+      ) : null}
     </div>
   )
 }

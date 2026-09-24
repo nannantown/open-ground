@@ -221,7 +221,21 @@ export const projectPanel = {
     'projectPanel.swarm.manager.stop': 'Stop',
     'projectPanel.swarm.manager.stopping': 'Stopping…',
     'projectPanel.swarm.manager.conversationHint':
-      "The manager hands the president's jobs to workers and integrates finished work. You don't need to talk to it.",
+      "The manager hands the president's jobs to workers and integrates finished work. While it runs, its recent conversation shows here.",
+    // A seat's live conversation (SwarmSeatFeed) and its quiet one-line send
+    // box (SwarmSeatSay) — the owner rarely needs either, so both stay small.
+    'projectPanel.swarm.feed.empty': 'Nothing said yet.',
+    'projectPanel.swarm.feed.input': 'Told',
+    'projectPanel.swarm.say.open': 'Send a word',
+    'projectPanel.swarm.say.managerPlaceholder': 'A word to the manager (usually not needed)',
+    'projectPanel.swarm.say.workerPlaceholder': 'A word to this worker (usually not needed)',
+    'projectPanel.swarm.say.send': 'Send',
+    'projectPanel.swarm.say.cancel': 'Cancel',
+    'projectPanel.swarm.say.keyHint': '⌘/Ctrl+Enter sends',
+    'projectPanel.swarm.say.delivered': 'Delivered.',
+    'projectPanel.swarm.say.woke': 'Woke the manager and delivered.',
+    'projectPanel.swarm.say.held': "It's busy, so this wasn't delivered. Try again in a moment.",
+    'projectPanel.swarm.say.failed': 'Not delivered: {error}',
     'projectPanel.swarm.overLimit':
       'The Agent Team has started {dispatched} workers since the app opened (guide: {limit}). It keeps going — check it is doing what you want.',
     'projectPanel.swarm.manager.start': 'Start',
@@ -722,7 +736,19 @@ export const projectPanel = {
     'projectPanel.swarm.manager.stop': '停止',
     'projectPanel.swarm.manager.stopping': '停止中…',
     'projectPanel.swarm.manager.conversationHint':
-      'マネージャーは社長が受けた仕事を worker に割り振り、仕上がりを統合します。話しかける必要はありません。',
+      'マネージャーは社長が受けた仕事をワーカーに割り振り、仕上がりを統合します。動いている間は、ここに直近のやりとりが出ます。',
+    'projectPanel.swarm.feed.empty': 'まだやりとりはありません。',
+    'projectPanel.swarm.feed.input': '受け取った指示',
+    'projectPanel.swarm.say.open': '一言送る',
+    'projectPanel.swarm.say.managerPlaceholder': 'マネージャーへの一言(ふだんは不要です)',
+    'projectPanel.swarm.say.workerPlaceholder': 'このワーカーへの一言(ふだんは不要です)',
+    'projectPanel.swarm.say.send': '送る',
+    'projectPanel.swarm.say.cancel': 'やめる',
+    'projectPanel.swarm.say.keyHint': '⌘/Ctrl+Enter で送信',
+    'projectPanel.swarm.say.delivered': '届けました。',
+    'projectPanel.swarm.say.woke': 'マネージャーを起こして届けました。',
+    'projectPanel.swarm.say.held': '取り込み中のため届けられませんでした。少し待ってからもう一度送ってください。',
+    'projectPanel.swarm.say.failed': '届きませんでした: {error}',
     'projectPanel.swarm.overLimit':
       'アプリを開いてから worker を {dispatched} 回動かしました（目安 {limit} 回）。止まらずに続いています —— 狙いどおりに動いているか確認してください。',
     'projectPanel.swarm.manager.start': '起動',

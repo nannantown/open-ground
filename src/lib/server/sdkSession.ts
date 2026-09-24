@@ -139,6 +139,12 @@ export interface SdkSessionInfo {
    *  therefore blind to a session that was asked to stop but is still running.
    *  Absent means NOT reaped (still live, or still unwinding). */
   reaped?: boolean
+  /** How many of the `seq` frames are 'input' frames — turns the desk was
+   *  handed, which are not output. `seq > (inputs ?? 0)` is "has this desk
+   *  produced anything": a freshly spawned desk takes its first prompt at once,
+   *  so `seq > 0` alone reads a silent desk as having painted at spawn
+   *  (swarmManagerRuntime lastOutputAt). Absent means 0. */
+  inputs?: number
   /** The pool will no longer ACCEPT input or an interrupt for this session —
    *  `pushSdkInput` and `interruptSdkSession` both reject on it, and
    *  `terminateSdkSession` sets it SYNCHRONOUSLY, long before {@link reaped}.
@@ -173,6 +179,9 @@ interface Entry {
    *  a reader that has fallen further behind than this is told so rather than
    *  being served a silently incomplete history. */
   buffer: SdkStreamFrame[]
+  /** How many of the `seq` frames are 'input' (turns the desk was HANDED,
+   *  not output it produced) — see {@link SdkSessionInfo.inputs}. */
+  inputs: number
   /** True once the buffer has dropped at least one frame. */
   truncated: boolean
   listeners: Set<Listener>
@@ -529,7 +538,11 @@ const announceStatus = (e: Entry, status: SdkSessionStatus, detail?: string): vo
   emit(e, { kind: 'status', status, ...(detail ? { detail } : {}) })
 }
 
-const makeInputIterable = (e: Entry): AsyncIterable<unknown> => ({
+/** How much of a received turn the 'input' event carries — the seat shows a
+ *  few lines of it; the full text is the CLI's, not the ring buffer's. */
+const INPUT_EVENT_MAX = 2000
+
+const makeInputIterable =(e: Entry): AsyncIterable<unknown> => ({
   async *[Symbol.asyncIterator]() {
     for (;;) {
       let text: string | null
@@ -537,6 +550,18 @@ const makeInputIterable = (e: Entry): AsyncIterable<unknown> => ({
       else if (e.closed) return
       else text = await new Promise<string | null>((res) => (e.wake = res))
       if (text === null) return
+      // Record the turn as RECEIVED — the seat's transcript shows what the desk
+      // was told (sdkEvents 'input'). lastEventAt is restored: it means "the
+      // desk produced something" to the stall readers (workerRuntime
+      // lastOutputAt, liveDesks), and a nudge the engine pushes into a stuck
+      // worker must not read as the worker waking up.
+      const at = e.lastEventAt
+      emit(e, {
+        kind: 'input',
+        text: text.length > INPUT_EVENT_MAX ? `${text.slice(0, INPUT_EVENT_MAX)}…` : text,
+      })
+      e.lastEventAt = at
+      e.inputs += 1
       yield {
         type: 'user',
         message: { role: 'user', content: [{ type: 'text', text }] },
@@ -749,6 +774,7 @@ export const spawnSdkSession = (opts: SpawnSdkSessionOpts): SdkSessionInfo => {
     seq: 0,
     buffer: [],
     truncated: false,
+    inputs: 0,
     listeners: new Set(),
     queue: [],
     wake: null,
@@ -824,7 +850,25 @@ const snapshot = (e: Entry): SdkSessionInfo => ({
   // can ask the question it actually has.
   ...(e.closed ? { closed: true } : {}),
   seq: e.seq,
+  ...(e.inputs ? { inputs: e.inputs } : {}),
 })
+
+/** The newest frames after `after`, at most `limit` of them — the POLLED twin
+ *  of the SSE replay, for the Agent Team bar's seats, which must not hold a
+ *  connection each (streamBudget.ts). Null for an unknown session. */
+export const readSdkFrames = (
+  id: string,
+  after: number,
+  limit: number,
+): { frames: SdkStreamFrame[]; seq: number; status: SdkSessionStatus; reaped: boolean } | null => {
+  const e = pool.sessions.get(id)
+  if (!e) return null
+  const newer: SdkStreamFrame[] = []
+  for (let i = e.buffer.length - 1; i >= 0 && newer.length < limit && e.buffer[i].seq > after; i--) {
+    newer.unshift(e.buffer[i])
+  }
+  return { frames: newer, seq: e.seq, status: e.status, reaped: !!e.reaped }
+}
 
 export const getSdkSession = (id: string): SdkSessionInfo | null => {
   const e = pool.sessions.get(id)

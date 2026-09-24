@@ -101,6 +101,23 @@ describe('listManagerDesks', () => {
     expect(d.lastOutputAt).toBeNull()
   })
 
+  it("a desk that has only TAKEN turns ('input' frames) still reports no output", () => {
+    // The shape production actually has for a silent desk since the pool
+    // records received turns: its spawn prompt makes seq 1.
+    const [d] = listManagerDesks('/repo', {
+      ptyDesks: () => [],
+      ptyAlive: () => true,
+      sdkDesks: () => [sdkDesk({ seq: 1, inputs: 1, lastEventAt: 12_345 })],
+    })
+    expect(d.lastOutputAt).toBeNull()
+    const [spoke] = listManagerDesks('/repo', {
+      ptyDesks: () => [],
+      ptyAlive: () => true,
+      sdkDesks: () => [sdkDesk({ seq: 2, inputs: 1, lastEventAt: 12_345 })],
+    })
+    expect(spoke.lastOutputAt).toBe(12_345)
+  })
+
   it('never returns a worker session — the role filter is the pool query, not a post-filter', () => {
     const sdkDesks = vi.fn(() => [])
     listManagerDesks('/repo', { ptyDesks: () => [], ptyAlive: () => true, sdkDesks })

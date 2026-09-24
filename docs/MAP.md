@@ -494,6 +494,13 @@
   席の状態は `/api/terminal/active`(両プール)。見えていて消えた卓=死亡、まだ見えない卓は5秒ごとの生存 probe
   (404/403/reaped のみ死亡・5xx は無視)→ どちらも reconcile が記録を消す(上部 Start で再起動できる)。質問 poll は `&status=open&lane=owner`(司令官が処理中の質問は出さない)。
   番人 = `SwarmModule.seats.test.tsx` / `SwarmManagerPane.test.tsx` / `SdkWorkerPane.test.tsx`(open-question banner)。
+  ⑦ **Seat conversations + send-a-word (2026-09-24, owner)**: the manager seat and every SDK worker seat show the
+  desk's recent conversation via `modules/SwarmSeatTalk.tsx` — POLLED from `GET /api/sdk-session/:id/tail`
+  (`readSdkFrames`, same double gate), never an EventSource per seat (the 6-connection trap above). The pool records
+  each turn a desk TAKES as an `'input'` frame (`makeInputIterable`; lastEventAt restored and counted in
+  `SdkSessionInfo.inputs` so an input is never mistaken for output — `swarmManagerRuntime` lastOutputAt). The folded
+  send box goes manager → `POST /api/swarm/manager/say`, worker → `POST /api/sdk-session/:id/input`; only Send or
+  ⌘/Ctrl+Enter sends. 番人 = `SwarmSeatTalk.test.tsx` / `sdkSession.test.ts` (input frame) / `sdkSessionRoutes.test.ts` (tail).
   重要レーンは TTL なし(社長不在中は保持・遅配は「約N時間前の知らせ」付き)・
   `~/.openground/supply-notice-queue.json` に永続(再起動でも消えない)・溜まった分は
   「(N件まとめて)」の1行で伝える。回答/却下で
