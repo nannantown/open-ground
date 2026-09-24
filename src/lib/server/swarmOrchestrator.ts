@@ -3044,7 +3044,8 @@ const stateOf = (
   // sites that WRITE the field pass what they just wrote). Defaulted false for the
   // remaining toggle endpoints, exactly like autonomyRemembered above — their ack
   // is superseded by the next 5s poll. NEVER an auto-arm input: the only consumer
-  // is the UI's one-click restore banner (resumeEngines still ignores the field —
+  // is the restore reminder — since 2026-09-24 read by the president, who tells the
+  // owner (the on-screen banner was removed; resumeEngines still ignores the field —
   // OVERSEER_DESIGN.md K2 / L9-③).
   overseerRemembered = false,
 ): SwarmOrchestratorState => {
@@ -6912,6 +6913,8 @@ const raiseNoAllowedModelTier = async (
 ): Promise<void> => {
   if (!deps.raiseQuestion) return
   const question =
+    // Frozen: this text feeds receiptKey (dedupe of an already-raised question),
+    // so it keeps the old name. Owner-facing wording lives in plainQuestion.
     'Swarm cannot launch: every model tier is switched OFF (Settings ▸ 使用可能モデル). Which tier should be re-enabled?'
   try {
     await deps.raiseQuestion({
@@ -6920,7 +6923,7 @@ const raiseNoAllowedModelTier = async (
       context:
         'すべてのモデル tier が使用可能モデル設定で OFF になっているため、worker / マネージャー / タスク窓口 / ' +
         'レビュアーのいずれも起動できず、dispatch を停止しています。cooling と違い期限で自然回復しません — ' +
-        '最低1つの tier を ON に戻すまで swarm は動きません。',
+        '最低1つの tier を ON に戻すまでエージェントチームは動きません。',
       plainQuestion:
         'AIを動かすための「使えるモデル」の設定が、すべてオフになっています。どうしますか？\n' +
         'A: 設定画面（使用可能モデル）で、どれか1つ以上をオンに戻す（すぐに作業が再開できます）\n' +
@@ -7937,7 +7940,7 @@ const escalateUnresponsiveManager = async (
     ...(ctx.branch ? { branch: ctx.branch } : {}),
     ...(ctx.taskTitle ? { taskTitle: ctx.taskTitle } : {}),
     detail: managerUnresponsiveDetail({ cause: ctx.cause, waitedMs: ctx.waitedMs, waiting: ctx.waiting }),
-    logHint: 'Swarm のバー → マネージャー / engine log の integrate 行',
+    logHint: 'エージェントチームのバー → マネージャー / engine log の integrate 行',
   })
 }
 
@@ -8471,7 +8474,7 @@ export const runIntegratePass = async (
           engine,
           'warn',
           `司令官の卓は起動しているが ${nudges} 回の声かけに応答しません — 卓が固まっている可能性。` +
-            `Swarm のバー → マネージャーで手動確認を(統合待ち ${swarmCards.length} 件)`,
+            `エージェントチームのバー → マネージャーで手動確認を(統合待ち ${swarmCards.length} 件)`,
           'integrate',
         )
       }
@@ -8514,7 +8517,7 @@ export const runIntegratePass = async (
           engine,
           'error',
           `司令官の卓に声をかけられません(${rs.unaddressable}回連続で書き込みに失敗) — ` +
-            `卓は動いているのに宛先が分からない状態です。Swarm のバー → マネージャーを開き直すと復旧します。` +
+            `卓は動いているのに宛先が分からない状態です。エージェントチームのバー → マネージャーを開き直すと復旧します。` +
             `統合待ち ${swarmCards.length} 件`,
           'integrate',
         )
@@ -8563,7 +8566,7 @@ export const runIntegratePass = async (
         engine,
         'error',
         `マネージャーが ${rs.attempts} 回連続で蘇生に失敗 — 統合が止まっています。手動でマネージャー卓を確認してください` +
-          `(Swarm のバー → マネージャー)。統合待ち ${swarmCards.length} 件`,
+          `(エージェントチームのバー → マネージャー)。統合待ち ${swarmCards.length} 件`,
         'integrate',
       )
       // Best-effort escalation (bell + OS toast) — never awaited, internal-catch so a
@@ -8574,7 +8577,7 @@ export const runIntegratePass = async (
         branch: swarmCards[0]?.branch,
         taskTitle: swarmCards[0]?.title || undefined,
         detail: `マネージャーが ${rs.attempts} 回連続で落ちています(統合待ち ${swarmCards.length} 件)。手動で確認を`,
-        logHint: 'Swarm のバー → マネージャー / engine log の integrate 行',
+        logHint: 'エージェントチームのバー → マネージャー / engine log の integrate 行',
       })
     }
     // GIVE UP THE LOOP, NOT RECOVERY (完了条件2, 2026-07-20). Returning here forever is
@@ -9513,14 +9516,14 @@ export const startOrchestrator = async (
   // card 2b — `overseer` is carried over from the value read above instead of being
   // derived from THIS engine's in-memory `.enabled` (what persistEngineIntent does).
   // On a fresh post-restart engine that flag is false, so the old full write ERASED
-  // the disk record the one-click restore banner reads — in the exact path where it
+  // the disk record the restore reminder reads — in the exact path where it
   // matters most (a boot whose resume was suppressed by the crash-loop breaker or
-  // preflight: the owner sees both banners and presses 再開 first). Turning autonomy
+  // preflight: the owner presses 再開 before being told about monitoring). Turning autonomy
   // ON says nothing about the overseer; it is a SEPARATE toggle the owner arms on its
   // own, and the only site that legitimately clears its intent is the explicit OFF
   // (stopOrchestrator's D1 asymmetry). resumeEngines still never reads the field, so
-  // preserving it changes NO resume behaviour — only whether the banner survives long
-  // enough to be pressed. The OR keeps the record honest in the idempotent-ON case
+  // preserving it changes NO resume behaviour — only whether the reminder survives long
+  // enough to be told to the owner. The OR keeps the record honest in the idempotent-ON case
   // (already armed ⇒ true even if a prior write had been lost to a disk fault).
   const rememberedOverseer = engine.overseer.enabled || priorIntent.overseer
   const persisted = await writeEngineIntent(projectPath, {
@@ -10065,10 +10068,10 @@ export const getOrchestratorState = async (
   // card 2b — the RAW persisted overseer intent (engine.json). Read on the SAME pure-read
   // discipline as the two markers above, and BEFORE the engine lookup for the same reason:
   // right after a restart there is no in-memory engine, and that is precisely when the
-  // one-click restore banner has to appear. This is a REMINDER read only — the boot path
+  // restore reminder has to be readable. This is a REMINDER read only — the boot path
   // (resumeEngines) still never reads this field back to arm the overseer, because a
   // restart is the one kill switch layer with no substitute (OVERSEER_DESIGN.md K2 /
-  // L9-③). readEngineIntent never throws (fail-quiet-to-OFF ⇒ no banner on a bad disk).
+  // L9-③). readEngineIntent never throws (fail-quiet-to-OFF ⇒ no reminder on a bad disk).
   const overseerIntent = (await readEngineIntent(projectPath)).overseer
   // The desks ACTUALLY live right now — both-pools reads, still pure/idempotent
   // (this GET's K8 no-mutate contract). This is the handle the UI needs to ADOPT
@@ -10525,7 +10528,7 @@ export const resumeEngines = async (
     await createSwarmFatalNotification({
       event: 'engine-resume-suppressed',
       detail:
-        '起動履歴を保存できなかったため(ディスク書き込み失敗)、安全のため swarm の自動再開を見送りました(手動でオンにできます)。',
+        '起動履歴を保存できなかったため(ディスク書き込み失敗)、安全のためエージェントチームの自動再開を見送りました(手動でオンにできます)。',
     }).catch(() => {})
     return { resumed: [], suppressed: true }
   }
@@ -10533,7 +10536,7 @@ export const resumeEngines = async (
     const recent = items.filter((r) => r.appVersion === appVersion && now - r.at <= 10 * 60 * 1000)
     await createSwarmFatalNotification({
       event: 'engine-resume-suppressed',
-      detail: `同じバージョンで短時間に${recent.length}回起動したため、念のため swarm の自動再開を見送りました。アプリを開き直しただけの場合は問題ありません — 手動でオンにできます。`,
+      detail: `同じバージョンで短時間に${recent.length}回起動したため、念のためエージェントチームの自動再開を見送りました。アプリを開き直しただけの場合は問題ありません — 手動でオンにできます。`,
     }).catch(() => {})
     return { resumed: [], suppressed: true }
   }
@@ -10621,7 +10624,7 @@ export const resumeEngines = async (
               projectPath,
               detail:
                 'claude をすぐに使えなかったため、司令官の卓を復帰できませんでした' +
-                `(${pre.body?.error ?? '理由不明'})。worker が動いていても、完了分を統合する司令官がいない状態です — 画面下の Swarm のバーから司令官を立て直してください。`,
+                `(${pre.body?.error ?? '理由不明'})。worker が動いていても、完了分を統合する司令官がいない状態です — 画面下のエージェントチームのバーから司令官を立て直してください。`,
             }).catch(() => {})
           }
         } catch (e) {
@@ -10630,7 +10633,7 @@ export const resumeEngines = async (
             projectPath,
             detail:
               `司令官の卓を復帰できませんでした(${e instanceof Error ? e.message : String(e)})。` +
-              'worker が動いていても、完了分を統合する司令官がいない状態です — 画面下の Swarm のバーから司令官を立て直してください。',
+              'worker が動いていても、完了分を統合する司令官がいない状態です — 画面下のエージェントチームのバーから司令官を立て直してください。',
           }).catch(() => {})
         }
       }
@@ -10653,8 +10656,8 @@ export const resumeEngines = async (
           event: 'engine-resume-suppressed',
           projectPath,
           detail:
-            'claude をすぐに使えなかったため、このプロジェクトの swarm 自動再開を見送りました' +
-            `(${pre.body?.error ?? '理由不明'})。画面下の Swarm のバーから手動でオンにできます。`,
+            'claude をすぐに使えなかったため、このプロジェクトのエージェントチームの自動再開を見送りました' +
+            `(${pre.body?.error ?? '理由不明'})。画面下のエージェントチームのバーから手動でオンにできます。`,
         }).catch(() => {})
         continue
       }
@@ -10856,8 +10859,8 @@ export const setOverseer = async (
   if (enabled && !engine.running) {
     logLine(engine, 'warn', 'overseer arm ignored — autonomy is OFF (turn the engine ON first)')
     // The arm was REFUSED, so the persisted reminder is untouched — report it as it
-    // still stands on disk (card 2b) instead of blanking the restore banner on a
-    // refusal. Fail-quiet: an unreadable engine.json just means no banner.
+    // still stands on disk (card 2b) instead of blanking the restore reminder on a
+    // refusal. Fail-quiet: an unreadable engine.json just means no reminder.
     return stateOf(engine, deps.isAlive, [], false, false, (await readEngineIntent(projectPath)).overseer)
   }
   if (engine.overseer.enabled !== enabled) {
@@ -10884,22 +10887,23 @@ export const setOverseer = async (
 
 /** card 2b — DISMISS the overseer restore reminder: forget the persisted
  *  `overseer:true` in this project's engine.json, WITHOUT touching any arm state.
- *  The [×] on the one-click restore banner (OVERSEER_DESIGN.md:161's visible
- *  surface) — "I saw it, don't ask again".
+ *  Was the [×] on the on-screen restore banner (OVERSEER_DESIGN.md:161's visible
+ *  surface) — "I saw it, don't ask again". That banner was removed (2026-09-24);
+ *  the president calls the route when the owner declines to re-arm monitoring.
  *
  *  WHY THIS IS ITS OWN ACTION and not `setOverseer(path, false)` — the d1d6d704
- *  MUST-FIX, verbatim, one toggle over: while the banner is up the overseer is by
+ *  MUST-FIX, verbatim, one toggle over: while the reminder stands the overseer is by
  *  definition NOT armed (`engine.overseer.enabled === false`), so setOverseer(false)
  *  would find `enabled !== enabled` FALSE, skip its whole body — including the
  *  `patchEngineIntent` — and change nothing at all. The disk would still say
- *  `overseer:true`, the next poll would re-surface the banner, and [×] would be a
- *  no-op the owner could press forever. This function writes the field directly, so
+ *  `overseer:true`, the next status read would raise the reminder again, and the
+ *  dismissal would be a no-op repeated forever. This function writes the field directly, so
  *  the dismissal is a real, observable state change.
  *
  *  Deliberately does NOT touch: `engine.overseer.enabled` (already false — and
  *  disarming is not what [×] means), `desiredRunning` (patch touches
  *  only its own field — a running engine must keep running when the owner declines
- *  a banner), and the arm CONDITIONS (this card adds a display, never a new way in).
+ *  the reminder), and the arm CONDITIONS (a reminder, never a new way in).
  *  Idempotent and safe with no in-memory engine (the common post-restart case):
  *  the write path is disk-only. FAIL-OPEN like every other intent write. */
 export const dismissOverseerReminder = async (
@@ -10909,7 +10913,7 @@ export const dismissOverseerReminder = async (
   const key = await canonicalize(projectPath)
   await patchEngineIntent(projectPath, { overseer: false })
   const engine = store.engines.get(key)
-  // No engine this session (right after a restart — the case the banner exists for):
+  // No engine this session (right after a restart — the case the reminder exists for):
   // report the same shape getOrchestratorState would, minus the reminder just cleared.
   if (!engine) {
     const stopped = await isSwarmManualStopPersisted(key)

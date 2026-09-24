@@ -4,8 +4,10 @@
 // Board's president drawer (BoardSupplyDock — the president's seat now exists
 // in exactly one place: the seats row inside this bar).
 //
-// - Folded by default: a single header row — "Swarm", running/stopped · N
-//   workers, questions waiting on the owner, and the master on/off switch.
+// - Folded by default: a single header row — the team's name ("Agent Team" /
+//   エージェントチーム on screen), questions waiting on the owner and cards
+//   awaiting integration (only when there are some), and the on/off switch.
+//   Clicking anywhere on that row opens / folds the bar (SwarmModule).
 //   Folded mounts no seat, so it opens no EventSource.
 // - Open: grows UPWARD to a saved height and shows the seats (president ·
 //   manager · workers). The top edge is a drag handle; the height is saved per

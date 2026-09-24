@@ -63,11 +63,11 @@ export interface SwarmEnvPreflightOptions {
 
 const MESSAGES: Record<SwarmEnvIssueId, string> = {
   gitMissing:
-    'git was not found. The swarm spawns each worker in its own git worktree, so git must be installed and on PATH.',
+    'git was not found. The Agent Team runs each worker in its own git worktree, so git must be installed and on PATH.',
   notAGitRepo:
-    "This project folder isn't a git repository. Swarm workers branch off it into isolated worktrees — run `git init` (and make an initial commit) here first.",
+    "This project folder isn't a git repository. Agent Team workers branch off it into isolated worktrees — run `git init` (and make an initial commit) here first.",
   shellMissing:
-    'No usable shell was found to run a terminal session (checked the SHELL environment variable / the default shell path). Swarm workers run inside an interactive shell.',
+    'No usable shell was found to run a terminal session (checked the SHELL environment variable / the default shell path). Agent Team workers run inside an interactive shell.',
 }
 
 // Cache briefly so a Swarm-tab poll landing right after a spawn attempt doesn't

@@ -1028,11 +1028,14 @@ export const swarmRoutes = new Hono()
   })
   // --- POST /api/swarm/orchestrator/overseer/dismiss — forget the restore reminder --
   // Body: { path }. card 2b: clears the persisted `overseer:true` in engine.json so the
-  // one-click restore banner stops appearing. Arms NOTHING and disarms nothing — it is
-  // purely "I saw it, don't ask again". A SEPARATE endpoint from …/overseer on purpose:
-  // POSTing { enabled:false } there is a NO-OP while the banner is up (the overseer is
-  // already disarmed, so setOverseer's change-guard skips the persist) — the d1d6d704
-  // dismiss trap. Owner-only + validated, like the rest of /api/swarm/* (K3).
+  // restore reminder (`overseerRemembered`) stops being raised. Since 2026-09-24 the
+  // caller is the president, when the owner answers "don't turn monitoring back on"
+  // (skills/supply/SKILL.md — the on-screen banner was removed). Arms NOTHING and
+  // disarms nothing — it is purely "I saw it, don't ask again". A SEPARATE endpoint
+  // from …/overseer on purpose: POSTing { enabled:false } there is a NO-OP while the
+  // reminder stands (the overseer is already disarmed, so setOverseer's change-guard
+  // skips the persist) — the d1d6d704 dismiss trap. Owner-only + validated, like the
+  // rest of /api/swarm/* (K3).
   .post('/api/swarm/orchestrator/overseer/dismiss', async (c) => {
     if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any

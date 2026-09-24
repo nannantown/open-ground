@@ -27,26 +27,21 @@ export const projectPanel = {
     // project_inapp_swarm_port). Never shown unless the experiment is on
     // (owner + the settings toggle, resolved server-side).
     'projectPanel.swarm.badge': 'Experimental',
-    'projectPanel.swarm.title': 'Swarm orchestration',
+    'projectPanel.swarm.title': 'Agent Team',
     // Master power switch (SwarmPowerBar) — the SINGLE on/off for the whole
     // Swarm tab. ON starts the autonomous engine AND launches the manager +
     // supply conversations together (idempotent); OFF only halts new dispatch
     // (running workers finish, worktrees are kept). The status shows running /
     // stopped + how many workers are live. (No separate auto-integrate switch —
     // retired 2026-07-16; the engine never pushes.)
-    'projectPanel.swarm.power.label': 'Swarm',
+    'projectPanel.swarm.power.label': 'Agent Team',
     'projectPanel.swarm.power.start': 'Start',
-    'projectPanel.swarm.power.running': 'Running',
     'projectPanel.swarm.power.stopped': 'Stopped',
-    // Deliberate owner pause (manualStop — persisted server-side, survives
-    // restarts), distinct from a merely never-started "Stopped".
-    'projectPanel.swarm.power.manualStop': 'Stopped by hand',
     'projectPanel.swarm.power.offline': 'Not available yet',
-    'projectPanel.swarm.power.workers': '{count} workers',
     // The Swarm bottom bar (2026-09-24 — replaced the Swarm tab).
-    'projectPanel.swarm.bar.expand': 'Open Swarm',
-    'projectPanel.swarm.bar.collapse': 'Fold Swarm away',
-    'projectPanel.swarm.bar.resize': 'Drag to change the height of Swarm',
+    'projectPanel.swarm.bar.expand': 'Open Agent Team',
+    'projectPanel.swarm.bar.collapse': 'Fold Agent Team away',
+    'projectPanel.swarm.bar.resize': 'Drag to change the height of Agent Team',
     // "Questions", not "waiting on you": the Board's blocked column is called
     // "Needs decision"/「判断待ち」 and counts something else — one word must
     // never name two different numbers on the same screen.
@@ -56,7 +51,7 @@ export const projectPanel = {
     'projectPanel.terminalOverBudget':
       'This pane is paused to keep the app responsive — too many live views are open. Its shell keeps running; close another pane to see it again.',
     'projectPanel.swarm.bar.streamLimit':
-      'Too many live views are open at once, so some Swarm seats show a summary. Close a terminal pane or switch tabs to see them live.',
+      'Too many live views are open at once, so some Agent Team seats show a summary. Close a terminal pane or switch tabs to see them live.',
     'projectPanel.swarm.bar.questionsHint': 'Open the bar and tell the president your answers.',
     'projectPanel.swarm.bar.attention': 'There is a notice inside — open the bar to read it.',
     'projectPanel.swarm.power.hint':
@@ -67,30 +62,6 @@ export const projectPanel = {
       'Autonomy was on for this project last session. It relaunched OFF — nothing is running.',
     'projectPanel.swarm.autonomyReminder.resume': 'Resume',
     'projectPanel.swarm.autonomyReminder.dismiss': 'Dismiss',
-    // Restored notice (autonomyResumed) — the OTHER half of the reminder above. A
-    // restart now brings the drain back on its own, so the "resume?" prompt (gated on
-    // !running) never fires for a restored project; without this line the restoration
-    // would happen in silence. Shown only when the BOOT restored it — never after a
-    // plain manual ON.
-    'projectPanel.swarm.autonomyRestored':
-      'Autonomy was on last session, so it started again automatically after the restart.',
-    // The same notice as a header chip — the sentence above is its tooltip.
-    'projectPanel.swarm.autonomyRestored.short': 'Resumed after restart',
-    // Overseer restore banner (overseerRemembered, card 2b). The supervisor is the ONE
-    // switch a restart never brings back — deliberately, because it does more than
-    // watch. Plain language for a non-programmer owner: what it does when it is on, so
-    // the owner presses the button KNOWING what they are turning back on.
-    'projectPanel.swarm.overseerReminder':
-      'The supervisor was on last session. After the restart it stays off until you turn it back on.',
-    'projectPanel.swarm.overseerReminder.effects':
-      'When on, the supervisor does more than send you messages: it starts up an AI on its own, steps in and gives instructions to work already in progress, and tidies up finished work.',
-    'projectPanel.swarm.overseerReminder.needsAutonomy':
-      'Turn autonomy on first, then you can bring the supervisor back.',
-    'projectPanel.swarm.overseerReminder.restore': 'Turn it back on',
-    // Its own label rather than a bare "Dismiss": this [×] can sit right under the
-    // autonomy notice's [×], and two identically-named buttons in a row are
-    // ambiguous to anyone navigating by screen reader.
-    'projectPanel.swarm.overseerReminder.dismiss': 'Dismiss the supervisor notice',
     // Env preflight (git/shell) — GET /api/swarm/preflight (swarmEnvPreflight),
     // the same gate the worker/supply/manager spawn routes enforce. Shown as ONE
     // banner listing every unmet prerequisite; ids mirror SwarmEnvIssueId. Plain
@@ -122,24 +93,11 @@ export const projectPanel = {
     'projectPanel.swarm.preflight.gitInitDone':
       'Done — git is ready. Workers can run here now.',
     'projectPanel.swarm.preflight.gitInitError': "Couldn't set up git here.",
-    // Execution mode (token budget) — one switch for every swarm launch (card 68d8e00f).
-    'projectPanel.swarm.mode.label': 'Mode',
-    'projectPanel.swarm.mode.max': 'Max',
-    // {top}/{light} are the tiers these modes ACTUALLY resolve to under the
-    // usable-models switches below — never a model the swarm may not launch.
-    'projectPanel.swarm.mode.max.hint':
-      'Every role on the top usable model ({top}) / max effort, heavy parallelism — peak quality, peak spend. For crunch time.',
-    'projectPanel.swarm.mode.economy': 'Economy',
-    'projectPanel.swarm.mode.economy.hint':
-      '{light}, low/medium effort, fewer parallel workers — minimise the weekly-budget burn.',
-    'projectPanel.swarm.mode.optimize': 'Optimize',
-    'projectPanel.swarm.mode.optimize.hint':
-      "Each card's difficulty decides — Ultra cards get the top tier ({top}), Touch cards drop to {light}, the rest run in between. The smart default.",
     // Usable models — the owner's PERMANENT per-tier switch (hard mask). Not the
     // transient quota cooling: an OFF tier never comes back on its own.
     'projectPanel.swarm.models.label': 'Usable models',
     'projectPanel.swarm.models.hint':
-      'No swarm role ever launches on a model switched off here — it survives restarts, unlike a rate-limit cooldown.',
+      'No Agent Team role ever launches on a model switched off here — it survives restarts, unlike a rate-limit cooldown.',
     'projectPanel.swarm.models.last': 'At least one model must stay on',
     // OFF / first-run onboarding (SwarmOnboarding) — the SINGLE centered screen
     // shown while the swarm is fully idle (engine stopped + no supply / manager
@@ -171,7 +129,7 @@ export const projectPanel = {
     // Workers list. Manual hand-dispatch was removed (the to-do rail is gone —
     // browse todos on the Board tab); workers are started by the autonomous
     // engine (the master power switch above) or the manager session.
-    'projectPanel.swarm.workersEmpty': 'No workers yet — Start the swarm (or ask the manager) to dispatch one.',
+    'projectPanel.swarm.workersEmpty': 'No workers yet — Start the Agent Team (or ask the manager) to dispatch one.',
     'projectPanel.swarm.statusWorking': 'Working',
     'projectPanel.swarm.statusWaiting': 'Waiting',
     'projectPanel.swarm.statusOfflineHold': 'Waiting for network',
@@ -201,7 +159,7 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.jumpLatest': 'Latest',
     'projectPanel.swarm.sdk.questionBanner': 'This worker asked you a question',
     'projectPanel.swarm.sdk.questionBannerHint':
-      'Tell the president your answer — in the President seat of the Swarm bar at the bottom of the screen. The worker resumes on your reply.',
+      'Tell the president your answer — in the President seat of the Agent Team bar at the bottom of the screen. The worker resumes on your reply.',
     'projectPanel.swarm.sdk.statusFailed': 'Failed',
     'projectPanel.swarm.sdk.interrupt': 'Stop the current turn (the session stays open)',
     'projectPanel.swarm.sdk.send': 'Send',
@@ -244,8 +202,6 @@ export const projectPanel = {
     // president. `overseer*` label the Monitoring switch on the top bar.
     'projectPanel.swarm.manager.tab': 'Manager',
     'projectPanel.swarm.manager.badge': 'Manager',
-    'projectPanel.swarm.manager.overseer': 'Monitoring',
-    'projectPanel.swarm.manager.overseerHint': 'Questions, stalled work and usage alerts. Off when stopped or restarted.',
     'projectPanel.swarm.manager.engineFailed': "Couldn't reach the engine: {error}",
     'projectPanel.swarm.manager.stageStarting': 'Starting',
     'projectPanel.swarm.manager.stageRunning': 'Running',
@@ -267,7 +223,7 @@ export const projectPanel = {
     'projectPanel.swarm.manager.conversationHint':
       "The manager hands the president's jobs to workers and integrates finished work. You don't need to talk to it.",
     'projectPanel.swarm.overLimit':
-      'The swarm has started {dispatched} workers since the app opened (guide: {limit}). It keeps going — check it is doing what you want.',
+      'The Agent Team has started {dispatched} workers since the app opened (guide: {limit}). It keeps going — check it is doing what you want.',
     'projectPanel.swarm.manager.start': 'Start',
     'projectPanel.swarm.manager.stopFull': 'Stop manager',
     'projectPanel.swarm.manager.stateRunning': 'Running',
@@ -590,24 +546,20 @@ export const projectPanel = {
     // Swarm — オーナー限定の実験（アプリ内 swarm オーケストレーション面、project_inapp_swarm_port）。
     // 実験 ON（オーナー＋設定トグル、サーバー解決）時のみ表示。
     'projectPanel.swarm.badge': '実験的',
-    'projectPanel.swarm.title': 'Swarm オーケストレーション',
+    'projectPanel.swarm.title': 'エージェントチーム',
     // 電源スイッチ（SwarmPowerBar）— Swarm バー全体の単一のオン/オフ。オンで自律
     // エンジンを起動し、マネージャー＋タスク窓口の対話もまとめて起動（冪等）。オフは新規の
     // 振り分けを止めるだけ（走行中の worker は完走・worktree は温存）。状態として
     // 稼働中/停止中＋稼働ワーカー数を表示。（自動統合の別スイッチは廃止
     // (2026-07-16) — エンジンは push しない。）
-    'projectPanel.swarm.power.label': 'Swarm',
+    'projectPanel.swarm.power.label': 'エージェントチーム',
     'projectPanel.swarm.power.start': '開始',
-    'projectPanel.swarm.power.running': '稼働中',
     'projectPanel.swarm.power.stopped': '停止中',
-    // 手動停止(manualStop — サーバ側で永続化・再起動を跨いで維持)。単なる未起動の「停止中」と区別。
-    'projectPanel.swarm.power.manualStop': '手動停止中',
     'projectPanel.swarm.power.offline': '未配備',
-    'projectPanel.swarm.power.workers': 'ワーカー {count}',
     // Swarm の下部バー(2026-09-24 — Swarm タブの置き換え)。
-    'projectPanel.swarm.bar.expand': 'Swarm をひらく',
-    'projectPanel.swarm.bar.collapse': 'Swarm をたたむ',
-    'projectPanel.swarm.bar.resize': 'ドラッグで Swarm の高さを変える',
+    'projectPanel.swarm.bar.expand': 'エージェントチームをひらく',
+    'projectPanel.swarm.bar.collapse': 'エージェントチームをたたむ',
+    'projectPanel.swarm.bar.resize': 'ドラッグでエージェントチームの高さを変える',
     // 「判断待ち」は Board の blocked 列の見出しで別の数 — 同じ言葉で別の数を指さない。
     'projectPanel.swarm.bar.questions': 'あなたへの質問 {count}',
     'projectPanel.swarm.bar.reviews': '統合待ち {count}',
@@ -625,26 +577,6 @@ export const projectPanel = {
       '前回このプロジェクトで自律ドレインが ON でした。再起動で OFF になっています（何も動いていません）。',
     'projectPanel.swarm.autonomyReminder.resume': '再開',
     'projectPanel.swarm.autonomyReminder.dismiss': '閉じる',
-    // 復元のお知らせ(autonomyResumed)— 上のリマインダーのもう半分。再起動で自動運転が
-    // ひとりでに戻るようになったため、!running を条件にした「再開しますか?」は復元された
-    // プロジェクトでは出ない。この1行が無いと復元が黙って起きる。手動 ON では出さず、
-    // 起動時に復元されたときだけ出す。
-    'projectPanel.swarm.autonomyRestored':
-      '前回このプロジェクトで自動運転が ON だったので、再起動のあと自動でまた動き出しています。',
-    // 同じお知らせの見出し行用の短い札 — 上の1文はそのツールチップ。
-    'projectPanel.swarm.autonomyRestored.short': '再起動後に自動再開',
-    // 監督の復帰バナー(overseerRemembered・card 2b)。監督は再起動で戻さない唯一のスイッチ
-    // ——「見ているだけ」ではないので意図的にそうしている。オーナー(非プログラマ)向けの
-    // 平易文で「ONにすると何をするのか」を書き、理由を分かった上で押せるようにする。
-    'projectPanel.swarm.overseerReminder':
-      '前回は監督もオンでした。再起動のあとはオフのままなので、必要なら戻してください。',
-    'projectPanel.swarm.overseerReminder.effects':
-      '監督はオンのあいだ、お知らせを出すだけではありません。自分で AI を立ち上げ、すでに進んでいる作業に横から指示を入れ、終わった作業の後片付けもします。',
-    'projectPanel.swarm.overseerReminder.needsAutonomy': '先に自動運転をオンにすると、監督を戻せます。',
-    'projectPanel.swarm.overseerReminder.restore': '戻す',
-    // 単なる「閉じる」にしないのは、autonomy の復元通知の [×] と縦に並びうるため。
-    // 同名ボタンが連続すると読み上げでどちらか分からない。
-    'projectPanel.swarm.overseerReminder.dismiss': '監督のお知らせを閉じる',
     // 環境の事前チェック(git/shell) — GET /api/swarm/preflight(swarmEnvPreflight)。
     // worker/supply/manager の起動ルートと同じ判定を、起動前に1枚のバナーで表示する。
     // 完了条件5: 非プログラマ向けの平易文(①何が足りないか ②どうすれば直るか(オー
@@ -672,24 +604,11 @@ export const projectPanel = {
     'projectPanel.swarm.preflight.gitInitDone':
       '完了 — gitの準備ができました。これでワーカーを走らせられます。',
     'projectPanel.swarm.preflight.gitInitError': 'gitの準備に失敗しました。',
-    // 実行モード（トークン節約）— swarm 起動全体に効く1スイッチ（card 68d8e00f）。
-    'projectPanel.swarm.mode.label': 'モード',
-    'projectPanel.swarm.mode.max': '最大出力',
-    // {top}/{light} は下の「使用可能モデル」を踏まえて実際に起動する tier。OFF にした
-    // モデル名は出さない（「最大出力 = Fable」と嘘をつかない）。
-    'projectPanel.swarm.mode.max.hint':
-      '全ロール最上位モデル({top}) / max effort・重並列。最高品質・最高コスト。ここぞの時に。',
-    'projectPanel.swarm.mode.economy': '節約',
-    'projectPanel.swarm.mode.economy.hint':
-      '{light}・低〜中effort・並列控えめ。週次枠の消費を最小化。',
-    'projectPanel.swarm.mode.optimize': '最適化',
-    'projectPanel.swarm.mode.optimize.hint':
-      'カードの難易度で割当 — 「最難」は最上位({top})、「軽微」は {light}、その間は中間のモデル。賢い既定（推奨）。',
     // 使用可能モデル — 恒久的な per-tier スイッチ（hard mask）。一時的な quota 冷却とは
     // 別レイヤーで、OFF にした tier は期限で復活しない。
     'projectPanel.swarm.models.label': '使用可能モデル',
     'projectPanel.swarm.models.hint':
-      'OFF にしたモデルには swarm のどの役割も起動しません。rate limit の冷却と違い、再起動しても残ります。',
+      'OFF にしたモデルにはエージェントチームのどの役割も起動しません。rate limit の冷却と違い、再起動しても残ります。',
     'projectPanel.swarm.models.last': '最低1つは ON にしてください',
     // OFF・初回オンボーディング（SwarmOnboarding）— swarm が完全に待機状態（エンジン
     // 停止かつタスク窓口／マネージャー／worker セッションなし）のとき中央に出す1枚。3つの役割
@@ -745,7 +664,7 @@ export const projectPanel = {
     'projectPanel.swarm.sdk.jumpLatest': '最新へ',
     'projectPanel.swarm.sdk.questionBanner': 'この作業者から質問が届いています',
     'projectPanel.swarm.sdk.questionBannerHint':
-      '答えは社長に伝えてください(画面の一番下の Swarm のバーをひらいて「社長」の席へ)。答えると作業者はそのまま再開します。',
+      '答えは社長に伝えてください(画面の一番下のエージェントチームのバーをひらいて「社長」の席へ)。答えると作業者はそのまま再開します。',
     'projectPanel.swarm.sdk.statusFailed': '失敗',
     'projectPanel.swarm.sdk.interrupt': '今のターンを止める(セッションは続きます)',
     'projectPanel.swarm.sdk.send': '送信',
@@ -784,8 +703,6 @@ export const projectPanel = {
     // 控えめな起動・停止)。オーナーが話すのは社長だけ。overseer* は上部バーの監視スイッチ。
     'projectPanel.swarm.manager.tab': 'マネージャー',
     'projectPanel.swarm.manager.badge': 'マネージャー',
-    'projectPanel.swarm.manager.overseer': '状況の監視',
-    'projectPanel.swarm.manager.overseerHint': '質問・作業の停滞・利用上限を通知。停止・再起動時はオフ。',
     'projectPanel.swarm.manager.engineFailed': 'エンジンに到達できませんでした: {error}',
     'projectPanel.swarm.manager.stageStarting': '起動中',
     'projectPanel.swarm.manager.stageRunning': '稼働中',

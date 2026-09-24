@@ -235,7 +235,8 @@ The last four suggestions were discussion only. They are not new runnable
 tasks and must not be silently folded into the remaining fuel cards:
 
 1. Roll back and report failed saves of Max/Economy/Optimize in
-   `src/components/canvas/modules/ExecutionModeToggle.tsx`. This is distinct
+   `src/components/canvas/modules/ExecutionModeToggle.tsx` (moot since 2026-09-24:
+   the mode menu left the screen — the president sets it and reads it back). This is distinct
    from the retired SDK runtime switch. The current mode-save path updates
    display first and does not handle non-2xx responses or restore on rejection.
 2. Fold manager analytics/weekly graphs into details while keeping progress,

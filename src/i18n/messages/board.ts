@@ -71,7 +71,7 @@ export const board = {
     'board.card.phaseBlocked': 'stuck',
     'board.card.phaseDone': 'wrapping up',
     'board.review.managerWorkingTitle':
-      'The commander is on integration duty right now — no need to open the Swarm bar.',
+      'The commander is on integration duty right now — no need to open the Agent Team bar.',
     'board.card.untitledParen': '(Untitled)',
     'board.card.duplicate': 'Duplicate card',
     'board.card.duplicateTitle':
@@ -102,7 +102,7 @@ export const board = {
     'board.detail.dependsNone': 'No cards left to depend on',
     'board.detail.dependsRemove': 'Remove the dependency on "{title}"',
     'board.detail.dependsCycleWarn':
-      'Circular dependency — these cards wait on each other, so the swarm will never start them. Remove a link to break the loop.',
+      'Circular dependency — these cards wait on each other, so the Agent Team will never start them. Remove a link to break the loop.',
     'board.detail.dueLabel': 'Due',
     'board.detail.dueClear': 'Clear the due date',
     // Priority (in-app swarm dispatch order) — picker labels + the card chip.
@@ -130,7 +130,7 @@ export const board = {
     'board.card.priorityTitle': 'Priority: {label}',
     'board.card.depsTitle': 'Waiting on: {titles}',
     'board.card.cycleTitle':
-      'Circular dependency — this card and its prerequisites wait on each other, so the swarm will never start them. Break the loop on the board.',
+      'Circular dependency — this card and its prerequisites wait on each other, so the Agent Team will never start them. Break the loop on the board.',
     'board.card.cycleChip': 'Cycle',
     'board.card.dueTitle': 'Due {date}',
     'board.detail.resizeWidth': 'Drag to resize the panel width',
@@ -165,7 +165,7 @@ export const board = {
       'This card’s worker was interrupted (an app restart or a usage limit). While autopilot is on it returns to To do by itself and resumes from its branch — you can also drag it back yourself.',
     'board.run.checkingWorker': 'Checking for a live worker…',
     'board.run.workerSettings':
-      'The supply officer picks the model from the card, and the commander integrates the result — this card has no per-card run settings while the swarm is on.',
+      'The supply officer picks the model from the card, and the commander integrates the result — this card has no per-card run settings while the Agent Team is on.',
     'board.run.missingFolder':
       'The project folder is missing — claude can’t start until it’s relocated.',
     'board.run.failed':
@@ -297,7 +297,7 @@ export const board = {
     'board.card.phaseBlocked': '停滞中',
     'board.card.phaseDone': '完了報告',
     'board.review.managerWorkingTitle':
-      '司令官がいま統合作業中です（Swarm のバーを開かなくてもここで分かります）。',
+      '司令官がいま統合作業中です（エージェントチームのバーを開かなくてもここで分かります）。',
     'board.card.untitledParen': '（無題）',
     'board.card.duplicate': 'カードを複製',
     'board.card.duplicateTitle':
@@ -328,7 +328,7 @@ export const board = {
     'board.detail.dependsNone': '依存に追加できるカードがありません',
     'board.detail.dependsRemove': '「{title}」への依存を外す',
     'board.detail.dependsCycleWarn':
-      '循環依存です — これらのカードは互いを待ち合うため、swarm は永久に起動しません。どれかの依存を外して循環を断ってください。',
+      '循環依存です — これらのカードは互いを待ち合うため、エージェントチームは永久に起動しません。どれかの依存を外して循環を断ってください。',
     'board.detail.dueLabel': '期限',
     'board.detail.dueClear': '期限をクリア',
     // 優先度（アプリ内 swarm のディスパッチ順）— ピッカーのラベル + カードのチップ。
@@ -356,7 +356,7 @@ export const board = {
     'board.card.priorityTitle': '優先度: {label}',
     'board.card.depsTitle': '先行タスク: {titles}',
     'board.card.cycleTitle':
-      '循環依存 — このカードと先行タスクが互いを待ち合うため、swarm は永久に起動しません。ボードで循環を断ってください。',
+      '循環依存 — このカードと先行タスクが互いを待ち合うため、エージェントチームは永久に起動しません。ボードで循環を断ってください。',
     'board.card.cycleChip': '循環',
     'board.card.dueTitle': '期限 {date}',
     'board.detail.resizeWidth': 'ドラッグでパネル幅を変更',
@@ -389,7 +389,7 @@ export const board = {
       'この worker は中断しています(アプリ再起動や利用上限など)。自動運転中は自動で未着手に戻り、ブランチの続きから再開されます — 手動で未着手へドラッグしてもかまいません。',
     'board.run.checkingWorker': 'worker の生存を確認しています…',
     'board.run.workerSettings':
-      'モデルは補給官がカードの内容から選び、結果は司令官が統合します。swarm がオンの間、このカード個別の実行設定はありません。',
+      'モデルは補給官がカードの内容から選び、結果は司令官が統合します。エージェントチームがオンの間、このカード個別の実行設定はありません。',
     'board.run.missingFolder':
       'プロジェクトフォルダが見つかりません。場所を再設定するまで claude は起動できません。',
     'board.run.failed':

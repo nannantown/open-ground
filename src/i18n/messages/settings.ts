@@ -17,24 +17,24 @@ export const settings = {
     // Experiments (owner-only — hidden unless the server marks you eligible)
     'settings.experiments.heading': 'Experiments',
     'settings.experiments.hint': 'Early, owner-only features. Off by default; not covered by support.',
-    'settings.experiments.swarm': 'Swarm orchestration',
+    'settings.experiments.swarm': 'Agent Team',
     'settings.experiments.swarmHint':
-      'Reveals the Swarm bar (along the bottom of every project) and its controls for you only — nothing runs on its own. Worker dispatch and the overseer both default off and stay off until you explicitly arm them, and reset to off on every restart. See the manual’s Swarm chapter for the full disclosure.',
+      'Reveals the Agent Team bar (along the bottom of every project) and its controls for you only — nothing runs on its own. Worker dispatch and the overseer both default off and stay off until you explicitly arm them, and reset to off on every restart. See the manual’s Agent Team chapter for the full disclosure.',
     'settings.experiments.sandbox': 'Sandbox Claude (macOS)',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
     // Public swarm opt-in (all users, macOS only) — "still being tuned"
-    'settings.swarmOptIn.heading': 'Swarm (experimental)',
+    'settings.swarmOptIn.heading': 'Agent Team (experimental)',
     'settings.swarmOptIn.hint': 'Still being tuned. Off by default — turn it on only if you want it.',
-    'settings.swarmOptIn.label': 'Enable Swarm',
+    'settings.swarmOptIn.label': 'Enable Agent Team',
     'settings.swarmOptIn.warning':
-      'Swarm runs autonomous Claude workers for you. Before turning it on, know: it uses your own Claude subscription and can run several sessions at once, so it may consume your quota heavily; workers run Claude with tool-permission prompts skipped, inside isolated copies of your project; and its notifications are currently in Japanese only. It is still being tuned and is not covered by support.',
+      'Agent Team runs autonomous Claude workers for you. Before turning it on, know: it uses your own Claude subscription and can run several sessions at once, so it may consume your quota heavily; workers run Claude with tool-permission prompts skipped, inside isolated copies of your project; and its notifications are currently in Japanese only. It is still being tuned and is not covered by support.',
     // Worker-directive TRIALS (Settings.workerTrials) — docs/trending/TRIALS.md.
     // Owner-facing wording deliberately states that the effect is UNPROVEN: the
     // measurement so far (-7.6% cost) sat inside the baseline's own 22% spread,
     // and a switch that oversells itself is how an unmeasured change becomes
     // permanent.
-    'settings.workerTrial.heading': 'Swarm worker trials (measuring)',
+    'settings.workerTrial.heading': 'Agent Team worker trials (measuring)',
     'settings.workerTrial.hint':
       'Settings whose effect is still being measured. Off by default, and turning one off restores the previous behaviour exactly — nothing else changes.',
     'settings.workerTrial.thinkInCode': 'Tell workers to narrow before opening files',
@@ -56,7 +56,7 @@ export const settings = {
     'settings.sound.heading': 'Completion sound',
     'settings.sound.label': 'Play a sound when Claude finishes',
     'settings.sound.hint':
-      'Rings once when a Claude session you are watching finishes its turn — terminal panes and board runs. Swarm workers stay silent.',
+      'Rings once when a Claude session you are watching finishes its turn — terminal panes and board runs. Agent Team workers stay silent.',
     'settings.sound.volume': 'Volume',
     'settings.sound.test': 'Test',
     // Hands-free updates (settings.autoUpdate)
@@ -69,7 +69,7 @@ export const settings = {
     // than OFF. And it promised to wait "while a terminal pane is open", which
     // is why it waited forever: an empty shell counted as work.
     'settings.autoUpdate.hint':
-      'New versions install themselves and the app reopens on its own — nothing asks you first, and you are still told an update is waiting so you can take it now. It does not wait for Claude: the commander and Swarm workers on autopilot pick up where they left off after the restart, and if the president was cut off mid-reply it answers your last message again once it is back. It only waits while you are using the app (3 minutes without keys or mouse is enough), and while a terminal you opened yourself has something running in it — until 30 minutes after the update arrived, because those terminals come back empty. It never retries by itself a version that failed to install. Quitting the app also applies a waiting update.',
+      'New versions install themselves and the app reopens on its own — nothing asks you first, and you are still told an update is waiting so you can take it now. It does not wait for Claude: the commander and Agent Team workers on autopilot pick up where they left off after the restart, and if the president was cut off mid-reply it answers your last message again once it is back. It only waits while you are using the app (3 minutes without keys or mouse is enough), and while a terminal you opened yourself has something running in it — until 30 minutes after the update arrived, because those terminals come back empty. It never retries by itself a version that failed to install. Quitting the app also applies a waiting update.',
     // Work mode (lockdown) — the non-Anthropic egress kill switch
     'settings.lockdown.heading': 'Work mode',
     'settings.lockdown.label': 'Block non-Anthropic connections',
@@ -103,7 +103,7 @@ export const settings = {
     // Research channels (Settings → Research channels; GET /api/research/channels)
     'settings.research.heading': 'Research channels',
     'settings.research.hint':
-      'Sources the swarm can draw on when you ask it to research something. Web pages work out of the box; the hints below unlock more. All checks run on this computer only.',
+      'Sources the Agent Team can draw on when you ask it to research something. Web pages work out of the box; the hints below unlock more. All checks run on this computer only.',
     'settings.research.recheck': 'Re-check',
     'settings.research.status.ok': 'Ready',
     'settings.research.status.part': 'Partly ready',
@@ -172,18 +172,18 @@ export const settings = {
     'settings.advanced': '詳細設定',
     'settings.experiments.heading': '実験的機能',
     'settings.experiments.hint': '初期段階のオーナー限定機能です。既定はオフで、サポート対象外です。',
-    'settings.experiments.swarm': 'Swarm オーケストレーション',
+    'settings.experiments.swarm': 'エージェントチーム',
     'settings.experiments.swarmHint':
-      'この端末で Swarm のバー(各プロジェクトの一番下)と操作を可視化するだけで、それ自体では何も自動実行されません。worker 起動・監督はどちらも既定オフで、あなたが個別に明示オンにするまで動かず、再起動のたびにオフへ戻ります。詳しくはマニュアルの Swarm 章を参照してください。',
+      'この端末でエージェントチームのバー(各プロジェクトの一番下)と操作を可視化するだけで、それ自体では何も自動実行されません。worker 起動・監督はどちらも既定オフで、あなたが個別に明示オンにするまで動かず、再起動のたびにオフへ戻ります。詳しくはマニュアルのエージェントチームの章を参照してください。',
     'settings.experiments.sandbox': 'Claude をサンドボックス化 (macOS)',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
-    'settings.swarmOptIn.heading': 'Swarm(試験運用)',
+    'settings.swarmOptIn.heading': 'エージェントチーム(試験運用)',
     'settings.swarmOptIn.hint': 'まだ調整中です。既定はオフ — 使いたい場合だけオンにしてください。',
-    'settings.swarmOptIn.label': 'Swarm を有効にする',
+    'settings.swarmOptIn.label': 'エージェントチームを有効にする',
     'settings.swarmOptIn.warning':
-      'Swarm はあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。通知は当面日本語のみです。まだ調整中で、サポート対象外です。',
-    'settings.workerTrial.heading': 'Swarm worker の試験(計測中)',
+      'エージェントチームはあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。通知は当面日本語のみです。まだ調整中で、サポート対象外です。',
+    'settings.workerTrial.heading': 'エージェントチームのワーカー試験(計測中)',
     'settings.workerTrial.hint':
       '効果をまだ測っている途中の設定です。既定はオフ。オフに戻すと元の動きに完全に戻ります(ほかには何も変わりません)。',
     'settings.workerTrial.thinkInCode': 'worker に「開く前に絞る」を指示する',
@@ -204,13 +204,13 @@ export const settings = {
     'settings.sound.heading': '完了音',
     'settings.sound.label': 'Claude の命令が終わったら音を鳴らす',
     'settings.sound.hint':
-      'あなたが見ている Claude（ターミナルのペインやボード実行）が返事を書き終えたときに1回鳴ります。swarm の worker は鳴りません。',
+      'あなたが見ている Claude（ターミナルのペインやボード実行）が返事を書き終えたときに1回鳴ります。エージェントチームの worker は鳴りません。',
     'settings.sound.volume': '音量',
     'settings.sound.test': '試聴',
     'settings.autoUpdate.heading': '自動アップデート',
     'settings.autoUpdate.label': '新しい版を自動で適用する',
     'settings.autoUpdate.hint':
-      '新しい版へ自動で入れ替え、アプリも自動で開き直します。確認は求めませんが、更新が待っていることはお知らせするので、今すぐ入れることもできます。Claude の作業中でも待ちません —— 司令官と自動運転中の Swarm ワーカーは開き直したあと続きから動き、社長は返事の途中で切れた場合、戻ってからあなたの直前の発言に答え直します。待つのは、あなたがアプリを操作している最中(3分間キーもマウスも触らなければ十分)と、あなた自身が開いたターミナルで何かが動いているときだけです(ターミナルは開き直すと空に戻るため。ただし更新が届いてから最長30分まで)。一度インストールに失敗した版を、勝手に何度も入れ直すことはしません。アプリを閉じたときにも適用されます。',
+      '新しい版へ自動で入れ替え、アプリも自動で開き直します。確認は求めませんが、更新が待っていることはお知らせするので、今すぐ入れることもできます。Claude の作業中でも待ちません —— 司令官と自動運転中のエージェントチームのワーカーは開き直したあと続きから動き、社長は返事の途中で切れた場合、戻ってからあなたの直前の発言に答え直します。待つのは、あなたがアプリを操作している最中(3分間キーもマウスも触らなければ十分)と、あなた自身が開いたターミナルで何かが動いているときだけです(ターミナルは開き直すと空に戻るため。ただし更新が届いてから最長30分まで)。一度インストールに失敗した版を、勝手に何度も入れ直すことはしません。アプリを閉じたときにも適用されます。',
     'settings.lockdown.heading': '業務モード',
     'settings.lockdown.label': 'Anthropic 以外の外部通信を遮断',
     'settings.lockdown.hint':
@@ -235,7 +235,7 @@ export const settings = {
     'settings.version.heading': 'バージョン',
     'settings.research.heading': '調査チャンネル',
     'settings.research.hint':
-      '調査をお願いしたとき、swarm がどこまで見に行けるかの一覧です。Webページは最初から使えます。足りないものは下のヒントで解放できます。チェックはこのパソコンの中だけで行われます。',
+      '調査をお願いしたとき、エージェントチームがどこまで見に行けるかの一覧です。Webページは最初から使えます。足りないものは下のヒントで解放できます。チェックはこのパソコンの中だけで行われます。',
     'settings.research.recheck': '再チェック',
     'settings.research.status.ok': '使える',
     'settings.research.status.part': '一部使える',

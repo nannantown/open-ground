@@ -176,26 +176,26 @@ const deliverToSupplyDesk = async (app: AppNotification): Promise<void> => {
  *  the style of electron's existing notifyRollback). The Japanese specifics ride
  *  in `detail`, which the engine log already phrases. */
 const EVENT_LABEL: Record<SwarmFatalEvent, string> = {
-  'rework-exhausted': 'Swarm — card parked (rework limit)',
-  'all-workers-down': 'Swarm — all workers stopped',
-  'exec-timeout': 'Swarm — worker hit time limit',
-  'guard-unwired': 'Swarm — worker spawn refused (guard unwired)',
+  'rework-exhausted': 'Agent Team — card parked (rework limit)',
+  'all-workers-down': 'Agent Team — all workers stopped',
+  'exec-timeout': 'Agent Team — worker hit time limit',
+  'guard-unwired': 'Agent Team — worker spawn refused (guard unwired)',
   rollback: 'Self-update rolled back',
   'canary-failed': 'Self-update canary failed',
-  'review-panel-failed': 'Swarm — review panel failed (merge withheld)',
-  'high-risk-hold': 'Swarm — high-risk paths (awaiting manual merge)',
-  'manager-unrevivable': 'Swarm — commander keeps dying (check it manually)',
-  'worker-spawn-failed': 'Swarm — workers cannot start (dispatch held)',
+  'review-panel-failed': 'Agent Team — review panel failed (merge withheld)',
+  'high-risk-hold': 'Agent Team — high-risk paths (awaiting manual merge)',
+  'manager-unrevivable': 'Agent Team — commander keeps dying (check it manually)',
+  'worker-spawn-failed': 'Agent Team — workers cannot start (dispatch held)',
   // The desk is UP and ignoring us — the counterpart of 'manager-unrevivable'
   // ("no desk can be raised"). Titled so the two never read as the same alarm.
-  'manager-unresponsive': 'Swarm — commander is stuck (integration waiting)',
+  'manager-unresponsive': 'Agent Team — commander is stuck (integration waiting)',
   // Fires from TWO distinct causes (swarmOrchestrator.ts resumeEngines): the
   // crash-loop breaker tripping (repeated restarts) OR the breaker's own boot
   // ring failing to persist (a disk fault — e.g. a first-ever launch before a
   // must-fix 2026-07-22 rework fixed the missing ensureOpenGroundHome() call).
   // The title stays cause-agnostic on purpose; `detail` (built per-call at the
   // fire site) is what actually says which one happened.
-  'engine-resume-suppressed': 'Swarm — auto-resume paused',
+  'engine-resume-suppressed': 'Agent Team — auto-resume paused',
   // Plain Japanese on purpose: unlike every other entry here (read by the
   // operator), this one is read by the OWNER, who is not a programmer, and it is
   // about their own data going missing. See homeIntegrity.ts.
@@ -210,7 +210,7 @@ export const formatFatalNotification = (n: SwarmFatalNotification): OsNotificati
   const branch = n.branch ? ` (${n.branch})` : ''
   const hint = n.logHint ? `\n${n.logHint}` : ''
   return {
-    title: `OPEN GROUND — ${EVENT_LABEL[n.event] ?? 'Swarm alert'}`,
+    title: `OPEN GROUND — ${EVENT_LABEL[n.event] ?? 'Agent Team alert'}`,
     body: `${n.detail}${ref}${branch}${hint}`,
   }
 }
@@ -269,27 +269,27 @@ export const createSwarmFatalNotification = async (
 // brainstem (S7/S9/S11 of docs/OVERSEER_DESIGN.md §6).
 
 const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
-  'escalation-open': 'Swarm — a question needs your answer',
-  'escalation-reminder': 'Swarm — a question is still waiting',
-  'review-idle': 'Swarm — review cards await integration',
-  'overseer-throttled': 'Swarm — overseer throttled (usage cap)',
-  'manager-woke': 'Swarm — commander woken to decide an integration',
-  'self-update-requested': 'Swarm — engine self-update cycle requested',
-  'daily-fuel-report': 'Swarm — daily fuel report',
+  'escalation-open': 'Agent Team — a question needs your answer',
+  'escalation-reminder': 'Agent Team — a question is still waiting',
+  'review-idle': 'Agent Team — review cards await integration',
+  'overseer-throttled': 'Agent Team — overseer throttled (usage cap)',
+  'manager-woke': 'Agent Team — commander woken to decide an integration',
+  'self-update-requested': 'Agent Team — engine self-update cycle requested',
+  'daily-fuel-report': 'Agent Team — daily fuel report',
   // Not a swarm event at all — the OWNER'S OWN conversation stopped. Titled for
   // what the owner sees on the toast, not for the subsystem that noticed.
   'session-limit': 'Claude — your conversation stopped (usage limit)',
-  'engine-resumed': 'Swarm — auto-resumed after restart',
+  'engine-resumed': 'Agent Team — auto-resumed after restart',
   // Also not a swarm event: the MACHINE is accumulating un-killable processes
   // (stuckProcessWatch.ts). Titled for what the owner sees, not the subsystem.
   'stuck-processes': 'Machine — stuck processes are piling up (restart clears them)',
-  'ready-without-work': 'Swarm — a worker says done, but no commits were found (check where the work is)',
+  'ready-without-work': 'Agent Team — a worker says done, but no commits were found (check where the work is)',
   // The answer the owner asked for could not reach their desk (closed, or busy
   // for the whole TTL). Titled as the answer itself, not as a delivery failure:
   // what the owner wants off this toast is the reply.
-  'commander-reply': 'Swarm — the commander answered your question',
+  'commander-reply': 'Agent Team — the commander answered your question',
   // A notice sits typed but unsent in the president's box (owner may send it).
-  'supply-notice-unsent': 'Swarm — a notice is waiting unsent in the President window',
+  'supply-notice-unsent': 'Agent Team — a notice is waiting unsent in the President window',
   'work-landed': 'Your requested work is done',
 }
 
@@ -298,7 +298,7 @@ export const formatInfoNotification = (n: SwarmInfoNotification): OsNotification
   const ref = n.taskTitle ? `「${n.taskTitle}」` : ''
   const branch = n.branch ? ` (${n.branch})` : ''
   return {
-    title: `OPEN GROUND — ${INFO_EVENT_LABEL[n.event] ?? 'Swarm info'}`,
+    title: `OPEN GROUND — ${INFO_EVENT_LABEL[n.event] ?? 'Agent Team info'}`,
     body: `${n.detail}${ref}${branch}`,
   }
 }

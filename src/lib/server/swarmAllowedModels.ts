@@ -155,7 +155,7 @@ export class NoAllowedModelTierError extends Error {
   constructor() {
     super(
       'no model tier is enabled — every tier is switched OFF in Settings (使用可能モデル). ' +
-        'Enable at least one tier before launching a swarm role.',
+        'Enable at least one tier before launching an Agent Team role.',
     )
     this.name = 'NoAllowedModelTierError'
   }

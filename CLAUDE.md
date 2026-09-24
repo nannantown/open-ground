@@ -289,10 +289,17 @@ older docs are historical, not operating instructions.
   (free workspace).
 - **Swarm is a bottom bar, not a tab** (owner decision 2026-09-24):
   `src/components/canvas/SwarmBottomBar.tsx`, rendered by `ProjectPanel`
-  under EVERY Layer 2 tab, folded to one line by default (status · workers ·
-  questions waiting on the owner · Start/Stop) and opening upward into the
-  seats (president · manager · workers — `SwarmModule`); its height is
-  dragged and saved per project. It replaced both the Swarm tab and the
+  under EVERY Layer 2 tab, folded to one line by default (name · questions
+  waiting on the owner and cards awaiting integration, each only when there
+  are some · on/off switch) and
+  opening upward into the seats (president · manager · workers —
+  `SwarmModule`) when ANY part of that line is clicked; its height is
+  dragged and saved per project. On screen it is called **エージェントチーム /
+  Agent Team** (owner decision 2026-09-24) — the code, API, data keys and
+  markers keep the name `swarm`. The monitoring switch and the execution-mode
+  menu are not on the screen: the owner asks the president, who changes them
+  per `skills/supply/SKILL.md` "Owner-requested settings"; the usable-models
+  mask lives in Settings (`SwarmAllowedModelsSetting.tsx`). It replaced both the Swarm tab and the
   Board's president drawer (`BoardSupplyDock`, deleted). Hidden unless the
   swarm experiment is open (`isSwarmVisible` in `moduleRegistry.tsx`) —
   owner via `experiments.swarm`, OR the login-free `swarmLocalOwner`

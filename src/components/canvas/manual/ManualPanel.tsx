@@ -310,7 +310,7 @@ function LayersDiagram({ lang }: { lang: 'en' | 'ja' }): JSX.Element {
         </div>
         {/* Swarm is a bar under every tab, not a tab (2026-09-24). */}
         <div className="mt-2 rounded-[2px] border border-line bg-bg-card px-3 py-1.5 text-meta text-ink-muted shadow-card">
-          {lang === 'ja' ? 'Swarm — どのタブでも一番下のバー' : 'Swarm — a bar along the bottom of every tab'}
+          {lang === 'ja' ? 'エージェントチーム — どのタブでも一番下のバー' : 'Agent Team — a bar along the bottom of every tab'}
         </div>
       </div>
     </div>

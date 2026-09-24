@@ -257,7 +257,7 @@ describe('folded into the bottom bar', () => {
     const toggle = await screen.findByRole('button', { name: 'projectPanel.swarm.bar.expand' })
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     // Give the polls a lap to land before claiming nothing mounted.
-    await waitFor(() => expect(screen.getByText(/projectPanel\.swarm\.power\.workers/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'projectPanel.swarm.power.label' }).hasAttribute('disabled')).toBe(false))
     expect(document.querySelector('[data-seat]')).toBeNull()
     toggle.click()
     expect(onToggle).toHaveBeenCalledTimes(1)
@@ -308,7 +308,7 @@ describe('folded into the bottom bar', () => {
     cleanup()
     harness({})
     render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
-    await waitFor(() => expect(screen.getByText(/projectPanel\.swarm\.power\.workers/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'projectPanel.swarm.power.label' }).hasAttribute('disabled')).toBe(false))
     expect(screen.queryByRole('status', { name: 'projectPanel.swarm.bar.attention' })).toBeNull()
   })
 })

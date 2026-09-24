@@ -1,17 +1,15 @@
 // @vitest-environment jsdom
 //
-// ExecutionModeMenu — the 使用可能モデル (model hard mask) half of the menu.
+// SwarmAllowedModelsSetting — the 使用可能モデル (model hard mask) on the
+// Settings screen (moved off the team bar's mode menu, owner 2026-09-24).
 //
-// Two invariants the server cannot enforce for the user, only refuse:
-//   • the LAST enabled tier can't be switched off (an all-OFF mask only parks the
-//     swarm; store.setUserSettings drops such a patch, so a UI that let you click
-//     it would show a lie until the next re-GET);
-//   • the execution-mode hints name the tier each mode ACTUALLY resolves to. With
-//     fable switched off, "Max" must not keep advertising Fable — that promise is
-//     exactly what the engine will never honor.
+// The invariant the server cannot enforce for the user, only refuse: the LAST
+// enabled tier can't be switched off (an all-OFF mask only parks the team;
+// store.setUserSettings drops such a patch, so a UI that let you click it would
+// show a lie until the next re-GET).
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
-import { ExecutionModeMenu } from './ExecutionModeToggle'
+import { SwarmAllowedModelsSetting } from './SwarmAllowedModelsSetting'
 import { I18nProvider } from '@/i18n/I18nContext'
 import type { SwarmAllowedModels } from '@/lib/types'
 
@@ -34,36 +32,32 @@ const stubFetch = (body: unknown, posts: unknown[]) =>
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response)
   })
 
-/** Render, then open the dropdown (the toggles live inside it). */
+/** Render the setting and return its group (the tier checkboxes live in it). */
 const openMenu = async (body: unknown, posts: unknown[] = []) => {
   vi.stubGlobal('fetch', stubFetch(body, posts))
   render(
     <I18nProvider>
-      <ExecutionModeMenu />
+      <SwarmAllowedModelsSetting />
     </I18nProvider>,
   )
-  // The trigger's label is the current mode ('Max' — the stubbed executionMode).
-  const trigger = await screen.findByRole('button', { expanded: false })
-  fireEvent.click(trigger)
-  return await screen.findByRole('menu')
+  const group = await screen.findByRole('group')
+  // Wait for the GET to land (the defaults are all-on too, so wait on a row).
+  await screen.findAllByRole('checkbox')
+  await new Promise((r) => setTimeout(r, 0))
+  return group
 }
 
 const tierRow = (menu: HTMLElement, label: string) =>
   within(menu)
-    .getAllByRole('menuitemcheckbox')
+    .getAllByRole('checkbox')
     .find((el) => el.textContent?.includes(label))!
 
-const maxHint = (menu: HTMLElement) =>
-  within(menu)
-    .getAllByRole('menuitemradio')
-    .find((el) => el.textContent?.startsWith('Max'))!.textContent ?? ''
-
-describe('ExecutionModeMenu — usable-models hard mask', () => {
+describe('SwarmAllowedModelsSetting — usable-models hard mask', () => {
   beforeEach(() => vi.unstubAllGlobals())
 
   it('renders one checkbox per ladder tier, all checked by default', async () => {
     const menu = await openMenu(settingsBody())
-    const rows = within(menu).getAllByRole('menuitemcheckbox')
+    const rows = within(menu).getAllByRole('checkbox')
     expect(rows.map((r) => r.textContent)).toEqual(['Fable', 'Opus', 'Sonnet', 'Haiku'])
     expect(rows.every((r) => r.getAttribute('aria-checked') === 'true')).toBe(true)
   })
@@ -112,45 +106,14 @@ describe('ExecutionModeMenu — usable-models hard mask', () => {
     )
     render(
       <I18nProvider>
-        <ExecutionModeMenu />
+        <SwarmAllowedModelsSetting />
       </I18nProvider>,
     )
-    fireEvent.click(await screen.findByRole('button', { expanded: false }))
-    const menu = await screen.findByRole('menu')
+    const menu = await screen.findByRole('group')
+    await new Promise((r) => setTimeout(r, 0))
     fireEvent.click(tierRow(menu, 'Fable'))
     await waitFor(() =>
       expect(tierRow(menu, 'Fable').getAttribute('aria-checked')).toBe('true'),
     )
-  })
-
-  it('the mode hints name the tier the mode RESOLVES to — never a switched-off model', async () => {
-    const menu = await openMenu(settingsBody())
-    expect(maxHint(menu)).toContain('Fable')
-  })
-
-  it('with the top tier off, "Max" advertises Opus and never mentions Fable', async () => {
-    const menu = await openMenu(settingsBody({ fable: false }))
-    const hint = maxHint(menu)
-    expect(hint).toContain('Opus')
-    expect(hint).not.toContain('Fable')
-  })
-
-  it('with fable+opus off, the hints fall all the way to Sonnet', async () => {
-    const menu = await openMenu(settingsBody({ fable: false, opus: false }))
-    const hint = maxHint(menu)
-    expect(hint).toContain('Sonnet')
-    expect(hint).not.toContain('Fable')
-    expect(hint).not.toContain('Opus')
-  })
-
-  it('with sonnet off, the CHEAP slot in the optimize hint drops to Haiku (not up to the top)', async () => {
-    const menu = await openMenu(settingsBody({ sonnet: false }))
-    const optimize =
-      within(menu)
-        .getAllByRole('menuitemradio')
-        .find((el) => el.textContent?.startsWith('Optimize'))!.textContent ?? ''
-    expect(optimize).toContain('Fable') // heavy work still on the top tier
-    expect(optimize).toContain('Haiku') // chores step DOWN past the disabled sonnet
-    expect(optimize).not.toContain('Sonnet')
   })
 })

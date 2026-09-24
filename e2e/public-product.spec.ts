@@ -171,7 +171,7 @@ test('public Swarm opt-in follows the platform gate while owner settings stay hi
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await expect(page.getByText('WordPress', { exact: true })).toHaveCount(0)
   await page.getByText('Advanced', { exact: true }).click()
-  const group = page.getByRole('group', { name: 'Enable Swarm', exact: true })
+  const group = page.getByRole('group', { name: 'Enable Agent Team', exact: true })
   if (available) {
     await group.getByRole('button', { name: 'On', exact: true }).click()
   } else {

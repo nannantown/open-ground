@@ -119,9 +119,11 @@ and is it used in the current model (president as the front desk, SDK-only, this
 | Landed-per-week chart (and `useLandedKpi`) | Remove | The owner asks the president 「着地は?」 and the president reads `GET /api/swarm/kpi/landed` (supply skill 「状況」 ④). The ledger and route stay, and `docs/OUTWARD_TRIAL.md` reads its weekly number that way |
 | Consumption panel | Remove | Only the over-budget notice mattered, so it moved to one line under the top bar |
 | Manager presence line + review-queue count | Remove | The seat's three-word status is enough |
-| Monitoring (overseer) switch | Move (top bar) | Needed to turn on question / stall / usage notices |
-| Monitoring re-arm reminder, restart-resume notices | Keep | Decisions the owner makes after a restart |
-| Top bar status, on/off switch, execution mode | Keep | The owner's main controls |
+| Monitoring (overseer) switch | Move (top bar) → Remove 2026-09-24 | The owner asks the president instead (supply skill "Owner-requested settings") |
+| Monitoring re-arm reminder | Keep → Remove 2026-09-24 | Went with the switch |
+| Restart-resume notices | Keep (the "resumed" header chip removed 2026-09-24) | The not-resumed reminder inside the bar stays |
+| Top bar on/off switch | Keep | The owner's main control |
+| Top bar status pill, execution mode | Keep → Remove 2026-09-24 | The switch says on/off; the mode is asked of the president; usable models moved to Settings |
 | Setup banner (git missing etc.), error banner | Keep | Explains why nothing can start. Engine errors now also show above the seats |
 | First-run explainer | Keep | For first-time users |
 | President seat, worker seats | Keep | As built by card ② |

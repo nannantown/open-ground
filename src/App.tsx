@@ -1504,6 +1504,9 @@ export default function App() {
         // toggle's visibility; enabled reflects the current choice.
         swarmOptInAvailable={experiments.swarmOptIn.available}
         swarmOptInEnabled={experiments.swarmOptIn.enabled}
+        // The team bar's own gate (incl. the login-free local-owner unlock), so
+        // Settings shows the usable-models mask to everyone who sees the bar.
+        swarmVisible={visibleExperiments.swarm === true}
         feedbackCanRead={ownerFeatures && feedbackCanRead}
         onFeedbackSeen={markFeedbackSeen}
       />

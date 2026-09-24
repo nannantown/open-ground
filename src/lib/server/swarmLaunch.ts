@@ -566,9 +566,9 @@ export const resolveAvailableTierProbed = async (
 //
 // The owner's hard mask (Settings.swarmAllowedModels) narrows the ladder BEFORE
 // any of this: a switched-OFF tier is simply not a candidate, in any mode. So a
-// swarm with fable OFF runs `max` on opus — and the mode's UI copy says so
-// (ExecutionModeToggle drops disabled tiers from the hint) rather than promising
-// a model the engine will never launch.
+// swarm with fable OFF runs `max` on opus. (The mode has no on-screen menu since
+// 2026-09-24 — the president sets it on the owner's request; the usable-models
+// mask is in Settings, SwarmAllowedModelsSetting.tsx.)
 //
 // A THIRD, PRE-LAUNCH signal narrows it further still: the cached `claude
 // /usage` scrape (claudeUsageCli — the same cache UsageHud reads, never a live

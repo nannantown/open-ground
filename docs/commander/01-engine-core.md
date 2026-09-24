@@ -292,11 +292,12 @@ worktree を掃除すると生きた作業を殺す(02 章 §6 の削除経路�
 
 **`overseer`(2026-07-22, 設計レビューで [hold] 論点が確定)**: 今も再起動で必ず OFF に戻る。ただし**揮発ではなくなった** — `enabled` の値は `engine.json` に書かれて記憶されるが、boot 時にそれを読み戻して arm することは**しない**(意図的)。「前回 overseer が ON だったから今も ON のはず」は今も**成立しない**——毎セッション明示的な再武装が必要。
 
-**その非対称は画面に出る(card 2b, 2026-07-24 実装済み)**: 黙って落とすのではなく、Swarm 画面の上部に「前回は監督もオンでした → [戻す] [監督のお知らせを閉じる]」のバナーが出る。司令官が見るべき点は 3 つ:
+**その非対称の伝え方(card 2b 2026-07-24 → 2026-09-24 に画面から撤去)**: 黙って落とさないために、当初は Swarm 画面の上部に「前回は監督もオンでした → [戻す] [×]」のバナーを出していた。**2026-09-24、オーナー決定でこのバナーは状況の監視スイッチごと画面から撤去された。** 今の経路は次のとおり:
 
-- **`GET /api/swarm/orchestrator` に `overseerRemembered` が増えた** — `engine.json` の `overseer` の**生値**。engine が in-memory に無くても(再起動直後がまさにそれ)ディスクから読んで返す。`overseer`(今 arm されているか)とは**別物** — バナー条件は `overseerRemembered && !overseer`。この値は**表示専用で、arm の入力には決してならない**(`resumeEngines()` は相変わらず読まない)。
-- **[戻す] は `POST …/overseer {enabled:true}`** — 実際に arm する。D1 ゲート(engine が running でなければ arm 拒否)は**据え置き**なので、自動運転 OFF のときボタンは disabled になり「先に自動運転をオンにすると、監督を戻せます」と出る。
-- **[×] は専用の `POST /api/swarm/orchestrator/overseer/dismiss`**(`dismissOverseerReminder` — `engine.json` の `overseer` だけを false に patch。arm 状態にも `desiredRunning`/`selfSupply` にも触らない)。⚠ `…/overseer {enabled:false}` で代用してはいけない — バナーが出ている時点で overseer は既に disarm 済みなので `setOverseer` の変更ガードに弾かれて**何も書かれず**、次の poll でバナーが戻る(autonomy バナーで実際に起きた `d1d6d704` の no-op 罠と同型)。
+- **`GET /api/swarm/orchestrator` の `overseerRemembered`**(残置) — `engine.json` の `overseer` の**生値**。engine が in-memory に無くても(再起動直後がまさにそれ)ディスクから読んで返す。`overseer`(今 arm されているか)とは**別物**。この値は**表示専用で、arm の入力には決してならない**(`resumeEngines()` は相変わらず読まない)。
+- **伝えるのは社長**: `overseerRemembered && !overseer` のとき、社長が状況報告で「再起動前は状況の監視がオンでしたが、今はオフです。戻しますか」と平易に一言伝える。**自分からは戻さない**(`skills/supply/SKILL.md`「Status」と「Owner-requested settings」)。
+- **戻すのはオーナーが頼んだときだけ、社長が `POST …/overseer {enabled:true}`** — 実際に arm する。D1 ゲート(engine が running でなければ arm 拒否 — 200 を返しつつ `.overseer` は false のまま)は**据え置き**なので、社長は必ず `.overseer` を読み戻して結果を伝える。司令官は触らない(`skills/og-manage/SKILL.md` Guardrails)。
+- **断られたら社長が専用の `POST /api/swarm/orchestrator/overseer/dismiss`** を呼ぶ(`dismissOverseerReminder` — `engine.json` の `overseer` だけを false に patch)。読み戻しは `GET …/orchestrator` の `.overseerRemembered` が false。これをしないと記録が残り、以後の状況報告で毎回同じ質問が出る。⚠ `…/overseer {enabled:false}` で代用してはいけない — disarm 済みの状態では `setOverseer` の変更ガードに弾かれて**何も書かれない**(`d1d6d704` の no-op 罠と同型)。
 
 **もう一つの副作用も塞いだ(card 2b)**: `startOrchestrator` は今も全書き(`writeEngineIntent` — 3フィールド)だが、書き込む `overseer` を「その時点の in-memory `.enabled`」だけから導出するのをやめ、**先にディスクの現値を読んで OR を取る**ようになった(`engine.overseer.enabled || priorIntent.overseer`)。以前は in-memory 由来の false で上書きしていたため、resume が抑止された boot(crash-loop breaker / preflight 失敗)で owner が先に「再開」を押すと、押した瞬間に復帰バナーの根拠が消えていた。resume は元々このフィールドを読まないので、値を残しても**再開挙動は一切変わらない**。
 

@@ -1118,9 +1118,12 @@ the owner asks 社長 「着地は?」, which is how `docs/OUTWARD_TRIAL.md` rea
 high-risk hold's owner hint now says to tell the president 「マージして」 (the マージ button it
 named is gone). Three words mean a **waiting** manager (a question pending, or parked on a usage
 limit) also reads 「動いている」 — by the owner's decision; those states reach the owner through
-Monitoring / the bell / the president, not through the seat. The **Monitoring (overseer) switch moved to the Swarm tab's top bar**
-(`SwarmMonitorToggle`) — same endpoint, same "off on every stop/restart, re-arm by hand" rule,
-still disabled while the engine is stopped. The seat's status comes from the both-pools
+Monitoring / the bell / the president, not through the seat. The **Monitoring (overseer) switch moved to the Swarm tab's top bar**, and on 2026-09-24 off the
+screen entirely: the owner asks the president, who POSTs the same endpoint and reads
+`GET /api/swarm/orchestrator` `.overseer` back (`skills/supply/SKILL.md` "Owner-requested
+settings"). Same "off on every stop/restart" rule; arming still needs a running engine. The
+overseer restore banner and its client dismiss action went with it (the server's
+`…/overseer/dismiss` route and `overseerRemembered` state remain, unused by the UI). The seat's status comes from the both-pools
 active-desk poll (the stream that used to notice a death is no longer rendered): a desk the poll
 saw and then lost counts as gone, and one it has not seen yet (a stored record from before a
 restart, a desk that refused on arrival) is probed every 5 s until seen — only a 404/403 or a

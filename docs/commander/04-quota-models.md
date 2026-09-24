@@ -535,7 +535,7 @@ worker/reviewer が付かないのは無人だから。ここでエンジンの�
 
 - **正典は `settings.json`** の `swarmAllowedModels`(types.ts:111-115、`Partial<SwarmAllowedModels>`)。既定は全 ON(`DEFAULT_SWARM_ALLOWED_MODELS`、types.ts:2190-2195)。
 - **normalizeAllowedModels は per-key fail-open**(swarmAllowedModels.ts:47-55): `src[tier] !== false` — **明示的 `false` だけが OFF**。キー欠落・typo・手壊れファイルは「使える」側に倒れる(モデルを黙って退役させない、40-46)。
-- **書込境界は全OFF拒否**: `setUserSettings` が mask を正規化し、`anyTierAllowed` が false なら **キーごと落として旧 mask を生存させる**(store.ts:181-185)。API 面は `POST /api/settings`(server/routes/misc.ts:328-343、allowlist `USER_SETTINGS_KEYS` に `swarmAllowedModels` 含む: store.ts:147-155)。UI(Settings ▸ 使用可能モデル = `ExecutionModeToggle.tsx`)も最後の1個の OFF をブロック(store.ts:180 コメント)。手編集で settings.json を全OFFにした場合だけは parse としては合法で、swarm は**音を立てて park**する(escalation、§5.5)— 黙って書き戻されはしない(swarmAllowedModels.ts:43-46)。
+- **書込境界は全OFF拒否**: `setUserSettings` が mask を正規化し、`anyTierAllowed` が false なら **キーごと落として旧 mask を生存させる**(store.ts:181-185)。API 面は `POST /api/settings`(server/routes/misc.ts:328-343、allowlist `USER_SETTINGS_KEYS` に `swarmAllowedModels` 含む: store.ts:147-155)。UI(Settings ▸ 使用可能モデル = `src/components/canvas/SwarmAllowedModelsSetting.tsx` — 2026-09-24 にバーのモードメニューから設定画面へ移設)も最後の1個の OFF をブロック(store.ts:180 コメント)。手編集で settings.json を全OFFにした場合だけは parse としては合法で、swarm は**音を立てて park**する(escalation、§5.5)— 黙って書き戻されはしない(swarmAllowedModels.ts:43-46)。
 - **globalThis ミラー** `__openground_swarm_allowed_models`(67-74): `getSettings()` が**毎読出で** `setAllowedModelTiersCache` を呼んで更新(store.ts:78, 111)。同期呼出(resolveAvailableTier の既定値)用の**後備え**であって第二の正典ではない(24-29)。await できる呼出側は必ず `getAllowedModelTiers()`(store.ts:195-196)の新鮮値を渡す契約。
 
 ### 5.3 判定関数群 — 独立2拒否権の AND

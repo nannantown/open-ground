@@ -42,7 +42,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { X, Power, Eye, ChevronUp, ChevronDown, Network, RotateCcw } from 'lucide-react'
+import { X, Power, ChevronUp, ChevronDown, Network } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -65,8 +65,7 @@ import { SwarmSeatHeader } from './SwarmSeatHeader'
 import { SwarmWorkerSeat } from './SwarmWorkerSeat'
 import { useSupplyDesk } from './useSupplyDesk'
 import { SwarmManagerPane } from './SwarmManagerPane'
-import { SwarmMonitorToggle, SwarmPowerStatus, SwarmPowerSwitch } from './SwarmPowerBar'
-import { ExecutionModeMenu } from './ExecutionModeToggle'
+import { SwarmPowerSwitch } from './SwarmPowerBar'
 import { SwarmOnboarding } from './SwarmOnboarding'
 import {
   useSwarmEngine,
@@ -375,19 +374,9 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
     error: engineError,
     toggleAutonomy,
     dismissAutonomyReminder,
-    toggleOverseer,
-    dismissOverseerReminder,
     envIssues,
     refreshEnvPreflight,
   } = useSwarmEngine(project.path, collapsed ? FOLDED_ENGINE_POLL_MS : undefined)
-
-  // The "autonomy was restored by the restart" notice (card 2b) is dismissed LOCALLY
-  // — unlike the two banners below it, there is no server marker to clear here. The
-  // persisted `swarmAutonomyOn` must STAY (it is what restores the engine on the next
-  // boot as well), and the stop-POST the resume reminder dismisses with would halt a
-  // healthy running engine. A notice, not a decision: hiding it for this session is
-  // the whole of what [×] means.
-  const [restoredNoticeDismissed, setRestoredNoticeDismissed] = useState(false)
 
   // ── Onboarding: FIRST RUN ONLY (2026-08-03 text-diet) ──────────────────────
   // The full explainer used to return on EVERY fully-idle visit — a returning
@@ -1143,64 +1132,76 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
   const foldedNotice =
     showEnvBanner ||
     engine.consumption.overLimit ||
-    (engine.autonomyRemembered && !engine.running) ||
-    (engine.overseerRemembered && !engine.overseer)
+    (engine.autonomyRemembered && !engine.running)
 
   return (
     // Right-pane-centric layout (条件4): the old left "to-do rail + dispatch"
     // panel was removed — browsing todos now lives on the Board tab (一本化), and
     // workers are started by the autonomous engine (the master power switch on
     // the header row) or the commander session, NOT by a per-card hand "dispatch"
-    // here (条件1/2/3). This wrapper is a vertical stack: ONE header row (status ·
-    // mode menu · master switch) + an error banner + the
+    // here (条件1/2/3). This wrapper is a vertical stack: ONE header row (name ·
+    // counts · master switch) + an error banner + the
     // full-height row of seats below.
     <div className={collapsed ? 'flex min-w-0 shrink-0 flex-col' : 'flex min-h-0 min-w-0 flex-1 flex-col'}>
       {/* ── The ONE header row ──────────────────────────────────────────────
-          Everything the old three stacked strips carried, on a single fixed-
-          height line so the terminal area below gets the vertical space back:
-          the live status pill (running/stopped · N workers), the execution-
-          mode dropdown (rare operation → an options menu, not an always-on
-          row), and the master on/off switch (条件1 — ON starts the engine +
-          launches commander & supply, idempotent; OFF halts new dispatch only). */}
+          The team's name, questions waiting on the owner, and the master on/off
+          switch (条件1 — ON starts the engine + launches commander & supply,
+          idempotent; OFF halts new dispatch only). Owner 2026-09-24: the
+          monitoring switch, the execution-mode menu, the "running · N workers"
+          pill and the "resumed after restart" chip are GONE from here — the
+          owner asks the president in words instead (skills/supply/SKILL.md),
+          and the usable-models mask moved to Settings.
+          The WHOLE row opens / folds the bar (owner: "make the whole bar
+          clickable"). A click that lands on a control inside it (the switch)
+          stays that control's; the keyboard path is the named toggle button. */}
       <div
+        onClick={
+          onToggleCollapsed
+            ? (e) => {
+                if ((e.target as Element).closest('button, a, input, select, textarea, [role="menu"]')) return
+                // A double-click is one intent, not open-then-fold; a drag that
+                // selected text is reading, not toggling.
+                if (e.detail > 1 || window.getSelection()?.toString()) return
+                onToggleCollapsed()
+              }
+            : undefined
+        }
         className={[
           // With the toggle, its own px-1.5 supplies the rest of the inset,
           // so the label lines up with the seats below (no negative margin).
           'flex min-h-[38px] shrink-0 flex-wrap items-center gap-x-3 gap-y-1 bg-bg py-1 pr-2',
-          onToggleCollapsed ? 'pl-1.5' : 'pl-3',
+          onToggleCollapsed
+            ? 'cursor-pointer pl-1.5 transition-colors duration-150 hover:bg-plane active:bg-line-soft has-[[role=switch]:hover]:bg-bg has-[[role=switch]:active]:bg-bg'
+            : 'pl-3',
           collapsed ? '' : 'border-b border-line',
         ].join(' ')}
       >
         {onToggleCollapsed && (
-          // The bar's open/close toggle. The name "Swarm" rides it, so the
-          // folded strip says what it is and the whole left edge is the target.
+          // The bar's open/close toggle — the keyboard / screen-reader handle of
+          // the row-wide click target, carrying the team's name.
           <button
             type="button"
-            onClick={onToggleCollapsed}
+            data-testid="swarm-bar-toggle"
+            // Same one-intent rule as the row: a double-click opens OR folds, not
+            // both. (Keyboard activation reports detail 0, so it always passes.)
+            onClick={(e) => {
+              if (e.detail > 1) return
+              onToggleCollapsed()
+            }}
             aria-expanded={!collapsed}
             aria-label={t(collapsed ? 'projectPanel.swarm.bar.expand' : 'projectPanel.swarm.bar.collapse')}
             title={t(collapsed ? 'projectPanel.swarm.bar.expand' : 'projectPanel.swarm.bar.collapse')}
             className={[
               'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-[4px] px-1.5 text-ui font-medium text-ink',
-              'transition-colors duration-150 hover:bg-plane active:bg-line-soft',
               'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
             ].join(' ')}
           >
             {collapsed ? <ChevronUp size={14} aria-hidden /> : <ChevronDown size={14} aria-hidden />}
             <Network size={12} strokeWidth={2.25} aria-hidden />
-            Swarm
+            {t('projectPanel.swarm.power.label')}
           </button>
         )}
-        <div className="min-w-0 flex-1 md:flex-none">
-        <SwarmPowerStatus
-          running={engine.running}
-          manualStop={engine.manualStop}
-          available={engineAvailable}
-          workerCount={allWorkers.length}
-        />
-        </div>
-        {/* Questions waiting on the owner — said only when there ARE some and
-            the inbox was actually read (ownerQuestionCount's contract). */}
+        {/* Something to read inside the folded bar (a banner below the header). */}
         {collapsed && foldedNotice && (
           <span
             role="status"
@@ -1209,6 +1210,8 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             className="h-[7px] w-[7px] shrink-0 rounded-full bg-accent"
           />
         )}
+        {/* Questions waiting on the owner — said only when there ARE some and
+            the inbox was actually read (ownerQuestionCount's contract). */}
         {ownerQuestionCount ? (
           <span
             title={t('projectPanel.swarm.bar.questionsHint')}
@@ -1223,49 +1226,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             {t('projectPanel.swarm.bar.reviews', { count: engine.reviews.length })}
           </span>
         ) : null}
-        {/* Restart notice (autonomyResumed, card 2b) — a restart RESTORES the
-            drain by itself, and without this it would happen in silence. It
-            rides the header as a short chip (the full sentence is its tooltip)
-            so it never costs the bar a second line (owner 2026-09-24). Keyed
-            off autonomyResumed, NOT `autonomyRemembered && running` — that pair
-            is equally true after a plain manual ON, which restored nothing.
-            Dismiss is LOCAL on purpose: the persisted marker must stay (it
-            restores the engine on the NEXT boot too), and the stop-POST the
-            !running reminder uses would STOP a healthy engine here. */}
-        {engine.autonomyResumed && engine.running && !restoredNoticeDismissed && (
-          // Below md the words give way to an icon (still read out: sr-only),
-          // so the running/stopped status beside it keeps its room; the full
-          // sentence is the tooltip.
-          <span
-            title={t('projectPanel.swarm.autonomyRestored')}
-            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-plane py-0.5 pl-2 pr-0.5 text-meta text-ink-muted"
-          >
-            <RotateCcw size={11} strokeWidth={2} aria-hidden className="shrink-0 md:hidden" />
-            <span className="sr-only md:not-sr-only">{t('projectPanel.swarm.autonomyRestored.short')}</span>
-            <button
-              type="button"
-              onClick={() => setRestoredNoticeDismissed(true)}
-              aria-label={t('projectPanel.swarm.autonomyReminder.dismiss')}
-              title={t('projectPanel.swarm.autonomyReminder.dismiss')}
-              className="inline-flex shrink-0 items-center justify-center rounded-full p-0.5 text-ink-muted transition-colors duration-150 hover:bg-line-soft hover:text-ink active:bg-line focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-            >
-              <X size={11} strokeWidth={2} />
-            </button>
-          </span>
-        )}
         <div className="min-w-0 flex-1" aria-hidden />
-        {!collapsed && (
-          <>
-            <SwarmMonitorToggle
-              on={engine.overseer}
-              running={engine.running}
-              available={engineAvailable}
-              busy={engineBusy}
-              onToggle={toggleOverseer}
-            />
-            <ExecutionModeMenu />
-          </>
-        )}
         <SwarmPowerSwitch
           running={engine.running}
           available={engineAvailable}
@@ -1411,59 +1372,6 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             disabled={engineBusy}
             aria-label={t('projectPanel.swarm.autonomyReminder.dismiss')}
             title={t('projectPanel.swarm.autonomyReminder.dismiss')}
-            className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-ink-muted transition-colors duration-150 enabled:hover:text-accent enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-          >
-            <X size={12} strokeWidth={2} />
-          </button>
-        </div>
-      )}
-
-      {/* Overseer restore banner (overseerRemembered, card 2b) — the ASYMMETRY made
-          visible, which is what OVERSEER_DESIGN.md:161 asks for. Autonomy and
-          self-supply come back on their own after a restart; the supervisor never
-          does, deliberately — it wakes an AI, types into running work and deletes
-          finished branches, and a restart is the one kill switch for that with no
-          substitute layer (K2 / L9-③). So instead of arming it, we say so and offer
-          one click. The plain-language line spells out those effects (no jargon) so
-          the owner presses the button KNOWING what comes back on.
-          Shown while the record says "was on" and it is NOT currently armed.
-          [×] goes through its OWN action — toggleOverseer(false) would be a
-          guaranteed no-op here (already disarmed ⇒ nothing written ⇒ banner returns
-          on the next poll: the d1d6d704 dismiss trap). */}
-      {engine.overseerRemembered && !engine.overseer && (
-        <div className="flex shrink-0 items-start gap-3 border-b border-line-soft bg-bg px-3 py-2">
-          <div className="min-w-0 flex-1">
-            <p className="text-meta leading-relaxed text-ink-muted">
-              {t('projectPanel.swarm.overseerReminder')}
-            </p>
-            <p className="mt-1 text-meta leading-relaxed text-ink-faint">
-              {t('projectPanel.swarm.overseerReminder.effects')}
-            </p>
-            {/* Arming REQUIRES a running engine (the D1 gate the server enforces —
-                this card adds a display, never a new way in). Say why the button is
-                dimmed rather than letting the click silently do nothing. */}
-            {!engine.running && (
-              <p className="mt-1 text-meta leading-relaxed text-ink-faint">
-                {t('projectPanel.swarm.overseerReminder.needsAutonomy')}
-              </p>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={() => toggleOverseer(true)}
-            disabled={engineBusy || !engineAvailable || !engine.running}
-            title={!engine.running ? t('projectPanel.swarm.overseerReminder.needsAutonomy') : undefined}
-            className="inline-flex shrink-0 items-center gap-1 rounded-[4px] border border-accent bg-accent px-2.5 py-1 text-meta font-medium text-bg-card transition-all duration-150 enabled:hover:border-accent-hover enabled:hover:bg-accent-hover enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-          >
-            <Eye size={12} strokeWidth={2.25} aria-hidden />
-            {t('projectPanel.swarm.overseerReminder.restore')}
-          </button>
-          <button
-            type="button"
-            onClick={() => dismissOverseerReminder()}
-            disabled={engineBusy}
-            aria-label={t('projectPanel.swarm.overseerReminder.dismiss')}
-            title={t('projectPanel.swarm.overseerReminder.dismiss')}
             className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-ink-muted transition-colors duration-150 enabled:hover:text-accent enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             <X size={12} strokeWidth={2} />

@@ -241,7 +241,7 @@ export const buildReportDetail = (
     // "no work finished" apart from "the loop silently died". (It costs no bell
     // slot from the fatal lane — see capNotificationsByKind in
     // swarmNotifications.ts, which caps info and fatal independently.)
-    return `${span}のスウォーム燃費: 終わったカードはありませんでした。`
+    return `${span}のエージェントチームの燃費: 終わったカードはありませんでした。`
   }
   const bundle = summary.bundleRate === null ? '—' : summary.bundleRate.toFixed(2)
   // Spelled out, not parenthesised jargon: 「…は別枠」 told the owner a number was
@@ -251,7 +251,7 @@ export const buildReportDetail = (
       ? `このほかに、下請けの調査役が出した文章が${plainCount(summary.sidechainOutputTokens)}あります(上の合計には含めていません)。`
       : ''
   const parts = [
-    `${span}のスウォーム燃費: カード${summary.cards}枚が終わりました。`,
+    `${span}のエージェントチームの燃費: カード${summary.cards}枚が終わりました。`,
     `1枚あたりの手数(中央値)${fmtNum(summary.medianTurns)}手・道具の束ね率${bundle}・文脈の最大${plainCount(summary.maxContext)}・文章の出力合計${plainCount(summary.outputTokens)}。`,
   ]
   if (side) parts.push(side)

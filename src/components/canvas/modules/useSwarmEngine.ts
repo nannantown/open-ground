@@ -283,17 +283,17 @@ export interface SwarmEngineState {
    *  session (right after a restart). */
   autonomyRemembered: boolean
   /** This session's engine is running because the BOOT RESUME restored it, not
-   *  because the owner pressed ON here (server `autonomyResumed`). The UI shows a
-   *  "restored from your last session" notice off THIS, not off
-   *  `autonomyRemembered && running` — that pair is equally true after a plain
-   *  manual ON, which restored nothing. Cleared server-side by either power-switch
-   *  action. */
+   *  because the owner pressed ON here (server `autonomyResumed`). Mirrored from
+   *  the server; no UI reads it since the "resumed after restart" chip was removed
+   *  (2026-09-24) — the `engine-resumed` OS notification still announces it.
+   *  Cleared server-side by either power-switch action. */
   autonomyResumed: boolean
   /** The persisted "the overseer was armed when this project last wrote its intent"
    *  record (server `engine.json`). NEVER an auto-arm — a restart deliberately
-   *  leaves the overseer OFF — so the UI offers a ONE-CLICK restore banner while
-   *  `overseerRemembered && !overseer`. Dismissing it goes through its OWN endpoint
-   *  (…/overseer/dismiss), never `overseer:false`, which would be a no-op here. */
+   *  leaves the overseer OFF. Mirrored from the server; no UI reads it since the
+   *  restore banner was removed (2026-09-24): the PRESIDENT reads it and tells the
+   *  owner while `overseerRemembered && !overseer`, and re-arms only when asked
+   *  (skills/supply/SKILL.md). */
   overseerRemembered: boolean
   /** The commander desk's heartbeat (see {@link EngineManagerHeartbeat}), or null
    *  when there is none to show (never written / unreadable / an action-ack
@@ -929,15 +929,6 @@ export interface UseSwarmEngine {
    *  clears the persisted marker (POST stop → forgetSwarmAutonomy). Distinct from
    *  toggleAutonomy(false), which no-ops when the engine is already stopped. */
   dismissAutonomyReminder: () => void
-  /** Overseer switch (EPIC C / C-core) — arm/disarm the autonomous proxy-you
-   *  brainstem. Reads back `sandboxWarning` when arming without the sandbox (L3). */
-  toggleOverseer: (next: boolean) => void
-  /** Dismiss the OVERSEER restore reminder (card 2b) without restoring: clears the
-   *  persisted `overseer:true` in engine.json through its OWN endpoint. Distinct
-   *  from toggleOverseer(false), which is a guaranteed NO-OP while the banner is up
-   *  (the overseer is already disarmed, so nothing is written and the banner
-   *  returns on the next poll — the d1d6d704 trap). */
-  dismissOverseerReminder: () => void
 }
 
 /** Own the commander engine's state for one project: one poll, the two switches,
@@ -1198,78 +1189,12 @@ export const useSwarmEngine = (projectPath: string, pollMs: number = ENGINE_POLL
     }
   }, [busy, callEngine, t])
 
-  // Dismiss the OVERSEER restore reminder (card 2b) — the owner saw the banner and
-  // chose not to bring the overseer back. Its OWN endpoint, never toggleOverseer(false):
-  // while the banner is up the overseer is by definition already disarmed, so a
-  // `enabled:false` POST hits setOverseer's change-guard, never reaches the persist, and
-  // leaves engine.json still saying true — the banner would return on the next poll and
-  // [×] would be a no-op forever (the d1d6d704 trap, one toggle over). Unconditional
-  // (no `next === current` short-circuit) for the same reason: it is the SERVER RECORD
-  // that must change here, not an in-memory arm flag.
-  const dismissOverseerReminder = useCallback(async () => {
-    if (busy) return
-    setBusy(true)
-    setError(null)
-    setEngine((s) => ({ ...s, overseerRemembered: false }))
-    try {
-      const res = await fetch('/api/swarm/orchestrator/overseer/dismiss', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path: projectPath }),
-      })
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string }
-        throw new Error(body?.error || `HTTP ${res.status}`)
-      }
-      setEngine(sanitizeEngineState(await res.json()))
-      setAvailable(true)
-    } catch (e) {
-      setEngine((s) => ({ ...s, overseerRemembered: true })) // revert — still remembered
-      setError(
-        t('projectPanel.swarm.manager.engineFailed', { error: e instanceof Error ? e.message : String(e) }),
-      )
-    } finally {
-      setBusy(false)
-    }
-  }, [busy, projectPath, t])
-
   // (The auto-wake toggle that used to live here — POST …/automerge — was retired
   // 2026-07-16: waking the commander is always on while the engine runs.)
 
-  // Overseer switch — the THIRD toggle (EPIC C / C-core). Same optimistic-then-confirm
-  // shape. Its own fetch (not callEngine) so it can read the `sandboxWarning` the route
-  // adds when arming WITHOUT the sandbox experiment (L3). Default OFF; an explicit
-  // autonomy OFF clears it server-side (D1), so the next state poll drops it back.
-  const toggleOverseer = useCallback(
-    async (next: boolean) => {
-      if (busy || next === engine.overseer) return
-      setBusy(true)
-      setError(null)
-      setEngine((s) => ({ ...s, overseer: next }))
-      try {
-        const res = await fetch('/api/swarm/orchestrator/overseer', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ path: projectPath, enabled: next }),
-        })
-        if (!res.ok) {
-          const body = (await res.json().catch(() => ({}))) as { error?: string }
-          throw new Error(body?.error || `HTTP ${res.status}`)
-        }
-        const raw: unknown = await res.json()
-        setEngine(sanitizeEngineState(raw))
-        setAvailable(true)
-      } catch (e) {
-        setEngine((s) => ({ ...s, overseer: !next }))
-        setError(
-          t('projectPanel.swarm.manager.engineFailed', { error: e instanceof Error ? e.message : String(e) }),
-        )
-      } finally {
-        setBusy(false)
-      }
-    },
-    [busy, engine.overseer, projectPath, t],
-  )
+  // (The overseer / monitoring switch that used to live here was removed with
+  // its bar control, owner 2026-09-24: the owner asks the president in words,
+  // who calls POST /api/swarm/orchestrator/overseer — skills/supply/SKILL.md.)
 
   return {
     engine,
@@ -1281,8 +1206,6 @@ export const useSwarmEngine = (projectPath: string, pollMs: number = ENGINE_POLL
     refreshEnvPreflight,
     toggleAutonomy: (next) => void toggleAutonomy(next),
     dismissAutonomyReminder: () => void dismissAutonomyReminder(),
-    toggleOverseer: (next) => void toggleOverseer(next),
-    dismissOverseerReminder: () => void dismissOverseerReminder(),
   }
 }
 

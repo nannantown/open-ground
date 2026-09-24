@@ -1815,12 +1815,15 @@ export interface SwarmOrchestratorState {
    *  deliberately never reads this field back to arm the overseer (its outward
    *  effects — waking a one-off brain, typing into a running worker's session,
    *  deleting branches / heartbeats — make a restart the one kill switch with no
-   *  substitute layer; OVERSEER_DESIGN.md K2 / L9-③). The Swarm UI reads it to
-   *  offer a ONE-CLICK restore banner while `overseerRemembered && !overseer`
-   *  (card 2b), which is the surface OVERSEER_DESIGN.md:161 asks for.
+   *  substitute layer; OVERSEER_DESIGN.md K2 / L9-③). The visible surface
+   *  OVERSEER_DESIGN.md:161 asks for was an on-screen restore banner (card 2b);
+   *  since 2026-09-24 it is the PRESIDENT, who reads this and tells the owner in
+   *  plain words while `overseerRemembered && !overseer`, re-arming only when
+   *  asked (skills/supply/SKILL.md).
    *
    *  Surfaced even before an engine exists this session (read straight off disk).
-   *  Cleared by the dedicated dismiss action (see `dismissOverseerReminder`) and
+   *  Cleared by the dedicated dismiss route (POST …/overseer/dismiss — no UI
+   *  calls it since the restore banner was removed, 2026-09-24) and
    *  by an explicit autonomy OFF; re-set whenever the overseer is armed.
    *  The remaining action endpoints report `false` (their ack is superseded by
    *  the next 5s poll) — exactly like {@link autonomyRemembered}. */

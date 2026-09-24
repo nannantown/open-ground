@@ -32,6 +32,7 @@ import { useClaudeConnection } from '@/lib/useClaudeConnection'
 import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 import type { Lang } from '@/i18n/messages'
+import { SwarmAllowedModelsSetting } from '@/components/canvas/SwarmAllowedModelsSetting'
 
 interface Props {
   open: boolean
@@ -54,6 +55,10 @@ interface Props {
    *  experiments section above. */
   swarmOptInAvailable?: boolean
   swarmOptInEnabled?: boolean
+  /** The agent-team bar is visible (the same gate ProjectPanel uses) — shows
+   *  the team's Settings sections even when neither toggle here opened it
+   *  (the login-free local-owner unlock). */
+  swarmVisible?: boolean
 }
 
 // Settings drawer. Deliberately minimal: only real preferences are visible
@@ -135,6 +140,7 @@ export const SettingsPanel = ({
   experimentsEligible = false,
   swarmOptInAvailable = false,
   swarmOptInEnabled = false,
+  swarmVisible = false,
 }: Props) => {
   const { t, lang, setLang } = useT()
   const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
@@ -717,7 +723,17 @@ export const SettingsPanel = ({
                     </div>
                   </Section>
                 )}
-                {(swarmOptIn || swarmExp) && (
+                {/* Usable models — moved here from the team bar's mode menu
+                    (owner 2026-09-24): a standing setting, not a bar control. */}
+                {(swarmVisible || swarmOptIn || swarmExp) && (
+                  <Section
+                    heading={t('projectPanel.swarm.models.label')}
+                    hint={t('projectPanel.swarm.models.hint')}
+                  >
+                    <SwarmAllowedModelsSetting />
+                  </Section>
+                )}
+                {(swarmVisible || swarmOptIn || swarmExp) && (
                   <Section
                     heading={t('settings.workerTrial.heading')}
                     hint={t('settings.workerTrial.hint')}

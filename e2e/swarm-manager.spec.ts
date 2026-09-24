@@ -6,10 +6,11 @@ import { createAndImportProject } from './fixtures/helpers'
 // the one thing that must hold is that its only button sits INSIDE the seat, in
 // both languages (the Japanese words are the wide ones) and both states (no desk
 // → Start, a live desk → Stop). Plus: no runtime selector for owner or public,
-// and Monitoring lives on the top bar.
+// and no Monitoring switch on the screen at all (owner 2026-09-24 — the owner
+// asks the president instead).
 const WORDS = {
   en: {
-    open: 'Open Swarm',
+    open: 'Open Agent Team',
     manager: 'Manager',
     absent: 'Not started',
     running: 'Running',
@@ -18,7 +19,7 @@ const WORDS = {
     monitoring: 'Monitoring',
   },
   ja: {
-    open: 'Swarm をひらく',
+    open: 'エージェントチームをひらく',
     manager: 'マネージャー',
     absent: 'いない',
     running: '動いている',
@@ -97,14 +98,8 @@ for (const lang of ['en', 'ja'] as const) {
           // The retired dashboard / command bar stay retired.
           await expect(seat.locator('textarea, input, aside')).toHaveCount(0)
 
-          // Monitoring moved to the top bar, beside the master switch.
-          const monitoring = page.getByRole('button', { name: w.monitoring, exact: true })
-          await expect(monitoring).toBeVisible()
-          await monitoring.scrollIntoViewIfNeeded()
-          const bounds = await monitoring.boundingBox()
-          expect(bounds).not.toBeNull()
-          expect(bounds!.x).toBeGreaterThanOrEqual(0)
-          expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width)
+          // Monitoring left the screen (owner 2026-09-24).
+          await expect(page.getByRole('button', { name: w.monitoring, exact: true })).toHaveCount(0)
           await expect(page.getByText('Runtime (experimental · all projects)', { exact: true })).toHaveCount(0)
           await expect(page.getByRole('group', { name: 'Commander on the Agent SDK', exact: true })).toHaveCount(0)
           await page.screenshot({ path: info.outputPath('manager.png'), fullPage: true, animations: 'disabled' })

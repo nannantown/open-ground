@@ -441,12 +441,19 @@
   ベル `work-landed`。正典は 06 章 §1.6。
   ⑦ **Swarm はタブではなく下部バー(2026-09-24・オーナー決定)**: `src/components/canvas/SwarmBottomBar.tsx`
   を `ProjectPanel` がタブ本体の三項演算の**外**(内容列の末尾)に置く = どのタブでも同じバー・タブ切替で
-  開閉状態も席も保たれる。既定は畳み(`SwarmModule collapsed` = 見出し1行だけ: 状態・人数・判断待ち数・
-  オン/オフのスイッチ。**席を1つもマウントしない = EventSource 0本**)。開くと上に広がり、上端ドラッグ/↑↓キーで高さ、
+  開閉状態も席も保たれる。既定は畳み(`SwarmModule collapsed` = 見出し1行だけ: 名前・あなたへの質問数(1件以上のときだけ)・
+  オン/オフのスイッチ。**席を1つもマウントしない = EventSource 0本**)。**行のどこを押しても開閉**
+  (中のボタン/スイッチを押したときは開閉しない — 見出し行の onClick が `closest('button,…')` で除外。
+  キーボードは名前入りのトグルボタン `data-testid="swarm-bar-toggle"`)。画面上の名前は
+  **エージェントチーム / Agent Team**(2026-09-24・コード/API/保存キー/マーカーは `swarm` のまま)。開くと上に広がり、上端ドラッグ/↑↓キーで高さ、
   高さだけ `openground.swarmbar.<projectId>` に保存(開閉は保存しない=毎回畳みで始まる)。
-  Header stays ONE line open or folded (owner 2026-09-24): the boot-restored notice (`autonomyResumed`)
-  is a dismissable chip inside the header row, and the master power is one `role="switch"`
-  (`SwarmPowerSwitch`, no text). The Board's "Board · N cards / Settings" band is gone — Project
+  Header stays ONE line open or folded (owner 2026-09-24): the master power is one `role="switch"`
+  (`SwarmPowerSwitch`, no text). Removed from the header the same day (owner request after using 0.11.142): the
+  "running · N workers" pill, the "resumed after restart" chip, the monitoring switch, the
+  execution-mode menu and the overseer restore banner — monitoring / mode are changed by the
+  president on the owner's explicit request (`skills/supply/SKILL.md` "Owner-requested settings"),
+  and the usable-models mask moved to Settings (`src/components/canvas/SwarmAllowedModelsSetting.tsx`).
+  番人 = `SwarmModule.header.test.tsx`. The Board's "Board · N cards / Settings" band is gone — Project
   Settings opens from the panel's ⋯ menu only; `BoardTab`'s toolbar row renders only for Mine-only / presence.
   Swarm タブ(`ModuleId 'swarm'`)は `MODULE_IDS` ごと撤去 — 保存済みタブ並び/最後のタブの `'swarm'` は
   無害に捨てられる。ゲートは `isSwarmVisible(moduleGate)` 1本(Board の `swarmVisible` も同じ)。
@@ -482,8 +489,8 @@
   ⑥ **マネージャー席は名札だけ(2026-09-23・カード③)**: `SwarmManagerPane` = 状態3語(動いている/止まっている/いない)
   +控えめな起動・停止のみ。会話ストリーム・命令バー・計器盤(KPI/着地/週/消費/在席)は撤去、`useLandedKpi` も削除
   (`GET /api/swarm/kpi/landed` と台帳は残置 — 社長が「着地は?」で読む=`skills/supply/SKILL.md` 状況④、
-  `docs/OUTWARD_TRIAL.md` の週次計測はこの経路)。棚卸し表 = `commander/SIMPLIFICATION.md`。「状況の監視」スイッチは上部バー
-  `SwarmMonitorToggle`(`SwarmPowerBar.tsx`)へ移設、予算超過(`consumption.overLimit`)は上部バー下の1行へ。
+  `docs/OUTWARD_TRIAL.md` の週次計測はこの経路)。棚卸し表 = `commander/SIMPLIFICATION.md`。「状況の監視」スイッチは上部バーへ移設
+  → 2026-09-24 に画面から撤去(社長に言葉で頼む)、予算超過(`consumption.overLimit`)は上部バー下の1行へ。
   席の状態は `/api/terminal/active`(両プール)。見えていて消えた卓=死亡、まだ見えない卓は5秒ごとの生存 probe
   (404/403/reaped のみ死亡・5xx は無視)→ どちらも reconcile が記録を消す(上部 Start で再起動できる)。質問 poll は `&status=open&lane=owner`(司令官が処理中の質問は出さない)。
   番人 = `SwarmModule.seats.test.tsx` / `SwarmManagerPane.test.tsx` / `SdkWorkerPane.test.tsx`(open-question banner)。

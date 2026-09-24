@@ -5,8 +5,9 @@
 // running / stopped / not there) and ONE quiet start/stop button. Nothing else.
 // Everything the seat used to carry — the commander's transcript / terminal,
 // the command bar (状況 / マージ / 掃除), the engine dashboard (KPIs, landed per
-// week, consumption, presence line) — was removed with that decision; the
-// Monitoring switch moved to the Swarm tab's top bar (SwarmMonitorToggle).
+// week, consumption, presence line) — was removed with that decision. (The
+// Monitoring switch went to the bar's header, then off the screen entirely on
+// 2026-09-24 — the owner asks the president to change it.)
 //
 // The desk's lifecycle (launch / stop / restart / reconcile after a restart)
 // is owned by SwarmModule; its status comes from SwarmModule's active-desk
