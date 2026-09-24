@@ -8449,7 +8449,79 @@ describe('collectUnownedDoing — 実行中で取り残されたカードは未�
     | { kind: 'parked'; worktree: string; sdkSessionId: string }
     | { kind: 'none'; worktree: string }
   const withDesk = (deps: ReturnType<typeof makeDeps>, state: DeskState) =>
-    Object.assign(deps, { unownedDeskState: async () => state })
+    Object.assign(deps, {
+      unownedDeskState: async () => state,
+      worktreeHeldByProcess: async () => false as boolean | null,
+    })
+
+  type Probe = boolean | null | 'unavailable'
+  const orphanDeps = (id: string, probe: { v: Probe }, probed: string[] = []) =>
+    Object.assign(withDesk(makeDeps({ cards: [card(id, { boardColumn: 'doing', branch: `swarm/${id}`, title: `${id} one` })] }), { kind: 'none', worktree: `/wt/${id}` }), {
+      worktreeHeldByProcess: async (wt: string) => (probed.push(wt), probe.v),
+    })
+  const holdLines = (engine: ReturnType<typeof newEngine>) => engine.log.filter((l) => l.message.includes('保留'))
+
+  it('an ORPHANED claude (server SIGKILL) still holding the tree blocks the reclaim until it exits — no twin', async () => {
+    const probe = { v: true as Probe }
+    const probed: string[] = []
+    const deps = orphanDeps('o', probe, probed)
+    const engine = newEngine({ running: true, workers: [] })
+    await runDispatchPass(engine, deps, NOW)
+    // An hour of passes while the orphan lives: never reclaimed…
+    for (let t = AFTER_GRACE; t <= AFTER_GRACE + 3_600_000; t += 31_000) await runDispatchPass(engine, deps, t)
+    expect(probed).toContain('/wt/o')
+    expect(deps.tornDown).toEqual([])
+    expect(deps.recovered).toEqual([])
+    // …journalled ONCE (a warn the owner sees), not once per pass — the 200-line
+    // ring must not be flushed by a long-lived orphan.
+    expect(holdLines(engine)).toHaveLength(1)
+    expect(holdLines(engine)[0]?.level).toBe('warn')
+    expect(holdLines(engine)[0]?.kind).not.toBe('routine')
+    // …and surfaced as an anomaly even though no in-process probe sees it.
+    const anomalies = await detectAnomalies(engine, [card('o', { boardColumn: 'doing', branch: 'swarm/o' })], {
+      ...deps,
+      isAlive: () => true,
+      worktreeExists: async () => true,
+      deskOccupies: async () => true,
+    }, AFTER_GRACE + 3_600_000)
+    expect(anomalies.map((a) => [a.kind, a.ref])).toEqual([['unowned-doing', 'o']])
+    // The orphan exits: the next probe (≈30s after the last hold) releases + reclaims.
+    probe.v = false
+    const last = AFTER_GRACE + 3_600_000 + 31_000
+    await runDispatchPass(engine, deps, last)
+    expect(deps.tornDown).toEqual([{ terminalId: '', worktree: '/wt/o' }])
+    expect(deps.recovered).toEqual([{ taskId: 'o', column: 'todo' }])
+    expect(holdLines(engine)).toHaveLength(2)
+    expect(holdLines(engine)[1]?.message).toContain('解除')
+    expect(engine.unownedOrphanHold?.size ?? 0).toBe(0)
+  })
+
+  it('a FAILING ps holds the card, but only for a bounded time — then the reclaim goes ahead', async () => {
+    const probe = { v: null as Probe }
+    const deps = orphanDeps('n', probe)
+    const engine = newEngine({ running: true, workers: [] })
+    await runDispatchPass(engine, deps, NOW)
+    await runDispatchPass(engine, deps, AFTER_GRACE)
+    await runDispatchPass(engine, deps, AFTER_GRACE + 4 * 60_000)
+    expect(deps.recovered).toEqual([])
+    await runDispatchPass(engine, deps, AFTER_GRACE + 5 * 60_000)
+    expect(deps.recovered).toEqual([{ taskId: 'n', column: 'todo' }])
+    expect(holdLines(engine)).toHaveLength(2)
+    expect(holdLines(engine)[1]?.message).toContain('打ち切って')
+  })
+
+  it('Windows (no ps at all) reclaims after the grace exactly as before — never held forever', async () => {
+    // isWorktreeHeldByProcess answers 'unavailable' on win32 (pinned with platform
+    // injected in swarmTranscriptProof.test.ts). The SIGKILL-orphan twin stays
+    // possible there — documented in commander 01 §7.4d.
+    const probe = { v: 'unavailable' as Probe }
+    const deps = orphanDeps('w', probe)
+    const engine = newEngine({ running: true, workers: [] })
+    await runDispatchPass(engine, deps, NOW)
+    await runDispatchPass(engine, deps, AFTER_GRACE)
+    expect(deps.recovered).toEqual([{ taskId: 'w', column: 'todo' }])
+    expect(holdLines(engine)).toHaveLength(0)
+  })
 
   it('a deskless doing card is requeued to todo AFTER the grace — never on first sight', async () => {
     const c = card('u', { boardColumn: 'doing', branch: 'swarm/u', title: 'stuck one' })

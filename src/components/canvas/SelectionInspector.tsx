@@ -44,6 +44,7 @@ import {
   clampLineHeight,
   type TextAlign,
 } from '@/lib/canvasTextStyle'
+import { lowContrastRatio, readableTextOn } from '@/lib/canvasContrast'
 import {
   resolveStickyFill,
   resolveFrameStyle,
@@ -163,6 +164,9 @@ interface Props {
   /** Plain frame "+ Auto layout" — falls back to a direct layout patch with
    *  AUTO_LAYOUT_DEFAULTS when not wired. */
   onAddAutoLayout?: () => void
+  /** Text only: the colour painted behind the selected text per theme, current theme first (backdropFor) —
+   *  an explicit text colour that fails AA against either gets a warning. */
+  textBackdrops?: (string | null)[]
 }
 
 // Figma-style Design panel for the current selection. DOCKED: fills its parent
@@ -179,6 +183,7 @@ export const SelectionInspector = ({
   isLayoutChild,
   parentLayout,
   onAddAutoLayout,
+  textBackdrops,
 }: Props) => {
   const multi = (elements?.length ?? 0) > 1
   return (
@@ -203,6 +208,7 @@ export const SelectionInspector = ({
           onPatch={onPatch}
           parentLayout={parentLayout ?? null}
           onAddAutoLayout={onAddAutoLayout}
+          textBackdrops={textBackdrops}
         />
       )}
     </div>
@@ -272,11 +278,13 @@ const SingleSelection = ({
   onPatch,
   parentLayout,
   onAddAutoLayout,
+  textBackdrops,
 }: {
   element: CanvasElement
   onPatch: (patch: Partial<CanvasElement>) => void
   parentLayout: FrameLayout | null
   onAddAutoLayout?: () => void
+  textBackdrops?: (string | null)[]
 }) => {
   const { t } = useT()
   const typeLabel =
@@ -316,7 +324,7 @@ const SingleSelection = ({
       )}
       {element.type === 'text' && (
         <Section title={t('canvas.insp.text')}>
-          <TextProperties element={element} onPatch={onPatch} />
+          <TextProperties element={element} onPatch={onPatch} backdrops={textBackdrops} />
         </Section>
       )}
     </>
@@ -1196,14 +1204,18 @@ const StrokeAlignPicker = ({
 const TextProperties = ({
   element,
   onPatch,
+  backdrops,
 }: {
   element: CanvasElement
   onPatch: (patch: Partial<CanvasElement>) => void
+  backdrops?: (string | null)[]
 }) => {
   const { t } = useT()
   const fontSize = element.fontSize ?? DEFAULT_TEXT_FONT_SIZE
   const fontFamily = element.fontFamily ?? FONT_DISPLAY_STACK
-  const textColor = element.textColor ?? DEFAULT_TEXT_COLOR
+  // Unset ⇒ show the colour the canvas actually auto-picks for this backdrop.
+  const textColor = element.textColor ?? (backdrops?.[0] ? readableTextOn(backdrops[0]) : DEFAULT_TEXT_COLOR)
+  const lowRatio = backdrops ? lowContrastRatio(element.textColor, ...backdrops) : null
   const fontWeight = element.fontWeight ?? DEFAULT_TEXT_FONT_WEIGHT
   const textAlign = element.textAlign ?? DEFAULT_TEXT_ALIGN
   const lineHeight = element.lineHeight ?? DEFAULT_LINE_HEIGHT
@@ -1390,6 +1402,20 @@ const TextProperties = ({
         value={textColor}
         onChange={(color) => onPatch({ textColor: color })}
       />
+      {lowRatio !== null && (
+        <div role="status" className="flex items-center gap-2 px-1 text-meta text-accent">
+          <span className="flex-1">
+            {t('canvas.insp.lowContrast', { ratio: lowRatio.toFixed(1) })}
+          </span>
+          <button
+            type="button"
+            onClick={() => onPatch({ textColor: undefined })}
+            className="rounded-[4px] border border-line px-1.5 py-0.5 text-ink transition-colors hover:bg-plane focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+          >
+            {t('canvas.insp.autoTextColor')}
+          </button>
+        </div>
+      )}
     </>
   )
 }

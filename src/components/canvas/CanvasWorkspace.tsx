@@ -18,6 +18,8 @@ import {
   groupCascadeSets,
 } from '@/lib/canvasGroup'
 import { applyElementPatch } from '@/lib/canvasTextStyle'
+import { backdropFor } from '@/lib/canvasContrast'
+import { useThemeName } from '@/lib/theme'
 import { reorderLayer, moveLayerOne, type LayerDropPlace } from '@/lib/canvasLayerTree'
 import { alignElements, alignElementsToBox, type AlignOp } from '@/lib/canvasAlign'
 import { applyAutoLayout, addAutoLayout, insertIntoLayoutAtPoint } from '@/lib/canvasAutoLayout'
@@ -94,6 +96,7 @@ export const CanvasWorkspace = ({
   onInspectorOpenChange,
 }: Props) => {
   const { t } = useT()
+  const theme = useThemeName()
   const [tool, setTool] = useState<Tool>('select')
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -1051,6 +1054,16 @@ export const CanvasWorkspace = ({
         (e) => selectedIds.includes(e.id) && e.type !== 'comment',
       )
   const inspectorElement = inspectorElements.length === 1 ? inspectorElements[0] : null
+  // Selected text: what is painted behind it per theme (current first) — the
+  // inspector's low-contrast warning checks both.
+  const inspectorTextBackdrops = useMemo(() => {
+    if (inspectorElement?.type !== 'text') return undefined
+    const byId = new Map(canvas.elements.map((e) => [e.id, e]))
+    const { hiddenViaGroup } = groupCascadeSets(canvas.elements)
+    return ([theme, theme === 'dark' ? 'light' : 'dark'] as const).map((th) =>
+      backdropFor(inspectorElement, byId, th, hiddenViaGroup),
+    )
+  }, [inspectorElement, canvas.elements, theme])
   // Layout-child context for the inspector: Figma hides the free-align row for
   // a child managed by auto layout and offers Fixed/Fill sizing instead.
   const inspectorParentLayout = (() => {
@@ -1382,6 +1395,7 @@ export const CanvasWorkspace = ({
                   alignEnabled={liveSelectedCount >= 2 || singleAlignsToFrame}
                   isLayoutChild={!!inspectorParentLayout}
                   parentLayout={inspectorParentLayout}
+                  textBackdrops={inspectorTextBackdrops}
                   onAddAutoLayout={() => {
                     // Same path as ⇧A so the direction heuristic applies.
                     const res = addAutoLayout(

@@ -4,7 +4,13 @@ import { tmpdir } from 'os'
 import { spawn } from 'child_process'
 import { join } from 'path'
 import { claudeDirName } from './claudeProjectDir'
-import { proveTranscriptLoadable, isTranscriptLoadable, ORPHAN_MTIME_WINDOW_MS } from './swarmTranscriptProof'
+import {
+  proveTranscriptLoadable,
+  isTranscriptLoadable,
+  isWorktreeHeldByProcess,
+  readProcessCommandLines,
+  ORPHAN_MTIME_WINDOW_MS,
+} from './swarmTranscriptProof'
 
 // swarmTranscriptProof — the SHARED transcript-loadable proof (card 4,
 // ENGINE_PERSISTENCE_PLAN §5). These are the completion-condition fixtures:
@@ -65,7 +71,7 @@ describe('swarmTranscriptProof — proveTranscriptLoadable (card 4 fixtures)', (
     const staleMs = Date.now() - 20_000
     await utimes(file, new Date(staleMs), new Date(staleMs))
     const sleep = vi.fn(async () => {})
-    const p = await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS, sleep })
+    const p = await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS, sleep, isSessionHeld: async () => false })
     expect(sleep).not.toHaveBeenCalled()
     expect(p.loadable).toBe(true)
     expect(p.reason).toBe('ok')
@@ -92,7 +98,7 @@ describe('swarmTranscriptProof — proveTranscriptLoadable (card 4 fixtures)', (
     const freshMs = Date.now() - 2_000
     await utimes(file, new Date(freshMs), new Date(freshMs))
     const sleep = vi.fn(async () => {})
-    const p = await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS, sleep })
+    const p = await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS, sleep, isSessionHeld: async () => false })
     // ~8s left of the 10s window (measured at proof time), then unmoved ⇒ dead ⇒ loadable.
     const waited = (sleep.mock.calls[0] as unknown as [number])[0]
     expect(waited).toBeGreaterThan(7_000)
@@ -112,7 +118,7 @@ describe('swarmTranscriptProof — proveTranscriptLoadable (card 4 fixtures)', (
     const file = await writeTranscript(id)
     const stopped = Date.now() - 9_700
     await utimes(file, new Date(stopped), new Date(stopped))
-    const p = await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS })
+    const p = await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS, isSessionHeld: async () => false })
     expect(p.loadable).toBe(true)
     expect(p.reason).toBe('ok')
   })
@@ -231,5 +237,32 @@ describe('swarmTranscriptProof — proveTranscriptLoadable (card 4 fixtures)', (
     await writeTranscript(id)
     await expect(isTranscriptLoadable(cwd, id)).resolves.toBe(true)
     await expect(isTranscriptLoadable(cwd, 'missing-id')).resolves.toBe(false)
+  })
+
+  // ── isWorktreeHeldByProcess — the unowned-doing sweep's orphan probe ─────
+  it('isWorktreeHeldByProcess matches every session recorded for the worktree against ONE ps snapshot', async () => {
+    const dead = 'dddd1111-1111-4111-8111-111111111111'
+    const orphan = 'eeee1111-1111-4111-8111-111111111111'
+    await writeTranscript(dead)
+    await writeTranscript(orphan)
+    let calls = 0
+    let psOut = `/usr/bin/zsh\nclaude --resume ${orphan} --print\n`
+    const ps = async () => (calls++, psOut)
+    await expect(isWorktreeHeldByProcess(cwd, ps)).resolves.toBe(true)
+    expect(calls).toBe(1)
+    psOut = '/usr/bin/zsh\n' // the orphan exited
+    await expect(isWorktreeHeldByProcess(cwd, ps)).resolves.toBe(false)
+    // This ps call failed ⇒ "could not tell" (callers hold, but only for a while).
+    await expect(isWorktreeHeldByProcess(cwd, async () => null)).resolves.toBe(null)
+  })
+
+  it('Windows has no ps: the check reports "unavailable" (reclaim as before), never "could not tell"', async () => {
+    await writeTranscript('ffff1111-1111-4111-8111-111111111111')
+    await expect(readProcessCommandLines('win32')).resolves.toBe('unavailable')
+    await expect(isWorktreeHeldByProcess(cwd, () => readProcessCommandLines('win32'))).resolves.toBe('unavailable')
+  })
+
+  it('isWorktreeHeldByProcess: no transcript dir ⇒ nothing ever ran there ⇒ false', async () => {
+    await expect(isWorktreeHeldByProcess(join(scratch, 'never-ran'), async () => 'claude --resume anything')).resolves.toBe(false)
   })
 })

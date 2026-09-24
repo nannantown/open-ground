@@ -14,7 +14,7 @@ import {
   Sun,
 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
-import { applyTheme, currentTheme, persistTheme, type ThemeName } from '@/lib/theme'
+import { applyTheme, currentTheme, persistTheme, useThemeName, type ThemeName } from '@/lib/theme'
 import { useAuth } from '@/lib/auth/AuthContext'
 import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
 import { OpenGroundWordmark } from '@/components/canvas/OpenGroundWordmark'
@@ -222,12 +222,7 @@ export const Toolbar = ({
 // under us and the moon/sun must follow.
 const ThemeToggle = () => {
   const { t } = useT()
-  const [theme, setTheme] = useState<ThemeName>(() => currentTheme())
-  useEffect(() => {
-    const observer = new MutationObserver(() => setTheme(currentTheme()))
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
-    return () => observer.disconnect()
-  }, [])
+  const theme = useThemeName()
   const toggle = () => {
     const next: ThemeName = currentTheme() === 'dark' ? 'light' : 'dark'
     applyTheme(next) // instant switch; the observer updates the icon

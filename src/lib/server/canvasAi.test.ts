@@ -170,11 +170,11 @@ describe('parseGeneratedElements', () => {
     expect(out[0].fill).toBe('#3A6B8C')
   })
 
-  it('pins a readable textColor onto a text that omits one (dark ink)', () => {
+  it('leaves an omitted textColor unset (the renderer auto-picks per backdrop + theme)', () => {
     const out = parseGeneratedElements(
       JSON.stringify([{ type: 'text', x: 0, y: 0, text: 'hi' }]),
     )
-    expect(out[0].textColor).toBe('#2A1F1A')
+    expect(out[0].textColor).toBeUndefined()
   })
 
   it('keeps an explicit textColor (override wins)', () => {
@@ -407,6 +407,10 @@ describe('buildGenerateElementsPrompt', () => {
     expect(prompt).toContain('textColor')
     expect(prompt).toContain('opacity')
     expect(prompt).toMatch(/contrast/i)
+  })
+
+  it('demands an explicit textColor for text on shapes / gradients / images (the auto colour cannot judge an image)', () => {
+    expect(prompt).toMatch(/SHAPE, on a GRADIENT fill, or on an IMAGE fill MUST set an explicit `textColor`/)
   })
 
   it('spells the completion marker in halves — never the literal marker', () => {

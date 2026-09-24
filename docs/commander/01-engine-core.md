@@ -456,14 +456,16 @@ fixture だったので、ガードを外しても引き渡し検査が止めて
 |---|---|---|
 | 生きて作業中(手動 worker 含む) | **触らない** | 健全。届けば §7.4c が回収する |
 | `quota-parked` だけが居る | セッション停止 + WIP salvage + **カードを todo へ** | unowned な park は誰にも解けない。owned と同じ requeue-not-hold(2026-08-13)に合流させる |
-| 誰も居ない | (worktree があれば salvage して) **カードを todo へ** | 再起動の残骸。branch は残るので次の dispatch が続きから入る |
+| サーバ内には誰も居ないが、その worktree の session を握る claude プロセスが OS に生きている | **触らない**(時計もリセット) | サーバの SIGKILL(猶予切れ・OOM・クラッシュ)で孤児になった worker。boot resume も 'live' で断っている。回収すると同じ worktree に新 worker が入り twin になる(2026-09-24)。保留の開始と解除を1回ずつ warn でジャーナルに書き、保留中は anomalies に `unowned-doing` として出る。`ps` がその回だけ失敗した場合も保留するが、失敗が5分続いたら打ち切って回収する(`ORPHAN_UNKNOWN_HOLD_CAP_MS`) |
+| 同上だが `ps` がそもそも無い(Windows) | 従来どおり回収 | 孤児を確かめる手段が無いので、main の挙動(30秒後に回収・再配車)を保つ。**Windows ではサーバ SIGKILL 後の孤児 twin はまだ起こりうる**(既知の残りリスク) |
+| 誰も居ない(プロセスも無い) | (worktree があれば salvage して) **カードを todo へ** | 再起動の残骸。branch は残るので次の dispatch が続きから入る。孤児が終われば、最後の保留から最大約30秒後の次の確認でここへ来る |
 
 **盗まないための造り**: ①数えたカード対象外 ②`promoteUnownedDelivered` が請求した
 id(移動が kept で失敗した分も含む)は除外 — 届いたカードを「無かったこと」にして
 todo へ流すのが最悪の誤動作 ③30秒の猶予(`UNOWNED_DOING_GRACE_MS` — 手動 dispatch は
 カード claim → セッション登録の順なので、その隙間で刈らない。'live' を見たら時計を
 リセットし**連続した無人時間**だけを数える) ④卓プローブは失敗時 'live' 側に倒す
-(証明できないものは奪わない) ⑤teardown が stillOccupied を返したら退く。
+(証明できないものは奪わない) ⑤teardown が stillOccupied を返したら退く ⑥'none' でも、worktree の transcript ディレクトリ(`~/.claude/projects/<cwd>/`)にある各 session id を 1回の `ps`(`/bin/ps` 優先)の出力と照合し(`isWorktreeHeldByProcess` — boot resume と同じ `readProcessCommandLines`)、生きていれば退く。判定できない回は最大5分まで退く。`ps` が無い(win32 / ENOENT)なら退かない。
 冷却テーブルには**書かない** — unowned 卓の tier は不明で、「推測で tier を冷やさない」
 (§7.4 の quota センサーの規約)が勝つ。上限が続いていれば、再 dispatch された
 engine-owned worker が壁に当たり、そのセンサーが正しく冷やす(1周だけ余分に回る。
@@ -481,7 +483,7 @@ engine 非所有のとき `GET /api/swarm/workers`(union)を引き、生きた�
 歯(mutation で赤を実測済み): `swarmOrchestrator.test.ts` の「collectUnownedDoing」
 7本(請求済み除外を外す / 猶予を外す / 'live' スキップを外す / todo→blocked に
 すり替え / parked の reason を crash にすり替え — 各1〜2本が赤)と、
-`BoardModule.drawerWorker.test.tsx` 4本(生存 id 条件を外す=残骸に画面が出る /
+孤児保留の3本(2026-09-24 — 孤児確認を外す / 'unavailable' を保留扱いにする / 5分の上限を外す / 毎回ログを書く / anomaly 条件を外す — 各1〜2本が赤)と、`BoardModule.drawerWorker.test.tsx` 4本(生存 id 条件を外す=残骸に画面が出る /
 中断分岐を外す=実行ボタンが戻る — 各赤)。
 
 ### 7.5 passInFlight / pendingDispatch は外から見えない

@@ -124,7 +124,7 @@ import {
 // card 4 (ENGINE_PERSISTENCE_PLAN §5) — the SHARED transcript-loadable proof (same
 // one swarmSessions' isSessionResumable uses), with the SIGKILL-orphan mtime guard
 // enabled for the worker resume path. See adoptResumeCandidates().
-import { proveTranscriptLoadable, ORPHAN_MTIME_WINDOW_MS } from './swarmTranscriptProof'
+import { proveTranscriptLoadable, isWorktreeHeldByProcess, ORPHAN_MTIME_WINDOW_MS } from './swarmTranscriptProof'
 import { recordPromoted, sweepLanded } from './swarmLandedLedger'
 // App version, read from package.json at BUILD time (same pattern as
 // server/routes/health.ts) — the crash-loop breaker keys its window on it so a
@@ -2208,6 +2208,12 @@ export interface ProjectEngine {
    *  backfill). In-memory only — a restart restarts the grace, which is the
    *  safe direction. */
   unownedDoingSeen?: Map<string, number>
+  /** Per-CARD (taskId) unowned-doing cards the sweep is HOLDING because a live
+   *  OS process may still own their worktree (a SIGKILL orphan). `since` = hold
+   *  start; `unknownSince` = start of the current run of "could not tell" probes
+   *  (capped — see ORPHAN_UNKNOWN_HOLD_CAP_MS). Drives the once-per-hold
+   *  start/release log lines and the 'unowned-doing' anomaly. In-memory only. */
+  unownedOrphanHold?: Map<string, { since: number; unknownSince?: number }>
   /** Drain/dispatch/integrate journal (ring buffer, oldest-first). */
   log: OrchestratorLogLine[]
   /** State inconsistencies detected on the latest pass (read-only — see
@@ -3214,6 +3220,14 @@ export interface OrchestratorDeps {
    *  lives in ONE place. OPTIONAL: absent ⇒ defaultUnownedDeskState; any failure
    *  inside must answer 'live' (cannot prove nobody is there ⇒ never steal). */
   unownedDeskState?: (projectPath: string, branch: string) => Promise<UnownedDeskState>
+  /** Does a live OS process still hold a claude session recorded for this
+   *  worktree? {@link collectUnownedDoing} asks before reclaiming a 'none' desk:
+   *  after a server SIGKILL the worker's `claude` survives as an orphan the
+   *  in-process desk probe cannot see, and reclaiming would put a second worker
+   *  on the same tree (twin). `true` ⇒ held; `null` (this ps call failed) ⇒ held
+   *  for at most ORPHAN_UNKNOWN_HOLD_CAP_MS; `'unavailable'` (no ps — Windows) ⇒
+   *  reclaimed as before. OPTIONAL: absent ⇒ isWorktreeHeldByProcess. */
+  worktreeHeldByProcess?: (worktree: string) => Promise<boolean | null | 'unavailable'>
   /** Newest mtime across a worker's OWN transcript + its sub-agent transcripts
    *  (its worktree cwd + agentSessionId), or null. The stall path's THIRD liveness
    *  channel, resolved ONLY for a worker the cheap channels (heartbeat + PTY output)
@@ -7112,6 +7126,11 @@ export type UnownedDeskState =
  *  passes to spare, while staying instant at human scale. */
 const UNOWNED_DOING_GRACE_MS = 30_000
 
+/** How long {@link collectUnownedDoing} keeps holding a card while every orphan
+ *  probe answers "could not tell" (a failing ps). Past this, the reclaim goes
+ *  ahead — an unprovable orphan must not strand the card forever. */
+const ORPHAN_UNKNOWN_HOLD_CAP_MS = 5 * 60_000
+
 /** {@link OrchestratorDeps.unownedDeskState} — same branch→dir mint as
  *  defaultDeskOccupies, then classify: any live non-parked SDK worker (or any
  *  other live desk — an owner's PTY, an unwinding session) answers 'live';
@@ -7183,6 +7202,7 @@ const collectUnownedDoing = async (
   now: number,
 ): Promise<void> => {
   const seen = (engine.unownedDoingSeen ??= new Map())
+  const holds = (engine.unownedOrphanHold ??= new Map())
   const countedIds = new Set(engine.workers.map((w) => w.taskId))
   const present = new Set<string>()
   for (const t of tasks) {
@@ -7202,11 +7222,56 @@ const collectUnownedDoing = async (
     } catch {
       continue // unprovable ⇒ untouched, same direction as the default's catch
     }
+    if (desk.kind !== 'none') holds.delete(t.id) // a desk showed up — no longer an orphan hold
     if (desk.kind === 'live') {
       // Somebody is working: restart the clock so the grace measures
       // CONTINUOUS abandonment, not time since the card was first noticed.
       seen.set(t.id, now)
       continue
+    }
+    // A server SIGKILL (grace expiry / OOM / crash) leaves the worker's `claude`
+    // alive as an orphan — boot resume declines it ('live'), but no in-process
+    // desk exists, so the probe above says 'none'. Reclaiming now would dispatch
+    // a new worker into the tree the orphan is still editing (twin). Hold while a
+    // process holds any of the tree's sessions. A failed ps holds too, but only
+    // for ORPHAN_UNKNOWN_HOLD_CAP_MS in a row. No ps at all (Windows) reclaims as
+    // before — the SIGKILL-orphan twin stays possible there (01 §7.4d).
+    if (desk.kind === 'none') {
+      let probe: boolean | null | 'unavailable'
+      try {
+        probe = await (deps.worktreeHeldByProcess ?? isWorktreeHeldByProcess)(desk.worktree)
+      } catch {
+        probe = null
+      }
+      const prev = holds.get(t.id)
+      const unknownSince = probe === null ? (prev?.unknownSince ?? now) : undefined
+      const capped = unknownSince !== undefined && now - unknownSince >= ORPHAN_UNKNOWN_HOLD_CAP_MS
+      if (probe === true || (probe === null && !capped)) {
+        holds.set(t.id, { since: prev?.since ?? now, ...(unknownSince !== undefined ? { unknownSince } : {}) })
+        seen.set(t.id, now)
+        if (!prev) {
+          logLine(
+            engine,
+            'warn',
+            probe === true
+              ? `worker 不在の実行中カードに生き残りの claude プロセスがあるため、終わるまで回収を保留します: ${shorten(t.title ?? '')} → ${branch}`
+              : `worker 不在の実行中カードのプロセス確認に失敗 — 最大${Math.round(ORPHAN_UNKNOWN_HOLD_CAP_MS / 60_000)}分回収を保留します: ${shorten(t.title ?? '')} → ${branch}`,
+            'dispatch',
+          )
+        }
+        continue
+      }
+      if (prev) {
+        holds.delete(t.id)
+        logLine(
+          engine,
+          'warn',
+          capped
+            ? `プロセス確認ができないまま${Math.round(ORPHAN_UNKNOWN_HOLD_CAP_MS / 60_000)}分経過 — 保留を打ち切って回収します: ${shorten(t.title ?? '')} → ${branch}`
+            : `生き残りの claude プロセスが終わったので回収の保留を解除します: ${shorten(t.title ?? '')} → ${branch}`,
+          'dispatch',
+        )
+      }
     }
     try {
       const td = await deps.recoverWorker({
@@ -7244,6 +7309,7 @@ const collectUnownedDoing = async (
   // Cards that left 'doing' (or got owned) stop being tracked — a later relapse
   // starts a fresh grace window.
   for (const id of Array.from(seen.keys())) if (!present.has(id)) seen.delete(id)
+  for (const id of Array.from(holds.keys())) if (!present.has(id)) holds.delete(id)
 }
 
 /** ONE pass. Idempotent-ish and side-effect-bounded:
@@ -8716,7 +8782,13 @@ export const detectAnomalies = async (
     }
     if (!treeExists) {
       out.push({ kind: 'orphan-doing', ref: t.id, branch, taskTitle: t.title ?? '' })
-    } else if (!(await (deps.deskOccupies ?? (async () => true))(engine.path, branch).catch(() => true))) {
+    } else if (
+      // An orphan hold (collectUnownedDoing) is exactly this row's case — the card
+      // is parked on a process the engine does not own — so it is surfaced
+      // whatever the in-process desk probe says (the hold journals only once).
+      engine.unownedOrphanHold?.has(t.id) ||
+      !(await (deps.deskOccupies ?? (async () => true))(engine.path, branch).catch(() => true))
+    ) {
       // …and the SIBLING case, which was the silent one (2026-08-27). A card in
       // 'doing' that no counted worker drains, whose worktree is STILL THERE, is
       // a worker the engine has lost track of — boot adoption declined it, or a

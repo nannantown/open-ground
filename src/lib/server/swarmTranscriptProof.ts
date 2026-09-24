@@ -30,7 +30,9 @@
 // stopping the workers, so every dead session used to read as "fresh" (2026-09-24). The role-desk path leaves the window OFF (it uses the live-PTY
 // check instead) by simply not passing `orphanWindowMs`.
 
-import { open, stat } from 'fs/promises'
+import { open, readdir, stat } from 'fs/promises'
+import { existsSync } from 'fs'
+import { dirname } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { sessionJsonlPath } from './transcript'
@@ -65,14 +67,26 @@ export type TranscriptProofReason = 'ok' | 'missing' | 'empty' | 'unparseable' |
 /** Does a running process carry `sessionId` on its command line? `null` = could not
  *  tell (ps failed / Windows) — the caller treats that as "held". One `ps` call. */
 export const isSessionHeldByProcess = async (sessionId: string): Promise<boolean | null> => {
+  const out = await readProcessCommandLines()
+  return out === null || out === 'unavailable' ? null : out.includes(sessionId)
+}
+
+/** One `ps` snapshot of every running command line. `'unavailable'` = this machine
+ *  has no `ps` at all (win32, or ENOENT) — a permanent condition, unlike `null` =
+ *  this one call failed (timeout, buffer, signal). `/bin/ps` is preferred so a
+ *  stripped or shadowed PATH cannot swap the binary. */
+export const readProcessCommandLines = async (
+  platform: NodeJS.Platform = process.platform,
+): Promise<string | null | 'unavailable'> => {
+  if (platform === 'win32') return 'unavailable'
   try {
-    const { stdout } = await execFile('ps', ['-axww', '-o', 'command='], {
+    const { stdout } = await execFile(existsSync('/bin/ps') ? '/bin/ps' : 'ps', ['-axww', '-o', 'command='], {
       timeout: 10_000,
       maxBuffer: 16 * 1024 * 1024,
     })
-    return stdout.includes(sessionId)
-  } catch {
-    return null
+    return stdout
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'unavailable' : null
   }
 }
 
@@ -151,3 +165,27 @@ export const proveTranscriptLoadable = async (
  *  live-PTY check for the still-open hazard instead). */
 export const isTranscriptLoadable = async (cwd: string, sessionId: string): Promise<boolean> =>
   (await proveTranscriptLoadable(cwd, sessionId)).loadable
+
+/** Is ANY claude session ever recorded for `cwd` still held by a running process?
+ *  The session ids are the transcript stems in claude's per-cwd project dir — so this
+ *  finds an orphaned worker (a server SIGKILL leaves its `claude` alive) even when no
+ *  roster row or in-process session remembers its id. `true` = held; `false` = no
+ *  transcript dir (nothing ever ran there) or no id is held; `null` = could not tell
+ *  THIS time (ps call failed, dir unreadable); `'unavailable'` = this machine cannot
+ *  run the check at all (no `ps` — Windows). All ids are matched against ONE ps
+ *  snapshot. `readCommands` is injectable (tests / platform). */
+export const isWorktreeHeldByProcess = async (
+  cwd: string,
+  readCommands: () => Promise<string | null | 'unavailable'> = () => readProcessCommandLines(),
+): Promise<boolean | null | 'unavailable'> => {
+  let names: string[]
+  try {
+    names = await readdir(dirname(sessionJsonlPath(cwd, 'x')))
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === 'ENOENT' ? false : null
+  }
+  const ids = names.filter((n) => n.endsWith('.jsonl')).map((n) => n.slice(0, -'.jsonl'.length))
+  if (!ids.length) return false
+  const out = await readCommands()
+  return out === null || out === 'unavailable' ? out : ids.some((id) => out.includes(id))
+}

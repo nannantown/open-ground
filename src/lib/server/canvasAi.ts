@@ -40,7 +40,6 @@ import {
 } from '@/lib/canvasAutoLayout'
 import { rectInside, type Rect } from '@/lib/canvasContainment'
 import { DEFAULT_STICKY_FILL, DRAWN_ARTBOARD_FILL } from '@/lib/canvasFillStyle'
-import { DEFAULT_TEXT_COLOR } from '@/lib/canvasTextStyle'
 import { newId } from '@/lib/ids'
 import type {
   CanvasAiActiveJob,
@@ -445,10 +444,11 @@ const forceReadableDefaults = (el: CanvasElement): void => {
       if (el.fill === undefined) el.fill = AI_SHAPE_FALLBACK_FILL
       break
     case 'text':
-      // Pin readable dark ink so generated text never rides on a default that
-      // could drift; dark ink reads against the paper and light fills (the
-      // prompt tells the model to set LIGHT text on dark fills explicitly).
-      if (el.textColor === undefined) el.textColor = DEFAULT_TEXT_COLOR
+      // Deliberately NOT pinned (2026-09-24). An unset textColor is picked at
+      // render from what is painted behind the text (canvasContrast.ts), in
+      // BOTH themes; the old pinned dark ink vanished into the dark-theme
+      // canvas because an explicit colour is respected as-is. Text on shapes /
+      // gradients / images is told by the prompt to set its own textColor.
       break
     case 'sticky':
       // Sticky body color (the `color` field) → the visible warm-yellow default
@@ -602,7 +602,8 @@ export const buildGenerateElementsPrompt = (file: string, userPrompt: string): s
     '',
     'Readability (REQUIRED — the canvas background is a warm paper color, #F2EDDE):',
     '- Every element must be clearly visible against that paper background. Give fills and text strong contrast to it; never use near-white, near-paper, or washed-out pale tints for anything that must be seen — that makes the design vanish into the page.',
-    '- Always set an explicit `textColor` on every `text` element: dark text on light fills, light text on dark fills, so text always contrasts with whatever is behind it. Never leave text to a default color.',
+    '- A `text` element sitting on a SHAPE, on a GRADIENT fill, or on an IMAGE fill MUST set an explicit `textColor` that contrasts at least 4.5:1 with that fill (light text on dark fills, dark text on light fills).',
+    '- A `text` element sitting directly on the canvas, on a sticky, or on a plain solid-colour frame may leave `textColor` UNSET: the canvas then picks dark or light text automatically from what is behind it, in both light and dark themes. If you do set it there, make it contrast at least 4.5:1 with that background.',
     '- Keep `opacity` at 1 (fully opaque). Lower it only for a deliberate, subtle overlay — never let a low opacity leave content faint or washed out.',
     '- Lay elements out so each stays legible: do not pile elements on top of each other so they hide or muddy one another. Overlap only when one element is intentionally a background or container for another — and then make sure their colors contrast.',
     "- When you place text or a shape on top of a frame or another shape, contrast its color against THAT element's fill, not just against the paper.",

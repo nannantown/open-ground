@@ -29,6 +29,8 @@ import { resolveTextStyle } from '@/lib/canvasTextStyle'
 import { siblingId, firstChildId, parentId as navParentId } from '@/lib/canvasSelectionNav'
 import { cloneSubset } from '@/lib/canvasClone'
 import { initialDrawnFrameFill } from '@/lib/canvasFillStyle'
+import { makeBackdropResolver } from '@/lib/canvasContrast'
+import { useThemeName } from '@/lib/theme'
 import type {
   CanvasElement,
   CanvasState,
@@ -3351,6 +3353,18 @@ export const InfiniteCanvas = ({
   // elements (a child whose parent is also selected doesn't count). Ungroupable
   // = the selection includes a group, or a member of one.
   const selById = useMemo(() => new Map(elements.map((e) => [e.id, e])), [elements])
+  // Sticky/text glyph colour is derived from what is painted behind them
+  // (canvas ground of the CURRENT theme + frames + what lies under a text —
+  // see makeBackdropResolver). Memoised: pan/zoom must not rescan the canvas.
+  const theme = useThemeName()
+  const backdrops = useMemo(() => {
+    const resolve = makeBackdropResolver(elements, theme, hiddenViaGroup)
+    const m = new Map<string, string | null>()
+    for (const el of elements)
+      if (el.type === 'sticky' || el.type === 'text') m.set(el.id, resolve(el))
+    return m
+  }, [elements, theme, hiddenViaGroup])
+  const backdropOf = (el: CanvasElement): string | null | undefined => backdrops.get(el.id)
   const selSet = selectedSet
   const canGroup =
     selectedIds.filter((id) => {
@@ -3869,6 +3883,7 @@ export const InfiniteCanvas = ({
               canvasId={canvasId}
               commentTool={commentCursor}
               onMeasure={onMeasureEligible(el) ? ecb.onMeasure : undefined}
+              backdrop={backdropOf(el)}
             />
           </div>
           )

@@ -1,4 +1,5 @@
 import type { Settings } from '@/lib/types'
+import { useEffect, useState } from 'react'
 
 /** Colour theme plumbing (第三弾「計器盤」2026-08-03).
  *
@@ -49,3 +50,15 @@ export const persistTheme = (theme: ThemeName): Promise<void> =>
   })
     .then(() => undefined)
     .catch(() => undefined)
+
+/** The applied theme, live: follows the html[data-theme] ATTRIBUTE (not local
+ *  state) so a toggle or a settings refresh anywhere re-renders the reader. */
+export const useThemeName = (): ThemeName => {
+  const [theme, setTheme] = useState<ThemeName>(() => currentTheme())
+  useEffect(() => {
+    const observer = new MutationObserver(() => setTheme(currentTheme()))
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => observer.disconnect()
+  }, [])
+  return theme
+}

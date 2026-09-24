@@ -7,6 +7,7 @@ import { resolveTextStyle } from '@/lib/canvasTextStyle'
 import { textSizingOf, textVAlignOf, textBox } from '@/lib/canvasTextSizing'
 import { resolveStickyFill, DEFAULT_STICKY_FILL } from '@/lib/canvasFillStyle'
 import { resolveOpacity } from '@/lib/canvasTransform'
+import { CANVAS_BACKDROP, stickyTextColor, textElementColor } from '@/lib/canvasContrast'
 import { CommentPin } from './CommentPin'
 import { ImageView } from './ImageView'
 import { ScreenView, useInspectTweak } from './ScreenView'
@@ -44,6 +45,11 @@ interface Props {
    *  layout-frame text's siblings. The reported box is whatever the mode's
    *  render produced; the parent decides which axes the measurement may keep. */
   onMeasure?: (w: number, h: number) => void
+  /** Sticky / text: the opaque colour painted behind the element (canvas
+   *  ground + ancestor fills + what lies under a text, see backdropFor). The glyph colour is
+   *  derived from it so text stays readable in both themes. Absent ⇒ the
+   *  light canvas ground; null ⇒ cannot be judged (image, auto page) ⇒ the default ink. */
+  backdrop?: string | null
 }
 
 const STICKY = 208
@@ -94,6 +100,7 @@ export const ElementView = memo(({
   canvasId,
   commentTool,
   onMeasure,
+  backdrop = CANVAS_BACKDROP.light,
 }: Props) => {
   const ta = useRef<HTMLTextAreaElement>(null)
 
@@ -241,6 +248,9 @@ export const ElementView = memo(({
             width: element.width ?? STICKY,
             height: element.height ?? STICKY,
             background: resolveStickyFill(element),
+            // Glyphs follow the note's own fill, never the theme ink — a pale
+            // note keeps dark text at night (and a dark note light text).
+            color: stickyTextColor(resolveStickyFill(element), backdrop ?? CANVAS_BACKDROP.light),
             opacity: resolveOpacity(element),
           }}
           className={[
@@ -257,11 +267,11 @@ export const ElementView = memo(({
             onBlur={onEditDone}
             onKeyDown={(e) => editorKeyDown(e, onEditDone)}
             onPointerDown={(e) => e.stopPropagation()}
-            className="block h-full w-full resize-none bg-transparent text-ui leading-relaxed text-ink focus:outline-none"
+            className="block h-full w-full resize-none bg-transparent text-ui leading-relaxed focus:outline-none"
           />
         ) : (
-          <div className="h-full w-full select-none overflow-hidden whitespace-pre-wrap text-ui leading-relaxed text-ink">
-            {element.text || <span className="text-ink/55">Double-click to edit</span>}
+          <div className="h-full w-full select-none overflow-hidden whitespace-pre-wrap text-ui leading-relaxed">
+            {element.text || <span className="opacity-[0.55]">Double-click to edit</span>}
           </div>
         )}
         </div>
@@ -279,7 +289,9 @@ export const ElementView = memo(({
   const textStyle: React.CSSProperties = {
     fontSize: typo.fontSize,
     fontFamily: typo.fontFamily,
-    color: typo.color,
+    // Explicit textColor wins; unset ⇒ auto from what is painted behind it
+    // (the fixed dark default vanished into the dark-theme canvas).
+    color: textElementColor(element, backdrop),
     fontWeight: typo.fontWeight,
     textAlign: typo.textAlign,
     lineHeight: typo.lineHeight,
