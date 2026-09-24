@@ -439,15 +439,19 @@
   ⑦ **Swarm はタブではなく下部バー(2026-09-24・オーナー決定)**: `src/components/canvas/SwarmBottomBar.tsx`
   を `ProjectPanel` がタブ本体の三項演算の**外**(内容列の末尾)に置く = どのタブでも同じバー・タブ切替で
   開閉状態も席も保たれる。既定は畳み(`SwarmModule collapsed` = 見出し1行だけ: 状態・人数・判断待ち数・
-  開始/停止。**席を1つもマウントしない = EventSource 0本**)。開くと上に広がり、上端ドラッグ/↑↓キーで高さ、
+  オン/オフのスイッチ。**席を1つもマウントしない = EventSource 0本**)。開くと上に広がり、上端ドラッグ/↑↓キーで高さ、
   高さだけ `openground.swarmbar.<projectId>` に保存(開閉は保存しない=毎回畳みで始まる)。
+  Header stays ONE line open or folded (owner 2026-09-24): the boot-restored notice (`autonomyResumed`)
+  is a dismissable chip inside the header row, and the master power is one `role="switch"`
+  (`SwarmPowerSwitch`, no text). The Board's "Board · N cards / Settings" band is gone — Project
+  Settings opens from the panel's ⋯ menu only; `BoardTab`'s toolbar row renders only for Mine-only / presence.
   Swarm タブ(`ModuleId 'swarm'`)は `MODULE_IDS` ごと撤去 — 保存済みタブ並び/最後のタブの `'swarm'` は
   無害に捨てられる。ゲートは `isSwarmVisible(moduleGate)` 1本(Board の `swarmVisible` も同じ)。
   Board の社長ドロワー `BoardSupplyDock` も削除 = 社長の席はバーの中の1つだけ(卓の二重起動防止は
   `useSupplyDesk` のガード+サーバの `spawnSwarmSupply` 排他ロックで従来どおり)。
   畳み中はエンジン poll を 15 秒に落とす(`FOLDED_ENGINE_POLL_MS` — 毎周サーバで git preflight が走る)。
-  初回(オンボーディング未読・完全停止)に畳んだ帯の「開始」を押すと、起動せずバーを開いて説明を出す。
-  バー内のお知らせ(予算超過・自動運転の再開/記憶・監視の記憶・環境バナー)は畳み中は帯の赤い点1つで知らせる。
+  初回(オンボーディング未読・完全停止)に畳んだ帯のスイッチをオンにすると、起動せずバーを開いて説明を出す。
+  バー内のお知らせ(予算超過・自動運転の記憶・監視の記憶・環境バナー)は畳み中は帯の赤い点1つで知らせる(再起動後の自動再開は見出し行の札なので点の対象外)。
   **接続の予算 `src/lib/streamBudget.ts`**(差し戻し 2026-09-24): HTTP/1.1 は同一 origin 6本まで・SSE 1本が1本を
   占有し、6本で後続 fetch(入力・poll・開始/停止)が永久に待つ。以前は Terminal タブと Swarm タブが排他だったが
   今は同時に出る。そこで SSE を開く3部品(`TerminalPane` / `ClaudeTerminalPane` / `SdkWorkerPane`)が生存中

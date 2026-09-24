@@ -42,7 +42,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { X, Power, Eye, ChevronUp, ChevronDown, Network } from 'lucide-react'
+import { X, Power, Eye, ChevronUp, ChevronDown, Network, RotateCcw } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -1143,7 +1143,6 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
   const foldedNotice =
     showEnvBanner ||
     engine.consumption.overLimit ||
-    (engine.autonomyResumed && engine.running && !restoredNoticeDismissed) ||
     (engine.autonomyRemembered && !engine.running) ||
     (engine.overseerRemembered && !engine.overseer)
 
@@ -1161,7 +1160,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
           height line so the terminal area below gets the vertical space back:
           the live status pill (running/stopped · N workers), the execution-
           mode dropdown (rare operation → an options menu, not an always-on
-          row), and the master Stop|Start switch (条件1 — ON starts the engine +
+          row), and the master on/off switch (条件1 — ON starts the engine +
           launches commander & supply, idempotent; OFF halts new dispatch only). */}
       <div
         className={[
@@ -1224,6 +1223,36 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             {t('projectPanel.swarm.bar.reviews', { count: engine.reviews.length })}
           </span>
         ) : null}
+        {/* Restart notice (autonomyResumed, card 2b) — a restart RESTORES the
+            drain by itself, and without this it would happen in silence. It
+            rides the header as a short chip (the full sentence is its tooltip)
+            so it never costs the bar a second line (owner 2026-09-24). Keyed
+            off autonomyResumed, NOT `autonomyRemembered && running` — that pair
+            is equally true after a plain manual ON, which restored nothing.
+            Dismiss is LOCAL on purpose: the persisted marker must stay (it
+            restores the engine on the NEXT boot too), and the stop-POST the
+            !running reminder uses would STOP a healthy engine here. */}
+        {engine.autonomyResumed && engine.running && !restoredNoticeDismissed && (
+          // Below md the words give way to an icon (still read out: sr-only),
+          // so the running/stopped status beside it keeps its room; the full
+          // sentence is the tooltip.
+          <span
+            title={t('projectPanel.swarm.autonomyRestored')}
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-plane py-0.5 pl-2 pr-0.5 text-meta text-ink-muted"
+          >
+            <RotateCcw size={11} strokeWidth={2} aria-hidden className="shrink-0 md:hidden" />
+            <span className="sr-only md:not-sr-only">{t('projectPanel.swarm.autonomyRestored.short')}</span>
+            <button
+              type="button"
+              onClick={() => setRestoredNoticeDismissed(true)}
+              aria-label={t('projectPanel.swarm.autonomyReminder.dismiss')}
+              title={t('projectPanel.swarm.autonomyReminder.dismiss')}
+              className="inline-flex shrink-0 items-center justify-center rounded-full p-0.5 text-ink-muted transition-colors duration-150 hover:bg-line-soft hover:text-ink active:bg-line focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              <X size={11} strokeWidth={2} />
+            </button>
+          </span>
+        )}
         <div className="min-w-0 flex-1" aria-hidden />
         {!collapsed && (
           <>
@@ -1355,31 +1384,6 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             limit: engine.consumption.limit,
           })}
         </p>
-      )}
-
-      {/* Restart notice (autonomyResumed, card 2b) — the OTHER half of the reminder
-          below. Since card 2 a restart RESTORES the drain by itself, so the "resume?"
-          prompt (gated on !running) never fires for a restored project and the
-          restoration used to happen in silence. Keyed off autonomyResumed, NOT
-          `autonomyRemembered && running`: that pair is equally true after a plain manual
-          ON, which restored nothing. Dismiss is LOCAL on purpose — the persisted marker
-          must stay (it is what restores the engine on the NEXT boot too), and the stop-
-          POST the reminder below uses would STOP a healthy running engine here. */}
-      {engine.autonomyResumed && engine.running && !restoredNoticeDismissed && (
-        <div className="flex shrink-0 items-center gap-3 border-b border-line-soft bg-bg px-3 py-2">
-          <span className="min-w-0 flex-1 text-meta leading-relaxed text-ink-muted">
-            {t('projectPanel.swarm.autonomyRestored')}
-          </span>
-          <button
-            type="button"
-            onClick={() => setRestoredNoticeDismissed(true)}
-            aria-label={t('projectPanel.swarm.autonomyReminder.dismiss')}
-            title={t('projectPanel.swarm.autonomyReminder.dismiss')}
-            className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-ink-muted transition-colors duration-150 enabled:hover:text-accent enabled:active:scale-[0.99] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-          >
-            <X size={12} strokeWidth={2} />
-          </button>
-        </div>
       )}
 
       {/* Restart reminder (autonomyRemembered) — shown when the drain is NOT running

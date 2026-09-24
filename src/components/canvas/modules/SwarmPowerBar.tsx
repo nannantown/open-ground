@@ -1,4 +1,4 @@
-// SwarmPowerBar — the SINGLE master Start/Stop switch for the whole Swarm tab,
+// SwarmPowerBar — the SINGLE master on/off switch for the whole Swarm bar,
 // split into two INLINE pieces (status pill + switch) that SwarmModule composes
 // into its one-line header (the old full-width bar + the separate mode row + the
 // separate tab row were three stacked strips that squeezed the terminal area —
@@ -88,56 +88,47 @@ interface SwitchProps {
   onToggle: (next: boolean) => void
 }
 
-/** The SINGLE master switch — a segmented Stop | Start on a subtle inset track.
- *  The SELECTED side is filled and colored by MEANING — Start-active = moss
- *  ("running"), Stop-active = ink ("stopped") — so WHICH state is current reads
- *  instantly (and without the old accent-red, which made a mere idle "Stop" look
- *  like a danger action). The inactive side is a ghost with an explicit hover;
- *  both share disabled + focus-visible (5-state, ui-interactive-states). */
+/** The SINGLE master switch — one on/off toggle, no words (owner 2026-09-24:
+ *  "an on/off switch is enough, as long as I can tell which it is"). The state
+ *  reads from the knob's side AND the track colour — moss when on, a quiet grey
+ *  track when off — and the status pill beside it says it in words. role=switch
+ *  + aria-checked gives screen readers "Swarm, on/off"; as a native button it
+ *  already takes Space / Enter. Hover / focus-visible / disabled per
+ *  ui-interactive-states. */
 export const SwarmPowerSwitch = ({ running, available, busy, onToggle }: SwitchProps) => {
   const { t } = useT()
-  const disabled = busy || !available
   return (
-    <div
-      role="group"
+    <button
+      type="button"
+      role="switch"
+      aria-checked={running}
       aria-label={t('projectPanel.swarm.power.label')}
       title={t('projectPanel.swarm.power.hint')}
-      aria-disabled={disabled}
-      className="inline-flex shrink-0 items-center gap-0.5 rounded-[5px] border border-line bg-bg-inset p-0.5"
+      disabled={busy || !available}
+      onClick={() => onToggle(!running)}
+      className={[
+        'group inline-flex h-6 shrink-0 items-center rounded-full px-0.5',
+        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+        'disabled:cursor-not-allowed disabled:opacity-40',
+      ].join(' ')}
     >
-      {(
-        [
-          [false, t('projectPanel.swarm.power.stop')],
-          [true, t('projectPanel.swarm.power.start')],
-        ] as [boolean, string][]
-      ).map(([v, label]) => {
-        const active = running === v
-        // Selected fill colored by meaning: Start (v=true) → moss = running,
-        // Stop (v=false) → ink = stopped; both inverse text for AA contrast.
-        const activeClass = v ? 'border-moss bg-moss text-bg-card' : 'border-ink bg-ink text-bg-card'
-        return (
-          <button
-            key={String(v)}
-            type="button"
-            onClick={() => {
-              if (!disabled && running !== v) onToggle(v)
-            }}
-            aria-pressed={active}
-            disabled={disabled}
-            className={[
-              'h-6 min-w-[52px] whitespace-nowrap rounded-[3px] px-2.5 text-meta font-medium transition-all duration-150',
-              'border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-              'disabled:cursor-not-allowed disabled:opacity-40',
-              active
-                ? activeClass
-                : 'border-transparent bg-transparent text-ink-muted enabled:hover:bg-bg-card enabled:hover:text-ink',
-            ].join(' ')}
-          >
-            {label}
-          </button>
-        )
-      })}
-    </div>
+      <span
+        aria-hidden
+        className={[
+          'relative inline-block h-[18px] w-[32px] rounded-full border transition-colors duration-150',
+          running
+            ? 'border-moss bg-moss group-enabled:group-hover:bg-moss/80 group-enabled:group-active:bg-moss/65'
+            : 'border-ink-faint bg-bg-inset group-enabled:group-hover:border-ink-muted group-enabled:group-hover:bg-plane group-enabled:group-active:bg-line-soft',
+        ].join(' ')}
+      >
+        <span
+          className={[
+            'absolute top-[2px] h-[12px] w-[12px] rounded-full transition-[left,background-color] duration-150',
+            running ? 'left-[16px] bg-bg-card' : 'left-[2px] bg-ink-muted',
+          ].join(' ')}
+        />
+      </span>
+    </button>
   )
 }
 

@@ -121,7 +121,7 @@ afterEach(() => {
 const EFFECTS = 'projectPanel.swarm.overseerReminder.effects'
 const RESTORE = 'projectPanel.swarm.overseerReminder.restore'
 const DISMISS = 'projectPanel.swarm.overseerReminder.dismiss'
-const RESTORED_NOTICE = 'projectPanel.swarm.autonomyRestored'
+const RESTORED_NOTICE = 'projectPanel.swarm.autonomyRestored.short'
 const NEEDS_AUTONOMY = 'projectPanel.swarm.overseerReminder.needsAutonomy'
 
 describe('overseer restore banner — the asymmetry made visible (完了条件1)', () => {
@@ -205,10 +205,40 @@ describe('autonomy restored notice — visible even though the engine came back 
     expect(await screen.findByText(RESTORED_NOTICE)).toBeTruthy()
   })
 
+  it('rides the header row instead of taking a line of its own (owner 2026-09-24)', async () => {
+    harness(engineState({ autonomyResumed: true, running: true }))
+    render(<SwarmModule project={project} />)
+    const chip = await screen.findByText(RESTORED_NOTICE)
+    const power = await screen.findByRole('switch', { name: 'projectPanel.swarm.power.label' })
+    // MUTATION: render the notice as its own banner below the header ⇒ red.
+    expect(power.parentElement?.contains(chip)).toBe(true)
+  })
+
+  it('shows on the FOLDED bar too — it no longer lights the attention dot, so it must be visible itself', async () => {
+    harness(engineState({ autonomyResumed: true, running: true }))
+    render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
+    // MUTATION: gate the chip on `!collapsed` ⇒ red (a restart would go silent while folded).
+    expect(await screen.findByText(RESTORED_NOTICE)).toBeTruthy()
+  })
+
   it('does NOT show after a plain manual ON — a manual start restored nothing', async () => {
     harness(engineState({ autonomyResumed: false, running: true, autonomyRemembered: true }))
     const view = render(<SwarmModule project={project} />)
     await waitFor(() => expect(view.queryByText(RESTORED_NOTICE)).toBeNull())
+  })
+})
+
+describe('master power switch — one on/off toggle (owner 2026-09-24)', () => {
+  it('a click while running turns it OFF: POSTs stop, never start', async () => {
+    const { posted } = harness(engineState({ running: true }))
+    render(<SwarmModule project={project} />)
+    const power = await screen.findByRole('switch', { name: 'projectPanel.swarm.power.label' })
+    await waitFor(() => expect(power.getAttribute('aria-checked')).toBe('true'))
+    await waitFor(() => expect(power.hasAttribute('disabled')).toBe(false))
+    power.click()
+    // MUTATION: make onClick always pass `true` ⇒ red (the owner could never stop Swarm).
+    await waitFor(() => expect(posted.some((p) => p.url === '/api/swarm/orchestrator/stop')).toBe(true))
+    expect(posted.some((p) => p.url === '/api/swarm/orchestrator/start')).toBe(false)
   })
 })
 
@@ -223,6 +253,7 @@ describe('banner copy — the owner has to understand what they are turning back
     'projectPanel.swarm.overseerReminder.restore',
     'projectPanel.swarm.overseerReminder.dismiss',
     'projectPanel.swarm.autonomyRestored',
+    'projectPanel.swarm.autonomyRestored.short',
   ] as const
 
   it('exists in JA and EN', () => {

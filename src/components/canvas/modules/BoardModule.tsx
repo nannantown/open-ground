@@ -111,9 +111,6 @@ export interface BoardModuleProps {
     task: ProjectTask,
     opts?: { cwd?: string; run?: TaskRunPayload },
   ) => Promise<TaskLaunchResult>
-  /** Open the Project Settings dialog (owned by ProjectPanel). Optional —
-   *  unset hides the Board toolbar's settings affordance. */
-  onOpenProjectSettings?: () => void
   /** Whether the local `claude` CLI is signed in (from useClaudeConnection in
    *  ProjectPanel). `undefined` = not yet known. Used to SKIP the fire-and-forget
    *  auto-title spawn while signed out — a signed-out claude opens its OAuth
@@ -166,7 +163,6 @@ export const BoardModule = ({
   liveTerminalId,
   onDeleteTask,
   onLaunchTask,
-  onOpenProjectSettings,
   claudeLoggedIn,
   onClaudeLogin,
   swarmVisible = false,
@@ -2133,7 +2129,6 @@ export const BoardModule = ({
             // resolver, so it is the only swarm fact on this surface without a
             // gate of its own inside a callback.
             reviewManagerPresence={swarmVisible ? managerPresence : undefined}
-            onOpenProjectSettings={onOpenProjectSettings}
           />
         </div>
       </div>

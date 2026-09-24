@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ChevronRight, Settings2 } from 'lucide-react'
+import { ChevronRight } from 'lucide-react'
 import { BoardCard } from '@/components/canvas/BoardCard'
 import {
   CLAUDE_EFFORTS,
@@ -378,9 +378,6 @@ interface BoardTabProps {
   /** The card whose detail drawer is open — rendered in a selected state so
    *  the board always shows WHICH card the drawer belongs to. */
   openTaskId?: string | null
-  /** Open the Project Settings dialog. Optional — unset renders no settings
-   *  affordance (back-compat for hosts without the dialog). */
-  onOpenProjectSettings?: () => void
   /** The task's live claude pane status — the card face carries the same
    *  marking as the Ground cards (flow F036): a coloured band along its top
    *  edge plus a "Running"/"Waiting" stamp at the head of the title. null =
@@ -432,7 +429,6 @@ export const BoardTab = ({
   projectPath,
   displayName,
   openTaskId,
-  onOpenProjectSettings,
   sessionStatus,
   workerForTask,
   managerForTask,
@@ -719,13 +715,14 @@ export const BoardTab = ({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* Toolbar */}
-      <div className="flex shrink-0 items-center justify-between gap-3 px-7 pb-2.5 pt-3.5">
+    <div className="flex h-full min-h-0 flex-col pt-3">
+      {/* Toolbar — only when it has something to hold. The "Board · N cards"
+          label and the Settings button were removed (owner 2026-09-24: the
+          height goes to the board; the Project Settings dialog stays one click
+          away in the panel's ⋯ menu), so in the ordinary case this row is gone. */}
+      {(hasAssignees || presence) && (
+      <div className="flex shrink-0 items-center justify-between gap-3 px-7 pb-2.5">
         <div className="flex items-center gap-3">
-          <p className="label-cap text-ink-muted">
-            {t('board.toolbar.count', { count: visibleTasks.length })}
-          </p>
           {/* "Mine only" — text-only filter toggle. Rendered only once some
               card has an assignee (with none it can match nothing). Needs a
               display name to match against; without one the toggle shows but
@@ -754,23 +751,9 @@ export const BoardTab = ({
           {/* Presence (u15) — who else is in this project's board room right now.
               Renders nothing unless collab is live and a peer is present. */}
           <CollabPresence channel={presence ?? null} />
-          {/* Project settings — surfaces the dialog that used to hide behind
-              the ⋯ menu. Quiet text+icon button, same register as the review
-              toggle's label. */}
-          {onOpenProjectSettings && (
-            <button
-              type="button"
-              onClick={onOpenProjectSettings}
-              disabled={projectMissing}
-              title={t('board.toolbar.projectSettings')}
-              className="flex items-center gap-1.5 rounded-sm px-1 py-1 text-meta text-ink-muted transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-muted"
-            >
-              <Settings2 size={13} className="shrink-0" />
-              {t('board.toolbar.projectSettings')}
-            </button>
-          )}
         </div>
       </div>
+      )}
 
       {/* Run-defaults strip — the board-wide launch profile (the drawer's
           per-card settings inherit these; the dedicated Personal rows left the

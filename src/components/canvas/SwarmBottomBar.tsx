@@ -5,7 +5,7 @@
 // in exactly one place: the seats row inside this bar).
 //
 // - Folded by default: a single header row — "Swarm", running/stopped · N
-//   workers, questions waiting on the owner, and the master Stop | Start.
+//   workers, questions waiting on the owner, and the master on/off switch.
 //   Folded mounts no seat, so it opens no EventSource.
 // - Open: grows UPWARD to a saved height and shows the seats (president ·
 //   manager · workers). The top edge is a drag handle; the height is saved per

@@ -28,7 +28,7 @@ export const projectPanel = {
     // (owner + the settings toggle, resolved server-side).
     'projectPanel.swarm.badge': 'Experimental',
     'projectPanel.swarm.title': 'Swarm orchestration',
-    // Master power switch (SwarmPowerBar) — the SINGLE Start/Stop for the whole
+    // Master power switch (SwarmPowerBar) — the SINGLE on/off for the whole
     // Swarm tab. ON starts the autonomous engine AND launches the manager +
     // supply conversations together (idempotent); OFF only halts new dispatch
     // (running workers finish, worktrees are kept). The status shows running /
@@ -36,7 +36,6 @@ export const projectPanel = {
     // retired 2026-07-16; the engine never pushes.)
     'projectPanel.swarm.power.label': 'Swarm',
     'projectPanel.swarm.power.start': 'Start',
-    'projectPanel.swarm.power.stop': 'Stop',
     'projectPanel.swarm.power.running': 'Running',
     'projectPanel.swarm.power.stopped': 'Stopped',
     // Deliberate owner pause (manualStop — persisted server-side, survives
@@ -61,7 +60,7 @@ export const projectPanel = {
     'projectPanel.swarm.bar.questionsHint': 'Open the bar and tell the president your answers.',
     'projectPanel.swarm.bar.attention': 'There is a notice inside — open the bar to read it.',
     'projectPanel.swarm.power.hint':
-      'Start the engine, manager, and supply officer together. Stop halts new dispatch only — running workers finish and their worktrees are kept.',
+      'On starts the engine, manager, and supply officer together. Off halts new dispatch only — running workers finish and their worktrees are kept.',
     // Restart reminder (autonomyRemembered) — autonomy is NEVER auto-resumed on
     // relaunch; if it was on last session the banner offers a one-click resume.
     'projectPanel.swarm.autonomyReminder':
@@ -75,6 +74,8 @@ export const projectPanel = {
     // plain manual ON.
     'projectPanel.swarm.autonomyRestored':
       'Autonomy was on last session, so it started again automatically after the restart.',
+    // The same notice as a header chip — the sentence above is its tooltip.
+    'projectPanel.swarm.autonomyRestored.short': 'Resumed after restart',
     // Overseer restore banner (overseerRemembered, card 2b). The supervisor is the ONE
     // switch a restart never brings back — deliberately, because it does more than
     // watch. Plain language for a non-programmer owner: what it does when it is on, so
@@ -590,14 +591,13 @@ export const projectPanel = {
     // 実験 ON（オーナー＋設定トグル、サーバー解決）時のみ表示。
     'projectPanel.swarm.badge': '実験的',
     'projectPanel.swarm.title': 'Swarm オーケストレーション',
-    // 電源スイッチ（SwarmPowerBar）— Swarm タブ全体の単一の開始/停止。オンで自律
+    // 電源スイッチ（SwarmPowerBar）— Swarm バー全体の単一のオン/オフ。オンで自律
     // エンジンを起動し、マネージャー＋タスク窓口の対話もまとめて起動（冪等）。オフは新規の
     // 振り分けを止めるだけ（走行中の worker は完走・worktree は温存）。状態として
     // 稼働中/停止中＋稼働ワーカー数を表示。（自動統合の別スイッチは廃止
     // (2026-07-16) — エンジンは push しない。）
     'projectPanel.swarm.power.label': 'Swarm',
     'projectPanel.swarm.power.start': '開始',
-    'projectPanel.swarm.power.stop': '停止',
     'projectPanel.swarm.power.running': '稼働中',
     'projectPanel.swarm.power.stopped': '停止中',
     // 手動停止(manualStop — サーバ側で永続化・再起動を跨いで維持)。単なる未起動の「停止中」と区別。
@@ -618,7 +618,7 @@ export const projectPanel = {
     'projectPanel.swarm.bar.questionsHint': 'バーをひらいて、社長に答えを伝えてください。',
     'projectPanel.swarm.bar.attention': '中にお知らせがあります — バーをひらいて確認してください。',
     'projectPanel.swarm.power.hint':
-      'エンジン・マネージャー・タスク窓口をまとめて起動します。停止は新規の振り分けを止めるだけで、走行中の worker は完走し worktree も残ります。',
+      'オンでエンジン・マネージャー・タスク窓口をまとめて起動します。オフは新規の振り分けを止めるだけで、走行中の worker は完走し worktree も残ります。',
     // 再起動リマインダー（autonomyRemembered）— 再起動で自律は自動再開しない。前回 ON
     // だった場合だけ、ワンクリック再開のバナーを出す。
     'projectPanel.swarm.autonomyReminder':
@@ -631,6 +631,8 @@ export const projectPanel = {
     // 起動時に復元されたときだけ出す。
     'projectPanel.swarm.autonomyRestored':
       '前回このプロジェクトで自動運転が ON だったので、再起動のあと自動でまた動き出しています。',
+    // 同じお知らせの見出し行用の短い札 — 上の1文はそのツールチップ。
+    'projectPanel.swarm.autonomyRestored.short': '再起動後に自動再開',
     // 監督の復帰バナー(overseerRemembered・card 2b)。監督は再起動で戻さない唯一のスイッチ
     // ——「見ているだけ」ではないので意図的にそうしている。オーナー(非プログラマ)向けの
     // 平易文で「ONにすると何をするのか」を書き、理由を分かった上で押せるようにする。

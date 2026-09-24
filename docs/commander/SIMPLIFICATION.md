@@ -121,7 +121,7 @@ and is it used in the current model (president as the front desk, SDK-only, this
 | Manager presence line + review-queue count | Remove | The seat's three-word status is enough |
 | Monitoring (overseer) switch | Move (top bar) | Needed to turn on question / stall / usage notices |
 | Monitoring re-arm reminder, restart-resume notices | Keep | Decisions the owner makes after a restart |
-| Top bar status, Start/Stop, execution mode | Keep | The owner's main controls |
+| Top bar status, on/off switch, execution mode | Keep | The owner's main controls |
 | Setup banner (git missing etc.), error banner | Keep | Explains why nothing can start. Engine errors now also show above the seats |
 | First-run explainer | Keep | For first-time users |
 | President seat, worker seats | Keep | As built by card ② |

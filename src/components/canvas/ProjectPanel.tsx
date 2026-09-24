@@ -2585,9 +2585,6 @@ const OwnedProjectBody = ({
           swarmVisible={isSwarmVisible(moduleGate)}
           detailId={boardDetailId}
           onOpenDetail={setBoardDetailId}
-          // Surface Project Settings right on the Board toolbar (the ⋯ menu
-          // entry stays as a second route).
-          onOpenProjectSettings={() => setProjectSettingsOpen(true)}
           // A card with a launched terminal counts as "touched" — the drawer's
           // close-discards-empty-card check must not drop it.
           hasTerminalSlot={id => id in taskTerminals}
