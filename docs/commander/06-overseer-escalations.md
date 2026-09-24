@@ -1349,3 +1349,51 @@ Adversarial review round (same day), each red measured the same way: menu exclus
 `replies` dropped from the saved file (`supplyNoticeAbsence` "reply … survives an app restart");
 the app-wide untrack restored ("stuck app-wide line on the only desk is told once"); the late
 reply not shortened (the length pin).
+
+## §1.11 — One 「仕上がり」 per card: the commander's report replaces the engine's (2026-09-24)
+
+Owner report: the `record` project's landing reached the president twice — the commander's reply
+(【司令官からの返事】「取り込み、iPhoneに入れました。版は〜」) and the engine's notice
+(【エンジンからの知らせ】「本体に取り込まれました:〜」). The president desk was restarting, both
+were held, and it told them back to back (「約20分前の知らせ」). Cause: two sources for one fact.
+`sweepLanded` queues its line ~3s after the card moves to `done`, while og-manage step 9 reports
+every landing through `supply/say` as well, often with what the engine cannot know (installed,
+version).
+
+Canonical = the commander's report (it says more); the engine's is the fallback:
+- `sweepLanded` → `queueSupplyLanding(path, cards)`: ONE important line per sweep, carrying its
+  `cards` ({taskId,title}) and its own `notBefore` = queued + `SUPPLY_LANDING_GRACE_MS` (20 min).
+  A later sweep never joins or re-times an earlier line (rework 1 — joining let a reply written
+  before B landed cover B, and pushed every earlier card back on each join); due lines are still
+  told together (`takeBundle`). A card already queued is not queued twice; landing lines dedup by
+  card id, not by text (two cards with one title are two landings).
+  A held line is **skipped, never blocking** — a question or stall queued behind it goes at once.
+- `supply/say` accepts `landed: ["<card id>", …]` (full id or ≥8-char prefix). When that reply is
+  **confirmed submitted** (its Enter landed — never at queue time, and not when the box merely read
+  empty, which is also what the owner clearing it looks like), every queued landing line it covers is
+  withdrawn (only the covered cards out of a multi-card line), and its ids are remembered for
+  24h so a landing the engine sweeps LATER (engine was off) is not queued. **Explicit ids only** —
+  no title matching (rework 1: a reply that merely mentions a card, 「「A」についてのご質問ですが…」,
+  withdrew A's landing, and with no later report the owner never heard A landed). A missed id
+  costs a duplicate, never silence.
+- **At least once:** no covering reply within the grace ⇒ the engine's line is told as before
+  (with its age). A covering reply that never reaches the desk (pushed over the 5-reply cap to the
+  bell) withdraws nothing. Held lines, `cards` and the 24h memory are persisted in
+  `supply-notice-queue.json` (`cards`/`notBefore`/`landed`/`reported`).
+- Untouched: questions, fatals, stalls, progress (withdrawal only touches lines with `cards`),
+  and the `work-landed` bell/toast (not held). Over the 30-line cap a landing line is evicted
+  FIRST (its bell already rang), then other news, a question last.
+- Ceiling (still two lines): a report without `landed` ids; a report delivered after the grace;
+  a report whose Enter did not take and whose box later read empty (dequeued but not confirmed
+  heard — withdrawal needs a confirmed submit, so the engine line is told too).
+
+Guards: `supplyNotice.test.ts` «one landing, one 「仕上がり」 on the desk» (11 cases). Red measured
+by hand, then restored: pre-fix shape (plain un-held notice) → 9 red; withdrawal widened to lines
+without cards → the question/stall/progress guard red; grace applied to every important line →
+the "never delays a question" guard red. Adversarial review round (same day) — 4 more cases in
+«a landing is never withdrawn by something the owner did not hear…», each red measured: the
+`reply.at >= landingAt` check, the quotes in the title match, the `heard` gate and the join removed.
+Rework 1 (commander's independent review) — «rework 1: every card keeps its own clock…» (4 cases,
+all red on the pre-rework code), re-measured after the fix: title match put back → 4 red; every
+queued landing re-timed on a new sweep → the 15-minute case red; eviction back to "oldest news"
+→ the cap case red; landing lines deduped by text → the same-title case red.

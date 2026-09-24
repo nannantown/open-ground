@@ -596,7 +596,14 @@ export const swarmRoutes = new Hono()
     // Reporting the call's success would say "delivered" for a reply that is
     // merely parked — the dishonesty `heldBecause` was added to avoid on the
     // outbound side.
-    const waiting = await queueSupplyReply(path, text)
+    // `landed` (optional): the card ids this reply reports as landed. Once the
+    // reply is delivered, the engine's own 「本体に取り込まれました」 for those
+    // cards is withdrawn — the owner hears one 「仕上がり」 per card
+    // (supplyNotice.SUPPLY_LANDING_GRACE_MS).
+    const landed = Array.isArray(body?.landed)
+      ? (body.landed as unknown[]).filter((x): x is string => typeof x === 'string' && x.length <= 64).slice(0, 50)
+      : []
+    const waiting = await queueSupplyReply(path, text, {}, landed)
     return c.json({ queued: true, delivered: waiting === 0 })
   })
   // Managers launch through the SDK with /og-manage in the primary checkout.

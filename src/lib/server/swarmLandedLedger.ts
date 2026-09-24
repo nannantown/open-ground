@@ -47,7 +47,7 @@ import { projectDataFile } from './projectDataPath'
 // Inlined at build time (resolveJsonModule / esbuild) — cwd-independent, same
 // pattern the health route uses for APP_VERSION.
 import { name as APP_PACKAGE_NAME } from '../../../package.json'
-import { queueSupplyNotice } from './supplyNotice'
+import { queueSupplyLanding, landedNoticeText } from './supplyNotice'
 import type { ProjectTask } from '../types'
 
 // ─── Shape ────────────────────────────────────────────────────────────────────
@@ -204,13 +204,11 @@ export const sweepLanded = async (
       // desk in the owner's words; any branch name / id / path a title might
       // carry is redacted by sanitizeSupplyNotice before it is typed.
       const landedNow = entries.filter((e) => e.landedAt === nowIso && doneIds.has(e.taskId))
-      const names = landedNow
-        .slice(0, 3)
-        .map((e) => `「${e.title.replace(/\s+/g, ' ').trim().slice(0, 40)}」`)
-        .join('')
-      const more = landedNow.length > 3 ? ` ほか${landedNow.length - 3}件` : ''
-      const detail = `お願いされていた作業が ${stamped} 件、本体に取り込まれました${names ? `: ${names}${more}` : ''}。`
-      queueSupplyNotice(projectPath, detail)
+      const cards = landedNow.map((e) => ({ taskId: e.taskId, title: e.title }))
+      const detail = landedNoticeText(cards)
+      // Held for the commander's own report of the same cards and withdrawn by
+      // it — one 「仕上がり」 per card on the desk (SUPPLY_LANDING_GRACE_MS).
+      queueSupplyLanding(projectPath, cards)
       // The 納品 also rings the bell / OS toast (the owner's 3-tier rule: a
       // delivery is worth a sound). Lazy + fire-and-forget: a failed bell write
       // must not undo a landing that is already recorded.

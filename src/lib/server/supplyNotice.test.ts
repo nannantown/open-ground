@@ -49,6 +49,8 @@ import {
   SUPPLY_PASTE_MEASURED_UNFOLDED,
   supplyReplyLine,
   supplyProgressLine,
+  queueSupplyLanding,
+  SUPPLY_LANDING_GRACE_MS,
 } from './supplyNotice'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1121,5 +1123,286 @@ describe('an unsent line is also bounded by time', () => {
     // A late reply (2026-09-24) gives up summary room to its age label.
     expect(supplyReplyLateLine(sanitizeSupplyNotice(big), 9999 * 3_600_000).length).toBeLessThanOrEqual(SUPPLY_PASTE_MEASURED_UNFOLDED)
     expect(supplyReplyLateLine('短い答え', 3 * 3_600_000)).toContain('約3時間前の返事')
+  })
+})
+
+// ─── ONE 「仕上がり」 per card (owner report 2026-09-24) ───────────────────────
+// A landing reached the desk twice: the commander's reply 「取り込み、iPhoneに
+// 入れました」 and the engine's 「本体に取り込まれました」 — back to back after a
+// desk restart. The engine's line now waits SUPPLY_LANDING_GRACE_MS for the
+// commander's report and is withdrawn once that report is DELIVERED.
+//
+// RED MEASURED 2026-09-24 (restored after):
+//   • production reverted to the pre-fix shape (queueSupplyLanding = a plain,
+//     un-held, card-less queueSupplyNotice) → 9 of these 11 fail: the landing
+//     is typed at once and a covering reply no longer withdraws it.
+//   • withdrawCoveredLandings made to drop lines WITHOUT cards too → the guard
+//     "questions, stalls and progress still arrive" fails.
+//   • the grace filter made to hold every important line → the guard "a held
+//     landing never delays a question" fails.
+describe('one landing, one 「仕上がり」 on the desk', () => {
+  const CARD = { taskId: '5a1c9e0b-1111-4222-8333-444455556666', title: '録音停止後の読み上げを標準でオフにする' }
+  const T0 = 1_000_000
+  const at = (h: Harness, t: number) => ({ ...h.deps, now: () => t })
+  const closedAt = (t: number) => ({ desks: () => [] as { id: string; cwd: string }[], now: () => t, onReplyExpired: () => {} })
+  const landingWrites = (h: Harness) => h.writes.filter(([, d]) => d.includes('本体に取り込まれました'))
+
+  it('with no commander report the landing is still told, once, after the grace', async () => {
+    const h = harness(IDLE)
+    await queueSupplyLanding(PROJECT, [CARD], at(h, T0))
+    expect(h.writes).toEqual([]) // held — waiting for the commander's report
+    await flushSupplyNotices(at(h, T0 + SUPPLY_LANDING_GRACE_MS))
+    await flushSupplyNotices(at(h, T0 + SUPPLY_LANDING_GRACE_MS + 60_000))
+    expect(landingWrites(h)).toHaveLength(1)
+    expect(landingWrites(h)[0]![1]).toContain('録音停止後の読み上げを標準でオフにする')
+  })
+
+  it('engine first, commander later: the commander report (with the card id) is the only line', async () => {
+    const h = harness(IDLE)
+    await queueSupplyLanding(PROJECT, [CARD], at(h, T0))
+    await queueSupplyReply(PROJECT, '取り込み、iPhoneに入れました。版は1.4.2です', at(h, T0 + 5 * 60_000), [CARD.taskId.slice(0, 8)])
+    await flushSupplyNotices(at(h, T0 + SUPPLY_LANDING_GRACE_MS + 1))
+    await flushSupplyNotices(at(h, T0 + 3 * SUPPLY_LANDING_GRACE_MS))
+    expect(h.writes).toHaveLength(1)
+    expect(h.writes[0]![1]).toContain('iPhoneに入れました')
+    expect(peekSupplyImportant().get(PROJECT)).toBeUndefined()
+  })
+
+  // Rework 1: a title alone never covers a card (a mention is not a report).
+  // Without the id the owner hears it twice — a duplicate, never silence.
+  it('a reply naming the card only by its title (no id) does NOT withdraw the landing', async () => {
+    const h = harness(IDLE)
+    await queueSupplyLanding(PROJECT, [CARD], at(h, T0))
+    await queueSupplyReply(PROJECT, `「${CARD.title}」を取り込みました`, at(h, T0 + 60_000))
+    await flushSupplyNotices(at(h, T0 + 2 * SUPPLY_LANDING_GRACE_MS))
+    expect(landingWrites(h)).toHaveLength(1)
+  })
+
+  it('desk restarting: both held, told as ONE line when it comes back', async () => {
+    await queueSupplyReply(PROJECT, '取り込み、iPhoneに入れました', closedAt(T0), [CARD.taskId])
+    await queueSupplyLanding(PROJECT, [CARD], closedAt(T0 + 1_000))
+    const h = harness(IDLE)
+    for (const t of [T0 + 25 * 60_000, T0 + 26 * 60_000, T0 + 60 * 60_000]) await flushSupplyNotices(at(h, t))
+    expect(h.writes).toHaveLength(1)
+    expect(h.writes[0]![1]).toContain('iPhoneに入れました')
+  })
+
+  it('a report delivered BEFORE the engine sees the landing keeps the later notice off the desk', async () => {
+    const h = harness(IDLE)
+    await queueSupplyReply(PROJECT, '取り込みました', at(h, T0), [CARD.taskId])
+    await queueSupplyLanding(PROJECT, [CARD], at(h, T0 + 60_000))
+    await flushSupplyNotices(at(h, T0 + 2 * SUPPLY_LANDING_GRACE_MS))
+    expect(h.writes).toHaveLength(1)
+  })
+
+  it('only the covered card leaves a multi-card notice; the other is still told', async () => {
+    const other = { taskId: '9f9f9f9f-0000-4000-8000-000000000000', title: '別の作業' }
+    const h = harness(IDLE)
+    await queueSupplyLanding(PROJECT, [CARD, other], at(h, T0))
+    await queueSupplyReply(PROJECT, '1件取り込みました', at(h, T0 + 60_000), [CARD.taskId])
+    await flushSupplyNotices(at(h, T0 + SUPPLY_LANDING_GRACE_MS + 1))
+    const told = landingWrites(h)
+    expect(told).toHaveLength(1)
+    expect(told[0]![1]).toContain('1 件')
+    expect(told[0]![1]).toContain('別の作業')
+    expect(told[0]![1]).not.toContain('録音停止後')
+  })
+
+  it('a reply for a DIFFERENT card does not silence this landing', async () => {
+    const h = harness(IDLE)
+    await queueSupplyLanding(PROJECT, [CARD], at(h, T0))
+    await queueSupplyReply(PROJECT, '別件を取り込みました', at(h, T0 + 60_000), ['0000aaaa-bbbb'])
+    await flushSupplyNotices(at(h, T0 + SUPPLY_LANDING_GRACE_MS + 1))
+    expect(landingWrites(h)).toHaveLength(1)
+  })
+
+  it('a covering reply that never reached the desk (pushed out over the cap) cannot take the landing with it', async () => {
+    await queueSupplyLanding(PROJECT, [CARD], closedAt(T0))
+    await queueSupplyReply(PROJECT, '取り込みました', closedAt(T0 + 1), [CARD.taskId])
+    for (let i = 0; i < SUPPLY_REPLY_CAP; i++) await queueSupplyReply(PROJECT, `別の返事${i}`, closedAt(T0 + 2 + i))
+    const h = harness(IDLE)
+    for (let i = 0; i <= SUPPLY_REPLY_CAP + 1; i++) await flushSupplyNotices(at(h, T0 + SUPPLY_LANDING_GRACE_MS + i))
+    expect(landingWrites(h)).toHaveLength(1)
+  })
+
+  it('survives an app restart: still held, still withdrawn by the report', async () => {
+    await queueSupplyLanding(PROJECT, [CARD], closedAt(T0))
+    resetSupplyNoticeState({ keepDisk: true })
+    const h = harness(IDLE)
+    await flushSupplyNotices(at(h, T0 + 60_000))
+    expect(h.writes).toEqual([]) // the hold came back from disk
+    await queueSupplyReply(PROJECT, '取り込みました', at(h, T0 + 2 * 60_000), [CARD.taskId])
+    resetSupplyNoticeState({ keepDisk: true })
+    await queueSupplyLanding(PROJECT, [CARD], at(h, T0 + 3 * 60_000)) // a re-sweep after the restart
+    await flushSupplyNotices(at(h, T0 + 3 * SUPPLY_LANDING_GRACE_MS))
+    expect(h.writes).toHaveLength(1)
+  })
+
+  // ── GUARDS: the dedup must never cost the owner a question, a stall or progress ──
+  it('questions, stalls and progress still arrive around a covering report', async () => {
+    const closed = closedAt(T0)
+    await queueSupplyLanding(PROJECT, [CARD], closed)
+    await noticeToSupply(
+      buildInfoAppNotification(
+        { event: 'escalation-open', detail: `「${CARD.title}」について質問が1件`, projectPath: PROJECT, escalationId: 'esc-1' },
+        T0,
+      ),
+      closed,
+    )
+    await noticeToSupply(info('review-idle', `「${CARD.title}」の確認が止まっています`), closed)
+    await queueSupplyProgress(PROJECT, `「${CARD.title}」に取りかかりました`, closed)
+    await queueSupplyReply(PROJECT, `「${CARD.title}」を取り込みました`, closed, [CARD.taskId])
+    const h = harness(IDLE)
+    for (let i = 0; i < 6; i++) await flushSupplyNotices(at(h, T0 + SUPPLY_LANDING_GRACE_MS + i))
+    const all = h.writes.map(([, d]) => d).join('\n')
+    expect(all).toContain('質問が1件')
+    expect(all).toContain('確認が止まっています')
+    expect(all).toContain('取りかかりました')
+    expect(landingWrites(h)).toEqual([])
+  })
+
+  it('a held landing never delays a question queued behind it', async () => {
+    const h = harness(IDLE)
+    await queueSupplyLanding(PROJECT, [CARD], at(h, T0))
+    await noticeToSupply(info('escalation-open', '質問が1件届きました'), at(h, T0 + 1_000))
+    expect(h.writes).toHaveLength(1)
+    expect(h.writes[0]![1]).toContain('質問が1件届きました')
+  })
+})
+
+// Adversarial review follow-up (2026-09-24). Each case is a way a landing could
+// be withdrawn although the owner never heard it was finished.
+// RED MEASURED 2026-09-24 (restored after), on the first-review code: the
+// `reply.at >= landingAt` check removed → "an earlier 「取りかかりました」" failed;
+// the quotes dropped from the title match → "a different, longer title" failed
+// (rework 1 then dropped the title match altogether — both now guard that no
+// mention covers a card); `if (heard)` removed → "a reply the owner cleared"
+// fails; same-title cards deduped by line → "two cards with the same title" fails.
+describe('a landing is never withdrawn by something the owner did not hear as its report', () => {
+  const CARD = { taskId: '7b7b7b7b-1111-4222-8333-444455556666', title: 'ログイン' }
+  const T0 = 5_000_000
+  const at = (h: Harness, t: number) => ({ ...h.deps, now: () => t })
+  const closedAt = (t: number) => ({ desks: () => [] as { id: string; cwd: string }[], now: () => t, onReplyExpired: () => {} })
+  const landingWrites = (h: Harness) => h.writes.filter(([, d]) => d.includes('本体に取り込まれました'))
+
+  it('an earlier 「取りかかりました」 reply, delivered after the landing, does not cover it', async () => {
+    await queueSupplyReply(PROJECT, `「${CARD.title}」に取りかかりました`, closedAt(T0))
+    await queueSupplyLanding(PROJECT, [CARD], closedAt(T0 + 60_000))
+    const h = harness(IDLE)
+    for (let i = 0; i < 3; i++) await flushSupplyNotices(at(h, T0 + SUPPLY_LANDING_GRACE_MS + 120_000 + i))
+    expect(landingWrites(h)).toHaveLength(1)
+  })
+
+  it('a reply about a different, longer title does not cover it', async () => {
+    const h = harness(IDLE)
+    await queueSupplyLanding(PROJECT, [CARD], at(h, T0))
+    await queueSupplyReply(PROJECT, '「ログイン画面の文言」は差し戻しました', at(h, T0 + 60_000))
+    await flushSupplyNotices(at(h, T0 + SUPPLY_LANDING_GRACE_MS + 1))
+    expect(landingWrites(h)).toHaveLength(1)
+  })
+
+  it('a reply the owner CLEARED from the box (never submitted) does not withdraw the landing', async () => {
+    let box = ''
+    const typed: string[] = []
+    const deps = {
+      desks: () => [{ id: DESK, cwd: PROJECT }],
+      screen: () => frame(box, FOOTER_IDLE),
+      write: (_id: string, w: string) => {
+        if (w !== '\r') {
+          box = w.replace(PASTE_OPEN, '').replace(PASTE_CLOSE, '')
+          typed.push(box)
+        } // every Enter is swallowed
+        return true
+      },
+      sleep: instant,
+      onReplyExpired: () => {},
+      onNoticeGivenUp: () => {},
+    }
+    await queueSupplyLanding(PROJECT, [CARD], { ...deps, now: () => T0 })
+    await queueSupplyReply(PROJECT, '取り込みました', { ...deps, now: () => T0 + 60_000 }, [CARD.taskId])
+    box = '' // the owner clears the box
+    await flushSupplyNotices({ ...deps, now: () => T0 + 120_000 }) // dequeues the reply, unheard
+    await flushSupplyNotices({ ...deps, now: () => T0 + SUPPLY_LANDING_GRACE_MS + 1 })
+    expect(typed.filter((t) => t.includes('本体に取り込まれました'))).toHaveLength(1)
+  })
+
+  it('two cards with the same title are both counted; reporting one leaves the other told', async () => {
+    const twin = { taskId: '8c8c8c8c-1111-4222-8333-444455556666', title: CARD.title }
+    const h = harness(IDLE)
+    await queueSupplyLanding(PROJECT, [CARD], at(h, T0))
+    await queueSupplyLanding(PROJECT, [twin], at(h, T0 + 60_000))
+    await queueSupplyReply(PROJECT, '1件取り込みました', at(h, T0 + 120_000), [CARD.taskId])
+    await flushSupplyNotices(at(h, T0 + 60_000 + SUPPLY_LANDING_GRACE_MS + 1))
+    expect(landingWrites(h)).toHaveLength(1)
+    expect(landingWrites(h)[0]![1]).toContain('1 件')
+  })
+})
+
+// Rework 1 (commander's independent review, 2026-09-24). Three ways the join /
+// the title match silenced or starved a landing.
+// RED MEASURED 2026-09-24: all four cases failed on the pre-rework code (join
+// into a held line, quoted-title fallback, "oldest news" eviction). After the
+// fix, re-measured by mutation (restored after): title match put back → 4 red;
+// every queued landing re-timed on a new sweep → the 15-minute case red;
+// eviction back to "oldest news" → the cap case red.
+describe('rework 1: every card keeps its own clock, and only an explicit report covers it', () => {
+  const T0 = 9_000_000
+  const at = (h: Harness, t: number) => ({ ...h.deps, now: () => t })
+  const busyAt = (t: number) => ({
+    desks: () => [{ id: DESK, cwd: PROJECT }],
+    screen: () => BUSY,
+    write: () => true,
+    sleep: instant,
+    now: () => t,
+    onReplyExpired: () => {},
+  })
+  const A = { taskId: 'aaaaaaaa-1111-4222-8333-444455556666', title: 'ログイン画面の修正' }
+  const B = { taskId: 'bbbbbbbb-1111-4222-8333-444455556666', title: '通知の文言' }
+  const landingWrites = (h: Harness) => h.writes.filter(([, d]) => d.includes('本体に取り込まれました'))
+
+  it('a reply written before B landed (「B はまだ検品中」) never withdraws B', async () => {
+    await queueSupplyLanding(PROJECT, [A], busyAt(T0))
+    await queueSupplyReply(PROJECT, `「${A.title}」は取り込み済み、「${B.title}」はまだ検品中です`, busyAt(T0 + 60_000))
+    await queueSupplyLanding(PROJECT, [B], busyAt(T0 + 120_000))
+    const h = harness(IDLE)
+    for (const t of [T0 + 5 * 60_000, T0 + 60 * 60_000, T0 + 61 * 60_000, T0 + 62 * 60_000]) await flushSupplyNotices(at(h, t))
+    expect(landingWrites(h).some(([, d]) => d.includes(B.title))).toBe(true)
+  })
+
+  it('landings every 15 minutes do not keep pushing the first one back', async () => {
+    const h = harness(IDLE)
+    for (let i = 0; i < 8; i++) {
+      await queueSupplyLanding(PROJECT, [{ taskId: `c${i}c${i}c${i}c${i}-0000`, title: `作業${i}` }], at(h, T0 + i * 15 * 60_000))
+    }
+    await flushSupplyNotices(at(h, T0 + 7 * 15 * 60_000 + 60_000))
+    expect(landingWrites(h).length).toBeGreaterThan(0)
+    expect(landingWrites(h)[0]![1]).toContain('作業0')
+  })
+
+  it('a reply that only MENTIONS a landed title (no landed ids) does not withdraw it', async () => {
+    await queueSupplyLanding(PROJECT, [A], busyAt(T0))
+    await queueSupplyReply(PROJECT, `「${A.title}」についてのご質問ですが、まだ確認中です`, busyAt(T0 + 60_000))
+    const h = harness(IDLE)
+    for (const t of [T0 + 5 * 60_000, T0 + 60 * 60_000, T0 + 61 * 60_000]) await flushSupplyNotices(at(h, t))
+    expect(landingWrites(h)).toHaveLength(1)
+  })
+
+  it('over the cap a landing goes before a stall, a fatal or a question', async () => {
+    const closed = { desks: () => [] as { id: string; cwd: string }[], now: () => T0, onReplyExpired: () => {} }
+    await noticeToSupply(info('review-idle', '確認が止まっています'), closed)
+    await noticeToSupply(fatal('止まりました'), closed)
+    await noticeToSupply(
+      buildInfoAppNotification({ event: 'escalation-open', detail: '質問が1件', projectPath: PROJECT, escalationId: 'esc-cap' }, T0),
+      closed,
+    )
+    for (let i = 0; i < SUPPLY_NOTICE_CAP; i++) {
+      await queueSupplyLanding(PROJECT, [{ taskId: `d${i}d${i}d${i}d${i}-0000`, title: `作業${i}` }], { ...closed, now: () => T0 + i })
+    }
+    const q = peekSupplyImportant().get(PROJECT) ?? []
+    expect(q.length).toBe(SUPPLY_NOTICE_CAP)
+    const all = q.join('\n')
+    expect(all).toContain('確認が止まっています')
+    expect(all).toContain('止まりました')
+    expect(all).toContain('質問が1件')
   })
 })

@@ -71,7 +71,16 @@ for (const width of [1600, 1280, 390, 320]) {
     expect(box.height).toBe(48)
     const iframeBox = (await page.locator('iframe[title="Songs"]').boundingBox())!
     expect(iframeBox.y).toBe(box.y + box.height)
-    expect(iframeBox.height).toBeGreaterThanOrEqual(height - 50)
+    // The folded Swarm bottom bar (0.11.138) sits under every tab: the tab body
+    // fills everything between the header and the bar, and the bar ends at the
+    // bottom of the screen. Measured, so a taller bar can't hide a short body.
+    // Bounded from both sides: the bar must not be pushed off-screen, and the
+    // body must not run under the bar (an overlaid bar would pass the minimum).
+    const barBox = (await page.getByTestId('swarm-bottom-bar').boundingBox())!
+    expect(barBox.y + barBox.height).toBeGreaterThanOrEqual(height - 1)
+    expect(barBox.y + barBox.height).toBeLessThanOrEqual(height + 1)
+    expect(iframeBox.y + iframeBox.height).toBeLessThanOrEqual(barBox.y + 1)
+    expect(iframeBox.height).toBeGreaterThanOrEqual(height - 50 - barBox.height)
     expect(iframeBox.width).toBeGreaterThanOrEqual(width - 2)
     await expect(page.getByTitle('Open Terminal', { exact: true })).toHaveCount(0)
     for (const label of ['Back to Ground', 'Project details', 'Claude usage', 'More actions']) {

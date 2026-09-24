@@ -404,7 +404,73 @@ interface PendingNotice {
   /** The question this line retells — set on escalation-open/-reminder, so the
    *  line can be withdrawn once the question is answered. */
   escalationId?: string
+  /** LANDING notices only: the cards it reports, so a commander reply that
+   *  reports the same cards withdraws it ({@link queueSupplyLanding}). */
+  cards?: LandedCard[]
+  /** LANDING notices only: not offered before this time
+   *  ({@link SUPPLY_LANDING_GRACE_MS}). Other lines queued behind it still go. */
+  notBefore?: number
+  /** REPLIES only: the card ids the commander said this reply reports as landed. */
+  landed?: string[]
 }
+
+/** A card a landing notice reports. */
+export interface LandedCard {
+  taskId: string
+  title: string
+}
+
+/**
+ * ONE 「仕上がり」 PER CARD (owner report 2026-09-24). A landing used to reach the
+ * desk twice: the engine's automatic 「本体に取り込まれました」 (sweepLanded, ~3s
+ * after the card moves to done) and the commander's own report of the same
+ * merge (og-manage: every landing is reported through supply/say, often with
+ * what the engine cannot know — installed on the phone, the version). A desk
+ * that was restarting held both and told them back to back.
+ *
+ * The commander's report is the one kept — it says more. So the engine's
+ * landing notice is HELD this long, and withdrawn if a commander reply that
+ * covers its cards is DELIVERED meanwhile ({@link withdrawCoveredLandings}).
+ * No covering reply by then ⇒ it is told as before (with its age): a landing
+ * is always told at least once. Withdrawal happens only on the reply's
+ * delivery, never on its queueing, so a reply that is itself lost (pushed out
+ * over {@link SUPPLY_REPLY_CAP}) can never take the landing with it.
+ *
+ * 20 minutes: the commander reports after it has cleaned up and moved the
+ * Board, sometimes after a post-merge install; the incident's reply came ~20
+ * minutes after the landing. The bell and the OS toast are NOT held — only the
+ * desk line waits.
+ * ponytail: fixed window; a commander report later than this still duplicates.
+ */
+export const SUPPLY_LANDING_GRACE_MS = 20 * 60 * 1000
+
+/** How long a delivered reply's explicit `landed` ids keep a LATER landing
+ *  notice for those cards off the desk (the sweep can run after the report —
+ *  the engine may have been off). */
+const REPORTED_TTL_MS = 24 * 60 * 60 * 1000
+const REPORTED_MAX = 100
+
+/** The landing line, one composer for the desk and the bell. Pure. */
+export const landedNoticeText = (cards: readonly LandedCard[]): string => {
+  const names = cards
+    .slice(0, 3)
+    .map((c) => `「${c.title.replace(/\s+/g, ' ').trim().slice(0, 40)}」`)
+    .join('')
+  const more = cards.length > 3 ? ` ほか${cards.length - 3}件` : ''
+  return `お願いされていた作業が ${cards.length} 件、本体に取り込まれました${names ? `: ${names}${more}` : ''}。`
+}
+
+/** An explicit id covers a card when it is its full id or a ≥8-char prefix. */
+const idCovers = (given: string, taskId: string): boolean =>
+  given.length >= 8 && taskId.toLowerCase().startsWith(given.toLowerCase())
+
+/** Does this delivered reply report this landing's card? ONLY by its explicit
+ *  `landed` ids (rework 1, 2026-09-24). A title match was tried and dropped: a
+ *  reply that merely MENTIONS a card (「「A」についてのご質問ですが…」, 「「B」は
+ *  まだ検品中」) withdrew its landing, and if no later report came the owner never
+ *  heard it landed. A missed id costs a duplicate; a false match costs silence. */
+const replyCovers = (reply: PendingNotice, c: LandedCard): boolean =>
+  reply.landed?.some((id) => idCovers(id, c.taskId)) ?? false
 
 /** The IMPORTANT queue per project. On `globalThis` so it survives `tsx watch`
  *  reloads in dev, like every other in-memory server map here. (A new global
@@ -430,11 +496,14 @@ declare global {
   var __openground_supply_unsent: Map<string, UnsentLine> | undefined
   // eslint-disable-next-line no-var
   var __openground_supply_gen: { n: number } | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_reported: Map<string, { id: string; at: number }[]> | undefined
 }
 
 interface UnsentLine {
   line: string
-  commit: () => void
+  /** `heard` = the Enter was confirmed to submit it (not just an empty box). */
+  commit: (heard: boolean) => void
   appWide: boolean
   /** What the line carries — picks the bell a given-up line rings. */
   kind: 'reply' | 'important' | 'progress'
@@ -458,6 +527,39 @@ const progress: Map<string, { items: string[]; at: number }> =
  *  are not allowed to share the news slot. */
 const replies: Map<string, PendingNotice[]> =
   globalThis.__openground_supply_reply ?? (globalThis.__openground_supply_reply = new Map())
+
+/** Per project: card ids a DELIVERED commander reply reported as landed
+ *  (explicit ids only) — a landing notice queued afterwards skips them. */
+const reportedLanded: Map<string, { id: string; at: number }[]> =
+  globalThis.__openground_supply_reported ?? (globalThis.__openground_supply_reported = new Map())
+
+/** A commander reply was DELIVERED: withdraw the queued landing notices it
+ *  covers (whole notice, or the covered cards out of a multi-card one) and
+ *  remember its explicit ids. Never touches a question, a stall, a fatal or
+ *  progress — only lines carrying `cards`. */
+const withdrawCoveredLandings = (key: string, reply: PendingNotice, now: number): void => {
+  const q = pending.get(key)
+  if (q) {
+    for (const n of [...q]) {
+      if (!n.cards) continue
+      const left = n.cards.filter((c) => !replyCovers(reply, c))
+      if (left.length === n.cards.length) continue
+      if (left.length === 0) {
+        q.splice(q.indexOf(n), 1)
+      } else {
+        n.cards = left
+        n.text = sanitizeSupplyNotice(landedNoticeText(left))
+        n.line = supplyNoticeLine(n.text)
+      }
+    }
+    if (q.length === 0) pending.delete(key)
+  }
+  if (reply.landed?.length) {
+    const r = (reportedLanded.get(key) ?? []).filter((e) => now - e.at < REPORTED_TTL_MS)
+    for (const id of reply.landed) r.push({ id, at: now })
+    reportedLanded.set(key, r.slice(-REPORTED_MAX))
+  }
+}
 
 /** Desk terminal ids already caught up ({@link catchUpSupplyDesks}). */
 const seenDesks: Set<string> =
@@ -529,14 +631,24 @@ const warnOnce = (key: string, msg: string): void => {
  *  same question; other notices dedup on their text), then cap — evicting news
  *  before questions. Shared by the push path and the disk merge. */
 const addUnique = (q: PendingNotice[], n: PendingNotice): void => {
+  // A landing line is the same only if it reports the same cards — two cards
+  // with one title are two landings, not one line said twice.
   const dup = q.some((p) =>
-    n.escalationId !== undefined && p.escalationId !== undefined ? p.escalationId === n.escalationId : p.line === n.line,
+    n.escalationId !== undefined && p.escalationId !== undefined
+      ? p.escalationId === n.escalationId
+      : n.cards || p.cards
+        ? !!n.cards && !!p.cards && n.cards.every((c) => p.cards!.some((x) => x.taskId === c.taskId))
+        : p.line === n.line,
   )
   if (!dup) q.push(n)
   // Over the cap, news goes before questions: a question dropped here would not
   // be re-read for a desk that was already caught up.
   while (q.length > SUPPLY_NOTICE_CAP) {
-    const news = q.findIndex((p) => !p.escalationId)
+    // Order (rework 1): a landing first — its bell/toast already rang — then
+    // other news, never a question before either. A stall or a fatal must
+    // outlive a landing.
+    const landing = q.findIndex((p) => !!p.cards)
+    const news = landing >= 0 ? landing : q.findIndex((p) => !p.escalationId)
     q.splice(news >= 0 ? news : 0, 1)
   }
 }
@@ -581,11 +693,13 @@ const ensureLoaded = (): void => {
   // longer age out to the bell, so a restart (the self-update right after a
   // merge, above all) must not be what loses one. Absent in older files.
   let replyEntries: unknown[]
+  let reportedEntries: unknown[]
   try {
-    const parsed = JSON.parse(raw) as { queues?: unknown; replies?: unknown }
+    const parsed = JSON.parse(raw) as { queues?: unknown; replies?: unknown; reported?: unknown }
     if (!Array.isArray(parsed?.queues)) throw new Error('not {queues: []}')
     entries = parsed.queues
     replyEntries = Array.isArray(parsed.replies) ? parsed.replies : []
+    reportedEntries = Array.isArray(parsed.reported) ? parsed.reported : []
   } catch (e) {
     try {
       renameSync(file, `${file}.corrupt-${Date.now()}`)
@@ -621,7 +735,19 @@ const ensureLoaded = (): void => {
     for (const it of entry[1] as Record<string, unknown>[]) {
       if (!it || typeof it.text !== 'string' || typeof it.at !== 'number') continue
       if (typeof it.escalationId === 'string' && it.escalationId) continue // a question — see above
-      addUnique(q, { text: it.text, line: supplyNoticeLine(it.text), at: it.at })
+      const cards = Array.isArray(it.cards)
+        ? (it.cards as Record<string, unknown>[]).filter(
+            (c): c is LandedCard & Record<string, unknown> =>
+              !!c && typeof c.taskId === 'string' && typeof c.title === 'string',
+          ).map((c) => ({ taskId: c.taskId, title: c.title }))
+        : []
+      addUnique(q, {
+        text: it.text,
+        line: supplyNoticeLine(it.text),
+        at: it.at,
+        ...(cards.length ? { cards } : {}),
+        ...(typeof it.notBefore === 'number' ? { notBefore: it.notBefore } : {}),
+      })
     }
     if (q.length) pending.set(entry[0], q)
   }
@@ -637,9 +763,17 @@ const ensureLoaded = (): void => {
     const q: PendingNotice[] = []
     for (const it of entry[1] as Record<string, unknown>[]) {
       if (!it || typeof it.text !== 'string' || !it.text || typeof it.at !== 'number') continue
-      q.push({ text: it.text, line: supplyReplyLine(it.text), at: it.at })
+      const landed = Array.isArray(it.landed) ? (it.landed as unknown[]).filter((x): x is string => typeof x === 'string') : []
+      q.push({ text: it.text, line: supplyReplyLine(it.text), at: it.at, ...(landed.length ? { landed } : {}) })
     }
     if (q.length) replies.set(entry[0], q.slice(-SUPPLY_REPLY_CAP))
+  }
+  for (const entry of reportedEntries) {
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) continue
+    const r = (entry[1] as Record<string, unknown>[])
+      .filter((e) => !!e && typeof e.id === 'string' && typeof e.at === 'number')
+      .map((e) => ({ id: e.id as string, at: e.at as number }))
+    reportedLanded.set(entry[0], [...r, ...(reportedLanded.get(entry[0]) ?? [])].slice(-REPORTED_MAX))
   }
   for (const [k, mq] of Array.from(memoryReplies)) replies.set(k, [...(replies.get(k) ?? []), ...mq].slice(-SUPPLY_REPLY_CAP))
   diskState.loaded = true
@@ -679,13 +813,23 @@ const savePending = (): void => {
     const file = queueFile()
     const queues = Array.from(pending, ([k, q]) => [
       k,
-      q.map((p) => ({ text: p.text ?? '', at: p.at, ...(p.escalationId ? { escalationId: p.escalationId } : {}) })),
+      q.map((p) => ({
+        text: p.text ?? '',
+        at: p.at,
+        ...(p.escalationId ? { escalationId: p.escalationId } : {}),
+        ...(p.cards ? { cards: p.cards } : {}),
+        ...(p.notBefore !== undefined ? { notBefore: p.notBefore } : {}),
+      })),
     ])
-    const reps = Array.from(replies, ([k, q]) => [k, q.map((r) => ({ text: r.text ?? '', at: r.at }))])
+    const reps = Array.from(replies, ([k, q]) => [
+      k,
+      q.map((r) => ({ text: r.text ?? '', at: r.at, ...(r.landed ? { landed: r.landed } : {}) })),
+    ])
+    const reported = Array.from(reportedLanded)
     tmp = join(dirname(file), `.${basename(file)}.tmp-${process.pid}-${tmpSeq++}`)
     const fd = openSync(tmp, 'w', 0o600)
     try {
-      writeSync(fd, JSON.stringify({ version: 1, queues, replies: reps }))
+      writeSync(fd, JSON.stringify({ version: 1, queues, replies: reps, reported }))
       fsyncSync(fd)
     } finally {
       closeSync(fd)
@@ -722,6 +866,7 @@ export const resetSupplyNoticeState = (opts: { keepDisk?: boolean } = {}): void 
   resolvedQuestions.clear()
   pending.clear()
   replies.clear()
+  reportedLanded.clear()
   progress.clear()
   seenDesks.clear()
   inFlight.clear()
@@ -823,8 +968,11 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
             detectMenu(fresh) === null &&
             readInputBoxText(fresh) !== null
           const gen = generation.n
+          // An EMPTY box is also what the owner clearing it looks like — so it
+          // dequeues the line but is not proof the owner heard it.
+          const cleared = fresh !== null && noticeDeliverable(fresh)
           const landed =
-            (fresh !== null && noticeDeliverable(fresh)) ||
+            cleared ||
             (await submitPastedInput(desk.id, sanitizeForPaste(left.line), {
               write: deps.write,
               sleep: deps.sleep,
@@ -834,7 +982,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
           if (gen !== generation.n) continue // state was reset meanwhile
           if (landed) {
             unsent.delete(desk.id)
-            left.commit()
+            left.commit(!cleared)
             delivered.push(key)
           } else if (
             !left.rang &&
@@ -869,14 +1017,17 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       const reply = queue?.[0] ?? null
       // App-wide fatals first: they are rare and concern the whole app.
       const appWideFree = !inFlight.has(APP_WIDE) && !Array.from(unsent.values()).some((u) => u.appWide && !u.rang)
+      // A landing notice inside its grace (SUPPLY_LANDING_GRACE_MS) is skipped,
+      // never blocking: a question queued behind it still goes now.
+      const due = (k: string) => (pending.get(k) ?? []).filter((p) => p.notBefore === undefined || p.notBefore <= now)
       const importantKey = reply
         ? null
-        : appWideFree && pending.get(APP_WIDE)?.length
+        : appWideFree && due(APP_WIDE).length
           ? APP_WIDE
-          : pending.get(key)?.length
+          : due(key).length
             ? key
             : null
-      const bundle = importantKey ? takeBundle(pending.get(importantKey) ?? [], now) : null
+      const bundle = importantKey ? takeBundle(due(importantKey), now) : null
       const important = bundle ? bundle.items[0] : null
       const digest = reply || important ? null : progress.get(key)
       const importantLine = bundle?.line
@@ -892,7 +1043,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       // have moved while this pass awaited the landing check.
       const nItems = digest?.items.length ?? 0
       let committed = false
-      const commit = (): void => {
+      const commit = (heard: boolean): void => {
         if (committed) return // once: a second call would splice undelivered progress
         committed = true
         if (reply) {
@@ -900,6 +1051,10 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
           const i = q ? q.indexOf(reply) : -1
           if (q && i >= 0) q.splice(i, 1)
           if (q && q.length === 0) replies.delete(key)
+          // The owner has now heard the commander's report: drop the engine's
+          // landing news for the same cards (SUPPLY_LANDING_GRACE_MS). Only on a
+          // CONFIRMED submit — a duplicate is better than silence.
+          if (heard) withdrawCoveredLandings(key, reply, deps.now())
           savePending()
         } else if (bundle) {
           const told = toldTo.get(desk.id) ?? new Set<string>()
@@ -935,7 +1090,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         const ok = await injectAnswerIntoWorker(desk.id, line, opts)
         if (gen !== generation.n) continue // state was reset meanwhile
         if (ok) {
-          commit()
+          commit(true)
           delivered.push(key)
         } else if (typed) {
           // The text is in the box but the Enter did not take: the next pass
@@ -1034,6 +1189,42 @@ export const queueSupplyNotice = (
 }
 
 /**
+ * The engine's landing notice (swarmLandedLedger.sweepLanded) — an important
+ * line that names its cards and waits {@link SUPPLY_LANDING_GRACE_MS} for the
+ * commander's own report of them (see there). Cards a commander reply already
+ * reported by id are left out; nothing left ⇒ nothing queued.
+ */
+export const queueSupplyLanding = (
+  projectPath: string,
+  cards: readonly LandedCard[],
+  deps: Partial<SupplyNoticeDeps> = {},
+): Promise<unknown> => {
+  if (!projectPath || cards.length === 0) return Promise.resolve()
+  ensureLoaded()
+  const key = deskKey(projectPath)
+  const now = (deps.now ?? Date.now)()
+  const told = (reportedLanded.get(key) ?? []).filter((r) => now - r.at < REPORTED_TTL_MS)
+  const left = cards
+    .filter((c) => !told.some((r) => idCovers(r.id, c.taskId)))
+    .map((c) => ({ taskId: c.taskId, title: c.title }))
+  if (left.length === 0) return Promise.resolve()
+  const q = pending.get(key) ?? []
+  // One line PER SWEEP, each with its own clock (rework 1): a later sweep never
+  // joins an earlier line — joining re-timed the earlier cards (a reply written
+  // before B landed then covered B) and pushed their release back on every
+  // join (8 landings 15 min apart = nothing told for ~106 min). Due lines are
+  // still told together — takeBundle folds them into one desk line. A card
+  // already queued is not queued twice.
+  const fresh = left.filter((c) => !q.some((n) => n.cards?.some((x) => x.taskId === c.taskId)))
+  if (fresh.length === 0) return Promise.resolve()
+  const text = sanitizeSupplyNotice(landedNoticeText(fresh))
+  addUnique(q, { line: supplyNoticeLine(text), text, at: now, cards: fresh, notBefore: now + SUPPLY_LANDING_GRACE_MS })
+  pending.set(key, q)
+  savePending()
+  return flushSupplyNotices(deps).catch(() => [])
+}
+
+/**
  * Add ONE progress item ("「X」に取りかかりました") to the project's digest. Items
  * accumulate until the desk is free and go out as ONE line; progress never rings
  * the bell. An identical item is not repeated.
@@ -1080,13 +1271,17 @@ export const queueSupplyReply = async (
   projectPath: string,
   summary: string,
   deps: Partial<SupplyNoticeDeps> = {},
+  /** Card ids this reply reports as landed — delivering it withdraws the
+   *  engine's own landing notice for them ({@link SUPPLY_LANDING_GRACE_MS}). */
+  landed: readonly string[] = [],
 ): Promise<number> => {
   const line = supplyReplyLine(summary)
   if (!projectPath || line.length === 0) return 0
   ensureLoaded()
   const key = deskKey(projectPath)
   const q = replies.get(key) ?? []
-  q.push({ line, text: sanitizeSupplyNotice(summary), at: (deps.now ?? Date.now)() })
+  const ids = landed.filter((id) => typeof id === 'string' && id.length >= 8)
+  q.push({ line, text: sanitizeSupplyNotice(summary), at: (deps.now ?? Date.now)(), ...(ids.length ? { landed: [...ids] } : {}) })
   // Over the cap the OLDEST goes, and it goes to the bell rather than nowhere.
   while (q.length > SUPPLY_REPLY_CAP) {
     const dropped = q.shift()

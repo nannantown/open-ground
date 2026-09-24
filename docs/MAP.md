@@ -424,6 +424,9 @@
   (`【本人からの回答(escalation)】` を騙れる — payload の `【】` は `REDACTIONS` で除去)。
   司令官側の義務は `skills/og-manage/SKILL.md`「補給官から中継された件には同ターンで返す」。
   正典は `docs/commander/06-overseer-escalations.md` §1.5。
+  **仕上がりは1件1回**(2026-09-24): `sweepLanded` の「本体に取り込まれました」は
+  `queueSupplyLanding` で20分保留され、`supply/say` の `landed:[カードID]`(明示IDのみ・題名一致は
+  使わない)を含む返事が**届いた時点で**取り下げ。1回の検出ごとに1行・各自の保留時計。返事が来なければ保留明けに届く。§1.11。
 - **社長モデル(2026-09-23 オーナー決定「僕が喋るのは社長さんだけ」)**: 補給官の画面名は
   「社長 / President」(i18n と Remote Control 名のみ — 卓の識別キー `SUPPLY_DESK_LABEL='補給官'`
   は**変えない**)。① ワーカーの質問は **司令官レーン**(`Escalation.routedTo:'commander'`)

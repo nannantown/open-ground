@@ -9,6 +9,7 @@ import { createAndImportProject } from './fixtures/helpers'
 // and Monitoring lives on the top bar.
 const WORDS = {
   en: {
+    open: 'Open Swarm',
     manager: 'Manager',
     absent: 'Not started',
     running: 'Running',
@@ -17,6 +18,7 @@ const WORDS = {
     monitoring: 'Monitoring',
   },
   ja: {
+    open: 'Swarm をひらく',
     manager: 'マネージャー',
     absent: 'いない',
     running: '動いている',
@@ -69,7 +71,9 @@ for (const lang of ['en', 'ja'] as const) {
               }))
           }, { id: project.id, lang, desk, sdkId: MANAGER_SDK_ID })
           await page.goto('/', { waitUntil: 'domcontentloaded' })
-          await page.getByRole('button', { name: 'Swarm', exact: true }).click()
+          // Swarm is a bottom bar under every tab (0.11.138), folded to one line:
+          // open it to reach the seats.
+          await page.getByTestId('swarm-bottom-bar').getByRole('button', { name: w.open, exact: true }).click()
 
           // The manager is the SECOND seat of a sideways-scrolling row; at 390px
           // it starts off-screen, so scroll it in first.

@@ -35,7 +35,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(page.getByRole('combobox', { name: 'Permissions', exact: true })).toHaveValue('plan')
     swarm = true
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('button', { name: 'Swarm', exact: true })).toBeVisible()
+    // Swarm is a bottom bar under every tab (0.11.138), not a tab.
+    await expect(page.getByTestId('swarm-bottom-bar')).toBeVisible()
     await expect(defaults).toHaveCount(0)
     await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toHaveCount(0)
     await expect(page.getByRole('combobox', { name: 'Permissions', exact: true })).toHaveCount(0)
@@ -44,6 +45,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     swarm = false
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(defaults).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.getByTestId('swarm-bottom-bar')).toHaveCount(0)
     await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toHaveValue('sonnet')
     await expect(page.getByRole('combobox', { name: 'Effort', exact: true })).toHaveValue('high')
     await expect(page.getByRole('combobox', { name: 'Permissions', exact: true })).toHaveValue('plan')
