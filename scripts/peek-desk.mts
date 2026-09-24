@@ -71,3 +71,20 @@ console.log('replay bytes    :', replay.length)
 console.log('--- SCREEN ---')
 console.log(screen)
 console.log('--- END ---')
+
+// Per-cell styling of the input row: tells a TYPED line from claude's dim
+// prompt-suggestion ghost text (identical in the plain-text screen).
+{
+  const buf = term.buffer.active
+  for (let y = 0; y < term.rows; y++) {
+    const line = buf.getLine(buf.baseY + y)
+    if (!line || !/^\s*❯/.test(line.translateToString(true))) continue
+    const cells: string[] = []
+    for (let x = 0; x < term.cols; x++) {
+      const c = line.getCell(x)
+      if (!c || !c.getChars().trim()) continue
+      cells.push(`${c.getChars()}[dim=${c.isDim()} fg=${c.isFgDefault() ? 'default' : c.getFgColor()}]`)
+    }
+    console.log(`row ${y}:`, cells.join(' '))
+  }
+}

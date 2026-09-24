@@ -168,9 +168,34 @@ interface PtySession {
 export const readScreen = (term: HeadlessTerminal, unwrap = false): string => {
   const buf = term.buffer.active
   const rows: string[] = []
+  let inGhost = false
   for (let y = 0; y < term.rows; y++) {
     const line = buf.getLine(buf.baseY + y)
-    const text = line ? line.translateToString(true) : ''
+    let text = line ? line.translateToString(true) : ''
+    // claude's PROMPT SUGGESTION: after a turn it pre-fills the EMPTY input box
+    // with a guess at the owner's next message (「❯ いまどう？」), drawn DIM. In
+    // plain text it is identical to typed text, so every "is the box empty?"
+    // reader (deskDeliverable, the Enter guard) read an idle desk as half-typed
+    // and held every notice for it — forever (owner report 2026-09-24: deliveries
+    // and a commander reply never reached the president). It is not input: drop
+    // it here, where every screen reader routes through. Only a box whose WHOLE
+    // content is dim is a suggestion — typed text and a 「[Pasted text …]」 marker
+    // render at normal intensity (measured on real claude 2.1.281,
+    // scripts/probe-ghost-and-paste.mts), so a box holding any of them is kept.
+    // A menu's cursor row (`❯ 1. Yes`) is never touched — detectMenu must see it.
+    // (Only spaces precede the glyph, so its string index IS its cell column.)
+    const prompt = /^\s*❯(?!\s*\d+\.)/.test(text) ? text.indexOf('❯') : -1
+    if (line && prompt >= 0) {
+      inGhost = dimOnlyFrom(line, term.cols, prompt + 1)
+      if (inGhost) text = text.slice(0, prompt + 1)
+    } else if (inGhost && line && !/^\s*[─━]{6,}/.test(text) && dimOnlyFrom(line, term.cols, 0)) {
+      // The suggestion's next rows, down to the box's closing rule — whether
+      // xterm marks them soft-wrapped or claude wrapped them itself (a narrow
+      // tiled pane). Never the rule, so the footer below keeps being read.
+      text = ''
+    } else {
+      inGhost = false
+    }
     if (unwrap && line?.isWrapped && rows.length > 0) {
       rows[rows.length - 1] += text // continuation of the row above — no separator
     } else {
@@ -178,6 +203,21 @@ export const readScreen = (term: HeadlessTerminal, unwrap = false): string => {
     }
   }
   return rows.join('\n')
+}
+
+/** Does this row hold visible text from column `from` on, ALL of it dim? An
+ *  INVERSE cell is skipped either way: it is how a TUI paints its own cursor,
+ *  and over a suggestion's first character it need not be dim. A row whose
+ *  only visible cell is the cursor is not a suggestion (nothing dim seen). */
+const dimOnlyFrom = (line: NonNullable<ReturnType<HeadlessTerminal['buffer']['active']['getLine']>>, cols: number, from: number): boolean => {
+  let seen = false
+  for (let x = from; x < cols; x++) {
+    const c = line.getCell(x)
+    if (!c || !c.getChars().trim() || c.isInverse()) continue
+    if (!c.isDim()) return false
+    seen = true
+  }
+  return seen
 }
 
 // Refresh the menu verdict from a fresh PTY output chunk. The two directions of

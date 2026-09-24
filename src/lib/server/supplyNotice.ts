@@ -43,9 +43,9 @@
 //   • BUNDLED: several queued important notices go out as ONE line (one desk
 //     turn), the WHOLE line kept within {@link SUPPLY_NOTICE_LINE_MAX} — the
 //     longest single notice, i.e. what is known to type cleanly into a desk.
-//   (Replies and the progress digest are still memory-only: a restart loses a
-//   commander reply queued for a closed desk — the bell keeps it via
-//   onReplyExpired only when it ages out in-process.)
+//   (Commander replies are persisted in the same file since 2026-09-24 — they
+//   never age out; only one pushed past SUPPLY_REPLY_CAP goes to the bell via
+//   onReplyExpired. The progress digest is memory-only.)
 //   • HELD, never forced, when the desk is generating / half-typed / showing a
 //     menu ({@link noticeDeliverable} — the same three refusals, byte for byte).
 //     A held notice is simply re-offered on the next pass. Missing is free.
@@ -211,6 +211,16 @@ const SUPPLY_REPLY_TAIL =
 export const supplyReplyLine = (summary: string): string =>
   `${SUPPLY_REPLY_PREFIX}${sanitizeSupplyNotice(summary)} ${SUPPLY_REPLY_TAIL}`
 
+/** A reply told ≥ {@link SUPPLY_NOTICE_AGE_LABEL_MS} late: 「(約N分前の返事) 」 up
+ *  front, the summary shortened by exactly that much so the whole line stays
+ *  within {@link SUPPLY_PASTE_MEASURED_UNFOLDED} (a folded paste never gets its
+ *  Enter). `text` is the already-sanitized summary. Pure. */
+export const supplyReplyLateLine = (text: string, ageMs: number): string => {
+  const tag = `(${noticeAgeLabel(ageMs)}の返事) `
+  const body = Array.from(text).slice(0, Math.max(0, SUPPLY_NOTICE_MAX - tag.length)).join('')
+  return `${SUPPLY_REPLY_PREFIX}${tag}${body} ${SUPPLY_REPLY_TAIL}`
+}
+
 /** How many undelivered replies a project may hold.
  *
  *  A QUEUE, not the news slot's single overwriting cell, and the difference is
@@ -267,13 +277,12 @@ export interface SupplyNoticeDeps {
   /** Injectable wait between the paste and its Enter (and between Enter
    *  re-sends) — tests pass an instant one. */
   sleep: (ms: number) => Promise<void>
-  /** Where a REPLY goes when it expired undelivered ({@link queueSupplyReply}).
-   *  A news item that ages out is simply dropped — the bell already holds it. A
-   *  reply is the answer to a question the OWNER asked, so dropping it silently
-   *  leaves them waiting forever for something that already arrived. */
+  /** The bell for a REPLY that is pushed out over {@link SUPPLY_REPLY_CAP}, or
+   *  whose unsent line is stuck in the box ({@link queueSupplyReply}). A reply is
+   *  the answer to a question the OWNER asked, so it must never vanish silently. */
   onReplyExpired: (projectPath: string, line: string) => void
-  /** Where an IMPORTANT or PROGRESS line goes when its unsent line is given up
-   *  ({@link SUPPLY_UNSENT_MAX_PASSES} / TTL). Its own bell kind — it is news,
+  /** The bell for an IMPORTANT or PROGRESS line whose unsent line is stuck
+   *  ({@link SUPPLY_UNSENT_MAX_PASSES} / TTL) — rung once, the line stays queued. Its own bell kind — it is news,
    *  not the commander's answer. Progress rings too: not for its content but
    *  because the line left in the box now blocks that desk. */
   onNoticeGivenUp: (projectPath: string, line: string) => void
@@ -361,11 +370,12 @@ const deskKey = (p: string): string => {
 }
 
 /**
- * How long an undelivered PROGRESS digest or commander REPLY stays worth saying.
- * Past this progress is DROPPED and a reply is handed to the bell. IMPORTANT
- * notices no longer expire (2026-09-23 — the desk is now their only retelling;
- * see the file header): the staleness below is solved for them by withdrawing
- * an answered question ({@link forgetSupplyQuestion}) and by the age label.
+ * How long an undelivered PROGRESS digest stays worth saying — past it, it is
+ * DROPPED — and how long an unsent line may sit before its stuck bell rings.
+ * IMPORTANT notices (2026-09-23) and commander REPLIES (2026-09-24) no longer
+ * expire — the desk is their only retelling; see the file header. Their
+ * staleness is solved by withdrawing an answered question
+ * ({@link forgetSupplyQuestion}) and by the age label.
  *
  * WHY IT EXPIRES AT ALL (the original reasoning, still true of progress). The commander's twin slot lives on
  * `ProjectEngine.managerNotice` and is recomputed from live state every pass, so
@@ -388,8 +398,8 @@ interface PendingNotice {
   /** The sanitized summary (IMPORTANT lane) — what a bundle is built from and
    *  what is persisted. */
   text?: string
-  /** When it was raised — the input to {@link SUPPLY_NOTICE_TTL_MS} (replies,
-   *  progress) and to the age label (important). */
+  /** When it was raised — the input to {@link SUPPLY_NOTICE_TTL_MS} (progress)
+   *  and to the age label (important, replies). */
   at: number
   /** The question this line retells — set on escalation-open/-reminder, so the
    *  line can be withdrawn once the question is answered. */
@@ -432,10 +442,12 @@ interface UnsentLine {
    *  generating, no menu). A busy desk is not counted: it is the owner working,
    *  not a wedged box, and counting it gave up in 1–2 minutes of a busy swarm. */
   passes: number
-  /** When it was left unsent. Past {@link SUPPLY_NOTICE_TTL_MS} it is given up
-   *  whatever the frame shows — a desk that never goes quiet must not hold it
-   *  forever (an app-wide one would block the app-wide lane for every desk). */
+  /** When it was left unsent. Past {@link SUPPLY_NOTICE_TTL_MS} it counts as
+   *  stuck whatever the frame shows — a desk that never goes quiet must not hold
+   *  an app-wide line forever (it would block that lane for every desk). */
   since: number
+  /** The stuck bell has rung — once per line, never a dequeue. */
+  rang?: boolean
 }
 const pending: Map<string, PendingNotice[]> =
   globalThis.__openground_supply_notice_q ?? (globalThis.__openground_supply_notice_q = new Map())
@@ -481,10 +493,10 @@ const generation: { n: number } =
   globalThis.__openground_supply_gen ?? (globalThis.__openground_supply_gen = { n: 0 })
 
 /** QUIET passes (see UnsentLine.passes) an unsent line gets for its Enter
- *  before it is given up: dequeued and handed to the bell, so a wedged box
- *  neither holds the desk's other lines back nor collects Enters forever. The
- *  line itself stays in the box — nothing is ever erased from the owner's desk —
- *  so that desk takes no further line until the owner sends or clears it. */
+ *  before its stuck bell rings ONCE. It is NOT dequeued (2026-09-24): the line
+ *  stays in the box — nothing is ever erased from the owner's desk — so that
+ *  desk takes no further line until the owner sends or clears it, and the Enter
+ *  keeps being offered (guarded: only while the box holds exactly our line). */
 export const SUPPLY_UNSENT_MAX_PASSES = 5
 
 /** Questions answered/dismissed recently — refused by pushImportant. */
@@ -565,10 +577,15 @@ const ensureLoaded = (): void => {
     return
   }
   let entries: unknown[]
+  // Commander replies are persisted beside the queue (2026-09-24): they no
+  // longer age out to the bell, so a restart (the self-update right after a
+  // merge, above all) must not be what loses one. Absent in older files.
+  let replyEntries: unknown[]
   try {
-    const parsed = JSON.parse(raw) as { queues?: unknown }
+    const parsed = JSON.parse(raw) as { queues?: unknown; replies?: unknown }
     if (!Array.isArray(parsed?.queues)) throw new Error('not {queues: []}')
     entries = parsed.queues
+    replyEntries = Array.isArray(parsed.replies) ? parsed.replies : []
   } catch (e) {
     try {
       renameSync(file, `${file}.corrupt-${Date.now()}`)
@@ -613,8 +630,20 @@ const ensureLoaded = (): void => {
     for (const n of mq) addUnique(q, n)
     if (q.length) pending.set(k, q)
   }
+  const memoryReplies = new Map(replies)
+  replies.clear()
+  for (const entry of replyEntries) {
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) continue
+    const q: PendingNotice[] = []
+    for (const it of entry[1] as Record<string, unknown>[]) {
+      if (!it || typeof it.text !== 'string' || !it.text || typeof it.at !== 'number') continue
+      q.push({ text: it.text, line: supplyReplyLine(it.text), at: it.at })
+    }
+    if (q.length) replies.set(entry[0], q.slice(-SUPPLY_REPLY_CAP))
+  }
+  for (const [k, mq] of Array.from(memoryReplies)) replies.set(k, [...(replies.get(k) ?? []), ...mq].slice(-SUPPLY_REPLY_CAP))
   diskState.loaded = true
-  if (memory.size) savePending()
+  if (memory.size || memoryReplies.size) savePending()
 }
 
 let tmpSeq = 0
@@ -652,10 +681,11 @@ const savePending = (): void => {
       k,
       q.map((p) => ({ text: p.text ?? '', at: p.at, ...(p.escalationId ? { escalationId: p.escalationId } : {}) })),
     ])
+    const reps = Array.from(replies, ([k, q]) => [k, q.map((r) => ({ text: r.text ?? '', at: r.at }))])
     tmp = join(dirname(file), `.${basename(file)}.tmp-${process.pid}-${tmpSeq++}`)
     const fd = openSync(tmp, 'w', 0o600)
     try {
-      writeSync(fd, JSON.stringify({ version: 1, queues }))
+      writeSync(fd, JSON.stringify({ version: 1, queues, replies: reps }))
       fsyncSync(fd)
     } finally {
       closeSync(fd)
@@ -744,22 +774,11 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
   for (const [key, p] of Array.from(progress)) {
     if (now - p.at > SUPPLY_NOTICE_TTL_MS) progress.delete(key)
   }
-  // Replies age out on the same clock, but they are HANDED ON rather than
-  // dropped (see SupplyNoticeDeps.onReplyExpired) — an answer the owner is
-  // waiting for must not simply vanish because their desk was closed.
-  for (const [key, q] of Array.from(replies)) {
-    const live = q.filter((r) => {
-      if (now - r.at <= SUPPLY_NOTICE_TTL_MS) return true
-      try {
-        deps.onReplyExpired(key, r.line)
-      } catch {
-        /* best effort — the bell is a fallback, not a correctness precondition */
-      }
-      return false
-    })
-    if (live.length === 0) replies.delete(key)
-    else replies.set(key, live)
-  }
+  // Replies do NOT age out (owner decision 2026-09-24). They used to be handed
+  // to the bell after SUPPLY_NOTICE_TTL_MS, and the bell is exactly what the
+  // owner — who talks only to the president — never reads: a commander reply
+  // that met a desk misread as half-typed (supplyNoticeGhost.test.ts) was lost
+  // that way. Like an important notice, a late one is told with its age.
   let desks: { id: string; cwd: string }[] = []
   try {
     desks = deps.desks()
@@ -817,16 +836,23 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
             unsent.delete(desk.id)
             left.commit()
             delivered.push(key)
-          } else if ((quiet && ++left.passes >= SUPPLY_UNSENT_MAX_PASSES) || now - left.since > SUPPLY_NOTICE_TTL_MS) {
-            // Given up: out of the queue, onto the bell — never silently. A
-            // reply rings as the answer (unless the TTL sweep already rang it);
-            // anything else rings "a notice is waiting unsent" — even progress,
-            // because the line left in the box now blocks this desk.
-            const replyStillQueued = replies.get(key)?.some((r) => r.line === left.line) ?? false
-            unsent.delete(desk.id)
-            left.commit()
+          } else if (
+            !left.rang &&
+            ((quiet && ++left.passes >= SUPPLY_UNSENT_MAX_PASSES) || now - left.since > SUPPLY_NOTICE_TTL_MS)
+          ) {
+            // Stuck: ring the bell ONCE — but NEVER dequeue (owner decision
+            // 2026-09-24: 「届けられなかったものは捨てずに再送し、配達済み扱いは
+            // 着地確認後だけ」). It used to commit here, and the president never
+            // heard a line that had only looked stuck (the ghost-text misread,
+            // supplyNoticeGhost.test.ts). A project line keeps its tracking: the
+            // box still holds it, so this desk could take nothing else anyway,
+            // and the box reading empty later still counts as landed. An APP-WIDE
+            // line keeps its tracking too, but a rung one no longer blocks the
+            // shared lane (`appWideFree`): another desk may take the item, and
+            // this desk's later landing then removes nothing (by identity).
+            left.rang = true
             if (left.kind !== 'reply') deps.onNoticeGivenUp(key, left.line)
-            else if (replyStillQueued) deps.onReplyExpired(key, left.line)
+            else deps.onReplyExpired(key, left.line)
           }
         } finally {
           release()
@@ -842,7 +868,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       const queue = replies.get(key)
       const reply = queue?.[0] ?? null
       // App-wide fatals first: they are rare and concern the whole app.
-      const appWideFree = !inFlight.has(APP_WIDE) && !Array.from(unsent.values()).some((u) => u.appWide)
+      const appWideFree = !inFlight.has(APP_WIDE) && !Array.from(unsent.values()).some((u) => u.appWide && !u.rang)
       const importantKey = reply
         ? null
         : appWideFree && pending.get(APP_WIDE)?.length
@@ -854,8 +880,12 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       const important = bundle ? bundle.items[0] : null
       const digest = reply || important ? null : progress.get(key)
       const importantLine = bundle?.line
+      const replyLine =
+        reply && now - reply.at >= SUPPLY_NOTICE_AGE_LABEL_MS && reply.text !== undefined
+          ? supplyReplyLateLine(reply.text, now - reply.at)
+          : reply?.line
       const line =
-        reply?.line ?? importantLine ?? (digest && digest.items.length ? supplyProgressLine(digest.items) : null)
+        replyLine ?? importantLine ?? (digest && digest.items.length ? supplyProgressLine(digest.items) : null)
       if (!line) continue
       if (!noticeDeliverable(screen)) continue // busy / half-typed / menu — next pass
       // Only what was delivered is removed — by identity, since the queues may
@@ -870,6 +900,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
           const i = q ? q.indexOf(reply) : -1
           if (q && i >= 0) q.splice(i, 1)
           if (q && q.length === 0) replies.delete(key)
+          savePending()
         } else if (bundle) {
           const told = toldTo.get(desk.id) ?? new Set<string>()
           for (const it of bundle.items) if (it.escalationId) told.add(it.escalationId)
@@ -1034,8 +1065,8 @@ export const queueSupplyProgress = (
  * being the one seat the owner talks to.
  *
  * Queued (never overwriting — {@link SUPPLY_REPLY_CAP}), delivered ahead of news
- * on the pass that already walks every desk, and handed to the bell if it ages
- * out. Same three refusals as every other engine→desk write: a busy, half-typed
+ * on the pass that already walks every desk, told with its age if late (it never
+ * ages out). Same three refusals as every other engine→desk write: a busy, half-typed
  * or menu-showing desk keeps the reply for the next pass.
  *
  * Returns how many replies are still WAITING for this project afterwards, so a
@@ -1052,9 +1083,10 @@ export const queueSupplyReply = async (
 ): Promise<number> => {
   const line = supplyReplyLine(summary)
   if (!projectPath || line.length === 0) return 0
+  ensureLoaded()
   const key = deskKey(projectPath)
   const q = replies.get(key) ?? []
-  q.push({ line, at: (deps.now ?? Date.now)() })
+  q.push({ line, text: sanitizeSupplyNotice(summary), at: (deps.now ?? Date.now)() })
   // Over the cap the OLDEST goes, and it goes to the bell rather than nowhere.
   while (q.length > SUPPLY_REPLY_CAP) {
     const dropped = q.shift()
@@ -1066,6 +1098,7 @@ export const queueSupplyReply = async (
     }
   }
   replies.set(key, q)
+  savePending()
   await flushSupplyNotices(deps).catch(() => [])
   return replies.get(key)?.length ?? 0
 }

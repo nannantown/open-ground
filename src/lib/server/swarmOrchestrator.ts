@@ -10112,6 +10112,14 @@ const adoptResumeCandidates = async (
       )
       continue
     }
+    // RE-READ THE STOP SWITCH after the proof (review 2026-09-24): the proof can
+    // sleep up to one orphan window — precisely on an update restart — and the
+    // re-read in resumeEngines ran BEFORE it. An OFF pressed meanwhile must not be
+    // answered with a worker nobody monitors (scheduleNext honours `running`).
+    if (!engine.running || (await isSwarmManualStopPersisted(engine.path))) {
+      logLine(engine, 'info', 'boot resume adopt stopped — owner switched autonomy off')
+      return
+    }
     const title = titleById.get(entry.taskId) ?? ''
     let spawn: SpawnSwarmWorkerResponse
     try {
@@ -10302,13 +10310,15 @@ export const resumeEngines = async (
       return reconcileRoster(projectPath, reconcileDeps)
     })
   // card 4 — the transcript proof gate for a resume candidate. Default = the shared
-  // probe with the SIGKILL-orphan mtime window ON (a transcript touched within it is
-  // presumed still-being-written by an orphaned claude, so fall back). Injectable.
+  // probe with the SIGKILL-orphan mtime window ON (a transcript that keeps changing
+  // across the window is presumed still-being-written by an orphaned claude, so fall
+  // back; one that stopped changing is dead and resumes). Injectable.
   const prove =
     opts?.proveResumable ??
     ((worktree: string, sessionId: string): Promise<boolean> =>
+      // No `now`: the proof reads the clock when it RUNS (the boot's `now` is taken
+      // before the breaker/quota awaits and the proofs run one after another).
       proveTranscriptLoadable(worktree, sessionId, {
-        now,
         orphanWindowMs: ORPHAN_MTIME_WINDOW_MS,
       }).then((p) => p.loadable))
   const { items, persisted } = await recordEngineBoot(appVersion, now)

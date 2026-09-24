@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto'
 import {
   resumeEngines,
   getOrchestratorState,
+  stopOrchestrator,
   defaultDeps,
   resumeStartedAtMs,
   MAX_EXEC_MS,
@@ -656,6 +657,26 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
     expect(spy.calls).toHaveLength(0) // no resume spawn — the card falls to reclaim
     const state = await getOrchestratorState(projA, liveDeps())
     expect(state.workers.find((x) => x.taskId === 'card-1')).toBeUndefined()
+  })
+
+  // Review 2026-09-24 must-fix 2: the proof can sleep ~10s (exactly the update-
+  // restart case). An owner OFF during that sleep must not be followed by a spawn —
+  // the stop-switch re-read above adopt already happened, and a worker spawned into a
+  // stopped engine runs with nobody monitoring it.
+  // TEETH (measured 2026-09-24): RED before the post-proof running re-check.
+  it('autonomy switched OFF while the transcript proof waits ⇒ the candidate is NOT spawned', async () => {
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+    const spy = spawnSpy()
+    const deps = liveDeps({ spawnWorker: spy.fn })
+    await resumeEngines(deps, {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: reconcileYielding([ENTRY]),
+      proveResumable: async () => {
+        await stopOrchestrator(projA, deps)
+        return true
+      },
+    })
+    expect(spy.calls).toHaveLength(0)
   })
 
   it('a candidate with NO captured session id cannot resume — no spawn (older roster row / lost id)', async () => {

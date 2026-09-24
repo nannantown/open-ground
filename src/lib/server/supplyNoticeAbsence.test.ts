@@ -52,7 +52,7 @@ vi.mock('./terminal', () => ({
 
 import { createSwarmFatalNotification } from './swarmNotifications'
 import { openEscalation, answerEscalation } from './swarmEscalations'
-import { resetSupplyNoticeState, queueSupplyNotice, catchUpSupplyDesks, peekSupplyImportant, SUPPLY_NOTICE_TTL_MS } from './supplyNotice'
+import { resetSupplyNoticeState, queueSupplyNotice, queueSupplyReply, catchUpSupplyDesks, peekSupplyImportant, SUPPLY_NOTICE_TTL_MS } from './supplyNotice'
 import { readFile, writeFile, readdir, chmod } from 'fs/promises'
 import { startSupplyContextCapLoop, stopSupplyContextCapLoop } from './supplyContextCap'
 
@@ -169,6 +169,16 @@ describe('a question opened while the president is closed', () => {
     await runLoopUntil(() => expect(told()).toContain('再起動の前に聞いた質問'))
     expect(told()).not.toContain('高リスクの変更を止めています')
     expect(told()).not.toContain('本体に取り込まれました')
+  })
+
+  // 2026-09-24: replies no longer age out to the bell, so they are persisted —
+  // a restart must not be what loses one. RED MEASURED: the `replies` key
+  // dropped from savePending → the answer is never told.
+  it('a commander reply queued for a closed desk survives an app restart', async () => {
+    await queueSupplyReply(project, '入れて大丈夫です。テストは通っています', { desks: () => [] })
+    resetSupplyNoticeState({ keepDisk: true }) // = the process restarted
+    openDesk('desk-1')
+    await runLoopUntil(() => expect(told()).toContain('入れて大丈夫です'))
   })
 
   // Review 2026-09-23 (S1), through the PRODUCTION reader. RED MEASURED:

@@ -375,7 +375,15 @@ monitorWorkers(engine.workers を歩く) → doing→review へ昇格
 worker は2種類ある:
 
 1. **再起動をまたいだ worker** — boot の `adoptResumeCandidates` が採用を見送った
-   もの(session id 無し / transcript 未証明 / spawn 失敗)。
+   もの(session id 無し / transcript 未証明 / spawn 失敗)。「transcript 未証明」は
+   存在しない・空・読めない、または**孤児 claude が生きている**場合。孤児の判定は
+   ①その session id をコマンドラインに持つプロセスが居る(`ps` 1回・失敗時も
+   断る)②最終更新が孤児窓(`ORPHAN_MTIME_WINDOW_MS` = 10秒)内なら窓が過ぎる
+   まで(最大10秒)待って測り直し、更新が進んでいる。どちらも無ければ resume する
+   (時刻の近さだけでは断らない — 2026-09-24、ハンズフリー更新は worker を止めて
+   約10秒で再起動するため旧実装は毎回断っていた)。時刻は証明を実行する時点で
+   読み、証明が通った後・起こす直前に自動運転の停止を読み直す
+   (`swarmTranscriptProof.ts` / `adoptResumeCandidates`)。
 2. **手動 worker** — `POST /api/swarm/worker`(Board の 実行 ボタン)は
    `engine.workers` に **push しない**。engine 自身の dispatch だけが数える。
    0.11.98 で 実行 が worker 経路になったので、こちらは日常的に発生する。

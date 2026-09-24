@@ -18,30 +18,39 @@
 // child `claude` can survive as an ORPHAN and keep appending to the SAME JSONL. Two
 // processes appending to one transcript interleave-corrupt it (the exact hazard the
 // role-desk `live` check guards, but at boot the PTY pool is empty so that check
-// can't help). So the worker path additionally refuses a transcript whose mtime is
-// within `orphanWindowMs` of now — "someone may still be writing" — and falls back
-// to crash reclaim. The role-desk path leaves the window OFF (it uses the live-PTY
+// can't help). So the worker path adds two signals before it will resume:
+//   1. PROCESS (primary): one `ps` — a live process whose command line carries the
+//      session id (`claude --session-id|--resume <id>`) holds it ⇒ refuse. This is
+//      what catches an orphan sitting in a long tool call (npm test, a sub-agent)
+//      that writes nothing for minutes. `ps` failing (incl. Windows, which has no
+//      `ps`) ⇒ refuse too: fail-safe to crash reclaim, never resume blind.
+//   2. MTIME (secondary): a transcript touched within `orphanWindowMs` is re-measured
+//      once the window has passed; moved ⇒ someone is writing ⇒ refuse.
+// Time-closeness alone no longer refuses: the hands-free update restarts ~10s after
+// stopping the workers, so every dead session used to read as "fresh" (2026-09-24). The role-desk path leaves the window OFF (it uses the live-PTY
 // check instead) by simply not passing `orphanWindowMs`.
 
 import { open, stat } from 'fs/promises'
+import { execFile as execFileCb } from 'child_process'
+import { promisify } from 'util'
 import { sessionJsonlPath } from './transcript'
+
+const execFile = promisify(execFileCb)
 
 // Only the HEAD of the transcript is read: a long session is a multi-MB JSONL and
 // this runs on every desk/worker (re)launch. One parseable event in the first chunk
 // is all the evidence we need that claude wrote a real session here.
 const PROBE_BYTES = 64 * 1024
 
-/** The orphan window (plan §5). A transcript touched within this many ms of `now`
- *  is presumed to still be held by a live (SIGKILL-orphaned) `claude`, so the boot
- *  must NOT `--resume` it. Sized to align "fall back" with "an orphan is likely":
- *  a FAST crash-respawn (Electron's 2s backoff — the case where a SIGKILLed child
- *  most plausibly survived) leaves the transcript's last write only a few seconds
- *  old, so this window catches it; a SLOW restart (a clean quit + reopen, or a
- *  self-update cutover — "再起動はたいていリリース", where no orphan exists because
- *  the PTYs were killed cleanly) has a much larger gap, so a genuinely-dead session
- *  reads as stale and resumes. It is a single-snapshot heuristic, not a proof of
- *  exclusivity — but every misfire is a fallback to crash reclaim, i.e. "worst case
- *  = same as today" (plan §5). Injectable so the fixtures drive both sides. */
+/** The orphan window (plan §5) — the SECONDARY signal (the process check is the
+ *  primary). A transcript touched within this many ms of the proof is re-measured
+ *  once the window has elapsed since its last write: moved ⇒ still being written ⇒
+ *  do NOT `--resume`; unmoved ⇒ resume (if no process holds the id). The old
+ *  single snapshot assumed a self-update cutover leaves a gap longer than the
+ *  window — false since 0.11.132 restarts without waiting (measured 9.7s,
+ *  2026-09-24). The wait is capped at one window (a future mtime — clock rewind,
+ *  restored ~/.claude — must not buy an unbounded sleep), and candidates are proven
+ *  one after another, so after the first wait the rest are already past it. */
 export const ORPHAN_MTIME_WINDOW_MS = 10_000
 
 /** Why a transcript is / isn't loadable — diagnostics for the caller's log.
@@ -49,8 +58,23 @@ export const ORPHAN_MTIME_WINDOW_MS = 10_000
  *   - `missing`     — no file / unreadable (pruned, fresh machine, ~/.claude wiped).
  *   - `empty`       — the file exists but is zero-length.
  *   - `unparseable` — non-empty but no parseable JSON line in the probed head.
- *   - `fresh`       — touched within the orphan window ⇒ presumed still-being-written. */
-export type TranscriptProofReason = 'ok' | 'missing' | 'empty' | 'unparseable' | 'fresh'
+ *   - `fresh`       — still changing across the orphan window ⇒ presumed still-being-written.
+ *   - `live`        — a running process holds the session id (or `ps` could not tell). */
+export type TranscriptProofReason = 'ok' | 'missing' | 'empty' | 'unparseable' | 'fresh' | 'live'
+
+/** Does a running process carry `sessionId` on its command line? `null` = could not
+ *  tell (ps failed / Windows) — the caller treats that as "held". One `ps` call. */
+export const isSessionHeldByProcess = async (sessionId: string): Promise<boolean | null> => {
+  try {
+    const { stdout } = await execFile('ps', ['-axww', '-o', 'command='], {
+      timeout: 10_000,
+      maxBuffer: 16 * 1024 * 1024,
+    })
+    return stdout.includes(sessionId)
+  } catch {
+    return null
+  }
+}
 
 export interface TranscriptProof {
   /** true ⇒ hand claude `--resume <sessionId>`; false ⇒ fall back (fresh id / reclaim). */
@@ -62,13 +86,18 @@ export interface TranscriptProof {
 
 /** Can `claude --resume <sessionId>` load this session from `cwd`? See the module
  *  header. `orphanWindowMs` (opt-in) enables the SIGKILL-orphan mtime guard — the
- *  worker path passes it; the role-desk path omits it. `now` is injected (default
- *  Date.now()) so the fixtures drive the orphan branch deterministically. Never
- *  throws — every fault degrades to `{loadable:false}`. */
+ *  worker path passes it; the role-desk path omits it. Time is read at PROOF time
+ *  (Date.now()), never a caller's earlier snapshot. `sleep` / `isSessionHeld` are
+ *  injectable so the fixtures can simulate an orphan (writing, or quiet). Never throws — every
+ *  fault degrades to `{loadable:false}`. */
 export const proveTranscriptLoadable = async (
   cwd: string,
   sessionId: string,
-  opts: { now?: number; orphanWindowMs?: number } = {},
+  opts: {
+    orphanWindowMs?: number
+    sleep?: (ms: number) => Promise<void>
+    isSessionHeld?: (sessionId: string) => Promise<boolean | null>
+  } = {},
 ): Promise<TranscriptProof> => {
   const path = sessionJsonlPath(cwd, sessionId)
   let fh: Awaited<ReturnType<typeof open>> | undefined
@@ -80,8 +109,16 @@ export const proveTranscriptLoadable = async (
     // Orphan window FIRST (before the read): a still-being-written transcript must
     // not be resumed no matter how parseable its head is.
     if (opts.orphanWindowMs !== undefined) {
-      const now = opts.now ?? Date.now()
-      if (now - mtimeMs < opts.orphanWindowMs) return { loadable: false, reason: 'fresh', mtimeMs }
+      const held = await (opts.isSessionHeld ?? isSessionHeldByProcess)(sessionId)
+      if (held !== false) return { loadable: false, reason: 'live', mtimeMs }
+      const wait = Math.min(mtimeMs + opts.orphanWindowMs - Date.now(), opts.orphanWindowMs)
+      if (wait > 0) {
+        await (opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(wait)
+        const again = await stat(path)
+        if (again.mtimeMs !== mtimeMs || again.size !== st.size) {
+          return { loadable: false, reason: 'fresh', mtimeMs: again.mtimeMs }
+        }
+      }
     }
     fh = await open(path, 'r')
     const buf = Buffer.alloc(Math.min(PROBE_BYTES, st.size))

@@ -627,9 +627,14 @@ curl -s -X POST "$API/api/swarm/manager" -H 'content-type: application/json' \
 - **証明してからしか resume しない(§10.3 と同じ哲学の共有ヘルパ)。** boot の reconcile が出した
   **resume 候補**(作業途中+worktree 生存)ごとに、`swarmTranscriptProof.ts` の
   `proveTranscriptLoadable` で transcript の実在・非空・パース可能を確認する。ここに**孤児検査**が
-  加わる: SIGKILL で server だけ死ぬと子 claude が孤児として生き残り同じ JSONL に書き続けうるので、
-  **mtime が直近(既定 10 秒)なら resume しない**(2 プロセスが 1 transcript に追記すると壊れる)。
-- **証明できなければ必ず fallback = 既存 crash reclaim。** 欠損/空/孤児 mtime/spawn 失敗はどれも
+  加わる: SIGKILL で server だけ死ぬと子 claude が孤児として生き残り同じ JSONL に書き続けうるので
+  (2 プロセスが 1 transcript に追記すると壊れる)、①**その session id をコマンドラインに持つ生きた
+  プロセスが居れば resume しない**(`ps` 1回。長い tool 呼び出し中で何分も書かない孤児もこれで捕まる。
+  `ps` が失敗したら — Windows を含め — 回収へ倒す)、②mtime が直近(既定 10 秒)なら窓が過ぎるまで
+  待って(最大 10 秒)測り直し、**更新が進んでいれば** resume しない。時刻の近さだけでは断らない
+  (2026-09-24 — ハンズフリー更新は worker を止めて約 10 秒で再起動するため、旧実装は毎回断っていた)。
+  証明が待っている間にオーナーが自動運転を OFF にしたら、その後の worker は起こさない。
+- **証明できなければ必ず fallback = 既存 crash reclaim。** 欠損/空/孤児(生きたプロセス・書き込み継続)/spawn 失敗はどれも
   「最悪でも今日と同じ」= worktree の未コミットを WIP 保全して差し戻し。resume は upside のみで、
   downside を作らない。
 - **前提ゲートは素通りしない。** resume の respawn も通常 spawn と同じ `claudeRunPreflight` +

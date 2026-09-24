@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, realpath, writeFile, utimes } from 'fs/promises'
 import { tmpdir } from 'os'
+import { spawn } from 'child_process'
 import { join } from 'path'
 import { claudeDirName } from './claudeProjectDir'
 import { proveTranscriptLoadable, isTranscriptLoadable, ORPHAN_MTIME_WINDOW_MS } from './swarmTranscriptProof'
@@ -8,7 +9,7 @@ import { proveTranscriptLoadable, isTranscriptLoadable, ORPHAN_MTIME_WINDOW_MS }
 // swarmTranscriptProof — the SHARED transcript-loadable proof (card 4,
 // ENGINE_PERSISTENCE_PLAN §5). These are the completion-condition fixtures:
 //   ① a proven transcript ⇒ loadable (the --resume path),
-//   ② JSONL missing / empty / orphan-fresh-mtime ⇒ NOT loadable (the fallback path).
+//   ② JSONL missing / empty / still-being-written ⇒ NOT loadable (the fallback path).
 // HOME is isolated (claude files its transcripts under $HOME/.claude/projects), and
 // the fixture writes the EXACT path sessionJsonlPath reads.
 
@@ -60,11 +61,12 @@ describe('swarmTranscriptProof — proveTranscriptLoadable (card 4 fixtures)', (
   it('the orphan window does NOT reject a STALE (old-mtime) transcript — it still resumes', async () => {
     const id = 'aaaa2222-2222-4222-8222-222222222222'
     const file = await writeTranscript(id)
-    const now = 1_000_000_000_000
-    // mtime 20s in the past, window 10s ⇒ now-mtime (20s) ≥ window ⇒ NOT fresh ⇒ loadable.
-    const staleMs = now - 20_000
+    // mtime 20s in the past, window 10s ⇒ past the window ⇒ no wait ⇒ loadable.
+    const staleMs = Date.now() - 20_000
     await utimes(file, new Date(staleMs), new Date(staleMs))
-    const p = await proveTranscriptLoadable(cwd, id, { now, orphanWindowMs: ORPHAN_MTIME_WINDOW_MS })
+    const sleep = vi.fn(async () => {})
+    const p = await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS, sleep })
+    expect(sleep).not.toHaveBeenCalled()
     expect(p.loadable).toBe(true)
     expect(p.reason).toBe('ok')
   })
@@ -84,31 +86,126 @@ describe('swarmTranscriptProof — proveTranscriptLoadable (card 4 fixtures)', (
     expect(p.reason).toBe('empty')
   })
 
-  it('FRESH mtime (orphan window) ⇒ not loadable (reason fresh) — the SIGKILL-orphan guard', async () => {
+  it('FRESH mtime waits out the rest of the window before re-measuring', async () => {
     const id = 'cccc3333-3333-4333-8333-333333333333'
-    const file = await writeTranscript(id) // real, parseable — only the mtime disqualifies it
-    const now = 1_000_000_000_000
-    // mtime 2s in the past, window 10s ⇒ now-mtime (2s) < window ⇒ presumed still-being-written.
-    const freshMs = now - 2_000
+    const file = await writeTranscript(id)
+    const freshMs = Date.now() - 2_000
     await utimes(file, new Date(freshMs), new Date(freshMs))
-    const p = await proveTranscriptLoadable(cwd, id, { now, orphanWindowMs: ORPHAN_MTIME_WINDOW_MS })
+    const sleep = vi.fn(async () => {})
+    const p = await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS, sleep })
+    // ~8s left of the 10s window (measured at proof time), then unmoved ⇒ dead ⇒ loadable.
+    const waited = (sleep.mock.calls[0] as unknown as [number])[0]
+    expect(waited).toBeGreaterThan(7_000)
+    expect(waited).toBeLessThanOrEqual(8_000)
+    expect(p.loadable).toBe(true)
+  })
+
+  // 2026-09-24 (0.11.133 hands-free update): the old app stopped every worker at
+  // 01:15:42.27 and the new server booted 9.7s later ⇒ all three DEAD sessions read
+  // as 'fresh' and were declined. Closeness in time alone must not decline: a fresh
+  // transcript is re-measured once the window has passed, and a mtime that did not
+  // move means nobody is writing ⇒ resume. Measured at PROOF time (no `now` passed).
+  // TEETH (measured 2026-09-24): on the pre-fix single-snapshot implementation this
+  // test is RED (reason 'fresh').
+  it('a DEAD session stopped 9.7s before boot is resumed (re-measured after the window)', async () => {
+    const id = 'abab7777-7777-4777-8777-777777777777'
+    const file = await writeTranscript(id)
+    const stopped = Date.now() - 9_700
+    await utimes(file, new Date(stopped), new Date(stopped))
+    const p = await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS })
+    expect(p.loadable).toBe(true)
+    expect(p.reason).toBe('ok')
+  })
+
+  it('an orphan STILL WRITING during the re-measure wait is declined (no twin)', async () => {
+    const id = 'acac8888-8888-4888-8888-888888888888'
+    const file = await writeTranscript(id)
+    // 2s old (8s of margin, not 300ms) so a loaded machine can't slide it out of the window.
+    const t0 = Date.now() - 2_000
+    await utimes(file, new Date(t0), new Date(t0))
+    const p = await proveTranscriptLoadable(cwd, id, {
+      orphanWindowMs: ORPHAN_MTIME_WINDOW_MS,
+      isSessionHeld: async () => false,
+      // the orphan appends while we wait
+      sleep: async () => {
+        await utimes(file, new Date(t0 + 5_000), new Date(t0 + 5_000))
+      },
+    })
     expect(p.loadable).toBe(false)
     expect(p.reason).toBe('fresh')
   })
 
-  // TEETH for the orphan guard: the SAME fresh transcript, but with NO orphan window,
-  // is loadable — so the window is exactly what makes a fresh transcript fall back.
-  // MUTATION: delete the `if (opts.orphanWindowMs !== undefined)` block in
-  // proveTranscriptLoadable and the FRESH test above flips to loadable ⇒ that test
-  // goes RED. (This asserts the "still loadable without the window" half so the two
-  // together pin the guard as load-bearing.)
+  // Review 2026-09-24 must-fix 1: a FUTURE mtime (clock rewind / NTP / a restored
+  // ~/.claude) must not buy an unbounded sleep — resumes are proven one project at a
+  // time, so an hour here stalls every later project's boot.
+  it('a FUTURE mtime waits at most one orphan window', async () => {
+    const id = 'adad9999-9999-4999-8999-999999999999'
+    const file = await writeTranscript(id)
+    const future = Date.now() + 3_600_000
+    await utimes(file, new Date(future), new Date(future))
+    const sleep = vi.fn(async () => {})
+    await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS, sleep, isSessionHeld: async () => false })
+    expect(sleep).toHaveBeenCalledTimes(1)
+    expect((sleep.mock.calls[0] as unknown as [number])[0]).toBeLessThanOrEqual(ORPHAN_MTIME_WINDOW_MS)
+  })
+
+  // Review 2026-09-24 must-fix 3: a server SIGKILL leaves claude as an orphan and
+  // Electron respawns in ~2s. An orphan inside a long tool call (npm test, a
+  // sub-agent) writes nothing for minutes — mtime alone calls it dead and a
+  // --resume twin lands on the same worktree. A live process holding the session
+  // id must decline regardless of how quiet the transcript is.
+  // TEETH (measured 2026-09-24): RED on the mtime-only implementation (loadable).
+  it('a QUIET orphan (long tool call, stale transcript) still holding the session is declined', async () => {
+    const id = 'aeae0000-0000-4000-8000-000000000000'
+    const file = await writeTranscript(id)
+    const old = Date.now() - 120_000
+    await utimes(file, new Date(old), new Date(old))
+    const p = await proveTranscriptLoadable(cwd, id, {
+      orphanWindowMs: ORPHAN_MTIME_WINDOW_MS,
+      isSessionHeld: async (sid) => sid === id,
+    })
+    expect(p.loadable).toBe(false)
+    expect(p.reason).toBe('live')
+  })
+
+  it('the default probe sees a real process whose command line carries the session id', async () => {
+    const id = 'afaf1111-1111-4111-8111-111111111111'
+    const file = await writeTranscript(id)
+    const old = Date.now() - 120_000
+    await utimes(file, new Date(old), new Date(old))
+    // stands in for `claude --resume <id>`: sh keeps the extra argv on its command line
+    const child = spawn('sh', ['-c', 'sleep 30; true', 'claude', '--resume', id], { stdio: 'ignore' })
+    try {
+      await new Promise((r) => setTimeout(r, 200))
+      const p = await proveTranscriptLoadable(cwd, id, { orphanWindowMs: ORPHAN_MTIME_WINDOW_MS })
+      expect(p.reason).toBe('live')
+    } finally {
+      child.kill('SIGKILL')
+    }
+  })
+
+  it('a FAILED process probe falls back (fail-safe) — never resumes blind', async () => {
+    const id = 'b0b02222-2222-4222-8222-222222222222'
+    const file = await writeTranscript(id)
+    const old = Date.now() - 120_000
+    await utimes(file, new Date(old), new Date(old))
+    const p = await proveTranscriptLoadable(cwd, id, {
+      orphanWindowMs: ORPHAN_MTIME_WINDOW_MS,
+      isSessionHeld: async () => null,
+    })
+    expect(p.loadable).toBe(false)
+    expect(p.reason).toBe('live')
+  })
+
+  // The role-desk path (no orphan window) never consults mtime. MUTATION: delete the
+  // `if (opts.orphanWindowMs !== undefined)` block and the STILL-WRITING test above
+  // goes RED (loadable) — that pair pins the guard as load-bearing.
   it('TEETH: a fresh transcript is loadable when the orphan window is OFF (role-desk path)', async () => {
     const id = 'dddd4444-4444-4444-8444-444444444444'
     const file = await writeTranscript(id)
-    const now = 1_000_000_000_000
-    await utimes(file, new Date(now - 2_000), new Date(now - 2_000))
+    await utimes(file, new Date(Date.now() - 2_000), new Date(Date.now() - 2_000))
     // No orphanWindowMs ⇒ mtime is never consulted ⇒ loadable.
-    const p = await proveTranscriptLoadable(cwd, id, { now })
+    const p = await proveTranscriptLoadable(cwd, id)
     expect(p.loadable).toBe(true)
     expect(p.reason).toBe('ok')
   })

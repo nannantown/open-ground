@@ -45,6 +45,7 @@ import {
   catchUpSupplyDesks,
   SUPPLY_NOTICE_LINE_MAX,
   SUPPLY_UNSENT_MAX_PASSES,
+  supplyReplyLateLine,
   SUPPLY_PASTE_MEASURED_UNFOLDED,
   supplyReplyLine,
   supplyProgressLine,
@@ -531,8 +532,9 @@ describe('a throwing desk does not abort the pass', () => {
 //     ordering test fails (news is typed while the owner waits on an answer).
 //   • the `noticeDeliverable` gate skipped for replies                 → the
 //     three refusal tests fail (a reply lands on a generating desk).
-//   • `deps.onReplyExpired` call dropped from the TTL sweep            → the
-//     expiry test fails (the answer is dropped, not handed to the bell).
+//   • (2026-09-24) the reply TTL sweep restored                         → the
+//     never-ages-out test fails (the answer went to the bell the owner never
+//     reads instead of to the president).
 //   • the over-cap `q.shift()` changed to `q.pop()`                    → the
 //     cap test fails (the NEWEST answer is the one thrown away).
 //   • `[/[【】]/g, '']` removed from REDACTIONS                         → the
@@ -609,16 +611,19 @@ describe('the commander REPLY lane', () => {
     expect(await queueSupplyReply(PROJECT, '三つ目', withSink(idle))).toBe(1)
   })
 
-  it('hands an EXPIRED reply to the bell instead of dropping it', async () => {
+  it('a reply never ages out — told to the president hours later, with its age, not to the bell', async () => {
     let now = 1_000
     const h = harness(IDLE)
-    const deps = { ...withSink(h), now: () => now, desks: () => [] }
-    await queueSupplyReply(PROJECT, '聞かれたことへの答え', deps)
-    now += SUPPLY_NOTICE_TTL_MS + 1
+    const deps = { ...withSink(h), now: () => now }
+    await queueSupplyReply(PROJECT, '聞かれたことへの答え', { ...deps, desks: () => [] })
+    now += 3 * 60 * 60 * 1000
+    await flushSupplyNotices({ ...deps, desks: () => [] })
+    expect(peekSupplyReplies().get(PROJECT)).toHaveLength(1)
     await flushSupplyNotices(deps)
     expect(peekSupplyReplies().get(PROJECT)).toBeUndefined()
-    expect(expired).toHaveLength(1)
-    expect(expired[0][1]).toContain('聞かれたことへの答え')
+    expect(expired).toHaveLength(0)
+    expect(h.writes[0][1]).toContain('約3時間前の返事')
+    expect(h.writes[0][1]).toContain('聞かれたことへの答え')
   })
 
   it('over the cap drops the OLDEST — and to the bell, not to nowhere', async () => {
@@ -839,14 +844,20 @@ describe('an unsent line: Enter only on a box that holds exactly our line', () =
     expect(peekSupplyReplies().get(PROJECT)).toHaveLength(1)
   })
 
-  it('gives up after SUPPLY_UNSENT_MAX_PASSES: dequeued and handed to the bell', async () => {
+  // 2026-09-24 (owner: 「捨てずに再送し、配達済み扱いは着地確認後だけ」): it used
+  // to be DEQUEUED here. RED MEASURED 2026-09-24 with the old `left.commit()`
+  // put back into the stuck branch: this test fails (the reply is gone).
+  it('stuck after SUPPLY_UNSENT_MAX_PASSES: rings the bell ONCE, stays queued until it leaves the box', async () => {
     const { d, deps } = wedged()
     await queueSupplyReply(PROJECT, '入れて大丈夫です', deps)
-    for (let i = 0; i < SUPPLY_UNSENT_MAX_PASSES; i++) await flushSupplyNotices(deps)
-    expect(peekSupplyReplies().get(PROJECT)).toBeUndefined()
+    for (let i = 0; i < SUPPLY_UNSENT_MAX_PASSES * 2; i++) await flushSupplyNotices(deps)
+    expect(peekSupplyReplies().get(PROJECT)).toHaveLength(1)
     expect(d.expired).toHaveLength(1)
     expect(d.expired[0]).toContain('入れて大丈夫です')
     expect(d.writes.filter((w) => w !== '\r')).toHaveLength(1) // never retyped
+    d.acceptEnter = true // the box takes an Enter at last
+    await flushSupplyNotices(deps)
+    expect(peekSupplyReplies().get(PROJECT)).toBeUndefined()
   })
 
   it('the owner types in the 200ms before the first Enter ⇒ it is not pressed', async () => {
@@ -983,17 +994,20 @@ describe('the president desk: patient with a busy desk, sure with a long paste',
       for (let i = 0; i < SUPPLY_UNSENT_MAX_PASSES; i++) await flushSupplyNotices(deps)
       return d
     }
+    // …and none of them is dequeued by it (2026-09-24: only a landing dequeues).
     const n = await give((deps) => queueSupplyNotice(PROJECT, '大事な知らせ', deps))
     expect(n.noticeBell).toHaveLength(1)
     expect(n.replyBell).toHaveLength(0)
+    expect(peekSupplyImportant().get(PROJECT)).toHaveLength(1)
     const r = await give((deps) => queueSupplyReply(PROJECT, '入れて大丈夫です', deps))
     expect(r.replyBell).toHaveLength(1)
     expect(r.noticeBell).toHaveLength(0)
+    expect(peekSupplyReplies().get(PROJECT)).toHaveLength(1)
     // Progress rings too — not for its news but because the box now blocks the desk.
     const p = await give((deps) => queueSupplyProgress(PROJECT, '「A」に取りかかりました', deps))
     expect(p.replyBell).toHaveLength(0)
     expect(p.noticeBell).toHaveLength(1)
-    expect(peekSupplyProgress().get(PROJECT)).toBeUndefined()
+    expect(peekSupplyProgress().get(PROJECT)).toEqual(['「A」に取りかかりました'])
   })
 })
 
@@ -1041,6 +1055,39 @@ describe('an unsent line is also bounded by time', () => {
     expect(toB()[0]).toContain('設定ファイルが読めない')
   })
 
+  // Review 2026-09-24 (#2): with ONE desk, a stuck app-wide line used to go back
+  // to its queue and be typed again after the owner sent the first copy by hand.
+  it('a stuck app-wide line on the only desk is told once, even when the owner sends it by hand', async () => {
+    let now = 1_000_000
+    let box = ''
+    const pastes: string[] = []
+    const noticeBell: string[] = []
+    const deps = {
+      desks: () => [{ id: DESK, cwd: PROJECT }],
+      screen: () => frame(box, FOOTER_IDLE),
+      write: (_id: string, w: string) => {
+        // Every Enter is swallowed (the box is wedged) until the owner acts.
+        if (w !== '\r') {
+          box = w.replace(PASTE_OPEN, '').replace(PASTE_CLOSE, '')
+          pastes.push(box)
+        }
+        return true
+      },
+      sleep: instant,
+      now: () => now,
+      onReplyExpired: () => {},
+      onNoticeGivenUp: (_p: string, l: string) => void noticeBell.push(l),
+    }
+    await noticeToSupply(fatal('ホームのデータが壊れた', null), deps)
+    now += SUPPLY_NOTICE_TTL_MS + 1
+    for (let i = 0; i < SUPPLY_UNSENT_MAX_PASSES + 1; i++) await flushSupplyNotices(deps)
+    expect(noticeBell).toHaveLength(1)
+    box = '' // the owner sent it by hand
+    for (let i = 0; i < 3; i++) await flushSupplyNotices(deps)
+    expect(pastes).toHaveLength(1)
+    expect(peekSupplyImportant().size).toBe(0)
+  })
+
   it('a held reply rings its bell once — the TTL sweep and the give-up do not both ring', async () => {
     let now = 1_000_000
     let box = ''
@@ -1071,5 +1118,8 @@ describe('an unsent line is also bounded by time', () => {
     expect(supplyProgressLine([big]).length).toBeLessThanOrEqual(SUPPLY_PASTE_MEASURED_UNFOLDED)
     expect(supplyNoticeLine(big).length).toBeLessThanOrEqual(SUPPLY_PASTE_MEASURED_UNFOLDED)
     expect(SUPPLY_NOTICE_LINE_MAX + lateLabel).toBeLessThanOrEqual(SUPPLY_PASTE_MEASURED_UNFOLDED)
+    // A late reply (2026-09-24) gives up summary room to its age label.
+    expect(supplyReplyLateLine(sanitizeSupplyNotice(big), 9999 * 3_600_000).length).toBeLessThanOrEqual(SUPPLY_PASTE_MEASURED_UNFOLDED)
+    expect(supplyReplyLateLine('短い答え', 3 * 3_600_000)).toContain('約3時間前の返事')
   })
 })

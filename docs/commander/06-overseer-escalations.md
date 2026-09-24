@@ -142,7 +142,7 @@ Any descriptions of the retired paths below are historical, not operating instru
 | 枠 | **キュー**(FIFO・cap `SUPPLY_REPLY_CAP`=5)。知らせの「新着が上書き」は答えには誤り — 同じ pass に2件来ると1件が黙って消え、オーナーは既に来ている答えを永久に待つ |
 | 優先 | 1 pass 1行、**返事が知らせより先**(オーナーは「聞いてきます」と言われて待っている) |
 | 断り方 | §1.4 と同一(`noticeDeliverable` の3拒否。ESC も Ctrl-U も送らない) |
-| 落ちないこと | TTL 超過・cap 溢れの返事は**ベルに回す**(info `commander-reply`)。知らせは落としてよい(ベルが持つ)が、答えは落とすとオーナーが待ち続ける |
+| 落ちないこと | cap 溢れの返事は**ベルに回す**(info `commander-reply`)。**TTL は無い**(2026-09-24 撤廃 — 遅れた返事は「(約N分前の返事)」付きで社長に届ける。§1.10)。答えは落とすとオーナーが待ち続ける |
 | 頭の印 | `SUPPLY_REPLY_PREFIX = '【司令官からの返事】'` — 知らせ(`【エンジンからの知らせ】`)と**別**。凍結(コード照合文字列) |
 | 話者の指定 | **させない。** body に「誰から」は無く、印はサーバ側で固定。可変にすると `【本人からの回答(escalation)】` を騙れる — payload の `【】` は `REDACTIONS` で除去する(2026-09-22 実測: 通知 `detail` に `【】` を含むものはツリーに1件も無い) |
 
@@ -1123,7 +1123,7 @@ What changed in `supplyNotice.ts`, because the desk is now the ONLY retelling:
 - **The important lane has no TTL.** A notice raised while no desk is open waits for the next
   desk (bounded by `SUPPLY_NOTICE_CAP`=30, oldest dropped — the bell keeps it). One line per desk
   per pass, FIFO, never overwritten. Delivered ≥10 min late it carries 「(約N分/時間前の知らせ)」
-  (`noticeAgeLabel`). Replies and progress keep the 30-min TTL.
+  (`noticeAgeLabel`). Progress keeps the 30-min TTL; replies lost theirs on 2026-09-24 (§1.10).
 - **Questions are withdrawn when they stop being true.** Lines from `escalation-open` /
   `-reminder` carry `escalationId`; `answerEscalation` / `dismissEscalation` call
   `forgetSupplyQuestion(id)` after persisting. A reminder never queues behind its own question.
@@ -1222,7 +1222,8 @@ generating (footer-scoped `isGenerating`), no menu (`detectMenu`), and the box e
 nothing (`submitPastedInput` `guardEnter`). "Landed" then needs positive evidence (generating, or
 the box read as `''`); no frame is not evidence. The re-send pass claims the desk before its first
 await; `commit` is once-only; `inFlight`/`unsent` live on `globalThis`. After
-`SUPPLY_UNSENT_MAX_PASSES` (5) passes an unsent line is dequeued and handed to the bell
+`SUPPLY_UNSENT_MAX_PASSES` (5) passes an unsent line rang the bell and was dequeued — **since
+2026-09-24 it rings once and stays queued** (§1.10)
 (see "Rework 2 (review follow-up of 536813ef)" below for which passes count and which bell). The landing check uses `isGenerating` for workers too (was the phrase anywhere
 on screen). Red measured per guard (see `supplyNotice.test.ts`).
 
@@ -1282,3 +1283,55 @@ box no longer equals our line, so `onlyOurPasteInBox` refuses every Enter: nothi
 blindly, the quiet passes count up, and after 5 the line is given up to the bell while
 `[Pasted text …]` stays in the box for the owner to send or clear. Keep lines under the cap
 rather than teaching the guard to accept a folded box (it cannot tell our fold from the owner's).
+
+## §1.10 — Deliveries never reached the president: claude's prompt suggestion (2026-09-24)
+
+Owner report (0.11.132): two `work-landed` deliveries (00:42Z, 01:02Z), a commander reply and a
+progress line never reached the president; the owner only heard of them by asking 「いまどう?」.
+Evidence, not inference:
+- `~/.openground/supply-notice-queue.json` still held both deliveries (plus a later fatal) under
+  the OPEN GROUND project path — **queued, not dropped, and keyed to the right project**.
+- The live president desk (`scripts/peek-desk.mts <id>`, the one `supply` desk of that project —
+  not a mix-up after the 23:24Z restart): idle, no menu, and `readInputBoxText` =
+  `"いまどう？"` — with every cell of it **dim**. That is claude's **prompt suggestion**: after a
+  turn, claude pre-fills the empty box with a guess at the owner's next message, drawn dim. In the
+  plain-text screen it is identical to typed text, so `noticeDeliverable` read the idle desk as
+  half-typed and held every line for it — forever.
+- The same misread explains the other two symptoms: the commander reply sat past the 30-min reply
+  TTL and was handed to the bell (the 01:12Z `commander-reply`), and a progress line whose Enter
+  DID land left a suggestion in the box, so the landing check never saw an empty box → `unsent` →
+  given up after 5 quiet passes (the 23:51Z `supply-notice-unsent`). Early progress got through
+  only because no suggestion was showing yet.
+
+Fix:
+- **`readScreen` (terminal.ts) drops the suggestion** — on the `❯` row, when EVERY visible cell
+  after the glyph is dim (plus its soft-wrapped all-dim tail). Every screen reader routes through
+  it, so the commander notice, the early compaction and the Enter guard are fixed with it.
+  Measured on real claude 2.1.281 (`scripts/probe-ghost-and-paste.mts`, throwaway haiku desk in the
+  test project): typed text, a single-line paste and a folded `[Pasted text #1 +3 lines]` all
+  render at normal intensity, so a box holding any of them still reads as occupied. Typed text
+  with a dim completion after it is kept whole (not all dim).
+- **Nothing is dequeued without a landing** (owner: 「届けられなかったものは捨てずに再送し、配達済み
+  扱いは着地確認後だけ」): a stuck unsent line rings its bell ONCE and stays queued — a project
+  line keeps its `unsent` tracking (the box still holds it; it lands when the box later reads
+  empty); an app-wide line keeps its tracking too, but once rung it no longer blocks the shared
+  lane (`appWideFree` ignores rung lines), so another desk may take the item — and with one desk
+  it is never retyped over its own box.
+- The ghost strip spares a menu cursor row (`❯ 1. …`), also drops a suggestion claude wrapped
+  over further rows itself (down to the box's closing rule, never the rule — the footer below
+  stays readable), and ignores an inverse cell (a TUI-painted cursor) when deciding "all dim".
+- **Replies never age out** — told late with 「(約N分/時間前の返事)」, the summary shortened by the
+  label's length so the whole line stays ≤ `SUPPLY_PASTE_MEASURED_UNFOLDED` (`supplyReplyLateLine`).
+  Only the cap (5) sends one to the bell. Replies are **persisted** beside the important queue
+  (`replies` key of `supply-notice-queue.json`, same load/save discipline), so a restart — the
+  self-update right after a merge, above all — does not lose one.
+
+Guards (red measured by reverting production by hand, then restored):
+`supplyNoticeGhost.test.ts` (real headless xterm + the server's `readScreen`; ghost strip removed →
+all 3 red), `supplyNotice.test.ts` "stuck after SUPPLY_UNSENT_MAX_PASSES…" and the bell-kind test
+(the old dequeue put back → 2 red), "a reply never ages out…" (the reply TTL sweep put back → red).
+Adversarial review round (same day), each red measured the same way: menu exclusion removed,
+`isWrapped` requirement restored, inverse cells counted (the three new `supplyNoticeGhost` cases);
+`replies` dropped from the saved file (`supplyNoticeAbsence` "reply … survives an app restart");
+the app-wide untrack restored ("stuck app-wide line on the only desk is told once"); the late
+reply not shortened (the length pin).
