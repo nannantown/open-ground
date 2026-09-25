@@ -30,6 +30,7 @@ import {
   listActiveTerminalCwds,
   listActiveTerminals,
   listPtySafetyViews,
+  listOwnerDeskTerminals,
   killTerminalsByCwdAndWait,
 } from './terminal'
 import {
@@ -493,6 +494,26 @@ export const updateRestartSafety = async (): Promise<UpdateRestartSafetyResponse
  *  its session is real project work wherever it runs. */
 export const isSdkDeskRole = (role: string | undefined): boolean =>
   role === 'manager' || role === 'supply'
+
+/** Ids of the live desks playing one ROLE, from BOTH pools: a PTY desk by the
+ *  `deskLabel` its launcher wrote, an SDK session by its `role`. The id is the
+ *  same key `listAllActiveDesks().claude[].id` carries, so a caller can ask
+ *  "is THIS desk generating?" without a second pool read. Pure read, never
+ *  throws — an unreadable pool contributes no ids. */
+export const listDeskIdsByRole = (ptyLabel: string, sdkRole: string): Set<string> => {
+  const ids = new Set<string>()
+  try {
+    for (const d of listOwnerDeskTerminals()) if (d.deskLabel === ptyLabel) ids.add(d.id)
+  } catch {
+    /* PTY pool unreadable */
+  }
+  try {
+    for (const s of listSdkSessions()) if (s.role === sdkRole) ids.add(s.id)
+  } catch {
+    /* SDK pool unreadable */
+  }
+  return ids
+}
 
 export const listAllActiveDesks = (): ActiveTerminalsResponse => {
   const pty = listActiveTerminals()

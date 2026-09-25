@@ -58,6 +58,11 @@ export interface GroundLampInput {
    *  card, or claude mid-generation? This is the only place process state is
    *  consulted, and only to tell 作業中 apart from 途中で止まっている. */
   liveWork: boolean
+  /** The PRESIDENT (supply desk, 社長) is generating in this project right now.
+   *  Owner, 2026-09-25: 「社長も動いてたら…ランニングって出るようにしてほしいな」.
+   *  Only mid-turn counts — a president idle at its prompt is absent/false and
+   *  changes nothing (the 2026-08-15 rule: alive is not a lamp). */
+  presidentWorking?: boolean
 }
 
 /** Cards that mean work was STARTED. `todo` is deliberately absent: a queued
@@ -76,12 +81,23 @@ export const startedTaskCount = (tasks: readonly ProjectTask[]): number =>
 
 /** The lamp. Pure — every input is passed in, so all four of the owner's cases
  *  are testable without a browser, a server, or a clock. */
-export const groundLamp = ({ started, openQuestions, liveWork }: GroundLampInput): GroundLamp => {
+export const groundLamp = ({
+  started,
+  openQuestions,
+  liveWork,
+  presidentWorking,
+}: GroundLampInput): GroundLamp => {
   // 1. A REAL QUESTION FOR YOU outranks everything, including running work:
   //    the swarm carrying on elsewhere does not make your answer less needed.
   //    `undefined` (inbox unreadable) is not zero and not a question — it just
   //    does not reach this branch.
   if ((openQuestions ?? 0) > 0) return 'waiting'
+
+  // 1a. THE PRESIDENT IS MID-TURN (2026-09-25). The owner asked it something and
+  //     it is answering — that is work, whatever the board says: a project with
+  //     no started card, or a board we could not read, is still visibly moving.
+  //     Below the question branch, so waiting still outranks running.
+  if (presidentWorking) return 'working'
 
   // 1b. THE BOARD ITSELF IS UNREADABLE. Checked after the question branch (a
   //     question we DID read is still a question) and before everything else,

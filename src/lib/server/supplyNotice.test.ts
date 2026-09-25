@@ -176,7 +176,7 @@ describe('supplyNoticeLine — what is actually typed', () => {
   it('carries the prefix the supply skill matches on, and the retell instruction', async () => {
     const line = supplyNoticeLine('質問が1件届いた')
     expect(line.startsWith(SUPPLY_NOTICE_PREFIX)).toBe(true)
-    expect(line).toContain('平易に1〜3行')
+    expect(line).toContain('平易に1〜3行、他プロジェクト分は1行')
   })
 
   it('never contains a bare CR — one notice is ONE turn, not two', async () => {

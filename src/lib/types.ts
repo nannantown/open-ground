@@ -2336,6 +2336,10 @@ export interface GroundLampRow {
    *  "we looked and found nothing moving", and a project with nothing started
    *  is never asked in the first place. */
   liveWork: boolean
+  /** The president (supply desk) is GENERATING in this project right now —
+   *  owner decision 2026-09-25. Present only when true; absent ⇒ not seen
+   *  generating (or an older server), which lights nothing. */
+  presidentWorking?: boolean
 }
 
 export interface GroundLampsResponse {

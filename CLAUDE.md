@@ -294,7 +294,11 @@ older docs are historical, not operating instructions.
   are some · on/off switch) and
   opening upward into the seats (president · manager · workers —
   `SwarmModule`) when ANY part of that line is clicked; its height is
-  dragged and saved per project. On screen it is called **エージェントチーム /
+  dragged and saved per project. The manager and each worker seat fold
+  into a thin vertical strip (`SwarmSeatStrip.tsx`, owner decision
+  2026-09-25): name + a lamp that pulses while that seat works, click to
+  open/fold, folded by default and remembered per project; a folded seat
+  opens no stream or poll. The president's seat never folds. On screen it is called **エージェントチーム /
   Agent Team** (owner decision 2026-09-24) — the code, API, data keys and
   markers keep the name `swarm`. The monitoring switch and the execution-mode
   menu are not on the screen: the owner asks the president, who changes them

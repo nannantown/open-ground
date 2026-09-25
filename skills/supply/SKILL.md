@@ -75,7 +75,8 @@ how to say it:
 |---|---|
 | `進捗: …` (cards started / being checked / sent back for fixes) | **1–2 short lines, no question.** 「〇〇に取りかかりました。△△はできて確認中です」. Rework is normal — 「確認で直しが入ったので、やり直しています」, not an alarm |
 | A question for the owner | the question in plain words + the choices + what each leads to, then wait for their answer (see "Answer a question") |
-| A question was closed (「〇〇 の質問「…」は「A」と答え済み」 / 「…取り下げ済み」 — may be another project's) | one short line 「〇〇の質問は A と答え済みです」 and **drop it from your list of waiting questions** — never call it 「判断待ち」 again. If the owner is not in the middle of it, one line is enough |
+| A question was closed (this project: 「〇〇 の質問「…」は「A」と答え済み」 / 「…取り下げ済み」) | one short line 「〇〇の質問は A と答え済みです」 and **drop it from your list of waiting questions** — never call it 「判断待ち」 again. If the owner is not in the middle of it, one line is enough |
+| **Another project's news** (「〇〇 の質問は答え済みです(〇〇 の判断待ちは残りN件 / もうありません)」 / 「…取り下げ済みです(…)」 — no question text) | **exactly one line, as short as it arrived**: 「〇〇の質問は答え済みです」. Do not expand it, do not guess the question or the answer, add no choices — the details are on that project's own desk. Update that project's waiting count to the N it gives (none left ⇒ it is no longer 「判断待ち」) (owner decision 2026-09-25: 「他のプロジェクトは1行くらいでいい。長く書くと混乱する」). The same holds when YOU mention another project (e.g. from a cross-project read): 「〇〇で質問が来ています」, one line |
 | Work stopped (on hold, finished work piling up unchecked, a worker says done but nothing is there) | what stopped, in one line, and what you suggest (「もう一度やらせますか?」) |
 | A high-risk change is held | a merge is waiting for their permission — ask |
 | Work landed (「本体に取り込まれました: 「X」」) | the **delivery** — see "Deliveries" below |
@@ -160,6 +161,12 @@ Read live, **never from memory** (commander may have acted since last look). GET
 (see "Owner-requested settings"). If they say no, clear the reminder so the question is not
 asked again in every report (same section, "Declined").
 
+**⓪ returns every project's questions — report only THIS project's in full.** Split the list by
+`projectPath`: the ones whose `projectPath` is this seat's `$PWD` are told as usual (question,
+choices, consequences). Every OTHER project gets exactly one line, no question text, no choices:
+「〇〇で質問が来ています(N件)」 (〇〇 = the folder name). The details are on that project's own
+seat (owner decision 2026-09-25: 「他のプロジェクトは1行くらいでいい。長く書くと混乱する」).
+
 **Waiting questions: only from a list you just read.** Whenever you tell the owner what is
 still waiting on them (「判断待ち」), read ⓪ **right then** and use only that — never a list
 from earlier in the conversation. Questions get answered elsewhere (another project's
@@ -178,7 +185,8 @@ nothing to install:
 | Open questions, every project | `curl -s "$OG/api/swarm/escalations?status=open&lane=owner"` |
 | Notices (the bell), every project | `curl -s "$OG/api/swarm/notifications"` |
 
-Group the answer BY PROJECT and keep it to a line each. Read these **only when asked** — they
+Group the answer BY PROJECT and keep it to a line each — for questions, 「〇〇で質問が来ています(N件)」,
+never the question text or its choices. Read these **only when asked** — they
 are a cross-project glance, not something to keep an eye on; polling them is exactly the
 autonomous watching "Never self-initiate" forbids. For anything deeper than "who needs
 attention", say that project has its own desk.
@@ -235,9 +243,10 @@ never see it. What reaches the owner's inbox (`lane=owner`) is what only the own
 the commander handed it on, it touches a standing boundary (release, deletion, cost…), or the
 commander did not settle it in time. Relaying those is your job:
 
-1. **Read**: `curl -s "$OG/api/swarm/escalations?status=open&lane=owner"`
+1. **Read** this project's only: `curl -s -G "$OG/api/swarm/escalations" --data-urlencode "status=open" --data-urlencode "lane=owner" --data-urlencode "path=$PWD"`
 2. **Present** `plainQuestion` (fallback `question`): ① what to decide ② options
-   ③ consequence of each.
+   ③ consequence of each. Another project's questions are not presented here — at most the
+   one line 「〇〇で質問が来ています(N件)」; they are answered on that project's seat.
 3. **Post answer**: `curl -s -X POST $OG/api/swarm/escalations/answer -H 'content-type: application/json' -d '{"id":"<id>","answer":"<user's answer>","fromDesk":"'"$PWD"'"}'`
    (`fromDesk` = this seat, so the app does not tell you back 「答え済み」 — every other
    president seat is told.)

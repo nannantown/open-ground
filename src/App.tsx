@@ -737,6 +737,7 @@ export default function App() {
             ...(row.started === undefined ? {} : { started: row.started }),
             ...(row.openQuestions === undefined ? {} : { openQuestions: row.openQuestions }),
             liveWork: row.liveWork,
+            presidentWorking: row.presidentWorking === true,
           })
           if (lamp) next.set(row.projectId, lamp)
         }

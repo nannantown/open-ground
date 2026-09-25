@@ -79,6 +79,19 @@ vi.mock('@/components/canvas/ClaudeTerminalPane', () => ({
   ),
 }))
 
+// These tests are about what an OPEN seat does, so every manager / worker seat
+// starts unfolded from its strip here (the real default is folded — see
+// SwarmSeatStrip and the "thin strips" tests in SwarmModule.seats.test.tsx).
+vi.mock('./SwarmSeatStrip', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./SwarmSeatStrip')>()
+  class AllOpen extends Set<string> {
+    has() {
+      return true
+    }
+  }
+  return { ...real, loadOpenSeats: () => new AllOpen() }
+})
+
 import { SwarmModule } from './SwarmModule'
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })

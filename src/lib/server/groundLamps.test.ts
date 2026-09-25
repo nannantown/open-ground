@@ -345,3 +345,56 @@ describe('liveWorkForProject — desks are machinery, not project work', () => {
     ).toBe(false)
   })
 })
+
+describe('the president (supply desk) — owner decision 2026-09-25', () => {
+  const pane = (id: string, cwd: string, status: 'working' | 'waiting') => ({ id, cwd, status, desk: true })
+  const desks =
+    (claude: ReturnType<typeof pane>[]): (() => ActiveTerminalsResponse) =>
+    () => ({ cwds: claude.map((c) => c.cwd), claude })
+
+  it('only a president that is GENERATING is reported — never the commander', async () => {
+    const { presidentWorkingCwds } = await import('./groundLamps')
+    const cwds = presidentWorkingCwds({
+      presidentIds: () => new Set(['pty-sup', 'sdk-sup']),
+      listDesks: desks([
+        pane('pty-sup', '/repo/a', 'working'),
+        pane('pty-mgr', '/repo/b', 'working'), // commander: still discounted
+        pane('sdk-sup', '/repo/c', 'working'),
+        pane('sdk-mgr', '/repo/d', 'working'),
+      ]),
+    })
+    expect(cwds.sort()).toEqual(['/repo/a', '/repo/c'])
+  })
+
+  it('an IDLE president (at its prompt) is not reported', async () => {
+    const { presidentWorkingCwds } = await import('./groundLamps')
+    expect(
+      presidentWorkingCwds({
+        presidentIds: () => new Set(['pty-sup', 'sdk-sup']),
+        listDesks: desks([pane('pty-sup', '/repo/a', 'waiting'), pane('sdk-sup', '/repo/a', 'waiting')]),
+      }),
+    ).toEqual([])
+  })
+
+  it('end to end: president generating ⇒ working even with nothing started; idle ⇒ dark', async () => {
+    const lampOf = async (cwds: string[]) => {
+      const { lamps } = await readGroundLamps({
+        projects: async () => P,
+        startedFor: async () => 0,
+        openQuestions: async () => new Map(),
+        liveWorkFor: async () => false,
+        presidentWorkingCwds: () => cwds,
+      })
+      return lamps.map((r) =>
+        groundLamp({
+          started: r.started,
+          openQuestions: r.openQuestions,
+          liveWork: r.liveWork,
+          presidentWorking: r.presidentWorking === true,
+        }),
+      )
+    }
+    expect(await lampOf(['/repo/a'])).toEqual(['working', null])
+    expect(await lampOf([])).toEqual([null, null])
+  })
+})

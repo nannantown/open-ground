@@ -41,6 +41,8 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
+  type ReactNode,
 } from 'react'
 import { X, Power, ChevronUp, ChevronDown, Network } from 'lucide-react'
 import { api } from '@/lib/api-client'
@@ -63,6 +65,7 @@ import { SdkWorkerPane, blipVerdict, type SdkSessionProbe } from './SdkWorkerPan
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 import { SwarmWorkerSeat } from './SwarmWorkerSeat'
+import { SwarmSeatStrip, loadOpenSeats, saveOpenSeats } from './SwarmSeatStrip'
 import { useSupplyDesk } from './useSupplyDesk'
 import { SwarmManagerPane } from './SwarmManagerPane'
 import { SwarmPowerSwitch } from './SwarmPowerBar'
@@ -296,6 +299,18 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
   // The ONE worker seat unfolded into its live transcript (by worktree), or
   // null. One at a time on purpose — see SwarmWorkerSeat.
   const [openWorktree, setOpenWorktree] = useState<string | null>(null)
+  // Manager / worker seats unfolded from their thin strip (SwarmSeatStrip),
+  // remembered per project. Default: all folded — the owner talks to 社長.
+  const [openSeats, setOpenSeats] = useState<ReadonlySet<string>>(() => loadOpenSeats(project.id))
+  const toggleSeat = useCallback(
+    (key: string) => {
+      const next = new Set(openSeats)
+      if (!next.delete(key)) next.add(key)
+      saveOpenSeats(project.id, next)
+      setOpenSeats(next)
+    },
+    [openSeats, project.id],
+  )
   // sdkSessionId → the newest OPEN question that worker asked the owner. One
   // poll for the whole fleet (a folded seat opens no stream of its own).
   const [questionBySdk, setQuestionBySdk] = useState<ReadonlyMap<string, string>>(new Map())
@@ -1121,9 +1136,11 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
   for (const w of allWorkers) {
     // Only a seat that will actually OPEN a stream spends a slot: an SDK
     // worker with a session id that is the unfolded one, or a PTY worker that
-    // has a terminal to attach to. (An id-less seat renders its summary.)
+    // has a terminal to attach to. (An id-less seat renders its summary.) A
+    // seat folded into its strip mounts nothing, so it never streams.
     const wantsStream =
-      w.runtime === 'sdk' ? !!w.sdkSessionId && openWorktree === w.worktree : !!w.terminalId
+      openSeats.has(w.worktree) &&
+      (w.runtime === 'sdk' ? !!w.sdkSessionId && openWorktree === w.worktree : !!w.terminalId)
     if (!wantsStream) continue
     if (takeSlot()) streamingWorktrees.add(w.worktree)
     else streamLimited = true
@@ -1493,7 +1510,15 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             (the owner talks only to the president). Its status comes from the
             active-desk poll, which sees both pools; a desk that died is cleared
             by the reconcile above. */}
-        <div className={SEAT_CLASS} style={MANAGER_SEAT_STYLE} data-seat="manager">
+        <SwarmSeatStrip
+          seatKey="manager"
+          role="manager"
+          running={!!manager && managerStatus === 'working'}
+          open={openSeats.has('manager')}
+          onToggle={() => toggleSeat('manager')}
+          openStyle={MANAGER_SEAT_STYLE}
+        >
+        <div className="h-full" data-seat="manager">
           <SwarmManagerPane
             status={manager ? managerStatus : null}
             busy={managerBusy}
@@ -1504,9 +1529,17 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             projectPath={project.path}
           />
         </div>
+        </SwarmSeatStrip>
         {allWorkers.length === 0 ? (
           // A vacant worker seat, so all three roles are always on the screen.
-          <div className={SEAT_CLASS} style={SEAT_STYLE}>
+          <SwarmSeatStrip
+            seatKey="vacant"
+            role="worker"
+            running={false}
+            open={openSeats.has('vacant')}
+            onToggle={() => toggleSeat('vacant')}
+            openStyle={WORKER_SEAT_STYLE}
+          >
             <div className="flex h-full min-h-0 flex-col bg-bg">
               <SwarmSeatHeader role="worker" sprite={null} statusLabel={t('projectPanel.swarm.seat.vacant')} />
               <div className="flex flex-1 items-center justify-center px-6 text-center">
@@ -1515,7 +1548,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
                 </p>
               </div>
             </div>
-          </div>
+          </SwarmSeatStrip>
         ) : (
           <>
             {allWorkers.map((w) => {
@@ -1533,9 +1566,25 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
               // from its heartbeat) opens no stream either way and keeps its
               // full tile, with Restart.
               const handle = sdkId ?? w.terminalId
+              // Every worker seat folds into its own strip; the lamp reads the
+              // same active-desk status the seat shows (no extra request).
+              const wrap = (openStyle: CSSProperties, seat: ReactNode) => (
+                <SwarmSeatStrip
+                  key={w.worktree}
+                  seatKey={w.worktree}
+                  role="worker"
+                  detail={w.taskTitle || w.note || w.branch}
+                  running={!!handle && statusOfPty(handle) === 'working'}
+                  open={openSeats.has(w.worktree)}
+                  onToggle={() => toggleSeat(w.worktree)}
+                  openStyle={openStyle}
+                >
+                  {seat}
+                </SwarmSeatStrip>
+              )
               if (handle && !streamingWorktrees.has(w.worktree)) {
-                return (
-                  <div key={w.worktree} className={SEAT_CLASS} style={WORKER_SEAT_STYLE}>
+                return wrap(
+                  WORKER_SEAT_STYLE,
                     <SwarmWorkerSeat
                       sdkSessionId={sdkId}
                       projectPath={project.path}
@@ -1550,12 +1599,12 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
                       onTerminate={!isEngine ? () => void terminate(w) : undefined}
                       onForceRemove={!isEngine ? () => void terminate(w, { force: true }) : undefined}
                       onRestart={!isEngine ? () => void restartWorker(w) : undefined}
-                    />
-                  </div>
+                    />,
                 )
               }
-              return (
-                <div key={w.worktree} className={SEAT_CLASS} style={SEAT_STYLE}>
+              return wrap(
+                SEAT_STYLE,
+                <>
                   {sdkId ? (
                     // An SDK worker has no terminal to render — its tile shows
                     // the distilled event stream instead. Same header vocabulary,
@@ -1602,7 +1651,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
                     onForceRemove={!isEngine ? () => void terminate(w, { force: true }) : undefined}
                   />
                   )}
-                </div>
+                </>,
               )
             })}
           </>

@@ -1274,7 +1274,7 @@ export const answerEscalation = async (
     await persist(all)
     // No longer true → withdraw its undelivered line and tell the president
     // desks it is closed (supplyNotice.noticeQuestionClosed).
-    noticeQuestionClosed(closedQuestion(record, opts?.fromDesk))
+    noticeQuestionClosed(closedQuestion(record, opts?.fromDesk, known))
 
     return { done: false, record }
   })
@@ -1340,11 +1340,18 @@ export const answerEscalation = async (
   return { escalation: record, delivery }
 }
 
-/** What the president desks are told when this record closes. */
-const closedQuestion = (e: Escalation, fromDesk?: string): Parameters<typeof noticeQuestionClosed>[0] => ({
+/** What the president desks are told when this record closes. `all` = the
+ *  store just persisted, for the project's remaining owner-lane count. */
+const closedQuestion = (
+  e: Escalation,
+  fromDesk: string | undefined,
+  all: readonly Escalation[],
+): Parameters<typeof noticeQuestionClosed>[0] => ({
   id: e.id,
   projectPath: e.projectPath,
   ownerLane: e.routedTo !== 'commander',
+  remaining: all.filter((x) => x.status === 'open' && x.routedTo !== 'commander' && x.projectPath === e.projectPath)
+    .length,
   subject: e.plainQuestion || e.question,
   outcome: e.status === 'dismissed' ? 'dismissed' : 'answered',
   ...(e.answer ? { answer: e.answer } : {}),
@@ -1369,7 +1376,7 @@ export const dismissEscalation = async (
     record.status = 'dismissed'
     record.dismissedAt = (deps?.now?.() ?? new Date()).toISOString()
     await persist(all)
-    noticeQuestionClosed(closedQuestion(record, deps?.fromDesk))
+    noticeQuestionClosed(closedQuestion(record, deps?.fromDesk, known))
     return record
   })
 }

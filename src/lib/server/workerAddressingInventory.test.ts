@@ -663,15 +663,15 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   },
   'src/lib/server/liveDesks.ts': {
     tier: 'both-pools',
-    why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, canonicalLiveDeskCwds/isDirOccupied/liveDeskOccupies (the occupancy question a spawn must ask), listAllActiveDesks, stopAllDesksInDirAndWait, and (0803) updateRestartSafety/computeRestartSafety — the "may the app restart itself to apply an update?" verdict for the Electron shell (GET /api/update/restart-safety).',
-    ptyFns: ['killTerminalsByCwdAndWait', 'listActiveTerminalCwds', 'listActiveTerminals', 'listPtySafetyViews'],
+    why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, canonicalLiveDeskCwds/isDirOccupied/liveDeskOccupies (the occupancy question a spawn must ask), listAllActiveDesks, stopAllDesksInDirAndWait, (0925) listDeskIdsByRole — the desk ids of one role from both pools (PTY deskLabel + SDK role) for the Ground president lamp, and (0803) updateRestartSafety/computeRestartSafety — the "may the app restart itself to apply an update?" verdict for the Electron shell (GET /api/update/restart-safety).',
+    ptyFns: ['killTerminalsByCwdAndWait', 'listActiveTerminalCwds', 'listActiveTerminals', 'listOwnerDeskTerminals', 'listPtySafetyViews'],
     sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'terminateSdkSessionsInDir'],
   },
   'src/lib/server/groundLamps.ts': {
     tier: 'both-pools',
-    why: 'GET /api/ground/lamps — whether a project is 作業中 or 途中でとまっている. A one-pool answer here is a LIE THE OWNER READS: swarm workers run on the SDK, so asking the PTY pool alone reports "nothing is moving" over a swarm working perfectly, and the card then says the project stalled. It goes through listAllActiveDesks (both pools) for the plain-pane arm, and through listSwarmWorkers — which itself reads both runtimes — for the worker arm. 2026-09-17: the worker arm takes each worker\'s ONE handle (sdkSessionId || terminalId, the identity invariant) and looks it up in that same both-pools list for a \'working\' status — a resident-but-parked SDK session (finished, awaiting integration) is alive, not working, and had kept the sns-hub card stamped RUNNING for hours.',
+    why: 'GET /api/ground/lamps — whether a project is 作業中 or 途中でとまっている. A one-pool answer here is a LIE THE OWNER READS: swarm workers run on the SDK, so asking the PTY pool alone reports "nothing is moving" over a swarm working perfectly, and the card then says the project stalled. It goes through listAllActiveDesks (both pools) for the plain-pane arm, and through listSwarmWorkers — which itself reads both runtimes — for the worker arm. 2026-09-17: the worker arm takes each worker\'s ONE handle (sdkSessionId || terminalId, the identity invariant) and looks it up in that same both-pools list for a \'working\' status — a resident-but-parked SDK session (finished, awaiting integration) is alive, not working, and had kept the sns-hub card stamped RUNNING for hours. 2026-09-25: the president arm asks listDeskIdsByRole (both pools) for the supply desk ids and checks them against the same listAllActiveDesks read for status working.',
     ptyFns: [],
-    sdkCalls: ['listAllActiveDesks'],
+    sdkCalls: ['listAllActiveDesks', 'listDeskIdsByRole'],
   },
   'server/routes/misc.ts': {
     tier: 'both-pools',

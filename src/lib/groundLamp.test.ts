@@ -20,7 +20,7 @@ const task = (over: Partial<ProjectTask> = {}): ProjectTask =>
  *  hand, which is what a split like this usually costs. */
 const lamp = (
   tasks: readonly ProjectTask[],
-  rest: { openQuestions?: number; liveWork: boolean },
+  rest: { openQuestions?: number; liveWork: boolean; presidentWorking?: boolean },
 ) => groundLamp({ started: startedTaskCount(tasks), ...rest })
 
 describe('groundLamp — the four cases the owner specified', () => {
@@ -162,5 +162,26 @@ describe('groundLamp — an unreadable board is its own answer', () => {
     // make the other's answer less true, and an unanswered question is the one
     // thing on this card that is genuinely waiting on the owner.
     expect(groundLamp({ openQuestions: 1, liveWork: false })).toBe('waiting')
+  })
+})
+
+// Owner, 2026-09-25: 「社長も動いてたら…ランニングって出るようにしてほしいな」.
+describe('groundLamp — the president (supply desk) mid-turn', () => {
+  it('a GENERATING president lights running even with nothing started', () => {
+    expect(lamp([], { liveWork: false, presidentWorking: true })).toBe('working')
+    expect(lamp([task({ done: true, boardColumn: 'done' })], { liveWork: false, presidentWorking: true })).toBe(
+      'working',
+    )
+    expect(lamp([task()], { liveWork: false, presidentWorking: true })).toBe('working')
+  })
+
+  it('an IDLE president changes nothing (alive is not a lamp — 2026-08-15)', () => {
+    expect(lamp([], { liveWork: false, presidentWorking: false })).toBeNull()
+    expect(lamp([task({ boardColumn: 'doing' })], { liveWork: false, presidentWorking: false })).toBeNull()
+    expect(lamp([task({ boardColumn: 'doing' })], { liveWork: true, presidentWorking: false })).toBe('working')
+  })
+
+  it('a question for the owner still outranks the president working', () => {
+    expect(lamp([], { openQuestions: 1, liveWork: false, presidentWorking: true })).toBe('waiting')
   })
 })

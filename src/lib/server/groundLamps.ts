@@ -31,7 +31,8 @@ import { readProjectData } from './projectData'
 import { getSettings } from './store'
 import { countOpenEscalationsByProject } from './swarmEscalations'
 import { listSwarmWorkers } from './swarmWorkerRegistry'
-import { listAllActiveDesks } from './liveDesks'
+import { listAllActiveDesks, listDeskIdsByRole } from './liveDesks'
+import { SUPPLY_DESK_LABEL } from './swarmSupply'
 import type { ClaudeActivity, GroundLampRow, GroundLampsResponse } from '@/lib/types'
 
 export interface GroundLampDeps {
@@ -43,6 +44,8 @@ export interface GroundLampDeps {
   openQuestions?: () => Promise<Map<string, number> | null>
   /** DI: is anything actually running for this project. */
   liveWorkFor?: (projectPath: string) => Promise<boolean>
+  /** DI: cwds of president (supply) desks that are generating right now. */
+  presidentWorkingCwds?: () => string[]
 }
 
 /** Started cards for one project. `undefined` (never 0) when the board could not
@@ -87,6 +90,13 @@ const defaultStartedFor = async (projectPath: string): Promise<number | undefine
  *  TerminalInfo.deskLabel / the SDK session's role — only desk launchers write
  *  those; a hand-started `claude` in the same repo never carries one), so the
  *  owner's own pane mid-generation still counts as the project working.
+ *
+ *  ⚠ AMENDED 2026-09-25 for the PRESIDENT only (supply desk, 社長): 「社長も動いて
+ *  たら…ランニングって出るようにしてほしいな」. The president is the one seat the
+ *  owner talks to, so its turn IS the work the owner is waiting on. It is NOT
+ *  counted here — it has its own row field (it must light a card with nothing
+ *  started too), see {@link presidentWorkingCwds}. The commander stays
+ *  discounted as above.
  *
  *  ⚠ BOTH POOLS, VIA liveDesks. `listActiveTerminals` is the PTY pool alone and
  *  is lint-restricted for exactly the reason that bites here: an SDK session has
@@ -144,6 +154,41 @@ export const liveWorkForProject = async (
   }
 }
 
+/** Where the PRESIDENT (supply desk) is generating right now — its cwds.
+ *
+ *  Owner, 2026-09-25: the Ground card says RUNNING while the president is
+ *  answering / researching / writing cards, and nothing when it sits at its
+ *  prompt. "Generating" is the pool's own beacon verdict (`status === 'working'`
+ *  — claudeWorking for a PTY desk, working/starting for an SDK one); a desk that
+ *  is merely ALIVE at its prompt reads 'waiting' and lights nothing, which keeps
+ *  the 2026-08-15 rule (alive is not a lamp).
+ *
+ *  The president is recognised by the launcher-written identity only — PTY
+ *  `deskLabel === SUPPLY_DESK_LABEL`, SDK `role === 'supply'` — so the commander
+ *  (also a desk) and hand-started panes never pass. All reads are in-memory pool
+ *  reads, done ONCE per lamps request. Unreadable ⇒ [] (no evidence ≠ working). */
+export const presidentWorkingCwds = (
+  deps: {
+    listDesks?: typeof listAllActiveDesks
+    presidentIds?: () => Set<string>
+  } = {},
+): string[] => {
+  let ids: Set<string>
+  try {
+    ids = (deps.presidentIds ?? (() => listDeskIdsByRole(SUPPLY_DESK_LABEL, 'supply')))()
+  } catch {
+    return []
+  }
+  if (ids.size === 0) return []
+  try {
+    return (deps.listDesks ?? listAllActiveDesks)()
+      .claude.filter((a) => a.status === 'working' && ids.has(a.id))
+      .map((a) => a.cwd)
+  } catch {
+    return []
+  }
+}
+
 /** Every registered project's lamp inputs. Never throws. */
 export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<GroundLampsResponse> => {
   const listProjects =
@@ -155,6 +200,7 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
   const startedFor = deps.startedFor ?? defaultStartedFor
   const liveWorkFor = deps.liveWorkFor ?? liveWorkForProject
   const readQuestions = deps.openQuestions ?? countOpenEscalationsByProject
+  const readPresident = deps.presidentWorkingCwds ?? presidentWorkingCwds
 
   let projects: Array<{ id: string; path: string }>
   try {
@@ -165,15 +211,22 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
   // ONE inbox read for the whole Ground. `null` ⇒ unreadable, which every row
   // then reports as an ABSENT count rather than a zero.
   const questions = await readQuestions().catch(() => null)
+  // ONE in-memory pool read for every project's president, likewise.
+  let presidentCwds: string[]
+  try {
+    presidentCwds = readPresident()
+  } catch {
+    presidentCwds = []
+  }
 
   const lamps = await Promise.all(
     projects.map(async (p): Promise<GroundLampRow> => {
       const started = await startedFor(p.path)
       let open: number | undefined
-      if (questions) {
-        const canon = await canonicalize(p.path).catch(() => p.path)
-        open = questions.get(canon) ?? 0
-      }
+      const canon =
+        questions || presidentCwds.length ? await canonicalize(p.path).catch(() => p.path) : p.path
+      if (questions) open = questions.get(canon) ?? 0
+      const presidentWorking = presidentCwds.some((c) => c === canon || c.startsWith(canon + '/'))
       // The short-circuit that keeps this cheap: with nothing started the lamp
       // is dark whatever the processes are doing, so do not go looking.
       const liveWork = started ? await liveWorkFor(p.path).catch(() => false) : false
@@ -182,6 +235,7 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
         ...(started === undefined ? {} : { started }),
         ...(open === undefined ? {} : { openQuestions: open }),
         liveWork,
+        ...(presidentWorking ? { presidentWorking: true } : {}),
       }
     }),
   )

@@ -83,9 +83,19 @@ for (const lang of ['en', 'ja'] as const) {
           // open it to reach the seats.
           await page.getByTestId('swarm-bottom-bar').getByRole('button', { name: w.open, exact: true }).click()
 
+          // Since 2026-09-25 the manager starts FOLDED into a thin strip: the
+          // strip is there, the seat's contents are not. One click opens it.
+          const strip = page.locator('[data-seat-strip="manager"]')
+          const seat = page.locator('[data-seat="manager"]')
+          await expect(strip).toHaveCount(1)
+          await expect(seat).toHaveCount(0)
+          const stripToggle = strip.locator(':scope > div > button')
+          await expect(stripToggle).toHaveAttribute('aria-expanded', 'false')
+          await stripToggle.click()
+          await expect(stripToggle).toHaveAttribute('aria-expanded', 'true')
+
           // The manager is the SECOND seat of a sideways-scrolling row; at 390px
           // it starts off-screen, so scroll it in first.
-          const seat = page.locator('[data-seat="manager"]')
           await expect(seat).toHaveCount(1)
           await seat.scrollIntoViewIfNeeded()
           await expect(seat.getByText(w.manager, { exact: true })).toBeVisible()

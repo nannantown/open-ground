@@ -88,6 +88,9 @@
   `src/lib/groundLamp.ts`(pure・オーナー指定の4ケース)、材料は `src/lib/server/groundLamps.ts`
   → `GET /api/ground/lamps`(started カード数・未回答の質問数・実際に動いているか)。
   作業中=running / 入力待ちも途中停止も waiting / **全部doneまたはtodoのみは何も出さない**。
+  **社長(補給の窓口)が生成中なら running**(2026-09-25 オーナー決定・started 0 でも灯る・
+  質問 waiting の方が優先)。判定は `presidentWorkingCwds`(PTY `deskLabel=補給官` / SDK
+  `role=supply` の pane が `status==='working'`)— 待ち受け中の社長・司令官は灯さない。
   罠(**サーバで見るのは SDK プールがあるから**): swarm worker は Agent SDK で動くので
   `/api/terminal/active`(PTY プール)には出ない。PTY プールだけで判定すると、完璧に動いて
   いる swarm に対して「途中で止まっている」と表示する。liveness は `liveDesks`(両プール)
@@ -477,6 +480,13 @@
   スクショ = `docs/screenshots/swarm-bottom-bar-20260924/`。
   番人 = `SwarmBottomBar.test.tsx` / `SwarmModule.seats.test.tsx`「folded into the bottom bar」/
   `ProjectPanel.dock.test.tsx`(タブ切替で開いたまま・フラグ無しでバー無し)/ `moduleRegistry.test.tsx`。
+  ⑧ **Seat strips (owner decision 2026-09-25)**: the manager seat and every worker seat fold into a
+  32px vertical strip (`modules/SwarmSeatStrip.tsx`) — role word, job, and one lamp that pulses only
+  while that seat's status (the existing `/api/terminal/active` poll) is `working`. Default folded;
+  open seats remembered per project in `openground.swarmseats.<projectId>`. A folded seat mounts
+  nothing (no tail poll, no stream — `wantsStream` in SwarmModule also requires the seat open). The
+  president's seat never folds and takes the freed width. Guard = `SwarmModule.seats.test.tsx`
+  "manager / worker seats fold into thin strips" (the other SwarmModule tests mock every seat open).
   ⑤ **監督タブは撤去済み(2026-09-23)**。続けて**サブタブ自体も廃止**(同日・1画面化):
   Swarm タブは 社長/マネージャー/ワーカー×N の席を1列に横並び(`SwarmModule` の seats row・
   狭い幅は横スクロールで統一)。`SwarmPaneId`/`SWARM_PANE_IDS`/`Settings.swarmPaneOrder` は削除

@@ -1091,6 +1091,23 @@ ride the normal bundle as one line. There is no timed auto-close in the store �
 are the only closing edges. Guard: `supplyQuestionClosed.test.ts` (both edges + withdraw + skip,
 red measured by disabling the push and the withdraw).
 
+**Other projects hear one short line (2026-09-25, owner decision).** Only the question's OWN
+project desk gets the full `questionClosedText` (question + answer). Every other desk gets
+`questionClosedBriefText`: 「<project> の質問は答え済みです / 取り下げ済みです(<project> の判断待ちは残りN件 /
+もうありません)」 — no question text, answer or choices. The count (`ClosedQuestion.remaining`,
+computed by `swarmEscalations.closedQuestion` from the store it just persisted) is what the other
+desk keeps for that project, and it keeps two closes distinct: the short line has no escalation
+id, so `addUnique` dedups it on text and two identical lines lost the second one.
+Among the lines the ENGINE pushes, this was the only cross-project one: `noticeToSupply` and
+`catchUpSupplyDesks` (`listOpenOwnerQuestionsStrict(desk.cwd)`) are already scoped to the desk's
+own project. The other source of other-project text is the president's OWN read of
+`/api/swarm/escalations` without `path` (every project); `skills/supply/SKILL.md` now reports this
+project's questions in full and every other project as one line 「〇〇で質問が来ています(N件)」, and the
+answer procedure reads with `path=$PWD`. Both notice tails say 「他プロジェクト分は1行」.
+Guard: `supplyQuestionClosed.test.ts` "another project never hears the question…" and "two closes
+in one other project…" (red measured: full text to every desk → 3 fail; count removed → the second
+close is dropped).
+
 ## §1.7 — The 監督 tab is gone; the president hears what was said while it was closed (2026-09-23)
 
 Owner decision (card ① of three: remove 監督 → one screen → shrink the commander): the Swarm

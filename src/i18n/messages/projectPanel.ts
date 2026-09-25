@@ -180,6 +180,8 @@ export const projectPanel = {
     'projectPanel.swarm.workersTab': 'Workers',
     'projectPanel.swarm.seat.worker': 'Worker',
     'projectPanel.swarm.seat.vacant': 'No one yet',
+    'projectPanel.swarm.seat.foldHint': 'Click to open or fold this seat',
+    'projectPanel.swarm.seat.running': 'working',
     'projectPanel.swarm.seat.openLog': 'Watch the work',
     'projectPanel.swarm.seat.closeLog': 'Close',
     // The question hint INSIDE the Swarm tab, where the president sits in the
@@ -698,6 +700,8 @@ export const projectPanel = {
     'projectPanel.swarm.workersTab': 'ワーカー',
     'projectPanel.swarm.seat.worker': 'ワーカー',
     'projectPanel.swarm.seat.vacant': 'まだいません',
+    'projectPanel.swarm.seat.foldHint': 'クリックで開く / 畳む',
+    'projectPanel.swarm.seat.running': '作業中',
     'projectPanel.swarm.seat.openLog': '作業の様子を見る',
     'projectPanel.swarm.seat.closeLog': '閉じる',
     'projectPanel.swarm.seat.questionHint':

@@ -21,10 +21,16 @@ const ptyMocks = vi.hoisted(() => ({
   listActiveTerminalCwds: vi.fn(() => [] as string[]),
   listActiveTerminals: vi.fn(() => ({ cwds: [] as string[], claude: [] as unknown[] })),
   killTerminalsByCwdAndWait: vi.fn(async () => true),
+  listOwnerDeskTerminals: vi.fn(() => [] as Array<{ id: string; deskLabel?: string }>),
 }))
 vi.mock('./terminal', () => ptyMocks)
 
-import { listAllLiveDeskCwds, listAllActiveDesks, stopAllDesksInDirAndWait } from './liveDesks'
+import {
+  listAllLiveDeskCwds,
+  listAllActiveDesks,
+  listDeskIdsByRole,
+  stopAllDesksInDirAndWait,
+} from './liveDesks'
 import {
   spawnSdkSession,
   terminateSdkSession,
@@ -310,5 +316,22 @@ describe('stopAllDesksInDirAndWait — the delete gate', () => {
     await settle()
     // …and once it is really gone, the delete is allowed.
     expect(await stopAllDesksInDirAndWait('/wt/target', { timeoutMs: 200, pollMs: 10 })).toBe(true)
+  })
+})
+
+describe('listDeskIdsByRole — one role, both pools (Ground president lamp, 2026-09-25)', () => {
+  it('matches a PTY desk by label and an SDK session by role — never another role', () => {
+    ptyMocks.listOwnerDeskTerminals.mockReturnValue([
+      { id: 'pty-sup', deskLabel: '補給官' },
+      { id: 'pty-mgr', deskLabel: '司令官' },
+      { id: 'pty-own' },
+    ])
+    const sup = spawnSdkSession({ cwd: '/repo/a', options: {}, queryFn: liveQuery, role: 'supply' })
+    const mgr = spawnSdkSession({ cwd: '/repo/a', options: {}, queryFn: liveQuery, role: 'manager' })
+    const ids = listDeskIdsByRole('補給官', 'supply')
+    expect(Array.from(ids).sort()).toEqual(['pty-sup', sup.id].sort())
+    terminateSdkSession(sup.id)
+    terminateSdkSession(mgr.id)
+    ptyMocks.listOwnerDeskTerminals.mockReturnValue([])
   })
 })

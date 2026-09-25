@@ -25,6 +25,20 @@ vi.mock('@/i18n/I18nContext', () => ({
   I18nProvider: ({ children }: { children: unknown }) => children,
 }))
 
+// These tests are about what an OPEN seat does, so every manager / worker seat
+// starts unfolded from its strip here (the real default is folded — see
+// SwarmSeatStrip and the "thin strips" tests in SwarmModule.seats.test.tsx).
+const seatFold = vi.hoisted(() => ({ allOpen: true }))
+vi.mock('./SwarmSeatStrip', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./SwarmSeatStrip')>()
+  class AllOpen extends Set<string> {
+    has() {
+      return true
+    }
+  }
+  return { ...real, loadOpenSeats: (id: string) => (seatFold.allOpen ? new AllOpen() : real.loadOpenSeats(id)) }
+})
+
 import { SwarmModule } from './SwarmModule'
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
@@ -315,5 +329,56 @@ describe('folded into the bottom bar', () => {
     render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
     await waitFor(() => expect(screen.getByRole('switch', { name: 'projectPanel.swarm.power.label' }).hasAttribute('disabled')).toBe(false))
     expect(screen.queryByRole('status', { name: 'projectPanel.swarm.bar.attention' })).toBeNull()
+  })
+})
+
+// Owner decision 2026-09-25: the manager and every worker fold into a thin
+// strip — folded by default, a lamp that pulses only while that seat works,
+// open/fold remembered per project. A folded seat mounts nothing, so it polls
+// no conversation and opens no stream.
+describe('manager / worker seats fold into thin strips', () => {
+  const strip = (key: string) => document.querySelector(`[data-seat-strip="${key}"]`) as HTMLElement | null
+  const stripButton = (key: string) => strip(key)!.querySelector(':scope > div > button') as HTMLButtonElement
+
+  it('starts folded: strips only, the lamp lit only on the working seat, no feed polls', async () => {
+    seatFold.allOpen = false
+    try {
+      storeManager()
+      const h = harness({
+        active: () => [
+          { id: MANAGER_SDK_ID, status: 'working' },
+          { id: 'sdk-w1', status: 'waiting' },
+        ],
+      })
+      render(<SwarmModule project={project} />)
+      await waitFor(() => expect(strip('manager')?.dataset.running).toBe('true'))
+      expect(strip(sdkWorker.worktree)).toBeTruthy()
+      expect(strip(sdkWorker.worktree)!.dataset.running).toBeUndefined()
+      expect(stripButton('manager').getAttribute('aria-expanded')).toBe('false')
+      expect(document.querySelector('[data-seat="manager"]')).toBeNull()
+      expect(document.querySelector('[data-seat-feed]')).toBeNull()
+      expect(h.urls.some((u) => u.includes('/tail?'))).toBe(false)
+    } finally {
+      seatFold.allOpen = true
+    }
+  })
+
+  it('a click opens the seat and is remembered; a second click folds it again', async () => {
+    seatFold.allOpen = false
+    try {
+      storeManager()
+      harness({ active: () => [{ id: MANAGER_SDK_ID, status: 'working' }] })
+      render(<SwarmModule project={project} />)
+      await waitFor(() => expect(strip('manager')).toBeTruthy())
+      act(() => stripButton('manager').click())
+      expect(document.querySelector('[data-seat="manager"]')).toBeTruthy()
+      expect(stripButton('manager').getAttribute('aria-expanded')).toBe('true')
+      expect(JSON.parse(localStorage.getItem(`openground.swarmseats.${project.id}`)!)).toEqual(['manager'])
+      act(() => stripButton('manager').click())
+      expect(document.querySelector('[data-seat="manager"]')).toBeNull()
+      expect(JSON.parse(localStorage.getItem(`openground.swarmseats.${project.id}`)!)).toEqual([])
+    } finally {
+      seatFold.allOpen = true
+    }
   })
 })
