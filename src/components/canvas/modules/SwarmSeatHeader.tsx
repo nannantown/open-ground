@@ -10,10 +10,12 @@
 // The tint is a theme token per role (`--og-seat-*` in globals.css, both
 // palettes, text contrast pinned by themePalette.test.ts).
 
-import type { ReactNode } from 'react'
+import { useContext, type ReactNode } from 'react'
+import { ChevronsRight } from 'lucide-react'
 import { SwarmSprite } from '@/components/canvas/SwarmSprite'
 import type { SpriteRole, SpriteState } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
+import { SeatFoldContext } from './SwarmSeatStrip'
 
 const SEAT_TINT: Record<SpriteRole, string> = {
   supply: 'bg-seat-supply',
@@ -50,11 +52,28 @@ export const SwarmSeatHeader = ({
   children?: ReactNode
 }) => {
   const { t } = useT()
-  const roleLabel = t(ROLE_LABEL_KEY[role])
+  // Set only inside a foldable open seat (SwarmOpenSeat) — the president's
+  // seat never folds, so it gets no button.
+  const fold = useContext(SeatFoldContext)
+  const onFold = fold?.onFold
+  const roleLabel = fold?.name ?? t(ROLE_LABEL_KEY[role])
   return (
     <div
       className={`flex min-h-[34px] shrink-0 items-center gap-2 border-b border-line-soft px-2.5 py-1.5 ${SEAT_TINT[role]}`}
     >
+      {onFold ? (
+        <button
+          type="button"
+          onClick={onFold}
+          aria-expanded
+          aria-label={t('projectPanel.swarm.seat.fold')}
+          title={t('projectPanel.swarm.seat.fold')}
+          data-seat-fold
+          className="-ml-1 flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded-[3px] text-ink-muted transition-colors duration-150 hover:bg-plane hover:text-ink active:bg-ink/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+        >
+          <ChevronsRight size={13} strokeWidth={2} aria-hidden />
+        </button>
+      ) : null}
       {/* The figure is decoration for a screen reader: the role and status
           words right after it already say the same thing in text. */}
       {sprite ? (

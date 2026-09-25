@@ -80,8 +80,8 @@ vi.mock('@/components/canvas/ClaudeTerminalPane', () => ({
 }))
 
 // These tests are about what an OPEN seat does, so every manager / worker seat
-// starts unfolded from its strip here (the real default is folded — see
-// SwarmSeatStrip and the "thin strips" tests in SwarmModule.seats.test.tsx).
+// starts unfolded here (the real default is folded — see
+// SwarmSeatStrip and the "icon rail" tests in SwarmModule.seats.test.tsx).
 vi.mock('./SwarmSeatStrip', async (importOriginal) => {
   const real = await importOriginal<typeof import('./SwarmSeatStrip')>()
   class AllOpen extends Set<string> {
@@ -263,7 +263,7 @@ const openSwarm = async () => {
   // One screen (2026-09-23): no tab to click — wait for a REAL worker seat
   // (the vacant placeholder gone), i.e. the roster poll has landed.
   await waitFor(() => {
-    expect(screen.getAllByText('projectPanel.swarm.seat.worker').length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/^projectPanel\.swarm\.seat\.workerN/).length).toBeGreaterThan(0)
     expect(screen.queryByText('projectPanel.swarm.seat.vacant')).toBeNull()
   })
 }

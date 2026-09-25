@@ -480,13 +480,21 @@
   スクショ = `docs/screenshots/swarm-bottom-bar-20260924/`。
   番人 = `SwarmBottomBar.test.tsx` / `SwarmModule.seats.test.tsx`「folded into the bottom bar」/
   `ProjectPanel.dock.test.tsx`(タブ切替で開いたまま・フラグ無しでバー無し)/ `moduleRegistry.test.tsx`。
-  ⑧ **Seat strips (owner decision 2026-09-25)**: the manager seat and every worker seat fold into a
-  32px vertical strip (`modules/SwarmSeatStrip.tsx`) — role word, job, and one lamp that pulses only
-  while that seat's status (the existing `/api/terminal/active` poll) is `working`. Default folded;
-  open seats remembered per project in `openground.swarmseats.<projectId>`. A folded seat mounts
-  nothing (no tail poll, no stream — `wantsStream` in SwarmModule also requires the seat open). The
-  president's seat never folds and takes the freed width. Guard = `SwarmModule.seats.test.tsx`
-  "manager / worker seats fold into thin strips" (the other SwarmModule tests mock every seat open).
+  ⑧ **Folded-seat icon rail (owner decision 2026-09-25, second design — the first, 32px vertical
+  strips with vertical text, was rejected: name shown twice, hard to read, lamp disagreed with the
+  nameplate)**: folded manager / worker seats are character icons on ONE 72px rail at the right edge
+  (`modules/SwarmSeatStrip.tsx` `SwarmSeatRail`), short horizontal name under each; lit (icon moves
+  + corner lamp) only when the nameplate would say working. Icon/hover words come from the same
+  `commanderSeatLook` (SwarmManagerPane) / `workerSeatLook` (SwarmWorkerSeat) the nameplates use —
+  never compute a seat's state a second way. An open seat (`SwarmOpenSeat`) is NOT on the rail; its
+  nameplate's left-end button folds it (`SeatFoldContext` → SwarmSeatHeader). The context also carries the rail's
+  name ("Worker 2"), so the nameplate says the same name. Folding a seat whose live log is open
+  (`openWorktree`) closes the log too — otherwise it reopens as SdkWorkerPane, whose nameplate reads
+  its own stream by other rules and disagrees with the rail. Default folded; open
+  seats remembered per project in `openground.swarmseats.<projectId>`. A folded seat mounts nothing
+  (no tail poll, no stream — `wantsStream` also requires the seat open). The president's seat never
+  folds. Guard = `SwarmModule.seats.test.tsx` "folded seats sit on the icon rail" (the other
+  SwarmModule tests mock every seat open).
   ⑤ **監督タブは撤去済み(2026-09-23)**。続けて**サブタブ自体も廃止**(同日・1画面化):
   Swarm タブは 社長/マネージャー/ワーカー×N の席を1列に横並び(`SwarmModule` の seats row・
   狭い幅は横スクロールで統一)。`SwarmPaneId`/`SWARM_PANE_IDS`/`Settings.swarmPaneOrder` は削除

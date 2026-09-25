@@ -64,10 +64,10 @@ import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SdkWorkerPane, blipVerdict, type SdkSessionProbe } from './SdkWorkerPane'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
-import { SwarmWorkerSeat } from './SwarmWorkerSeat'
-import { SwarmSeatStrip, loadOpenSeats, saveOpenSeats } from './SwarmSeatStrip'
+import { SwarmWorkerSeat, workerSeatLook } from './SwarmWorkerSeat'
+import { SwarmOpenSeat, SwarmSeatRail, loadOpenSeats, saveOpenSeats, type RailSeat } from './SwarmSeatStrip'
 import { useSupplyDesk } from './useSupplyDesk'
-import { SwarmManagerPane } from './SwarmManagerPane'
+import { SwarmManagerPane, commanderSeatLook } from './SwarmManagerPane'
 import { SwarmPowerSwitch } from './SwarmPowerBar'
 import { SwarmOnboarding } from './SwarmOnboarding'
 import {
@@ -299,17 +299,24 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
   // The ONE worker seat unfolded into its live transcript (by worktree), or
   // null. One at a time on purpose — see SwarmWorkerSeat.
   const [openWorktree, setOpenWorktree] = useState<string | null>(null)
-  // Manager / worker seats unfolded from their thin strip (SwarmSeatStrip),
+  // Manager / worker seats unfolded from the folded-seat rail (SwarmSeatStrip),
   // remembered per project. Default: all folded — the owner talks to 社長.
   const [openSeats, setOpenSeats] = useState<ReadonlySet<string>>(() => loadOpenSeats(project.id))
   const toggleSeat = useCallback(
     (key: string) => {
       const next = new Set(openSeats)
-      if (!next.delete(key)) next.add(key)
+      // Folding a seat whose live log is open closes the log too. Otherwise it
+      // reopens as SdkWorkerPane, whose nameplate reads its OWN stream by other
+      // rules (limit wait, failure, …) and can disagree with the rail icon it
+      // was just clicked from. Reopened, it is always SwarmWorkerSeat — the
+      // same workerSeatLook the rail uses.
+      if (next.delete(key)) {
+        if (key === openWorktree) setOpenWorktree(null)
+      } else next.add(key)
       saveOpenSeats(project.id, next)
       setOpenSeats(next)
     },
-    [openSeats, project.id],
+    [openSeats, openWorktree, project.id],
   )
   // sdkSessionId → the newest OPEN question that worker asked the owner. One
   // poll for the whole fleet (a folded seat opens no stream of its own).
@@ -1145,6 +1152,35 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
     if (takeSlot()) streamingWorktrees.add(w.worktree)
     else streamLimited = true
   }
+  // The folded seats, as icons on the rail. Each icon's words come from the
+  // SAME look function its nameplate uses, fed the SAME status the open seat
+  // gets below — so the rail can never say something the nameplate does not.
+  const railSeats: RailSeat[] = []
+  if (!openSeats.has('manager')) {
+    const l = commanderSeatLook(manager ? managerStatus : null)
+    railSeats.push({ key: 'manager', role: 'commander', name: t('projectPanel.swarm.manager.tab'), statusLabel: t(l.labelKey), sprite: l.sprite, lit: l.lit })
+  }
+  if (allWorkers.length === 0) {
+    if (!openSeats.has('vacant')) {
+      railSeats.push({ key: 'vacant', role: 'worker', name: t('projectPanel.swarm.seat.worker'), statusLabel: t('projectPanel.swarm.seat.vacant'), sprite: null, lit: false })
+    }
+  } else {
+    allWorkers.forEach((w, i) => {
+      if (openSeats.has(w.worktree)) return
+      const sdkId = w.runtime === 'sdk' ? w.sdkSessionId : undefined
+      const handle = sdkId ?? w.terminalId
+      const l = workerSeatLook(handle ? statusOfPty(handle) : 'exited', sdkId ? (questionBySdk.get(sdkId) ?? null) : null)
+      railSeats.push({
+        key: w.worktree,
+        role: 'worker',
+        name: t('projectPanel.swarm.seat.workerN', { n: i + 1 }),
+        statusLabel: t(l.labelKey),
+        detail: w.taskTitle || w.note || w.branch,
+        sprite: l.sprite,
+        lit: l.lit,
+      })
+    })
+  }
 
   // Notices that live INSIDE the bar (below the header). Folded, they are not
   // drawn, so the strip carries one dot saying "there is something to read".
@@ -1455,6 +1491,8 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
           {t('projectPanel.swarm.bar.streamLimit')}
         </div>
       )}
+      {/* The open seats scroll; the folded-seat rail stays put at the right. */}
+      <div className="flex min-h-0 min-w-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 gap-px overflow-x-auto overflow-y-auto bg-line-strong">
         <div className={SEAT_CLASS} style={SEAT_STYLE}>
           {supply && !supplyStreams ? (
@@ -1510,14 +1548,8 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             (the owner talks only to the president). Its status comes from the
             active-desk poll, which sees both pools; a desk that died is cleared
             by the reconcile above. */}
-        <SwarmSeatStrip
-          seatKey="manager"
-          role="manager"
-          running={!!manager && managerStatus === 'working'}
-          open={openSeats.has('manager')}
-          onToggle={() => toggleSeat('manager')}
-          openStyle={MANAGER_SEAT_STYLE}
-        >
+        {openSeats.has('manager') && (
+        <SwarmOpenSeat seatKey="manager" onFold={() => toggleSeat('manager')} style={MANAGER_SEAT_STYLE}>
         <div className="h-full" data-seat="manager">
           <SwarmManagerPane
             status={manager ? managerStatus : null}
@@ -1529,17 +1561,12 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             projectPath={project.path}
           />
         </div>
-        </SwarmSeatStrip>
+        </SwarmOpenSeat>
+        )}
         {allWorkers.length === 0 ? (
+          openSeats.has('vacant') && (
           // A vacant worker seat, so all three roles are always on the screen.
-          <SwarmSeatStrip
-            seatKey="vacant"
-            role="worker"
-            running={false}
-            open={openSeats.has('vacant')}
-            onToggle={() => toggleSeat('vacant')}
-            openStyle={WORKER_SEAT_STYLE}
-          >
+          <SwarmOpenSeat seatKey="vacant" onFold={() => toggleSeat('vacant')} style={WORKER_SEAT_STYLE}>
             <div className="flex h-full min-h-0 flex-col bg-bg">
               <SwarmSeatHeader role="worker" sprite={null} statusLabel={t('projectPanel.swarm.seat.vacant')} />
               <div className="flex flex-1 items-center justify-center px-6 text-center">
@@ -1548,10 +1575,11 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
                 </p>
               </div>
             </div>
-          </SwarmSeatStrip>
+          </SwarmOpenSeat>
+          )
         ) : (
           <>
-            {allWorkers.map((w) => {
+            {allWorkers.map((w, i) => {
               // Engine-tracked workers (stage present — see swarmWorkerRegistry.ts)
               // are read-only here (the orchestrator owns their lifecycle); every
               // other worker — engine-dispatch-independent: curl-direct or a UI
@@ -1566,21 +1594,19 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
               // from its heartbeat) opens no stream either way and keeps its
               // full tile, with Restart.
               const handle = sdkId ?? w.terminalId
-              // Every worker seat folds into its own strip; the lamp reads the
-              // same active-desk status the seat shows (no extra request).
-              const wrap = (openStyle: CSSProperties, seat: ReactNode) => (
-                <SwarmSeatStrip
+              // A folded seat is only an icon on the rail — it mounts nothing.
+              if (!openSeats.has(w.worktree)) return null
+              const wrap = (style: CSSProperties, seat: ReactNode) => (
+                <SwarmOpenSeat
                   key={w.worktree}
                   seatKey={w.worktree}
-                  role="worker"
-                  detail={w.taskTitle || w.note || w.branch}
-                  running={!!handle && statusOfPty(handle) === 'working'}
-                  open={openSeats.has(w.worktree)}
-                  onToggle={() => toggleSeat(w.worktree)}
-                  openStyle={openStyle}
+                  // The same name the rail gives this seat ("Worker 2").
+                  name={t('projectPanel.swarm.seat.workerN', { n: i + 1 })}
+                  onFold={() => toggleSeat(w.worktree)}
+                  style={style}
                 >
                   {seat}
-                </SwarmSeatStrip>
+                </SwarmOpenSeat>
               )
               if (handle && !streamingWorktrees.has(w.worktree)) {
                 return wrap(
@@ -1656,6 +1682,8 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             })}
           </>
         )}
+      </div>
+      <SwarmSeatRail seats={railSeats} onOpen={toggleSeat} />
       </div>
       </>
       )}

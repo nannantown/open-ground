@@ -27,8 +27,8 @@ vi.mock('@/i18n/I18nContext', () => ({
 }))
 
 // These tests are about what an OPEN seat does, so every manager / worker seat
-// starts unfolded from its strip here (the real default is folded — see
-// SwarmSeatStrip and the "thin strips" tests in SwarmModule.seats.test.tsx).
+// starts unfolded here (the real default is folded — see
+// SwarmSeatStrip and the "icon rail" tests in SwarmModule.seats.test.tsx).
 vi.mock('./SwarmSeatStrip', async (importOriginal) => {
   const real = await importOriginal<typeof import('./SwarmSeatStrip')>()
   class AllOpen extends Set<string> {

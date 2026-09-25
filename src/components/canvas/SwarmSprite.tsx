@@ -40,13 +40,15 @@ export interface SwarmSpriteProps {
    *  says to a reader who cannot see it. */
   label: string
   className?: string
+  /** Draw one still frame — a seat that is not working does not move. */
+  still?: boolean
 }
 
 /** Extra columns to the right of the 16px body for the state's mark (…, !, the
  *  finished work). Kept in the same pixel lattice so nothing lands off-grid. */
 const MARK_COLS = 6
 
-export const SwarmSprite = ({ role, state, scale = 1, label, className }: SwarmSpriteProps) => {
+export const SwarmSprite = ({ role, state, scale = 1, label, className, still: stillProp = false }: SwarmSpriteProps) => {
   const ref = useRef<HTMLCanvasElement | null>(null)
 
   useEffect(() => {
@@ -59,9 +61,10 @@ export const SwarmSprite = ({ role, state, scale = 1, label, className }: SwarmS
     const c = SPRITE_COLORS[state]
     const S = scale
     const still =
-      typeof window !== 'undefined' &&
-      typeof window.matchMedia === 'function' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      stillProp ||
+      (typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches)
 
     let raf = 0
     let t = 0
@@ -147,7 +150,7 @@ export const SwarmSprite = ({ role, state, scale = 1, label, className }: SwarmS
     }
     raf = requestAnimationFrame(loop)
     return () => cancelAnimationFrame(raf)
-  }, [role, state, scale])
+  }, [role, state, scale, stillProp])
 
   const w = (SPRITE_SIZE + MARK_COLS) * scale
   const h = (SPRITE_SIZE + 2) * scale

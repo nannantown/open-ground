@@ -1,20 +1,30 @@
-// SwarmSeatStrip — the manager's and each worker's seat, foldable into a thin
-// vertical strip (owner decision 2026-09-25: "the owner mostly uses the
-// president's seat; fold the others, but still show that they are moving").
+// SwarmSeatStrip — folding the manager's and each worker's seat (owner decision
+// 2026-09-25: "the owner mostly uses the president's seat; fold the others, but
+// still show that they are moving").
 //
-// Folded, the strip carries the role word, the job (a worker's task title) and
-// ONE lamp that pulses while that seat is working and is gone otherwise. The
-// lamp reads the module's existing status (the active-desk poll) — a folded
-// seat mounts NOTHING else, so it opens no stream and runs no feed poll (the
-// connection budget in streamBudget.ts stays as it was). Clicking the strip
-// opens the seat to its right; clicking it again folds it. The president's
-// seat never folds and takes the width the strips give up.
+// Second design, same day. The first folded every seat into its own 32px strip
+// with the role word written vertically, and the strip stayed beside the seat
+// when it opened. The owner saw it and said no: the name showed twice (strip +
+// nameplate), vertical text is hard to read, and the strip's lamp read a
+// different status than the nameplate. So now:
+//   - FOLDED seats leave the row and sit as character icons in ONE narrow
+//     column at the right edge (SwarmSeatRail): icon, short horizontal name
+//     under it. A working seat's icon moves and its corner lamp glows; any
+//     other seat's icon is faded and still. Hover = "name · status".
+//   - An OPEN seat is only its own seat (SwarmOpenSeat): no strip beside it, the
+//     name once in its nameplate, and the fold button at the nameplate's left
+//     end (SwarmSeatHeader reads SeatFoldContext).
+//   - The rail's icon, lamp and words come from the SAME functions the
+//     nameplates use (commanderSeatLook / workerSeatLook), so they cannot drift.
+// A folded seat still mounts NOTHING — no stream, no feed poll (the connection
+// budget in streamBudget.ts is unchanged). The president's seat never folds.
 //
 // Which seats are open is remembered per project in localStorage, the same way
 // the bottom bar remembers its own open/height (SwarmBottomBar.tsx).
 
-import type { CSSProperties, ReactNode } from 'react'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { createContext, type CSSProperties, type ReactNode } from 'react'
+import { SwarmSprite } from '@/components/canvas/SwarmSprite'
+import type { SpriteState } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
 
 export const swarmSeatsKey = (projectId: string) => `openground.swarmseats.${projectId}`
@@ -40,68 +50,95 @@ export const saveOpenSeats = (projectId: string, open: ReadonlySet<string>) => {
   }
 }
 
-const STRIP_W = 32
-const FOLDED_STYLE: CSSProperties = { flex: `0 0 ${STRIP_W}px`, minWidth: STRIP_W, minHeight: 220 }
+/** Set by an open, foldable seat: its nameplate draws the fold button from
+ *  `onFold` and, when given, shows `name` (the rail's name, e.g. "Worker 2")
+ *  instead of the bare role word. */
+export const SeatFoldContext = createContext<{ onFold: () => void; name?: string } | null>(null)
 
-const TINT = { manager: 'bg-seat-manager', worker: 'bg-seat-worker' } as const
-
-export const SwarmSeatStrip = ({
+/** An open manager / worker seat: just the seat, sized by its own style. */
+export const SwarmOpenSeat = ({
   seatKey,
-  role,
-  detail,
-  running,
-  open,
-  onToggle,
-  openStyle,
+  name,
+  onFold,
+  style,
   children,
 }: {
   seatKey: string
-  role: 'manager' | 'worker'
-  /** A worker's job, written down the strip under the role word. */
-  detail?: string
-  /** The seat is working right now — the lamp pulses. */
-  running: boolean
-  open: boolean
-  onToggle: () => void
-  /** The seat's own flex sizing while open. */
-  openStyle: CSSProperties
+  name?: string
+  onFold: () => void
+  style: CSSProperties
   children: ReactNode
-}) => {
+}) => (
+  <div className="h-full overflow-hidden" style={style} data-seat-open={seatKey}>
+    <SeatFoldContext.Provider value={{ onFold, name }}>{children}</SeatFoldContext.Provider>
+  </div>
+)
+
+export interface RailSeat {
+  key: string
+  role: 'commander' | 'worker'
+  /** Short horizontal name under the icon ("Manager", "Worker 2"). */
+  name: string
+  /** The nameplate's status word, from the same look function. */
+  statusLabel: string
+  /** A worker's job, added to the hover text. */
+  detail?: string
+  /** The nameplate's figure; null (nobody there) draws the figure faded. */
+  sprite: SpriteState | null
+  /** The nameplate says working — the icon moves and the lamp glows. */
+  lit: boolean
+}
+
+/** The folded seats, as a column of character icons. Nothing folded ⇒ nothing. */
+export const SwarmSeatRail = ({ seats, onOpen }: { seats: readonly RailSeat[]; onOpen: (key: string) => void }) => {
   const { t } = useT()
-  const roleLabel = t(role === 'manager' ? 'projectPanel.swarm.manager.tab' : 'projectPanel.swarm.seat.worker')
-  const name = detail ? `${roleLabel} — ${detail}` : roleLabel
+  if (seats.length === 0) return null
   return (
     <div
-      className="flex h-full overflow-hidden bg-bg"
-      style={open ? { ...openStyle, minWidth: Number(openStyle.minWidth ?? 0) + STRIP_W } : FOLDED_STYLE}
-      data-seat-strip={seatKey}
-      data-running={running || undefined}
+      role="group"
+      aria-label={t('projectPanel.swarm.seat.rail')}
+      className="flex w-[72px] shrink-0 flex-col gap-1 overflow-y-auto border-l border-line-soft bg-bg p-1"
+      data-seat-rail
     >
-      <div className={`flex shrink-0 ${TINT[role]}`} style={{ width: STRIP_W }}>
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={open}
-          aria-label={running ? `${name} (${t('projectPanel.swarm.seat.running')})` : name}
-          title={`${name}\n${t('projectPanel.swarm.seat.foldHint')}`}
-          className="flex w-full min-h-0 cursor-pointer flex-col items-center gap-2 border-r border-line-soft py-2 text-ink-muted transition-colors duration-150 hover:bg-ink/[0.06] hover:text-ink active:bg-ink/10 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
-        >
-          {open ? <ChevronLeft size={12} aria-hidden /> : <ChevronRight size={12} aria-hidden />}
-          {/* The lamp: pulses while working, gone otherwise (space kept so the
-              words don't jump). run-pulse holds still under reduced motion. */}
-          <span
-            aria-hidden
-            className={`h-2 w-2 shrink-0 rounded-full bg-accent ${running ? 'run-pulse' : 'invisible'}`}
-          />
-          <span className="shrink-0 text-meta font-medium text-ink [writing-mode:vertical-rl]">{roleLabel}</span>
-          {detail ? (
-            <span className="min-h-0 flex-1 truncate text-start text-micro text-ink-muted [writing-mode:vertical-rl]">
-              {detail}
+      {seats.map((s) => {
+        const tip = t('projectPanel.swarm.seat.railTip', { name: s.name, status: s.statusLabel })
+        return (
+          <button
+            key={s.key}
+            type="button"
+            onClick={() => onOpen(s.key)}
+            aria-expanded={false}
+            aria-label={tip}
+            title={s.detail ? `${tip}\n${s.detail}` : tip}
+            data-rail-seat={s.key}
+            data-lit={s.lit || undefined}
+            className="group flex w-full shrink-0 cursor-pointer flex-col items-center gap-0.5 rounded-[3px] px-0.5 pb-1 pt-1.5 text-ink-muted transition-colors duration-150 hover:bg-plane hover:text-ink active:bg-ink/10 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+          >
+            <span className="relative inline-flex">
+              <span aria-hidden className={`inline-flex transition-opacity duration-150 ${s.lit ? '' : 'opacity-40 group-hover:opacity-70'}`}>
+                <SwarmSprite
+                  role={s.role}
+                  state={s.sprite ?? 'starting'}
+                  scale={2}
+                  still={!s.lit}
+                  label={tip}
+                />
+              </span>
+              {/* The corner lamp — only on a working seat. run-pulse holds
+                  still under reduced motion. */}
+              {s.lit ? (
+                <span
+                  aria-hidden
+                  className="run-pulse absolute right-0 top-0 h-2 w-2 rounded-full bg-moss ring-2 ring-bg"
+                />
+              ) : null}
             </span>
-          ) : null}
-        </button>
-      </div>
-      {open ? <div className="h-full min-w-0 flex-1 overflow-hidden">{children}</div> : null}
+            <span className={`w-full truncate text-center text-micro ${s.lit ? 'font-medium text-ink' : ''}`}>
+              {s.name}
+            </span>
+          </button>
+        )
+      })}
     </div>
   )
 }

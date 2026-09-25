@@ -42,6 +42,15 @@ const STATE_LABEL: Record<CommanderSeatState, MessageKey> = {
   absent: 'projectPanel.swarm.manager.stateAbsent',
 }
 
+/** Everything the seat says about its state — the ONE source for both the open
+ *  seat's nameplate and its icon on the folded-seat rail (SwarmSeatRail), so
+ *  the two can never disagree (owner, 2026-09-25: the old strip's lamp was grey
+ *  while the nameplate said 動いている). `lit` = the nameplate says running. */
+export const commanderSeatLook = (status: WorkerStatus | null) => {
+  const state = commanderSeatState(status)
+  return { sprite: status ? BEACON_SPRITE[status] : null, labelKey: STATE_LABEL[state], lit: state === 'running' }
+}
+
 interface Props {
   /** The commander desk's live status, or null when there is no desk. */
   status: WorkerStatus | null
@@ -70,6 +79,7 @@ export const SwarmManagerPane = ({
 }: Props) => {
   const { t } = useT()
   const state = commanderSeatState(status)
+  const look = commanderSeatLook(status)
   const running = state === 'running'
   // The seat is narrow, so the button shows the short word; its accessible
   // name says whose start / stop it is (the top bar has its own Start / Stop).
@@ -81,8 +91,8 @@ export const SwarmManagerPane = ({
     <div className="flex h-full min-h-0 flex-col bg-bg">
       <SwarmSeatHeader
         role="commander"
-        sprite={status ? BEACON_SPRITE[status] : null}
-        statusLabel={t(STATE_LABEL[state])}
+        sprite={look.sprite}
+        statusLabel={t(look.labelKey)}
       >
         <button
           type="button"

@@ -16,6 +16,7 @@
 
 import { Power, RotateCcw, Trash2, AlertTriangle, ScrollText } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
+import type { MessageKey } from '@/i18n/messages'
 import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import type { WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
@@ -23,6 +24,30 @@ import { SwarmSeatFeed, SwarmSeatSay, sayToWorker } from './SwarmSeatTalk'
 
 const SMALL_BTN =
   'flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1'
+
+const STATUS_LABEL: Record<WorkerStatus, MessageKey> = {
+  working: 'projectPanel.swarm.statusWorking',
+  waiting: 'projectPanel.swarm.statusWaiting',
+  starting: 'projectPanel.swarm.statusStarting',
+  exited: 'projectPanel.swarm.statusExited',
+}
+
+/** Everything a worker seat says about its state — the ONE source for both the
+ *  nameplate below and the seat's icon on the folded-seat rail (SwarmSeatRail),
+ *  so the two can never disagree. An open question outranks every other state
+ *  (spriteStateFor's rule). `lit` = the nameplate says working. */
+export const workerSeatLook = (status: WorkerStatus, question: string | null) => {
+  // Display-only: decides what to DRAW (see workerAddressingInventory).
+  const live = status !== 'exited'
+  const asking = live && question !== null
+  return {
+    live,
+    sprite: asking ? ('asking' as const) : BEACON_SPRITE[status],
+    labelKey: asking ? ('projectPanel.swarm.sdk.statusQuestion' as const) : STATUS_LABEL[status],
+    waiting: asking || status === 'waiting',
+    lit: !asking && status === 'working',
+  }
+}
 
 export const SwarmWorkerSeat = ({
   branch,
@@ -60,26 +85,19 @@ export const SwarmWorkerSeat = ({
   onRestart?: () => void
 }) => {
   const { t } = useT()
-  const live = status !== 'exited'
-  // An open question outranks every other state (spriteStateFor's rule).
-  const asking = live && question !== null
-  const statusLabel = asking
-    ? t('projectPanel.swarm.sdk.statusQuestion')
-    : {
-        working: t('projectPanel.swarm.statusWorking'),
-        waiting: t('projectPanel.swarm.statusWaiting'),
-        starting: t('projectPanel.swarm.statusStarting'),
-        exited: t('projectPanel.swarm.statusExited'),
-      }[status]
+  const look = workerSeatLook(status, question)
+  const live = look.live
+  const asking = look.sprite === 'asking'
+  const statusLabel = t(look.labelKey)
   const job = taskTitle || branch
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
       <SwarmSeatHeader
         role="worker"
-        sprite={asking ? 'asking' : BEACON_SPRITE[status]}
+        sprite={look.sprite}
         statusLabel={statusLabel}
-        waiting={asking || status === 'waiting'}
+        waiting={look.waiting}
         detailTitle={taskTitle ? `${taskTitle} — ${branch}` : branch}
       >
         {onTerminate ? (

@@ -295,10 +295,15 @@ older docs are historical, not operating instructions.
   opening upward into the seats (president · manager · workers —
   `SwarmModule`) when ANY part of that line is clicked; its height is
   dragged and saved per project. The manager and each worker seat fold
-  into a thin vertical strip (`SwarmSeatStrip.tsx`, owner decision
-  2026-09-25): name + a lamp that pulses while that seat works, click to
-  open/fold, folded by default and remembered per project; a folded seat
-  opens no stream or poll. The president's seat never folds. On screen it is called **エージェントチーム /
+  onto ONE icon rail at the right edge (`SwarmSeatStrip.tsx`, owner
+  decision 2026-09-25, second design): the character icon with a short
+  horizontal name under it; only a working seat's icon moves and its corner
+  lamp glows (the rest are faded), and icon + hover text come from the SAME
+  look function as the seat's nameplate (`commanderSeatLook` /
+  `workerSeatLook`). Clicking an icon opens the seat and removes it from
+  the rail — the name then shows once, in the nameplate, whose left-end
+  button folds it back. Folded by default, remembered per project; a folded
+  seat opens no stream or poll. The president's seat never folds. On screen it is called **エージェントチーム /
   Agent Team** (owner decision 2026-09-24) — the code, API, data keys and
   markers keep the name `swarm`. The monitoring switch and the execution-mode
   menu are not on the screen: the owner asks the president, who changes them

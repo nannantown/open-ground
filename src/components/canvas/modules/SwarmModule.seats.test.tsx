@@ -26,8 +26,8 @@ vi.mock('@/i18n/I18nContext', () => ({
 }))
 
 // These tests are about what an OPEN seat does, so every manager / worker seat
-// starts unfolded from its strip here (the real default is folded — see
-// SwarmSeatStrip and the "thin strips" tests in SwarmModule.seats.test.tsx).
+// starts unfolded here (the real default is folded — see
+// SwarmSeatStrip and the "icon rail" tests in SwarmModule.seats.test.tsx).
 const seatFold = vi.hoisted(() => ({ allOpen: true }))
 vi.mock('./SwarmSeatStrip', async (importOriginal) => {
   const real = await importOriginal<typeof import('./SwarmSeatStrip')>()
@@ -206,6 +206,7 @@ describe("the manager's seat (③, conversation since 2026-09-24)", () => {
     expect(seat).toBeTruthy()
     const buttons = within(seat as HTMLElement).getAllByRole('button')
     expect(buttons.map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual([
+      'projectPanel.swarm.seat.fold',
       'projectPanel.swarm.manager.stopFull',
       'projectPanel.swarm.say.open',
     ])
@@ -332,15 +333,16 @@ describe('folded into the bottom bar', () => {
   })
 })
 
-// Owner decision 2026-09-25: the manager and every worker fold into a thin
-// strip — folded by default, a lamp that pulses only while that seat works,
-// open/fold remembered per project. A folded seat mounts nothing, so it polls
-// no conversation and opens no stream.
-describe('manager / worker seats fold into thin strips', () => {
-  const strip = (key: string) => document.querySelector(`[data-seat-strip="${key}"]`) as HTMLElement | null
-  const stripButton = (key: string) => strip(key)!.querySelector(':scope > div > button') as HTMLButtonElement
+// Owner decision 2026-09-25 (second design): a folded manager / worker seat is
+// a character icon on ONE rail at the right edge — a working seat's icon lit, the
+// rest faded; open/fold remembered per project. An OPEN seat leaves the rail (its
+// name shows once, in its nameplate, with the fold button). A folded seat mounts
+// nothing, so it polls no conversation and opens no stream.
+describe('folded seats sit on the icon rail', () => {
+  const railSeat = (key: string) => document.querySelector(`[data-rail-seat="${key}"]`) as HTMLButtonElement | null
+  const openSeat = (key: string) => document.querySelector(`[data-seat-open="${key}"]`) as HTMLElement | null
 
-  it('starts folded: strips only, the lamp lit only on the working seat, no feed polls', async () => {
+  it('starts folded: icons only, lit only on the working seat, no feed polls', async () => {
     seatFold.allOpen = false
     try {
       storeManager()
@@ -351,10 +353,10 @@ describe('manager / worker seats fold into thin strips', () => {
         ],
       })
       render(<SwarmModule project={project} />)
-      await waitFor(() => expect(strip('manager')?.dataset.running).toBe('true'))
-      expect(strip(sdkWorker.worktree)).toBeTruthy()
-      expect(strip(sdkWorker.worktree)!.dataset.running).toBeUndefined()
-      expect(stripButton('manager').getAttribute('aria-expanded')).toBe('false')
+      await waitFor(() => expect(railSeat('manager')?.dataset.lit).toBe('true'))
+      expect(railSeat(sdkWorker.worktree)).toBeTruthy()
+      expect(railSeat(sdkWorker.worktree)!.dataset.lit).toBeUndefined()
+      expect(railSeat(sdkWorker.worktree)!.getAttribute('aria-label')).toContain('projectPanel.swarm.statusWaiting')
       expect(document.querySelector('[data-seat="manager"]')).toBeNull()
       expect(document.querySelector('[data-seat-feed]')).toBeNull()
       expect(h.urls.some((u) => u.includes('/tail?'))).toBe(false)
@@ -363,20 +365,73 @@ describe('manager / worker seats fold into thin strips', () => {
     }
   })
 
-  it('a click opens the seat and is remembered; a second click folds it again', async () => {
+  // The bug the owner saw: the nameplate said 動いている while the lamp was grey
+  // (a WAITING desk). The icon must light — and say — exactly what the nameplate says.
+  it('the icon says the same state the nameplate says (a waiting manager is "running", lit)', async () => {
+    seatFold.allOpen = false
+    try {
+      storeManager()
+      harness({ active: () => [{ id: MANAGER_SDK_ID, status: 'waiting' }] })
+      render(<SwarmModule project={project} />)
+      await waitFor(() => expect(railSeat('manager')?.getAttribute('aria-label')).toContain('projectPanel.swarm.manager.stateRunning'))
+      expect(railSeat('manager')!.dataset.lit).toBe('true')
+      act(() => railSeat('manager')!.click())
+      const seat = openSeat('manager')!
+      expect(within(seat).getByText('projectPanel.swarm.manager.stateRunning')).toBeTruthy()
+    } finally {
+      seatFold.allOpen = true
+    }
+  })
+
+  it('an opened seat leaves the rail, shows its name once, folds from its nameplate, and is remembered', async () => {
     seatFold.allOpen = false
     try {
       storeManager()
       harness({ active: () => [{ id: MANAGER_SDK_ID, status: 'working' }] })
       render(<SwarmModule project={project} />)
-      await waitFor(() => expect(strip('manager')).toBeTruthy())
-      act(() => stripButton('manager').click())
+      await waitFor(() => expect(railSeat('manager')).toBeTruthy())
+      act(() => railSeat('manager')!.click())
       expect(document.querySelector('[data-seat="manager"]')).toBeTruthy()
-      expect(stripButton('manager').getAttribute('aria-expanded')).toBe('true')
+      expect(railSeat('manager')).toBeNull()
+      expect(screen.getAllByText('projectPanel.swarm.manager.tab')).toHaveLength(1)
       expect(JSON.parse(localStorage.getItem(`openground.swarmseats.${project.id}`)!)).toEqual(['manager'])
-      act(() => stripButton('manager').click())
+      const fold = openSeat('manager')!.querySelector('[data-seat-fold]') as HTMLButtonElement
+      act(() => fold.click())
       expect(document.querySelector('[data-seat="manager"]')).toBeNull()
+      expect(railSeat('manager')).toBeTruthy()
       expect(JSON.parse(localStorage.getItem(`openground.swarmseats.${project.id}`)!)).toEqual([])
+    } finally {
+      seatFold.allOpen = true
+    }
+  })
+
+  // Commander rework 1: a seat folded while its live log was open reopened as
+  // SdkWorkerPane, whose nameplate reads its own stream by other rules — a
+  // worker the rail showed as "asking" came back as "working". Folding closes
+  // the log, so the reopened seat speaks through the same look as the rail —
+  // and under the same name ("Worker 1", not the bare role word).
+  it('a seat folded with its log open reopens saying what its rail icon said, under the same name', async () => {
+    seatFold.allOpen = false
+    try {
+      localStorage.setItem(`openground.swarmseats.${project.id}`, JSON.stringify([sdkWorker.worktree]))
+      harness({
+        active: () => [{ id: 'sdk-w1', status: 'waiting' }],
+        escalations: [{ status: 'open', sdkSessionId: 'sdk-w1', question: 'keep ours?', createdAt: '2026-09-25T01:00:00.000Z' }],
+      })
+      render(<SwarmModule project={project} />)
+      const workerName = 'projectPanel.swarm.seat.workerN:{"n":1}'
+      await waitFor(() => expect(within(openSeat(sdkWorker.worktree)!).getByText('projectPanel.swarm.sdk.statusQuestion')).toBeTruthy())
+      expect(within(openSeat(sdkWorker.worktree)!).getByText(workerName)).toBeTruthy()
+      act(() => (within(openSeat(sdkWorker.worktree)!).getByText('projectPanel.swarm.seat.openLog').closest('button') as HTMLButtonElement).click())
+      await waitFor(() => expect(within(openSeat(sdkWorker.worktree)!).queryByText('projectPanel.swarm.seat.openLog')).toBeNull())
+      act(() => (openSeat(sdkWorker.worktree)!.querySelector('[data-seat-fold]') as HTMLButtonElement).click())
+      const icon = railSeat(sdkWorker.worktree)!
+      expect(icon.getAttribute('aria-label')).toContain('projectPanel.swarm.sdk.statusQuestion')
+      expect(icon.getAttribute('aria-label')).toContain('"name":"' + workerName.replace(/"/g, '\\"'))
+      act(() => icon.click())
+      const seat = openSeat(sdkWorker.worktree)!
+      expect(within(seat).getByText('projectPanel.swarm.sdk.statusQuestion')).toBeTruthy()
+      expect(within(seat).getByText(workerName)).toBeTruthy()
     } finally {
       seatFold.allOpen = true
     }
