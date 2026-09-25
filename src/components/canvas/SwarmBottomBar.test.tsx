@@ -62,7 +62,7 @@ describe('SwarmBottomBar', () => {
     fireEvent.pointerMove(handle, { clientY: 400, pointerId: 1, buttons: 1 })
     fireEvent.pointerUp(handle, { clientY: 400, pointerId: 1 })
     expect(bar().style.height).toBe(`${SWARM_BAR_DEFAULT_H + 100}px`)
-    expect(JSON.parse(localStorage.getItem(swarmBarKey('p1'))!)).toEqual({ h: SWARM_BAR_DEFAULT_H + 100 })
+    expect(JSON.parse(localStorage.getItem(swarmBarKey('p1'))!)).toEqual({ h: SWARM_BAR_DEFAULT_H + 100, open: true })
     // After the drag, merely hovering the handle must not resize.
     fireEvent.pointerMove(handle, { clientY: 200, pointerId: 1, buttons: 0 })
     expect(bar().style.height).toBe(`${SWARM_BAR_DEFAULT_H + 100}px`)
@@ -92,6 +92,29 @@ describe('SwarmBottomBar', () => {
     for (let i = 0; i < 40; i++) fireEvent.keyDown(handle, { key: 'ArrowDown' })
     expect(parseInt(bar().style.height, 10)).toBeGreaterThanOrEqual(180)
     expect(JSON.parse(localStorage.getItem(swarmBarKey('p1'))!).h).toBe(parseInt(bar().style.height, 10))
+  })
+
+  it('remembers open / folded per project across a re-entry (owner decision 2026-09-25)', () => {
+    render(<SwarmBottomBar project={project('p1')} />)
+    fireEvent.click(screen.getByText('folded'))
+    fireEvent.keyDown(screen.getByRole('separator'), { key: 'ArrowUp' })
+    // Back to Ground (unmount), then into the same project again.
+    cleanup()
+    render(<SwarmBottomBar project={project('p1')} />)
+    expect(screen.getByText('open')).toBeTruthy()
+    expect(bar().style.height).toBe(`${SWARM_BAR_DEFAULT_H + 24}px`)
+    // Another project, never opened, still starts folded.
+    cleanup()
+    render(<SwarmBottomBar project={project('p2')} />)
+    expect(screen.getByText('folded')).toBeTruthy()
+    // Fold p1, leave, come back: folded, and its height is kept.
+    cleanup()
+    render(<SwarmBottomBar project={project('p1')} />)
+    fireEvent.click(screen.getByText('open'))
+    cleanup()
+    render(<SwarmBottomBar project={project('p1')} />)
+    expect(screen.getByText('folded')).toBeTruthy()
+    expect(JSON.parse(localStorage.getItem(swarmBarKey('p1'))!)).toEqual({ h: SWARM_BAR_DEFAULT_H + 24, open: false })
   })
 
   it('folding again keeps the height for the next open', () => {

@@ -11,9 +11,12 @@
 //   Folded mounts no seat, so it opens no EventSource.
 // - Open: grows UPWARD to a saved height and shows the seats (president ·
 //   manager · workers). The top edge is a drag handle; the height is saved per
-//   project and restored next time. Open/closed itself is NOT saved — every
-//   project opens folded — but it survives tab switches, because ProjectPanel
-//   renders this bar outside the tab body.
+//   project and restored next time. Open/closed is saved per project too
+//   (owner decision 2026-09-25): leave a project with the bar open and it is
+//   open when you come back, even after a restart. A project never opened
+//   before starts folded. Opening on entry cannot freeze the window: the seats
+//   only get what the page's streams leave (streamBudget.ts, pinned in
+//   SwarmModule.streamBudget.test.tsx).
 
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import type { ProjectMeta } from '@/lib/types'
@@ -29,27 +32,35 @@ const KEY_STEP = 24
 
 export const swarmBarKey = (projectId: string) => `openground.swarmbar.${projectId}`
 
-export const loadSwarmBarHeight = (projectId: string): number => {
+type SavedBar = { h?: unknown; open?: unknown }
+
+const readSaved = (projectId: string): SavedBar => {
   try {
-    const raw = JSON.parse(localStorage.getItem(swarmBarKey(projectId)) ?? 'null') as { h?: unknown } | null
-    const h = raw?.h
-    return typeof h === 'number' && Number.isFinite(h) ? Math.max(SWARM_BAR_MIN_H, Math.round(h)) : SWARM_BAR_DEFAULT_H
+    const raw = JSON.parse(localStorage.getItem(swarmBarKey(projectId)) ?? 'null') as SavedBar | null
+    return raw && typeof raw === 'object' ? raw : {}
   } catch {
-    return SWARM_BAR_DEFAULT_H
+    return {}
   }
 }
 
-const saveHeight = (projectId: string, h: number) => {
+export const loadSwarmBarHeight = (projectId: string): number => {
+  const h = readSaved(projectId).h
+  return typeof h === 'number' && Number.isFinite(h) ? Math.max(SWARM_BAR_MIN_H, Math.round(h)) : SWARM_BAR_DEFAULT_H
+}
+
+export const loadSwarmBarOpen = (projectId: string): boolean => readSaved(projectId).open === true
+
+const save = (projectId: string, patch: { h?: number; open?: boolean }) => {
   try {
-    localStorage.setItem(swarmBarKey(projectId), JSON.stringify({ h }))
+    localStorage.setItem(swarmBarKey(projectId), JSON.stringify({ ...readSaved(projectId), ...patch }))
   } catch {
-    /* storage full / disabled — the height just won't be remembered */
+    /* storage full / disabled — the bar just won't be remembered */
   }
 }
 
 export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
   const { t } = useT()
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(() => loadSwarmBarOpen(project.id))
   const [height, setHeight] = useState(() => loadSwarmBarHeight(project.id))
   const rootRef = useRef<HTMLDivElement>(null)
   const drag = useRef<{ y: number; h: number } | null>(null)
@@ -79,7 +90,7 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
   const commit = (h: number) => {
     const v = clamp(h)
     setHeight(v)
-    saveHeight(project.id, v)
+    save(project.id, { h: v })
   }
 
   // Pointer capture keeps the drag on the handle even when the pointer runs
@@ -152,7 +163,8 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
         collapsed={!open}
         onToggleCollapsed={() => {
           if (!open) setHeight((h) => clamp(h))
-          setOpen((o) => !o)
+          setOpen(!open)
+          save(project.id, { open: !open })
         }}
       />
       </StreamOwnerContext.Provider>
