@@ -1,7 +1,8 @@
-import { existsSync, mkdtempSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { afterEach, beforeEach, expect } from 'vitest'
+import { afterAll, afterEach, beforeEach, expect } from 'vitest'
+import { TEST_HOME_PREFIX } from '@/lib/server/testHomeSweep'
 import { canonicalizePath, productionHome, testHomeProblem } from '@/lib/server/testHomeGuard'
 import { installRepoRootFence } from './repoRootFence'
 
@@ -43,8 +44,37 @@ import { installRepoRootFence } from './repoRootFence'
 // (via testHomeGuard.ts) and throws even if this file never ran — necessary
 // because a tolerant caller can swallow an exception, but it cannot swallow a
 // write that never happened.
-const tmpHome = mkdtempSync(join(tmpdir(), 'openground-test-home-'))
+//
+// ONE SANDBOX PER TEST FILE, REMOVED WHEN THE FILE ENDS (2026-09-26). The home
+// used to be created and never deleted, and so did every `mkdtemp(tmpdir())`
+// the tests themselves made: the owner's temp dir held 153,830
+// openground-test-home-* dirs plus ~30k og-* dirs (13 GB). Now the sandbox is
+// also the process's temp dir (TMPDIR/TMP/TEMP — os.tmpdir() reads them per
+// call, child processes inherit them), so whatever a test file leaves behind
+// is inside it, and the afterAll below deletes it. The home is a subdir, so it
+// still sits under tmpdir() for the fence. A run that is killed before
+// afterAll leaves its sandbox; sweepStaleTestHomes (testHomeSweep.ts) collects
+// those later.
+//
+// The sandbox is made in the ORIGINAL temp dir, recorded once per process: under
+// --no-isolate the next file runs in this same process after the afterAll below
+// deleted the dir TMPDIR points at, and mkdtemp(tmpdir()) would then be ENOENT.
+const baseTmp = (process.env.OPENGROUND_TEST_BASE_TMP ??= tmpdir())
+const sandbox = mkdtempSync(join(baseTmp, TEST_HOME_PREFIX))
+const tmpHome = join(sandbox, 'home')
+mkdirSync(tmpHome)
 process.env.OPENGROUND_HOME = tmpHome
+for (const key of ['TMPDIR', 'TMP', 'TEMP']) process.env[key] = sandbox
+// Registered first, so under vitest's 'stack' hook order it runs LAST — after
+// every afterAll of the file itself.
+afterAll(() => {
+  try {
+    rmSync(sandbox, { recursive: true, force: true, maxRetries: 3 })
+  } catch {
+    // Best effort: a child still writing into it must not fail the file. The
+    // stale sweep picks it up later.
+  }
+})
 
 // The genuine ~/.openground — reported for attribution when the check below
 // refuses to run the suite.

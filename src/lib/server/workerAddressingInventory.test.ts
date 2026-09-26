@@ -695,6 +695,12 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     ptyFns: [],
     sdkCalls: ['canonicalLiveDeskCwds', 'isDirOccupied'],
   },
+  'src/lib/server/swarmWorkerReaper.ts': {
+    tier: 'both-pools',
+    why: 'The finished-worker reaper (2026-09-26) removes swarm worktrees on a boot loop. Whether a session is still in a tree, and whether it moved recently, must come from the liveDesks seam (both pools): a one-pool answer reads a working SDK worker as gone and removes its tree — the worktreeCleanup 0731 shape again.',
+    ptyFns: [],
+    sdkCalls: ['canonicalLiveDeskCwds', 'deskRecentlyActiveIn', 'isDirOccupied'],
+  },
   'src/lib/server/sdkDeskLimit.ts': {
     tier: 'sdk-live-predicate',
     why: 'Subscribes to an SDK desk\'s frame stream to notice a quota refusal. Pure SDK side by construction — there is no PTY handle here — but it must stay declared so a change that starts reaching for a terminalId is visible.',

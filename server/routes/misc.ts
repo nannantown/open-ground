@@ -55,7 +55,7 @@ import { claudeConnection } from '@/lib/server/claudeConnection'
 import { probeGhCli } from '@/lib/server/ghCli'
 import { installHooks, uninstallHooks } from '@/lib/server/hooksInstall'
 import { readGroundLamps } from '@/lib/server/groundLamps'
-import { markGroundSeen } from '@/lib/server/groundMarks'
+import { markGroundOpened, markGroundSeen } from '@/lib/server/groundMarks'
 import { requireProjectPath } from '../middleware/projectPath'
 import type {
   NotificationStateResponse,
@@ -205,6 +205,16 @@ export const miscRoutes = new Hono()
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
     await markGroundSeen(path)
+    return c.json({ ok: true })
+  })
+  // --- POST /api/ground/opened ----------------------------------------------
+  // The owner has this PROJECT open (any tab) — stamp it, which clears the
+  // card's eye (delivered, just look) but never a hand (2026-09-26, 「プロジェクト
+  // の中に入ったら、既読みたいな感じ」). Body: { path }.
+  .post('/api/ground/opened', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    await markGroundOpened(path)
     return c.json({ ok: true })
   })
   // --- GET /api/projects ----------------------------------------------------

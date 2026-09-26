@@ -1800,3 +1800,18 @@ teeth: `stuckProcessWatch.test.ts`(21 件)が判定を**壊れたマシンを再
    OG も claude も無実で、犯人が過去のテストの残骸ということがある。
 10. **U 状態を見たら kill を試さない。** 時間の無駄だと実測済み(§7.3)。
    予防はコード側、復旧は再起動、と割り切る。
+
+## 8. Temp-dir cleanup — the sandbox is also TMPDIR (2026-09-26)
+
+Measured on the owner's machine: 153,830 `openground-test-home-*` dirs plus ~30k `og-*` dirs, 13 GB,
+because the pinned home was never deleted and neither was anything tests `mkdtemp(tmpdir())`'d.
+`src/test/setup-home.ts` now creates one sandbox per test file, pins `OPENGROUND_HOME=<sandbox>/home`
+(still under `tmpdir()`, so the fence is unchanged) and `TMPDIR/TMP/TEMP=<sandbox>` (read per call by
+`os.tmpdir()`, inherited by children), and removes the sandbox in an afterAll registered first (runs
+last). Killed runs are collected by `src/lib/server/testHomeSweep.ts` (server boot + every 6 h; only
+prefix `openground-test-home-`, real dir, own uid, untouched 3 h — other temp dirs are never judged).
+The sandbox is always made in the ORIGINAL temp dir, recorded once per process in
+`OPENGROUND_TEST_BASE_TMP` — under `--no-isolate` the next file runs in the same process after the
+previous file deleted the dir TMPDIR points at (mkdtemp would be ENOENT).
+Teeth (`testHomeSweep.test.ts`, measured red): the afterAll removal, the TMPDIR repoint, the age
+check, and a child `vitest run --no-isolate --maxWorkers=1` over two files (the base-tmp record).

@@ -36,8 +36,9 @@ describe('ProjectJumpPalette', () => {
         lamps={new Map([['a', 'working'], ['b', 'question']])}
       />,
     )
-    expect(screen.getByText('toolbar.searchLampWorking')).toBeTruthy()
-    // An icon, not a word (owner 2026-09-26) — its name lives in the label.
+    // Marks, not words (owner 2026-09-26) — each name lives in the label.
+    expect(screen.getByRole('img', { name: 'toolbar.searchLampWorking' })).toBeTruthy()
+    expect(screen.queryByText('toolbar.searchLampWorking')).toBeNull()
     expect(screen.getByRole('img', { name: 'toolbar.searchLampQuestion' })).toBeTruthy()
     expect(screen.queryByText('toolbar.searchLampQuestion', { ignore: 'title' })).toBeNull()
   })

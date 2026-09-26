@@ -420,7 +420,7 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
 > - **喋って止まった卓は3つ同時に凍る** —— これが実測インシデントで、だから検知できる。
 >
 > **閾値 40 分の根拠(逆振れ防止・完了条件2)**: 働いている司令官が**3チャネル全部**を空けうる最大幅を超える必要がある。
-> その最大幅は「sub-agent が走っていない長い1コマンド」= `npm test` フル(実測3〜12分・swarm 負荷下)で、
+> その最大幅は「sub-agent が走っていない長い1コマンド」= `npm test` フル(実測3〜12分・swarm 負荷下。2026-09-26 以降はこれに全体テストの順番待ち時間が乗りうる — 同時2本まで・VERIFICATION.md §10)で、
 > それ以外の手順は tool_result ごとに 2. を、レビュー中は 3. を動かす。40分はその**3倍以上**。
 > **これは「止まった司令官が見過ごされる上限」であって、働いている司令官への締切ではない** —— 描画も止まった卓は
 > 従来どおり10分の `MANAGER_HEARTBEAT_STALE_MS` 経路で拾う(そちらが常道で速い)。
@@ -1163,6 +1163,10 @@ git rebase origin/main            # 競合したら止めて worker 委譲 or �
 # 3) 再検証(engine の verify と同じ基準。node_modules は本体から)
 ln -s <projectPath>/node_modules node_modules 2>/dev/null || true
 npx tsc --noEmit && npm run lint && npm test    # 赤なら push しない — reworkOrPark 相当の差し戻しへ
+#    (2026-09-26) `npm test` may be skipped ONLY when `npx tsx scripts/full-suite-passed.mts <worker-wt>`
+#    exits 0 = the worker's own full run passed on this exact HEAD and it already contains
+#    origin/main (the rebase above was a no-op). After a real rebase it always runs. Full runs
+#    queue machine-wide (max 2 at once, src/test/fullSuiteGate.ts), so allow for waiting time.
 
 # 4) 緑なら FF push(force 厳禁)
 git push origin HEAD:main

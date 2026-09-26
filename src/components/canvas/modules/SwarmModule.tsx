@@ -49,6 +49,7 @@ import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
 import { reconcileDesk } from '@/lib/deskReconcile'
+import type { SwarmBarHandle } from '@/components/canvas/SwarmBottomBar'
 import type {
   ActiveTerminalsResponse,
   BoardColumn,
@@ -65,7 +66,16 @@ import { SdkWorkerPane, blipVerdict, type SdkSessionProbe } from './SdkWorkerPan
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 import { SwarmWorkerSeat, workerSeatLook } from './SwarmWorkerSeat'
-import { SwarmOpenSeat, SwarmSeatRail, loadOpenSeats, saveOpenSeats, type RailSeat } from './SwarmSeatStrip'
+import {
+  SeatSizeContext,
+  SizedSeat,
+  SwarmOpenSeat,
+  SwarmSeatRail,
+  loadOpenSeats,
+  saveOpenSeats,
+  useSeatSizes,
+  type RailSeat,
+} from './SwarmSeatStrip'
 import { useSupplyDesk } from './useSupplyDesk'
 import { SwarmManagerPane, commanderSeatLook } from './SwarmManagerPane'
 import { SwarmPowerSwitch } from './SwarmPowerBar'
@@ -89,7 +99,6 @@ import { STREAM_BUDGET, useStreamCount } from '@/lib/streamBudget'
 // can't stretch its seat. Past the width, the row scrolls — every seat stays
 // reachable. Narrow windows therefore always SCROLL, never wrap.
 const SEAT_STYLE = { flex: '1 0 360px', minWidth: 360, minHeight: 220 } as const
-const SEAT_CLASS = 'h-full overflow-hidden'
 // A FOLDED worker seat (SwarmWorkerSeat) carries a nameplate and a few lines,
 // so it can be narrower — more of the fleet fits on one screen.
 // 260 tall, not 220: a waiting worker with its question AND the opened send box
@@ -267,9 +276,11 @@ interface SwarmModuleProps {
   collapsed?: boolean
   /** Present ⇒ the header row carries the bar's open/close toggle. */
   onToggleCollapsed?: () => void
+  /** The bottom bar's drag handlers, spread on the header row (SwarmBottomBar). */
+  barHandle?: SwarmBarHandle
 }
 
-export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: SwarmModuleProps) => {
+export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, barHandle }: SwarmModuleProps) => {
   const { t } = useT()
 
   // PTY id → live status from GET /api/terminal/active (working|waiting).
@@ -302,6 +313,8 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
   // Manager / worker seats unfolded from the folded-seat rail (SwarmSeatStrip),
   // remembered per project. Default: all folded — the owner talks to 社長.
   const [openSeats, setOpenSeats] = useState<ReadonlySet<string>>(() => loadOpenSeats(project.id))
+  // Seat widths / the one wide seat (SwarmSeatStrip), remembered per project.
+  const seatSizes = useSeatSizes(project.id)
   const toggleSeat = useCallback(
     (key: string) => {
       const next = new Set(openSeats)
@@ -1155,6 +1168,17 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
   // The folded seats, as icons on the rail. Each icon's words come from the
   // SAME look function its nameplate uses, fed the SAME status the open seat
   // gets below — so the rail can never say something the nameplate does not.
+  // The open seats, left to right — each seat's border sizes the one before it.
+  const openOrder = [
+    'supply',
+    ...(openSeats.has('manager') ? ['manager'] : []),
+    ...(allWorkers.length === 0
+      ? openSeats.has('vacant')
+        ? ['vacant']
+        : []
+      : allWorkers.filter((w) => openSeats.has(w.worktree)).map((w) => w.worktree)),
+  ]
+  const prevSeat = (key: string) => openOrder[openOrder.indexOf(key) - 1]
   const railSeats: RailSeat[] = []
   if (!openSeats.has('manager')) {
     const l = commanderSeatLook(manager ? managerStatus : null)
@@ -1210,6 +1234,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
           clickable"). A click that lands on a control inside it (the switch)
           stays that control's; the keyboard path is the named toggle button. */}
       <div
+        {...barHandle}
         onClick={
           onToggleCollapsed
             ? (e) => {
@@ -1226,7 +1251,9 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
           // so the label lines up with the seats below (no negative margin).
           'flex min-h-[38px] shrink-0 flex-wrap items-center gap-x-3 gap-y-1 bg-bg py-1 pr-2',
           onToggleCollapsed
-            ? 'cursor-pointer pl-1.5 transition-colors duration-150 hover:bg-plane active:bg-line-soft has-[[role=switch]:hover]:bg-bg has-[[role=switch]:active]:bg-bg'
+            ? // With the bar's drag handle the row is grabbed (row-resize); a
+              // press without moving still opens / folds.
+              `${barHandle ? 'cursor-row-resize touch-none select-none' : 'cursor-pointer'} pl-1.5 transition-colors duration-150 hover:bg-plane active:bg-line-soft has-[[role=switch]:hover]:bg-bg has-[[role=switch]:active]:bg-bg`
             : 'pl-3',
           collapsed ? '' : 'border-b border-line',
         ].join(' ')}
@@ -1247,7 +1274,8 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
             aria-label={t(collapsed ? 'projectPanel.swarm.bar.expand' : 'projectPanel.swarm.bar.collapse')}
             title={t(collapsed ? 'projectPanel.swarm.bar.expand' : 'projectPanel.swarm.bar.collapse')}
             className={[
-              'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-[4px] px-1.5 text-ui font-medium text-ink',
+              // cursor-[inherit]: the name is part of the grab handle too.
+              'inline-flex h-7 shrink-0 cursor-[inherit] items-center gap-1.5 rounded-[4px] px-1.5 text-ui font-medium text-ink',
               'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
             ].join(' ')}
           >
@@ -1493,8 +1521,10 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
       )}
       {/* The open seats scroll; the folded-seat rail stays put at the right. */}
       <div className="flex min-h-0 min-w-0 flex-1">
-      <div className="flex min-h-0 min-w-0 flex-1 gap-px overflow-x-auto overflow-y-auto bg-line-strong">
-        <div className={SEAT_CLASS} style={SEAT_STYLE}>
+      <SeatSizeContext.Provider value={{ ...seatSizes, order: openOrder }}>
+      {/* No gap: the 1px line between seats is the drag border (SeatBorder). */}
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-auto bg-bg">
+        <SizedSeat seatKey="supply" style={SEAT_STYLE}>
           {supply && !supplyStreams ? (
             // The desk is up but the connection budget is spent: its
             // nameplate and why, instead of a stream that would starve fetches.
@@ -1543,13 +1573,13 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
               </div>
             </div>
           )}
-        </div>
+        </SizedSeat>
         {/* The manager's seat — nameplate + a quiet start/stop, nothing else
             (the owner talks only to the president). Its status comes from the
             active-desk poll, which sees both pools; a desk that died is cleared
             by the reconcile above. */}
         {openSeats.has('manager') && (
-        <SwarmOpenSeat seatKey="manager" onFold={() => toggleSeat('manager')} style={MANAGER_SEAT_STYLE}>
+        <SwarmOpenSeat seatKey="manager" prevKey={prevSeat('manager')} onFold={() => toggleSeat('manager')} style={MANAGER_SEAT_STYLE}>
         <div className="h-full" data-seat="manager">
           <SwarmManagerPane
             status={manager ? managerStatus : null}
@@ -1566,7 +1596,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
         {allWorkers.length === 0 ? (
           openSeats.has('vacant') && (
           // A vacant worker seat, so all three roles are always on the screen.
-          <SwarmOpenSeat seatKey="vacant" onFold={() => toggleSeat('vacant')} style={WORKER_SEAT_STYLE}>
+          <SwarmOpenSeat seatKey="vacant" prevKey={prevSeat('vacant')} onFold={() => toggleSeat('vacant')} style={WORKER_SEAT_STYLE}>
             <div className="flex h-full min-h-0 flex-col bg-bg">
               <SwarmSeatHeader role="worker" sprite={null} statusLabel={t('projectPanel.swarm.seat.vacant')} />
               <div className="flex flex-1 items-center justify-center px-6 text-center">
@@ -1600,6 +1630,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
                 <SwarmOpenSeat
                   key={w.worktree}
                   seatKey={w.worktree}
+                  prevKey={prevSeat(w.worktree)}
                   // The same name the rail gives this seat ("Worker 2").
                   name={t('projectPanel.swarm.seat.workerN', { n: i + 1 })}
                   onFold={() => toggleSeat(w.worktree)}
@@ -1683,6 +1714,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed }: S
           </>
         )}
       </div>
+      </SeatSizeContext.Provider>
       <SwarmSeatRail seats={railSeats} onOpen={toggleSeat} />
       </div>
       </>

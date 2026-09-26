@@ -10,12 +10,12 @@
 // The tint is a theme token per role (`--og-seat-*` in globals.css, both
 // palettes, text contrast pinned by themePalette.test.ts).
 
-import { useContext, type ReactNode } from 'react'
+import { useContext, type MouseEvent, type ReactNode } from 'react'
 import { ChevronsRight } from 'lucide-react'
 import { SwarmSprite } from '@/components/canvas/SwarmSprite'
 import type { SpriteRole, SpriteState } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
-import { SeatFoldContext } from './SwarmSeatStrip'
+import { SeatFoldContext, SeatKeyContext, SeatSizeContext } from './SwarmSeatStrip'
 
 const SEAT_TINT: Record<SpriteRole, string> = {
   supply: 'bg-seat-supply',
@@ -57,9 +57,24 @@ export const SwarmSeatHeader = ({
   const fold = useContext(SeatFoldContext)
   const onFold = fold?.onFold
   const roleLabel = fold?.name ?? t(ROLE_LABEL_KEY[role])
+  // Inside a sized seat (SwarmSeatStrip SizedSeat), a press on the plate — not
+  // on one of its buttons — opens this seat up big, and again puts it back.
+  const sizes = useContext(SeatSizeContext)
+  const seatKey = useContext(SeatKeyContext)
+  const widen =
+    sizes && seatKey
+      ? (e: MouseEvent<HTMLDivElement>) => {
+          if ((e.target as Element).closest('button, a, input, select, textarea, [role="menu"]')) return
+          if (e.detail > 1 || window.getSelection()?.toString()) return
+          sizes.toggleWide(seatKey)
+        }
+      : undefined
   return (
     <div
-      className={`flex min-h-[34px] shrink-0 items-center gap-2 border-b border-line-soft px-2.5 py-1.5 ${SEAT_TINT[role]}`}
+      onClick={widen}
+      className={`flex min-h-[34px] shrink-0 items-center gap-2 border-b border-line-soft px-2.5 py-1.5 ${SEAT_TINT[role]} ${
+        widen ? 'cursor-pointer transition-shadow duration-150 hover:shadow-[inset_0_-2px_0_rgb(var(--og-accent)/0.5)]' : ''
+      }`}
     >
       {onFold ? (
         <button

@@ -509,6 +509,10 @@ export const InfiniteCanvas = ({
 
   const [panning, setPanning] = useState(false)
   const [draw, setDraw] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
+  // Ground frame under the idle pointer: its border firms up so the frame's
+  // extent reads while the user reaches for it. The body is click-through, so
+  // CSS :hover can't see it — hit-tested with topFrameAt instead.
+  const [hoverFrameId, setHoverFrameId] = useState<string | null>(null)
   // Alignment guide lines shown while a single element is being snap-dragged.
   // The ref mirrors the state so the pointer-up handler can clear them without a
   // stale-closure read (and skip a needless re-render on a plain click).
@@ -2280,6 +2284,10 @@ export const InfiniteCanvas = ({
       // Selection-chrome hover cursor (resize arrows / rotate arrow) first —
       // it owns the viewport's inline cursor while over the chrome.
       updateChromeCursor(e)
+      if (frameVariant === 'ground') {
+        const w = worldFromEvent(e)
+        setHoverFrameId(tool === 'select' ? topFrameAt(w.x, w.y) ?? null : null)
+      }
       // Hover sync with the Layers panel — report only on change so an idle
       // sweep doesn't storm the parent with renders.
       if (onHoverElement && tool === 'select') {
@@ -3820,6 +3828,7 @@ export const InfiniteCanvas = ({
       // (rare), still run the up-path so a press can't get stuck.
       onLostPointerCapture={onViewportPointerUp}
       onPointerLeave={() => {
+        setHoverFrameId(null)
         if (lastHoverRef.current !== null) {
           lastHoverRef.current = null
           onHoverElement?.(null)
@@ -3897,6 +3906,7 @@ export const InfiniteCanvas = ({
               <FrameView
                 frame={frame}
                 selected={selectedSet.has(frame.id)}
+                hovered={hoverFrameId === frame.id}
                 editing={editingId === frame.id}
                 onHeaderPointerDown={fcb.onPointerDown}
                 onChangeLabel={fcb.onChangeLabel}

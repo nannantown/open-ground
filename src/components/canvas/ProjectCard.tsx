@@ -145,10 +145,16 @@ export const ProjectCard = memo(({
 
       {/* claude-status stamp, mirroring the coord label on the right margin */}
       {lamp === 'working' && (
-        // claude is busy — moss, with the dot pulsing while live.
-        <div className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap label-cap-latin text-moss-text">
-          <span className="run-pulse h-[5px] w-[5px] rounded-full bg-moss" />
-          <span>Running</span>
+        // The project's work is not finished (groundLamp.ts) — a pulsing moss
+        // dot, no label (owner 2026-09-26: one mark, no words; the words live in
+        // the hover text), matching the moss band along the top edge.
+        <div
+          role="img"
+          title={t('projectPanel.groundMarkWorking')}
+          aria-label={t('projectPanel.groundMarkWorking')}
+          className="absolute -top-[5px] right-3 flex h-[10px] items-center bg-bg-card px-1.5"
+        >
+          <span className="run-pulse h-[7px] w-[7px] rounded-full bg-moss" />
         </div>
       )}
       {lamp === 'unknown' && (
@@ -158,11 +164,12 @@ export const ProjectCard = memo(({
         // Deliberately the quietest stamp on the card: it is a fact about this
         // app, not about their project, and it must not compete with Waiting.
         <div
-          title="This project's board could not be read"
-          className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap label-cap-latin text-ink-subtle"
+          role="img"
+          title={t('projectPanel.groundMarkUnknown')}
+          aria-label={t('projectPanel.groundMarkUnknown')}
+          className="absolute -top-[5px] right-3 flex h-[10px] items-center bg-bg-card px-1.5"
         >
-          <span className="h-[5px] w-[5px] rounded-full bg-ink-faint" />
-          <span>No data</span>
+          <span className="h-[7px] w-[7px] rounded-full border border-ink-faint" />
         </div>
       )}
       {lamp === 'question' && (

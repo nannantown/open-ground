@@ -310,8 +310,13 @@ older docs are historical, not operating instructions.
   waiting on the owner and cards awaiting integration, each only when there
   are some · on/off switch) and
   opening upward into the seats (president · manager · workers —
-  `SwarmModule`) when ANY part of that line is clicked; its height is
-  dragged and saved per project. The manager and each worker seat fold
+  `SwarmModule`) when ANY part of that line is clicked; dragging that same
+  line up / down resizes it (owner 2026-09-26 — a move under a few px is
+  still a click; controls inside the line neither toggle nor drag) and the
+  height is saved per project. Open seats are resized by dragging the
+  border between them, and a click on that border or on a seat's nameplate
+  opens that seat up wide (again to restore); widths are saved per project
+  (`SizedSeat` / `SeatBorder` in `SwarmSeatStrip.tsx`). The manager and each worker seat fold
   onto ONE icon rail at the right edge (`SwarmSeatStrip.tsx`, owner
   decision 2026-09-25, second design): the character icon with a short
   horizontal name under it; only a working seat's icon moves and its corner

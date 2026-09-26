@@ -126,8 +126,14 @@
   --og-seat-worker: 222 233 226;  /* #DEE9E2 */
   /* shadow ink for box-shadows (tailwind.config.ts boxShadow) */
   --og-shadow: 42 31 26;
-  /* Ground frame body wash (FrameView paints it at 35%): paper in light… */
-  --og-frame-wash: 242 237 222;  /* #F2EDDE */
+  /* Ground frame (FrameView): the body is a faint tint a shade off the grid —
+     ink in light (a touch deeper), cream in dark (a touch lighter). Nested
+     frames stack the translucent wash one step further. The line stays about
+     a card edge and firms up only on hover (owner 2026-09-26). */
+  --og-frame-wash: 42 31 26;     /* #2A1F1A ink */
+  --og-frame-wash-alpha: 0.045;
+  --og-frame-line: 222 211 186;  /* #DED3BA */
+  --og-frame-line-hover: 160 142 108; /* #A08E6C */
   /* paper grain: multiply sinks the grain into the light paper */
   --og-grain-blend: multiply;
   --og-grain-opacity: 0.6;
@@ -219,8 +225,11 @@ html[data-theme='dark'] {
   --og-seat-manager: 48 48 60;    /* #30303C */
   --og-seat-worker: 40 56 50;     /* #283832 */
   --og-shadow: 0 0 0;
-  /* …near-black in dark, so frames sink instead of glowing */
-  --og-frame-wash: 20 16 12;     /* #14100C */
+  /* …cream in dark: a faint lift, kept low so frames never glow */
+  --og-frame-wash: 248 244 232;  /* #F8F4E8 cream */
+  --og-frame-wash-alpha: 0.035;
+  --og-frame-line: 66 51 41;     /* #423329 */
+  --og-frame-line-hover: 128 106 86; /* #806A56 */
   /* multiply would vanish on dark — plain low-opacity grain instead
      (measured on the mock: stdev 1.7 → 2.8 keeps the texture visible) */
   --og-grain-blend: normal;

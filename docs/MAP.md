@@ -103,11 +103,15 @@
 - **カードのランプ**(2026-08-15 に「プロセスの生死」→「仕事の状態」へ移設): 判定は
   `src/lib/groundLamp.ts`(pure・オーナー指定の4ケース)、材料は `src/lib/server/groundLamps.ts`
   → `GET /api/ground/lamps`(started カード数・未回答の質問数・実際に動いているか)。
-  作業中=running / **全部doneまたはtodoのみは何も出さない**。
+  **running = 仕事が終わっていない**(2026-09-26 オーナー決定): doing/review の未完カード(`inFlightTaskCount`)・
+  自動運転中(`isEngineRunning(canon)`=engine.running)に**エンジンが実際に始める** todo(`src/lib/dispatchGate.ts` の `isDispatchableCard`=下書きでない・本文あり・未承認の自己補給でない を selectDispatch と共有+前提カード完了済み。題名だけのメモは数えない)・司令官/社長の生成中
+  (`commanderWorkingCwds`/`presidentWorkingCwds`)・started ありでの worker/自分の pane 生成中。
+  **blocked のみ・todo のみ(自動運転 off)・全部done は何も出さない**。印は文字なし(苔色の点+ホバー文言)。
   **質問(挙手 `Hand`)と確認待ち(目 `Eye`)の印**(2026-09-26 オーナー決定・旧 waiting を置換・絵文字/ラベル無し、
   ホバー文言のみ): 質問 = 未回答エスカレーション(答えるまで残る)または社長の最後の発言が「？」で終わり未読(**オーナー自身の発言への返事に限る**・最後の段落に「？」(「」内の引用は除く)。オーナーが次に発言するまで立ったまま。【エンジンからの知らせ】【司令官からの返事】(supplyNotice.ts の定数と完全一致)・`<command-…>`・自動圧縮の要約(isCompactSummary)とそれへの返事は、立ても消しもしない=納品の「これで OK ですか?」では点かず、再確認で本物の質問も消えない。判定=`stepPresidentAsk`、転記は差分だけ読み進める) /
-  確認待ち = landed ledger の最新 landedAt が未読。「見た」= 下部バーを開いている間 `POST /api/ground/seen`
-  (`SwarmBottomBar` が開いた時・畳んだ/離れた時に打つ)→ `projects/<uuid>/ground-seen.json`。材料は
+  確認待ち = landed ledger の最新 landedAt が未読。「見た」は2種(`src/lib/useGroundLook.ts`、開いた時・離れた時に打つ):
+  バーを開く=`POST /api/ground/seen`→`ground-seen.json`(社長の手と目を消す)/ **プロジェクトを開く**=
+  `POST /api/ground/opened`→`ground-opened.json`(`ProjectPanel`・**目だけ消す、手は消さない**・別ファイル=打刻競合なし)。材料は
   `src/lib/server/groundMarks.ts`(社長の JSONL 末尾 256KB を size+mtime キャッシュで読む)。優先 = 質問 > running > 確認待ち。
   seenAt が一度も無いプロジェクトは時刻系の印を出さない(基準が無い=付きっぱなしを防ぐ)。
   **社長(補給の窓口)が生成中なら running**(2026-09-25 オーナー決定・started 0 でも灯る・
@@ -250,6 +254,26 @@
   あれば活動語ではなくそちらを言う(`spriteStateFor` の asking 優先と一致させる)。
 - **診断・改修の前に `docs/commander/00-INDEX.md`**(症状→章の直行表)。理想形 = `TARGET-STATE.md`。
   安全不変条件 = `docs/SWARM_SAFETY_INVARIANTS.md` + `src/lib/server/swarmSafety.test.ts`(触る前に緑確認)
+- **Finished-worker cleanup (2026-09-26)**: `swarmWorkerReaper.ts` — boot loop (every 3 min,
+  engine-independent, **primary instance :47776 only**, kill-switch `OPENGROUND_WORKER_REAP=0`)
+  removes a central `swarm/*` worktree only when it is clean AND its branch is already in main
+  (`checkMergedBranches`, no fetch) AND either the engine (live or saved roster) holds it with its
+  card `done` and its session idle 10 min, or nobody holds it, no session is in it and it has been
+  quiet 60 min (then removal refuses rather than stops a session — `refuseIfOccupied`). Both are
+  re-checked right before removal; a corrupt saved `roster.json` removes nothing that round. Then the janitor's safe sweep drops the branch (`-d`) and heartbeat.
+  This is what keeps the seat rail from filling with finished workers (the seat list is
+  `GET /api/swarm/workers`; a heartbeat whose worktree still exists is shown forever).
+  Tests: `swarmWorkerReaper.test.ts` (real git). Rules: docs/commander/02 §6 path 9.
+- **Worker's iOS simulators closed on teardown (2026-09-26)**: `swarmSimulators.ts`
+  `shutdownWorkerSimulators`, called fire-and-forget from BOTH success paths of
+  `removeSwarmWorktree` (so reaper, abandon and the commander's step 7 all close them). Closes a
+  Booted device only if one of the worker's own Bash commands (its claude transcripts, keyed by the
+  worktree path) names it — by UDID; by whole name ONLY if that name is unique among ALL the Mac's
+  devices, the command boots (`simctl boot` / `xcodebuild test`, not `build`) and it finished —
+  so with several same-named devices it is effectively UDID-only — AND simctl's `lastBootedAt` falls inside that command's run window (±1 s)
+  AND no other live worktree's Bash commands name it. Owner-booted (booted before the command) and
+  bare `open -a Simulator` devices are never touched. Tests: `swarmSimulators.test.ts` (attribution),
+  `swarmWorktreeTrust.test.ts` (wiring). Rules: docs/commander/02 §6 path 9.
 - **worker の SDK ランタイム(実装済み・ダイヤル既定は 0801 に SDK へ反転・reader まで届いたのは
   0802/詳細は本節 §5 後段「ダイヤル既定は 2026-08-01 に反転」の段)**: 入口は
   `workerRuntime.ts`(WorkerRuntime seam・`workerKey`・pty/sdk 実装)/
@@ -475,7 +499,10 @@
   オン/オフのスイッチ。**席を1つもマウントしない = EventSource 0本**)。**行のどこを押しても開閉**
   (中のボタン/スイッチを押したときは開閉しない — 見出し行の onClick が `closest('button,…')` で除外。
   キーボードは名前入りのトグルボタン `data-testid="swarm-bar-toggle"`)。画面上の名前は
-  **エージェントチーム / Agent Team**(2026-09-24・コード/API/保存キー/マーカーは `swarm` のまま)。開くと上に広がり、上端ドラッグ/↑↓キーで高さ、
+  **エージェントチーム / Agent Team**(2026-09-24・コード/API/保存キー/マーカーは `swarm` のまま)。開くと上に広がる。**見出し行そのものがつかみ手**(2026-09-26・オーナー): 行のどこでも上下ドラッグで高さ
+(畳んだ行を上へ引けば開き、開いた帯を床の半分より下へ引けば畳む)、`SWARM_BAR_DRAG_SLOP`(4px)未満の移動はクリック=開閉、
+ドラッグ直後のクリックは捨てる。中のボタン/スイッチ上の押下は開閉もドラッグもしない(`NOT_A_HANDLE`)。キーボードはトグル上の↑↓。
+旧・上端の 5px セパレータは撤去。ハンドラは `SwarmBottomBar` が `barHandle` で `SwarmModule` の見出し行に渡す。
   高さだけ `openground.swarmbar.<projectId>` に保存(開閉は保存しない=毎回畳みで始まる)。
   Header stays ONE line open or folded (owner 2026-09-24): the master power is one `role="switch"`
   (`SwarmPowerSwitch`, no text). Removed from the header the same day (owner request after using 0.11.142): the
@@ -522,6 +549,16 @@
   (no tail poll, no stream — `wantsStream` also requires the seat open). The president's seat never
   folds. Guard = `SwarmModule.seats.test.tsx` "folded seats sit on the icon rail" (the other
   SwarmModule tests mock every seat open).
+  ⑨ **Seat widths (owner 2026-09-26)**: every open seat is a `SizedSeat` (`modules/SwarmSeatStrip.tsx`);
+  each seat but the first has a `SeatBorder` (role=separator, the 1px divider with a 5px grab area)
+  in front of it that sizes the seat on its LEFT — drag past `SEAT_DRAG_SLOP` sets that seat's width
+  (min = its style's minWidth), a plain press makes it the WIDE seat (it grows, the others drop
+  to their minimum) and a second press puts the row back. The saved marks are judged against the
+  row AS IT STANDS (`openOrder`, passed in the context): a wide mark whose seat is folded / gone is
+  ignored, and the LAST seat ignores its saved width and grows — else the row ends in a blank gap
+  (差し戻し 2026-09-26). A press on a nameplate (not its buttons)
+  widens its own seat (`SeatKeyContext` → SwarmSeatHeader). Widths + wide seat saved per project in
+  `openground.swarmseatw.<projectId>`. Guard = `SwarmSeatStrip.sizes.test.tsx`.
   ⑤ **監督タブは撤去済み(2026-09-23)**。続けて**サブタブ自体も廃止**(同日・1画面化):
   Swarm タブは 社長/マネージャー/ワーカー×N の席を1列に横並び(`SwarmModule` の seats row・
   狭い幅は横スクロールで統一)。`SwarmPaneId`/`SWARM_PANE_IDS`/`Settings.swarmPaneOrder` は削除
@@ -858,6 +895,11 @@
   tmpdir 配下でなければ **throw(読み取りも例外にしない)**。homedir アンカーの `hooksInstall.ts`
   (`guardedHomedir`)だけは構造的に choke point 外なので同じ fence をミラー。pin と犯人特定 =
   `src/test/setup-home.ts`(+ `setup-dom.ts` / `registerProject.ts`)。回帰 = `testHomeGuard.test.ts`
+  **Temp cleanup (2026-09-26)**: setup-home makes ONE `openground-test-home-*` sandbox per test
+  file, points OPENGROUND_HOME at `<sandbox>/home` AND TMPDIR/TMP/TEMP at the sandbox, and
+  `rmSync`s it in afterAll — so everything a file `mkdtemp(tmpdir())`s goes with it (153,830
+  leftover dirs / 13 GB before). Killed runs' sandboxes: `testHomeSweep.ts` (boot + every 6 h from
+  `server/index.ts`, prefix-only, untouched 3 h). Tests: `testHomeSweep.test.ts` (runs a child vitest).
   **落とし穴 — `tmpdir()` の実体が OS で違う**: `tempRoots()` は非 win32 で `/tmp` を
   ハードコードで足すので、Linux(CI)では「実 tmp の中に建てた不安全ホーム」が安全と判定され、
   macOS(`/var/folders/…`)でだけ緑になる。temp まわりの teeth は必ず `TMPDIR=/tmp` でも回すこと
@@ -885,4 +927,17 @@
 - e2e: `e2e/*.spec.ts`(playwright — build + prod boot して :47776 を叩く)+ `playwright.config.ts`
 - **完了ゲート3点セット**: `npx tsc --noEmit` / `npm test` / `npm run lint` — tsc は test/lint が
   捕捉しない型エラーを捕る(必須)
+- **Full-suite gate (2026-09-26)**: `vitest.config.ts` → `src/test/fullSuiteGate.ts`
+  (`enterFullSuiteGate`). A whole-suite run (no path filter / `--changed` / `related`) waits
+  until fewer than 2 full runs are going across every worktree of the repo (state under
+  `<git-common-dir>/og-test-gate/`, dead pid or 3 min without a stamp = slot freed), and gets
+  `maxWorkers = (cores-1)/2` when it shares. A plain `npm test` started on a clean tree records its
+  exit code + tree id in `<git-dir>/og-full-suite.json`; `npx tsx scripts/full-suite-passed.mts <wt>`
+  (`src/test/fullSuiteRecord.ts`) tells the commander whether that pass covers the branch
+  as it would land. Tests = `src/test/fullSuiteGate.test.ts`. Pitfalls: a change to
+  `package.json` / `vitest.config.*` makes `--changed` select everything, ungated
+  (vitest `forceRerunTriggers`); a directory filter is ungated too. Never use
+  `git rev-parse --path-format=absolute` here: the owner's git is 2.28 (flag is 2.31+) and
+  echoes the flag back as output — each worktree then got its own queue (`gateDir`, 0926 rework).
+  Canon: VERIFICATION.md §10
 - 罠: vitest を mid-run で kill しない(遅い≠ハング。親だけ kill すると forks が孤児化して暴走)。

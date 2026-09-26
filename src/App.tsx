@@ -728,19 +728,22 @@ export default function App() {
         const next = new Map<string, GroundLamp>()
         for (const row of data.lamps ?? []) {
           if (!known.has(row.projectId)) continue
-          // Both optional fields are passed through ABSENT rather than defaulted:
-          // `started` missing means the board could not be read (⇒ 'unknown', a
+          // Optional fields are passed through ABSENT rather than defaulted:
+          // `inFlight` / `started` missing means the board could not be read (⇒ 'unknown', a
           // visible stamp, because drawing nothing is how a FINISHED project
           // looks), and `openQuestions` missing means the inbox could not be
           // read, which contributes nothing either way.
           const lamp = groundLamp({
             ...(row.started === undefined ? {} : { started: row.started }),
+            ...(row.inFlight === undefined ? {} : { inFlight: row.inFlight }),
             ...(row.openQuestions === undefined ? {} : { openQuestions: row.openQuestions }),
             liveWork: row.liveWork,
             presidentWorking: row.presidentWorking === true,
+            commanderWorking: row.commanderWorking === true,
             presidentAskedAt: row.presidentAskedAt,
             deliveredAt: row.deliveredAt,
             seenAt: row.seenAt,
+            openedAt: row.openedAt,
           })
           if (lamp) next.set(row.projectId, lamp)
         }

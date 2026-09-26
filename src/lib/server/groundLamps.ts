@@ -25,7 +25,7 @@
 // NOTHING HERE THROWS. A project whose board cannot be read contributes a row
 // with no counts rather than taking the whole Ground's lamps down with it.
 
-import { startedTaskCount } from '@/lib/groundLamp'
+import { inFlightTaskCount, startedTaskCount } from '@/lib/groundLamp'
 import { canonicalize } from './canonicalize'
 import { readProjectData } from './projectData'
 import { getSettings } from './store'
@@ -33,33 +33,49 @@ import { countOpenEscalationsByProject } from './swarmEscalations'
 import { listSwarmWorkers } from './swarmWorkerRegistry'
 import { listAllActiveDesks, listDeskIdsByRole } from './liveDesks'
 import { SUPPLY_DESK_LABEL } from './swarmSupply'
-import { readDeliveredAt, readGroundSeenAt, readPresidentAskedAt } from './groundMarks'
+import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
+import { isEngineRunning } from './swarmOrchestrator'
+import { readDeliveredAt, readGroundOpenedAt, readGroundSeenAt, readPresidentAskedAt } from './groundMarks'
 import type { ClaudeActivity, GroundLampRow, GroundLampsResponse } from '@/lib/types'
 
 export interface GroundLampDeps {
   /** DI: every registered project, as `{ id, path }`. */
   projects?: () => Promise<Array<{ id: string; path: string }>>
-  /** DI: started-card count for one project, or undefined when unreadable. */
-  startedFor?: (projectPath: string) => Promise<number | undefined>
+  /** DI: the board's two counts for one project (started = doing/review/blocked,
+   *  inFlight = inFlightTaskCount under this project's autopilot), or undefined
+   *  when the board is unreadable. `canonPath` keys the autopilot lookup. */
+  boardFor?: (projectPath: string, canonPath: string) => Promise<BoardCounts | undefined>
   /** DI: open questions per canonical project path, or null when unreadable. */
   openQuestions?: () => Promise<Map<string, number> | null>
   /** DI: is anything actually running for this project. */
   liveWorkFor?: (projectPath: string) => Promise<boolean>
   /** DI: cwds of president (supply) desks that are generating right now. */
   presidentWorkingCwds?: () => string[]
+  /** DI: cwds of commander desks that are generating right now. */
+  commanderWorkingCwds?: () => string[]
   /** DI: the question / review mark timestamps (groundMarks.ts), each ms or undefined. */
   presidentAskedAtFor?: (projectPath: string) => Promise<number | undefined>
   deliveredAtFor?: (projectPath: string) => Promise<number | undefined>
   seenAtFor?: (projectPath: string) => Promise<number | undefined>
+  openedAtFor?: (projectPath: string) => Promise<number | undefined>
 }
 
-/** Started cards for one project. `undefined` (never 0) when the board could not
- *  be read: an unreadable board is not an empty board, and a 0 here would go
- *  straight out as "this project has nothing in flight". */
-const defaultStartedFor = async (projectPath: string): Promise<number | undefined> => {
+export interface BoardCounts {
+  started: number
+  inFlight: number
+}
+
+/** The board's counts for one project. `undefined` (never 0) when the board
+ *  could not be read: an unreadable board is not an empty board, and a 0 here
+ *  would go straight out as "this project has nothing in flight". The autopilot
+ *  is an in-memory read (isEngineRunning) — no extra disk. */
+const defaultBoardFor = async (projectPath: string, canonPath: string): Promise<BoardCounts | undefined> => {
   try {
-    const data = await readProjectData(projectPath)
-    return startedTaskCount(data.tasks ?? [])
+    const tasks = (await readProjectData(projectPath)).tasks ?? []
+    return {
+      started: startedTaskCount(tasks),
+      inFlight: inFlightTaskCount(tasks, { autopilot: isEngineRunning(canonPath) }),
+    }
   } catch {
     return undefined
   }
@@ -100,8 +116,12 @@ const defaultStartedFor = async (projectPath: string): Promise<number | undefine
  *  たら…ランニングって出るようにしてほしいな」. The president is the one seat the
  *  owner talks to, so its turn IS the work the owner is waiting on. It is NOT
  *  counted here — it has its own row field (it must light a card with nothing
- *  started too), see {@link presidentWorkingCwds}. The commander stays
- *  discounted as above.
+ *  started too), see {@link presidentWorkingCwds}.
+ *
+ *  ⚠ AMENDED 2026-09-26 for the COMMANDER too (「マネージャーが動いてるんだったら
+ *  …ランニング」): generating commanders light the lamp through their own row
+ *  field (commanderWorkingCwds), not here — this function stays "workers and the
+ *  owner's own panes".
  *
  *  ⚠ BOTH POOLS, VIA liveDesks. `listActiveTerminals` is the PTY pool alone and
  *  is lint-restricted for exactly the reason that bites here: an SDK session has
@@ -177,16 +197,37 @@ export const presidentWorkingCwds = (
     listDesks?: typeof listAllActiveDesks
     presidentIds?: () => Set<string>
   } = {},
+): string[] =>
+  workingDeskCwds(deps.presidentIds ?? (() => listDeskIdsByRole(SUPPLY_DESK_LABEL, 'supply')), deps.listDesks)
+
+/** Where the COMMANDER (司令官) is generating right now — the same read as the
+ *  president's, keyed by the commander's launcher-written identity (PTY
+ *  `deskLabel === MANAGER_DESK_LABEL`, SDK `role === 'manager'`). Owner,
+ *  2026-09-26: 「マネージャーが動いてるんだったら…ランニング」 — this lifts the
+ *  2026-08-17 "desks do not count" rule for the commander (see
+ *  {@link liveWorkForProject}); a commander idle at its prompt still counts for
+ *  nothing. */
+export const commanderWorkingCwds = (
+  deps: {
+    listDesks?: typeof listAllActiveDesks
+    commanderIds?: () => Set<string>
+  } = {},
+): string[] =>
+  workingDeskCwds(deps.commanderIds ?? (() => listDeskIdsByRole(MANAGER_DESK_LABEL, 'manager')), deps.listDesks)
+
+const workingDeskCwds = (
+  readIds: () => Set<string>,
+  listDesks: typeof listAllActiveDesks = listAllActiveDesks,
 ): string[] => {
   let ids: Set<string>
   try {
-    ids = (deps.presidentIds ?? (() => listDeskIdsByRole(SUPPLY_DESK_LABEL, 'supply')))()
+    ids = readIds()
   } catch {
     return []
   }
   if (ids.size === 0) return []
   try {
-    return (deps.listDesks ?? listAllActiveDesks)()
+    return listDesks()
       .claude.filter((a) => a.status === 'working' && ids.has(a.id))
       .map((a) => a.cwd)
   } catch {
@@ -202,13 +243,15 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
       const settings = await getSettings()
       return (settings.projects ?? []).map((p) => ({ id: p.id, path: p.path }))
     })
-  const startedFor = deps.startedFor ?? defaultStartedFor
+  const boardFor = deps.boardFor ?? defaultBoardFor
   const liveWorkFor = deps.liveWorkFor ?? liveWorkForProject
   const readQuestions = deps.openQuestions ?? countOpenEscalationsByProject
   const readPresident = deps.presidentWorkingCwds ?? presidentWorkingCwds
+  const readCommander = deps.commanderWorkingCwds ?? commanderWorkingCwds
   const askedAtFor = deps.presidentAskedAtFor ?? readPresidentAskedAt
   const deliveredAtFor = deps.deliveredAtFor ?? readDeliveredAt
   const seenAtFor = deps.seenAtFor ?? readGroundSeenAt
+  const openedAtFor = deps.openedAtFor ?? readGroundOpenedAt
 
   let projects: Array<{ id: string; path: string }>
   try {
@@ -219,43 +262,53 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
   // ONE inbox read for the whole Ground. `null` ⇒ unreadable, which every row
   // then reports as an ABSENT count rather than a zero.
   const questions = await readQuestions().catch(() => null)
-  // ONE in-memory pool read for every project's president, likewise.
-  let presidentCwds: string[]
-  try {
-    presidentCwds = readPresident()
-  } catch {
-    presidentCwds = []
+  // ONE in-memory pool read for every project's president / commander, likewise.
+  const cwdsOf = (read: () => string[]): string[] => {
+    try {
+      return read()
+    } catch {
+      return []
+    }
   }
+  const presidentCwds = cwdsOf(readPresident)
+  const commanderCwds = cwdsOf(readCommander)
+  const under = (cwds: string[], canon: string) => cwds.some((c) => c === canon || c.startsWith(canon + '/'))
 
   const lamps = await Promise.all(
     projects.map(async (p): Promise<GroundLampRow> => {
-      const started = await startedFor(p.path)
       let open: number | undefined
-      const canon =
-        questions || presidentCwds.length ? await canonicalize(p.path).catch(() => p.path) : p.path
+      const canon = await canonicalize(p.path).catch(() => p.path)
+      const board = await boardFor(p.path, canon).catch(() => undefined)
+      const started = board?.started
       if (questions) open = questions.get(canon) ?? 0
-      const presidentWorking = presidentCwds.some((c) => c === canon || c.startsWith(canon + '/'))
-      // The short-circuit that keeps this cheap: with nothing started the lamp
-      // is dark whatever the processes are doing, so do not go looking.
-      const liveWork = started ? await liveWorkFor(p.path).catch(() => false) : false
+      const presidentWorking = under(presidentCwds, canon)
+      const commanderWorking = under(commanderCwds, canon)
+      // The short-circuit that keeps this cheap: ask the worker registry ONLY
+      // when its answer can change the verdict — something is started (else a
+      // live process is not work) and nothing in flight (else it is running
+      // already). In practice: a board holding only blocked cards.
+      const liveWork = started && !board?.inFlight ? await liveWorkFor(p.path).catch(() => false) : false
       // The timed marks (2026-09-26). Three small file reads per project; the
       // president's transcript tail is walked incrementally, cached on path+offset (groundMarks.ts).
       const quiet = (f: (x: string) => Promise<number | undefined>) =>
         f(p.path).catch(() => undefined)
-      const [presidentAskedAt, deliveredAt, seenAt] = await Promise.all([
+      const [presidentAskedAt, deliveredAt, seenAt, openedAt] = await Promise.all([
         quiet(askedAtFor),
         quiet(deliveredAtFor),
         quiet(seenAtFor),
+        quiet(openedAtFor),
       ])
       return {
         projectId: p.id,
-        ...(started === undefined ? {} : { started }),
+        ...(board === undefined ? {} : { started: board.started, inFlight: board.inFlight }),
         ...(open === undefined ? {} : { openQuestions: open }),
         liveWork,
         ...(presidentWorking ? { presidentWorking: true } : {}),
+        ...(commanderWorking ? { commanderWorking: true } : {}),
         ...(presidentAskedAt === undefined ? {} : { presidentAskedAt }),
         ...(deliveredAt === undefined ? {} : { deliveredAt }),
         ...(seenAt === undefined ? {} : { seenAt }),
+        ...(openedAt === undefined ? {} : { openedAt }),
       }
     }),
   )

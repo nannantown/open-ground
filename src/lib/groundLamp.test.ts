@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { groundLamp, startedTaskCount } from './groundLamp'
+import { groundLamp, inFlightTaskCount, startedTaskCount } from './groundLamp'
 import type { ProjectTask } from '@/lib/types'
 
 // The owner's spec — 2026-08-15 verbatim, amended 2026-08-18 — one guard per line:
@@ -20,8 +20,22 @@ const task = (over: Partial<ProjectTask> = {}): ProjectTask =>
  *  hand, which is what a split like this usually costs. */
 const lamp = (
   tasks: readonly ProjectTask[],
-  rest: { openQuestions?: number; liveWork: boolean; presidentWorking?: boolean },
-) => groundLamp({ started: startedTaskCount(tasks), ...rest })
+  {
+    autopilot = false,
+    ...rest
+  }: {
+    openQuestions?: number
+    liveWork: boolean
+    presidentWorking?: boolean
+    commanderWorking?: boolean
+    autopilot?: boolean
+  },
+) =>
+  groundLamp({
+    started: startedTaskCount(tasks),
+    inFlight: inFlightTaskCount(tasks, { autopilot }),
+    ...rest,
+  })
 
 describe('groundLamp — the four cases the owner specified', () => {
   it('作業中なら running', () => {
@@ -35,15 +49,15 @@ describe('groundLamp — the four cases the owner specified', () => {
     )
   })
 
-  it('started-but-idle work shows NO lamp — waiting is only ever a question (2026-08-18)', () => {
+  it('parked (blocked-only) work shows NO lamp — waiting is only ever a question (2026-08-18)', () => {
     // The owner's amendment, measured on their own board: three long-parked
     // Needs-decision cards held the card amber for weeks. Parked or stalled
     // work is the machine's problem first (the engine reclaims dead workers);
     // when it truly needs a human it raises an escalation, which lights
     // WAITING through the inbox branch — the only branch allowed to.
-    for (const col of ['doing', 'review', 'blocked'] as const) {
-      expect(lamp([task({ boardColumn: col })], { liveWork: false }), col).toBeNull()
-    }
+    // 2026-09-26 kept this for blocked: 「保留 blocked だけのときは含めない」.
+    expect(lamp([task({ boardColumn: 'blocked' })], { liveWork: false })).toBeNull()
+    expect(lamp([task({ boardColumn: 'blocked' })], { liveWork: false, autopilot: true })).toBeNull()
   })
 
   it('…and a question over that same idle board DOES light waiting', () => {
@@ -153,8 +167,8 @@ describe('groundLamp — an unreadable board is its own answer', () => {
   })
 
   it('is never confused with a genuinely empty board', () => {
-    expect(groundLamp({ started: 0, liveWork: false })).toBeNull()
-    expect(groundLamp({ started: 0, liveWork: true })).toBeNull()
+    expect(groundLamp({ started: 0, inFlight: 0, liveWork: false })).toBeNull()
+    expect(groundLamp({ started: 0, inFlight: 0, liveWork: true })).toBeNull()
   })
 
   it('a question we DID read still outranks a board we did not', () => {
@@ -177,8 +191,8 @@ describe('groundLamp — the president (supply desk) mid-turn', () => {
 
   it('an IDLE president changes nothing (alive is not a lamp — 2026-08-15)', () => {
     expect(lamp([], { liveWork: false, presidentWorking: false })).toBeNull()
-    expect(lamp([task({ boardColumn: 'doing' })], { liveWork: false, presidentWorking: false })).toBeNull()
-    expect(lamp([task({ boardColumn: 'doing' })], { liveWork: true, presidentWorking: false })).toBe('working')
+    expect(lamp([task({ boardColumn: 'blocked' })], { liveWork: false, presidentWorking: false })).toBeNull()
+    expect(lamp([task({ boardColumn: 'blocked' })], { liveWork: true, presidentWorking: false })).toBe('working')
   })
 
   it('a question for the owner still outranks the president working', () => {
@@ -190,7 +204,7 @@ describe('groundLamp — the president (supply desk) mid-turn', () => {
 // 答えないといけないのか」. question = a raised hand, review = an eye.
 describe('groundLamp — question vs review, cleared by a look (2026-09-26)', () => {
   const SEEN = 1_000_000
-  const idle = { started: 0, liveWork: false }
+  const idle = { started: 0, inFlight: 0, liveWork: false }
 
   it('the president ending on a question you have not seen ⇒ question', () => {
     expect(groundLamp({ ...idle, presidentAskedAt: SEEN + 1, seenAt: SEEN })).toBe('question')
@@ -227,5 +241,125 @@ describe('groundLamp — question vs review, cleared by a look (2026-09-26)', ()
     expect(
       groundLamp({ ...idle, presidentWorking: true, presidentAskedAt: SEEN + 1, seenAt: SEEN }),
     ).toBe('working')
+  })
+})
+
+// Owner, 2026-09-26: 「ワーカーとかが動いてたりマネージャーが動いてるんだったら、そのタスク
+// がまだ終わってなくて、そのレビュー待ちとか受け渡しの最中なんだったらそれはランニング
+// だよね」 — running means THE WORK IS NOT FINISHED, not "a claude is mid-turn".
+describe('groundLamp — running until the work is finished (2026-09-26)', () => {
+  it('a card in doing is running even between turns (no one generating)', () => {
+    expect(lamp([task({ boardColumn: 'doing' })], { liveWork: false })).toBe('working')
+  })
+
+  it('a card only in REVIEW (awaiting the commander) is running', () => {
+    expect(lamp([task({ boardColumn: 'review' })], { liveWork: false })).toBe('working')
+  })
+
+  it('mid-handover — review card, worker finished, commander integrating — is running', () => {
+    const board = [task({ id: 'a', boardColumn: 'review' }), task({ id: 'b', done: true, boardColumn: 'done' })]
+    expect(lamp(board, { liveWork: false, commanderWorking: true })).toBe('working')
+    // …and stays running while the commander is between passes.
+    expect(lamp(board, { liveWork: false, commanderWorking: false })).toBe('working')
+  })
+
+  it('the commander alone generating lights running, even with every card done', () => {
+    expect(lamp([task({ done: true, boardColumn: 'done' })], { liveWork: false, commanderWorking: true })).toBe(
+      'working',
+    )
+    expect(lamp([], { liveWork: false, commanderWorking: true })).toBe('working')
+  })
+
+  it('an IDLE commander (at its prompt) lights nothing — alive is not a lamp', () => {
+    expect(lamp([task({ done: true, boardColumn: 'done' })], { liveWork: false, commanderWorking: false })).toBeNull()
+  })
+
+  it('todo only + autopilot ON ⇒ running (it is about to move); OFF ⇒ nothing', () => {
+    const board = [task({ id: 'a', notes: 'done when …' }), task({ id: 'b', boardColumn: undefined, notes: 'x' })]
+    expect(lamp(board, { liveWork: false, autopilot: true })).toBe('working')
+    expect(lamp(board, { liveWork: false, autopilot: false })).toBeNull()
+  })
+
+  it('a DRAFT todo never counts, autopilot or not (the engine never dispatches it)', () => {
+    expect(lamp([task({ draft: true, notes: 'x' })], { liveWork: false, autopilot: true })).toBeNull()
+  })
+
+  // Rework 1 (2026-09-26): the lamp counts a todo by the ENGINE's own gates.
+  it('a TITLE-ONLY todo (no body) + autopilot ON is not running — the engine never starts it', () => {
+    expect(lamp([task({ notes: '' })], { liveWork: false, autopilot: true })).toBeNull()
+    expect(lamp([task({ notes: '   \n ' })], { liveWork: false, autopilot: true })).toBeNull()
+    expect(lamp([task({ notes: undefined })], { liveWork: false, autopilot: true })).toBeNull()
+  })
+
+  it('an UNAPPROVED self-supply proposal + autopilot ON is not running; once approved it is', () => {
+    const proposal = { notes: 'x', selfSupplyKey: 'k1' }
+    expect(lamp([task(proposal)], { liveWork: false, autopilot: true })).toBeNull()
+    expect(lamp([task({ ...proposal, selfSupplyApproved: true })], { liveWork: false, autopilot: true })).toBe(
+      'working',
+    )
+  })
+
+  it('a todo waiting on a PARKED prerequisite is not running (it will never start)', () => {
+    const board = [
+      task({ id: 'dep', boardColumn: 'blocked' }),
+      task({ id: 'next', notes: 'x', dependsOn: ['dep'] }),
+    ]
+    expect(lamp(board, { liveWork: false, autopilot: true })).toBeNull()
+    // …its prerequisite done ⇒ it is next up ⇒ running.
+    const ready = [task({ id: 'dep', done: true, boardColumn: 'done' }), task({ id: 'next', notes: 'x', dependsOn: ['dep'] })]
+    expect(lamp(ready, { liveWork: false, autopilot: true })).toBe('working')
+    // A prerequisite id missing from the board is satisfied (selectDispatch ⑤).
+    expect(lamp([task({ notes: 'x', dependsOn: ['gone'] })], { liveWork: false, autopilot: true })).toBe('working')
+  })
+
+  it('a question still outranks in-flight work', () => {
+    expect(lamp([task({ boardColumn: 'review' })], { openQuestions: 1, liveWork: false })).toBe('question')
+  })
+
+  it('in-flight work outranks the eye — delivery is shown once everything is finished', () => {
+    const t = { deliveredAt: 2_000, seenAt: 1_000 }
+    expect(groundLamp({ started: 1, inFlight: 1, liveWork: false, ...t })).toBe('working')
+    expect(groundLamp({ started: 0, inFlight: 0, liveWork: false, ...t })).toBe('review')
+  })
+})
+
+describe('inFlightTaskCount — the one definition of "not finished"', () => {
+  it('counts unfinished doing / review, plus non-draft todo only under autopilot', () => {
+    const board = [
+      task({ id: 'a', boardColumn: 'doing' }),
+      task({ id: 'b', boardColumn: 'review' }),
+      task({ id: 'c', boardColumn: 'blocked' }),
+      task({ id: 'd', boardColumn: 'todo', notes: 'x' }),
+      task({ id: 'e', boardColumn: 'todo', draft: true, notes: 'x' }),
+      task({ id: 'h', boardColumn: 'todo' }),
+      task({ id: 'f', boardColumn: 'review', done: true }),
+      task({ id: 'g', boardColumn: 'done', done: true }),
+    ]
+    expect(inFlightTaskCount(board, { autopilot: false })).toBe(2)
+    expect(inFlightTaskCount(board, { autopilot: true })).toBe(3)
+  })
+})
+
+// 既読 (2026-09-26): 「確認待ちのところでプロジェクトの中に入ったら、既読みたいな感じ」 —
+// opening the project clears the eye; a hand is never cleared by a look alone.
+describe('groundLamp — opening the project is the read receipt (2026-09-26)', () => {
+  const idle = { started: 0, inFlight: 0, liveWork: false }
+  const T = 1_000_000
+
+  it('opening the project (openedAt) clears the eye', () => {
+    expect(groundLamp({ ...idle, deliveredAt: T + 1, seenAt: T })).toBe('review')
+    expect(groundLamp({ ...idle, deliveredAt: T + 1, seenAt: T, openedAt: T + 2 })).toBeNull()
+  })
+
+  it('openedAt alone is a baseline (a project whose seat was never opened)', () => {
+    expect(groundLamp({ ...idle, deliveredAt: T + 1, openedAt: T })).toBe('review')
+    expect(groundLamp({ ...idle, deliveredAt: T, openedAt: T + 1 })).toBeNull()
+  })
+
+  it('opening the project does NOT clear the hand — neither kind', () => {
+    // An escalation, open after a visit.
+    expect(groundLamp({ ...idle, openQuestions: 1, openedAt: T + 5 })).toBe('question')
+    // The president's question, asked after the last seat look, project opened since.
+    expect(groundLamp({ ...idle, presidentAskedAt: T + 1, seenAt: T, openedAt: T + 5 })).toBe('question')
   })
 })

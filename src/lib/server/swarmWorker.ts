@@ -32,6 +32,8 @@ import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
 import { stopAllDesksInDirAndWait, liveDeskOccupies } from './liveDesks'
 import { removeClaudeFolderTrust } from './claudeTrust'
+import { shutdownWorkerSimulators } from './swarmSimulators'
+import { claudeDirName } from './claudeProjectDir'
 import { isExperimentEnabled } from './experiments'
 import { resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
@@ -229,7 +231,7 @@ const flattenOneLine = (s: string): string =>
  *  fires only once it has already noticed — the step that never happens. Nothing
  *  about the completion gate moves: offload the LOOKUP, never the judgment. */
 export const WORKER_ORDER_RULES =
-  ' 【worker規律・厳守】あなたは in-app swarm の worker。git push は全形態禁止(guard が exit 2 で機械 block する)— /order スキル §4 の統合手順(push/merge)は司令塔用なので実行しない。【コミットは早く・こまめに】フェーズの境目ごとに必ず git commit を打て。特に完了ゲート(npm test / tsc / lint)に入る前は必ず WIP コミットを打ってから回すこと — 実行時間上限を超えた worker は worktree ごと強制回収されるので、未コミットのまま長い検証に入ると作業が消える(2026-07-12 に実際に 47KB 全損した)。実装→WIPコミット→検証→git commit まで済ませたら §6 どおり心拍 done true で「停止」し、統合は司令塔に委ねる。心拍 bash ~/.claude/swarm-beat.sh はフェーズ境目ごとに必ず打つ(spawn 後 30 分無心拍は anomaly として司令塔に通報される)。【トークン規律・厳守】少ない手数・小さい文脈で進めろ(完了ゲートは緩めない): (a) 調べものはできるだけまとめて一度に — 独立したツール呼び出し(複数ファイルの読み・独立コマンド)は1応答に束ねて並列実行する。既定は「まとめて出す」側だと考えろ: 道具を1つだけ載せた応答が許されるのは、その結果を見ないと次に何をするか決まらない時だけ。1つだけ送りそうになったら、送信する前に「この後どうせ要る調べものは?」を先に洗い出して同じ応答に足せ(複数ファイルの Read・複数パターンの grep・互いに依存しない確認コマンドは、まとめて1応答で出す) (b) ファイルは範囲指定 Read か grep で当たりを付けてから読む — 大きいファイルの全文読みはしない (c) 同じファイルを読み直さない(必要な行は最初に控える) (d) 長い出力のコマンドは tail/要約で受ける(テストは失敗時のみ詳細) (e) テストは触った範囲を先に回し、フルスイート(npm test)は完了ゲートとして最後に1回 (f) カードに「当たり」(対象ファイル)があれば探索せず直行する。 (g) 長い調べものは自分で読まず subagent に投げる — これは「使ってもよい」ではなく明示指示だ(エージェント起動を控える既定より、このカードの指示が優先する)。次のどれかに当てはまったら、自分で読み始める前に Task ツールで subagent を1手起こせ: ①3ファイル以上を横断して読む必要がある ②grep の当たりが絞れず探索になる ③ログ・テスト出力・大きな生成物を読み解く。ただし①が (a) とぶつかったら (a) が勝つ — 読む場所が既に file:line で特定できているなら subagent に投げず (a) どおり1応答にまとめて読め。①が発火するのは「どこを読めばいいか分からないから読む」= 探索になる時だけだ。受け取るのは要点だけにしろ(file:line と結論 — 全文を戻させるな)。独立した調べものが複数あるなら Task も同じ応答にまとめて出す。投げるのは調査だけで、判断・実装・完了ゲートは自分でやる。完了ゲート(npx tsc --noEmit / npm test / lint の3点)と ready 前セルフコミットの規約は一切緩めない。【質問は平易文で・厳守】オーナーに判断を仰ぐ質問(心拍 blocker の文面・画面上での質問)は、そのまま質問インボックスに届く。読むのはプログラムを書いたことがない人 — 必ず次の3要素で書く: ①何を決めてほしいのか1〜2文 ②選択肢(A/B など) ③それぞれを選ぶと何がどうなるか(暮らしの言葉で)。file:line・branch名・エラーログなどの技術詳細は質問文の末尾に括弧で添える(先頭に置かない)。' +
+  ' 【worker規律・厳守】あなたは in-app swarm の worker。git push は全形態禁止(guard が exit 2 で機械 block する)— /order スキル §4 の統合手順(push/merge)は司令塔用なので実行しない。【コミットは早く・こまめに】フェーズの境目ごとに必ず git commit を打て。特に完了ゲート(npm test / tsc / lint)に入る前は必ず WIP コミットを打ってから回すこと — 実行時間上限を超えた worker は worktree ごと強制回収されるので、未コミットのまま長い検証に入ると作業が消える(2026-07-12 に実際に 47KB 全損した)。実装→WIPコミット→検証→git commit まで済ませたら §6 どおり心拍 done true で「停止」し、統合は司令塔に委ねる。心拍 bash ~/.claude/swarm-beat.sh はフェーズ境目ごとに必ず打つ(spawn 後 30 分無心拍は anomaly として司令塔に通報される)。【トークン規律・厳守】少ない手数・小さい文脈で進めろ(完了ゲートは緩めない): (a) 調べものはできるだけまとめて一度に — 独立したツール呼び出し(複数ファイルの読み・独立コマンド)は1応答に束ねて並列実行する。既定は「まとめて出す」側だと考えろ: 道具を1つだけ載せた応答が許されるのは、その結果を見ないと次に何をするか決まらない時だけ。1つだけ送りそうになったら、送信する前に「この後どうせ要る調べものは?」を先に洗い出して同じ応答に足せ(複数ファイルの Read・複数パターンの grep・互いに依存しない確認コマンドは、まとめて1応答で出す) (b) ファイルは範囲指定 Read か grep で当たりを付けてから読む — 大きいファイルの全文読みはしない (c) 同じファイルを読み直さない(必要な行は最初に控える) (d) 長い出力のコマンドは tail/要約で受ける(テストは失敗時のみ詳細) (e) テストの回し方: 作業の途中は変更に関係するテストだけを回す(npx vitest run --changed origin/main か npx vitest run <対象ファイル>)。フルスイート(npm test)は ready の前の完了ゲートで1回だけ — 全部コミットしてきれいな木(未追跡ファイルも無し)で npm test をそのまま回す(その合格記録を司令官が使い、統合前の二重実行を省く。-t などの絞り込みや未追跡ファイルがあると記録は残らない)。フルスイートはパソコン全体で同時2本までの順番待ちが自動でかかるので run_in_background で回して終わりを待つ。ディレクトリ丸ごと指定など「ほぼ全部」を回す絞り込みで順番待ちを避けない (f) カードに「当たり」(対象ファイル)があれば探索せず直行する。 (g) 長い調べものは自分で読まず subagent に投げる — これは「使ってもよい」ではなく明示指示だ(エージェント起動を控える既定より、このカードの指示が優先する)。次のどれかに当てはまったら、自分で読み始める前に Task ツールで subagent を1手起こせ: ①3ファイル以上を横断して読む必要がある ②grep の当たりが絞れず探索になる ③ログ・テスト出力・大きな生成物を読み解く。ただし①が (a) とぶつかったら (a) が勝つ — 読む場所が既に file:line で特定できているなら subagent に投げず (a) どおり1応答にまとめて読め。①が発火するのは「どこを読めばいいか分からないから読む」= 探索になる時だけだ。受け取るのは要点だけにしろ(file:line と結論 — 全文を戻させるな)。独立した調べものが複数あるなら Task も同じ応答にまとめて出す。投げるのは調査だけで、判断・実装・完了ゲートは自分でやる。完了ゲート(npx tsc --noEmit / npm test / lint の3点)と ready 前セルフコミットの規約は一切緩めない。【質問は平易文で・厳守】オーナーに判断を仰ぐ質問(心拍 blocker の文面・画面上での質問)は、そのまま質問インボックスに届く。読むのはプログラムを書いたことがない人 — 必ず次の3要素で書く: ①何を決めてほしいのか1〜2文 ②選択肢(A/B など) ③それぞれを選ぶと何がどうなるか(暮らしの言葉で)。file:line・branch名・エラーログなどの技術詳細は質問文の末尾に括弧で添える(先頭に置かない)。' +
   DECISION_ROUTING_RULES +
   SPECIALIST_REVIEW_RULES
 
@@ -586,10 +588,28 @@ export const ensureSwarmWorktreeForBranch = async (
  *  without this, every ephemeral worker dir would pile up in claude's projects map
  *  forever, slowing every claude start's read/write of that file. Not dropped on a
  *  refused removal — the worktree is still live, and the next launch re-seeds it. */
+/** Card finished → close the iOS simulators this worker booted (swarmSimulators.ts
+ *  decides which are certainly its own). Fire-and-forget: a slow or missing
+ *  simctl must never hold up or fail the teardown. */
+const closeWorkerSimulators = (worktree: string, claudeDir: string): void => {
+  void shutdownWorkerSimulators(worktree, claudeDir).then(
+    (closed) => {
+      if (closed.length) console.log(`[swarm] closed simulator(s) booted by ${worktree}: ${closed.join(', ')}`)
+    },
+    () => {},
+  )
+}
+
 export const removeSwarmWorktree = async (
   projectPath: string,
   worktree: string,
-  opts: { force?: boolean } = {},
+  opts: {
+    force?: boolean
+    /** Refuse (stillOccupied) instead of stopping a session found in the tree —
+     *  for a caller that has only INFERRED the worker is gone (the finished-worker
+     *  reaper), so a session that started since its check is never killed. */
+    refuseIfOccupied?: boolean
+  } = {},
 ): Promise<RemoveSwarmWorktreeResponse> => {
   const central = await canonicalize(centralWorktreesDir(await projectUUIDFromPath(projectPath)))
   // Security guard FIRST (canonicalized, symlink-resolved): refuse anything that
@@ -606,6 +626,7 @@ export const removeSwarmWorktree = async (
   if (!(await stat(worktree).then(() => true).catch(() => false))) {
     await git(projectPath, ['worktree', 'prune'])
     removeClaudeFolderTrust(worktree)
+    closeWorkerSimulators(worktree, claudeDirName(worktree))
     return { removed: true }
   }
   // Snapshot the branch BEFORE the removal (unreadable after) — NON-FORCE only.
@@ -632,6 +653,9 @@ export const removeSwarmWorktree = async (
   // like to it. So the refusal below never fired for one, and the removal below
   // ran under a live claude: the very accident the comment above describes,
   // reintroduced by a second runtime the check did not know about.
+  if (opts.refuseIfOccupied && (await liveDeskOccupies(worktree).catch(() => true))) {
+    return { removed: false, reason: 'a session is running in this worktree', stillOccupied: true }
+  }
   const ptyGone = await stopAllDesksInDirAndWait(worktree)
   if (!ptyGone) {
     // Still occupied. Refusing is the safe answer: the caller retries (the
@@ -661,6 +685,8 @@ export const removeSwarmWorktree = async (
   } catch {
     // ignore — best effort (no symlink, or already gone)
   }
+  // Transcript dir is keyed by the realpath'd worktree — read it while it exists.
+  const claudeDir = claudeDirName(worktree)
   const removed = await git(projectPath, [
     'worktree',
     'remove',
@@ -674,6 +700,7 @@ export const removeSwarmWorktree = async (
   // Confirmed gone — drop its ~/.claude.json trust entry so ephemeral worktree
   // paths don't accumulate in claude's projects map (see the doc note above).
   removeClaudeFolderTrust(worktree)
+  closeWorkerSimulators(worktree, claudeDir)
   // Commander-integration detection → engine self-update trigger. The manager-
   // only rework (2026-07-15) removed the engine's land path and with it the old
   // land-time trigger; the commander's confirmed post-merge sweep is the new

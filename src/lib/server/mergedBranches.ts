@@ -123,6 +123,9 @@ export const checkMergedBranches = async (
   projectPath: string,
   branches: string[],
   targetBranch?: string,
+  /** `fetch:false` skips the network refresh (a periodic caller — a stale trunk
+   *  ref only makes a branch read 'open', never the reverse). Default true. */
+  opts: { fetch?: boolean } = {},
 ): Promise<Record<string, MergedBranchStatus>> => {
   // Every requested branch gets a verdict; default = unknown.
   const result: Record<string, MergedBranchStatus> = {}
@@ -150,7 +153,7 @@ export const checkMergedBranches = async (
 
   // Freshen the target once — best-effort (no remote / offline is fine; the
   // ancestry check then runs against the refs we already have).
-  await git(projectPath, ['fetch', 'origin', target])
+  if (opts.fetch !== false) await git(projectPath, ['fetch', 'origin', target])
 
   // ── Resolve the target REF (local tip first, then origin's) ─────────────
   // TARGET ref prefers origin/<target>: the fetch above just freshened it,

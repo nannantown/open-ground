@@ -9,6 +9,8 @@
 //                     ledger, swarmLandedLedger.ts) — "work was delivered".
 //   seenAt            the last time the owner had the project open with the
 //                     agent-team bar (the president's seat) unfolded.
+//   openedAt          the last time the owner had the project open at all —
+//                     clears the eye only (ground-opened.json, 2026-09-26).
 //
 // A mark is lit only when its event is NEWER than seenAt, so opening the seat
 // is what clears it — and nothing can stay lit forever on a misread: the next
@@ -28,9 +30,28 @@ const SEEN_FILE = 'ground-seen.json'
 
 /** When the owner last looked at this project's president seat (ms), or
  *  undefined when never recorded / unreadable. */
-export const readGroundSeenAt = async (projectPath: string): Promise<number | undefined> => {
+export const readGroundSeenAt = async (projectPath: string): Promise<number | undefined> =>
+  readStamp(projectPath, SEEN_FILE)
+
+/** Stamp "the owner is looking at it now". */
+export const markGroundSeen = async (projectPath: string, now = Date.now()): Promise<void> =>
+  writeStamp(projectPath, SEEN_FILE, now)
+
+/** The PROJECT-open stamp (2026-09-26): clears the eye only, never a hand.
+ *  Its own file rather than a second field in ground-seen.json, so the seat
+ *  and the project panel — which stamp at the same moment — never race a
+ *  read-modify-write and drop each other's stamp. */
+const OPENED_FILE = 'ground-opened.json'
+
+export const readGroundOpenedAt = async (projectPath: string): Promise<number | undefined> =>
+  readStamp(projectPath, OPENED_FILE)
+
+export const markGroundOpened = async (projectPath: string, now = Date.now()): Promise<void> =>
+  writeStamp(projectPath, OPENED_FILE, now)
+
+async function readStamp(projectPath: string, name: string): Promise<number | undefined> {
   try {
-    const raw = JSON.parse(await readFile(await projectDataFile(projectPath, SEEN_FILE), 'utf8'))
+    const raw = JSON.parse(await readFile(await projectDataFile(projectPath, name), 'utf8'))
     const t = Date.parse(raw?.seenAt)
     return Number.isFinite(t) ? t : undefined
   } catch {
@@ -38,9 +59,8 @@ export const readGroundSeenAt = async (projectPath: string): Promise<number | un
   }
 }
 
-/** Stamp "the owner is looking at it now". */
-export const markGroundSeen = async (projectPath: string, now = Date.now()): Promise<void> => {
-  const file = await projectDataFile(projectPath, SEEN_FILE)
+async function writeStamp(projectPath: string, name: string, now: number): Promise<void> {
+  const file = await projectDataFile(projectPath, name)
   await mkdir(dirname(file), { recursive: true })
   await atomicWriteJson(file, { seenAt: new Date(now).toISOString() })
 }

@@ -131,9 +131,13 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick, lamps }: P
                     )}
                   </span>
                   {lamp === 'working' && (
-                    <span className="flex shrink-0 items-center gap-1 label-cap text-moss-text">
-                      <span className="run-pulse h-[5px] w-[5px] rounded-full bg-moss" />
-                      {t('toolbar.searchLampWorking')}
+                    <span
+                      role="img"
+                      title={t('toolbar.searchLampWorking')}
+                      aria-label={t('toolbar.searchLampWorking')}
+                      className="flex h-[14px] w-[14px] shrink-0 items-center justify-center"
+                    >
+                      <span className="run-pulse h-[7px] w-[7px] rounded-full bg-moss" />
                     </span>
                   )}
                   {lamp === 'question' && (

@@ -360,6 +360,82 @@ vitest はその後片付けの失敗を**直前のテスト**に帰属させる
 - できるなら、主張をコメントではなく**テスト名**に移す（テストが消えれば主張も消える）
 - 「本番はこの形か？」を一次資料（型定義・実際の出力）で確かめてから書く
 
+## 10. How tests are run: related while working, the full suite once (owner decision 2026-09-26)
+
+Measured cause of the slow machine (docs/research/20260926-machine-slowness-deep-dive.md):
+eight workers each running the whole suite (~7,300 tests) with vitest's default pool
+(cores-1 = 10 forks) at the same time — load 360-720 on 11 cores, 0.2 GB free, swap growing.
+Worker count stays; the way they test changes:
+
+1. **While working**: only tests related to the change —
+   `npx vitest run --changed origin/main` or `npx vitest run <touched test files>`.
+2. **The full suite (`npm test`) once**, as the completion gate right before `ready`,
+   on a committed, clean tree. Run it in the background: it may queue.
+3. **At most 2 full runs at once on the machine — enforced by the app, not by the
+   prompt.** `vitest.config.ts` calls `enterFullSuiteGate()` (`src/test/fullSuiteGate.ts`):
+   a whole-suite invocation (no path filter, no `--changed`, not `related`) waits until a
+   slot is free, across every worktree of the repo (state in `<git-common-dir>/og-test-gate/`).
+   A holder that dies (crash, SIGKILL) frees its slot on the next look (pid gone); one that
+   stops stamping for 3 min is dropped too (pid reuse), so nothing can block the line forever.
+   Waiters go in arrival order.
+4. **Fork count follows the number of full runs**: alone = vitest's default (cores-1);
+   sharing = `(cores-1)/2`. Filtered runs keep the default.
+5. **Commander: no second run of the same tree.** A plain `npm test` (`vitest run`, at most
+   `--reporter=x`; `-t` / `--shard` / `--bail` / anything else records nothing) that STARTED on a
+   clean tree (untracked files count as dirty) writes its process exit code and HEAD's tree id to
+   `<git-dir>/og-full-suite.json` on exit. The exit code, not vitest's "passed" reason: vitest 4.1.7
+   says "passed" even when unhandled errors turn the run red. `npx tsx scripts/full-suite-passed.mts
+   <wt>` exits 0 only if that record says exit 0 for exactly the current HEAD's contents, the tree
+   is still clean, and HEAD already contains `origin/main` — i.e. an FF push lands the very tree
+   that was tested (rewording the commit keeps it valid). Anything else (main moved → rebase, new
+   changes, dirty, failed) → the commander runs the suite, once, on the tree that will land. "The full suite passed at least once on the
+   latest base before it reached main" is unchanged.
+
+Measured on the owner's machine 2026-09-26 (11 cores / 36 GB, other swarm workers live),
+4 full runs requested at the same moment, sampled every 30 s like the investigation
+(`sysctl vm.loadavg`, `vm_stat`):
+
+| | load1 peak | free memory low | all 4 finished |
+|---|---|---|---|
+| before (no gate, 10 forks each), 16:48-16:55 | **617** | 0.05 GB | 393 s |
+| after (gate: 2 at a time, 5 forks each when shared), 16:42-16:48 | **56** | 0.41 GB | 354 s |
+
+The whole batch also finished sooner: 40 forks fighting over 11 cores gain nothing.
+
+Conditions, stated plainly (corrected in the 2026-09-26 rework): both rows were measured at
+commit 8bbc9401, whose gate located the line with plain `git rev-parse --git-common-dir`; the
+queue was observed live in the primary's `.git/og-test-gate/state.json` (2 running, 2 waiting).
+All 4 runs came from ONE worktree. A later review fix switched to `--path-format=absolute`,
+which the owner's git 2.28 (`/usr/local/bin/git`; the flag is git 2.31+) echoes back as an
+extra output line — every worktree then got its own private line, i.e. no limit across
+worktrees. That build never produced the numbers above. After the fix (`gateDir`), re-checked
+on the same machine and git 2.28, 17:14-17:20: 3 full runs requested at once, 1 from a second
+`git worktree add` and 2 from this worktree → the primary's `state.json` showed the second
+worktree's run and this worktree's run both `running` and the third `waiting`; it started
+when the first finished. load1 during that window: 23 → 61 at the busiest (two runs);
+a later rise to 170 came while at most one test run was going and persisted with none — the
+OPEN GROUND app helper at ~155% CPU plus disk-image work, not tests.
+
+Also: a slot is freed when its holder's pid is gone, when it stops stamping for 3 min, or after
+60 min of running (hung/orphaned run); a holder that was dropped while the machine slept goes
+back into the running list, never behind the waiters. A bookkeeping error never fails a test run.
+
+**Open issue (2026-09-26, measured):** inside a swarm worker's worktree (under
+`~/.openground/projects/…/worktrees/`) `npm test` is currently always red by 4 environment-only
+failures — `sdkGuardHook.test.ts` ×3 (the guard refuses a hook root under the data home) and
+`gitInit.routes.test.ts` ×1 (git identity). So a worker's record says exit 1 and the commander
+still runs the suite: safe, but the double run is not saved until those tests stop depending on
+where the worktree lives (separate card).
+
+Known gaps (accepted): a branch touching `package.json` / `vitest.config.*` makes `--changed`
+select every test (vitest `forceRerunTriggers`) and that run is not gated; neither is a
+directory filter, nor `--config <another file>`. The line is per repository (all worktrees of
+one clone share it), not per machine. The first full run to start alone keeps 10 forks even if a
+second joins later. Queue time adds to a full run's wall time (the commander's 40-min stall
+threshold in docs/commander/03 §2.3 assumed 3-12 min). Guard: `src/test/fullSuiteGate.test.ts`
+(15 mutations of the gate and the record measured red, 2026-09-26; a 16th found a redundant
+check, which was deleted).
+
 ---
 
 ## 参照

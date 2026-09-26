@@ -41,7 +41,8 @@ export const projectPanel = {
     // The Swarm bottom bar (2026-09-24 — replaced the Swarm tab).
     'projectPanel.swarm.bar.expand': 'Open Agent Team',
     'projectPanel.swarm.bar.collapse': 'Fold Agent Team away',
-    'projectPanel.swarm.bar.resize': 'Drag to change the height of Agent Team',
+    // Tooltip of the border between two open seats (SwarmSeatStrip SeatBorder).
+    'projectPanel.swarm.seat.border': 'Drag to resize · click to widen',
     // "Questions", not "waiting on you": the Board's blocked column is called
     // "Needs decision"/「判断待ち」 and counts something else — one word must
     // never name two different numbers on the same screen.
@@ -450,6 +451,8 @@ export const projectPanel = {
     // Ground card marks (2026-09-26) — hover text only; the mark itself is an icon.
     'projectPanel.groundMarkQuestion': 'Waiting for your answer',
     'projectPanel.groundMarkReview': 'Delivered — take a look',
+    'projectPanel.groundMarkWorking': 'Running',
+    'projectPanel.groundMarkUnknown': 'Board could not be read',
     // Invite link v2 — permission mode + bounds picker (owner, before minting).
     'projectPanel.collabModeLabel': 'Who can join',
     'projectPanel.collabModeOpen': 'Anyone with the link',
@@ -580,7 +583,7 @@ export const projectPanel = {
     // Swarm の下部バー(2026-09-24 — Swarm タブの置き換え)。
     'projectPanel.swarm.bar.expand': 'エージェントチームをひらく',
     'projectPanel.swarm.bar.collapse': 'エージェントチームをたたむ',
-    'projectPanel.swarm.bar.resize': 'ドラッグでエージェントチームの高さを変える',
+    'projectPanel.swarm.seat.border': 'ドラッグで幅を変える・クリックで広げる',
     // 「判断待ち」は Board の blocked 列の見出しで別の数 — 同じ言葉で別の数を指さない。
     'projectPanel.swarm.bar.questions': 'あなたへの質問 {count}',
     'projectPanel.swarm.bar.reviews': '統合待ち {count}',
@@ -966,6 +969,8 @@ export const projectPanel = {
     'projectPanel.groundSharedTitle': 'あなたに共有されたプロジェクト',
     'projectPanel.groundMarkQuestion': 'あなたの答えを待っています',
     'projectPanel.groundMarkReview': '納品されました(見るだけ)',
+    'projectPanel.groundMarkWorking': '動いている',
+    'projectPanel.groundMarkUnknown': 'ボードを読めませんでした',
     // 招待リンク v2 — 権限モード + 上限の選択（オーナー・作成前）。
     'projectPanel.collabModeLabel': '参加できる人',
     'projectPanel.collabModeOpen': 'リンクを知っている人は誰でも',

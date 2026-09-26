@@ -1,5 +1,13 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+import { mkdtemp, realpath, symlink } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { liveWorkForProject, readGroundLamps } from './groundLamps'
+
+// The DEFAULT board reader is exercised once (the autopilot wiring); every
+// other case injects `boardFor`, so this mock is inert for them.
+const board = vi.hoisted(() => ({ tasks: [] as unknown[] }))
+vi.mock('./projectData', () => ({ readProjectData: async () => ({ tasks: board.tasks }) }))
 import { groundLamp } from '@/lib/groundLamp'
 import type { ActiveTerminalsResponse, GroundLampRow, SwarmWorkerRecord } from '@/lib/types'
 
@@ -18,6 +26,9 @@ const P = [
   { id: 'uuid-b', path: '/repo/b' },
 ]
 
+/** A readable board: `started` cards, of which `inFlight` keep it running. */
+const b = (started: number, inFlight = 0) => ({ started, inFlight })
+
 const row = (lamps: GroundLampRow[], id: string): GroundLampRow =>
   lamps.find((l) => l.projectId === id)!
 
@@ -25,7 +36,7 @@ describe('readGroundLamps — one row per registered project', () => {
   it('carries the started count, the open questions and the liveness', async () => {
     const { lamps } = await readGroundLamps({
       projects: async () => P,
-      startedFor: async (p) => (p === '/repo/a' ? 2 : 0),
+      boardFor: async (p) => b(p === '/repo/a' ? 2 : 0),
       openQuestions: async () => new Map([['/repo/a', 3]]),
       liveWorkFor: async () => true,
     })
@@ -33,6 +44,7 @@ describe('readGroundLamps — one row per registered project', () => {
     expect(row(lamps, 'uuid-a')).toEqual({
       projectId: 'uuid-a',
       started: 2,
+      inFlight: 0,
       openQuestions: 3,
       liveWork: true,
     })
@@ -47,7 +59,7 @@ describe('readGroundLamps — one row per registered project', () => {
     // row with no count rather than drawing a dark card off it.
     const { lamps } = await readGroundLamps({
       projects: async () => P,
-      startedFor: async (p) => (p === '/repo/a' ? undefined : 1),
+      boardFor: async (p) => (p === '/repo/a' ? undefined : b(1)),
       openQuestions: async () => new Map(),
       liveWorkFor: async () => false,
     })
@@ -63,7 +75,7 @@ describe('readGroundLamps — one row per registered project', () => {
     // could not be opened.
     const { lamps } = await readGroundLamps({
       projects: async () => P,
-      startedFor: async () => 1,
+      boardFor: async () => b(1),
       openQuestions: async () => null,
       liveWorkFor: async () => false,
     })
@@ -79,7 +91,7 @@ describe('readGroundLamps — one row per registered project', () => {
     const asked: string[] = []
     const { lamps } = await readGroundLamps({
       projects: async () => P,
-      startedFor: async (p) => (p === '/repo/a' ? 1 : 0),
+      boardFor: async (p) => b(p === '/repo/a' ? 1 : 0),
       openQuestions: async () => new Map(),
       liveWorkFor: async (p) => {
         asked.push(p)
@@ -94,7 +106,7 @@ describe('readGroundLamps — one row per registered project', () => {
     const asked: string[] = []
     await readGroundLamps({
       projects: async () => P,
-      startedFor: async () => undefined,
+      boardFor: async () => undefined,
       openQuestions: async () => new Map(),
       liveWorkFor: async (p) => {
         asked.push(p)
@@ -109,7 +121,7 @@ describe('readGroundLamps — it never throws, whatever fails', () => {
   it('a failing liveness read costs that one project its liveWork, nothing else', async () => {
     const { lamps } = await readGroundLamps({
       projects: async () => P,
-      startedFor: async () => 1,
+      boardFor: async () => b(1),
       openQuestions: async () => new Map(),
       liveWorkFor: async (p) => {
         if (p === '/repo/a') throw new Error('git exploded')
@@ -123,7 +135,7 @@ describe('readGroundLamps — it never throws, whatever fails', () => {
   it('a failing inbox read is the same as an unreadable one', async () => {
     const { lamps } = await readGroundLamps({
       projects: async () => P,
-      startedFor: async () => 1,
+      boardFor: async () => b(1),
       openQuestions: async () => {
         throw new Error('EIO')
       },
@@ -153,46 +165,110 @@ describe('the rows drive the lamp the owner asked for', () => {
       ? null
       : groundLamp({
           started: r.started,
+          inFlight: r.inFlight,
           ...(r.openQuestions === undefined ? {} : { openQuestions: r.openQuestions }),
           liveWork: r.liveWork,
+          commanderWorking: r.commanderWorking === true,
         })
 
   it('every task done ⇒ the card is DARK, desks or no desks', async () => {
     const { lamps } = await readGroundLamps({
       projects: async () => [P[0]],
-      startedFor: async () => 0,
+      boardFor: async () => b(0),
       openQuestions: async () => new Map(),
       liveWorkFor: async () => true,
     })
     expect(lampFor(lamps[0])).toBeNull()
   })
 
-  it('a card in doing with a worker on it ⇒ running', async () => {
+  it('a blocked card with a worker still generating on it ⇒ running', async () => {
     const { lamps } = await readGroundLamps({
       projects: async () => [P[0]],
-      startedFor: async () => 1,
+      boardFor: async () => b(1),
       openQuestions: async () => new Map(),
       liveWorkFor: async () => true,
     })
     expect(lampFor(lamps[0])).toBe('working')
   })
 
-  it('a card in doing with nothing moving it ⇒ NO lamp (owner amendment, 2026-08-18)', async () => {
+  it('a parked (blocked-only) card with nothing moving it ⇒ NO lamp (owner amendment, 2026-08-18)', async () => {
     // 「waitingは僕が何かをしないといけない時にだけ出しましょう」 — idle work is
     // the machine's problem; only a question in the inbox is the owner's.
     const { lamps } = await readGroundLamps({
       projects: async () => [P[0]],
-      startedFor: async () => 1,
+      boardFor: async () => b(1),
       openQuestions: async () => new Map(),
       liveWorkFor: async () => false,
     })
     expect(lampFor(lamps[0])).toBeNull()
   })
 
+  it('a card in review with NOTHING generating ⇒ running (2026-09-26), without a registry read', async () => {
+    const asked: string[] = []
+    const { lamps } = await readGroundLamps({
+      projects: async () => [P[0]],
+      boardFor: async () => b(1, 1),
+      openQuestions: async () => new Map(),
+      liveWorkFor: async (p) => {
+        asked.push(p)
+        return false
+      },
+    })
+    expect(lampFor(lamps[0])).toBe('working')
+    // In flight already answers "running" — the expensive read cannot change it.
+    expect(asked).toEqual([])
+  })
+
+  it('todo only: the DEFAULT board reader counts it in flight exactly while the autopilot runs', async () => {
+    // Registered through a SYMLINK: engines are keyed by the canonical path, so
+    // a lookup by the raw path would silently read "autopilot off".
+    const root = await mkdtemp(join(tmpdir(), 'og-lamp-auto-'))
+    const link = join(root, 'link')
+    await symlink(tmpdir(), link)
+    const canon = await realpath(link)
+    board.tasks = [{ id: 't', title: 'queued', notes: 'done when …', done: false, boardColumn: 'todo' }]
+    const engines = globalThis.__openground_swarm_orchestrator!.engines as Map<string, unknown>
+    const inFlight = async () =>
+      (
+        await readGroundLamps({
+          projects: async () => [{ id: 'uuid-x', path: link }],
+          openQuestions: async () => new Map(),
+          liveWorkFor: async () => false,
+          presidentWorkingCwds: () => [],
+          commanderWorkingCwds: () => [],
+        })
+      ).lamps[0].inFlight
+    try {
+      expect(await inFlight()).toBe(0)
+      engines.set(canon, { running: true })
+      expect(await inFlight()).toBe(1)
+      engines.set(canon, { running: false })
+      expect(await inFlight()).toBe(0)
+    } finally {
+      engines.delete(canon)
+      board.tasks = []
+    }
+  })
+
+  it('a commander generating ⇒ running with every card done; idle ⇒ dark', async () => {
+    const lampOf = async (cwds: string[]) => {
+      const { lamps } = await readGroundLamps({
+        projects: async () => P,
+        boardFor: async () => b(0),
+        openQuestions: async () => new Map(),
+        liveWorkFor: async () => false,
+        commanderWorkingCwds: () => cwds,
+      })
+      return lamps.map(lampFor)
+    }
+    expect(await lampOf(['/repo/a/sub'])).toEqual(['working', null])
+    expect(await lampOf([])).toEqual([null, null])
+  })
+
   it('an open question ⇒ question, even while the swarm runs', async () => {
     const { lamps } = await readGroundLamps({
       projects: async () => [P[0]],
-      startedFor: async () => 1,
+      boardFor: async () => b(1),
       openQuestions: async () => new Map([['/repo/a', 1]]),
       liveWorkFor: async () => true,
     })
@@ -352,6 +428,20 @@ describe('the president (supply desk) — owner decision 2026-09-25', () => {
     (claude: ReturnType<typeof pane>[]): (() => ActiveTerminalsResponse) =>
     () => ({ cwds: claude.map((c) => c.cwd), claude })
 
+  it('commanderWorkingCwds reports only a GENERATING commander — never the president', async () => {
+    const { commanderWorkingCwds } = await import('./groundLamps')
+    expect(
+      commanderWorkingCwds({
+        commanderIds: () => new Set(['pty-mgr', 'sdk-mgr']),
+        listDesks: desks([
+          pane('pty-sup', '/repo/a', 'working'),
+          pane('pty-mgr', '/repo/b', 'working'),
+          pane('sdk-mgr', '/repo/d', 'waiting'),
+        ]),
+      }),
+    ).toEqual(['/repo/b'])
+  })
+
   it('only a president that is GENERATING is reported — never the commander', async () => {
     const { presidentWorkingCwds } = await import('./groundLamps')
     const cwds = presidentWorkingCwds({
@@ -380,7 +470,7 @@ describe('the president (supply desk) — owner decision 2026-09-25', () => {
     const lampOf = async (cwds: string[]) => {
       const { lamps } = await readGroundLamps({
         projects: async () => P,
-        startedFor: async () => 0,
+        boardFor: async () => b(0),
         openQuestions: async () => new Map(),
         liveWorkFor: async () => false,
         presidentWorkingCwds: () => cwds,
@@ -388,6 +478,7 @@ describe('the president (supply desk) — owner decision 2026-09-25', () => {
       return lamps.map((r) =>
         groundLamp({
           started: r.started,
+          inFlight: r.inFlight,
           openQuestions: r.openQuestions,
           liveWork: r.liveWork,
           presidentWorking: r.presidentWorking === true,
@@ -402,7 +493,7 @@ describe('the president (supply desk) — owner decision 2026-09-25', () => {
 describe('readGroundLamps — the question / review timestamps (2026-09-26)', () => {
   const base = {
     projects: async () => [P[0]],
-    startedFor: async () => 0,
+    boardFor: async () => b(0),
     openQuestions: async () => new Map(),
     liveWorkFor: async () => false,
     presidentWorkingCwds: () => [],

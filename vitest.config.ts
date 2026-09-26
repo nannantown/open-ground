@@ -1,13 +1,20 @@
 import { defineConfig } from 'vitest/config'
 import { resolve } from 'path'
+import { enterFullSuiteGate } from './src/test/fullSuiteGate'
 
 // Vitest config — kept tiny so the first wave of tests is purely about
 // covering important *pure* logic (string parsers, slug generators, schema
 // validation). Component / browser tests can be layered on later by adding
 // a `jsdom` environment to specific files via the `// @vitest-environment`
 // pragma; the global default stays `node` for fast startup.
-export default defineConfig({
+export default defineConfig(async () => {
+  // Whole-suite runs queue here (max 2 at once on this machine) and split the
+  // cores when two share it — see src/test/fullSuiteGate.ts. Filtered runs
+  // (a path, --changed, related) pass straight through.
+  const gate = await enterFullSuiteGate()
+  return {
   test: {
+    ...(gate?.maxWorkers ? { maxWorkers: gate.maxWorkers } : {}),
     // src/** covers the pure-logic unit tests; server/** covers the Hono
     // route integration tests (server/**/__tests__/*.test.ts) that import the
     // bare `app` and exercise routes via app.request(...) without binding a
@@ -120,4 +127,5 @@ export default defineConfig({
       '@': resolve(__dirname, './src'),
     },
   },
+  }
 })

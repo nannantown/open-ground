@@ -137,3 +137,26 @@ describe('ProjectPanel initial load — res.ok guard', () => {
     expect(screen.queryByText('projectPanel.retry')).toBeNull()
   })
 })
+
+// Opening a project is the read receipt for the Ground card's eye (owner
+// 2026-09-26: 「プロジェクトの中に入ったら、既読みたいな感じ」). The panel — not
+// the agent-team bar — must stamp it, and with the 'opened' kind: a /seen
+// stamp here would clear the president's hand on a mere visit.
+describe('ProjectPanel — opening the project clears the Ground eye', () => {
+  it('stamps POST /api/ground/opened with the path on open and on leave, never /seen', async () => {
+    h.projectGet = () => Promise.resolve(new Response(JSON.stringify(VALID), { status: 200 }))
+    const { unmount } = renderPanel()
+    await screen.findByTestId('board')
+    const f = fetch as unknown as ReturnType<typeof vi.fn>
+    const ground = () =>
+      f.mock.calls
+        .filter((c) => String(c[0]).startsWith('/api/ground/'))
+        .map((c) => [String(c[0]), JSON.parse(String((c[1] as RequestInit).body)).path])
+    expect(ground()).toEqual([['/api/ground/opened', '/tmp/proj']])
+    unmount()
+    expect(ground()).toEqual([
+      ['/api/ground/opened', '/tmp/proj'],
+      ['/api/ground/opened', '/tmp/proj'],
+    ])
+  })
+})

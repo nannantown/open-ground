@@ -330,7 +330,7 @@ claude --session-id <uuid> --dangerously-skip-permissions \
 
 **`languageDirective` の対象範囲は commit/PR 本文を含まない(2026-08-13 訂正、2周目レビュー)**: 初版は en/ja 両分岐に「PR and commit descriptions」/「PR・コミットの説明」を含めていたが、同日 main に入った CLAUDE.md「## Language policy」(オーナー決定)が「**New work defaults to English. Code comments, commit messages, new docs, … should be primarily in English**」とし、例外リスト(conversational replies / escalation questions・plainQuestion / UI copy / notification detail)に commit・PR 説明を含めていない — つまり `ja` の directive が「コミットの説明は日本語で」と命じるのは、`settings.language='ja'` の機体で spawn される全ロールに対して CLAUDE.md と正面衝突する。`languageDirective` の対象は CLAUDE.md の例外4面(会話返答・escalation/blocker 質問文・UI 文言・通知 detail)と同じ範囲に絞り、commit/PR の言語は CLAUDE.md 側に一任するよう修正済み(`promptLang.ts`)。
 
-**トークン規律(2026-07-18 追加、`WORKER_ORDER_RULES` 内 【トークン規律・厳守】節)**: 実測(swarm-token-audit カード)でワーカー7体全員のツール束ね率が 1.00(独立作業を1手ずつ実行・1手ごとに最大33万トークンの会話文脈を読み直す)だったため、標準指示に (a) 独立ツール呼び出しは1応答へ束ねて並列実行 (b) ファイルは範囲指定 Read か grep で当たりを付けてから読む(全文読み禁止) (c) 同じファイルを読み直さない (d) 長い出力は tail/要約で受ける(テストは失敗時のみ詳細) (e) フルスイート(`npm test`)は完了ゲートとして最後に1回・触った範囲を先に回す (f) カードに当たり(対象ファイル)があれば探索せず直行、の6項目を焼き込んだ。**完了ゲート(`npx tsc --noEmit` / `npm test` / lint の3点)と ready 前セルフコミットの規約は不変** — 緩めているのは探索コスト・文脈量だけで、品質ゲートには一切手を付けていない。文言はピンテスト(swarmWorker.test.ts の `WORKER_ORDER_RULES token discipline`)で固定。効果判定(束ね率≥1.5・手数中央値≤120)は別カード(swarm-token-audit)が継続観測する。
+**トークン規律(2026-07-18 追加、`WORKER_ORDER_RULES` 内 【トークン規律・厳守】節)**: 実測(swarm-token-audit カード)でワーカー7体全員のツール束ね率が 1.00(独立作業を1手ずつ実行・1手ごとに最大33万トークンの会話文脈を読み直す)だったため、標準指示に (a) 独立ツール呼び出しは1応答へ束ねて並列実行 (b) ファイルは範囲指定 Read か grep で当たりを付けてから読む(全文読み禁止) (c) 同じファイルを読み直さない (d) 長い出力は tail/要約で受ける(テストは失敗時のみ詳細) (e) フルスイート(`npm test`)は完了ゲートとして最後に1回・触った範囲を先に回す(**2026-09-26 改訂**: 途中は `--changed origin/main` か対象ファイルだけ・フルは ready 前にきれいな木で1回・パソコン全体で同時2本までの順番待ちを vitest.config.ts がアプリ側で強制し、合格記録で司令官の二重実行を省く — VERIFICATION.md §10) (f) カードに当たり(対象ファイル)があれば探索せず直行、の6項目を焼き込んだ。**完了ゲート(`npx tsc --noEmit` / `npm test` / lint の3点)と ready 前セルフコミットの規約は不変** — 緩めているのは探索コスト・文脈量だけで、品質ゲートには一切手を付けていない。文言はピンテスト(swarmWorker.test.ts の `WORKER_ORDER_RULES token discipline`)で固定。効果判定(束ね率≥1.5・手数中央値≤120)は別カード(swarm-token-audit)が継続観測する。
 
 **(a) の既定反転(2026-07-22 追加、日次燃費日報の劣化起票から)**: 上の (a) を焼き込んで4日経っても**束ね率は 1.12 で基準(1.3)割れのまま横ばい**だった(`npm run swarm:audit` 実測)。原因は文言が**条件付きルール**だったこと — 「独立したツール呼び出しは束ねて並列実行する」は、worker が「この2手は独立だ」と**気づけた時にしか発火しない**。逐次に考える既定の思考順(1手決める→送る→結果を見て次を決める)ではその気づきに到達しないので、ルールは書いてあるのに空振りする。そこで (a) を**既定の反転**に書き換えた: 「調べものはできるだけまとめて一度に」を先頭に置き、**まとめて出すのが既定・道具1つだけの応答が許されるのは『その結果を見ないと次が決まらない時』に限る**とし、さらに**送信直前の自己点検**(「この後どうせ要る調べものは?」を洗い出して同じ応答に足す)を1つ足した。**なぜこれで指標が戻るか**: 束ね率の定義は `tool_use 数 ÷ tool_use を含む応答数`(`swarmTokenAudit.ts`)なので、比を上げる手は「1応答あたりの道具数を増やす」以外に無く、既定を反転させると単発応答が『結果依存の時だけ』に絞られて分母が減る — **同じ仕事を少ない往復で終える**ということであり、調べる量を減らすわけではない。**完了ゲート3点と ready 前セルフコミットは今回も不変**。ピンは**見出し句ではなく機構2文**に張る(`swarmWorker.test.ts` の同 describe / `pins the DEFAULT-INVERSION mechanism of (a), not just its heading`) — ①既定文「道具を1つだけ載せた応答が許されるのは、その結果を見ないと次に何をするか決まらない時だけ」 ②送信直前の自己点検「1つだけ送りそうになったら…同じ応答に足せ」 の2文を、`(b)` 手前までを (a) 節として切り出した**その中で**見る(機構が別節へ流れて (a) が見出しだけの殻に戻る書き換えも赤になる)。⚠ **初版のピンは見出し句 `調べものはできるだけまとめて一度に` 1本きりで、機構2文を両方消してもスイート全緑だった**(2026-07-22 変異実測: 2文を削除して `swarmWorker.test.ts` を回すと **41 passed / 0 failed** — 見出し句のピンも `1応答に束ねて並列実行する` のピンも生き残る。機構ピン追加後は同じ変異で **1 failed**)。見出しは「何と呼ぶか」しか固定せず「何をさせるか」は無防備になる — **効く文がどれかを見極めてそこに張る**のがピンテストの要件で、条文が在ることの確認は代用にならない(束ね率を動かせるのは「1応答あたりの道具数」だけで、その数を実際に増やすのはこの2文)。効果は翌日以降の日次燃費日報が判定する。
 
@@ -910,8 +910,71 @@ worktree を消せるコードパスは以下で**全部**(検索根拠: `remove
 | 6 | 統合成功後の `defaultCleanup`(:4884)(**HISTORICAL — 2026-07-15 マネージャ専任化で engine land ごと撤去・発火しない**。現在の統合後掃除は司令官の手動手順 — 03 章 §5) | (当時)autoMerge がその branch を trunk に land し、カードが review→done に動いた直後 | **force** + **`branch -D`** | — (統合済み = コミット済み) | **消える** | 残る(branch 消滅により janitor の掃除対象になる) | `integrated (ff|rebase-ff): … → main`(もう出ない) |
 | 7 | `POST /api/project/worktrees/clean`(server/routes/project.ts:458-468 → worktreeCleanup.ts:105-171) | 手動 API / UI の worktree 掃除 | **force なし**(clean のみ。dirty と live-PTY は必ず skip — :140-143) | — (dirty は skip) | 残る | 残る | (エンジン外) |
 | 8 | `withRebasedWorktree`(:4458) | エンジンの verify/レビュー用 **一時** `.review-*` dir(worker の worktree ではない) | force | — | — | — | — |
+| 9 | `reapFinishedWorkers`(`swarmWorkerReaper.ts`・2026-09-26) | 起動ループ 3 分毎(エンジン ON/OFF・監督と無関係・primary :47776 のみ) | **force なし**(`removeSwarmWorktree` non-force — git が dirty を拒否) | — (dirty は消さない) | 直後の janitor が `-d` で消す | 直後の janitor が消す(worktree 消滅で対象になる) | (ログ無し — 観測点は `GET /api/swarm/workers` から席が消えること) |
 
-janitor(`runSwarmJanitor` — swarmJanitor.ts:405-413)は **worktree 本体を消さない**。消すのは (1) merged/empty な `swarm/*` branch(`-d` のみ。`-D` は user-explicit force のみ — :219-231)、(2) 15 分 stale かつ worker 証明済み消滅の心拍ファイル(:310-390)、(3) terminal pool の死骸エントリ(terminal.ts:753-773 — kill はしない)。呼び出しは overseer ON 時の 15 分毎のみ(swarmOverseer.ts:568-570)。
+janitor(`runSwarmJanitor` — swarmJanitor.ts:405-413)は **worktree 本体を消さない**。消すのは (1) merged/empty な `swarm/*` branch(`-d` のみ。`-D` は user-explicit force のみ — :219-231)、(2) 15 分 stale かつ worker 証明済み消滅の心拍ファイル(:310-390)、(3) terminal pool の死骸エントリ(terminal.ts:753-773 — kill はしない)。呼び出しは overseer ON 時の 15 分毎(swarmOverseer.ts)と、下の経路 9 の起動ループ(毎回 reap の直後)。
+
+### Finished workers are put away automatically (path 9, 2026-09-26)
+
+**Why seats piled up (owner report 2026-09-26: 6 seats on the bar, 4 long finished).** Since the
+2026-07-15 manager-only rework the engine no longer lands branches, so it no longer tears a worker
+down after integration either (path 6 is historical). The only remaining "put it away" step was the
+commander's manual og-manage §マージ step 7. When a commander skipped it, the worktree and heartbeat
+stayed on disk, and every automatic sweep read "worktree still exists" as "worker still exists": the
+janitor (overseer-only, never removes worktrees), the boot retention sweep (keeps any heartbeat whose
+worktree exists), and `GET /api/swarm/workers` arm 3 (draws every such heartbeat as a seat). The
+engine's monitor only drops a done worker's roster row when its session exits — no teardown.
+
+**Now:** `swarmWorkerReaper.ts` runs every 3 minutes from server boot. A central `swarm/*`
+worktree is removed only when ALL hold:
+
+1. **Clean** — no uncommitted change (a failed probe counts as dirty).
+2. **Integrated** — `checkMergedBranches` = `merged` (tip reachable from the trunk, or every patch
+   already there). `open` / `unknown` keep it.
+3. **Finished** — (a) the engine holds it (live roster **or the saved `roster.json`**, which covers
+   the restart window) **and its card is `done`** and no session in it moved for 10 min; the idle
+   session is stopped by `removeSwarmWorktree`, exactly like step 7. Or (b) the engine does not hold
+   it, **no session (PTY or SDK) is in it** (a session in a subdirectory counts), and its newest
+   heartbeat / worktree creation is older than **60 min** — longer than the 30-min silent-worker
+   threshold. In (b) the removal passes `refuseIfOccupied`, so a session that started since the
+   check makes it refuse instead of stopping anything. A roster row with the card anywhere else —
+   including missing, which a transient empty Board read also looks like — is left to the engine.
+   A saved `roster.json` that exists but cannot be read or parsed removes nothing that round
+   (`readSavedRosterStrict` — the shared `readRoster` reads a corrupt file as empty, which here
+   would mean "the engine holds nothing").
+4. **Re-checked just before removal** — (a) re-reads the card column and idleness, (b) re-reads the
+   roster. Earlier removals in the same pass can take seconds.
+
+Runs in the **primary instance only** (port 47776): sessions and the engine live in one process, and
+`npm run dev:alt` shares `~/.openground`, so a second server would read the primary's working workers
+as dead. The merge check does not fetch (a stale trunk ref only makes a branch look unmerged). A
+non-force `git worktree remove` also deletes gitignored files in the tree — same as step 7.
+
+When something was removed, `runSwarmJanitor` (no force) then deletes the merged branch with `-d` and the orphaned heartbeat.
+Step 7 stays the commander's job; this is the safety net for when it does not happen. Guards:
+`swarmWorkerReaper.test.ts` (real git: integrated → removed / unintegrated commit → kept / live
+session (also in a subdirectory) → kept / dirty → kept / engine-held: `done` → removed, `review` →
+kept, moving session → kept / unreadable roster or Board → kept / engine adopts it mid-pass → kept /
+fresh heartbeat → kept / node_modules symlink is not "dirty" and its target survives / a REAL PTY
+that appears in an unheld worktree after the liveness snapshot → refused, neither stopped nor removed
+(the only test that goes through `removeSwarmWorktree`'s real `refuseIfOccupied` check) / corrupt
+saved roster → nothing removed, no roster file → empty roster). Each measured red with production reverted. Kill-switch: `OPENGROUND_WORKER_REAP=0`.
+
+**Simulators go with the worktree (2026-09-26).** Measured: a finished worker's "iPhone 17 Pro"
+stayed booted ~55 min holding ~7 GB. `removeSwarmWorktree` now calls `shutdownWorkerSimulators`
+(`swarmSimulators.ts`, fire-and-forget, macOS only) on both of its success paths, so every teardown
+route above closes them. Attribution must be certain: the device is Booted, one of THIS worker's Bash
+commands names it — by UDID, or by its whole name ("iPhone 17" does not match "iPhone 17 Pro") but a
+name counts ONLY if (a) no other device on the Mac, any state or runtime, has that name, (b) the command
+boots a device (`simctl boot`, `xcodebuild test` / `test-without-building` — never `build` or grep),
+and (c) it finished (a killed command's 30-min open window is UDID-only). A name alone cannot tell the
+owner's device from the worker's when several share it (this Mac: 5 × "iPhone 17 Pro"), so there it
+is effectively UDID-only — a leak accepted over closing the owner's device — simctl's `lastBootedAt` lies inside that
+command's run window (tool_use .. tool_result, ±1 s: lastBootedAt is whole seconds — an owner-booted
+device, same name or not, was already up before the command started, so it fails this), and no Bash
+command of another live worktree names it. A device opened by a bare `open -a Simulator` (names
+nothing) is left running. Guards: `swarmSimulators.test.ts`,
+`swarmWorktreeTrust.test.ts` (wiring) — measured red with production reverted.
 
 ### 実測(2026-07-10「rebase 済み worktree(self-supp)が worker 停止後に消えた」)の犯人特定
 

@@ -10,18 +10,20 @@
 //   Clicking anywhere on that row opens / folds the bar (SwarmModule).
 //   Folded mounts no seat, so it opens no EventSource.
 // - Open: grows UPWARD to a saved height and shows the seats (president ·
-//   manager · workers). The top edge is a drag handle; the height is saved per
-//   project and restored next time. Open/closed is saved per project too
+//   manager · workers). The whole header row is the drag handle (owner
+//   2026-09-26): drag it up / down to resize (a folded row dragged up opens,
+//   an open bar dragged low folds), press it without moving to open / fold.
+//   The height is saved per project and restored next time. Open/closed is
+//   saved per project too
 //   (owner decision 2026-09-25): leave a project with the bar open and it is
 //   open when you come back, even after a restart. A project never opened
 //   before starts folded. Opening on entry cannot freeze the window: the seats
 //   only get what the page's streams leave (streamBudget.ts, pinned in
 //   SwarmModule.streamBudget.test.tsx).
 
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
+import { useEffect, useRef, useState, type HTMLAttributes, type KeyboardEvent, type PointerEvent } from 'react'
 import type { ProjectMeta } from '@/lib/types'
-import { useT } from '@/i18n/I18nContext'
-import { GROUND_SEEN_EVENT } from '@/lib/groundLamp'
+import { useGroundLook } from '@/lib/useGroundLook'
 import { SwarmModule } from '@/components/canvas/modules/SwarmModule'
 import { StreamOwnerContext } from '@/lib/streamBudget'
 
@@ -30,6 +32,20 @@ export const SWARM_BAR_MIN_H = 180
 /** Space always left for the tab above the open bar (px). */
 const TOP_RESERVE = 120
 const KEY_STEP = 24
+/** A press that moves less than this is a click (open / fold), not a drag (px). */
+export const SWARM_BAR_DRAG_SLOP = 4
+/** A drag released below this height folds the bar. */
+const FOLD_BELOW = SWARM_BAR_MIN_H / 2
+/** Presses on these stay theirs — no open / fold, no drag. The bar's own named
+ *  toggle button IS part of the handle. */
+const NOT_A_HANDLE =
+  'button:not([data-testid="swarm-bar-toggle"]), a, input, select, textarea, [role="switch"], [role="menu"]'
+
+/** The handlers that make SwarmModule's header row the bar's handle. */
+export type SwarmBarHandle = Pick<
+  HTMLAttributes<HTMLElement>,
+  'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel' | 'onLostPointerCapture' | 'onKeyDown'
+>
 
 export const swarmBarKey = (projectId: string) => `openground.swarmbar.${projectId}`
 
@@ -60,11 +76,9 @@ const save = (projectId: string, patch: { h?: number; open?: boolean }) => {
 }
 
 export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
-  const { t } = useT()
   const [open, setOpen] = useState(() => loadSwarmBarOpen(project.id))
   const [height, setHeight] = useState(() => loadSwarmBarHeight(project.id))
   const rootRef = useRef<HTMLDivElement>(null)
-  const drag = useRef<{ y: number; h: number } | null>(null)
   // Height of the column the bar lives in (0 = not measured). The SHOWN
   // height is the saved one fitted into it, so a window that shrank since
   // the height was saved never pushes the tab above out of view.
@@ -79,29 +93,9 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
     return () => ro.disconnect()
   }, [open])
   // "The owner has looked at the president's seat" — clears the Ground card's
-  // question / review marks (groundLamp.ts, 2026-09-26). Stamped when the bar
-  // is open and visible, and again when the owner leaves (fold, close the
-  // project, hide the window) so whatever arrived WHILE they sat here counts
-  // as seen too.
-  useEffect(() => {
-    if (!open) return
-    const stamp = () =>
-      void fetch('/api/ground/seen', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: project.path }),
-        keepalive: true,
-      })
-        .then(() => window.dispatchEvent(new Event(GROUND_SEEN_EVENT)))
-        .catch(() => {})
-    if (!document.hidden) stamp()
-    const onVis = () => stamp()
-    document.addEventListener('visibilitychange', onVis)
-    return () => {
-      document.removeEventListener('visibilitychange', onVis)
-      stamp()
-    }
-  }, [open, project.path])
+  // president hand / eye (groundLamp.ts, 2026-09-26). The eye alone is also
+  // cleared by merely opening the project (ProjectPanel's 'opened' look).
+  useGroundLook(project.path, 'seen', open)
   const maxH = parentH > 0 ? Math.max(SWARM_BAR_MIN_H, parentH - TOP_RESERVE) : undefined
   const shownH = maxH === undefined ? height : Math.min(height, maxH)
 
@@ -118,28 +112,61 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
     save(project.id, { h: v })
   }
 
-  // Pointer capture keeps the drag on the handle even when the pointer runs
-  // over an iframe / terminal, and releases by itself on up/cancel.
-  const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return
-    e.preventDefault()
-    e.currentTarget.setPointerCapture(e.pointerId)
-    drag.current = { y: e.clientY, h: rootRef.current?.offsetHeight || shownH }
+  // The drag. A press that moves less than SWARM_BAR_DRAG_SLOP stays a click;
+  // past it the press is a drag and the click that follows is swallowed.
+  // Pointer capture — taken only once it IS a drag, so a plain click is left
+  // alone — keeps the drag alive over an iframe / terminal.
+  // `kept`: the saved height, put back when the drag ends in a fold.
+  const drag = useRef<{ y: number; h: number; moved: boolean; raw: number; kept: number } | null>(null)
+  const swallowClick = useRef(false)
+  const onPointerDown = (e: PointerEvent<HTMLElement>) => {
+    if (e.button !== 0 || (e.target as Element).closest(NOT_A_HANDLE)) return
+    const h = rootRef.current?.offsetHeight || (open ? shownH : 0)
+    drag.current = { y: e.clientY, h, moved: false, raw: h, kept: height }
+    // Capture at once: a quick flick leaves the 38px row before its first
+    // move is heard (measured in the real app). The click after a still press
+    // then lands on the row itself, whose onClick opens / folds.
+    e.currentTarget.setPointerCapture?.(e.pointerId)
   }
-  const endDrag = (e: PointerEvent<HTMLDivElement>) => {
-    if (!drag.current) return
+  const endDrag = (e: PointerEvent<HTMLElement>) => {
+    const d = drag.current
     drag.current = null
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
-    commit(rootRef.current?.offsetHeight || shownH)
+    if (e.currentTarget.hasPointerCapture?.(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
+    if (!d?.moved) return
+    swallowClick.current = true
+    setTimeout(() => (swallowClick.current = false), 0)
+    if (d.raw < FOLD_BELOW) {
+      setHeight(d.kept)
+      setOpen(false)
+      save(project.id, { open: false })
+    } else {
+      const v = clamp(d.raw)
+      setOpen(true)
+      setHeight(v)
+      save(project.id, { h: v, open: true })
+    }
   }
-  const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
-    if (!drag.current) return
+  const onPointerMove = (e: PointerEvent<HTMLElement>) => {
+    const d = drag.current
+    if (!d) return
     // The button came up somewhere we never heard about (capture lost to the
     // OS, a window switch): end the drag instead of resizing on hover.
     if (e.buttons === 0) return endDrag(e)
-    setHeight(clamp(drag.current.h + (drag.current.y - e.clientY)))
+    const dy = d.y - e.clientY
+    if (!d.moved) {
+      if (Math.abs(dy) < SWARM_BAR_DRAG_SLOP) return
+      d.moved = true
+    }
+    d.raw = d.h + dy
+    if (d.raw < FOLD_BELOW) setOpen(false)
+    else {
+      setOpen(true)
+      setHeight(clamp(d.raw))
+    }
   }
-  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+  // Keyboard path: the arrow keys on the bar's named toggle button.
+  const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (!open || !(e.target as Element).closest('[data-testid="swarm-bar-toggle"]')) return
     if (e.key === 'ArrowUp') commit(shownH + KEY_STEP)
     else if (e.key === 'ArrowDown') commit(shownH - KEY_STEP)
     else return
@@ -156,37 +183,22 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
       ].join(' ')}
       style={open ? { height: shownH } : undefined}
     >
-      {open && (
-        <div
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label={t('projectPanel.swarm.bar.resize')}
-          aria-valuenow={shownH}
-          aria-valuemin={SWARM_BAR_MIN_H}
-          aria-valuemax={maxH}
-          title={t('projectPanel.swarm.bar.resize')}
-          tabIndex={0}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
-          onLostPointerCapture={endDrag}
-          onDoubleClick={() => commit(SWARM_BAR_DEFAULT_H)}
-          onKeyDown={onKeyDown}
-          className={[
-            'absolute inset-x-0 top-0 z-10 h-[5px] cursor-row-resize touch-none',
-            'transition-colors duration-150 hover:bg-accent/30 active:bg-accent/50',
-            'focus-visible:bg-accent/50 focus-visible:outline-none',
-          ].join(' ')}
-        />
-      )}
       {/* Every stream opened inside the bar counts as the BAR's, so the page
           (the open tab) keeps priority — streamBudget.ts. */}
       <StreamOwnerContext.Provider value="swarmBar">
       <SwarmModule
         project={project}
         collapsed={!open}
+        barHandle={{
+          onPointerDown,
+          onPointerMove,
+          onPointerUp: endDrag,
+          onPointerCancel: endDrag,
+          onLostPointerCapture: endDrag,
+          onKeyDown,
+        }}
         onToggleCollapsed={() => {
+          if (swallowClick.current) return
           if (!open) setHeight((h) => clamp(h))
           setOpen(!open)
           save(project.id, { open: !open })

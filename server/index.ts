@@ -9,6 +9,7 @@
 // single-instance launcher's "never silently shift ports" rule). Binding to
 // 127.0.0.1 (not 0.0.0.0) keeps this local-only, same as `next dev` here.
 
+import { sweepStaleTestHomes } from '@/lib/server/testHomeSweep'
 import { serve } from '@hono/node-server'
 import { app } from './app'
 import {
@@ -32,6 +33,7 @@ import { startDailyFuelReportLoop } from '@/lib/server/dailyFuelReport'
 import { startBlogPublishLoop } from '@/lib/server/blogPublish'
 import { startOwnerDeskLimitLoop } from '@/lib/server/ownerDeskLimit'
 import { startSupplyContextCapLoop } from '@/lib/server/supplyContextCap'
+import { startWorkerReapLoop } from '@/lib/server/swarmWorkerReaper'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
 import { installSwarmTooling } from '@/lib/server/swarmToolingInstall'
@@ -127,6 +129,18 @@ void ensureCoolingTableLoaded(Date.now())
 // launching fail-open while the probe still runs. Fire-and-forget by contract:
 // runs the claude preflight itself, never throws, never blocks boot.
 warmTierProbeAtBoot()
+
+// Test sandboxes a killed vitest run never removed (setup-home.ts removes its own
+// at the end of each file). At boot and every 6 h — the app often runs for weeks
+// between restarts. Only `openground-test-home-*` dirs untouched for 3 h.
+const sweepTestHomes = () =>
+  void sweepStaleTestHomes()
+    .then((n) => {
+      if (n) console.log(`[openground:hono] removed ${n} stale test sandbox(es) from the temp dir`)
+    })
+    .catch(() => {})
+sweepTestHomes()
+setInterval(sweepTestHomes, 6 * 60 * 60_000).unref()
 
 // Retention sweep — drop the raw episodic layer (run cache + attachments) older
 // than RAW_RETENTION_DAYS. Fire-and-forget after boot so it never blocks
@@ -404,6 +418,18 @@ if (process.env.OPENGROUND_DESK_LIMIT_WATCH !== '0') {
 // (swarmManager.ts), not here. Same boot-loop shape; this entry only.
 // Kill-switch: Settings.deskContextCapTokens = 0.
 startSupplyContextCapLoop()
+
+// FINISHED-WORKER REAP (swarmWorkerReaper.ts, owner request 2026-09-26): a swarm
+// worker whose branch is already in main and whose card is done (or that has
+// sat dead and quiet) has its worktree removed, so its seat leaves the agent-team
+// bar. Never touches uncommitted or unintegrated work. Engine-independent, same
+// boot-loop shape. Kill-switch: OPENGROUND_WORKER_REAP=0.
+// PRIMARY INSTANCE ONLY: sessions and the engine live in this process, so a
+// second server (npm run dev:alt, same ~/.openground) would read the primary's
+// working workers as dead.
+if (process.env.OPENGROUND_WORKER_REAP !== '0' && PORT === 47776) {
+  startWorkerReapLoop()
+}
 
 // Listen errors (chiefly EADDRINUSE on the fixed port) are a TRUE fatal: the
 // single-instance contract says we must fail loudly, never silently shift

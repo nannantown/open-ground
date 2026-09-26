@@ -26,7 +26,7 @@ import { claudeDirName } from './claudeProjectDir'
 //     depends on exactly that.
 // ---------------------------------------------------------------------------
 
-const claudeProjectsRoot = () => join(homedir(), '.claude', 'projects')
+export const claudeProjectsRoot = () => join(homedir(), '.claude', 'projects')
 const sessionDir = (cwd: string): string =>
   join(claudeProjectsRoot(), claudeDirName(cwd))
 /** Where claude keeps THIS session's transcript — the one place that knowledge

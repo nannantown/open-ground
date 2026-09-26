@@ -74,6 +74,13 @@ one target is a misuse.
 revert/retry. Important findings get adversarial review (separate agent:
 "is this actually right? what breaks it?"); ultracode scale = multiple
 reviewers + majority vote per item.
+**Test runs (OPEN GROUND, owner decision 2026-09-26)**: while working run
+only related tests (`npx vitest run --changed origin/main` or the touched
+files); the full `npm test` runs ONCE, as the completion gate before
+`ready`, on a committed clean tree, no untracked files (its pass record
+lets the commander skip a second run). The app queues full runs machine-wide (2 at once), so
+run it in the background and wait; don't dodge the queue with a
+near-everything filter. Canon: docs/VERIFICATION.md §10.
 
 **4. Integrate** - commit each worktree's result to a feature branch -> PR
 per unit; protected main: PR+CI, merge only once green. **Never `git

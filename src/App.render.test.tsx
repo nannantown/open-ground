@@ -26,6 +26,8 @@ import { projectPanel } from '@/i18n/messages/projectPanel'
 /** The Ground card marks are icons; their names are the hover text (en). */
 const QUESTION_MARK = projectPanel.en['projectPanel.groundMarkQuestion']
 const REVIEW_MARK = projectPanel.en['projectPanel.groundMarkReview']
+const RUNNING_MARK = projectPanel.en['projectPanel.groundMarkWorking']
+const UNKNOWN_MARK = projectPanel.en['projectPanel.groundMarkUnknown']
 
 // InfiniteCanvas observes its viewport with a ResizeObserver — absent in jsdom.
 class ROStub {
@@ -248,7 +250,7 @@ describe('App — whole-render integration', () => {
     // signal, and a live process must not be able to break it.
     installFetch({
       projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
-      lamps: [{ projectId: 'a', started: 0, openQuestions: 0, liveWork: true }],
+      lamps: [{ projectId: 'a', started: 0, inFlight: 0, openQuestions: 0, liveWork: true }],
     })
     await act(async () => {
       renderApp()
@@ -258,49 +260,51 @@ describe('App — whole-render integration', () => {
       expect((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0),
     )
     expect(screen.queryByLabelText(QUESTION_MARK)).not.toBeInTheDocument()
-    expect(screen.queryByText('Running')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(RUNNING_MARK)).not.toBeInTheDocument()
     // …and it is SILENT, not "No data" — the board was read, and it said done.
-    expect(screen.queryByText('No data')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(UNKNOWN_MARK)).not.toBeInTheDocument()
   })
 
-  it('says Running while a started card is actually being worked', async () => {
+  it('says Running while a card is in flight — even with nothing generating (2026-09-26)', async () => {
+    // A card in review / being handed over has no claude mid-turn, and the
+    // card must not go dark then: 「全部終わるまでずっとこの表示」.
     installFetch({
       projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
-      lamps: [{ projectId: 'a', started: 1, openQuestions: 0, liveWork: true }],
+      lamps: [{ projectId: 'a', started: 1, inFlight: 1, openQuestions: 0, liveWork: false }],
     })
     await act(async () => {
       renderApp()
     })
-    expect(await screen.findByText('Running')).toBeInTheDocument()
+    expect(await screen.findByLabelText(RUNNING_MARK)).toBeInTheDocument()
     expect(screen.queryByLabelText(QUESTION_MARK)).not.toBeInTheDocument()
   })
 
-  it('stays SILENT on started-but-idle work — waiting is only ever a question (2026-08-18)', async () => {
+  it('stays SILENT on parked (blocked-only) work — waiting is only ever a question (2026-08-18)', async () => {
     // The owner's amendment: 「waitingは僕が何かをしないといけない時にだけ出しま
-    // しょう」. Parked/stalled cards are the machine's problem; the card goes
-    // amber only for an unanswered question (the case below).
+    // しょう」. Parked cards are the machine's problem; the card goes amber only
+    // for an unanswered question (the case below).
     installFetch({
       projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
-      lamps: [{ projectId: 'a', started: 1, openQuestions: 0, liveWork: false }],
+      lamps: [{ projectId: 'a', started: 1, inFlight: 0, openQuestions: 0, liveWork: false }],
     })
     await act(async () => {
       renderApp()
     })
     await screen.findByText('Northwind Atlas')
     expect(screen.queryByLabelText(QUESTION_MARK)).not.toBeInTheDocument()
-    expect(screen.queryByText('Running')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(RUNNING_MARK)).not.toBeInTheDocument()
   })
 
   it('raises the QUESTION mark for an open question even while the swarm runs', async () => {
     installFetch({
       projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
-      lamps: [{ projectId: 'a', started: 2, openQuestions: 1, liveWork: true }],
+      lamps: [{ projectId: 'a', started: 2, inFlight: 2, openQuestions: 1, liveWork: true }],
     })
     await act(async () => {
       renderApp()
     })
     expect(await screen.findByLabelText(QUESTION_MARK)).toBeInTheDocument()
-    expect(screen.queryByText('Running')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(RUNNING_MARK)).not.toBeInTheDocument()
   })
 
   // ── question / review marks (owner decision 2026-09-26) ──────────────────
@@ -310,7 +314,7 @@ describe('App — whole-render integration', () => {
   const markCase = async (row: Partial<GroundLampRow>) => {
     installFetch({
       projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
-      lamps: [{ projectId: 'a', started: 0, openQuestions: 0, liveWork: false, ...row }],
+      lamps: [{ projectId: 'a', started: 0, inFlight: 0, openQuestions: 0, liveWork: false, ...row }],
     })
     await act(async () => {
       renderApp()
@@ -328,7 +332,28 @@ describe('App — whole-render integration', () => {
     await markCase({ deliveredAt: T0 + 60_000, seenAt: T0 })
     expect(await screen.findByLabelText(REVIEW_MARK)).toBeInTheDocument()
     expect(screen.queryByLabelText(QUESTION_MARK)).not.toBeInTheDocument()
-    expect(screen.queryByText('Running')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(RUNNING_MARK)).not.toBeInTheDocument()
+  })
+
+  it('opening the project (openedAt) clears the eye', async () => {
+    // Card b (same delivery, never opened) proves the lamps were APPLIED: its
+    // eye is on screen, and the opened card a must have none.
+    const row = { started: 0, inFlight: 0, openQuestions: 0, liveWork: false, deliveredAt: T0 + 60_000, seenAt: T0 }
+    installFetch({
+      projects: [
+        projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' }),
+        projectMeta({ id: 'b', name: 'Harbor Ledger', path: '/b' }),
+      ],
+      lamps: [
+        { projectId: 'a', ...row, openedAt: T0 + 120_000 },
+        { projectId: 'b', ...row },
+      ],
+    })
+    await act(async () => {
+      renderApp()
+    })
+    await screen.findByLabelText(REVIEW_MARK)
+    expect(screen.getAllByLabelText(REVIEW_MARK)).toHaveLength(1)
   })
 
   it('both at once ⇒ the QUESTION mark wins', async () => {
@@ -347,8 +372,8 @@ describe('App — whole-render integration', () => {
         projectMeta({ id: 'b', name: 'Harbor Ledger', path: '/b' }),
       ],
       lamps: [
-        { projectId: 'a', started: 0, openQuestions: 0, liveWork: false, presidentAskedAt: T0, deliveredAt: T0, seenAt: T0 + 60_000 },
-        { projectId: 'b', started: 0, openQuestions: 1, liveWork: false },
+        { projectId: 'a', started: 0, inFlight: 0, openQuestions: 0, liveWork: false, presidentAskedAt: T0, deliveredAt: T0, seenAt: T0 + 60_000 },
+        { projectId: 'b', started: 0, inFlight: 0, openQuestions: 1, liveWork: false },
       ],
     })
     await act(async () => {
@@ -372,8 +397,8 @@ describe('App — whole-render integration', () => {
     await act(async () => {
       renderApp()
     })
-    expect(await screen.findByText('No data')).toBeInTheDocument()
-    expect(screen.queryByText('Running')).not.toBeInTheDocument()
+    expect(await screen.findByLabelText(UNKNOWN_MARK)).toBeInTheDocument()
+    expect(screen.queryByLabelText(RUNNING_MARK)).not.toBeInTheDocument()
     expect(screen.queryByLabelText(QUESTION_MARK)).not.toBeInTheDocument()
   })
 

@@ -213,6 +213,7 @@ First read the owner's answers (§Answers come back only when you look). Land on
 1. **dirty=0** confirmed (wait if worker still writing).
 2. `git fetch origin main`.
 3. **Re-verify (mandatory)**: run the goal's own checks in `<wt>` yourself (`npx tsc --noEmit` / `npm test` etc). Green → continue; red → don't push, go §rework (heartbeat `ready` is unverified self-report — never push on it alone).
+   **Full suite once, not twice** (owner decision 2026-09-26): in OPEN GROUND first run `npx tsx scripts/full-suite-passed.mts <wt>`. Exit 0 = the worker's own `npm test` exited 0 on exactly this HEAD's contents, the tree is clean, and HEAD already contains origin/main — FF push lands the tested tree, so skip `npm test` (tsc / lint still run). Exit 1 (prints why) = run `npm test`; if the reason is "HEAD does not contain origin/main", do step 5's rebase FIRST and run it once on the rebased tree (not once before and again after). Any rebase = the suite runs again. Never skip on the heartbeat's word. Full runs queue machine-wide (2 at once): run it in the background and wait.
 4. **独立レビュー(敵対・必須)**: Agent ツールでレビュアーを起動し、`git -C <wt> diff origin/main..HEAD` と
    ゴール(心拍 task / カード)を渡して「ゴールを本当に満たすか・バグ/退行/破壊的操作は?
    緑のテスト≠正しい前提で file:line+根拠」を出させる。must-fix が出たら入れず §差し戻し。
@@ -251,7 +252,7 @@ First read the owner's answers (§Answers come back only when you look). Land on
      → **3 の再検証をやり直し**、緑なら FF push。
    - **実衝突** → `git -C <wt> rebase --abort` で復旧してから止めて受信箱へ(§Where reports go。半端な rebase 状態で放置しない)。
 6. **Check push exit code** — non-zero → don't clean up (reject → redo from step 5's rebase; **force-push forbidden**).
-7. **Clean up only after confirming landed**: `fetch origin main` then `merge-base --is-ancestor <branch> origin/main` true → `POST /api/swarm/worktree/remove -d '{"path":…,"worktree":"<wt>","force":false}'` → `branch -d <branch>` (**`-d` only**) → rm that branch's heartbeat file.
+7. **Clean up only after confirming landed**: `fetch origin main` then `merge-base --is-ancestor <branch> origin/main` true → `POST /api/swarm/worktree/remove -d '{"path":…,"worktree":"<wt>","force":false}'` → `branch -d <branch>` (**`-d` only**) → rm that branch's heartbeat file. (Safety net: the app's finished-worker reaper does the same within ~3 min once the card is `done` — still do it yourself.)
 8. **Move Board in lockstep** (§Board): READY→`move review`, landed→`move done`, must-fix/red→`rework`. Code integration and column move always paired.
 9. **Report each landing as it lands** — right after step 8 moves that card to `done`, one `supply/say` (plain words) **with `"landed":["<full card id>"]`**. The engine holds its own 「本体に取り込まれました」 for ~20 min waiting for your report and drops it once yours is delivered — so the owner hears each landing ONCE. Only the `landed` ids count (naming the title in the text does not); without them, or later than ~20 min, the owner hears it twice. Put anything extra (installed on the phone, version) in the same line. Each landed branch moves origin/main — **redo from step 2 each time**. Close with one summary of what did NOT land (skipped+why / remaining) — no `landed` ids there, those were already reported.
 

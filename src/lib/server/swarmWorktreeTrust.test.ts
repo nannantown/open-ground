@@ -270,3 +270,22 @@ describe('cleanProjectWorktrees — central sweep trust pruning (Issue 1, LEAK 2
     expect(after?.history).toEqual([{ display: 'prior session' }])
   })
 })
+
+// Card finished → its simulators are closed. The attribution itself is pinned in
+// swarmSimulators.test.ts; this pins that every teardown path actually asks.
+vi.mock('./swarmSimulators', () => ({ shutdownWorkerSimulators: vi.fn(async () => []) }))
+
+describe('removeSwarmWorktree — closes the worker’s simulators', () => {
+  it('asks for the removed worktree on the normal and the already-gone path', async () => {
+    const { shutdownWorkerSimulators } = await import('./swarmSimulators')
+    const spy = vi.mocked(shutdownWorkerSimulators)
+    spy.mockClear()
+    const { proj } = await registeredRepo()
+    const a = await createSwarmWorktree(proj)
+    await removeSwarmWorktree(proj, a.worktree, { force: true })
+    const b = await createSwarmWorktree(proj)
+    await rm(b.worktree, { recursive: true, force: true })
+    await removeSwarmWorktree(proj, b.worktree)
+    expect(spy.mock.calls.map((c) => c[0])).toEqual([a.worktree, b.worktree])
+  })
+})

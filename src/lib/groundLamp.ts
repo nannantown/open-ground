@@ -38,11 +38,29 @@
 //              measurements: stepPresidentAsk in src/lib/server/groundMarks.ts.
 //   review   — work landed on main (the engine's landed ledger) after the owner
 //              last opened the president's seat (drawn as an eye). Just look.
-// Both TIMED marks clear when the owner opens the project with the agent-team
-// bar unfolded (POST /api/ground/seen stamps seenAt). With no seenAt on record
-// there is no baseline, so neither timed mark lights — a mark only a visit
-// nobody has made yet could clear would be furniture again.
+// The president's hand clears when the owner opens the agent-team bar (the
+// president's seat — POST /api/ground/seen stamps seenAt); an open escalation
+// clears only by answering it. The EYE clears when the owner merely OPENS THE
+// PROJECT (2026-09-26, 「プロジェクトの中に入ったら、既読みたいな感じ」 — POST
+// /api/ground/opened stamps openedAt; there is no button to press). Opening the
+// project never clears a hand. With no stamp on record there is no baseline,
+// so the timed mark does not light — a mark only a visit nobody has made yet
+// could clear would be furniture again.
 // Precedence: question > running > review > unknown > nothing.
+//
+// RUNNING = THE PROJECT'S WORK IS NOT FINISHED — 2026-09-26, owner: 「ワーカーとか
+// が動いてたりマネージャーが動いてるんだったら、そのタスクがまだ終わってなくて、その
+// レビュー待ちとか受け渡しの最中なんだったらそれはランニングだよね」. Before this the
+// lamp needed a started card AND a live generating claude, so it went dark while
+// a card sat in review / was being handed over (a worker finished, the commander
+// not yet integrating) — the card read "resting" mid-delivery. Now running is
+// lit by any of: an unfinished card in doing / review (inFlightTaskCount); a
+// non-draft todo card while the project's autopilot (swarm engine) is on — it
+// is about to move; a worker / the owner's pane generating on a started board;
+// the commander or the president generating. NOT by blocked cards alone: parked
+// work stays dark (the 2026-08-18 retirement below). This supersedes the
+// 2026-08-17 "desks do not count" rule FOR THE COMMANDER (the owner named it);
+// a desk idle at its prompt still lights nothing.
 //
 // NOTHING IS ALSO AN ANSWER. The owner, on why a resting project must show no
 // lamp at all: 「作業が終わってて何も出さない時にuserは見にいくんですよ」 — silence is
@@ -52,6 +70,7 @@
 // Needs-decision column.
 
 import type { ProjectTask } from '@/lib/types'
+import { isDispatchableCard } from '@/lib/dispatchGate'
 
 /** What a Ground card's lamp says.
  *
@@ -60,6 +79,10 @@ import type { ProjectTask } from '@/lib/types'
 export type GroundLamp = 'working' | 'question' | 'review' | 'unknown' | null
 
 export interface GroundLampInput {
+  /** Unfinished work that keeps the lamp RUNNING by itself — see
+   *  {@link inFlightTaskCount}. Counted from the same board read as `started`.
+   *  ⚠ ABSENT ⇒ THE BOARD COULD NOT BE READ ⇒ `'unknown'` (see `started`). */
+  inFlight?: number
   /** How many of the project's cards were STARTED — see {@link startedTaskCount},
    *  which is the only place that decides what "started" means. Counted on the
    *  SERVER, because the client has no reason to hold every project's board.
@@ -84,6 +107,9 @@ export interface GroundLampInput {
    *  Only mid-turn counts — a president idle at its prompt is absent/false and
    *  changes nothing (the 2026-08-15 rule: alive is not a lamp). */
   presidentWorking?: boolean
+  /** The COMMANDER (司令官) is generating in this project right now — owner,
+   *  2026-09-26: 「マネージャーが動いてるんだったら…ランニング」. Mid-turn only. */
+  commanderWorking?: boolean
   /** Epoch ms the president ended its last reply with a question (absent ⇒ not
    *  asking). Lights 'question' only when newer than `seenAt`. */
   presidentAskedAt?: number
@@ -91,6 +117,9 @@ export interface GroundLampInput {
   deliveredAt?: number
   /** Epoch ms the owner last opened this project's president seat. */
   seenAt?: number
+  /** Epoch ms the owner last had this PROJECT open (any tab). Clears the eye
+   *  only — never a hand. */
+  openedAt?: number
 }
 
 /** An event the owner has not seen yet. No seenAt ⇒ no baseline ⇒ never. */
@@ -111,16 +140,54 @@ const isStarted = (t: ProjectTask): boolean =>
 export const startedTaskCount = (tasks: readonly ProjectTask[]): number =>
   tasks.reduce((n, t) => (isStarted(t) ? n + 1 : n), 0)
 
+/** Work that is NOT FINISHED and keeps the project running (2026-09-26): an
+ *  unfinished card in doing (being worked) or review (awaiting the commander's
+ *  check / being handed over to main), plus — only while the autopilot is on —
+ *  a todo card the engine WILL start — the engine's own per-card gates
+ *  (isDispatchableCard: not a draft, has a body, not an unapproved self-supply
+ *  proposal) and no unfinished prerequisite. A title-only memo card is never
+ *  dispatched, so counting it held a project running forever (rework 1,
+ *  2026-09-26). A card waiting on a prerequisite is left to that prerequisite:
+ *  if it is moving it lights running itself; if it is parked, nothing will
+ *  start this one either. With the autopilot off a todo card is a backlog
+ *  nobody is moving. Blocked cards never count: parked work lights nothing
+ *  (2026-08-18). */
+export const inFlightTaskCount = (
+  tasks: readonly ProjectTask[],
+  { autopilot }: { autopilot: boolean },
+): number => {
+  // "done" for a prerequisite = the done COLUMN, exactly as selectDispatch reads it.
+  const doneIds = new Set(
+    tasks.filter((t) => (t.boardColumn ?? (t.done ? 'done' : 'todo')) === 'done').map((t) => t.id),
+  )
+  const ids = new Set(tasks.map((t) => t.id))
+  // Same prerequisite rule as selectDispatch ⑤: an id absent from the board is satisfied.
+  const prereqsMet = (t: ProjectTask) =>
+    (Array.isArray(t.dependsOn) ? t.dependsOn : []).every((id) => !ids.has(id) || doneIds.has(id))
+  return tasks.reduce((n, t) => {
+    if (t.done) return n
+    const col = t.boardColumn ?? 'todo'
+    const moving =
+      col === 'doing' ||
+      col === 'review' ||
+      (autopilot && col === 'todo' && isDispatchableCard(t) && prereqsMet(t))
+    return moving ? n + 1 : n
+  }, 0)
+}
+
 /** The lamp. Pure — every input is passed in, so all four of the owner's cases
  *  are testable without a browser, a server, or a clock. */
 export const groundLamp = ({
+  inFlight,
   started,
   openQuestions,
   liveWork,
   presidentWorking,
+  commanderWorking,
   presidentAskedAt,
   deliveredAt,
   seenAt,
+  openedAt,
 }: GroundLampInput): GroundLamp => {
   // 1. A REAL QUESTION FOR YOU outranks everything, including running work:
   //    the swarm carrying on elsewhere does not make your answer less needed.
@@ -135,39 +202,41 @@ export const groundLamp = ({
   if (presidentWorking) return 'working'
 
   // 1c. THE PRESIDENT IS WAITING ON YOUR ANSWER (2026-09-26): its last reply to
-  //     you has a question in its final paragraph and you have not opened its seat since. Below
-  //     presidentWorking because a president mid-turn has not finished asking.
+  //     you has a question in its final paragraph and you have not opened its
+  //     seat since — opening the PROJECT does not clear it (openedAt is not
+  //     read here). Below presidentWorking: a president mid-turn has not
+  //     finished asking.
   if (unseen(presidentAskedAt, seenAt)) return 'question'
 
-  // 1d. Running work outranks "come and look" — the delivery is not going away.
-  if (started !== undefined && started > 0 && liveWork) return 'working'
+  // 2. 作業中 — the work is not finished (see the header). Outranks "come and
+  //    look": the delivery is not going away. A live process on a board with
+  //    nothing started is NOT work (a stray pane cannot light a finished
+  //    project), hence `started > 0` beside liveWork.
+  if ((inFlight ?? 0) > 0 || commanderWorking || ((started ?? 0) > 0 && liveWork)) return 'working'
 
   // 1e. DELIVERED WHILE YOU WERE AWAY (2026-09-26): look, nothing to answer.
-  //     Above 'unknown' — the landed ledger is its own file and was read.
-  if (unseen(deliveredAt, seenAt)) return 'review'
+  //     Either stamp is a look — opening the seat means the project was open,
+  //     and an older ground-seen.json predates openedAt. Above 'unknown' — the
+  //     landed ledger is its own file and was read.
+  const looked =
+    seenAt === undefined ? openedAt : openedAt === undefined ? seenAt : Math.max(seenAt, openedAt)
+  if (unseen(deliveredAt, looked)) return 'review'
 
-  // 1b. THE BOARD ITSELF IS UNREADABLE. Checked after the question branch (a
-  //     question we DID read is still a question) and before everything else,
-  //     because every remaining answer — including the silent one — is a claim
-  //     about cards nobody could open. 'nothing' is not available as a default
-  //     on this surface: it is what a finished project looks like.
-  if (started === undefined) return 'unknown'
+  // 1b. THE BOARD ITSELF IS UNREADABLE. Checked after the branches that did not
+  //     need it, because every remaining answer — including the silent one — is
+  //     a claim about cards nobody could open. 'nothing' is not available as a
+  //     default on this surface: it is what a finished project looks like.
+  if (inFlight === undefined) return 'unknown'
 
-  // 3. 全部done(または積んだだけ)⇒ 何もなし。 Checked before the activity split so
-  //    a stray desk process can never light a finished project.
-  if (started === 0) return null
-
-  // 2. 作業中 — something was started AND something is actually running.
-  //
-  // …and otherwise NOTHING. This used to be the 「途中でとまってても waiting」
-  // branch (see the header): started-but-idle now shows no lamp, because idle
-  // work is not a demand on the owner — parked Needs-decision cards sit in
-  // their own column saying so, a stalled worker is reclaimed by the engine,
-  // and anything that truly needs a human arrives as a question and takes the
-  // WAITING branch above. Amber only ever means "answer me".
-  return liveWork ? 'working' : null
+  // 3. 全部done / 積んだだけ(自動運転 off) / 保留(blocked)だけ ⇒ 何もなし. Parked
+  //    work is not a demand on the owner — this used to be the 「途中でとまってても
+  //    waiting」 branch (see the header): parked Needs-decision cards sit in their
+  //    own column saying so, a stalled worker is reclaimed by the engine, and
+  //    anything that truly needs a human arrives as a question above.
+  return null
 }
 
-/** Window event SwarmBottomBar fires after stamping POST /api/ground/seen, so
- *  App re-polls the lamps at once instead of on its next 5s tick. */
+/** Window event fired after stamping POST /api/ground/seen or /opened
+ *  (useGroundLook), so App re-polls the lamps at once instead of on its next
+ *  5s tick. */
 export const GROUND_SEEN_EVENT = 'og:ground-seen'

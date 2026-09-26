@@ -2339,19 +2339,27 @@ export interface GroundLampRow {
   /** Cards in doing / review / blocked that are not done (see
    *  `startedTaskCount`). ABSENT ⇒ the board could not be read. */
   started?: number
+  /** Unfinished work that keeps the lamp running (`inFlightTaskCount`: doing /
+   *  review, plus non-draft todo while the autopilot is on). Present exactly
+   *  when `started` is — the same board read. 2026-09-26. */
+  inFlight?: number
   /** Open escalations naming this project. ABSENT ⇒ the inbox could not be
    *  read — which contributes nothing to the verdict, rather than "no
    *  questions". */
   openQuestions?: number
   /** Is anything ACTUALLY running for this project — a swarm worker on either
    *  runtime, or a `claude` pane mid-generation. Not optional: false here means
-   *  "we looked and found nothing moving", and a project with nothing started
-   *  is never asked in the first place. */
+   *  "we looked and found nothing moving" — or that looking could not change
+   *  the verdict (nothing started, or `inFlight` already lights running), in
+   *  which case it is never asked. */
   liveWork: boolean
   /** The president (supply desk) is GENERATING in this project right now —
    *  owner decision 2026-09-25. Present only when true; absent ⇒ not seen
    *  generating (or an older server), which lights nothing. */
   presidentWorking?: boolean
+  /** The commander is GENERATING in this project right now (2026-09-26).
+   *  Present only when true. */
+  commanderWorking?: boolean
   /** Epoch ms of the president's last reply when it ENDS WITH A QUESTION to the
    *  owner (and nothing came after it). Absent ⇒ not asking / unreadable.
    *  2026-09-26 — see groundMarks.ts. */
@@ -2361,6 +2369,9 @@ export interface GroundLampRow {
   /** Epoch ms the owner last had this project's president seat open. Absent ⇒
    *  never recorded, which lights neither timed mark (no baseline to beat). */
   seenAt?: number
+  /** Epoch ms the owner last had this PROJECT open at all (POST
+   *  /api/ground/opened). Clears the eye only, never a hand. Absent ⇒ never. */
+  openedAt?: number
 }
 
 export interface GroundLampsResponse {

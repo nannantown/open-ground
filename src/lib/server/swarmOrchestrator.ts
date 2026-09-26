@@ -60,6 +60,7 @@
 // /api/swarm/*. By the time a call reaches this module the caller is the owner
 // and the path is a registered project.
 
+import { hasCompletionConditions, isDispatchableCard } from '@/lib/dispatchGate'
 import { observeBoardProgress } from './supplyProgress'
 import { kickCommanderQuestionSweep } from './commanderQuestions'
 import { execFile as execFileCb } from 'child_process'
@@ -626,24 +627,10 @@ export const isTodoCard = (t: ProjectTask): boolean =>
  *  (An undefined column never folds to 'review', so the explicit check suffices.) */
 export const isReviewCard = (t: ProjectTask): boolean => t.boardColumn === 'review'
 
-/** Does this card carry the COMPLETION CONDITIONS a worker needs — i.e. is its
- *  `notes` body non-empty?
- *
- *  ⚠ THE ACCIDENT THIS EXISTS FOR (owner report, 2026-09-11). The supply officer
- *  queued two cards; autopilot dispatched BOTH to workers 8 seconds later, before
- *  the 完了条件 had been written. The workers started on a title alone. This was
- *  not a mistake by the writer — the SHIPPED supply procedure said to `add` the
- *  title first and fill `notes` in a second write (skills/supply/SKILL.md step
- *  4), so every queued card passed through a window where it was dispatchable
- *  and incomplete. The procedure is fixed too, but an instruction is not a
- *  guard: any writer (a human typing into the Board's 未着手 column included)
- *  can leave a card title-only for a moment, and the engine ticks every 3s.
- *
- *  So the invariant lives HERE, in the queue gate: a card with no body is not
- *  work, it is a placeholder. The owner's manual 実行 button is deliberately
- *  unaffected — pressing it IS the statement "dispatch this as it stands". */
-export const hasCompletionConditions = (t: ProjectTask): boolean =>
-  (t.notes ?? '').trim().length > 0
+// hasCompletionConditions (dispatch gate ⑦) and the other per-card gates ⑥⑦⑧
+// live in the client-safe src/lib/dispatchGate.ts, so the Ground lamp counts a
+// queued card as "about to move" by the SAME rule the engine starts it by.
+export { hasCompletionConditions }
 
 /** Dispatch queue order. Delegates to the shared {@link sortByPriority} (in
  *  src/lib/boardPriority.ts — one source of truth with the Board UI) so the
@@ -802,17 +789,10 @@ export const selectDispatch = (
   for (const card of sortTodos(tasks.filter(isTodoCard))) {
     if (picks.length >= slots) break
     if (dispatchedIds.has(card.id)) continue // ② already in flight
-    // ⑥ SELF-SUPPLY APPROVAL (card b3fbbfba) — a card the engine PROPOSED itself
-    //   (selfSupplyKey set) is an inert proposal until the owner approves it. This
-    //   is the primary runaway defense: the engine can fill todo with discovered
-    //   improvement points, but NONE of them spawn a worker without explicit owner
-    //   sign-off. A human-authored card (no selfSupplyKey) is unaffected.
-    if (card.selfSupplyKey && !card.selfSupplyApproved) continue
-    // ⑦ CONTENT REQUIRED (owner report 2026-09-11) — a card whose body is empty
-    //   is a placeholder, not work. See hasCompletionConditions for the accident.
-    if (!hasCompletionConditions(card)) continue
-    // ⑧ DRAFT (owner decision 2026-09-26): still being written, see ProjectTask.draft.
-    if (card.draft) continue
+    // ⑥ SELF-SUPPLY APPROVAL / ⑦ CONTENT REQUIRED / ⑧ DRAFT — the per-card
+    //   gates, one definition shared with the Ground lamp: isDispatchableCard in
+    //   src/lib/dispatchGate.ts (each gate's history is documented there).
+    if (!isDispatchableCard(card)) continue
     const k = contentKey(card)
     if (k && claimedContent.has(k)) continue // ③ duplicate content
     const files = Array.from(declaredFiles(card))
@@ -2329,6 +2309,11 @@ declare global {
 const store: OrchestratorStore =
   globalThis.__openground_swarm_orchestrator ??
   (globalThis.__openground_swarm_orchestrator = { engines: new Map() })
+
+/** Is this project's autopilot (engine) running right now? `key` = the
+ *  canonical project path. Pure in-memory read — the Ground lamp asks it every
+ *  few seconds (groundLamps.ts), so it must not touch disk. */
+export const isEngineRunning = (key: string): boolean => store.engines.get(key)?.running === true
 
 const getOrCreateEngine = (key: string): ProjectEngine => {
   let engine = store.engines.get(key)

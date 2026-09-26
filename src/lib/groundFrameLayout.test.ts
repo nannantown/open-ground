@@ -292,9 +292,19 @@ describe('Ground frame wash is themed', () => {
     /--og-frame-wash:\s*(\d+)\s+(\d+)\s+(\d+)/.exec(block)!.slice(1).map(Number)
   const dark = css.slice(css.indexOf("html[data-theme='dark']"))
 
-  it('dark wash is darker than the dark ground (no glowing frames)', () => {
-    const bg = /--og-bg:\s*(\d+)\s+(\d+)\s+(\d+)/.exec(dark)!.slice(1).map(Number)
-    const lum = (c: number[]) => c[0] + c[1] + c[2]
-    expect(lum(wash(dark))).toBeLessThan(lum(bg))
+  // Owner 2026-09-26: the frame body reads as a block a shade off the grid —
+  // lighter on the dark ground, deeper on the light one.
+  const lum = (c: number[]) => c[0] + c[1] + c[2]
+  const bgOf = (block: string) => /--og-bg:\s*(\d+)\s+(\d+)\s+(\d+)/.exec(block)!.slice(1).map(Number)
+  it('dark wash lifts the dark ground, light wash deepens the light one', () => {
+    expect(lum(wash(dark))).toBeGreaterThan(lum(bgOf(dark)))
+    expect(lum(wash(css))).toBeLessThan(lum(bgOf(css)))
+  })
+  it('the wash stays faint so frames never outshine their cards', () => {
+    for (const block of [css, dark]) {
+      const a = Number(/--og-frame-wash-alpha:\s*([\d.]+)/.exec(block)![1])
+      expect(a).toBeGreaterThan(0)
+      expect(a).toBeLessThanOrEqual(0.08)
+    }
   })
 })

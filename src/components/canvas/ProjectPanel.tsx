@@ -111,6 +111,7 @@ import {
 import { killEmbeddedTerminals } from '@/components/canvas/EmbeddedClaudeTerminal'
 import { CustomTabCreateDialog } from '@/components/canvas/modules/CustomTabCreateDialog'
 import { CustomTabPickerDialog } from '@/components/canvas/modules/CustomTabPickerDialog'
+import { useGroundLook } from '@/lib/useGroundLook'
 
 // The per-project tabs are declared once in the module registry
 // (moduleRegistry.tsx) — plus the user's custom tabs (`custom:<uuid>`,
@@ -314,6 +315,9 @@ const OwnedProjectBody = ({
   const detailsButtonRef = useRef<HTMLButtonElement>(null)
   const detailsRef = useRef<HTMLDivElement>(null)
   useEffect(() => { setDetailsOpen(false) }, [project?.path])
+  // Opening the project IS reading its delivery — clears the Ground card's eye
+  // (never a hand). Owner 2026-09-26: 「プロジェクトの中に入ったら、既読みたいな感じ」.
+  useGroundLook(project?.path, 'opened')
   useEffect(() => {
     if (!detailsOpen) return
     const trigger = detailsButtonRef.current

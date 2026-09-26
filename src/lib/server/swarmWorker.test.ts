@@ -93,7 +93,11 @@ describe('WORKER_ORDER_RULES token discipline', () => {
     expect(WORKER_ORDER_RULES).toMatch(/範囲指定 Read か grep で当たりを付けてから読む/)
     expect(WORKER_ORDER_RULES).toMatch(/同じファイルを読み直さない/)
     expect(WORKER_ORDER_RULES).toMatch(/tail\/要約で受ける/)
-    expect(WORKER_ORDER_RULES).toMatch(/フルスイート\(npm test\)は完了ゲートとして最後に1回/)
+    // Two-stage testing, 2026-09-26 form: related tests while working, the full
+    // suite once before ready (queued machine-wide, so in the background).
+    expect(WORKER_ORDER_RULES).toMatch(/作業の途中は変更に関係するテストだけを回す\(npx vitest run --changed origin\/main/)
+    expect(WORKER_ORDER_RULES).toMatch(/フルスイート\(npm test\)は ready の前の完了ゲートで1回だけ/)
+    expect(WORKER_ORDER_RULES).toMatch(/run_in_background で回して終わりを待つ/)
     expect(WORKER_ORDER_RULES).toMatch(/「当たり」\(対象ファイル\)があれば探索せず直行する/)
   })
 

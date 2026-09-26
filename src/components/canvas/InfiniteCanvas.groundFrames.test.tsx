@@ -28,6 +28,7 @@ vi.mock('@/lib/canvasContainment', async (orig) => {
 })
 
 import { InfiniteCanvas } from './InfiniteCanvas'
+import { groundFrameStroke } from './FrameView'
 
 class ROStub {
   disconnect = vi.fn()
@@ -314,5 +315,18 @@ describe('Ground frame wash', () => {
   })
   it('an explicitly picked colour is honoured', () => {
     expect(bg('#336699')).not.toContain('--og-frame-wash')
+  })
+})
+
+describe('Ground frame stroke', () => {
+  it('the default stroke is the quiet themed line, firmer only on hover', () => {
+    for (const s of [undefined, '#B8A988', '#b8a988']) {
+      expect(groundFrameStroke(s, false)).toBe('rgb(var(--og-frame-line))')
+      expect(groundFrameStroke(s, true)).toBe('rgb(var(--og-frame-line-hover))')
+    }
+  })
+  it('a picked stroke is honoured, hovered or not', () => {
+    expect(groundFrameStroke('#336699', false)).toBe('#336699')
+    expect(groundFrameStroke('#336699', true)).toBe('#336699')
   })
 })

@@ -263,6 +263,30 @@ describe('Hono routes — dynamic params & 404 guard', () => {
     expect(bad.status).toBeGreaterThanOrEqual(400)
   })
 
+  it('POST /api/ground/opened stamps openedAt ONLY — never seenAt (the hand stays)', async () => {
+    // Opening the project clears the eye; the president's hand is keyed on
+    // seenAt, so the two stamps must not bleed into each other.
+    const dir = await mkdtemp(join(tmpdir(), 'og-route-opened-'))
+    const uuid = await registerTestProject(dir)
+    const before = Date.now()
+    const res = await app.request('/api/ground/opened', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: dir }),
+    })
+    expect(res.status).toBe(200)
+    const body = (await (await app.request('/api/ground/lamps')).json()) as GroundLampsResponse
+    const row = body.lamps.find((l) => l.projectId === uuid)
+    expect(row?.openedAt).toBeGreaterThanOrEqual(before - 1000)
+    expect(row?.seenAt).toBeUndefined()
+    const bad = await app.request('/api/ground/opened', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: '/definitely/not/registered' }),
+    })
+    expect(bad.status).toBeGreaterThanOrEqual(400)
+  })
+
   it('GET /api/terminal/active stamps projectId on a worker PTY in a CENTRAL worktree', async () => {
     // The Ground beacon bug: a swarm worker's cwd is its worktree under
     // ~/.openground/projects/<uuid>/worktrees/, OUTSIDE the project folder, so a

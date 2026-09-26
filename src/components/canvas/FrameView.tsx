@@ -7,6 +7,7 @@ import {
   resolveStrokeStyle,
   renderStrokeWidth,
   DEFAULT_FRAME_FILL,
+  DEFAULT_FRAME_STROKE_COLOR,
 } from '@/lib/canvasFillStyle'
 import {
   resolveFrameCornerRadius,
@@ -18,6 +19,8 @@ import { shadowsCss } from '@/lib/canvasShadow'
 interface Props {
   frame: CanvasElement
   selected: boolean
+  /** The idle pointer is over this frame (the deepest one under it). */
+  hovered?: boolean
   editing: boolean
   onHeaderPointerDown: (e: React.PointerEvent) => void
   onChangeLabel: (text: string) => void
@@ -43,11 +46,14 @@ const HEADER_ACTION_CLASS = [
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
 ].join(' ')
 
-// A Ground frame with no fill of its own paints the themed wash
-// (--og-frame-wash: paper in light, near-black in dark) so it never glows on
-// the dark ground. The legacy paper default and plain white (old white-filled
-// frames) count as "no fill of its own" too; any other picked fill is honoured.
-export const GROUND_FRAME_WASH = 'rgb(var(--og-frame-wash) / 0.35)'
+// A Ground frame with no fill of its own paints the themed wash: a faint tint
+// of ink (light) / cream (dark), so the frame reads as one block a shade off
+// the grid instead of leaning on its outline (owner 2026-09-26). The wash is
+// translucent, so a nested frame stacks one more step on its parent's — outer
+// and inner stay distinguishable without a depth prop. The legacy paper
+// default and plain white (old white-filled frames) count as "no fill of its
+// own" too; any other picked fill is honoured.
+export const GROUND_FRAME_WASH = 'rgb(var(--og-frame-wash) / var(--og-frame-wash-alpha))'
 const WASHED_FILLS = new Set(
   [DEFAULT_FRAME_FILL, '#fff', '#ffffff', 'white'].map((v) => v.replace(/\s/g, '')),
 )
@@ -57,12 +63,21 @@ export function groundFrameBackground(fill: string | undefined, resolved: string
   return resolved
 }
 
+// The default (unpicked) stroke is themed and quiet — about a card edge — and
+// firms up only while the frame is hovered, so its extent shows when the user
+// reaches for it. A stroke the user picked is honoured as-is.
+export function groundFrameStroke(stroke: string | undefined, hovered: boolean): string {
+  if (stroke !== undefined && stroke.toUpperCase() !== DEFAULT_FRAME_STROKE_COLOR) return stroke
+  return hovered ? 'rgb(var(--og-frame-line-hover))' : 'rgb(var(--og-frame-line))'
+}
+
 // A grouping frame: a labelled rectangle drawn behind the cards. Only its
 // header bar is interactive (drag it to move the frame + everything inside);
 // the body is click-through so cards on top stay reachable.
 export const FrameView = memo(({
   frame,
   selected,
+  hovered = false,
   editing,
   onHeaderPointerDown,
   onChangeLabel,
@@ -108,7 +123,8 @@ export const FrameView = memo(({
         // renderStrokeWidth keeps the selection affordance (≥1px) and collapses a
         // no-fill stroke to 0 so a removed border occupies no box space.
         borderWidth: renderStrokeWidth(fillStyle.strokeColor, fillStyle.strokeWidth, selected),
-        borderColor: selected ? undefined : fillStyle.strokeColor,
+        borderColor: selected ? undefined : groundFrameStroke(frame.strokeColor, hovered),
+        transition: 'border-color 0.15s ease',
         borderRadius: radius,
         boxShadow: shadowsCss(frame),
         opacity: resolveOpacity(frame),
