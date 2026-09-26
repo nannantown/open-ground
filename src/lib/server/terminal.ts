@@ -129,6 +129,12 @@ interface PtySession {
   // stream alone can't reveal (it's cursor-addressed repaints). null for plain
   // shells. Absent (undefined) on fake test sessions — treat as null.
   headless?: HeadlessTerminal | null
+  // Input that did NOT come from an app delivery (the owner's keystrokes via
+  // /api/terminal/:id/input, pastes, slash commands — every writeInput): a
+  // counter and the time of the newest. A delivery may press Enter on a box it
+  // cannot see whole only while this has not moved since its own paste
+  // (swarmEscalations.submitPastedInput). Optional: tests inject bare sessions.
+  foreignInput?: { seq: number; at: number }
   menuTimer?: ReturnType<typeof setTimeout> | null
   // streamId → flow counters for ACK-based back-pressure on the PTY → SSE
   // path. Optional (like headless) because tests inject bare session objects
@@ -855,7 +861,26 @@ export const writeInput = (id: string, data: string): boolean => {
   const s = sessions.get(id)
   if (!s || s.info.finishedAt) return false
   s.pty.write(data)
+  s.foreignInput = { seq: (s.foreignInput?.seq ?? 0) + 1, at: Date.now() }
   return true
+}
+
+/** writeInput for an app DELIVERY into a desk (supplyNotice): the same write,
+ *  but not recorded as foreign input — so the delivery can tell its own bytes
+ *  from anyone else's. Every other writer uses writeInput and is counted. */
+export const writeDeliveryInput = (id: string, data: string): boolean => {
+  const s = sessions.get(id)
+  if (!s || s.info.finishedAt) return false
+  s.pty.write(data)
+  return true
+}
+
+/** The foreign-input record of a live terminal ({seq:0, at:0} before any),
+ *  or null when there is no such live terminal. */
+export const terminalForeignInput = (id: string): { seq: number; at: number } | null => {
+  const s = sessions.get(id)
+  if (!s || s.info.finishedAt) return null
+  return s.foreignInput ?? { seq: 0, at: 0 }
 }
 
 export const resizeTerminal = (id: string, cols: number, rows: number): boolean => {

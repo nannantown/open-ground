@@ -1253,7 +1253,7 @@ Now every president line (reply / important / progress) goes through the shared 
 **Rework 1 (review 848e75f0).** Every CR into the president's box — the first one after the
 paste too — is pressed only when `onlyOurPasteInBox` holds on a frame read right before it: not
 generating (footer-scoped `isGenerating`), no menu (`detectMenu`), and the box equal to our line
-(whitespace-normalised). Anything else — the owner typed after it, a menu, no frame — presses
+(whitespace-normalised; since 2026-09-26 also its scrolled tail — §1.12). Anything else — the owner typed after it, a menu, no frame — presses
 nothing (`submitPastedInput` `guardEnter`). "Landed" then needs positive evidence (generating, or
 the box read as `''`); no frame is not evidence. The re-send pass claims the desk before its first
 await; `commit` is once-only; `inFlight`/`unsent` live on `globalThis`. After
@@ -1418,3 +1418,74 @@ Rework 1 (commander's independent review) — «rework 1: every card keeps its o
 all red on the pre-rework code), re-measured after the fix: title match put back → 4 red; every
 queued landing re-timed on a new sweep → the 15-minute case red; eviction back to "oldest news"
 → the cap case red; landing lines deduped by text → the same-title case red.
+
+## §1.12 — A long line sat unsent in a short president desk; a path spelled in another case (2026-09-26)
+
+Owner report (0.11.148): 「司令官からの連絡が社長の入力欄に入ったまま送信されずに止まる」. This is
+the same symptom the 09-23/24 reworks (§1.9, §1.10) addressed, and every one of those guards stayed
+green — so the hole had to be one their frames could not draw. Measured, not inferred:
+
+- **Claude Code scrolls a tall input box to its END.** `scripts/probe-supply-delivery.mts` (a
+  throwaway haiku desk, the production `injectAnswerIntoWorker` with `guardEnter`) at 93x16 — the
+  size of a real president desk at that moment (echona, `peek-desk.mts`) — pasted a 473-char reply
+  and the box showed only its **last 3 rows**. `onlyOurPasteInBox` demanded the box equal the WHOLE
+  line, so it never did: no Enter was pressed, and the unsent re-press (§1.9 Rework 2) asks the same
+  question, so no later pass pressed it either. Stuck until the owner pressed Enter.
+  Before the fix: 93x16 / 473, 93x24 / 473 and 93x10 / 373 stuck; 120x32 and 120x40 / 473 sent —
+  **§1.9's 473 measurement was taken at a tall pane, which is why it missed this.** The unit tests
+  missed it because every frame they draw shows the whole payload.
+- **Fix.** `onlyOurPasteInBox` also accepts a box showing a TAIL of our line
+  (whitespace-normalised, at least `SCROLLED_TAIL_MIN` = 24 chars). The tail cannot vouch for the
+  hidden head, so `injectAnswerIntoWorker` (guard mode) now re-reads the screen right before the
+  paste and pastes only onto a quiet, menu-less, EMPTY box — the caller's `noticeDeliverable` read
+  is from before its awaits. Typing after the paste lands at the end and breaks the suffix, so it
+  still refuses. After the fix all three stuck cases were submitted (generating, box empty); a desk
+  that is generating gets nothing written at all (held, re-offered next pass — no half-typed line).
+- **Second hole, same owner-side symptom (nothing arrives).** `supply-notice-queue.json` held four
+  Kickstand commander replies for 90 minutes beside an idle, empty desk: the registry entry (and so
+  the desk's cwd) is `…/kickstand`, the SDK commander's canonical cwd is `…/Kickstand`, and
+  `deskKey` compared them with `resolve` (case-sensitive). `deskKey` now uses
+  `realpathSync.native` (on-disk spelling, symlinks resolved; `resolve` when the path does not
+  exist), and keys loaded from the saved queue go through it too.
+- **Adversarial review (same day) → a head check.** The pre-paste re-read reads the headless
+  screen, which lags keystrokes by tens of ms, so owner typing that landed just before the paste
+  was invisible to it — and in a scrolled box the tail alone would then have submitted it. Now,
+  when the box is scrolled, `submitPastedInput` sends Ctrl+A (box scrolls to its head), checks the
+  head is the START of our line, sends Ctrl+E back, re-checks the tail, and only then presses
+  Enter — cursor moves only, nothing erased. Measured on real claude: Ctrl+A shows the head,
+  Ctrl+E the tail; with 「おーなー」 typed a moment before the paste the head read
+  「おーなーあたま…」 and no Enter was pressed (the line stays in the box as an unsent line — it is
+  never erased — and the stuck bell rings once). The same check stops the unsent re-press from
+  submitting an older line the owner recalled with ↑ whose tail matches ours (every line ends in
+  the same fixed tail). Also from the review: the loader had sent the app-wide marker key
+  `*app-wide*` through `deskKey`, which resolved it to `<cwd>/*app-wide*` and lost saved app-wide
+  notices on restart — `deskKey` now returns the marker unchanged; saved queues merged under one
+  folder key dedupe (important lane by `addUnique`, replies by text + time).
+- **Rework 1 (commander) — decide by a server fact, not by the screen.** The screen can show only
+  the head and the tail of a scrolled box, never the rows between, and never keys typed faster
+  than the repaint — so an owner who edited the MIDDLE of an unsent line (it can sit there for
+  minutes) or pressed a key between Ctrl+A and Enter would have been submitted with it. Now every
+  `writeInput` into a PTY (the UI's keystrokes via `/api/terminal/:id/input`, pastes, slash
+  commands, the auto `/compact`) bumps a per-terminal foreign-input record
+  (`terminal.terminalForeignInput` — `{seq, at}`); the delivery writes through
+  `writeDeliveryInput`, which is not counted. A box that does not show our WHOLE line is pressed
+  only while `seq` equals the value read in the same tick as our paste — checked before Ctrl+A
+  and again in the same tick as the Enter; the unsent re-press carries the paste-time `seq`, so
+  once the owner has touched the box it is never pressed by us again (the owner sends or clears
+  it; the stuck bell rings once). A whole-visible box keeps the exact-equality rule. The paste
+  itself is also refused while the desk had foreign input within `FOREIGN_INPUT_QUIET_MS`
+  (1.5 s) — the screen may not show it yet. Ctrl+E is always sent after Ctrl+A (`finally`), so a
+  refused check never leaves the cursor at the head. Real claude (probe with the same record):
+  93x16 / 93x24 / 93x10 long lines submitted; 「おーなー」 typed a moment before a delivery ⇒
+  nothing pasted at all, the box holds only 「おーなー」.
+- **Known limit.** Input that does not go through this PTY is not in the record — above all the
+  phone's Remote Control, which talks to claude directly. For that path only the screen checks
+  (whole-line equality, or head + tail after Ctrl+A) stand between it and an Enter; an edit to the
+  hidden middle made from the phone while our line sits unsent is not detected.
+- Guards: `supplyNoticeScrolledBox.test.ts` (10), each red measured by reverting production: the
+  tail clause removed → 5 red; the head check removed → 3 red (owner text before the paste, the
+  recalled older line); `deskKey` back to `resolve` → the case test; the pre-paste re-read
+  removed → "does not paste over the owner's typing"; the marker fed through `deskKey` → the
+  restart test. Rework 1: the `seq` rule removed → the middle-edit and the key-between-Ctrl+A-and-
+  Enter tests; only the pre-Enter re-check removed → the latter; Ctrl+E not sent on refusal → 6
+  red; delivery writes counted, or owner writes not counted → the terminal record test.

@@ -69,13 +69,19 @@
 // four conservative gates in front of it while this needs none.
 
 import { basename, dirname, join, resolve } from 'path'
-import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'fs'
+import { closeSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeSync } from 'fs'
 import { openGroundHome } from './paths'
 import { noticeDeliverable } from './deskDeliverable'
 import { isGenerating, readInputBoxText } from '@/lib/claudeScreen'
 import { detectMenu } from '@/lib/claudeMenu'
 import { SUPPLY_DESK_LABEL } from './swarmSupply'
-import { listOwnerDeskTerminals, isTerminalProcessAlive, getTerminalScreen, writeInput } from './terminal'
+import {
+  listOwnerDeskTerminals,
+  isTerminalProcessAlive,
+  getTerminalScreen,
+  terminalForeignInput,
+  writeDeliveryInput,
+} from './terminal'
 import type { AppNotification, SwarmInfoEvent } from '../types'
 
 /** The INFO-grade events that reach the supply desk. Everything absent from this
@@ -270,8 +276,13 @@ export interface SupplyNoticeDeps {
   /** Live supply desks, as {terminalId, cwd}. */
   desks: () => { id: string; cwd: string }[]
   screen: (terminalId: string) => string | null
-  /** Type the line into the desk; true iff the keystrokes were written. */
+  /** Type the line into the desk; true iff the keystrokes were written. The
+   *  default does NOT count as foreign input (terminal.writeDeliveryInput). */
   write: (terminalId: string, data: string) => boolean
+  /** The desk's record of input that did not come from a delivery
+   *  (terminal.terminalForeignInput) — what lets an Enter be pressed on a box
+   *  that shows only part of our line. */
+  foreignInput: (terminalId: string) => { seq: number; at: number } | null
   /** Injectable clock — {@link SUPPLY_NOTICE_TTL_MS} is measured against it. */
   now: () => number
   /** Injectable wait between the paste and its Enter (and between Enter
@@ -308,7 +319,8 @@ const defaultDeps: SupplyNoticeDeps = {
       .sort((a, b) => b.startedAtMs - a.startedAtMs)
       .map((d) => ({ id: d.id, cwd: d.cwd })),
   screen: getTerminalScreen,
-  write: writeInput,
+  write: writeDeliveryInput,
+  foreignInput: terminalForeignInput,
   now: () => Date.now(),
   sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
   // Lazy + dynamic on purpose: swarmNotifications imports THIS module (it calls
@@ -356,16 +368,30 @@ const defaultDeps: SupplyNoticeDeps = {
  *  therefore loses every notice for a desk opened as `/repo/x/` (trailing slash
  *  passes validation), forever and silently.
  *
- *  `resolve` is the sync normalisation that covers it (trailing slash, `.`/`..`,
- *  duplicate separators). It does NOT resolve symlinks — `canonicalize` would,
- *  but it is async and this runs inside a synchronous delivery pass; a project
- *  reached through two different symlinked spellings still misses, which is the
- *  same limitation the PTY pool's own `listLiveDesksIn` comparison has. */
+ *  The sync `realpathSync.native` covers it (trailing slash, `.`/`..`, duplicate
+ *  separators, symlinks, and the letter CASE a case-insensitive disk ignores);
+ *  keys loaded from the saved queue go through it too, so a line saved under an
+ *  older spelling still finds its desk. */
 const deskKey = (p: string): string => {
+  // The app-wide lane's key is a marker, not a path: never resolve it (a
+  // resolved `<cwd>/*app-wide*` matches neither the lane nor any desk — review
+  // 2026-09-26, a restart then lost every saved app-wide notice).
+  if (p === APP_WIDE) return p
+  // The ON-DISK spelling first (realpath(3) — `realpathSync.native`, not the JS
+  // walk, which keeps the caller's case). MEASURED 2026-09-26: the Kickstand
+  // registry entry is `…/kickstand`, so its president desk runs in that cwd,
+  // while its SDK commander runs in the canonical `…/Kickstand` and sends
+  // supply/say with that spelling. macOS folds case, `resolve` does not: four
+  // commander replies sat queued for 90 minutes beside an idle, empty desk.
+  // A path that does not exist (tests, a vanished folder) keeps `resolve`.
   try {
-    return resolve(p)
+    return realpathSync.native(p)
   } catch {
-    return p
+    try {
+      return resolve(p)
+    } catch {
+      return p
+    }
   }
 }
 
@@ -517,6 +543,8 @@ interface UnsentLine {
   since: number
   /** The stuck bell has rung — once per line, never a dequeue. */
   rang?: boolean
+  /** The desk's foreign-input seq in the tick the line was pasted. */
+  seq?: number
 }
 const pending: Map<string, PendingNotice[]> =
   globalThis.__openground_supply_notice_q ?? (globalThis.__openground_supply_notice_q = new Map())
@@ -598,7 +626,8 @@ const generation: { n: number } =
  *  before its stuck bell rings ONCE. It is NOT dequeued (2026-09-24): the line
  *  stays in the box — nothing is ever erased from the owner's desk — so that
  *  desk takes no further line until the owner sends or clears it, and the Enter
- *  keeps being offered (guarded: only while the box holds exactly our line). */
+ *  keeps being offered (guarded: only while the box shows only our line — see
+ *  onlyOurPasteInBox). */
 export const SUPPLY_UNSENT_MAX_PASSES = 5
 
 /** Questions answered/dismissed recently — refused by pushImportant. */
@@ -749,7 +778,13 @@ const ensureLoaded = (): void => {
         ...(typeof it.notBefore === 'number' ? { notBefore: it.notBefore } : {}),
       })
     }
-    if (q.length) pending.set(entry[0], q)
+    if (q.length) {
+      // Two saved spellings of one folder fold into one queue, deduped.
+      const k = deskKey(entry[0])
+      const merged = pending.get(k) ?? []
+      for (const n of q) addUnique(merged, n)
+      pending.set(k, merged)
+    }
   }
   for (const [k, mq] of Array.from(memory)) {
     const q = pending.get(k) ?? []
@@ -766,14 +801,20 @@ const ensureLoaded = (): void => {
       const landed = Array.isArray(it.landed) ? (it.landed as unknown[]).filter((x): x is string => typeof x === 'string') : []
       q.push({ text: it.text, line: supplyReplyLine(it.text), at: it.at, ...(landed.length ? { landed } : {}) })
     }
-    if (q.length) replies.set(entry[0], q.slice(-SUPPLY_REPLY_CAP))
+    if (q.length) {
+      const k = deskKey(entry[0])
+      const have = replies.get(k) ?? []
+      const fresh = q.filter((r) => !have.some((h) => h.text === r.text && h.at === r.at))
+      replies.set(k, [...have, ...fresh].slice(-SUPPLY_REPLY_CAP))
+    }
   }
   for (const entry of reportedEntries) {
     if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) continue
     const r = (entry[1] as Record<string, unknown>[])
       .filter((e) => !!e && typeof e.id === 'string' && typeof e.at === 'number')
       .map((e) => ({ id: e.id as string, at: e.at as number }))
-    reportedLanded.set(entry[0], [...r, ...(reportedLanded.get(entry[0]) ?? [])].slice(-REPORTED_MAX))
+    const k = deskKey(entry[0])
+    reportedLanded.set(k, [...r, ...(reportedLanded.get(k) ?? [])].slice(-REPORTED_MAX))
   }
   for (const [k, mq] of Array.from(memoryReplies)) replies.set(k, [...(replies.get(k) ?? []), ...mq].slice(-SUPPLY_REPLY_CAP))
   diskState.loaded = true
@@ -948,8 +989,8 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       const left = unsent.get(desk.id)
       if (left) {
         // Our own line from an earlier pass. Only its Enter is ever re-sent —
-        // never the text — and only on a frame where the box holds EXACTLY that
-        // line, no menu is open and the desk is not generating (guardEnter): an
+        // never the text — and only on a frame where the box shows only that
+        // line (onlyOurPasteInBox), no menu is open and the desk is not generating (guardEnter): an
         // Enter must never submit the owner's own typing or confirm a menu.
         // Claimed BEFORE the first await so a concurrent pass cannot press too.
         const release = claim(desk.id)
@@ -978,6 +1019,8 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
               sleep: deps.sleep,
               readScreen: deps.screen,
               guardEnter: true,
+              foreignInput: deps.foreignInput,
+              sinceSeq: left.seq,
             }))
           if (gen !== generation.n) continue // state was reset meanwhile
           if (landed) {
@@ -1085,8 +1128,17 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       const releaseAppWide = appWide ? claim(APP_WIDE) : () => {}
       try {
         const { injectAnswerIntoWorker } = await import('./swarmEscalations')
-        const opts = { write: trackedWrite, sleep: deps.sleep, readScreen: deps.screen, guardEnter: true }
+        const opts = {
+          write: trackedWrite,
+          sleep: deps.sleep,
+          readScreen: deps.screen,
+          guardEnter: true,
+          foreignInput: deps.foreignInput,
+        }
         const gen = generation.n
+        // Same tick as the paste write inside injectAnswerIntoWorker (its first
+        // await comes after it), so this is the seq the line was pasted at.
+        const seq = deps.foreignInput(desk.id)?.seq
         const ok = await injectAnswerIntoWorker(desk.id, line, opts)
         if (gen !== generation.n) continue // state was reset meanwhile
         if (ok) {
@@ -1096,7 +1148,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
           // The text is in the box but the Enter did not take: the next pass
           // re-sends ONLY the Enter (never the text — no double line).
           const kind = reply ? 'reply' : bundle ? 'important' : 'progress'
-          unsent.set(desk.id, { line, commit, appWide, kind, passes: 0, since: now })
+          unsent.set(desk.id, { line, commit, appWide, kind, passes: 0, since: now, seq })
         }
       } finally {
         releaseDesk()

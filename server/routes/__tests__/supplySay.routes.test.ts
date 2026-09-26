@@ -50,7 +50,9 @@ vi.mock('@/lib/server/terminal', async (orig) => {
     isTerminalProcessAlive: () => true,
     // Like a real desk: a paste shows in the box, the Enter clears it.
     getTerminalScreen: (id: string) => (typedBox.has(id) ? IDLE_BOX(typedBox.get(id)!) : screen),
-    writeInput: (id: string, data: string) => {
+    terminalForeignInput: () => ({ seq: 0, at: 0 }),
+    // The delivery's writer (not counted as foreign input).
+    writeDeliveryInput: (id: string, data: string) => {
       // The line goes out as a bracketed paste (recorded unwrapped); its Enter
       // is a separate bare-CR write, counted in `enters`.
       if (data === '\r') {

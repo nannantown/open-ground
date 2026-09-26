@@ -20,6 +20,8 @@ vi.mock('./terminal', () => ({
   getTerminalScreen: () =>
     ['⏺ working', '─'.repeat(40), '❯ ', '─'.repeat(40), '  ⏵⏵ bypass permissions on · esc to interrupt'].join('\n'),
   writeInput: () => false,
+  writeDeliveryInput: () => false,
+  terminalForeignInput: () => ({ seq: 0, at: 0 }),
 }))
 vi.mock('./swarmSupply', () => ({ SUPPLY_DESK_LABEL: '社長' }))
 

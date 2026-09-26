@@ -872,28 +872,91 @@ export const injectAnswerIntoWorker = async (
     readScreen?: (id: string) => string | null
     /** Owner-desk mode — see {@link submitPastedInput}. */
     guardEnter?: boolean
+    /** Owner-desk mode: the terminal's foreign-input record — see {@link submitPastedInput}. */
+    foreignInput?: (id: string) => { seq: number; at: number } | null
   },
 ): Promise<boolean> => {
   const write = deps?.write ?? writeInput
   const sleep =
     deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const payload = sanitizeForPaste(text)
+  // Owner's desk: re-read the box RIGHT before pasting. The caller's
+  // deliverability read is from before its awaits, and once the box is
+  // scrolled (see onlyOurPasteInBox) the Enter guard can no longer see the
+  // head of the box — this read is what keeps the owner's own typing out of it.
+  if (deps?.guardEnter === true) {
+    let now: string | null = null
+    try {
+      now = (deps.readScreen ?? getTerminalScreen)(terminalId)
+    } catch {
+      now = null
+    }
+    if (now === null || isGenerating(now) || detectMenu(now) !== null || readInputBoxText(now) !== '') return false
+    // The screen lags keystrokes: input written moments ago may not be painted
+    // yet, so an "empty" frame proves nothing right after the owner typed.
+    const rec = deps.foreignInput?.(terminalId)
+    if (rec && Date.now() - rec.at < FOREIGN_INPUT_QUIET_MS) return false
+  }
+  // Read in the SAME tick as the paste write below: foreign input counted after
+  // this is input that arrived after our paste.
+  const sinceSeq = deps?.foreignInput?.(terminalId)?.seq
   if (!write(terminalId, bracketedPaste(payload))) return false
   await sleep(ESCALATION_ENTER_DELAY_MS)
-  return submitPastedInput(terminalId, payload, deps)
+  return submitPastedInput(terminalId, payload, { ...deps, sinceSeq })
 }
+
+/** An owner's desk that received foreign input this recently is not pasted
+ *  into: its screen may not show that input yet. */
+export const FOREIGN_INPUT_QUIET_MS = 1500
 
 /** Whitespace-free form — TUI wrapping inserts newlines + indent. */
 const squash = (t: string): string => t.replace(/\s+/g, '')
 
+/** Shortest scrolled tail accepted as ours — a box showing a fragment this
+ *  short proves too little about what is above it. */
+export const SCROLLED_TAIL_MIN = 24
+
 /** May a bare CR be pressed on this frame WITHOUT touching anything but our own
  *  pasted text? Not generating, no menu (a CR would confirm an option nobody
- *  chose), and the input box holds EXACTLY our payload (a CR would otherwise
- *  submit whatever the owner typed with it). No frame ⇒ no evidence ⇒ false. */
+ *  chose), and the input box shows ONLY our payload (a CR would otherwise
+ *  submit whatever the owner typed with it). No frame ⇒ no evidence ⇒ false.
+ *
+ *  "Shows only our payload" is the whole payload, OR its tail. Claude Code caps
+ *  the rows its input box draws and scrolls a taller input to its END — MEASURED
+ *  2026-09-26 on real claude (scripts/probe-supply-delivery.mts): a 473-char
+ *  line at 93x16 (a president desk's real size) and a 373-char one at 93x10
+ *  showed only their last 3 rows. Exact equality never held there, so no Enter
+ *  was ever pressed and the line sat in the box for good — the unsent re-press
+ *  asks this same question. The tail cannot vouch for the hidden head: that is
+ *  covered twice: {@link injectAnswerIntoWorker} re-reads an EMPTY box right
+ *  before the paste, and {@link submitPastedInput} scrolls the box to its head
+ *  (Ctrl+A) and checks it is our line's start before any Enter. Anything typed
+ *  after the paste lands at the end, so it breaks the suffix and refuses. */
+/** Wait after a Ctrl+A / Ctrl+E for claude to repaint the scrolled box. */
+export const CURSOR_SETTLE_MS = 400
+
+/** The box shows our WHOLE payload (not scrolled). */
+const boxShowsWhole = (screen: string | null, payload: string): boolean => {
+  const box = screen === null ? null : readInputBoxText(screen)
+  return box !== null && squash(box) === squash(payload)
+}
+
+/** After Ctrl+A: the box shows the START of our payload, on a quiet frame. */
+const headIsOurs = (screen: string | null, payload: string): boolean => {
+  if (screen === null || isGenerating(screen) || detectMenu(screen) !== null) return false
+  const box = readInputBoxText(screen)
+  if (box === null) return false
+  const b = squash(box)
+  return b.length >= SCROLLED_TAIL_MIN && squash(payload).startsWith(b)
+}
+
 export const onlyOurPasteInBox = (screen: string | null, payload: string): boolean => {
   if (screen === null || isGenerating(screen) || detectMenu(screen) !== null) return false
   const box = readInputBoxText(screen)
-  return box !== null && squash(box) === squash(payload) && squash(payload) !== ''
+  if (box === null) return false
+  const b = squash(box)
+  const p = squash(payload)
+  return p !== '' && (b === p || (b.length >= SCROLLED_TAIL_MIN && p.endsWith(b)))
 }
 
 /**
@@ -917,6 +980,11 @@ export const submitPastedInput = async (
     sleep?: (ms: number) => Promise<void>
     readScreen?: (id: string) => string | null
     guardEnter?: boolean
+    /** The terminal's foreign-input record (terminal.terminalForeignInput) and
+     *  its `seq` in the tick our paste was written. Without BOTH, a box that
+     *  does not show our whole line is never pressed. */
+    foreignInput?: (id: string) => { seq: number; at: number } | null
+    sinceSeq?: number
   },
 ): Promise<boolean> => {
   const write = deps?.write ?? writeInput
@@ -924,6 +992,13 @@ export const submitPastedInput = async (
     deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const readScreen = deps?.readScreen ?? getTerminalScreen
   const guard = deps?.guardEnter === true
+  /** Nothing but our own deliveries has been written to this PTY since our
+   *  paste — a server-side FACT, not a reading of the screen. */
+  const untouchedSincePaste = (): boolean => {
+    if (deps?.sinceSeq === undefined || !deps.foreignInput) return false
+    const r = deps.foreignInput(terminalId)
+    return r !== null && r.seq === deps.sinceSeq
+  }
   const read = (): string | null => {
     try {
       return readScreen(terminalId)
@@ -938,10 +1013,37 @@ export const submitPastedInput = async (
     if (isGenerating(screen)) return true
     return guard ? readInputBoxText(screen) === '' : !pasteStillInInputBox(screen, payload)
   }
-  const press = (): boolean => {
+  const press = async (): Promise<boolean> => {
     if (guard) {
       const screen = read()
       if (!onlyOurPasteInBox(screen, payload)) return false
+      // Scrolled box: the tail is ours, the hidden head is not yet proven.
+      // Ctrl+A scrolls the box to its start, Ctrl+E back to its end — cursor
+      // moves only, nothing is erased (measured on real claude 2026-09-26: a
+      // head of 「おーなー」 typed before our paste shows up on Ctrl+A). Owner
+      // typing that landed just before the paste — newer than any frame the
+      // pre-paste re-read could see — is caught here instead of submitted.
+      //
+      // The screen can only ever show the head and the tail — never the rows
+      // between, nor keys typed faster than the repaint. So what decides is the
+      // server's own record: the box may be pressed unseen only while NO input
+      // but our deliveries has reached this PTY since our paste (review
+      // 2026-09-26, commander's rule), checked before Ctrl+A and again in the
+      // same tick as the Enter. Otherwise nothing is pressed and nothing erased.
+      if (!boxShowsWhole(screen, payload)) {
+        if (!untouchedSincePaste()) return false
+        if (!write(terminalId, '\x01')) return false
+        let head: string | null = null
+        try {
+          await sleep(CURSOR_SETTLE_MS)
+          head = read()
+        } finally {
+          write(terminalId, '\x05') // the cursor always goes back to the end
+        }
+        await sleep(CURSOR_SETTLE_MS)
+        if (!headIsOurs(head, payload) || !onlyOurPasteInBox(read(), payload)) return false
+        if (!untouchedSincePaste()) return false
+      }
     }
     return write(terminalId, '\r')
   }
@@ -958,13 +1060,13 @@ export const submitPastedInput = async (
     }
   }
   // Refused ⇒ nothing pressed, nothing proven: the caller keeps the line.
-  if (!press()) return false
+  if (!(await press())) return false
   for (let attempt = 0; ; attempt++) {
     await sleep(ENTER_RETRY_INTERVAL_MS)
     const screen = read()
     if (landed(screen)) return true
     if (attempt >= ENTER_RETRY_MAX) return false // still pending after N resends
-    if (!press()) return false // PTY died, or the box no longer holds only our line
+    if (!(await press())) return false // PTY died, or the box no longer holds only our line
   }
 }
 

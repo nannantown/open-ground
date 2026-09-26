@@ -36,9 +36,15 @@ vi.mock('./terminal', () => ({
   isTerminalProcessAlive: () => true,
   // Like a real desk: a paste shows in the box, the Enter clears it.
   getTerminalScreen: (id: string) => (typedBox.has(id) ? IDLE_BOX(typedBox.get(id)!) : IDLE_SCREEN),
+  // The delivery writes through writeDeliveryInput (not counted as foreign
+  // input); the counted writeInput must never be its sink.
+  writeInput: () => {
+    throw new Error('a delivery must write through writeDeliveryInput')
+  },
+  terminalForeignInput: () => ({ seq: 0, at: 0 }),
   // Lines only: the submitting Enter is a separate bare-CR write (after the
   // paste), counted in `enters`.
-  writeInput: (id: string, data: string) => {
+  writeDeliveryInput: (id: string, data: string) => {
     if (data === '\r') {
       enters.push(id)
       typedBox.delete(id)
