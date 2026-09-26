@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useBoardCollab } from '@/lib/collab/RealtimeContext'
-import { ChevronRight, GitBranch, Trash2, X } from 'lucide-react'
+import { AlertTriangle, Check, ChevronRight, ExternalLink, GitBranch, Sparkles, Trash2, X } from 'lucide-react'
 import { BoardTab, columnOf } from '@/components/canvas/BoardTab'
 import { newId } from '@/lib/ids'
 import { api } from '@/lib/api-client'
@@ -1479,9 +1479,10 @@ export const BoardModule = ({
             href={task.prUrl}
             target="_blank"
             rel="noreferrer"
-            className="inline-block max-w-full truncate rounded-sm border border-line px-2.5 py-1 text-ui text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="inline-flex max-w-full items-center gap-1 rounded-sm border border-line px-2.5 py-1 text-ui text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
-            {task.prUrl.replace(/^https?:\/\//, '')} ↗
+            <span className="min-w-0 truncate">{task.prUrl.replace(/^https?:\/\//, '')}</span>
+            <ExternalLink size={11} strokeWidth={2} aria-hidden className="shrink-0" />
           </a>
         </div>
       )}
@@ -1613,7 +1614,7 @@ export const BoardModule = ({
                   }}
                   className="shrink-0 rounded-sm px-0.5 text-ink-faint transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                 >
-                  ✕
+                  <X size={10} strokeWidth={2} aria-hidden />
                 </button>
               </span>
             )
@@ -1668,7 +1669,7 @@ export const BoardModule = ({
             break it — purely informational, the field itself is untouched. */}
         {dependencyCycleIds(data.tasks).has(task.id) && (
           <p className="mt-1.5 flex items-start gap-1 text-meta text-accent">
-            <span aria-hidden>⚠︎</span>
+            <AlertTriangle size={12} strokeWidth={2} aria-hidden className="mt-0.5 shrink-0" />
             <span>{t('board.detail.dependsCycleWarn')}</span>
           </p>
         )}
@@ -1694,7 +1695,7 @@ export const BoardModule = ({
               onClick={() => patchTask(task, { dueDate: undefined })}
               className="shrink-0 rounded-sm px-1.5 py-1 text-meta text-ink-faint transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             >
-              ✕
+              <X size={12} strokeWidth={2} aria-hidden />
             </button>
           )}
         </div>
@@ -2443,7 +2444,7 @@ export const BoardModule = ({
                         className="shrink-0 text-accent"
                         title={t('board.detail.titleAutoTitle')}
                       >
-                        ✦
+                        <Sparkles size={12} strokeWidth={1.75} aria-hidden />
                       </span>
                     )}
                   </button>
@@ -2455,7 +2456,10 @@ export const BoardModule = ({
                       title={t('board.detail.regenTitle')}
                       className="mr-3 shrink-0 rounded-sm px-1.5 py-0.5 text-ui text-ink-faint transition-colors hover:bg-plane hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                     >
-                      {regenBusy ? '✦ …' : '✦'}
+                      <span className="flex items-center gap-1">
+                        <Sparkles size={12} strokeWidth={1.75} aria-hidden />
+                        {regenBusy ? '…' : null}
+                      </span>
                     </button>
                   )}
                 </div>
@@ -2550,8 +2554,9 @@ export const BoardModule = ({
                           onOpenDetail(null)
                         }}
                         title={t('board.detail.markDoneTitle')}
-                        className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
+                        className="flex shrink-0 items-center gap-1 rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
                       >
+                        <Check size={11} strokeWidth={2} aria-hidden />
                         {t('board.detail.markDone')}
                       </button>
                     )}
@@ -2561,9 +2566,10 @@ export const BoardModule = ({
                         target="_blank"
                         rel="noreferrer"
                         title={detailTask.prUrl}
-                        className="shrink-0 text-ink-muted underline decoration-line underline-offset-2 transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        className="inline-flex shrink-0 items-center gap-0.5 text-ink-muted underline decoration-line underline-offset-2 transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                       >
-                        PR ↗
+                        PR
+                        <ExternalLink size={10} strokeWidth={2} aria-hidden />
                       </a>
                     )}
                     {/* PR state + diff stats (B023 — F058/F085): quiet chip

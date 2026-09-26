@@ -33,6 +33,7 @@ import { countOpenEscalationsByProject } from './swarmEscalations'
 import { listSwarmWorkers } from './swarmWorkerRegistry'
 import { listAllActiveDesks, listDeskIdsByRole } from './liveDesks'
 import { SUPPLY_DESK_LABEL } from './swarmSupply'
+import { readDeliveredAt, readGroundSeenAt, readPresidentAskedAt } from './groundMarks'
 import type { ClaudeActivity, GroundLampRow, GroundLampsResponse } from '@/lib/types'
 
 export interface GroundLampDeps {
@@ -46,6 +47,10 @@ export interface GroundLampDeps {
   liveWorkFor?: (projectPath: string) => Promise<boolean>
   /** DI: cwds of president (supply) desks that are generating right now. */
   presidentWorkingCwds?: () => string[]
+  /** DI: the question / review mark timestamps (groundMarks.ts), each ms or undefined. */
+  presidentAskedAtFor?: (projectPath: string) => Promise<number | undefined>
+  deliveredAtFor?: (projectPath: string) => Promise<number | undefined>
+  seenAtFor?: (projectPath: string) => Promise<number | undefined>
 }
 
 /** Started cards for one project. `undefined` (never 0) when the board could not
@@ -201,6 +206,9 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
   const liveWorkFor = deps.liveWorkFor ?? liveWorkForProject
   const readQuestions = deps.openQuestions ?? countOpenEscalationsByProject
   const readPresident = deps.presidentWorkingCwds ?? presidentWorkingCwds
+  const askedAtFor = deps.presidentAskedAtFor ?? readPresidentAskedAt
+  const deliveredAtFor = deps.deliveredAtFor ?? readDeliveredAt
+  const seenAtFor = deps.seenAtFor ?? readGroundSeenAt
 
   let projects: Array<{ id: string; path: string }>
   try {
@@ -230,12 +238,24 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
       // The short-circuit that keeps this cheap: with nothing started the lamp
       // is dark whatever the processes are doing, so do not go looking.
       const liveWork = started ? await liveWorkFor(p.path).catch(() => false) : false
+      // The timed marks (2026-09-26). Three small file reads per project; the
+      // president's transcript tail is walked incrementally, cached on path+offset (groundMarks.ts).
+      const quiet = (f: (x: string) => Promise<number | undefined>) =>
+        f(p.path).catch(() => undefined)
+      const [presidentAskedAt, deliveredAt, seenAt] = await Promise.all([
+        quiet(askedAtFor),
+        quiet(deliveredAtFor),
+        quiet(seenAtFor),
+      ])
       return {
         projectId: p.id,
         ...(started === undefined ? {} : { started }),
         ...(open === undefined ? {} : { openQuestions: open }),
         liveWork,
         ...(presidentWorking ? { presidentWorking: true } : {}),
+        ...(presidentAskedAt === undefined ? {} : { presidentAskedAt }),
+        ...(deliveredAt === undefined ? {} : { deliveredAt }),
+        ...(seenAt === undefined ? {} : { seenAt }),
       }
     }),
   )

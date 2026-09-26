@@ -239,6 +239,30 @@ describe('Hono routes — dynamic params & 404 guard', () => {
     expect(row!.liveWork).toBe(false)
   })
 
+  it('POST /api/ground/seen stamps seenAt, read back by the lamps route (2026-09-26)', async () => {
+    // Opening the president's seat is what clears the card's question / review
+    // marks — so the stamp must land where the PRODUCTION reader looks.
+    const dir = await mkdtemp(join(tmpdir(), 'og-route-seen-'))
+    const uuid = await registerTestProject(dir)
+    const before = Date.now()
+    const res = await app.request('/api/ground/seen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: dir }),
+    })
+    expect(res.status).toBe(200)
+    const body = (await (await app.request('/api/ground/lamps')).json()) as GroundLampsResponse
+    const row = body.lamps.find((l) => l.projectId === uuid)
+    expect(row?.seenAt).toBeGreaterThanOrEqual(before - 1000)
+    // …and an unregistered path is refused, never written.
+    const bad = await app.request('/api/ground/seen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: '/definitely/not/registered' }),
+    })
+    expect(bad.status).toBeGreaterThanOrEqual(400)
+  })
+
   it('GET /api/terminal/active stamps projectId on a worker PTY in a CENTRAL worktree', async () => {
     // The Ground beacon bug: a swarm worker's cwd is its worktree under
     // ~/.openground/projects/<uuid>/worktrees/, OUTSIDE the project folder, so a

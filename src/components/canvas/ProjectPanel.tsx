@@ -280,7 +280,6 @@ interface Props {
   experiments?: ExperimentFlags
   /** App-owner surfaces, independent of the public/local Swarm unlock. */
   ownerFeatures?: boolean
-  viewModeControl?: React.ReactNode
   accessLoaded?: boolean
   /** Member capability flag — the SINGLE owner/member switch. When present, this
    *  project is a folder-less collab project shared WITH the user, so ProjectPanel
@@ -305,7 +304,6 @@ const OwnedProjectBody = ({
   feedbackEnabled,
   experiments,
   ownerFeatures = false,
-  viewModeControl,
   accessLoaded = true,
 }: Props) => {
   const { t, lang } = useT()
@@ -2253,7 +2251,6 @@ const OwnedProjectBody = ({
                 )}
               </div>
               <div className="flex min-w-0 flex-wrap items-center gap-3 border-t border-line px-5 py-3">
-                {viewModeControl}
                 {/* Owner UI only; the CLI can still read the project's skill files. */}
                 {ownerFeatures && <button
                   type="button"

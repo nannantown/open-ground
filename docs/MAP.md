@@ -27,8 +27,8 @@
   The earlier unshipped/stopped snapshot is historical; check live state.
 - Public/owner surface contract: `docs/PUBLIC_PRODUCT_SCOPE.md`. Public Board,
   Terminal and opt-in Swarm (a bottom bar under every tab, not a tab — see §5); owner-only per-project Canvas, Research, custom tabs
-  and WordPress/Skills UI. Owner display preview: `OwnerViewSwitch.tsx` +
-  `App.tsx`; Ground tools collapse in `ToolPalette.tsx`. Automatic fuel reports
+  and WordPress/Skills UI. Owner display preview: Settings switch (`SettingsPanel.tsx` +
+  `App.tsx`); Ground tools collapse in `ToolPalette.tsx`. Automatic fuel reports
   are owner-only (`dailyFuelReport.ts`); meters/safety remain public. Visibility
   changes preserve existing data and hidden layouts. Public tabs have fixed
   order/visibility; only owner view offers add/hide/reorder. Feedback has one
@@ -84,13 +84,32 @@
   **別フィールド**で持つこと — 兼用したら窓が消えて再発した。
 - UI: `src/App.tsx`(Ground 本体)+ `src/components/canvas/` の `ProjectCard` / `ProjectCanvas` /
   `ProjectPanel`(カードを開いた中身・タブ切替)/ `Toolbar` / `NewProjectModal`
-- **プロジェクト検索**(2026-09-26): 入口 = `Toolbar` の「プロジェクトを探す」+ ⌘K → `ProjectJumpPalette`。
+- **プロジェクト検索**(2026-09-26): 入口 = `Toolbar` の虫めがねアイコンのみ(文字なし・tooltip に「プロジェクトを探す ⌘K」)+ ⌘K → `ProjectJumpPalette`。
   一致判定・移動先・最近開いた順は pure の `src/lib/groundJump.ts`(テスト `groundJump.test.ts`)、
   カメラ移動と光らせは `App.tsx` の `flyToCard`(着地後は静かな選択=Enter/クリックで開く)。
+- **Ground frames** (2026-09-26): header actions are icon-only (`FrameView.tsx`: LayoutGrid = tidy,
+  Shrink = fit, tooltip only). Geometry is pure in `src/lib/groundFrameLayout.ts` (`tidyLayout` /
+  `fitFrameRect`, test `groundFrameLayout.test.ts`); `InfiniteCanvas.tsx` `frameContentBoxes`
+  collects a frame's DIRECT contents as boxes — its own cards (geometric, directOnly) plus child
+  elements (persisted `parentId`), a child frame carrying its descendants + the cards inside it.
+  Membership at every depth is one rule (`frameDirectChildren` / `carriedBy`): persisted
+  `parentId` when it points at a live element, else the innermost enclosing frame by geometry
+  (legacy parentless frames/stickies). Tidy flows those boxes in rows (frame only grows); fit snaps
+  the frame to their bounds + pad. A locked frame disables both; a locked child disables tidy.
+  A frame fill that is unset, plain white or the legacy paper default paints `--og-frame-wash`
+  (globals.css, both palettes) at 35%, so frames sink instead of glowing on the dark ground; any
+  other picked fill is honoured. Wiring guard: `InfiniteCanvas.groundFrames.test.tsx`.
+  Trap: cards have no `parentId` — card membership is geometry, recomputed per action.
 - **カードのランプ**(2026-08-15 に「プロセスの生死」→「仕事の状態」へ移設): 判定は
   `src/lib/groundLamp.ts`(pure・オーナー指定の4ケース)、材料は `src/lib/server/groundLamps.ts`
   → `GET /api/ground/lamps`(started カード数・未回答の質問数・実際に動いているか)。
-  作業中=running / 入力待ちも途中停止も waiting / **全部doneまたはtodoのみは何も出さない**。
+  作業中=running / **全部doneまたはtodoのみは何も出さない**。
+  **質問(挙手 `Hand`)と確認待ち(目 `Eye`)の印**(2026-09-26 オーナー決定・旧 waiting を置換・絵文字/ラベル無し、
+  ホバー文言のみ): 質問 = 未回答エスカレーション(答えるまで残る)または社長の最後の発言が「？」で終わり未読(**オーナー自身の発言への返事に限る**・最後の段落に「？」(「」内の引用は除く)。オーナーが次に発言するまで立ったまま。【エンジンからの知らせ】【司令官からの返事】(supplyNotice.ts の定数と完全一致)・`<command-…>`・自動圧縮の要約(isCompactSummary)とそれへの返事は、立ても消しもしない=納品の「これで OK ですか?」では点かず、再確認で本物の質問も消えない。判定=`stepPresidentAsk`、転記は差分だけ読み進める) /
+  確認待ち = landed ledger の最新 landedAt が未読。「見た」= 下部バーを開いている間 `POST /api/ground/seen`
+  (`SwarmBottomBar` が開いた時・畳んだ/離れた時に打つ)→ `projects/<uuid>/ground-seen.json`。材料は
+  `src/lib/server/groundMarks.ts`(社長の JSONL 末尾 256KB を size+mtime キャッシュで読む)。優先 = 質問 > running > 確認待ち。
+  seenAt が一度も無いプロジェクトは時刻系の印を出さない(基準が無い=付きっぱなしを防ぐ)。
   **社長(補給の窓口)が生成中なら running**(2026-09-25 オーナー決定・started 0 でも灯る・
   質問 waiting の方が優先)。判定は `presidentWorkingCwds`(PTY `deskLabel=補給官` / SDK
   `role=supply` の pane が `status==='working'`)— 待ち受け中の社長・司令官は灯さない。
@@ -794,6 +813,7 @@
   Existing installed sources and their original role restrictions remain intact.
 
 ## 11. 小さい領域(1行ずつ)
+- no emoji: guard `src/noEmojiGuard.test.ts` scans every non-test file under `src/` + `server/` (comments stripped, `server/dist` skipped) — marks are lucide icons; only claude-TUI parsers / model-only prompts are exempt whole-file, other screen readers get a per-file allowed glyph (`ALLOWED_CHARS`)
 - feedback: `server/routes/feedback.ts` + `src/components/canvas/FeedbackModal.tsx` + `src/lib/feedbackImages.ts` —
   anon insert-only。**読み側 sanitize 必須**(anon は任意 JSON を書ける)
 - usage 予算: `src/components/canvas/UsageHud.tsx` + `src/lib/server/claudeUsage.ts` / `claudeUsageCli.ts` +

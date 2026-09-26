@@ -161,3 +161,24 @@ describe('no negative margins in the bar', () => {
     }
   })
 })
+
+describe('SwarmBottomBar — looking at the president seat clears the Ground marks (2026-09-26)', () => {
+  const seenCalls = (f: ReturnType<typeof vi.fn>) =>
+    f.mock.calls.filter((c) => String(c[0]).includes('/api/ground/seen'))
+
+  it('folded never stamps; opening stamps; folding again stamps once more', () => {
+    const f = vi.fn(() => Promise.resolve(new Response('{}')))
+    vi.stubGlobal('fetch', f)
+    try {
+      render(<SwarmBottomBar project={project('p1')} />)
+      expect(seenCalls(f)).toHaveLength(0)
+      fireEvent.click(screen.getByText('folded'))
+      expect(seenCalls(f)).toHaveLength(1)
+      expect(JSON.parse(String((seenCalls(f)[0][1] as RequestInit).body))).toEqual({ path: '/tmp/p1' })
+      fireEvent.click(screen.getByText('open'))
+      expect(seenCalls(f)).toHaveLength(2)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})

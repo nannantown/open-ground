@@ -5,7 +5,6 @@ import { InfiniteCanvas } from '@/components/canvas/InfiniteCanvas'
 import { CustomFrameHost, destroyFramesForProject } from '@/components/canvas/modules/CustomFrameHost'
 import { usePlayback } from '@/lib/playback/playbackStore'
 import { Toolbar } from '@/components/canvas/Toolbar'
-import { OwnerViewSwitch } from '@/components/canvas/OwnerViewSwitch'
 import { ToolPalette } from '@/components/canvas/ToolPalette'
 import { SettingsPanel } from '@/components/canvas/SettingsPanel'
 import { NewProjectModal } from '@/components/canvas/NewProjectModal'
@@ -26,7 +25,7 @@ import { EmptyState } from '@/components/canvas/EmptyState'
 import { GroundLoadError } from '@/components/canvas/GroundLoadError'
 import { UsageHud } from '@/components/canvas/UsageHud'
 import { ManualPanel } from '@/components/canvas/manual/ManualPanel'
-import { groundLamp, type GroundLamp } from '@/lib/groundLamp'
+import { GROUND_SEEN_EVENT, groundLamp, type GroundLamp } from '@/lib/groundLamp'
 import { setClientLockdown } from '@/lib/lockdownClient'
 import { autoLayout, findFreeSpot, frameLabelFor } from '@/lib/layout'
 import { GHOST_H, GHOST_W, PlacementGhost } from '@/components/canvas/PlacementGhost'
@@ -251,7 +250,7 @@ export default function App() {
   // on collab); a non-owner gets 403 → stays empty, so the bell is unaffected.
   const [swarmNotifs, setSwarmNotifs] = useState<AppNotification[]>([])
   const [readNotifIds, setReadNotifIds] = useState<ReadonlySet<string>>(() => new Set())
-  // Per-project GROUND LAMP: projectId → 'working' | 'waiting'. A project absent
+  // Per-project GROUND LAMP: projectId → 'working' | 'question' | 'review'. A project absent
   // from the map draws nothing at all, which is a real answer — 「作業が終わってて
   // 何も出さない時にuserは見にいくんですよ」.
   //
@@ -739,6 +738,9 @@ export default function App() {
             ...(row.openQuestions === undefined ? {} : { openQuestions: row.openQuestions }),
             liveWork: row.liveWork,
             presidentWorking: row.presidentWorking === true,
+            presidentAskedAt: row.presidentAskedAt,
+            deliveredAt: row.deliveredAt,
+            seenAt: row.seenAt,
           })
           if (lamp) next.set(row.projectId, lamp)
         }
@@ -757,10 +759,14 @@ export default function App() {
     const id = window.setInterval(() => void poll(), 5_000)
     const onFocus = () => void poll()
     window.addEventListener('focus', onFocus)
+    // The president's seat was just looked at (SwarmBottomBar) — re-poll now so
+    // the card's question / review mark is gone by the time Ground shows again.
+    window.addEventListener(GROUND_SEEN_EVENT, onFocus)
     return () => {
       cancelled = true
       window.clearInterval(id)
       window.removeEventListener('focus', onFocus)
+      window.removeEventListener(GROUND_SEEN_EVENT, onFocus)
     }
   }, [projects])
 
@@ -1297,9 +1303,6 @@ export default function App() {
   // The frame the selected card sits inside supplies its category label —
   // derived from canvas geometry, not a hand-typed field.
   const frameLabel = singleSelected ? frameLabelFor(singleSelected.id, canvas) : null
-  const viewModeControl = experiments.eligible ? (
-    <OwnerViewSwitch publicPreview={publicPreview} onChange={setPreviewPublic} />
-  ) : undefined
 
   return (
     <main className="h-screen w-screen overflow-hidden bg-bg relative">
@@ -1372,7 +1375,6 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenManual={() => setManualOpen(true)}
         onOpenSkills={ownerFeatures ? () => setSkillsPanelOpen(true) : undefined}
-        viewModeControl={!singleSelected && !openShared ? viewModeControl : undefined}
         // Member entry to the join dialog — the INITIAL join needs it (a member
         // with an invite code/link has nowhere to paste it otherwise; already-
         // joined projects also show as Ground cards). Gated on collabEnabled, so
@@ -1405,7 +1407,6 @@ export default function App() {
         // Preview uses the public opt-in; actual role and running jobs stay intact.
         experiments={visibleExperiments}
         ownerFeatures={ownerFeatures}
-        viewModeControl={viewModeControl}
         accessLoaded={experiments.loaded}
         onClose={openShared ? () => setOpenShared(null) : () => setSelectedIds([])}
         onRemove={removeFromCanvas}
@@ -1538,6 +1539,9 @@ export default function App() {
         // Owner-only: reveals the experiment toggles. Non-owners never see them
         // (eligible:false), so the feature's existence stays hidden.
         experimentsEligible={ownerFeatures}
+        // Display-preview switch: keyed on the REAL role (not ownerFeatures),
+        // so it stays reachable while the public view is on.
+        publicPreview={experiments.eligible ? { on: publicPreview, onChange: setPreviewPublic } : undefined}
         // Public swarm opt-in (all users, macOS only). available gates the
         // toggle's visibility; enabled reflects the current choice.
         swarmOptInAvailable={experiments.swarmOptIn.available}

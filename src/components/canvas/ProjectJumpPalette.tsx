@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Search, FolderOpen, Archive } from 'lucide-react'
+import { Search, FolderOpen, Archive, Eye, Hand } from 'lucide-react'
 import { Overlay, DialogCard } from '@/components/ui/overlay'
 import type { ProjectMeta } from '@/lib/types'
 import type { GroundLamp } from '@/lib/groundLamp'
@@ -136,11 +136,27 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick, lamps }: P
                       {t('toolbar.searchLampWorking')}
                     </span>
                   )}
-                  {lamp === 'waiting' && (
-                    <span className="flex shrink-0 items-center gap-1 label-cap text-[var(--beacon-waiting)]">
-                      <span className="h-[5px] w-[5px] rounded-full bg-ochre" />
-                      {t('toolbar.searchLampWaiting')}
-                    </span>
+                  {lamp === 'question' && (
+                    <Hand
+                      size={12}
+                      strokeWidth={2}
+                      role="img"
+                      aria-label={t('toolbar.searchLampQuestion')}
+                      className="shrink-0 text-[var(--beacon-waiting)]"
+                    >
+                      <title>{t('toolbar.searchLampQuestion')}</title>
+                    </Hand>
+                  )}
+                  {lamp === 'review' && (
+                    <Eye
+                      size={12}
+                      strokeWidth={2}
+                      role="img"
+                      aria-label={t('toolbar.searchLampReview')}
+                      className="shrink-0 text-ink"
+                    >
+                      <title>{t('toolbar.searchLampReview')}</title>
+                    </Eye>
                   )}
                   {p.openTaskCount > 0 && (
                     <span className="shrink-0 label-cap label-cap-latin text-accent">

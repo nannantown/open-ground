@@ -13,7 +13,7 @@
 // See docs/SDK_WORKER_MIGRATION_PLAN.md §3.6.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Square, CornerDownLeft, Power, Trash2, AlertTriangle, RotateCcw, X } from 'lucide-react'
+import { Square, CornerDownLeft, Power, Trash2, AlertTriangle, RotateCcw, X, Wrench, ChevronDown, ChevronRight } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { holdStream, useStreamOwner } from '@/lib/streamBudget'
 import type { SpriteState } from '@/lib/swarm/sprites'
@@ -855,12 +855,15 @@ export const ToolCard = ({ item }: { item: Extract<SdkRenderItem, { kind: 'tool'
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="flex w-full items-baseline gap-1 rounded-[3px] px-1 py-0.5 text-left font-mono text-micro text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+        className="flex w-full items-center gap-1 rounded-[3px] px-1 py-0.5 text-left font-mono text-micro text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
       >
-        <span className="shrink-0 text-ink-faint" aria-hidden>
-          {expanded ? '▾' : '▸'}
-        </span>
-        <span className="min-w-0 flex-1 truncate">🔧 {toolCardSummary(item.use)}</span>
+        {expanded ? (
+          <ChevronDown size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
+        ) : (
+          <ChevronRight size={11} strokeWidth={2} className="shrink-0 text-ink-faint" aria-hidden />
+        )}
+        <Wrench size={11} strokeWidth={2} className="shrink-0" aria-hidden />
+        <span className="min-w-0 flex-1 truncate">{toolCardSummary(item.use)}</span>
         {item.result && !expanded ? (
           <span className={`min-w-0 max-w-[45%] truncate ${isError ? 'text-error' : 'text-ink-faint'}`}>
             ⎿ {item.result.head}
@@ -904,9 +907,12 @@ export const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) 
       return <ProseBlocks text={ev.text} subagent={ev.fromSubagent} />
     case 'tool_use':
       return (
-        <div className={`font-mono text-micro text-ink-muted ${ev.fromSubagent ? 'pl-3' : ''}`}>
-          🔧 {ev.name}
-          {ev.detail ? ` ${ev.detail}` : ''}
+        <div className={`flex items-center gap-1 font-mono text-micro text-ink-muted ${ev.fromSubagent ? 'pl-3' : ''}`}>
+          <Wrench size={11} strokeWidth={2} className="shrink-0" aria-hidden />
+          <span className="min-w-0">
+            {ev.name}
+            {ev.detail ? ` ${ev.detail}` : ''}
+          </span>
         </div>
       )
     case 'tool_result':

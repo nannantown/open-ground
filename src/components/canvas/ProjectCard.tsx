@@ -1,6 +1,8 @@
 import {
+  Eye,
   GitBranch,
   FolderClosed,
+  Hand,
   Users,
 } from 'lucide-react'
 import { memo } from 'react'
@@ -15,7 +17,9 @@ interface Props {
   selected?: boolean
   active?: boolean
   /** What this project's WORK is doing: 'working' → moss "Running" edge bar +
-   *  stamp, 'waiting' → amber "Waiting" (it needs you, or it stalled).
+   *  stamp, 'question' → amber edge bar + a raised-hand icon (a question only
+   *  you can answer), 'review' → an eye icon alone (delivered, just look) —
+   *  icons with hover text only, never a label or an emoji (2026-09-26).
    *  null/undefined → NOTHING AT ALL, which is the answer for a project whose
    *  cards are all done or merely queued — 「作業が終わってて何も出さない時に user は
    *  見にいくんですよ」.
@@ -25,7 +29,7 @@ interface Props {
    *  parked at its prompt). The stamps below tested for 'working' and 'waiting'
    *  explicitly and so ignored it, but the top EDGE BAR tested for truthiness
    *  and painted 'idle' amber — an "it needs you" band over a project that
-   *  needed nothing. GroundLamp has no third value to get wrong. */
+   *  needed nothing. GroundLamp has no 'idle' to get wrong. */
   lamp?: GroundLamp
   /** Set while the card was just jumped to by the search; a new value replays the flash. */
   flashKey?: number
@@ -47,10 +51,12 @@ const coordFromId = (id: string) => {
   return `${String.fromCharCode(65 + a)}·${String(b).padStart(2, '0')}`
 }
 
-// One project on the Ground: name + description. While a claude session is
-// live here the card carries the runner-era surveyor's marking — a coloured
-// band along the top edge plus a stamp on the right margin: moss "Running"
-// (scanning) while claude works, amber "Waiting" when it sits on the human.
+// One project on the Ground: name + description. The card carries the
+// runner-era surveyor's marking, decided by src/lib/groundLamp.ts — a coloured
+// band along the top edge plus a mark on the right margin: moss "Running"
+// (scanning) while work runs, an amber band + raised hand when a question only
+// the owner can answer is waiting, an eye alone when work was delivered since
+// the owner last looked.
 //
 // A folder-less collab project shared WITH the user (shared=true) renders
 // through this SAME path but wears the dedicated `invite` accent so it reads at
@@ -108,10 +114,11 @@ export const ProjectCard = memo(({
         />
       )}
       {/* lamp edge — a surveyor's marking along the card's top. Drawn ONLY for
-          the two states that are about the work; 'unknown' gets the stamp below
+          the two states that are about the work (running / a question for you;
+          'review' is "just look", so it gets the eye alone); 'unknown' gets the stamp below
           and no band, because a coloured band reads as an alarm and "we could
           not read your board" is not one. */}
-      {(lamp === 'working' || lamp === 'waiting') && (
+      {(lamp === 'working' || lamp === 'question') && (
         <div
           className={[
             'absolute left-0 right-0 top-0 h-[3px] overflow-hidden rounded-t-[2px]',
@@ -158,15 +165,30 @@ export const ProjectCard = memo(({
           <span>No data</span>
         </div>
       )}
-      {lamp === 'waiting' && (
-        // claude is sitting on the human — "your turn". Amber for attention:
-        // dot in the ochre token (3:1 graphics contrast is met), label in the
-        // darkened amber var (≥4.5:1 on the card — raw ochre is only ~4:1 at
-        // this size). Steady, no pulse: pulsing means "activity", and a
-        // full-opacity stamp stays visible at a glance.
-        <div className="absolute -top-[7px] right-3 flex items-center gap-1 bg-bg-card px-1.5 label-cap label-cap-latin text-[var(--beacon-waiting)]">
-          <span className="h-[5px] w-[5px] rounded-full bg-ochre" />
-          <span>Waiting</span>
+      {lamp === 'question' && (
+        // A question only you can answer (2026-09-26) — a raised hand, no label
+        // (owner: minimal, never explanatory, never an emoji; the words live in
+        // the hover text). Amber in the darkened var (≥4.5:1 on the card), steady:
+        // pulsing means activity.
+        <div
+          role="img"
+          title={t('projectPanel.groundMarkQuestion')}
+          aria-label={t('projectPanel.groundMarkQuestion')}
+          className="absolute -top-[8px] right-3 flex items-center bg-bg-card px-1 text-[var(--beacon-waiting)]"
+        >
+          <Hand size={14} strokeWidth={2} aria-hidden />
+        </div>
+      )}
+      {lamp === 'review' && (
+        // Delivered while you were away — just look. An eye in plain ink: it
+        // asks for a glance, not an answer, so it takes no attention colour.
+        <div
+          role="img"
+          title={t('projectPanel.groundMarkReview')}
+          aria-label={t('projectPanel.groundMarkReview')}
+          className="absolute -top-[8px] right-3 flex items-center bg-bg-card px-1 text-ink"
+        >
+          <Eye size={14} strokeWidth={2} aria-hidden />
         </div>
       )}
 

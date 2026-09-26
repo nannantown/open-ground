@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Copy, GripVertical } from 'lucide-react'
+import { AlertTriangle, Check, Copy, ExternalLink, GripVertical, Link2 } from 'lucide-react'
 import type { BoardColumn, ClaudeBeaconStatus, ClaudeEffort, EscalationWhy, ProjectTask } from '@/lib/types'
 import { formatDueShort, isOverdue } from '@/lib/boardDeps'
 import { PRIORITY_META } from '@/lib/boardPriority'
@@ -699,7 +699,7 @@ const BoardCardInner = ({
                 title={`${t('board.card.reviewedBy', { name: task.reviewedBy.trim() })} — ${t('board.card.reviewedClear')}`}
                 className="mt-1 flex max-w-full items-center gap-1 rounded-sm px-0 py-0.5 text-micro text-moss transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-moss"
               >
-                <span aria-hidden className="shrink-0">✓</span>
+                <Check size={11} strokeWidth={2} aria-hidden className="shrink-0" />
                 <span className="min-w-0 truncate">
                   {t('board.card.reviewedBy', { name: task.reviewedBy.trim() })}
                 </span>
@@ -729,7 +729,7 @@ const BoardCardInner = ({
               className="mt-1 flex min-w-0 items-center gap-1 rounded-sm border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-micro text-accent"
               title={t('board.card.integrationConflictTitle')}
             >
-              <span aria-hidden className="shrink-0">⚠</span>
+              <AlertTriangle size={11} strokeWidth={2} aria-hidden className="shrink-0" />
               <span className="min-w-0 truncate">
                 {t('board.card.integrationConflict')}
               </span>
@@ -810,29 +810,28 @@ const BoardCardInner = ({
                         draggable={false}
                         onClick={e => e.stopPropagation()}
                         title={task.prUrl}
-                        className="shrink-0 rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                        className="flex shrink-0 items-center gap-0.5 rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                       >
-                        PR ↗
+                        PR
+                        <ExternalLink size={10} strokeWidth={2} aria-hidden />
                       </a>
                     )}
                     {depCount > 0 && (
                       <span
                         title={t('board.card.depsTitle', { titles: depTitlesText })}
-                        className="shrink-0 text-micro text-ink-muted"
+                        className="flex shrink-0 items-center gap-0.5 text-micro text-ink-muted"
                       >
-                        {/* U+FE0E pins text presentation — without it some
-                            platforms render the chain as a color emoji. */}
-                        ⛓︎ {depCount}
+                        <Link2 size={11} strokeWidth={2} aria-hidden />
+                        {depCount}
                       </span>
                     )}
                     {inCycle && (
                       <span
                         title={t('board.card.cycleTitle')}
-                        className="shrink-0 rounded-sm border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-micro font-medium text-accent"
+                        className="flex shrink-0 items-center gap-0.5 rounded-sm border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-micro font-medium text-accent"
                       >
-                        {/* U+FE0E forces text (not emoji) rendering of the
-                            warning sign — matches the chain. */}
-                        ⚠︎ {t('board.card.cycleChip')}
+                        <AlertTriangle size={10} strokeWidth={2} aria-hidden />
+                        {t('board.card.cycleChip')}
                       </span>
                     )}
                     {task.dueDate && (

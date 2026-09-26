@@ -31,7 +31,7 @@ describe('groundLamp — the four cases the owner specified', () => {
   it('何かこちらで入力しないといけないなら waiting — even while other work runs', () => {
     // A question for you is not made less urgent by the swarm carrying on.
     expect(lamp([task({ boardColumn: 'doing' })], { openQuestions: 1, liveWork: true })).toBe(
-      'waiting',
+      'question',
     )
   })
 
@@ -50,7 +50,7 @@ describe('groundLamp — the four cases the owner specified', () => {
     // The pair that keeps the retirement honest: the same three parked cards
     // plus one unanswered question is amber — the question, not the cards.
     expect(lamp([task({ boardColumn: 'blocked' })], { openQuestions: 1, liveWork: false })).toBe(
-      'waiting',
+      'question',
     )
   })
 
@@ -161,7 +161,7 @@ describe('groundLamp — an unreadable board is its own answer', () => {
     // The inbox and the board are separate reads. Failing to open one does not
     // make the other's answer less true, and an unanswered question is the one
     // thing on this card that is genuinely waiting on the owner.
-    expect(groundLamp({ openQuestions: 1, liveWork: false })).toBe('waiting')
+    expect(groundLamp({ openQuestions: 1, liveWork: false })).toBe('question')
   })
 })
 
@@ -182,6 +182,50 @@ describe('groundLamp — the president (supply desk) mid-turn', () => {
   })
 
   it('a question for the owner still outranks the president working', () => {
-    expect(lamp([], { openQuestions: 1, liveWork: false, presidentWorking: true })).toBe('waiting')
+    expect(lamp([], { openQuestions: 1, liveWork: false, presidentWorking: true })).toBe('question')
+  })
+})
+
+// The owner's 2026-09-26 split: 「ただ終わって僕が確認待ちなのか、質問があって僕が
+// 答えないといけないのか」. question = a raised hand, review = an eye.
+describe('groundLamp — question vs review, cleared by a look (2026-09-26)', () => {
+  const SEEN = 1_000_000
+  const idle = { started: 0, liveWork: false }
+
+  it('the president ending on a question you have not seen ⇒ question', () => {
+    expect(groundLamp({ ...idle, presidentAskedAt: SEEN + 1, seenAt: SEEN })).toBe('question')
+  })
+
+  it('work delivered after your last look ⇒ review', () => {
+    expect(groundLamp({ ...idle, deliveredAt: SEEN + 1, seenAt: SEEN })).toBe('review')
+  })
+
+  it('opening the seat (seenAt moves past both) clears them', () => {
+    expect(groundLamp({ ...idle, presidentAskedAt: SEEN, deliveredAt: SEEN, seenAt: SEEN + 1 })).toBeNull()
+  })
+
+  it('both at once ⇒ question wins', () => {
+    expect(
+      groundLamp({ ...idle, presidentAskedAt: SEEN + 1, deliveredAt: SEEN + 2, seenAt: SEEN }),
+    ).toBe('question')
+  })
+
+  it('no look ever recorded ⇒ no baseline ⇒ neither timed mark (never furniture)', () => {
+    expect(groundLamp({ ...idle, presidentAskedAt: SEEN, deliveredAt: SEEN })).toBeNull()
+  })
+
+  it('an open escalation stays a question after a look — it is cleared by answering it', () => {
+    expect(groundLamp({ ...idle, openQuestions: 1, seenAt: SEEN + 1 })).toBe('question')
+  })
+
+  it('running work outranks review; review outranks an unreadable board', () => {
+    expect(groundLamp({ started: 1, liveWork: true, deliveredAt: SEEN + 1, seenAt: SEEN })).toBe('working')
+    expect(groundLamp({ liveWork: false, deliveredAt: SEEN + 1, seenAt: SEEN })).toBe('review')
+  })
+
+  it('a president mid-turn is working, not yet asking', () => {
+    expect(
+      groundLamp({ ...idle, presidentWorking: true, presidentAskedAt: SEEN + 1, seenAt: SEEN }),
+    ).toBe('working')
   })
 })

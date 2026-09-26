@@ -50,6 +50,8 @@ interface Props {
    *  server-side from the og_roles owner role. Non-owners get false, so the
    *  toggles — and the very existence of the experiments — stay hidden. */
   experimentsEligible?: boolean
+  /** Owner-only display preview switch (real role, not the previewed one). */
+  publicPreview?: { on: boolean; onChange: (on: boolean) => void }
   /** Public swarm opt-in (all users). `available` (macOS) reveals the toggle
    *  for everyone; `enabled` is the current choice. Distinct from the owner-only
    *  experiments section above. */
@@ -138,6 +140,7 @@ export const SettingsPanel = ({
   feedbackCanRead = false,
   onFeedbackSeen,
   experimentsEligible = false,
+  publicPreview,
   swarmOptInAvailable = false,
   swarmOptInEnabled = false,
   swarmVisible = false,
@@ -586,6 +589,20 @@ export const SettingsPanel = ({
           {/* Current app version — always visible (not behind Advanced) so a user
               can confirm an update took effect. Reads GET /api/health. */}
           {open && <AppVersionSection />}
+
+          {/* Owner-only display preview (real role): outside Advanced so it is
+              always one glance away, and it stays here in the public view. */}
+          {publicPreview && (
+            <div className="mt-6 border-t border-line pt-4">
+              <ExperimentToggle
+                label={t('settings.publicPreview.label')}
+                value={publicPreview.on}
+                onChange={publicPreview.onChange}
+                offLabel={t('settings.experiments.off')}
+                onLabel={t('settings.experiments.on')}
+              />
+            </div>
+          )}
 
           {/* Advanced — working defaults; hidden until needed. */}
           <div className="mt-6 border-t border-line pt-4">

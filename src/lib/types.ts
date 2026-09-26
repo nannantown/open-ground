@@ -2340,6 +2340,15 @@ export interface GroundLampRow {
    *  owner decision 2026-09-25. Present only when true; absent ⇒ not seen
    *  generating (or an older server), which lights nothing. */
   presidentWorking?: boolean
+  /** Epoch ms of the president's last reply when it ENDS WITH A QUESTION to the
+   *  owner (and nothing came after it). Absent ⇒ not asking / unreadable.
+   *  2026-09-26 — see groundMarks.ts. */
+  presidentAskedAt?: number
+  /** Epoch ms of the latest card the engine landed on main. Absent ⇒ none. */
+  deliveredAt?: number
+  /** Epoch ms the owner last had this project's president seat open. Absent ⇒
+   *  never recorded, which lights neither timed mark (no baseline to beat). */
+  seenAt?: number
 }
 
 export interface GroundLampsResponse {

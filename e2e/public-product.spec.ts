@@ -1,5 +1,16 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { createAndImportProject } from './fixtures/helpers'
+
+const SWITCH = 'Show as a public user sees it'
+// The project screen is a full overlay: leave it, flip the Settings switch, reopen the card.
+async function setPublicView(page: Page, on: boolean, projectName: string) {
+  await page.getByRole('button', { name: 'Back to Ground', exact: true }).click()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('group', { name: SWITCH }).getByRole('button', { name: on ? 'On' : 'Off', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Settings' }).getByRole('button', { name: 'Close' }).click()
+  await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveCSS('pointer-events', 'none')
+  await page.getByText(projectName, { exact: true }).first().click()
+}
 
 const ID = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
 
@@ -48,7 +59,12 @@ for (const width of [1280, 390]) {
     await expect(page.getByRole('button', { name: 'Canvas', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Saved tab', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Skills', exact: true })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Public view', exact: true })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Back to Ground', exact: true }).click()
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await expect(page.getByRole('group', { name: SWITCH })).toHaveCount(0)
+    await page.getByRole('dialog', { name: 'Settings' }).getByRole('button', { name: 'Close' }).click()
+    await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveCSS('pointer-events', 'none')
+    await page.getByText(project.name, { exact: true }).first().click()
     await expect(page.getByRole('button', { name: 'Add tab', exact: true })).toHaveCount(0)
     const board = page.getByRole('button', { name: 'Board', exact: true })
     const terminal = page.getByRole('button', { name: 'Terminal', exact: true })
@@ -82,16 +98,14 @@ for (const width of [1280, 390]) {
     page.on('request', req => {
       if (req.method() !== 'GET' && /\/api\/(settings|auth|project(?:\?|$))/.test(req.url())) mutations.push(req.url())
     })
-    await page.getByRole('button', { name: 'Project details', exact: true }).click()
-    await page.getByRole('button', { name: 'Public view', exact: true }).click()
+    await setPublicView(page, true, project.name)
     await expect(page.getByRole('button', { name: 'Canvas', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Saved tab', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Skills', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Board', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Add tab', exact: true })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Public view', exact: true })).toHaveAttribute('aria-pressed', 'true')
     await page.screenshot({ path: info.outputPath(`owner-public-preview-${width}.png`), fullPage: true, animations: 'disabled' })
-    await page.getByRole('button', { name: 'Owner view', exact: true }).click()
+    await setPublicView(page, false, project.name)
     await expect(page.getByRole('button', { name: 'Saved design', exact: true })).toBeVisible()
     expect(await (await request.get(url)).json()).toEqual(saved)
     expect(await (await request.get(canvasUrl)).json()).toEqual(savedCanvas)
@@ -115,12 +129,12 @@ for (const width of [1280, 390]) {
     }, project.id)
     await page.goto('/', { waitUntil: 'domcontentloaded' })
     await expect(page.getByTestId('swarm-bottom-bar')).toBeVisible()
-    await page.getByRole('button', { name: 'Project details', exact: true }).click()
-    await page.getByRole('button', { name: 'Public view', exact: true }).click()
+    await setPublicView(page, true, project.name)
     await expect(page.getByTestId('swarm-bottom-bar')).toHaveCount(0)
-    await page.keyboard.press('Escape')
     await page.getByRole('button', { name: 'Back to Ground', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Public view', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await expect(page.getByRole('group', { name: SWITCH }).getByRole('button', { name: 'On', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await page.getByRole('dialog', { name: 'Settings' }).getByRole('button', { name: 'Close' }).click()
     await expect(page.getByRole('button', { name: 'Skills', exact: true })).toHaveCount(0)
     await expect(page.getByTitle('Text (T)', { exact: true })).toHaveCount(0)
     const before = await (await request.get('/api/canvas')).json()
@@ -144,12 +158,16 @@ for (const width of [1280, 390]) {
     await page.keyboard.press('Escape')
     // The display choice survives navigation, but reload returns to owner view.
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await page.getByRole('button', { name: 'Project details', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Owner view', exact: true })).toHaveAttribute('aria-pressed', 'true')
-    await page.getByRole('button', { name: 'Public view', exact: true }).click()
+    await page.getByRole('button', { name: 'Back to Ground', exact: true }).click()
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await expect(page.getByRole('group', { name: SWITCH }).getByRole('button', { name: 'Off', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await page.getByRole('dialog', { name: 'Settings' }).getByRole('button', { name: 'Close' }).click()
+    await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveCSS('pointer-events', 'none')
+    await page.getByText(project.name, { exact: true }).first().click()
+    await setPublicView(page, true, project.name)
     await expect(page.getByTestId('swarm-bottom-bar')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Canvas', exact: true })).toHaveCount(0)
-    await page.getByRole('button', { name: 'Owner view', exact: true }).click()
+    await setPublicView(page, false, project.name)
     await expect(page.getByRole('button', { name: 'Canvas', exact: true })).toBeVisible()
     await request.post('/api/settings', { data: { swarmOptIn: false } })
   })

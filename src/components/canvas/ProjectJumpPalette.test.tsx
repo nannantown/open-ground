@@ -26,18 +26,34 @@ const meta = (id: string, name: string, description = ''): ProjectMeta => ({
 const projects = [meta('a', 'alpha'), meta('b', 'beta', '家庭菜園の記録')]
 
 describe('ProjectJumpPalette', () => {
-  it('shows each row’s running / your-turn lamp', () => {
+  it('shows each row’s running / question / review mark', () => {
     render(
       <ProjectJumpPalette
         open
         projects={projects}
         onClose={() => {}}
         onPick={() => {}}
-        lamps={new Map([['a', 'working'], ['b', 'waiting']])}
+        lamps={new Map([['a', 'working'], ['b', 'question']])}
       />,
     )
     expect(screen.getByText('toolbar.searchLampWorking')).toBeTruthy()
-    expect(screen.getByText('toolbar.searchLampWaiting')).toBeTruthy()
+    // An icon, not a word (owner 2026-09-26) — its name lives in the label.
+    expect(screen.getByRole('img', { name: 'toolbar.searchLampQuestion' })).toBeTruthy()
+    expect(screen.queryByText('toolbar.searchLampQuestion', { ignore: 'title' })).toBeNull()
+  })
+
+  it('a delivered-unseen row carries the eye, not the hand', () => {
+    render(
+      <ProjectJumpPalette
+        open
+        projects={projects}
+        onClose={() => {}}
+        onPick={() => {}}
+        lamps={new Map([['a', 'review']])}
+      />,
+    )
+    expect(screen.getByRole('img', { name: 'toolbar.searchLampReview' })).toBeTruthy()
+    expect(screen.queryByRole('img', { name: 'toolbar.searchLampQuestion' })).toBeNull()
   })
 
   it('picks a description match on Enter, but not while an IME is composing', () => {

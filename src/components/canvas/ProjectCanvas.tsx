@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { X } from 'lucide-react'
 import { useBoardCollab, useCanvasCollab } from '@/lib/collab/RealtimeContext'
 import { usePublishPresence } from '@/components/canvas/CollabPresence'
 import { useT } from '@/i18n/I18nContext'
@@ -861,7 +862,7 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
             onClick={() => setNotice(null)}
             className="shrink-0 rounded-[3px] px-1.5 py-1 text-ink-muted transition-colors hover:bg-bg-elevated hover:text-ink active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
-            ✕
+            <X size={12} strokeWidth={2} aria-hidden />
           </button>
         </div>
       )}

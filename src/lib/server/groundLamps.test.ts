@@ -189,14 +189,14 @@ describe('the rows drive the lamp the owner asked for', () => {
     expect(lampFor(lamps[0])).toBeNull()
   })
 
-  it('an open question ⇒ waiting, even while the swarm runs', async () => {
+  it('an open question ⇒ question, even while the swarm runs', async () => {
     const { lamps } = await readGroundLamps({
       projects: async () => [P[0]],
       startedFor: async () => 1,
       openQuestions: async () => new Map([['/repo/a', 1]]),
       liveWorkFor: async () => true,
     })
-    expect(lampFor(lamps[0])).toBe('waiting')
+    expect(lampFor(lamps[0])).toBe('question')
   })
 })
 
@@ -396,5 +396,44 @@ describe('the president (supply desk) — owner decision 2026-09-25', () => {
     }
     expect(await lampOf(['/repo/a'])).toEqual(['working', null])
     expect(await lampOf([])).toEqual([null, null])
+  })
+})
+
+describe('readGroundLamps — the question / review timestamps (2026-09-26)', () => {
+  const base = {
+    projects: async () => [P[0]],
+    startedFor: async () => 0,
+    openQuestions: async () => new Map(),
+    liveWorkFor: async () => false,
+    presidentWorkingCwds: () => [],
+  }
+
+  it('carries presidentAskedAt / deliveredAt / seenAt through to the row', async () => {
+    const { lamps } = await readGroundLamps({
+      ...base,
+      presidentAskedAtFor: async () => 30,
+      deliveredAtFor: async () => 20,
+      seenAtFor: async () => 10,
+    })
+    expect(lamps[0]).toMatchObject({ presidentAskedAt: 30, deliveredAt: 20, seenAt: 10 })
+    expect(
+      groundLamp({ started: 0, liveWork: false, presidentAskedAt: 30, deliveredAt: 20, seenAt: 10 }),
+    ).toBe('question')
+  })
+
+  it('an unreadable / throwing reader leaves the field ABSENT, never a number', async () => {
+    const { lamps } = await readGroundLamps({
+      ...base,
+      presidentAskedAtFor: async () => {
+        throw new Error('boom')
+      },
+      deliveredAtFor: async () => undefined,
+      seenAtFor: async () => {
+        throw new Error('boom')
+      },
+    })
+    expect(lamps[0]).not.toHaveProperty('presidentAskedAt')
+    expect(lamps[0]).not.toHaveProperty('deliveredAt')
+    expect(lamps[0]).not.toHaveProperty('seenAt')
   })
 })

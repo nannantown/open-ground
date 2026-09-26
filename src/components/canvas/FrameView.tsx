@@ -1,8 +1,13 @@
 import { memo, useEffect, useRef } from 'react'
-import { LayoutGrid } from 'lucide-react'
+import { LayoutGrid, Shrink } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
-import { resolveFrameStyle, resolveStrokeStyle, renderStrokeWidth } from '@/lib/canvasFillStyle'
+import {
+  resolveFrameStyle,
+  resolveStrokeStyle,
+  renderStrokeWidth,
+  DEFAULT_FRAME_FILL,
+} from '@/lib/canvasFillStyle'
 import {
   resolveFrameCornerRadius,
   clampRadiusToBox,
@@ -17,10 +22,39 @@ interface Props {
   onHeaderPointerDown: (e: React.PointerEvent) => void
   onChangeLabel: (text: string) => void
   onEditDone: () => void
-  /** Tidy the cards sitting inside this frame into a neat grid. Provided only
-   *  when the frame actually contains project cards (so empty frames / frames on
-   *  surfaces without cards don't show a dead button). */
+  /** Tidy the frame's direct cards and child frames into rows. Provided only
+   *  when the frame has contents (so empty frames don't show a dead button). */
   onTidy?: () => void
+  /** A lock forbids tidy (locked frame, or a locked child it would move). */
+  tidyDisabled?: boolean
+  /** Snap the frame to hug its contents plus a small margin. Same gating. */
+  onFit?: () => void
+  /** A locked frame can't be refit. */
+  fitDisabled?: boolean
+}
+
+// Icon-only header action (owner 2026-09-26: no text labels, tooltip only).
+const HEADER_ACTION_CLASS = [
+  'shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-[3px]',
+  'cursor-pointer text-ink-muted transition-colors duration-150',
+  'hover:bg-plane hover:text-ink',
+  'active:bg-line-soft active:text-ink',
+  'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-muted',
+  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+].join(' ')
+
+// A Ground frame with no fill of its own paints the themed wash
+// (--og-frame-wash: paper in light, near-black in dark) so it never glows on
+// the dark ground. The legacy paper default and plain white (old white-filled
+// frames) count as "no fill of its own" too; any other picked fill is honoured.
+export const GROUND_FRAME_WASH = 'rgb(var(--og-frame-wash) / 0.35)'
+const WASHED_FILLS = new Set(
+  [DEFAULT_FRAME_FILL, '#fff', '#ffffff', 'white'].map((v) => v.replace(/\s/g, '')),
+)
+export function groundFrameBackground(fill: string | undefined, resolved: string): string {
+  if (fill === undefined || WASHED_FILLS.has(fill.toLowerCase().replace(/\s/g, '')))
+    return GROUND_FRAME_WASH
+  return resolved
 }
 
 // A grouping frame: a labelled rectangle drawn behind the cards. Only its
@@ -34,6 +68,9 @@ export const FrameView = memo(({
   onChangeLabel,
   onEditDone,
   onTidy,
+  tidyDisabled,
+  onFit,
+  fitDisabled,
 }: Props) => {
   const { t } = useT()
   const inp = useRef<HTMLInputElement>(null)
@@ -64,7 +101,7 @@ export const FrameView = memo(({
       style={{
         width: w,
         height: h,
-        background: fillStyle.fill,
+        background: groundFrameBackground(frame.fill, fillStyle.fill),
         // Selected → a SOLID accent outline (Figma's selection ring is always
         // solid); otherwise honour the element's own dashed/dotted style.
         borderStyle: selected ? 'solid' : resolveStrokeStyle(frame),
@@ -123,29 +160,28 @@ export const FrameView = memo(({
             <span className="flex-1 select-none truncate font-display text-read leading-none text-ink">
               {frame.text || <span className="text-ink-faint">Frame</span>}
             </span>
-            {onTidy && (
-              <button
-                type="button"
-                title={t('canvasEl.frame.tidyTooltip')}
-                aria-label={t('canvasEl.frame.tidyTooltip')}
-                // Don't let the press start a frame drag; the click does the tidy.
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onTidy()
-                }}
-                className={[
-                  'shrink-0 inline-flex h-6 items-center gap-1 rounded-[3px] px-2',
-                  'cursor-pointer text-meta font-medium tracking-[0.02em]',
-                  'text-ink-muted transition-colors',
-                  'hover:bg-plane hover:text-ink',
-                  'active:bg-line-soft',
-                  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
-                ].join(' ')}
-              >
-                <LayoutGrid size={12} strokeWidth={2} className="shrink-0" />
-                {t('canvasEl.frame.tidy')}
-              </button>
+            {([
+              [onTidy, 'canvasEl.frame.tidyTooltip', LayoutGrid, tidyDisabled],
+              [onFit, 'canvasEl.frame.fitTooltip', Shrink, fitDisabled],
+            ] as const).map(([act, key, Icon, disabled]) =>
+              act ? (
+                <button
+                  key={key}
+                  type="button"
+                  disabled={disabled}
+                  title={t(key)}
+                  aria-label={t(key)}
+                  // Don't let the press start a frame drag; the click acts.
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    act()
+                  }}
+                  className={HEADER_ACTION_CLASS}
+                >
+                  <Icon size={14} strokeWidth={2} />
+                </button>
+              ) : null,
             )}
           </>
         )}

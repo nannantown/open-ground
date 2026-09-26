@@ -21,6 +21,11 @@ import { I18nProvider } from '@/i18n/I18nContext'
 import { AuthProvider } from '@/lib/auth/AuthContext'
 import { RealtimeProvider } from '@/lib/collab/RealtimeContext'
 import type { GroundLampRow, ProjectMeta, ProjectData } from '@/lib/types'
+import { projectPanel } from '@/i18n/messages/projectPanel'
+
+/** The Ground card marks are icons; their names are the hover text (en). */
+const QUESTION_MARK = projectPanel.en['projectPanel.groundMarkQuestion']
+const REVIEW_MARK = projectPanel.en['projectPanel.groundMarkReview']
 
 // InfiniteCanvas observes its viewport with a ResizeObserver — absent in jsdom.
 class ROStub {
@@ -176,13 +181,18 @@ describe('App — whole-render integration', () => {
     expect(screen.getByRole('button', { name: 'Skills' })).toBeTruthy()
     const writes = () => fetchMock.mock.calls.filter(([input, init]) => methodOf(input, init) !== 'GET')
     const before = writes().length
-    fireEvent.click(screen.getByRole('button', { name: 'Public view' }))
+    const settingsSwitch = () => within(screen.getByRole('dialog', { name: 'Settings' })).getByRole('group', { name: 'Show as a public user sees it' })
+    expect(screen.queryByRole('button', { name: 'Public view' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(within(settingsSwitch()).getByRole('button', { name: 'On' }))
+    fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('button', { name: 'Skills' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
     expect(screen.queryByText('WordPress', { exact: true })).toBeNull()
     expect(writes()).toHaveLength(before)
+    // The way back must stay reachable while the public view is on.
+    fireEvent.click(within(settingsSwitch()).getByRole('button', { name: 'Off' }))
     fireEvent.keyDown(document, { key: 'Escape' })
-    fireEvent.click(screen.getByRole('button', { name: 'Owner view' }))
     expect(screen.getByRole('button', { name: 'Skills' })).toBeTruthy()
     expect(writes()).toHaveLength(before)
   })
@@ -190,6 +200,9 @@ describe('App — whole-render integration', () => {
   it('never exposes the preview switch or global skills to a public user', async () => {
     installFetch()
     await act(async () => { renderApp() })
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(screen.queryByRole('group', { name: 'Show as a public user sees it' })).toBeNull()
+    fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('button', { name: 'Public view' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Skills' })).toBeNull()
   })
@@ -244,7 +257,7 @@ describe('App — whole-render integration', () => {
     await waitFor(() =>
       expect((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0),
     )
-    expect(screen.queryByText('Waiting')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(QUESTION_MARK)).not.toBeInTheDocument()
     expect(screen.queryByText('Running')).not.toBeInTheDocument()
     // …and it is SILENT, not "No data" — the board was read, and it said done.
     expect(screen.queryByText('No data')).not.toBeInTheDocument()
@@ -259,7 +272,7 @@ describe('App — whole-render integration', () => {
       renderApp()
     })
     expect(await screen.findByText('Running')).toBeInTheDocument()
-    expect(screen.queryByText('Waiting')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(QUESTION_MARK)).not.toBeInTheDocument()
   })
 
   it('stays SILENT on started-but-idle work — waiting is only ever a question (2026-08-18)', async () => {
@@ -274,11 +287,11 @@ describe('App — whole-render integration', () => {
       renderApp()
     })
     await screen.findByText('Northwind Atlas')
-    expect(screen.queryByText('Waiting')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(QUESTION_MARK)).not.toBeInTheDocument()
     expect(screen.queryByText('Running')).not.toBeInTheDocument()
   })
 
-  it('says Waiting for an open question even while the swarm runs', async () => {
+  it('raises the QUESTION mark for an open question even while the swarm runs', async () => {
     installFetch({
       projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
       lamps: [{ projectId: 'a', started: 2, openQuestions: 1, liveWork: true }],
@@ -286,8 +299,64 @@ describe('App — whole-render integration', () => {
     await act(async () => {
       renderApp()
     })
-    expect(await screen.findByText('Waiting')).toBeInTheDocument()
+    expect(await screen.findByLabelText(QUESTION_MARK)).toBeInTheDocument()
     expect(screen.queryByText('Running')).not.toBeInTheDocument()
+  })
+
+  // ── question / review marks (owner decision 2026-09-26) ──────────────────
+  // Icons with hover text, never a label or an emoji. The timed marks compare
+  // against seenAt (the last look at the president's seat).
+  const T0 = Date.parse('2026-09-26T00:00:00Z')
+  const markCase = async (row: Partial<GroundLampRow>) => {
+    installFetch({
+      projects: [projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' })],
+      lamps: [{ projectId: 'a', started: 0, openQuestions: 0, liveWork: false, ...row }],
+    })
+    await act(async () => {
+      renderApp()
+    })
+    await screen.findByText('Northwind Atlas')
+  }
+
+  it('the president ending on a question you have not seen ⇒ the QUESTION mark', async () => {
+    await markCase({ presidentAskedAt: T0 + 60_000, seenAt: T0 })
+    expect(await screen.findByLabelText(QUESTION_MARK)).toBeInTheDocument()
+    expect(screen.queryByLabelText(REVIEW_MARK)).not.toBeInTheDocument()
+  })
+
+  it('delivered after your last look ⇒ the REVIEW mark (an eye), not the question', async () => {
+    await markCase({ deliveredAt: T0 + 60_000, seenAt: T0 })
+    expect(await screen.findByLabelText(REVIEW_MARK)).toBeInTheDocument()
+    expect(screen.queryByLabelText(QUESTION_MARK)).not.toBeInTheDocument()
+    expect(screen.queryByText('Running')).not.toBeInTheDocument()
+  })
+
+  it('both at once ⇒ the QUESTION mark wins', async () => {
+    await markCase({ presidentAskedAt: T0 + 60_000, deliveredAt: T0 + 90_000, seenAt: T0 })
+    expect(await screen.findByLabelText(QUESTION_MARK)).toBeInTheDocument()
+    expect(screen.queryByLabelText(REVIEW_MARK)).not.toBeInTheDocument()
+  })
+
+  it('once you have looked (seenAt after both) ⇒ nothing at all', async () => {
+    // A second card with an open question is the proof the lamps response was
+    // APPLIED (waiting for the fetch call alone passed before any mark could
+    // render). Once its mark is on screen, the looked-at card must have none.
+    installFetch({
+      projects: [
+        projectMeta({ id: 'a', name: 'Northwind Atlas', path: '/a' }),
+        projectMeta({ id: 'b', name: 'Harbor Ledger', path: '/b' }),
+      ],
+      lamps: [
+        { projectId: 'a', started: 0, openQuestions: 0, liveWork: false, presidentAskedAt: T0, deliveredAt: T0, seenAt: T0 + 60_000 },
+        { projectId: 'b', started: 0, openQuestions: 1, liveWork: false },
+      ],
+    })
+    await act(async () => {
+      renderApp()
+    })
+    await screen.findByLabelText(QUESTION_MARK)
+    expect(screen.getAllByLabelText(QUESTION_MARK)).toHaveLength(1)
+    expect(screen.queryByLabelText(REVIEW_MARK)).not.toBeInTheDocument()
   })
 
   it('says NO DATA — not silence — over a board it could not read', async () => {
@@ -305,7 +374,7 @@ describe('App — whole-render integration', () => {
     })
     expect(await screen.findByText('No data')).toBeInTheDocument()
     expect(screen.queryByText('Running')).not.toBeInTheDocument()
-    expect(screen.queryByText('Waiting')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(QUESTION_MARK)).not.toBeInTheDocument()
   })
 
   it('surfaces the global "Claude is designing" beacon while a Canvas AI job is active', async () => {

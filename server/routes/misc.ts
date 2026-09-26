@@ -55,6 +55,8 @@ import { claudeConnection } from '@/lib/server/claudeConnection'
 import { probeGhCli } from '@/lib/server/ghCli'
 import { installHooks, uninstallHooks } from '@/lib/server/hooksInstall'
 import { readGroundLamps } from '@/lib/server/groundLamps'
+import { markGroundSeen } from '@/lib/server/groundMarks'
+import { requireProjectPath } from '../middleware/projectPath'
 import type {
   NotificationStateResponse,
   ProjectsResponse,
@@ -195,6 +197,16 @@ export const miscRoutes = new Hono()
   // and reports that as an ABSENT count rather than a zero, so one bad
   // tasks.json cannot darken every other card on the canvas.
   .get('/api/ground/lamps', async (c) => c.json(await readGroundLamps()))
+  // --- POST /api/ground/seen ------------------------------------------------
+  // The owner has this project open with the agent-team bar (the president's
+  // seat) unfolded — stamp it, which clears the card's question / review marks
+  // for everything up to now (src/lib/groundLamp.ts). Body: { path }.
+  .post('/api/ground/seen', async (c) => {
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    await markGroundSeen(path)
+    return c.json({ ok: true })
+  })
   // --- GET /api/projects ----------------------------------------------------
   .get('/api/projects', async (c) => {
     // Runs the one-shot legacy migration (existing users' projectsRoot →

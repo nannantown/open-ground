@@ -23,6 +23,7 @@ import {
   SlidersHorizontal,
   Keyboard,
   Workflow,
+  Sparkles,
 } from 'lucide-react'
 
 /** One string in both languages. EN is the source of truth; JA mirrors it. */
@@ -39,7 +40,7 @@ export type Block =
   | { kind: 'steps'; items: Bi[] }
   | { kind: 'bullets'; items: Bi[] }
   | { kind: 'note'; tone?: 'info' | 'tip' | 'warn'; text: Bi }
-  | { kind: 'rows'; mono?: boolean; rows: { k: string; v: Bi }[] }
+  | { kind: 'rows'; mono?: boolean; rows: { k: ReactNode; v: Bi }[] }
   | { kind: 'diagram'; id: 'layers' | 'board' | 'data' }
 
 export interface Section {
@@ -177,8 +178,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'Each card shows the project name, description, open-task count and a map coordinate. When a claude session is live in that project, a beacon appears: moss "Running" (a pulsing dot — claude is working) or amber "Waiting" (claude is waiting on you).',
-          ja: '各カードにはプロジェクト名・説明・未着手タスク数・地図座標が出ます。そのプロジェクトで claude セッションが動いていると、ビーコンが灯ります —— 苔色の「Running」（点滅するドット = claude が作業中）か、琥珀の「Waiting」（claude があなたの番を待っている）。',
+          en: 'Each card shows the project name, description, open-task count and a map coordinate, and at its top right at most one mark: moss "Running" (work is moving right now), a raised hand (a question is waiting for your answer — the president answered you with a question, or something only you can decide is open) or an eye (work was delivered since you last looked — just take a look). Opening the project with the Agent Team bar unfolded clears the hand and the eye; an open decision stays until you answer it. The hand wins over the eye. No mark means nothing needs you — look whenever you like.',
+          ja: '各カードにはプロジェクト名・説明・未着手タスク数・地図座標が出て、右上に印が最大1つ付きます —— 苔色の「Running」（いま作業が動いている）、挙手の手（あなたの答えを待っている質問がある: あなたへの社長の返事が質問で終わっている、またはあなたにしか決められない質問が開いている）、目（前に見てから作業が納品された: 見るだけでよい）。プロジェクトを開いてエージェントチームのバーを広げると手と目は消えます（あなたにしか決められない質問は、答えるまで残ります）。両方当てはまるときは手が優先。印が無ければ、見に行かなくて大丈夫です。',
         },
       },
       {
@@ -194,15 +195,15 @@ export const MANUAL_SECTIONS: Section[] = [
         items: [
           { en: 'Pan: scroll, or hold Space and drag (or middle-drag).', ja: 'パン：スクロール、または Space を押しながらドラッグ（中ボタンドラッグも可）。' },
           { en: 'Zoom: ⌘scroll or ⌘± ; ⇧1 fits everything, ⌘0 resets to 100%.', ja: 'ズーム：⌘スクロール か ⌘± 。⇧1 で全体にフィット、⌘0 で 100% に戻ります。' },
-          { en: 'Find a project: click “Find a project” at the top right (or press ⌘K) and type part of its name or a word from its description. Recently opened projects are listed first, each with its Running / Your turn lamp. Pick one and the Ground glides to that card, zooms in until it is readable and flashes it; press Enter again (or click the card) to open it.', ja: 'プロジェクトを探す：右上の「プロジェクトを探す」を押す（または ⌘K）と、名前の一部や説明文の言葉で探せます。何も打たなければ最近開いたプロジェクトが上に並び、それぞれに「動いている／あなたの番」のランプが出ます。選ぶと画面がそのカードまでなめらかに移動して読める大きさまで寄り、カードが一瞬光ります。もう一度 Enter（またはカードをクリック）で開きます。' },
+          { en: 'Find a project: click the magnifier icon at the top right (or press ⌘K) and type part of its name or a word from its description. Recently opened projects are listed first, each with its Running / hand / eye mark. Pick one and the Ground glides to that card, zooms in until it is readable and flashes it; press Enter again (or click the card) to open it.', ja: 'プロジェクトを探す：右上の虫めがねアイコンを押す（または ⌘K）と、名前の一部や説明文の言葉で探せます。何も打たなければ最近開いたプロジェクトが上に並び、それぞれに「動いている／手／目」の印が出ます。選ぶと画面がそのカードまでなめらかに移動して読める大きさまで寄り、カードが一瞬光ります。もう一度 Enter（またはカードをクリック）で開きます。' },
         ],
       },
       { kind: 'subhead', text: { en: 'Organize', ja: '整理する' } },
       {
         kind: 'p',
         text: {
-          en: 'The left tool strip has Select (V), Text (T), Sticky (S) and Frame (F). Draw a frame around cards to group them — the frame label becomes that project’s category. Text and stickies are free annotations on the canvas.',
-          ja: '左のツール列には 選択(V)・テキスト(T)・付箋(S)・フレーム(F) があります。カードをフレームで囲むとグループ化でき、フレームのラベルがそのプロジェクトのカテゴリになります。テキストと付箋はキャンバス上の自由な注釈です。',
+          en: 'The left tool strip has Select (V), Text (T), Sticky (S) and Frame (F). Draw a frame around cards to group them — the frame label becomes that project’s category. Text and stickies are free annotations on the canvas. Frames can sit inside frames. A frame’s header has two icons: the grid icon tidies its cards and inner frames into neat rows side by side (an inner frame moves with everything in it), and the shrink icon fits the frame snugly around its contents.',
+          ja: '左のツール列には 選択(V)・テキスト(T)・付箋(S)・フレーム(F) があります。カードをフレームで囲むとグループ化でき、フレームのラベルがそのプロジェクトのカテゴリになります。テキストと付箋はキャンバス上の自由な注釈です。フレームの中にフレームを入れることもできます。フレームの見出しには2つのアイコンがあり、格子のアイコンは中のカードと内側のフレームを重ならないよう行に並べ(内側のフレームは中身ごと動きます)、縮むアイコンはフレームを中身ぴったりの大きさに合わせます。',
         },
       },
       { kind: 'subhead', text: { en: 'The top bar', ja: 'トップバー' } },
@@ -410,7 +411,7 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'bullets',
         items: [
-          { en: 'The ✦ button opens a prompt bar — describe a layout and claude generates native canvas elements at your viewport.', ja: '✦ ボタンでプロンプトバーが開きます —— レイアウトを言葉で伝えると、claude が表示中の位置にネイティブのキャンバス要素を生成します。' },
+          { en: 'The sparkle button opens a prompt bar — describe a layout and claude generates native canvas elements at your viewport.', ja: 'きらめきのボタンでプロンプトバーが開きます —— レイアウトを言葉で伝えると、claude が表示中の位置にネイティブのキャンバス要素を生成します。' },
           { en: 'Select a mock, turn on inspect, click an element inside it and type an instruction ("make the button red") — claude rewrites the source and the preview updates.', ja: 'モックを選んでインスペクトを有効にし、中の要素をクリックして指示を打つと（「ボタンを赤く」）—— claude がソースを書き換え、プレビューが更新されます。' },
         ],
       },
@@ -704,7 +705,7 @@ export const MANUAL_SECTIONS: Section[] = [
         kind: 'rows',
         rows: [
           { k: 'V T S F R O C I', v: { en: 'Select · Text · Sticky · Frame · Rect · Ellipse · Comment · Image.', ja: '選択 · テキスト · 付箋 · フレーム · 長方形 · 楕円 · コメント · 画像。' } },
-          { k: '✦', v: { en: 'Generate elements with claude.', ja: 'claude で要素を生成。' } },
+          { k: <Sparkles {...ICON} aria-label="Generate" />, v: { en: 'Generate elements with claude.', ja: 'claude で要素を生成。' } },
           { k: '⌘\\', v: { en: 'Toggle focus mode (hide both sidebars).', ja: '集中モード（両サイドバーを隠す）。' } },
           { k: '⌘C · ⌘V · ⌘D', v: { en: 'Copy · paste · duplicate.', ja: 'コピー · 貼り付け · 複製。' } },
           { k: '⌥⌘C · ⌥⌘V', v: { en: 'Copy · paste style.', ja: 'スタイルをコピー · 貼り付け。' } },

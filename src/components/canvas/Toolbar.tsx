@@ -33,7 +33,6 @@ interface Props {
   onOpenManual: () => void
   /** Owner-only entry; existing skill files remain available to the CLI. */
   onOpenSkills?: () => void
-  viewModeControl?: React.ReactNode
   /** Opens the "Shared with me" join dialog (paste an invite code or link →
    *  join a collaborator's project). Provided ONLY when realtime collab is
    *  enabled — undefined hides the entry, so the default build shows nothing.
@@ -91,7 +90,6 @@ export const Toolbar = ({
   projectCount,
   unreadFeedback = 0,
   usage,
-  viewModeControl,
 }: Props) => {
   const { t } = useT()
   return (
@@ -131,7 +129,6 @@ export const Toolbar = ({
           </>
         )}
       </div>
-        {viewModeControl}
       </div>
 
       <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-3">
@@ -141,14 +138,11 @@ export const Toolbar = ({
           <button
             type="button"
             onClick={onSearch}
-            title={t('toolbar.search')}
-            className="flex items-center gap-2 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] pl-2.5 pr-2 py-2 shadow-card text-ui text-ink-muted transition-colors hover:bg-plane hover:border-line-strong hover:text-ink active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-40 disabled:cursor-not-allowed"
+            title={`${t('toolbar.search')} ${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'}`}
+            aria-label={t('toolbar.search')}
+            className="flex h-8 w-8 items-center justify-center bg-bg-card/95 backdrop-blur border border-line rounded-[3px] shadow-card text-ink-muted transition-colors hover:bg-plane hover:border-line-strong hover:text-ink active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            <Search size={13} strokeWidth={1.75} />
-            <span>{t('toolbar.search')}</span>
-            <kbd className="rounded-[2px] border border-line bg-bg-inset px-1 font-sans text-meta text-ink-subtle">
-              {/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'}
-            </kbd>
+            <Search size={15} strokeWidth={1.75} />
           </button>
         )}
         {/* The gauge is the widest single item in the bar (~200px). It is ambient

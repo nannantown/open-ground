@@ -51,6 +51,7 @@ import {
   type Container,
   type Rect,
 } from '@/lib/canvasContainment'
+import { tidyLayout, fitFrameRect, type LayoutBox, type FrameGeometry } from '@/lib/groundFrameLayout'
 import {
   groupElements,
   ungroupElements,
@@ -91,7 +92,7 @@ export interface CanvasZoomApi {
 
 interface Props {
   projects: ProjectMeta[]
-  /** Ground-only: per-project LAMP ('working'/'waiting'), decided from the
+  /** Ground-only: per-project LAMP ('working'/'question'/'review'), decided from the
    *  project's WORK rather than from live processes (src/lib/groundLamp.ts). A
    *  project with no entry draws no lamp, which is itself an answer — a finished
    *  project is meant to be silent. The per-project Canvas tab renders no
@@ -223,11 +224,9 @@ const SIZABLE_TYPES = new Set<CanvasElement['type']>([
 // Smallest a group-resize bounding box may shrink to (world px), so a selection
 // can't collapse to zero.
 const GROUP_RESIZE_MIN = 20
-// "整理" (tidy) grid geometry, in world px. HEADER mirrors FrameView's h-9
-// header bar; PAD is the inset from the frame edge; GAP separates cells.
-const FRAME_HEADER_H = 36
-const TIDY_PAD = 24
-const TIDY_GAP = 20
+// Ground frame tidy / fit geometry, in world px. header mirrors FrameView's
+// h-9 label bar; pad is the inset from the frame edge; gap separates boxes.
+const FRAME_GEOMETRY: FrameGeometry = { header: 36, pad: 24, gap: 20 }
 
 // Custom cursor for the Comment tool — a small chat-bubble glyph whose
 // bottom-left tail is the cursor hotspot. SVG colours come straight from the
@@ -434,6 +433,7 @@ interface FrameLeafCb {
   onChangeLabel: (t: string) => void
   onEditDone: () => void
   onTidy: () => void
+  onFit: () => void
 }
 
 // Free-form canvas: project cards, text/sticky annotations and grouping
@@ -3240,11 +3240,11 @@ export const InfiniteCanvas = ({
     opts?: { directOnly?: boolean },
   ): string[] => {
     const c = canvasRef.current
-    const fb = fullBounds(frame)
+    const fb = groundBox(frame)
     const otherFrames = opts?.directOnly
       ? c.elements
           .filter((e) => e.type === 'frame' && e.id !== frame.id)
-          .map((e) => ({ id: e.id, b: fullBounds(e), area: 0 }))
+          .map((e) => ({ id: e.id, b: groundBox(e), area: 0 }))
           .map((f) => ({ ...f, area: f.b.w * f.b.h }))
       : null
     const thisArea = fb.w * fb.h
@@ -3274,67 +3274,193 @@ export const InfiniteCanvas = ({
     return ids
   }
 
-  // "整理": snap the cards inside a frame into a tidy grid, keeping them in their
-  // current reading order (row, then column) so each card barely moves from
-  // where it already sits — the closest neat arrangement. The frame grows (never
-  // shrinks) to fit the grid, so nothing spills outside it.
-  const tidyFrame = (frame: CanvasElement) => {
-    const c = canvasRef.current
-    const ids = cardsInFrame(frame, { directOnly: true })
-    if (ids.length === 0) return
-    // Real rendered card heights: offsetHeight is the pre-transform layout size
-    // (= world px, the CSS `scale` doesn't change it), so the grid rows can't
-    // overlap a tall card. Width is fixed (w-64 = CARD_W).
-    const heightById = new Map<string, number>()
-    const root = viewportRef.current
-    if (root) {
-      for (const id of ids) {
-        const node = root.querySelector(
-          `[data-card-id="${CSS.escape(id)}"]`,
-        ) as HTMLElement | null
-        if (node) heightById.set(id, node.offsetHeight)
+  // A frame's on-screen box: an unsized frame renders at FrameView's /
+  // DesignFrameView's 400×280 default, not fullBounds' sticky-sized fallback.
+  // cardsInFrame measures frames with this too, so card membership and the
+  // tidy / fit boxes agree on an unsized frame's size.
+  const groundBox = (el: CanvasElement) =>
+    el.type === 'frame'
+      ? { x: el.x, y: el.y, w: el.width ?? 400, h: el.height ?? 280 }
+      : fullBounds(el)
+
+  // The visible elements directly inside a Ground frame. Membership is the
+  // persisted parentId when it points at a live element; a parentless element
+  // (legacy frames, a frame the parent was resized over) falls back to
+  // geometry — its centre's innermost enclosing frame — the same rule cards use.
+  const frameDirectChildren = (frame: CanvasElement): CanvasElement[] => {
+    const els = canvasRef.current.elements
+    const ids = new Set(els.map((e) => e.id))
+    const frames = els.filter((e) => e.type === 'frame' && !e.hidden)
+    return els.filter((el) => {
+      if (el.id === frame.id || el.hidden || hiddenViaGroup.has(el.id)) return false
+      if (el.type === 'comment' || el.type === 'group') return false
+      if (el.parentId && ids.has(el.parentId)) return el.parentId === frame.id
+      const b = groundBox(el)
+      const cx = b.x + b.w / 2
+      const cy = b.y + b.h / 2
+      const own = descendantIds(els, el.id)
+      let best: { id: string; area: number } | null = null
+      for (const f of frames) {
+        if (f.id === el.id || own.has(f.id)) continue
+        const fb = groundBox(f)
+        if (cx < fb.x || cx > fb.x + fb.w || cy < fb.y || cy > fb.y + fb.h) continue
+        const area = fb.w * fb.h
+        if (!best || area < best.area) best = { id: f.id, area }
+      }
+      return best?.id === frame.id
+    })
+  }
+
+  // Everything that rides with `root` at ANY depth, by the same rule as
+  // frameDirectChildren (parentId, else innermost-enclosing-frame geometry) plus
+  // plain parentId descendants — so a parentless grandchild frame or sticky
+  // travels with its frame exactly like the cards inside it do.
+  const carriedBy = (root: CanvasElement): CanvasElement[] => {
+    const els = canvasRef.current.elements
+    const out = new Map<string, CanvasElement>()
+    const stack = [root]
+    while (stack.length) {
+      const cur = stack.pop()!
+      const kids = [
+        ...(cur.type === 'frame' ? frameDirectChildren(cur) : []),
+        ...els.filter((e) => e.parentId === cur.id),
+      ]
+      for (const k of kids) {
+        if (k.id === root.id || out.has(k.id)) continue
+        out.set(k.id, k)
+        stack.push(k)
       }
     }
-    const cellH = Math.max(CARD_H, ...ids.map((id) => heightById.get(id) ?? 0))
-    const rowBand = cellH + TIDY_GAP
-    const ordered = ids
-      .map((id) => ({ id, pos: c.positions[id]! }))
-      .sort((a, b) => {
-        const ra = Math.round(a.pos.y / rowBand)
-        const rb = Math.round(b.pos.y / rowBand)
-        if (ra !== rb) return ra - rb
-        return a.pos.x - b.pos.x
-      })
-    const fb = fullBounds(frame)
-    const usableW = Math.max(fb.w, CARD_W + TIDY_PAD * 2)
-    const cols = Math.max(
-      1,
-      Math.floor((usableW - TIDY_PAD * 2 + TIDY_GAP) / (CARD_W + TIDY_GAP)),
-    )
-    const rows = Math.ceil(ordered.length / cols)
-    const nextPositions = { ...c.positions }
-    ordered.forEach((item, i) => {
-      const col = i % cols
-      const row = Math.floor(i / cols)
-      nextPositions[item.id] = {
-        x: fb.x + TIDY_PAD + col * (CARD_W + TIDY_GAP),
-        y: fb.y + FRAME_HEADER_H + TIDY_PAD + row * (cellH + TIDY_GAP),
+    return Array.from(out.values())
+  }
+
+  // A frame's DIRECT contents as layout boxes: its own project cards
+  // (geometric, directOnly) plus its direct child elements. A child frame's box
+  // is the union of the frame, its visible descendants and every card riding
+  // inside it (a card is claimed by its centre, so it may overhang the edge),
+  // and it carries all of them — the nested frame's own arrangement is left
+  // untouched. Card heights are the real rendered ones (offsetHeight is the
+  // pre-transform layout size = world px; cards are never culled). A box is
+  // `locked` when it or anything it carries is locked. Shared by tidy + fit.
+  const frameContentBoxes = (frame: CanvasElement) => {
+    const c = canvasRef.current
+    const root = viewportRef.current
+    const cardBox = (id: string) => {
+      const pos = c.positions[id]!
+      const node = root?.querySelector(
+        `[data-card-id="${CSS.escape(id)}"]`,
+      ) as HTMLElement | null
+      return { x: pos.x, y: pos.y, w: CARD_W, h: node?.offsetHeight || CARD_H }
+    }
+    const union = (bs: { x: number; y: number; w: number; h: number }[]) => {
+      const x = Math.min(...bs.map((b) => b.x))
+      const y = Math.min(...bs.map((b) => b.y))
+      return {
+        x,
+        y,
+        w: Math.max(...bs.map((b) => b.x + b.w)) - x,
+        h: Math.max(...bs.map((b) => b.y + b.h)) - y,
       }
+    }
+    const claimed = new Set<string>()
+    const boxes: (LayoutBox & { cards: string[]; els: string[]; locked: boolean })[] = []
+    for (const el of frameDirectChildren(frame)) {
+      const carried = carriedBy(el)
+      // Cards ride by the same rule as elements: each frame this box carries
+      // (itself + carried frames, any depth) brings its OWN direct cards — so a
+      // card in a grandchild's overhang past the child's edge comes along, and
+      // a card in a frame that merely sits inside the child's rect but belongs
+      // elsewhere (parentId) stays with its real owner.
+      const cards = [el, ...carried]
+        .filter((f) => f.type === 'frame')
+        .flatMap((f) => cardsInFrame(f, { directOnly: true }))
+        .filter((id) => !claimed.has(id) && c.positions[id])
+      cards.forEach((id) => claimed.add(id))
+      const b = union([
+        groundBox(el),
+        ...carried.filter((d) => !d.hidden && d.type !== 'comment').map(groundBox),
+        ...cards.map(cardBox),
+      ])
+      const locked = [el, ...carried].some((d) => !isManipulable(d))
+      boxes.push({ id: el.id, ...b, cards, els: [el.id, ...carried.map((d) => d.id)], locked })
+    }
+    for (const id of cardsInFrame(frame, { directOnly: true })) {
+      if (!c.positions[id] || claimed.has(id)) continue
+      boxes.push({ id, ...cardBox(id), cards: [id], els: [], locked: false })
+    }
+    return boxes
+  }
+
+  // Render-time gate for the tidy / fit buttons (no DOM measuring): whether
+  // the frame has anything to act on, and which actions a lock forbids (a lock
+  // is immune to every mutation): a locked frame can neither tidy nor fit; a
+  // locked child — or anything it carries — would be moved by tidy.
+  const frameActionState = (frame: CanvasElement) => {
+    const kids = frameDirectChildren(frame)
+    const has = kids.length > 0 || cardsInFrame(frame, { directOnly: true }).length > 0
+    const frameLocked = !isManipulable(frame)
+    const childLocked = kids.some(
+      (k) => !isManipulable(k) || carriedBy(k).some((d) => !isManipulable(d)),
+    )
+    return { has, tidyDisabled: frameLocked || childLocked, fitDisabled: frameLocked }
+  }
+  // Once per content change, not per render: pan / wheel / a card drag
+  // re-render every frame and carriedBy is O(N²). The viewport plays no part;
+  // canvasRef.current is this render's canvas, so the reads agree with deps.
+  const frameActions = useMemo(
+    () =>
+      new Map(
+        frameVariant === 'design' ? [] : frames.map((f) => [f.id, frameActionState(f)]),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- frameActionState reads canvasRef; these are its inputs
+    [frames, elements, positions, projects, lockedViaGroup, hiddenViaGroup, frameVariant],
+  )
+
+  // Tidy: flow the frame's direct cards AND child frames into rows as equals
+  // (tidyLayout), each child frame moving with its whole contents so nothing
+  // overlaps. The frame grows (never shrinks) to hold the flow.
+  const tidyFrame = (frame: CanvasElement) => {
+    const c = canvasRef.current
+    if (!isManipulable(frame)) return
+    const boxes = frameContentBoxes(frame)
+    if (boxes.length === 0 || boxes.some((b) => b.locked)) return
+    const fb = groundBox(frame)
+    const flow = tidyLayout(fb, boxes, FRAME_GEOMETRY)
+    const nextPositions = { ...c.positions }
+    const shift = new Map<string, { dx: number; dy: number }>()
+    for (const b of boxes) {
+      const to = flow.positions.get(b.id)!
+      const d = { dx: to.x - b.x, dy: to.y - b.y }
+      for (const id of b.cards) {
+        const p = c.positions[id]
+        if (p) nextPositions[id] = { x: p.x + d.dx, y: p.y + d.dy }
+      }
+      for (const id of b.els) shift.set(id, d)
+    }
+    const nextW = Math.max(fb.w, flow.width)
+    const nextH = Math.max(fb.h, flow.height)
+    const nextElements = c.elements.map((el) => {
+      if (el.id === frame.id)
+        return nextW !== fb.w || nextH !== fb.h ? { ...el, width: nextW, height: nextH } : el
+      const d = shift.get(el.id)
+      return d && (d.dx || d.dy) ? { ...el, x: el.x + d.dx, y: el.y + d.dy } : el
     })
-    // Grow the frame to contain the grid (never shrink — respect the user's
-    // chosen shape; only extend when the grid needs more room).
-    const neededW = TIDY_PAD * 2 + cols * CARD_W + (cols - 1) * TIDY_GAP
-    const neededH =
-      FRAME_HEADER_H + TIDY_PAD * 2 + rows * cellH + (rows - 1) * TIDY_GAP
-    const nextW = Math.max(frame.width ?? 0, neededW)
-    const nextH = Math.max(frame.height ?? 0, neededH)
-    const grew = nextW !== (frame.width ?? 0) || nextH !== (frame.height ?? 0)
-    const nextElements = grew
-      ? c.elements.map((el) =>
-          el.id === frame.id ? { ...el, width: nextW, height: nextH } : el,
-        )
-      : c.elements
     onCanvasChange({ ...c, positions: nextPositions, elements: nextElements })
+  }
+
+  // Fit: snap the frame to hug its direct contents plus a small margin
+  // (fitFrameRect). Contents stay put; the frame may shrink or grow.
+  const fitFrame = (frame: CanvasElement) => {
+    if (!isManipulable(frame)) return
+    const c = canvasRef.current
+    const r = fitFrameRect(frameContentBoxes(frame), FRAME_GEOMETRY)
+    if (!r) return
+    onCanvasChange({
+      ...c,
+      elements: c.elements.map((el) =>
+        el.id === frame.id ? { ...el, x: r.x, y: r.y, width: r.w, height: r.h } : el,
+      ),
+    })
   }
 
   const onContextMenu = (e: React.MouseEvent) => {
@@ -3566,6 +3692,8 @@ export const InfiniteCanvas = ({
   onTextMeasuredRef.current = onTextMeasured
   const tidyFrameRef = useRef(tidyFrame)
   tidyFrameRef.current = tidyFrame
+  const fitFrameRef = useRef(fitFrame)
+  fitFrameRef.current = fitFrame
   const projectsRef = useRef(projects)
   projectsRef.current = projects
   const setEditingIdRef = useRef(setEditingId)
@@ -3624,6 +3752,10 @@ export const InfiniteCanvas = ({
         onTidy: () => {
           const fr = canvasRef.current.elements.find((x) => x.id === id)
           if (fr) tidyFrameRef.current(fr)
+        },
+        onFit: () => {
+          const fr = canvasRef.current.elements.find((x) => x.id === id)
+          if (fr) fitFrameRef.current(fr)
         },
       }
       frameCbCache.current.set(id, cb)
@@ -3763,11 +3895,17 @@ export const InfiniteCanvas = ({
                 onHeaderPointerDown={fcb.onPointerDown}
                 onChangeLabel={fcb.onChangeLabel}
                 onEditDone={fcb.onEditDone}
-                onTidy={
-                  cardsInFrame(frame, { directOnly: true }).length > 0
-                    ? fcb.onTidy
-                    : undefined
-                }
+                {...(() => {
+                  const st = frameActions.get(frame.id)
+                  return st?.has
+                    ? {
+                        onTidy: fcb.onTidy,
+                        onFit: fcb.onFit,
+                        tidyDisabled: st.tidyDisabled,
+                        fitDisabled: st.fitDisabled,
+                      }
+                    : {}
+                })()}
               />
             )}
           </div>

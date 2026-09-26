@@ -126,6 +126,8 @@
   --og-seat-worker: 222 233 226;  /* #DEE9E2 */
   /* shadow ink for box-shadows (tailwind.config.ts boxShadow) */
   --og-shadow: 42 31 26;
+  /* Ground frame body wash (FrameView paints it at 35%): paper in light… */
+  --og-frame-wash: 242 237 222;  /* #F2EDDE */
   /* paper grain: multiply sinks the grain into the light paper */
   --og-grain-blend: multiply;
   --og-grain-opacity: 0.6;
@@ -217,6 +219,8 @@ html[data-theme='dark'] {
   --og-seat-manager: 48 48 60;    /* #30303C */
   --og-seat-worker: 40 56 50;     /* #283832 */
   --og-shadow: 0 0 0;
+  /* …near-black in dark, so frames sink instead of glowing */
+  --og-frame-wash: 20 16 12;     /* #14100C */
   /* multiply would vanish on dark — plain low-opacity grain instead
      (measured on the mock: stdev 1.7 → 2.8 keeps the texture visible) */
   --og-grain-blend: normal;

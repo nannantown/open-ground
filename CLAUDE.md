@@ -158,6 +158,18 @@ pruned at boot by `src/lib/server/retention.ts`.)
 停止条件は機械的不変条件 — tsc / lint / 全テスト / build / **番人の赤の実測** /
 実機の一巡 / PII・HOME・棚卸し番人。
 
+## UI design principles (owner decision 2026-09-26)
+
+- **Minimal.** Do not make UI explanatory: no descriptive labels or shortcut
+  hints printed on controls. The less on screen, the better. A short tooltip
+  on hover is the most explanation a control gets.
+- **Never emoji** — not in the UI, not in copy, not in notifications. The app
+  has none. Use lucide icons, or a custom SVG matching the app's stroke width
+  and corner radius when lucide has no fit (icons can be commissioned from
+  Codex).
+- Interactive states (hover / active / focus-visible) and both themes still
+  apply; see `~/.claude/skills/ui-interactive-states.md`.
+
 ## Git discipline
 
 **Never use `git stash` in this repo.** Work must be either committed or discarded

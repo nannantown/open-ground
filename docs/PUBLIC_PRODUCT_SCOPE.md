@@ -72,9 +72,9 @@ backup restoration or change the stored description format.
 
 ## Owner Preview
 
-The owner-only Owner view / Public view switch appears on Ground and in local
-project details, opened from the project name in the single-row header
-(`OwnerViewSwitch.tsx`). App derives visible capabilities from
+The owner-only "show as a public user sees it" switch lives in Settings, not on
+Ground (`SettingsPanel.tsx`; keyed on the real role so it stays reachable while
+the public view is on). App derives visible capabilities from
 the real role plus this window-local choice. Public preview hides owner tabs,
 Skills, owner settings, manual chapters and the feedback inbox; Swarm follows
 the public macOS opt-in, not the owner's experimental/local unlock.

@@ -97,7 +97,7 @@ for (const width of [1600, 1280, 390, 320]) {
     const details = page.getByRole('dialog', { name: 'Project details', exact: true })
     await expect(details.getByText(description, { exact: true })).toBeVisible()
     await expect(details.getByRole('button', { name: 'Refresh description', exact: true })).toBeVisible()
-    await expect(details.getByRole('button', { name: 'Owner view', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await expect(details.getByRole('button', { name: 'Owner view', exact: true })).toHaveCount(0)
     await expectInsideViewport(details, width, height)
     await details.getByRole('button', { name: 'Active branches', exact: true }).click()
     await expect(page.getByRole('menu').getByText('main', { exact: true })).toBeVisible()

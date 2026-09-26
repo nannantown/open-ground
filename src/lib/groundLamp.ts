@@ -12,9 +12,9 @@
 // long-parked Needs-decision items lighting the card amber for weeks. Stalled
 // or parked work is the MACHINE's problem first: the engine reclaims dead
 // workers on its own, and the moment it genuinely needs the owner it raises an
-// escalation — which lands in the question inbox and lights WAITING through
-// the one branch that survives. So amber now means exactly one thing: there is
-// a question only you can answer.
+// escalation — which lands in the question inbox and lights WAITING (since
+// 2026-09-26: 'question') through the one branch that survives. So amber now
+// means exactly one thing: there is a question only you can answer.
 //
 // WHY IT MOVED OFF PROCESS LIVENESS. The old lamp asked "is a `claude` alive in
 // this project?", and every project running a swarm has a commander and a
@@ -22,6 +22,27 @@
 // 「あなたの番」 with every task done — reported twice, and an idle timer did not
 // fix it, because a commander wakes every few minutes to read the Board and so
 // is never quiet for long. A process being alive was simply never the question.
+//
+// QUESTION vs REVIEW — 2026-09-26, owner: 「ただ終わって僕が確認待ちなのか、質問が
+// あって僕が答えないといけないのかっていうのがわかるようにしたい」. The old amber
+// 'waiting' became 'question' (drawn as a raised hand, never an emoji):
+//   question — an open escalation only the owner can answer (stays until it is
+//              answered), OR the president's latest reply TO THE OWNER'S OWN
+//              WORDS closed on a question, the owner has not spoken since, and
+//              has not opened its seat since. App notices typed into the desk
+//              (【エンジンからの知らせ】 / 【司令官からの返事】) and the president's
+//              retelling of them neither raise nor clear it: the retelling of a
+//              delivery ends 「これで OK ですか?」 (that must be the eye, not the
+//              hand), while a re-ask 「…まだお返事を待っています。進めてよいですか？」
+//              must not erase the real question. Rule + real-transcript
+//              measurements: stepPresidentAsk in src/lib/server/groundMarks.ts.
+//   review   — work landed on main (the engine's landed ledger) after the owner
+//              last opened the president's seat (drawn as an eye). Just look.
+// Both TIMED marks clear when the owner opens the project with the agent-team
+// bar unfolded (POST /api/ground/seen stamps seenAt). With no seenAt on record
+// there is no baseline, so neither timed mark lights — a mark only a visit
+// nobody has made yet could clear would be furniture again.
+// Precedence: question > running > review > unknown > nothing.
 //
 // NOTHING IS ALSO AN ANSWER. The owner, on why a resting project must show no
 // lamp at all: 「作業が終わってて何も出さない時にuserは見にいくんですよ」 — silence is
@@ -36,7 +57,7 @@ import type { ProjectTask } from '@/lib/types'
  *
  *  `null` = no lamp at all, and it is a REAL answer: the project is resting.
  *  `'unknown'` is the one that exists to stop a lie — see `started` below. */
-export type GroundLamp = 'working' | 'waiting' | 'unknown' | null
+export type GroundLamp = 'working' | 'question' | 'review' | 'unknown' | null
 
 export interface GroundLampInput {
   /** How many of the project's cards were STARTED — see {@link startedTaskCount},
@@ -63,7 +84,18 @@ export interface GroundLampInput {
    *  Only mid-turn counts — a president idle at its prompt is absent/false and
    *  changes nothing (the 2026-08-15 rule: alive is not a lamp). */
   presidentWorking?: boolean
+  /** Epoch ms the president ended its last reply with a question (absent ⇒ not
+   *  asking). Lights 'question' only when newer than `seenAt`. */
+  presidentAskedAt?: number
+  /** Epoch ms of the latest landed card. Lights 'review' when newer than `seenAt`. */
+  deliveredAt?: number
+  /** Epoch ms the owner last opened this project's president seat. */
+  seenAt?: number
 }
+
+/** An event the owner has not seen yet. No seenAt ⇒ no baseline ⇒ never. */
+const unseen = (at: number | undefined, seenAt: number | undefined): boolean =>
+  at !== undefined && seenAt !== undefined && at > seenAt
 
 /** Cards that mean work was STARTED. `todo` is deliberately absent: a queued
  *  card has not begun, so it is not 「途中でとまって」 anything — and lighting every
@@ -86,18 +118,33 @@ export const groundLamp = ({
   openQuestions,
   liveWork,
   presidentWorking,
+  presidentAskedAt,
+  deliveredAt,
+  seenAt,
 }: GroundLampInput): GroundLamp => {
   // 1. A REAL QUESTION FOR YOU outranks everything, including running work:
   //    the swarm carrying on elsewhere does not make your answer less needed.
   //    `undefined` (inbox unreadable) is not zero and not a question — it just
   //    does not reach this branch.
-  if ((openQuestions ?? 0) > 0) return 'waiting'
+  if ((openQuestions ?? 0) > 0) return 'question'
 
   // 1a. THE PRESIDENT IS MID-TURN (2026-09-25). The owner asked it something and
   //     it is answering — that is work, whatever the board says: a project with
   //     no started card, or a board we could not read, is still visibly moving.
   //     Below the question branch, so waiting still outranks running.
   if (presidentWorking) return 'working'
+
+  // 1c. THE PRESIDENT IS WAITING ON YOUR ANSWER (2026-09-26): its last reply to
+  //     you has a question in its final paragraph and you have not opened its seat since. Below
+  //     presidentWorking because a president mid-turn has not finished asking.
+  if (unseen(presidentAskedAt, seenAt)) return 'question'
+
+  // 1d. Running work outranks "come and look" — the delivery is not going away.
+  if (started !== undefined && started > 0 && liveWork) return 'working'
+
+  // 1e. DELIVERED WHILE YOU WERE AWAY (2026-09-26): look, nothing to answer.
+  //     Above 'unknown' — the landed ledger is its own file and was read.
+  if (unseen(deliveredAt, seenAt)) return 'review'
 
   // 1b. THE BOARD ITSELF IS UNREADABLE. Checked after the question branch (a
   //     question we DID read is still a question) and before everything else,
@@ -120,3 +167,7 @@ export const groundLamp = ({
   // WAITING branch above. Amber only ever means "answer me".
   return liveWork ? 'working' : null
 }
+
+/** Window event SwarmBottomBar fires after stamping POST /api/ground/seen, so
+ *  App re-polls the lamps at once instead of on its next 5s tick. */
+export const GROUND_SEEN_EVENT = 'og:ground-seen'

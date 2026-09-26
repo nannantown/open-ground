@@ -447,6 +447,9 @@ export const projectPanel = {
     // Ground canvas alongside your own cards (collab enabled only).
     'projectPanel.groundSharedBadge': 'Shared',
     'projectPanel.groundSharedTitle': 'Shared with you',
+    // Ground card marks (2026-09-26) — hover text only; the mark itself is an icon.
+    'projectPanel.groundMarkQuestion': 'Waiting for your answer',
+    'projectPanel.groundMarkReview': 'Delivered — take a look',
     // Invite link v2 — permission mode + bounds picker (owner, before minting).
     'projectPanel.collabModeLabel': 'Who can join',
     'projectPanel.collabModeOpen': 'Anyone with the link',
@@ -961,6 +964,8 @@ export const projectPanel = {
     // キャンバスで自分のカードと並べて表示（collab 有効時のみ）。
     'projectPanel.groundSharedBadge': '共有',
     'projectPanel.groundSharedTitle': 'あなたに共有されたプロジェクト',
+    'projectPanel.groundMarkQuestion': 'あなたの答えを待っています',
+    'projectPanel.groundMarkReview': '納品されました(見るだけ)',
     // 招待リンク v2 — 権限モード + 上限の選択（オーナー・作成前）。
     'projectPanel.collabModeLabel': '参加できる人',
     'projectPanel.collabModeOpen': 'リンクを知っている人は誰でも',

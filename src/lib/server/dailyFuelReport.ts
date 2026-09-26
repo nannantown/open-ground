@@ -413,7 +413,7 @@ const openProposalNote = (card: ProjectTask): string => {
       doing: '前回の改善提案カードは現在作業中です',
       review: '前回の改善提案カードは作業が終わり、確認待ちです',
     }[columnOf(card)] ?? '前回の改善提案カードがまだ残っています'
-  return `⚠ 燃費が基準より悪化しています。${where}ので、新しい起票はしていません。`
+  return `燃費が基準より悪化しています。${where}ので、新しい起票はしていません。`
 }
 
 /** Pick the Board the proposal card goes to: the REGISTERED project with the
@@ -636,12 +636,12 @@ export const runDailyFuelReport = async (
           setFuelMemo({ ...armed, proposal })
           proposalOutcome = 'filed'
           proposalNote =
-            '⚠ 燃費が基準より悪化したため、改善提案カードを保留列(blocked)に起票しました。実施するなら todo 列へ動かしてください — それが承認になります。'
+            '燃費が基準より悪化したため、改善提案カードを保留列(blocked)に起票しました。実施するなら todo 列へ動かしてください — それが承認になります。'
         }
       } else {
         proposalOutcome = 'no-target'
         proposalNote =
-          '⚠ 燃費が基準より悪化しています(起票先のプロジェクトが見つからないため、お知らせのみ)。'
+          '燃費が基準より悪化しています(起票先のプロジェクトが見つからないため、お知らせのみ)。'
       }
     }
   }

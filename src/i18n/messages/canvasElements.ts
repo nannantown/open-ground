@@ -31,8 +31,8 @@ export const canvasElements = {
     'canvasEl.screen.emptyHint':
       'Double-click to write source, or ask Claude in the Canvas chat to “build this screen”.',
     // FrameView
-    'canvasEl.frame.tidy': 'Tidy',
-    'canvasEl.frame.tidyTooltip': 'Tidy the cards inside this frame',
+    'canvasEl.frame.tidyTooltip': 'Tidy',
+    'canvasEl.frame.fitTooltip': 'Fit',
     // ImageView
     'canvasEl.image.notFound': 'Image not found',
     // Folder-less collab member: the image bytes live only on the owner's
@@ -74,8 +74,8 @@ export const canvasElements = {
     'canvasEl.screen.emptyHint':
       'ダブルクリックでソースを書くか、Canvas チャットで Claude に「この画面を作って」と頼んでください。',
     // FrameView
-    'canvasEl.frame.tidy': '整理',
-    'canvasEl.frame.tidyTooltip': 'フレーム内のカードを整理',
+    'canvasEl.frame.tidyTooltip': '整頓',
+    'canvasEl.frame.fitTooltip': 'フィット',
     // ImageView
     'canvasEl.image.notFound': '画像が見つかりません',
     'canvasEl.image.unavailable': '画像は同期されていません',

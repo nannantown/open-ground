@@ -21,6 +21,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import type { ProjectMeta } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
+import { GROUND_SEEN_EVENT } from '@/lib/groundLamp'
 import { SwarmModule } from '@/components/canvas/modules/SwarmModule'
 import { StreamOwnerContext } from '@/lib/streamBudget'
 
@@ -77,6 +78,30 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
     ro.observe(parent)
     return () => ro.disconnect()
   }, [open])
+  // "The owner has looked at the president's seat" — clears the Ground card's
+  // question / review marks (groundLamp.ts, 2026-09-26). Stamped when the bar
+  // is open and visible, and again when the owner leaves (fold, close the
+  // project, hide the window) so whatever arrived WHILE they sat here counts
+  // as seen too.
+  useEffect(() => {
+    if (!open) return
+    const stamp = () =>
+      void fetch('/api/ground/seen', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: project.path }),
+        keepalive: true,
+      })
+        .then(() => window.dispatchEvent(new Event(GROUND_SEEN_EVENT)))
+        .catch(() => {})
+    if (!document.hidden) stamp()
+    const onVis = () => stamp()
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      document.removeEventListener('visibilitychange', onVis)
+      stamp()
+    }
+  }, [open, project.path])
   const maxH = parentH > 0 ? Math.max(SWARM_BAR_MIN_H, parentH - TOP_RESERVE) : undefined
   const shownH = maxH === undefined ? height : Math.min(height, maxH)
 
