@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef } from 'react'
-import { LayoutGrid, Shrink } from 'lucide-react'
+import { LayoutGrid, Minimize } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
 import {
@@ -162,7 +162,7 @@ export const FrameView = memo(({
             </span>
             {([
               [onTidy, 'canvasEl.frame.tidyTooltip', LayoutGrid, tidyDisabled],
-              [onFit, 'canvasEl.frame.fitTooltip', Shrink, fitDisabled],
+              [onFit, 'canvasEl.frame.fitTooltip', Minimize, fitDisabled],
             ] as const).map(([act, key, Icon, disabled]) =>
               act ? (
                 <button

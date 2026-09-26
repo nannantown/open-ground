@@ -16,6 +16,7 @@
 // worker → /api/sdk-session/:id/input) and shows the honest answer.
 
 import { useEffect, useRef, useState } from 'react'
+import { ChevronDown } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { groupSdkFrames } from '@/lib/sdkTranscript'
 import { EventRow, ToolCard, postFailureMessage, type Frame } from './SdkWorkerPane'
@@ -124,7 +125,8 @@ export const SwarmSeatFeed = ({
           onClick={() => setDrifted(false)}
           className="absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded-full border border-line bg-bg-card px-2 py-0.5 text-micro text-ink-muted shadow-sm transition-colors duration-150 hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
         >
-          ↓ {t('projectPanel.swarm.sdk.jumpLatest')}
+          <ChevronDown size={11} strokeWidth={2} className="mr-0.5 inline-block align-[-1px]" />
+          {t('projectPanel.swarm.sdk.jumpLatest')}
         </button>
       ) : null}
     </div>

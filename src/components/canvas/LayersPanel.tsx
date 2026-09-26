@@ -1,13 +1,13 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import {
-  ArrowDown,
-  ArrowRight,
   ChevronUp,
   ChevronDown,
   ChevronRight,
+  Columns3,
   Eye,
   EyeOff,
   Lock,
+  Rows3,
   Search,
   Unlock,
   X,
@@ -662,14 +662,14 @@ export const LayersPanel = memo(({
 })
 
 // Type glyph for a row. A frame with auto layout shows its stacking direction
-// (Figma's → / ↓) instead of the generic frame icon; everything else uses the
+// (columns / rows) instead of the generic frame icon; everything else uses the
 // shared element icon.
 const LayerIcon = ({ element }: { element: CanvasElement }) => {
   if (element.type === 'frame' && element.layout) {
     return element.layout.mode === 'row' ? (
-      <ArrowRight size={13} strokeWidth={1.75} />
+      <Columns3 size={13} strokeWidth={1.75} />
     ) : (
-      <ArrowDown size={13} strokeWidth={1.75} />
+      <Rows3 size={13} strokeWidth={1.75} />
     )
   }
   return <CanvasElementIcon element={element} />

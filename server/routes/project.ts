@@ -266,7 +266,32 @@ interface TasksBody {
 // recorded, never a failure.)
 const BRANCH_RE = /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/
 
-const BOARD_COLUMNS: readonly BoardColumn[] = ['todo', 'doing', 'review', 'done', 'blocked']
+/** WRITE-side type check for the card fields whose silent loss changes what
+ *  the engine does (owner report 2026-09-26). The READ side (ProjectTaskSchema)
+ *  is tolerant on purpose: a junk `dependsOn` drops the FIELD so an old file
+ *  never loses a card. On a write that tolerance is a trap: PUT
+ *  `dependsOn: "<id>"` answered 200 and the order vanished, so both cards
+ *  started at once. Reject it here instead, so the writer learns. Returns the
+ *  error text, or null when the body is fine (non-array `tasks` is left to the
+ *  store, unchanged). */
+export const cardFieldTypeError = (body: unknown): string | null => {
+  const tasks = (body as { tasks?: unknown } | null)?.tasks
+  if (!Array.isArray(tasks)) return null
+  for (let i = 0; i < tasks.length; i++) {
+    const t: unknown = tasks[i]
+    if (!t || typeof t !== 'object') continue
+    const { dependsOn, draft } = t as { dependsOn?: unknown; draft?: unknown }
+    if (dependsOn !== undefined && !(Array.isArray(dependsOn) && dependsOn.every((d) => typeof d === 'string'))) {
+      return `tasks[${i}].dependsOn must be an array of card ids (strings), e.g. ["<id>"]`
+    }
+    if (draft !== undefined && typeof draft !== 'boolean') {
+      return `tasks[${i}].draft must be true or false`
+    }
+  }
+  return null
+}
+
+const BOARD_COLUMNS: readonly BoardColumn[] =['todo', 'doing', 'review', 'done', 'blocked']
 
 /** Per-item outcome for a setColumn/setBranch/setIntegrationConflict entry —
  *  lets a caller tell "applied" apart from "id didn't match any card / value
@@ -304,6 +329,8 @@ export const projectRoutes = new Hono()
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
     const body = (await c.req.json()) as ProjectData
+    const bad = cardFieldTypeError(body)
+    if (bad) return c.json({ error: bad }, 400)
     try {
       // The body's updatedAt is the snapshot token the client last READ —
       // writeProjectData refuses the write (CAS) when the store has moved on,
@@ -863,6 +890,13 @@ export const projectRoutes = new Hono()
     const value = body[field]
     if (value !== undefined && !Array.isArray(value)) {
       return c.json({ error: `${field} must be an array` }, 400)
+    }
+  }
+  // Card fields this endpoint cannot set. Accepting them with a 200 is how an
+  // order (dependsOn) silently vanished (owner report 2026-09-26): say so.
+  for (const field of ['dependsOn', 'draft'] as const) {
+    if (field in (body as object)) {
+      return c.json({ error: `${field} cannot be set here; write the card with PUT /api/project` }, 400)
     }
   }
 

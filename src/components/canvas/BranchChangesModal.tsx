@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { GitBranch, Loader2 } from 'lucide-react'
+import { ChevronRight, GitBranch, Loader2 } from 'lucide-react'
 import { Overlay, DialogCard, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type { BranchChangesResponse, FileDiffResponse, FileDiffScope } from '@/lib/types'
@@ -213,7 +213,7 @@ export const BranchChangesModal = ({ open, path, onClose, onData }: Props) => {
                   </span>
                   {git.target && !git.sameBranch && (
                     <>
-                      <span className="text-ui text-ink-faint">→</span>
+                      <ChevronRight size={13} strokeWidth={1.75} className="shrink-0 text-ink-faint" />
                       <span className="truncate font-mono text-ui text-ink-muted">{git.target}</span>
                       <span className="text-meta tabular-nums text-ink-faint">
                         {t('projectPanel.branchAheadBehind', {

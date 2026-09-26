@@ -120,6 +120,8 @@ export const withCardDuplicated = (data: ProjectData, taskId: string): ProjectDa
     boardColumn: col,
     ...(src.notes !== undefined ? { notes: src.notes } : {}),
     ...(src.assignee !== undefined ? { assignee: src.assignee } : {}),
+    // A copy of a draft is still a draft: otherwise it is dispatchable at once.
+    ...(src.draft ? { draft: true } : {}),
   }
   // Renumber the column: existing cards in display priority order, the copy
   // spliced in right after the source.
@@ -674,6 +676,15 @@ export const BoardTab = ({
     moveCard(taskId, 'done', null)
   }, [moveCard])
 
+  // Release a draft (gate ⑧): the card may start automatically from the next pass.
+  const handleReleaseDraft = useCallback((taskId: string) => {
+    const cur = dataRef.current
+    onPersistRef.current({
+      ...cur,
+      tasks: cur.tasks.map(x => (x.id === taskId ? { ...x, draft: undefined } : x)),
+    })
+  }, [])
+
   // Review stamp set/clear (F062). `value === undefined` clears it.
   const handleSetReviewedBy = useCallback((taskId: string, value: string | undefined) => {
     const cur = dataRef.current
@@ -974,6 +985,7 @@ export const BoardTab = ({
                 onCommitTitle={handleCommitTitle}
                 onSetReviewedBy={handleSetReviewedBy}
                 onMoveToDone={handleMoveToDone}
+                onReleaseDraft={handleReleaseDraft}
               />
             )
           }

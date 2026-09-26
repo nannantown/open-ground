@@ -388,8 +388,8 @@ export const restoreHint = (
     )
   }
   return parts.length > 0
-    ? `控えの置き場所 → ${parts.join(' / ')}`
-    : `控えの置き場所 → ${backupsRootDirLabel()}（今回は該当する控えがありませんでした）`
+    ? `控えの置き場所: ${parts.join(' / ')}`
+    : `控えの置き場所: ${backupsRootDirLabel()}（今回は該当する控えがありませんでした）`
 }
 
 /** The backups root, for the "nothing to restore" case. Uses the path builder,

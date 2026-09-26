@@ -39,7 +39,7 @@ export const canvasElements = {
     // device (the shared doc carries the reference, not the binary).
     'canvasEl.image.unavailable': 'Image not synced',
     // CommentPin
-    'canvasEl.comment.placeholder': 'Comment on this element — ⌘↵ to Run',
+    'canvasEl.comment.placeholder': 'Comment on this element — ⌘Enter to Run',
     // InfiniteCanvas context menu
     'canvasEl.menu.duplicate': 'Duplicate',
     'canvasEl.menu.bringToFront': 'Bring to front',
@@ -80,7 +80,7 @@ export const canvasElements = {
     'canvasEl.image.notFound': '画像が見つかりません',
     'canvasEl.image.unavailable': '画像は同期されていません',
     // CommentPin
-    'canvasEl.comment.placeholder': 'この要素についてのコメント — ⌘↵ で Run',
+    'canvasEl.comment.placeholder': 'この要素についてのコメント — ⌘Enter で Run',
     // InfiniteCanvas context menu
     'canvasEl.menu.duplicate': '複製',
     'canvasEl.menu.bringToFront': '最前面へ',

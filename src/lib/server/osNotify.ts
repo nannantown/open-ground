@@ -24,6 +24,37 @@ export const OS_NOTIFY_MESSAGE = 'openground:notify'
  *  in swarmNotifications.ts. */
 export const CREATE_NOTIFICATION_MESSAGE = 'openground:create-notification'
 
+/** The IPC message electron/main.js sends on window focus / blur so the gate
+ *  below knows whether the owner is looking at OPEN GROUND right now. */
+export const WINDOW_FOCUS_MESSAGE = 'openground:window-focus'
+
+/** The ONLY notification events that may raise a Mac toast (owner decision
+ *  2026-09-26 — "only what must reach me while I'm looking elsewhere"): a
+ *  question that stops work until answered (first time only — reminders stay in
+ *  the bell), the owner's own conversation hit its usage limit, and stuck
+ *  processes piling up (restart needed). An ALLOWLIST on purpose: a new event
+ *  kind stays bell-only until someone adds it here. Everything else — fatal
+ *  included ("mistaken for an error during updates") — still reaches the bell
+ *  and the president's seat, just never the Mac toast. */
+export const OS_TOAST_EVENTS: ReadonlySet<string> = new Set([
+  'escalation-open',
+  'session-limit',
+  'stuck-processes',
+])
+
+let windowFocused = false
+
+/** Record the window focus state relayed by electron/main.js. */
+export function setWindowFocused(focused: boolean): void {
+  windowFocused = focused
+}
+
+/** The single Mac-toast gate: an allowlisted event AND the OPEN GROUND window is
+ *  not in front (when it is, the owner already sees it on screen). */
+export function shouldRaiseOsNotification(event: string): boolean {
+  return OS_TOAST_EVENTS.has(event) && !windowFocused
+}
+
 /** Title + body for one OS notification. */
 export interface OsNotification {
   title: string

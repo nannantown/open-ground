@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, FolderPlus, Palette, Users } from 'lucide-react'
+import { ChevronLeft, FolderPlus, Palette, Users } from 'lucide-react'
 import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import {
@@ -538,7 +538,7 @@ export const SharedProjectBody = ({
                   onClick={() => setActiveCanvasId(null)}
                   className="flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                 >
-                  <ArrowLeft size={12} />
+                  <ChevronLeft size={12} />
                   {t('projectPanel.collabCanvasBack')}
                 </button>
                 <span className="truncate text-ui text-ink" title={activeCanvasName}>

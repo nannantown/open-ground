@@ -142,7 +142,7 @@ export const fireSelfUpdateIfIntegrated = async (
       // a failed write never disturbs the removal that called us.
       await createSwarmInfoNotification({
         event: 'self-update-requested',
-        detail: `マネージャーの統合を検知（${snap.branch} → ${trunk} 到達済み）— エンジン自己入替サイクル（rebuild→canary→切替）を要求しました`,
+        detail: `マネージャーの統合を検知（${snap.branch} が ${trunk} に到達済み）— エンジン自己入替サイクル（rebuild・canary・切替）を要求しました`,
         projectPath,
         branch: snap.branch,
       }).catch(() => {})

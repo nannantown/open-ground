@@ -53,7 +53,12 @@ microphone delegation. Work mode disables the direct integration too.
 This is a trusted local app integration, not a relaxation of arbitrary source
 sandboxing. Browser/OS microphone permission is still required. A nested opaque
 sandbox cannot support getUserMedia, even with an inner `allow` attribute.
-The existing source remains the startup launcher until NENE answers its probe.
+Until NENE answers its probe (2xx) the tab shows only "Starting…" while OPEN
+GROUND itself starts NENE's serve.js (`POST /api/local-apps/nene-songs/start`,
+`src/lib/server/localAppLauncher.ts`: fixed command, no input, registered folder
+whose package.json is "nene-songs"), or "Couldn't start" + a reason + Try again.
+The module's own source is not shown meanwhile, so no shell command reaches the
+owner (owner decision 2026-09-26).
 Once connected, transient probe failures do not reload or destroy the document.
 Visible direct frames also receive Space/Enter from non-editable host focus.
 Existing playback heartbeats keep active recordings and pending saves alive.

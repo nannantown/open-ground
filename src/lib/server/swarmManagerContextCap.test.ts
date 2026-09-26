@@ -94,7 +94,7 @@ describe('commander spawn × desk context cap', () => {
     // The NEXT boot resumes the new, small conversation — not the dropped one.
     expect(mocks.recordSwarmSession).toHaveBeenCalledWith(PROJ, 'manager', o.agentSessionId)
     expect(mocks.logToEngine).toHaveBeenCalledTimes(1)
-    expect(mocks.logToEngine.mock.calls[0][2]).toContain('司令官の卓を作り直した(文脈 346,076 → 0)')
+    expect(mocks.logToEngine.mock.calls[0][2]).toContain('司令官の卓を作り直した(文脈 346,076 から 0 へ)')
   })
 
   it('cap 0 (off) ⇒ resumes even a huge conversation', async () => {

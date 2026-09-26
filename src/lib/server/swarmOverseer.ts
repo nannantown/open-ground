@@ -82,15 +82,15 @@ export interface OverseerSignalSpec {
 }
 
 export const OVERSEER_SIGNALS: readonly OverseerSignalSpec[] = [
-  { id: 'S1', tier: 'T3', note: 'rework-exhausted (anomaly) → raise to the inbox' },
-  { id: 'S2', tier: 'T3', note: 'all-workers-down (fatal) → raise to the inbox' },
-  { id: 'S3', tier: 'T3', note: 'exec-timeout (fatal) → raise to the inbox' },
-  { id: 'S4', tier: 'T3', note: 'worker free-text question → owner inbox' },
-  { id: 'S5', tier: 'T3', note: 'blocked-column card dwelt 30min → raise to the inbox' },
-  { id: 'S7', tier: 'T0prime', note: 'mergeable review cards idle 30min → info notice' },
-  { id: 'S9', tier: 'THROTTLED', note: 'usage over (100%) → notify; questions still reach the owner' },
-  { id: 'S10', tier: 'T3', note: 'selfUpdate rollback / canary-failed (fatal) → raise to the inbox' },
-  { id: 'S11', tier: 'T0prime', note: 'inbox open record unanswered 6h → re-notify once' },
+  { id: 'S1', tier: 'T3', note: 'rework-exhausted (anomaly): raise to the inbox' },
+  { id: 'S2', tier: 'T3', note: 'all-workers-down (fatal): raise to the inbox' },
+  { id: 'S3', tier: 'T3', note: 'exec-timeout (fatal): raise to the inbox' },
+  { id: 'S4', tier: 'T3', note: 'worker free-text question: owner inbox' },
+  { id: 'S5', tier: 'T3', note: 'blocked-column card dwelt 30min: raise to the inbox' },
+  { id: 'S7', tier: 'T0prime', note: 'mergeable review cards idle 30min: info notice' },
+  { id: 'S9', tier: 'THROTTLED', note: 'usage over (100%): notify; questions still reach the owner' },
+  { id: 'S10', tier: 'T3', note: 'selfUpdate rollback / canary-failed (fatal): raise to the inbox' },
+  { id: 'S11', tier: 'T0prime', note: 'inbox open record unanswered 6h: re-notify once' },
 ] as const
 
 /** Per-engine overseer state (§5). In-memory ONLY — held on the ProjectEngine, which
@@ -573,7 +573,7 @@ const detectStateAnomalies = async (
     const ok = await raiseToInbox(deps, now, ov, {
       projectPath: engine.path,
       question: `差し戻し上限を超えて blocked 入りしたカード ${who} をどうしますか？（設計見直し / 諦めて放置 / 分割して再依頼）`,
-      context: `review→doing の差し戻しが ${a.attempts ?? '?'} 回で上限超過し 'blocked' に退避。本人の方針判断が要ります。`,
+      context: `review から doing への差し戻しが ${a.attempts ?? '?'} 回で上限超過し 'blocked' に退避。本人の方針判断が要ります。`,
       plainQuestion:
         `${who} の作業をAIに${a.attempts ?? '数'}回やり直させましたが、検査に合格しませんでした。この作業をどうするか決めてください。\n` +
         'A: 頼み方や作業の分け方を見直して、もう一度やらせる（やり方を変えて再挑戦します）\n' +

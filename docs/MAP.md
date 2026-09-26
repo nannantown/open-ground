@@ -139,6 +139,11 @@
 - Manual run-defaults visibility follows `BoardModule.swarmVisible`, the same
   gate as Run routing and per-card settings. `BoardTab.showRunDefaults` changes
   display only; saved launch preferences survive enabling/disabling Swarm.
+- Draft cards (2026-09-26): `ProjectTask.draft` holds a todo card out of Swarm dispatch
+  (`selectDispatch` gate ⑧). Board fades it (`BoardCard.tsx`) and its hover button clears
+  it (`BoardTab.handleReleaseDraft`). `PUT /api/project` returns 400 for a non-array
+  `dependsOn` or non-boolean `draft` (`cardFieldTypeError`), and `POST /api/project/tasks`
+  refuses both keys. Tests: `swarmOrchestrator.test.ts` (⑧), `tasks.test.ts`, `BoardCard.test.tsx`.
 - 罠: API 契約の落とし穴(フル UUID 必須・列名・短縮 id 黙殺の歴史)は
   `docs/commander/05-board-api-contract.md`。collab 共有中は Y.Doc が権威 — サーバ側の Board
   書込みは collabMirror 経由でないとクライアントに巻き戻される(→ §6)。
@@ -799,6 +804,9 @@
   `src/lib/modules/`(descriptor / ids / tabOrder / customTabAttach / useCustomModules / useExperiments)
 - UI: `modules/CustomFrameHost.tsx`(sandbox iframe host)/ `CustomTabPickerDialog` /
   `CustomTabCreateDialog` / `CustomModuleView` (full-width preview, no terminal dock).
+  Songs (`localApp: 'nene-songs'`): when NENE's serve.js (:8899) is down the view
+  calls `POST /api/local-apps/nene-songs/start` (`src/lib/server/localAppLauncher.ts`,
+  fixed command, no input) and shows only Starting / Couldn't start + Try again.
   Creation no longer launches or pastes into a side terminal. Existing terminal
   bindings are left untouched except by explicit module-deletion cleanup.
 - NENE input recording: `src/lib/localAppFrame.ts` resolves the explicit
@@ -827,7 +835,7 @@
   (srcdoc 側の検証は `src/lib/srcdocLockdown.test.ts`)
 - 実験 gate: `src/lib/server/experiments.ts` + `src/lib/modules/useExperiments.ts`(Swarm タブ等の owner 限定機能)
 - 通知: `src/components/canvas/` の `NotificationBell` / `NotificationPanel` +
-  `src/lib/server/osNotify.ts`(swarm 由来は `swarmNotifications.ts` → commander/06)
+  `src/lib/server/osNotify.ts`(Mac トーストの唯一の判定 `shouldRaiseOsNotification` = 許可リスト3種 + 前面時は出さない。番人 `osToastGate.test.ts`。swarm 由来は `swarmNotifications.ts` → commander/06)
 - deep link: `src/lib/deepLink.ts` + `useJoinDeepLink.ts`(招待リンク)
 - playback: `src/lib/playback/playbackStore.ts` + `src/components/canvas/PlaybackEq.tsx`
 - onboarding: `src/components/Onboarding.tsx`

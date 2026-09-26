@@ -91,7 +91,7 @@ const parseStatusZ = (raw: string): BranchWorkingChange[] => {
     if (/[RC]/.test(entry.slice(0, 2))) {
       // Next NUL field is the rename/copy source.
       const from = fields[++i]
-      if (from) path = `${from} → ${path}`
+      if (from) path = `${from} › ${path}`
     }
     out.push({ status, path })
   }

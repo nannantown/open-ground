@@ -297,11 +297,11 @@ function updateDialogText(lang, kind, opts) {
       return ja
         ? {
             message: 'アップデートを確認できませんでした。',
-            detail: 'このビルドにはアップデート機能が入っていません。最新版は Help → Release Notes から確認できます。',
+            detail: 'このビルドにはアップデート機能が入っていません。最新版は Help › Release Notes から確認できます。',
           }
         : {
             message: 'Could not check for updates.',
-            detail: 'This build has no updater attached. You can check the latest version under Help → Release Notes.',
+            detail: 'This build has no updater attached. You can check the latest version under Help › Release Notes.',
           }
     case 'up-to-date':
       return ja
@@ -357,7 +357,7 @@ function updateDialogText(lang, kind, opts) {
             detail:
               '更新の入れ替えを行う macOS のプログラム（OPEN GROUND の ShipIt）が、バックグラウンドでの実行を止められています。' +
               'このまま再起動しても何も入らないので、先に止めています。\n\n' +
-              'システム設定 → 一般 → ログイン項目と機能拡張 →「バックグラウンドでの実行を許可」で OPEN GROUND をオンにしてから、' +
+              'システム設定 › 一般 › ログイン項目と機能拡張 ›「バックグラウンドでの実行を許可」で OPEN GROUND をオンにしてから、' +
               'もう一度「再起動」を選んでください。' +
               (label ? `\n\n（ターミナルなら: launchctl enable gui/$(id -u)/${label}）` : '') +
               '\n\n急ぐならリリースページからインストーラを入れてください。',
@@ -370,7 +370,7 @@ function updateDialogText(lang, kind, opts) {
             detail:
               "The macOS helper that swaps the app in (OPEN GROUND's ShipIt) is not allowed to run in the background, " +
               'so restarting now would install nothing — the app stopped before quitting.\n\n' +
-              'Turn OPEN GROUND on under System Settings → General → Login Items & Extensions → "Allow in the Background", ' +
+              'Turn OPEN GROUND on under System Settings › General › Login Items & Extensions › "Allow in the Background", ' +
               'then choose Restart again.' +
               (label ? `\n\n(Terminal: launchctl enable gui/$(id -u)/${label})` : '') +
               '\n\nTo move on now, install from the release page.',

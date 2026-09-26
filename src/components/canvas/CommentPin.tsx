@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import {
   CheckCircle2,
+  ChevronRight,
   MessageSquareText,
   RotateCcw,
 } from 'lucide-react'
@@ -108,7 +109,8 @@ export const CommentPin = ({
                 title={`Attached to ${anchorLabel}`}
                 className="ml-1 truncate rounded-[3px] bg-bg-inset px-1.5 py-[1px] font-mono text-plate normal-case tracking-normal text-ink-faint"
               >
-                ↳ {anchorLabel}
+                <ChevronRight size={10} strokeWidth={2} className="mr-0.5 inline-block align-[-1px]" />
+                {anchorLabel}
               </span>
             ) : null}
             {onToggleResolved && (

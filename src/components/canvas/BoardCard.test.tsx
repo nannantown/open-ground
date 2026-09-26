@@ -63,6 +63,30 @@ describe('BoardCard extraction smoke', () => {
     expect(getByText('Charlie')).toBeTruthy()
   })
 
+  it('a draft card is faded, and its release button clears ONLY that flag (gate ⑧)', () => {
+    const onPersist = vi.fn()
+    const onOpenTask = vi.fn()
+    const { getByLabelText, getByText } = render(
+      <BoardTab
+        data={data([
+          task({ id: 'd', title: 'Drafty', boardColumn: 'todo', draft: true, dependsOn: ['p'] }),
+          task({ id: 'p', title: 'Plain', boardColumn: 'todo' }),
+        ])}
+        onPersist={onPersist}
+        onOpenTask={onOpenTask}
+        onCreateTask={vi.fn(() => 'new')}
+      />,
+    )
+    expect(getByText('Drafty').closest('article')?.className).toContain('opacity-50')
+    expect(getByText('Plain').closest('article')?.className).not.toContain('opacity-50')
+    fireEvent.click(getByLabelText('board.card.releaseDraft'))
+    expect(onOpenTask).not.toHaveBeenCalled()
+    const saved = onPersist.mock.calls[0][0] as ProjectData
+    const d = saved.tasks.find(x => x.id === 'd')
+    expect(d?.draft).toBeUndefined()
+    expect(d?.dependsOn).toEqual(['p'])
+  })
+
   it('clicking a card opens it (onOpenTask with its id)', () => {
     const onOpenTask = vi.fn()
     const { getByText } = render(

@@ -256,7 +256,7 @@ export const projectPanel = {
     'projectPanel.deleteFailed': 'Delete failed: {error} — the folder was not removed. Try again, or move it to the Trash in Finder yourself.',
     'projectPanel.deleting': 'Deleting…',
     // Tabs
-    'projectPanel.dragToReorder': 'Drag to reorder · Alt+←/→ to move',
+    'projectPanel.dragToReorder': 'Drag to reorder · Alt+Left/Right to move',
     // More menu
     'projectPanel.moreActions': 'More actions',
     'projectPanel.revealInFinder': 'Reveal in Finder',
@@ -776,7 +776,7 @@ export const projectPanel = {
     'projectPanel.deleteFailed': '削除に失敗しました: {error} — フォルダは残っています。もう一度試すか、Finder でゴミ箱に移動してください。',
     'projectPanel.deleting': '削除中…',
     // Tabs
-    'projectPanel.dragToReorder': 'ドラッグで並べ替え · Alt+←/→ で移動',
+    'projectPanel.dragToReorder': 'ドラッグで並べ替え · Alt+左右キーで移動',
     // More menu
     'projectPanel.moreActions': 'その他の操作',
     'projectPanel.revealInFinder': 'Finderで開く',

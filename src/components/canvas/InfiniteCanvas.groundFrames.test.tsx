@@ -154,6 +154,67 @@ describe('Ground frame tidy (through InfiniteCanvas)', () => {
   })
 })
 
+describe('Ground frame tidy: the owner 0.11.149 layout', () => {
+  // "MyProjects" (too tall) holds child frame "Todo" with 4 cards, plus
+  // kickstand and AIResearch loose, stacked to Todo's right.
+  const owner = (): CanvasState => ({
+    viewport: { x: 0, y: 0, zoom: 1 },
+    positions: {
+      t1: { x: 48, y: 120 },
+      t2: { x: 324, y: 120 },
+      t3: { x: 600, y: 120 },
+      t4: { x: 48, y: 300 },
+      kickstand: { x: 930, y: 62 },
+      ai: { x: 932, y: 230 },
+    },
+    elements: [
+      frame('MyProjects', 0, 0, 1250, 1100),
+      frame('Todo', 24, 60, 881, 424, { parentId: 'MyProjects' }),
+    ],
+  })
+
+  it('stacks kickstand + AIResearch beside Todo and the frame hugs them', () => {
+    const { action, lastState } = renderScene(owner())
+    fireEvent.click(action('MyProjects', 'tidyTooltip'))
+    const s = lastState()!
+    const todo = elRect(s, 'Todo')
+    const kick = cardRect(s, 'kickstand')
+    const ai = cardRect(s, 'ai')
+    expect(kick.x).toBe(todo.x + todo.w + G.gap)
+    expect(ai.x).toBe(kick.x)
+    expect(ai.y).toBe(kick.y + CARD_H + G.gap)
+    expect(ai.y + ai.h).toBeLessThanOrEqual(todo.y + todo.h)
+    // The outer frame shrinks to its contents + margin (was 1250×1100).
+    const outer = elRect(s, 'MyProjects')
+    expect(outer).toEqual({
+      x: 0,
+      y: 0,
+      w: kick.x + CARD_W + G.pad,
+      h: todo.y + todo.h + G.pad,
+    })
+  })
+})
+
+describe('Ground frame tidy: shrinking stops at what tidy leaves in place', () => {
+  it('a group of stickies owned by the frame (parentId) stays inside it', () => {
+    const cv: CanvasState = {
+      viewport: { x: 0, y: 0, zoom: 1 },
+      positions: { p1: { x: 40, y: 80 }, p2: { x: 400, y: 80 } },
+      elements: [
+        frame('F', 0, 0, 1200, 900),
+        { id: 'G', type: 'group', x: 900, y: 700, parentId: 'F' } as CanvasElement,
+        { id: 's1', type: 'sticky', text: '', x: 900, y: 700, width: 100, height: 80, parentId: 'G' } as CanvasElement,
+        { id: 's2', type: 'sticky', text: '', x: 1020, y: 700, width: 100, height: 80, parentId: 'G' } as CanvasElement,
+      ],
+    }
+    const { action, lastState } = renderScene(cv)
+    fireEvent.click(action('F', 'tidyTooltip'))
+    const f = elRect(lastState()!, 'F')
+    expect(f.x + f.w).toBeGreaterThanOrEqual(1120 + G.pad)
+    expect(f.y + f.h).toBeGreaterThanOrEqual(780 + G.pad)
+  })
+})
+
 describe('Ground frame tidy: nested edge cases', () => {
   const shiftOf = (b: CanvasState, a: CanvasState, id: string) => {
     const x = b.elements.find((e) => e.id === id)!

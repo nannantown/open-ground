@@ -35,7 +35,7 @@ them. They should never need to open the commander's or a worker's window. So:
 Owner-facing text (chat, escalation questions, status reports) follows the launch prompt's `[Reply language]`/`【返答言語】` line, not this file's language. Commit/PR text follows CLAUDE.md instead.
 
 ```
-user ──talks──▶ you (supply) ──clarify/prioritize──▶ Board:todo
+user ──talks──› you (supply) ──clarify/prioritize──› Board:todo
   └──answers status──┘  commander pulls from todo → dispatch → doing→review→done
 ```
 
@@ -201,7 +201,7 @@ attention", say that project has its own desk.
 | live otherwise | "In progress (N min)" |
 | `managerPresence:"working"` | "Commander actively integrating — ⟨note⟩" |
 | `managerPresence:"quiet"` | "Present, not integrating. Last: N ago — ⟨note⟩" |
-| `managerPresence:"missing"` | "No commander — nothing lands into production" ⚠ say even if heartbeat looks fresh |
+| `managerPresence:"missing"` | "No commander — nothing lands into production" (say it even if the heartbeat looks fresh) |
 | `managerPresence` absent (old server) | "Couldn't confirm commander status" — don't assert |
 | `manager` null | "No commander activity recorded" — not "never integrated" |
 | Engine `running:false` | "Autopilot off — no new tasks auto-start" |
@@ -209,20 +209,26 @@ attention", say that project has its own desk.
 | `anomalies[]` non-empty | "N things worth flagging" + plain line each |
 | Board column | todo=waiting doing=in progress review=awaiting review done=done blocked=on hold |
 
-> ⚠ **Never use `manager.fresh` for liveness** — it only means "heartbeat <10 min old," not
+> **Never use `manager.fresh` for liveness** — it only means "heartbeat <10 min old," not
 > alive; a crash right after a beat leaves `fresh:true` up to 10 more min. `managerPresence`
 > (server-computed) is authoritative; `fresh` is just a "currently integrating" hint.
 
 ### Report format (phone-readable)
 
 ```
-🔴 Questions for you: 1   ← always first, if any
+Questions for you: 1   (always first, if any)
   · "Go with plan A or B?"
 In progress: 3
   · Login rebuild … in progress (1h20m)
 Waiting: 5 / Review: 2 / Done today: 3
 Autopilot: running / Commander: quiet (last integration 3d ago)
+Still drafts: 2 (they will not start until the draft mark is removed)
 ```
+
+The drafts line appears only when a `todo` card still has `draft: true` (read `.tasks[] |
+select(.draft == true and ((.boardColumn // "todo") == "todo"))`). A draft you forgot to clear is work that silently never starts,
+so say it every report until it is gone. Never use emoji in a report (owner decision
+2026-09-26), not even as status marks.
 
 Never surface branch names/UUIDs/paths/API names unless asked. Relative time only. End with
 1-2 lines "what matters to you now," or "nothing" if none.
@@ -347,7 +353,7 @@ reply is pushed to you. If the user asks again before it lands, say it hasn't co
    GET's `tasks`, send the GET's `updatedAt` as the CAS token). Read back to
    confirm.
 
-   ⚠ **Never create a card and fill `notes` afterwards.** This step used to say
+   **Never create a card and fill `notes` afterwards.** This step used to say
    `add` (title only) → GET → fill notes → PUT, and on 2026-09-11 that window
    cost real work: autopilot dispatched two cards **8 seconds** after creation,
    so the workers started from a title with no completion conditions. The
@@ -365,14 +371,37 @@ reply is pushed to you. If the user asks again before it lands, say it hasn't co
    If you cannot finish the card yet (you still need an answer from the user),
    write it with `boardColumn: 'blocked'` and move it to `todo` once it is
    complete. A blocked card is never dispatched, by design.
-5. **Report 1 line/card**: "Queued to Board:todo → ⟨title⟩ (priority: X)." Nothing more —
+
+   **Several cards, or any order between them: write them as DRAFTS first.**
+   A card in `todo` can start within seconds. On 2026-09-26 two cards that
+   touched the same screen were queued, the order ("fix typos after the
+   screen work") was added a moment later, and autopilot had already started
+   both. So for a multi-card or ordered request:
+   1. Generate every card's id first, so each dependent card's `dependsOn`
+      can name its prerequisites' ids: an ARRAY of full ids, `["<id>"]`,
+      never a bare string (the server answers 400 to a string).
+   2. One `PUT /api/project` that adds EVERY card with `draft: true` and its
+      `dependsOn` (plus notes, tier, priority). A draft is never started
+      automatically.
+   3. Read the Board back (`GET`) and check every card: notes present,
+      `dependsOn` pointing at the right ids. Fix anything with another PUT
+      while the drafts are still on.
+   4. ONE final `PUT /api/project` that removes `draft` from all of them
+      together (omit the key, or set it to `false`). Every PUT's CAS token is
+      the `updatedAt` of the read you just did (step 3's GET), not the first
+      one; a stale token gets a 409. The engine picks the cards up on its
+      next pass, in `dependsOn` order.
+   A single card with no order needs no draft: write it complete, as above.
+   The owner can also clear a draft on the Board card.
+5. **Report 1 line/card**: "Queued to Board:todo: ⟨title⟩ (priority: X)." Nothing more —
    dispatching is the commander's job.
 
 ## Priority guidance
 
 - User says "urgent" → `priority:'urgent'` (`high` next tier).
 - Bug fixes / broken-thing recovery outrank new features by default.
-- Prerequisite task → set dependent card's `dependsOn` to the prerequisite's id.
+- Prerequisite task → set dependent card's `dependsOn` to `["<prerequisite id>"]` (an array),
+  written while the cards are still drafts (step 4). Added later, it can arrive too late.
 - Otherwise `normal` — commander weighs effective priority + context; rough ordering is enough.
 - To reorder: change `priority`, don't re-add (engine pulls by effective priority, not array
   order). To deprioritize without deleting, `setColumn` to `blocked`.
@@ -444,7 +473,7 @@ until you finish it.
 
 `priority`: `'urgent'|'high'|'normal'|'low'` (urgency via priority, not position — engine
 pulls by effective priority, static + age-based escalation, so urgent-but-last-queued is
-still taken first and old cards don't starve). `dependsOn` = prerequisite id: blocks dispatch
+still taken first and old cards don't starve). `dependsOn` = array of prerequisite ids: blocks dispatch
 until that card is `done`.
 
 **"What tasks are there / show the Board"** → "column view" command — the user's at-a-glance

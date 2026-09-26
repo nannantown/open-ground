@@ -69,7 +69,7 @@ describe('supply desk context cap', () => {
     }
   })
 
-  it('sends once, waits for the compaction, then logs 「圧縮した(文脈 N → M)」 exactly once', async () => {
+  it('sends once, waits for the compaction, then logs 「圧縮した(文脈 N から M へ)」 exactly once', async () => {
     const { h, deps } = harness({ tokens: 346_000 })
     await runSupplyContextCapPass(deps)
     // Still over the cap while it compacts (no boundary yet) — must NOT resend.
@@ -84,7 +84,7 @@ describe('supply desk context cap', () => {
     expect(r.compacted).toEqual(['term-s'])
     expect(h.logs).toHaveLength(1)
     expect(h.logs[0].path).toBe('/repo/og')
-    expect(h.logs[0].msg).toBe('補給官の卓を圧縮した(文脈 346,000 → 12,345)')
+    expect(h.logs[0].msg).toBe('補給官の卓を圧縮した(文脈 346,000 から 12,345 へ)')
     await runSupplyContextCapPass(deps)
     expect(h.logs).toHaveLength(1)
     expect(h.sends).toHaveLength(1)

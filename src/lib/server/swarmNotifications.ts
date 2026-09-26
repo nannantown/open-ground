@@ -1,7 +1,8 @@
 // swarmNotifications — the in-app half of the escalation safety valve. A FATAL
 // event of the unmanned swarm / self-improvement loop (see {@link SwarmFatalEvent})
 // becomes (1) a PERSISTED in-app notification the Ground お知らせ bell renders, and
-// (2) an OS-native push toast (via osNotify.ts → electron/main.js). Reuses the
+// (2) an OS-native push toast (via osNotify.ts → electron/main.js) — ONLY for the
+// events shouldRaiseOsNotification allows (osNotify.ts OS_TOAST_EVENTS). Reuses the
 // existing notification mechanism (card d9a3e2): the records here are plain
 // {@link AppNotification}s with kind 'swarm-fatal', surfaced through GET
 // /api/swarm/notifications and read-tracked by the SAME /api/notifications read
@@ -15,7 +16,14 @@
 import { readFile } from 'fs/promises'
 import { ensureOpenGroundHome, swarmNotificationsFile } from './paths'
 import { atomicWriteJson } from './atomicWrite'
-import { sendOsNotification, CREATE_NOTIFICATION_MESSAGE, type OsNotification } from './osNotify'
+import {
+  sendOsNotification,
+  shouldRaiseOsNotification,
+  setWindowFocused,
+  CREATE_NOTIFICATION_MESSAGE,
+  WINDOW_FOCUS_MESSAGE,
+  type OsNotification,
+} from './osNotify'
 import type {
   AppNotification,
   SwarmFatalNotification,
@@ -252,7 +260,9 @@ export const createSwarmFatalNotification = async (
   const createdAt = opts?.now ?? Date.now()
   const app = buildFatalAppNotification(n, createdAt)
   await appendSwarmNotification(app)
-  if (opts?.os !== false) sendOsNotification(formatFatalNotification(n))
+  if (opts?.os !== false && shouldRaiseOsNotification(n.event)) {
+    sendOsNotification(formatFatalNotification(n))
+  }
   // …and tell the project's SUPPLY desk, so the owner hears it from the one seat
   // they already talk to instead of having to go and look (supplyNotice.ts). An
   // ADDITIONAL route, never a replacement: the bell and the toast above are
@@ -334,7 +344,9 @@ export const createSwarmInfoNotification = async (
   const createdAt = opts?.now ?? Date.now()
   const app = buildInfoAppNotification(n, createdAt)
   await appendSwarmNotification(app)
-  if (opts?.os !== false) sendOsNotification(formatInfoNotification(n))
+  if (opts?.os !== false && shouldRaiseOsNotification(n.event)) {
+    sendOsNotification(formatInfoNotification(n))
+  }
   // Same supply-desk route as the fatal path — but filtered: only the info
   // events on SUPPLY_NOTICE_INFO_EVENTS get through, because most of this lane
   // is routine and the supply desk is the owner's own (and fattest) context.
@@ -358,7 +370,11 @@ export const registerIncomingNotifications = (): void => {
   incomingRegistered = true
   process.on('message', (msg: unknown) => {
     if (!msg || typeof msg !== 'object') return
-    const m = msg as { type?: unknown; notification?: unknown }
+    const m = msg as { type?: unknown; notification?: unknown; focused?: unknown }
+    if (m.type === WINDOW_FOCUS_MESSAGE) {
+      setWindowFocused(m.focused === true)
+      return
+    }
     if (m.type !== CREATE_NOTIFICATION_MESSAGE) return
     const n = m.notification as Partial<SwarmFatalNotification> | undefined
     if (!n || typeof n !== 'object' || typeof n.event !== 'string' || typeof n.detail !== 'string') {

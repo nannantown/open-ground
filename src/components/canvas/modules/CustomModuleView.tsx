@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import type {
   CustomModuleDef,
@@ -7,6 +7,7 @@ import type {
 import { buildScreenSrcdoc } from '@/lib/screenSrcdoc'
 import { useClientLockdown } from '@/lib/lockdownClient'
 import { localAppUrl } from '@/lib/localAppFrame'
+import type { LocalAppStartFailure } from '@/lib/server/localAppLauncher'
 import {
   attachFrameAnchor,
   detachFrameAnchor,
@@ -101,21 +102,45 @@ export const CustomModuleView = ({
   const lockdown = useClientLockdown()
   const localUrl = lockdown ? null : localAppUrl(module, window.location.origin)
   const [localReady, setLocalReady] = useState(() => !!getCustomFramesSnapshot().get(module.id)?.localAppUrl)
-  // Keep the existing launcher while the local server is down. Once connected,
-  // transient health failures must not replace an active recording document.
+  // While the local server is down the app starts it itself (owner decision
+  // 2026-09-26: never ask the owner for terminal work) and shows only
+  // "starting" / "couldn't start + Try again" — never the module's own
+  // fallback screen. Once connected, transient health failures must not
+  // replace an active recording document.
+  const [launch, setLaunch] = useState<'starting' | LocalAppStartFailure | 'failed' | null>(null)
+  const autoStarted = useRef(false)
+  const localReadyRef = useRef(localReady)
+  localReadyRef.current = localReady
+  const startLocal = useCallback(async () => {
+    setLaunch('starting')
+    try {
+      const r = await fetch('/api/local-apps/nene-songs/start', { method: 'POST' })
+      const body = (await r.json()) as { ok: boolean; reason?: LocalAppStartFailure }
+      if (!body.ok) { setLaunch(body.reason ?? 'failed'); return }
+      // The server's "ok" is not trusted to show the frame: only this view's
+      // own r.ok poll flips localReady. If that poll never confirms (another
+      // process on :8899, serve.js answering errors), fall back to Try again.
+      window.setTimeout(() => {
+        if (!localReadyRef.current) setLaunch(cur => (cur === 'starting' ? 'timeout' : cur))
+      }, 10_000)
+    } catch {
+      setLaunch('failed')
+    }
+  }, [])
   useEffect(() => {
     if (!localUrl || localReady) return
     let cancelled = false
     const check = async () => {
       try {
         const r = await fetch(`${localUrl}songs-data.js`, { method: 'HEAD', signal: AbortSignal.timeout(3000) })
-        if (!cancelled && r.ok) setLocalReady(true)
-      } catch { /* The sandboxed launcher remains available. */ }
+        if (!cancelled && r.ok) { setLocalReady(true); setLaunch(null); return }
+      } catch { /* down — start it below */ }
+      if (!cancelled && !autoStarted.current) { autoStarted.current = true; void startLocal() }
     }
     void check()
     const timer = window.setInterval(() => void check(), 3000)
     return () => { cancelled = true; window.clearInterval(timer) }
-  }, [localUrl, localReady])
+  }, [localUrl, localReady, startLocal])
   const srcDoc = useMemo(
     () =>
       src === null
@@ -141,7 +166,7 @@ export const CustomModuleView = ({
   // no-ops in the store, so re-opening an unchanged tab never reloads the
   // iframe — only an actual source edit does.
   useEffect(() => {
-    if (srcDoc !== null) setFrameSource(module.id, srcDoc, module.label, localReady ? localUrl : null)
+    if (srcDoc !== null && (!localUrl || localReady)) setFrameSource(module.id, srcDoc, module.label, localUrl)
   }, [srcDoc, module.id, module.label, localUrl, localReady])
 
   // Whether the hosted frame is already rendering content — if so, skip the
@@ -157,8 +182,22 @@ export const CustomModuleView = ({
               while the tab is visible; the div only supplies the geometry. */}
           <div ref={anchorRef} className="relative h-full w-full">
             {!frameLive && (
-              <div className="flex h-full items-center justify-center px-8 text-center text-ui text-ink-faint">
-                {loadFailed
+              <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center text-ui text-ink-faint">
+                {localUrl && launch && launch !== 'starting' ? (
+                  <>
+                    <div className="text-ink">{t('customTabs.localStartFailed')}</div>
+                    <div>{t(`customTabs.localStartFailed.${launch}`)}</div>
+                    <button
+                      type="button"
+                      onClick={() => void startLocal()}
+                      className="shrink-0 rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:bg-accent/10 hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    >
+                      {t('customTabs.localStartRetry')}
+                    </button>
+                  </>
+                ) : localUrl && launch === 'starting' ? (
+                  t('customTabs.localStarting')
+                ) : loadFailed
                   ? t('customTabs.sourceLoadFailed')
                   : t('customTabs.sourceLoading')}
               </div>

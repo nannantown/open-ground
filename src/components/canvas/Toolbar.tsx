@@ -132,19 +132,6 @@ export const Toolbar = ({
       </div>
 
       <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-3">
-        {/* Project search — always visible so ⌘K isn't the only way in (the
-            owner didn't know the shortcut existed). Opens ProjectJumpPalette. */}
-        {onSearch && projectCount > 0 && (
-          <button
-            type="button"
-            onClick={onSearch}
-            title={`${t('toolbar.search')} ${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'}`}
-            aria-label={t('toolbar.search')}
-            className="flex h-8 w-8 items-center justify-center bg-bg-card/95 backdrop-blur border border-line rounded-[3px] shadow-card text-ink-muted transition-colors hover:bg-plane hover:border-line-strong hover:text-ink active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <Search size={15} strokeWidth={1.75} />
-          </button>
-        )}
         {/* The gauge is the widest single item in the bar (~200px). It is ambient
             information, not a control, so it is the first thing to go. */}
         {usage && <div className="hidden xl:flex items-center">{usage}</div>}
@@ -164,6 +151,15 @@ export const Toolbar = ({
         )}
         <div className="flex items-center gap-0 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] p-0.5 shadow-card">
           <AddMenu onNewProject={onNewProject} onImport={onImport} />
+          {/* Project search (opens ProjectJumpPalette; ⌘K unchanged). */}
+          {onSearch && projectCount > 0 && (
+            <IconButton
+              onClick={onSearch}
+              title={`${t('toolbar.search')} ${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'}`}
+            >
+              <Search size={13} strokeWidth={1.75} />
+            </IconButton>
+          )}
           {onAccount && (
             <>
               <span className="h-4 w-px bg-line-soft" />

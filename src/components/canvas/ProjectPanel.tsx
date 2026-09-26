@@ -2,9 +2,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
-  ArrowLeft,
   Archive,
   ChevronDown,
+  ChevronLeft,
   EyeOff,
   FolderOpen,
   GitBranch,
@@ -1884,7 +1884,7 @@ const OwnedProjectBody = ({
       <header data-testid="project-header" className="flex h-12 min-w-0 shrink-0 items-center gap-1 px-2 sm:gap-3 sm:px-4">
         <div className="flex min-w-0 shrink-0 items-center gap-1">
           <IconButton title={t('projectPanel.backToGround')} onClick={onClose}>
-            <ArrowLeft size={16} strokeWidth={1.75} />
+            <ChevronLeft size={16} strokeWidth={1.75} />
           </IconButton>
           <h2 className="min-w-0">
             <button

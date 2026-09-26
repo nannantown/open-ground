@@ -17,7 +17,7 @@ interface Props {
   lamps?: ReadonlyMap<string, GroundLamp>
 }
 
-// The Ground's project search (⌘K, or the toolbar's search pill). Matching
+// The Ground's project search (⌘K, or the search button beside Add in the toolbar). Matching
 // lives in lib/groundJump.ts: name (fuzzy) or description (substring); an
 // empty query lists recently opened projects first.
 export const ProjectJumpPalette = ({ open, projects, onClose, onPick, lamps }: Props) => {

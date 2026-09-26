@@ -223,7 +223,7 @@ const renderSdkEvent = (ev: SdkEvent): string | null => {
     case 'api_error':
       return `API Error${ev.status === null ? '' : `: ${ev.status}`} ${ev.head}`.trim()
     case 'compact':
-      return `[compacted ${ev.preTokens}→${ev.postTokens ?? '?'} tokens]`
+      return `[compacted ${ev.preTokens} to ${ev.postTokens ?? '?'} tokens]`
     default:
       return null
   }

@@ -5,7 +5,7 @@
 // app-wide toggle (useT), with its own EN/JA switch in the header for quick
 // flipping while reading.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { CornerDownRight } from 'lucide-react'
+import { ChevronRight } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { OpenGroundMark } from '@/components/canvas/OpenGroundMark'
 import { Overlay, DialogHeader } from '@/components/ui/overlay'
@@ -262,7 +262,7 @@ export function ManualPanel({ open, onClose, ownerFeatures = false }: { open: bo
           <div className="mx-auto max-w-[760px] px-6 py-10 md:px-12">
             {sections.map(renderSection)}
             <footer className="mt-2 flex items-center gap-1.5 border-t border-line-soft pt-6 text-meta text-ink-faint">
-              <CornerDownRight size={12} strokeWidth={1.75} className="shrink-0" />
+              <ChevronRight size={12} strokeWidth={1.75} className="shrink-0" />
               <span>
                 {lang === 'ja'
                   ? 'このページは実装に追従する生きた仕様です。動作を変えたら、対応するセクションも更新してください。'
@@ -296,7 +296,7 @@ function LayersDiagram({ lang }: { lang: 'en' | 'ja' }): JSX.Element {
         </div>
       </div>
       <div className="flex items-center gap-1.5 pl-1 text-ink-faint">
-        <CornerDownRight size={13} strokeWidth={1.75} />
+        <ChevronRight size={13} strokeWidth={1.75} />
         <span className="text-meta">{lang === 'ja' ? 'カードを開く' : 'open a card'}</span>
       </div>
       <div>

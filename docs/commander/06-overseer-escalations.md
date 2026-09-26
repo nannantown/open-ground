@@ -2,6 +2,17 @@
 
 ## Current Contract (2026-09-19)
 
+**Update 2026-09-26 (owner decision): Mac toasts are an allowlist of three.** Every notification
+still reaches the bell and (per `SUPPLY_NOTICE_*`) the president's desk, but only
+`escalation-open` (first raise; reminders are bell-only), `session-limit` and `stuck-processes`
+raise a Mac toast — and none of them while the OPEN GROUND window is focused (Electron relays
+focus/blur as `openground:window-focus`). Fatal events included ("mistaken for an error during
+updates"). Electron raises no toast of its own (rollback / canary-failed / preparing-install are
+bell or dock-bar only; the updater uses `checkForUpdates()`, not the `AndNotify` variant). The
+single gate is `shouldRaiseOsNotification` in `src/lib/server/osNotify.ts`; guard:
+`src/lib/server/osToastGate.test.ts`. Any "bell + OS toast" wording below for other events is
+superseded by this.
+
 **Update 2026-09-23 (§1.6 below):** S4 and the engine's free-text worker questions now enter
 the **commander lane** first (`routedTo:'commander'`, no bell/toast/desk notice); the commander
 answers (`by:'commander'`) or raises them, and they are promoted to the owner automatically after
@@ -61,7 +72,7 @@ Any descriptions of the retired paths below are historical, not operating instru
 | 大脳(brain) | `src/lib/server/swarmOverseerBrain.ts` | S4 でだけ起きる one-off `claude` PTY(proxy-you)。fire-and-forget — パスは絶対に await しない(`swarmOverseer.ts:14-18`) |
 | 記憶 | `~/.openground/you-corpus.md` (`src/lib/server/paths.ts:45`) | 大脳の判断根拠。書き戻すのは owner の回答だけ(`swarmOverseer.ts:19-20`、`swarmEscalations.ts:24-25`) |
 | 受信箱(C1) | `src/lib/server/swarmEscalations.ts` | escalations.json の CRUD + PTY 注入(W16)+ you-corpus 書き戻し |
-| 通知(bell/toast) | `src/lib/server/swarmNotifications.ts` | swarm-notifications.json(fatal/info)+ OS toast + **補給官の卓**(§1.4) |
+| 通知(bell/toast) | `src/lib/server/swarmNotifications.ts` | swarm-notifications.json(fatal/info)+ OS toast(**許可リスト3種のみ・ウィンドウ前面時は出さない** — `osNotify.ts` の `OS_TOAST_EVENTS` / `shouldRaiseOsNotification`、2026-09-26 オーナー決定)+ **補給官の卓**(§1.4) |
 | 補給官への配達 | `src/lib/server/supplyNotice.ts` | 上の通知のうち**オーナーの判断/認知が要る4種だけ**を、そのプロジェクトの補給官の卓に1行打つ |
 | 可逆性ゲート(C4) | `src/lib/server/swarmReversibility.ts` | 大脳の前後で question/answer を構造チェック(`swarmOverseerBrain.ts:48-53` import) |
 | ルート | `server/routes/swarm.ts` | `/api/swarm/escalations*`(`:740,761,833,858`)、overseer トグル(`:688`)、通知(`:535`)。**全ルート swarm owner gate**(swarmGate.ts — owner ログイン or ローカル解錠、§7 前提) |

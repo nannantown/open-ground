@@ -22,7 +22,7 @@
 // ONE SEND PER COMPACTION: after sending, the desk is remembered as pending
 // until its fill drops under the cap (sessionContextTokens reads the
 // compact_boundary's postTokens as soon as it lands) — then ONE engine-log line
-// 「補給官の卓を圧縮した(文脈 N → M)」. A pending send that never lands is
+// 「補給官の卓を圧縮した(文脈 N から M へ)」. A pending send that never lands is
 // retried after COMPACT_RETRY_MS, never every pass.
 //
 // Native auto-compact is untouched; this only fires earlier than it would.

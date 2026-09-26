@@ -13,6 +13,8 @@ import {
   readModuleSource,
   updateModule,
 } from '@/lib/server/customModules'
+import { startNene } from '@/lib/server/localAppLauncher'
+import { isLockdownEnabledSync } from '@/lib/server/lockdown'
 // Contract limits (docs/CUSTOM_TABS_PLAN.md): label 1–60 chars, description
 // ≤ 4000. Shared by create + update so the bounds can't drift.
 const MAX_LABEL = 60
@@ -117,4 +119,13 @@ export const customModulesRoutes = new Hono()
     const ok = await deleteModule(def.id)
     if (!ok) return notFound(c)
     return c.json({ ok: true })
+  })
+  // --- POST /api/local-apps/nene-songs/start — start NENE's serve.js --------
+  // No input; fixed command (see localAppLauncher). Only when a tab actually
+  // declares the NENE integration, and never under work-mode lockdown.
+  .post('/api/local-apps/nene-songs/start', async (c) => {
+    if (isLockdownEnabledSync()) return forbidden(c)
+    const modules = await listModules()
+    if (!modules.some((m) => m.localApp === 'nene-songs')) return notFound(c)
+    return c.json(await startNene())
   })

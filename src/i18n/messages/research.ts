@@ -14,7 +14,7 @@ export const research = {
     'research.empty.how':
       'Ask for research on the Board — file a card like "Look into how people talk about X" and run it. The report lands here when the work is merged.',
     'research.empty.channels':
-      'What the researcher can reach is listed in Settings → Research channels.',
+      'What the researcher can reach is listed in Settings › Research channels.',
 
     // --- Report list + reader -----------------------------------------------
     'research.list.heading': 'Reports',
@@ -82,7 +82,7 @@ export const research = {
     'research.empty.how':
       'Boardに「◯◎の評判を調べて」のようなカードを積んで実行すると、調査レポートが完成後ここに並びます。',
     'research.empty.channels':
-      '調査がどこまで見に行けるかは「設定 → 調査チャンネル」で確認できます。',
+      '調査がどこまで見に行けるかは「設定 › 調査チャンネル」で確認できます。',
 
     'research.list.heading': 'レポート',
     'research.blog.send': 'ブログへ',

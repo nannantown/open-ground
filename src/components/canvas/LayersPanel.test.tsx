@@ -123,11 +123,11 @@ describe('LayersPanel — tree + expand/collapse', () => {
   it('a layout frame shows its stacking direction as the type icon', () => {
     const layout = { gap: 8, padding: 8, align: 'start' as const }
     const r = renderPanel([el({ id: 'lf', type: 'frame', layout: { ...layout, mode: 'row' } })])
-    expect(r.container.querySelector('.lucide-arrow-right')).toBeTruthy()
+    expect(r.container.querySelector('.lucide-columns3')).toBeTruthy()
     r.rerenderWith({
       elements: [el({ id: 'lf', type: 'frame', layout: { ...layout, mode: 'column' } })],
     })
-    expect(r.container.querySelector('.lucide-arrow-down')).toBeTruthy()
+    expect(r.container.querySelector('.lucide-rows3')).toBeTruthy()
   })
 
   it('a hidden element dims its label', () => {

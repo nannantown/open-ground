@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { AlertTriangle, Check, Copy, ExternalLink, GripVertical, Link2 } from 'lucide-react'
+import { AlertTriangle, Check, Copy, ExternalLink, GripVertical, Link2, PencilOff } from 'lucide-react'
 import type { BoardColumn, ClaudeBeaconStatus, ClaudeEffort, EscalationWhy, ProjectTask } from '@/lib/types'
 import { formatDueShort, isOverdue } from '@/lib/boardDeps'
 import { PRIORITY_META } from '@/lib/boardPriority'
@@ -244,6 +244,9 @@ export interface BoardCardProps {
   onCommitTitle: (taskId: string, currentTitle: string, raw: string) => void
   onSetReviewedBy: (taskId: string, value: string | undefined) => void
   onMoveToDone: (taskId: string) => void
+  /** Clear the card's `draft` flag (selectDispatch gate ⑧): the owner's way to
+   *  let a card the president left as a draft start automatically. */
+  onReleaseDraft: (taskId: string) => void
 }
 
 const BoardCardInner = ({
@@ -283,6 +286,7 @@ const BoardCardInner = ({
   onCommitTitle,
   onSetReviewedBy,
   onMoveToDone,
+  onReleaseDraft,
 }: BoardCardProps) => {
   const { t } = useT()
   const isReview = columnKey === 'review'
@@ -380,7 +384,11 @@ const BoardCardInner = ({
         isSelected && !isEditing ? 'bg-accent/15 ring-1 ring-inset ring-accent' : 'bg-bg-card',
         'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink',
         isDragHidden ? 'hidden' : '',
+        // Draft (gate ⑧): faded until released, no label (owner: minimal UI).
+        // Full strength while hovered / focused so it stays readable to work on.
+        task.draft ? 'opacity-50 hover:opacity-100 focus-within:opacity-100' : '',
       ].join(' ')}
+      title={task.draft ? t('board.card.draftTitle') : undefined}
     >
       {/* Top edge — the surveyor's marking. A swarm worker on a doing card takes
           precedence (moss scanning while its PTY produces output, steady
@@ -441,6 +449,31 @@ const BoardCardInner = ({
           ].join(' ')}
         >
           <Copy size={12} />
+        </button>
+      )}
+      {/* Release draft (gate ⑧) — beside Duplicate, draft cards only. */}
+      {!isEditing && task.draft && (
+        <button
+          type="button"
+          draggable={false}
+          disabled={projectMissing}
+          aria-label={t('board.card.releaseDraft')}
+          title={t('board.card.releaseDraft')}
+          onClick={e => {
+            e.stopPropagation()
+            onReleaseDraft(task.id)
+          }}
+          onKeyDown={e => {
+            if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
+          }}
+          className={[
+            'absolute right-7 top-1 rounded-sm p-1 text-ink-faint transition-[opacity,color,background-color] focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
+            projectMissing
+              ? 'cursor-not-allowed opacity-0 group-hover:opacity-40'
+              : 'opacity-0 hover:bg-plane hover:text-ink active:bg-plane active:text-ink group-hover:opacity-100',
+          ].join(' ')}
+        >
+          <PencilOff size={12} />
         </button>
       )}
       <div className="flex items-start gap-1.5">

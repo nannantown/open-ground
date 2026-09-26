@@ -13,7 +13,7 @@
 // See docs/SDK_WORKER_MIGRATION_PLAN.md §3.6.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Square, CornerDownLeft, Power, Trash2, AlertTriangle, RotateCcw, X, Wrench, ChevronDown, ChevronRight } from 'lucide-react'
+import { Square, SendHorizontal, Power, Trash2, AlertTriangle, RotateCcw, X, Wrench, ChevronDown, ChevronRight } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { holdStream, useStreamOwner } from '@/lib/streamBudget'
 import type { SpriteState } from '@/lib/swarm/sprites'
@@ -677,7 +677,8 @@ export const SdkWorkerPane = ({
             onClick={jumpToLatest}
             className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-line bg-bg-card px-2.5 py-1 text-micro text-ink-muted shadow-sm transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
-            ↓ {t('projectPanel.swarm.sdk.jumpLatest')}
+            <ChevronDown size={11} strokeWidth={2} className="mr-0.5 inline-block align-[-1px]" />
+            {t('projectPanel.swarm.sdk.jumpLatest')}
           </button>
         ) : null}
       </div>
@@ -733,7 +734,7 @@ export const SdkWorkerPane = ({
             title={t('projectPanel.swarm.sdk.send')}
             className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
-            <CornerDownLeft size={11} strokeWidth={2.25} />
+            <SendHorizontal size={11} strokeWidth={2.25} />
           </button>
         </div>
       ) : null}
@@ -918,7 +919,8 @@ export const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) 
     case 'tool_result':
       return (
         <div className={`font-mono text-micro ${ev.ok ? 'text-ink-faint' : 'text-error'} ${ev.fromSubagent ? 'pl-3' : ''}`}>
-          ↳ {ev.head}
+          <ChevronRight size={10} strokeWidth={2} className="mr-0.5 inline-block align-[-1px]" />
+          {ev.head}
         </div>
       )
     case 'thinking':
@@ -955,9 +957,9 @@ export const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) 
       // will wonder why the desk "forgot". The token counts are the proof.
       return (
         <div className="my-1 rounded-[3px] border border-line bg-bg-card px-2 py-1 font-mono text-micro text-ink-muted">
-          ⟳ {t('projectPanel.swarm.sdk.compact')}
+          {t('projectPanel.swarm.sdk.compact')}
           {ev.preTokens > 0
-            ? ` — ${fmtTokens(ev.preTokens)}${ev.postTokens !== null ? ` → ${fmtTokens(ev.postTokens)}` : ''}`
+            ? ` — ${fmtTokens(ev.preTokens)}${ev.postTokens !== null ? ` › ${fmtTokens(ev.postTokens)}` : ''}`
             : ''}
         </div>
       )

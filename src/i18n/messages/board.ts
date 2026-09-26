@@ -23,7 +23,7 @@ export const board = {
       'Delete {count} cards in Done. On a shared board the deletion applies to everyone.',
     // Card
     'board.card.untitled': 'Untitled',
-    'board.empty.guide': 'Write a card → Run → the terminal does the task → done merges.',
+    'board.empty.guide': 'Write a card › Run › the terminal does the task › done merges.',
     'board.card.sessionWorking': 'Claude is working on this card',
     // The visible stamp on the card. Short by design — the mock's state line is
     // a word, not a sentence, and it sits inline before the title.
@@ -38,7 +38,7 @@ export const board = {
     'board.card.reviewedClear': 'Click to clear the reviewed stamp',
     'board.card.merged': 'Merged',
     'board.card.mergedTitle': "This card's branch is already merged into the target branch",
-    'board.card.mergedToDone': '→ Done',
+    'board.card.mergedToDone': 'Move to Done',
     'board.card.mergedToDoneTitle':
       'Move this card to Done — the branch has landed (nothing moves without this click)',
     'board.card.integrationConflict': 'Needs manual merge',
@@ -74,6 +74,8 @@ export const board = {
       'The commander is on integration duty right now — no need to open the Agent Team bar.',
     'board.card.untitledParen': '(Untitled)',
     'board.card.duplicate': 'Duplicate card',
+    'board.card.draftTitle': 'Draft: will not start automatically',
+    'board.card.releaseDraft': 'Finish draft (lets it start)',
     'board.card.duplicateTitle':
       'Duplicate this card right below — content and assignee are copied; branch, PR and review state are not',
     'board.card.ariaLabel': '{title} — {column}. Press Enter to open',
@@ -118,7 +120,7 @@ export const board = {
     'board.detail.tier.auto': 'Auto',
     'board.detail.tier.auto.hint': 'Not set — estimated from the card text.',
     'board.detail.tierFloored': 'Actually runs as: {tier} (raised for safety)',
-    'board.detail.tierEstimated': 'Auto → {tier}',
+    'board.detail.tierEstimated': 'Auto: {tier}',
     'board.detail.tier.touch': 'Touch',
     'board.detail.tier.touch.hint': 'A small, well-understood change — typo, copy, rename. Lightest worker.',
     'board.detail.tier.standard': 'Standard',
@@ -202,14 +204,14 @@ export const board = {
     'board.detail.insertTaskTooLarge':
       'The task content is too large to paste — split it into smaller tasks, then insert again.',
     'board.detail.flowBaseDefault': 'the launch branch',
-    'board.detail.flowPr': 'On finish: PR → {base} (a human merges)',
-    'board.detail.flowPrReview': 'On finish: PR → {base}, card moves to Review (a human merges)',
+    'board.detail.flowPr': 'On finish: PR to {base} (a human merges)',
+    'board.detail.flowPrReview': 'On finish: PR to {base}, card moves to Review (a human merges)',
     'board.detail.isolationNote': 'Works on its own task/ branch in an isolated worktree',
     'board.detail.profileNote': '{mode} · {model}',
     'board.detail.profileModelDefault': 'CLI default model',
     'board.detail.profileTitle':
       'Launch profile for this run — board defaults (the strip above the board) overridden by this card’s run settings',
-    'board.detail.flowMerge': 'On finish: merge → {base}',
+    'board.detail.flowMerge': 'On finish: merge into {base}',
     'board.detail.titleAutoTitle': 'Auto-generated title — editing it makes it yours',
     'board.detail.regenTitle': 'Regenerate the title from the content (AI)',
     'board.detail.fieldsToggle': 'Show / hide the task fields',
@@ -257,7 +259,7 @@ export const board = {
       'Done のカード {count} 枚を削除します。共有ボードではボード全員に反映されます。',
     // Card
     'board.card.untitled': '無題',
-    'board.empty.guide': 'カードを書く → 実行 → ターミナルが走る → 完了でマージ。',
+    'board.empty.guide': 'カードを書く › 実行 › ターミナルが走る › 完了でマージ。',
     'board.card.sessionWorking': 'このカードで claude が作業中です',
     'board.card.sessionWorkingLabel': '稼働',
     'board.card.sessionWaitingLabel': '待ち',
@@ -270,7 +272,7 @@ export const board = {
     'board.card.reviewedClear': 'クリックでレビュー済みを解除',
     'board.card.merged': 'マージ済み',
     'board.card.mergedTitle': 'このカードのブランチはターゲットブランチへマージ済みです',
-    'board.card.mergedToDone': '→ 完了',
+    'board.card.mergedToDone': '完了へ',
     'board.card.mergedToDoneTitle':
       'このカードを完了列へ移動します — ブランチはマージ済み（クリックするまで動きません）',
     'board.card.integrationConflict': '要手動統合',
@@ -300,6 +302,8 @@ export const board = {
       '司令官がいま統合作業中です（エージェントチームのバーを開かなくてもここで分かります）。',
     'board.card.untitledParen': '（無題）',
     'board.card.duplicate': 'カードを複製',
+    'board.card.draftTitle': '下書き: 自動では始まりません',
+    'board.card.releaseDraft': '下書きを外す(自動で始まるようにする)',
     'board.card.duplicateTitle':
       'このカードをすぐ下に複製します — 内容と担当者はコピー、ブランチ・PR・レビュー状態は引き継ぎません',
     'board.card.ariaLabel': '{title} — {column}。Enter で開く',
@@ -344,7 +348,7 @@ export const board = {
     'board.detail.tier.auto': '自動',
     'board.detail.tier.auto.hint': '未設定 — カードの文面から推定します。',
     'board.detail.tierFloored': '実際は: {tier}(安全のため引き上げ)',
-    'board.detail.tierEstimated': '自動 → {tier}',
+    'board.detail.tierEstimated': '自動: {tier}',
     'board.detail.tier.touch': '軽微',
     'board.detail.tier.touch.hint': '誤字・文言・名前の変更など、小さくて見通しのよい変更。いちばん軽いワーカー。',
     'board.detail.tier.standard': '標準',
@@ -426,8 +430,8 @@ export const board = {
     'board.detail.insertTaskTooLarge':
       'タスク内容が大きすぎて貼り付けられません — 内容を小さなタスクに分割してから、もう一度挿入してください。',
     'board.detail.flowBaseDefault': '起動時のブランチ',
-    'board.detail.flowPr': '完了時: PR → {base}（人間がマージ）',
-    'board.detail.flowPrReview': '完了時: PR → {base}、カードはレビュー列へ（人間がマージ）',
+    'board.detail.flowPr': '完了時: {base} への PR（人間がマージ）',
+    'board.detail.flowPrReview': '完了時: {base} への PR、カードはレビュー列へ（人間がマージ）',
     'board.detail.isolationNote': '専用の task/ ブランチ + worktree に隔離して作業',
     'board.detail.profileNote': '{mode} · {model}',
     'board.detail.profileModelDefault': 'CLI 既定モデル',
@@ -457,6 +461,6 @@ export const board = {
       'レビューセッションを準備できませんでした — セッションを再起動してもう一度お試しください。',
     // Task terminal (drawer relaunch CTA — shown after the session exits)
     'board.taskTerminal.hint':
-      'ここで claude を起動し、「タスク内容を入力欄へ」→ Enter で実行します。',
+      'ここで claude を起動し、「タスク内容を入力欄へ」のあと Enter で実行します。',
   } as Record<string, string>,
 }

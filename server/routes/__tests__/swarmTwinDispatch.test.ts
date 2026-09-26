@@ -220,6 +220,15 @@ describe('POST /api/swarm/worker — the card is claimed BEFORE the worker spawn
     expect(after?.branch).toBeUndefined()
   })
 
+  it('a manual start of a DRAFT card runs it and clears the draft mark (gate ⑧ exemption)', async () => {
+    await seedCard({ id: 'c1', draft: true })
+    const res = await app.request('/api/swarm/worker', json({ path: proj, taskId: 'c1' }))
+    expect(res.status).toBe(200)
+    const after = await cardNow('c1')
+    expect(after?.boardColumn).toBe('doing')
+    expect(after?.draft).toBeUndefined()
+  })
+
   it('refuses (409) a card another dispatch already owns, and spawns nothing', async () => {
     await seedCard({ id: 'c1', boardColumn: 'doing', branch: 'swarm/first-worker' })
 

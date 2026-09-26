@@ -49,7 +49,7 @@ export const settings = {
     'settings.wordpress.username': 'Username',
     'settings.wordpress.appPassword': 'Application password',
     'settings.wordpress.appPasswordHint':
-      'WP admin → Users → Profile → Application Passwords. Not your login password — revocable there at any time.',
+      'WP admin › Users › Profile › Application Passwords. Not your login password — revocable there at any time.',
     'settings.wordpress.save': 'Save',
     'settings.wordpress.saved': 'Connected',
     'settings.wordpress.clear': 'Disconnect',
@@ -101,7 +101,7 @@ export const settings = {
     'settings.releaseNotes.current': 'Current',
     // App version (so users can confirm an update actually took effect)
     'settings.version.heading': 'Version',
-    // Research channels (Settings → Research channels; GET /api/research/channels)
+    // Research channels (Settings › Research channels; GET /api/research/channels)
     'settings.research.heading': 'Research channels',
     'settings.research.hint':
       'Sources the Agent Team can draw on when you ask it to research something. Web pages work out of the box; the hints below unlock more. All checks run on this computer only.',
@@ -150,7 +150,7 @@ export const settings = {
     'settings.research.x.promise':
       'Both values stay on this computer. They are never uploaded, never shown back, and are handed only to the research tools running here.',
     'settings.research.x.howto':
-      'In the browser where you are signed in to X: open x.com, press F12, go to Application → Cookies → x.com, and copy the values of auth_token and ct0.',
+      'In the browser where you are signed in to X: open x.com, press F12, go to Application › Cookies › x.com, and copy the values of auth_token and ct0.',
     'settings.research.x.save': 'Save',
     'settings.research.x.clear': 'Remove',
     'settings.research.x.saved': 'Cookies saved — X search will be available to new research runs.',
@@ -198,7 +198,7 @@ export const settings = {
     'settings.wordpress.username': 'ユーザー名',
     'settings.wordpress.appPassword': 'アプリケーションパスワード',
     'settings.wordpress.appPasswordHint':
-      'WordPress 管理画面 → ユーザー → プロフィール → アプリケーションパスワードで発行。ログインパスワードではありません（いつでも無効化できます）。',
+      'WordPress 管理画面 › ユーザー › プロフィール › アプリケーションパスワードで発行。ログインパスワードではありません（いつでも無効化できます）。',
     'settings.wordpress.save': '保存',
     'settings.wordpress.saved': '設定済み',
     'settings.wordpress.clear': '解除',
@@ -281,7 +281,7 @@ export const settings = {
     'settings.research.x.promise':
       '2つの値はこのパソコンから出ません。どこにも送信されず、画面に再表示されることもなく、この端末で動く調査ツールにだけ渡されます。',
     'settings.research.x.howto':
-      'Xにログインしているブラウザで x.com を開き、F12 → Application → Cookies → x.com の順にたどって、auth_token と ct0 の値をコピーしてください。',
+      'Xにログインしているブラウザで x.com を開き、F12 › Application › Cookies › x.com の順にたどって、auth_token と ct0 の値をコピーしてください。',
     'settings.research.x.save': '保存',
     'settings.research.x.clear': '削除',
     'settings.research.x.saved': 'Cookieを保存しました — 次の調査からXの検索が使えます。',

@@ -2047,6 +2047,18 @@ export interface ProjectTask {
   selfSupplyKey?: string
   /** Legacy approval only; retirement never silently approves an existing proposal. */
   selfSupplyApproved?: boolean
+  /** DRAFT: the card is still being written, so the swarm engine NEVER
+   *  auto-dispatches it (selectDispatch gate ⑧, owner decision 2026-09-26).
+   *  The president writes a multi-card, ordered request with every card
+   *  `draft: true`, fills in `dependsOn`, reads it back, then clears every
+   *  draft in ONE write, so no card starts before the order exists.
+   *  Held, not dropped: the pass after the flag is cleared, the card goes
+   *  through the ordinary gates (dependsOn, same-file ...). The manual 実行
+   *  button is not gated (pressing it is the owner's own "go"). The owner can
+   *  clear it on the Board card. Shared data. (3点セット: here /
+   *  ProjectTaskSchema with `.catch(true)` so a junk value stays HELD / the
+   *  PUT /api/project type check.) */
+  draft?: boolean
   /** 差し戻し(review→doing)ループガードのカウンタ — POST /api/project/tasks
    *  {rework:[{id}]} が review→doing に移す度+1し、maxReworks(既定3)を超えたら
    *  moveをdoingでなくblockedへ差し替える。~/.claude/swarm-board.sh reworkと同一

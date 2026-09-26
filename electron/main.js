@@ -184,11 +184,13 @@ const SELF_UPDATE_MESSAGE = 'openground:self-update'
 
 // Escalation safety valve (card 6fe48c1f). MUST match the literals in
 // src/lib/server/osNotify.ts. OS_NOTIFY_MESSAGE: the server asks us to show an
-// OS-native toast for a FATAL swarm event (server→main). CREATE_NOTIFICATION_MESSAGE:
-// we ask the server to create an in-app notification for a self-update rollback /
-// canary failure (main→server — events only Electron observes).
+// OS-native toast (server→main; the server already applied the allowlist + focus
+// gate). CREATE_NOTIFICATION_MESSAGE: we ask the server to create an in-app
+// notification for a self-update rollback / canary failure (main→server — events
+// only Electron observes). WINDOW_FOCUS_MESSAGE: window focus state (main→server).
 const OS_NOTIFY_MESSAGE = 'openground:notify'
 const CREATE_NOTIFICATION_MESSAGE = 'openground:create-notification'
+const WINDOW_FOCUS_MESSAGE = 'openground:window-focus'
 
 // Release-time update bell. MUST match UPDATE_CHECK_MESSAGE in
 // src/lib/server/updateNudge.ts: the server relays POST /api/update/check-now
@@ -698,8 +700,11 @@ function createWindow() {
     }
   })
 
+  mainWindow.on('focus', relayWindowFocus)
+  mainWindow.on('blur', relayWindowFocus)
   mainWindow.on('closed', () => {
     mainWindow = null
+    relayWindowFocus()
   })
 
   return mainWindow
@@ -952,6 +957,7 @@ async function spawnLiveEngine({ bootId, bootKind }) {
   child.on('message', onServerMessage)
 
   serverChild = child
+  relayWindowFocus()
   return { child, port: FIXED_PORT, bootId }
 }
 
@@ -1559,20 +1565,12 @@ function runSelfUpdateTests() {
 }
 
 // User-facing notification of a rollback (condition 3: leave it in BOTH the engine
-// log AND a notification). Non-blocking native notification so the unmanned loop is
-// never stalled by a modal; the [self-update] log lines carry the full detail.
+// log AND a notification). Bell only, never a modal or a Mac toast (owner decision
+// 2026-09-26 — see OS_TOAST_EVENTS in osNotify.ts); the [self-update] log lines
+// carry the full detail. The server adds no toast either (os:false on the bridge).
 function notifyRollback(info) {
   const sha = String((info && info.goodSha) || 'unknown').slice(0, 7)
   const ok = info && info.ok
-  showOsNotification(
-    ok ? 'OPEN GROUND — self-update rolled back' : 'OPEN GROUND — rollback failed',
-    ok
-      ? `A broken self-update was reverted to the last working build (${sha}). The app kept running.`
-      : `A self-update failed and the rollback could not recover (${(info && info.reason) || 'error'}). Relaunch may be needed.`,
-  )
-  // Escalation safety valve (in-app half): also record it in the Ground bell so the
-  // event persists past the transient OS toast. The server shows no second toast
-  // for this (createSwarmFatalNotification os:false on the inward bridge).
   createInAppNotification({
     event: 'rollback',
     detail: ok
@@ -1582,8 +1580,9 @@ function notifyRollback(info) {
   })
 }
 
-// Show an OS-native toast. The single guarded entry point for every OS push (the
-// rollback notice and the server-driven swarm escalations both route through it).
+// Show an OS-native toast. Reached ONLY from the server's OS_NOTIFY_MESSAGE, which
+// is gated by shouldRaiseOsNotification (src/lib/server/osNotify.ts: allowlist +
+// window focus) — do not call it from main.js directly.
 // Non-blocking, best-effort — a notification fault never disturbs the caller.
 function showOsNotification(title, body) {
   try {
@@ -1596,14 +1595,26 @@ function showOsNotification(title, body) {
 
 // Ask the forked server to CREATE an in-app notification (the Ground bell record)
 // for an event only Electron observes (self-update rollback / canary failure).
-// Best-effort: a dead/absent server child just drops it (the OS toast already fired).
+// Best-effort: a dead/absent server child just drops it.
 function createInAppNotification(notification) {
+  sendToServer({ type: CREATE_NOTIFICATION_MESSAGE, notification })
+}
+
+// Tell the server whether the window is in front, so its toast gate stays quiet
+// while the owner is already looking at OPEN GROUND. Sent on focus/blur and right
+// after each engine fork (a fresh child starts out assuming "not focused").
+function relayWindowFocus() {
+  const focused = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused())
+  sendToServer({ type: WINDOW_FOCUS_MESSAGE, focused })
+}
+
+function sendToServer(msg) {
   try {
     if (serverChild && !serverChild.killed && typeof serverChild.send === 'function') {
-      serverChild.send({ type: CREATE_NOTIFICATION_MESSAGE, notification })
+      serverChild.send(msg)
     }
   } catch (err) {
-    selfUpdateLog('warn', `in-app notify: send failed (${err && err.message ? err.message : err})`)
+    selfUpdateLog('warn', `server ipc: send failed (${err && err.message ? err.message : err})`)
   }
 }
 
@@ -1782,9 +1793,9 @@ function onServerMessage(msg) {
 
 // Escalation safety valve: track CONSECUTIVE non-switching self-update cycles
 // (rebuild/canary/regression failures). A successful switch resets the streak; once
-// it reaches the threshold, push "canary昇格失敗の連続" to the human (OS toast +
-// Ground bell). The rollback path has its own notice (notifyRollback); this covers
-// the cycles that never even switched.
+// it reaches the threshold, push "canary昇格失敗の連続" to the Ground bell (no Mac
+// toast — see OS_TOAST_EVENTS in osNotify.ts). The rollback path has its own
+// notice (notifyRollback); this covers the cycles that never even switched.
 function handleSelfUpdateOutcome(result) {
   if (result && result.switched) {
     selfUpdateConsecutiveFailures = 0
@@ -1793,10 +1804,6 @@ function handleSelfUpdateOutcome(result) {
   selfUpdateConsecutiveFailures += 1
   if (selfUpdateConsecutiveFailures < CANARY_FAILURE_ALERT_THRESHOLD) return
   const reason = (result && result.reason) || 'unknown'
-  showOsNotification(
-    'OPEN GROUND — Self-update canary failed',
-    `A self-update has failed to promote ${selfUpdateConsecutiveFailures} times in a row (${reason}). The running build is unchanged.`,
-  )
   createInAppNotification({
     event: 'canary-failed',
     detail: `self-update が ${selfUpdateConsecutiveFailures} 回連続で昇格に失敗しました（${reason}）。稼働中のビルドは変更なし。`,
@@ -2194,25 +2201,14 @@ function showUpdateDialog(kind, opts) {
  *
  *  Deliberately NOT the swarm notification channel: those rows are the swarm's
  *  needs-attention feed (and typed + labelled + translated as such), and "macOS
- *  is unzipping" belongs in neither. Two main-process primitives that already
- *  exist say it without inventing a contract: the dock/taskbar bar and an OS
- *  toast. Both follow Settings.language like every other owner-facing string. */
-function notifyPreparingInstall(version) {
+ *  is unzipping" belongs in neither. The dock/taskbar bar says it without
+ *  inventing a contract. No Mac toast (owner decision 2026-09-26: toasts are
+ *  reserved for the three OS_TOAST_EVENTS in src/lib/server/osNotify.ts — an
+ *  update notice was read as an error). */
+function notifyPreparingInstall() {
   // > 1 is macOS's INDETERMINATE bar: "something is happening", without
   // pretending to a percentage we do not have (Squirrel reports none).
   setUpdateDockProgress(2)
-  const ja = updateDialogLanguage() === 'ja'
-  const named = version
-    ? `OPEN GROUND ${version}`
-    : ja
-      ? '新しいバージョン'
-      : 'A new version of OPEN GROUND'
-  showOsNotification(
-    'OPEN GROUND',
-    ja
-      ? `${named} の準備をしています。終わり次第、自動で再起動します — それまでは今のまま使えます。`
-      : `Preparing ${named}. It restarts itself as soon as that finishes — keep using the app until then.`,
-  )
 }
 
 /** Staging never finished. NOTHING was torn down, so the app is fine — say that,
@@ -2388,7 +2384,7 @@ function reportInstallBlocked(version, label) {
 async function applyUpdateWhenStaged(version, opts = {}) {
   if (applyInFlight) {
     // A second press is not a second install; it is "did you hear me?".
-    notifyPreparingInstall(version)
+    notifyPreparingInstall()
     return
   }
   applyInFlight = true
@@ -2408,7 +2404,7 @@ async function applyUpdateWhenStaged(version, opts = {}) {
   // rather than invent a delay.
   if (nativeUpdaterHandle && installReadiness(process.platform, squirrelStaged) === 'staging') {
     ulog.info('waiting for the OS installer to stage the update before tearing down')
-    notifyPreparingInstall(version)
+    notifyPreparingInstall()
     const staged = await waitForInstallStaged({
       isStaged: () => squirrelStaged,
       onStaged: (cb) => {
@@ -2578,7 +2574,7 @@ function armInstallSelfRepair(verdict) {
   // Written BEFORE the attempt is armed: a run that dies before quitting must
   // not hand the same attempt to every launch from here on.
   writePendingInstall({ path: marker, from: verdict.from || '', to: verdict.to || '' })
-  armedKickstart = { why: `self-repair of the failed ${verdict.from} → ${verdict.to} install`, verifyRelaunch: true }
+  armedKickstart = { why: `self-repair of the failed ${verdict.from} to ${verdict.to} install`, verifyRelaunch: true }
   ulog.info(`boot: self-repair ARMED — ${verdict.to} is still staged; the next quit will start ShipIt by hand`)
 }
 
@@ -3092,12 +3088,13 @@ function initAutoUpdater() {
     createInAppNotification({
       event: 'update-ready',
       detail: `新しい版 ${version} の準備ができました。手が空いた頃合いに自動で入れ替えますが、今すぐでも構いません。`,
-      logHint: '設定 → 自動アップデート で、いま適用できない理由が見られます。',
+      logHint: '設定 › 自動アップデート で、いま適用できない理由が見られます。',
     })
   })
 
-  // Kick off an initial check, then poll every 4h. checkForUpdatesAndNotify
-  // surfaces a native OS notification on its own in addition to our handlers.
+  // Kick off an initial check, then poll every 4h. checkForUpdates(), NOT the
+  // AndNotify variant: that one raises its own Mac toast on download, and toasts
+  // are reserved for OS_TOAST_EVENTS (osNotify.ts, owner decision 2026-09-26).
   //
   // WORK MODE (lockdown): the switch is re-read from settings.json IMMEDIATELY
   // BEFORE every check (electron/lockdown.js) — not once at init — so toggling
@@ -3117,7 +3114,7 @@ function initAutoUpdater() {
     // per tick so the Settings toggle needs no app restart (same liveness
     // contract as the lockdown read above).
     autoUpdater.autoInstallOnAppQuit = eagerSquirrelHandoff(process.platform, autoUpdateEnabled())
-    autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+    autoUpdater.checkForUpdates().catch((err) => {
       ulog.error(`${label} check failed:`, err && err.message)
     })
   }

@@ -3416,9 +3416,10 @@ export const InfiniteCanvas = ({
     [frames, elements, positions, projects, lockedViaGroup, hiddenViaGroup, frameVariant],
   )
 
-  // Tidy: flow the frame's direct cards AND child frames into rows as equals
+  // Tidy: pack the frame's direct cards AND child frames as equals
   // (tidyLayout), each child frame moving with its whole contents so nothing
-  // overlaps. The frame grows (never shrinks) to hold the flow.
+  // overlaps. The frame then hugs the packing (grows or shrinks), top-left
+  // fixed — but never past what it owns and tidy did not move.
   const tidyFrame = (frame: CanvasElement) => {
     const c = canvasRef.current
     if (!isManipulable(frame)) return
@@ -3437,8 +3438,13 @@ export const InfiniteCanvas = ({
       }
       for (const id of b.els) shift.set(id, d)
     }
-    const nextW = Math.max(fb.w, flow.width)
-    const nextH = Math.max(fb.h, flow.height)
+    // Anything the frame owns that tidy leaves in place (a group and its
+    // members, by parentId) keeps the frame from shrinking out from under it.
+    const kept = carriedBy(frame)
+      .filter((e) => !shift.has(e.id) && !e.hidden && e.type !== 'comment' && e.type !== 'group')
+      .map(groundBox)
+    const nextW = Math.max(flow.width, ...kept.map((r) => r.x + r.w - fb.x + FRAME_GEOMETRY.pad))
+    const nextH = Math.max(flow.height, ...kept.map((r) => r.y + r.h - fb.y + FRAME_GEOMETRY.pad))
     const nextElements = c.elements.map((el) => {
       if (el.id === frame.id)
         return nextW !== fb.w || nextH !== fb.h ? { ...el, width: nextW, height: nextH } : el

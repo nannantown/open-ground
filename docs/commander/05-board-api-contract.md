@@ -71,6 +71,7 @@ Any descriptions of the retired paths below are historical, not operating instru
 | `attachments` | preprocess で**要素単位** filter + `.catch(undefined)` (`schemas.ts:104-109`) | 壊れた要素だけ drop、非配列ならフィールド drop |
 | `integrationConflict` | `.optional().catch(undefined)` | フィールド drop |
 | `selfSupplyKey` / `selfSupplyApproved` | `.optional().catch(undefined)` | drop。approved が落ちる方向は**ゲート閉**で安全 (`schemas.ts:148-149`) |
+| `draft` | `z.boolean().optional().catch(true)` | junk reads as **`true`** (the card stays held by dispatch gate ⑧, fail-closed). On write, `PUT /api/project` answers **400** for a non-boolean `draft` or a non-array `dependsOn` (`cardFieldTypeError`, 2026-09-26: a string `dependsOn` used to answer 200 and vanish); `POST /api/project/tasks` refuses both keys, since it cannot set them |
 | `reworkCount` | `z.number().int().nonnegative().optional().catch(undefined)` | drop(負数/小数でループガードを無効化できない `schemas.ts:150-155`) |
 
 ### 2.2 「不正 1 フィールドでカードが消えない」二段構え
@@ -675,8 +676,8 @@ allowlisted — tune it without a UI). The fill is `sessionContextTokens`
 
 | Desk | At the cap | Where | Log line (engine log, next to `consumption:`) |
 |---|---|---|---|
-| Commander | **Recycle at spawn**: a resumable conversation at/over the cap is NOT `--resume`d; a fresh session opens, still booted on `MANAGER_RESUME_INJECTION` (it re-reads Board / workers / engine through the API and git) and the NEW id is recorded, so the next boot resumes the small one | `deskContextCap.recycleDeskSessionIfOverCap` called from `swarmManager.launchNewDesk` (both runtimes) | `司令官の卓を作り直した(文脈 N → 0)` |
-| Supply officer | **Compact while alive**: a boot loop (60s) types one `/compact` into the live supply PTY once idle | `supplyContextCap.ts` (`startSupplyContextCapLoop`, wired in `server/index.ts`) | `補給官の卓を圧縮した(文脈 N → M)` |
+| Commander | **Recycle at spawn**: a resumable conversation at/over the cap is NOT `--resume`d; a fresh session opens, still booted on `MANAGER_RESUME_INJECTION` (it re-reads Board / workers / engine through the API and git) and the NEW id is recorded, so the next boot resumes the small one | `deskContextCap.recycleDeskSessionIfOverCap` called from `swarmManager.launchNewDesk` (both runtimes) | `司令官の卓を作り直した(文脈 N から 0 へ)` |
+| Supply officer | **Compact while alive**: a boot loop (60s) types one `/compact` into the live supply PTY once idle | `supplyContextCap.ts` (`startSupplyContextCapLoop`, wired in `server/index.ts`) | `補給官の卓を圧縮した(文脈 N から M へ)` |
 
 - **Commander only at spawn.** A live commander is not interrupted; the cap applies at
   its next spawn (app restart = every release, the engine's resuscitation, the 司令官
@@ -708,4 +709,4 @@ allowlisted — tune it without a UI). The fill is `sessionContextTokens`
   ③ the desk's 「状況」 matched the scratch project exactly (2 cards blocked/done, no
   workers, engine off, git state) and echoed nothing from the copied memory — the
   memory loss did no harm, so no hand-off note is needed. Engine journal:
-  `司令官の卓を作り直した(文脈 409,418 → 0)…`.
+  `司令官の卓を作り直した(文脈 409,418 から 0 へ)…`.

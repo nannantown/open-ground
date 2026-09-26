@@ -119,6 +119,14 @@ describe('withCardDuplicated (card duplication — F020)', () => {
     expect(dup.title).toBe('A (copy)')
   })
 
+  it('a copy of a draft stays a draft (never dispatchable before the original)', () => {
+    const d = task({ id: 'd', boardColumn: 'todo', draft: true })
+    const p = task({ id: 'p', boardColumn: 'todo' })
+    const next = withCardDuplicated(projectData([d, p]), 'd')
+    expect(next.tasks[1].draft).toBe(true)
+    expect(withCardDuplicated(next, 'p').tasks.find(t => t.title.endsWith('(copy)') && t.id !== next.tasks[1].id)?.draft).toBeUndefined()
+  })
+
   it('renumbers boardOrder 0..n: copy right below the source, the rest pushed down', () => {
     const a = task({ id: 'a', boardColumn: 'todo', boardOrder: 0 })
     const b = task({ id: 'b', boardColumn: 'todo', boardOrder: 1 })

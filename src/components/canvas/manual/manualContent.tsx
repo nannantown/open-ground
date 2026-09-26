@@ -125,8 +125,8 @@ export const MANUAL_SECTIONS: Section[] = [
         kind: 'steps',
         items: [
           {
-            en: 'Top-right, click + → New project (creates a folder in your workspace) or Import folder (registers any folder you already have).',
-            ja: '右上の ＋ → 「新規プロジェクト」（ワークスペースにフォルダを作成）か「フォルダをインポート」（既存のフォルダを登録）を選びます。',
+            en: 'Top-right, click + › New project (creates a folder in your workspace) or Import folder (registers any folder you already have).',
+            ja: '右上の ＋ › 「新規プロジェクト」（ワークスペースにフォルダを作成）か「フォルダをインポート」（既存のフォルダを登録）を選びます。',
           },
           {
             en: 'The card lands on the Ground and its panel opens automatically.',
@@ -274,8 +274,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'OPEN GROUND never writes into your repo. A project’s Board and Canvas data live centrally under `~/.openground/projects/<id>/` (see Reference → Where your data lives).',
-          ja: 'OPEN GROUND はあなたのリポジトリに書き込みません。プロジェクトの Board・Canvas データは `~/.openground/projects/<id>/` の下に中央集約されます（リファレンス → データの保存場所 を参照）。',
+          en: 'OPEN GROUND never writes into your repo. A project’s Board and Canvas data live centrally under `~/.openground/projects/<id>/` (see Reference › Where your data lives).',
+          ja: 'OPEN GROUND はあなたのリポジトリに書き込みません。プロジェクトの Board・Canvas データは `~/.openground/projects/<id>/` の下に中央集約されます（リファレンス › データの保存場所 を参照）。',
         },
       },
     ],
@@ -340,7 +340,7 @@ export const MANUAL_SECTIONS: Section[] = [
         items: [
           { en: 'PR-flow tasks land in In review with a PR link.', ja: 'PR フローのタスクは、PR リンクつきで「レビュー待ち」に届きます。' },
           { en: '"Review with claude" opens a diff-review session in the task’s worktree; "Try this branch locally" opens that worktree in Finder.', ja: '「claude でレビュー」はタスクの worktree で差分レビューのセッションを開き、「このブランチをローカルで試す」はその worktree を Finder で開きます。' },
-          { en: 'When the PR is merged (you merge it), a Merged chip appears — click → Done. The move is never automatic.', ja: 'PR がマージされると（マージするのはあなた）「Merged」チップが出ます —— 「→ 完了」を押して動かします。自動では動きません。' },
+          { en: 'When the PR is merged (you merge it), a Merged chip appears — click it to move the card to Done. The move is never automatic.', ja: 'PR がマージされると（マージするのはあなた）「Merged」チップが出ます —— 「完了へ」を押して動かします。自動では動きません。' },
         ],
       },
       { kind: 'subhead', text: { en: 'Find things', ja: '見つける' } },
@@ -450,7 +450,7 @@ export const MANUAL_SECTIONS: Section[] = [
         items: [
           { en: '"+ New" adds a pane (1 pane = full width; more split evenly).', ja: '「＋ 新規」でペインを追加（1ペインなら全幅、増えると均等に分割）。' },
           { en: 'Double-click a pane’s label to rename it; the close button appears once more than one pane is open.', ja: 'ペインのラベルをダブルクリックで改名。閉じるボタンは、ペインが2つ以上のときに現れます。' },
-          { en: 'Reorder by dragging the pane header, or Alt+←/→.', ja: 'ペインのヘッダをドラッグ、または Alt+←/→ で並べ替え。' },
+          { en: 'Reorder by dragging the pane header, or Alt+Left/Right.', ja: 'ペインのヘッダをドラッグ、または Alt+左右キーで並べ替え。' },
         ],
       },
       { kind: 'subhead', text: { en: 'Sessions', ja: 'セッション' } },
@@ -550,16 +550,24 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'With Settings → Automatic updates on (the default), a new version installs itself and the app reopens on its own, usually within about an hour of the release. It does not wait for Claude to finish: the commander and — with Agent Team autopilot on — Agent Team workers pick up where they left off after the restart (a worker keeps its uncommitted changes and redoes only the step it was in). If the president was cut off mid-reply, it checks the Board once it is back and answers your last message again — doing the request if it was not done yet, without filing it twice. With autopilot off, a worker’s changes stay where they are but it does not restart by itself. It waits only while you are using the app (3 minutes without typing or moving the mouse in it is enough), and while a terminal you opened yourself has something running in it — until 30 minutes after the update arrived, because your own terminals come back as empty shells. A version that failed to install is never retried by itself; you will be told, and “Restart now” still works. Turn it off and nothing changes behind your back: you get the “Restart now / Later” dialog instead.',
-          ja: '設定 → 自動アップデート がオン（既定）なら、新しい版は自動で入り、アプリも自動で開き直します。目安はリリースから1時間程度です。Claude の作業が終わるのは待ちません —— 司令官と、自動運転オンならエージェントチームのワーカーも、開き直したあと続きから動きます（ワーカーのコミット前の変更は残り、やりかけの1手だけがやり直しになります）。社長が返事の途中で切れた場合は、戻ってから Board を確かめ、あなたの直前の発言に答え直します —— 依頼がまだ済んでいなければ実行し、済んでいれば二重には積みません。自動運転オフのときは、ワーカーの変更はそのまま残りますが、自分では動き出しません。待つのは、あなたがアプリを操作している最中（3分間キーもマウスも触らなければ十分）と、あなた自身が開いたターミナルで何かが動いているときだけ —— こちらは更新が届いてから最長30分です。あなたのターミナルは開き直すと空のシェルに戻るためです。一度インストールに失敗した版を勝手に入れ直すことはしません（お知らせが出て、「今すぐ再起動」は使えます）。オフにすると勝手には入れ替わらず、「今すぐ再起動 / あとで」のダイアログが出ます。',
+          en: 'With Settings › Automatic updates on (the default), a new version installs itself and the app reopens on its own, usually within about an hour of the release. It does not wait for Claude to finish: the commander and — with Agent Team autopilot on — Agent Team workers pick up where they left off after the restart (a worker keeps its uncommitted changes and redoes only the step it was in). If the president was cut off mid-reply, it checks the Board once it is back and answers your last message again — doing the request if it was not done yet, without filing it twice. With autopilot off, a worker’s changes stay where they are but it does not restart by itself. It waits only while you are using the app (3 minutes without typing or moving the mouse in it is enough), and while a terminal you opened yourself has something running in it — until 30 minutes after the update arrived, because your own terminals come back as empty shells. A version that failed to install is never retried by itself; you will be told, and “Restart now” still works. Turn it off and nothing changes behind your back: you get the “Restart now / Later” dialog instead.',
+          ja: '設定 › 自動アップデート がオン（既定）なら、新しい版は自動で入り、アプリも自動で開き直します。目安はリリースから1時間程度です。Claude の作業が終わるのは待ちません —— 司令官と、自動運転オンならエージェントチームのワーカーも、開き直したあと続きから動きます（ワーカーのコミット前の変更は残り、やりかけの1手だけがやり直しになります）。社長が返事の途中で切れた場合は、戻ってから Board を確かめ、あなたの直前の発言に答え直します —— 依頼がまだ済んでいなければ実行し、済んでいれば二重には積みません。自動運転オフのときは、ワーカーの変更はそのまま残りますが、自分では動き出しません。待つのは、あなたがアプリを操作している最中（3分間キーもマウスも触らなければ十分）と、あなた自身が開いたターミナルで何かが動いているときだけ —— こちらは更新が届いてから最長30分です。あなたのターミナルは開き直すと空のシェルに戻るためです。一度インストールに失敗した版を勝手に入れ直すことはしません（お知らせが出て、「今すぐ再起動」は使えます）。オフにすると勝手には入れ替わらず、「今すぐ再起動 / あとで」のダイアログが出ます。',
+        },
+      },
+      { kind: 'subhead', text: { en: 'Mac notifications', ja: 'Mac の通知' } },
+      {
+        kind: 'p',
+        text: {
+          en: 'The notification bell in the app records everything. A Mac notification (the pop-up at the top right of the screen) appears only in three cases, and only while you are looking at another app: a question that stops the work until you answer it (the first time only, not the reminders), your own Claude conversation stopping at its usage limit, and stuck processes piling up on your computer so that a restart is needed. Progress, finished work, updates and Agent Team errors stay in the bell and with the president.',
+          ja: 'アプリ内の通知ベルにはすべて記録されます。Mac の通知（画面右上に出るもの）は、次の3つのときだけ、しかも OPEN GROUND 以外の画面を見ているときだけ出ます：あなたが答えないと作業が止まる質問が来たとき（最初の1回だけ・催促は出ません）、あなた自身の Claude の会話が使用量の上限で止まったとき、パソコンに止まったままの処理がたまって再起動が必要なとき。進み具合・納品・アップデート・エージェントチームのエラーは、ベルと社長の席に届きます。',
         },
       },
       { kind: 'subhead', text: { en: 'Work mode (lockdown)', ja: '業務モード（ロックダウン）' } },
       {
         kind: 'p',
         text: {
-          en: 'For confidential machines: Settings → Advanced → Work mode is a one-toggle kill switch for every connection that isn’t your own Claude. While it is on, OPEN GROUND stops talking to anything else — update checks, release notes, feedback, sign-in (including token refreshes for an existing login), and shared projects are all disabled, and the server refuses any other outbound request as a backstop. Your claude CLI keeps working as usual — the whole point is “Claude only”.',
-          ja: '機密情報を扱うマシン向け：設定 → 詳細設定 → 業務モード は、自分の Claude 以外のすべての通信を 1 トグルで止めるキルスイッチです。オンの間、OPEN GROUND は Claude 以外のどことも通信しません —— アップデート確認・リリースノート・フィードバック・サインイン（ログイン済みセッションのトークン更新も含む）・共有プロジェクトはすべて無効になり、その他の外向き通信もサーバーが最後の砦として拒否します。claude CLI はそのまま使えます —— 「Claude だけ」がこのモードの目的です。',
+          en: 'For confidential machines: Settings › Advanced › Work mode is a one-toggle kill switch for every connection that isn’t your own Claude. While it is on, OPEN GROUND stops talking to anything else — update checks, release notes, feedback, sign-in (including token refreshes for an existing login), and shared projects are all disabled, and the server refuses any other outbound request as a backstop. Your claude CLI keeps working as usual — the whole point is “Claude only”.',
+          ja: '機密情報を扱うマシン向け：設定 › 詳細設定 › 業務モード は、自分の Claude 以外のすべての通信を 1 トグルで止めるキルスイッチです。オンの間、OPEN GROUND は Claude 以外のどことも通信しません —— アップデート確認・リリースノート・フィードバック・サインイン（ログイン済みセッションのトークン更新も含む）・共有プロジェクトはすべて無効になり、その他の外向き通信もサーバーが最後の砦として拒否します。claude CLI はそのまま使えます —— 「Claude だけ」がこのモードの目的です。',
         },
       },
       {
@@ -625,8 +633,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'Agent Team is hidden by default. Enable it from Settings → Experiments → Agent Team. This only reveals the Agent Team bar and its controls for you — nothing runs automatically. Every autonomous action inside stays off until you explicitly arm it. Once armed, worker dispatch now survives an app restart — see the next section for exactly what that means and does not mean.',
-          ja: 'エージェントチームは既定では非表示です。設定 → 実験的機能 → エージェントチーム で有効化してください。これはエージェントチームのバーと操作を可視化するだけで、それ自体では何も自動実行されません。中の自律的な操作はすべて、あなたが個別に明示オンにするまで動きません。一度オンにすると、worker 起動はアプリの再起動をまたいで生き残るようになりました —— 具体的に何がどうなるかは次の節で説明します。',
+          en: 'Agent Team is hidden by default. Enable it from Settings › Experiments › Agent Team. This only reveals the Agent Team bar and its controls for you — nothing runs automatically. Every autonomous action inside stays off until you explicitly arm it. Once armed, worker dispatch now survives an app restart — see the next section for exactly what that means and does not mean.',
+          ja: 'エージェントチームは既定では非表示です。設定 › 実験的機能 › エージェントチーム で有効化してください。これはエージェントチームのバーと操作を可視化するだけで、それ自体では何も自動実行されません。中の自律的な操作はすべて、あなたが個別に明示オンにするまで動きません。一度オンにすると、worker 起動はアプリの再起動をまたいで生き残るようになりました —— 具体的に何がどうなるかは次の節で説明します。',
         },
       },
       { kind: 'subhead', text: { en: 'A bar under every tab, every seat inside', ja: 'どのタブでも一番下にバー・中に全員の席' } },
@@ -652,6 +660,10 @@ export const MANUAL_SECTIONS: Section[] = [
           {
             en: 'Destructive git (force-push, `branch -D`, history rewrite) and other irreversible actions (deleting a project, publishing a release) are never automated by Agent Team, regardless of any toggle — those always require your direct action.',
             ja: '破壊的な git 操作（force-push・`branch -D`・履歴の書き換え）や、その他の不可逆な操作（プロジェクトの削除・リリースの公開）は、どのスイッチをオンにしていてもエージェントチームが自動で行うことは一切ありません —— 常にあなた自身の直接操作が必要です。',
+          },
+          {
+            en: 'Draft cards: a card marked as a draft (shown faded on the Board) is never started automatically. The president writes several related cards as drafts, adds their order, then removes every draft mark at once, so nothing starts before the order is in place. To release one yourself, hover the card and click the crossed-out pencil.',
+            ja: '下書きのカード：下書きの印が付いたカード（Board で薄く表示）は自動では始まりません。社長は関連する複数のカードを下書きで書き、順番を入れてから全部の印を一度に外すので、順番が決まる前に始まることはありません。自分で外すときは、カードにマウスを乗せて斜線入りの鉛筆を押します。',
           },
         ],
       },
@@ -723,7 +735,7 @@ export const MANUAL_SECTIONS: Section[] = [
           { k: '⌘Z · ⇧⌘Z', v: { en: 'Board: undo · redo board edits.', ja: 'ボード：ボード編集の取り消し · やり直し。' } },
           { k: '⌘C · ⌘V', v: { en: 'Terminal: copy · paste (image paste saves a file).', ja: 'ターミナル：コピー · 貼り付け（画像はファイルとして保存）。' } },
           { k: '⇧Enter', v: { en: 'Terminal: newline without sending.', ja: 'ターミナル：送信せず改行。' } },
-          { k: 'Alt+← / →', v: { en: 'Terminal: reorder panes.', ja: 'ターミナル：ペインを並べ替え。' } },
+          { k: 'Alt+Left / Right', v: { en: 'Terminal: reorder panes.', ja: 'ターミナル：ペインを並べ替え。' } },
           { k: 'Ctrl+Tab', v: { en: 'Panel: cycle visible tabs.', ja: 'パネル：表示中のタブを循環。' } },
         ],
       },

@@ -75,8 +75,8 @@ export const recycleDeskSessionIfOverCap = async (
 /** The engine-log line for a recycled desk (owner-readable, next to the
  *  `consumption:` lines). */
 export const deskRecycledLogLine = (deskLabel: string, fromTokens: number): string =>
-  `${deskLabel}の卓を作り直した(文脈 ${fromTokens.toLocaleString('en-US')} → 0)— 文脈上限を超えたため前回の会話を再開せず新しい会話で起動`
+  `${deskLabel}の卓を作り直した(文脈 ${fromTokens.toLocaleString('en-US')} から 0 へ)— 文脈上限を超えたため前回の会話を再開せず新しい会話で起動`
 
 /** The engine-log line for a compacted desk. */
 export const deskCompactedLogLine = (deskLabel: string, fromTokens: number, toTokens: number | null): string =>
-  `${deskLabel}の卓を圧縮した(文脈 ${fromTokens.toLocaleString('en-US')} → ${toTokens === null ? '不明' : toTokens.toLocaleString('en-US')})`
+  `${deskLabel}の卓を圧縮した(文脈 ${fromTokens.toLocaleString('en-US')} から ${toTokens === null ? '不明' : toTokens.toLocaleString('en-US')} へ)`

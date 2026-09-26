@@ -714,7 +714,7 @@ export const declaredFiles = (t: ProjectTask): Set<string> => {
   return out
 }
 
-/** The next cards to dispatch this pass. Queue order (sortTodos), gated by SEVEN
+/** The next cards to dispatch this pass. Queue order (sortTodos), gated by EIGHT
  *  independent rules so the engine never starts unsafe parallel work:
  *    ① COLUMN  — only `todo` cards are ever candidates. blocked / doing / review /
  *       done are filtered out here (the gate lives in this function, not just the
@@ -743,6 +743,11 @@ export const declaredFiles = (t: ProjectTask): Set<string> => {
  *       their 完了条件 existed). Held, not dropped: the moment the body lands the
  *       card is picked on the next pass, and the manual 実行 button bypasses this
  *       gate by design.
+ *    ⑧ DRAFT — a card flagged `draft` is still being written (owner decision
+ *       2026-09-26: two ordered cards were dispatched together before their
+ *       dependsOn was written). Held, not dropped: the pass after the flag is
+ *       cleared the card goes through ⑤ and the rest as usual. Same manual-実行
+ *       exemption as ⑦.
  *  "Active work" = the doing column ∪ the review column ∪ the counted workers
  *  (dispatchedIds resolved against `tasks`). REVIEW is included because a promoted
  *  worker's branch is still UNMERGED while it sits in review (integration is a
@@ -806,6 +811,8 @@ export const selectDispatch = (
     // ⑦ CONTENT REQUIRED (owner report 2026-09-11) — a card whose body is empty
     //   is a placeholder, not work. See hasCompletionConditions for the accident.
     if (!hasCompletionConditions(card)) continue
+    // ⑧ DRAFT (owner decision 2026-09-26): still being written, see ProjectTask.draft.
+    if (card.draft) continue
     const k = contentKey(card)
     if (k && claimedContent.has(k)) continue // ③ duplicate content
     const files = Array.from(declaredFiles(card))
@@ -6436,9 +6443,9 @@ const monitorWorkers = async (
         execTimeoutShape: reason === 'integration-wait' ? shape : undefined,
         detail:
           reason !== 'integration-wait'
-            ? `ワーカーが実行時間上限 ${limitMin}分 を超過（実作業 ${workedMin}分・通算 ${ranMin}分／うち統合待ち ${waitedMin}分は控除済み）→ 強制回収。未コミットの作業はブランチに WIP コミットで保全されます（未検証）。`
+            ? `ワーカーが実行時間上限 ${limitMin}分 を超過（実作業 ${workedMin}分・通算 ${ranMin}分／うち統合待ち ${waitedMin}分は控除済み）のため強制回収。未コミットの作業はブランチに WIP コミットで保全されます（未検証）。`
             : shape === 'rework'
-              ? `一度 ready に到達したワーカーが、差し戻し後の再作業で作業上限 ${limitMin}分 に到達（実作業 ${workedMin}分・通算 ${ranMin}分／うち統合待ち ${waitedMin}分は控除済み）→ 停止。暴走ではありません（統合可能な成果を一度出しています）。カードは review へ戻します。ただし再作業は途中で打ち切られ、未コミット分は WIP コミットで保全されるだけなので、ブランチ ${w.branch} の先端は未検証です — そのまま統合せず、まず差分を確認してください。`
+              ? `一度 ready に到達したワーカーが、差し戻し後の再作業で作業上限 ${limitMin}分 に到達（実作業 ${workedMin}分・通算 ${ranMin}分／うち統合待ち ${waitedMin}分は控除済み）のため停止。暴走ではありません（統合可能な成果を一度出しています）。カードは review へ戻します。ただし再作業は途中で打ち切られ、未コミット分は WIP コミットで保全されるだけなので、ブランチ ${w.branch} の先端は未検証です — そのまま統合せず、まず差分を確認してください。`
               : shape === 'capped-wait'
                 ? `一度 ready に到達したワーカーが、統合待ちが長引いたため停止しました（統合待ち ${rawWaitedMin}分 のうち控除できるのは上限 ${capMin}分 まで。超過分が計上され、判定時間 ${workedMin}分 が上限 ${limitMin}分 に達しました／通算 ${ranMin}分）。上限に達した原因は待ち時間であって作業ではありません — このワーカーの再作業は ${reworkedMin}分 です。暴走でもありません。ブランチ ${w.branch} の先端は ready 到達時のままなので、そのまま統合を判断できます（停止時に未コミットの変更があった場合のみ WIP コミットが 1 つ乗ります — engine log の WIP 行で分かります）。カードは review に残ります。`
                 : `一度 ready に到達したワーカーが、作業上限 ${limitMin}分 に到達したため停止しました（実作業 ${workedMin}分・通算 ${ranMin}分／統合待ち ${rawWaitedMin}分 は全額控除済み・再作業 ${reworkedMin}分）。待ち時間が原因ではありません — 上限に達したのは実作業です。暴走でもありません（統合可能な成果を一度出しています）。カードは review へ移します。ブランチ ${w.branch} の先端は打ち切り時点のもので未検証です — そのまま統合せず、まず差分を確認してください。`,
@@ -7527,7 +7534,7 @@ export const runDispatchPass = async (
   // question after this fix is "why is my card not moving?" — so the engine
   // names them, once per change of the held set (never per 3s tick).
   const heldIncomplete = todos.filter(
-    (t) => !countedIds.has(t.id) && t.abandoned !== true && !hasCompletionConditions(t),
+    (t) => !countedIds.has(t.id) && t.abandoned !== true && !t.draft && !hasCompletionConditions(t),
   )
   const heldSig = heldIncomplete.map((t) => t.id).sort().join(',')
   if (heldSig !== (engine.incompleteHeldSig ?? '')) {
@@ -7940,7 +7947,7 @@ const escalateUnresponsiveManager = async (
     ...(ctx.branch ? { branch: ctx.branch } : {}),
     ...(ctx.taskTitle ? { taskTitle: ctx.taskTitle } : {}),
     detail: managerUnresponsiveDetail({ cause: ctx.cause, waitedMs: ctx.waitedMs, waiting: ctx.waiting }),
-    logHint: 'エージェントチームのバー → マネージャー / engine log の integrate 行',
+    logHint: 'エージェントチームのバー › マネージャー / engine log の integrate 行',
   })
 }
 
@@ -8474,7 +8481,7 @@ export const runIntegratePass = async (
           engine,
           'warn',
           `司令官の卓は起動しているが ${nudges} 回の声かけに応答しません — 卓が固まっている可能性。` +
-            `エージェントチームのバー → マネージャーで手動確認を(統合待ち ${swarmCards.length} 件)`,
+            `エージェントチームのバー › マネージャーで手動確認を(統合待ち ${swarmCards.length} 件)`,
           'integrate',
         )
       }
@@ -8517,7 +8524,7 @@ export const runIntegratePass = async (
           engine,
           'error',
           `司令官の卓に声をかけられません(${rs.unaddressable}回連続で書き込みに失敗) — ` +
-            `卓は動いているのに宛先が分からない状態です。エージェントチームのバー → マネージャーを開き直すと復旧します。` +
+            `卓は動いているのに宛先が分からない状態です。エージェントチームのバー › マネージャーを開き直すと復旧します。` +
             `統合待ち ${swarmCards.length} 件`,
           'integrate',
         )
@@ -8566,7 +8573,7 @@ export const runIntegratePass = async (
         engine,
         'error',
         `マネージャーが ${rs.attempts} 回連続で蘇生に失敗 — 統合が止まっています。手動でマネージャー卓を確認してください` +
-          `(エージェントチームのバー → マネージャー)。統合待ち ${swarmCards.length} 件`,
+          `(エージェントチームのバー › マネージャー)。統合待ち ${swarmCards.length} 件`,
         'integrate',
       )
       // Best-effort escalation (bell + OS toast) — never awaited, internal-catch so a
@@ -8577,7 +8584,7 @@ export const runIntegratePass = async (
         branch: swarmCards[0]?.branch,
         taskTitle: swarmCards[0]?.title || undefined,
         detail: `マネージャーが ${rs.attempts} 回連続で落ちています(統合待ち ${swarmCards.length} 件)。手動で確認を`,
-        logHint: 'エージェントチームのバー → マネージャー / engine log の integrate 行',
+        logHint: 'エージェントチームのバー › マネージャー / engine log の integrate 行',
       })
     }
     // GIVE UP THE LOOP, NOT RECOVERY (完了条件2, 2026-07-20). Returning here forever is
@@ -9181,7 +9188,7 @@ export const fireFatalNotifications = (
     if (a.kind !== 'rework-exhausted') continue
     current.set(`rework-exhausted:${a.ref}`, {
       event: 'rework-exhausted',
-      detail: `差し戻し上限を超過し 'blocked' に退避しました（review→doing を ${a.attempts ?? '?'} 回バウンス）。`,
+      detail: `差し戻し上限を超過し 'blocked' に退避しました（review と doing の間を ${a.attempts ?? '?'} 回往復）。`,
       projectPath: engine.path,
       taskId: a.ref,
       branch: a.branch,

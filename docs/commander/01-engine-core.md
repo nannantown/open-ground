@@ -143,7 +143,7 @@ scheduleNext(TICK_MS=3s) ──▶ runEnginePass
 
 fill の直前(:4450-4467)。`spawnBlock(now, allowedTiers)` が非 null なら**新規 dispatch を全停止**(monitor/reconcile は動く)。2 種: `all-cooling`(全有効 tier 冷却中 — `parkUntil` に最早 reset)/ `none-allowed`(owner が全 tier OFF — 期限なし、escalation を 1 回上げる :4348-4370)。enter-edge のみ log(`spawnBlockSig`)。解除も edge で log(:4463-4467)。詳細は 04 章。
 
-### 4.3 selectDispatch — 7 ゲート
+### 4.3 selectDispatch — 8 ゲート
 
 キュー順は `sortTodos`(:418 → `sortByPriority`: 実効優先度(静的 + aging)→ boardOrder → createdAt)。各候補に:
 
@@ -156,6 +156,7 @@ fill の直前(:4450-4467)。`spawnBlock(now, allowedTiers)` が非 null なら*
 | ④ | FILE | :564-565 | `files:` / `ファイル:` 指令行で**宣言された**ファイル(`declaredFiles` :457 — opt-in、散文中のパスは対象外)が claim 済みなら保留(同一ファイル作業の直列化) |
 | ⑤ | DEPENDS | :566 | `dependsOn` の**実在する未 done** 前提がある間は保留(:526-529)。削除済み/typo の id は「満たされた」扱い — 永久 stuck にしない |
 | ⑦ | CONTENT REQUIRED | `hasCompletionConditions` | **内容(notes)が空のカードは配らない**(2026-09-11 追加)。⚠ 実測の事故: 補給官が積んだ2枚を**8秒後**に司令官が worker へ配布し、**完了条件が書かれる前**に着手した。原因は書き手のミスではなく**同梱の補給官手順書自体**が「先に題名だけ `add` → 後で notes を PUT」と書いていたこと(skills/supply/SKILL.md step 4 — 同じ変更で一括書き込みに修正)。指示は安全装置ではないので、不変条件はここに置いた。**捨てずに保留** — 内容が入れば次の周回で拾う。**手動の「実行」は対象外**(押すこと自体が「今の内容で配れ」という表明)。保留中のカードはジャーナルに1行(held 集合の変化時のみ)+ カード詳細に理由が出る |
+| ⑧ | DRAFT | `card.draft` | **下書き印(`draft: true`)のカードは配らない**(2026-09-26 追加)。Incident: in Echona the president queued two cards that touch the same screen, then added the order (`dependsOn`) afterwards; autopilot had already started both. A wait timer was rejected by the owner (every card would pay the delay). Instead the president writes multi-card / ordered requests as drafts, adds `dependsOn`, reads back, and clears every draft in ONE `PUT` (skills/supply/SKILL.md step 4). Held, not dropped: after the flag clears, ⑤ and the other gates apply as usual. Manual 実行 is exempt (same as ⑦). A draft is not counted in the ⑦ "empty body" journal line. The schema reads a junk `draft` value as `true` (fail-closed); `PUT /api/project` refuses non-boolean `draft` and non-array `dependsOn` with 400 (05 章 §2.1). The owner releases a draft from the Board card's hover button. A manual start (`POST /api/swarm/worker` claim) clears the flag; a duplicated draft stays a draft; the commander's manual pick (og-manage step 2) skips drafts |
 
 "active work" = doing 列 ∪ **review 列**(promote 済みでも未統合の branch は競合面)∪ counted workers(:536-543)。pick するたび claim 集合が育つので、同一 pass 内の衝突も防がれる(:567-569)。純関数(IO なし)。
 
@@ -682,7 +683,7 @@ npm run swarm:audit -- --json                                # 機械可読 {sco
   新旧モジュールが別 boolean を見て二重 tick する穴を塞ぐ。
 - **ゼロの日の方針**: 「終わったカードはありませんでした」の 1 行を**通知する**(スキップしない) —
   毎日必ず届くことで「完了ゼロ」と「ループが死んでいる」を見分けられるようにする設計判断。
-  OS toast は劣化日のみ(平常日はベルだけの静かな定期便)。この「毎日必ず 1 件」が
+  OS toast は出さない(2026-09-26 以降、Mac 通知は `OS_TOAST_EVENTS` の3種のみ — 06 章)。この「毎日必ず 1 件」が
   **ベルの cap を kind 別に分けた理由**でもある(06 章 §3.4)— 共有 cap のままだと、静かな日が
   続くだけで日報が `rework-exhausted` 等の fatal をベルから押し出して**安全弁が消えた**。
 - **オーナー向け文面の約束**: 数字は万単位(`33.6万`・`120万`)で出す(`plainCount` — `1200k` は

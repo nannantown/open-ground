@@ -22,12 +22,33 @@ export interface FrameGeometry {
   gap: number
 }
 
-/** Tidy: flow the boxes into rows inside `frame`, in their current reading
- *  order (top-to-bottom, then left-to-right), so each barely moves. A row
- *  wraps when the next box would cross the frame's usable width (never
- *  narrower than the widest box). Rows are as tall as their tallest box, so no
- *  two boxes overlap. Returns each box's new top-left and the frame size the
- *  flow needs; the caller decides whether the frame may grow. */
+/** Slack on tidy's fit checks, width and stack height (world px): far below anything visible, far above
+ *  float round-off. */
+const FIT_EPS = 1e-6
+
+/** Tidy: pack the boxes inside `frame`, in their current reading order
+ *  (top-to-bottom, then left-to-right), so each barely moves.
+ *
+ *  Rows (shelves) with stacking: a box goes to the right along the current
+ *  row's top while it fits the usable width. When it doesn't, it stacks under
+ *  the row's LAST column if it still fits inside the row's height (so small
+ *  cards pile up beside a tall child frame instead of dropping under it);
+ *  otherwise it opens a new row. Once a box has stacked, the row takes no more
+ *  at its top, so the result reads back in the same order and a second tidy
+ *  moves nothing.
+ *
+ *  Stacking never makes a row taller, so same-size cards come out exactly as
+ *  the old row flow (two equal cards + gap never fit in one card's height).
+ *  Cards of varying height stay in plain rows too unless one card is taller
+ *  than two others plus the gap — then the short ones may stack beside it.
+ *  Ceiling: a child frame shorter than two stacked cards gets no stack (the
+ *  card drops to the next row). Free skyline / masonry packing was tried and
+ *  rejected — with real (varying) card heights it scrambled reading order and
+ *  flip-flopped on every press.
+ *
+ *  The usable width is the frame's (never narrower than the widest box).
+ *  Returns each box's new top-left and the frame size that hugs the packing;
+ *  no two boxes overlap and neighbours keep at least `g.gap` between them. */
 export function tidyLayout(
   frame: { x: number; y: number; w: number },
   boxes: LayoutBox[],
@@ -48,26 +69,48 @@ export function tidyLayout(
   }
   const ordered = readRows.flatMap((r) => r.sort((a, b) => a.x - b.x))
 
-  const usableW = Math.max(frame.w - g.pad * 2, ...boxes.map((b) => b.w))
-  let cx = 0
-  let cy = 0
-  let rowH = 0
+  // + FIT_EPS: a frame that hugs its contents (w = pad*2 + right edge) can
+  // come back a hair narrower than that edge after the float round trip —
+  // world coords are never rounded — and must still fit what it hugs.
+  const usableW = Math.max(frame.w - g.pad * 2, ...boxes.map((b) => b.w)) + FIT_EPS
   let maxRight = 0
+  let maxBottom = 0
+  const place = (b: LayoutBox, x: number, y: number) => {
+    positions.set(b.id, { x: frame.x + g.pad + x, y: frame.y + g.header + g.pad + y })
+    maxRight = Math.max(maxRight, x + b.w)
+    maxBottom = Math.max(maxBottom, y + b.h)
+  }
+  let rowY = 0 // current row's top
+  let rowH = 0 // its tallest box
+  let cx = 0 // next free x at the row's top
+  let stacked = false // a box was stacked: the row takes no more at its top
+  let col = { x: 0, y: 0 } // last column: its left x and next free y (row-relative)
   for (const b of ordered) {
-    if (cx > 0 && cx + b.w > usableW) {
-      cy += rowH + g.gap
-      cx = 0
-      rowH = 0
+    if (!stacked && (cx === 0 || cx + b.w <= usableW)) {
+      place(b, cx, rowY)
+      col = { x: cx, y: b.h + g.gap }
+      rowH = Math.max(rowH, b.h)
+      cx += b.w + g.gap
+    } else if (col.y + b.h <= rowH + FIT_EPS && col.x + b.w <= usableW) {
+      // + FIT_EPS: rowH may be a child frame's height re-measured from
+      // unrounded world coords, a hair short of an exact fit.
+      place(b, col.x, rowY + col.y)
+      col.y += b.h + g.gap
+      cx = Math.max(cx, col.x + b.w + g.gap)
+      stacked = true
+    } else {
+      rowY += rowH + g.gap
+      place(b, 0, rowY)
+      col = { x: 0, y: b.h + g.gap }
+      rowH = b.h
+      cx = b.w + g.gap
+      stacked = false
     }
-    positions.set(b.id, { x: frame.x + g.pad + cx, y: frame.y + g.header + g.pad + cy })
-    cx += b.w + g.gap
-    rowH = Math.max(rowH, b.h)
-    maxRight = Math.max(maxRight, cx - g.gap)
   }
   return {
     positions,
     width: g.pad * 2 + maxRight,
-    height: g.header + g.pad * 2 + cy + rowH,
+    height: g.header + g.pad * 2 + maxBottom,
   }
 }
 

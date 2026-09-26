@@ -10,9 +10,9 @@ import {
   EyeOff,
   Minus,
   Pipette,
-  ArrowDown,
-  ArrowRight,
-  Expand,
+  Rows3,
+  Columns3,
+  SquareDashed,
   AlignStartHorizontal,
   AlignCenterHorizontal,
   AlignEndHorizontal,
@@ -559,14 +559,14 @@ const AutoLayoutProperties = ({
       key: 'column',
       active: layout.mode === 'column',
       title: t('canvas.insp.layoutColumn'),
-      icon: ArrowDown,
+      icon: Rows3,
       onClick: () => onPatch({ layout: { ...layout, mode: 'column' } }),
     },
     {
       key: 'row',
       active: layout.mode === 'row',
       title: t('canvas.insp.layoutRow'),
-      icon: ArrowRight,
+      icon: Columns3,
       onClick: () => onPatch({ layout: { ...layout, mode: 'row' } }),
     },
   ]
@@ -687,7 +687,7 @@ const AutoLayoutProperties = ({
                   : 'border-line bg-bg text-ink-muted hover:border-line-strong hover:bg-bg-elevated hover:text-ink',
               ].join(' ')}
             >
-              <Expand size={12} strokeWidth={2} />
+              <SquareDashed size={12} strokeWidth={2} />
             </button>
           </div>
         </div>

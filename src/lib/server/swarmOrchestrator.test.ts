@@ -648,6 +648,22 @@ describe('selectDispatch', () => {
     expect(selectDispatch([after], new Set(), 1).map((c) => c.id)).toEqual(['c'])
   })
 
+  // ⑧ DRAFT — the 2026-09-26 accident (Echona): two ordered cards were put in
+  // todo, the order was written afterwards, and autopilot started both first.
+  it('⑧ never dispatches a DRAFT card; clearing the flag releases it next pass', () => {
+    const a = card('A', { draft: true, boardOrder: 0 })
+    const b = card('B', { draft: true, boardOrder: 1, dependsOn: ['A'] })
+    expect(selectDispatch([a, b], new Set(), 10)).toEqual([])
+    // Released in ONE write: ⑤ still orders them, so only A starts.
+    const released = [{ ...a, draft: false }, { ...b, draft: undefined }]
+    expect(selectDispatch(released, new Set(), 10).map((c) => c.id)).toEqual(['A'])
+  })
+
+  it('⑧ a draft never blocks the complete card queued behind it', () => {
+    const tasks = [card('d', { draft: true, boardOrder: 0 }), card('ok', { boardOrder: 1 })]
+    expect(selectDispatch(tasks, new Set(), 10).map((c) => c.id)).toEqual(['ok'])
+  })
+
   it('③ does not dispatch two content-duplicate todos in one pass', () => {
     const dup = [
       card('a', { title: 'same work', notes: 'identical', boardOrder: 0 }),

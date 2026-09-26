@@ -152,6 +152,10 @@ export const ProjectTaskSchema = z.object({
   selfSupplyKey: z.string().optional().catch(undefined),
   // .catch(undefined): junk → undefined → falsy → the gate stays CLOSED (safe).
   selfSupplyApproved: z.boolean().optional().catch(undefined),
+  // Draft hold (selectDispatch gate ⑧). .catch(TRUE), unlike its neighbours:
+  // a present-but-junk value (hand edit) keeps the card HELD (fail-closed); the
+  // owner sees a faded card and can release it. Absent stays absent (optional).
+  draft: z.boolean().optional().catch(true),
   // 差し戻しループガードのカウンタ — POST /api/project/tasks {rework} が bump し、
   // done/todo着地で自動リセットする (types.ts参照)。.int().nonnegative(): a
   // hand-edited negative/fractional value could otherwise defeat the loop guard

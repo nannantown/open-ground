@@ -221,6 +221,9 @@ const claimCardForDispatch = async (projectPath: string, taskId: string): Promis
     }
     card.boardColumn = 'doing'
     card.done = false
+    // A manual start is the "go" a draft waits for (gate ⑧): the card is no
+    // longer being written, so it must not stay faded / reported as a draft.
+    delete card.draft
     outcome = { kind: 'claimed' }
   })
   return outcome

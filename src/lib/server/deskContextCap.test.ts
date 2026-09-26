@@ -54,8 +54,8 @@ describe('recycleDeskSessionIfOverCap', () => {
 
 describe('engine-log lines', () => {
   it('say what happened in the owner’s words, with the numbers', () => {
-    expect(deskRecycledLogLine('司令官', 346_076)).toContain('司令官の卓を作り直した(文脈 346,076 → 0)')
-    expect(deskCompactedLogLine('補給官', 965_390, 170_458)).toBe('補給官の卓を圧縮した(文脈 965,390 → 170,458)')
-    expect(deskCompactedLogLine('補給官', 400_000, null)).toContain('→ 不明')
+    expect(deskRecycledLogLine('司令官', 346_076)).toContain('司令官の卓を作り直した(文脈 346,076 から 0 へ)')
+    expect(deskCompactedLogLine('補給官', 965_390, 170_458)).toBe('補給官の卓を圧縮した(文脈 965,390 から 170,458 へ)')
+    expect(deskCompactedLogLine('補給官', 400_000, null)).toContain('から 不明 へ')
   })
 })

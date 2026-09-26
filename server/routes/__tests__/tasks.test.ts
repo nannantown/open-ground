@@ -93,6 +93,56 @@ describe('POST /api/project/tasks — core ops', () => {
   })
 })
 
+// The 2026-09-26 report: `dependsOn` written as a string answered 200 and the
+// field vanished (the read-side schema drops junk), so the ordered cards ran
+// together. Writes of the wrong shape are now refused with a 400.
+describe('card field types on write (dependsOn / draft)', () => {
+  const put = (path: string, body: unknown) =>
+    app.request(`/api/project?path=${encodeURIComponent(path)}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  const load = async (path: string) =>
+    (await app.request(`/api/project?path=${encodeURIComponent(path)}`)).json()
+
+  it('PUT /api/project: string dependsOn or non-boolean draft is 400 and nothing is written', async () => {
+    const dir = await makeRegisteredDir('types-put')
+    const a = await addTask(dir, 'A')
+    const b = await addTask(dir, 'B')
+    for (const bad of [{ dependsOn: a.id }, { dependsOn: [1] }, { dependsOn: null }, { draft: 'yes' }, { draft: null }]) {
+      const data = await load(dir)
+      const tasks = data.tasks.map((t: ProjectTask) => (t.id === b.id ? { ...t, ...bad } : t))
+      const res = await put(dir, { ...data, tasks })
+      expect(res.status, JSON.stringify(bad)).toBe(400)
+    }
+    expect(await getTask(dir, b.id)).toEqual(b)
+  })
+
+  it('PUT /api/project: well-formed dependsOn + draft round-trip through the store', async () => {
+    const dir = await makeRegisteredDir('types-ok')
+    const a = await addTask(dir, 'A')
+    const b = await addTask(dir, 'B')
+    const data = await load(dir)
+    const tasks = data.tasks.map((t: ProjectTask) =>
+      t.id === b.id ? { ...t, dependsOn: [a.id], draft: true } : t,
+    )
+    expect((await put(dir, { ...data, tasks })).status).toBe(200)
+    const back = await getTask(dir, b.id)
+    expect(back?.dependsOn).toEqual([a.id])
+    expect(back?.draft).toBe(true)
+  })
+
+  it('POST /api/project/tasks: dependsOn / draft cannot be set there, so they are refused, not dropped', async () => {
+    const dir = await makeRegisteredDir('types-post')
+    for (const extra of [{ dependsOn: 'x' }, { dependsOn: ['x'] }, { draft: false }]) {
+      const res = await app.request('/api/project/tasks', json({ path: dir, add: ['C'], ...extra }))
+      expect(res.status, JSON.stringify(extra)).toBe(400)
+    }
+    expect((await load(dir)).tasks).toHaveLength(0)
+  })
+})
+
 describe('POST /api/project/tasks — setPrUrl validation', () => {
   it('records an https PR URL; empty string clears it', async () => {
     const dir = await makeRegisteredDir('pr')

@@ -163,6 +163,11 @@ pruned at boot by `src/lib/server/retention.ts`.)
 - **Minimal.** Do not make UI explanatory: no descriptive labels or shortcut
   hints printed on controls. The less on screen, the better. A short tooltip
   on hover is the most explanation a control gets.
+- **Direction marks are chevrons only** (owner decision 2026-09-26): lucide
+  `Chevron*` (the 「く」 shape), never a shafted arrow — no `Arrow*` / `Move*` /
+  `Corner*` / `Shrink` / `Expand` icons, no ← → ↑ ↓ glyphs in screen text (use
+  › or words).
+  Guarded by `src/noEmojiGuard.test.ts`.
 - **Never emoji** — not in the UI, not in copy, not in notifications. The app
   has none. Use lucide icons, or a custom SVG matching the app's stroke width
   and corner radius when lucide has no fit (icons can be commissioned from
