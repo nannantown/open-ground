@@ -968,9 +968,14 @@ commands names it — by UDID, or by its whole name ("iPhone 17" does not match 
 name counts ONLY if (a) no other device on the Mac, any state or runtime, has that name, (b) the command
 boots a device (`simctl boot`, `xcodebuild test` / `test-without-building` — never `build` or grep),
 and (c) it finished (a killed command's 30-min open window is UDID-only). A name alone cannot tell the
-owner's device from the worker's when several share it (this Mac: 5 × "iPhone 17 Pro"), so there it
-is effectively UDID-only — a leak accepted over closing the owner's device — simctl's `lastBootedAt` lies inside that
-command's run window (tool_use .. tool_result, ±1 s: lastBootedAt is whole seconds — an owner-booted
+owner's device from the worker's when several share it (this Mac: 5 × "iPhone 17 Pro"), so for such
+a name only the UDID counts — a leak accepted over closing the owner's device. Names held by a single
+device (this Mac, 2026-09-26: 7, e.g. "iPhone 16" / "iPhone 16 Pro") do match by name. Stopped devices
+count toward (a) — the worker's own may be shut down while the owner's same-named one is up (guarded;
+counting only booted ones measured red). `\`-continued command lines are NOT joined (joining let a `# … test …` comment on the next line make a
+`build` count as a boot and close the owner's only device — guarded, measured red), so a multi-line
+`xcodebuild … test` is not name-matched: an accepted leak. In addition,
+simctl's `lastBootedAt` must lie inside that command's run window (tool_use .. tool_result, ±1 s: lastBootedAt is whole seconds — an owner-booted
 device, same name or not, was already up before the command started, so it fails this), and no Bash
 command of another live worktree names it. A device opened by a bare `open -a Simulator` (names
 nothing) is left running. Guards: `swarmSimulators.test.ts`,

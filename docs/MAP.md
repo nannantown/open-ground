@@ -270,7 +270,9 @@
   Booted device only if one of the worker's own Bash commands (its claude transcripts, keyed by the
   worktree path) names it — by UDID; by whole name ONLY if that name is unique among ALL the Mac's
   devices, the command boots (`simctl boot` / `xcodebuild test`, not `build`) and it finished —
-  so with several same-named devices it is effectively UDID-only — AND simctl's `lastBootedAt` falls inside that command's run window (±1 s)
+  (stopped devices count; a shared name like "iPhone 17 Pro" is UDID-only, a single-device name
+  like "iPhone 16" matches by name — 7 such on the dev Mac, 2026-09-26; `\`-continued lines are
+  NOT joined — a `# … test` comment line would turn a build into a "boot") — AND simctl's `lastBootedAt` falls inside that command's run window (±1 s)
   AND no other live worktree's Bash commands name it. Owner-booted (booted before the command) and
   bare `open -a Simulator` devices are never touched. Tests: `swarmSimulators.test.ts` (attribution),
   `swarmWorktreeTrust.test.ts` (wiring). Rules: docs/commander/02 §6 path 9.

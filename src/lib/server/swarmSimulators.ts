@@ -11,9 +11,12 @@
 //      test` / `test-without-building` — not `build`, not grep),
 //      (c) the command finished (has a tool_result; a killed command's 30-min
 //      open window is UDID-only).
-//      On a Mac with several same-named devices (5 × "iPhone 17 Pro" across
-//      runtimes, measured 2026-09-26) this is effectively UDID-only — a leak we
-//      accept rather than close something the owner started;
+//      A name shared by several devices (this Mac, measured 2026-09-26: 5 ×
+//      "iPhone 17 Pro" across runtimes) never matches — only its UDID does; a leak
+//      we accept rather than close something the owner started. Names with a
+//      single device DO match (this Mac: 7 such, e.g. "iPhone 16" / "iPhone 16
+//      Pro"). Stopped devices count toward (a): the worker's own device may be
+//      shut down while the owner's same-named one is up;
 //   3. the device's lastBootedAt (simctl) falls inside that command's run window
 //      (tool_use timestamp .. its tool_result timestamp) — so the command is what
 //      booted it. A device the owner booted earlier fails this (it was already up;
@@ -82,6 +85,9 @@ export const bashWindows = (jsonl: string): Window[] => {
     if (!Number.isFinite(ts) || !Array.isArray(content)) continue
     for (const c of content as Array<Record<string, unknown>>) {
       if (c.type === 'tool_use' && c.name === 'Bash') {
+        // Lines are NOT joined at a trailing `\`: the joined text lets BOOTS run past a
+        // `# … test …` comment on the next line (review 2026-09-26). A multi-line
+        // `xcodebuild … test` is therefore not name-matched — an accepted leak.
         const cmd = String((c.input as { command?: unknown } | undefined)?.command ?? '')
         const w = { cmd, start: ts, end: ts + OPEN_WINDOW_MS, finished: false }
         out.push(w)

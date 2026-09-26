@@ -56,7 +56,7 @@ describe('detectMenu', () => {
     expect(detectMenu('Pick?\n 2. b\n 3. c\nEsc to cancel')).toBeNull()
   })
 
-  it('detects an arrow-style menu via its footer even without a ? question', () => {
+  it('detects an arrow-style menu (cursor, no ? question)', () => {
     const screen = `Would you like to proceed
  ❯ 1. Approve and start
    2. Keep planning
@@ -64,5 +64,70 @@ describe('detectMenu', () => {
     const m = detectMenu(screen)
     expect(m).not.toBeNull()
     expect(m!.options.map((o) => o.n)).toEqual([1, 2])
+  })
+
+  it('a ">" prefix is not a cursor', () => {
+    expect(detectMenu('Pick?\n > 1. a\n   2. b\nEsc to cancel')).toBeNull()
+  })
+
+  it('a cursored run with the input box below it is history, not a menu', () => {
+    expect(detectMenu('❯ 1. a\n  2. b\n\n⏺ ok\n────────\n❯ \n────────')).toBeNull()
+  })
+
+  it('picks the bottom cursored run', () => {
+    const m = detectMenu('Old?\n❯ 1. x\n  2. y\nNew?\n❯ 1. p\n  2. q\nEsc to cancel')
+    expect(m!.question).toBe('New?')
+  })
+
+  // Commander review 2026-09-26 — both were menus before the cursor gate and
+  // null after its first version (a live chooser read as idle).
+  it('a numbered row inside an option description does not split the menu', () => {
+    const m = detectMenu('色は?\n❯ 1. 赤\n     1. 明るい\n  2. 青\n  3. Type something.\n\nEnter to select · Esc to cancel')
+    expect(m?.options.map((o) => o.label)).toEqual(['赤', '青', 'Type something.'])
+  })
+
+  it('a bare ❯ row under a chooser (a status line) does not hide it', () => {
+    expect(detectMenu('Do you want to proceed?\n❯ 1. Yes\n  2. No\n\n❯ status line')).not.toBeNull()
+  })
+
+  // Commander rework 2 — REAL claude 2.1.283 frame (158x22, bypass + Remote
+  // Control): a multiSelect AskUserQuestion after ↓×3, the cursor on the
+  // un-numbered Submit row. Captured with scripts/probe-desk-choosers.mts multi.
+  const RULE158 = '─'.repeat(158)
+  const MULTI_ROWS = [
+    RULE158,
+    '←  ☐ 色  ✔ Submit  →',
+    '好きな色は?(複数可)',
+    '  1. [ ] 赤',
+    '         赤',
+    '  2. [ ] 青',
+    '         青',
+    '  3. [ ] Type something',
+    '❯    Submit',
+    RULE158,
+    '  4. Chat about this',
+    'Enter to select · ↑/↓ to navigate · ctrl+g to edit in Micro · Esc to cancel',
+  ]
+  it('multiSelect: the cursor on the un-numbered Submit row is still a menu', () => {
+    expect(detectMenu(MULTI_ROWS.join('\n'))).not.toBeNull()
+  })
+
+  it('multiSelect: the cursor on each numbered row is a menu too', () => {
+    const bare = MULTI_ROWS.map((r) => r.replace(/^❯ {3}Submit$/, '     Submit'))
+    for (const n of [1, 2, 3, 4]) {
+      const f = bare.map((r) => r.replace(new RegExp(`^  ${n}\\. `), `❯ ${n}. `)).join('\n')
+      expect(f).toContain(`❯ ${n}. `)
+      expect(detectMenu(f)?.options.map((o) => o.n)).toEqual([1, 2, 3, 4])
+    }
+  })
+
+  it('an owner turn under a numbered list is not a menu, even with a chooser hint in prose', () => {
+    const f = ['  1. a', '  2. b', '', '❯ 了解', '', '⏺ Esc to cancel で止められます', '', RULE158, '❯ ', RULE158].join('\n')
+    expect(detectMenu(f)).toBeNull()
+  })
+
+  it('an un-numbered ❯ row under a numbered list needs the chooser hint below it', () => {
+    // A frame with no input box on it (mid-repaint): the owner turn is the last ❯.
+    expect(detectMenu(['  1. a', '  2. b', '', '❯ 了解', '', '⏺ ok'].join('\n'))).toBeNull()
   })
 })

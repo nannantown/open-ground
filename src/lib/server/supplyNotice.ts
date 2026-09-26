@@ -71,7 +71,8 @@
 import { basename, dirname, join, resolve } from 'path'
 import { closeSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeSync } from 'fs'
 import { openGroundHome } from './paths'
-import { noticeDeliverable } from './deskDeliverable'
+import { noticeDeliverable, noticeHoldReason, type NoticeHoldReason } from './deskDeliverable'
+import { logToEngine } from './engineLogSink'
 import { isGenerating, readInputBoxText } from '@/lib/claudeScreen'
 import { detectMenu } from '@/lib/claudeMenu'
 import { SUPPLY_DESK_LABEL } from './swarmSupply'
@@ -133,7 +134,7 @@ const REDACTIONS: readonly [RegExp, string][] = [
   // 【 or 】, so nothing real is lost.
   [/[【】]/g, ''],
   [/\bswarm\/[\w.\-/]+/g, '…'], //            branch names
-  [/(?:~|\.{1,2})?\/[\w.\-]+(?:\/[\w.\-]+)+/g, '…'], // absolute + relative paths
+  [/(?:~|\.{1,2})?\/[\w.-]+(?:\/[\w.-]+)+/g, '…'], // absolute + relative paths
   [/\b[0-9a-f]{8,}\b/gi, '…'], //              card ids, UUIDs, short SHAs
 ]
 
@@ -301,6 +302,8 @@ export interface SupplyNoticeDeps {
    *  lane), as {escalation id, owner-facing detail}. Read by
    *  {@link catchUpSupplyDesks} when a new desk appears. */
   openQuestions: (projectPath: string) => Promise<{ id: string; detail: string; at?: number }[]>
+  /** The engine journal line for a hold past {@link SUPPLY_HOLD_LOG_MS}. */
+  log: (projectPath: string, level: 'info' | 'warn' | 'error', message: string) => void
 }
 
 const defaultDeps: SupplyNoticeDeps = {
@@ -357,6 +360,7 @@ const defaultDeps: SupplyNoticeDeps = {
       return { id: e.id, detail: ownerQuestionDetail(e), ...(Number.isFinite(at) ? { at } : {}) }
     })
   },
+  log: logToEngine,
 }
 
 /** The key both sides of the match are reduced to.
@@ -524,6 +528,8 @@ declare global {
   var __openground_supply_gen: { n: number } | undefined
   // eslint-disable-next-line no-var
   var __openground_supply_reported: Map<string, { id: string; at: number }[]> | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_held: Map<string, { since: number; logged: boolean }> | undefined
 }
 
 interface UnsentLine {
@@ -621,6 +627,35 @@ const unsent: Map<string, UnsentLine> =
  *  a reset must not write its outcome into the fresh state. */
 const generation: { n: number } =
   globalThis.__openground_supply_gen ?? (globalThis.__openground_supply_gen = { n: 0 })
+
+/** How long a desk may hold a line it has to deliver before the engine journal
+ *  says why — ONE line per hold (2026-09-26: an Echona president held three
+ *  replies for ~55 min and nothing anywhere recorded the reason). */
+export const SUPPLY_HOLD_LOG_MS = 5 * 60 * 1000
+const HOLD_TEXT: Record<NoticeHoldReason | 'enter-not-taken', string> = {
+  generating: '社長が返答中',
+  typed: '入力欄に文字が残っている',
+  'no-input-box': '画面の入力欄が読めない',
+  menu: '選択メニューが開いていると判定',
+  'enter-not-taken': '打ち込んだ行の Enter が通らない',
+}
+/** Per desk terminal id: since when it has been holding a line it has to deliver. */
+const held: Map<string, { since: number; logged: boolean }> =
+  globalThis.__openground_supply_held ?? (globalThis.__openground_supply_held = new Map())
+const noteHold = (
+  deps: SupplyNoticeDeps,
+  key: string,
+  deskId: string,
+  reason: NoticeHoldReason | 'enter-not-taken',
+  now: number,
+): void => {
+  const h = held.get(deskId) ?? { since: now, logged: false }
+  held.set(deskId, h)
+  if (h.logged || now - h.since < SUPPLY_HOLD_LOG_MS) return
+  h.logged = true
+  const min = Math.round((now - h.since) / 60_000)
+  deps.log(key, 'warn', `社長の窓口への配達を${min}分保留中: ${HOLD_TEXT[reason]} (${reason})`)
+}
 
 /** QUIET passes (see UnsentLine.passes) an unsent line gets for its Enter
  *  before its stuck bell rings ONCE. It is NOT dequeued (2026-09-24): the line
@@ -912,6 +947,7 @@ export const resetSupplyNoticeState = (opts: { keepDisk?: boolean } = {}): void 
   seenDesks.clear()
   inFlight.clear()
   unsent.clear()
+  held.clear()
   generation.n++
 }
 
@@ -952,7 +988,10 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
   // BOTH lanes, or the pass bails before it ever looks at the replies — which
   // it did, and the reply tests caught it: with no news queued, a commander's
   // answer sat in the queue until some unrelated notice happened to arrive.
-  if (pending.size === 0 && replies.size === 0 && progress.size === 0 && unsent.size === 0) return delivered
+  if (pending.size === 0 && replies.size === 0 && progress.size === 0 && unsent.size === 0) {
+    held.clear() // nothing left to hold (a line can also leave without a delivery)
+    return delivered
+  }
   const now = deps.now()
   // Stale PROGRESS is dropped rather than delivered late — see
   // SUPPLY_NOTICE_TTL_MS. IMPORTANT notices are NOT: they wait for the next desk
@@ -1025,9 +1064,15 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
           if (gen !== generation.n) continue // state was reset meanwhile
           if (landed) {
             unsent.delete(desk.id)
+            held.delete(desk.id)
             left.commit(!cleared)
             delivered.push(key)
-          } else if (
+            continue
+          }
+          // A quiet frame whose box still holds our line: our Enter did not take
+          // (not the owner's typing — the box is ours).
+          noteHold(deps, key, desk.id, quiet ? 'enter-not-taken' : (noticeHoldReason(fresh) ?? 'no-input-box'), now)
+          if (
             !left.rang &&
             ((quiet && ++left.passes >= SUPPLY_UNSENT_MAX_PASSES) || now - left.since > SUPPLY_NOTICE_TTL_MS)
           ) {
@@ -1080,8 +1125,15 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
           : reply?.line
       const line =
         replyLine ?? importantLine ?? (digest && digest.items.length ? supplyProgressLine(digest.items) : null)
-      if (!line) continue
-      if (!noticeDeliverable(screen)) continue // busy / half-typed / menu — next pass
+      if (!line) {
+        held.delete(desk.id)
+        continue
+      }
+      const hold = noticeHoldReason(screen)
+      if (hold) {
+        noteHold(deps, key, desk.id, hold, now) // busy / half-typed / menu — next pass
+        continue
+      }
       // Only what was delivered is removed — by identity, since the queues may
       // have moved while this pass awaited the landing check.
       const nItems = digest?.items.length ?? 0
@@ -1142,6 +1194,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         const ok = await injectAnswerIntoWorker(desk.id, line, opts)
         if (gen !== generation.n) continue // state was reset meanwhile
         if (ok) {
+          held.delete(desk.id)
           commit(true)
           delivered.push(key)
         } else if (typed) {
@@ -1508,6 +1561,7 @@ export const catchUpSupplyDesks = async (partial: Partial<SupplyNoticeDeps> = {}
   for (const id of Array.from(seenDesks)) if (!live.has(id)) seenDesks.delete(id)
   for (const id of Array.from(toldTo.keys())) if (!live.has(id)) toldTo.delete(id)
   for (const id of Array.from(unsent.keys())) if (!live.has(id)) unsent.delete(id) // still queued
+  for (const id of Array.from(held.keys())) if (!live.has(id)) held.delete(id)
   let added = false
   for (const desk of desks) {
     if (seenDesks.has(desk.id)) continue

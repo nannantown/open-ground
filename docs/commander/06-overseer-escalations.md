@@ -1500,3 +1500,77 @@ green — so the hole had to be one their frames could not draw. Measured, not i
   restart test. Rework 1: the `seq` rule removed → the middle-edit and the key-between-Ctrl+A-and-
   Enter tests; only the pre-Enter re-check removed → the latter; Ctrl+E not sent on refusal → 6
   red; delivery writes counted, or owner writes not counted → the terminal record test.
+
+## §1.13 — An idle president held replies behind its own numbered list (2026-09-26)
+
+Owner report (Echona, 0.11.151): three commander replies reached the president 51–60 minutes late,
+told as 「(約56分前の返事)」, and only after the 0.11.152 self-update restarted the app — while the
+transcript shows the desk idle for 8, 23 and 14 minutes in that window. The engine journal said
+nothing. Measured, not inferred:
+
+- **The misread.** `detectMenu` (src/lib/claudeMenu.ts) accepted a numbered run as an open chooser
+  when ANY row of the frame matched its footer regex (or the line above ended in `?`). Every
+  president desk runs in bypass mode, and its idle footer
+  `⏵⏵ bypass permissions on (shift+tab to cycle)` matched `shift+tab`. So an answer ending in
+  `1. … 2. … 3. …` read as a menu for as long as it stayed on screen, `noticeDeliverable` said
+  "not now" every pass, and nothing moved until the owner's next exchange scrolled the list off —
+  or a restart repainted the desk. The transcript matches it turn by turn: the answers at 07:43,
+  08:35, 09:14 and 09:39 end in numbered lists and the replies behind them waited; the held replies
+  went out on the first pass after an answer without one (08:31 → delivered 08:33).
+- **Reproduced on a real desk.** `scripts/probe-supply-numbered-list.mts` (real claude, bypass +
+  Remote Control, 158x22 like the Echona desk, the production `queueSupplyReply` /
+  `flushSupplyNotices`, the test project, a throwaway `OPENGROUND_HOME`): before the fix
+  `detectMenu` returned the three list items, `noticeDeliverable` false, the reply HELD for three
+  passes; after it, delivered in 1 s and answered.
+- **Not the other suspects.** The late label proves the replies were freshly pasted after the
+  restart (an `unsent` line keeps its original unlabelled text), and the same desk took other lines
+  in between whenever no list was on screen — so neither a wedged `unsent` line nor a desk missing
+  from `desks()`. Phone (Remote Control) turns did not block by themselves: 08:30 and 09:58 were
+  phone turns and the held lines went out right after them.
+- **Fix — gate on the cursor.** A real chooser always highlights an option with `❯`/`▸`; a list
+  claude wrote never does. `detectMenu` now requires a cursored consecutive run and no longer reads
+  footers or a trailing `?` (`>` is no longer a cursor glyph). This was already the fix of
+  2026-06-09 (`60252731`); the terminal-only purge deleted the file and `fd28a9c4` restored the
+  version from before it. A real menu is still refused twice over: `detectMenu`, and
+  `readInputBoxText` reads its `❯ 1. …` row as a non-empty box. The pane's `menuOpen` and the
+  swarmEscalations Enter guards read the same function and lose the same false positive.
+- **A hold that lasts is visible.** `noticeHoldReason` (deskDeliverable.ts) names the refusal
+  (`generating` / `typed` / `no-input-box` / `menu`; `enter-not-taken` for an unsent line whose
+  Enter did not take). When a desk has held a line it had to deliver for `SUPPLY_HOLD_LOG_MS`
+  (5 min), the engine journal gets ONE warn line —
+  「社長の窓口への配達をN分保留中: <理由> (<code>)」. The clock restarts after each delivery.
+- **Adversarial review (same day) → the cursor must be the last `❯` row.** An owner turn sent as
+  `1. … 2. …` renders as `❯ 1. …` / `  2. …` in the history and still passed the cursor gate. A
+  chooser REPLACES the input box, so its cursor row is the last `❯` on screen — measured on real
+  claude 2.1.283 for `/model` and AskUserQuestion (`scripts/probe-desk-choosers.mts`, both now read
+  `menu`). A cursored run with the input box below it is history (see Rework 1). Also: `noticeHoldReason` checks the
+  menu before the box (a chooser's `❯ 1.` row otherwise reads as typed text — refused either way,
+  but misnamed); an unsent line on a quiet frame is logged as `enter-not-taken`, not as the owner's
+  typing; the hold clock is cleared when every queue empties. Known limit, unchanged: a chooser
+  scrolled so option 1 is off screen is not a run from 1 — `readInputBoxText` still reads its `❯`
+  row as a non-empty box, so it is refused (as `typed`).
+- **Rework 1 (commander) — two live choosers read as idle.** The first cursor gate required a
+  consecutive run CONTAINING the cursor and no `❯` row anywhere below it; both were measured to
+  miss real menus that origin/main caught: an option description holding its own numbered row
+  (`❯ 1. 赤` / `     1. 明るい` / `  2. 青` split the run and the cursored `1.` was dropped), and a
+  bare `❯` row under a chooser (a shell-style status line) hid it. Now the options are gathered
+  FROM the cursor (back to 1, then forward), skipping numbered rows that do not continue the
+  count, and only a real input box — a `❯` row directly under a rule — marks the run as history.
+  Both rules err toward "menu": a misread holds a notice, never types one. Re-measured on real
+  claude: the numbered-list desk still takes the reply in 1 s; `/model` and AskUserQuestion read
+  `menu`.
+- **Rework 2 (commander) — the cursor on an un-numbered row.** A multiSelect AskUserQuestion puts
+  the cursor on `❯    Submit` (no number) after ↓×3; rework 1 read that live chooser as idle —
+  and `menuOpen` is what `boundaryClear` trusts before typing Ctrl-U + `/clear`. An un-numbered
+  cursor row now counts when numbered options 1,2,… sit above it, no input box sits below it, and a
+  chooser's own `Esc to cancel` / `Esc to exit` hint sits below it (never part of the idle bypass
+  footer, so the original misread stays fixed). Real claude (`probe-desk-choosers.mts multi`, one ↓
+  at a time): options 1, 2, 3, Submit and 4 all read `menu`; the numbered-list desk still takes the
+  reply in 1 s.
+- Guards: `supplyNoticeNumberedList.test.ts` (7, real chooser frames) + `claudeMenu.test.ts`, red
+  measured by reverting production: the old `detectMenu` gate → 5 red; the hold note removed from
+  the busy branch → the journal test; the hold not cleared on delivery → the restart test; the
+  last-`❯` rule removed → the owner-list test and the history test; menu-before-box removed → the
+  chooser test; rework 1's first version → the description-row and status-line tests in
+  `claudeMenu.test.ts`; rework 1's final version (7969c34b) → the Submit-row test; the chooser-hint
+  condition removed → the mid-repaint owner-turn test.

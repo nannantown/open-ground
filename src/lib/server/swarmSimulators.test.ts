@@ -136,3 +136,24 @@ describe('name attribution never closes the owner\'s device', () => {
     expect(await run(k, [pro(A, '2026-09-26T06:50:03Z')])).toEqual([A])
   })
 })
+
+// Same-name count must include STOPPED devices: the worker's own device may be shut down
+// already while the owner's same-named one is up — counting only Booted ones would make the
+// name look unique and close the owner's device.
+describe('same-name count includes stopped devices', () => {
+  const pro = (udid: string, lastBootedAt?: string): SimDevice => ({ udid, name: 'iPhone 17 Pro', lastBootedAt })
+
+  it('worker\'s device stopped, owner\'s same-named device booted in the window: nothing closed', async () => {
+    const xb = [bash('s', "xcodebuild test -destination 'platform=iOS Simulator,name=iPhone 17 Pro'", '2026-09-26T06:50:00.000Z', '2026-09-26T07:00:00.000Z')]
+    expect(await run(xb, [pro(B, '2026-09-26T06:55:00Z')], [], [pro(A, '2026-09-26T06:50:30Z')])).toEqual([])
+  })
+})
+
+describe('line-continued commands', () => {
+  // Review repro 2026-09-26: joining `\`-continued lines let a `# … test …` comment on the
+  // next line turn a build into a "boot" and close the owner's only "iPhone 16".
+  it('a build continued onto a comment line mentioning test does not close the owner\'s device', async () => {
+    const xb = [bash('c', "xcodebuild build -scheme App -destination 'name=iPhone 16' \\\n  # TODO: switch to test on iPhone 16", '2026-09-26T06:50:00.000Z', '2026-09-26T06:58:00.000Z')]
+    expect(await run(xb, [{ udid: A, name: 'iPhone 16', lastBootedAt: '2026-09-26T06:51:00Z' }])).toEqual([])
+  })
+})

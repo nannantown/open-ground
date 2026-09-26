@@ -52,5 +52,20 @@ import { detectMenu } from '@/lib/claudeMenu'
  *
  *  All three refusals mean the SAME thing to the caller — "not now" — and none loses the
  *  notice: it stays queued and the next pass asks again. */
-export const noticeDeliverable = (screen: string | null | undefined): boolean =>
-  !isGenerating(screen) && readInputBoxText(screen ?? '') === '' && detectMenu(screen ?? '') === null
+export const noticeDeliverable = (screen: string | null | undefined): boolean => noticeHoldReason(screen) === null
+
+/** WHY {@link noticeDeliverable} says "not now" — null when it says "now". The
+ *  same three refusals, named, so a hold that lasts can be told in the engine
+ *  journal (supplyNotice.ts SUPPLY_HOLD_LOG_MS) instead of being silent: an
+ *  Echona president held replies ~55 min on a misread menu (2026-09-26) and
+ *  nothing anywhere said why. */
+export type NoticeHoldReason = 'generating' | 'typed' | 'no-input-box' | 'menu'
+export const noticeHoldReason = (screen: string | null | undefined): NoticeHoldReason | null => {
+  if (isGenerating(screen)) return 'generating'
+  // Menu before the box: a chooser hides the input box and its `❯ 1.` row would
+  // otherwise read as typed text — refused either way, but misnamed.
+  if (detectMenu(screen ?? '') !== null) return 'menu'
+  const box = readInputBoxText(screen ?? '')
+  if (box === null) return 'no-input-box'
+  return box === '' ? null : 'typed'
+}
