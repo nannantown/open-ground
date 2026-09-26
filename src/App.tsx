@@ -38,6 +38,7 @@ import { descriptionForLang } from '@/lib/descriptionLang'
 import { pickFolder } from '@/lib/pickFolder'
 import { useAuth } from '@/lib/auth/AuthContext'
 import { useT } from '@/i18n/I18nContext'
+import { jumpViewport, viewportAt, recordRecentProject } from '@/lib/groundJump'
 import type {
   AppNotification,
   AppNotificationsResponse,
@@ -1000,6 +1001,14 @@ export default function App() {
       }
       if (k === 'enter') {
         if (typing || editingId || selectedIds.length !== 1 || !canvas) return
+        // A card the search just flew to sits quietly selected (no panel);
+        // Enter opens it — a fresh array ends the quiet state.
+        if (e.isComposing || e.keyCode === 229) return
+        if (visibleProjects.some((p) => p.id === selectedIds[0])) {
+          e.preventDefault()
+          setSelectedIds([selectedIds[0]])
+          return
+        }
         if (canvas.elements.some((el) => el.id === selectedIds[0])) {
           e.preventDefault()
           setEditingId(selectedIds[0])
@@ -1076,25 +1085,51 @@ export default function App() {
     await load()
   }
 
-  // Re-centre the viewport on a freshly-created card so the user sees it.
-  // Card geometry (256 × 132) is fixed in lib/layout.ts; we keep the current
-  // zoom so the user's mental scale of the canvas is preserved.
-  const centerOnCard = (pos: { x: number; y: number }) => {
-    setCanvas((c) => {
-      if (!c) return c
-      const zoom = c.viewport.zoom
-      const next = {
-        ...c,
-        viewport: {
-          zoom,
-          x: window.innerWidth / 2 - (pos.x + 128) * zoom,
-          y: window.innerHeight / 2 - (pos.y + 66) * zoom,
-        },
+  // Search jump (owner ask 2026-09-26): glide the camera to the card, zoomed
+  // in to a readable scale, then flash it so the eye finds "here". Frames
+  // don't persist; only the landing viewport is saved.
+  // ponytail: a pan/zoom during the ~0.45s flight is overridden by it; cancel
+  // on wheel/pointerdown if that ever bothers anyone.
+  const flyRaf = useRef<number | null>(null)
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [flash, setFlash] = useState<{ id: string; at: number } | null>(null)
+  const flyToCard = (id: string, pos: { x: number; y: number }) => {
+    if (!canvas) return
+    const screen = { w: window.innerWidth, h: window.innerHeight }
+    const from = canvas.viewport
+    const to = jumpViewport(pos, screen, from.zoom)
+    if (flyRaf.current !== null) cancelAnimationFrame(flyRaf.current)
+    const instant = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    const DURATION = 450
+    const start = performance.now()
+    const step = (now: number) => {
+      const t = instant ? 1 : Math.min(1, (now - start) / DURATION)
+      const done = t >= 1
+      const vp = done ? to : viewportAt(from, to, 1 - Math.pow(1 - t, 3), screen)
+      setCanvas((c) => {
+        if (!c) return c
+        const next = { ...c, viewport: vp }
+        if (done) scheduleSave(next)
+        return next
+      })
+      if (!done) {
+        flyRaf.current = requestAnimationFrame(step)
+        return
       }
-      scheduleSave(next)
-      return next
-    })
+      flyRaf.current = null
+      setFlash({ id, at: now })
+      if (flashTimer.current) clearTimeout(flashTimer.current)
+      flashTimer.current = setTimeout(() => setFlash(null), 1800)
+    }
+    flyRaf.current = requestAnimationFrame(step)
   }
+
+  // Recently opened projects feed the search's empty-query list.
+  useEffect(() => {
+    if (selectedIds.length === 1 && selectedIds !== quietSel && projects.some((p) => p.id === selectedIds[0])) {
+      recordRecentProject(selectedIds[0])
+    }
+  }, [selectedIds, quietSel, projects])
 
   // Click-to-place (owner ask 2026-09-24): a freshly created / imported card
   // no longer drops into an auto grid slot where it gets buried — it rides the
@@ -1120,7 +1155,7 @@ export default function App() {
   }, [])
   // Nearest free slot to the view centre; `scroll` also brings it to centre.
   // One updater for position + viewport: a setState updater runs lazily, so
-  // the spot can't be read back out of it for a separate centerOnCard call.
+  // the spot can't be read back out of it for a separate camera move.
   const autoPlace = useCallback(
     (id: string, scroll: boolean) =>
       mutateCanvas((c) => {
@@ -1293,6 +1328,7 @@ export default function App() {
         // otherwise V/F/Delete/⌘A typed into the panel's canvas would also
         // drive this invisible surface. A shared-project panel covers it too.
         suspendKeys={!!singleSelected || !!openShared}
+        flash={flash}
       />
       </div>
       {placingId && (
@@ -1330,6 +1366,7 @@ export default function App() {
         </div>
       )}
       <Toolbar
+        onSearch={() => setJumpOpen(true)}
         onNewProject={() => setNewProjectOpen(true)}
         onImport={importProject}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -1543,6 +1580,7 @@ export default function App() {
       <ProjectJumpPalette
         open={jumpOpen}
         projects={visibleProjects}
+        lamps={lampById}
         onClose={() => setJumpOpen(false)}
         onPick={(p) => {
           setJumpOpen(false)
@@ -1551,9 +1589,18 @@ export default function App() {
           // lists owned projects — see nextSelectionOnOpenOwned).
           const sel = nextSelectionOnOpenOwned(p.id)
           setOpenShared(sel.openShared)
-          setSelectedIds(sel.selectedIds)
           const pos = canvas.positions[p.id]
-          if (pos) centerOnCard(pos)
+          if (!pos) {
+            // No card on the Ground to fly to — just open it.
+            setSelectedIds(sel.selectedIds)
+            return
+          }
+          // Selected ON THE GROUND without opening the panel (same quiet
+          // selection as a just-placed card): the owner sees where it is;
+          // Enter or a click on the card opens it.
+          setQuietSel(sel.selectedIds)
+          setSelectedIds(sel.selectedIds)
+          flyToCard(p.id, pos)
         }}
       />
     </main>

@@ -2,41 +2,29 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Search, FolderOpen, Archive } from 'lucide-react'
 import { Overlay, DialogCard } from '@/components/ui/overlay'
 import type { ProjectMeta } from '@/lib/types'
+import type { GroundLamp } from '@/lib/groundLamp'
+import { matchProjects, readRecentProjects } from '@/lib/groundJump'
+import { useT } from '@/i18n/I18nContext'
 
 interface Props {
   open: boolean
   projects: ProjectMeta[]
   onClose: () => void
-  /** Called when a project is picked — page.tsx selects it and centres on its card. */
+  /** Called when a project is picked — App flies the Ground to its card. */
   onPick: (project: ProjectMeta) => void
+  /** Same lamps the Ground cards draw — shown per row so "running / your turn"
+   *  is visible while searching. */
+  lamps?: ReadonlyMap<string, GroundLamp>
 }
 
-// Fast, forgiving subsequence match — every char of the query (lowercased)
-// must appear in order somewhere in `name`. Adjacent matches and prefix
-// matches score higher so "pmm" beats "p-m-m" beats nothing.
-const fuzzyScore = (name: string, q: string): number | null => {
-  if (!q) return 0
-  const hay = name.toLowerCase()
-  const needle = q.toLowerCase()
-  let hi = 0
-  let score = 0
-  let lastIdx = -2
-  for (let i = 0; i < needle.length; i++) {
-    const c = needle[i]
-    const found = hay.indexOf(c, hi)
-    if (found < 0) return null
-    score += found - hi // earlier matches cost less
-    if (found === lastIdx + 1) score -= 4 // adjacent bonus
-    if (found === 0) score -= 6 // prefix bonus
-    lastIdx = found
-    hi = found + 1
-  }
-  return score
-}
-
-export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) => {
+// The Ground's project search (⌘K, or the toolbar's search pill). Matching
+// lives in lib/groundJump.ts: name (fuzzy) or description (substring); an
+// empty query lists recently opened projects first.
+export const ProjectJumpPalette = ({ open, projects, onClose, onPick, lamps }: Props) => {
+  const { t } = useT()
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
+  const [recent, setRecent] = useState<string[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -44,24 +32,15 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
     if (open) {
       setQuery('')
       setActive(0)
+      setRecent(readRecentProjects())
       setTimeout(() => inputRef.current?.focus(), 0)
     }
   }, [open])
 
-  const matches = useMemo(() => {
-    const q = query.trim()
-    if (!q) {
-      // Empty query: show recents first (projects come in mtime-desc from the scanner).
-      return projects.slice(0, 12)
-    }
-    const scored: { p: ProjectMeta; s: number }[] = []
-    for (const p of projects) {
-      const s = fuzzyScore(p.name, q)
-      if (s !== null) scored.push({ p, s })
-    }
-    scored.sort((a, b) => a.s - b.s)
-    return scored.slice(0, 12).map((x) => x.p)
-  }, [projects, query])
+  const matches = useMemo(
+    () => matchProjects(projects, query, recent),
+    [projects, query, recent],
+  )
 
   // Clamp the selection to the new list length whenever matches change.
   useEffect(() => {
@@ -87,6 +66,8 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
       e.preventDefault()
       setActive((i) => Math.max(i - 1, 0))
     } else if (e.key === 'Enter') {
+      // IME: the Enter that confirms a Japanese conversion must not pick.
+      if (e.nativeEvent.isComposing || e.keyCode === 229) return
       e.preventDefault()
       const pick = matches[active]
       if (pick) onPick(pick)
@@ -98,12 +79,12 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
       placement="top"
       onClose={onClose}
       closeOnEsc={false}
-      aria-label="Jump to project"
+      aria-label={t('toolbar.search')}
     >
       <DialogCard
-        className="w-[520px] max-w-[92vw] max-h-[68vh]"
+        className="w-[560px] max-w-[92vw] max-h-[68vh]"
         onKeyDown={onKey}
-        ariaLabel="Jump to project"
+        ariaLabel={t('toolbar.search')}
       >
         <div className="shrink-0 flex items-center gap-2.5 border-b border-line px-4 py-3">
           <Search size={14} className="text-ink-faint shrink-0" />
@@ -112,7 +93,7 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Jump to project…"
+            placeholder={t('toolbar.searchPlaceholder')}
             className="flex-1 min-w-0 bg-transparent text-read text-ink placeholder:text-ink-faint focus:outline-none"
           />
           <span className="label-cap label-cap-latin text-ink-faint shrink-0">esc</span>
@@ -121,35 +102,58 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick }: Props) =
         <div ref={listRef} className="overflow-y-auto py-1.5">
           {matches.length === 0 ? (
             <p className="px-4 py-6 text-center text-ui text-ink-subtle">
-              No projects match
+              {t('toolbar.searchNoMatch')}
             </p>
           ) : (
-            matches.map((p, i) => (
-              <button
-                key={p.id}
-                onClick={() => onPick(p)}
-                onMouseEnter={() => setActive(i)}
-                className={[
-                  'group flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors',
-                  i === active
-                    ? 'bg-bg-inset'
-                    : 'hover:bg-plane/60',
-                ].join(' ')}
-              >
-                {p.missing ? (
-                  <Archive size={12} className="shrink-0 text-accent" />
-                ) : (
-                  <FolderOpen size={12} className="shrink-0 text-ink-faint" />
-                )}
-                <span className="truncate text-ui text-ink">{p.name}</span>
-                {p.openTaskCount > 0 && (
-                  <span className="ml-auto shrink-0 label-cap label-cap-latin text-accent">
-                    {p.openTaskCount} open
+            matches.map((p, i) => {
+              const lamp = lamps?.get(p.id)
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => onPick(p)}
+                  onMouseEnter={() => setActive(i)}
+                  className={[
+                    'group flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors',
+                    'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+                    i === active ? 'bg-bg-inset' : 'hover:bg-plane/60',
+                  ].join(' ')}
+                >
+                  {p.missing ? (
+                    <Archive size={12} className="shrink-0 text-accent" />
+                  ) : (
+                    <FolderOpen size={12} className="shrink-0 text-ink-faint" />
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-ui text-ink">{p.name}</span>
+                    {p.description && (
+                      <span className="block truncate text-meta text-ink-subtle">{p.description}</span>
+                    )}
                   </span>
-                )}
-              </button>
-            ))
+                  {lamp === 'working' && (
+                    <span className="flex shrink-0 items-center gap-1 label-cap text-moss-text">
+                      <span className="run-pulse h-[5px] w-[5px] rounded-full bg-moss" />
+                      {t('toolbar.searchLampWorking')}
+                    </span>
+                  )}
+                  {lamp === 'waiting' && (
+                    <span className="flex shrink-0 items-center gap-1 label-cap text-[var(--beacon-waiting)]">
+                      <span className="h-[5px] w-[5px] rounded-full bg-ochre" />
+                      {t('toolbar.searchLampWaiting')}
+                    </span>
+                  )}
+                  {p.openTaskCount > 0 && (
+                    <span className="shrink-0 label-cap label-cap-latin text-accent">
+                      {p.openTaskCount} open
+                    </span>
+                  )}
+                </button>
+              )
+            })
           )}
+        </div>
+        <div className="shrink-0 border-t border-line-soft px-4 py-2 text-meta text-ink-faint">
+          {t('toolbar.searchHint')}
         </div>
       </DialogCard>
     </Overlay>

@@ -194,7 +194,7 @@ export const MANUAL_SECTIONS: Section[] = [
         items: [
           { en: 'Pan: scroll, or hold Space and drag (or middle-drag).', ja: 'パン：スクロール、または Space を押しながらドラッグ（中ボタンドラッグも可）。' },
           { en: 'Zoom: ⌘scroll or ⌘± ; ⇧1 fits everything, ⌘0 resets to 100%.', ja: 'ズーム：⌘スクロール か ⌘± 。⇧1 で全体にフィット、⌘0 で 100% に戻ります。' },
-          { en: '⌘K opens the jump palette — fuzzy-find any project and fly straight to it.', ja: '⌘K でジャンプパレットが開きます —— あいまい検索で任意のプロジェクトへ一気に飛べます。' },
+          { en: 'Find a project: click “Find a project” at the top right (or press ⌘K) and type part of its name or a word from its description. Recently opened projects are listed first, each with its Running / Your turn lamp. Pick one and the Ground glides to that card, zooms in until it is readable and flashes it; press Enter again (or click the card) to open it.', ja: 'プロジェクトを探す：右上の「プロジェクトを探す」を押す（または ⌘K）と、名前の一部や説明文の言葉で探せます。何も打たなければ最近開いたプロジェクトが上に並び、それぞれに「動いている／あなたの番」のランプが出ます。選ぶと画面がそのカードまでなめらかに移動して読める大きさまで寄り、カードが一瞬光ります。もう一度 Enter（またはカードをクリック）で開きます。' },
         ],
       },
       { kind: 'subhead', text: { en: 'Organize', ja: '整理する' } },
@@ -688,7 +688,7 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'rows',
         rows: [
-          { k: '⌘K', v: { en: 'Jump-to-project palette (works even while typing).', ja: 'プロジェクトへジャンプ（入力中でも効きます）。' } },
+          { k: '⌘K', v: { en: 'Find a project and fly to it (works even while typing).', ja: 'プロジェクトを探してそこへ移動（入力中でも効きます）。' } },
           { k: 'N', v: { en: 'New project.', ja: '新規プロジェクト。' } },
           { k: '⌘R', v: { en: 'Reload the project list.', ja: 'プロジェクト一覧を再読み込み。' } },
           { k: 'V · T · S · F', v: { en: 'Select · Text · Sticky · Frame tool.', ja: '選択 · テキスト · 付箋 · フレーム ツール。' } },

@@ -31,6 +31,13 @@ export const toolbar = {
     'toolbar.langEn': 'EN',
     'toolbar.langJa': 'JA',
     'toolbar.betaTooltip': 'Beta — breaking changes may still land.',
+    // Ground project search (the pill + the ⌘K palette it opens).
+    'toolbar.search': 'Find a project',
+    'toolbar.searchPlaceholder': 'Find a project by name or description…',
+    'toolbar.searchNoMatch': 'No projects match',
+    'toolbar.searchHint': '↑↓ to choose · Enter to fly there · Enter again (or click the card) to open it',
+    'toolbar.searchLampWorking': 'Running',
+    'toolbar.searchLampWaiting': 'Your turn',
   } as Record<string, string>,
   ja: {
     'toolbar.add': 'プロジェクトを追加',
@@ -60,5 +67,11 @@ export const toolbar = {
     'toolbar.langEn': 'EN',
     'toolbar.langJa': 'JA',
     'toolbar.betaTooltip': 'ベータ版です。今後、破壊的な変更が入る可能性があります。',
+    'toolbar.search': 'プロジェクトを探す',
+    'toolbar.searchPlaceholder': '名前や説明の言葉でプロジェクトを探す…',
+    'toolbar.searchNoMatch': '見つかりませんでした',
+    'toolbar.searchHint': '↑↓ で選ぶ · Enter でそこへ移動 · もう一度 Enter(またはカードをクリック)で開く',
+    'toolbar.searchLampWorking': '動いている',
+    'toolbar.searchLampWaiting': 'あなたの番',
   } as Record<string, string>,
 }

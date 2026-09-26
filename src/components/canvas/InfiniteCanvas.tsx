@@ -166,6 +166,8 @@ interface Props {
    *  here goes quiet — otherwise a V/F/Delete typed into the panel's canvas
    *  would ALSO drive the invisible Ground beneath it. */
   suspendKeys?: boolean
+  /** A card the project search just flew to — it flashes once ("here"). */
+  flash?: { id: string; at: number } | null
 }
 
 const CLICK_THRESHOLD_PX = 5
@@ -464,6 +466,7 @@ export const InfiniteCanvas = ({
   onImagePaste,
   frameVariant = 'ground',
   suspendKeys = false,
+  flash,
 }: Props) => {
   const { t } = useT()
   // editingId is owned by the page (so the toolbar / shortcuts can drive it);
@@ -3800,6 +3803,7 @@ export const InfiniteCanvas = ({
                 selected={selectedSet.has(p.id)}
                 lamp={lamps?.get(p.id)}
                 playback={playbackByProject?.get(p.id)}
+                flashKey={flash?.id === p.id ? flash.at : undefined}
               />
             </div>
           )

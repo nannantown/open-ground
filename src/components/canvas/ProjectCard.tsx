@@ -27,6 +27,8 @@ interface Props {
    *  and painted 'idle' amber — an "it needs you" band over a project that
    *  needed nothing. GroundLamp has no third value to get wrong. */
   lamp?: GroundLamp
+  /** Set while the card was just jumped to by the search; a new value replays the flash. */
+  flashKey?: number
   /** Audio from this project is playing somewhere in the app (the Songs
    *  custom tab's embedded player) → a "Playing" EQ stamp on the bottom
    *  margin; `title` names the track in the tooltip. Undefined = silent. */
@@ -64,6 +66,7 @@ export const ProjectCard = memo(({
   active,
   lamp,
   playback,
+  flashKey,
   shared,
 }: Props) => {
   const { t } = useT()
@@ -97,6 +100,13 @@ export const ProjectCard = memo(({
         project.missing ? 'opacity-50' : '',
       ].join(' ')}
     >
+      {flashKey !== undefined && (
+        <div
+          key={flashKey}
+          aria-hidden
+          className="jump-flash pointer-events-none absolute -inset-[6px] rounded-[5px] border-2 border-accent"
+        />
+      )}
       {/* lamp edge — a surveyor's marking along the card's top. Drawn ONLY for
           the two states that are about the work; 'unknown' gets the stamp below
           and no band, because a coloured band reads as an alarm and "we could

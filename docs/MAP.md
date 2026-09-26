@@ -84,6 +84,9 @@
   **別フィールド**で持つこと — 兼用したら窓が消えて再発した。
 - UI: `src/App.tsx`(Ground 本体)+ `src/components/canvas/` の `ProjectCard` / `ProjectCanvas` /
   `ProjectPanel`(カードを開いた中身・タブ切替)/ `Toolbar` / `NewProjectModal`
+- **プロジェクト検索**(2026-09-26): 入口 = `Toolbar` の「プロジェクトを探す」+ ⌘K → `ProjectJumpPalette`。
+  一致判定・移動先・最近開いた順は pure の `src/lib/groundJump.ts`(テスト `groundJump.test.ts`)、
+  カメラ移動と光らせは `App.tsx` の `flyToCard`(着地後は静かな選択=Enter/クリックで開く)。
 - **カードのランプ**(2026-08-15 に「プロセスの生死」→「仕事の状態」へ移設): 判定は
   `src/lib/groundLamp.ts`(pure・オーナー指定の4ケース)、材料は `src/lib/server/groundLamps.ts`
   → `GET /api/ground/lamps`(started カード数・未回答の質問数・実際に動いているか)。

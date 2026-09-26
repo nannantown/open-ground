@@ -12,6 +12,7 @@ import {
   DoorOpen,
   Moon,
   Sun,
+  Search,
 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { applyTheme, currentTheme, persistTheme, useThemeName, type ThemeName } from '@/lib/theme'
@@ -23,6 +24,8 @@ import { NotificationBell } from '@/components/canvas/NotificationBell'
 import type { AppNotification } from '@/lib/types'
 
 interface Props {
+  /** Opens the project search (the ⌘K palette). Shown only when there are projects. */
+  onSearch?: () => void
   onNewProject: () => void
   onImport: () => void
   onOpenSettings: () => void
@@ -72,6 +75,7 @@ interface Props {
 // lives in Settings now (auto-detected from the OS otherwise), and refresh is ⌘R
 // / auto-on-focus — so neither needs a permanent button here.
 export const Toolbar = ({
+  onSearch,
   onNewProject,
   onImport,
   onOpenSettings,
@@ -131,6 +135,22 @@ export const Toolbar = ({
       </div>
 
       <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-3">
+        {/* Project search — always visible so ⌘K isn't the only way in (the
+            owner didn't know the shortcut existed). Opens ProjectJumpPalette. */}
+        {onSearch && projectCount > 0 && (
+          <button
+            type="button"
+            onClick={onSearch}
+            title={t('toolbar.search')}
+            className="flex items-center gap-2 bg-bg-card/95 backdrop-blur border border-line rounded-[3px] pl-2.5 pr-2 py-2 shadow-card text-ui text-ink-muted transition-colors hover:bg-plane hover:border-line-strong hover:text-ink active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Search size={13} strokeWidth={1.75} />
+            <span>{t('toolbar.search')}</span>
+            <kbd className="rounded-[2px] border border-line bg-bg-inset px-1 font-sans text-meta text-ink-subtle">
+              {/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'}
+            </kbd>
+          </button>
+        )}
         {/* The gauge is the widest single item in the bar (~200px). It is ambient
             information, not a control, so it is the first thing to go. */}
         {usage && <div className="hidden xl:flex items-center">{usage}</div>}
