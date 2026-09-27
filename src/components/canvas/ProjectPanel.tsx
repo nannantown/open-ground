@@ -1915,6 +1915,7 @@ const OwnedProjectBody = ({
           gate={moduleGate}
           customTabs={customModules.map(customModuleTabDef)}
           onAddTab={ownerFeatures ? () => setPickerOpen(true) : undefined}
+          addTabDisabled={loading || !data || loadedDataPathRef.current !== project.path}
           rowMenu={ownerFeatures ? { actionFor: tabRowAction } : undefined}
           badges={{ board: data?.tasks.filter(t => !t.done && t.boardColumn === 'review').length ?? 0 }}
         />
@@ -3179,6 +3180,7 @@ const ViewTabs = ({
   customTabs,
   gate,
   onAddTab,
+  addTabDisabled = false,
   rowMenu,
   badges,
 }: {
@@ -3200,6 +3202,8 @@ const ViewTabs = ({
   /** "+" opens the per-project picker (attach customs + show/hide built-ins);
    *  undefined hides it. */
   onAddTab?: () => void
+  /** Attachment needs the current project's data; never offer a silent no-op. */
+  addTabDisabled?: boolean
   /** Right-click menu on a tab — `actionFor(id)` returns the single action that
    *  tab offers (detach a custom / hide a built-in) or null for no menu (library
    *  delete lives in the "+" picker; the last visible tab is locked). Undefined
@@ -3422,9 +3426,10 @@ const ViewTabs = ({
         <button
           type="button"
           onClick={onAddTab}
+          disabled={addTabDisabled}
           title={t('customTabs.addTabHint')}
           aria-label={t('customTabs.addTab')}
-          className="mb-1 rounded-sm p-1 text-ink-faint transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          className="mb-1 rounded-sm p-1 text-ink-faint transition-colors enabled:hover:bg-plane enabled:hover:text-ink enabled:active:bg-plane enabled:active:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
         >
           <Plus size={12} strokeWidth={2.25} />
         </button>
