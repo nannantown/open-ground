@@ -1,6 +1,11 @@
 import { test, expect } from '@playwright/test'
 import { createAndImportProject } from './fixtures/helpers'
 
+// Drain route.fetch/fulfill callbacks before Playwright closes their context.
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: 'wait' })
+})
+
 // The manager starts as an icon on the folded-seat rail. Opening it mounts
 // the nameplate, start/stop, conversation feed (for an SDK desk), and folded
 // "Send a word" control. Pin opening/folding and unclipped controls in both
