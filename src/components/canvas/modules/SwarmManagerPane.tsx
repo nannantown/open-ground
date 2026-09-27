@@ -18,7 +18,8 @@
 // The desk's lifecycle (launch / stop / restart / reconcile after a restart)
 // is owned by SwarmModule; its status comes from SwarmModule's active-desk
 // poll (GET /api/terminal/active lists BOTH pools, so an SDK commander is seen
-// there too). This component never fetches.
+// there too). SwarmSeatFeed owns the conversation polling; SwarmSeatSay owns
+// the send request. This component delegates both to those children.
 
 import { Power } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
