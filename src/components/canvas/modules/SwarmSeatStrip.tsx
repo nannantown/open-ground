@@ -73,9 +73,9 @@ export const SeatFoldContext = createContext<{ onFold: () => void; name?: string
 // pressing it without moving makes that seat the WIDE one (every other seat
 // drops to its minimum and the wide seat takes all the rest — a fixed share
 // would overflow the row and cut the last seat off) and pressing again puts the row
-// back. The nameplate does the same for its own seat (so the last seat, which
-// has no border after it, can be widened too). Widths and the wide seat are
-// remembered per project, like the fold state above.
+// back. (The nameplate no longer widens: since 2026-09-27 a press on it folds
+// the seat — SwarmSeatHeader.) Widths and the wide seat are remembered per
+// project, like the fold state above.
 
 export const swarmSeatSizesKey = (projectId: string) => `openground.swarmseatw.${projectId}`
 /** A press on a border that moves less than this is a click (px). */
@@ -123,8 +123,6 @@ interface SeatSizeApi {
 /** The saved sizes + the open seats as they stand now, left to right. */
 export type SeatRow = SeatSizeApi & { order: readonly string[] }
 export const SeatSizeContext = createContext<SeatRow | null>(null)
-/** The key of the seat a nameplate sits in (SwarmSeatHeader). */
-export const SeatKeyContext = createContext<string | null>(null)
 
 export const useSeatSizes = (projectId: string): SeatSizeApi => {
   const [sizes, setSizes] = useState<SeatSizes>(() => loadSeatSizes(projectId))
@@ -265,7 +263,7 @@ export const SizedSeat = ({
         className={`h-full overflow-hidden ${api?.dragging ? '' : 'transition-[flex] duration-200 ease-out motion-reduce:transition-none'}`}
         style={seatSizedStyle(seatKey, style, api)}
       >
-        <SeatKeyContext.Provider value={seatKey}>{children}</SeatKeyContext.Provider>
+        {children}
       </div>
     </>
   )

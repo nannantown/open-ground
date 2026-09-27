@@ -558,8 +558,8 @@
   to their minimum) and a second press puts the row back. The saved marks are judged against the
   row AS IT STANDS (`openOrder`, passed in the context): a wide mark whose seat is folded / gone is
   ignored, and the LAST seat ignores its saved width and grows — else the row ends in a blank gap
-  (差し戻し 2026-09-26). A press on a nameplate (not its buttons)
-  widens its own seat (`SeatKeyContext` → SwarmSeatHeader). Widths + wide seat saved per project in
+  (差し戻し 2026-09-26). A nameplate does NOT widen (owner 2026-09-27):
+  a press on it (not its buttons) folds a manager / worker seat and does nothing on the president's. Widths + wide seat saved per project in
   `openground.swarmseatw.<projectId>`. Guard = `SwarmSeatStrip.sizes.test.tsx`.
   ⑤ **監督タブは撤去済み(2026-09-23)**。続けて**サブタブ自体も廃止**(同日・1画面化):
   Swarm タブは 社長/マネージャー/ワーカー×N の席を1列に横並び(`SwarmModule` の seats row・

@@ -15,7 +15,7 @@ import { ChevronsRight } from 'lucide-react'
 import { SwarmSprite } from '@/components/canvas/SwarmSprite'
 import type { SpriteRole, SpriteState } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
-import { SeatFoldContext, SeatKeyContext, SeatSizeContext } from './SwarmSeatStrip'
+import { SeatFoldContext } from './SwarmSeatStrip'
 
 const SEAT_TINT: Record<SpriteRole, string> = {
   supply: 'bg-seat-supply',
@@ -57,23 +57,22 @@ export const SwarmSeatHeader = ({
   const fold = useContext(SeatFoldContext)
   const onFold = fold?.onFold
   const roleLabel = fold?.name ?? t(ROLE_LABEL_KEY[role])
-  // Inside a sized seat (SwarmSeatStrip SizedSeat), a press on the plate — not
-  // on one of its buttons — opens this seat up big, and again puts it back.
-  const sizes = useContext(SeatSizeContext)
-  const seatKey = useContext(SeatKeyContext)
-  const widen =
-    sizes && seatKey
-      ? (e: MouseEvent<HTMLDivElement>) => {
-          if ((e.target as Element).closest('button, a, input, select, textarea, [role="menu"]')) return
-          if (e.detail > 1 || window.getSelection()?.toString()) return
-          sizes.toggleWide(seatKey)
-        }
-      : undefined
+  // A press anywhere on a foldable plate — not on one of its buttons — folds
+  // the seat back onto the rail (owner 2026-09-27: the icon opens a seat, its
+  // plate closes it). The president's plate has no fold, so a press does
+  // nothing. Widening a seat is the border's job alone (SeatBorder).
+  const foldFromPlate = onFold
+    ? (e: MouseEvent<HTMLDivElement>) => {
+        if ((e.target as Element).closest('button, a, input, select, textarea, [role="menu"]')) return
+        if (e.detail > 1 || window.getSelection()?.toString()) return
+        onFold()
+      }
+    : undefined
   return (
     <div
-      onClick={widen}
+      onClick={foldFromPlate}
       className={`flex min-h-[34px] shrink-0 items-center gap-2 border-b border-line-soft px-2.5 py-1.5 ${SEAT_TINT[role]} ${
-        widen ? 'cursor-pointer transition-shadow duration-150 hover:shadow-[inset_0_-2px_0_rgb(var(--og-accent)/0.5)]' : ''
+        foldFromPlate ? 'cursor-pointer transition-shadow duration-150 hover:shadow-[inset_0_-2px_0_rgb(var(--og-accent)/0.5)]' : ''
       }`}
     >
       {onFold ? (

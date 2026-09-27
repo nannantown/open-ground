@@ -3,9 +3,9 @@
 // Seat widths (owner 2026-09-26): the border in front of a seat sizes the seat
 // on its LEFT — a drag past SEAT_DRAG_SLOP px sets its width, a press that
 // moves less opens that seat up big (the others drop to their minimum) and
-// pressing again puts the row back. The nameplate does the same for its own
-// seat, except on its buttons. Widths and the wide seat are remembered per
-// project.
+// pressing again puts the row back. The nameplate does NOT widen (owner
+// 2026-09-27): it folds a foldable seat and does nothing on the president's.
+// Widths and the wide seat are remembered per project.
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
@@ -14,7 +14,7 @@ vi.mock('@/i18n/I18nContext', () => ({
   useT: () => ({ t: (k: string) => k, lang: 'en', setLang: () => {}, toggleLang: () => {} }),
 }))
 
-import { SEAT_DRAG_SLOP, SeatSizeContext, SizedSeat, swarmSeatSizesKey, useSeatSizes } from './SwarmSeatStrip'
+import { SEAT_DRAG_SLOP, SeatFoldContext, SeatSizeContext, SizedSeat, swarmSeatSizesKey, useSeatSizes } from './SwarmSeatStrip'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 
 const A = { flex: '1 0 360px', minWidth: 360 }
@@ -100,14 +100,30 @@ describe('seat widths', () => {
     expect(seat('b').style.flex).toBe('1 0 280px')
   })
 
-  it('the nameplate widens its own seat, but not from its buttons', () => {
+  // Owner 2026-09-27: the plate no longer widens. The president's plate (no
+  // fold) does nothing; a foldable plate folds its seat, except from its buttons.
+  it("a press on the president's nameplate changes nothing", () => {
     render(<Row />)
-    fireEvent.click(screen.getByRole('button', { name: 'stop' }))
-    expect(saved()).toBeNull()
-    fireEvent.click(screen.getByText('idle'))
-    expect(seat('a').getAttribute('data-seat-wide')).toBe('true')
     fireEvent.click(screen.getByText('idle'))
     expect(seat('a').getAttribute('data-seat-wide')).toBeNull()
+    expect(saved()).toBeNull()
+  })
+
+  it('a press on a foldable nameplate folds the seat, but not from its buttons', () => {
+    const onFold = vi.fn()
+    render(
+      <SeatFoldContext.Provider value={{ onFold }}>
+        <SwarmSeatHeader role="commander" sprite={null} statusLabel="running">
+          <button type="button">stop</button>
+        </SwarmSeatHeader>
+      </SeatFoldContext.Provider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'stop' }))
+    expect(onFold).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByText('running'))
+    expect(onFold).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'projectPanel.swarm.seat.fold' }))
+    expect(onFold).toHaveBeenCalledTimes(2)
   })
 
   it('widths and the wide seat are remembered per project', () => {
