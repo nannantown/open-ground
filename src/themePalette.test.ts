@@ -76,13 +76,19 @@ const COMMON_PAIRS: [string, string][] = [
   ['accent-deeper', 'accent-soft'], // IconButton active / selected chips
   ['ochre-deep', 'ochre-soft'], // Board priority "high" chip (boardPriority.ts)
   ['invite', 'invite-soft'], // shared/invite badge
+  // THE STATE VOCABULARY (2026-09-27, 完了=緑 / 動作中=青 / 指示待ち=黄): each token
+  // colours a lamp, its icon AND its status word, on every surface a state is
+  // drawn on — so it is held to text grade everywhere, in both themes.
+  ...SURFACES.flatMap((s) =>
+    (['status-run', 'status-done', 'status-ask'] as const).map((t): [string, string] => [t, s]),
+  ),
 ]
 
 // The night panel additionally carries status colours straight on its surfaces
 // (the instrument lamps) and labels on the deepest terminal-frame surface.
-// Azure was removed from the palette on 2026-08-04 — the vocabulary is three
-// colours (稼働=苔 / 待ち=黄土 / 高=朱) and a fourth had been signalling the
-// SAME state that moss already signalled on the Board.
+// Azure was removed from the palette on 2026-08-04 because a fourth colour was
+// signalling the SAME state moss signalled. Since 2026-09-27 the state lamps are
+// the status-* tokens (COMMON_PAIRS); moss / ochre remain for non-state uses.
 const DARK_ONLY_PAIRS: [string, string][] = [
   ['accent', 'bg-inset'],
   ['accent', 'accent-soft'],

@@ -48,7 +48,7 @@ export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRe
         role="supply"
         sprite={BEACON_SPRITE[status]}
         statusLabel={statusLabel}
-        waiting={status === 'waiting'}
+        tone={status === 'working' ? 'run' : undefined}
         detailTitle={t('projectPanel.swarm.supply.hint')}
       >
         <button

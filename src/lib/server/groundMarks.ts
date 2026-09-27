@@ -10,7 +10,7 @@
 //   seenAt            the last time the owner had the project open with the
 //                     agent-team bar (the president's seat) unfolded.
 //   openedAt          the last time the owner had the project open at all —
-//                     clears the eye only (ground-opened.json, 2026-09-26).
+//                     clears the check only (ground-opened.json, 2026-09-26).
 //
 // A mark is lit only when its event is NEWER than seenAt, so opening the seat
 // is what clears it — and nothing can stay lit forever on a misread: the next
@@ -37,7 +37,7 @@ export const readGroundSeenAt = async (projectPath: string): Promise<number | un
 export const markGroundSeen = async (projectPath: string, now = Date.now()): Promise<void> =>
   writeStamp(projectPath, SEEN_FILE, now)
 
-/** The PROJECT-open stamp (2026-09-26): clears the eye only, never a hand.
+/** The PROJECT-open stamp (2026-09-26): clears the check only, never a hand.
  *  Its own file rather than a second field in ground-seen.json, so the seat
  *  and the project panel — which stamp at the same moment — never race a
  *  read-modify-write and drop each other's stamp. */
@@ -150,7 +150,7 @@ export const freshAskState = (): PresidentAskState => ({ ownerTurn: false })
  *   - App notices and the president's retelling of them neither raise nor
  *     clear it: the retelling is usually 「…案はまだお返事を待っています。進めて
  *     よいですか？」 — the SAME question re-asked — while 「これで OK ですか？」 after a
- *     delivery must not light the hand (that is the eye's job). Looking only at
+ *     delivery must not light the hand (that is the check's job). Looking only at
  *     the last line, as the first two versions did, lost real questions every
  *     few minutes under autopilot and still lit deliveries.
  *   - Within an owner turn the LAST text wins: 「調べますか？」 followed by tool

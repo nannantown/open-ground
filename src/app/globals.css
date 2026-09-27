@@ -114,12 +114,23 @@
   --og-ochre-deep: 125 88 20;    /* #7D5814 — soft 4.83:1, card 5.83:1 */
   --og-ochre-deeper: 110 78 19;  /* #6E4E13 */
   --og-ochre-soft: 233 223 196;  /* #E9DFC4 */
+  /* THE STATE VOCABULARY — owner 2026-09-27: 「緑が完了、青が動いている、黄色が
+     指示待ち」. One token per state, used for the lamp, its icon and its word
+     alike (Ground card, jump palette, agent-team seats and figures, Board), so
+     every surface says a state in the same colour. Text-grade on every surface
+     in BOTH palettes (themePalette.test.ts) — on paper that makes 黄 a dark
+     gold, because a true yellow cannot be read on cream. The 2026-08-04 removal
+     of azure was about a fourth colour saying the SAME state as moss; blue now
+     owns running alone, and moss / ochre keep their non-state uses. */
+  --og-status-run: 44 94 159;    /* #2C5E9F 動作中 */
+  --og-status-done: 37 107 59;   /* #256B3B 完了 */
+  --og-status-ask: 118 92 0;     /* #765C00 指示待ち */
   --og-invite: 94 74 135;        /* #5E4A87 */
   --og-invite-soft: 228 220 239; /* #E4DCEF */
   /* Swarm seat nameplates — one quiet tint per role (2026-09-23, the one-screen
      Swarm tab): warm apricot = 社長 (otter), cool slate = manager (owl), mint =
-     worker (rabbit). Low chroma on purpose — the status lamps (moss / ochre /
-     vermillion) must stay the loudest colour on a seat. Text-bearing surfaces:
+     worker (rabbit). Low chroma on purpose — the status lamps (status-run / -done /
+     -ask) must stay the loudest colour on a seat. Text-bearing surfaces:
      themePalette.test.ts holds every ink on them to 4.5:1. */
   --og-seat-supply: 240 226 208;  /* #F0E2D0 */
   --og-seat-manager: 225 228 234; /* #E1E4EA */
@@ -139,10 +150,6 @@
   --og-grain-opacity: 0.6;
   /* legacy alias — a few rules below still read it */
   --paper-tint: rgb(var(--og-bg));
-  /* Ground card "Waiting" beacon label — claude is sitting on the human.
-     Amber, darkened from the ochre token (#9A6E20, only ~4:1) so the 10px
-     label clears WCAG AA (4.5:1) on the card bg #F8F4E8. Tracks ochre-deep. */
-  --beacon-waiting: #7D5814;
 }
 
 /* 夜の計器盤 — the dark instrument palette. Same token names, night values. */
@@ -219,6 +226,9 @@ html[data-theme='dark'] {
   --og-ochre-deeper: 232 196 128;/* #E8C480 */
   --og-ochre-soft: 62 49 32;     /* #3E3120 */
   --og-verm: 224 106 90;         /* #E06A5A — the 高 chip's fill */
+  --og-status-run: 134 182 238;  /* #86B6EE 動作中 */
+  --og-status-done: 134 204 142; /* #86CC8E 完了 */
+  --og-status-ask: 232 193 74;   /* #E8C14A 指示待ち */
   --og-invite: 172 152 216;      /* #AC98D8 */
   --og-invite-soft: 58 49 73;    /* #3A3149 */
   --og-seat-supply: 72 50 40;     /* #483228 */
@@ -234,7 +244,6 @@ html[data-theme='dark'] {
      (measured on the mock: stdev 1.7 → 2.8 keeps the texture visible) */
   --og-grain-blend: normal;
   --og-grain-opacity: 0.12;
-  --beacon-waiting: #DDAE58;
 }
 
 /* Assistant brand mark: a calm continuous rotation while the assistant is

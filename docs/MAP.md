@@ -106,12 +106,12 @@
   **running = 仕事が終わっていない**(2026-09-26 オーナー決定): doing/review の未完カード(`inFlightTaskCount`)・
   自動運転中(`isEngineRunning(canon)`=engine.running)に**エンジンが実際に始める** todo(`src/lib/dispatchGate.ts` の `isDispatchableCard`=下書きでない・本文あり・未承認の自己補給でない を selectDispatch と共有+前提カード完了済み。題名だけのメモは数えない)・司令官/社長の生成中
   (`commanderWorkingCwds`/`presidentWorkingCwds`)・started ありでの worker/自分の pane 生成中。
-  **blocked のみ・todo のみ(自動運転 off)・全部done は何も出さない**。印は文字なし(苔色の点+ホバー文言)。
-  **質問(挙手 `Hand`)と確認待ち(目 `Eye`)の印**(2026-09-26 オーナー決定・旧 waiting を置換・絵文字/ラベル無し、
+  **blocked のみ・todo のみ(自動運転 off)・全部done は何も出さない**。印は文字なし(青の点+ホバー文言)。
+  **質問(黄の挙手 `Hand`)と確認待ち(緑のチェック `CircleCheck`・2026-09-27 に目 `Eye` から変更)の印**(2026-09-26 オーナー決定・旧 waiting を置換・絵文字/ラベル無し、色は status-run/done/ask・`src/statusColors.test.ts`、
   ホバー文言のみ): 質問 = 未回答エスカレーション(答えるまで残る)または社長の最後の発言が「？」で終わり未読(**オーナー自身の発言への返事に限る**・最後の段落に「？」(「」内の引用は除く)。オーナーが次に発言するまで立ったまま。【エンジンからの知らせ】【司令官からの返事】(supplyNotice.ts の定数と完全一致)・`<command-…>`・自動圧縮の要約(isCompactSummary)とそれへの返事は、立ても消しもしない=納品の「これで OK ですか?」では点かず、再確認で本物の質問も消えない。判定=`stepPresidentAsk`、転記は差分だけ読み進める) /
   確認待ち = landed ledger の最新 landedAt が未読。「見た」は2種(`src/lib/useGroundLook.ts`、開いた時・離れた時に打つ):
-  バーを開く=`POST /api/ground/seen`→`ground-seen.json`(社長の手と目を消す)/ **プロジェクトを開く**=
-  `POST /api/ground/opened`→`ground-opened.json`(`ProjectPanel`・**目だけ消す、手は消さない**・別ファイル=打刻競合なし)。材料は
+  バーを開く=`POST /api/ground/seen`→`ground-seen.json`(社長の手とチェックを消す)/ **プロジェクトを開く**=
+  `POST /api/ground/opened`→`ground-opened.json`(`ProjectPanel`・**チェックだけ消す、手は消さない**・別ファイル=打刻競合なし)。材料は
   `src/lib/server/groundMarks.ts`(社長の JSONL 末尾 256KB を size+mtime キャッシュで読む)。優先 = 質問 > running > 確認待ち。
   seenAt が一度も無いプロジェクトは時刻系の印を出さない(基準が無い=付きっぱなしを防ぐ)。
   **社長(補給の窓口)が生成中なら running**(2026-09-25 オーナー決定・started 0 でも灯る・

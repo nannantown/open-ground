@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Search, FolderOpen, Archive, Eye, Hand } from 'lucide-react'
+import { Search, FolderOpen, Archive, CircleCheck, Hand } from 'lucide-react'
 import { Overlay, DialogCard } from '@/components/ui/overlay'
 import type { ProjectMeta } from '@/lib/types'
 import type { GroundLamp } from '@/lib/groundLamp'
@@ -137,7 +137,7 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick, lamps }: P
                       aria-label={t('toolbar.searchLampWorking')}
                       className="flex h-[14px] w-[14px] shrink-0 items-center justify-center"
                     >
-                      <span className="run-pulse h-[7px] w-[7px] rounded-full bg-moss" />
+                      <span className="run-pulse h-[7px] w-[7px] rounded-full bg-status-run" />
                     </span>
                   )}
                   {lamp === 'question' && (
@@ -146,21 +146,21 @@ export const ProjectJumpPalette = ({ open, projects, onClose, onPick, lamps }: P
                       strokeWidth={2}
                       role="img"
                       aria-label={t('toolbar.searchLampQuestion')}
-                      className="shrink-0 text-[var(--beacon-waiting)]"
+                      className="shrink-0 text-status-ask"
                     >
                       <title>{t('toolbar.searchLampQuestion')}</title>
                     </Hand>
                   )}
                   {lamp === 'review' && (
-                    <Eye
+                    <CircleCheck
                       size={12}
                       strokeWidth={2}
                       role="img"
                       aria-label={t('toolbar.searchLampReview')}
-                      className="shrink-0 text-ink"
+                      className="shrink-0 text-status-done"
                     >
                       <title>{t('toolbar.searchLampReview')}</title>
-                    </Eye>
+                    </CircleCheck>
                   )}
                   {p.openTaskCount > 0 && (
                     <span className="shrink-0 label-cap label-cap-latin text-accent">

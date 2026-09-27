@@ -93,6 +93,7 @@ export const SwarmManagerPane = ({
         role="commander"
         sprite={look.sprite}
         statusLabel={t(look.labelKey)}
+        tone={look.lit ? 'run' : undefined}
       >
         <button
           type="button"

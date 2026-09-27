@@ -1026,8 +1026,10 @@ export const BoardTab = ({
                       cards.length === 0
                         ? 'bg-ink/[0.18]'
                         : col.key === 'doing'
-                          ? 'bg-moss shadow-lamp-moss'
-                          : 'bg-ochre shadow-lamp-ochre',
+                          ? 'bg-status-run shadow-lamp-run'
+                          : col.key === 'review'
+                            ? 'bg-status-done shadow-lamp-done'
+                            : 'bg-status-ask shadow-lamp-ask',
                     ].join(' ')}
                   />
                 )}
@@ -1079,7 +1081,8 @@ export const BoardTab = ({
                 <span className="flex shrink-0 items-center gap-[7px] whitespace-nowrap text-meta font-semibold text-ink-muted">
                   {/* Instrument lamp: lit only while the column carries work
                       that means something is HAPPENING or WAITING ON YOU —
-                      doing=moss, review=ochre, blocked=ochre. Neutral when
+                      doing=blue (moving), review=green (finished,
+                      to be looked at), blocked=yellow (needs a decision). Neutral when
                       empty or for the passive lanes (todo/done). */}
                   {/* The mock draws a lamp ONLY on the lanes that can mean
                       「動いている」/「あなた待ち」 — todo and done carry none at all.
@@ -1093,8 +1096,10 @@ export const BoardTab = ({
                         cards.length === 0
                           ? 'bg-ink/[0.18]'
                           : col.key === 'doing'
-                            ? 'bg-moss shadow-lamp-moss'
-                            : 'bg-ochre shadow-lamp-ochre',
+                            ? 'bg-status-run shadow-lamp-run'
+                            : col.key === 'review'
+                              ? 'bg-status-done shadow-lamp-done'
+                              : 'bg-status-ask shadow-lamp-ask',
                       ].join(' ')}
                     />
                   )}
@@ -1113,11 +1118,11 @@ export const BoardTab = ({
                 {col.key === 'review' && reviewManagerPresence === 'working' && (
                   <span
                     title={t('board.review.managerWorkingTitle')}
-                    className="flex min-w-0 items-center gap-1 whitespace-nowrap text-meta text-moss-text"
+                    className="flex min-w-0 items-center gap-1 whitespace-nowrap text-meta text-status-run"
                   >
                     <span
                       aria-hidden
-                      className="run-pulse h-1.5 w-1.5 shrink-0 rounded-full bg-moss shadow-lamp-moss"
+                      className="run-pulse h-1.5 w-1.5 shrink-0 rounded-full bg-status-run shadow-lamp-run"
                     />
                     <span className="truncate">
                       {t('board.card.managerLabel')} {t('projectPanel.swarm.manager.stageRunning')}

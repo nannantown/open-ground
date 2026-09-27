@@ -41,7 +41,7 @@ interface SwitchProps {
 
 /** The SINGLE master switch — one on/off toggle, no words (owner 2026-09-24:
  *  "an on/off switch is enough, as long as I can tell which it is"). The state
- *  reads from the knob's side AND the track colour — moss when on, a quiet grey
+ *  reads from the knob's side AND the track colour — blue (status-run) when on, a quiet grey
  *  track when off. role=switch
  *  + aria-checked gives screen readers "<team>, on/off"; as a native button it
  *  already takes Space / Enter. Hover / focus-visible / disabled per
@@ -68,7 +68,7 @@ export const SwarmPowerSwitch = ({ running, available, busy, onToggle }: SwitchP
         className={[
           'relative inline-block h-[18px] w-[32px] rounded-full border transition-colors duration-150',
           running
-            ? 'border-moss bg-moss group-enabled:group-hover:bg-moss/80 group-enabled:group-active:bg-moss/65'
+            ? 'border-status-run bg-status-run group-enabled:group-hover:bg-status-run/80 group-enabled:group-active:bg-status-run/65'
             : 'border-ink-faint bg-bg-inset group-enabled:group-hover:border-ink-muted group-enabled:group-hover:bg-plane group-enabled:group-active:bg-line-soft',
         ].join(' ')}
       >

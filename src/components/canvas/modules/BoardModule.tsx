@@ -2554,7 +2554,7 @@ export const BoardModule = ({
                           onOpenDetail(null)
                         }}
                         title={t('board.detail.markDoneTitle')}
-                        className="flex shrink-0 items-center gap-1 rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
+                        className="flex shrink-0 items-center gap-1 rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-status-done hover:text-status-done active:border-status-done active:text-status-done focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
                       >
                         <Check size={11} strokeWidth={2} aria-hidden />
                         {t('board.detail.markDone')}
@@ -2579,7 +2579,7 @@ export const BoardModule = ({
                       <span
                         className={`shrink-0 text-micro ${
                           prInfo.state === 'MERGED'
-                            ? 'text-moss'
+                            ? 'text-status-done'
                             : prInfo.state === 'CLOSED'
                               ? 'text-accent'
                               : 'text-ink-muted'

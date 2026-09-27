@@ -172,6 +172,13 @@ pruned at boot by `src/lib/server/retention.ts`.)
   has none. Use lucide icons, or a custom SVG matching the app's stroke width
   and corner radius when lucide has no fit (icons can be commissioned from
   Codex).
+- **State colours are three, app-wide** (owner decision 2026-09-27): done =
+  green + a check (lucide `CircleCheck`), running = blue, needs the owner's
+  answer = yellow (the raised `Hand` on the Ground card). Tokens
+  `status-done` / `status-run` / `status-ask` (globals.css, both palettes);
+  used on the Ground card, the project search list, the agent-team bar, seat
+  figures / corner lamps / nameplates and the Board. A seat idling at its
+  prompt is NOT yellow — it asks nothing. Guarded by `src/statusColors.test.ts`.
 - Interactive states (hover / active / focus-visible) and both themes still
   apply; see `~/.claude/skills/ui-interactive-states.md`.
 
@@ -320,7 +327,8 @@ older docs are historical, not operating instructions.
   onto ONE icon rail at the right edge (`SwarmSeatStrip.tsx`, owner
   decision 2026-09-25, second design): the character icon with a short
   horizontal name under it; only a working seat's icon moves and its corner
-  lamp glows (the rest are faded), and icon + hover text come from the SAME
+  lamp glows blue, a seat with a question for the owner keeps a steady yellow
+  lamp and is not faded (2026-09-27), the rest are faded, and icon + hover text come from the SAME
   look function as the seat's nameplate (`commanderSeatLook` /
   `workerSeatLook`). Clicking an icon opens the seat and removes it from
   the rail — the name then shows once, in the nameplate; a click anywhere

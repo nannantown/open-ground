@@ -44,7 +44,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from 'react'
-import { X, Power, ChevronUp, ChevronDown, Network } from 'lucide-react'
+import { X, Power, ChevronUp, ChevronDown, Network, Hand, CircleCheck } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { columnOf } from '@/components/canvas/BoardTab'
 import { useT } from '@/i18n/I18nContext'
@@ -1202,6 +1202,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
         detail: w.taskTitle || w.note || w.branch,
         sprite: l.sprite,
         lit: l.lit,
+        asking: l.tone === 'ask',
       })
     })
   }
@@ -1298,14 +1299,17 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
         {ownerQuestionCount ? (
           <span
             title={t('projectPanel.swarm.bar.questionsHint')}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-ochre-soft px-2 py-0.5 text-meta text-ink"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-plane px-2 py-0.5 text-meta text-ink"
           >
-            <span className="h-[6px] w-[6px] shrink-0 rounded-full bg-ochre" aria-hidden />
+            {/* The Ground card's question mark, in the question colour (2026-09-27). */}
+            <Hand size={12} strokeWidth={2} className="shrink-0 text-status-ask" aria-hidden />
             {t('projectPanel.swarm.bar.questions', { count: ownerQuestionCount })}
           </span>
         ) : null}
         {engineAvailable && engine.reviews.length > 0 ? (
           <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-plane px-2 py-0.5 text-meta text-ink">
+            {/* Finished work awaiting its check — the Board's review lamp colour. */}
+            <CircleCheck size={12} strokeWidth={2} className="shrink-0 text-status-done" aria-hidden />
             {t('projectPanel.swarm.bar.reviews', { count: engine.reviews.length })}
           </span>
         ) : null}

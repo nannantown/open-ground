@@ -16,34 +16,34 @@ import { useT } from '@/i18n/I18nContext'
 import type { MessageKey } from '@/i18n/messages'
 
 // ── Swarm worker status vocabulary (doing-column cards) ──────────────────────
-// The SAME beacon palette the Ground/Board cards + the SwarmWorkerPane already
-// use: moss = working, ochre = waiting, ink-faint = booting/idle.
+// The app's state colours (owner 2026-09-27: 完了=緑 / 動作中=青 / 指示待ち=黄):
+// status-run = working, status-done = done, a quiet ink = a worker idling at its
+// prompt (it asks the owner nothing — yellow is kept for a real question),
+// ink-faint = booting.
 // Display-only (the strip carries no interactions) — these are status colours,
-// so contrast on the paper card (moss/ochre/ink-faint all clear AA) is the
+// so contrast on the paper card (status-* / ink-muted / ink-faint all clear AA) is the
 // only CLAUDE.md rule that bites here.
-// ⚠ THE COLOUR VOCABULARY IS THREE (案C: 「色は状態だけ — 稼働=苔・待ち=黄土・高=朱」).
-// Azure was not in it. This card dropped it first; on 2026-08-04 the rest of
-// the app followed and the token was deleted outright, so the fourth colour
-// cannot come back by someone reaching for it.
+// ⚠ ONE COLOUR PER STATE. Azure was deleted on 2026-08-04 because it was a
+// fourth colour saying the same thing moss said; since 2026-09-27 blue
+// (status-run) owns running alone and moss is no longer a state colour.
 const WORKER_BAND: Record<WorkerActivity, string> = {
-  working: 'bg-moss',
-  waiting: 'bg-ochre',
+  working: 'bg-status-run',
+  waiting: 'bg-ink-muted',
   starting: 'bg-ink-faint',
-  done: 'bg-moss',
+  done: 'bg-status-done',
 }
 const WORKER_DOT: Record<WorkerActivity, string> = {
   // The lamps carry their glow (shadow-lamp-*) — a dot without it is a bullet.
-  working: 'bg-moss shadow-lamp-moss',
-  waiting: 'bg-ochre shadow-lamp-ochre',
+  working: 'bg-status-run shadow-lamp-run',
+  waiting: 'bg-ink-muted',
   starting: 'bg-ink-faint',
-  done: 'bg-moss',
+  done: 'bg-status-done shadow-lamp-done',
 }
 const WORKER_LABEL_CLS: Record<WorkerActivity, string> = {
-  // moss-TEXT, not moss: the lamp's fill is too dark to read as a label.
-  working: 'text-moss-text',
-  waiting: 'text-[var(--beacon-waiting)]',
+  working: 'text-status-run',
+  waiting: 'text-ink-muted',
   starting: 'text-ink-faint',
-  done: 'text-moss-text',
+  done: 'text-status-done',
 }
 // Localized via the SAME keys the Swarm Manager monitor + worker pane use, so a
 // JA owner sees 稼働中 / 待機中 / 起動中 / 完了 — not a board-only English island.
@@ -55,12 +55,12 @@ const WORKER_LABEL_KEY: Record<WorkerActivity, MessageKey> = {
 }
 
 // ── Commander linkage vocabulary (review-column cards) ───────────────────────
-// Same three-colour rule as the worker strip: moss=working, ochre=waiting,
-// ink-faint=off. The ONE addition is accent for a conflict — the same red the
+// Same state colours as the worker strip: status-run=working, a quiet ink =
+// at its prompt, ink-faint=off. The ONE addition is accent for a conflict — the same red the
 // integrationConflict chip below already uses for "needs the owner's hands".
 const MANAGER_DOT: Record<ManagerTone, string> = {
-  working: 'bg-moss shadow-lamp-moss',
-  waiting: 'bg-ochre shadow-lamp-ochre',
+  working: 'bg-status-run shadow-lamp-run',
+  waiting: 'bg-ink-muted',
   alert: 'bg-accent',
   off: 'bg-ink-faint',
 }
@@ -90,8 +90,8 @@ const MANAGER_SPRITE_LABEL_KEY: Record<ManagerTone, MessageKey> = {
 // Presence word colour follows the PRESENCE (not the lamp tone), so a conflict
 // lamp never paints 稼働中 red — the status text carries the red instead.
 const MANAGER_PRESENCE_CLS: Record<Exclude<ManagerPresence, 'unknown'>, string> = {
-  working: 'text-moss-text',
-  quiet: 'text-[var(--beacon-waiting)]',
+  working: 'text-status-run',
+  quiet: 'text-ink-muted',
   missing: 'text-ink-faint',
 }
 // Localized via the SAME keys the Swarm tab uses (稼働中/待機中 + the review
@@ -391,11 +391,11 @@ const BoardCardInner = ({
       title={task.draft ? t('board.card.draftTitle') : undefined}
     >
       {/* Top edge — the surveyor's marking. A swarm worker on a doing card takes
-          precedence (moss scanning while its PTY produces output, steady
+          precedence (blue scanning while its PTY produces output, steady
           otherwise — synced to the worker; it disappears the moment the engine
           drops the worker). Otherwise the same claude-status band the Ground
-          cards carry: moss scanning while claude works, steady amber while it
-          waits on the human. */}
+          cards carry: blue scanning while claude works, steady yellow while it
+          waits on the owner's input. */}
       {hasWorker ? (
         <div
           className={[
@@ -412,7 +412,7 @@ const BoardCardInner = ({
           <div
             className={[
               'absolute left-0 right-0 top-0 h-[3px] overflow-hidden rounded-t-[2px]',
-              claudeStatus === 'working' ? 'bg-moss' : 'bg-ochre',
+              claudeStatus === 'working' ? 'bg-status-run' : 'bg-status-ask',
             ].join(' ')}
           >
             {claudeStatus === 'working' && (
@@ -512,9 +512,9 @@ const BoardCardInner = ({
               {!hasWorker && claudeStatus === 'working' && (
                 <span
                   title={t('board.card.sessionWorking')}
-                  className="mr-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap align-middle text-meta text-moss-text"
+                  className="mr-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap align-middle text-meta text-status-run"
                 >
-                  <span className="run-pulse h-1.5 w-1.5 rounded-full bg-moss shadow-lamp-moss" />
+                  <span className="run-pulse h-1.5 w-1.5 rounded-full bg-status-run shadow-lamp-run" />
                   {t('board.card.sessionWorkingLabel')}
                 </span>
               )}
@@ -523,9 +523,9 @@ const BoardCardInner = ({
                 // (same register as the Ground card's Waiting stamp).
                 <span
                   title={t('board.card.sessionWaiting')}
-                  className="mr-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap align-middle text-meta text-[var(--beacon-waiting)]"
+                  className="mr-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap align-middle text-meta text-status-ask"
                 >
-                  <span className="h-1.5 w-1.5 rounded-full bg-ochre shadow-lamp-ochre" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-status-ask shadow-lamp-ask" />
                   {t('board.card.sessionWaitingLabel')}
                 </span>
               )}
@@ -688,7 +688,7 @@ const BoardCardInner = ({
                 // desk because the machine cannot reach the API. Say THAT — a
                 // bare 待機中 here reads as a stalled commander, which is the
                 // misreading that sent the owner to the Swarm tab by hand.
-                <span className="shrink-0 whitespace-nowrap text-meta text-[var(--beacon-waiting)]">
+                <span className="shrink-0 whitespace-nowrap text-meta text-ink-muted">
                   {t('projectPanel.swarm.statusOfflineHold')}
                 </span>
               ) : (
@@ -730,7 +730,7 @@ const BoardCardInner = ({
                 // Full name in the tooltip — the visible label truncates on long
                 // reviewer names (260px card).
                 title={`${t('board.card.reviewedBy', { name: task.reviewedBy.trim() })} — ${t('board.card.reviewedClear')}`}
-                className="mt-1 flex max-w-full items-center gap-1 rounded-sm px-0 py-0.5 text-micro text-moss transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-moss"
+                className="mt-1 flex max-w-full items-center gap-1 rounded-sm px-0 py-0.5 text-micro text-status-done transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-status-done"
               >
                 <Check size={11} strokeWidth={2} aria-hidden className="shrink-0" />
                 <span className="min-w-0 truncate">
@@ -747,7 +747,7 @@ const BoardCardInner = ({
                   onSetReviewedBy(task.id, displayName.trim())
                 }}
                 title={t('board.card.markReviewedTitle')}
-                className="mt-1 whitespace-nowrap rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-moss hover:text-moss active:border-moss active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
+                className="mt-1 whitespace-nowrap rounded-sm border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-status-done hover:text-status-done active:border-status-done active:text-status-done focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-muted"
               >
                 {t('board.card.markReviewed')}
               </button>
@@ -769,7 +769,7 @@ const BoardCardInner = ({
             </div>
           )}
           {/* Merged detection (B018/F065) — the branch this review card carries
-              already landed in the target branch: a small moss chip + an EXPLICIT
+              already landed in the target branch: a small green (status-done) chip + an EXPLICIT
               "→ Done" button. Deliberately never automatic (F050) — the user
               clicks, the card moves, the reviewedBy stamp survives (moveCard
               keeps it for the done column). */}
@@ -777,7 +777,7 @@ const BoardCardInner = ({
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 gap-y-1">
               <span
                 title={t('board.card.mergedTitle')}
-                className="shrink-0 rounded-sm border border-moss/40 bg-moss/10 px-1.5 py-0.5 text-micro leading-none text-moss"
+                className="shrink-0 rounded-sm border border-status-done/40 bg-status-done/10 px-1.5 py-0.5 text-micro leading-none text-status-done"
               >
                 {t('board.card.merged')}
               </span>
@@ -795,7 +795,7 @@ const BoardCardInner = ({
                   if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
                 }}
                 title={t('board.card.mergedToDoneTitle')}
-                className="min-w-0 truncate rounded-sm px-1 py-0.5 text-micro text-ink-muted transition-colors hover:bg-plane hover:text-moss active:bg-plane active:text-moss focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+                className="min-w-0 truncate rounded-sm px-1 py-0.5 text-micro text-ink-muted transition-colors hover:bg-plane hover:text-status-done active:bg-plane active:text-status-done focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
               >
                 {t('board.card.mergedToDone')}
               </button>

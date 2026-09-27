@@ -13,7 +13,7 @@
 // See docs/SDK_WORKER_MIGRATION_PLAN.md §3.6.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Square, SendHorizontal, Power, Trash2, AlertTriangle, RotateCcw, X, Wrench, ChevronDown, ChevronRight } from 'lucide-react'
+import { Square, SendHorizontal, Power, Trash2, AlertTriangle, Hand, RotateCcw, X, Wrench, ChevronDown, ChevronRight } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { holdStream, useStreamOwner } from '@/lib/streamBudget'
 import type { SpriteState } from '@/lib/swarm/sprites'
@@ -145,8 +145,8 @@ interface Props {
 
 // The worker's figure per session state (sprites.ts). `exited`/`failed` draw
 // NO figure — nobody is there any more — and the nameplate shows a grey dot.
-// 'quota-parked' is the waiting lamp: to the owner it is a worker waiting on
-// something it cannot supply itself.
+// 'quota-parked' draws the resting figure: the worker waits on a quota it
+// cannot supply itself — a machine matter, not a question for the owner.
 const SDK_SPRITE: Record<SdkSessionStatus, SpriteState | null> = {
   starting: 'starting',
   working: 'working',
@@ -515,8 +515,8 @@ export const SdkWorkerPane = ({
   // An open question outranks every other state (spriteStateFor's rule) —
   // it is the one state that is a claim on the owner.
   const sprite = SDK_SPRITE[status] && openQuestion ? 'asking' : SDK_SPRITE[status]
-  const statusLabel =
-    openQuestion && status === 'waiting' ? t('projectPanel.swarm.sdk.statusQuestion') : baseStatusLabel
+  const showsQuestion = Boolean(openQuestion) && status === 'waiting'
+  const statusLabel = showsQuestion ? t('projectPanel.swarm.sdk.statusQuestion') : baseStatusLabel
 
   return (
     // PAPER, not a counterfeit terminal. The rows below already speak the paper
@@ -530,7 +530,7 @@ export const SdkWorkerPane = ({
         role="worker"
         sprite={sprite}
         statusLabel={statusLabel}
-        waiting={status === 'waiting' || status === 'quota-parked'}
+        tone={showsQuestion ? 'ask' : status === 'working' ? 'run' : undefined}
         detail={taskTitle || branch}
         detailTitle={taskTitle ? `${taskTitle} — ${branch}` : branch}
       >
@@ -585,12 +585,12 @@ export const SdkWorkerPane = ({
         // role="status": it matters to a screen reader exactly as much.
         <div
           role="status"
-          className="shrink-0 border-b border-ochre/40 bg-ochre/10 px-2.5 py-2"
+          className="shrink-0 border-b border-status-ask/40 bg-status-ask/10 px-2.5 py-2"
         >
           <div className="flex items-start gap-1.5">
-            <AlertTriangle size={13} strokeWidth={2.25} className="mt-0.5 shrink-0 text-ochre" aria-hidden />
+            <Hand size={13} strokeWidth={2.25} className="mt-0.5 shrink-0 text-status-ask" aria-hidden />
             <div className="min-w-0 flex-1">
-              <div className="text-meta font-medium text-ochre">
+              <div className="text-meta font-medium text-status-ask">
                 {t('projectPanel.swarm.sdk.questionBanner')}
               </div>
               <div className="mt-0.5 line-clamp-3 text-ui leading-snug text-ink" title={openQuestion}>

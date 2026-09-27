@@ -38,14 +38,19 @@ export const SPRITE_COLORS: Record<
 > = {
   // og-line-strong — alive but not yet doing anything
   starting: { body: '#6B5A48', shade: '#4A3D31', light: '#8A7660' },
-  // og-moss — the running lamp, same green the rest of the app uses for "going"
-  working: { body: '#9DB36B', shade: '#71834C', light: '#D6E0BE' },
-  // og-ochre — the waiting lamp
-  waiting: { body: '#DDAE58', shade: '#A67F3B', light: '#F0DCB4' },
-  // og-accent — reserved for the one state that is a claim on the owner
-  asking: { body: '#F29580', shade: '#B96A58', light: '#FBD3C8' },
-  // fades out; drawn in the starting palette because it is leaving, not working
-  done: { body: '#6B5A48', shade: '#4A3D31', light: '#8A7660' },
+  // THE STATE VOCABULARY (owner 2026-09-27: 完了=緑 / 動作中=青 / 指示待ち=黄).
+  // Bodies are the NIGHT values of the status-* tokens in globals.css (pinned by
+  // sprites.test.ts) — mid-tones, so one figure reads on paper and at night.
+  // status-run — moving
+  working: { body: '#86B6EE', shade: '#5B87BD', light: '#D2E4F8' },
+  // at its prompt with nothing asked of the owner — a quiet resting grey, NOT
+  // yellow: yellow is the owner's-answer colour, and a seat idling is not a
+  // question (the same rule the Ground lamp follows — an idle desk lights nothing)
+  waiting: { body: '#A39584', shade: '#766A5C', light: '#CFC6BA' },
+  // status-ask — the one state that is a claim on the owner
+  asking: { body: '#E8C14A', shade: '#A88A2C', light: '#F5E2A4' },
+  // status-done — finished; it sets its work down and fades out
+  done: { body: '#86CC8E', shade: '#5C9763', light: '#D0ECD3' },
 }
 
 /** The eye. Never takes the state colour — a figure whose eyes turn green stops

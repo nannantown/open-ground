@@ -3405,7 +3405,7 @@ const ViewTabs = ({
               <span
                 title={t('projectPanel.reviewWaitingTitle')}
                 className={[
-                  'shrink-0 rounded-full border border-ochre/60 px-1.5 text-plate font-medium leading-[14px] text-[var(--beacon-waiting)]',
+                  'shrink-0 rounded-full border border-status-done/60 px-1.5 text-plate font-medium leading-[14px] text-status-done',
                 ].join(' ')}
               >
                 {badges![m.id]}

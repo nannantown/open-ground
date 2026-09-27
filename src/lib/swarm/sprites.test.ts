@@ -86,6 +86,21 @@ describe('the state palette', () => {
     }
   })
 
+  it('draws running / question / done in the status-* colours (globals.css, night values)', () => {
+    // One vocabulary app-wide (owner 2026-09-27): the figure's body must be the
+    // same blue / yellow / green the Ground lamp and the seat words use.
+    const css = readFileSync(path.join(process.cwd(), 'src/app/globals.css'), 'utf8')
+    const dark = css.slice(css.indexOf("html[data-theme='dark'] {"))
+    const hex = (tok: string) => {
+      const m = dark.match(new RegExp(`--og-${tok}:\\s*(\\d+)\\s+(\\d+)\\s+(\\d+)`))
+      expect(m, tok).toBeTruthy()
+      return '#' + m!.slice(1, 4).map((n) => Number(n).toString(16).padStart(2, '0')).join('').toUpperCase()
+    }
+    expect(SPRITE_COLORS.working.body.toUpperCase()).toBe(hex('status-run'))
+    expect(SPRITE_COLORS.asking.body.toUpperCase()).toBe(hex('status-ask'))
+    expect(SPRITE_COLORS.done.body.toUpperCase()).toBe(hex('status-done'))
+  })
+
   it('gives each ATTENTION level a distinct colour', () => {
     // working / waiting / asking must never share a body colour — they are the
     // three the owner reads at a glance to decide whether to look.

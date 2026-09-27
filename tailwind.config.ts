@@ -125,6 +125,14 @@ const config: Config = {
           deep: 'rgb(var(--og-ochre-deep) / <alpha-value>)',
           deeper: 'rgb(var(--og-ochre-deeper) / <alpha-value>)',
         },
+        // THE STATE VOCABULARY (owner 2026-09-27): 完了=緑 / 動作中=青 / 指示待ち=黄.
+        // One token per state, text-grade in both palettes, so the same class
+        // colours a lamp, an icon and a status word. Values live in globals.css.
+        status: {
+          run: 'rgb(var(--og-status-run) / <alpha-value>)',
+          done: 'rgb(var(--og-status-done) / <alpha-value>)',
+          ask: 'rgb(var(--og-status-ask) / <alpha-value>)',
+        },
         // Shared/invited semantic accent — a folder-less collab project shared
         // WITH the user wears this (and only this) so it reads at a glance as
         // shared, distinct from the user's own (local) cards.
@@ -146,8 +154,9 @@ const config: Config = {
       boxShadow: {
         /** The instrument lamps GLOW. Without this they are just dots, and the
          *  whole 計器盤 reading of the board goes with them. */
-        'lamp-moss': '0 0 7px rgb(var(--og-moss) / 0.55)',
-        'lamp-ochre': '0 0 7px rgb(var(--og-ochre) / 0.55)',
+        'lamp-run': '0 0 7px rgb(var(--og-status-run) / 0.55)',
+        'lamp-done': '0 0 7px rgb(var(--og-status-done) / 0.55)',
+        'lamp-ask': '0 0 7px rgb(var(--og-status-ask) / 0.55)',
         card: '0 1px 0 rgb(var(--og-shadow) / 0.04), 0 1px 2px rgb(var(--og-shadow) / 0.06)',
         'card-hover': '0 1px 0 rgb(var(--og-shadow) / 0.06), 0 6px 14px rgb(var(--og-shadow) / 0.08)',
         'card-active': '0 1px 0 rgb(var(--og-accent) / 0.20), 0 8px 24px rgb(var(--og-accent) / 0.18)',

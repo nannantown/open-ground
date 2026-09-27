@@ -301,8 +301,10 @@ export interface RailSeat {
   detail?: string
   /** The nameplate's figure; null (nobody there) draws the figure faded. */
   sprite: SpriteState | null
-  /** The nameplate says working — the icon moves and the lamp glows. */
+  /** The nameplate says working — the icon moves and the lamp glows blue. */
   lit: boolean
+  /** An open question only the owner can answer — a steady yellow lamp. */
+  asking?: boolean
 }
 
 /** The folded seats, as a column of character icons. Nothing folded ⇒ nothing. */
@@ -331,7 +333,7 @@ export const SwarmSeatRail = ({ seats, onOpen }: { seats: readonly RailSeat[]; o
             className="group flex w-full shrink-0 cursor-pointer flex-col items-center gap-0.5 rounded-[3px] px-0.5 pb-1 pt-1.5 text-ink-muted transition-colors duration-150 hover:bg-plane hover:text-ink active:bg-ink/10 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
           >
             <span className="relative inline-flex">
-              <span aria-hidden className={`inline-flex transition-opacity duration-150 ${s.lit ? '' : 'opacity-40 group-hover:opacity-70'}`}>
+              <span aria-hidden className={`inline-flex transition-opacity duration-150 ${s.lit || s.asking ? '' : 'opacity-40 group-hover:opacity-70'}`}>
                 <SwarmSprite
                   role={s.role}
                   state={s.sprite ?? 'starting'}
@@ -340,12 +342,19 @@ export const SwarmSeatRail = ({ seats, onOpen }: { seats: readonly RailSeat[]; o
                   label={tip}
                 />
               </span>
-              {/* The corner lamp — only on a working seat. run-pulse holds
-                  still under reduced motion. */}
+              {/* The corner lamp, in the state colours (owner 2026-09-27): blue
+                  pulsing on a working seat (run-pulse holds still under reduced
+                  motion), steady yellow on a seat with a question for the owner. */}
               {s.lit ? (
                 <span
                   aria-hidden
-                  className="run-pulse absolute right-0 top-0 h-2 w-2 rounded-full bg-moss ring-2 ring-bg"
+                  className="run-pulse absolute right-0 top-0 h-2 w-2 rounded-full bg-status-run ring-2 ring-bg"
+                />
+              ) : s.asking ? (
+                <span
+                  aria-hidden
+                  data-rail-asking
+                  className="absolute right-0 top-0 h-2 w-2 rounded-full bg-status-ask ring-2 ring-bg"
                 />
               ) : null}
             </span>

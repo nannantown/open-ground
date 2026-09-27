@@ -444,8 +444,8 @@ export function useInspectTweak({
 
   const badge = selected ? (
     <div className="absolute right-2 top-2 z-10 flex items-center gap-1.5">
-      {/* The mode flip (selected = live) needs a visible signal — the moss
-          dot mirrors the Ground card's Working beacon register. */}
+      {/* The mode flip (selected = live) needs a visible signal — a moss
+          dot. A mode, not one of the three work states (status-*). */}
       <span className="pointer-events-none flex items-center gap-1.5 rounded-full border border-line bg-bg-card/95 px-2.5 py-1 text-micro font-medium text-moss shadow-card">
         <span className="h-[5px] w-[5px] rounded-full bg-moss" />
         {t('canvasEl.iframe.interactive')}

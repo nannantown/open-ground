@@ -33,7 +33,7 @@ export const SwarmSeatHeader = ({
   role,
   sprite,
   statusLabel,
-  waiting = false,
+  tone,
   detail,
   detailTitle,
   children,
@@ -43,8 +43,10 @@ export const SwarmSeatHeader = ({
    *  then shows a plain grey dot instead of a dimmed animal (sprites.ts). */
   sprite: SpriteState | null
   statusLabel: string
-  /** Colour the status word as the waiting lamp (needs the owner / parked). */
-  waiting?: boolean
+  /** Colour the status word in the state's colour (owner 2026-09-27): 'run' =
+   *  blue (moving), 'ask' = yellow (a question only the owner can answer).
+   *  Absent = a quiet grey — a seat idling at its prompt asks nothing. */
+  tone?: 'run' | 'ask'
   /** What this seat is doing — a worker's task title. */
   detail?: string
   detailTitle?: string
@@ -104,7 +106,7 @@ export const SwarmSeatHeader = ({
           span: it cost two gaps, which is what clipped the manager's only
           button in its narrow seat. */}
       <span
-        className={`label-cap min-w-0 truncate ${detail ? 'shrink-0' : 'flex-1'} ${waiting ? 'text-[var(--beacon-waiting)]' : 'text-ink-faint'}`}
+        className={`label-cap min-w-0 truncate ${detail ? 'shrink-0' : 'flex-1'} ${tone === 'run' ? 'text-status-run' : tone === 'ask' ? 'text-status-ask' : 'text-ink-faint'}`}
         title={detail ? undefined : detailTitle}
       >
         {statusLabel}

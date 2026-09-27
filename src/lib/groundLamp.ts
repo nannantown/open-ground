@@ -13,8 +13,8 @@
 // or parked work is the MACHINE's problem first: the engine reclaims dead
 // workers on its own, and the moment it genuinely needs the owner it raises an
 // escalation — which lands in the question inbox and lights WAITING (since
-// 2026-09-26: 'question') through the one branch that survives. So amber now
-// means exactly one thing: there is a question only you can answer.
+// 2026-09-26: 'question') through the one branch that survives. So amber (yellow
+// since 2026-09-27) now means exactly one thing: there is a question only you can answer.
 //
 // WHY IT MOVED OFF PROCESS LIVENESS. The old lamp asked "is a `claude` alive in
 // this project?", and every project running a swarm has a commander and a
@@ -25,22 +25,24 @@
 //
 // QUESTION vs REVIEW — 2026-09-26, owner: 「ただ終わって僕が確認待ちなのか、質問が
 // あって僕が答えないといけないのかっていうのがわかるようにしたい」. The old amber
-// 'waiting' became 'question' (drawn as a raised hand, never an emoji):
+// 'waiting' became 'question' (drawn as a raised hand in the question colour —
+// yellow, status-ask — never an emoji):
 //   question — an open escalation only the owner can answer (stays until it is
 //              answered), OR the president's latest reply TO THE OWNER'S OWN
 //              WORDS closed on a question, the owner has not spoken since, and
 //              has not opened its seat since. App notices typed into the desk
 //              (【エンジンからの知らせ】 / 【司令官からの返事】) and the president's
 //              retelling of them neither raise nor clear it: the retelling of a
-//              delivery ends 「これで OK ですか?」 (that must be the eye, not the
+//              delivery ends 「これで OK ですか?」 (that must be the check, not the
 //              hand), while a re-ask 「…まだお返事を待っています。進めてよいですか？」
 //              must not erase the real question. Rule + real-transcript
 //              measurements: stepPresidentAsk in src/lib/server/groundMarks.ts.
 //   review   — work landed on main (the engine's landed ledger) after the owner
-//              last opened the president's seat (drawn as an eye). Just look.
+//              last opened the president's seat (drawn as a green check —
+//              an eye until 2026-09-27, when the owner found it odd). Just look.
 // The president's hand clears when the owner opens the agent-team bar (the
 // president's seat — POST /api/ground/seen stamps seenAt); an open escalation
-// clears only by answering it. The EYE clears when the owner merely OPENS THE
+// clears only by answering it. The CHECK clears when the owner merely OPENS THE
 // PROJECT (2026-09-26, 「プロジェクトの中に入ったら、既読みたいな感じ」 — POST
 // /api/ground/opened stamps openedAt; there is no button to press). Opening the
 // project never clears a hand. With no stamp on record there is no baseline,
@@ -117,7 +119,7 @@ export interface GroundLampInput {
   deliveredAt?: number
   /** Epoch ms the owner last opened this project's president seat. */
   seenAt?: number
-  /** Epoch ms the owner last had this PROJECT open (any tab). Clears the eye
+  /** Epoch ms the owner last had this PROJECT open (any tab). Clears the check
    *  only — never a hand. */
   openedAt?: number
 }

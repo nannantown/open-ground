@@ -93,7 +93,7 @@ export const SwarmWorkerPane = ({
         role="worker"
         sprite={BEACON_SPRITE[status]}
         statusLabel={statusLabel}
-        waiting={status === 'waiting'}
+        tone={status === 'working' ? 'run' : undefined}
         detail={taskTitle || branch}
         detailTitle={taskTitle ? `${taskTitle} — ${branch}` : branch}
       >

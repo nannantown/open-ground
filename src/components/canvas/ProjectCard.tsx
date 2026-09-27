@@ -1,5 +1,5 @@
 import {
-  Eye,
+  CircleCheck,
   GitBranch,
   FolderClosed,
   Hand,
@@ -16,10 +16,12 @@ interface Props {
   onPointerDown?: (e: React.PointerEvent) => void
   selected?: boolean
   active?: boolean
-  /** What this project's WORK is doing: 'working' → moss "Running" edge bar +
-   *  stamp, 'question' → amber edge bar + a raised-hand icon (a question only
-   *  you can answer), 'review' → an eye icon alone (delivered, just look) —
-   *  icons with hover text only, never a label or an emoji (2026-09-26).
+  /** What this project's WORK is doing, in the app's three state colours
+   *  (owner 2026-09-27: 完了=緑 / 動作中=青 / 指示待ち=黄): 'working' → a blue
+   *  edge bar + pulsing dot, 'question' → a yellow edge bar + a raised hand (a
+   *  question only you can answer), 'review' → a green edge bar + a check
+   *  (delivered, just look) — icons with hover text only, never a label or an
+   *  emoji (2026-09-26).
    *  null/undefined → NOTHING AT ALL, which is the answer for a project whose
    *  cards are all done or merely queued — 「作業が終わってて何も出さない時に user は
    *  見にいくんですよ」.
@@ -53,9 +55,9 @@ const coordFromId = (id: string) => {
 
 // One project on the Ground: name + description. The card carries the
 // runner-era surveyor's marking, decided by src/lib/groundLamp.ts — a coloured
-// band along the top edge plus a mark on the right margin: moss "Running"
-// (scanning) while work runs, an amber band + raised hand when a question only
-// the owner can answer is waiting, an eye alone when work was delivered since
+// band along the top edge plus a mark on the right margin: blue (scanning, a
+// pulsing dot) while work runs, yellow + a raised hand when a question only the
+// owner can answer is waiting, green + a check when work was delivered since
 // the owner last looked.
 //
 // A folder-less collab project shared WITH the user (shared=true) renders
@@ -113,16 +115,14 @@ export const ProjectCard = memo(({
           className="jump-flash pointer-events-none absolute -inset-[6px] rounded-[5px] border-2 border-accent"
         />
       )}
-      {/* lamp edge — a surveyor's marking along the card's top. Drawn ONLY for
-          the two states that are about the work (running / a question for you;
-          'review' is "just look", so it gets the eye alone); 'unknown' gets the stamp below
-          and no band, because a coloured band reads as an alarm and "we could
-          not read your board" is not one. */}
-      {(lamp === 'working' || lamp === 'question') && (
+      {/* lamp edge — a surveyor's marking along the card's top, in the state's
+          colour. 'unknown' gets the stamp below and no band, because a coloured
+          band reads as a state and "we could not read your board" is not one. */}
+      {(lamp === 'working' || lamp === 'question' || lamp === 'review') && (
         <div
           className={[
             'absolute left-0 right-0 top-0 h-[3px] overflow-hidden rounded-t-[2px]',
-            lamp === 'working' ? 'bg-moss' : 'bg-ochre',
+            lamp === 'working' ? 'bg-status-run' : lamp === 'question' ? 'bg-status-ask' : 'bg-status-done',
           ].join(' ')}
         >
           {lamp === 'working' && (
@@ -145,16 +145,16 @@ export const ProjectCard = memo(({
 
       {/* claude-status stamp, mirroring the coord label on the right margin */}
       {lamp === 'working' && (
-        // The project's work is not finished (groundLamp.ts) — a pulsing moss
+        // The project's work is not finished (groundLamp.ts) — a pulsing blue
         // dot, no label (owner 2026-09-26: one mark, no words; the words live in
-        // the hover text), matching the moss band along the top edge.
+        // the hover text), matching the blue band along the top edge.
         <div
           role="img"
           title={t('projectPanel.groundMarkWorking')}
           aria-label={t('projectPanel.groundMarkWorking')}
           className="absolute -top-[5px] right-3 flex h-[10px] items-center bg-bg-card px-1.5"
         >
-          <span className="run-pulse h-[7px] w-[7px] rounded-full bg-moss" />
+          <span className="run-pulse h-[7px] w-[7px] rounded-full bg-status-run" />
         </div>
       )}
       {lamp === 'unknown' && (
@@ -175,27 +175,27 @@ export const ProjectCard = memo(({
       {lamp === 'question' && (
         // A question only you can answer (2026-09-26) — a raised hand, no label
         // (owner: minimal, never explanatory, never an emoji; the words live in
-        // the hover text). Amber in the darkened var (≥4.5:1 on the card), steady:
+        // the hover text). Yellow (status-ask, ≥4.5:1 on the card), steady:
         // pulsing means activity.
         <div
           role="img"
           title={t('projectPanel.groundMarkQuestion')}
           aria-label={t('projectPanel.groundMarkQuestion')}
-          className="absolute -top-[8px] right-3 flex items-center bg-bg-card px-1 text-[var(--beacon-waiting)]"
+          className="absolute -top-[8px] right-3 flex items-center bg-bg-card px-1 text-status-ask"
         >
           <Hand size={14} strokeWidth={2} aria-hidden />
         </div>
       )}
       {lamp === 'review' && (
-        // Delivered while you were away — just look. An eye in plain ink: it
-        // asks for a glance, not an answer, so it takes no attention colour.
+        // Delivered while you were away — just look. A green check (owner
+        // 2026-09-27: the eye read oddly; 完了 is the familiar green tick), steady.
         <div
           role="img"
           title={t('projectPanel.groundMarkReview')}
           aria-label={t('projectPanel.groundMarkReview')}
-          className="absolute -top-[8px] right-3 flex items-center bg-bg-card px-1 text-ink"
+          className="absolute -top-[8px] right-3 flex items-center bg-bg-card px-1 text-status-done"
         >
-          <Eye size={14} strokeWidth={2} aria-hidden />
+          <CircleCheck size={14} strokeWidth={2} aria-hidden />
         </div>
       )}
 

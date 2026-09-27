@@ -44,7 +44,7 @@ export const workerSeatLook = (status: WorkerStatus, question: string | null) =>
     live,
     sprite: asking ? ('asking' as const) : BEACON_SPRITE[status],
     labelKey: asking ? ('projectPanel.swarm.sdk.statusQuestion' as const) : STATUS_LABEL[status],
-    waiting: asking || status === 'waiting',
+    tone: asking ? ('ask' as const) : status === 'working' ? ('run' as const) : undefined,
     lit: !asking && status === 'working',
   }
 }
@@ -97,7 +97,7 @@ export const SwarmWorkerSeat = ({
         role="worker"
         sprite={look.sprite}
         statusLabel={statusLabel}
-        waiting={look.waiting}
+        tone={look.tone}
         detailTitle={taskTitle ? `${taskTitle} — ${branch}` : branch}
       >
         {onTerminate ? (
@@ -133,8 +133,8 @@ export const SwarmWorkerSeat = ({
           {job}
         </p>
         {asking ? (
-          <div role="status" className="rounded-[3px] border border-ochre/40 bg-ochre/10 px-2.5 py-2">
-            <div className="text-meta font-medium text-ochre">
+          <div role="status" className="rounded-[3px] border border-status-ask/40 bg-status-ask/10 px-2.5 py-2">
+            <div className="text-meta font-medium text-status-ask">
               {t('projectPanel.swarm.sdk.questionBanner')}
             </div>
             <div className="mt-0.5 line-clamp-4 text-ui leading-snug text-ink" title={question ?? undefined}>

@@ -427,6 +427,8 @@ describe('folded seats sit on the icon rail', () => {
       act(() => (openSeat(sdkWorker.worktree)!.querySelector('[data-seat-fold]') as HTMLButtonElement).click())
       const icon = railSeat(sdkWorker.worktree)!
       expect(icon.getAttribute('aria-label')).toContain('projectPanel.swarm.sdk.statusQuestion')
+      // The asking seat's corner lamp is the question colour (2026-09-27).
+      expect(icon.querySelector('[data-rail-asking]')?.className).toContain('bg-status-ask')
       expect(icon.getAttribute('aria-label')).toContain('"name":"' + workerName.replace(/"/g, '\\"'))
       act(() => icon.click())
       const seat = openSeat(sdkWorker.worktree)!
