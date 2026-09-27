@@ -150,7 +150,7 @@ test.describe('Click-to-place a new Ground card', () => {
       .toBe('-100,-80')
   })
 
-  test('⌘K after placing opens the placed card (quiet selection ends)', async ({ request, page }) => {
+  test('⌘K after placing finds the card, then a second Enter opens it', async ({ request, page }) => {
     const dir = await realpath(await mkdtemp(join(tmpdir(), 'og-e2e-jump-')))
     await boot(page, dir)
     await openAddMenu(page)
@@ -161,7 +161,10 @@ test.describe('Click-to-place a new Ground card', () => {
     await expect(boardTab).toHaveCount(0)
 
     await page.keyboard.press('ControlOrMeta+k')
-    await page.getByPlaceholder('Jump to project…').fill(dir.split('/').pop()!)
+    await page.getByRole('dialog', { name: 'Find a project', exact: true }).getByRole('textbox').fill(dir.split('/').pop()!)
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('dialog', { name: 'Find a project', exact: true })).toBeHidden()
+    await expect(boardTab).toHaveCount(0)
     await page.keyboard.press('Enter')
     await expect(boardTab.first()).toBeVisible()
     void request
@@ -244,7 +247,7 @@ test.describe('Click-to-place a new Ground card', () => {
     await expect(hint).toBeVisible()
 
     await page.keyboard.press('ControlOrMeta+k')
-    const search = page.getByPlaceholder('Jump to project…')
+    const search = page.getByRole('dialog', { name: 'Find a project', exact: true }).getByRole('textbox')
     await expect(search).toBeFocused() // the palette takes focus a frame after opening
     await page.keyboard.press('Escape')
     await expect(search).toBeHidden()
