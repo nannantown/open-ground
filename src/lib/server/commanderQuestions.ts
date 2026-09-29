@@ -33,6 +33,7 @@ import {
   listEscalations,
   markCommanderTold,
   raiseEscalationToOwner,
+  redeliverAnswerToCommander,
 } from './swarmEscalations'
 import { relayToCommander } from './commanderRelay'
 import type { Escalation } from '../types'
@@ -77,6 +78,9 @@ export interface CommanderQuestionDeps {
   tell: (projectPath: string, text: string) => Promise<boolean>
   markTold: (id: string, atIso: string) => Promise<void>
   raise: (id: string) => Promise<unknown>
+  /** Answers to the commander's OWN questions not yet accepted by its desk. */
+  listOwed: (projectPath: string) => Promise<Escalation[]>
+  redeliver: (id: string) => Promise<boolean>
   windowMs: number
 }
 
@@ -91,12 +95,17 @@ const defaultDeps: CommanderQuestionDeps = {
   // swarmEscalations → swarmOrchestrator, so a binding read at init may be unset.
   markTold: (id, at) => markCommanderTold(id, at),
   raise: (id) => raiseEscalationToOwner(id),
+  listOwed: async (projectPath) =>
+    (await listEscalations({ projectPath, status: 'answered' })).filter((e) => e.commanderAnswerOwed),
+  redeliver: (id) => redeliverAnswerToCommander(id),
   windowMs: COMMANDER_ANSWER_WINDOW_MS,
 }
 
 export interface CommanderSweepOutcome {
   told: string[]
   raised: string[]
+  /** Answers to the commander's own questions re-sent and accepted this pass. */
+  answered: string[]
 }
 
 /**
@@ -108,7 +117,22 @@ export const sweepCommanderQuestions = async (
   partial: Partial<CommanderQuestionDeps> = {},
 ): Promise<CommanderSweepOutcome> => {
   const deps = { ...defaultDeps, ...partial }
-  const out: CommanderSweepOutcome = { told: [], raised: [] }
+  const out: CommanderSweepOutcome = { told: [], raised: [], answered: [] }
+  // The other direction first: the OWNER answered a question the commander
+  // raised, and the desk has not accepted it yet (busy, or none could be woken
+  // when the answer came). Re-sent every sweep until it lands — the commander
+  // is stopped on it.
+  try {
+    for (const e of await deps.listOwed(projectPath)) {
+      try {
+        if (await deps.redeliver(e.id)) out.answered.push(e.id)
+      } catch {
+        /* next sweep retries */
+      }
+    }
+  } catch {
+    /* next sweep retries */
+  }
   let open: Escalation[]
   try {
     open = (await deps.listOpen(projectPath)).filter((e) => e.routedTo === 'commander')
@@ -163,14 +187,22 @@ export const kickCommanderQuestionSweep = (projectPath: string, now = Date.now()
     })
 }
 
+/** Projects with something for the commander: a question held in its lane, or
+ *  an answer to its own question its desk has not taken yet. */
+export const projectsNeedingCommanderSweep = async (): Promise<string[]> => {
+  const open = await listEscalations({ status: 'open' })
+  const owed = (await listEscalations({ status: 'answered' })).filter((e) => e.commanderAnswerOwed)
+  return Array.from(
+    new Set([...open.filter((e) => e.routedTo === 'commander'), ...owed].map((e) => e.projectPath)),
+  )
+}
+
 /** The boot-wide backstop, riding the supply desk loop (60s, runs whether or
  *  not any engine does): a question left in the commander lane when its engine
  *  stopped must still reach the commander or, past the window, the owner. */
 export const kickAllCommanderQuestionSweeps = async (now = Date.now()): Promise<void> => {
   try {
-    const open = await listEscalations({ status: 'open' })
-    const projects = new Set(open.filter((e) => e.routedTo === 'commander').map((e) => e.projectPath))
-    for (const p of Array.from(projects)) kickCommanderQuestionSweep(p, now)
+    for (const p of await projectsNeedingCommanderSweep()) kickCommanderQuestionSweep(p, now)
   } catch {
     /* next loop retries */
   }

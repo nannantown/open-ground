@@ -1206,7 +1206,50 @@ export interface AnswerEscalationDeps {
   canPushInto?: (sdkSessionId: string, projectPath: string) => Promise<boolean>
   /** DI for tests: the SDK delivery (default `pushSdkInput`). */
   push?: (sdkSessionId: string, text: string) => boolean
+  /** DI for tests: say one line to the project's commander desk (waking one if
+   *  none stands; true only when the desk accepted it (default: the same relay
+   *  as `manager/say` — without waking on the answer request, waking on retry). */
+  tellCommander?: (projectPath: string, text: string) => Promise<boolean>
   now?: () => Date
+}
+
+/** A question the commander raised ITSELF: the skill keys every such raise
+ *  `commander:<reason>:…` (the rework route does too), and it carries no worker
+ *  address. Nobody but the commander is waiting on its answer. */
+export const isCommanderRaised = (e: Escalation): boolean =>
+  e.receiptKey.startsWith('commander:') && !e.terminalId && !e.sdkSessionId
+
+/** The ONE line the commander desk receives for an answer to its own question.
+ *  One line on purpose: a multi-line say leaves its tail in the composer and
+ *  wedges the desk (measured 2026-08-02). Pure. */
+export const commanderAnswerLine = (e: Escalation): string => {
+  const flat = (s: string, n: number) => {
+    const t = s.replace(/\s+/g, ' ').trim()
+    return t.length > n ? `${t.slice(0, n)}…` : t
+  }
+  const asked = e.plainQuestion
+    ? `オーナーに見せた質問「${flat(e.plainQuestion, 500)}」`
+    : `質問「${flat(e.question, 500)}」`
+  return (
+    `【あなたの質問への回答】あなた(司令官)が上げた質問(id=${e.id}, receiptKey=${e.receiptKey})に` +
+    `オーナーが答えました。${asked} → オーナーの回答「${flat(e.answer ?? '', 800)}」。` +
+    `待たずに、この回答どおりに今すぐ進めてください(質問の時点から状況が変わっていたら、今の状況で判断してください)。`
+  )
+}
+
+/** `wake:false` on the answer request itself: waking a commander takes tens of
+ *  seconds (up to the spawn lock's 120s), and the owner's answer POST must not
+ *  hang on it — the sweep wakes one instead ({@link redeliverAnswerToCommander}). */
+const relayTell = (wake: boolean) => async (projectPath: string, text: string): Promise<boolean> => {
+  try {
+    // Lazy: commanderRelay → swarmManager reaches back into modules that import
+    // this one; a static import would be a cycle.
+    const { relayToCommander } = await import('./commanderRelay')
+    const r = await relayToCommander(projectPath, text, { wake })
+    return r.ok && r.delivered
+  } catch {
+    return false
+  }
 }
 
 /** The delivery leg, shared by the first answer and a re-delivery retry:
@@ -1261,6 +1304,7 @@ const deliverAnswer = async (
     record.injectedAt = (deps?.now?.() ?? new Date()).toISOString()
     return 'injected'
   }
+  let queued = false
   if (record.taskId) {
     // Worker gone (or not injectable) → ride the learning-loop slot so the
     // NEXT dispatch of this card carries the owner's decision
@@ -1311,9 +1355,24 @@ const deliverAnswer = async (
       // reads; the choice is read from the answer alone.
       { workerAddressed, answer },
     )
-    return 'queued'
+    queued = true
   }
-  return 'skipped'
+  // A question the COMMANDER raised itself has no worker to inject into, so the
+  // lanes above could only ever end in 'queued' (the card's next dispatch) or
+  // 'skipped' — while the commander, the one actually waiting, heard nothing and
+  // sat 「答えを待ちます」 for 4h20m (2026-09-29). Tell its desk, the same way
+  // manager/say does. Not accepted ⇒ the record stays 'answered' (never reported
+  // as delivered) and the commander sweep re-sends it.
+  if (
+    isCommanderRaised(record) &&
+    record.answeredBy !== 'commander' &&
+    (await (deps?.tellCommander ?? relayTell(false))(record.projectPath, commanderAnswerLine(record)))
+  ) {
+    record.status = 'injected'
+    record.injectedAt = (deps?.now?.() ?? new Date()).toISOString()
+    return 'injected'
+  }
+  return queued ? 'queued' : 'skipped'
 }
 
 /**
@@ -1373,6 +1432,7 @@ export const answerEscalation = async (
     record.answer = text
     record.answeredAt = (deps?.now?.() ?? new Date()).toISOString()
     record.status = 'answered'
+    if (by === 'owner' && isCommanderRaised(record)) record.commanderAnswerOwed = true
     await persist(all)
     // No longer true → withdraw its undelivered line and tell the president
     // desks it is closed (supplyNotice.noticeQuestionClosed).
@@ -1431,15 +1491,67 @@ export const answerEscalation = async (
   let delivery: EscalationDelivery
   try {
     delivery = await deliverAnswer(record, deps)
+    // PHASE 3 — record the promotion, back under the chain, as a fresh
+    // read-modify-write of the ONE field (see markInjected). Inside the
+    // in-flight guard: released before the write lands, the commander sweep
+    // could still read 'answered' and send the same answer a second time.
+    if (delivery === 'injected' && record.injectedAt) {
+      await markInjected(record.id, record.injectedAt).catch(() => {})
+    }
   } finally {
     deliveringIds.delete(record.id)
   }
-  // PHASE 3 — record the promotion, back under the chain, as a fresh
-  // read-modify-write of the ONE field (see markInjected).
-  if (delivery === 'injected' && record.injectedAt) {
-    await markInjected(record.id, record.injectedAt).catch(() => {})
-  }
   return { escalation: record, delivery }
+}
+
+/** Minimum gap between two re-send attempts of one owed answer. */
+export const COMMANDER_ANSWER_RETRY_GAP_MS = 60_000
+/** How long after the answer the sweep keeps trying. */
+export const COMMANDER_ANSWER_RETRY_MAX_MS = 24 * 60 * 60 * 1000
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __openground_commander_answer_attempts: Map<string, number> | undefined
+}
+const redeliverAttempts: Map<string, number> =
+  globalThis.__openground_commander_answer_attempts ??
+  (globalThis.__openground_commander_answer_attempts = new Map())
+
+/** The commander sweep's retry for an answer still owed to the commander desk
+ *  ({@link Escalation.commanderAnswerOwed}, status 'answered'). Only the
+ *  commander leg is repeated — not the card's next-dispatch queue, nor a
+ *  declared 「見送る」 — so a retry every sweep changes nothing else. True when
+ *  the desk accepted it (the record is then 'injected'). */
+export const redeliverAnswerToCommander = async (
+  id: string,
+  deps?: Pick<AnswerEscalationDeps, 'tellCommander' | 'isPathAllowed' | 'now'>,
+): Promise<boolean> => {
+  // Claimed BEFORE the read: an answer POST in flight for the same record holds
+  // this slot until its 'injected' write has landed (answerEscalation PHASE 3).
+  if (deliveringIds.has(id)) return false
+  const now = (deps?.now?.() ?? new Date()).getTime()
+  // Bounded: at most one attempt per COMMANDER_ANSWER_RETRY_GAP_MS (a wake that
+  // keeps failing must not relaunch a commander every sweep), and none past
+  // COMMANDER_ANSWER_RETRY_MAX_MS after the answer — the row then simply stays
+  // 'answered' (honest: not delivered), and the commander's 状況 backstop reads it.
+  if (now - (redeliverAttempts.get(id) ?? 0) < COMMANDER_ANSWER_RETRY_GAP_MS) return false
+  deliveringIds.add(id)
+  try {
+    const record = (await readTolerant()).find((e) => e.id === id)
+    if (!record || record.status !== 'answered' || !record.commanderAnswerOwed) return false
+    if (!(now - Date.parse(record.answeredAt ?? '') < COMMANDER_ANSWER_RETRY_MAX_MS)) return false
+    if (!(await (deps?.isPathAllowed ?? isValidProjectPath)(record.projectPath))) return false
+    redeliverAttempts.set(id, now)
+    const told = await (deps?.tellCommander ?? relayTell(true))(
+      record.projectPath,
+      commanderAnswerLine(record),
+    )
+    if (!told) return false
+    await markInjected(id, (deps?.now?.() ?? new Date()).toISOString())
+    return true
+  } finally {
+    deliveringIds.delete(id)
+  }
 }
 
 /** What the president desks are told when this record closes. `all` = the

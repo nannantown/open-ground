@@ -1,14 +1,15 @@
 import { test, expect } from '@playwright/test'
 import { createAndImportProject } from './fixtures/helpers'
 
-// The manager's seat (card ③, 2026-09-23): a nameplate only — status + one
-// start/stop — in a narrow fixed-width seat. The seat clips its overflow, so
-// the one thing that must hold is that its buttons sit INSIDE the seat, in
-// both languages (the Japanese words are the wide ones) and both states (no desk
-// → Start, a live desk → Stop). Since 86cd5e71 the seat also carries a folded
-// "Send a word" link whose box appears only when opened. Plus: no runtime
-// selector for owner or public, and no Monitoring switch on the screen at all
-// (owner 2026-09-24 — the owner asks the president instead).
+// Drain route.fetch/fulfill callbacks before Playwright closes their context.
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: 'wait' })
+})
+
+// The manager starts as an icon on the folded-seat rail. Opening it mounts
+// the nameplate, start/stop, conversation feed (for an SDK desk), and folded
+// "Send a word" control. Pin opening/folding and unclipped controls in both
+// languages, viewport sizes, desk states, and owner/public modes.
 const WORDS = {
   en: {
     open: 'Open Agent Team',
@@ -21,6 +22,7 @@ const WORDS = {
     say: 'Send a word',
     sayBox: 'A word to the manager (usually not needed)',
     cancel: 'Cancel',
+    fold: 'Fold this seat',
   },
   ja: {
     open: 'エージェントチームをひらく',
@@ -33,6 +35,7 @@ const WORDS = {
     say: '一言送る',
     sayBox: 'マネージャーへの一言(ふだんは不要です)',
     cancel: 'やめる',
+    fold: 'この席を畳む',
   },
 } as const
 
@@ -83,35 +86,32 @@ for (const lang of ['en', 'ja'] as const) {
           // open it to reach the seats.
           await page.getByTestId('swarm-bottom-bar').getByRole('button', { name: w.open, exact: true }).click()
 
-          // Since 2026-09-25 the manager starts FOLDED into a thin strip: the
-          // strip is there, the seat's contents are not. One click opens it.
-          const strip = page.locator('[data-seat-strip="manager"]')
+          const icon = page.locator('[data-rail-seat="manager"]')
           const seat = page.locator('[data-seat="manager"]')
-          await expect(strip).toHaveCount(1)
+          await expect(icon).toBeVisible()
+          await expect(icon).toHaveAttribute('aria-expanded', 'false')
+          await expect(icon).toHaveAccessibleName(`${w.manager}${lang === 'ja' ? '・' : ' · '}${desk === 'running' ? w.running : w.absent}`)
           await expect(seat).toHaveCount(0)
-          const stripToggle = strip.locator(':scope > div > button')
-          await expect(stripToggle).toHaveAttribute('aria-expanded', 'false')
-          await stripToggle.click()
-          await expect(stripToggle).toHaveAttribute('aria-expanded', 'true')
-
-          // The manager is the SECOND seat of a sideways-scrolling row; at 390px
-          // it starts off-screen, so scroll it in first.
-          await expect(seat).toHaveCount(1)
+          await icon.click()
+          await expect(icon).toHaveCount(0)
+          await expect(seat).toBeVisible()
           await seat.scrollIntoViewIfNeeded()
+          const fold = seat.getByRole('button', { name: w.fold, exact: true })
+          await expect(fold).toHaveAttribute('aria-expanded', 'true')
+
           await expect(seat.getByText(w.manager, { exact: true })).toBeVisible()
           await expect(seat.getByText(desk === 'running' ? w.running : w.absent, { exact: true })).toBeVisible()
           const button = seat.getByRole('button', { name: desk === 'running' ? w.stop : w.start, exact: true })
           const say = seat.getByRole('button', { name: w.say, exact: true })
           await expect(button).toBeVisible()
           await expect(say).toBeVisible()
-          // The seat's only two controls — start/stop and the folded "Send a
-          // word" — and neither is clipped by the seat.
-          await expect(seat.getByRole('button')).toHaveCount(2)
+          // Fold, start/stop and "Send a word" all stay inside the seat.
+          await expect(seat.getByRole('button')).toHaveCount(3)
           const seatBox = await seat.boundingBox()
           expect(seatBox).not.toBeNull()
           expect(seatBox!.x).toBeGreaterThanOrEqual(0)
           expect(seatBox!.x + seatBox!.width).toBeLessThanOrEqual(width)
-          for (const control of [button, say]) {
+          for (const control of [fold, button, say]) {
             const box = await control.boundingBox()
             expect(box).not.toBeNull()
             expect(box!.x).toBeGreaterThanOrEqual(seatBox!.x)
@@ -131,6 +131,10 @@ for (const lang of ['en', 'ja'] as const) {
           await expect(page.getByText('Runtime (experimental · all projects)', { exact: true })).toHaveCount(0)
           await expect(page.getByRole('group', { name: 'Commander on the Agent SDK', exact: true })).toHaveCount(0)
           await page.screenshot({ path: info.outputPath('manager.png'), fullPage: true, animations: 'disabled' })
+          await fold.click()
+          await expect(seat).toHaveCount(0)
+          await expect(icon).toBeVisible()
+          await expect(icon).toHaveAttribute('aria-expanded', 'false')
         })
       }
     }

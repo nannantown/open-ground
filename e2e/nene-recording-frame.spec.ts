@@ -6,6 +6,15 @@ const ID = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
 
 test('NENE gets a real microphone-capable origin without weakening arbitrary tabs', async ({ page, request }) => {
   const project = await createAndImportProject(request, 'nene-input')
+  const projectUrl = `/api/project?path=${encodeURIComponent(project.path)}`
+  // Hold the initial read so fast fixture responses cannot hide the loading
+  // race: attaching before project data exists used to silently drop the tab.
+  let releaseProject!: () => void
+  const projectReady = new Promise<void>(resolve => { releaseProject = resolve })
+  await page.route('**/api/project?*', async route => {
+    if (route.request().method() === 'GET') await projectReady
+    await route.continue()
+  })
   await page.route('**/api/experiments', route => route.fulfill({ json: { eligible: true, flags: {}, swarmOptIn: { available: true, enabled: false } } }))
   await page.route('**/api/custom-modules', route => route.fulfill({ json: {
     role: 'owner', modules: [{ id: ID, label: 'Songs', framework: 'html', localApp: 'nene-songs', createdAt: '', updatedAt: '' }],
@@ -32,8 +41,16 @@ test('NENE gets a real microphone-capable origin without weakening arbitrary tab
     localStorage.setItem('openground.view', JSON.stringify({ projectId: id, panelTab: 'board' }))
   }, project.id)
   await page.goto('/')
-  await page.getByRole('button', { name: 'Add tab', exact: true }).click()
+  const addTab = page.getByRole('button', { name: 'Add tab', exact: true })
+  try {
+    await expect(addTab).toBeVisible()
+    await expect(addTab).toBeDisabled()
+  } finally {
+    releaseProject()
+  }
+  await addTab.click()
   await page.getByRole('dialog', { name: 'Add a tab to this project' }).getByText('Songs', { exact: true }).click()
+  await expect.poll(async () => (await (await request.get(projectUrl)).json()).customTabs).toContain(ID)
   const frame = page.frameLocator('iframe[title="Songs"]')
   await frame.locator('#capture').click()
   await expect(frame.locator('#result')).toHaveText('live')

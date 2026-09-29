@@ -121,7 +121,9 @@ describe('POST /api/project/tasks rework — cap opens the owner question in the
     await rework(dir, task.id)
     const first = await rework(dir, task.id)
     expect(first.receiptKey).toBe(`commander:rework-cap:${task.id}:2:swarm/w:${head1}`)
-    await answerEscalation(first.escalationId, 'A: やり直す')
+    // A commander-keyed answer is also relayed to the commander desk — stubbed:
+    // the real relay would wake (spawn) a commander in this scratch project.
+    await answerEscalation(first.escalationId, 'A: やり直す', { tellCommander: async () => false })
     // Owner said redo: back to todo (counter resets), the redo re-enters the
     // SAME branch (resolveReusableWork) and commits again before the next cap.
     await post({ setColumn: [{ id: task.id, column: 'todo' }] })

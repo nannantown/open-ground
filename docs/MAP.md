@@ -853,6 +853,10 @@
   Only that direct frame receives microphone permission; arbitrary sources
   remain opaque. Tests: `localAppFrame.test.ts`, `CustomFrameHost.test.tsx`,
   `e2e/nene-recording-frame.spec.ts` (real getUserMedia with fake input only).
+  `ProjectPanel` disables Add tab until the current project's data has loaded;
+  otherwise an early library selection silently loses the attachment. The
+  NENE E2E holds the initial read, checks the disabled state, then verifies
+  persisted attachment, microphone capture and keyboard forwarding.
 - 設計: `docs/CUSTOM_TABS_PLAN.md` (current local-only contract)
 - テスト: `customModules*.test.ts` / `routes/__tests__/customModules` ・ `retiredMarketplace.routes` ・ `customModuleTerminal`
 - 罠: hot-reload はタブ hidden 中は停止する仕様。編集ロールは Supabase og_roles(§7)。

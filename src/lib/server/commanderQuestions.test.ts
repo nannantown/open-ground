@@ -10,8 +10,15 @@ import {
   countOpenEscalationsByProject,
   EscalationStateError,
   type OpenEscalationInput,
+  redeliverAnswerToCommander,
+  COMMANDER_ANSWER_RETRY_GAP_MS,
+  COMMANDER_ANSWER_RETRY_MAX_MS,
 } from './swarmEscalations'
-import { sweepCommanderQuestions, commanderQuestionText } from './commanderQuestions'
+import {
+  sweepCommanderQuestions,
+  commanderQuestionText,
+  projectsNeedingCommanderSweep,
+} from './commanderQuestions'
 import { needsOwnerDirectly } from './swarmDecisionRouting'
 import { indexEscalationsByTask } from '../boardEscalation'
 
@@ -209,5 +216,85 @@ describe('needsOwnerDirectly / commanderQuestionText', () => {
     expect(text).toContain('"by":"commander"')
     expect(text).toContain('escalations/raise')
     expect(text).toContain('abc')
+  })
+})
+
+describe('sweepCommanderQuestions — answers owed to the commander (2026-09-29)', () => {
+  it('re-sends an answer to the commander’s own question until its desk takes it, then stops', async () => {
+    const { escalation } = await openEscalation(
+      {
+        projectPath: project,
+        question: 'Land the 0.11.156 fix into main?',
+        context: 'ctx',
+        whyEscalated: 'policy',
+        receiptKey: 'commander:high-risk:none:d397e8d10000',
+      },
+      { notify: async () => {} },
+    )
+    // The answer arrives while no desk can take it.
+    await answerEscalation(escalation.id, 'A', { isPathAllowed: async () => true, tellCommander: async () => false })
+    const said: string[] = []
+    let deskUp = false
+    const tellCommander = async (_p: string, text: string) => {
+      said.push(text)
+      return deskUp
+    }
+    let clock = Date.now()
+    const deps = {
+      tell: async () => true,
+      redeliver: (id: string) =>
+        redeliverAnswerToCommander(id, { isPathAllowed: async () => true, tellCommander, now: () => new Date(clock) }),
+    }
+    expect((await sweepCommanderQuestions(project, deps)).answered).toEqual([])
+    deskUp = true
+    // Within the retry gap: not attempted again (a failing wake is not re-run every sweep).
+    expect((await sweepCommanderQuestions(project, deps)).answered).toEqual([])
+    expect(said).toHaveLength(1)
+    clock += COMMANDER_ANSWER_RETRY_GAP_MS
+    expect((await sweepCommanderQuestions(project, deps)).answered).toEqual([escalation.id])
+    clock += COMMANDER_ANSWER_RETRY_GAP_MS
+    await sweepCommanderQuestions(project, deps)
+    expect(said).toHaveLength(2) // once refused, once taken — never again after
+    expect(said[1]).toContain('オーナーの回答「A」')
+    const [row] = await listEscalations({ projectPath: project })
+    expect(row.status).toBe('injected')
+  })
+})
+
+describe('owed commander answers — bounds and the engine-less backstop', () => {
+  const ownQ = () =>
+    openEscalation(
+      {
+        projectPath: project,
+        question: 'q?',
+        context: 'c',
+        whyEscalated: 'policy',
+        receiptKey: 'commander:blocked:none:bounds',
+      },
+      { notify: async () => {} },
+    )
+
+  it('gives up a day after the answer (the row stays answered — not delivered)', async () => {
+    const { escalation } = await ownQ()
+    await answerEscalation(escalation.id, 'A', { isPathAllowed: async () => true, tellCommander: async () => false })
+    const said: string[] = []
+    const late = new Date(Date.now() + COMMANDER_ANSWER_RETRY_MAX_MS + 1)
+    const ok = await redeliverAnswerToCommander(escalation.id, {
+      isPathAllowed: async () => true,
+      now: () => late,
+      tellCommander: async (_p, t) => {
+        said.push(t)
+        return true
+      },
+    })
+    expect(ok).toBe(false)
+    expect(said).toHaveLength(0)
+    expect((await listEscalations({ projectPath: project }))[0].status).toBe('answered')
+  })
+
+  it('the 60s supply-loop backstop sweeps a project whose only pending item is an owed answer', async () => {
+    const { escalation } = await ownQ()
+    await answerEscalation(escalation.id, 'A', { isPathAllowed: async () => true, tellCommander: async () => false })
+    expect(await projectsNeedingCommanderSweep()).toEqual([project])
   })
 })

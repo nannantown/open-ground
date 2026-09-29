@@ -200,16 +200,34 @@ commander alone — S1 no longer fires in practice, because nothing adds to `eng
 (`swarmOrchestrator.ts:318-319`). Before raising, it reads `?path=<repo>&lane=owner` **without a
 status filter** (an `answered`-only list cannot contain a newer `open` or `dismissed` row, so an
 older answer would pass as newest) and looks only at the newest row with the exact key.
-**Ceiling:** a commander-raised question has no worker address, so the owner's answer stays
-`answered` and nothing wakes the commander; the commander picks it up at the start of its next
-状況 / マージ. Those raises carry `receiptKey` = `commander:<reason>:<taskId>:<HEAD sha>`: the
+**Answer delivery to the commander (2026-09-29):** a commander-raised question has no worker
+address. Until 0.11.156 that meant the owner's answer stayed `answered`, went nowhere, and the
+commander sat 「答えを待ちます」 (measured 2026-09-29: two questions answered at 10:14 JST, the
+commander still waiting at 14:32 until the president relayed it by `manager/say`). Now
+`deliverAnswer` (`swarmEscalations.ts`) recognises the row (`isCommanderRaised` = `commander:`
+receiptKey and no `terminalId`/`sdkSessionId`) and says ONE line (`commanderAnswerLine`) to a
+standing commander desk through `relayToCommander` (the `manager/say` path; no wake on the answer
+request itself — a wake takes tens of seconds and the answer POST must not hang on it).
+With a `taskId` the next-dispatch queue still runs as before; the commander is told as well.
+Accepted → `injected`. Not accepted / no desk → the row stays `answered` with
+`commanderAnswerOwed:true` (never reported as delivered), and the commander sweep
+(`commanderQuestions.ts`, every engine pass / the 60s supply loop, which runs without an engine)
+re-sends only that line via `redeliverAnswerToCommander`, **waking a desk if none stands** — at
+most once per `COMMANDER_ANSWER_RETRY_GAP_MS` (60s) and for `COMMANDER_ANSWER_RETRY_MAX_MS` (24h)
+after the answer; past that the row just stays `answered`. Measured 2026-09-29 on a scratch
+project: a waiting desk took the line within seconds; with no desk, the sweep woke one and
+delivered ~60s after the answer. Rows answered before the fix carry no `commanderAnswerOwed` and
+are never replayed. For the commander, `injected` = answered (the og-manage skill reads
+`answered` or `injected`); it still reads its rows at the start of 状況 / マージ as a backstop. Guards:
+`swarmEscalations.test.ts` 「answers to the commander's OWN questions…」 and
+`commanderQuestions.test.ts` 「answers owed to the commander」 (red measured with the leg removed). Those raises carry `receiptKey` = `commander:<reason>:<taskId>:<HEAD sha>`: the
 prefix tells the commander's rows from workers', and an answer is used only while the branch HEAD
 still matches (a reworked branch returns to the same Board spot, so Board state alone would let an
 old 「入れて」 land a high-risk diff the owner never saw). A HEAD change means "ask again" only while
 the card is still held where the question left it — a card that landed / is `done` / whose branch
 is gone (`none`) needs no new question. `rework-cap` answers are read from the newest row whose key
 matches the card's **current** `reworkCount`, branch and branch HEAD exactly (`open` → wait, `dismissed` → leave the card
-held, `answered` + still `blocked` → carry it out once; B and C are not repeated in later 状況).
+held, `answered`/`injected` + still `blocked` → carry it out once; B and C are not repeated in later 状況).
 Every other reason: only the newest row for the exact key counts, and a `dismissed` one means "not
 approved" — no re-ask at that HEAD. `<HEAD sha>` comes from
 `git -C <repo> rev-parse --verify <branch>` (`none` when the branch is gone). Escalations have no "handled" mark. With a `taskId`, the

@@ -3038,6 +3038,12 @@ export interface Escalation {
   /** Who wrote {@link answer}. Absent ⇒ 'owner' (every older record). The worker
    *  is told which, in words — a commander's call must never read as the owner's. */
   answeredBy?: 'owner' | 'commander'
+  /** Set when an answer to a question the COMMANDER raised itself (a
+   *  `commander:` receiptKey, no worker address) was recorded — the answer is
+   *  owed to the commander desk. While the record is still 'answered' the
+   *  commander sweep keeps re-sending it; 'injected' means the desk accepted it.
+   *  Absent on records answered before 2026-09-29, so those are never replayed. */
+  commanderAnswerOwed?: boolean
 }
 
 /** One inbox row as served by GET /api/swarm/escalations: the record plus the

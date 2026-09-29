@@ -131,25 +131,26 @@ Text you print in your own window reaches **nobody**. Every "report" / "tell the
   review-failed / blocked questions for you. The check below only prevents duplicates.
 - Before opening, `GET $OG/api/swarm/escalations?path=<repo>&lane=owner` (no `status` filter —
   every status comes back) and look only at the **newest** row (by `createdAt`) with the
-  **exact** `receiptKey`: `open` → don't open a second; `answered` → follow that answer;
+  **exact** `receiptKey`: `open` → don't open a second; `answered` or `injected` (= answered, and the line reached you) → follow that answer;
   `dismissed` → "not approved", don't re-ask for that HEAD. A different HEAD is a new occasion →
   **ask again, but only while the card is still held where the question left it** (still held in
   `review` / still `blocked`); a card that has moved on (landed, `done`, branch gone = `none`)
   needs no question. An old answer never covers new commits.
 - Don't follow up with `supply/say` — the app already tells the president a question arrived.
 
-### Answers come back only when you look (read them first)
+### Answers to your questions (a line arrives; still read them first)
 
-Nothing wakes you when the owner answers a question you opened (it has no worker address, so it
-stays `answered` — no delivery, no nudge; a real wake needs a code change and is out of scope).
-The president still tells the owner "answer delivered". So **at the start of "状況" and of
-"マージ"**:
+When the owner answers a question you opened, the app says it to your desk as one line starting
+`【あなたの質問への回答】` (waking you if no desk stands; re-sent until your desk takes it, then the
+row is `injected` — `injected` means answered too). On that line, act at once by the rules below — don't wait for "状況". The
+line can be missed (desk stopped, answers from before 2026-09-29), so **also at the start of
+"状況" and of "マージ"**:
 1. `GET $OG/api/swarm/escalations?path=<repo>&lane=owner` (**no `status` filter** — you need
    `open` and `dismissed` rows too), keep only yours (`receiptKey` starts with `commander:`).
 2. **Look only at the newest row** (by `createdAt`) per key — and branch on its status. Act on it **only if its
    occasion is still the current one**:
    - `high-risk` / `conflict` / `review-failed` / `blocked`: the `<HEAD sha>` in the key equals the
-     branch's current `git -C <repo> rev-parse --verify <branch>` **and** the row is `answered` **and** the card still sits where the question
+     branch's current `git -C <repo> rev-parse --verify <branch>` **and** the row is `answered` or `injected` **and** the card still sits where the question
      left it (e.g. still held in `review` and the answer is "入れて" → land it by §マージ). HEAD
      moved → the answer is about code the owner no longer sees; ignore it, and ask again only if
      the card is still held there (moved on / branch `none` → nothing to ask).
@@ -158,7 +159,7 @@ The president still tells the owner "answer delivered". So **at the start of "�
      branch's HEAD, first 12 hex|none>` (rows with another count, branch or HEAD answered earlier
      occasions and are never used; if the card capped again at the same HEAD, the `rework` call
      opened a fresh row with the same key — the newest one wins). `open` → wait. `dismissed` → do nothing.
-     `answered` and the card still `blocked` → carry it out **once**: "A: やり直す" → `setColumn`
+     `answered`/`injected` and the card still `blocked` → carry it out **once**: "A: やり直す" → `setColumn`
      to `todo` (unless the engine already did); "B: 分けて頼み直す" → file the split cards in
      `todo`, then move the original to `done` with `"abandoned":true`; "C: 見送る" → leave it in
      `blocked`. B and C are finished once carried out — **don't repeat or re-report them in later
@@ -173,7 +174,7 @@ The president still tells the owner "answer delivered". So **at the start of "�
 ## Owner vocabulary
 
 ### "状況" / status
-0. Read the owner's answers to your questions (§Answers come back only when you look).
+0. Read the owner's answers to your questions (§Answers to your questions).
 1. Read `GET /api/swarm/workers` + `GET /api/swarm/orchestrator`.
 2. `git fetch origin main`, then one line/worker: **branch, task(note), phase, dirty, behind/ahead, flags**. dirty via `git -C <worktree> status --porcelain | wc -l`; ahead/behind via `git rev-list --left-right --count origin/main...<branch>`. Flags: [mergeable]=`ready:true`(or done)+dirty=0. [maybe-stuck]=heartbeat stale >30min or `blocked:true` (**read `blockers`**, may be a question — answer, don't just nudge; plain silence → nudge first, else check the agent-team bar or git log/dirty). [dirty]=uncommitted work. [needs-rebase]=behind>0 (routine). [conflict-risk]=2+ `swarm/*` touch same files (`diff --name-only $(merge-base origin/main <br>)..<br>` overlap).
 3. One engine line: `running` (also autowakes commander on ready), `reviews[]` (ff/rebase/conflict), `anomalies[]` (orphan-doing, worker-stale, no-heartbeat, move-stuck, rework-exhausted), `parkUntil`.

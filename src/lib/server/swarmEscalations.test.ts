@@ -20,6 +20,7 @@ import {
   MAX_ESCALATION_SHOT_CHARS,
   MAX_ESCALATION_PLAIN_QUESTION,
   ENTER_RETRY_MAX,
+  redeliverAnswerToCommander,
 } from './swarmEscalations'
 import { escalationsFile, escalationShotsDir } from './paths'
 import { readUnparkIntent } from './swarmOrchestrator'
@@ -1100,5 +1101,136 @@ describe('lock order — an owner answer during an engine tick must not deadlock
     // already-injected no-op). Never two pastes into the same prompt.
     expect(maxConcurrent).toBeLessThanOrEqual(1)
     expect([a.delivery, b.delivery].filter((d) => d === 'injected').length).toBeLessThanOrEqual(1)
+  })
+})
+
+// 2026-09-29: the commander raised two questions itself, the owner answered both
+// within 6 minutes, and the commander sat 「答えを待ちます」 for 4h20m — the
+// records had no worker address, so the answer went nowhere while reading
+// 'answered'. These pin that the commander desk now hears it, and that an
+// undelivered answer is never reported as delivered.
+describe('answers to the commander’s OWN questions reach the commander desk', () => {
+  const commanderOwn = (over: Partial<OpenEscalationInput> = {}) =>
+    openInput({
+      receiptKey: 'commander:high-risk:none:d397e8d10000',
+      taskId: undefined,
+      branch: 'fix/e2e-ui-contracts',
+      plainQuestion: '本体に取り込みますか?\nA: 取り込む\nB: 取り込まない',
+      ...over,
+    })
+  const recorder = (ok: boolean) => {
+    const said: Array<{ path: string; text: string }> = []
+    return {
+      said,
+      tellCommander: async (path: string, text: string) => {
+        said.push({ path, text })
+        return ok
+      },
+    }
+  }
+
+  it('the owner’s answer is said to the commander desk, on ONE line, and the record is injected', async () => {
+    const { escalation } = await openEscalation(commanderOwn(), { notify: async (n) => n })
+    const r = recorder(true)
+    const res = await answerEscalation(escalation.id, 'A', { isPathAllowed: async () => true, ...r })
+    expect(res.delivery).toBe('injected')
+    expect(r.said).toHaveLength(1)
+    expect(r.said[0].path).toBe(project)
+    expect(r.said[0].text).toContain(escalation.id)
+    expect(r.said[0].text).toContain('オーナーの回答「A」')
+    expect(r.said[0].text).not.toMatch(/\n/)
+    const [row] = await listEscalations()
+    expect(row.status).toBe('injected')
+  })
+
+  it('a desk that did not take it leaves the record answered (not delivered), and the retry delivers once', async () => {
+    const { escalation } = await openEscalation(commanderOwn(), { notify: async (n) => n })
+    const down = recorder(false)
+    const res = await answerEscalation(escalation.id, 'A', { isPathAllowed: async () => true, ...down })
+    expect(res.delivery).toBe('skipped')
+    expect(down.said).toHaveLength(1)
+    let [row] = await listEscalations()
+    expect(row.status).toBe('answered')
+    expect(row.commanderAnswerOwed).toBe(true)
+
+    const up = recorder(true)
+    expect(await redeliverAnswerToCommander(escalation.id, { isPathAllowed: async () => true, ...up })).toBe(true)
+    expect(up.said[0].text).toContain('オーナーの回答「A」')
+    ;[row] = await listEscalations()
+    expect(row.status).toBe('injected')
+    // Delivered ⇒ never said again.
+    expect(await redeliverAnswerToCommander(escalation.id, { isPathAllowed: async () => true, ...up })).toBe(false)
+    expect(up.said).toHaveLength(1)
+  })
+
+  it('with a card: the next-dispatch queue still runs AND the commander is told', async () => {
+    const { escalation } = await openEscalation(
+      commanderOwn({ receiptKey: 'commander:blocked:card-1:abc', taskId: 'card-1' }),
+      { notify: async (n) => n },
+    )
+    const queued: string[] = []
+    const r = recorder(true)
+    const res = await answerEscalation(escalation.id, 'A', {
+      isPathAllowed: async () => true,
+      queueForNextDispatch: async (_p, taskId) => {
+        queued.push(taskId)
+      },
+      ...r,
+    })
+    expect(queued).toEqual(['card-1'])
+    expect(r.said).toHaveLength(1)
+    expect(res.delivery).toBe('injected')
+  })
+
+  it('a WORKER’s question and an unkeyed app raise are never relayed to the commander', async () => {
+    const r = recorder(true)
+    const w = await openEscalation(openInput({ terminalId: 'pty-9', taskId: undefined }), { notify: async (n) => n })
+    await answerEscalation(w.escalation.id, 'A', {
+      isPathAllowed: async () => true,
+      canInjectInto: async () => true,
+      write: () => true,
+      sleep: async () => {},
+      readScreen: () => '',
+      ...r,
+    })
+    const app = await openEscalation(openInput({ taskId: undefined, question: '別の質問?' }), { notify: async (n) => n })
+    const res = await answerEscalation(app.escalation.id, 'A', { isPathAllowed: async () => true, ...r })
+    expect(res.delivery).toBe('skipped')
+    expect(r.said).toHaveLength(0)
+    expect((await listEscalations()).some((e) => e.commanderAnswerOwed)).toBe(false)
+  })
+
+  it('a retry arriving while the answer POST is still delivering does not send it twice', async () => {
+    const { escalation } = await openEscalation(commanderOwn(), { notify: async (n) => n })
+    let concurrent: boolean | undefined
+    const said: string[] = []
+    await answerEscalation(escalation.id, 'A', {
+      isPathAllowed: async () => true,
+      tellCommander: async (_p, text) => {
+        said.push(text)
+        concurrent = await redeliverAnswerToCommander(escalation.id, {
+          isPathAllowed: async () => true,
+          tellCommander: async (_q, t) => {
+            said.push(t)
+            return true
+          },
+        })
+        return true
+      },
+    })
+    expect(concurrent).toBe(false)
+    expect(said).toHaveLength(1)
+    expect((await listEscalations())[0].status).toBe('injected')
+  })
+
+  it('a record answered before the fix (no owed mark) is never replayed', async () => {
+    const { escalation } = await openEscalation(commanderOwn(), { notify: async (n) => n })
+    await answerEscalation(escalation.id, 'A', { isPathAllowed: async () => true, tellCommander: async () => false })
+    const raw = JSON.parse(await readFile(escalationsFile(), 'utf8'))
+    delete raw.items[0].commanderAnswerOwed
+    await writeFile(escalationsFile(), JSON.stringify(raw))
+    const r = recorder(true)
+    expect(await redeliverAnswerToCommander(escalation.id, { isPathAllowed: async () => true, ...r })).toBe(false)
+    expect(r.said).toHaveLength(0)
   })
 })

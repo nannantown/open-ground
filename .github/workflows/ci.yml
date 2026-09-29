@@ -154,7 +154,7 @@ jobs:
 
       - name: Run e2e (Playwright)
         # Playwright's webServer block in playwright.config.ts starts
-        # `npm run dev` automatically and waits for the port to bind, so
+        # the production build and isolated server, then waits for the port, so
         # we don't need a separate background job here.
         run: npm run test:e2e
 
@@ -163,5 +163,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
-          path: playwright-report/
+          path: |
+            playwright-report/
+            test-results/
           retention-days: 7
