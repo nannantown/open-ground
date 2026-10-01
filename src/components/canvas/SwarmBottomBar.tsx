@@ -75,6 +75,15 @@ const save = (projectId: string, patch: { h?: number; open?: boolean }) => {
   }
 }
 
+/** The open / fold shortcut (owner 2026-10-01): Cmd+J on macOS — VS Code's
+ *  "toggle bottom panel". Elsewhere Ctrl+Shift+J, not Ctrl+J: Ctrl+J is a
+ *  newline in Claude Code's prompt, and Ctrl+Shift is the terminal panes'
+ *  existing chord convention (TerminalPane isClipboardChord). */
+export const isSwarmBarChord = (e: globalThis.KeyboardEvent, isMac: boolean): boolean =>
+  e.key.toLowerCase() === 'j' &&
+  !e.altKey &&
+  (isMac ? e.metaKey && !e.ctrlKey && !e.shiftKey : e.ctrlKey && e.shiftKey && !e.metaKey)
+
 export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
   const [open, setOpen] = useState(() => loadSwarmBarOpen(project.id))
   const [height, setHeight] = useState(() => loadSwarmBarHeight(project.id))
@@ -173,6 +182,28 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
     e.preventDefault()
   }
 
+  const toggle = () => {
+    if (!open) setHeight((h) => clamp(h))
+    setOpen(!open)
+    save(project.id, { open: !open })
+  }
+  // The shortcut. Capture phase on window so it still works with the caret
+  // in a terminal (xterm would otherwise eat the key) or the president's
+  // input; never during IME composition.
+  const toggleRef = useRef(toggle)
+  toggleRef.current = toggle
+  useEffect(() => {
+    const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.isComposing || e.keyCode === 229 || !isSwarmBarChord(e, isMac)) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (!e.repeat) toggleRef.current()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
+
   return (
     <div
       ref={rootRef}
@@ -199,9 +230,7 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
         }}
         onToggleCollapsed={() => {
           if (swallowClick.current) return
-          if (!open) setHeight((h) => clamp(h))
-          setOpen(!open)
-          save(project.id, { open: !open })
+          toggle()
         }}
       />
       </StreamOwnerContext.Provider>

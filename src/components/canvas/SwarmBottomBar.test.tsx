@@ -200,6 +200,44 @@ describe('SwarmBottomBar', () => {
     fireEvent.click(toggle())
     expect(bar().style.height).toBe(`${SWARM_BAR_DEFAULT_H + 24}px`)
   })
+
+  it('Cmd+J opens and folds it from anywhere — even inside a terminal — but not mid-IME', () => {
+    vi.stubGlobal('navigator', { ...navigator, platform: 'MacIntel' })
+    const term = document.createElement('textarea')
+    document.body.appendChild(term)
+    try {
+      render(<SwarmBottomBar project={project('p1')} />)
+      const seen = vi.fn()
+      term.addEventListener('keydown', seen)
+      fireEvent.keyDown(term, { key: 'j', metaKey: true })
+      expect(toggle().textContent).toBe('open')
+      expect(saved().open).toBe(true)
+      expect(seen).not.toHaveBeenCalled() // the terminal never got the key
+      fireEvent.keyDown(term, { key: 'j', metaKey: true, isComposing: true })
+      fireEvent.keyDown(term, { key: 'j', ctrlKey: true })
+      fireEvent.keyDown(term, { key: 'k', metaKey: true })
+      expect(toggle().textContent).toBe('open')
+      fireEvent.keyDown(window, { key: 'J', metaKey: true })
+      expect(toggle().textContent).toBe('folded')
+      expect(saved().open).toBe(false)
+    } finally {
+      term.remove()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it("off the Mac the chord is Ctrl+Shift+J — plain Ctrl+J stays Claude's newline", () => {
+    vi.stubGlobal('navigator', { ...navigator, platform: 'Win32' })
+    try {
+      render(<SwarmBottomBar project={project('p1')} />)
+      fireEvent.keyDown(window, { key: 'j', ctrlKey: true })
+      expect(toggle().textContent).toBe('folded')
+      fireEvent.keyDown(window, { key: 'J', ctrlKey: true, shiftKey: true })
+      expect(toggle().textContent).toBe('open')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 // 差し戻し 2026-09-24 (must-fix 2): the folded strip said 「判断待ち 4」-style
