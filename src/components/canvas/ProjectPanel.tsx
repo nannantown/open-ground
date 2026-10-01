@@ -361,6 +361,8 @@ const OwnedProjectBody = ({
   // not vanish behind a native alert() the user can dismiss without reading.
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Sends the debounced save right away; null when none is waiting. */
+  const flushPendingSave = useRef<((snapshot: ProjectData | null) => void) | null>(null)
   const lastSavedJson = useRef<string>('')
 
   // ── Regenerate description (a navigation-safe server-side JOB) ──────────────
@@ -871,15 +873,19 @@ const OwnedProjectBody = ({
       if (!project) return
       setData(next)
       if (saveTimer.current) clearTimeout(saveTimer.current)
-      const fire = async () => {
+      // `snapshot` is set only by the leave-flush: pinned to the project being
+      // left, because dataRef will be null (Ground) or another project by then.
+      const fire = async (snapshot?: ProjectData | null) => {
         if (savingRef.current) {
-          saveTimer.current = setTimeout(fire, 100)
+          saveTimer.current = setTimeout(() => void fire(snapshot), 100)
           return
         }
+        saveTimer.current = null
+        flushPendingSave.current = null
         // Send the LATEST draft at fire time, not the `next` captured when the
         // timer was scheduled — state may have adopted a fresher CAS token (or
         // newer edits) since then.
-        const current = dataRef.current
+        const current = snapshot ?? dataRef.current
         if (!current) return
         const body = JSON.stringify(current)
         if (body === lastSavedJson.current) return
@@ -899,8 +905,12 @@ const OwnedProjectBody = ({
               .catch(() => null)
             if (fresh?.ok) {
               const d = (await fresh.json()) as ProjectData
-              setData(d)
-              lastSavedJson.current = JSON.stringify(d)
+              // A leave-flush answers for a project no longer on screen: never
+              // adopt it into the panel's state (Ground / the next project).
+              if (!snapshot) {
+                setData(d)
+                lastSavedJson.current = JSON.stringify(d)
+              }
               onSaved?.(project.path, d)
             }
             return
@@ -910,16 +920,35 @@ const OwnedProjectBody = ({
           // Adopt the server-stamped CAS token without touching newer local
           // edits (field values stay identical, so controlled inputs — and an
           // in-progress IME composition — are unaffected).
-          setData(prev => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
-          lastSavedJson.current = JSON.stringify({ ...current, updatedAt: saved.updatedAt })
+          if (!snapshot) {
+            setData(prev => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
+            lastSavedJson.current = JSON.stringify({ ...current, updatedAt: saved.updatedAt })
+          }
           onSaved?.(project.path, saved)
         } finally {
           savingRef.current = false
         }
       }
-      saveTimer.current = setTimeout(fire, 350)
+      saveTimer.current = setTimeout(() => void fire(), 350)
+      flushPendingSave.current = snapshot => {
+        if (saveTimer.current) clearTimeout(saveTimer.current)
+        saveTimer.current = null
+        void fire(snapshot)
+      }
     },
     [project, onSaved],
+  )
+
+  // Leaving this project (back to Ground, or to another project): send the
+  // save still waiting on its debounce NOW, pinned to this project's data —
+  // once data is reset the timer would find nothing and drop it. A note typed
+  // then left via Cmd+[ (caret still in the field) saves only through here.
+  // dataRef is assigned at render, so it still holds the old project's draft
+  // while this cleanup runs.
+  useEffect(
+    () => () => flushPendingSave.current?.(dataRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [project?.path],
   )
 
   // Board self-contained (P1): the task whose detail/conversation is open as a
@@ -1887,7 +1916,7 @@ const OwnedProjectBody = ({
     <Overlay position="fixed" layer="panel" backdrop="paper" placement="fill" escOverlay={false}>
       <header data-testid="project-header" className="flex h-12 min-w-0 shrink-0 items-center gap-1 px-2 sm:gap-3 sm:px-4">
         <div className="flex min-w-0 shrink-0 items-center gap-1">
-          <IconButton title={t('projectPanel.backToGround')} onClick={onClose}>
+          <IconButton title={`${t('projectPanel.backToGround')} ${groundChordHint()}`} onClick={onClose}>
             <ChevronLeft size={16} strokeWidth={1.75} />
           </IconButton>
           <h2 className="min-w-0">
@@ -2811,7 +2840,51 @@ const OwnedProjectBody = ({
 // the user renders SharedProjectBody (Board + Canvas over the DO, reduced
 // chrome); every other project renders OwnedProjectBody (the full owner surface,
 // unchanged). There is no separate shared panel — this is the only one.
+//
+// Back-to-Ground shortcut (owner 2026-10-01). Cmd+G was asked for but is the
+// Canvas's Group (Cmd+Shift+G Ungroup), so it is Cmd+[ on macOS — the Finder /
+// browser "Back" chord; the Canvas's own `[` (send backward) only acts with NO
+// modifier. Elsewhere Ctrl+Shift+[: plain Ctrl+[ is ESC in a terminal, and
+// Ctrl+Shift is the terminal panes' chord convention (same split as the
+// agent-team bar's Cmd+J, isSwarmBarChord). Matched on e.key so it follows the
+// printed key on JIS as well as US (Shift+[ reports '{'). Escape keeps working.
+export const isGroundChord = (e: globalThis.KeyboardEvent, isMac: boolean): boolean =>
+  !e.altKey &&
+  (isMac
+    ? e.key === '[' && e.metaKey && !e.ctrlKey && !e.shiftKey
+    : (e.key === '[' || e.key === '{') && e.ctrlKey && e.shiftKey && !e.metaKey)
+
+const isMacPlatform = () => typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
+/** Hover-hint text for the back buttons (never printed on screen). */
+export const groundChordHint = () => (isMacPlatform() ? '⌘[' : 'Ctrl+Shift+[')
+
 export const ProjectPanel = (props: Props) => {
+  // Capture phase on window so it works with the caret in a terminal (xterm
+  // would otherwise eat the key) or any input; never during IME composition.
+  // Only while a project is open: the panel stays mounted on Ground with
+  // project=null, and there the key must stay untouched.
+  const onCloseRef = useRef(props.onClose)
+  onCloseRef.current = props.onClose
+  const open = !!(props.project || props.shared)
+  useEffect(() => {
+    if (!open) return
+    const isMac = isMacPlatform()
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.isComposing || e.keyCode === 229 || !isGroundChord(e, isMac)) return
+      // Settings / ⌘K palette / dialogs own the keyboard (same test as Escape in App.tsx).
+      if (document.querySelector('[data-esc-overlay]')) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.repeat) return
+      // Same order as clicking the back button: blur first so fields that save
+      // on blur (Board drawer notes) commit before the panel unmounts.
+      const ae = document.activeElement
+      if (ae instanceof HTMLElement) ae.blur()
+      onCloseRef.current()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [open])
   if (props.shared) {
     return (
       // key on the collab id forces a fresh member subtree per shared project —

@@ -295,3 +295,27 @@ describe('SharedProjectBody — local-folder link gating', () => {
     expect(screen.queryByText('projectPanel.collabLinkFolder')).toBeNull()
   })
 })
+
+// The back-to-Ground chord (ProjectPanel) bails while a [data-esc-overlay] is
+// open. The shared panel IS the project view, so it must not wear that mark —
+// it did (Overlay's default), which silently muted Cmd+[ for every member.
+describe('SharedProjectBody — the back-to-Ground chord works here too', () => {
+  it('Cmd+[ inside a shared project calls onClose once', async () => {
+    vi.stubGlobal('navigator', { ...navigator, platform: 'MacIntel' })
+    mockBinding = makeBinding([], true)
+    const { ProjectPanel } = await import('./ProjectPanel')
+    const onClose = vi.fn()
+    render(
+      <ProjectPanel
+        project={null}
+        shared={{ id: 'pid-1', label: 'X' }}
+        onClose={onClose}
+        onRemove={() => {}}
+        frameLabel={null}
+      />,
+    )
+    fireEvent.keyDown(window, { key: '[', metaKey: true })
+    vi.unstubAllGlobals()
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+})

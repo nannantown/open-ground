@@ -10,6 +10,7 @@ import { BoardModule, type TaskLaunchResult } from '@/components/canvas/modules/
 import { CanvasWorkspace } from '@/components/canvas/CanvasWorkspace'
 import { CollabPresence } from '@/components/canvas/CollabPresence'
 import { TerminalPane } from '@/components/canvas/TerminalPane'
+import { groundChordHint } from '@/components/canvas/ProjectPanel'
 import { pickFolder } from '@/lib/pickFolder'
 import type {
   CanvasFile,
@@ -451,6 +452,11 @@ export const SharedProjectBody = ({
       backdrop="surface"
       placement="fill"
       onClose={onClose}
+      // Like the owned panel: this IS the project view, not a dialog over it,
+      // so it must not claim [data-esc-overlay] — that would mute the
+      // back-to-Ground chord (ProjectPanel). Its own Esc→onClose still runs
+      // (closeOnEsc) and preventDefaults, so App's Escape still bails.
+      escOverlay={false}
       aria-label={label}
     >
       {/* Header — back to Ground, the shared name, and a realtime status pill. */}
@@ -460,6 +466,7 @@ export const SharedProjectBody = ({
         align="center"
         onBack={onClose}
         backLabel={t('projectPanel.backToGround')}
+        backTitle={`${t('projectPanel.backToGround')} ${groundChordHint()}`}
         leading={
           <div className="flex min-w-0 items-center gap-2">
             <span className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-line px-1.5 py-0.5 text-micro uppercase tracking-wide text-ink-muted">

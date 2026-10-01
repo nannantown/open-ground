@@ -54,6 +54,7 @@ type Align = keyof typeof ALIGN
 export function DialogHeader({
   onBack,
   backLabel,
+  backTitle,
   leading,
   eyebrow,
   title,
@@ -70,6 +71,8 @@ export function DialogHeader({
 }: {
   onBack?: () => void
   backLabel?: string
+  /** Hover hint for the back link (e.g. its shortcut) — never printed. */
+  backTitle?: string
   leading?: ReactNode
   eyebrow?: ReactNode
   title?: ReactNode
@@ -116,7 +119,7 @@ export function DialogHeader({
   return (
     <header className={cx(bar, ALIGN[align], 'justify-between gap-3')}>
       <div className="flex min-w-0 items-center gap-2.5">
-        {onBack && <BackLink label={backLabel ?? ''} onClick={onBack} className="shrink-0" />}
+        {onBack && <BackLink label={backLabel ?? ''} title={backTitle} onClick={onBack} className="shrink-0" />}
         {titleBlock}
       </div>
       {(actions || onClose) && (

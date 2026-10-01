@@ -9,7 +9,7 @@
 // throws on `!r.ok` so the load routes through the catch → setLoadError → the
 // designed Retry UI, matching reloadProjectData / persist / the describe poll.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import type { ProjectData, ProjectMeta } from '@/lib/types'
 
 // --- Mocks -----------------------------------------------------------------
@@ -33,8 +33,17 @@ vi.mock('@/lib/useClaudeConnection', () => ({
 // reaches `data`, the success branch renders this and throws on `data.tasks`,
 // failing the test. On the error path the Board must never mount at all.
 vi.mock('@/components/canvas/modules/BoardModule', () => ({
-  BoardModule: (props: { data: ProjectData }) => (
-    <div data-testid="board">{props.data.tasks.length}</div>
+  // The notes field stands in for the drawer's notes (defaultValue + onBlur →
+  // persist, BoardModule.tsx) for the leave-saves guards.
+  BoardModule: (props: { data: ProjectData; persist: (d: ProjectData) => void }) => (
+    <div data-testid="board">
+      {props.data.tasks.length}
+      <textarea
+        data-testid="board-notes"
+        defaultValue={props.data.notes}
+        onBlur={e => props.persist({ ...props.data, notes: e.currentTarget.value })}
+      />
+    </div>
   ),
 }))
 vi.mock('@/components/canvas/CanvasWorkspace', () => ({
@@ -46,6 +55,7 @@ vi.mock('@/components/canvas/CanvasWorkspace', () => ({
 // an undefined route.
 const h = vi.hoisted(() => ({
   projectGet: null as null | ((...a: unknown[]) => Promise<Response>),
+  puts: [] as ProjectData[],
 }))
 vi.mock('@/lib/api-client', () => {
   const benign = () =>
@@ -56,8 +66,10 @@ vi.mock('@/lib/api-client', () => {
     new Proxy(function () {} as object, {
       get: (_t, prop) =>
         prop === 'then' ? undefined : deep([...path, typeof prop === 'string' ? prop : String(prop)]),
-      apply: (_t, _this, args: unknown[]) =>
-        path.join('.') === 'project.$get' && h.projectGet ? h.projectGet(...args) : benign(),
+      apply: (_t, _this, args: unknown[]) => {
+        if (path.join('.') === 'project.$put') h.puts.push((args[0] as { json: ProjectData }).json)
+        return path.join('.') === 'project.$get' && h.projectGet ? h.projectGet(...args) : benign()
+      },
     })
   return { api: { api: deep([]) } }
 })
@@ -107,6 +119,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   h.projectGet = null
+  h.puts = []
   vi.unstubAllGlobals()
 })
 
@@ -158,5 +171,119 @@ describe('ProjectPanel — opening the project clears the Ground eye', () => {
       ['/api/ground/opened', '/tmp/proj'],
       ['/api/ground/opened', '/tmp/proj'],
     ])
+  })
+})
+
+// Back-to-Ground shortcut (owner 2026-10-01). Cmd+G is the Canvas's Group, so
+// the chord is Cmd+[ on the Mac / Ctrl+Shift+[ elsewhere. It must work with the
+// caret in a terminal (xterm's input is a TEXTAREA that would eat the key),
+// never mid-IME, never on Ground (the panel stays mounted with project=null),
+// never under an overlay, and it must let blur-saved fields commit first.
+describe('ProjectPanel — Cmd+[ goes back to Ground', () => {
+  const mac = () => vi.stubGlobal('navigator', { ...navigator, platform: 'MacIntel' })
+  const loaded = () => {
+    h.projectGet = () => Promise.resolve(new Response(JSON.stringify(VALID), { status: 200 }))
+  }
+
+  it('closes on Cmd+[ with the caret in a terminal, not mid-IME or on other chords', () => {
+    mac()
+    loaded()
+    const term = document.createElement('textarea')
+    document.body.appendChild(term)
+    try {
+      const onClose = vi.fn()
+      render(<ProjectPanel project={PROJECT} onClose={onClose} onRemove={noop} frameLabel={null} />)
+      const seen = vi.fn()
+      term.addEventListener('keydown', seen)
+      fireEvent.keyDown(term, { key: '[', metaKey: true, isComposing: true })
+      fireEvent.keyDown(term, { key: '[', ctrlKey: true })
+      fireEvent.keyDown(term, { key: '[' })
+      fireEvent.keyDown(term, { key: 'g', metaKey: true }) // Canvas Group stays Canvas's
+      fireEvent.keyDown(term, { key: 'g', metaKey: true, shiftKey: true }) // and Ungroup
+      expect(onClose).not.toHaveBeenCalled()
+      fireEvent.keyDown(term, { key: '[', metaKey: true })
+      expect(onClose).toHaveBeenCalledTimes(1)
+      expect(seen).toHaveBeenCalledTimes(5) // the terminal never got the Cmd+[
+    } finally {
+      term.remove()
+    }
+  })
+
+  it('off the Mac the chord is Ctrl+Shift+[ — plain Ctrl+[ stays ESC for the terminal', () => {
+    vi.stubGlobal('navigator', { ...navigator, platform: 'Win32' })
+    loaded()
+    const onClose = vi.fn()
+    render(<ProjectPanel project={PROJECT} onClose={onClose} onRemove={noop} frameLabel={null} />)
+    fireEvent.keyDown(window, { key: '[', ctrlKey: true })
+    fireEvent.keyDown(window, { key: 'G', ctrlKey: true, shiftKey: true })
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.keyDown(window, { key: '{', ctrlKey: true, shiftKey: true })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('on Ground (project=null) the key is left alone — no close, not stopped', () => {
+    mac()
+    const onClose = vi.fn()
+    render(<ProjectPanel project={null} onClose={onClose} onRemove={noop} frameLabel={null} />)
+    const seen = vi.fn()
+    window.addEventListener('keydown', seen)
+    try {
+      const ev = new KeyboardEvent('keydown', { key: '[', metaKey: true, bubbles: true, cancelable: true })
+      document.body.dispatchEvent(ev)
+      expect(onClose).not.toHaveBeenCalled()
+      expect(ev.defaultPrevented).toBe(false)
+      expect(seen).toHaveBeenCalledTimes(1)
+    } finally {
+      window.removeEventListener('keydown', seen)
+    }
+  })
+
+  // The Board drawer's notes save on blur through persist(), which debounces.
+  // Leaving drops the project (App passes project=null), so the debounced save
+  // must be flushed on the way out or it finds no data and is lost. Asserts
+  // the BODY that reaches PUT, not merely that a save handler ran.
+  const typeNoteThenLeave = async (leave: (notes: HTMLElement) => void) => {
+    mac()
+    loaded()
+    const onClose = vi.fn(() =>
+      view.rerender(<ProjectPanel project={null} onClose={onClose} onRemove={noop} frameLabel={null} />),
+    )
+    const view = render(<ProjectPanel project={PROJECT} onClose={onClose} onRemove={noop} frameLabel={null} />)
+    const notes = (await screen.findByTestId('board-notes')) as HTMLTextAreaElement
+    notes.focus()
+    notes.value = 'memo typed just before leaving'
+    leave(notes)
+    expect(onClose).toHaveBeenCalledTimes(1)
+    await waitFor(() =>
+      expect(h.puts.map(b => b.notes)).toContain('memo typed just before leaving'),
+    )
+  }
+
+  it('a note typed then left with Cmd+[ (caret still in it) is saved', async () => {
+    await typeNoteThenLeave(notes => fireEvent.keyDown(notes, { key: '[', metaKey: true }))
+  })
+
+  it('…and the same through the back button', async () => {
+    await typeNoteThenLeave(() => {
+      const back = screen.getByTitle(/projectPanel\.backToGround/)
+      back.focus() // what a real click does first: the field blurs
+      fireEvent.click(back)
+    })
+  })
+
+  it('does nothing while an overlay (settings / palette / dialog) is open', () => {
+    mac()
+    loaded()
+    const overlay = document.createElement('div')
+    overlay.setAttribute('data-esc-overlay', '')
+    document.body.appendChild(overlay)
+    try {
+      const onClose = vi.fn()
+      render(<ProjectPanel project={PROJECT} onClose={onClose} onRemove={noop} frameLabel={null} />)
+      fireEvent.keyDown(window, { key: '[', metaKey: true })
+      expect(onClose).not.toHaveBeenCalled()
+    } finally {
+      overlay.remove()
+    }
   })
 })

@@ -24,6 +24,7 @@ export function BackLink({
   className,
   disabled,
   tone = 'default',
+  title,
 }: {
   label: string
   onClick: () => void
@@ -31,11 +32,14 @@ export function BackLink({
   disabled?: boolean
   /** `onDeep` for the non-inverting `bg-deep` slab. Ink only — same geometry. */
   tone?: 'default' | 'onDeep'
+  /** Hover hint (e.g. a shortcut) — never printed on screen. */
+  title?: string
 }): JSX.Element {
   return (
     <button
       type="button"
       onClick={onClick}
+      title={title}
       disabled={disabled}
       className={[
         // 案C `.back`: 11px / .08em / weight 400 / ink-muted. It was `label-cap`
