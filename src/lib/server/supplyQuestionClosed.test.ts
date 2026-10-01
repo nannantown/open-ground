@@ -69,8 +69,8 @@ const queueOpenNotice = (id: string) =>
 
 const lines = (p: string) => peekSupplyImportant().get(p) ?? []
 
-describe('a closed question reaches every president desk', () => {
-  it('answered: withdraws the undelivered open line and tells both desks (other project too)', async () => {
+describe('a closed question reaches its own project desk only', () => {
+  it('answered: withdraws the undelivered open line and tells its own desk in full', async () => {
     const e = await open()
     expect(e.routedTo).not.toBe('commander')
     await queueOpenNotice(e.id)
@@ -78,48 +78,28 @@ describe('a closed question reaches every president desk', () => {
 
     await answerEscalation(e.id, 'A: 公開')
 
-    for (const p of [alpha, beta]) expect(lines(p).some((l) => l.includes('質問が届いています'))).toBe(false)
-    // Its own project: in full (question + answer).
+    expect(lines(alpha).some((l) => l.includes('質問が届いています'))).toBe(false)
     expect(lines(alpha).some((l) => l.includes('公開してよいですか') && l.includes('「A: 公開」と答え済み'))).toBe(true)
-    // Another project: ONE short line — project name + what happened, still
-    // saying it is no longer waiting (owner decision 2026-09-25).
-    expect(lines(beta)).toHaveLength(1)
-    expect(lines(beta)[0]).toContain('alpha の質問は答え済みです(alpha の判断待ちはもうありません)')
   })
 
-  it('another project never hears the question, the answer or the choices', async () => {
-    const e = await open()
-    await answerEscalation(e.id, 'A: 公開')
-    const other = lines(beta).join('\n')
-    expect(other).toContain('alpha の質問は答え済み')
-    expect(other).toContain('判断待ちはもうありません')
-    for (const leak of ['公開してよいですか', 'A: 公開', 'B: 待つ', 'raw worker question']) expect(other).not.toContain(leak)
-  })
-
-  it('two closes in one other project are two distinct lines, each with the remaining count', async () => {
+  // Owner decision 2026-10-01: 「プロジェクトの中ではプロジェクトの中のことしか見せない」.
+  // The OPEN GROUND desk used to hear 「sns-hub の質問は答え済みです」 every time
+  // sns-hub closed a question.
+  it('another project desk hears nothing — answered, dismissed, or several closes', async () => {
     const e1 = await open()
     const e2 = await open('another worker question')
+    const e3 = await open('third worker question')
     await answerEscalation(e1.id, 'A: 公開')
     await answerEscalation(e2.id, 'B: 待つ')
-    // Neither is swallowed by the text dedup, and the other desk can keep an
-    // exact per-project waiting count.
-    const q = lines(beta)
-    expect(q).toHaveLength(2)
-    expect(q[0]).toContain('alpha の判断待ちは残り1件')
-    expect(q[1]).toContain('alpha の判断待ちはもうありません')
-  })
-
-  it('dismissed: told as withdrawn (other project: the short line)', async () => {
-    const e = await open()
-    await dismissEscalation(e.id)
-    for (const p of [alpha, beta]) expect(lines(p).some((l) => l.includes('取り下げ済み'))).toBe(true)
-    expect(lines(beta).join('\n')).not.toContain('公開してよいですか')
+    await dismissEscalation(e3.id)
+    expect(lines(beta)).toEqual([])
+    expect(lines(alpha).join('\n')).toContain('取り下げ済み')
   })
 
   it('the desk that closed it is not told again', async () => {
     const e = await open()
-    await answerEscalation(e.id, 'B: 待つ', undefined, { fromDesk: beta })
+    await answerEscalation(e.id, 'B: 待つ', undefined, { fromDesk: alpha })
+    expect(lines(alpha)).toEqual([])
     expect(lines(beta)).toEqual([])
-    expect(lines(alpha).some((l) => l.includes('答え済み'))).toBe(true)
   })
 })

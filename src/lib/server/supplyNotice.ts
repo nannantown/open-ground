@@ -164,7 +164,7 @@ export const SUPPLY_NOTICE_PREFIX = '【エンジンからの知らせ】'
  *  RETELL it to the owner, who is not a programmer — so the obligation travels
  *  with the notice rather than living only in the skill file, which a compacted
  *  desk may no longer have in view. */
-const SUPPLY_NOTICE_TAIL = '(自動の知らせ。平易に1〜3行、他プロジェクト分は1行で。専門用語・ID不可)'
+const SUPPLY_NOTICE_TAIL = '(自動の知らせ。平易に1〜3行。専門用語・ID不可)'
 
 /** Progress digest tail — shorter still: it is news, not a decision, and the
  *  owner asked not to be asked anything about it. */
@@ -1246,7 +1246,7 @@ export const SUPPLY_NOTICE_LINE_MAX = SUPPLY_NOTICE_PREFIX.length + SUPPLY_NOTIC
  *  so an emoji-heavy summary can run up to ~2x longer in UTF-16 than measured. */
 export const SUPPLY_PASTE_MEASURED_UNFOLDED = 473
 
-const SUPPLY_BUNDLE_TAIL = '(自動の知らせ・まとめ。件ごとに平易に短く、他プロジェクト分は1行。専門用語・ID不可。質問は選択肢と影響も)'
+const SUPPLY_BUNDLE_TAIL = '(自動の知らせ・まとめ。件ごとに平易に短く。専門用語・ID不可。質問は選択肢と影響も)'
 
 /** The next line for a queue: its oldest notice, plus as many following ones as
  *  fit in {@link SUPPLY_NOTICE_LINE_MAX} — so a backlog (a desk opening after a
@@ -1457,11 +1457,6 @@ export interface ClosedQuestion {
   subject: string
   outcome: 'answered' | 'dismissed'
   answer?: string
-  /** Owner-lane questions still open in that project after this one closed —
-   *  what another project's desk keeps as its per-project waiting count, and
-   *  what keeps two closes' short lines distinct (they carry no escalation id,
-   *  so the queue dedups them on text). */
-  remaining?: number
   /** The project path of the president desk that closed it, if it was one —
    *  that desk already knows and is not told again. */
   fromDesk?: string
@@ -1480,34 +1475,18 @@ export const questionClosedText = (c: ClosedQuestion): string => {
   return `${q}${what} — もう判断待ちではありません(判断待ちの一覧から外すこと)`
 }
 
-/** The ONE short line a president of ANOTHER project hears when a question
- *  closes (owner decision 2026-09-25: 「他のプロジェクトのところでは本当に短い
- *  文章。1行くらいでいい」). Project name + what happened only — no question
- *  text, no answer, no choices; the details live on that project's own desk.
- *  The tail carries that project's REMAINING waiting count: it is what this desk
- *  keeps for another project (「〇〇で質問が来ています(N件)」), and it keeps two
- *  closes in one project distinct — the line has no escalation id, so identical
- *  text would be deduped and the second close silently dropped. Pure. */
-export const questionClosedBriefText = (c: ClosedQuestion): string => {
-  const name = basename(c.projectPath)
-  const tail =
-    c.remaining === undefined
-      ? 'もう判断待ちではありません'
-      : c.remaining > 0
-        ? `${name} の判断待ちは残り${c.remaining}件`
-        : `${name} の判断待ちはもうありません`
-  return `${name} の質問は${c.outcome === 'answered' ? '答え済み' : '取り下げ済み'}です(${tail})`
-}
-
 /**
  * A question was answered or dismissed: withdraw any undelivered line that
- * still asks it ({@link forgetSupplyQuestion}), then tell every president desk
- * that may be holding it as open (owner decision 2026-09-24 — a president
+ * still asks it ({@link forgetSupplyQuestion}), then tell its project's president desk
+ * which may be holding it as open (owner decision 2026-09-24 — a president
  * retold two already-answered questions as 「まだ判断待ち」 because it only ever
- * heard the OPEN side). Owner-lane questions go to EVERY desk (a president
- * lists owner questions across all projects); commander-lane ones only to the
- * desks that were actually told. The closing desk itself is skipped. Several
- * closes waiting on one desk ride the ordinary bundle as one line.
+ * heard the OPEN side). Only the question's OWN project desk is told (owner
+ * decision 2026-10-01: 「プロジェクトの中ではプロジェクトの中のことしか見せない」 —
+ * this replaces the 2026-09-25 one-line notice to every other project, which
+ * repeated on the OPEN GROUND desk every time sns-hub closed a question);
+ * a commander-lane one only if that desk was actually told. The closing desk
+ * itself is skipped. Several closes waiting on one desk ride the ordinary
+ * bundle as one line.
  */
 export const noticeQuestionClosed = (c: ClosedQuestion, partial: Partial<SupplyNoticeDeps> = {}): void => {
   forgetSupplyQuestion(c.id)
@@ -1518,15 +1497,10 @@ export const noticeQuestionClosed = (c: ClosedQuestion, partial: Partial<SupplyN
   } catch {
     return
   }
-  const targets = new Set<string>()
-  for (const d of desks) if (c.ownerLane || toldTo.get(d.id)?.has(c.id)) targets.add(deskKey(d.cwd))
-  if (c.fromDesk) targets.delete(deskKey(c.fromDesk))
-  if (targets.size === 0) return
-  // The question's own project hears it in full; every OTHER project's desk
-  // hears one short line ({@link questionClosedBriefText}).
   const own = deskKey(c.projectPath)
-  const at = deps.now()
-  for (const k of Array.from(targets)) pushImportant(k, k === own ? questionClosedText(c) : questionClosedBriefText(c), at)
+  if (c.fromDesk && deskKey(c.fromDesk) === own) return
+  if (!desks.some((d) => deskKey(d.cwd) === own && (c.ownerLane || toldTo.get(d.id)?.has(c.id)))) return
+  pushImportant(own, questionClosedText(c), deps.now())
   // Not awaited: the caller holds the escalation store's write chain, and a
   // delivery pass must never be waited on from inside it (swarmEscalations L1/L2).
   void flushSupplyNotices(partial).catch(() => [])

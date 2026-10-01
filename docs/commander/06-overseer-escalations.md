@@ -1137,6 +1137,23 @@ Guard: `supplyQuestionClosed.test.ts` "another project never hears the question�
 in one other project…" (red measured: full text to every desk → 3 fail; count removed → the second
 close is dropped).
 
+**Superseded (2026-10-01, owner decision): a president hears its OWN project only.**
+「プロジェクトの中ではプロジェクトの中のことしか見せない」 — the short cross-project line above was
+the noise: the OPEN GROUND desk heard 「sns-hub の質問は答え済みです(sns-hub の判断待ちはもうありません)」
+7+ times on 2026-09-30〜10-01 and the president retold each one. Cause of the repetition, measured
+from the two desks' transcripts: every one of those lines followed, ~15 s later, a separate
+`escalations/answer` POST by the sns-hub president — each was a DISTINCT close (sns-hub kept
+getting a question and answering it, so the count was 0 every time), not a re-delivery bug. Removing
+the cross-project push removes all of them; no second cause was found.
+Now `noticeQuestionClosed` queues `questionClosedText` on the question's own project desk only
+(owner lane; commander lane only if that desk was told), skipped when `fromDesk` is that same
+project. `questionClosedBriefText` and `ClosedQuestion.remaining` are deleted, and both notice
+tails no longer say 「他プロジェクト分は1行」. `skills/supply/SKILL.md` drops the
+「Another project's news」 row and the 「〇〇で質問が来ています(N件)」 line from status reports; ⓪ reads
+with `path=$PWD`. The only cross-project talk left is when the owner asks 「他のプロジェクトはどう?」
+themselves. Guard: `supplyQuestionClosed.test.ts` "another project desk hears nothing…" (red
+measured against the pre-fix code: 3 fail incl. the tail test in `supplyNotice.test.ts`).
+
 ## §1.7 — The 監督 tab is gone; the president hears what was said while it was closed (2026-09-23)
 
 Owner decision (card ① of three: remove 監督 → one screen → shrink the commander): the Swarm
