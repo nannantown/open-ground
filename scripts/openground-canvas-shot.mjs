@@ -132,7 +132,10 @@ if (args.task) {
   for (const file of shots) {
     const { json } = await api('POST', '/api/project/task-asset', {
       path: projectPath,
-      name: `${wanted.name}-${path.basename(file)}`,
+      // The engine reads the `-canvas-light.png` / `-canvas-dark.png` tail as the
+      // Canvas-deliverable proof (CANVAS_SHOT_SUFFIXES) and the upload route keeps
+      // 120 chars — cap the canvas name so the tail always survives.
+      name: `${wanted.name.slice(0, 80)}-${path.basename(file)}`,
       mime: 'image/png',
       dataBase64: fs.readFileSync(file).toString('base64'),
     })

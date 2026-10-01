@@ -480,6 +480,31 @@ teardown の WIP 保全がコミット忘れをブランチに救う。猶予中
 そのまま promote(保持は刑ではない)。番人: `swarmOrchestrator.test.ts`「READY WITHOUT WORK」
 + 実 git `swarmOrchestrator.integration.test.ts`「NESTED REPO」。
 
+**【2026-10-01・Canvas が成果のカード】** Canvas に図を置くカードは成果が中央データ
+(`~/.openground/projects/<uuid>/canvases/`)に置かれ、ブランチは構造上 0 コミット。旧判定では
+完成して明暗の写真まで付けた worker が ready-without-work で blocked に停まり、オーナーに
+「成果が見当たらない」「保留」の知らせが 2 通届いた(実測: 23:36 配車 → 23:42 Canvas 更新 →
+23:43 warn → 23:47 blocked)。`ready` かつ親・入れ子とも **0 と読めた**(`commitsUnknown` なら対象外 —
+読めないカウントの裏に本物のコミットがあり得る)ときだけ `hasCanvasDeliverable` を読み、**カードに
+`…-canvas-light.png` と `…-canvas-dark.png` が両方付いていて、それぞれの画像ファイル(central
+`task-assets/<id>`)が worker の `startedAt` 以後に書かれている**(`deps.taskAssetWrittenSince`。
+`openground-canvas-shot.mjs --task` の命名 = `CANVAS_SHOT_SUFFIXES`。アップロードは毎回ファイルを
+書き直すので撮り直しは新しい扱い)なら `probe.canvasDeliverable` → promote(promote 行に
+`成果の所在: Canvas`)。Canvas JSON の更新時刻は使わない — 開いた Canvas をパン/ズームしただけでも
+書き換わり、また配車し直された worker は既にある図を撮り直すだけのことがある。写真の無いコードのカードは
+従来どおり ready-without-work(2026-09-13 の見張りは不変)、前の回の古い写真だけでも立たない。
+宣言(ready)抜きの証拠だけでは promote しない。`probeHasWork` には**混ぜない**(twin guard の
+「ブランチにコミットがある」の意味を変えないため)。**さらに worktree が clean であること**
+(`deps.worktreeIsClean` = `git status --porcelain` が自分の node_modules symlink 以外空。取得失敗・
+dep 不在は dirty 扱い = fail-closed)。Canvas UI に触るコードのカードもオーナー規則で明暗写真を付けるので、
+コードを未コミットのまま ready を打つと写真だけでは区別できない — clean 確認がそれを従来どおり
+ready-without-work(→ blocked、teardown の WIP 保全付き)へ落とす(2026-10-01 差し戻し M1)。
+アプリ再起動の resume は `startedAt` を停止時間ぶん後ろへずらすので、再起動前に撮った写真は数えず
+従来どおり停まる(撮り直せば進む)。統合側は og-manage §4b の注記(step 1 の直後): 写真を見て、
+テスト/レビュー/push は飛ばし cleanup + `move done`。0 コミットのブランチは git 上「統合済み」なので、
+カードが done になり worktree がきれいなら reaper が片付ける(成果は Canvas にあり失われない)。
+番人: `swarmCanvasDeliverable.test.ts` + `swarmOrchestrator.test.ts`「READY WITHOUT WORK」の CANVAS / DIRTY / UNREADABLE / CODE card。
+
 - `commitsAhead` = **branch ref が trunk より先行しているコミット数**(:3043 `defaultCountCommitsAhead`)。worktree ではなく共有 repo の branch ref で数えるので worktree 消滅後も判定可能。trunk はプロジェクトごとに解決(origin/main 固定ではない)
 - `ready` = 心拍ファイルの `readyToMerge === true`(:3100、`defaultReadHeartbeat` 内)
 - `blocked` = `phase==='blocked'` または blockers 非空(:3111、同上)

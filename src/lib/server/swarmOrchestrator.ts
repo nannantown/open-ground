@@ -180,6 +180,7 @@ import { centralWorktreesDir } from './paths'
 import { liveDeskOccupies, deskRecentlyActiveIn } from './liveDesks'
 import { probeOnline } from './swarmConnectivity'
 import { projectUUIDFromPath } from './projectDataPath'
+import { taskAssetPath } from './taskAssets'
 import { appendEngineJournalLine } from './engineJournal'
 import { registerEngineLogSink } from './engineLogSink'
 import {
@@ -1208,6 +1209,15 @@ export interface WorkerProbe {
   /** The nested repos those commits live in (directory names under the worktree),
    *  display/journal only — so the commander is told WHERE to look. */
   nestedRepos?: readonly string[]
+  /** The deliverable is on a project CANVAS, not in git (2026-10-01): the card
+   *  carries a light + a dark canvas shot both WRITTEN after the worker started
+   *  ({@link hasCanvasDeliverable}) AND the worker's worktree is clean (nothing
+   *  uncommitted — {@link OrchestratorDeps.worktreeIsClean}). Only probed when a
+   *  readable count shows no commit anywhere; absent ⇒ false, so an
+   *  older/handwritten probe literal keeps today's meaning. Deliberately NOT
+   *  folded into {@link probeHasWork}: that count also feeds the twin guard,
+   *  which is about a BRANCH carrying commits. */
+  canvasDeliverable?: boolean
   /** The worker's heartbeat sign, or null if it never wrote one. */
   heartbeat: HeartbeatSign | null
 }
@@ -1348,7 +1358,17 @@ export const classifyWorker = (
   // count in; the parent-only count stays exactly as it was for callers that
   // want it (the twin guard names the parent branch specifically).
   const hasWork = probeHasWork(probe)
-  const promote = hasWork && (ready || (!probe.alive && !blocked))
+  // ⚠ WORK CAN LIVE ON A CANVAS (owner report, 2026-10-01). A card whose job is to
+  // put figures on the project's Canvas writes to OPEN GROUND's central data
+  // (~/.openground/projects/<uuid>/canvases/), never to the repo — so a finished,
+  // shot, ready:true worker counted 0 commits, was flagged "no deliverable" and
+  // parked in blocked. canvasDeliverable is not a declaration: it needs the card's
+  // light + dark shots WRITTEN during this run (the existing Canvas deliverable
+  // rule) AND a clean worktree — so a code card with 0 commits (no shots, or shots
+  // of a Canvas UI it touched but uncommitted code beside them) still falls to
+  // READY WITHOUT WORK below. Only on ready: the worker's own "done" plus the
+  // evidence, never evidence alone.
+  const promote = (hasWork && (ready || (!probe.alive && !blocked))) || (ready && probe.canvasDeliverable === true)
   if (promote) return { promote: true, stage: 'done' }
   if (!probe.alive) return { promote: false, stage: 'running' }
   // READY WITHOUT WORK — a live worker that DECLARED itself done while the engine
@@ -3130,6 +3150,18 @@ export interface OrchestratorDeps {
    *  case pays nothing. Optional so existing dep literals keep compiling; the
    *  default scanner is used when absent. Any failure ⇒ 0 (no proof, no promote). */
   countNestedCommits?: (worktree: string) => Promise<NestedWorkProbe>
+  /** Was this Board-card image (task asset) written at/after `sinceMs`? The
+   *  freshness half of the Canvas deliverable evidence (2026-10-01, see
+   *  {@link hasCanvasDeliverable}); only consulted for a ready worker with no
+   *  commits anywhere. Optional so existing dep literals keep compiling; the
+   *  default stats the central task-assets file. Any failure ⇒ false. */
+  taskAssetWrittenSince?: (projectPath: string, assetId: string, sinceMs: number) => Promise<boolean>
+  /** Does the worker's worktree hold NOTHING uncommitted (its own node_modules
+   *  symlink aside)? The other half of the Canvas evidence: a card that also wrote
+   *  code and forgot to commit must keep the READY WITHOUT WORK park (whose
+   *  teardown WIP-salvages it), never ride a Canvas promote into review dirty.
+   *  Absent / failure ⇒ false (fail-closed: unproven clean ⇒ no Canvas promote). */
+  worktreeIsClean?: (worktree: string) => Promise<boolean>
   /** The worker's heartbeat sign for its branch, or null when it never wrote
    *  one / it's unreadable. Carries the display-only phase/note/at too. (Card②) */
   readHeartbeat: (
@@ -4662,6 +4694,74 @@ const defaultCountCommitsAhead = async (
   return null // every candidate trunk ref failed to verify
 }
 
+/** The file-name tails `openground-canvas-shot.mjs --task` gives the two shots it
+ *  attaches (`<canvas name>-canvas-light.png` / `-canvas-dark.png`). PROTOCOL with
+ *  scripts/openground-canvas-shot.mjs — rename one side, rename both. */
+export const CANVAS_SHOT_SUFFIXES = ['-canvas-light.png', '-canvas-dark.png'] as const
+
+/**
+ * Is this card's deliverable on a Canvas? (owner report, 2026-10-01)
+ *
+ * A Canvas card's output lives in OPEN GROUND's central data, never on the swarm
+ * branch, so the commit count the promote gate reads is 0 by construction — the
+ * incident's worker drew two figures, attached its light/dark shots, beat
+ * ready:true, and was reported 「成果のコミットが見つからない」 then parked in
+ * blocked. The proof: the card carries a light AND a dark shot (/order §Canvas
+ * deliverables — the owner's existing condition, unchanged), each WRITTEN during
+ * this run (writeTaskAsset rewrites the file on every upload, so a re-shoot is
+ * fresh; stale shots from an earlier run are not). Fresh shots, not a fresh canvas
+ * file: the canvas JSON is also rewritten by a mere pan/zoom of an open canvas, and
+ * a re-dispatched worker whose figures already exist only re-shoots.
+ * A code card never attaches canvas shots, so the 2026-09-13 guard (ready with 0
+ * commits ⇒ tell + park) keeps its teeth for it. A card that touches Canvas UI
+ * code DOES attach shots (owner rule) — if it forgot to commit, the monitor's
+ * clean-worktree check ({@link OrchestratorDeps.worktreeIsClean}, read beside
+ * this) refuses the Canvas route, so it still parks with its WIP salvaged.
+ * ponytail: measured from startedAt, which an app-restart resume moves forward by
+ * the downtime — shots taken before the restart then don't count and the card
+ * parks as before (a re-shoot clears it). Use the first-dispatch time if that bites.
+ */
+export const hasCanvasDeliverable = async (
+  projectPath: string,
+  card: Pick<ProjectTask, 'attachments'>,
+  startedAt: string,
+  taskAssetWrittenSince: OrchestratorDeps['taskAssetWrittenSince'],
+): Promise<boolean> => {
+  const sinceMs = Date.parse(startedAt)
+  if (!Number.isFinite(sinceMs) || !taskAssetWrittenSince) return false
+  const fresh = async (suffix: string): Promise<boolean> => {
+    for (const a of card.attachments ?? []) {
+      if (!a.name.endsWith(suffix)) continue
+      try {
+        if (await taskAssetWrittenSince(projectPath, a.id, sinceMs)) return true
+      } catch {
+        /* unreadable — not evidence */
+      }
+    }
+    return false
+  }
+  return (await fresh(CANVAS_SHOT_SUFFIXES[0])) && (await fresh(CANVAS_SHOT_SUFFIXES[1]))
+}
+
+/** Default {@link OrchestratorDeps.taskAssetWrittenSince}: the asset file's mtime
+ *  in the project's central task-assets dir. Read-only (stat only). */
+const defaultTaskAssetWrittenSince = async (projectPath: string, assetId: string, sinceMs: number): Promise<boolean> =>
+  (await stat(await taskAssetPath(projectPath, assetId))).mtimeMs >= sinceMs
+
+/** Default {@link OrchestratorDeps.worktreeIsClean}: `git status --porcelain` is
+ *  empty once the worktree's own node_modules SYMLINK is ignored (shared install,
+ *  not work — same rule as the reaper's isDirty). Read-only: unlike
+ *  {@link commitWipBeforeTeardown} it never unlinks. Status unavailable ⇒ false. */
+const defaultWorktreeIsClean = async (worktree: string): Promise<boolean> => {
+  const status = await gitOut(worktree, ['status', '--porcelain'])
+  if (status === null) return false
+  const nmIsLink = await lstat(join(worktree, 'node_modules')).then(
+    (st) => st.isSymbolicLink(),
+    () => false,
+  )
+  return status.split('\n').every((l) => !l.trim() || (nmIsLink && /^\?\? node_modules\/?$/.test(l.trim())))
+}
+
 /** What {@link defaultCountNestedCommits} found: the summed commit count and the
  *  nested repos (directory names under the worktree) that carry them. */
 export interface NestedWorkProbe {
@@ -5447,6 +5547,8 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   isAlive: (w) => runtimeOf(w).isAlive(w),
   countCommitsAhead: defaultCountCommitsAhead,
   countNestedCommits: defaultCountNestedCommits,
+  taskAssetWrittenSince: defaultTaskAssetWrittenSince,
+  worktreeIsClean: defaultWorktreeIsClean,
   readHeartbeat: defaultReadHeartbeat,
   recoverCard: defaultRecoverCard,
   recoverWorker: defaultRecoverWorker,
@@ -6041,7 +6143,28 @@ const monitorWorkers = async (
         /* no nested evidence — the harmless direction for a promote gate */
       }
     }
-    const probe: WorkerProbe = { alive, commitsAhead, commitsUnknown, heartbeat, nestedCommits, nestedRepos }
+    // CANVAS evidence (2026-10-01) — consulted ONLY for a ready worker with a
+    // PROVEN zero (an unreadable count may hide real commits, and the commander
+    // skips the push for a Canvas promote), i.e. the case READY WITHOUT WORK flags.
+    // Fresh shots first (cheap), then a CLEAN worktree: uncommitted code beside the
+    // shots must keep the park (+ WIP salvage), not ride into review dirty.
+    let canvasDeliverable = false
+    if (heartbeat?.ready === true && commitsAhead === 0 && !commitsUnknown && nestedCommits === 0) {
+      canvasDeliverable =
+        (await hasCanvasDeliverable(engine.path, card, w.startedAt, deps.taskAssetWrittenSince)) &&
+        !!w.worktree &&
+        !!deps.worktreeIsClean &&
+        (await deps.worktreeIsClean(w.worktree).catch(() => false))
+    }
+    const probe: WorkerProbe = {
+      alive,
+      commitsAhead,
+      commitsUnknown,
+      heartbeat,
+      nestedCommits,
+      nestedRepos,
+      canvasDeliverable,
+    }
 
     const verdict = classifyWorker(probe, sinceStart(w.startedAt) >= STARTUP_GRACE_MS)
     let { promote, stage } = verdict // reassigned by the 差し戻し suppression below
@@ -6082,7 +6205,9 @@ const monitorWorkers = async (
         const nestedNote =
           commitsAhead === 0 && nestedCommits > 0
             ? ` — 成果の所在: 入れ子リポ ${nestedRepos.join(' / ')} に ${nestedCommits} コミット(親ブランチは 0)`
-            : ''
+            : commitsAhead === 0 && canvasDeliverable
+              ? ' — 成果の所在: Canvas(コミットは 0・明暗の写真はカードに添付)'
+              : ''
         logLine(engine, 'info', `promoted to review: ${shorten(w.taskTitle)} → ${w.branch}${nestedNote}`, 'promote')
         // 着地台帳 (swarm-landed.json): the DURABLE twin of that promote line —
         // the journal ring dies with the process, the weekly landed KPI must

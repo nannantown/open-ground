@@ -1006,6 +1006,88 @@ describe('monitor — READY WITHOUT WORK: told once, held un-nudged, then parked
     expect(engine.readyWithoutWork?.size ?? 0).toBe(0) // the hold was cleared by the promote
   })
 
+  // Owner report 2026-10-01: a Canvas card's figures live in central data, so its
+  // branch is 0 by construction — it was warned about and parked in blocked.
+  const canvasShots = [
+    { id: 'a'.repeat(40) + '.png', name: '原価-canvas-light.png', mime: 'image/png' },
+    { id: 'b'.repeat(40) + '.png', name: '原価-canvas-dark.png', mime: 'image/png' },
+  ]
+
+  it('a CANVAS card (light + dark shots written during the run) is PROMOTED, never warned or parked', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing', attachments: canvasShots })],
+      heartbeats: new Map([['a', readyAtT0]]),
+    })
+    deps.taskAssetWrittenSince = async (_p, _id, since) => since === T0
+    deps.worktreeIsClean = async (wt) => wt === '/wt/a'
+    const first = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, first)
+    await runDispatchPass(engine, deps, first + READY_WITHOUT_WORK_GRACE_MS + 1)
+    expect(deps.reviews).toEqual([{ taskId: 'a', branch: 'swarm/a' }])
+    expect(deps.recovered).toEqual([])
+    expect(engine.log.some((l) => l.message.includes('完了を申告しましたが'))).toBe(false)
+    expect(engine.log.find((l) => l.message.startsWith('promoted to review'))?.message).toContain('成果の所在: Canvas')
+  })
+
+  it('fresh shots but a DIRTY worktree (uncommitted code beside a Canvas UI shot) ⇒ NOT promoted, still READY WITHOUT WORK → parked', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing', attachments: canvasShots })],
+      heartbeats: new Map([['a', readyAtT0]]),
+    })
+    deps.taskAssetWrittenSince = async () => true
+    deps.worktreeIsClean = async () => false
+    const first = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, first)
+    expect(engine.log.some((l) => l.message.includes('完了を申告しましたが'))).toBe(true)
+    await runDispatchPass(engine, deps, first + READY_WITHOUT_WORK_GRACE_MS + 1)
+    expect(deps.reviews).toEqual([])
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }])
+    expect(deps.teardownOpts.map((o) => o.reason)).toEqual(['ready-without-work'])
+  })
+
+  it('no clean-worktree probe at all ⇒ fail-closed, no Canvas promote', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing', attachments: canvasShots })],
+      heartbeats: new Map([['a', readyAtT0]]),
+    })
+    deps.taskAssetWrittenSince = async () => true
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(deps.reviews).toEqual([])
+  })
+
+  it('an UNREADABLE commit count never takes the Canvas route (real commits may hide behind it)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing', attachments: canvasShots })],
+      heartbeats: new Map([['a', readyAtT0]]),
+      commitsUnknown: new Set(['a']),
+    })
+    deps.taskAssetWrittenSince = async () => true
+    deps.worktreeIsClean = async () => true // every OTHER proof holds — only the unreadable count may refuse
+    await runDispatchPass(engine, deps, T0 + STALL_SILENCE_MS + 1)
+    expect(deps.reviews).toEqual([])
+    expect(engine.log.some((l) => l.message.includes('完了を申告しましたが'))).toBe(true)
+  })
+
+  it('a CODE card with 0 commits is still warned and parked (no shots on the card)', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      heartbeats: new Map([['a', readyAtT0]]),
+    })
+    deps.taskAssetWrittenSince = async () => true
+    deps.worktreeIsClean = async () => true // every OTHER proof holds — only the missing shots may refuse
+    const first = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, deps, first)
+    await runDispatchPass(engine, deps, first + READY_WITHOUT_WORK_GRACE_MS + 1)
+    expect(deps.reviews).toEqual([])
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }])
+    expect(engine.log.some((l) => l.message.includes('完了を申告しましたが'))).toBe(true)
+  })
+
   it('an UNREADABLE parent count is said so, not reported as a proven zero', async () => {
     const engine = newEngine({ workers: [w1()] })
     const deps = makeDeps({

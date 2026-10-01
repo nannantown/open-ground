@@ -212,6 +212,11 @@ First read the owner's answers (§Answers come back only when you look). Land on
    ユニットテスト側の実ファイル HOLD/PASS(it.each)が固定する。集合を変えるときは SKILL.md と
    HIGH_RISK_PATHS と実ファイルテストを同じコミットで — 片方だけ変えるとテストが割れる。)
 1. **dirty=0** confirmed (wait if worker still writing).
+   **Canvas-only card** (promote line `成果の所在: Canvas`, or a review card whose deliverable is a
+   Canvas): confirm `git -C <wt> rev-list --count origin/main..HEAD` is 0 and the worktree is clean
+   (dirty ⇒ the worker forgot to commit code ⇒ §rework). Then nothing lands in git: do 4b (look at
+   the shots), skip 3–6 (no diff to test, review or push), then step 7's cleanup, step 8's `move done`
+   and step 9's report (`supply/say` with `"landed":["<full card id>"]`).
 2. `git fetch origin main`.
 3. **Re-verify (mandatory)**: run the goal's own checks in `<wt>` yourself (`npx tsc --noEmit` / `npm test` etc). Green → continue; red → don't push, go §rework (heartbeat `ready` is unverified self-report — never push on it alone).
    **Full suite once, not twice** (owner decision 2026-09-26): in OPEN GROUND first run `npx tsx scripts/full-suite-passed.mts <wt>`. Exit 0 = the worker's own `npm test` exited 0 on exactly this HEAD's contents, the tree is clean, and HEAD already contains origin/main — FF push lands the tested tree, so skip `npm test` (tsc / lint still run). Exit 1 (prints why) = run `npm test`; if the reason is "HEAD does not contain origin/main", do step 5's rebase FIRST and run it once on the rebased tree (not once before and again after). Any rebase = the suite runs again. Never skip on the heartbeat's word. Full runs queue machine-wide (2 at once): run it in the background and wait.
