@@ -56,6 +56,8 @@ const PTY_BY_DESIGN = [
   //                                          reads a screen, types /compact into it
   'src/lib/server/phoneLink.ts', //          asks which project has a live SUPPLY desk
   //                                          (PTY-only, above) by the supply label
+  'src/lib/server/phoneAssistant.ts', //     one-off PTY per assistant line (canvasAi's
+  //                                          runner); waits for it to die before rm cwd
   'server/routes/customModules.ts', //        custom tabs are PTY panes by design
   'server/routes/sse.ts', //                  the PTY output stream
   'server/index.ts', //                       starts/stops the PTY sweep loop

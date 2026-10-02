@@ -131,6 +131,13 @@ export interface LaunchClaudeOpts {
   // per launch and empty by default. Research knowledge sessions pass their
   // utility-specific deny list; workers, supply and interactive terminals do not.
   disallowedTools?: string[]
+  // ALLOW-list of built-in tools (`--tools`; "" = none). Unlike the deny-list it
+  // also shuts out tools added by a later claude version. Opt-in, unset = all.
+  tools?: string[]
+  // `--restricted` (claude 2.1.287 --help): drops the code-running tools, ignores
+  // user/project/local settings files, CONFINES the file tools to the working
+  // directories and refuses bypassPermissions — pair it with acceptEdits.
+  restricted?: boolean
   // Mark this as a HEADLESS UTILITY session: a real claude PTY whose output is
   // marker-scraped, with NO user-visible pane (auto-title / auto-description).
   // Carried onto the pool entry (TerminalInfo.hidden) so listActiveTerminals
@@ -329,6 +336,8 @@ export const buildClaudeArgv = (
     | 'remoteControl'
     | 'strictMcpConfig'
     | 'disallowedTools'
+    | 'tools'
+    | 'restricted'
   >,
   promptFilePath: string | null,
   contextFilePath: string | null = null,
@@ -369,6 +378,9 @@ export const buildClaudeArgv = (
   // that takes a value always bounds it.
   const disallowed = (opts.disallowedTools ?? []).map((t) => t.trim()).filter(Boolean)
   if (disallowed.length) args.push('--disallowed-tools', q(disallowed.join(',')))
+  // Same variadic hazard, same two belts: one quoted token, before --session-id.
+  if (opts.tools) args.push('--tools', q(opts.tools.join(',')))
+  if (opts.restricted) args.push('--restricted')
   if (opts.resume) {
     args.push('--resume', opts.agentSessionId)
   } else {

@@ -51,7 +51,7 @@ import type {
 } from '@/lib/types'
 import { appendCanvasElements, hashElementSource, updateCanvasElementSource } from './canvasData'
 import { claudeRunPreflight } from './claudePreflight'
-import { launchClaude } from './claudeTerminal'
+import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
 import { killTerminal, killTerminalsByCwdAndWait, subscribeTerminal } from './terminal'
 
 // ── Completion marker ────────────────────────────────────────────────────────
@@ -157,6 +157,9 @@ export interface FileTaskOpts {
    *  CANVAS_AI_MODEL default (sonnet). Routes narrow to SWARM_MODEL_TIERS ∩
    *  the allowed-models mask before it reaches here. */
   model?: string
+  /** Launch overrides for a caller that must be tighter than a canvas job
+   *  (the phone assistant: hidden, Write only, confined to the handoff dir). */
+  launch?: Pick<LaunchClaudeOpts, 'permissionMode' | 'tools' | 'restricted' | 'hidden' | 'name' | 'disallowedTools'>
 }
 
 /** Run one file-handoff claude task: spawn a claude PTY session in the handoff
@@ -202,6 +205,7 @@ export const runFileTask = async (opts: FileTaskOpts): Promise<string> => {
     // sandboxed claude can't plant one that this auto-run spawns outside the
     // sandbox (sandbox experiment hardening — see strictMcpConfig opt).
     strictMcpConfig: true,
+    ...opts.launch,
   })
 
   let buffer = ''

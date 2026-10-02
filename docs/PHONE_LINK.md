@@ -2,7 +2,8 @@
 
 Owner request, 2026-10-01: with earphones in and the Mac out of reach, hear what
 reaches the president desk (progress, questions for the owner, deliveries) and
-the president's replies as they happen, and talk back (push-to-talk). This page
+the president's replies as they happen, and talk back (push-to-talk) — plus, since
+2026-10-02, an **assistant** that looks across all projects (see "The assistant"). This page
 is the **whole contract for the iPhone app** — build against it alone.
 
 Free to run: a Cloudflare Workers free-plan relay, the owner's Claude
@@ -87,6 +88,7 @@ one; see "Waking the phone").
 | `notice` | an app notice that reached the desk (progress, a question for the owner, a delivery) — plain words, prefix stripped | yes (the president usually retells it right after; the app may choose to read only `president`) |
 | `commander` | the commander's reply that reached the desk | same as `notice` |
 | `owner` | the owner's own words as the desk received them (from the phone OR typed at the Mac) | no — use it to confirm "heard" |
+| `assistant` | the assistant's answer (`projectId: "assistant"`, see "The assistant") | yes |
 
 `seq` is strictly increasing per pairing; remember the last one and reconnect
 with `?after=`. The relay keeps the last 200 events: if the first event after a
@@ -103,7 +105,8 @@ relay drops what it already has — the phone sees each event once. Text can con
 { "type": "projects", "selected": "<id or null>", "projects": [ { "id": "<uuid>", "name": "OPEN GROUND", "desk": true } ] }
 ```
 `desk` = that project's president desk is running now. Events only come from
-the `selected` project.
+the `selected` project — and from the assistant, which is always the first
+entry (`"assistant": true`, never `selected`; see "The assistant").
 
 **`ack`** — what happened to a `say`:
 ```json
@@ -119,7 +122,8 @@ Mac, or while a menu is open (it waits, it does not interrupt). `desk:
 `reason`: `empty`, `too-long` (+`max`: over 473 characters after newlines are
 folded — longer would wedge the desk; ask the owner to say it in parts),
 `no-project`, `forbidden` (the Mac is not signed in as the owner), `desk-failed`
-(+`detail`).
+(+`detail`), `assistant-failed` (+`detail`) / `busy` (assistant only). A `delivered` from the
+assistant may carry `card` (see "The assistant").
 
 `delivered` lives in the Mac's memory: if OPEN GROUND restarts (you see `mac`
 online:false then true) while a `say` is still `queued`, that line is gone and no
@@ -157,6 +161,8 @@ your words (which IS sent again) is the proof that it was heard.
   answer is then what you hear; answered with `projects`).
   "社長に頼んで…" needs nothing special: the president takes orders and writes
   the card the same way it does at the Mac.
+- `say` with `"projectId": "assistant"` — to the assistant instead (2000
+  characters, newlines kept, no selection change; see "The assistant").
 - `select` — hear this project from now on (no replay of its past). Answered
   with `projects`.
 - `projects` — ask for the list again.
@@ -170,6 +176,104 @@ your words (which IS sent again) is the proof that it was heard.
 
 Frames over 16,384 characters or of any other `type` are refused (`bad-frame`), never
 forwarded to the Mac.
+
+## The assistant (talk partner across all projects, 2026-10-02)
+
+Owner request, 2026-10-02: one partner who looks across EVERY project, answers
+short, and — when asked — puts a work card on a project's Board. Its talk stays
+on the phone: it never reaches a president desk, the president's chat, the
+Board's notes or any screen on the Mac. Only the card it writes appears (on that
+project's Board, as an ordinary `todo` card).
+
+**On the wire** — the same frames, with `projectId: "assistant"`:
+- `projects` always lists it FIRST: `{ "id": "assistant", "name": "アシスタント", "desk": false, "assistant": true }`
+  (`desk` means nothing for it — always `false`, so an app that picks the first
+  live desk never lands on it)
+  (`name` follows the Mac's language: `Assistant` in English). It is never
+  `selected`; `select` with it changes nothing (answered with `projects`).
+- `say` with `"projectId": "assistant"` goes to it (the selection does not
+  change). Up to **2000** characters (`text.utf16.count`), newlines kept — it is
+  not typed into a desk, so the 473 limit and the dropped `!` `/` `#` do not
+  apply. `empty` / `too-long` (+`max: 2000`) as for a desk.
+- Then: `ack queued` at once and an `event` `kind: "owner"` with the words; the
+  answer comes as `ack delivered` (`heard: true`, plus `card` when it wrote one:
+  `{ "projectId", "taskId", "title" }`) followed by ONE `event` with
+  `kind: "assistant"` — read it aloud. Or `ack rejected` `reason:
+  "assistant-failed"` (+`detail`: one short plain sentence in the Mac's language,
+  e.g. 「アシスタントが時間内に答えられませんでした。」 / "The assistant did not answer
+  in time." — never an internal error) when it could not answer (Claude not
+  signed in, no answer in 3 min, work mode switched on meanwhile). An answer
+  takes roughly 5–40 s (a Claude session starts per line); lines wait their
+  turn, one at a time. With one line being answered and one waiting, a further
+  line gets ONLY `ack rejected` `reason: "busy"` (no `queued`, no `owner` event,
+  no `detail`) — say it again later.
+- Its events come **whatever project is selected**. Show them in the
+  assistant's conversation, not the president's (tell them apart by
+  `projectId`). They are replayed with `?after=` like any other event, but a
+  Mac connection that dies silently can lose one (they carry no transcript
+  position) — the missing `ack delivered` / `event` then shows it; offer to ask again
+  (asking again does not make a second card: an open card of the same title in
+  that project is reported as already there, never as newly written). When the
+  Mac's socket to the relay is closed at the moment an answer is ready, the Mac
+  keeps it (the newest 20 frames) and sends it, in order, once the socket is
+  back — always before anything newer, so an older answer never follows a newer
+  one. Work mode drops what was kept: it is never sent, not even after work mode
+  is switched off (as for the president's words).
+- The push rules are the president's: one push when the answer went out, none
+  while a line waits for its answer — for at most 2 min, as for a desk.
+
+**What it does** (`src/lib/server/phoneAssistant.ts`):
+- Each line is one Claude Code session on the owner's subscription (no API key,
+  no cost), through canvasAi's file-handoff runner: a hidden PTY in a fresh temp
+  dir started with `--tools Write --restricted --permission-mode acceptEdits`
+  (`ASSISTANT_LAUNCH`): its only tool is Write, and `--restricted` confines it to
+  that dir — a write anywhere else is refused and creates nothing (measured
+  2026-10-02 on claude 2.1.287). MCP tools are kept out twice
+  (`--strict-mcp-config` and `--disallowed-tools mcp__*`; `--tools` covers only
+  built-in tools). It cannot read, run or change anything else; the card is
+  written by the Mac, not by the model. Guard: `phoneAssistantLaunch.test.ts`
+  (the argv of the claude a real line starts).
+- The Mac hands it the state of every registered project (Board counts, what is
+  being worked on, open questions for the owner) and the last few lines of this
+  conversation (kept in memory only, forgotten after 30 min of quiet or a
+  restart). The transcript Claude Code keeps for the temp dir is deleted with it.
+  The state handed over includes text others wrote (card titles, workers'
+  questions); it is quoted as data, and with no tools beyond its answer file an
+  injected line cannot act on the Mac — but it CAN shape the answer, including a
+  card: that card lands in `todo` and is dispatched like any other. The same
+  checks hold for it (a registered project, every field present, one card), and
+  it shows on the Board like any card. Whether the prompt holds the runner's
+  completion marker is decided by the runner's OWN detector (`containsDoneMarker`),
+  never by a pattern of ours, and on the prompt AS CLAUDE'S SCREEN SHOWS IT: the
+  TUI drops every invisible format character (zero-width spaces and joiners,
+  soft hyphens, variation selectors, tag and bidi characters, Hangul fillers) and
+  the C1 control characters U+0080–009F, so those are removed before the check. When it fires, that turn is built again
+  with every `_` in ALL of its data (every project's titles and questions, the
+  owner's words, the style, the whole history) as a full-width `＿` — the marker
+  needs two ASCII `_` and the template has none — and a prompt the detector still
+  fires on is never started (the phone gets the plain "could not answer" failure).
+  So no text, however split by spaces, escape codes, invisible characters or
+  nesting, can end a line early. The price: while marker text sits in the status
+  or the history (until the idle reset), the model sees `snake＿case` instead of
+  `snake_case` in that turn's data, and a card it writes may carry the `＿`
+  (seen: a card asked to be titled with the marker itself). A turn without
+  marker text keeps every `_` as written.
+- It answers as JSON `{reply, card}`. When the owner asks for work and both the
+  project and the request are clear, `card` = `{projectId, title, goal, judge,
+  done[], placement, tier}`; the Mac checks every field is there and the project
+  is registered, then writes ONE `todo` card whose notes carry Goal / How the
+  owner judges it / Done when / Final placement (headings follow the Mac's
+  language). An incomplete card is not written and the reply says so instead of
+  claiming it was. When either is unclear it asks one short question back.
+  It never dispatches, moves, merges or answers anything.
+- How it talks is the owner's free text: Settings → **iPhone** →
+  「アシスタントの話し方」, stored as `~/.openground/assistant-style.md`
+  (editable by hand too; empty = the default below). Read fresh on every line,
+  so a change applies to the next answer. Default (owner decision 2026-10-02):
+  friend's tone, conclusion first, 1–2 sentences, stuck things / questions
+  waiting for the owner before progress.
+- Owner only and work mode as for the rest of the link: under work mode it is
+  never asked.
 
 ## Waking the phone (Push to Talk)
 
@@ -305,7 +409,10 @@ live on users' Macs — so the relay sends it, and the Mac only says "something 
   `node scripts/phone-link-say.mjs <pairing code> "text"` — prints every frame
   and exits 0 once the president answered after the line landed. `--key x`
   shows a wrong key is refused; no text = listen only.
-- Unit guards: `src/lib/server/phoneLink.test.ts`, `src/lib/server/phonePush.test.ts`
+- The assistant: `node scripts/phone-link-say.mjs <code> "全体どう?" --project assistant`
+  (exits 0 once its `assistant` event came after the `delivered`).
+- Unit guards: `src/lib/server/phoneLink.test.ts`, `src/lib/server/phoneAssistant.test.ts`
+  (style change reaches the next prompt; a card lands complete in another project), `src/lib/server/phonePush.test.ts`
   (the APNs request as a real HTTP/2 server receives it, JWT, 410),
   `src/lib/server/phoneRelayAuth.test.ts`,
   `src/lib/server/supplyNoticeOwnerSay.test.ts`.

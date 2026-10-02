@@ -4,6 +4,7 @@
 import { Hono, type MiddlewareHandler } from 'hono'
 import { pushKeySaved, hasPhoneLinkAccess, pairPhone, pairingCode, phoneLinkStatus, readPhoneLinkConfig, unpairPhone } from '@/lib/server/phoneLink'
 import { savePushKey } from '@/lib/server/phonePush'
+import { readAssistantStyle, saveAssistantStyle } from '@/lib/server/phoneAssistant'
 import { hostIsLocal, originIsLocal } from '../loopback'
 
 // The pairing code is a WRITE credential (whoever holds it speaks as the owner),
@@ -32,6 +33,13 @@ export const phoneLinkRoutes = new Hono()
     return cfg ? c.json({ code: pairingCode(cfg) }) : c.json({ error: 'not paired' }, 404)
   })
   .post('/api/phone-link/unpair', async () => reply(await unpairPhone()))
+  // How the assistant talks (phoneAssistant.ts) — the owner's free text, read
+  // fresh on every turn. Empty = back to the default.
+  .get('/api/phone-link/assistant-style', async (c) => c.json(await readAssistantStyle()))
+  .post('/api/phone-link/assistant-style', async (c) => {
+    const r = await saveAssistantStyle(((await c.req.json().catch(() => ({}))) as { style?: unknown }).style)
+    return 'error' in r ? c.json(r, 400) : c.json(await readAssistantStyle())
+  })
   // The owner's APNs key (Push to Talk), once. Stored 0600, never returned.
   .post('/api/phone-link/push-key', async (c) => {
     const r = await savePushKey(await c.req.json().catch(() => ({})))

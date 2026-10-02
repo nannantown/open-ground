@@ -47,4 +47,5 @@ ws.on('message', (d) => {
   if (f.type === 'ack' && f.id === id && f.state === 'rejected') done(1, `rejected: ${f.reason}`)
   if (f.type === 'ack' && f.id === id && f.state === 'delivered') landed = true
   if (f.type === 'event' && f.kind === 'president' && landed) done(0, 'president answered')
+  if (f.type === 'event' && f.kind === 'assistant' && landed) done(0, 'assistant answered') // --project assistant
 })

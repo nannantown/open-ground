@@ -769,6 +769,10 @@
   置き直しは `forgetTail` がディスクの `floor` も消して保存する(再起動後に古い床へ戻らない)。起動時は
   `startPhoneLink` が先に `getSettings()` で業務モードの写しを温めてから繋ぐ(温まる前は「OFF」に見えるため)。
   番人 = `phoneLink.test.ts`(再起動をまたぐ業務モード3本)/ `phoneLinkBoot.test.ts`(起動時に中継へ1回も繋がない)。
+- アシスタント(全プロジェクトまとめ役, 2026-10-02): `src/lib/server/phoneAssistant.ts`(1行=隠し PTY の claude 1回・
+  canvasAi `runFileTask` のファイル受け渡し・状況は Mac が組んで渡す・カードは Mac が検証して `mutateProjectData` で1枚)/
+  `phoneLink.ts` の `assistantSay`(`projectId:"assistant"`・社長の卓には入れない)/ 話し方 = `~/.openground/assistant-style.md`
+  (設定 → iPhone の欄・route `/api/phone-link/assistant-style`)。テスト `phoneAssistant.test.ts` / `phoneAssistantLaunch.test.ts`(実際の起動 argv = Write のみ・閉じ込め・bypass 無し)/ `phoneLink.test.ts`。
 - 画面ロック中に起こす(Push to Talk, 2026-10-02): APNs 送信は `src/lib/server/phonePush.ts`(オーナーの .p8 を
   `~/.openground/phone-push-key.json` 0600 に保存・JWT ES256 を30分ごとに作り直し・`node:http2` で1回ずつ接続)。
   トークン受け取り・間隔(5秒)・say の最終 ack 待ち(最長2分)・410/BadDeviceToken で破棄・403 等の恒久拒否は鍵かトークンが変わるまで止めて設定に表示・無応答/429/5xx は間隔後に最大3回再送、は `phoneLink.ts` の

@@ -184,6 +184,10 @@ owner line rings no bell. Order per pass: owner → commander reply → importan
 Guard: `supplyNoticeOwnerSay.test.ts` (priority / no prefix / held while busy or half-typed /
 mode characters / length cap / trailing backslash — red measured by mutation, 2026-10-01).
 
+The phone's **assistant** (2026-10-02, `phoneAssistant.ts`) does NOT use this lane: its talk never
+reaches a desk. Its only trace is a complete `todo` card it may write into a project (notes:
+Goal / How the owner judges it / Done when / Final placement) — dispatched like any president card.
+
 ### 1.8 Where the commander's own reports go (2026-09-23, owner decision)
 
 The commander's window is no longer on screen (Swarm single-screen, step ③) — the owner

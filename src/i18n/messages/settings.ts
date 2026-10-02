@@ -54,6 +54,8 @@ export const settings = {
     'settings.phoneLink.push.replace': 'Replace key',
     'settings.phoneLink.push.file': 'Apple key file (.p8)',
     'settings.phoneLink.push.bad': 'That key, Key ID or Team ID was not accepted.',
+    'settings.phoneLink.assistant.style': 'How the assistant talks',
+    'settings.phoneLink.assistant.failed': 'Could not save. Try again.',
     'settings.workerTrial.heading': 'Agent Team worker trials (measuring)',
     'settings.workerTrial.hint':
       'Settings whose effect is still being measured. Off by default, and turning one off restores the previous behaviour exactly — nothing else changes.',
@@ -222,6 +224,8 @@ export const settings = {
     'settings.phoneLink.push.replace': '鍵を入れ替える',
     'settings.phoneLink.push.file': 'Apple の鍵ファイル (.p8)',
     'settings.phoneLink.push.bad': '鍵・Key ID・Team ID のどれかが正しくありません。',
+    'settings.phoneLink.assistant.style': 'アシスタントの話し方',
+    'settings.phoneLink.assistant.failed': '保存できませんでした。もう一度試してください。',
     'settings.workerTrial.heading': 'エージェントチームのワーカー試験(計測中)',
     'settings.workerTrial.hint':
       '効果をまだ測っている途中の設定です。既定はオフ。オフに戻すと元の動きに完全に戻ります(ほかには何も変わりません)。',

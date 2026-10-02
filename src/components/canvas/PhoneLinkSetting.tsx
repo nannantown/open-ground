@@ -36,6 +36,39 @@ export const PhoneLinkSetting = ({ frame }: { frame: (body: ReactNode) => ReactN
   const [failed, setFailed] = useState(false)
   const [keyForm, setKeyForm] = useState<{ p8: string; keyId: string; teamId: string } | null>(null)
   const [keyBad, setKeyBad] = useState(false)
+  // How the assistant talks: what the server has, and the owner's edit of it.
+  const [style, setStyle] = useState<{ saved: string; draft: string } | null>(null)
+  const [styleSaved, setStyleSaved] = useState(false)
+  const [styleFailed, setStyleFailed] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/phone-link/assistant-style')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => typeof s?.style === 'string' && setStyle({ saved: s.style, draft: s.style }))
+      .catch(() => {})
+  }, [])
+
+  const saveStyle = async () => {
+    if (!style) return
+    setBusy(true)
+    setStyleFailed(false)
+    try {
+      const r = await fetch('/api/phone-link/assistant-style', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ style: style.draft }),
+      })
+      if (!r.ok) throw new Error('style')
+      const s = await r.json()
+      setStyle({ saved: s.style, draft: s.style })
+      setStyleSaved(true)
+      setTimeout(() => setStyleSaved(false), 1500)
+    } catch {
+      setStyleFailed(true)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const load = useCallback(() => {
     fetch('/api/phone-link')
@@ -222,6 +255,29 @@ export const PhoneLinkSetting = ({ frame }: { frame: (body: ReactNode) => ReactN
               </button>
             </>
           )}
+        </div>
+      )}
+      {style && (
+        <div className="flex w-full flex-col gap-2">
+          <label htmlFor="assistant-style" className="text-ui text-ink">
+            {t('settings.phoneLink.assistant.style')}
+          </label>
+          <textarea
+            id="assistant-style"
+            value={style.draft}
+            onChange={(e) => setStyle({ ...style, draft: e.target.value })}
+            disabled={busy}
+            rows={4}
+            maxLength={4000}
+            className="w-full resize-y rounded-[3px] border border-line bg-bg-card px-2.5 py-2 text-ui leading-relaxed text-ink placeholder:text-ink-faint hover:border-line-strong focus:outline-none focus-visible:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
+          />
+          <div className="flex items-center justify-end gap-2">
+            {styleFailed && <span className="text-ui text-ink-muted">{t('settings.phoneLink.assistant.failed')}</span>}
+            {styleSaved && <Check size={14} className="text-status-done" aria-label={t('common.save')} />}
+            <button type="button" className={BTN} disabled={busy || style.draft === style.saved} onClick={saveStyle}>
+              {t('common.save')}
+            </button>
+          </div>
         </div>
       )}
     </div>

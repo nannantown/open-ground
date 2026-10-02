@@ -856,6 +856,11 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     why: 'A one-off claude PTY this module spawns for a canvas generation job and tears down itself. Not a worker, not on the roster.',
     ptyFns: ['killTerminal', 'killTerminalsByCwdAndWait', 'subscribeTerminal'],
   },
+  'src/lib/server/phoneAssistant.ts': {
+    tier: 'pty-only-by-design',
+    why: "The iPhone assistant (2026-10-02) runs each line as a one-off claude PTY via canvasAi's runFileTask in its own fresh temp dir, and waits for that PTY to die before removing the dir. Not a worker, not a desk, not on the roster.",
+    ptyFns: ['killTerminalsByCwdAndWait'],
+  },
   'src/lib/server/generateDescription.ts': {
     tier: 'pty-only-by-design',
     why: "A one-off claude PTY for the card's auto-description, spawned and killed in the same function. Not a worker.",

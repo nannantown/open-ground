@@ -5,12 +5,15 @@ import { mkdtempSync, writeFileSync, appendFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const h = vi.hoisted(() => ({ owner: true, desk: false, file: '', files: {} as Record<string, string>, projects: [] as { id: string; path: string }[] }))
+const h = vi.hoisted(() => ({ owner: true, desk: false, file: '', files: {} as Record<string, string>, projects: [] as { id: string; path: string }[], language: undefined as string | undefined, settingsThrow: false }))
 vi.mock('./swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => h.owner }))
 vi.mock('./roles', () => ({ getCustomTabRole: async () => null }))
 vi.mock('./store', async (orig) => ({
   ...(await orig<typeof import('./store')>()),
-  getSettings: async () => ({ projects: h.projects }),
+  getSettings: async () => {
+    if (h.settingsThrow) throw new Error('settings unreadable')
+    return { projects: h.projects, language: h.language }
+  },
 }))
 vi.mock('./swarmSessions', () => ({
   readSwarmSessions: async (p: string) => ({ supply: { cwd: p, sessionId: 's1' } }),
@@ -22,7 +25,8 @@ vi.mock('./terminal', async (orig) => ({
   listLiveDesksIn: () => (h.desk ? [{ id: 'd1' }] : []),
 }))
 
-import { flushPush, PUSH_GAP_MS, PUSH_RETRY_MAX, SAY_HOLD_MAX_MS, handlePhoneFrame, handleRelayFrame, phoneEventsFromLine, pumpTranscript, pairingCode, pairPhone, readPhoneLinkConfig, relayUrlAllowed, startPhoneLink, stopPhoneLink, unpairPhone, tick, __testLinkState } from './phoneLink'
+import { AssistantFailure, askAssistant, __resetAssistantMemory } from './phoneAssistant'
+import { __testConnect, flushAssistantOutbox, flushPush, PUSH_GAP_MS, PUSH_RETRY_MAX, SAY_HOLD_MAX_MS, handlePhoneFrame, handleRelayFrame, phoneEventsFromLine, pumpTranscript, pairingCode, pairPhone, readPhoneLinkConfig, relayUrlAllowed, startPhoneLink, stopPhoneLink, unpairPhone, tick, __testLinkState } from './phoneLink'
 import { alreadyStored, asCursor, type Cursor, type PushTarget } from '../../../worker/src/phoneRelayAuth'
 import { setLockdownCache } from './lockdown'
 import { openGroundHome } from './paths'
@@ -69,6 +73,8 @@ beforeEach(() => {
   h.desk = false
   h.projects = [{ id: 'p1', path: PROJECT }]
   h.files = {}
+  h.language = undefined
+  h.settingsThrow = false
   setLockdownCache(false)
 })
 
@@ -189,6 +195,186 @@ describe('handlePhoneFrame — the phone speaks', () => {
     const st = __testLinkState(CFG, sock)
     await handlePhoneFrame(st, { type: 'say', id: 's', text: 'こっち', projectId: 'p2' }, { supply: fakeDesk().deps, wakeDesk: async () => null })
     expect(sent.find((f) => f.type === 'projects')).toMatchObject({ selected: 'p2' })
+  })
+})
+
+describe('the assistant — a talk partner of its own, heard on the phone only', () => {
+  it('heads the project list and is never the selected project', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    await handlePhoneFrame(st, { type: 'select', projectId: 'assistant' })
+    const f = sent.at(-1) as { type: string; selected: string; projects: { id: string }[] }
+    expect(f.type).toBe('projects')
+    expect(f.projects.map((p) => p.id)).toEqual(['assistant', 'p1'])
+    expect(f.selected).toBe('p1')
+  })
+
+  it('a say to it is answered to the phone and never typed into a president desk', async () => {
+    const { sent, sock } = fakeSocket()
+    const desk = fakeDesk()
+    const st = __testLinkState(CFG, sock)
+    const asked: string[] = []
+    const card = { projectId: 'p1', taskId: 't1', title: 'ログイン直す' }
+    await handlePhoneFrame(st, { type: 'say', id: 'a1', text: 'alphaでログイン直して', projectId: 'assistant' }, {
+      supply: desk.deps,
+      wakeDesk: async () => 'must not wake a desk',
+      assistant: async (t) => (asked.push(t), { reply: 'alphaにカード積んだよ。', card }),
+    })
+    expect(asked).toEqual(['alphaでログイン直して'])
+    expect(desk.writes).toEqual([])
+    expect(sent.filter((f) => f.type === 'ack').map((f) => [f.id, f.state, f.projectId])).toEqual([
+      ['a1', 'queued', 'assistant'],
+      ['a1', 'delivered', 'assistant'],
+    ])
+    expect(sent.find((f) => f.state === 'delivered')?.card).toEqual(card)
+    expect(sent.filter((f) => f.type === 'event').map((f) => [f.projectId, f.kind, f.text])).toEqual([
+      ['assistant', 'owner', 'alphaでログイン直して'],
+      ['assistant', 'assistant', 'alphaにカード積んだよ。'],
+    ])
+    expect(st.says.size).toBe(0) // the push hold is released once the answer is out
+  })
+
+  it('an answer that finds the relay socket closed is sent once it is back, in order', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    sock.readyState = 3 // closed while the assistant was thinking
+    await handlePhoneFrame(st, { type: 'say', id: 'o1', text: '全体どう?', projectId: 'assistant' }, {
+      assistant: async () => ({ reply: '全部順調' }),
+    })
+    expect(sent).toEqual([])
+    sock.readyState = 1
+    st.lastHeard = Date.now()
+    await tick(st)
+    const mine = sent.filter((f) => f.projectId === 'assistant' || f.id === 'o1')
+    expect(mine.map((f) => [f.type, f.state ?? f.kind])).toEqual([
+      ['ack', 'queued'],
+      ['event', 'owner'],
+      ['ack', 'delivered'],
+      ['event', 'assistant'],
+    ])
+    await tick(st)
+    expect(sent.filter((f) => f.kind === 'assistant')).toHaveLength(1) // sent once, not again
+  })
+
+  it('kept answers go out before a newer line, so the phone never hears them out of order', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    sock.readyState = 3
+    await handlePhoneFrame(st, { type: 'say', id: 'old', text: '一つ目', projectId: 'assistant' }, { assistant: async () => ({ reply: '古い答え' }) })
+    sock.readyState = 1 // back, before any tick
+    await handlePhoneFrame(st, { type: 'say', id: 'new', text: '二つ目', projectId: 'assistant' }, { assistant: async () => ({ reply: '新しい答え' }) })
+    expect(sent.filter((f) => f.kind === 'assistant').map((f) => f.text)).toEqual(['古い答え', '新しい答え'])
+    expect(sent.filter((f) => f.type === 'ack').map((f) => f.id)).toEqual(['old', 'old', 'new', 'new'])
+  })
+
+  it('at most 20 kept frames: the oldest go first', async () => {
+    const { sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    sock.readyState = 3
+    for (let i = 1; i <= 6; i++)
+      await handlePhoneFrame(st, { type: 'say', id: `k${i}`, text: `${i}`, projectId: 'assistant' }, { assistant: async () => ({ reply: `r${i}` }) })
+    expect(st.assistantOutbox).toHaveLength(20)
+    expect(st.assistantOutbox.at(-1)).toMatchObject({ kind: 'assistant', text: 'r6' })
+  })
+
+  it('work mode drops what was kept: it is never sent, not even once switched off', async () => {
+    const sent: Record<string, unknown>[] = []
+    const sock = { readyState: 3, send: (s: string) => void sent.push(JSON.parse(s)), terminate: () => {} }
+    const st = __testLinkState(CFG, sock)
+    await handlePhoneFrame(st, { type: 'say', id: 'z1', text: '全体どう?', projectId: 'assistant' }, { assistant: async () => ({ reply: '秘密の答え' }) })
+    sock.readyState = 1
+    setLockdownCache(true)
+    await tick(st) // work mode cuts the link
+    setLockdownCache(false)
+    st.lastHeard = Date.now()
+    await tick(st)
+    expect(sent.filter((f) => f.projectId === 'assistant' || f.id === 'z1')).toEqual([])
+  })
+
+  it('work mode met on the reconnect drops what was kept: nothing is sent after it is switched off', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    sock.readyState = 3 // socket down: frames are kept, tick does nothing
+    await handlePhoneFrame(st, { type: 'say', id: 'c1', text: '全体どう?', projectId: 'assistant' }, { assistant: async () => ({ reply: '秘密の答え' }) })
+    expect(st.assistantOutbox.length).toBeGreaterThan(0)
+    st.stopped = false
+    setLockdownCache(true)
+    __testConnect(st) // the path a closed socket actually takes
+    st.stopped = true
+    clearTimeout(st.retry)
+    setLockdownCache(false)
+    sock.readyState = 1 // reconnected after work mode
+    st.lastHeard = Date.now()
+    await tick(st)
+    expect(sent.filter((f) => f.projectId === 'assistant' || f.id === 'c1')).toEqual([])
+  })
+
+  it("a failure is told in the Mac's language, and still told when the settings cannot be read", async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    const timedOut = async () => {
+      throw new Error('canvas AI session timed out')
+    }
+    h.language = 'ja'
+    await handlePhoneFrame(st, { type: 'say', id: 'j1', text: '全体どう?', projectId: 'assistant' }, { assistant: timedOut })
+    h.settingsThrow = true
+    await handlePhoneFrame(st, { type: 'say', id: 'j2', text: '全体どう?', projectId: 'assistant' }, { assistant: timedOut })
+    expect(sent.filter((f) => f.state === 'rejected').map((f) => [f.id, f.detail])).toEqual([
+      ['j1', 'アシスタントが時間内に答えられませんでした。'],
+      ['j2', 'The assistant did not answer in time.'],
+    ])
+  })
+
+  it('a full assistant gets just busy: nothing queued, nothing echoed, not asked', async () => {
+    __resetAssistantMemory()
+    const never: Parameters<typeof askAssistant>[1] = { run: () => new Promise(() => {}), digest: async () => ({ text: '', projects: [] }) }
+    void askAssistant('1', never).catch(() => {})
+    void askAssistant('2', never).catch(() => {})
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    const asked: string[] = []
+    await handlePhoneFrame(st, { type: 'say', id: 'f3', text: '3', projectId: 'assistant' }, {
+      assistant: async (t) => (asked.push(t), { reply: 'x' }),
+    })
+    __resetAssistantMemory()
+    expect(asked).toEqual([])
+    expect(sent).toEqual([{ type: 'ack', id: 'f3', state: 'rejected', reason: 'busy' }])
+  })
+
+  it('a busy assistant and an internal failure reach the phone as a reason and plain words only', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    await handlePhoneFrame(st, { type: 'say', id: 'b1', text: 'まだ?', projectId: 'assistant' }, {
+      assistant: async () => {
+        throw new AssistantFailure('busy', 'still answering')
+      },
+    })
+    await handlePhoneFrame(st, { type: 'say', id: 'b2', text: '全体どう?', projectId: 'assistant' }, {
+      assistant: async () => {
+        throw new Error('projectUUIDFromPath: no registered project owns /Users/x/secret')
+      },
+    })
+    const final = sent.filter((f) => f.type === 'ack' && f.state === 'rejected')
+    expect(final.map((f) => [f.id, f.reason])).toEqual([
+      ['b1', 'busy'],
+      ['b2', 'assistant-failed'],
+    ])
+    expect(JSON.stringify(final)).not.toMatch(/projectUUIDFromPath|\/Users\//)
+  })
+
+  it('an assistant that cannot answer is reported, not left queued', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    await handlePhoneFrame(st, { type: 'say', id: 'a2', text: '全体どう?', projectId: 'assistant' }, {
+      assistant: async () => {
+        throw new Error('claude not ready')
+      },
+    })
+    expect(sent.filter((f) => f.type === 'ack').map((f) => [f.state, f.reason])).toEqual([
+      ['queued', undefined],
+      ['rejected', 'assistant-failed'],
+    ])
+    expect(st.says.size).toBe(0)
   })
 })
 
@@ -611,6 +797,33 @@ describe('waking the phone with a Push to Talk push', () => {
     return { st, sent, pushes, deps }
   }
   const settle = () => new Promise((r) => setTimeout(r, 0))
+
+  it('an answer kept while the socket was closed wakes the phone when it goes out', async () => {
+    const { st, pushes, deps } = pushing()
+    const sock = st.ws as unknown as { readyState: number }
+    sock.readyState = 3
+    await handlePhoneFrame(st, { type: 'say', id: 'w2', text: '全体どう?', projectId: 'assistant' }, {
+      ...deps,
+      assistant: async () => ({ reply: '全部順調' }),
+    })
+    await settle()
+    expect(pushes).toEqual([])
+    sock.readyState = 1
+    flushAssistantOutbox(st, deps) // what tick does once the socket is back
+    await settle()
+    expect(pushes).toEqual([T1])
+  })
+
+  it("the assistant's answer wakes a locked phone once it is out", async () => {
+    const { st, sent, pushes, deps } = pushing()
+    await handlePhoneFrame(st, { type: 'say', id: 'w1', text: '全体どう?', projectId: 'assistant' }, {
+      ...deps,
+      assistant: async () => ({ reply: '全部順調' }),
+    })
+    await settle()
+    expect(sent.some((f) => f.kind === 'assistant')).toBe(true)
+    expect(pushes).toEqual([T1])
+  })
 
   it('the phone token is kept with the keys (0600), replaced by a newer one, and forgotten on request', async () => {
     const st = __testLinkState(CFG, fakeSocket().sock)

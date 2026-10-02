@@ -41,6 +41,8 @@ import { alreadyStored, asCursor, asPushTarget, type Cursor, type PushTarget } f
 import { providerTokenExpired, renewStaleProviderToken, pushKeyFingerprint, pushRefusedForGood, pushTokenGone, pushTransient, refusalIsTheApp, readPushKey, sendPushToTalk, type PushKey, type PushResult } from './phonePush'
 import { isSwarmLocalOwnerUnlocked } from './swarmGate'
 import { getCustomTabRole } from './roles'
+import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assistantBusy, plainAssistantError, type AssistantAnswer } from './phoneAssistant'
+import { langOf, pick } from './promptLang'
 
 /** The relay the owner deployed (worker/wrangler.phone.jsonc). Override with
  *  OPENGROUND_PHONE_RELAY_URL at pairing time (tests, a self-hosted relay). */
@@ -246,6 +248,10 @@ interface LinkState {
   pushRetries: number
   pushTimer?: ReturnType<typeof setTimeout>
   says: Set<{ at: number }>
+  /** Assistant frames that found the relay socket closed (its answers carry no
+   *  transcript position, so nothing else would ever send them). Sent by tick
+   *  once the socket is back; capped at ASSISTANT_OUTBOX_MAX, oldest dropped. */
+  assistantOutbox: Record<string, unknown>[]
 }
 
 declare global {
@@ -261,6 +267,8 @@ export interface PhoneLinkDeps {
   /** The APNs key / the push itself (tests). */
   pushKey?: () => Promise<PushKey | null>
   sendPush?: (key: PushKey, target: PushTarget) => Promise<PushResult>
+  /** The cross-project assistant's turn (tests). */
+  assistant?: (text: string) => Promise<AssistantAnswer>
 }
 
 /** Only the primary instance (fixed port 47776) holds the link: a second server
@@ -289,6 +297,7 @@ const newLinkState = (cfg: PhoneLinkConfig, ws: WebSocket | null): LinkState => 
   pushing: false,
   pushRetries: 0,
   says: new Set(),
+  assistantOutbox: [],
 })
 
 const send = (st: LinkState, frame: unknown): boolean => {
@@ -327,7 +336,14 @@ const selectedProject = async (st: LinkState) => {
 
 const sendProjects = async (st: LinkState, force = false): Promise<void> => {
   const { all, chosen } = await selectedProject(st)
-  const frame = { type: 'projects', selected: chosen?.id ?? null, projects: all.map(({ id, name, desk }) => ({ id, name, desk })) }
+  // The assistant first: a talk partner of its own, never `selected` (its events
+  // come whatever is selected — docs/PHONE_LINK.md "The assistant").
+  const assistant = { id: ASSISTANT_ID, name: pick(langOf(await getSettings()), { en: 'Assistant', ja: 'アシスタント' }), desk: false, assistant: true }
+  const frame = {
+    type: 'projects',
+    selected: chosen?.id ?? null,
+    projects: [assistant, ...all.map(({ id, name, desk }) => ({ id, name, desk }))],
+  }
   const body = JSON.stringify(frame)
   if (!force && body === st.lastProjects) return
   if (send(st, frame)) st.lastProjects = body
@@ -444,6 +460,62 @@ export const pushKeySaved = async (): Promise<void> => {
   }
 }
 
+const ASSISTANT_OUTBOX_MAX = 20
+const isAssistantAnswer = (f: Record<string, unknown>) => f.type === 'event' && f.kind === 'assistant'
+
+/** Send an assistant frame, or keep it for the next open socket (never under
+ *  work mode: what is said then is never sent). What is kept goes first, so the
+ *  phone never hears an older answer after a newer one. True = it went out now. */
+const sendAssistant = (st: LinkState, frame: Record<string, unknown>, deps: PhoneLinkDeps): boolean => {
+  flushAssistantOutbox(st, deps)
+  if (!st.assistantOutbox.length && send(st, frame)) return true
+  if (!isLockdownEnabledSync()) st.assistantOutbox = [...st.assistantOutbox, frame].slice(-ASSISTANT_OUTBOX_MAX)
+  return false
+}
+
+/** What the assistant said while the socket was down, in order. Exported for tests. */
+export const flushAssistantOutbox = (st: LinkState, deps: PhoneLinkDeps = {}): void => {
+  while (st.assistantOutbox.length && send(st, st.assistantOutbox[0])) {
+    const f = st.assistantOutbox.shift()!
+    if (isAssistantAnswer(f)) owePush(st, deps)
+  }
+}
+
+/** A say to the assistant (phoneAssistant.ts): answered on the Mac and sent to
+ *  the phone only — never typed into a desk, never shown on a screen. */
+const assistantSay = async (st: LinkState, id: string | undefined, text: string, deps: PhoneLinkDeps): Promise<void> => {
+  const ack = (state: 'queued' | 'delivered' | 'rejected', extra: Record<string, unknown> = {}) =>
+    sendAssistant(st, { type: 'ack', ...(id !== undefined ? { id } : {}), state, ...extra }, deps)
+  const line = text.trim()
+  if (!line) return void ack('rejected', { reason: 'empty' })
+  if (line.length > ASSISTANT_SAY_MAX) return void ack('rejected', { reason: 'too-long', max: ASSISTANT_SAY_MAX })
+  // Work mode: nothing would go out, so nothing is asked either.
+  if (isLockdownEnabledSync()) return
+  // Full (one answering, one waiting): just `busy`, nothing queued or echoed.
+  if (assistantBusy()) return void ack('rejected', { reason: 'busy' })
+  // The owner has just spoken: no push until the answer is out (see flushPush).
+  const hold = { at: Date.now() }
+  st.says.add(hold)
+  ack('queued', { projectId: ASSISTANT_ID })
+  sendAssistant(st, { type: 'event', projectId: ASSISTANT_ID, kind: 'owner', text: line, at: Date.now() }, deps)
+  // One final ack, whatever happens after the answer came back. The phone hears
+  // plain words only (plainAssistantError), never an internal message.
+  // Settings unreadable: English, but the final ack still goes.
+  const a = await (deps.assistant ?? askAssistant)(line).catch(async (e: unknown) =>
+    plainAssistantError(e, await getSettings().then(langOf, () => 'en' as const)),
+  )
+  if (a instanceof AssistantFailure) {
+    ack('rejected', { reason: a.reason, ...(a.reason === 'busy' ? {} : { detail: a.message }) })
+    if (st.says.delete(hold)) void flushPush(st, deps).catch(() => {})
+    return
+  }
+  ack('delivered', { projectId: ASSISTANT_ID, heard: true, ...(a.card ? { card: a.card } : {}) })
+  const sent = sendAssistant(st, { type: 'event', projectId: ASSISTANT_ID, kind: 'assistant', text: a.reply, at: Date.now() }, deps)
+  st.says.delete(hold)
+  if (sent) owePush(st, deps)
+  else void flushPush(st, deps).catch(() => {})
+}
+
 /** One frame relayed from the phone. Exported for tests. */
 export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>, deps: PhoneLinkDeps = {}): Promise<void> => {
   const id = typeof f.id === 'string' ? f.id.slice(0, 100) : undefined
@@ -464,6 +536,8 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
     return
   }
   if (f.type === 'select') {
+    // Nothing to select: the assistant's answers come whatever is selected.
+    if (f.projectId === ASSISTANT_ID) return sendProjects(st, true)
     const { all, chosen } = await selectedProject(st)
     const p = all.find((x) => x.id === f.projectId)
     if (!p) return void ack('rejected', { reason: 'no-project' })
@@ -473,6 +547,7 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
   }
   if (f.type !== 'say') return
   const text = typeof f.text === 'string' ? f.text : ''
+  if (f.projectId === ASSISTANT_ID) return assistantSay(st, id, text, deps)
   // Empty once the mode characters are dropped ('/', '!!'): it would never land.
   if (!ownerSayLine(text)) return void ack('rejected', { reason: 'empty' })
   if (ownerSayTooLong(text)) return void ack('rejected', { reason: 'too-long', max: SUPPLY_OWNER_SAY_MAX })
@@ -607,6 +682,7 @@ const connect = (st: LinkState): void => {
     // Work mode refuses every non-Anthropic host; look again later — and what
     // is said meanwhile never leaves this Mac, not even once it is switched off.
     void forgetTail(st)
+    st.assistantOutbox = []
     later(st, 60_000)
     return
   }
@@ -667,6 +743,7 @@ export const tick = async (st: LinkState): Promise<void> => {
     if (isLockdownEnabledSync()) {
       st.ws.terminate()
       await forgetTail(st)
+      st.assistantOutbox = [] // unsent assistant talk goes the way of the desk's
       return
     }
     const now = Date.now()
@@ -684,6 +761,7 @@ export const tick = async (st: LinkState): Promise<void> => {
       else st.lastProjectsAt = now
     }
     if (st.access && now >= st.resumeBy) await pumpTranscript(st)
+    if (st.access) flushAssistantOutbox(st)
   } catch {
     /* next tick */
   } finally {
@@ -819,6 +897,8 @@ export const unpairPhone = async (): Promise<{ ok: true } | { error: PhoneLinkRe
   return { ok: true }
 }
 
-/** Tests only. */
+/** Tests: the reconnect step (work mode is checked there first). */
+export const __testConnect = (st: LinkState): void => connect(st)
+
 export const __testLinkState = (cfg: PhoneLinkConfig, ws: { readyState: number; send: (s: string) => void }): LinkState =>
   newLinkState(cfg, ws as unknown as WebSocket)
