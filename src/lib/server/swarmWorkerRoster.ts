@@ -65,6 +65,8 @@ export interface RosterEntry {
   spawnAt: number
   workedMs: number
   reworkCount: number
+  /** Epoch ms of a dispatch that re-entered an existing branch (OrchestratorWorker.reenteredAt). */
+  reenteredAt?: number
 }
 
 interface RosterFile {
@@ -100,6 +102,7 @@ const parseEntry = (raw: unknown): RosterEntry | null => {
     spawnAt: num(e.spawnAt),
     workedMs: num(e.workedMs),
     reworkCount: num(e.reworkCount),
+    ...(num(e.reenteredAt) > 0 ? { reenteredAt: num(e.reenteredAt) } : {}),
   }
 }
 

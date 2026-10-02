@@ -550,6 +550,50 @@ promote && w.reworkAt のとき: hbAtMs > reworkAtMs(差し戻しより厳密に
 - **worker 不在/死亡**: カード review→todo(新 worker に再 dispatch)+ 死骸 teardown(**worktree force 削除**、branch 維持)
 - **上限超過(count > MAX_REWORKS)**: カード blocked 退避 + teardown。人手待ち
 
+### 5.3a Re-entered work — the previous worker's ready is not the new worker's (2026-10-02)
+
+**Symptom (measured twice on 2026-10-02).** A 保留 card (parked in `blocked` at the
+rework cap) that the owner answered 「A: やり直す」 for goes back to `todo` with its
+`card.branch`. Dispatch then RE-ENTERS that branch (`resolveReusableWork` →
+`ensureSwarmWorktreeForBranch`, the 2026-08-04 quota re-entry), so the new worker
+inherits the branch's heartbeat file — still the previous worker's
+`readyToMerge:true` — and its commits. `classifyWorker` read that as "done" and the
+card was promoted 3 seconds after dispatch (journal: `dispatch … 10:40:57` →
+`promoted to review … 10:41:00`); the commander had to drag it back by hand. The
+`reworkAt` guard (§5.3) did not apply: a fresh worker carries no `reworkAt`. The
+same shape hits a quota requeue whose previous worker had beaten ready.
+
+**Mechanism.** A dispatch that actually spawned onto the re-entered branch stamps
+`reenteredAt` (= its `startedAt`) on the roster entry. In the monitor:
+
+1. A heartbeat whose `at` is not strictly newer than `reenteredAt` (or has no
+   parseable `at`) is treated as ABSENT — the re-entered worker looks exactly like
+   a fresh dispatch with no heartbeat file yet. This also keeps the stale file out
+   of ready-without-work, the question arm and the `reworkAt` readyAt stamp.
+2. A re-entered worker promotes ONLY on its own ready. The branch's old commits
+   would otherwise satisfy the "PTY exited with commits and no blocker" door; a
+   re-entered worker that dies before its own ready falls to `recoverLost`, whose
+   `commitsAhead>0` rule parks the card in `blocked` with the old work intact.
+
+First dispatches (no `card.branch`, or a branch that could not be re-entered and
+fell back to a fresh one) are not marked, so their promote is unchanged.
+`reenteredAt` is persisted in the roster (`RosterEntry.reenteredAt`, epoch ms) so a
+restart's `--resume` keeps the guard. **Implication for the commander:** after
+「やり直す」 the card stays in `doing` until the new worker beats `done true`
+itself — no hand move back to `doing` is needed. Regression:
+`swarmQuotaReentry.test.ts` describe "re-entry — the previous worker's ready is not
+this worker's" (red measured against the pre-fix code; each of the two guards has
+its own red).
+
+The same staleness rule (`heartbeatPredatesReentry`, exported from
+`swarmOverseer.ts`) also gates the overseer's S4 question read: the inherited file
+of a 保留 card usually still carries the question the owner just answered, and
+without the gate the re-entered worker re-raised it to the inbox under its new
+`S4:<workerKey>`. Regression: `swarmOverseer.test.ts` "does not re-raise the
+previous worker's question for a re-entered worker" (red measured).
+`/api/swarm/workers` (display) still shows the inherited file as-is — read the
+card column, not that row, until the new worker beats.
+
 ### 5.4 回収(recoverLost / recoveryColumn)
 
 セッション死亡・stall(心拍・runtime 出力・**sub-agent/transcript の mtime**・**実行中の背景タスク** の 4 チャネルすべてが 10 分沈黙 — `STALL_SILENCE_MS`。第3チャネルは §5.4a、**第4チャネル(背景タスク)は §5.4b**)・作業上限到達(**実作業**が 90 分 — `MAX_EXEC_MS`、env `OPENGROUND_SWARM_MAX_EXEC_MIN` で可変。控除項は §5.5、ラベルの二分は §5.6)・**quota 停止**(0813 改訂: プールの `quotaBlocked` 判定 + `QUOTA_STOP_DEBOUNCE_MS`=60秒の沈黙で**即 requeue** — 20 分 hold は削除)のとき、`recoverLost` が worktree+セッションを teardown し、カードの行き先を `recoveryColumn` で決める(**permission 詰まりの腕は 0813 に削除** — trust ダイアログは PTY の TUI フレームで、SDK セッションには存在しない):
@@ -1064,6 +1108,7 @@ nothing) is left running. Guards: `swarmSimulators.test.ts`,
 2. **【0710 実測】「rebase 済みだから安全」と思っていた worktree が worker 停止で消えた** — §6 のとおり、停止=force 削除が仕様。しかも rebase で commitsAhead=0 になった branch は promote 不能なので、PTY 死亡 → crash 回収(経路 3)コース。**worktree を残したい stop は存在しない**(soft Terminate=経路 1 の force なしだけが dirty tree を拒否して守る — ただし clean なら消える)
 3. **worker 停止 → RESTART の順で操作すると RESTART が必ず失敗する** — 停止が worktree を消すため(§6 → RESTART 節)。再開させたいなら停止せず RESTART(古い PTY は API/UI が kill してくれる)
 4. **差し戻し後の即 re-promote は起きない設計** — 心拍ファイルに古い `readyToMerge:true` が残っていても、`reworkAt` より新しい心拍が来るまで promote は抑制される(:5284-5292)。「worker に直せと言ったのにカードが review に戻らない」ときは、worker が **swarm-beat.sh を打ち直していない**のをまず疑う。**【0713 実測・同日修正(残穴あり)】**司令官が Board API(`{rework}`)で差し戻したカードをエンジンが二度と拾わない事象があった — 外部差し戻しは in-memory roster に届かず `stage:'done'` のまま早期 continue(:5209-5233)で永久スキップされ、worker が直して ready を打ち直しても doing に沈み続けた(実測 55 分・手動 setColumn でしか復旧せず)。修正後は monitor が「stage:'done' なのにカードが doing」を外部差し戻しとして観測し `stage='running'` + `reworkAt=now` で再武装する(:5167-5190。§5.3)。古い心拍で即 re-promote しない保証(この項の前段)もこの経路でそのまま効く。**ただし PTY が差し戻しより前に exit していた場合は roster にエントリが無く観測できない** — 同じ沈み方がその稀な条件でだけ残る(§5.3 の「既知の残穴」。orphan-doing 異常も worktree 残存で発火しない)
+4a. **保留→「やり直す」の再配車で即 review に上がることはもう無い**(2026-10-02 修正) — 同じブランチに戻った新 worker は前任の古い ready 心拍・旧コミットでは昇格せず、自分で done true を打つまで doing に残る(§5.3a)。司令官が手で doing に戻す必要は無い
 5. **worker が commit せず done true だけ打っても何も進まない** — promote は commitsAhead>0 が必須(`hasWork` swarmOrchestrator.ts:1030)。dead+ready+成果ゼロは blocked 送り(:1041)。worker の掟「ready 前に必ず自分でコミット」はコードで強制されている
 6. **エンジン roster は in-memory** — アプリ/サーバ再起動でエンジンは worker を忘れる(stage 無しのエンジン外 worker として workers API に出続ける)。「エンジンに worker が居ないから全員死んだ」ではない。ソース 2/3(live PTY / 心拍ファイル)で必ず突き合わせる
 7. **心拍ファイルは worker 停止後も最大 15 分+α 残る** — janitor は overseer ON 時 15 分毎にしか回らず(swarmOverseer.ts:135 既定値, :620 発火条件)、しかも branch か worktree の消滅が証明できるまで消さない(swarmJanitor.ts:377)。**dead worker タイルが workers API に残っていても異常ではない**。branch も worktree も残したまま PTY だけ死んだ手動 worker は、restart 対象として意図的に表示され続ける(swarmWorkerRegistry.ts:238-251)

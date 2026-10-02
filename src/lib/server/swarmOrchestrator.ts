@@ -201,6 +201,7 @@ import {
   runOverseerPass,
   initOverseerRuntime,
   defaultOverseerDeps,
+  heartbeatPredatesReentry,
   type OverseerRuntime,
 } from './swarmOverseer'
 import type {
@@ -6129,6 +6130,14 @@ const monitorWorkers = async (
     } catch {
       /* treat as null */
     }
+    // RE-ENTERED WORK (2026-10-02, measured twice): a 保留 card answered 「やり直す」
+    // (or a quota requeue) is dispatched back onto the branch it already carries, and
+    // the heartbeat file of that branch is the PREVIOUS worker's — still ready:true.
+    // With the old commits that read as "done" and the card was promoted 3 seconds
+    // after dispatch, before the new worker had done anything. A heartbeat not
+    // strictly newer than the re-entry is not this worker's sign: treat it as absent,
+    // exactly like a fresh dispatch's missing file.
+    if (heartbeat && heartbeatPredatesReentry(heartbeat, w.reenteredAt)) heartbeat = null
     // NESTED-repo evidence (2026-09-13) — consulted ONLY when the parent branch
     // shows nothing (0 or unreadable), so the single-repo common case never pays
     // for the scan. See defaultCountNestedCommits for the incident.
@@ -6188,6 +6197,16 @@ const monitorWorkers = async (
         promote = false
         stage = 'running' // re-working after a 差し戻し — not 'done'
       }
+    }
+    // …and a re-entered worker promotes ONLY on its own ready. The branch's commits
+    // predate it, so the "PTY exited with commits and no blocker" path would promote
+    // a re-entered worker that crashed before doing anything. (Its heartbeat is
+    // already fresh-or-null above, so `ready` here is this worker's own.) Not
+    // promoted ⇒ a dead one falls to recoverLost, whose commitsAhead>0 rule parks
+    // the card in blocked with the old work intact.
+    if (promote && w.reenteredAt && heartbeat?.ready !== true) {
+      promote = false
+      stage = 'running'
     }
 
     if (promote) {
@@ -7115,6 +7134,7 @@ const rosterEntryOf = (
     spawnAt: known ? spawnAtMs : now,
     workedMs: known ? Math.max(0, now - budgetFromMs - idle) : 0,
     reworkCount: card?.reworkCount ?? w.reworkCount ?? 0,
+    ...(w.reenteredAt && Number.isFinite(Date.parse(w.reenteredAt)) ? { reenteredAt: Date.parse(w.reenteredAt) } : {}),
   }
 }
 
@@ -7136,6 +7156,7 @@ const rosterSignature = (workers: OrchestratorWorker[]): string =>
         w.reworkAt ?? '',
         w.readyAt ?? '',
         w.reworkCount ?? 0,
+        w.reenteredAt ?? '',
       ])
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
   )
@@ -7834,14 +7855,19 @@ export const runDispatchPass = async (
       // move fails the worker must stay counted (the dispatchedIds guard then
       // blocks a re-dispatch, and step 3 reconciles the move next pass). It enters
       // at stage 'starting' — the next monitor pass advances it.
+      const startedAt = new Date().toISOString()
       engine.workers.push({
         terminalId: spawn.terminalId,
         branch: spawn.branch,
         worktree: spawn.worktree,
         taskId: card.id,
         taskTitle: title,
-        startedAt: new Date().toISOString(),
+        startedAt,
         stage: 'starting',
+        // Re-entered work: the branch's heartbeat + commits are the PREVIOUS worker's
+        // (see the stale-sign guard in monitorWorkers). Keyed on the branch actually
+        // spawned, so a re-entry that fell back to a fresh branch is not marked.
+        ...(reuse && spawn.branch === reuse.branch ? { reenteredAt: startedAt } : {}),
         // HOW it was launched. Absent ⇒ 'pty', so an older fake/caller that does
         // not report a runtime keeps meaning what it always meant. The handles
         // are mutually exclusive by invariant (workerRuntime.ts).
@@ -10514,6 +10540,7 @@ const adoptResumeCandidates = async (
       ...(spawn.effort ? { effort: spawn.effort } : {}),
       ...(spawn.agentSessionId ? { sessionId: spawn.agentSessionId } : {}),
       reworkCount: entry.reworkCount,
+      ...(entry.reenteredAt ? { reenteredAt: new Date(entry.reenteredAt).toISOString() } : {}),
     })
     resumed += 1
     logLine(engine, 'info', `worker resumed (--resume): ${shorten(title || entry.branch)} → ${spawn.branch}`, 'dispatch')

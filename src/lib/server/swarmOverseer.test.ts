@@ -137,6 +137,21 @@ describe('owner questions without Persona', () => {
     expect(calls.openEscalation[0]).toMatchObject({ askCommanderFirst: true })
   })
 
+  // 2026-10-02: a card re-entered on its old branch inherits the previous worker's
+  // heartbeat file. Its (already answered) question is not the new worker's.
+  it('does not re-raise the previous worker’s question for a re-entered worker; raises its own', async () => {
+    const calls = makeCalls()
+    const engine = makeEngine({ workers: [{ ...worker(), reenteredAt: '2026-10-02T10:40:57.000Z' }] })
+    let hb = { ready: false, blocked: true, blockers: 'やり直しますか？', at: '2026-10-02T09:00:00Z' }
+    const deps = makeDeps(calls, { readHeartbeat: async () => hb })
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(calls.openEscalation).toHaveLength(0)
+
+    hb = { ...hb, blockers: '新しい質問ですか？', at: '2026-10-02T10:45:00Z' }
+    await runOverseerPass(engine, [], () => {}, deps)
+    expect(calls.openEscalation.map((e) => e.question)).toEqual(['新しい質問ですか？'])
+  })
+
   it('retries a failed inbox write without losing the question', async () => {
     const calls = makeCalls()
     const engine = makeEngine({ workers: [worker()] })

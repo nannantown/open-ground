@@ -121,6 +121,15 @@ describe('swarmWorkerRoster — persistence (card 3)', () => {
     expect(got[0]).toMatchObject({ worktree: '/wt/z', branch: 'swarm/z', workedMs: 0, spawnAt: 0, reworkCount: 3 })
   })
 
+  it('reenteredAt survives a write/read round-trip (a restart must not revive a stale ready)', async () => {
+    await writeRoster(project, [entry({ reenteredAt: 1_759_400_000_000 })])
+    const [got] = await readRoster(project)
+    expect(got.reenteredAt).toBe(1_759_400_000_000)
+    // absent stays absent — a fresh dispatch is not marked
+    await writeRoster(project, [entry({})])
+    expect((await readRoster(project))[0]).not.toHaveProperty('reenteredAt')
+  })
+
   it('upsert replaces by worktree (identity), not appends', async () => {
     await writeRoster(project, [entry({ workedMs: 1 })])
     await upsertRosterEntry(project, entry({ workedMs: 999 }))

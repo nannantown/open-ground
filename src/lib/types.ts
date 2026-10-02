@@ -1289,6 +1289,14 @@ export interface OrchestratorWorker {
    *  wall-clock). Cleared on a fresh-heartbeat promote. In-memory only; absent for a
    *  never-reworked worker. */
   reworkAt?: string
+  /** ISO timestamp of a dispatch that RE-ENTERED a branch the card already carried
+   *  (quota requeue, or a 保留 card the owner answered 「やり直す」 for). That branch's
+   *  heartbeat file and commits belong to the PREVIOUS worker, so until this worker
+   *  beats on its own (a heartbeat strictly newer than this) the engine treats the
+   *  heartbeat as absent, and it promotes only on this worker's own ready. Persisted
+   *  in the roster so a restart cannot revive the stale ready. Absent on a fresh
+   *  dispatch. */
+  reenteredAt?: string
   /** ISO timestamp this worker FIRST reached ready — the pass its card was first
    *  OBSERVED sitting in 'review'/'done'. Bound to WHERE THE CARD IS, not to whose
    *  write moved it there: the engine's own promote and a commander hand-move

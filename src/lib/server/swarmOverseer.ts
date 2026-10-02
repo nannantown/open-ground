@@ -158,7 +158,7 @@ export interface OverseerEngine {
    *  addresses on `terminalId` silently collapses every SDK worker into one (see
    *  the S4 signal key below). `terminalId` stays optional for that reason —
    *  {@link import('../types').OrchestratorWorker} satisfies this either way. */
-  workers: readonly (WorkerHandle & { branch: string; taskId: string; taskTitle: string })[]
+  workers: readonly (WorkerHandle & { branch: string; taskId: string; taskTitle: string; reenteredAt?: string })[]
   /** Review-column integration readiness (for S7). */
   reviews: readonly OrchestratorReview[]
   overseer: OverseerRuntime
@@ -471,6 +471,18 @@ export const runOverseerPass = async (
   return { ran: true, fired, throttled: ov.throttled }
 }
 
+/** A worker that RE-ENTERED its card's existing branch (OrchestratorWorker.reenteredAt)
+ *  inherits that branch's heartbeat FILE from the previous worker. Until it beats on
+ *  its own — `at` strictly newer than the re-entry — that file is not its sign: a stale
+ *  ready:true promoted a 「やり直す」 card in 3s (2026-10-02), and a stale blocked
+ *  question would re-raise an already-answered one. Unparseable `at` ⇒ stale.
+ *  Shared by the monitor (swarmOrchestrator) and S4 below. */
+export const heartbeatPredatesReentry = (hb: Pick<HeartbeatSign, 'at'>, reenteredAt: string | undefined): boolean => {
+  if (!reenteredAt) return false
+  const hbAtMs = hb.at ? Date.parse(hb.at) : Number.NaN
+  return !(Number.isFinite(hbAtMs) && hbAtMs > Date.parse(reenteredAt))
+}
+
 // S4: worker questions go to the commander first (commanderQuestions.ts); the
 // owner hears only boundary questions, ones the commander hands on, and ones it
 // does not settle within COMMANDER_ANSWER_WINDOW_MS.
@@ -487,7 +499,7 @@ const detectWorkerQuestions = async (
   const live = engine.workers.filter((w) => deps.isAlive(w))
   for (const w of live) {
     const hb = await deps.readHeartbeat(engine.path, w.branch).catch(() => null)
-    if (!hb?.blocked) continue
+    if (!hb?.blocked || heartbeatPredatesReentry(hb, w.reenteredAt)) continue
     const blockerText = (hb.blockers ?? hb.note ?? '').trim()
     if (!blockerText || !looksLikeQuestion(blockerText)) continue
 
