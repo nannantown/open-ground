@@ -564,7 +564,8 @@ card was promoted 3 seconds after dispatch (journal: `dispatch … 10:40:57` →
 same shape hits a quota requeue whose previous worker had beaten ready.
 
 **Mechanism.** A dispatch that actually spawned onto the re-entered branch stamps
-`reenteredAt` (= its `startedAt`) on the roster entry. In the monitor:
+`reenteredAt` (= its `startedAt`) on the in-memory worker (`OrchestratorWorker`);
+`syncRoster` → `rosterEntryOf` persists it into the roster. In the monitor:
 
 1. A heartbeat whose `at` is not strictly newer than `reenteredAt` (or has no
    parseable `at`) is treated as ABSENT — the re-entered worker looks exactly like
@@ -577,8 +578,43 @@ same shape hits a quota requeue whose previous worker had beaten ready.
 
 First dispatches (no `card.branch`, or a branch that could not be re-entered and
 fell back to a fresh one) are not marked, so their promote is unchanged.
-`reenteredAt` is persisted in the roster (`RosterEntry.reenteredAt`, epoch ms) so a
-restart's `--resume` keeps the guard. **Implication for the commander:** after
+`reenteredAt` is persisted in the roster (`RosterEntry.reenteredAt`, epoch ms) and
+`adoptResumeCandidates` restores it onto the resumed worker, so a restart's
+`--resume` keeps the guard.
+
+**A re-entering worker starts with no heartbeat file.** `spawnSwarmWorker` — where
+both doors meet, the engine dispatch and the manual `POST /api/swarm/worker` (Board
+「実行」, commander's manual start) — deletes the branch's heartbeat file
+(`clearBranchHeartbeat`) when it is handed an EXISTING worktree and is NOT a
+`--resume`, and only AFTER the `WorktreeOccupiedError` occupancy check: a refused
+spawn must not erase a live desk's ready / question (a card in `todo` beside a live
+worker would otherwise lose that worker's heartbeat every 3 s tick), and a resumed
+worker's file is its own sign. Best-effort: a failed delete never fails the spawn.
+
+Why it is needed beyond `reenteredAt`: that mark only guards a worker the engine is
+MONITORING. A worker nobody counts leaves the card unowned in `doing` — the manual
+door (never in `engine.workers`), or a restart where the boot declined the resume
+(no session id, transcript unproven — typically an orphaned claude still holds the
+session — or autonomy switched off during the proof) or never resumed at all (engine
+off at restart and switched on later, crash-loop breaker, failed preflight, Board
+read failure). There `promoteUnownedDelivered`, whose only stale-ready guard is
+`reworkCount` (which 「やり直す」 clears), would read the previous worker's ready +
+commits as a delivery. With the file gone it finds no ready, and the card stays in
+`doing` for `collectUnownedDoing`'s ordinary path (01 章 §7.4d: grace, orphan hold
+while a claude process still holds the session, salvage, requeue to `todo`) — the
+boot itself does not move the card. If the delete failed, the in-memory / roster
+`reenteredAt` is the only fence (engine workers only).
+Regression: `swarmWorkerReentryHeartbeat.test.ts` (the real `spawnSwarmWorker`: the
+manual door's next engine pass does not promote; a refused spawn keeps the file; a
+`--resume` keeps it; a failing delete does not fail the spawn; only that branch's
+file goes), `swarmOrchestrator.resumeEngines.test.ts` describe "a re-entered worker
+across a restart is not promoted on the previous ready" (dispatch → restart → each of
+the three decline branches and the never-resumed path stay `doing`; control: the new
+worker's own ready IS collected; adopted resume with the stale file still present ⇒
+the restored `reenteredAt` holds) and `swarmWorkerRoster.test.ts` "syncRoster — a
+re-entry dispatch persists reenteredAt". Red measured for: the delete removed, the
+delete moved above the occupancy check, the resume restore, and the roster write.
+**Implication for the commander:** after
 「やり直す」 the card stays in `doing` until the new worker beats `done true`
 itself — no hand move back to `doing` is needed. Regression:
 `swarmQuotaReentry.test.ts` describe "re-entry — the previous worker's ready is not
@@ -591,8 +627,9 @@ of a 保留 card usually still carries the question the owner just answered, and
 without the gate the re-entered worker re-raised it to the inbox under its new
 `S4:<workerKey>`. Regression: `swarmOverseer.test.ts` "does not re-raise the
 previous worker's question for a re-entered worker" (red measured).
-`/api/swarm/workers` (display) still shows the inherited file as-is — read the
-card column, not that row, until the new worker beats.
+Since the re-entering spawn deletes the inherited file, `/api/swarm/workers`
+(display) shows no heartbeat for the row until the new worker beats (it only shows
+an inherited one if that delete failed).
 
 ### 5.4 回収(recoverLost / recoveryColumn)
 

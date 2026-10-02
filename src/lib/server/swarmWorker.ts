@@ -25,7 +25,8 @@ import { promisify } from 'util'
 import { lstat, mkdir, stat, symlink, unlink } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
-import { centralWorktreesDir } from './paths'
+import { centralWorktreesDir, openGroundHome } from './paths'
+import { swarmRepoKey } from './swarmJanitor'
 import { isGitRepoRoot } from './gitRepoGuard'
 import { projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
@@ -817,6 +818,20 @@ export class WorktreeOccupiedError extends Error {
   }
 }
 
+/** Delete `branch`'s worker heartbeat file — the one swarm-beat.sh writes and the
+ *  engine's readHeartbeat reads (`<home>/swarm/<repoKey>/<branch, / → ->.json`).
+ *  A missing file is fine; any other fault throws. See the re-entry note in
+ *  {@link spawnSwarmWorker}. */
+export const clearBranchHeartbeat = async (projectPath: string, branch: string): Promise<void> => {
+  const key = await swarmRepoKey(projectPath)
+  if (!key) return
+  try {
+    await unlink(join(openGroundHome(), 'swarm', key, `${branch.replace(/\//g, '-')}.json`))
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+  }
+}
+
 // One bell/toast per THROTTLE window, not per refused spawn — the engine's
 // dispatch tick retries a refused spawn every few seconds, and the refusal
 // itself (the throw) already repeats; only the human-facing notification needs
@@ -930,6 +945,23 @@ export const spawnSwarmWorker = async (
   // "cannot prove the directory is empty" must not authorise a spawn into it.
   if (opts.worktree && (await liveDeskOccupies(worktree))) {
     throw new WorktreeOccupiedError(worktree)
+  }
+  // RE-ENTRY STARTS WITH NO HEARTBEAT (2026-10-02, 02 章 §5.3a). A NEW worker sent
+  // into an existing worktree inherits the branch's heartbeat file: the previous
+  // worker's sticky ready:true (and a 保留 card's already-answered question). Read
+  // as this worker's sign it promoted a 「やり直す」 card to review on old commits —
+  // via the engine's monitor, and, for a worker nobody counts (the manual door, or
+  // any card left unowned in 'doing' by a restart), via promoteUnownedDelivered,
+  // whose reworkCount guard 「やり直す」 clears. So it is deleted here, the one place
+  // both doors (engine dispatch, POST /api/swarm/worker) meet — and only:
+  //   · AFTER the occupancy check: a live desk in this worktree owns that file, and
+  //     a refused spawn must not erase its ready / question (a 3s tick would);
+  //   · NOT on --resume: a resumed worker continues the same conversation, so the
+  //     file is its own sign.
+  // Best-effort: a failed delete never fails the spawn (the engine's in-memory
+  // `reenteredAt` guard still fences its own workers).
+  if (opts.worktree && !opts.resumeSessionId) {
+    await clearBranchHeartbeat(opts.projectPath, branch).catch(() => {})
   }
   // RESUME (card 4): reuse the PERSISTED session id so `--resume <id>` reattaches
   // the same conversation; else mint a fresh one (unchanged). resumeSessionId only

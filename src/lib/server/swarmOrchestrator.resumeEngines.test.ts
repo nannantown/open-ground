@@ -14,6 +14,8 @@ import {
   TICK_MS,
   BOOT_RESUME_GRACE_MS,
   __resetOrchestratorForTests,
+  __seedEngineForTests,
+  runDispatchPass,
   type OrchestratorDeps,
   type IntegrationDeps,
   type AnomalyDeps,
@@ -786,6 +788,181 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
       proveResumable: async () => true, // even if "provable", no id ⇒ nothing to --resume
     })
     expect(spy.calls).toHaveLength(0)
+  })
+
+  // RE-ENTRY ACROSS A RESTART (2026-10-02). A 「やり直す」 card re-enters its old
+  // branch, where the PREVIOUS worker's ready:true heartbeat and commits sit (and
+  // 「やり直す」 cleared reworkCount, so promoteUnownedDelivered's own guard is off).
+  // The fix deletes that heartbeat when the re-entering worker is SPAWNED
+  // (spawnSwarmWorker), so whatever the boot does afterwards — declines the resume
+  // for any reason, or never resumes and autonomy is switched on later — the card
+  // stays in 'doing' for the ordinary unowned-doing machinery (grace, orphan hold,
+  // salvage + requeue to todo — 01 章 §7.4d), never promoted.
+  describe('a re-entered worker across a restart is not promoted on the previous ready', () => {
+    const OLD = '2026-10-02T09:00:00.000Z' // the previous worker's beat
+    const REENTRY = { ...ENTRY, reworkCount: 0, reenteredAt: Date.parse('2026-10-02T10:00:00.000Z') } as typeof ENTRY
+
+    const engineAt = (path: string) =>
+      ({
+        path,
+        running: true,
+        passInFlight: false,
+        generation: 0,
+        timer: null,
+        workers: [],
+        reviews: [],
+        conflictedBranches: new Set(),
+        verifyFailed: new Map(),
+        reviewFailed: new Map(),
+        reviewDeferred: new Map(),
+        highRiskHolds: new Map(),
+        lastIntegrateAt: 0,
+        recoveries: new Map(),
+        reworks: new Map(),
+        reworkReasons: new Map(),
+        conflictReworks: new Map(),
+        stuckMoves: new Map(),
+        nudges: new Map(),
+        rateLimited: new Map(),
+        permissionWaits: new Map(),
+        log: [],
+        anomalies: [],
+        notified: new Set(),
+        pendingFatal: [],
+      }) as never
+
+    /** One store for the board AND the branch's heartbeat file, shared by the
+     *  dispatch before the restart and the boot after it. */
+    const world = () => {
+      const board = new Map([
+        ['card-1', { id: 'card-1', title: 'redo me', notes: 'completion conditions', boardColumn: 'todo', branch: ENTRY.branch } as never as { boardColumn: string }],
+      ])
+      let hb: { ready: boolean; blocked: boolean; at: string } | null = { ready: true, blocked: false, at: OLD }
+      const promoted: string[] = []
+      let fetches = 0
+      const deps = liveDeps({
+        fetchTasks: async () => {
+          fetches += 1
+          return Array.from(board.values()) as never
+        },
+        readHeartbeat: async () => hb as never,
+        countCommitsAhead: async () => 3, // the previous worker's commits
+        resolveReusableWork: async () => ({ worktree: ENTRY.worktree, branch: ENTRY.branch }),
+        // spawnSwarmWorker's re-entry contract (pinned against the real function in
+        // swarmWorkerReentryHeartbeat.test.ts): a non-resume spawn into an existing
+        // worktree deletes the branch's heartbeat; a --resume keeps it.
+        spawnWorker: async (opts) => {
+          if (opts.worktree && !opts.resumeSessionId) hb = null
+          return {
+            terminalId: opts.resumeSessionId ? 't-resume' : 't-reenter',
+            agentSessionId: opts.resumeSessionId ?? 'sid-reenter',
+            worktree: ENTRY.worktree,
+            branch: ENTRY.branch,
+          }
+        },
+        moveToDoing: async (_p: string, id: string) => {
+          const c = board.get(id)
+          if (c) board.set(id, { ...c, boardColumn: 'doing' })
+          return true
+        },
+        moveToReview: async (_p: string, id: string) => {
+          promoted.push(id)
+          return true
+        },
+        recoverCard: async (_p: string, id: string, column: 'todo' | 'blocked') => {
+          const c = board.get(id)
+          if (c) board.set(id, { ...c, boardColumn: column })
+          return true
+        },
+      })
+      /** Before the restart: the 「やり直す」 card goes back onto its branch, then the app dies. */
+      const dispatchReentryThenRestart = async () => {
+        const engine = engineAt(await canonicalize(projA))
+        __seedEngineForTests(engine)
+        await runDispatchPass(engine, deps)
+        expect(board.get('card-1')?.boardColumn).toBe('doing')
+        __resetOrchestratorForTests() // every in-memory worker (and its reenteredAt) is gone
+        fetches = 0
+      }
+      /** The boot pass is fire-and-forget: wait until it has read the board, then let it settle. */
+      const passSettled = async () => {
+        await vi.waitFor(() => expect(fetches).toBeGreaterThanOrEqual(1))
+        await new Promise((r) => setTimeout(r, 300))
+      }
+      const boot = async (entry: typeof ENTRY, prove: () => Promise<boolean>) => {
+        await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+        await resumeEngines(deps, {
+          listProjectPaths: async () => [projA],
+          reconcileRoster: reconcileYielding([entry]),
+          proveResumable: prove,
+        })
+      }
+      return { board, promoted, deps, passSettled, boot, dispatchReentryThenRestart, setHeartbeat: (v: typeof hb) => (hb = v) }
+    }
+
+    // Each decline branch of adoptResumeCandidates, and the "boot never resumed"
+    // path. TEETH: all four RED when the re-entry spawn keeps the stale heartbeat
+    // (the real delete in spawnSwarmWorker has its own red, swarmWorkerReentryHeartbeat.test.ts).
+    it('resume DECLINED (transcript unproven, e.g. an orphan still holds the session) ⇒ stays doing, never promoted', async () => {
+      const w = world()
+      await w.dispatchReentryThenRestart()
+      await w.boot(REENTRY, async () => false)
+      await w.passSettled()
+      expect(w.promoted).toEqual([])
+      expect(w.board.get('card-1')?.boardColumn).toBe('doing')
+    })
+
+    it('resume DECLINED (no captured session id) ⇒ stays doing, never promoted', async () => {
+      const w = world()
+      await w.dispatchReentryThenRestart()
+      await w.boot({ ...REENTRY, sessionId: '' }, async () => true)
+      await w.passSettled()
+      expect(w.promoted).toEqual([])
+      expect(w.board.get('card-1')?.boardColumn).toBe('doing')
+    })
+
+    it('resume DECLINED (autonomy switched off during the proof), then switched back on ⇒ never promoted', async () => {
+      const w = world()
+      await w.dispatchReentryThenRestart()
+      await w.boot(REENTRY, async () => {
+        await stopOrchestrator(projA, w.deps)
+        return true
+      })
+      await startOrchestrator(projA, w.deps) // the owner turns it back on later: a pass runs with no reconcile
+      await w.passSettled()
+      expect(w.promoted).toEqual([])
+      expect(w.board.get('card-1')?.boardColumn).toBe('doing')
+    })
+
+    it('boot resume NEVER ran (engine was off at restart), autonomy switched on later ⇒ never promoted', async () => {
+      const w = world()
+      await w.dispatchReentryThenRestart()
+      await startOrchestrator(projA, w.deps)
+      await w.passSettled()
+      expect(w.promoted).toEqual([])
+      expect(w.board.get('card-1')?.boardColumn).toBe('doing')
+    })
+
+    it('CONTROL: once the NEW worker beats ready itself, the unowned card IS collected', async () => {
+      const w = world()
+      await w.dispatchReentryThenRestart()
+      w.setHeartbeat({ ready: true, blocked: false, at: new Date().toISOString() })
+      await w.boot(REENTRY, async () => false)
+      await vi.waitFor(() => expect(w.promoted).toEqual(['card-1']))
+    })
+
+    // The second fence, for a heartbeat the dispatch could NOT delete (an unlink
+    // fault, or a branch re-entered before this fix): a resumed worker gets its
+    // roster `reenteredAt` back, and the monitor ignores the older file.
+    // TEETH: RED with adoptResumeCandidates' reenteredAt restore removed.
+    it('resume ADOPTED with the stale file still present ⇒ the restored reenteredAt keeps it from promoting', async () => {
+      const w = world()
+      w.board.set('card-1', { ...w.board.get('card-1')!, boardColumn: 'doing' })
+      await w.boot(REENTRY, async () => true)
+      await w.passSettled()
+      expect(w.promoted).toEqual([])
+      expect(w.board.get('card-1')?.boardColumn).toBe('doing')
+    })
   })
 
   it('a resume spawn that THROWS (a preflight / guard-wiring refusal, a gone worktree) falls back WITHOUT crashing the boot', async () => {

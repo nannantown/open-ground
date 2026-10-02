@@ -7813,6 +7813,9 @@ export const runDispatchPass = async (
           `前回の作業場に戻ります: ${shorten(title)} — 途中まで進んだ内容はそのまま残っています(${reuse.branch})`,
           'dispatch',
         )
+        // The previous worker's heartbeat file on this branch is deleted by
+        // spawnSwarmWorker itself (non-resume spawn into an existing worktree, after
+        // its occupancy check) — shared with the manual POST /api/swarm/worker door.
       }
 
       let spawn: SpawnSwarmWorkerResponse

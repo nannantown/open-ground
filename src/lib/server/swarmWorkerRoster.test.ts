@@ -332,3 +332,70 @@ describe('classifyRosterEntry — a sticky ready heartbeat is not a handover', (
     ).toBe('ready')
   })
 })
+
+// THE WRITER HALF of the restart-proof re-entry mark (2026-10-02). The round-trip
+// test above proves the FILE keeps `reenteredAt`; this proves the engine actually
+// PUTS it there — a re-entry dispatch's in-memory `reenteredAt` reaches roster.json
+// through rosterEntryOf/syncRoster, so a boot after it still knows the branch's
+// ready is the previous worker's.
+describe('syncRoster — a re-entry dispatch persists reenteredAt', () => {
+  it('re-entering a card’s existing branch writes reenteredAt into the roster', async () => {
+    const { runDispatchPass, __seedEngineForTests, __resetOrchestratorForTests } = await import('./swarmOrchestrator')
+    __resetOrchestratorForTests()
+    const engine = {
+      path: project,
+      running: true,
+      passInFlight: false,
+      generation: 0,
+      timer: null,
+      workers: [],
+      reviews: [],
+      conflictedBranches: new Set(),
+      verifyFailed: new Map(),
+      reviewFailed: new Map(),
+      reviewDeferred: new Map(),
+      highRiskHolds: new Map(),
+      lastIntegrateAt: 0,
+      recoveries: new Map(),
+      reworks: new Map(),
+      reworkReasons: new Map(),
+      conflictReworks: new Map(),
+      stuckMoves: new Map(),
+      nudges: new Map(),
+      rateLimited: new Map(),
+      permissionWaits: new Map(),
+      log: [],
+      anomalies: [],
+      notified: new Set(),
+      pendingFatal: [],
+    } as never
+    __seedEngineForTests(engine)
+    const wt = join(scratch, 'wt', 'existing')
+    const card = { id: 'a', title: 'card a', notes: 'completion conditions', done: false, boardColumn: 'todo', branch: 'swarm/existing' } as ProjectTask
+    const deps = {
+      fetchTasks: async () => [card],
+      resolveReusableWork: async () => ({ worktree: wt, branch: 'swarm/existing' }),
+      spawnWorker: async () => ({ terminalId: 'pty-1', agentSessionId: 's', worktree: wt, branch: 'swarm/existing' }),
+      moveToDoing: async () => true,
+      moveToReview: async () => true,
+      countCommitsAhead: async () => 0,
+      readHeartbeat: async () => null,
+      isAlive: () => true,
+      recoverCard: async () => true,
+      recoverWorker: async () => ({ removed: true }),
+      lastOutputAt: () => null,
+      nudge: () => true,
+      escalate: async () => true,
+      recentOutput: () => null,
+    } as never
+    try {
+      await runDispatchPass(engine, deps)
+      const rows = await readRoster(project)
+      expect(rows).toHaveLength(1)
+      expect(rows[0].worktree).toBe(wt)
+      expect(rows[0].reenteredAt).toBeGreaterThan(0)
+    } finally {
+      __resetOrchestratorForTests()
+    }
+  })
+})
