@@ -11,7 +11,7 @@
 // `?after=<seq>`), and the transcript position of the newest stored event. A Mac `reset` frame erases all of it and retires the room
 // for good (unpair / re-pair: a new pairing is a new room).
 import { DurableObject } from 'cloudflare:workers'
-import { PHONE_RELAY_TOKEN_HEADER, alreadyStored, asCursor, macAllowed, parseRoomPath, tokenHashFor, type Cursor } from './phoneRelayAuth'
+import { PHONE_RELAY_TOKEN_HEADER, alreadyStored, asCursor, asPushTarget, macAllowed, parseRoomPath, tokenHashFor, type Cursor } from './phoneRelayAuth'
 
 export interface Env {
   OgPhoneRelay: DurableObjectNamespace<OgPhoneRelay>
@@ -75,12 +75,19 @@ export class OgPhoneRelay extends DurableObject<Env> {
       // The Mac rewinds its transcript reader to just after this, so whatever it
       // sent into a half-dead socket (OPEN, but never arrived) is sent again.
       this.send(server, { type: 'resume', cur: (await this.ctx.storage.get<Cursor>('cur')) ?? null })
+      const held = await this.ctx.storage.get('pushToken')
+      if (held) {
+        this.send(server, held)
+        await this.ctx.storage.delete('pushToken')
+      }
       this.toPhones({ type: 'mac', online: true })
     } else {
       const head = (await this.ctx.storage.get<number>('seq')) ?? 0
       const projects = (await this.ctx.storage.get('projects')) ?? null
       const macOnline = this.ctx.getWebSockets('mac').length > 0
-      this.send(server, { type: 'hello', v: 1, mac: macOnline, head, projects })
+      // `pushToken`: hand over your push token — the Mac (as it last said) can push.
+      const pushToken = (await this.ctx.storage.get<boolean>('push')) === true
+      this.send(server, { type: 'hello', v: 1, mac: macOnline, head, projects, pushToken })
       // Catch-up only when asked: no `after` = live from now (Number(null) is 0).
       const raw = new URL(req.url).searchParams.get('after')
       const after = raw === null || raw === '' ? NaN : Number(raw)
@@ -97,13 +104,29 @@ export class OgPhoneRelay extends DurableObject<Env> {
     const role = this.ctx.getTags(ws)[0]
     if (role === 'phone') {
       const f = parse(msg, PHONE_FRAME_MAX)
-      if (!f || (f.type !== 'say' && f.type !== 'select' && f.type !== 'projects')) {
+      if (!f || (f.type !== 'say' && f.type !== 'select' && f.type !== 'projects' && f.type !== 'push-token')) {
         this.send(ws, { type: 'error', code: 'bad-frame' })
         return
       }
       const mac = this.ctx.getWebSockets('mac')[0]
+      if (!mac && f.type === 'push-token') {
+        // A new token while the Mac sleeps: held (the newest only) until it is
+        // back, or the Mac would push to a dead token and the phone, locked,
+        // would never be woken again. Erased by `reset` with the rest.
+        const target = asPushTarget(f)
+        if (target === undefined) return this.send(ws, { type: 'error', code: 'bad-frame' })
+        await this.ctx.storage.put('pushToken', { type: 'push-token', ...(target ?? { token: null }) })
+        return
+      }
       if (!mac) {
         this.send(ws, { type: 'error', code: 'mac-offline', ...(typeof f.id === 'string' ? { id: f.id } : {}) })
+        return
+      }
+      if (f.type === 'push-token') {
+        // Passed on, never stored here: the Mac keeps it and sends the push.
+        const target = asPushTarget(f)
+        if (target === undefined) return this.send(ws, { type: 'error', code: 'bad-frame' })
+        this.send(mac, { type: 'push-token', ...(target ?? { token: null }) })
         return
       }
       this.send(mac, f)
@@ -127,6 +150,8 @@ export class OgPhoneRelay extends DurableObject<Env> {
       this.toPhones(f)
     } else if (f.type === 'ack') {
       this.toPhones(f)
+    } else if (f.type === 'push-ready') {
+      await this.ctx.storage.put('push', f.on === true)
     } else if (f.type === 'reset') {
       // Unpair: nothing of this room may be readable afterwards.
       for (const p of this.ctx.getWebSockets('phone')) p.close(4003, 'unpaired')

@@ -37,7 +37,8 @@ import {
   type SupplyNoticeDeps,
 } from './supplyNotice'
 import { isLockdownEnabledSync } from './lockdown'
-import { asCursor, type Cursor } from '../../../worker/src/phoneRelayAuth'
+import { alreadyStored, asCursor, asPushTarget, type Cursor, type PushTarget } from '../../../worker/src/phoneRelayAuth'
+import { providerTokenExpired, renewStaleProviderToken, pushKeyFingerprint, pushRefusedForGood, pushTokenGone, pushTransient, refusalIsTheApp, readPushKey, sendPushToTalk, type PushKey, type PushResult } from './phonePush'
 import { isSwarmLocalOwnerUnlocked } from './swarmGate'
 import { getCustomTabRole } from './roles'
 
@@ -57,6 +58,12 @@ export interface PhoneLinkConfig {
    *  read after one cannot reach into talk the previous run never read (said
    *  while another project was selected, or under work mode). */
   floor?: { f: string; o: number }
+  /** The phone's newest Push to Talk token (`push-token` frame). Dropped with
+   *  the pairing (unpair removes the file, pairing writes a new one without it). */
+  push?: PushTarget
+  /** Apple's last permanent refusal, for this token + key (fingerprint). While
+   *  both are unchanged nothing is pushed and Settings says the wake is off. */
+  pushRefused?: { reason: string; token: string; key: string }
 }
 
 export type PhoneEventKind = 'notice' | 'commander' | 'owner' | 'president'
@@ -78,6 +85,21 @@ const RESUME_WAIT_MS = 5000
 /** A resume never rewinds further than this (a Mac back after a long time
  *  away does not read hours of talk into the earphones). */
 const RESUME_MAX_BEHIND = 4 * READ_MAX
+/** At most one push per this while the president keeps writing. */
+export const PUSH_GAP_MS = 5000
+/** A say from the phone holds pushes until its final ack — but never longer
+ *  than this (an owner line has no TTL: a desk that never frees up would
+ *  otherwise silence the phone for good). */
+export const SAY_HOLD_MAX_MS = 2 * 60_000
+/** A push that got no answer / 429 / 5xx is tried again after the gap, this many
+ *  times in a row at most. */
+export const PUSH_RETRY_MAX = 3
+
+/** Apple's standing refusal of this token with this key, or null. */
+const pushRefusal = (cfg: PhoneLinkConfig, key: PushKey): string | null => {
+  const r = cfg.pushRefused
+  return r && typeof r.reason === 'string' && r.token === cfg.push?.token && r.key === pushKeyFingerprint(key) ? r.reason : null
+}
 
 /** The app owner only (owner decision 2026-10-01: 「まずはオーナー自分専用」) —
  *  NOT the public Agent Team opt-in, which opens the rest of the swarm. The relay
@@ -99,7 +121,10 @@ export const pairingCode = (c: PhoneLinkConfig): string =>
 export const readPhoneLinkConfig = async (): Promise<PhoneLinkConfig | null> => {
   try {
     const c = JSON.parse(await readFile(configFile(), 'utf8')) as PhoneLinkConfig
-    return c?.v === 1 && c.relayUrl && relayUrlAllowed(c.relayUrl) && c.macKey && c.phoneKey ? c : null
+    if (!(c?.v === 1 && c.relayUrl && relayUrlAllowed(c.relayUrl) && c.macKey && c.phoneKey)) return null
+    const { push, ...rest } = c
+    const target = push && typeof push === 'object' ? asPushTarget(push as unknown as Record<string, unknown>) : null
+    return target ? { ...rest, push: target } : rest
   } catch {
     return null
   }
@@ -195,6 +220,9 @@ interface LinkState {
   /** The relay's answer to this connection: the position of the newest event
    *  it STORED (null = none). Applied once by pumpTranscript, then cleared. */
   resume?: Cursor | null
+  /** The last resume applied: what is re-sent up to there the relay already has
+   *  (and drops), so it wakes nobody — a Mac reconnect is not news. */
+  pushFloor?: Cursor | null
   /** Nothing is read for the phone until the relay said where it stands. */
   resumeBy: number
   /** stopPhoneLink ran: a tick still in flight must not write the config back
@@ -208,6 +236,16 @@ interface LinkState {
   /** Owner access as of the last projects refresh: a Mac that stopped being the
    *  owner (signed out) stops feeding the phone within PROJECTS_EVERY_MS. */
   access: boolean
+  /** Push to Talk: when the last push went out, whether one is owed, the timer
+   *  that sends it once the gap / say hold is over, and the phone says still
+   *  waiting for their final ack. */
+  pushedAt: number
+  pushOwed: boolean
+  pushing: boolean
+  /** Consecutive transient failures of the owed push (see PUSH_RETRY_MAX). */
+  pushRetries: number
+  pushTimer?: ReturnType<typeof setTimeout>
+  says: Set<{ at: number }>
 }
 
 declare global {
@@ -220,6 +258,9 @@ export interface PhoneLinkDeps {
   supply?: Partial<SupplyNoticeDeps>
   /** Start the president desk of a project that has none (null = started). */
   wakeDesk?: (path: string) => Promise<string | null>
+  /** The APNs key / the push itself (tests). */
+  pushKey?: () => Promise<PushKey | null>
+  sendPush?: (key: PushKey, target: PushTarget) => Promise<PushResult>
 }
 
 /** Only the primary instance (fixed port 47776) holds the link: a second server
@@ -243,6 +284,11 @@ const newLinkState = (cfg: PhoneLinkConfig, ws: WebSocket | null): LinkState => 
   access: true,
   resumeBy: 0,
   firstTail: true,
+  pushedAt: 0,
+  pushOwed: false,
+  pushing: false,
+  pushRetries: 0,
+  says: new Set(),
 })
 
 const send = (st: LinkState, frame: unknown): boolean => {
@@ -313,6 +359,91 @@ const selectProject = async (st: LinkState, projectId: string): Promise<void> =>
   await sendProjects(st, true)
 }
 
+// ── waking the phone (Push to Talk, docs/PHONE_LINK.md "Waking the phone") ──
+
+/** Send the owed push once the gap since the last one and every say hold are
+ *  over (a timer comes back then). Exported for tests. */
+export const flushPush = async (st: LinkState, deps: PhoneLinkDeps = {}): Promise<void> => {
+  const target = st.cfg.push
+  if (!st.pushOwed || st.pushing || st.retired) return
+  // No token / no owner / work mode: nothing is owed (work-mode talk is never announced).
+  if (!target || !st.access || isLockdownEnabledSync()) return void (st.pushOwed = false)
+  const now = Date.now()
+  for (const s of Array.from(st.says)) if (now - s.at >= SAY_HOLD_MAX_MS) st.says.delete(s)
+  // The owner is talking or has just finished: a push would cut in with the
+  // president's voice. It goes once the say's ack went out (or the hold ran out).
+  const at = Math.max(st.pushedAt + PUSH_GAP_MS, ...Array.from(st.says, (s) => s.at + SAY_HOLD_MAX_MS))
+  if (at > now) {
+    clearTimeout(st.pushTimer)
+    st.pushTimer = setTimeout(() => void flushPush(st, deps).catch(() => {}), at - now)
+    st.pushTimer.unref?.()
+    return
+  }
+  st.pushing = true
+  try {
+    const key = await (deps.pushKey ?? readPushKey)()
+    // No key, or Apple refuses this key + token for good: not owed.
+    if (!key || pushRefusal(st.cfg, key)) return void (st.pushOwed = false)
+    st.pushOwed = false
+    st.pushedAt = Date.now()
+    const r = await (deps.sendPush ?? sendPushToTalk)(key, target)
+    if (r.status === 200) st.pushRetries = 0
+    else if (pushTokenGone(r)) {
+      st.pushRetries = 0
+      // Only the token that failed (a newer one may have come in meanwhile).
+      if (st.cfg.push?.token === target.token) {
+        const { push: _gone, ...rest } = st.cfg
+        st.cfg = rest
+        if (!st.retired) await writeConfig(st.cfg).catch(() => {})
+      }
+    } else if (pushRefusedForGood(r)) {
+      st.pushRetries = 0
+      st.cfg = { ...st.cfg, pushRefused: { reason: r.reason ?? String(r.status), token: target.token, key: pushKeyFingerprint(key) } }
+      if (!st.retired) await writeConfig(st.cfg).catch(() => {})
+    } else if ((pushTransient(r) || providerTokenExpired(r)) && st.pushRetries < PUSH_RETRY_MAX) {
+      // Lost on the way, or our JWT too old (signed anew if Apple allows it yet):
+      // owed again, sent once the gap is over (finally below).
+      if (providerTokenExpired(r)) renewStaleProviderToken()
+      st.pushRetries++
+      st.pushOwed = true
+    } else st.pushRetries = 0
+    // Status and Apple's reason only — never the token or the key.
+    if (r.status !== 200) console.warn(`[phone-link] push not accepted: ${r.status} ${r.reason ?? ''}`)
+  } finally {
+    st.pushing = false
+    // Owed while this one was in flight: it waits out the gap like any other.
+    if (st.pushOwed) void flushPush(st, deps).catch(() => {})
+  }
+}
+
+/** Something the phone reads aloud went to the relay. */
+const owePush = (st: LinkState, deps: PhoneLinkDeps): void => {
+  if (!st.cfg.push) return
+  st.pushOwed = true
+  void flushPush(st, deps).catch(() => {})
+}
+
+/** The owner entered (or replaced) the APNs key: clear any refusal and tell the
+ *  relay now, on the live socket (a restart of the link would drop the say holds). */
+export const pushKeySaved = async (): Promise<void> => {
+  // Entering the key (even the same one again) is the owner's "try again":
+  // any stored refusal goes, on the live link and on disk.
+  const st = globalThis.__openground_phone_link
+  if (st) {
+    const { pushRefused: _gone, ...rest } = st.cfg
+    st.cfg = rest
+    st.pushRetries = 0
+    if (!st.retired) await writeConfig(st.cfg).catch(() => {})
+    if (st.access) send(st, { type: 'push-ready', on: (await readPushKey()) !== null })
+    return
+  }
+  const cfg = await readPhoneLinkConfig()
+  if (cfg?.pushRefused) {
+    const { pushRefused: _gone, ...rest } = cfg
+    await writeConfig(rest).catch(() => {}) // the key is saved; a stale refusal only waits for the next save
+  }
+}
+
 /** One frame relayed from the phone. Exported for tests. */
 export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>, deps: PhoneLinkDeps = {}): Promise<void> => {
   const id = typeof f.id === 'string' ? f.id.slice(0, 100) : undefined
@@ -321,6 +452,17 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
   // The president is an owner seat: no owner access, nothing is answered.
   if (!(await hasPhoneLinkAccess())) return void ack('rejected', { reason: 'forbidden' })
   if (f.type === 'projects') return sendProjects(st, true)
+  if (f.type === 'push-token') {
+    const target = asPushTarget(f)
+    if (target === undefined) return
+    // A refusal that was the app's (topic) is tried again once the app hands its
+    // token over anew — reopening the app is the fix Settings asks for.
+    const { push: _old, pushRefused, ...rest } = st.cfg
+    const keep = pushRefused && !refusalIsTheApp(pushRefused.reason) ? { pushRefused } : {}
+    st.cfg = target ? { ...rest, ...keep, push: target } : { ...rest, ...keep }
+    if (!st.retired) await writeConfig(st.cfg).catch(() => {})
+    return
+  }
   if (f.type === 'select') {
     const { all, chosen } = await selectedProject(st)
     const p = all.find((x) => x.id === f.projectId)
@@ -339,19 +481,34 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
   if (!p) return void ack('rejected', { reason: 'no-project' })
   // Saying to another project selects it — otherwise its answer is never heard.
   if (p.id !== chosen?.id) await selectProject(st, p.id)
+  // No push until this say's final ack went out (see flushPush).
+  const hold = { at: Date.now() }
+  st.says.add(hold)
+  const release = () => {
+    if (st.says.delete(hold)) void flushPush(st, deps).catch(() => {})
+  }
   let starting = false
   if (!p.desk) {
     const err = await (deps.wakeDesk ?? defaultWakeDesk)(p.path).catch((e) => String(e?.message ?? e))
-    if (err) return void ack('rejected', { reason: 'desk-failed', detail: err.slice(0, 200) })
+    if (err) {
+      ack('rejected', { reason: 'desk-failed', detail: err.slice(0, 200) })
+      return release()
+    }
     starting = true
   }
   ack('queued', { projectId: p.id, ...(starting ? { desk: 'starting' } : {}) })
   await queueSupplyOwnerSay(
     p.path,
     text,
-    (heard) => void ack('delivered', { projectId: p.id, heard }),
+    (heard) => {
+      ack('delivered', { projectId: p.id, heard })
+      release()
+    },
     deps.supply ?? {},
-  )
+  ).catch((e) => {
+    release()
+    throw e
+  })
 }
 
 /** One frame from the relay: its own `resume` (the relay never forwards a phone
@@ -369,7 +526,7 @@ export const handleRelayFrame = async (st: LinkState, f: Record<string, unknown>
  *  no-pong cut. So on every new connection the relay says where its newest
  *  STORED event sits (`resume`), the reader rewinds to there, and the relay drops
  *  what it already has: nothing lost, nothing told twice. Exported for tests. */
-export const pumpTranscript = async (st: LinkState): Promise<number> => {
+export const pumpTranscript = async (st: LinkState, deps: PhoneLinkDeps = {}): Promise<number> => {
   const { chosen } = await selectedProject(st)
   if (!chosen) return 0
   const sess = (await readSwarmSessions(chosen.path)).supply
@@ -397,6 +554,7 @@ export const pumpTranscript = async (st: LinkState): Promise<number> => {
   if (st.resume !== undefined) {
     const r = st.resume
     st.resume = undefined
+    st.pushFloor = r
     // Back to just after the newest event the relay stored — or, when it stored
     // nothing of this file, to where reading of it began — never below the floor.
     const start = st.tail.start ?? st.tail.offset
@@ -429,6 +587,8 @@ export const pumpTranscript = async (st: LinkState): Promise<number> => {
     for (let i = 0; i < events.length; i++) {
       if (!send(st, { type: 'event', projectId: chosen.id, ...events[i], cur: { f: fid, o: base + at, i } })) return n
       n++
+      // What the phone reads aloud wakes it (the owner's own words do not).
+      if (events[i].kind !== 'owner' && !alreadyStored(st.pushFloor, { f: fid, o: base + at, i })) owePush(st, deps)
     }
     at = nl + 1
     st.tail.offset = base + at
@@ -461,7 +621,10 @@ const connect = (st: LinkState): void => {
     void (async () => {
       if (isLockdownEnabledSync()) return
       st.access = await hasPhoneLinkAccess()
-      if (st.access) await sendProjects(st, true)
+      if (!st.access) return
+      // The relay tells the phone it may hand over its push token only while this is on.
+      send(st, { type: 'push-ready', on: (await readPushKey()) !== null })
+      await sendProjects(st, true)
     })().catch(() => {})
   })
   ws.on('message', (data) => {
@@ -535,6 +698,7 @@ export const stopPhoneLink = (): void => {
   st.retired = true
   clearTimeout(st.retry)
   clearInterval(st.loop)
+  clearTimeout(st.pushTimer)
   st.ws?.close()
   globalThis.__openground_phone_link = undefined
 }
@@ -559,12 +723,21 @@ export const startPhoneLink = async (): Promise<boolean> => {
 
 export const phoneLinkStatus = async () => {
   const cfg = await readPhoneLinkConfig()
+  const key = await readPushKey()
   const st = globalThis.__openground_phone_link
   return {
     paired: cfg !== null,
     online: st?.ws?.readyState === WebSocket.OPEN,
     relayUrl: cfg?.relayUrl ?? null,
     projectId: cfg?.projectId ?? null,
+    /** Push to Talk: the APNs key's ID once the owner entered it (never the key),
+     *  and whether the phone handed over a token. */
+    pushKeyId: key?.keyId ?? null,
+    pushPhone: !!cfg?.push,
+    /** Apple refuses this key + token for good (its reason), else null. */
+    pushRefused: cfg && key ? pushRefusal(cfg, key) : null,
+    /** Whose fault: 'app' (token / topic — reopen the iPhone app) or 'key'. */
+    pushRefusedBy: cfg && key && pushRefusal(cfg, key) ? (refusalIsTheApp(pushRefusal(cfg, key)!) ? 'app' : 'key') : null,
   }
 }
 

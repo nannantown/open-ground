@@ -67,3 +67,25 @@ export const asCursor = (v: unknown): Cursor | null => {
 /** `c` was already stored (same file, not after the last stored position). */
 export const alreadyStored = (last: Cursor | null | undefined, c: Cursor): boolean =>
   !!last && last.f === c.f && (c.o < last.o || (c.o === last.o && c.i <= last.i))
+
+/** Where a Push to Talk push for the phone goes (docs/PHONE_LINK.md "Waking the
+ *  phone"): its ephemeral APNs token, which APNs host, and the `apns-topic`. */
+export interface PushTarget {
+  token: string
+  env: 'development' | 'production'
+  topic: string
+}
+/** A phone `push-token` frame's target: null = "forget it" (`token: null`),
+ *  undefined = not a valid frame. Checked tightly: the token goes into the APNs
+ *  request path. */
+export const asPushTarget = (f: Record<string, unknown>): PushTarget | null | undefined => {
+  if (f.token === null) return null
+  const { token, env, topic } = f
+  return typeof token === 'string' &&
+    /^[0-9a-f]{16,200}$/i.test(token) &&
+    (env === 'development' || env === 'production') &&
+    typeof topic === 'string' &&
+    /^[A-Za-z0-9.-]{1,180}\.voip-ptt$/.test(topic)
+    ? { token: token.toLowerCase(), env, topic }
+    : undefined
+}

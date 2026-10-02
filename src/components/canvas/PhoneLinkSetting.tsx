@@ -3,14 +3,25 @@
 // answers 403 to anyone else and then nothing — not even `frame` — renders.
 // Pairing copies a code to the clipboard; the iPhone app pastes it (Universal
 // Clipboard). Unpairing erases the relay room and the old code stops working.
+// Once paired, the owner's APNs key (.p8 + Key ID + Team ID) can be entered so
+// the Mac wakes the phone with a Push to Talk push (docs/PHONE_LINK.md "Waking
+// the phone"). The key goes to this Mac's server only and is never shown again.
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { Check, Copy, Smartphone } from 'lucide-react'
+import { BellRing, Check, Copy, Smartphone } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 
 interface Status {
   paired: boolean
   online: boolean
+  pushKeyId: string | null
+  pushPhone: boolean
+  pushRefused: string | null
+  pushRefusedBy: 'key' | 'app' | null
 }
+
+const INPUT =
+  'w-28 rounded-[3px] border border-line bg-bg-card px-2.5 py-1.5 text-ui text-ink placeholder:text-ink-faint ' +
+  'hover:border-line-strong focus:border-accent focus:outline-none disabled:opacity-40 transition-colors'
 
 const BTN =
   'inline-flex items-center gap-1.5 rounded-[2px] border border-line-strong bg-bg-elevated px-3 py-2 label-cap text-ink-muted ' +
@@ -23,11 +34,26 @@ export const PhoneLinkSetting = ({ frame }: { frame: (body: ReactNode) => ReactN
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [keyForm, setKeyForm] = useState<{ p8: string; keyId: string; teamId: string } | null>(null)
+  const [keyBad, setKeyBad] = useState(false)
 
   const load = useCallback(() => {
     fetch('/api/phone-link')
       .then((r) => (r.ok ? r.json() : null))
-      .then((s) => setStatus(s ? { paired: s.paired === true, online: s.online === true } : null))
+      .then((s) =>
+        setStatus(
+          s
+            ? {
+                paired: s.paired === true,
+                online: s.online === true,
+                pushKeyId: typeof s.pushKeyId === 'string' ? s.pushKeyId : null,
+                pushPhone: s.pushPhone === true,
+                pushRefused: typeof s.pushRefused === 'string' ? s.pushRefused : null,
+                pushRefusedBy: s.pushRefusedBy === 'app' || s.pushRefusedBy === 'key' ? s.pushRefusedBy : null,
+              }
+            : null,
+        ),
+      )
       .catch(() => setStatus(null))
   }, [])
 
@@ -74,6 +100,26 @@ export const PhoneLinkSetting = ({ frame }: { frame: (body: ReactNode) => ReactN
       if (!(await fetch('/api/phone-link/unpair', { method: 'POST' })).ok) throw new Error('unpair')
     })
 
+  const saveKey = async () => {
+    if (!keyForm) return
+    setBusy(true)
+    setKeyBad(false)
+    try {
+      const r = await fetch('/api/phone-link/push-key', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(keyForm),
+      })
+      if (r.ok) setKeyForm(null)
+      else setKeyBad(true)
+    } catch {
+      setKeyBad(true)
+    } finally {
+      setBusy(false)
+      load()
+    }
+  }
+
   if (!status) return null
   return frame(
     <div className="flex flex-wrap items-center gap-2">
@@ -102,6 +148,81 @@ export const PhoneLinkSetting = ({ frame }: { frame: (body: ReactNode) => ReactN
             {t('settings.phoneLink.unpair')}
           </button>
         </>
+      )}
+      {status.paired && (
+        <div className="flex w-full flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 text-ui text-ink">
+            <BellRing
+              size={14}
+              className={status.pushKeyId && status.pushPhone && !status.pushRefused ? 'text-status-done' : 'text-ink-subtle'}
+            />
+            {!status.pushKeyId
+              ? t('settings.phoneLink.push.off')
+              : status.pushRefused
+                ? t(status.pushRefusedBy === 'app' ? 'settings.phoneLink.push.refusedApp' : 'settings.phoneLink.push.refused')
+                : status.pushPhone
+                ? t('settings.phoneLink.push.on')
+                : t('settings.phoneLink.push.waiting')}
+          </span>
+          {keyBad && <span className="text-ui text-ink-muted">{t('settings.phoneLink.push.bad')}</span>}
+          <span className="flex-1" />
+          {!keyForm ? (
+            <button
+              type="button"
+              className={BTN}
+              disabled={busy}
+              onClick={() => (setKeyBad(false), setKeyForm({ p8: '', keyId: '', teamId: '' }))}
+            >
+              {status.pushKeyId ? t('settings.phoneLink.push.replace') : t('settings.phoneLink.push.add')}
+            </button>
+          ) : (
+            <>
+              <input
+                type="file"
+                accept=".p8"
+                aria-label={t('settings.phoneLink.push.file')}
+                disabled={busy}
+                className="max-w-48 text-ui text-ink-muted file:mr-2 file:cursor-pointer file:rounded-[2px] file:border file:border-line-strong file:bg-bg-elevated file:px-2 file:py-1 file:text-ink-muted hover:file:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                onChange={async (e) => {
+                  const f = e.target.files?.[0]
+                  const p8 = f ? await f.text() : ''
+                  setKeyForm((k) => (k ? { ...k, p8 } : k))
+                }}
+              />
+              <input
+                type="text"
+                placeholder="Key ID"
+                autoComplete="off"
+                spellCheck={false}
+                disabled={busy}
+                className={INPUT}
+                value={keyForm.keyId}
+                onChange={(e) => setKeyForm({ ...keyForm, keyId: e.target.value })}
+              />
+              <input
+                type="text"
+                placeholder="Team ID"
+                autoComplete="off"
+                spellCheck={false}
+                disabled={busy}
+                className={INPUT}
+                value={keyForm.teamId}
+                onChange={(e) => setKeyForm({ ...keyForm, teamId: e.target.value })}
+              />
+              <button
+                type="button"
+                className={BTN}
+                disabled={busy || !keyForm.p8 || !keyForm.keyId.trim() || !keyForm.teamId.trim()}
+                onClick={saveKey}
+              >
+                {t('common.save')}
+              </button>
+              <button type="button" className={BTN} disabled={busy} onClick={() => (setKeyForm(null), setKeyBad(false))}>
+                {t('common.cancel')}
+              </button>
+            </>
+          )}
+        </div>
       )}
     </div>
   )

@@ -22,7 +22,9 @@ iPhone app ──wss──▶ Cloudflare relay room ◀──wss── OPEN GROU
   `https://og-phone-relay.mindbrew.workers.dev`. A SEPARATE Worker from
   og-collab. Deploy: `cd worker && npx wrangler deploy -c wrangler.phone.jsonc`.
 - Mac end: `src/lib/server/phoneLink.ts` (started at boot when paired),
-  routes `server/routes/phoneLink.ts`, Settings section `PhoneLinkSetting.tsx`.
+  routes `server/routes/phoneLink.ts`, Settings section `PhoneLinkSetting.tsx`;
+  the APNs push that wakes a locked phone: `src/lib/server/phonePush.ts`
+  (see "Waking the phone").
 - The Mac must be running OPEN GROUND. When it is not, the phone still connects
   and hears `mac: false`; anything it says is refused with `mac-offline`.
 
@@ -67,10 +69,12 @@ All other frames are JSON text, one object per frame, with a `type`.
 
 **`hello`** — first frame on every connect:
 ```json
-{ "type": "hello", "v": 1, "mac": true, "head": 42, "projects": { "type": "projects", "selected": "<id>", "projects": [ ... ] } }
+{ "type": "hello", "v": 1, "mac": true, "head": 42, "projects": { "type": "projects", "selected": "<id>", "projects": [ ... ] }, "pushToken": true }
 ```
 `head` = newest event `seq` the relay holds. `projects` = last list the Mac sent
-(or `null`).
+(or `null`). `pushToken` = the Mac (as it last said) can wake this phone: send
+your `push-token` now — even with `mac: false` (absent or `false` = do not send
+one; see "Waking the phone").
 
 **`event`** — something to read aloud, in order:
 ```json
@@ -136,6 +140,8 @@ your words (which IS sent again) is the proof that it was heard.
 { "type": "say", "id": "<unique per message>", "text": "今どうなってる?", "projectId": "<optional>" }
 { "type": "select", "projectId": "<id>" }
 { "type": "projects" }
+{ "type": "push-token", "token": "<hex>", "env": "production", "topic": "<bundle id>.voip-ptt" }
+{ "type": "push-token", "token": null }
 ```
 
 - `say` — the owner's words. Typed into the president desk as the **owner
@@ -154,9 +160,100 @@ your words (which IS sent again) is the proof that it was heard.
 - `select` — hear this project from now on (no replay of its past). Answered
   with `projects`.
 - `projects` — ask for the list again.
+- `push-token` — only after a `hello` with `"pushToken": true`. The Push to Talk
+  ephemeral token (hex), which APNs host it belongs to (`env`: `development` for
+  a debug build, `production` for TestFlight / App Store) and the `apns-topic`
+  (bundle id + `.voip-ptt`). `token: null` = forget it. Anything else
+  (non-hex token, other `env`, a topic not ending in `.voip-ptt`) is refused
+  with `bad-frame`. No reply on success. With the Mac offline the relay holds the
+  newest one and hands it to the Mac when it is back (no `mac-offline`).
 
 Frames over 16,384 characters or of any other `type` are refused (`bad-frame`), never
 forwarded to the Mac.
+
+## Waking the phone (Push to Talk)
+
+iOS suspends the app soon after the screen locks, and the socket dies with it.
+The Mac then wakes the phone with an Apple **Push to Talk** push: the system makes
+"社長" the active speaker, the app redials with `?after=` and reads what came.
+Free: APNs costs nothing; the key is the owner's own (Apple Developer membership).
+
+**Relay.** Passes `push-token` on to the Mac. Only while the Mac is away does it
+keep one — the newest — and hands it over (once) when the Mac connects: a token
+that changed while the Mac slept would otherwise never arrive, the Mac would push
+to the dead one, and a locked phone would not be woken again. `reset` erases it.
+The Mac sends `{ "type": "push-ready", "on": true|false }` on every connect and
+when the owner enters the key (on = it holds an APNs key); the room remembers the
+last value, and `hello` carries it as `pushToken`. A phone already connected when
+the key was first entered hands its token over on its next connect.
+
+**Mac** (`phoneLink.ts` + `phonePush.ts`):
+- Keeps only the newest token, in `~/.openground/phone-link.json` (0600) next to
+  the pairing keys. `token: null`, unlinking, and pairing again drop it.
+- When an event the phone reads aloud (`president`, `notice`, `commander` — not
+  `owner`) has gone to the relay, it owes the phone one push. Pushes go at most
+  once per **5 s**: more events inside that gap are covered by one push at its end.
+  What a Mac reconnect re-sends (the relay already has it — see `resume`) owes
+  no push.
+- **No push while a `say` from the phone has no final ack** (`delivered` or
+  `rejected`) — the owner has just spoken and a push would cut in with the
+  president's voice. The owed push goes once that ack is out. A `say` holds
+  pushes for at most **2 min** (a desk that never frees up must not silence the
+  phone for good).
+- The request: `POST https://api.push.apple.com/3/device/<token>` (or
+  `api.sandbox.push.apple.com` for `env: development`) over **HTTP/2**
+  (`node:http2`; APNs speaks nothing else, and a Worker's subrequests are
+  HTTP/1.1 — that is why the Mac sends it). Headers `apns-push-type: pushtotalk`,
+  `apns-topic: <topic>`, `apns-priority: 10`, `apns-expiration: 0`,
+  `authorization: bearer <JWT>`. Body `{"aps":{}}` — nothing readable goes
+  through Apple; the phone fetches the words over the relay. (docs/PUSH.md in the
+  iPhone repo proposed a `seq` in the body; the Mac does not know the relay's
+  `seq`, and the app does not read the payload, so it is left out.)
+- JWT: ES256, header `{alg, kid: <Key ID>}`, claims `{iss: <Team ID>, iat}`,
+  made again every 30 min (Apple: not more often than every 20, not less often
+  than every 60), or at once when the owner enters a different key.
+- Apple's answer decides what happens next (only the status and Apple's reason
+  are ever logged — never the token or the key):
+  - `410` (any reason) or `400 BadDeviceToken` → the token is dropped (the
+    phone sends a new one when it joins its channel again).
+  - **Refused for good** — any other `403` (`InvalidProviderToken`,
+    `BadEnvironmentKeyIdInToken`, …) or `400` `DeviceTokenNotForTopic` /
+    `TopicDisallowed` / `BadTopic`: the token is kept, the refusal is saved
+    with it in `phone-link.json` (with the token and a fingerprint of the key
+    it was refused for), and nothing more is pushed until the phone sends
+    another token, the owner enters a key again (even the same one — saving
+    the key always clears a stored refusal), or — for `DeviceTokenNotForTopic`
+    / `BadTopic` — the app hands its token over again.
+    `GET /api/phone-link` reports it as `pushRefused: "<reason>"` and
+    `pushRefusedBy: "key" | "app"` (`403` and `TopicDisallowed` — a
+    topic-specific key that does not cover the app — are the key;
+    `DeviceTokenNotForTopic` / `BadTopic` are the iPhone app), and Settings → iPhone says the wake has stopped — "Apple refused the
+    key" or "reopen the iPhone app" — instead of saying it works.
+  - **Our JWT too old** — `403 ExpiredProviderToken` (Apple: "a new token
+    should be generated"): the push is retried like a lost one below and is
+    never saved as a refusal. The cached JWT is dropped first if it is at least
+    20 min old (Apple allows a new one no more often); a younger one coming back
+    expired means the Mac's clock is off, so it is not re-signed.
+  - **Lost on the way** — no answer (network error, 10 s timeout), `429` or a
+    `5xx`: owed again and sent once the 5 s gap is over, at most **3** times in
+    a row; after that it waits for the next event. Any final answer (sent,
+    token dropped, refused) starts the count afresh.
+- Work mode is checked again right before the HTTP/2 connect (work mode's
+  egress guard wraps `fetch`, which `node:http2` does not use).
+- Nothing is pushed under work mode, without owner access, without a token or
+  without a key.
+
+**Owner, once:** create an APNs key on developer.apple.com and enter it in
+Settings → **iPhone** (「Apple の鍵を入れる」: the `.p8` file, Key ID, Team ID).
+Plain-language steps: `docs/IPHONE_PUSH_KEY_SETUP.md`. The key is stored in
+`~/.openground/phone-push-key.json` (0600), survives unlink / re-pair, and is
+never returned by any route or logged — Settings shows only its Key ID.
+The Mac holds ONE key. A key made for Sandbox only cannot push to a TestFlight
+build (and the reverse): APNs answers `403 BadEnvironmentKeyIdInToken`, the
+token is kept, and Settings shows the wake as stopped until a key for the right
+environment is entered. TestFlight / App Store builds need a Production key; a
+debug build from Xcode needs a Sandbox key in its place (or one key made for
+both environments, where the developer site still offers that).
 
 ## Security model
 
@@ -184,6 +281,8 @@ forwarded to the Mac.
 - The pairing code is a write credential, so `/api/phone-link/*` answers only a
   loopback `Host`/`Origin` on EVERY method (a DNS-rebinding page cannot read it),
   and the code is fetched with POST.
+- The APNs key and the phone's push token are stored 0600 and never logged or
+  returned; the token is checked as hex before it goes into the request path.
 - One Mac end per room: only the primary OPEN GROUND (port 47776) holds the link.
   A room taken over by another Mac end (close `4001`) waits 60 s before retrying.
 
@@ -191,20 +290,23 @@ forwarded to the Mac.
 never share anything. What is missing is a gate on who may *create* rooms on the
 operator's relay (e.g. a subscription check in front of `fetch` in
 `phoneRelay.ts`) — today anyone can make their own pair of keys and use the
-relay as a pipe of their own. Add that gate before the app is public.
+relay as a pipe of their own. Add that gate before the app is public. The push
+must move too: each user's Mac would need the operator's APNs key, which cannot
+live on users' Macs — so the relay sends it, and the Mac only says "something new".
 
 ## Verifying
 
 - Relay, against a local workerd or the deployed one:
   `cd worker && node test/phoneRelay.local.mjs` /
   `RELAY=https://og-phone-relay.mindbrew.workers.dev node test/phoneRelay.local.mjs`
-  (16 checks: missing / wrong / swapped keys refused, frames pass, catch-up,
-  unlink retires both keys).
+  (33 checks: missing / wrong / swapped keys refused, frames pass, catch-up,
+  resume, push-ready / push-token, unlink retires both keys).
 - End to end, a stand-in for the phone:
   `node scripts/phone-link-say.mjs <pairing code> "text"` — prints every frame
   and exits 0 once the president answered after the line landed. `--key x`
   shows a wrong key is refused; no text = listen only.
-- Unit guards: `src/lib/server/phoneLink.test.ts`,
+- Unit guards: `src/lib/server/phoneLink.test.ts`, `src/lib/server/phonePush.test.ts`
+  (the APNs request as a real HTTP/2 server receives it, JWT, 410),
   `src/lib/server/phoneRelayAuth.test.ts`,
   `src/lib/server/supplyNoticeOwnerSay.test.ts`.
 - ⚠ A test server started from inside a Claude Code session inherits
@@ -213,5 +315,5 @@ relay as a pipe of their own. Add that gate before the app is public.
 
 ## Not built (yet)
 
-Push notifications when the app is closed (APNs) — today the phone hears only
-while its socket is open; a paid voice model; a QR code for pairing.
+A paid voice model; a QR code for pairing. (The lock-screen wake is built; its
+check on a real locked iPhone waits until the owner has entered the key.)

@@ -106,7 +106,37 @@ try {
   check('the resend after it is stored once (seq 3)', await until(() => phone.frames.some((f) => f.type === 'event' && f.seq === 3 && f.text === 'B')))
   check('...and the already stored one is not told twice', phone.frames.filter((f) => f.type === 'event' && f.text === 'A').length === 1)
 
-  mac2.ws.send(JSON.stringify({ type: 'reset' }))
+  // Waking the phone (Push to Talk): the Mac says it can push, then the phone
+  // hands over its token — passed to the Mac, never stored here.
+  check('hello says pushToken:false before the Mac said it can push', phone.frames[0]?.pushToken === false)
+  mac2.ws.send(JSON.stringify({ type: 'push-ready', on: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  const woken = await open('phone', room, phoneKey)
+  check('...and pushToken:true once it did', await until(() => woken.frames[0]?.type === 'hello' && woken.frames[0].pushToken === true))
+  const tok = { type: 'push-token', token: 'ab'.repeat(32), env: 'production', topic: 'com.x.phone.voip-ptt' }
+  woken.ws.send(JSON.stringify(tok))
+  check('the push token reaches the Mac', await until(() => mac2.frames.some((f) => f.type === 'push-token' && f.token === tok.token && f.env === 'production' && f.topic === tok.topic)))
+  woken.ws.send(JSON.stringify({ type: 'push-token', token: null }))
+  check('"forget it" reaches the Mac', await until(() => mac2.frames.some((f) => f.type === 'push-token' && f.token === null)))
+  woken.ws.send(JSON.stringify({ ...tok, token: '../x' }))
+  check('a malformed push token is refused', await until(() => woken.frames.some((f) => f.type === 'error' && f.code === 'bad-frame')))
+  check('...and never reached the Mac', !mac2.frames.some((f) => f.token === '../x'))
+  // A token that changes while the Mac is away is held and handed over on its return.
+  mac2.ws.close()
+  await until(() => woken.frames.some((f) => f.type === 'mac' && f.online === false))
+  const asleep = await open('phone', room, phoneKey)
+  check('with the Mac away, hello still says pushToken:true', await until(() => asleep.frames[0]?.type === 'hello' && asleep.frames[0].mac === false && asleep.frames[0].pushToken === true))
+  asleep.ws.send(JSON.stringify({ ...tok, token: 'cd'.repeat(32) }))
+  await new Promise((r) => setTimeout(r, 300))
+  check('...the token is not refused as mac-offline', !asleep.frames.some((f) => f.type === 'error'))
+  const mac3 = await open('mac', room, macKey)
+  check('...and reaches the Mac when it is back', await until(() => mac3.frames.some((f) => f.type === 'push-token' && f.token === 'cd'.repeat(32))))
+  const mac4 = await open('mac', room, macKey)
+  await new Promise((r) => setTimeout(r, 500))
+  check('...once only', !mac4.frames.some((f) => f.type === 'push-token'))
+  const macLast = mac4
+
+  macLast.ws.send(JSON.stringify({ type: 'reset' }))
   check('reset closes the phones', await until(() => phone.closed !== null && late.closed !== null, 40000))
   check('after reset the old phone key is refused (401)', (await open('phone', room, phoneKey)).status === 401)
   check('after reset the old Mac key is refused too (401)', (await open('mac', room, macKey)).status === 401)

@@ -22,12 +22,17 @@ vi.mock('./terminal', async (orig) => ({
   listLiveDesksIn: () => (h.desk ? [{ id: 'd1' }] : []),
 }))
 
-import { handlePhoneFrame, handleRelayFrame, phoneEventsFromLine, pumpTranscript, pairingCode, pairPhone, readPhoneLinkConfig, relayUrlAllowed, startPhoneLink, stopPhoneLink, unpairPhone, tick, __testLinkState } from './phoneLink'
-import { alreadyStored, asCursor, type Cursor } from '../../../worker/src/phoneRelayAuth'
+import { flushPush, PUSH_GAP_MS, PUSH_RETRY_MAX, SAY_HOLD_MAX_MS, handlePhoneFrame, handleRelayFrame, phoneEventsFromLine, pumpTranscript, pairingCode, pairPhone, readPhoneLinkConfig, relayUrlAllowed, startPhoneLink, stopPhoneLink, unpairPhone, tick, __testLinkState } from './phoneLink'
+import { alreadyStored, asCursor, type Cursor, type PushTarget } from '../../../worker/src/phoneRelayAuth'
 import { setLockdownCache } from './lockdown'
 import { openGroundHome } from './paths'
 import { phoneLinkRoutes } from '../../../server/routes/phoneLink'
-import { resetSupplyNoticeState, SUPPLY_OWNER_SAY_MAX, SUPPLY_NOTICE_PREFIX, supplyNoticeLine, supplyReplyLine } from './supplyNotice'
+import { generateKeyPairSync } from 'node:crypto'
+import { statSync } from 'node:fs'
+import type { AddressInfo } from 'node:net'
+import { WebSocketServer } from 'ws'
+import { JWT_MIN_AGE_MS, savePushKey, type PushKey } from './phonePush'
+import { flushSupplyNotices, resetSupplyNoticeState, SUPPLY_OWNER_SAY_MAX, SUPPLY_NOTICE_PREFIX, supplyNoticeLine, supplyReplyLine } from './supplyNotice'
 
 const PROJECT = '/repo/alpha'
 const CFG = { v: 1 as const, relayUrl: 'https://relay.test', macKey: 'm'.repeat(43), phoneKey: 'p'.repeat(43), projectId: 'p1' }
@@ -585,5 +590,427 @@ describe('pairingCode', () => {
     expect(c.key).toBe(CFG.phoneKey)
     expect(c.url).toMatch(/^wss:\/\/relay\.test\/v1\/[0-9a-f]{64}\/phone$/)
     expect(c.url).not.toContain(CFG.macKey)
+  })
+})
+
+// ── waking the phone (Push to Talk, docs/PHONE_LINK.md "Waking the phone") ──
+
+describe('waking the phone with a Push to Talk push', () => {
+  const P8 = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  const KEY: PushKey = { v: 1, keyId: 'ABC123DEFG', teamId: 'TEAM123456', p8: P8 }
+  const T1: PushTarget = { token: 'ab'.repeat(32), env: 'production', topic: 'com.nannantown.openground.phone.voip-ptt' }
+  const T2: PushTarget = { ...T1, token: 'cd'.repeat(32), env: 'development' }
+  const cfgFile = () => join(openGroundHome(), 'phone-link.json')
+
+  /** A link with a token and a recording APNs: `pushes` = the targets pushed to. */
+  const pushing = (reply: { status: number; reason?: string } = { status: 200 }) => {
+    const pushes: (typeof T1)[] = []
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState({ ...CFG, push: T1 }, sock)
+    const deps = { pushKey: async () => KEY, sendPush: async (_k: PushKey, t: typeof T1) => (pushes.push(t), reply) }
+    return { st, sent, pushes, deps }
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 0))
+
+  it('the phone token is kept with the keys (0600), replaced by a newer one, and forgotten on request', async () => {
+    const st = __testLinkState(CFG, fakeSocket().sock)
+    await handlePhoneFrame(st, { type: 'push-token', ...T1 })
+    expect((await readPhoneLinkConfig())?.push).toEqual(T1)
+    expect(statSync(cfgFile()).mode & 0o777).toBe(0o600)
+    await handlePhoneFrame(st, { type: 'push-token', ...T2 })
+    expect((await readPhoneLinkConfig())?.push).toEqual(T2) // the newest wins
+    // Not a token (it would go into the APNs request path): ignored, the old one stays.
+    await handlePhoneFrame(st, { type: 'push-token', ...T1, token: '../../x' })
+    await handlePhoneFrame(st, { type: 'push-token', ...T1, topic: 'com.x.app' })
+    expect((await readPhoneLinkConfig())?.push).toEqual(T2)
+    await handlePhoneFrame(st, { type: 'push-token', token: null })
+    expect((await readPhoneLinkConfig())?.push).toBeUndefined()
+  })
+
+  it('what the phone reads aloud wakes it — at most once per few seconds while the president keeps writing', async () => {
+    h.file = join(dir, 'push1.jsonl')
+    writeFileSync(h.file, '')
+    const { st, pushes, deps } = pushing()
+    await pumpTranscript(st, deps)
+    appendFileSync(h.file, user('進めて') + '\n') // the owner's own words: nothing to wake for
+    await pumpTranscript(st, deps)
+    await settle()
+    expect(pushes).toEqual([])
+    appendFileSync(h.file, asst([{ type: 'text', text: '了解です' }]) + '\n' + user(`${SUPPLY_NOTICE_PREFIX}完成しました`) + '\n')
+    await pumpTranscript(st, deps)
+    await settle()
+    expect(pushes).toEqual([T1])
+    appendFileSync(h.file, asst([{ type: 'text', text: '続きです' }]) + '\n')
+    await pumpTranscript(st, deps)
+    await settle()
+    expect(pushes).toHaveLength(1) // within the gap: owed, not sent
+    expect(st.pushOwed).toBe(true)
+    st.pushedAt -= PUSH_GAP_MS // the gap is over (the timer's moment)
+    await flushPush(st, deps)
+    expect(pushes).toHaveLength(2)
+    clearTimeout(st.pushTimer)
+  })
+
+  it('no push while a say from the phone has no final ack; it goes once the ack went out', async () => {
+    h.desk = true
+    h.file = join(dir, 'push2.jsonl')
+    writeFileSync(h.file, '')
+    const { st, sent, pushes, deps } = pushing()
+    let busy = true
+    const desk = fakeDesk()
+    const supply = { ...desk.deps, screen: () => desk.deps.screen() + (busy ? ' · esc to interrupt' : '') }
+    await pumpTranscript(st, deps)
+    await handlePhoneFrame(st, { type: 'say', id: 's1', text: '状況は?' }, { ...deps, supply })
+    expect(sent.filter((f) => f.type === 'ack').map((f) => f.state)).toEqual(['queued'])
+    appendFileSync(h.file, asst([{ type: 'text', text: 'まだ前の返事を書いています' }]) + '\n')
+    await pumpTranscript(st, deps)
+    await settle()
+    expect(pushes).toEqual([]) // held: the owner just spoke
+    busy = false
+    await flushSupplyNotices(supply)
+    expect(sent.filter((f) => f.type === 'ack').map((f) => f.state)).toEqual(['queued', 'delivered'])
+    await vi.waitFor(() => expect(pushes).toEqual([T1]))
+    clearTimeout(st.pushTimer)
+  })
+
+  it('a say that never lands holds pushes for a while, not for good', async () => {
+    h.desk = true
+    const { st, pushes, deps } = pushing()
+    const desk = fakeDesk()
+    const supply = { ...desk.deps, screen: () => desk.deps.screen() + ' · esc to interrupt' }
+    await handlePhoneFrame(st, { type: 'say', id: 's2', text: 'もしもし' }, { ...deps, supply })
+    st.pushOwed = true
+    await flushPush(st, deps)
+    expect(pushes).toEqual([])
+    for (const hold of Array.from(st.says)) hold.at -= SAY_HOLD_MAX_MS
+    await flushPush(st, deps)
+    expect(pushes).toEqual([T1])
+    clearTimeout(st.pushTimer)
+    resetSupplyNoticeState()
+  })
+
+  it('a Mac reconnect re-sends what the relay already has, and that wakes nobody', async () => {
+    h.file = join(dir, 'push3.jsonl')
+    writeFileSync(h.file, '')
+    const { st, sent, pushes, deps } = pushing()
+    await pumpTranscript(st, deps)
+    appendFileSync(h.file, asst([{ type: 'text', text: '一つ目' }, { type: 'text', text: '二つ目' }]) + '\n')
+    await pumpTranscript(st, deps)
+    await settle()
+    expect(pushes).toHaveLength(1)
+    st.pushedAt = 0
+    // Reconnect: the relay says it stored the last event; the Mac rewinds to its line and re-sends.
+    const last = sent.filter((f) => f.type === 'event').at(-1)!
+    await handleRelayFrame(st, { type: 'resume', cur: last.cur })
+    expect(await pumpTranscript(st, deps)).toBe(2)
+    await settle()
+    expect(pushes).toHaveLength(1)
+    appendFileSync(h.file, asst([{ type: 'text', text: '新しい話' }]) + '\n')
+    await pumpTranscript(st, deps)
+    await settle()
+    expect(pushes).toHaveLength(2)
+    clearTimeout(st.pushTimer)
+  })
+
+  it('something said while a push is in flight is still pushed, after the gap', async () => {
+    let release = () => {}
+    const pushes: PushTarget[] = []
+    const st = __testLinkState({ ...CFG, push: T1 }, fakeSocket().sock)
+    const deps = {
+      pushKey: async () => KEY,
+      sendPush: async (_k: PushKey, t: PushTarget) => {
+        pushes.push(t)
+        if (pushes.length === 1) await new Promise<void>((r) => (release = r))
+        return { status: 200 }
+      },
+    }
+    st.pushOwed = true
+    const first = flushPush(st, deps)
+    await vi.waitFor(() => expect(pushes).toHaveLength(1))
+    st.pushOwed = true // a new event while the first push is in flight
+    await flushPush(st, deps)
+    release()
+    await first
+    await vi.waitFor(() => expect(st.pushTimer).toBeDefined()) // waits out the gap
+    st.pushedAt -= PUSH_GAP_MS
+    await flushPush(st, deps)
+    expect(pushes).toHaveLength(2)
+    clearTimeout(st.pushTimer)
+  })
+
+  it('a push lost on the way (no answer, 429, 5xx) is sent again after the gap — a few times, not forever', async () => {
+    const answers = [{ status: 0, reason: 'timeout' }, { status: 429, reason: 'TooManyRequests' }, { status: 200 }]
+    const pushes: PushTarget[] = []
+    const st = __testLinkState({ ...CFG, push: T1 }, fakeSocket().sock)
+    const deps = { pushKey: async () => KEY, sendPush: async (_k: PushKey, t: PushTarget) => (pushes.push(t), answers[pushes.length - 1] ?? { status: 200 }) }
+    const gapOver = async () => {
+      await vi.waitFor(() => expect(st.pushing).toBe(false))
+      st.pushedAt -= PUSH_GAP_MS
+      await flushPush(st, deps)
+    }
+    st.pushOwed = true
+    await flushPush(st, deps)
+    expect(pushes).toHaveLength(1)
+    expect(st.pushOwed).toBe(true) // owed again, not lost
+    await gapOver()
+    await gapOver()
+    expect(pushes).toHaveLength(3) // delivered on the third try
+    expect(st.pushOwed).toBe(false)
+    // Apple never answers: PUSH_RETRY_MAX more tries, then it stops.
+    const down = pushing({ status: 503, reason: 'ServiceUnavailable' })
+    down.st.pushOwed = true
+    await flushPush(down.st, down.deps)
+    for (let i = 0; i < PUSH_RETRY_MAX + 3; i++) {
+      await vi.waitFor(() => expect(down.st.pushing).toBe(false))
+      down.st.pushedAt -= PUSH_GAP_MS
+      await flushPush(down.st, down.deps)
+    }
+    expect(down.pushes).toHaveLength(1 + PUSH_RETRY_MAX)
+    expect(down.st.pushOwed).toBe(false)
+    clearTimeout(st.pushTimer)
+    clearTimeout(down.st.pushTimer)
+  })
+
+  it('a refusal Apple will repeat stops the pushes until the key or the token changes, and Settings says so', async () => {
+    rmSync(join(openGroundHome(), 'phone-link.json'), { force: true })
+    expect(await savePushKey(KEY)).toEqual({ ok: true })
+    const status = async () => (await phoneLinkRoutes.request('/api/phone-link', { headers: { host: '127.0.0.1:47776' } })).json()
+    for (const reply of [
+      { status: 403, reason: 'BadEnvironmentKeyIdInToken' },
+      { status: 403, reason: 'InvalidProviderToken' },
+      { status: 400, reason: 'DeviceTokenNotForTopic' },
+    ]) {
+      const { st, pushes, deps } = pushing(reply)
+      deps.pushKey = async () => KEY
+      await handlePhoneFrame(st, { type: 'push-token', ...T1 }) // saved
+      st.pushOwed = true
+      await flushPush(st, deps)
+      expect(pushes).toHaveLength(1)
+      expect(await status()).toMatchObject({ pushRefused: reply.reason, pushPhone: true })
+      for (let i = 0; i < 3; i++) {
+        st.pushedAt -= PUSH_GAP_MS
+        st.pushOwed = true
+        await flushPush(st, deps)
+      }
+      expect(pushes).toHaveLength(1) // not retried on every event
+      expect(st.cfg.push).toEqual(T1) // the token is kept (it is not the token's fault)
+      // A new token from the phone: tried again.
+      await handlePhoneFrame(st, { type: 'push-token', ...T2 })
+      expect((await status()).pushRefused).toBeNull()
+      st.pushOwed = true
+      st.pushedAt -= PUSH_GAP_MS
+      await flushPush(st, deps)
+      expect(pushes).toHaveLength(2)
+      // Refused again; then the owner enters a corrected key: tried again.
+      const fixed = { ...KEY, p8: generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }
+      deps.pushKey = async () => fixed
+      st.pushOwed = true
+      st.pushedAt -= PUSH_GAP_MS
+      await flushPush(st, deps)
+      expect(pushes).toHaveLength(3)
+      clearTimeout(st.pushTimer)
+    }
+  })
+
+  it('Settings blames the key for a 403 and the iPhone app for a token / topic refusal', async () => {
+    rmSync(join(openGroundHome(), 'phone-link.json'), { force: true })
+    expect(await savePushKey(KEY)).toEqual({ ok: true })
+    const status = async () => (await phoneLinkRoutes.request('/api/phone-link', { headers: { host: '127.0.0.1:47776' } })).json()
+    for (const [reply, by] of [
+      [{ status: 403, reason: 'InvalidProviderToken' }, 'key'],
+      [{ status: 400, reason: 'BadTopic' }, 'app'],
+      [{ status: 400, reason: 'TopicDisallowed' }, 'key'], // a topic-specific key not covering the app
+    ] as const) {
+      const { st, deps } = pushing(reply)
+      await handlePhoneFrame(st, { type: 'push-token', ...T1 })
+      st.pushOwed = true
+      st.pushRetries = 2 // two tries lost before: the next event starts afresh
+      await flushPush(st, deps)
+      expect(await status()).toMatchObject({ pushRefused: reply.reason, pushRefusedBy: by })
+      expect(st.pushRetries).toBe(0)
+      // The app reopened hands over the SAME token: an app refusal is tried again, a key refusal stays.
+      await handlePhoneFrame(st, { type: 'push-token', ...T1 })
+      expect((await status()).pushRefused).toBe(by === 'app' ? null : reply.reason)
+    }
+  })
+
+  it('an expired provider token (403 ExpiredProviderToken) is signed anew and the push retried — never a lasting refusal', async () => {
+    rmSync(join(openGroundHome(), 'phone-link.json'), { force: true })
+    expect(await savePushKey(KEY)).toEqual({ ok: true })
+    const answers = [{ status: 403, reason: 'ExpiredProviderToken' }, { status: 200 }]
+    const pushes: PushTarget[] = []
+    const jwts: unknown[] = []
+    const st = __testLinkState({ ...CFG, push: T1 }, fakeSocket().sock)
+    const deps = {
+      pushKey: async () => KEY,
+      sendPush: async (_k: PushKey, t: PushTarget) => {
+        jwts.push(globalThis.__openground_apns_jwt)
+        return (pushes.push(t), answers[pushes.length - 1] ?? { status: 200 })
+      },
+    }
+    globalThis.__openground_apns_jwt = { id: 'cached', token: 'stale.jwt.sig', at: Date.now() - JWT_MIN_AGE_MS }
+    st.pushOwed = true
+    await flushPush(st, deps)
+    expect(globalThis.__openground_apns_jwt).toBeUndefined() // the next push signs a fresh one
+    expect(st.cfg.pushRefused).toBeUndefined()
+    expect(st.pushOwed).toBe(true) // owed again
+    await vi.waitFor(() => expect(st.pushing).toBe(false))
+    st.pushedAt -= PUSH_GAP_MS
+    await flushPush(st, deps)
+    expect(pushes).toHaveLength(2)
+    expect(jwts[0]).toMatchObject({ id: 'cached' })
+    expect((await (await phoneLinkRoutes.request('/api/phone-link', { headers: { host: '127.0.0.1:47776' } })).json()).pushRefused).toBeNull()
+    clearTimeout(st.pushTimer)
+    // The Mac's clock is off: every answer is "expired". Retried within the cap,
+    // then it waits for the next event — and a token younger than Apple's 20 min
+    // floor is not signed anew (TooManyProviderTokenUpdates).
+    const down = pushing({ status: 403, reason: 'ExpiredProviderToken' })
+    const young = { id: 'young', token: 'young.jwt.sig', at: Date.now() }
+    globalThis.__openground_apns_jwt = young
+    down.st.pushOwed = true
+    await flushPush(down.st, down.deps)
+    for (let i = 0; i < PUSH_RETRY_MAX + 3; i++) {
+      await vi.waitFor(() => expect(down.st.pushing).toBe(false))
+      down.st.pushedAt -= PUSH_GAP_MS
+      await flushPush(down.st, down.deps)
+    }
+    expect(down.pushes).toHaveLength(1 + PUSH_RETRY_MAX)
+    expect(down.st.pushOwed).toBe(false)
+    expect(down.st.pushRetries).toBe(0)
+    expect(down.st.cfg.pushRefused).toBeUndefined()
+    expect(globalThis.__openground_apns_jwt).toBe(young)
+    clearTimeout(down.st.pushTimer)
+  })
+
+  it('entering the key in Settings — even the same key — clears a stored refusal, live or not', async () => {
+    const save = () =>
+      phoneLinkRoutes.request('/api/phone-link/push-key', {
+        method: 'POST',
+        headers: { host: '127.0.0.1:47776', 'content-type': 'application/json' },
+        body: JSON.stringify(KEY),
+      })
+    const status = async () => (await phoneLinkRoutes.request('/api/phone-link', { headers: { host: '127.0.0.1:47776' } })).json()
+    expect(await savePushKey(KEY)).toEqual({ ok: true })
+    // Live link: refused, then the same key again — pushed again.
+    const { st, pushes, deps } = pushing({ status: 403, reason: 'InvalidProviderToken' })
+    await handlePhoneFrame(st, { type: 'push-token', ...T1 })
+    st.pushOwed = true
+    await flushPush(st, deps)
+    expect((await status()).pushRefused).toBe('InvalidProviderToken')
+    globalThis.__openground_phone_link = st
+    try {
+      expect((await save()).status).toBe(200)
+    } finally {
+      globalThis.__openground_phone_link = undefined
+    }
+    expect(st.cfg.pushRefused).toBeUndefined()
+    expect((await status()).pushRefused).toBeNull()
+    st.pushOwed = true
+    st.pushedAt -= PUSH_GAP_MS
+    await flushPush(st, deps)
+    expect(pushes).toHaveLength(2)
+    // No live link (app restarted without the relay): the saved refusal goes from disk.
+    expect((await readPhoneLinkConfig())?.pushRefused).toBeDefined()
+    expect((await save()).status).toBe(200)
+    expect((await readPhoneLinkConfig())?.pushRefused).toBeUndefined()
+    expect((await readPhoneLinkConfig())?.push).toEqual(T1)
+    clearTimeout(st.pushTimer)
+  })
+
+  it('a token APNs calls dead (410, BadDeviceToken) is forgotten; any other refusal keeps it', async () => {
+    for (const [reply, kept] of [
+      [{ status: 410, reason: 'Unregistered' }, false],
+      [{ status: 400, reason: 'BadDeviceToken' }, false],
+      [{ status: 403, reason: 'InvalidProviderToken' }, true],
+      [{ status: 0, reason: 'connect' }, true],
+    ] as const) {
+      const { st, pushes, deps } = pushing(reply)
+      st.pushOwed = true
+      st.pushRetries = 2
+      await flushPush(st, deps)
+      expect(pushes).toHaveLength(1)
+      expect(st.cfg.push).toEqual(kept ? T1 : undefined)
+      if (!kept) expect(st.pushRetries).toBe(0)
+      clearTimeout(st.pushTimer)
+    }
+    // Saved, then dropped ON DISK too.
+    const { st, deps } = pushing({ status: 410 })
+    await handlePhoneFrame(st, { type: 'push-token', ...T1 })
+    expect((await readPhoneLinkConfig())?.push).toEqual(T1)
+    st.pushOwed = true
+    await flushPush(st, deps)
+    expect((await readPhoneLinkConfig())?.push).toBeUndefined()
+  })
+
+  it('without a token, without the APNs key, or under work mode, nothing is pushed', async () => {
+    const a = pushing()
+    a.st.cfg = CFG
+    a.st.pushOwed = true
+    await flushPush(a.st, a.deps)
+    const b = pushing()
+    b.st.pushOwed = true
+    await flushPush(b.st, { ...b.deps, pushKey: async () => null })
+    const c = pushing()
+    c.st.pushOwed = true
+    setLockdownCache(true)
+    await flushPush(c.st, c.deps)
+    expect([...a.pushes, ...b.pushes, ...c.pushes]).toEqual([])
+    expect([a.st.pushOwed, b.st.pushOwed, c.st.pushOwed]).toEqual([false, false, false])
+  })
+
+  it('the Mac tells the relay it can push; pairing again drops the token; the key is never handed back', async () => {
+    const frames: Record<string, unknown>[] = []
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    wss.on('connection', (ws) =>
+      ws.on('message', (m) => {
+        const f = JSON.parse(String(m))
+        frames.push(f)
+        if (f.type === 'reset') ws.close(1000)
+      }),
+    )
+    await new Promise((r) => wss.once('listening', r))
+    const relayUrl = `http://127.0.0.1:${(wss.address() as AddressInfo).port}`
+    try {
+      writeFileSync(cfgFile(), JSON.stringify({ ...CFG, relayUrl, push: T1 }), { mode: 0o600 })
+      rmSync(join(openGroundHome(), 'phone-push-key.json'), { force: true })
+      expect(await startPhoneLink()).toBe(true)
+      await vi.waitFor(() => expect(frames.find((f) => f.type === 'push-ready')).toEqual({ type: 'push-ready', on: false }))
+      // The owner enters the key in Settings: the relay hears it on the same socket.
+      const put = await phoneLinkRoutes.request('/api/phone-link/push-key', {
+        method: 'POST',
+        headers: { host: '127.0.0.1:47776', 'content-type': 'application/json' },
+        body: JSON.stringify(KEY),
+      })
+      expect(put.status).toBe(200)
+      await vi.waitFor(() => expect(frames.filter((f) => f.type === 'push-ready').at(-1)).toEqual({ type: 'push-ready', on: true }))
+      expect(wss.clients.size).toBe(1) // not a reconnect
+      // Nothing secret ever went to the relay: not the key, its ID, nor the phone token.
+      const wire = JSON.stringify(frames)
+      for (const secret of ['PRIVATE KEY', P8.split('\n')[1], KEY.keyId, KEY.teamId, T1.token]) expect(wire).not.toContain(secret)
+      const status = await phoneLinkRoutes.request('/api/phone-link', { headers: { host: '127.0.0.1:47776' } })
+      const body = await status.text()
+      expect(JSON.parse(body)).toMatchObject({ pushKeyId: KEY.keyId, pushPhone: true })
+      expect(body).not.toContain('PRIVATE KEY')
+      expect(body).not.toContain(T1.token)
+      process.env.OPENGROUND_PHONE_RELAY_URL = relayUrl
+      const paired = await pairPhone()
+      expect(paired).toHaveProperty('code')
+      expect((await readPhoneLinkConfig())?.push).toBeUndefined()
+    } finally {
+      delete process.env.OPENGROUND_PHONE_RELAY_URL
+      stopPhoneLink()
+      rmSync(cfgFile(), { force: true })
+      wss.close()
+    }
+  })
+
+  it('the APNs key route refuses a bad key and keeps nothing', async () => {
+    const r = await phoneLinkRoutes.request('/api/phone-link/push-key', {
+      method: 'POST',
+      headers: { host: '127.0.0.1:47776', 'content-type': 'application/json' },
+      body: JSON.stringify({ p8: 'x', keyId: 'ABC123DEFG', teamId: 'TEAM123456' }),
+    })
+    expect(r.status).toBe(400)
+    expect(await r.json()).toEqual({ error: 'bad-key' })
   })
 })

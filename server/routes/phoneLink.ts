@@ -2,7 +2,8 @@
 // desks (src/lib/server/phoneLink.ts, docs/PHONE_LINK.md). Owner-only: the
 // president is an owner seat, and the pairing code is a key.
 import { Hono, type MiddlewareHandler } from 'hono'
-import { hasPhoneLinkAccess, pairPhone, pairingCode, phoneLinkStatus, readPhoneLinkConfig, unpairPhone } from '@/lib/server/phoneLink'
+import { pushKeySaved, hasPhoneLinkAccess, pairPhone, pairingCode, phoneLinkStatus, readPhoneLinkConfig, unpairPhone } from '@/lib/server/phoneLink'
+import { savePushKey } from '@/lib/server/phonePush'
 import { hostIsLocal, originIsLocal } from '../loopback'
 
 // The pairing code is a WRITE credential (whoever holds it speaks as the owner),
@@ -31,3 +32,10 @@ export const phoneLinkRoutes = new Hono()
     return cfg ? c.json({ code: pairingCode(cfg) }) : c.json({ error: 'not paired' }, 404)
   })
   .post('/api/phone-link/unpair', async () => reply(await unpairPhone()))
+  // The owner's APNs key (Push to Talk), once. Stored 0600, never returned.
+  .post('/api/phone-link/push-key', async (c) => {
+    const r = await savePushKey(await c.req.json().catch(() => ({})))
+    if ('error' in r) return c.json(r, 400)
+    await pushKeySaved()
+    return c.json(r)
+  })
