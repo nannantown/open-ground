@@ -12,8 +12,6 @@ import {
   Minus,
   MoreHorizontal,
   Plus,
-  RotateCw,
-  Sparkles,
   SquareCode,
   Star,
   Terminal,
@@ -22,7 +20,7 @@ import {
 } from 'lucide-react'
 import { Btn } from '@/components/ui/Btn'
 import { BackLink } from '@/components/ui/BackLink'
-import { Overlay, DialogCard, DialogHeader } from '@/components/ui/overlay'
+import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { useT } from '@/i18n/I18nContext'
 import type {
   BranchChangesResponse,
@@ -311,19 +309,11 @@ const OwnedProjectBody = ({
   // Per-tab contextual feedback: opening the modal here tags the submission
   // with the active tab (source + display label) so the report says which
   const [data, setData] = useState<ProjectData | null>(null)
-  const [detailsOpen, setDetailsOpen] = useState(false)
-  const detailsButtonRef = useRef<HTMLButtonElement>(null)
-  const detailsRef = useRef<HTMLDivElement>(null)
-  useEffect(() => { setDetailsOpen(false) }, [project?.path])
+  // Bumped by the ⋯ menu's "Rename" — the header title turns into its input.
+  const [renameSignal, setRenameSignal] = useState(0)
   // Opening the project IS reading its delivery — clears the Ground card's eye
   // (never a hand). Owner 2026-09-26: 「プロジェクトの中に入ったら、既読みたいな感じ」.
   useGroundLook(project?.path, 'opened')
-  useEffect(() => {
-    if (!detailsOpen) return
-    const trigger = detailsButtonRef.current
-    detailsRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
-    return () => trigger?.focus()
-  }, [detailsOpen])
   // Which project path the currently-held `data` was loaded for. `data` itself
   // carries no path, and a project switch keeps the old data on screen until the
   // new fetch resolves — so the "open on the first tab" logic must wait until
@@ -416,13 +406,18 @@ const OwnedProjectBody = ({
   // to <body> at 50 keeps the menus above the frame. Position is measured from
   // the trigger when the menu opens (fixed coords; the menus close on resize).
   const editorBtnRef = useRef<HTMLButtonElement | null>(null)
+  // Below lg the inline tools are display:none and their menus open from the ⋯
+  // menu instead — anchor to whichever trigger is actually on screen.
+  const moreAnchorRef = useRef<HTMLDivElement | null>(null)
+  const menuAnchor = (btn: HTMLElement | null) =>
+    (btn && btn.offsetParent !== null ? btn : moreAnchorRef.current)?.getBoundingClientRect()
   const [editorMenuPos, setEditorMenuPos] = useState<{ left: number; top: number } | null>(null)
   useLayoutEffect(() => {
     if (!editorMenuOpen) {
       setEditorMenuPos(null)
       return
     }
-    const r = editorBtnRef.current?.getBoundingClientRect()
+    const r = menuAnchor(editorBtnRef.current)
     if (r) setEditorMenuPos({ left: Math.max(8, Math.min(r.left, window.innerWidth - 248)), top: r.bottom + 4 })
   }, [editorMenuOpen])
   useEffect(() => {
@@ -451,11 +446,14 @@ const OwnedProjectBody = ({
   useEffect(() => {
     if (!editorMenuOpen) return
     const close = () => setEditorMenuOpen(false)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); close() } }
     window.addEventListener('mousedown', close)
     window.addEventListener('resize', close)
+    window.addEventListener('keydown', onKey, true)
     return () => {
       window.removeEventListener('mousedown', close)
       window.removeEventListener('resize', close)
+      window.removeEventListener('keydown', onKey, true)
     }
   }, [editorMenuOpen])
 
@@ -551,12 +549,6 @@ const OwnedProjectBody = ({
   const [branchInfo, setBranchInfo] = useState<BranchChangesResponse | null>(null)
   const [branchModalOpen, setBranchModalOpen] = useState(false)
   const [branchMenuOpen, setBranchMenuOpen] = useState(false)
-  useEffect(() => {
-    if (!detailsOpen) {
-      setEditorMenuOpen(false)
-      setBranchMenuOpen(false)
-    }
-  }, [detailsOpen])
   const [activeBranches, setActiveBranches] =
     useState<ActiveBranchesResponse | null>(null)
   const [skillsOpen, setSkillsOpen] = useState(false)
@@ -572,7 +564,7 @@ const OwnedProjectBody = ({
       setBranchMenuPos(null)
       return
     }
-    const r = branchBtnRef.current?.getBoundingClientRect()
+    const r = menuAnchor(branchBtnRef.current)
     if (r) setBranchMenuPos({ left: Math.max(8, Math.min(r.left, window.innerWidth - 296)), top: r.bottom + 4 })
   }, [branchMenuOpen])
   useEffect(() => {
@@ -631,11 +623,14 @@ const OwnedProjectBody = ({
   useEffect(() => {
     if (!branchMenuOpen) return
     const close = () => setBranchMenuOpen(false)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); close() } }
     window.addEventListener('mousedown', close)
     window.addEventListener('resize', close)
+    window.addEventListener('keydown', onKey, true)
     return () => {
       window.removeEventListener('mousedown', close)
       window.removeEventListener('resize', close)
+      window.removeEventListener('keydown', onKey, true)
     }
   }, [branchMenuOpen])
 
@@ -1919,21 +1914,260 @@ const OwnedProjectBody = ({
           <IconButton title={`${t('projectPanel.backToGround')} ${groundChordHint()}`} onClick={onClose}>
             <ChevronLeft size={16} strokeWidth={1.75} />
           </IconButton>
-          <h2 className="min-w-0">
-            <button
-              ref={detailsButtonRef}
-              type="button"
-              onClick={() => setDetailsOpen(true)}
-              aria-label={t('projectPanel.projectDetails')}
-              aria-haspopup="dialog"
-              aria-expanded={detailsOpen}
-              title={`${project.name}\n${t('projectPanel.projectDetails')}`}
-              className="flex h-8 max-w-[80px] items-center gap-1 rounded-sm px-1.5 font-display text-title font-semibold tracking-normal text-ink transition-colors hover:bg-plane active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-[360px]:max-w-[100px] sm:max-w-[200px]"
-            >
-              <span className="truncate">{project.name}</span>
-              {describing ? <Loader2 size={12} className="shrink-0 animate-spin" /> : <ChevronDown size={12} className="shrink-0" />}
-            </button>
+          <h2 className="flex min-w-0 items-center gap-1 px-1.5">
+            <EditableTitle
+              name={project.name}
+              editSignal={renameSignal}
+              description={data ? descriptionForLang(data, lang) : ''}
+              onRename={onRename ? (next) => onRename(project, next) : undefined}
+            />
+            {describing && <Loader2 size={12} className="shrink-0 animate-spin text-ink-faint" />}
           </h2>
+          {/* Below lg the tab strip needs this width (inline from sm it squeezed
+              the tabs to 0px between 640 and ~770px) — these three move into
+              the ⋯ menu there (its `narrow` items) instead. */}
+          <div className="hidden shrink-0 items-center gap-0.5 lg:flex">
+          {/* Frequently used, so it's a standalone one-click button next to the
+              title rather than buried in the ⋯ menu. Label/tooltip follows the
+              host OS (Finder / Explorer / file manager). */}
+          <button
+            onClick={revealInFinder}
+            disabled={project.missing}
+            title={t(revealLabelKey())}
+            aria-label={t(revealLabelKey())}
+            className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+          >
+            <FolderOpen size={16} strokeWidth={1.75} />
+          </button>
+          {/* Open the folder in an editor — a single button. Clicking it opens
+              the chooser menu (editors installed on this machine — open any, or
+              star one as the new default); with nothing to choose it launches
+              directly via CLI auto-detection. mousedown stops at the container
+              so the outside-click closer only fires for clicks truly outside. */}
+          <div
+            className="relative flex shrink-0 items-center"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <button
+              ref={editorBtnRef}
+              onClick={handleEditorButton}
+              disabled={project.missing}
+              title={t('projectPanel.openInEditor')}
+              aria-label={t('projectPanel.openInEditor')}
+              aria-haspopup={canChooseEditor ? 'menu' : undefined}
+              aria-expanded={canChooseEditor ? editorMenuOpen : undefined}
+              className={`flex shrink-0 items-center gap-0.5 rounded-sm p-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint ${
+                editorMenuOpen
+                  ? 'bg-bg-inset text-ink-muted'
+                  : 'text-ink-faint hover:bg-plane hover:text-ink-muted active:bg-plane active:text-ink-muted'
+              }`}
+            >
+              <SquareCode size={16} strokeWidth={1.75} />
+              {canChooseEditor && (
+                <ChevronDown
+                  size={12}
+                  strokeWidth={2}
+                  className={`shrink-0 transition-transform ${editorMenuOpen ? 'rotate-180' : ''}`}
+                />
+              )}
+            </button>
+            {editorMenuOpen && editorMenuPos && createPortal(
+              // Body portal at overlay-modal z — must beat a hosted custom-
+              // tab iframe (z 45), which any in-panel z cannot (the panel is
+              // one z-40 stacking context). stopPropagation keeps inside
+              // clicks from reaching the window outside-click closer.
+              <div
+                role="menu"
+                onMouseDown={(e) => e.stopPropagation()}
+                style={{ left: editorMenuPos.left, top: editorMenuPos.top, maxHeight: `calc(100vh - ${editorMenuPos.top + 8}px)` }}
+                className="fixed z-overlay-modal w-60 overflow-y-auto rounded-md border border-line bg-bg-card py-1 shadow-lg"
+              >
+                <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
+                  {t('projectPanel.openInEditor')}
+                </div>
+                {installedEditors.length === 0 && (
+                  <div className="px-3 py-1.5 text-ui text-ink-faint">
+                    {t('projectPanel.editorNoneFound')}
+                  </div>
+                )}
+                {installedEditors.map((ed) => {
+                  const isDefault = defaultEditor?.name === ed.name
+                  return (
+                    <div key={ed.name} className="group flex items-center gap-1 px-1">
+                      <button
+                        role="menuitem"
+                        onClick={() => void openInEditorWith(ed)}
+                        className="min-w-0 flex-1 truncate rounded-sm px-2 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                      >
+                        {ed.name}
+                      </button>
+                      <button
+                        onClick={() => void saveDefaultEditor(isDefault ? null : ed)}
+                        title={
+                          isDefault
+                            ? t('projectPanel.editorClearDefault')
+                            : t('projectPanel.editorSetDefault')
+                        }
+                        aria-label={
+                          isDefault
+                            ? t('projectPanel.editorClearDefault')
+                            : t('projectPanel.editorSetDefault')
+                        }
+                        aria-pressed={isDefault}
+                        className={`shrink-0 rounded-sm p-1.5 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent ${
+                          isDefault
+                            ? 'text-accent'
+                            : 'text-ink-faint opacity-0 hover:text-ink-muted focus-visible:opacity-100 group-hover:opacity-100'
+                        }`}
+                      >
+                        <Star size={14} strokeWidth={2} className={isDefault ? 'fill-current' : ''} />
+                      </button>
+                    </div>
+                  )
+                })}
+                {(canPickEditor || defaultEditor) && (
+                  <div className="my-1 border-t border-line" />
+                )}
+                {canPickEditor && (
+                  <button
+                    role="menuitem"
+                    onClick={() => void pickEditor()}
+                    className="block w-full px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                  >
+                    {t('projectPanel.editorPickOther')}
+                  </button>
+                )}
+                {defaultEditor && (
+                  <button
+                    role="menuitem"
+                    onClick={() => void saveDefaultEditor(null)}
+                    className="block w-full px-3 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:bg-bg-inset focus-visible:text-ink-muted focus-visible:outline-none"
+                  >
+                    {t('projectPanel.editorClearDefault')}
+                  </button>
+                )}
+              </div>,
+              document.body,
+            )}
+          </div>
+          {/* Branch chip — only for git projects: current branch, a dot when
+              the working tree is dirty; opens the Branch changes modal. */}
+          {branchInfo?.isGit && (
+            <div
+              className="relative flex shrink-0 items-center"
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <button
+                ref={branchBtnRef}
+                onClick={() => setBranchMenuOpen((v) => !v)}
+                disabled={project.missing}
+                title={t('projectPanel.branchMenuTitle')}
+                aria-label={t('projectPanel.branchMenuTitle')}
+                aria-haspopup="menu"
+                aria-expanded={branchMenuOpen}
+                className={`flex min-w-0 shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-meta transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted ${
+                  branchMenuOpen
+                    ? 'border-line bg-bg-inset text-ink'
+                    : 'border-line text-ink-muted hover:bg-plane hover:text-ink active:bg-plane active:text-ink'
+                }`}
+              >
+                <GitBranch size={11} strokeWidth={2} className="shrink-0" />
+                <span className="max-w-[140px] truncate font-mono">
+                  {branchInfo.branch ?? 'HEAD'}
+                </span>
+                {branchInfo.working.length > 0 && (
+                  <span
+                    aria-hidden
+                    className="h-1.5 w-1.5 shrink-0 rounded-full bg-ochre"
+                  />
+                )}
+                <ChevronDown
+                  size={11}
+                  strokeWidth={2}
+                  className={`shrink-0 transition-transform ${
+                    branchMenuOpen ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
+              {branchMenuOpen && branchMenuPos && createPortal(
+                // Body portal at overlay-modal z — same hosted custom-tab
+                // iframe stacking reason as the editor menu above.
+                <div
+                  role="menu"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  style={{ left: branchMenuPos.left, top: branchMenuPos.top, maxHeight: `min(60vh, calc(100vh - ${branchMenuPos.top + 8}px))` }}
+                  className="fixed z-overlay-modal max-h-[60vh] w-72 overflow-y-auto rounded-md border border-line bg-bg-card py-1 shadow-lg"
+                >
+                  <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
+                    {t('projectPanel.branchMenuTitle')}
+                  </div>
+                  {activeBranches === null ? (
+                    <div className="flex items-center gap-2 px-3 py-2 text-ui text-ink-faint">
+                      <Loader2 size={12} className="animate-spin" />
+                    </div>
+                  ) : activeBranches.branches.length === 0 ? (
+                    <div className="px-3 py-1.5 text-ui text-ink-faint">
+                      {t('projectPanel.branchMenuEmpty')}
+                    </div>
+                  ) : (
+                    activeBranches.branches.map((b) => (
+                      <div
+                        key={b.name}
+                        role="menuitem"
+                        className="flex items-start gap-2 px-3 py-1.5"
+                      >
+                        <GitBranch
+                          size={12}
+                          strokeWidth={2}
+                          className={`mt-0.5 shrink-0 ${
+                            b.current ? 'text-accent' : 'text-ink-faint'
+                          }`}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`truncate font-mono text-ui ${
+                                b.current ? 'text-ink' : 'text-ink-muted'
+                              }`}
+                              title={b.name}
+                            >
+                              {b.name}
+                            </span>
+                            {b.current && (
+                              <span className="shrink-0 rounded-sm bg-bg-inset px-1 py-px text-plate uppercase tracking-wide text-ink-faint">
+                                {t('projectPanel.branchMenuCurrent')}
+                              </span>
+                            )}
+                          </div>
+                          {b.worktreePath && (
+                            <div
+                              className="truncate text-meta text-ink-faint"
+                              title={b.worktreePath}
+                            >
+                              {b.worktreePath}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                  <div className="my-1 border-t border-line" />
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setBranchMenuOpen(false)
+                      setBranchModalOpen(true)
+                    }}
+                    className="block w-full px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
+                  >
+                    {t('projectPanel.branchChangesTitle')}
+                  </button>
+                </div>,
+                document.body,
+              )}
+            </div>
+          )}
+          </div>
         </div>
         <ViewTabs
           view={view}
@@ -1950,12 +2184,28 @@ const OwnedProjectBody = ({
         />
         <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
           <UsageHud compact />
+          <div ref={moreAnchorRef}>
           <MoreMenu
             onProjectSettings={() => setProjectSettingsOpen(true)}
             projectSettingsDisabled={!data}
+            onRename={onRename ? () => setRenameSignal(n => n + 1) : undefined}
+            description={data && !project.missing ? {
+              label: t(describing ? 'projectPanel.cancelDescription'
+                : descriptionForLang(data, lang) ? 'projectPanel.regenerateDescription'
+                : 'projectPanel.generateDescription'),
+              onClick: regenerateDescription,
+            } : undefined}
+            onSkills={ownerFeatures && !project.missing ? () => setSkillsOpen(true) : undefined}
+            onInvite={collabEnabled && !project.missing ? () => setCollabInviteOpen(true) : undefined}
+            narrow={project.missing ? [] : [
+              { key: 'reveal', label: t(revealLabelKey()), run: revealInFinder },
+              { key: 'editor', label: t('projectPanel.openInEditor'), run: handleEditorButton },
+              ...(branchInfo?.isGit ? [{ key: 'branch', label: t('projectPanel.branchMenuTitle'), run: () => setBranchMenuOpen(true) }] : []),
+            ]}
             onRemove={() => onRemove(project)}
             onDelete={() => setConfirmingDelete(true)}
           />
+          </div>
           <span className="hidden sm:flex">
             <IconButton title={t('common.close')} onClick={onClose}>
               <X size={15} strokeWidth={1.75} />
@@ -1963,357 +2213,6 @@ const OwnedProjectBody = ({
           </span>
         </div>
       </header>
-
-      {/* Metadata is on demand, outside the panel stacking context so hosted
-          custom tabs cannot cover it. Hiding chrome never changes saved data. */}
-      {detailsOpen && createPortal(
-        <Overlay onClose={() => setDetailsOpen(false)}>
-          <DialogCard className="w-full max-w-[640px] max-h-[85vh]" ariaLabel={t('projectPanel.projectDetails')}>
-            <div ref={detailsRef} className="min-h-0 overflow-y-auto" onScroll={() => { setEditorMenuOpen(false); setBranchMenuOpen(false) }} onKeyDown={e => {
-              if (e.key !== 'Tab' || editorMenuOpen || branchMenuOpen) return
-              const controls = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]'))
-              const first = controls[0], last = controls[controls.length - 1]
-              if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus() }
-              else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus() }
-            }}>
-              <DialogHeader density="bar" separator="line" title={t('projectPanel.projectDetails')} titleClassName="text-ui font-semibold text-ink" onClose={() => setDetailsOpen(false)} closeLabel={t('common.close')} />
-              <div className="min-w-0 px-5 py-4">
-                <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-                  <EditableTitle
-                    name={project.name}
-                    size="fullscreen"
-                    onRename={onRename ? (next) => onRename(project, next) : undefined}
-                  />
-                  {/* Frequently used, so it's a standalone one-click button next to the
-                      title rather than buried in the ⋯ menu. Label/tooltip follows the
-                      host OS (Finder / Explorer / file manager). */}
-                  <button
-                    onClick={revealInFinder}
-                    disabled={project.missing}
-                    title={t(revealLabelKey())}
-                    aria-label={t(revealLabelKey())}
-                    className="shrink-0 rounded-sm p-1 text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
-                  >
-                    <FolderOpen size={16} strokeWidth={1.75} />
-                  </button>
-                  {/* Open the folder in an editor — a single button. Clicking it opens
-                      the chooser menu (editors installed on this machine — open any, or
-                      star one as the new default); with nothing to choose it launches
-                      directly via CLI auto-detection. mousedown stops at the container
-                      so the outside-click closer only fires for clicks truly outside. */}
-                  <div
-                    className="relative flex shrink-0 items-center"
-                    onMouseDown={(e) => e.stopPropagation()}
-                  >
-                    <button
-                      ref={editorBtnRef}
-                      onClick={handleEditorButton}
-                      disabled={project.missing}
-                      title={t('projectPanel.openInEditor')}
-                      aria-label={t('projectPanel.openInEditor')}
-                      aria-haspopup={canChooseEditor ? 'menu' : undefined}
-                      aria-expanded={canChooseEditor ? editorMenuOpen : undefined}
-                      className={`flex shrink-0 items-center gap-0.5 rounded-sm p-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint ${
-                        editorMenuOpen
-                          ? 'bg-bg-inset text-ink-muted'
-                          : 'text-ink-faint hover:bg-plane hover:text-ink-muted active:bg-plane active:text-ink-muted'
-                      }`}
-                    >
-                      <SquareCode size={16} strokeWidth={1.75} />
-                      {canChooseEditor && (
-                        <ChevronDown
-                          size={12}
-                          strokeWidth={2}
-                          className={`shrink-0 transition-transform ${editorMenuOpen ? 'rotate-180' : ''}`}
-                        />
-                      )}
-                    </button>
-                    {editorMenuOpen && editorMenuPos && createPortal(
-                      // Body portal at overlay-modal z — must beat a hosted custom-
-                      // tab iframe (z 45), which any in-panel z cannot (the panel is
-                      // one z-40 stacking context). stopPropagation keeps inside
-                      // clicks from reaching the window outside-click closer.
-                      <div
-                        role="menu"
-                        onMouseDown={(e) => e.stopPropagation()}
-                        style={{ left: editorMenuPos.left, top: editorMenuPos.top, maxHeight: `calc(100vh - ${editorMenuPos.top + 8}px)` }}
-                        className="fixed z-overlay-modal w-60 overflow-y-auto rounded-md border border-line bg-bg-card py-1 shadow-lg"
-                      >
-                        <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
-                          {t('projectPanel.openInEditor')}
-                        </div>
-                        {installedEditors.length === 0 && (
-                          <div className="px-3 py-1.5 text-ui text-ink-faint">
-                            {t('projectPanel.editorNoneFound')}
-                          </div>
-                        )}
-                        {installedEditors.map((ed) => {
-                          const isDefault = defaultEditor?.name === ed.name
-                          return (
-                            <div key={ed.name} className="group flex items-center gap-1 px-1">
-                              <button
-                                role="menuitem"
-                                onClick={() => void openInEditorWith(ed)}
-                                className="min-w-0 flex-1 truncate rounded-sm px-2 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
-                              >
-                                {ed.name}
-                              </button>
-                              <button
-                                onClick={() => void saveDefaultEditor(isDefault ? null : ed)}
-                                title={
-                                  isDefault
-                                    ? t('projectPanel.editorClearDefault')
-                                    : t('projectPanel.editorSetDefault')
-                                }
-                                aria-label={
-                                  isDefault
-                                    ? t('projectPanel.editorClearDefault')
-                                    : t('projectPanel.editorSetDefault')
-                                }
-                                aria-pressed={isDefault}
-                                className={`shrink-0 rounded-sm p-1.5 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent ${
-                                  isDefault
-                                    ? 'text-accent'
-                                    : 'text-ink-faint opacity-0 hover:text-ink-muted focus-visible:opacity-100 group-hover:opacity-100'
-                                }`}
-                              >
-                                <Star size={14} strokeWidth={2} className={isDefault ? 'fill-current' : ''} />
-                              </button>
-                            </div>
-                          )
-                        })}
-                        {(canPickEditor || defaultEditor) && (
-                          <div className="my-1 border-t border-line" />
-                        )}
-                        {canPickEditor && (
-                          <button
-                            role="menuitem"
-                            onClick={() => void pickEditor()}
-                            className="block w-full px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
-                          >
-                            {t('projectPanel.editorPickOther')}
-                          </button>
-                        )}
-                        {defaultEditor && (
-                          <button
-                            role="menuitem"
-                            onClick={() => void saveDefaultEditor(null)}
-                            className="block w-full px-3 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:bg-bg-inset focus-visible:text-ink-muted focus-visible:outline-none"
-                          >
-                            {t('projectPanel.editorClearDefault')}
-                          </button>
-                        )}
-                      </div>,
-                      document.body,
-                    )}
-                  </div>
-                  {/* Branch chip — only for git projects: current branch, a dot when
-                      the working tree is dirty; opens the Branch changes modal. */}
-                  {branchInfo?.isGit && (
-                    <div
-                      className="relative flex shrink-0 items-center"
-                      onMouseDown={(e) => e.stopPropagation()}
-                    >
-                      <button
-                        ref={branchBtnRef}
-                        onClick={() => setBranchMenuOpen((v) => !v)}
-                        disabled={project.missing}
-                        title={t('projectPanel.branchMenuTitle')}
-                        aria-label={t('projectPanel.branchMenuTitle')}
-                        aria-haspopup="menu"
-                        aria-expanded={branchMenuOpen}
-                        className={`flex min-w-0 shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-meta transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted ${
-                          branchMenuOpen
-                            ? 'border-line bg-bg-inset text-ink'
-                            : 'border-line text-ink-muted hover:bg-plane hover:text-ink active:bg-plane active:text-ink'
-                        }`}
-                      >
-                        <GitBranch size={11} strokeWidth={2} className="shrink-0" />
-                        <span className="max-w-[180px] truncate font-mono">
-                          {branchInfo.branch ?? 'HEAD'}
-                        </span>
-                        {branchInfo.working.length > 0 && (
-                          <span
-                            aria-hidden
-                            className="h-1.5 w-1.5 shrink-0 rounded-full bg-ochre"
-                          />
-                        )}
-                        <ChevronDown
-                          size={11}
-                          strokeWidth={2}
-                          className={`shrink-0 transition-transform ${
-                            branchMenuOpen ? 'rotate-180' : ''
-                          }`}
-                        />
-                      </button>
-                      {branchMenuOpen && branchMenuPos && createPortal(
-                        // Body portal at overlay-modal z — same hosted custom-tab
-                        // iframe stacking reason as the editor menu above.
-                        <div
-                          role="menu"
-                          onMouseDown={(e) => e.stopPropagation()}
-                          style={{ left: branchMenuPos.left, top: branchMenuPos.top, maxHeight: `min(60vh, calc(100vh - ${branchMenuPos.top + 8}px))` }}
-                          className="fixed z-overlay-modal max-h-[60vh] w-72 overflow-y-auto rounded-md border border-line bg-bg-card py-1 shadow-lg"
-                        >
-                          <div className="label-cap px-3 pb-1 pt-1.5 text-ink-faint">
-                            {t('projectPanel.branchMenuTitle')}
-                          </div>
-                          {activeBranches === null ? (
-                            <div className="flex items-center gap-2 px-3 py-2 text-ui text-ink-faint">
-                              <Loader2 size={12} className="animate-spin" />
-                            </div>
-                          ) : activeBranches.branches.length === 0 ? (
-                            <div className="px-3 py-1.5 text-ui text-ink-faint">
-                              {t('projectPanel.branchMenuEmpty')}
-                            </div>
-                          ) : (
-                            activeBranches.branches.map((b) => (
-                              <div
-                                key={b.name}
-                                role="menuitem"
-                                className="flex items-start gap-2 px-3 py-1.5"
-                              >
-                                <GitBranch
-                                  size={12}
-                                  strokeWidth={2}
-                                  className={`mt-0.5 shrink-0 ${
-                                    b.current ? 'text-accent' : 'text-ink-faint'
-                                  }`}
-                                />
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex items-center gap-1.5">
-                                    <span
-                                      className={`truncate font-mono text-ui ${
-                                        b.current ? 'text-ink' : 'text-ink-muted'
-                                      }`}
-                                      title={b.name}
-                                    >
-                                      {b.name}
-                                    </span>
-                                    {b.current && (
-                                      <span className="shrink-0 rounded-sm bg-bg-inset px-1 py-px text-plate uppercase tracking-wide text-ink-faint">
-                                        {t('projectPanel.branchMenuCurrent')}
-                                      </span>
-                                    )}
-                                  </div>
-                                  {b.worktreePath && (
-                                    <div
-                                      className="truncate text-meta text-ink-faint"
-                                      title={b.worktreePath}
-                                    >
-                                      {b.worktreePath}
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                            ))
-                          )}
-                          <div className="my-1 border-t border-line" />
-                          <button
-                            role="menuitem"
-                            onClick={() => {
-                              setBranchMenuOpen(false)
-                              setDetailsOpen(false)
-                              setBranchModalOpen(true)
-                            }}
-                            className="block w-full px-3 py-1.5 text-left text-ui text-ink-muted transition-colors hover:bg-plane hover:text-ink focus-visible:bg-bg-inset focus-visible:text-ink focus-visible:outline-none"
-                          >
-                            {t('projectPanel.branchChangesTitle')}
-                          </button>
-                        </div>,
-                        document.body,
-                      )}
-                    </div>
-                  )}
-                </div>
-                {data && (
-                  descriptionForLang(data, lang) ? (
-                    /* ── Filled state: refresh button LEFT, then the generated text.
-                          The description is generate-only (no manual editing) — the
-                          text swaps in when claude finishes, persisted server-side. ── */
-                    <div className="mt-3 flex items-start gap-1.5">
-                      {/* Refresh button — spins while claude works */}
-                      <button
-                        onClick={regenerateDescription}
-                        disabled={project.missing}
-                        title={
-                          describing
-                            ? t('projectPanel.cancelDescription')
-                            : t('projectPanel.regenerateDescription')
-                        }
-                        aria-label={
-                          describing
-                            ? t('projectPanel.cancelDescription')
-                            : t('projectPanel.regenerateDescription')
-                        }
-                        className="mt-0.5 shrink-0 rounded-sm p-0.5 text-ink-faint transition-colors hover:bg-plane hover:text-ink-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
-                      >
-                        {describing ? (
-                          <Loader2 size={11} className="animate-spin" />
-                        ) : (
-                          <RotateCw size={11} />
-                        )}
-                      </button>
-                      <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ui leading-relaxed text-ink-muted">
-                        {descriptionForLang(data, lang)}
-                      </p>
-                    </div>
-                  ) : (
-                    /* ── Empty state: a plain text-only generate button (no icon) ── */
-                    <div className="mt-1">
-                      <button
-                        onClick={regenerateDescription}
-                        disabled={project.missing}
-                        title={
-                          describing
-                            ? t('projectPanel.cancelDescription')
-                            : t('projectPanel.generateDescription')
-                        }
-                        aria-label={
-                          describing
-                            ? t('projectPanel.cancelDescription')
-                            : t('projectPanel.generateDescription')
-                        }
-                        className="rounded-sm border border-line px-2.5 py-1 text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-plane active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
-                      >
-                        {describing
-                          ? t('projectPanel.generating')
-                          : t('projectPanel.generateDescription')}
-                      </button>
-                    </div>
-                  )
-                )}
-              </div>
-              <div className="flex min-w-0 flex-wrap items-center gap-3 border-t border-line px-5 py-3">
-                {/* Owner UI only; the CLI can still read the project's skill files. */}
-                {ownerFeatures && <button
-                  type="button"
-                  onClick={() => { setDetailsOpen(false); setSkillsOpen(true) }}
-                  disabled={project.missing}
-                  title={t('projectPanel.skillsButtonHint')}
-                  aria-label={t('projectPanel.skillsButton')}
-                  className="flex shrink-0 items-center gap-1 rounded-sm px-1 py-1 text-meta text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-faint"
-                >
-                  <Sparkles size={12} strokeWidth={1.75} className="shrink-0" />
-                  {t('projectPanel.skillsButton')}
-                </button>}
-                {/* Realtime-collab invite — a quiet text button, only when collab is
-                    enabled (default build: hidden, no collab UI at all). */}
-                {collabEnabled && !project.missing && (
-                  <button
-                    type="button"
-                    onClick={() => { setDetailsOpen(false); setCollabInviteOpen(true) }}
-                    title={t('projectPanel.collabEntryTitle')}
-                    className="shrink-0 rounded-sm px-1 py-1 text-meta text-ink-faint transition-colors hover:text-ink active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                  >
-                    {t('projectPanel.collabEntry')}
-                  </button>
-                )}
-              </div>
-            </div>
-          </DialogCard>
-        </Overlay>, document.body,
-      )}
 
       {project.missing && (
         <div className="flex items-start gap-2 border-b border-accent/30 bg-accent/5 px-8 py-2.5">
@@ -3571,6 +3470,19 @@ const revealLabelKey = (): 'projectPanel.revealInFinder' | 'projectPanel.revealI
   return 'projectPanel.revealFolder'
 }
 
+type MenuItem = { key: string; label: string; run: () => void }
+const MoreMenuItem = ({ item, close }: { item: MenuItem; close: () => void }) => (
+  <button
+    onClick={() => {
+      close()
+      item.run()
+    }}
+    className="flex w-full items-center px-3 py-1.5 text-left text-ui text-ink transition-colors hover:bg-plane active:bg-bg-inset focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+  >
+    {item.label}
+  </button>
+)
+
 // The share entry points moved out of this menu (docs/SHARE_UX_FLOWS.md §2b):
 // enabling lives on the header "Share…" button + the settings CTA, and
 // stopping lives in the settings dialog's 共有 section.
@@ -3579,7 +3491,23 @@ const MoreMenu = ({
   projectSettingsDisabled,
   onRemove,
   onDelete,
+  onRename,
+  description,
+  onSkills,
+  onInvite,
+  narrow = [],
 }: {
+  /** Header tools (folder / editor / branch) that only fit from lg up —
+   *  listed here for narrower screens and hidden from lg up. */
+  narrow?: MenuItem[]
+  /** Header title → inline rename input. Absent when renaming isn't allowed. */
+  onRename?: () => void
+  /** Generate / refresh / stop the auto-description (label follows state). */
+  description?: { label: string; onClick: () => void }
+  /** Owner-only skills list. */
+  onSkills?: () => void
+  /** Realtime-collab invite — only when collab is enabled. */
+  onInvite?: () => void
   /** Open the Project settings dialog (workflow/team + personal launch
    *  prefs). Disabled until the project's data has loaded. */
   onProjectSettings: () => void
@@ -3612,11 +3540,15 @@ const MoreMenu = ({
       setOpen(false)
     }
     const closeNow = () => setOpen(false)
+    // Capture + preventDefault: App's global Escape must not close the project.
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); closeNow() } }
     window.addEventListener('mousedown', close)
     window.addEventListener('resize', closeNow)
+    window.addEventListener('keydown', onKey, true)
     return () => {
       window.removeEventListener('mousedown', close)
       window.removeEventListener('resize', closeNow)
+      window.removeEventListener('keydown', onKey, true)
     }
   }, [open])
   return (
@@ -3641,6 +3573,16 @@ const MoreMenu = ({
           >
             {t('projectPanel.projectSettingsMenu')}
           </button>
+          {narrow.length > 0 && <div className="lg:hidden">
+            {narrow.map(item => <MoreMenuItem key={item.key} item={item} close={() => setOpen(false)} />)}
+            <div className="my-1 border-t border-line-soft" />
+          </div>}
+          {([
+            onRename && { key: 'rename', label: t('projectPanel.renameProjectMenu'), run: onRename },
+            description && { key: 'describe', label: description.label, run: description.onClick },
+            onSkills && { key: 'skills', label: t('projectPanel.skillsButton'), run: onSkills },
+            onInvite && { key: 'invite', label: t('projectPanel.collabEntry'), run: onInvite },
+          ].filter(Boolean) as MenuItem[]).map(item => <MoreMenuItem key={item.key} item={item} close={() => setOpen(false)} />)}
           <div className="my-1 border-t border-line-soft" />
           <button
             onClick={() => {
@@ -3671,43 +3613,36 @@ const MoreMenu = ({
 }
 
 
-// ---------- Editable project title ----------
+// ---------- Project title (header) ----------
 
-// Display heading; CLICK (or hit Enter while typing in the input) to set the
-// project NAME — the cosmetic registry displayName, NOT the folder on disk.
-// Default name is the folder basename; clearing the field reverts to it.
-// Validation errors surface inline. Disabled (read-only) when onRename is
-// omitted — e.g. the member side, which can't rename a shared project.
-const TITLE_CSS = {
-  fullscreen: {
-    // Long names wrap inside the compact details dialog, never widen it.
-    text: 'min-w-0 break-words font-display text-head font-semibold leading-tight tracking-normal text-ink',
-    style: { fontVariationSettings: "'opsz' 26, 'SOFT' 40, 'wght' 600" } as React.CSSProperties,
-    input: 'font-display text-head font-semibold leading-tight tracking-normal',
-  },
-  sidebar: {
-    text: 'font-display text-head text-ink leading-[1.05] tracking-tightest truncate',
-    style: { fontVariationSettings: "'opsz' 28, 'SOFT' 40" } as React.CSSProperties,
-    input: 'font-display text-head leading-[1.05] tracking-tightest',
-  },
-}
+// Plain text in the header — clicking it does nothing (owner 2026-10-02: the
+// title used to open a "project details" dialog; it no longer opens anything).
+// Renaming starts from the ⋯ menu, which bumps `editSignal`: the title turns
+// into an input (Enter / blur commits, Escape cancels). The name is the
+// cosmetic registry displayName, NOT the folder on disk; clearing reverts to
+// the folder basename. Without onRename (e.g. a shared project's member side)
+// the signal is ignored.
+const TITLE_STYLE: React.CSSProperties = { fontVariationSettings: "'opsz' 26, 'SOFT' 40, 'wght' 600" }
+const TITLE_WIDTH = 'max-w-[80px] min-[360px]:max-w-[100px] sm:max-w-[200px]'
 
 const EditableTitle = ({
   name,
-  size,
+  editSignal,
+  description,
   onRename,
 }: {
   name: string
-  size: 'fullscreen' | 'sidebar'
+  editSignal: number
+  /** Shown under the name in the hover tooltip — the only place the project
+   *  reads its description now that the details dialog is gone. */
+  description?: string
   onRename?: (next: string) => Promise<{ error?: string } | void>
 }) => {
-  const { t } = useT()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(name)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
-  const css = TITLE_CSS[size]
 
   // Re-sync the draft whenever the underlying name changes (a successful
   // rename, or switching to a different selected project).
@@ -3715,19 +3650,19 @@ const EditableTitle = ({
     if (!editing) setDraft(name)
   }, [name, editing])
 
-  const start = () => {
-    if (!onRename) return
+  useEffect(() => {
+    if (!editSignal || !onRename) return
     setDraft(name)
     setError(null)
     setEditing(true)
-    setTimeout(() => {
-      const el = inputRef.current
-      if (el) {
-        el.focus()
-        el.select()
-      }
-    }, 0)
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editSignal])
+
+  useEffect(() => {
+    if (!editing) return
+    inputRef.current?.focus()
+    inputRef.current?.select()
+  }, [editing])
 
   const cancel = () => {
     setEditing(false)
@@ -3755,7 +3690,7 @@ const EditableTitle = ({
 
   if (editing) {
     return (
-      <div className="min-w-0 flex-1">
+      <span className="relative block min-w-0">
         <input
           ref={inputRef}
           value={draft}
@@ -3765,6 +3700,7 @@ const EditableTitle = ({
           }}
           onBlur={commit}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return
             if (e.key === 'Enter') {
               e.preventDefault()
               commit()
@@ -3774,27 +3710,25 @@ const EditableTitle = ({
             }
           }}
           disabled={busy}
-          className={[
-            css.input,
-            'w-full rounded-[2px] border border-accent bg-bg-card px-1.5 py-0.5 text-ink focus:outline-none',
-          ].join(' ')}
-          style={css.style}
+          className={`${TITLE_WIDTH} w-[200px] rounded-[2px] border border-accent bg-bg-card px-1 py-0.5 font-display text-title font-semibold tracking-normal text-ink focus:outline-none`}
+          style={TITLE_STYLE}
         />
         {error && (
-          <p className="mt-1 text-meta text-accent leading-tight">{error}</p>
+          <span role="alert" className="absolute left-0 top-full z-10 mt-1 w-max max-w-[280px] rounded-sm border border-line bg-bg-card px-2 py-1 text-meta leading-tight text-accent shadow-lg">
+            {error}
+          </span>
         )}
-      </div>
+      </span>
     )
   }
 
   return (
-    <h2
-      onClick={start}
-      title={onRename ? t('projectPanel.clickToRenameProject') : undefined}
-      className={[css.text, onRename ? 'cursor-text' : ''].join(' ')}
-      style={css.style}
+    <span
+      title={description ? `${name}\n${description}` : name}
+      className={`${TITLE_WIDTH} block truncate font-display text-title font-semibold tracking-normal text-ink`}
+      style={TITLE_STYLE}
     >
       {name}
-    </h2>
+    </span>
   )
 }

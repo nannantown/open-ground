@@ -13,8 +13,15 @@ async function expectInsideViewport(locator: Locator, width: number, height: num
   expect(box!.y + box!.height).toBeLessThanOrEqual(height + 1)
 }
 
-for (const width of [1600, 1280, 390, 320]) {
-  test(`one-row project header preserves workspace and details at ${width}px`, async ({ page, request }, info) => {
+// A long branch name is the worst case for the inline branch chip.
+const BRANCH = 'feature/a-really-long-branch-name-for-header-layout'
+// Folder / editor / branch sit beside the name from Tailwind's lg (1024px) up;
+// narrower, they live in the ⋯ menu (inline from 640px they squeezed the tabs
+// to 0px — owner card 2026-10-02, rework 1).
+const INLINE_TOOLS = 1024
+
+for (const width of [1600, 1280, 1024, 700, 640, 390, 320]) {
+  test(`one-row project header keeps tabs and header tools usable at ${width}px`, async ({ page, request }, info) => {
     const height = 900
     await page.setViewportSize({ width, height })
     const project = await createAndImportProject(request, 'NENE-long-project-name-for-header-layout')
@@ -48,10 +55,10 @@ for (const width of [1600, 1280, 390, 320]) {
     } }))
     await page.route('**/api/usage/breakdown*', route => route.fulfill({ json: { days: 7, total: 0, scannedAt: null, rows: [] } }))
     await page.route('**/api/project/branch-changes?*', route => route.fulfill({ json: {
-      isGit: true, branch: 'main', target: 'main', sameBranch: true, ahead: 0, behind: 0, working: [], committed: [],
+      isGit: true, branch: BRANCH, target: 'main', sameBranch: true, ahead: 0, behind: 0, working: [], committed: [],
     } }))
     await page.route('**/api/project/active-branches?*', route => route.fulfill({ json: {
-      isGit: true, branches: [{ name: 'main', current: true, worktreePath: project.path }],
+      isGit: true, branches: [{ name: BRANCH, current: true, worktreePath: project.path }],
     } }))
     await page.route('**/api/project/editors', route => route.fulfill({ json: {
       editors: [{ name: 'Test editor', path: '/fixture/editor' }], default: null, canPick: false,
@@ -64,8 +71,10 @@ for (const width of [1600, 1280, 390, 320]) {
     const frame = page.frameLocator('iframe[title="Songs"]')
     await frame.getByRole('button', { name: 'Play fixture' }).click()
     const header = page.getByTestId('project-header')
-    const detailsButton = header.getByRole('button', { name: 'Project details', exact: true })
-    await expect(detailsButton).toHaveAttribute('title', `${project.name}\nProject details`)
+    // The name is plain text: hovering shows name + description, clicking opens nothing.
+    const title = header.getByText(project.name, { exact: true })
+    await expect(title).toHaveAttribute('title', `${project.name}\n${description}`)
+    expect(await title.evaluate(el => el.closest('button'))).toBeNull()
     await expect(header.getByRole('button', { name: 'Claude usage', exact: true })).toContainText('23%')
     const box = (await header.boundingBox())!
     expect(box.height).toBe(48)
@@ -83,36 +92,52 @@ for (const width of [1600, 1280, 390, 320]) {
     expect(iframeBox.height).toBeGreaterThanOrEqual(height - 50 - barBox.height)
     expect(iframeBox.width).toBeGreaterThanOrEqual(width - 2)
     await expect(page.getByTitle('Open Terminal', { exact: true })).toHaveCount(0)
-    for (const label of ['Back to Ground', 'Project details', 'Claude usage', 'More actions']) {
+    // The back button's name carries its chord hint ("Back to Ground ⌘[").
+    const controls = [/^Back to Ground/, 'Claude usage', 'More actions', ...(width >= 640 ? ['Close'] : [])]
+    for (const label of controls) {
       await expectInsideViewport(header.getByRole('button', { name: label, exact: true }), width, 48)
     }
+    expect(await header.evaluate(el => el.scrollWidth)).toBeLessThanOrEqual(width)
     const strip = page.getByTestId('project-tabs')
     const songBox = (await strip.getByRole('button', { name: 'Songs', exact: true }).boundingBox())!
     const stripBox = (await strip.boundingBox())!
+    expect(songBox.width).toBeGreaterThanOrEqual(40)
     expect(songBox.x).toBeGreaterThanOrEqual(stripBox.x)
     expect(songBox.x + songBox.width).toBeLessThanOrEqual(stripBox.x + stripBox.width + 1)
     await page.screenshot({ path: info.outputPath(`project-header-${width}.png`), fullPage: true })
 
-    await detailsButton.click()
-    const details = page.getByRole('dialog', { name: 'Project details', exact: true })
-    await expect(details.getByText(description, { exact: true })).toBeVisible()
-    await expect(details.getByRole('button', { name: 'Refresh description', exact: true })).toBeVisible()
-    await expect(details.getByRole('button', { name: 'Owner view', exact: true })).toHaveCount(0)
-    await expectInsideViewport(details, width, height)
-    await details.getByRole('button', { name: 'Active branches', exact: true }).click()
-    await expect(page.getByRole('menu').getByText('main', { exact: true })).toBeVisible()
-    await expectInsideViewport(page.getByRole('menu'), width, height)
-    await page.screenshot({ path: info.outputPath(`project-details-${width}.png`), fullPage: true })
-    await page.keyboard.press('Escape')
-    await expect(details).toHaveCount(0)
-    await expect(detailsButton).toBeFocused()
+    // Clicking the name opens nothing (other dialogs, e.g. Settings, stay mounted hidden).
+    const dialogs = await page.getByRole('dialog').count()
+    await title.click()
+    await page.waitForTimeout(300)
+    await expect(page.getByRole('dialog')).toHaveCount(dialogs)
+
+    // Editor chooser + branch list: inline from INLINE_TOOLS up, else via ⋯ —
+    // the same menus either way. Escape closes only the menu, never the project.
+    const more = header.getByRole('button', { name: 'More actions', exact: true })
+    const inline = width >= INLINE_TOOLS
+    await expect(header.getByRole('button', { name: 'Open in editor', exact: true })).toBeVisible({ visible: inline })
+    for (const [trigger, item] of [['Open in editor', 'Test editor'], ['Active branches', BRANCH]] as const) {
+      if (inline) await header.getByRole('button', { name: trigger, exact: true }).click()
+      else {
+        await more.click()
+        await page.getByRole('button', { name: trigger, exact: true }).last().click()
+      }
+      await expect(page.getByRole('menu').getByText(item, { exact: true })).toBeVisible()
+      await expectInsideViewport(page.getByRole('menu'), width, height)
+      await page.screenshot({ path: info.outputPath(`project-header-${trigger.replace(/ /g, '-')}-${width}.png`), fullPage: true })
+      await page.keyboard.press('Escape')
+      await expect(page.getByRole('menu')).toHaveCount(0)
+      await expect(header).toBeVisible()
+    }
     await expect(frame.getByRole('button', { name: 'Playback state retained' })).toBeVisible()
-    await detailsButton.click()
-    await expect(page.getByRole('menu')).toHaveCount(0)
-    await details.getByRole('button', { name: 'Open in editor', exact: true }).click()
-    await expect(page.getByRole('menuitem', { name: 'Test editor', exact: true })).toBeVisible()
-    await expectInsideViewport(page.getByRole('menu'), width, height)
+
+    await more.click()
+    await expect(page.getByRole('button', { name: 'Refresh description', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Rename', exact: true })).toBeVisible()
     await page.keyboard.press('Escape')
+    await expect(page.getByRole('button', { name: 'Refresh description', exact: true })).toHaveCount(0)
+    await expect(header).toBeVisible()
 
     await header.getByRole('button', { name: 'Claude usage', exact: true }).click()
     await expect(page.getByText('Session', { exact: true })).toBeVisible()
@@ -129,6 +154,6 @@ for (const width of [1600, 1280, 390, 320]) {
       return selected.x >= bounds.x - 1 && selected.x + selected.width <= bounds.x + bounds.width + 1
     }).toBe(true)
     expect((await header.boundingBox())!.height).toBe(48)
-    await expect(page.getByRole('dialog', { name: 'Project details', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('dialog')).toHaveCount(dialogs)
   })
 }

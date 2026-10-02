@@ -165,9 +165,9 @@ describe('ProjectPanel — the Canvas/Board side terminal dock is gone', () => {
     await screen.findByTestId('board')
     expect(screen.queryByRole('button', { name: 'projectPanel.skillsButton' })).toBeNull()
     expect(h.paths).not.toContain('project.open.$get')
-    fireEvent.click(screen.getByRole('button', { name: 'projectPanel.projectDetails' }))
     expect(screen.getByRole('button', { name: 'projectPanel.openInEditor' })).toBeTruthy()
     view.rerender(<ProjectPanel project={p} ownerFeatures onClose={noop} onRemove={noop} frameLabel={null} />)
+    fireEvent.click(screen.getByRole('button', { name: 'projectPanel.moreActions' }))
     expect(screen.getByRole('button', { name: 'projectPanel.skillsButton' })).toBeTruthy()
   })
   it.each(['canvas', 'research', 'custom:saved'] as const)('shows Board without changing a public user\'s saved %s view', async tab => {

@@ -4,9 +4,8 @@ export const projectPanel = {
   en: {
     // Header
     'projectPanel.backToGround': 'Back to Ground',
-    'projectPanel.projectDetails': 'Project details',
+    'projectPanel.renameProjectMenu': 'Rename',
     'projectPanel.claudeNotFound': 'claude CLI not found — install Claude Code, then restart OPEN GROUND',
-    'projectPanel.generating': 'Generating…',
     'projectPanel.cancelDescription': 'Stop generating',
     'projectPanel.regenerateDescription': 'Refresh description',
     'projectPanel.generateDescription': 'Generate description',
@@ -286,7 +285,6 @@ export const projectPanel = {
     'projectPanel.branchNoChanges': 'No changes',
     'projectPanel.branchLoadFailed': "Couldn't read branch changes: {error}",
     'projectPanel.skillsButton': 'Skills',
-    'projectPanel.skillsButtonHint': "List this project's Claude skills (.claude/skills)",
     'projectPanel.skillsModalTitle': 'Skills',
     'projectPanel.skillsSectionGlobal': 'Your global skills',
     'projectPanel.skillsEmptyProject': 'No skills in this project yet.',
@@ -365,7 +363,6 @@ export const projectPanel = {
     // Realtime collaboration — invite (link-based self-join). OFF by default;
     // these only render when collab is enabled (OPENGROUND_REALTIME + worker).
     'projectPanel.collabEntry': 'Invite',
-    'projectPanel.collabEntryTitle': 'Invite collaborators (realtime)',
     'projectPanel.collabLabel': 'Realtime collaboration',
     'projectPanel.collabTitle': 'Invite to “{name}”',
     'projectPanel.collabExplain': 'Collaborators edit this project’s Board and Canvas with you in realtime. Each person runs Claude with their own subscription — the workspace is shared, the work is each your own.',
@@ -542,15 +539,13 @@ export const projectPanel = {
     // EditableTaskTitle
     // EditableTitle
     'projectPanel.doubleClickToRename': 'Double-click to rename',
-    'projectPanel.clickToRenameProject': 'Click to rename project',
     // Running roster — live claude lanes for the project.
   } as Record<string, string>,
   ja: {
     // Header
     'projectPanel.backToGround': 'Ground に戻る',
-    'projectPanel.projectDetails': 'プロジェクトの詳細',
+    'projectPanel.renameProjectMenu': '名前を変更',
     'projectPanel.claudeNotFound': 'claude CLI が見つかりません — Claude Code をインストールして OPEN GROUND を再起動してください',
-    'projectPanel.generating': '生成中…',
     'projectPanel.cancelDescription': '生成を停止',
     'projectPanel.regenerateDescription': '説明を更新',
     'projectPanel.generateDescription': '説明を生成',
@@ -808,7 +803,6 @@ export const projectPanel = {
     'projectPanel.branchNoChanges': '変更はありません',
     'projectPanel.branchLoadFailed': 'ブランチの変更を取得できませんでした: {error}',
     'projectPanel.skillsButton': 'スキル',
-    'projectPanel.skillsButtonHint': 'このプロジェクトの Claude スキル（.claude/skills）を一覧',
     'projectPanel.skillsModalTitle': 'スキル',
     'projectPanel.skillsSectionGlobal': 'あなたのグローバルスキル',
     'projectPanel.skillsEmptyProject': 'このプロジェクトにスキルはまだありません。',
@@ -884,7 +878,6 @@ export const projectPanel = {
     'projectPanel.inviteDone': '完了',
     // リアルタイム共同編集 — 招待（リンクベースの自己参加）。既定はOFF。
     'projectPanel.collabEntry': '招待',
-    'projectPanel.collabEntryTitle': '共同編集に招待（リアルタイム）',
     'projectPanel.collabLabel': 'リアルタイム共同編集',
     'projectPanel.collabTitle': '「{name}」に招待',
     'projectPanel.collabExplain': '共同編集者はこのプロジェクトの Board と Canvas をあなたとリアルタイムで編集します。Claude は各自のサブスクリプションで動かします（場は共有・作業は各自）。',
@@ -1059,7 +1052,6 @@ export const projectPanel = {
     // EditableTaskTitle
     // EditableTitle
     'projectPanel.doubleClickToRename': 'ダブルクリックで名前を変更',
-    'projectPanel.clickToRenameProject': 'クリックでプロジェクト名を変更',
     // Running roster — live claude lanes for the project.
   } as Record<string, string>,
 }

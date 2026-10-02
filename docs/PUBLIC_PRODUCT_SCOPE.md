@@ -66,8 +66,8 @@ preferences are retained.
 
 Description refreshes discard reads whose saved baseline changed while they
 were in flight; a late pre-generation poll cannot replace the generated text.
-Ground and the project details use the same language fallback, including when
-only a generated language field survives. This does not prevent deliberate
+Ground and the project title's hover tooltip use the same language fallback,
+including when only a generated language field survives. This does not prevent deliberate
 backup restoration or change the stored description format.
 
 ## Owner Preview
@@ -178,9 +178,15 @@ and a newly packaged GUI release still require release acceptance testing.
 ### Compact Project Header (2026-09-21)
 
 - Local project headers now occupy one 48px row. Tabs scroll horizontally;
-  long names truncate in the bar and remain available in project details.
-  Description generation, rename, folder/editor/branch actions, Skills, and
-  owner/public display switching remain available from the project name.
+  long names truncate in the bar.
+- 2026-10-02 (owner): the project name is plain text and opens nothing — the
+  project details dialog is gone. Its hover tooltip shows the full name and
+  the description. Folder / editor (with its chooser) / branch sit right of
+  the name from 1024px up; narrower, they move into the header "…" menu,
+  which opens the same editor chooser and branch list. Rename, description
+  generation, Skills (owner) and the collab invite (when enabled) live in
+  that "…" menu too. Escape with the editor or branch menu open closes only
+  that menu.
 - Description and layout data are unchanged. Usage details stay available
   from the compact meter; Escape closes that popover without closing the
   project. Hosted custom tabs preserve their document state when details open

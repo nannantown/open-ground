@@ -158,11 +158,15 @@ describe('App — whole-render integration', () => {
       localStorage.setItem('openground:onboarded', '1')
       localStorage.setItem('openground.view', JSON.stringify({ projectId: 'id', panelTab: 'board' }))
       await act(async () => { renderApp() })
-      fireEvent.click(screen.getByRole('button', { name: 'Project details' }))
-      expect(screen.getAllByText(summary)).toHaveLength(2)
+      // Ground card + the project title's hover tooltip (owner 2026-10-02:
+      // the details dialog is gone; the name's title carries the description).
+      const titled = () => within(screen.getByTestId('project-header')).getByText('Project').getAttribute('title')
+      expect(screen.getAllByText(summary)).toHaveLength(1)
+      expect(titled()).toBe(`Project\n${summary}`)
       opts.projectData = { ...opts.projectData!, notes: 'External edit', updatedAt: '2026-09-21T00:00:01.000Z' }
       await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
-      expect(screen.getAllByText(summary)).toHaveLength(2)
+      expect(screen.getAllByText(summary)).toHaveLength(1)
+      expect(titled()).toBe(`Project\n${summary}`)
     } finally { vi.useRealTimers() }
   })
 

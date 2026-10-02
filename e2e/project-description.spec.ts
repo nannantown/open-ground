@@ -10,7 +10,9 @@ test('generated descriptions survive a delayed old read, Ground navigation and r
     localStorage.setItem('openground.view', JSON.stringify({ projectId: id, panelTab: 'board' }))
   }, project.id)
   await page.goto('/', { waitUntil: 'domcontentloaded' })
-  await page.getByRole('button', { name: 'Project details', exact: true }).click()
+  // The project name is plain text; its hover tooltip carries the description.
+  const title = page.getByTestId('project-header').getByText(project.name, { exact: true })
+  await page.getByRole('button', { name: 'More actions', exact: true }).click()
   const generate = page.getByRole('button', { name: 'Generate description', exact: true })
   await expect(generate).toBeVisible()
 
@@ -31,7 +33,7 @@ test('generated descriptions survive a delayed old read, Ground navigation and r
     await oldReadStarted
     await generate.click()
     const summary = 'A project for testing saved descriptions.'
-    await expect(page.getByText(summary, { exact: true }).last()).toBeVisible()
+    await expect(title).toHaveAttribute('title', `${project.name}\n${summary}`)
     const saved = await (await request.get(url)).json()
     expect(saved.descriptionEn).toBe(summary)
     expect(saved.descriptionJa).toBeTruthy()
@@ -43,9 +45,8 @@ test('generated descriptions survive a delayed old read, Ground navigation and r
     release()
     await oldReadFinished
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
-    await expect(page.getByText(summary, { exact: true }).last()).toBeVisible()
-    await page.keyboard.press('Escape')
-    await page.getByRole('button', { name: 'Back to Ground', exact: true }).click()
+    await expect(title).toHaveAttribute('title', `${project.name}\n${summary}`)
+    await page.getByRole('button', { name: /^Back to Ground/ }).click()
     await expect(page.getByText(summary, { exact: true })).toBeVisible()
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(page.getByText(summary, { exact: true })).toBeVisible()
