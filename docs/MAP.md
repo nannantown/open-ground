@@ -746,6 +746,30 @@
 - 罠: feature-gate OFF が既定(未設定なら inert)。共有中の Board / Canvas へのサーバ書込みは
   **必ず mirror 経由**(直書きは Y.Doc に巻き戻される)。
 
+## 6b. Phone link — iPhone から社長窓口と話す(2026-10-01)
+- 契約(iPhone アプリ係はこれだけ見る): `docs/PHONE_LINK.md`
+- 中継: `worker/src/phoneRelay.ts`(DO・1ペア1部屋・ハイバネーション)/ `phoneRelayAuth.ts`(鍵判定・純関数)/
+  `worker/wrangler.phone.jsonc`(og-collab とは別 Worker。`cd worker && npx wrangler deploy -c wrangler.phone.jsonc`)
+- Mac 側: `src/lib/server/phoneLink.ts`(外向き WS・社長の transcript を tail して event 送出・say を
+  `supplyNotice.queueSupplyOwnerSay` へ・卓が無ければ起こす)/ route `server/routes/phoneLink.ts`(owner 限定)/
+  起動は `server/index.ts` の `startPhoneLink()` / 画面 `PhoneLinkSetting.tsx`(設定 → iPhone)
+- テスト: `phoneLink.test.ts` / `phoneRelayAuth.test.ts` / `supplyNoticeOwnerSay.test.ts` /
+  `worker/test/phoneRelay.local.mjs`(実 workerd・CI の worker ジョブで毎回。`RELAY=` で本番中継)/ 代役 `scripts/phone-link-say.mjs`
+- 罠: Claude Code の中から起動した試験サーバーは `CLAUDE_CODE_CHILD_SESSION` を継いで卓の transcript が
+  保存されず、feed が無言になる(`CLAUDE*` env を外して起動)。鍵は `X-OG-Token` ヘッダ(`Authorization` は
+  Apple の予約ヘッダ)。`?after` 無しの接続は履歴を流さない。仕事モード(lockdown)中は繋がない
+  (繋がっていたら切る・ペアリング/解除も断る)。リンクを持つのは主インスタンス(:47776)だけ
+  (dev:alt は `OPENGROUND_PHONE_LINK=1` で強制)。ペアリングコードは書き込み鍵なので `/code` は POST・
+  全メソッドで Host/Origin を loopback 限定。社長卓への1行は 473 字(畳まれない長さ)まで=超えは `too-long`。
+  接続が OPEN のまま死ぬ(回線切替・スリープ)と送った分が消えるので、各 event に transcript 位置 `cur` を付け、
+  中継が最後に保存した位置を Mac 再接続時に `resume` で返し、Mac が巻き戻して再送・中継が重複を捨てる。
+  巻き戻しは床(読み始めた位置)より前へ行かない。床は `phone-link.json` の `floor` に保存され再起動をまたぐ —
+  起動後最初の読み位置だけが前回の床(同じファイルのとき)まで戻れる。選び直し・業務モード(解除後も)では
+  床を今の末尾に置き直す(プロジェクトを行き来した間や業務モード中の話が新しい話として読み上げられないため)。
+  置き直しは `forgetTail` がディスクの `floor` も消して保存する(再起動後に古い床へ戻らない)。起動時は
+  `startPhoneLink` が先に `getSettings()` で業務モードの写しを温めてから繋ぐ(温まる前は「OFF」に見えるため)。
+  番人 = `phoneLink.test.ts`(再起動をまたぐ業務モード3本)/ `phoneLinkBoot.test.ts`(起動時に中継へ1回も繋がない)。
+
 ## 7. Auth・ロール — 任意ログイン(Supabase OAuth)
 - `server/routes/auth.ts`(PKCE・google/github)/ `src/lib/server/supabaseAuth.ts` /
   `authStore.ts`(サーバ永続 session)/ `roles.ts`(og_roles 照会・owner 判定)

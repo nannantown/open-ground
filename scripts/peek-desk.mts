@@ -6,7 +6,7 @@ import xterm from '@xterm/headless'
 import { readScreen } from '../src/lib/server/terminal'
 import { isGenerating, readInputBoxText, extractContextLeftPct } from '../src/lib/claudeScreen'
 
-const BASE = 'http://127.0.0.1:47776'
+const BASE = process.env.OG ?? 'http://127.0.0.1:47776' // OG= another instance
 const id = process.argv[2]
 if (!id) throw new Error('usage: peek-desk.mts <terminalId>')
 

@@ -170,6 +170,20 @@ Any descriptions of the retired paths below are historical, not operating instru
 `if (pending.size === 0) return` が返事レーンの**前**にあり、知らせが1件も無いと答えが配達されなかった。
 番人が先に書かれていたので出た(掟 §1)。
 
+### 1.6b The OWNER lane — the owner's words from the phone (2026-10-01, owner request)
+
+`supplyNotice.ts` has a fourth lane ahead of the other three: `queueSupplyOwnerSay` — the
+owner's own words arriving from the iPhone (`phoneLink.ts`, contract `docs/PHONE_LINK.md`).
+Typed in with **no prefix** (so `promptAuthor` reads them as the owner, and the president's
+standing-question mark clears as if typed at the Mac), on one line, with a leading `!` `/` `#`
+dropped (shell / command / memory mode), a trailing `\` dropped (its Enter would insert a
+newline). A line longer than `SUPPLY_PASTE_MEASURED_UNFOLDED` is REFUSED (`too-long`), never cut
+or split: it would fold to 「[Pasted text #1]」 and wedge the desk for every lane. Same three refusals and the same Enter-only re-press as
+every other lane; memory-only (the phone gets `delivered` when it lands and can resend). A stuck
+owner line rings no bell. Order per pass: owner → commander reply → important → progress.
+Guard: `supplyNoticeOwnerSay.test.ts` (priority / no prefix / held while busy or half-typed /
+mode characters / length cap / trailing backslash — red measured by mutation, 2026-10-01).
+
 ### 1.8 Where the commander's own reports go (2026-09-23, owner decision)
 
 The commander's window is no longer on screen (Swarm single-screen, step ③) — the owner

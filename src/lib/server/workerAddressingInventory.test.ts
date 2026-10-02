@@ -839,6 +839,12 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     ptyFns: ['listOwnerDeskTerminals', 'isTerminalProcessAlive', 'getTerminalScreen', 'terminalForeignInput', 'writeDeliveryInput'],
   },
 
+  'src/lib/server/phoneLink.ts': {
+    tier: 'pty-only-by-design',
+    why: "The iPhone link (2026-10-01) only asks whether a project's SUPPLY desk is up (listLiveDesksIn by the supply label) to tell the phone and to start one before typing; the typing itself goes through supplyNotice.ts above. The supply desk is PTY-only by design (swarmSupply.ts above), so there is no SDK desk to ask about and no worker here.",
+    ptyFns: ['listLiveDesksIn'],
+  },
+
   // ── one-off utility PTYs: each spawns its own claude, reads it, kills it ──
   'src/lib/server/claudeTerminal.ts': {
     tier: 'pty-only-by-design',

@@ -35,6 +35,16 @@ export const settings = {
     // measurement so far (-7.6% cost) sat inside the baseline's own 22% spread,
     // and a switch that oversells itself is how an unmeasured change becomes
     // permanent.
+    // Phone link (owner) — docs/PHONE_LINK.md
+    'settings.phoneLink.heading': 'iPhone',
+    'settings.phoneLink.hint': 'Talk to the president from your iPhone, away from this Mac. The code is copied — paste it into the iPhone app. Unlinking stops the old code.',
+    'settings.phoneLink.unpaired': 'Not linked',
+    'settings.phoneLink.online': 'Linked',
+    'settings.phoneLink.offline': 'Linked · not connected',
+    'settings.phoneLink.pair': 'Link iPhone',
+    'settings.phoneLink.copy': 'Copy code',
+    'settings.phoneLink.unpair': 'Unlink',
+    'settings.phoneLink.failed': 'Could not reach the relay (or work mode is on). Nothing changed — try again.',
     'settings.workerTrial.heading': 'Agent Team worker trials (measuring)',
     'settings.workerTrial.hint':
       'Settings whose effect is still being measured. Off by default, and turning one off restores the previous behaviour exactly — nothing else changes.',
@@ -185,6 +195,15 @@ export const settings = {
     'settings.swarmOptIn.label': 'エージェントチームを有効にする',
     'settings.swarmOptIn.warning':
       'エージェントチームはあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。通知は当面日本語のみです。まだ調整中で、サポート対象外です。',
+    'settings.phoneLink.heading': 'iPhone',
+    'settings.phoneLink.hint': 'Mac から離れていても、iPhone から社長と話せます。コードがコピーされるので iPhone のアプリに貼り付けてください。解除すると古いコードは使えなくなります。',
+    'settings.phoneLink.unpaired': '未接続',
+    'settings.phoneLink.online': '接続中',
+    'settings.phoneLink.offline': '設定済み・つながっていません',
+    'settings.phoneLink.pair': 'iPhone とつなぐ',
+    'settings.phoneLink.copy': 'コードをコピー',
+    'settings.phoneLink.unpair': '解除',
+    'settings.phoneLink.failed': '中継先につながりませんでした(または業務モード中)。何も変わっていません。もう一度お試しください。',
     'settings.workerTrial.heading': 'エージェントチームのワーカー試験(計測中)',
     'settings.workerTrial.hint':
       '効果をまだ測っている途中の設定です。既定はオフ。オフに戻すと元の動きに完全に戻ります(ほかには何も変わりません)。',

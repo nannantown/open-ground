@@ -54,6 +54,8 @@ const PTY_BY_DESIGN = [
   'src/lib/server/supplyContextCap.ts', //   compacts the SUPPLY desk (PTY-only, above):
   //                                          lists owner PTY desks by the supply label,
   //                                          reads a screen, types /compact into it
+  'src/lib/server/phoneLink.ts', //          asks which project has a live SUPPLY desk
+  //                                          (PTY-only, above) by the supply label
   'server/routes/customModules.ts', //        custom tabs are PTY panes by design
   'server/routes/sse.ts', //                  the PTY output stream
   'server/index.ts', //                       starts/stops the PTY sweep loop

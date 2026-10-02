@@ -28,6 +28,7 @@ import { authRoutes } from './routes/auth'
 import { customModulesRoutes } from './routes/customModules'
 import { collabRoutes } from './routes/collab'
 import { researchRoutes } from './routes/research'
+import { phoneLinkRoutes } from './routes/phoneLink'
 import { originIsLocal, hostIsLocal } from './loopback'
 
 // ── CSRF / cross-origin guard helpers ──────────────────────────────────────
@@ -116,6 +117,7 @@ export const createApp = () => {
     .route('/', customModulesRoutes) // I — custom tab modules (role-gated; docs/CUSTOM_TABS_PLAN.md)
     .route('/', collabRoutes)    // K — realtime collab gating + per-project resolution (env-gated)
     .route('/', researchRoutes)  // M — research channels: checker + local-only cookie store
+    .route('/', phoneLinkRoutes) // N — iPhone ⇄ president desk via the CF relay (docs/PHONE_LINK.md)
 
   // Any /api/* not matched above is a genuine API 404 — it must NOT fall
   // through to the SPA static handler below (which would return index.html

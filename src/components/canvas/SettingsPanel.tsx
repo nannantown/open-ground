@@ -33,6 +33,7 @@ import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 import type { Lang } from '@/i18n/messages'
 import { SwarmAllowedModelsSetting } from '@/components/canvas/SwarmAllowedModelsSetting'
+import { PhoneLinkSetting } from '@/components/canvas/PhoneLinkSetting'
 
 interface Props {
   open: boolean
@@ -750,6 +751,15 @@ export const SettingsPanel = ({
                     <SwarmAllowedModelsSetting />
                   </Section>
                 )}
+                {/* iPhone ⇄ president — owner only: the component renders
+                    nothing (section included) when its route answers 403. */}
+                <PhoneLinkSetting
+                  frame={(body) => (
+                    <Section heading={t('settings.phoneLink.heading')} hint={t('settings.phoneLink.hint')}>
+                      {body}
+                    </Section>
+                  )}
+                />
                 {(swarmVisible || swarmOptIn || swarmExp) && (
                   <Section
                     heading={t('settings.workerTrial.heading')}

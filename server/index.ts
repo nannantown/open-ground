@@ -33,6 +33,7 @@ import { startDailyFuelReportLoop } from '@/lib/server/dailyFuelReport'
 import { startBlogPublishLoop } from '@/lib/server/blogPublish'
 import { startOwnerDeskLimitLoop } from '@/lib/server/ownerDeskLimit'
 import { startSupplyContextCapLoop } from '@/lib/server/supplyContextCap'
+import { startPhoneLink } from '@/lib/server/phoneLink'
 import { startWorkerReapLoop } from '@/lib/server/swarmWorkerReaper'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
@@ -418,6 +419,12 @@ if (process.env.OPENGROUND_DESK_LIMIT_WATCH !== '0') {
 // (swarmManager.ts), not here. Same boot-loop shape; this entry only.
 // Kill-switch: Settings.deskContextCapTokens = 0.
 startSupplyContextCapLoop()
+
+// PHONE LINK (phoneLink.ts, owner request 2026-10-01): when the owner has paired
+// an iPhone, dial OUT to its Cloudflare relay room so the phone can talk to the
+// president desks from anywhere. Unpaired = nothing happens. Primary (:47776)
+// only — see isPhoneLinkPrimary.
+void startPhoneLink().catch(() => {})
 
 // FINISHED-WORKER REAP (swarmWorkerReaper.ts, owner request 2026-09-26): a swarm
 // worker whose branch is already in main and whose card is done (or that has

@@ -1,0 +1,16 @@
+{
+  // OPEN GROUND phone link relay (docs/PHONE_LINK.md) — a SEPARATE Worker from
+  // og-collab (wrangler.jsonc), so deploying it never touches the collab rooms.
+  //   deploy:  npx wrangler deploy -c wrangler.phone.jsonc   (from worker/)
+  // No secrets: rooms are keyed by the hash of the phone's key (phoneRelayAuth.ts).
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "og-phone-relay",
+  "main": "src/phoneRelay.ts",
+  "compatibility_date": "2026-06-18",
+  "durable_objects": {
+    "bindings": [{ "name": "OgPhoneRelay", "class_name": "OgPhoneRelay" }]
+  },
+  // SQLite-backed: the only Durable Object storage the free plan allows.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OgPhoneRelay"] }],
+  "observability": { "enabled": true }
+}

@@ -511,6 +511,8 @@ declare global {
   // eslint-disable-next-line no-var
   var __openground_supply_reply: Map<string, PendingNotice[]> | undefined
   // eslint-disable-next-line no-var
+  var __openground_supply_owner: Map<string, OwnerSay[]> | undefined
+  // eslint-disable-next-line no-var
   var __openground_supply_progress: Map<string, { items: string[]; at: number }> | undefined
   // eslint-disable-next-line no-var
   var __openground_supply_seen_desks: Set<string> | undefined
@@ -537,8 +539,9 @@ interface UnsentLine {
   /** `heard` = the Enter was confirmed to submit it (not just an empty box). */
   commit: (heard: boolean) => void
   appWide: boolean
-  /** What the line carries — picks the bell a given-up line rings. */
-  kind: 'reply' | 'important' | 'progress'
+  /** What the line carries — picks the bell a given-up line rings (none for
+   *  'owner': the owner's own words have no bell; the sender sees no landing). */
+  kind: 'owner' | 'reply' | 'important' | 'progress'
   /** Later passes that could not press its Enter ON A QUIET FRAME (readable, not
    *  generating, no menu). A busy desk is not counted: it is the owner working,
    *  not a wedged box, and counting it gave up in 1–2 minutes of a busy swarm. */
@@ -561,6 +564,19 @@ const progress: Map<string, { items: string[]; at: number }> =
  *  are not allowed to share the news slot. */
 const replies: Map<string, PendingNotice[]> =
   globalThis.__openground_supply_reply ?? (globalThis.__openground_supply_reply = new Map())
+
+/** The owner's OWN words typed somewhere other than the desk (the phone link,
+ *  phoneLink.ts) — queued per project and typed in WITHOUT a prefix, so the
+ *  president reads them as the owner speaking (groundMarks.promptAuthor). They go
+ *  ahead of every other lane: the owner is waiting on the answer. Memory-only —
+ *  the sender hears `onDone` when it lands and can resend after a restart. */
+interface OwnerSay {
+  line: string
+  /** `heard` = the Enter was confirmed (false = the box was found emptied). */
+  onDone?: (heard: boolean) => void
+}
+const ownerSays: Map<string, OwnerSay[]> =
+  globalThis.__openground_supply_owner ?? (globalThis.__openground_supply_owner = new Map())
 
 /** Per project: card ids a DELIVERED commander reply reported as landed
  *  (explicit ids only) — a landing notice queued afterwards skips them. */
@@ -942,6 +958,7 @@ export const resetSupplyNoticeState = (opts: { keepDisk?: boolean } = {}): void 
   resolvedQuestions.clear()
   pending.clear()
   replies.clear()
+  ownerSays.clear()
   reportedLanded.clear()
   progress.clear()
   seenDesks.clear()
@@ -988,7 +1005,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
   // BOTH lanes, or the pass bails before it ever looks at the replies — which
   // it did, and the reply tests caught it: with no news queued, a commander's
   // answer sat in the queue until some unrelated notice happened to arrive.
-  if (pending.size === 0 && replies.size === 0 && progress.size === 0 && unsent.size === 0) {
+  if (pending.size === 0 && replies.size === 0 && ownerSays.size === 0 && progress.size === 0 && unsent.size === 0) {
     held.clear() // nothing left to hold (a line can also leave without a delivery)
     return delivered
   }
@@ -1087,8 +1104,8 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
             // shared lane (`appWideFree`): another desk may take the item, and
             // this desk's later landing then removes nothing (by identity).
             left.rang = true
-            if (left.kind !== 'reply') deps.onNoticeGivenUp(key, left.line)
-            else deps.onReplyExpired(key, left.line)
+            if (left.kind === 'reply') deps.onReplyExpired(key, left.line)
+            else if (left.kind !== 'owner') deps.onNoticeGivenUp(key, left.line)
           }
         } finally {
           release()
@@ -1101,14 +1118,16 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       // line — so a second write in the same pass would hit a busy desk and be
       // held anyway. Answering first means the wait the owner actually notices
       // is the one that ends.
+      // The owner's own words go first of all (OwnerSay).
+      const own = ownerSays.get(key)?.[0] ?? null
       const queue = replies.get(key)
-      const reply = queue?.[0] ?? null
+      const reply = own ? null : (queue?.[0] ?? null)
       // App-wide fatals first: they are rare and concern the whole app.
       const appWideFree = !inFlight.has(APP_WIDE) && !Array.from(unsent.values()).some((u) => u.appWide && !u.rang)
       // A landing notice inside its grace (SUPPLY_LANDING_GRACE_MS) is skipped,
       // never blocking: a question queued behind it still goes now.
       const due = (k: string) => (pending.get(k) ?? []).filter((p) => p.notBefore === undefined || p.notBefore <= now)
-      const importantKey = reply
+      const importantKey = own || reply
         ? null
         : appWideFree && due(APP_WIDE).length
           ? APP_WIDE
@@ -1117,14 +1136,14 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
             : null
       const bundle = importantKey ? takeBundle(due(importantKey), now) : null
       const important = bundle ? bundle.items[0] : null
-      const digest = reply || important ? null : progress.get(key)
+      const digest = own || reply || important ? null : progress.get(key)
       const importantLine = bundle?.line
       const replyLine =
         reply && now - reply.at >= SUPPLY_NOTICE_AGE_LABEL_MS && reply.text !== undefined
           ? supplyReplyLateLine(reply.text, now - reply.at)
           : reply?.line
       const line =
-        replyLine ?? importantLine ?? (digest && digest.items.length ? supplyProgressLine(digest.items) : null)
+        own?.line ?? replyLine ?? importantLine ?? (digest && digest.items.length ? supplyProgressLine(digest.items) : null)
       if (!line) {
         held.delete(desk.id)
         continue
@@ -1141,7 +1160,17 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       const commit = (heard: boolean): void => {
         if (committed) return // once: a second call would splice undelivered progress
         committed = true
-        if (reply) {
+        if (own) {
+          const q = ownerSays.get(key)
+          const i = q ? q.indexOf(own) : -1
+          if (q && i >= 0) q.splice(i, 1)
+          if (q && q.length === 0) ownerSays.delete(key)
+          try {
+            own.onDone?.(heard)
+          } catch {
+            /* the sender's problem, not the desk's */
+          }
+        } else if (reply) {
           const q = replies.get(key)
           const i = q ? q.indexOf(reply) : -1
           if (q && i >= 0) q.splice(i, 1)
@@ -1200,7 +1229,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         } else if (typed) {
           // The text is in the box but the Enter did not take: the next pass
           // re-sends ONLY the Enter (never the text — no double line).
-          const kind = reply ? 'reply' : bundle ? 'important' : 'progress'
+          const kind = own ? 'owner' : reply ? 'reply' : bundle ? 'important' : 'progress'
           unsent.set(desk.id, { line, commit, appWide, kind, passes: 0, since: now, seq })
         }
       } finally {
@@ -1401,6 +1430,61 @@ export const queueSupplyReply = async (
   savePending()
   await flushSupplyNotices(deps).catch(() => [])
   return replies.get(key)?.length ?? 0
+}
+
+/** An app-typed desk line as the owner should hear it (phone link): without the
+ *  frozen prefix and without the instruction tail meant for the president. */
+export const supplyLineBody = (line: string): string => {
+  let s = line.trim()
+  for (const p of [SUPPLY_NOTICE_PREFIX, SUPPLY_REPLY_PREFIX]) if (s.startsWith(p)) s = s.slice(p.length)
+  for (const t of [SUPPLY_NOTICE_TAIL, SUPPLY_PROGRESS_TAIL, SUPPLY_REPLY_TAIL, SUPPLY_BUNDLE_TAIL]) {
+    if (s.endsWith(t)) s = s.slice(0, -t.length)
+  }
+  return s.trim()
+}
+
+/** The longest owner line typed in: the length measured not to fold
+ *  ({@link SUPPLY_PASTE_MEASURED_UNFOLDED}). A longer one folds to
+ *  「[Pasted text #1]」, its Enter never lands and the desk is wedged for every
+ *  lane — so it is REFUSED (the phone hears `too-long`), never cut or split. */
+export const SUPPLY_OWNER_SAY_MAX = SUPPLY_PASTE_MEASURED_UNFOLDED
+
+/** The owner's words as one desk line: control characters and newlines become
+ *  spaces (a multi-line paste wedges the desk), and the leading characters
+ *  Claude Code treats as a mode switch rather than a message (`!` = shell,
+ *  `/` = command, `#` = memory) are dropped — a phone message is always
+ *  something to SAY, never a command run on the Mac. */
+export const ownerSayLine = (text: string): string =>
+  text
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s!/#]+/, '')
+    // A trailing backslash makes Claude Code's Enter insert a newline.
+    .replace(/[\s\\]+$/, '')
+
+/** The owner line is too long to type in safely ({@link SUPPLY_OWNER_SAY_MAX}). */
+export const ownerSayTooLong = (text: string): boolean => ownerSayLine(text).length > SUPPLY_OWNER_SAY_MAX
+
+/**
+ * The owner's own words, typed into the project's president desk with no
+ * prefix (OwnerSay) — ahead of replies and news, under the same three refusals
+ * (busy / half-typed / menu ⇒ the next pass). `onDone` fires once, when it lands.
+ * Returns how many owner lines are still waiting for this project (0 = landed).
+ */
+export const queueSupplyOwnerSay = async (
+  projectPath: string,
+  text: string,
+  onDone?: (heard: boolean) => void,
+  deps: Partial<SupplyNoticeDeps> = {},
+): Promise<number> => {
+  const line = ownerSayLine(text)
+  if (!projectPath || !line || line.length > SUPPLY_OWNER_SAY_MAX) return 0
+  const key = deskKey(projectPath)
+  const q = ownerSays.get(key) ?? []
+  q.push({ line, ...(onDone ? { onDone } : {}) })
+  ownerSays.set(key, q)
+  await flushSupplyNotices(deps).catch(() => [])
+  return ownerSays.get(key)?.length ?? 0
 }
 
 /**
