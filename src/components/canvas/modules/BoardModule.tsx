@@ -46,6 +46,7 @@ import { engineWorkerKey } from './useSwarmEngine'
 import { assigneeCandidates, withRegisteredAssignee } from '@/lib/assignees'
 import { dependencyCandidates, dependencyCycleIds } from '@/lib/boardDeps'
 import { TASK_MODEL_CHOICES } from '@/lib/claudeLaunchChoices'
+import { isInAssistantWindow } from '@/components/assistant/assistantWindow'
 import { cardTierSource, resolveCardTier } from '@/lib/cardTier'
 
 /** Result of a task-terminal launch attempt (ProjectPanel.launchTaskTerminal).
@@ -1856,7 +1857,9 @@ export const BoardModule = ({
         // the drawer) — this CAPTURE listener fires before its React handler,
         // so without the exemption Esc would close the whole drawer.
         el instanceof HTMLSelectElement ||
-        (el instanceof HTMLElement && el.closest('.xterm'))
+        (el instanceof HTMLElement && el.closest('.xterm')) ||
+        // The floating assistant's window owns its own Escape.
+        isInAssistantWindow(el)
       )
         return
       // An open overlay outranks the drawer — let it have the key.

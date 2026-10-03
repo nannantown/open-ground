@@ -185,6 +185,9 @@ describe('App — whole-render integration', () => {
     localStorage.setItem('openground:onboarded', '1')
     await act(async () => { renderApp() })
     expect(screen.getByRole('button', { name: 'Skills' })).toBeTruthy()
+    // The owner's floating assistant (the routes answer here) — absent from the public view.
+    const assistant = () => screen.queryByRole('button', { name: 'Assistant' })
+    await waitFor(() => expect(assistant()).toBeTruthy())
     const writes = () => fetchMock.mock.calls.filter(([input, init]) => methodOf(input, init) !== 'GET')
     const before = writes().length
     const settingsSwitch = () => within(screen.getByRole('dialog', { name: 'Settings' })).getByRole('group', { name: 'Show as a public user sees it' })
@@ -193,6 +196,7 @@ describe('App — whole-render integration', () => {
     fireEvent.click(within(settingsSwitch()).getByRole('button', { name: 'On' }))
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('button', { name: 'Skills' })).toBeNull()
+    expect(assistant()).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
     expect(screen.queryByText('WordPress', { exact: true })).toBeNull()
     expect(writes()).toHaveLength(before)
@@ -200,6 +204,7 @@ describe('App — whole-render integration', () => {
     fireEvent.click(within(settingsSwitch()).getByRole('button', { name: 'Off' }))
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.getByRole('button', { name: 'Skills' })).toBeTruthy()
+    await waitFor(() => expect(assistant()).toBeTruthy())
     expect(writes()).toHaveLength(before)
   })
 

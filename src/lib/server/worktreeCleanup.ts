@@ -31,6 +31,7 @@ import { canonicalize } from './canonicalize'
 import { centralWorktreesDir } from './paths'
 import { projectUUIDFromPath } from './projectDataPath'
 import { removeClaudeFolderTrust } from './claudeTrust'
+import { readCwdTable, stopProcessesInDir } from './worktreeProcesses'
 import type { ProjectWorktreeInfo, CleanWorktreesResult } from '../types'
 
 const execFile = promisify(execFileCb)
@@ -148,6 +149,7 @@ export const cleanProjectWorktrees = async (
   // asked in the other direction. One rule, one place.
   const liveCwds = await canonicalLiveDeskCwds()
   const isLive = (dir: string) => isDirOccupied(liveCwds, dir)
+  let cwdTable: Promise<string> | undefined
   for (const wt of await listProjectWorktrees(projectPath)) {
     if (wt.dirty || isLive(wt.dir)) {
       skippedDirty.push(wt.dir)
@@ -157,6 +159,10 @@ export const cleanProjectWorktrees = async (
     // the un-canonicalized central) — launchClaude seeded BOTH this raw key and
     // its realpath, but listProjectWorktrees only yields the resolved wt.dir.
     const rawDir = rawCentral + wt.dir.slice(canonCentral.length)
+    // Same as removeSwarmWorktree: a dev server / watcher left running in the
+    // tree outlives the removal and refills the directory (02 §5.3b).
+    // ONE machine-wide lsof for the whole sweep (~1 s each), read on first need.
+    await stopProcessesInDir(wt.dir, { cwdTable: await (cwdTable ??= readCwdTable()) })
     // No --force: even after our own dirty probe, git re-checks and refuses
     // a worktree that picked up changes in the race window — that refusal
     // lands in skippedDirty instead of destroying work.

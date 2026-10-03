@@ -80,6 +80,7 @@ import { computeSnap, type SnapBox, type SnapGuide } from '@/lib/canvasSnap'
 import { resizeGroup, unionBounds, type GResizeItem } from '@/lib/canvasGroupResize'
 import { SHAPE_DEFAULT_W, SHAPE_DEFAULT_H, drawRectFromDrag } from '@/lib/canvasShape'
 import { useT } from '@/i18n/I18nContext'
+import { isInAssistantWindow } from '@/components/assistant/assistantWindow'
 
 /** Imperative zoom handle the shell's zoom pill drives — same code paths as
  *  the ⌘± / ⇧0 / ⇧1 keyboard zooms. */
@@ -955,6 +956,7 @@ export const InfiniteCanvas = ({
       if (editingId) return
       const ae = document.activeElement
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
+      if (isInAssistantWindow(ae)) return
       const c = canvasRef.current
       // removeElements scrubs any comment whose anchor — or element whose parent
       // frame — was just deleted (no dangling anchorId / parentId), and returns
@@ -984,6 +986,7 @@ export const InfiniteCanvas = ({
       if (editingId) return
       const ae = document.activeElement
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
+      if (isInAssistantWindow(ae)) return
       e.preventDefault()
       if (e.shiftKey) {
         // ⌘⇧G dissolves SELECTED FRAMES too (Figma — also how an auto-layout
@@ -1040,6 +1043,7 @@ export const InfiniteCanvas = ({
       if (editingId || e.metaKey || e.ctrlKey || e.altKey) return
       const ae = document.activeElement
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
+      if (isInAssistantWindow(ae)) return
       if (!selectedRef.current.length) return
       const nudges: Record<string, [number, number]> = {
         ArrowUp: [0, -1],
@@ -1145,6 +1149,10 @@ export const InfiniteCanvas = ({
       }
       const ae = document.activeElement
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
+      // Keys from inside the floating assistant's window are the window's: its
+      // own listener subscribes when it opens — after this one — so without
+      // this a click in the talk then Esc would also flip the canvas tool.
+      if (isInAssistantWindow(e.target)) return
       const mod = e.metaKey || e.ctrlKey
       const key = e.key.toLowerCase()
 
@@ -1393,6 +1401,7 @@ export const InfiniteCanvas = ({
       if (e.code !== 'Space' || e.repeat) return
       const ae = document.activeElement
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
+      if (isInAssistantWindow(ae)) return
       e.preventDefault()
       spaceDown.current = true
       setSpaceHeld(true)

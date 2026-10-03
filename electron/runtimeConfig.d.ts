@@ -11,6 +11,7 @@ export type BakedKey =
   | 'SUPABASE_ANON_KEY'
   | 'OPENGROUND_REALTIME'
   | 'OPENGROUND_COLLAB_WS_URL'
+  | 'OPENGROUND_PHONE_RELAY_APP_KEY'
 
 export type BakedAuthEnv = Partial<Record<BakedKey, string>>
 

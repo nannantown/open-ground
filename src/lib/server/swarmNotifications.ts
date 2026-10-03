@@ -197,6 +197,7 @@ const EVENT_LABEL: Record<SwarmFatalEvent, string> = {
   // The desk is UP and ignoring us — the counterpart of 'manager-unrevivable'
   // ("no desk can be raised"). Titled so the two never read as the same alarm.
   'manager-unresponsive': 'Agent Team — commander is stuck (integration waiting)',
+  'reentry-failed': 'Agent Team — card parked (could not return to its work)',
   // Fires from TWO distinct causes (swarmOrchestrator.ts resumeEngines): the
   // crash-loop breaker tripping (repeated restarts) OR the breaker's own boot
   // ring failing to persist (a disk fault — e.g. a first-ever launch before a

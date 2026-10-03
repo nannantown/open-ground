@@ -20,7 +20,8 @@ vi.mock('./terminal', async (orig) => ({
   killTerminalsByCwdAndWait: async () => true,
 }))
 
-import { askAssistant, __resetAssistantMemory } from './phoneAssistant'
+import { ASSISTANT_KICKOFF, askAssistant, __resetAssistantMemory } from './phoneAssistant'
+import { writeAssistantMemory } from './assistantMemory'
 import { buildClaudeArgv, type LaunchClaudeOpts } from './claudeTerminal'
 
 describe('the claude each assistant line starts', () => {
@@ -38,5 +39,20 @@ describe('the claude each assistant line starts', () => {
     expect(at('--disallowed-tools')).toBe('mcp__*')
     expect(argv).toContain('--strict-mcp-config')
     expect(argv).not.toContain('--dangerously-skip-permissions')
+  })
+
+  it("keeps the owner's words and the memo out of claude's prompt history: only a fixed line is the prompt", async () => {
+    h.launches.length = 0
+    __resetAssistantMemory()
+    await writeAssistantMemory('ヒミツのメモ', 4000)
+    await expect(askAssistant('ヒミツの話', { digest: async () => ({ text: '', projects: [] }) })).rejects.toBeTruthy()
+    const opts = h.launches[0] as LaunchClaudeOpts
+    // The positional prompt is what ~/.claude/history.jsonl records (no time limit).
+    expect(opts.initialPrompt).toBe(ASSISTANT_KICKOFF)
+    expect(opts.initialPrompt).not.toContain('ヒミツ')
+    // Everything else rides --append-system-prompt, which is not recorded.
+    expect(opts.systemPrompt).toContain('ヒミツの話')
+    expect(opts.systemPrompt).toContain('ヒミツのメモ')
+    expect(buildClaudeArgv(opts, '/tmp/p.txt', '/tmp/ctx.md')).toContain('--append-system-prompt')
   })
 })

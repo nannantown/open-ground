@@ -2702,6 +2702,11 @@ export type SwarmFatalEvent =
   // log line and permanent silence — the field bug of 2026-08-14 (two cards sat
   // in review, the desk was alive and idle, and nobody was told).
   | 'manager-unresponsive'
+  // 'reentry-failed' (2026-10-03, docs/commander/02 §5.3b): a card whose branch
+  // holds commits could not re-enter its worktree REENTRY_MAX_FAILURES passes in a
+  // row, so the engine parked it in 'blocked' rather than start a fresh branch over
+  // the work. `branch` is the branch holding it; `logHint` the way out.
+  | 'reentry-failed'
   // 'engine-resume-suppressed' (docs/ENGINE_PERSISTENCE_PLAN.md §4-2, card 2): the
   // boot-time crash-loop breaker tripped — this build restarted
   // BREAKER_THRESHOLD+ times inside the trailing window, so resumeEngines()

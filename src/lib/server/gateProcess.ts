@@ -330,6 +330,7 @@ export const GATE_ENV_HERMETIC: readonly string[] = [
   'SUPABASE_ANON_KEY',
   'OPENGROUND_REALTIME',
   'OPENGROUND_COLLAB_WS_URL',
+  'OPENGROUND_PHONE_RELAY_APP_KEY',
 ]
 
 /** Everything a verifier child has stripped by NAME LIST. Kept as one exported

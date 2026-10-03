@@ -86,6 +86,7 @@ import {
   writeManagerHeartbeat,
   noticeDeliverable,
   ClaudeNotReadyError,
+  cardBranchHoldsWork,
 } from '@/lib/server/swarmOrchestrator'
 import { listSwarmNotifications, markSwarmNotificationHandled } from '@/lib/server/swarmNotifications'
 import {
@@ -433,6 +434,12 @@ export const swarmRoutes = new Hono()
       )
       const branch = typeof card?.branch === 'string' ? card.branch.trim() : ''
       if (branch) reuse = (await ensureSwarmWorktreeForBranch(path, branch))?.worktree
+      // …and never a fresh branch over committed work it could not re-enter
+      // (2026-10-03 — same guard as runDispatchPass).
+      if (!reuse && branch && (await cardBranchHoldsWork(path, branch)) !== false) {
+        if (claimed) await releaseCardClaim(path, taskId).catch(() => {})
+        return c.json({ error: `cannot re-enter ${branch}, which holds work — not starting a fresh branch over it` }, 409)
+      }
     }
 
     let res: SpawnSwarmWorkerResponse

@@ -27,6 +27,7 @@ import { UsageHud } from '@/components/canvas/UsageHud'
 import { ManualPanel } from '@/components/canvas/manual/ManualPanel'
 import { GROUND_SEEN_EVENT, groundLamp, type GroundLamp } from '@/lib/groundLamp'
 import { setClientLockdown } from '@/lib/lockdownClient'
+import { FloatingAssistant } from '@/components/assistant/FloatingAssistant'
 import { autoLayout, findFreeSpot, frameLabelFor } from '@/lib/layout'
 import { GHOST_H, GHOST_W, PlacementGhost } from '@/components/canvas/PlacementGhost'
 import { useCanvasHistory } from '@/lib/useCanvasHistory'
@@ -1610,6 +1611,15 @@ export default function App() {
           flyToCard(p.id, pos)
         }}
       />
+      {/* The owner's assistant floats over every screen (docs/ASSISTANT_DESIGN.md).
+          Not in the public-view preview. Re-mounted when the signed-in user or work
+          mode changes, so it asks the owner-only routes again (they decide). */}
+      {!publicPreview && (
+        <FloatingAssistant
+          key={`${authUser?.id ?? ''}:${settings?.lockdownMode === true}`}
+          disabled={settings?.lockdownMode === true}
+        />
+      )}
     </main>
   )
 }

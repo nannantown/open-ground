@@ -16,7 +16,7 @@
 // hard-coded, and `runtime-config.json` is gitignored so nothing is committed.
 //
 // SECURITY — only PUBLIC values ever ship:
-//   - BAKED_KEYS is an explicit allowlist of exactly the four public values.
+//   - BAKED_KEYS is an explicit allowlist of exactly the five public values.
 //     The Supabase **anon key is a public key by design**; safety rests on Row
 //     Level Security enforcing owner/member/self boundaries at the DB (audited —
 //     see REPORT.md). OPENGROUND_REALTIME is a boolean feature flag and
@@ -48,11 +48,15 @@ const { assertBakeable } = require('./secretPolicy')
 //   SUPABASE_URL / SUPABASE_ANON_KEY  — app login (anon key is public by design)
 //   OPENGROUND_REALTIME               — collab feature flag ('1' enables)
 //   OPENGROUND_COLLAB_WS_URL          — public Worker WS endpoint (token-relay dest)
+//   OPENGROUND_PHONE_RELAY_APP_KEY    — lets an OPEN GROUND Mac create its phone-link
+//                                       room; every copy carries it (an install pass,
+//                                       not a secret — docs/PHONE_LINK.md "Security model")
 const BAKED_KEYS = [
   'SUPABASE_URL',
   'SUPABASE_ANON_KEY',
   'OPENGROUND_REALTIME',
   'OPENGROUND_COLLAB_WS_URL',
+  'OPENGROUND_PHONE_RELAY_APP_KEY',
 ]
 
 // Hard guard: a future edit must never add a secret OR an authority value to the

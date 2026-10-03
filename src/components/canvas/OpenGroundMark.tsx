@@ -16,17 +16,20 @@ import { OG_RING_ORDER, OG_SHARD_CENTROIDS, OG_SHARDS, OG_VIEWBOX } from './open
 // Below this rendered pixel size, draw the carved ring instead of the shards.
 const SWAP_PX = 48
 
-// Carved-ring geometry, in the source viewBox's units.
-const CX = 145
-const CY = 80
-const OUTER = 82 // outer radius (grain-band outer edge)
-const INNER = 48 // inner radius (grain-band inner edge → centre hole)
+// Carved-ring geometry, in the source viewBox's units. Exported: the floating
+// assistant (AssistantMark) draws this same ring — it is the app icon's shape.
+export const OG_RING_CX = 145
+export const OG_RING_CY = 80
+export const OG_RING_OUTER = 82 // outer radius (grain-band outer edge)
+const CX = OG_RING_CX
+const CY = OG_RING_CY
+export const OG_RING_INNER = 48 // inner radius (grain-band inner edge → centre hole)
 const NOTCH_COUNT = 8
-const NOTCH_SCALE = 1.7 // enlarge each notch about its centre so it overshoots OUTER
+export const OG_NOTCH_SCALE = 1.7 // enlarge each notch about its centre so it overshoots OUTER
 
 // Pick NOTCH_COUNT shards spread evenly around the ring (subsample the angle-
 // sorted order). Computed once — the geometry never changes.
-const NOTCH_SHARDS: number[] = (() => {
+export const OG_NOTCH_SHARDS: number[] = (() => {
   const total = OG_RING_ORDER.length
   const out: number[] = []
   for (let k = 0; k < NOTCH_COUNT; k++) {
@@ -34,6 +37,31 @@ const NOTCH_SHARDS: number[] = (() => {
   }
   return Array.from(new Set(out))
 })()
+
+/** The carved ring's cut-outs as an SVG mask: white = ring material, black =
+ *  the centre hole and the NOTCH_COUNT grain-shaped notches. Fill a circle of
+ *  radius OG_RING_OUTER at (OG_RING_CX, OG_RING_CY) through it to get the ring.
+ *  The mask region is in user space with margin, so a filled piece that is
+ *  translated a few units (the assistant's breathing) keeps its cut-outs. */
+export const CarvedRingMask = ({ id }: { id: string }) => (
+  <mask id={id} maskUnits="userSpaceOnUse" x="40" y="-25" width="210" height="210">
+    <rect x="40" y="-25" width="210" height="210" fill="white" />
+    {/* centre hole */}
+    <circle cx={CX} cy={CY} r={OG_RING_INNER} fill="black" />
+    {/* grain-shaped notches, scaled about each shard's own centre */}
+    {OG_NOTCH_SHARDS.map((i) => {
+      const [mx, my] = OG_SHARD_CENTROIDS[i]
+      return (
+        <path
+          key={i}
+          d={OG_SHARDS[i]}
+          fill="black"
+          transform={`translate(${mx} ${my}) scale(${OG_NOTCH_SCALE}) translate(${-mx} ${-my})`}
+        />
+      )
+    })}
+  </mask>
+)
 
 export const OpenGroundMark = ({
   size = 16,
@@ -63,24 +91,8 @@ export const OpenGroundMark = ({
   if (size < SWAP_PX) {
     return (
       <svg {...common}>
-        <mask id={maskId}>
-          <rect x="60" y="-5" width="170" height="170" fill="white" />
-          {/* centre hole */}
-          <circle cx={CX} cy={CY} r={INNER} fill="black" />
-          {/* grain-shaped notches, scaled about each shard's own centre */}
-          {NOTCH_SHARDS.map((i) => {
-            const [mx, my] = OG_SHARD_CENTROIDS[i]
-            return (
-              <path
-                key={i}
-                d={OG_SHARDS[i]}
-                fill="black"
-                transform={`translate(${mx} ${my}) scale(${NOTCH_SCALE}) translate(${-mx} ${-my})`}
-              />
-            )
-          })}
-        </mask>
-        <circle cx={CX} cy={CY} r={OUTER} fill={color} mask={`url(#${maskId})`} />
+        <CarvedRingMask id={maskId} />
+        <circle cx={CX} cy={CY} r={OG_RING_OUTER} fill={color} mask={`url(#${maskId})`} />
       </svg>
     )
   }

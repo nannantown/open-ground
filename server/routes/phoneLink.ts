@@ -4,7 +4,26 @@
 import { Hono, type MiddlewareHandler } from 'hono'
 import { pushKeySaved, hasPhoneLinkAccess, pairPhone, pairingCode, phoneLinkStatus, readPhoneLinkConfig, unpairPhone } from '@/lib/server/phoneLink'
 import { savePushKey } from '@/lib/server/phonePush'
-import { readAssistantStyle, saveAssistantStyle } from '@/lib/server/phoneAssistant'
+import {
+  ASSISTANT_SAY_MAX,
+  AssistantFailure,
+  askAssistant,
+  assistantBusy,
+  plainAssistantError,
+  readAssistantStyle,
+  saveAssistantStyle,
+} from '@/lib/server/phoneAssistant'
+import {
+  clearAssistantLog,
+  clearAssistantMemory,
+  deleteAssistantEntry,
+  readAssistantConfig,
+  readAssistantLog,
+  readAssistantMemory,
+  saveAssistantConfig,
+} from '@/lib/server/assistantMemory'
+import { getPromptLang } from '@/lib/server/promptLang'
+import { isLockdownEnabledSync } from '@/lib/server/lockdown'
 import { hostIsLocal, originIsLocal } from '../loopback'
 
 // The pairing code is a WRITE credential (whoever holds it speaks as the owner),
@@ -39,6 +58,36 @@ export const phoneLinkRoutes = new Hono()
   .post('/api/phone-link/assistant-style', async (c) => {
     const r = await saveAssistantStyle(((await c.req.json().catch(() => ({}))) as { style?: unknown }).style)
     return 'error' in r ? c.json(r, 400) : c.json(await readAssistantStyle())
+  })
+  // The assistant's records, kept on this Mac only (assistantMemory.ts): the
+  // screen reads them here, the phone through the link (`assistant-history`).
+  .get('/api/phone-link/assistant/log', async (c) =>
+    c.json({ entries: await readAssistantLog(), memory: await readAssistantMemory(), ...(await readAssistantConfig()) }),
+  )
+  .delete('/api/phone-link/assistant/log', async (c) => (await clearAssistantLog(), c.json({ ok: true })))
+  .delete('/api/phone-link/assistant/log/:id', async (c) =>
+    (await deleteAssistantEntry(c.req.param('id'))) ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404),
+  )
+  .delete('/api/phone-link/assistant/memory', async (c) => (await clearAssistantMemory(), c.json({ ok: true })))
+  // How many days the log is kept, how long the memo may be.
+  .post('/api/phone-link/assistant/config', async (c) => {
+    const r = await saveAssistantConfig(await c.req.json().catch(() => ({})))
+    return 'error' in r ? c.json(r, 400) : c.json(r)
+  })
+  // Talk to the assistant from the screen: the same assistant, the same log.
+  .post('/api/phone-link/assistant/say', async (c) => {
+    const text = ((await c.req.json().catch(() => ({}))) as { text?: unknown }).text
+    const line = typeof text === 'string' ? text.trim() : ''
+    if (!line) return c.json({ error: 'empty' }, 400)
+    if (line.length > ASSISTANT_SAY_MAX) return c.json({ error: 'too-long', max: ASSISTANT_SAY_MAX }, 400)
+    if (isLockdownEnabledSync()) return c.json({ error: 'work-mode' }, 409)
+    if (assistantBusy()) return c.json({ error: 'busy' }, 429)
+    try {
+      return c.json(await askAssistant(line, { via: 'screen' }))
+    } catch (e) {
+      const f: AssistantFailure = plainAssistantError(e, await getPromptLang().catch(() => 'en' as const))
+      return c.json({ error: f.reason, detail: f.message }, f.reason === 'busy' ? 429 : 502)
+    }
   })
   // The owner's APNs key (Push to Talk), once. Stored 0600, never returned.
   .post('/api/phone-link/push-key', async (c) => {

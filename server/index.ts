@@ -33,7 +33,9 @@ import { startDailyFuelReportLoop } from '@/lib/server/dailyFuelReport'
 import { startBlogPublishLoop } from '@/lib/server/blogPublish'
 import { startOwnerDeskLimitLoop } from '@/lib/server/ownerDeskLimit'
 import { startSupplyContextCapLoop } from '@/lib/server/supplyContextCap'
-import { startPhoneLink } from '@/lib/server/phoneLink'
+import { isPhoneLinkPrimary, startPhoneLink } from '@/lib/server/phoneLink'
+import { foldIdleAssistantTalk } from '@/lib/server/phoneAssistant'
+import { pruneAssistantLog } from '@/lib/server/assistantMemory'
 import { startWorkerReapLoop } from '@/lib/server/swarmWorkerReaper'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
@@ -425,6 +427,21 @@ startSupplyContextCapLoop()
 // president desks from anywhere. Unpaired = nothing happens. Primary (:47776)
 // only — see isPhoneLinkPrimary.
 void startPhoneLink().catch(() => {})
+// The assistant's talk log is kept N days (assistantMemory.ts, owner decision
+// 2026-10-03): at boot and every hour, talk old enough is first folded into the
+// memo (a claude run only when there is any; primary instance only, so two
+// instances never fold the same lines), then days past the kept ones are deleted
+// (reads and saves delete them too).
+const keepAssistantMemory = async (): Promise<void> => {
+  // Settings first: work mode reads "off" until they are loaded once.
+  await getSettings()
+  // ONE run per tick (up to 16,000 characters, oldest first): an owner line never
+  // waits behind more than one, and a stuck fold is retried twice a day at most.
+  if (isPhoneLinkPrimary()) await foldIdleAssistantTalk().catch(() => false)
+  await pruneAssistantLog()
+}
+void keepAssistantMemory().catch(() => {})
+setInterval(() => void keepAssistantMemory().catch(() => {}), 3_600_000).unref()
 
 // FINISHED-WORKER REAP (swarmWorkerReaper.ts, owner request 2026-09-26): a swarm
 // worker whose branch is already in main and whose card is done (or that has

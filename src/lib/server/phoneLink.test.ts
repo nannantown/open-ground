@@ -29,6 +29,7 @@ import { AssistantFailure, askAssistant, __resetAssistantMemory } from './phoneA
 import { __testConnect, flushAssistantOutbox, flushPush, PUSH_GAP_MS, PUSH_RETRY_MAX, SAY_HOLD_MAX_MS, handlePhoneFrame, handleRelayFrame, phoneEventsFromLine, pumpTranscript, pairingCode, pairPhone, readPhoneLinkConfig, relayUrlAllowed, startPhoneLink, stopPhoneLink, unpairPhone, tick, __testLinkState } from './phoneLink'
 import { alreadyStored, asCursor, type Cursor, type PushTarget } from '../../../worker/src/phoneRelayAuth'
 import { setLockdownCache } from './lockdown'
+import { saveAssistantConfig } from './assistantMemory'
 import { openGroundHome } from './paths'
 import { phoneLinkRoutes } from '../../../server/routes/phoneLink'
 import { generateKeyPairSync } from 'node:crypto'
@@ -209,6 +210,22 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
     expect(f.selected).toBe('p1')
   })
 
+  it('carries the name and colour the owner gave it, and a plain name before that', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    const entry = () => (sent.at(-1) as { projects: { id: string; name: string; look?: string }[] }).projects[0]
+    try {
+      await handlePhoneFrame(st, { type: 'projects' })
+      expect(entry().name).not.toBe('')
+      expect(entry().look).toBe('verm')
+      await saveAssistantConfig({ name: 'ノノ', look: 'moss' })
+      await handlePhoneFrame(st, { type: 'projects' })
+      expect(entry()).toMatchObject({ id: 'assistant', name: 'ノノ', look: 'moss' })
+    } finally {
+      await saveAssistantConfig({ name: '', look: 'verm' })
+    }
+  })
+
   it('a say to it is answered to the phone and never typed into a president desk', async () => {
     const { sent, sock } = fakeSocket()
     const desk = fakeDesk()
@@ -232,6 +249,8 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
       ['assistant', 'assistant', 'alphaにカード積んだよ。'],
     ])
     expect(st.says.size).toBe(0) // the push hold is released once the answer is out
+    // The phone matches the echo to its say by id, not by the words.
+    expect(sent.find((f) => f.type === 'event' && f.kind === 'owner')?.id).toBe('a1')
   })
 
   it('an answer that finds the relay socket closed is sent once it is back, in order', async () => {
@@ -396,6 +415,140 @@ describe('pumpTranscript — the phone hears, in order, without replaying the pa
     ])
     appendFileSync(h.file, asst([{ type: 'text', text: '途中' }]).slice(0, 20)) // a half-written line waits
     expect(await pumpTranscript(st)).toBe(0)
+  })
+})
+
+describe('the owner echo carries the id of the phone say it came from', () => {
+  it('a phone say echoes with its id; words typed at the Mac have none; a resend keeps the id', async () => {
+    h.file = join(dir, 'say-id.jsonl')
+    writeFileSync(h.file, '')
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    await pumpTranscript(st)
+    // Same words twice from the phone: each echo gets its own say, in order.
+    for (const id of ['s1', 's2']) await handlePhoneFrame(st, { type: 'say', id, text: '/ 進めて ' }, { supply: fakeDesk().deps, wakeDesk: async () => null })
+    appendFileSync(h.file, [user('進めて'), user('Macで打った'), user('進めて')].join('\n') + '\n')
+    sock.readyState = 3 // the first try goes nowhere: the resend must carry the same ids
+    expect(await pumpTranscript(st)).toBe(0)
+    sock.readyState = 1
+    expect(await pumpTranscript(st)).toBe(3)
+    expect(sent.filter((f) => f.type === 'event').map((f) => [f.kind, f.text, f.id])).toEqual([
+      ['owner', '進めて', 's1'],
+      ['owner', 'Macで打った', undefined],
+      ['owner', '進めて', 's2'],
+    ])
+  })
+
+  it('claude drops lone invisible characters from the transcript: the echo still gets the id', async () => {
+    h.file = join(dir, 'say-id-invisible.jsonl')
+    writeFileSync(h.file, '')
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    await pumpTranscript(st)
+    for (const [id, text] of [['zw', '進め\u200bて'], ['ivs', '葛\u{E0100}']]) await handlePhoneFrame(st, { type: 'say', id, text }, { supply: fakeDesk().deps, wakeDesk: async () => null })
+    appendFileSync(h.file, [user('進めて'), user('葛')].join('\n') + '\n')
+    await pumpTranscript(st)
+    expect(sent.filter((f) => f.kind === 'owner').map((f) => f.id)).toEqual(['zw', 'ivs'])
+  })
+
+  it('emoji VS16 / ZWJ stay in the transcript: the echo still gets the id', async () => {
+    h.file = join(dir, 'say-id-emoji.jsonl')
+    writeFileSync(h.file, '')
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    await pumpTranscript(st)
+    const words = ['了解\u2764\uFE0F', '家族\u{1F468}\u200D\u{1F469}\u200D\u{1F467}']
+    for (let i = 0; i < words.length; i++) await handlePhoneFrame(st, { type: 'say', id: `e${i}`, text: words[i] }, { supply: fakeDesk().deps, wakeDesk: async () => null })
+    appendFileSync(h.file, words.map((w) => user(w)).join('\n') + '\n')
+    await pumpTranscript(st)
+    expect(sent.filter((f) => f.kind === 'owner').map((f) => f.id)).toEqual(['e0', 'e1'])
+  })
+
+  it('a say not echoed before work mode went on never lends its id to a later one', async () => {
+    h.file = join(dir, 'say-id-lockdown.jsonl')
+    writeFileSync(h.file, '')
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, Object.assign(sock, { terminate: () => {} }))
+    st.lastHeard = Date.now()
+    await pumpTranscript(st)
+    await handlePhoneFrame(st, { type: 'say', id: 'old', text: 'はい' }, { supply: fakeDesk().deps, wakeDesk: async () => null })
+    setLockdownCache(true)
+    await tick(st) // work mode: the link is cut and the tail forgotten
+    setLockdownCache(false)
+    sock.readyState = 1
+    await pumpTranscript(st)
+    await handlePhoneFrame(st, { type: 'say', id: 'new', text: 'はい' }, { supply: fakeDesk().deps, wakeDesk: async () => null })
+    appendFileSync(h.file, user('はい') + '\n')
+    await pumpTranscript(st)
+    expect(sent.filter((f) => f.kind === 'owner').map((f) => f.id)).toEqual(['new'])
+  })
+
+  it('a say the owner cleared from the box never lends its id to a later one with the same words', async () => {
+    h.file = join(dir, 'say-id-lost.jsonl')
+    writeFileSync(h.file, '')
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    let box = ''
+    let swallow = true // the Enter does not take, until the owner clears the box by hand
+    const desk = {
+      ...fakeDesk().deps,
+      screen: () => ['⏺ done.', '', '─'.repeat(40), `❯ ${box}`, '─'.repeat(40), '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n'),
+      write: (_id: string, data: string) => {
+        if (data !== '\r') box = data.replace(/\x1b\[20[01]~/g, '')
+        else if (!swallow) box = ''
+        return true
+      },
+    }
+    await pumpTranscript(st)
+    await handlePhoneFrame(st, { type: 'say', id: 'lost', text: 'はい' }, { supply: desk, wakeDesk: async () => null })
+    box = ''
+    swallow = false
+    await handlePhoneFrame(st, { type: 'say', id: 's2', text: 'はい' }, { supply: desk, wakeDesk: async () => null })
+    await flushSupplyNotices(desk)
+    appendFileSync(h.file, user('はい') + '\n')
+    await pumpTranscript(st)
+    expect(sent.filter((f) => f.state === 'delivered').map((f) => [f.id, f.heard])).toEqual([
+      ['lost', false],
+      ['s2', true],
+    ])
+    expect(sent.filter((f) => f.kind === 'owner').map((f) => f.id)).toEqual(['s2'])
+  })
+
+  it('switching projects drops the says to the one left that were not echoed yet', async () => {
+    h.projects = [
+      { id: 'p1', path: PROJECT },
+      { id: 'p2', path: '/repo/beta' },
+    ]
+    h.files = { [PROJECT]: join(dir, 'sw-a.jsonl'), '/repo/beta': join(dir, 'sw-b.jsonl') }
+    for (const f of Object.values(h.files)) writeFileSync(f, '')
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    await pumpTranscript(st)
+    await handlePhoneFrame(st, { type: 'say', id: 'never', text: 'はい' }, { supply: fakeDesk().deps, wakeDesk: async () => null }) // typed, not transcribed
+    await handlePhoneFrame(st, { type: 'select', projectId: 'p2' })
+    await handlePhoneFrame(st, { type: 'select', projectId: 'p1' })
+    await pumpTranscript(st)
+    appendFileSync(h.files[PROJECT], user('はい') + '\n') // typed at the Mac
+    await pumpTranscript(st)
+    expect(sent.filter((f) => f.kind === 'owner').map((f) => [f.projectId, f.id])).toEqual([['p1', undefined]])
+  })
+
+  it("another project's say never lends its id to this project's echo", async () => {
+    h.projects = [
+      { id: 'p1', path: PROJECT },
+      { id: 'p2', path: '/repo/beta' },
+    ]
+    h.files = { [PROJECT]: join(dir, 'pj-a.jsonl'), '/repo/beta': join(dir, 'pj-b.jsonl') }
+    for (const f of Object.values(h.files)) writeFileSync(f, '')
+    h.desk = true
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    await handlePhoneFrame(st, { type: 'say', id: 'beta', text: 'はい', projectId: 'p2' }, { supply: fakeDesk().deps, wakeDesk: async () => null })
+    h.projects = [{ id: 'p1', path: PROJECT }] // p2 unregistered: the link falls back to p1 without a select
+    await pumpTranscript(st)
+    appendFileSync(h.files[PROJECT], user('はい') + '\n') // typed at the Mac
+    await pumpTranscript(st)
+    expect(sent.filter((f) => f.kind === 'owner').map((f) => [f.projectId, f.id])).toEqual([['p1', undefined]])
   })
 })
 
@@ -1214,6 +1367,82 @@ describe('waking the phone with a Push to Talk push', () => {
       stopPhoneLink()
       rmSync(cfgFile(), { force: true })
       wss.close()
+    }
+  })
+
+  it('the Mac carries the app key that lets it create its room; without it the relay refuses and pairing fails', async () => {
+    // A relay that, like worker/src/phoneRelay.ts, creates a room only for a Mac
+    // with the app key, and lets the Mac that made it back in with its key alone.
+    const seen: (string | undefined)[] = []
+    const rooms = new Map<string, string>()
+    const wss = new WebSocketServer({
+      port: 0,
+      host: '127.0.0.1',
+      verifyClient: ({ req }, cb) => {
+        const app = req.headers['x-og-app-key'] as string | undefined
+        const mac = String(req.headers['x-og-token'])
+        seen.push(app)
+        const made = rooms.get(String(req.url))
+        if (made !== undefined) return cb(made === mac, 401)
+        if (app !== 'app-pass-1') return cb(false, 401)
+        rooms.set(String(req.url), mac)
+        cb(true)
+      },
+    })
+    await new Promise((r) => wss.once('listening', r))
+    process.env.OPENGROUND_PHONE_RELAY_URL = `http://127.0.0.1:${(wss.address() as AddressInfo).port}`
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      rmSync(cfgFile(), { force: true })
+      expect(await pairPhone()).toEqual({ error: 'relay-unreachable' })
+      expect(await readPhoneLinkConfig()).toBeNull()
+      // The relay answered 401: the log names the missing app key.
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('no OPENGROUND_PHONE_RELAY_APP_KEY'))).toBe(true)
+      warn.mockClear()
+      process.env.OPENGROUND_PHONE_RELAY_APP_KEY = 'app-pass-1'
+      expect(await pairPhone()).toHaveProperty('code')
+      expect(seen).toEqual([undefined, 'app-pass-1', ...seen.slice(2)])
+      // The link itself dials with it too.
+      await vi.waitFor(() => expect(wss.clients.size).toBe(1))
+      expect(seen.every((s, i) => i === 0 || s === 'app-pass-1')).toBe(true)
+      // Pairing again from a build the relay refuses keeps the pairing that works:
+      // the new room is asked for BEFORE the old one is unlinked.
+      const resets: unknown[] = []
+      wss.on('connection', (ws) => ws.on('message', (m) => String(m).includes('"reset"') && resets.push(m)))
+      const before = await readPhoneLinkConfig()
+      delete process.env.OPENGROUND_PHONE_RELAY_APP_KEY
+      expect(await pairPhone()).toEqual({ error: 'relay-unreachable' })
+      expect(await readPhoneLinkConfig()).toEqual(before)
+      await new Promise((r) => setTimeout(r, 100))
+      expect(resets).toEqual([])
+    } finally {
+      warn.mockRestore()
+      delete process.env.OPENGROUND_PHONE_RELAY_URL
+      delete process.env.OPENGROUND_PHONE_RELAY_APP_KEY
+      stopPhoneLink()
+      rmSync(cfgFile(), { force: true })
+      wss.close()
+    }
+  })
+
+  it('a relay that cannot be reached at all is not blamed on the missing app key', async () => {
+    // A port nobody listens on: connection refused, no HTTP answer at all.
+    const probe = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    await new Promise((r) => probe.once('listening', r))
+    const port = (probe.address() as AddressInfo).port
+    await new Promise((r) => probe.close(r))
+    process.env.OPENGROUND_PHONE_RELAY_URL = `http://127.0.0.1:${port}`
+    delete process.env.OPENGROUND_PHONE_RELAY_APP_KEY
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      rmSync(cfgFile(), { force: true })
+      expect(await pairPhone()).toEqual({ error: 'relay-unreachable' })
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('OPENGROUND_PHONE_RELAY_APP_KEY'))).toBe(false)
+    } finally {
+      warn.mockRestore()
+      delete process.env.OPENGROUND_PHONE_RELAY_URL
+      stopPhoneLink()
+      rmSync(cfgFile(), { force: true })
     }
   })
 

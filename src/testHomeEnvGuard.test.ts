@@ -1377,6 +1377,10 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'writes-elsewhere',
     why: 'Offline SDK CLI fixture: the caller pins HOME and capture to mkdtemp directories, and the fixture rejects canonical paths outside temporary roots before writing transcripts or captures.',
   },
+  'scripts/verify-assistant-memory.mts': {
+    tier: 'writes-elsewhere',
+    why: "manual real-claude check of the assistant's memory: only READS ~/.claude/history.jsonl (to show that no talk or memo was recorded there); every write goes to its own mkdtemp OPENGROUND_HOME under os.tmpdir(), removed at the end",
+  },
   'src/testHomeEnvGuard.test.ts': {
     tier: 'writes-elsewhere',
     why: "this scanner: quotes ~/.claude paths in the table above and in its own prose, and reads sources to check them. Its ONLY mutations are the repo-root listing fence's teeth — a mkdtemp under REPO_PROBE_PREFIX at the repo root, removed in a finally — so nothing it writes is under any home. Declared rather than exempted: the raw-write rule runs on this tier too, so it still cannot grow a write aimed at the real Claude home",

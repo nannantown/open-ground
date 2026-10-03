@@ -2,7 +2,15 @@
   // OPEN GROUND phone link relay (docs/PHONE_LINK.md) — a SEPARATE Worker from
   // og-collab (wrangler.jsonc), so deploying it never touches the collab rooms.
   //   deploy:  npx wrangler deploy -c wrangler.phone.jsonc   (from worker/)
-  // No secrets: rooms are keyed by the hash of the phone's key (phoneRelayAuth.ts).
+  // Rooms are keyed by the hash of the phone's key (phoneRelayAuth.ts).
+  // ONE secret, ROOM_CREATE_KEY — only a Mac sending it can create a room
+  // (mayCreateRoom in phoneRelay.ts; unset = nobody can). Set it with
+  //   npx wrangler secret put ROOM_CREATE_KEY -c wrangler.phone.jsonc
+  // and the SAME value as the open-ground repo secret OPENGROUND_PHONE_RELAY_APP_KEY
+  // (release builds bake it). Expiry (7 d events, 30 d idle rooms) and per-room
+  // caps: RELAY_LIMITS in phoneRelayAuth.ts — deliberately not a var here.
+  // compatibility_date must stay >= 2026-02-24: deleteAll() then drops the
+  // room's alarm too (reset / idle erase rely on it).
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "og-phone-relay",
   "main": "src/phoneRelay.ts",
@@ -12,5 +20,10 @@
   },
   // SQLite-backed: the only Durable Object storage the free plan allows.
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OgPhoneRelay"] }],
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  // ROLLOUT — delete this var (and deploy) once the owner's Mac runs a release
+  // that carries the app key: until then any Mac may still create a room, because
+  // re-pairing from an older build would otherwise lose the pairing (it unlinks
+  // the old room before making the new one). Removed = the gate is on.
+  "vars": { "ROOM_CREATE": "open" }
 }

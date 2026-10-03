@@ -185,8 +185,10 @@ Guard: `supplyNoticeOwnerSay.test.ts` (priority / no prefix / held while busy or
 mode characters / length cap / trailing backslash — red measured by mutation, 2026-10-01).
 
 The phone's **assistant** (2026-10-02, `phoneAssistant.ts`) does NOT use this lane: its talk never
-reaches a desk. Its only trace is a complete `todo` card it may write into a project (notes:
+reaches a desk. Its only trace in the engine is a complete `todo` card it may write into a project (notes:
 Goal / How the owner judges it / Done when / Final placement) — dispatched like any president card.
+(Its conversation is kept on the Mac in `~/.openground/assistant/` — a 30-day log and one fixed-size
+memo, `assistantMemory.ts`, docs/PHONE_LINK.md "What the assistant remembers" — which no engine path reads.)
 
 ### 1.8 Where the commander's own reports go (2026-09-23, owner decision)
 

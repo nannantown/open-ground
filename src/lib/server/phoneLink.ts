@@ -43,16 +43,26 @@ import { isSwarmLocalOwnerUnlocked } from './swarmGate'
 import { getCustomTabRole } from './roles'
 import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assistantBusy, plainAssistantError, type AssistantAnswer } from './phoneAssistant'
 import { langOf, pick } from './promptLang'
+import { e2eKeyOf, open as openSealed, seal, sealTag } from './phoneLinkSeal'
+import { readAssistantConfig, readAssistantLog, readAssistantMemory } from './assistantMemory'
 
 /** The relay the owner deployed (worker/wrangler.phone.jsonc). Override with
  *  OPENGROUND_PHONE_RELAY_URL at pairing time (tests, a self-hosted relay). */
 export const PHONE_RELAY_DEFAULT_URL = 'https://og-phone-relay.mindbrew.workers.dev'
 
 export interface PhoneLinkConfig {
-  v: 1
+  /** 2 = sealed (docs/PHONE_LINK.md "Sealed frames"); 1 = a plaintext pairing
+   *  from before 2026-10-03, honoured until LEGACY_V1_UNTIL. */
+  v: 1 | 2
   relayUrl: string
   macKey: string
   phoneKey: string
+  /** v2: the 32-byte end-to-end key (base64url). In the pairing code, never
+   *  sent to the relay. */
+  e2eKey?: string
+  /** v2: ids of phone frames accepted within SEALED_MAX_AGE_MS (id → its ts), so
+   *  a frame replayed by the relay is refused even across an app restart. */
+  seenIds?: Record<string, number>
   /** The project (registry UUID) whose president the phone hears. */
   projectId?: string
   /** Where reading of the current transcript began (`f` = project:file). A
@@ -66,6 +76,11 @@ export interface PhoneLinkConfig {
   /** Apple's last permanent refusal, for this token + key (fingerprint). While
    *  both are unchanged nothing is pushed and Settings says the wake is off. */
   pushRefused?: { reason: string; token: string; key: string }
+  /** v2: the phone fetched the assistant's records once (`assistant-history`),
+   *  so it knows the `assistant` frame: from then on the assistant's talk goes
+   *  out as that (sealed, passed on by the relay and never kept) instead of as
+   *  `event`s the relay keeps (sealed) for catch-up. */
+  assistantDirect?: boolean
 }
 
 export type PhoneEventKind = 'notice' | 'commander' | 'owner' | 'president'
@@ -75,6 +90,14 @@ export interface PhoneEvent {
   /** ms from the transcript line, when it has one. */
   at?: number
 }
+
+/** A plaintext (v1) pairing stops connecting after this: pair again to get v2. */
+export const LEGACY_V1_UNTIL = Date.parse('2026-11-30T00:00:00Z')
+/** A sealed phone frame whose ts is further than this from the Mac's clock is
+ *  refused (a say is answered `stale`): the relay cannot hold a say and use it later. */
+export const SEALED_MAX_AGE_MS = 5 * 60_000
+/** Content frames sealed on a v2 pairing (control frames stay plain). */
+const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history'])
 
 const EVENT_TEXT_MAX = 8000
 const TAIL_TICK_MS = 1000
@@ -115,15 +138,25 @@ const roomOf = (phoneKey: string): string => createHash('sha256').update(phoneKe
 const wsBase = (relayUrl: string): string => relayUrl.replace(/^http/, 'ws').replace(/\/+$/, '')
 export const roomUrl = (c: PhoneLinkConfig, role: 'mac' | 'phone'): string =>
   `${wsBase(c.relayUrl)}/v1/${roomOf(c.phoneKey)}/${role}`
+/** The Mac end's headers: its key, plus the app key that lets it create its room
+ *  (baked into release builds; only a NEW room needs it — an existing one,
+ *  even one emptied after 30 idle days, is entered with the Mac key alone).
+ *  Exported for tests. */
+export const macHeaders = (c: PhoneLinkConfig): Record<string, string> => {
+  const app = process.env.OPENGROUND_PHONE_RELAY_APP_KEY
+  return { 'X-OG-Token': c.macKey, ...(app ? { 'X-OG-App-Key': app } : {}) }
+}
 
 /** What the phone is given once (docs/PHONE_LINK.md §Pairing). */
 export const pairingCode = (c: PhoneLinkConfig): string =>
-  Buffer.from(JSON.stringify({ v: 1, url: roomUrl(c, 'phone'), key: c.phoneKey })).toString('base64url')
+  Buffer.from(
+    JSON.stringify(c.v === 2 ? { v: 2, url: roomUrl(c, 'phone'), key: c.phoneKey, e2e: c.e2eKey } : { v: 1, url: roomUrl(c, 'phone'), key: c.phoneKey }),
+  ).toString('base64url')
 
 export const readPhoneLinkConfig = async (): Promise<PhoneLinkConfig | null> => {
   try {
     const c = JSON.parse(await readFile(configFile(), 'utf8')) as PhoneLinkConfig
-    if (!(c?.v === 1 && c.relayUrl && relayUrlAllowed(c.relayUrl) && c.macKey && c.phoneKey)) return null
+    if (!((c?.v === 1 || (c?.v === 2 && e2eKeyOf(c.e2eKey))) && c.relayUrl && relayUrlAllowed(c.relayUrl) && c.macKey && c.phoneKey)) return null
     const { push, ...rest } = c
     const target = push && typeof push === 'object' ? asPushTarget(push as unknown as Record<string, unknown>) : null
     return target ? { ...rest, push: target } : rest
@@ -131,7 +164,15 @@ export const readPhoneLinkConfig = async (): Promise<PhoneLinkConfig | null> => 
     return null
   }
 }
-const writeConfig = (c: PhoneLinkConfig) => atomicWriteJson(configFile(), c, { mode: 0o600 })
+/** One write at a time, in call order: each goes through its own temp file, so
+ *  unchained renames could land out of order and an older snapshot (without a
+ *  just-seen phone frame id) could win on disk. */
+let configWrites: Promise<unknown> = Promise.resolve()
+const writeConfig = (c: PhoneLinkConfig): Promise<void> => {
+  const w = configWrites.then(() => atomicWriteJson(configFile(), c, { mode: 0o600 }))
+  configWrites = w.catch(() => {})
+  return w
+}
 
 // ── transcript → events ─────────────────────────────────────────────────────
 
@@ -252,6 +293,11 @@ interface LinkState {
    *  transcript position, so nothing else would ever send them). Sent by tick
    *  once the socket is back; capped at ASSISTANT_OUTBOX_MAX, oldest dropped. */
   assistantOutbox: Record<string, unknown>[]
+  /** The phone's say ids, so the desk's `owner` echo carries the id of the say
+   *  it came from (docs/PHONE_LINK.md `event`). `cur` = the transcript position
+   *  it was matched to, so a resend after a reconnect carries the same id.
+   *  Capped at SAY_IDS_MAX, oldest dropped. */
+  sayIds: { projectId: string; text: string; id: string; cur?: string }[]
 }
 
 declare global {
@@ -298,13 +344,48 @@ const newLinkState = (cfg: PhoneLinkConfig, ws: WebSocket | null): LinkState => 
   pushRetries: 0,
   says: new Set(),
   assistantOutbox: [],
+  sayIds: [],
 })
 
-const send = (st: LinkState, frame: unknown): boolean => {
+/** `cur.f` as the relay sees it: on v2 a keyed tag (the plain one names the
+ *  project and the session file), so the relay can still compare it. */
+const wireCurFile = (cfg: PhoneLinkConfig, f: string): string => {
+  const key = cfg.v === 2 ? e2eKeyOf(cfg.e2eKey) : null
+  return key ? sealTag(key, 'cur', f) : f
+}
+
+/** Every sealed Mac → phone frame carries `sent`: strictly increasing, so the
+ *  phone can tell an old `projects` the relay plays again from the newest. */
+let lastSent = 0
+const nextSent = (): number => (lastSent = Math.max(lastSent + 1, Date.now()))
+
+/** What the relay gets for a frame: on a v2 pairing a content frame keeps only
+ *  its `type` (routing) and an event its `cur` (resend dedupe, file tagged);
+ *  the rest is in `box`. Exported for tests. */
+export const outerFrame = (cfg: PhoneLinkConfig, frame: Record<string, unknown>): Record<string, unknown> | null => {
+  if (cfg.v !== 2 || !SEALED_TYPES.has(String(frame.type))) return frame
+  const key = e2eKeyOf(cfg.e2eKey)
+  if (!key) return null // fail closed: a v2 pairing never sends words in plain
+  const { cur: rawCur, ...inner } = frame
+  const cur = asCursor(rawCur)
+  inner.sent = nextSent()
+  // An event's own mark, inside (`id` stays the say id of an owner echo): the
+  // relay can re-send a stored event under a new `seq`, and the phone skips one
+  // whose `eid` it already read. From the transcript position, so a Mac resend
+  // of the same line carries the same `eid`.
+  // The assistant's own frames get one too (random: the relay never stores them,
+  // but a phone that hears one twice — a reconnect overlap — still skips it).
+  if (frame.type === 'event' || frame.type === 'assistant') inner.eid = cur ? sealTag(key, 'eid', `${cur.f}:${cur.o}:${cur.i}`) : randomBytes(16).toString('base64url')
+  return { type: frame.type, box: seal(key, 'm2p', inner), ...(cur ? { cur: { ...cur, f: sealTag(key, 'cur', cur.f) } } : {}) }
+}
+
+const send = (st: LinkState, frame: Record<string, unknown>): boolean => {
   // Work mode: nothing goes out — not even in the moment before tick cuts the
   // socket (an ack, a project list, the rest of a pump in flight).
   if (st.ws?.readyState !== WebSocket.OPEN || isLockdownEnabledSync()) return false
-  st.ws.send(JSON.stringify(frame))
+  const out = outerFrame(st.cfg, frame)
+  if (!out) return false
+  st.ws.send(JSON.stringify(out))
   return true
 }
 
@@ -338,7 +419,16 @@ const sendProjects = async (st: LinkState, force = false): Promise<void> => {
   const { all, chosen } = await selectedProject(st)
   // The assistant first: a talk partner of its own, never `selected` (its events
   // come whatever is selected — docs/PHONE_LINK.md "The assistant").
-  const assistant = { id: ASSISTANT_ID, name: pick(langOf(await getSettings()), { en: 'Assistant', ja: 'アシスタント' }), desk: false, assistant: true }
+  // Its name and colour are the owner's (Settings of the floating assistant —
+  // docs/ASSISTANT_DESIGN.md); unnamed, it is just "Assistant".
+  const look = await readAssistantConfig()
+  const assistant = {
+    id: ASSISTANT_ID,
+    name: look.name || pick(langOf(await getSettings()), { en: 'Assistant', ja: 'アシスタント' }),
+    look: look.look,
+    desk: false,
+    assistant: true,
+  }
   const frame = {
     type: 'projects',
     selected: chosen?.id ?? null,
@@ -358,6 +448,9 @@ const forgetTail = async (st: LinkState): Promise<void> => {
   st.tail = { offset: 0 }
   st.resume = undefined
   st.firstTail = false
+  // A say not echoed yet never will be now (project left, or work mode): left
+  // waiting, a later say with the same words would get its id.
+  st.sayIds = st.sayIds.filter((x) => x.cur)
   const { floor: _gone, ...rest } = st.cfg
   st.cfg = rest
   if (!st.retired) await writeConfig(st.cfg).catch(() => {})
@@ -461,7 +554,66 @@ export const pushKeySaved = async (): Promise<void> => {
 }
 
 const ASSISTANT_OUTBOX_MAX = 20
-const isAssistantAnswer = (f: Record<string, unknown>) => f.type === 'event' && f.kind === 'assistant'
+const SAY_IDS_MAX = 20
+
+/** Characters claude's transcript drops when they stand alone (zero-width
+ *  space, lone ZWJ, variation selectors incl. IVS, soft hyphen, LRM, tag
+ *  characters, U+3164 …, measured on a real claude PTY): gone from BOTH sides
+ *  before the words are compared, or the echo of such a say carries no id. */
+const INVISIBLE = new RegExp('[\\p{Cf}\\p{Default_Ignorable_Code_Point}]', 'gu')
+const sayKey = (s: string): string => clip(s.replace(INVISIBLE, ''))
+
+/** The id of the phone say an `owner` line at `cur` echoes, if any: the one
+ *  already matched to this position, else the oldest unmatched say of this
+ *  project with the same words (the Mac typed them; compared as sayKey). */
+const sayIdFor = (st: LinkState, projectId: string, text: string, cur: string): string | undefined => {
+  const key = sayKey(text)
+  const e =
+    st.sayIds.find((x) => x.cur === cur) ?? st.sayIds.find((x) => !x.cur && x.projectId === projectId && x.text === key)
+  if (e) e.cur = cur
+  return e?.id
+}
+
+const isAssistantAnswer = (f: Record<string, unknown>) => (f.type === 'event' || f.type === 'assistant') && f.kind === 'assistant'
+
+/** One line of the assistant's talk. Both shapes are sealed on v2 (outerFrame);
+ *  once the phone fetches records from the Mac it gets the `assistant` frame,
+ *  which the relay passes on without keeping. */
+const assistantTalk = (st: LinkState, kind: 'owner' | 'assistant', body: Record<string, unknown>, id?: string): Record<string, unknown> =>
+  st.cfg.v === 2 && st.cfg.assistantDirect
+    ? { type: 'assistant', kind, ...body, ...(id !== undefined ? { id } : {}) }
+    : { type: 'event', projectId: ASSISTANT_ID, kind, ...body, ...(id !== undefined ? { id } : {}) }
+
+/** The plain-text budget of one `assistant-history` page: sealed and base64'd
+ *  it stays under the relay's 64 KB Mac frame (memo at its 8000-character
+ *  maximum included). */
+const HISTORY_PAGE_BYTES = 40_000
+
+/** The phone fetches the assistant's records from the Mac (they are kept here
+ *  only): newest first, a page at a time (`before` = the oldest `at` it has),
+ *  the memo and the settings with the first page. v2 only — sealed by
+ *  outerFrame; a v1 (plaintext) pairing is told to pair again and gets none. */
+const assistantHistory = async (st: LinkState, f: Record<string, unknown>, id: string | undefined): Promise<void> => {
+  if (isLockdownEnabledSync()) return
+  if (st.cfg.v !== 2) return void send(st, { type: 'assistant-history', ...(id !== undefined ? { id } : {}), error: 'pair-again' })
+  if (!st.cfg.assistantDirect) {
+    st.cfg = { ...st.cfg, assistantDirect: true }
+    if (!st.retired) await writeConfig(st.cfg).catch(() => {})
+  }
+  const before = typeof f.before === 'number' ? f.before : undefined
+  const head = before === undefined ? { memory: await readAssistantMemory(), ...(await readAssistantConfig()) } : {}
+  const all = (await readAssistantLog()).filter((e) => before === undefined || e.at < before)
+  let bytes = Buffer.byteLength(JSON.stringify(head))
+  let from = all.length
+  while (from > 0) {
+    const size = Buffer.byteLength(JSON.stringify(all[from - 1])) + 1
+    if (from < all.length && bytes + size > HISTORY_PAGE_BYTES) break
+    bytes += size
+    from--
+  }
+  const page = { entries: all.slice(from), more: from > 0, ...head }
+  send(st, { type: 'assistant-history', ...(id !== undefined ? { id } : {}), ...page })
+}
 
 /** Send an assistant frame, or keep it for the next open socket (never under
  *  work mode: what is said then is never sent). What is kept goes first, so the
@@ -497,7 +649,7 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
   const hold = { at: Date.now() }
   st.says.add(hold)
   ack('queued', { projectId: ASSISTANT_ID })
-  sendAssistant(st, { type: 'event', projectId: ASSISTANT_ID, kind: 'owner', text: line, at: Date.now() }, deps)
+  sendAssistant(st, assistantTalk(st, 'owner', { text: line, at: Date.now() }, id), deps)
   // One final ack, whatever happens after the answer came back. The phone hears
   // plain words only (plainAssistantError), never an internal message.
   // Settings unreadable: English, but the final ack still goes.
@@ -510,7 +662,7 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
     return
   }
   ack('delivered', { projectId: ASSISTANT_ID, heard: true, ...(a.card ? { card: a.card } : {}) })
-  const sent = sendAssistant(st, { type: 'event', projectId: ASSISTANT_ID, kind: 'assistant', text: a.reply, at: Date.now() }, deps)
+  const sent = sendAssistant(st, assistantTalk(st, 'assistant', { text: a.reply, at: Date.now() }), deps)
   st.says.delete(hold)
   if (sent) owePush(st, deps)
   else void flushPush(st, deps).catch(() => {})
@@ -545,6 +697,7 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
     if (p.id === chosen?.id) return sendProjects(st, true)
     return selectProject(st, p.id)
   }
+  if (f.type === 'assistant-history') return assistantHistory(st, f, id)
   if (f.type !== 'say') return
   const text = typeof f.text === 'string' ? f.text : ''
   if (f.projectId === ASSISTANT_ID) return assistantSay(st, id, text, deps)
@@ -572,10 +725,15 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
     starting = true
   }
   ack('queued', { projectId: p.id, ...(starting ? { desk: 'starting' } : {}) })
+  const said: LinkState['sayIds'][number] | undefined = id !== undefined ? { projectId: p.id, text: sayKey(ownerSayLine(text)), id } : undefined
+  if (said) st.sayIds = [...st.sayIds, said].slice(-SAY_IDS_MAX)
   await queueSupplyOwnerSay(
     p.path,
     text,
     (heard) => {
+      // The box was found emptied (sent or cleared — unknown): not transcribed
+      // yet, so a later say with the same words must not get this id.
+      if (!heard && said && !said.cur) st.sayIds = st.sayIds.filter((x) => x !== said)
       ack('delivered', { projectId: p.id, heard })
       release()
     },
@@ -589,9 +747,65 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
 /** One frame from the relay: its own `resume` (the relay never forwards a phone
  *  frame of that type), else a phone frame. Exported for tests. */
 export const handleRelayFrame = async (st: LinkState, f: Record<string, unknown>, deps: PhoneLinkDeps = {}): Promise<void> => {
-  if (f.type !== 'resume') return handlePhoneFrame(st, f, deps)
-  st.resume = asCursor(f.cur)
-  st.resumeBy = 0
+  if (f.type === 'resume') {
+    st.resume = asCursor(f.cur)
+    st.resumeBy = 0
+    return
+  }
+  if (st.cfg.v !== 2 || f.type === 'push-token') return handlePhoneFrame(st, f, deps)
+  const key = e2eKeyOf(st.cfg.e2eKey)
+  const inner = key ? await unsealPhoneFrame(st, key, f) : null
+  if (inner) return handlePhoneFrame(st, inner, deps)
+}
+
+let lastDropWarn = 0
+
+/** A v2 phone frame, opened and checked — or null (dropped). Only what the
+ *  phone sealed with the pairing's key opens: a frame the relay made up, altered
+ *  or plays back from the Mac's own direction never does. Every frame must be
+ *  fresh (ts within SEALED_MAX_AGE_MS) and its id new — a replayed `select`
+ *  could otherwise steer the next say — and a say must name its project.
+ *  Logs never carry the content. */
+const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
+  const inner = openSealed(key, 'p2m', f.box)
+  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history')) {
+    // The relay can send these at will: one line a minute, never the frame.
+    if (Date.now() - lastDropWarn > 60_000) {
+      console.warn(
+        inner
+          ? '[phone-link] dropped a phone frame that opened but has an unexpected type'
+          : '[phone-link] dropped a phone frame that did not open with the pairing key',
+      )
+      lastDropWarn = Date.now()
+    }
+    return null
+  }
+  const id = typeof inner.id === 'string' && inner.id.length > 0 && inner.id.length <= 100 ? inner.id : null
+  if (!id) return null
+  const now = Date.now()
+  const ts = inner.ts
+  if (!(typeof ts === 'number' && Math.abs(now - ts) <= SEALED_MAX_AGE_MS)) {
+    if (inner.type === 'say') send(st, { type: 'ack', id, state: 'rejected', reason: 'stale' })
+    return null
+  }
+  const seen = Object.fromEntries(Object.entries(st.cfg.seenIds ?? {}).filter(([, t]) => typeof t === 'number' && now - t <= SEALED_MAX_AGE_MS))
+  if (id in seen) return null // a second time: the first one was answered
+  st.cfg = { ...st.cfg, seenIds: { ...seen, [id]: ts } }
+  // On disk before it acts: a restart right after must still know this id —
+  // when it cannot be saved, the frame is not acted on (fail closed).
+  if (st.retired) return null
+  try {
+    await writeConfig(st.cfg)
+  } catch {
+    // Not acted on — but a say is told so, or the phone waits for nothing.
+    if (inner.type === 'say') send(st, { type: 'ack', id, state: 'rejected', reason: 'mac-error' })
+    return null
+  }
+  if (inner.type === 'say' && typeof inner.projectId !== 'string') {
+    send(st, { type: 'ack', id, state: 'rejected', reason: 'no-project' })
+    return null
+  }
+  return inner
 }
 
 /** Read the selected president's transcript from the last offset and send
@@ -627,7 +841,9 @@ export const pumpTranscript = async (st: LinkState, deps: PhoneLinkDeps = {}): P
     await persistFloor(st, fid, 0)
   } else if (size < st.tail.offset) st.tail.offset = size
   if (st.resume !== undefined) {
-    const r = st.resume
+    // The relay speaks of the file by the tag it was sent under (v2).
+    const raw = st.resume
+    const r = raw && raw.f === wireCurFile(st.cfg, fid) ? { ...raw, f: fid } : raw
     st.resume = undefined
     st.pushFloor = r
     // Back to just after the newest event the relay stored — or, when it stored
@@ -660,7 +876,9 @@ export const pumpTranscript = async (st: LinkState, deps: PhoneLinkDeps = {}): P
     // '\n' never splits a UTF-8 character.
     const events = phoneEventsFromLine(buf.subarray(at, nl).toString('utf8'))
     for (let i = 0; i < events.length; i++) {
-      if (!send(st, { type: 'event', projectId: chosen.id, ...events[i], cur: { f: fid, o: base + at, i } })) return n
+      const ev = events[i]
+      const sayId = ev.kind === 'owner' ? sayIdFor(st, chosen.id, ev.text, `${fid}:${base + at}:${i}`) : undefined
+      if (!send(st, { type: 'event', projectId: chosen.id, ...ev, ...(sayId !== undefined ? { id: sayId } : {}), cur: { f: fid, o: base + at, i } })) return n
       n++
       // What the phone reads aloud wakes it (the owner's own words do not).
       if (events[i].kind !== 'owner' && !alreadyStored(st.pushFloor, { f: fid, o: base + at, i })) owePush(st, deps)
@@ -678,6 +896,8 @@ const later = (st: LinkState, ms: number) => {
 
 const connect = (st: LinkState): void => {
   if (st.stopped) return
+  // A plaintext pairing past its date: no more dialing, also on a running link.
+  if (st.cfg.v === 1 && Date.now() >= LEGACY_V1_UNTIL) return void (st.stopped = true)
   if (isLockdownEnabledSync()) {
     // Work mode refuses every non-Anthropic host; look again later — and what
     // is said meanwhile never leaves this Mac, not even once it is switched off.
@@ -686,7 +906,7 @@ const connect = (st: LinkState): void => {
     later(st, 60_000)
     return
   }
-  const ws = new WebSocket(roomUrl(st.cfg, 'mac'), { headers: { 'X-OG-Token': st.cfg.macKey } })
+  const ws = new WebSocket(roomUrl(st.cfg, 'mac'), { headers: macHeaders(st.cfg) })
   st.ws = ws
   ws.on('open', () => {
     st.backoff = 2000
@@ -726,8 +946,10 @@ const connect = (st: LinkState): void => {
     if (st.ws === ws) st.ws = null
     if (st.stopped) return
     // 4001 = another Mac end took the room (a second app on this pairing):
-    // do not snatch it straight back.
-    const wait = code === 4001 ? 60_000 : st.backoff
+    // do not snatch it straight back. 4029 = over the relay's per-minute limit:
+    // a quick redial would trip it again (push-ready / projects count) until the
+    // minute turns, so wait it out; the relay resumes us from its newest event.
+    const wait = code === 4001 || code === 4029 ? 60_000 : st.backoff
     later(st, wait)
     st.backoff = Math.min(Math.max(st.backoff * 2, wait), 60_000)
   })
@@ -786,7 +1008,7 @@ export const startPhoneLink = async (): Promise<boolean> => {
   stopPhoneLink()
   if (!isPhoneLinkPrimary()) return false
   const cfg = await readPhoneLinkConfig()
-  if (!cfg) return false
+  if (!cfg || (cfg.v === 1 && Date.now() >= LEGACY_V1_UNTIL)) return false
   // Warm the work-mode mirror first: isLockdownEnabledSync() reads false until
   // the first settings read, and at boot this can be the first one to finish.
   await getSettings()
@@ -807,6 +1029,8 @@ export const phoneLinkStatus = async () => {
     paired: cfg !== null,
     online: st?.ws?.readyState === WebSocket.OPEN,
     relayUrl: cfg?.relayUrl ?? null,
+    /** v2: the relay cannot read or forge what passes (false = pair again). */
+    sealed: cfg?.v === 2,
     projectId: cfg?.projectId ?? null,
     /** Push to Talk: the APNs key's ID once the owner entered it (never the key),
      *  and whether the phone handed over a token. */
@@ -821,22 +1045,23 @@ export const phoneLinkStatus = async () => {
 
 /** Open the room's Mac end once (5 s): `reset` erases and retires the room;
  *  otherwise this only registers the Mac key (the room keeps the first Mac key
- *  it sees). True when the relay did it — a reset of an already retired room
- *  (401) counts as done. */
-const dialRoom = (cfg: PhoneLinkConfig, reset: boolean): Promise<boolean> =>
+ *  it sees). `ok` when the relay did it — a reset of an already retired room
+ *  (401) counts as done. `status` is the HTTP status the relay refused the
+ *  upgrade with; absent for a network failure / DNS error / timeout / close. */
+const dialRoom = (cfg: PhoneLinkConfig, reset: boolean): Promise<{ ok: boolean; status?: number }> =>
   new Promise((resolve) => {
-    const ws = new WebSocket(roomUrl(cfg, 'mac'), { headers: { 'X-OG-Token': cfg.macKey } })
+    const ws = new WebSocket(roomUrl(cfg, 'mac'), { headers: macHeaders(cfg) })
     let settled = false
-    const done = (ok: boolean) => {
+    const done = (ok: boolean, status?: number) => {
       if (settled) return
       settled = true
       clearTimeout(t)
       ws.terminate()
-      resolve(ok)
+      resolve({ ok, status })
     }
     const t = setTimeout(() => done(false), 5000)
     ws.on('open', () => (reset ? ws.send(JSON.stringify({ type: 'reset' })) : done(true)))
-    ws.on('unexpected-response', (_req, res) => done(reset && res.statusCode === 401))
+    ws.on('unexpected-response', (_req, res) => done(reset && res.statusCode === 401, res.statusCode))
     ws.on('close', (code) => done(code === 1000))
     ws.on('error', () => done(false))
   })
@@ -865,14 +1090,24 @@ export const pairPhone = async (): Promise<{ code: string } | { error: PhoneLink
   const old = await readPhoneLinkConfig()
   stopPhoneLink()
   const cfg: PhoneLinkConfig = {
-    v: 1,
+    v: 2,
     relayUrl,
     macKey: key(),
     phoneKey: key(),
+    e2eKey: key(),
     ...(old?.projectId ? { projectId: old.projectId } : {}),
   }
-  // The old phone must be cut off before a new one is let in.
-  if ((old && !(await dialRoom(old, true))) || !(await dialRoom(cfg, false))) {
+  // The new room first (the relay may refuse it: no app key), then the old phone
+  // is cut off — and only then is the new code handed out. Either step failing
+  // leaves the old pairing as it was.
+  const made = await dialRoom(cfg, false)
+  if (!made.ok || (old && !(await dialRoom(old, true)).ok)) {
+    // A gated relay refuses a new room without the app key (401), which the
+    // owner sees only as "could not reach the relay": name that cause — but
+    // only when the relay really answered the NEW room with 401. A network
+    // failure, timeout or a failed reset of the old room says nothing about it.
+    if (made.status === 401 && !process.env.OPENGROUND_PHONE_RELAY_APP_KEY)
+      console.warn('[phone-link] pairing failed: the relay refused the new room (401) and this build has no OPENGROUND_PHONE_RELAY_APP_KEY — a relay with the gate on refuses new rooms without it (docs/PHONE_LINK.md "Security model")')
     await startPhoneLink()
     return { error: 'relay-unreachable' }
   }
@@ -889,7 +1124,7 @@ export const unpairPhone = async (): Promise<{ ok: true } | { error: PhoneLinkRe
   const old = await readPhoneLinkConfig()
   if (!old) return { ok: true }
   stopPhoneLink()
-  if (!(await dialRoom(old, true))) {
+  if (!(await dialRoom(old, true)).ok) {
     await startPhoneLink()
     return { error: 'relay-unreachable' }
   }

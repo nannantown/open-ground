@@ -22,7 +22,7 @@
 
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
-import { lstat, mkdir, stat, symlink, unlink } from 'fs/promises'
+import { lstat, mkdir, rm, stat, symlink, unlink } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { centralWorktreesDir, openGroundHome } from './paths'
@@ -32,6 +32,7 @@ import { projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
 import { stopAllDesksInDirAndWait, liveDeskOccupies } from './liveDesks'
+import { stopProcessesInDir } from './worktreeProcesses'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { shutdownWorkerSimulators } from './swarmSimulators'
 import { claudeDirName } from './claudeProjectDir'
@@ -567,6 +568,22 @@ export const ensureSwarmWorktreeForBranch = async (
     // fail with a stale-administrative-file error; prune clears the record
     // first (measured: without it, exit 128).
     await git(projectPath, ['worktree', 'prune'])
+    // DEBRIS AT THE ADDRESS (measured 2026-10-03, card d84bec79). A worker had
+    // started a dev server (vite) in its worktree; the quota teardown removed the
+    // worktree but not that process, and vite wrote `.vite/` straight back into
+    // the path. `git worktree add` refuses a non-empty directory, this function
+    // returned null, and dispatch minted a FRESH branch over the 4 commits the
+    // card already had. A directory with no `.git` is not a checkout (every
+    // worktree, live or with a pruned record, keeps its `.git` file): its files
+    // were written after the checkout was gone (the teardown WIP-commits the tree
+    // first), so clearing it loses nothing. Anything with a `.git` is left
+    // alone — unknown state.
+    if (
+      (await stat(dir).then((st) => st.isDirectory()).catch(() => false)) &&
+      !(await lstat(join(dir, '.git')).then(() => true).catch(() => false))
+    ) {
+      await rm(dir, { recursive: true, force: true })
+    }
     if ((await git(projectPath, ['worktree', 'add', dir, name])) === null) return null
     if (!(await stat(dir).then((st) => st.isDirectory()).catch(() => false))) return null
     await linkWorktreeNodeModules(projectPath, dir)
@@ -625,6 +642,9 @@ export const removeSwarmWorktree = async (
   // Idempotent: already gone on disk → treat as removed (still prune stale
   // worktree bookkeeping in the project's repo + any lingering trust entry).
   if (!(await stat(worktree).then(() => true).catch(() => false))) {
+    // A process that outlived an earlier removal still holds the vanished path as
+    // its cwd (and may write it back — the .vite debris of 02 §5.3b). Stop it too.
+    await stopProcessesInDir(worktree)
     await git(projectPath, ['worktree', 'prune'])
     removeClaudeFolderTrust(worktree)
     closeWorkerSimulators(worktree, claudeDirName(worktree))
@@ -673,6 +693,11 @@ export const removeSwarmWorktree = async (
       stillOccupied: true,
     }
   }
+  // The desk is gone; now whatever it started in the tree and left running (a
+  // detached `npm run dev`, a watcher) — selected by cwd inside this worktree only
+  // (worktreeProcesses.ts). Left alive, it outlives the removal by hours and
+  // refills the directory (02 §5.3b, measured 2026-10-03).
+  await stopProcessesInDir(worktree)
   // Drop the node_modules convenience symlink before removing: under a
   // `node_modules/` (trailing-slash) .gitignore — the dominant convention — the
   // SYMLINK reads as UNTRACKED (the pattern matches directories only), which

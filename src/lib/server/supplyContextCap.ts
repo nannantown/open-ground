@@ -95,6 +95,17 @@ declare global {
   var __openground_supply_context_cap: SupplyCapState | undefined
   // eslint-disable-next-line no-var
   var __openground_supply_context_cap_timer: ReturnType<typeof setInterval> | null | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_context_cap_inflight: Set<Promise<unknown>> | undefined
+}
+
+/** Passes a tick started that have not finished yet — clearing the timer does
+ *  not stop them, so {@link stopSupplyContextCapLoop} waits for these. */
+const inFlightPasses: Set<Promise<unknown>> =
+  globalThis.__openground_supply_context_cap_inflight ?? (globalThis.__openground_supply_context_cap_inflight = new Set())
+const track = (p: Promise<unknown>): void => {
+  const settled = p.catch(() => {}).finally(() => inFlightPasses.delete(settled))
+  inFlightPasses.add(settled)
 }
 
 const state: SupplyCapState =
@@ -171,20 +182,24 @@ export const startSupplyContextCapLoop = (intervalMs: number = SUPPLY_CONTEXT_CA
     // for the channel also forbade adding polling, and this is already the pass
     // that walks every live supply desk. Delivery on the happy path happened
     // inline at queue time; this is only the retry.
-    void catchUpSupplyDesks().catch(() => {})
+    track(catchUpSupplyDesks())
     // Backstop for the commander question lane (commanderQuestions.ts): a
     // question held inside the company must reach someone even with no engine
     // running to carry its sweep.
-    void kickAllCommanderQuestionSweeps()
-    void runSupplyContextCapPass().catch(() => {})
+    track(kickAllCommanderQuestionSweeps())
+    track(runSupplyContextCapPass())
   }, intervalMs)
   ;(timer as { unref?: () => void }).unref?.()
   globalThis.__openground_supply_context_cap_timer = timer
 }
 
-export const stopSupplyContextCapLoop = (): void => {
+/** Stop the loop. The returned promise settles once every pass already
+ *  started has finished (they keep writing — a paste's Enter, the saved queue —
+ *  after the timer is cleared). Fire-and-forget callers may ignore it. */
+export const stopSupplyContextCapLoop = async (): Promise<void> => {
   if (globalThis.__openground_supply_context_cap_timer) {
     clearInterval(globalThis.__openground_supply_context_cap_timer)
     globalThis.__openground_supply_context_cap_timer = null
   }
+  while (inFlightPasses.size) await Promise.all(Array.from(inFlightPasses))
 }

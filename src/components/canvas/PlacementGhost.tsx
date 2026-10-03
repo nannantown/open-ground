@@ -1,5 +1,6 @@
 import { useEffect, useState, type RefObject } from 'react'
 import { useT } from '@/i18n/I18nContext'
+import { isInAssistantWindow } from '@/components/assistant/assistantWindow'
 
 // Ground card box (InfiniteCanvas CARD_W × CARD_H) — the ghost is drawn at the
 // card's real on-screen size so what you see is where it lands.
@@ -47,6 +48,8 @@ export function PlacementGhost({ name, zoom, groundRef, onPlace, onCancel }: Pro
       // palette — the shared [data-esc-overlay] contract) opened mid-placement.
       const el = e.target instanceof HTMLElement ? e.target : null
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
+      // …or to the floating assistant's window (its keys are its own).
+      if (isInAssistantWindow(el)) return
       if (document.querySelector('[data-esc-overlay]')) return
       e.preventDefault()
       e.stopPropagation()

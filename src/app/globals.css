@@ -510,6 +510,64 @@ a:focus-visible {
 .eq-bars > span:nth-child(2) { animation-delay: -0.9s; }
 .eq-bars > span:nth-child(3) { animation-delay: -0.2s; }
 
+/* The floating assistant's character (AssistantMark.tsx, docs/ASSISTANT_DESIGN.md):
+   the app icon's carved ring, drawn as 4 pieces, each moving on its own —
+   small, never showy.
+   - breathe: every piece drifts out along its own radius and back (4.2 s), a
+     little behind the one before it round the ring, so the ring opens and
+     closes like a breath rather than pulsing as one block.
+   - blink: once every 7 s the ring closes in for a moment.
+   - think: a light in the owner's colour runs round the pieces (1.2 s a lap).
+   - off: still. Reduced motion: still. */
+.og-ast-shard {
+  fill: rgb(var(--og-ink));
+  animation: og-ast-breathe 4.2s ease-in-out infinite;
+  animation-delay: calc(var(--k) * 0.24s);
+}
+.og-ast-shard.is-lead {
+  fill: var(--og-ast-look);
+}
+.og-ast-blink {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  animation: og-ast-blink 7s ease-in-out infinite;
+}
+.og-ast[data-mode='think'] .og-ast-shard {
+  animation:
+    og-ast-breathe 4.2s ease-in-out infinite,
+    og-ast-glow 1.2s linear infinite;
+  animation-delay: calc(var(--k) * 0.24s), calc(var(--k) * 0.3s - 1.2s);
+}
+.og-ast[data-mode='off'] .og-ast-shard,
+.og-ast[data-mode='off'] .og-ast-blink {
+  animation: none;
+}
+@keyframes og-ast-breathe {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(calc(var(--dx) * 4px), calc(var(--dy) * 4px)); }
+}
+@keyframes og-ast-blink {
+  0%, 93%, 100% { transform: scale(1); }
+  95.5% { transform: scale(0.93); }
+}
+/* The running light also lifts its shard out of the dimmed rest, so it still
+   reads when the owner's colour is ink itself. */
+@keyframes og-ast-glow {
+  0% { fill: var(--og-ast-look); opacity: 1; }
+  35%, 100% { fill: rgb(var(--og-ink)); opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .og-ast-shard,
+  .og-ast-blink,
+  .og-ast[data-mode='think'] .og-ast-shard {
+    animation: none;
+  }
+  /* Still while thinking: the mark dims, its coloured shard stays lit. */
+  .og-ast[data-mode='think'] .og-ast-shard:not(.is-lead) {
+    opacity: 0.45;
+  }
+}
+
 /* Respect reduced-motion: the status beacons (terminal pulse, the claude /
    swarm-worker scanning edge, the running dot, the playing EQ bars) are status
    hints, never load-bearing — so honour the OS "reduce motion" preference by

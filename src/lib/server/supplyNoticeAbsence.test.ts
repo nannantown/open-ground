@@ -79,7 +79,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  stopSupplyContextCapLoop()
+  await stopSupplyContextCapLoop()
   vi.useRealTimers()
   await rm(home, { recursive: true, force: true })
   // NEVER unset — an empty OPENGROUND_HOME resolves to the REAL ~/.openground.
@@ -96,7 +96,7 @@ const runLoopUntil = async (cond: () => void) => {
   try {
     await vi.waitFor(cond, { timeout: 10_000, interval: 20 })
   } finally {
-    stopSupplyContextCapLoop()
+    await stopSupplyContextCapLoop()
     await catchUpSupplyDesks()
   }
 }
@@ -104,7 +104,7 @@ const runLoopUntil = async (cond: () => void) => {
 const runLoopFor = async (ms: number) => {
   startSupplyContextCapLoop(10)
   await new Promise((r) => setTimeout(r, ms))
-  stopSupplyContextCapLoop()
+  await stopSupplyContextCapLoop()
   await catchUpSupplyDesks()
 }
 const told = () => writes.map(([, l]) => l).join('\n')

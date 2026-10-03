@@ -242,6 +242,8 @@ for (const key of [
   // tests stub these per case; vi.unstubAllEnvs() restores "unset".
   'OPENGROUND_REALTIME',
   'OPENGROUND_COLLAB_WS_URL',
+  // The phone-link app key: baked like the two above, read lazily by phoneLink.ts.
+  'OPENGROUND_PHONE_RELAY_APP_KEY',
 ]) {
   // Guard the guard: this list must never grow to include a home var. Unsetting
   // OPENGROUND_HOME makes openGroundHome() fall back to the user's REAL

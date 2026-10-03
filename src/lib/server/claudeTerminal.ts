@@ -113,6 +113,11 @@ export interface LaunchClaudeOpts {
   // via --append-system-prompt. Set false for utility sessions whose output is
   // marker-scraped and must not drift (generateDescription).
   appContext?: boolean
+  // Text for --append-system-prompt INSTEAD of the app context. Unlike the
+  // positional prompt, it is not written to claude's prompt history
+  // (~/.claude/history.jsonl, kept with no time limit) — the phone assistant
+  // puts the owner's talk and long-term memo here so they expire as promised.
+  systemPrompt?: string
   // Pass `--strict-mcp-config` so claude loads ONLY explicitly-passed MCP config
   // and IGNORES the user-scope `~/.claude.json` `mcpServers` (+ project `.mcp.json`).
   // Set TRUE on OG's NON-sandboxed, auto-triggered utility sessions
@@ -569,10 +574,10 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   // App context (default ON) — rides --append-system-prompt via the same
   // file trick. The file must outlive the shell's `cat` at launch only.
   let contextFilePath: string | null = null
-  if (opts.appContext !== false) {
+  if (opts.systemPrompt || opts.appContext !== false) {
     const port = Number(process.env.PORT) || 47776
     contextFilePath = join(mkdtempSync(join(tmpdir(), 'openground-ctx-')), 'context.md')
-    writeFileSync(contextFilePath, buildAppContextPrompt(opts.cwd, port))
+    writeFileSync(contextFilePath, opts.systemPrompt || buildAppContextPrompt(opts.cwd, port), { mode: 0o600 })
     const f = contextFilePath
     setTimeout(() => { rm(f, { force: true }, () => {}) }, 60_000)
   }

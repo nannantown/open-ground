@@ -274,6 +274,21 @@ describe('POST /api/swarm/worker — the card is claimed BEFORE the worker spawn
     expect((await cardNow('c1'))?.boardColumn).toBe('blocked')
   })
 
+  // 2026-10-03 (docs/commander/02 §5.3b): re-entry failed on a branch that may hold
+  // work ⇒ never a fresh branch stamped over it. This fixture is a plain tmpdir, so
+  // re-entry fails and the commit count is unreadable — which the guard reads as
+  // "holds work" (a git hiccup must not read as "nothing there").
+  it('refuses (409) a todo card whose branch it cannot re-enter, hands it back, spawns nothing', async () => {
+    await seedCard({ id: 'c1', branch: 'swarm/has-work' })
+
+    const res = await app.request('/api/swarm/worker', json({ path: proj, taskId: 'c1' }))
+    expect(res.status).toBe(409)
+    expect(spawnCalls).toHaveLength(0)
+    const after = await cardNow('c1')
+    expect(after?.boardColumn).toBe('todo') // the claim was released
+    expect(after?.branch).toBe('swarm/has-work') // no fresh branch over the work
+  })
+
   it('a title-only spawn (no card) never touches the board', async () => {
     const res = await app.request('/api/swarm/worker', json({ path: proj, title: 'no card' }))
     expect(res.status).toBe(200)

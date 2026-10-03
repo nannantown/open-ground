@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { execFile as execFileCb } from 'child_process'
+import { execFile as execFileCb, spawn } from 'child_process'
 import { promisify } from 'util'
 import { mkdtemp, mkdir, rm, realpath, writeFile, stat, symlink } from 'fs/promises'
 import { tmpdir } from 'os'
@@ -231,6 +231,25 @@ describe('cleanProjectWorktrees', () => {
     const again = await cleanProjectWorktrees(dir)
     expect(again.removed).toEqual([])
     expect(again.skippedDirty.sort()).toEqual([dirtyModified, dirtyUntracked].sort())
+  })
+
+  // 「掃除」 goes through here, not removeSwarmWorktree — it must stop a dev server
+  // left running in the tree just the same (02 §5.3b).
+  it.skipIf(process.platform === 'win32')('stops a detached process left running in a removed worktree', async () => {
+    const { dir, central } = await makeProject()
+    const clean = await addCentralWorktree(dir, central, 'task-p', 'task/p')
+    const c = spawn('sleep', ['300'], { cwd: clean, detached: true, stdio: 'ignore' })
+    try {
+      expect((await cleanProjectWorktrees(dir)).removed).toEqual([clean])
+      const exited = await new Promise<boolean>((res) => {
+        if (c.exitCode !== null || c.signalCode !== null) return res(true)
+        const t = setTimeout(() => res(false), 5_000)
+        c.once('exit', () => (clearTimeout(t), res(true)))
+      })
+      expect(exited).toBe(true)
+    } finally {
+      c.kill('SIGKILL')
+    }
   })
 
   it('no central worktrees → { removed: [], skippedDirty: [] }', async () => {

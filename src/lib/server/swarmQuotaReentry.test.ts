@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { runDispatchPass, __seedEngineForTests } from './swarmOrchestrator'
-import type { ProjectTask, SpawnSwarmWorkerResponse } from '@/lib/types'
+import type { ProjectTask, SpawnSwarmWorkerResponse, SwarmFatalNotification } from '@/lib/types'
 
 // THE ORPHANED COMMITS (measured 2026-08-04).
 //
@@ -137,6 +137,148 @@ describe('quota re-entry — a requeued card goes back to its own work', () => {
 
     expect(h.spawned).toEqual([{ worktree: undefined }])
     expect(h.board.get('a')?.boardColumn).toBe('doing')
+  })
+
+  // 2026-10-03 (card d84bec79): the fresh fallback above is only safe when the
+  // branch holds nothing. With commits on it, a fresh dispatch orphans them.
+  it('a branch WITH commits that cannot be re-entered is never replaced by a fresh one', async () => {
+    const engine = engineLiteral('/proj-unreenterable')
+    __seedEngineForTests(engine)
+    const parked: string[] = []
+    const h = harness([card({ id: 'a', branch: 'swarm/has-work' })], {})
+    const deps = {
+      ...(h.deps as object),
+      countCommitsAhead: async () => 4,
+      recoverCard: async (_p: string, id: string, column: 'todo' | 'blocked') => {
+        parked.push(`${id}:${column}`)
+        h.board.set(id, { ...h.board.get(id)!, boardColumn: column })
+        return true
+      },
+    } as never
+
+    await runDispatchPass(engine, deps)
+    await runDispatchPass(engine, deps)
+    // Two passes: still todo, still its own branch, nothing spawned — retried, not replaced.
+    expect(h.spawned).toEqual([])
+    expect(h.branchStamps).toEqual([])
+    expect(h.board.get('a')).toMatchObject({ boardColumn: 'todo', branch: 'swarm/has-work' })
+
+    await runDispatchPass(engine, deps)
+    // Third: parked for a human, the branch still untouched.
+    expect(h.spawned).toEqual([])
+    expect(parked).toEqual(['a:blocked'])
+    expect(h.board.get('a')).toMatchObject({ boardColumn: 'blocked', branch: 'swarm/has-work' })
+  })
+
+  it('the park rings the bell with the branch holding the work and the way out', async () => {
+    const engine = engineLiteral('/proj-park-bell')
+    __seedEngineForTests(engine)
+    const bells: SwarmFatalNotification[] = []
+    const h = harness([card({ id: 'a', branch: 'swarm/has-work' })], {})
+    const deps = {
+      ...(h.deps as object),
+      countCommitsAhead: async () => 4,
+      notify: (n: SwarmFatalNotification) => bells.push(n),
+    } as never
+
+    await runDispatchPass(engine, deps)
+    await runDispatchPass(engine, deps)
+    expect(bells).toEqual([]) // retries are quiet
+    await runDispatchPass(engine, deps)
+
+    expect(bells).toHaveLength(1)
+    expect(bells[0]).toMatchObject({ event: 'reentry-failed', taskId: 'a', branch: 'swarm/has-work' })
+    expect(bells[0].detail).toContain('保留') // plain words for the owner…
+    expect(bells[0].detail).not.toMatch(/branch|ブランチ|\.git|swarm\//)
+    expect(bells[0].logHint).toContain('社長に') // the owner talks to the president only
+    expect(bells[0].logHint).toContain('swarm/has-work') // …the technical way out after
+    expect(bells[0].logHint).toContain('card.branch を外して')
+    expect(bells[0].logHint).toContain('フォルダ')
+  })
+
+  // `picks` is a snapshot taken before the reservation; re-entry must read the
+  // card off the FRESH re-read. Here the snapshot has no branch yet, the board does.
+  it('re-entry reads the branch off the fresh board read, not the pick snapshot', async () => {
+    const engine = engineLiteral('/proj-fresh-read')
+    __seedEngineForTests(engine)
+    const h = harness([card({ id: 'a', branch: 'swarm/has-work' })], {})
+    let reads = 0
+    const deps = {
+      ...(h.deps as object),
+      countCommitsAhead: async () => 4,
+      fetchTasks: async () =>
+        ++reads === 1
+          ? Array.from(h.board.values()).map((t) => ({ ...t, branch: undefined }))
+          : Array.from(h.board.values()),
+    } as never
+
+    await runDispatchPass(engine, deps)
+
+    // A read off the snapshot sees no branch and mints a fresh one over 4 commits.
+    expect(h.spawned).toEqual([])
+    expect(h.board.get('a')).toMatchObject({ boardColumn: 'todo', branch: 'swarm/has-work' })
+  })
+
+  it('…and the resolver is handed the fresh card, so it re-enters the worktree', async () => {
+    const engine = engineLiteral('/proj-fresh-resolve')
+    __seedEngineForTests(engine)
+    const h = harness([card({ id: 'a', branch: 'swarm/existing' })], { 'swarm/existing': '/wt/existing' })
+    let reads = 0
+    const deps = {
+      ...(h.deps as object),
+      fetchTasks: async () =>
+        ++reads === 1
+          ? Array.from(h.board.values()).map((t) => ({ ...t, branch: undefined }))
+          : Array.from(h.board.values()),
+    } as never
+
+    await runDispatchPass(engine, deps)
+
+    expect(h.spawned).toEqual([{ worktree: '/wt/existing' }])
+  })
+
+  it('a branch git reports GONE (deleted) still dispatches fresh', async () => {
+    const engine = engineLiteral('/proj-deleted')
+    __seedEngineForTests(engine)
+    const h = harness([card({ id: 'a', branch: 'swarm/deleted' })], {})
+    const deps = { ...(h.deps as object), countCommitsAhead: async () => null, branchExists: async () => false } as never
+
+    await runDispatchPass(engine, deps)
+
+    expect(h.spawned).toEqual([{ worktree: undefined }])
+  })
+
+  it('an UNREADABLE count (git hiccup) is held, not read as "nothing there"', async () => {
+    const engine = engineLiteral('/proj-hiccup')
+    __seedEngineForTests(engine)
+    const h = harness([card({ id: 'a', branch: 'swarm/has-work' })], {})
+    const deps = { ...(h.deps as object), countCommitsAhead: async () => null, branchExists: async () => null } as never
+
+    await runDispatchPass(engine, deps)
+
+    expect(h.spawned).toEqual([])
+    expect(h.board.get('a')).toMatchObject({ boardColumn: 'todo', branch: 'swarm/has-work' })
+  })
+
+  it('a card that left todo between failures starts its count over', async () => {
+    const engine = engineLiteral('/proj-count-reset')
+    __seedEngineForTests(engine)
+    const parked: string[] = []
+    const h = harness([card({ id: 'a', branch: 'swarm/has-work' })], {})
+    const deps = {
+      ...(h.deps as object),
+      countCommitsAhead: async () => 2,
+      recoverCard: async (_p: string, id: string, column: string) => (parked.push(`${id}:${column}`), true),
+    } as never
+
+    await runDispatchPass(engine, deps)
+    await runDispatchPass(engine, deps) // 2 failures
+    h.board.set('a', { ...h.board.get('a')!, boardColumn: 'blocked' }) // the owner moves it away…
+    await runDispatchPass(engine, deps)
+    h.board.set('a', { ...h.board.get('a')!, boardColumn: 'todo' }) // …and back
+    await runDispatchPass(engine, deps)
+
+    expect(parked).toEqual([]) // one fresh failure, not the third of the old run
   })
 })
 

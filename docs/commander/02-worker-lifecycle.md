@@ -577,7 +577,7 @@ same shape hits a quota requeue whose previous worker had beaten ready.
    `commitsAhead>0` rule parks the card in `blocked` with the old work intact.
 
 First dispatches (no `card.branch`, or a branch that could not be re-entered and
-fell back to a fresh one) are not marked, so their promote is unchanged.
+holds no commits, so it fell back to a fresh one — see §5.3b) are not marked, so their promote is unchanged.
 `reenteredAt` is persisted in the roster (`RosterEntry.reenteredAt`, epoch ms) and
 `adoptResumeCandidates` restores it onto the resumed worker, so a restart's
 `--resume` keeps the guard.
@@ -630,6 +630,82 @@ previous worker's question for a re-entered worker" (red measured).
 Since the re-entering spawn deletes the inherited file, `/api/swarm/workers`
 (display) shows no heartbeat for the row until the new worker beats (it only shows
 an inherited one if that delete failed).
+
+### 5.3b Re-entry never falls back to a fresh branch over commits (2026-10-03)
+
+**Symptom (measured 2026-10-03, card d84bec79).** The FIRST quota requeue of a
+card dispatched fresh (`06:18:08 dispatch → …151808`, no 「前回の作業場に戻ります」,
+`card.branch` overwritten) although its branch `…145418` held 4 commits; later
+requeues of the new branch re-entered fine. **Cause:** the worker had started a dev
+server (concurrently + tsx watch + vite) inside its worktree. The quota teardown
+removed the worktree but not that process, and vite wrote `.vite/` straight back
+into the old path. `git worktree add <dir> <branch>` refuses a non-empty directory,
+`ensureSwarmWorktreeForBranch` returned null, and dispatch took the fresh path.
+(The later 1-minute workers never started a server, so their paths stayed empty.)
+
+**Four layers now:**
+1. **The source.** `stopProcessesInDir` (worktreeProcesses.ts) runs before
+   `git worktree remove` in both removal doors: `removeSwarmWorktree` (swarmWorker.ts
+   — quota/crash reclaim, abandon, the finished-worker reaper, the commander's
+   post-merge sweep; after the desk session is stopped, and also on the already-gone
+   path, since lsof still reports a deleted cwd) and `cleanProjectWorktrees`
+   (worktreeCleanup.ts — 「掃除」; after the dirty / live-desk skips). It stops a
+   process only when BOTH hold: its cwd is the worktree or under it (`lsof -d cwd
+   -Fpn`, matched in the raw AND realpath form), and NEITHER it NOR ANY DESCENDANT
+   has a controlling terminal (one `ps -axo pid=,ppid=,tty=`; `??` / `?` = none). A
+   shell the owner `cd`'d into the worktree (Terminal.app / iTerm / VS Code / an OG
+   terminal pane) has a TTY itself. A program that HOLDS terminals may not: a tmux
+   server is TTY-less, keeps the folder it was first started in as its cwd, and runs
+   every session on a pty (reviewer-measured) — stopping it would kill all of them,
+   hence the descendant rule. SDK workers run TTY-less, so what their Bash tool left
+   behind (a detached dev server and its children) has no terminal anywhere. Never
+   the OG server's own pid. SIGTERM, then SIGKILL after 3 s. Each probe is capped at
+   ~10 s; a probe that timed out or died on a signal is discarded whole (a cut-off
+   path line could match a neighbouring folder) — only lsof's exit 1 (some
+   processes unreadable) keeps its stdout. Unreadable ⇒ stop nothing, teardown goes
+   on. 「掃除」 reads the lsof table once per sweep. No-op on Windows (no lsof).
+2. `ensureSwarmWorktreeForBranch` (swarmWorker.ts) clears the directory at the
+   branch's worktree address when it holds no `.git` — that is debris written
+   after the checkout was gone (every worktree, live or with a pruned record, keeps
+   its `.git` file; the teardown WIP-commits the tree first). A directory with a
+   `.git` is left alone (null).
+3. `runDispatchPass`: when re-entry still returns null but `countCommitsAhead` on
+   `card.branch` (read off the FRESH re-read, not the `picks` snapshot) is > 0, the
+   card is NOT dispatched fresh. It stays in `todo` and is retried next pass (warn
+   「前回の作業場に戻れませんでした(n/3)」); after `REENTRY_MAX_FAILURES` (3)
+   consecutive failures it is parked in `blocked` with the branch untouched (error
+   line) and the bell rings: fatal notification `reentry-failed` — `detail` in plain
+   words for the owner (the card is on hold, the work is kept); `logHint` opens with
+   "ask the president (社長)" — the only seat the owner talks to — then
+   adds the commander's way out: the branch and its commit count, clear a
+   `.git`-less folder at the old worktree path and put the card back in todo, or
+   remove `card.branch` to start fresh (that branch's commits are then not carried
+   over). "Holds work" is `cardBranchHoldsWork`: count
+   > 0, OR count unreadable (null) unless `git branch --list` positively says the
+   branch is gone — a git hiccup must not read as "nothing there". Only 0 commits
+   ahead or a provably deleted branch dispatches fresh, as before. Counter:
+   `engine.reentryFailures` (in-memory; a card that leaves todo starts over).
+4. The manual/commander door `POST /api/swarm/worker` applies the same
+   `cardBranchHoldsWork` check: re-entry failed on a branch that holds work ⇒ 409
+   (claim released, card back in `todo`, no worker), never a fresh branch stamped
+   over it.
+
+**Tests:** `swarmQuotaReentryDebris.test.ts` (real git: a `sleep` with its cwd in
+the worktree dies on removal while one in the project root survives; one sitting in
+an already-deleted worktree path dies too; a process with a TTY (under `script`)
+in the worktree is left alone while a detached one beside it is stopped; a TTY-less
+parent holding a pty child (detached `script` — the tmux shape) is left alone; a
+symlinked form of the path still finds the process; the server's own pid is never
+selected; the descendant-TTY rule on a ps table; a timed-out / signalled probe's
+partial stdout is discarded;
+debris refill → resolver re-creates the
+worktree; `.git` present → left alone; the repro through `runDispatchPass` with the
+production resolver), `swarmQuotaReentry.test.ts` "a branch WITH commits that cannot
+be re-entered is never replaced by a fresh one", "the park rings the bell …", the two
+"fresh board read" cases (snapshot without the branch, board with it), and
+`server/routes/__tests__/swarmTwinDispatch.test.ts` "refuses (409) a todo card whose
+branch it cannot re-enter", `worktreeCleanup.test.ts` "stops a detached process left
+running in a removed worktree". Red measured with each layer reverted separately.
 
 ### 5.4 回収(recoverLost / recoveryColumn)
 

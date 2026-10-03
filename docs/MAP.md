@@ -264,6 +264,13 @@
   This is what keeps the seat rail from filling with finished workers (the seat list is
   `GET /api/swarm/workers`; a heartbeat whose worktree still exists is shown forever).
   Tests: `swarmWorkerReaper.test.ts` (real git). Rules: docs/commander/02 §6 path 9.
+- **Worker's leftover processes stopped on teardown (2026-10-03)**: `worktreeProcesses.ts`
+  `stopProcessesInDir`, awaited in BOTH paths of `removeSwarmWorktree` (after the desk is
+  stopped; also when the dir is already gone) and in `cleanProjectWorktrees` (掃除). Selects
+  cwd inside the worktree AND no controlling terminal in its whole subtree (an owner's
+  shell, and a tmux server holding sessions, are left alone); `lsof -d cwd -Fpn` +
+  `ps -axo pid=,ppid=,tty=`, no-op on Windows: SIGTERM, then SIGKILL after 3 s.
+  Tests: `swarmQuotaReentryDebris.test.ts`, `worktreeCleanup.test.ts`. Rules: docs/commander/02 §5.3b.
 - **Worker's iOS simulators closed on teardown (2026-09-26)**: `swarmSimulators.ts`
   `shutdownWorkerSimulators`, called fire-and-forget from BOTH success paths of
   `removeSwarmWorktree` (so reaper, abandon and the commander's step 7 all close them). Closes a
@@ -748,7 +755,7 @@
 
 ## 6b. Phone link — iPhone から社長窓口と話す(2026-10-01)
 - 契約(iPhone アプリ係はこれだけ見る): `docs/PHONE_LINK.md`
-- 中継: `worker/src/phoneRelay.ts`(DO・1ペア1部屋・ハイバネーション)/ `phoneRelayAuth.ts`(鍵判定・純関数)/
+- 中継: `worker/src/phoneRelay.ts`(DO・1ペア1部屋・ハイバネーション・部屋作成は app key 必須 `mayCreateRoom`=サブスク差し替え点・alarm で7日/30日消去)/ `phoneRelayAuth.ts`(鍵判定・`RELAY_LIMITS`=期限と上限の唯一の置き場・純関数)/
   `worker/wrangler.phone.jsonc`(og-collab とは別 Worker。`cd worker && npx wrangler deploy -c wrangler.phone.jsonc`)
 - Mac 側: `src/lib/server/phoneLink.ts`(外向き WS・社長の transcript を tail して event 送出・say を
   `supplyNotice.queueSupplyOwnerSay` へ・卓が無ければ起こす)/ route `server/routes/phoneLink.ts`(owner 限定)/
@@ -773,12 +780,41 @@
   canvasAi `runFileTask` のファイル受け渡し・状況は Mac が組んで渡す・カードは Mac が検証して `mutateProjectData` で1枚)/
   `phoneLink.ts` の `assistantSay`(`projectId:"assistant"`・社長の卓には入れない)/ 話し方 = `~/.openground/assistant-style.md`
   (設定 → iPhone の欄・route `/api/phone-link/assistant-style`)。テスト `phoneAssistant.test.ts` / `phoneAssistantLaunch.test.ts`(実際の起動 argv = Write のみ・閉じ込め・bypass 無し)/ `phoneLink.test.ts`。
+- アシスタントの記憶(2026-10-03): `src/lib/server/assistantMemory.ts`(`~/.openground/assistant/` 0700 — 会話の記録 `log/YYYY-MM-DD.jsonl`
+  を既定30日で日ごと削除・要約メモ `memory.md` 1本を既定4000字以下に保つ・`state.json` = どこまで要約に畳んだか・`config.json` = 日数/字数)。
+  毎回読むのは 要約メモ + まだ畳んでいない直近の会話だけ(30行/16000字を超えたら古い分を畳ませる = `phoneAssistant.ts` の `turn`)。
+  画面 = `AssistantMemorySetting.tsx`(設定 → iPhone・画面から話す1行/見る/1件消す/全部消す/日数と字数)・route `/api/phone-link/assistant/{log,memory,config,say}`。
+  iPhone は `assistant-history` で Mac から取りに来る(v2 ペアリングのみ・v1 は `pair-again` で記録を出さない)。封は main の v2 封に一本化
+  (`phoneLink.ts` の `SEALED_TYPES` に `assistant` / `assistant-history`)。取りに来た後の話は `type:"assistant"` で流し中継は保存しない
+  (`phoneRelay.ts` は型の通過許可だけ・要再配備)。1日以上待っている行も畳む(期限切れ前に)。起動時+1時間ごとに、誰も話していなくても古い行を先に畳み
+  (`foldIdleAssistantTalk`・主インスタンスのみ)、それから古い日を消す(`server/index.ts` の `keepAssistantMemory`)。
+  罠: 上限超え・空のメモは捨てる(切り詰めると末尾=新しく畳んだ事実が消えるのに畳み済み印が付く。空は `forgetAll` のときだけ有効 — オーナーがその発言で忘れるよう頼み空になったときだけ。無人の畳み込みは空メモで既存メモを消せない)。
+  無人の畳み込みは1時間に1回・保存できなかった同じ行は12時間あけて再試行(`state.json` の `idleTried`・再起動をまたぐ。契約枠を無人で溶かさない)。
+  中身(会話・メモ)は `--append-system-prompt` で渡し、打ち込む1行は固定(`ASSISTANT_KICKOFF`)= `~/.claude/history.jsonl` に残さない。
+  テスト `assistantMemory.test.ts`(30日超え削除・字数上限・再起動後も続く・畳み込み)/ `phoneLinkSealed.test.ts`(実リレー室で封・保存なし・ページ分け・v1拒否)/ `worker/test/phoneRelay.local.mjs`。
+- 浮いているアシスタント(Dots 風, 2026-10-03): `src/components/assistant/FloatingAssistant.tsx`(全画面の角に浮くキャラクター・
+  ドラッグで移動 `localStorage og.assistant.pos`・クリック/Esc で会話窓・名前と色)/ `useAssistant.ts`(会話の状態は常駐ボタン側 =
+  閉じても答えは届き未読の点が付く)/ `AssistantMark.tsx`(キャラクター = アプリアイコンの形 = 太い輪+8つの切れ込み `OpenGroundMark.tsx` の `CarvedRingMask` を穴まで届く4つの切れ込みで4片に分けて・片ごとに呼吸/まばたき/考え中は色が巡る = `globals.css` の `.og-ast*`)。`App.tsx` で1回マウント・業務モードは薄く押せない・
+  オーナー以外は描かない(`/api/phone-link/*` は ownerOnly)。名前と色 = `config.json` の `name`/`look`(`assistantMemory.ts`)→
+  iPhone へは `projects` 先頭と `assistant-history` に載る。設計正典(iPhone 版もこれだけで作る)= `docs/ASSISTANT_DESIGN.md`。
+  テスト `FloatingAssistant.test.tsx` / `AssistantMark.test.tsx`(20枚のかけらに戻す/切れ込みが小さいロゴ印とずれると赤)/ `assistantMemory.test.ts` / `phoneLink.test.ts`。
 - 画面ロック中に起こす(Push to Talk, 2026-10-02): APNs 送信は `src/lib/server/phonePush.ts`(オーナーの .p8 を
   `~/.openground/phone-push-key.json` 0600 に保存・JWT ES256 を30分ごとに作り直し・`node:http2` で1回ずつ接続)。
   トークン受け取り・間隔(5秒)・say の最終 ack 待ち(最長2分)・410/BadDeviceToken で破棄・403 等の恒久拒否は鍵かトークンが変わるまで止めて設定に表示・無応答/429/5xx は間隔後に最大3回再送、は `phoneLink.ts` の
   `flushPush`。中継は `push-token` を Mac へ渡す(Mac 不在中だけ最新1つを預かり、戻った Mac に1回渡す)・Mac の
   `push-ready` を覚えて hello に `pushToken`。再接続の再送(中継が持っている分)は呼び出さない。テスト `phonePush.test.ts`(実 HTTP/2 サーバーで要求の形)。鍵の作り方(オーナー向け)
   `docs/IPHONE_PUSH_KEY_SETUP.md`。中継の変更は deploy して初めて効く。
+- Sealed frames (v2, 2026-10-03): words between phone and Mac are AES-256-GCM sealed with the pairing's `e2e` key
+  (never sent to the relay) — `src/lib/server/phoneLinkSeal.ts`; outer/inner split + say `ts`/`id` replay check in
+  `phoneLink.ts` (`outerFrame` / `unsealPhoneFrame`). The relay is unchanged (type-agnostic, no redeploy). Guard
+  `phoneLinkSealed.test.ts` runs the REAL relay room in vitest (mocked `cloudflare:workers`, loaded by a path tsc does
+  not follow). v1 plaintext pairings stop dialing at `LEGACY_V1_UNTIL` (2026-11-30).
+  Keyed tags (`sealTag`, HMAC-SHA256 under a key HKDF-derived from `e2e` — never the AES key itself): `cur.f` outside
+  the seal (relay resend dedupe), `eid` inside (per event = file:offset:index-in-line, so a resend keeps it and two
+  blocks on one line differ). `sent` inside every Mac → phone frame: strictly increasing within one Mac run only
+  (clock after a restart) — the phone resets its highest on reconnect. Owner-echo `id`: `sayIdFor` matches words
+  with Cf / Default_Ignorable chars stripped (claude drops them); unechoed says are dropped on heard:false and
+  on `forgetTail` (project left, work mode).
 
 ## 7. Auth・ロール — 任意ログイン(Supabase OAuth)
 - `server/routes/auth.ts`(PKCE・google/github)/ `src/lib/server/supabaseAuth.ts` /

@@ -1,7 +1,7 @@
 // The phone assistant (phoneAssistant.ts). Asserts what the MODEL is told and
 // what lands on the BOARD (read back with the production reader), never "a
 // function was called". HOME is tmpdir-isolated by setup-home.ts.
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mkdir, mkdtemp, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -11,6 +11,7 @@ import { buildClaudeArgv } from './claudeTerminal'
 import { CANVAS_DONE_MARKER, containsDoneMarker } from './canvasAi'
 import { setLockdownCache } from './lockdown'
 import { setSettings } from './store'
+import { clearAssistantLog, clearAssistantMemory } from './assistantMemory'
 import {
   ASSISTANT_LAUNCH,
   AssistantFailure,
@@ -37,6 +38,8 @@ const model = (...answers: unknown[]) => {
 
 beforeEach(async () => {
   __resetAssistantMemory()
+  await clearAssistantLog()
+  await clearAssistantMemory()
   await saveAssistantStyle('')
   setLockdownCache(false)
 })
@@ -52,7 +55,10 @@ const gated = () => {
     })
   return { started, release, run }
 }
-const tick = () => new Promise((r) => setTimeout(r, 10))
+/** Wait until `n` lines have reached the model — an observable condition, not
+ *  a fixed delay (a 10 ms sleep lost to the digest / settings / lockdown awaits
+ *  under full-suite load). */
+const startedCount = (m: { started: string[] }, n: number) => vi.waitFor(() => expect(m.started).toHaveLength(n))
 const noProjects: AssistantDeps['digest'] = async () => ({ text: '(none)', projects: [] })
 /** What claude's screen shows of a prompt (measured on a real claude PTY,
  *  2.1.287): it drops every Unicode format / default-ignorable character and
@@ -67,17 +73,15 @@ describe('lines wait their turn — one at a time, at most one waiting', () => {
     const b = askAssistant('二つ目', { run: m.run, digest: noProjects })
     const c = askAssistant('三つ目', { run: m.run, digest: noProjects })
     await expect(c).rejects.toMatchObject({ reason: 'busy' })
-    await tick()
-    expect(m.started).toHaveLength(1)
+    await startedCount(m, 1)
     m.release[0]()
     await a
-    await tick()
-    expect(m.started).toHaveLength(2)
+    await startedCount(m, 2)
     m.release[1]()
     await b
     // Room again once they are answered.
     const d = askAssistant('四つ目', { run: m.run, digest: noProjects })
-    await tick()
+    await startedCount(m, 3)
     m.release[2]()
     await expect(d).resolves.toEqual({ reply: 'ok' })
   })
@@ -108,15 +112,18 @@ describe('the prompt can never hold the marker the runner waits for — checked 
   const T = '_DONE'
   const M = H + T
   const nest = (n: number) => H.repeat(n) + M + T.repeat(n)
-  type Slots = { style?: string; digest?: string; text?: string; history?: { who: 'owner' | 'assistant'; text: string }[] }
+  type Turn = { who: 'owner' | 'assistant'; text: string }
+  type Slots = { style?: string; digest?: string; text?: string; history?: Turn[]; memory?: string; fold?: Turn[] }
   const build = (p: Slots) =>
-    buildAssistantPrompt({ style: p.style ?? 's', digest: p.digest ?? 'd', history: p.history ?? [], text: p.text ?? 'hi', file: '/x/answer.json', lang: 'ja', now: new Date(0) })
+    buildAssistantPrompt({ style: p.style ?? 's', digest: p.digest ?? 'd', history: p.history ?? [], text: p.text ?? 'hi', file: '/x/answer.json', lang: 'ja', now: new Date(0), memory: p.memory, fold: p.fold })
   const slots: Record<string, (s: string) => Slots> = {
     digest: (s) => ({ digest: s }),
     digestQuoted: (s) => ({ digest: '- "x" working on: ' + JSON.stringify(s) }),
     owner: (s) => ({ text: s }),
     style: (s) => ({ style: s }),
     history: (s) => ({ history: [{ who: 'owner', text: s }, { who: 'assistant', text: 'ok' }] }),
+    memory: (s) => ({ memory: s }),
+    fold: (s) => ({ fold: [{ who: 'owner', text: s }] }),
   }
   // What the detector drops or collapses (whitespace of every kind, control and
   // escape codes), and what claude's screen drops (format / default-ignorable).

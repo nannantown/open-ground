@@ -41,30 +41,42 @@ The code is handed out only after the new room has registered this Mac.
 The code is base64url (no padding) of this JSON:
 
 ```json
-{ "v": 1, "url": "wss://og-phone-relay.mindbrew.workers.dev/v1/<room>/phone", "key": "<phone key>" }
+{ "v": 2, "url": "wss://og-phone-relay.mindbrew.workers.dev/v1/<room>/phone", "key": "<phone key>", "e2e": "<end-to-end key>" }
 ```
 
-Store `url` and `key` in the **Keychain** (the key is the only thing that opens
-the room). Do not log the key.
+Store `url`, `key` and `e2e` in the **Keychain** (`key` opens the room; `e2e`
+seals and opens every word — it is never sent anywhere). Log neither.
+`e2e` is 32 random bytes in base64url (43 characters). Every frame that carries
+words is sealed with it — see **Sealed frames**. A `"v": 1` code (no `e2e`) is
+the old plaintext pairing; see "Moving from v1" there.
 
 ## Connecting
 
 Open a WebSocket to `url` with the header **`X-OG-Token: <key>`**
 (`URLSessionWebSocketTask` from a `URLRequest`; not `Authorization` — Apple
 lists it as a reserved header that may be dropped). To catch up after being out
-of signal, append `?after=<last seq you have>`.
+of signal, append `?after=<last seq you have>`. Add `&heard=<seq>` (the newest
+`seq` actually read aloud — never one you might rewind below) and the relay
+erases every event up to it: it holds only what you have not heard yet.
 
 | Reply | Meaning |
 |---|---|
 | `101` | open |
 | `401` | wrong / missing key, or this pairing was unlinked on the Mac → ask the owner to pair again |
+| `404` | no Mac has made this room yet (pairing makes it before handing out the code, so normally never seen) → retry with backoff (do NOT treat it as unlinked) |
 | `426` | not a WebSocket upgrade |
+| `429` | this room already has 5 phone connections, or more than 60 connections this minute → back off and retry |
 
 Keepalive: send the text frame `ping` every ~30 s (answered `pong` by the relay
-without waking it). Reconnect with backoff on close. Close code `4003` = the
-pairing was unlinked (the old key will only get 401 from now on).
+without waking it; a phone socket silent for 90 s is taken as dead and closed
+`4000` to make room). Reconnect with backoff on close. Close code `4003` = the
+pairing was unlinked (the old key will only get 401 from now on); `4029` = more
+than 120 phone frames this minute in the room — reconnect with backoff.
 
-All other frames are JSON text, one object per frame, with a `type`.
+All other frames are JSON text, one object per frame, with a `type`. On a v2
+pairing the frames below that carry words — `say`, `select`, `projects`,
+`event`, `ack`, `assistant`, `assistant-history` — travel **sealed**: the JSON shown in the next two sections is
+what is INSIDE the seal (see **Sealed frames** for the outside).
 
 ## Frames the phone receives
 
@@ -73,7 +85,7 @@ All other frames are JSON text, one object per frame, with a `type`.
 { "type": "hello", "v": 1, "mac": true, "head": 42, "projects": { "type": "projects", "selected": "<id>", "projects": [ ... ] }, "pushToken": true }
 ```
 `head` = newest event `seq` the relay holds. `projects` = last list the Mac sent
-(or `null`). `pushToken` = the Mac (as it last said) can wake this phone: send
+(or `null`) — on v2 the SEALED frame `{ "type": "projects", "box": "…" }`: open it. `pushToken` = the Mac (as it last said) can wake this phone: send
 your `push-token` now — even with `mac: false` (absent or `false` = do not send
 one; see "Waking the phone").
 
@@ -90,8 +102,40 @@ one; see "Waking the phone").
 | `owner` | the owner's own words as the desk received them (from the phone OR typed at the Mac) | no — use it to confirm "heard" |
 | `assistant` | the assistant's answer (`projectId: "assistant"`, see "The assistant") | yes |
 
+Once the phone has fetched the assistant's records, its talk comes as
+`assistant` frames instead of these events, and the Mac answers
+`assistant-history` with an `assistant-history` frame — see "What the assistant remembers".
+
+**`id` on an `owner` event** (since 2026-10-03) — when the words came from a
+phone `say`, the event carries that say's `id` (the same string you sent, cut to
+100 characters — exactly what its `ack`s carry):
+```json
+{ "type": "event", "seq": 44, "projectId": "<id>", "kind": "owner", "text": "今どうなってる?", "id": "<your say id>" }
+```
+Match the echo to your say BY `id`, never by comparing the words (the desk drops
+`!` `/` `#` and folds newlines, so the text can differ from what you sent). Both
+the president's desk and the assistant (`projectId: "assistant"`) do this. A
+resend after a reconnect carries the same `id`. Older apps that ignore `id` keep
+working.
+
+No `id` on an `owner` event = any of:
+- words typed at the Mac;
+- a say from before the Mac's OPEN GROUND last restarted (it remembers the last
+  20 says, in memory only);
+- a say whose final ack was `delivered` with `heard: false` (the Mac found the
+  box emptied — the owner may have sent it or cleared it; if it was sent after
+  all, its echo comes without `id`);
+- a say to a project you then switched away from (`select`, or a say to another
+  project) before its echo was read;
+- a say whose echo had not been read when work mode went on at the Mac (nothing
+  said in work mode is sent, and afterwards the Mac reads from the end).
+
+So when no echo carries your say's `id`, rely on its final `ack` (`delivered`)
+as the proof it reached the Mac — never wait for an echo.
+
 `seq` is strictly increasing per pairing; remember the last one and reconnect
-with `?after=`. The relay keeps the last 200 events: if the first event after a
+with `?after=`. The relay keeps the last 200 events, none longer than 7 days
+(and none you said you `heard`): if the first event after a
 reconnect has a `seq` above `after + 1`, some were missed (say so rather than
 pretend). Nothing said while the Mac's OPEN GROUND was not running is ever sent.
 Nothing is lost when the Mac's connection silently dies (Wi-Fi / network change,
@@ -119,9 +163,10 @@ president's input — this can take a while: the desk is never typed into while
 the president is still writing, while the owner has half-typed something at the
 Mac, or while a menu is open (it waits, it does not interrupt). `desk:
 "starting"` = no president desk was running, so it was started first.
-`reason`: `empty`, `too-long` (+`max`: over 473 characters after newlines are
+`reason`: `stale` (v2: the say's `ts` is more than 5 min from the Mac's clock —
+check the phone's clock, then say it again with a new `id`), `empty`, `too-long` (+`max`: over 473 characters after newlines are
 folded — longer would wedge the desk; ask the owner to say it in parts),
-`no-project`, `forbidden` (the Mac is not signed in as the owner), `desk-failed`
+`no-project`, `mac-error` (v2: the Mac could not save that it accepted the say — say it again with a new `id`), `forbidden` (the Mac is not signed in as the owner), `desk-failed`
 (+`detail`), `assistant-failed` (+`detail`) / `busy` (assistant only). A `delivered` from the
 assistant may carry `card` (see "The assistant").
 
@@ -148,6 +193,10 @@ your words (which IS sent again) is the proof that it was heard.
 { "type": "push-token", "token": null }
 ```
 
+On a v2 pairing `say` / `select` / `projects` are sealed, and inside the seal
+each also carries `id` + `ts`; a `say` MUST carry `projectId` (see **Sealed
+frames** — "goes to the selected project" below is v1 only).
+
 - `say` — the owner's words. Typed into the president desk as the **owner
   speaking** (no prefix), on one line (newlines become spaces), up to **473
   characters** (longer is refused with `too-long`, see `ack`). Counted as a
@@ -166,6 +215,8 @@ your words (which IS sent again) is the proof that it was heard.
 - `select` — hear this project from now on (no replay of its past). Answered
   with `projects`.
 - `projects` — ask for the list again.
+- `assistant-history` — fetch the assistant's records from the Mac (v2 only, see
+  "What the assistant remembers").
 - `push-token` — only after a `hello` with `"pushToken": true`. The Push to Talk
   ephemeral token (hex), which APNs host it belongs to (`env`: `development` for
   a debug build, `production` for TestFlight / App Store) and the `apns-topic`
@@ -177,6 +228,147 @@ your words (which IS sent again) is the proof that it was heard.
 Frames over 16,384 characters or of any other `type` are refused (`bad-frame`), never
 forwarded to the Mac.
 
+## Sealed frames (v2, 2026-10-03)
+
+Owner decision 2026-10-03: the relay (Cloudflare) must not be able to read what
+passes, nor slip in words of its own. So the phone and the Mac seal every frame
+that carries words with the pairing's `e2e` key; the relay only routes and stores
+ciphertext. Free: nothing changes on the relay (it was already type-agnostic —
+no redeploy), and the crypto is the OS's own (CryptoKit / Node `crypto`).
+
+**Cipher.** AES-256-GCM, key = the 32 bytes of `e2e`, a fresh random 12-byte
+nonce per frame, 16-byte tag. Additional authenticated data (AAD) = the UTF-8
+bytes of
+- `og-phone-link/v2 p2m` — phone → Mac,
+- `og-phone-link/v2 m2p` — Mac → phone.
+
+The direction in the AAD means a frame the Mac sent never opens as one from the
+phone (the relay cannot bounce the Mac's words back at it), and vice versa.
+
+**`box`** = **standard** base64 (with `=` padding — what `Data(base64Encoded:)`
+reads; not base64url) of `nonce(12) ‖ ciphertext ‖ tag(16)` — exactly CryptoKit's
+`AES.GCM.SealedBox.combined` ("nonce, ciphertext, then tag", available with the
+default 12-byte nonce). The plaintext is the UTF-8 JSON of the inner frame.
+
+```swift
+import CryptoKit
+// `e2e` in the code is base64url WITHOUT padding: Data(base64Encoded:) alone returns nil.
+func dataFromBase64URL(_ s: String) -> Data? {
+  var b = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+  b += String(repeating: "=", count: (4 - b.count % 4) % 4)
+  return Data(base64Encoded: b)
+}
+let key = SymmetricKey(data: dataFromBase64URL(code.e2e)!)    // 32 bytes
+func aad(_ dir: String) -> Data { Data("og-phone-link/v2 \(dir)".utf8) }
+// send
+let box = try AES.GCM.seal(json, using: key, authenticating: aad("p2m")).combined!.base64EncodedString()
+// receive
+let sealed = try AES.GCM.SealedBox(combined: Data(base64Encoded: box)!)
+let json = try AES.GCM.open(sealed, using: key, authenticating: aad("m2p"))  // throws = drop the frame
+```
+
+**Outside of the seal** (what the relay sees):
+
+| Direction | Frame on the wire |
+|---|---|
+| phone → | `{ "type": "say", "id": "<same id as inside>", "box": "…" }` — the outer `id` is only for the relay's `mac-offline` error; the Mac uses the inner one |
+| phone → | `{ "type": "select", "box": "…" }`, `{ "type": "projects", "box": "…" }` |
+| → phone | `{ "type": "event", "seq": 43, "at": <relay ms>, "box": "…" }` — `seq` (for `?after=`) and `at` are the relay's; the event's own `at`, `projectId`, `kind`, `text`, `id`, `eid`, `sent` are inside |
+| → phone | `{ "type": "ack", "box": "…" }`, `{ "type": "projects", "box": "…" }` (also as `hello.projects`) |
+| phone → | `{ "type": "assistant-history", "box": "…" }` (inner: `id`, `ts` as for every phone frame, optional `before`) |
+| → phone | `{ "type": "assistant", "box": "…" }`, `{ "type": "assistant-history", "box": "…" }` — passed on, never stored by the relay, no `seq` (see "What the assistant remembers") |
+
+Plain (no words in them, the relay must read them): `hello`, `mac`, `error`,
+`push-token` (the relay holds it while the Mac is away; a push carries nothing
+readable), `ping`/`pong`, and the Mac's `resume` / `push-ready` / `reset`.
+The Mac → relay event also carries its transcript position `cur` outside
+(`{ f, o, i }`: file, byte offset, index in line — needed for the relay's resend
+dedupe). On v2 `f` is a keyed tag (HMAC-SHA256 under a tag key derived from
+`e2e` with HKDF-SHA256 — empty salt, info `og-phone-link/v2 tag`, 32 bytes — so
+the AES-GCM key is never used as an HMAC key too), not the project id and session
+file name it stands for; the relay never hands `cur` to the phone. Only the Mac
+computes these tags (also `eid`); the phone never needs the tag key.
+What the relay does see: the offsets, so roughly how much was said.
+
+**Inside the seal, phone → Mac**: EVERY frame carries a fresh `id` (unique per
+frame, 1–100 characters — a UUID string is fine; never re-used) and `ts` = the
+phone's clock in ms (`Int64(Date().timeIntervalSince1970 * 1000)`). A `say`
+MUST name its project (on v2 `projectId` is required — the one the owner is
+looking at, `"assistant"` for the assistant):
+```json
+{ "type": "say", "id": "<uuid>", "ts": 1790000000000, "text": "今どうなってる?", "projectId": "<id>" }
+{ "type": "select", "id": "<uuid>", "ts": 1790000000000, "projectId": "<id>" }
+{ "type": "projects", "id": "<uuid>", "ts": 1790000000000 }
+```
+The Mac drops (silently, no reply — it cannot know who sent it):
+a frame that does not open (forged, altered, another key, the wrong direction), one that opens but is not a `say` / `select` / `projects` / `assistant-history`,
+plain JSON in place of `box`, a frame without an `id`, and a frame whose `id`
+it has already accepted (kept for 5 min, across a Mac restart: the first one was
+answered). A frame whose `ts` is more than **5 min** from the Mac's clock is
+refused: a `say` gets `ack rejected` `reason: "stale"`, a `select` / `projects`
+is dropped. A `say` without `projectId` gets `ack rejected` `reason: "no-project"`
+(otherwise a `select` the relay withheld could send the owner's words to the
+wrong president). A frame the Mac could not record as accepted (its disk write
+failed) is not acted on: a `say` gets `ack rejected` `reason: "mac-error"` (send
+it again as a new say), a `select` / `projects` is dropped. A say the owner
+repeats is a NEW say (new `id`, new `ts`).
+
+**Inside the seal, Mac → phone**: exactly the `event` (without `seq`), `ack` and
+`projects` JSON of "Frames the phone receives", plus:
+- `sent` on every frame — strictly increasing within one run of the Mac's OPEN
+  GROUND (the Mac's clock in ms, bumped by 1 when two frames share a ms); after
+  the Mac restarts it starts again from its clock, which can be LOWER than the
+  last `sent` you saw. So reset your highest `sent` on every new connection
+  (`hello`), and compare only within one connection;
+- `eid` on every `event` and `assistant` frame — that frame's own mark (a short base64url string). It
+  is NOT the `id`: an `owner` echo of a phone `say` keeps carrying that say's `id`
+  (see "`id` on an `owner` event"). A Mac resend of the same transcript line
+  carries the same `eid`.
+
+The phone:
+- drops a frame that does not open, and on v2 any `event` / `ack` / `projects` /
+  `assistant` / `assistant-history` (also `hello.projects`) without a `box`;
+- skips an `event` or `assistant` frame whose `eid` it already read (the relay can re-send a stored
+  event under a new `seq`; `?after=` catch-up re-sends ones you have too);
+- keeps the `projects` with the highest `sent` (since this connection) and drops an older one (the relay
+  can play an old list again, also as `hello.projects`); its OWN choice of
+  project is what counts — every `say` names it in `projectId`, never "whatever
+  `selected` says";
+- ignores an `ack` for an `id` that already had its final ack (`delivered` /
+  `rejected`) — e.g. a `stale` provoked by the relay playing an old say again.
+
+**What this does not cover.** The relay can still see who talks when and how
+long a frame is, drop or delay frames, and re-send a Mac → phone frame it stored
+(the rules above make that harmless). It cannot read or write words. The room
+keys (`X-OG-Token`) are unchanged and still gate the room. `push-token` stays
+plain: a relay could point the wake push elsewhere or drop it — the push carries
+nothing readable.
+
+**Test vectors** (the Mac's unit test checks it seals exactly these:
+`src/lib/server/phoneLinkSealed.test.ts`):
+- `e2e` = bytes `00 01 … 1f` = `AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8`
+- nonces are fixed only for the vectors — in use always fresh and random (a
+  nonce must never be used twice under one key)
+- phone → Mac, plaintext `{"type":"say","id":"vec-1","ts":1790000000000,"text":"今どうなってる?"}`
+  (a byte-exact vector, not a full say — a real one also carries `projectId`),
+  nonce = bytes `a0 a1 … ab`, AAD `og-phone-link/v2 p2m`, box:
+  `oKGio6SlpqeoqaqrnToIVDWuIIVAFuaqJVbitxSOYzLk0iFBrSwKpAvYVzvjQX7PnxJjDW+sNPg5VqGNImMyaljy/sXLvYr3R/EDUzUWZu6TRmVGF2B0J62zcTsid6CGROXtZM/4Z0XKQw==`
+- Mac → phone, plaintext `{"type":"event","projectId":"p1","kind":"president","text":"了解しました","at":1790000000123}`
+  (a real event also carries `eid` and `sent`),
+  nonce = bytes `b0 b1 … bb`, AAD `og-phone-link/v2 m2p`, box:
+  `sLGys7S1tre4ubq74ncu0pyomWVlneHHoymq7qZMO71/S+xBF6qgy37ywzQpaUhTDbqEgocr0i9P0ObQQxk16zlPJ4g5qFYS4CGmFxVL3TWdX+dk+l01vR+ZwB1k8b2QkklC5MXLSKAbaT+OUZMD39ZHqORZKUS8RDFOsuy7pg==`
+- Opening either with the other direction's AAD must fail. Both were opened by
+  CryptoKit (`AES.GCM.open`, Swift 6.4 on macOS 27, 2026-10-03), and a box CryptoKit
+  sealed opens on the Mac (in the same test).
+
+**Moving from v1** (company decision). Pairing always makes v2 from now on. A v1
+(plaintext) pairing keeps working as before so the phone is not cut off before
+its app update — until **2026-11-30 (UTC)**; from then the Mac no longer dials
+with it. Settings → iPhone shows 「暗号化されていません。iPhone のアプリを更新してから、解除してつなぎ直してください」
+on a v1 pairing. A v2 pairing accepts nothing plain: a `say` without `box` is
+dropped. Re-pairing (once, after both the Mac and the iPhone app are updated)
+erases the old room — with the plaintext it held — as unlinking always did.
+
 ## The assistant (talk partner across all projects, 2026-10-02)
 
 Owner request, 2026-10-02: one partner who looks across EVERY project, answers
@@ -186,16 +378,20 @@ Board's notes or any screen on the Mac. Only the card it writes appears (on that
 project's Board, as an ordinary `todo` card).
 
 **On the wire** — the same frames, with `projectId: "assistant"`:
-- `projects` always lists it FIRST: `{ "id": "assistant", "name": "アシスタント", "desk": false, "assistant": true }`
+- `projects` always lists it FIRST: `{ "id": "assistant", "name": "アシスタント", "look": "verm", "desk": false, "assistant": true }`
   (`desk` means nothing for it — always `false`, so an app that picks the first
   live desk never lands on it)
-  (`name` follows the Mac's language: `Assistant` in English). It is never
+  (`name` is the name the owner gave it on the Mac — the floating assistant,
+  2026-10-03 — and until then follows the Mac's language: `Assistant` in English;
+  `look` is its colour, `verm` | `moss` | `ochre` | `ink` — draw the character per
+  docs/ASSISTANT_DESIGN.md. A renamed assistant reaches the phone with the next
+  periodic `projects`, or at once on `projects` / the history page). It is never
   `selected`; `select` with it changes nothing (answered with `projects`).
 - `say` with `"projectId": "assistant"` goes to it (the selection does not
   change). Up to **2000** characters (`text.utf16.count`), newlines kept — it is
   not typed into a desk, so the 473 limit and the dropped `!` `/` `#` do not
   apply. `empty` / `too-long` (+`max: 2000`) as for a desk.
-- Then: `ack queued` at once and an `event` `kind: "owner"` with the words; the
+- Then: `ack queued` at once and an `event` `kind: "owner"` with the words and your `id`; the
   answer comes as `ack delivered` (`heard: true`, plus `card` when it wrote one:
   `{ "projectId", "taskId", "title" }`) followed by ONE `event` with
   `kind: "assistant"` — read it aloud. Or `ack rejected` `reason:
@@ -234,9 +430,14 @@ project's Board, as an ordinary `todo` card).
   written by the Mac, not by the model. Guard: `phoneAssistantLaunch.test.ts`
   (the argv of the claude a real line starts).
 - The Mac hands it the state of every registered project (Board counts, what is
-  being worked on, open questions for the owner) and the last few lines of this
-  conversation (kept in memory only, forgotten after 30 min of quiet or a
-  restart). The transcript Claude Code keeps for the temp dir is deleted with it.
+  being worked on, open questions for the owner), its long-term memo and the
+  recent talk not yet folded into the memo — kept on the Mac in text files that
+  survive a restart (see "What the assistant remembers"). The transcript Claude
+  Code keeps for the temp dir is deleted with it. All of that goes in as the
+  system prompt (`--append-system-prompt`); the typed prompt — the only thing
+  Claude Code records in its prompt history `~/.claude/history.jsonl`, kept with
+  no time limit — is one fixed line (`ASSISTANT_KICKOFF`), so no copy of the talk
+  or the memo outlives a delete or the kept days there.
   The state handed over includes text others wrote (card titles, workers'
   questions); it is quoted as data, and with no tools beyond its answer file an
   injected line cannot act on the Mac — but it CAN shape the answer, including a
@@ -249,12 +450,12 @@ project's Board, as an ordinary `todo` card).
   soft hyphens, variation selectors, tag and bidi characters, Hangul fillers) and
   the C1 control characters U+0080–009F, so those are removed before the check. When it fires, that turn is built again
   with every `_` in ALL of its data (every project's titles and questions, the
-  owner's words, the style, the whole history) as a full-width `＿` — the marker
+  owner's words, the style, the memo, the whole history) as a full-width `＿` — the marker
   needs two ASCII `_` and the template has none — and a prompt the detector still
   fires on is never started (the phone gets the plain "could not answer" failure).
   So no text, however split by spaces, escape codes, invisible characters or
   nesting, can end a line early. The price: while marker text sits in the status
-  or the history (until the idle reset), the model sees `snake＿case` instead of
+  or the history (until it is folded into the memo), the model sees `snake＿case` instead of
   `snake_case` in that turn's data, and a card it writes may carry the `＿`
   (seen: a card asked to be titled with the marker itself). A turn without
   marker text keeps every `_` as written.
@@ -274,6 +475,134 @@ project's Board, as an ordinary `todo` card).
   waiting for the owner before progress.
 - Owner only and work mode as for the rest of the link: under work mode it is
   never asked.
+
+## What the assistant remembers (2026-10-03)
+
+Owner decision, 2026-10-03: "delete the talk after some days, but remember roughly
+what we talked about — inherited like compacting, at a fixed size", kept as text
+on the Mac (no database, not on Cloudflare). The Mac, the iPhone and the OPEN
+GROUND screen talk to the SAME assistant and land in the SAME record — and the
+record lives on the Mac only.
+
+**On the Mac** (`src/lib/server/assistantMemory.ts`), `~/.openground/assistant/`
+(folder 0700, files 0600):
+- `log/YYYY-MM-DD.jsonl` — every line said (owner and assistant), one JSON per
+  line: `{ "id", "at", "who": "owner"|"assistant", "text", "via": "phone"|"screen", "card"? }`.
+  Kept **30 days** by default (Settings, 1–365): a line older than that is never
+  read or sent again, and its day file is deleted once the whole UTC day is past
+  — at boot, every hour, and whenever the log is read or the setting changes.
+- `memory.md` — the ONE long-term memo, **at most 4000 characters** by default
+  (Settings, 500–8000; characters as the owner counts them — an emoji is one).
+  Never longer: the model is asked for 90% of the size, a memo it returns longer
+  than the size set at that moment is thrown away whole (not cut — a cut drops
+  its end, where the newly folded lines went; the memo stays as it was and the
+  same lines are folded again next run), and a smaller size cuts the stored memo
+  at once (Settings asks first: lowering either number deletes / cuts without
+  folding). An EMPTY memo from the model is ignored too, unless it also says
+  `"forgetAll": true` — offered only when the owner's line itself asks to forget
+  something and the memo then comes out empty ("forget it" about the memo's only
+  fact included), so a placeholder `""` or a fold turn never wipes the memory
+  and a real "forget" always can. A fold-only run (nobody talking) gets no such
+  flag and never empties a memo that holds something.
+- `state.json` — the last log line already folded into the memo, and the last fold-only run (`idleTried`: its first line and time). `config.json` — the two numbers.
+
+**What each answer reads** — the memo + the talk not yet folded into it, never
+the whole log. Once that unfolded talk passes 30 lines or 16,000 characters —
+or a line of it is more than a day old (half the kept days if that is shorter),
+so recent talk does not expire unfolded after a quiet spell —
+the turn shows the older part as "leaving your view" and the model MUST return
+the memo rewritten with what still matters (decisions, preferences, ongoing
+threads, promises, what it was asked to remember; small talk and finished
+things dropped); the newest 20 lines / 8000 characters stay verbatim. At most
+16,000 characters are folded per turn, oldest first (only what was shown is
+marked folded; the rest goes next turn), and a fold the model skips is asked
+again next line. A memo the model returns in a wrong shape is ignored — the reply
+and the card still count. While nobody talks, the Mac folds talk that is old
+enough on its own (`foldIdleAssistantTalk`, at boot and every hour — ONE run per
+tick — before the old days are deleted; a claude run only when there is something
+to fold, never under work mode, primary instance only; a run that saved nothing —
+claude failed, or the memo was left out / thrown away — is not repeated on the
+same lines for 12 hours, kept in `state.json` so a restart does not reset it: a
+stuck fold costs at most ~2 runs a day; a fold-only run never empties a memo that
+holds something), so a silence longer than the kept days
+does not delete talk unfolded — as long as the Mac is on and Claude is signed
+in. If folding keeps failing (Claude signed out, the memo always coming back too
+long), the lines still expire after the kept days, unfolded and without a notice. A line that got no answer is logged too (the owner's words only), so the
+next answer sees it. So the prompt stays bounded (memo + at most
+~30 lines) however long the owner keeps talking, and the memo stays one fixed size.
+"覚えておいて" / "忘れて" — the model returns the memo with exactly that changed
+(forget = removed, and not brought up again). The log itself is only deleted by
+age (or by the owner) — folding does not delete it.
+
+**Seen and deleted by the owner** — Settings → **iPhone**, under 「アシスタントの話し方」:
+the two numbers, the memo (delete), and the log newest first (delete one line /
+delete all). Deleting a log line does not take back what the memo already took
+from it — delete the memo, or say 「忘れて」. A delete made while a line is being
+answered is not undone by that line (it does not write its memo back).
+
+**The screen's API** (owner-only, loopback, like the rest of `/api/phone-link/*`):
+`GET /api/phone-link/assistant/log` → `{ entries, memory, logDays, memoryChars }`;
+`DELETE …/assistant/log` (all) and `…/assistant/log/<id>` (one); `DELETE …/assistant/memory`;
+`POST …/assistant/config` `{ logDays?, memoryChars? }` (out of range → 400, nothing changed);
+`POST …/assistant/say` `{ text }` → `{ reply, card? }` — talk from the screen,
+same assistant, same log (`via: "screen"`). The screen's one line for it sits
+above the talk log in Settings → iPhone (Enter or 送る; the answer shows in the
+log). The phone sees screen talk in its next `assistant-history`.
+
+### Fetching the records from the phone
+
+The relay never keeps the assistant's records (`assistant-history` pages) and never sees them in plain text:
+they cross only as **sealed frames of a v2 pairing** — the same seal as every
+other content frame (see "Sealed frames"; no second cipher). The phone fetches
+them from the Mac (inner frame, sealed `p2m` like a `say`):
+
+```json
+{ "type": "assistant-history", "id": "<uuid>", "ts": 1790000000000, "before": 1790846484310 }
+```
+`before` (optional) = the `at` of the oldest entry the phone already has; leave
+it out for the newest page. The Mac answers (only while it is online; work mode =
+no answer) with one sealed `assistant-history` frame whose inner JSON is
+```json
+{ "type": "assistant-history", "id": "<same>", "sent": 1790000000001,
+  "entries": [ { "id", "at", "who", "text", "via", "card"? } ], "more": false,
+  "memory": "…", "logDays": 30, "memoryChars": 4000, "name": "ノノ", "look": "verm" }
+```
+`entries` oldest first; `memory` / `logDays` / `memoryChars` / `name` / `look` only on the page
+without `before`. `more: true` = ask again with `before` = the first entry's `at`.
+A page fits one relay frame (≤ 40 KB before sealing). Fetch on every connect (and
+after `mac` online:true): the Mac is the record; the phone keeps a copy only to show it.
+REPLACE the shown list with what the pages bring — never merge live `assistant`
+frames into it by `at`: a live frame's `at` is when it was sent, not the log
+entry's, and a line that failed (ack `assistant-failed`) is logged with the
+owner's words only (no answer) — the shown list follows the Mac's.
+Page with `before` taken only from fetched entries, and take only the
+`assistant-history` whose `id` is the one you asked with (an old page the relay
+plays again, or one meant for another request, is dropped).
+
+**A v1 (plaintext) pairing never gets the records**: its `assistant-history` is
+answered `{ "type": "assistant-history", "id": "<same>", "error": "pair-again" }`
+(no entries, no memo) — ask the owner to link the iPhone again (v2). Its live
+assistant talk stays the old plain `event`s until `LEGACY_V1_UNTIL`, like
+everything else on a v1 pairing.
+
+**After the first `assistant-history` (v2), for good** (until linked again), the
+assistant's lines come as sealed `assistant` frames instead of `event`s. Inner:
+```json
+{ "type": "assistant", "kind": "owner", "text": "…", "at": 1790846484310, "id": "<your say id>", "sent": … }
+{ "type": "assistant", "kind": "assistant", "text": "…", "at": 1790846490000, "sent": … }
+```
+The relay passes them on and stores nothing (no `seq`, no `?after=` replay) —
+what the phone missed it gets from `assistant-history`. Each carries its own
+`eid` (inside the seal): skip one you already read. Read `kind: "assistant"`
+aloud as before; `card` stays in the `ack delivered`. Before that first fetch a v2
+pairing gets the assistant as sealed `event`s (`projectId: "assistant"`), which
+the relay keeps as ciphertext like any event (the newest 200 at most, erased once the phone has heard it or after 7 days). A `say` to the
+assistant is an ordinary sealed `say` with `projectId: "assistant"`.
+
+**Relay redeploy needed** for `assistant-history` / `assistant` (its frame-type
+allowlist): `cd worker && npx wrangler deploy -c wrangler.phone.jsonc`. Until then
+the old relay refuses the phone's `assistant-history` (`bad-frame`), so the Mac
+never switches and the assistant keeps talking in sealed `event`s — nothing breaks.
 
 ## Waking the phone (Push to Talk)
 
@@ -361,6 +690,10 @@ both environments, where the developer site still offers that).
 
 ## Security model
 
+- What passes and what the relay stores is sealed end to end (v2, see **Sealed
+  frames**): the `e2e` key is only in the pairing code and on the two devices.
+  Neither key nor plaintext is ever logged: the Mac logs only that a phone frame
+  did not open, or opened but was of an unexpected type.
 - The room is named by `sha256(phone key)`. The phone proves itself with the key
   whose hash is the room — nothing about the phone is stored on the relay.
 - The Mac has its own, different key; the room remembers the hash of the first
@@ -369,6 +702,12 @@ both environments, where the developer site still offers that).
   end.
 - The relay must be `https` (the keys travel in a header); plain `http` is
   accepted only for a relay on this machine.
+- The assistant's records (log and memo) stay on the Mac (`~/.openground/assistant/`,
+  0600) and are never written to a log. They cross the relay only sealed on a v2
+  pairing (never to a v1 one). Once the phone fetches them, the assistant's talk is
+  no longer stored on the relay; what it said BEFORE that first fetch stays there
+  as sealed `event`s (ciphertext) like any event — erased once heard, after 7 days at the latest —
+  see "What the assistant remembers".
 - Keys are 32 random bytes each, stored on the Mac in
   `~/.openground/phone-link.json` (mode 0600), never in the repo.
 - Unlinking (or linking again) sends `reset`: the room erases everything it
@@ -390,27 +729,142 @@ both environments, where the developer site still offers that).
 - One Mac end per room: only the primary OPEN GROUND (port 47776) holds the link.
   A room taken over by another Mac end (close `4001`) waits 60 s before retrying.
 
+- **Only an OPEN GROUND Mac creates a room** (since 2026-10-03). A room exists
+  once a Mac registered its key, and the relay registers one only when the Mac
+  also sends the **app key** (`X-OG-App-Key`). The relay holds it as the Worker
+  secret `ROOM_CREATE_KEY`; release builds carry the same value, baked from the
+  open-ground repo secret `OPENGROUND_PHONE_RELAY_APP_KEY` (`release.yml` →
+  `electron/runtime-config.json` → the server's env). A phone can never create
+  a room (it gets `404`), so a stranger's key makes the relay store nothing. The app key is an
+  install pass, not a secret (anyone can dig it out of the app): it stops casual
+  use of the relay as a free pipe, while each pairing's own keys stay the real
+  boundary. No app key on the relay = no room can be created (fail closed).
+  A room that already exists is entered with its keys alone, so **pairings made
+  before the gate keep working — no re-pairing**. A build without the app key
+  (a source checkout without the env var, an old release) cannot pair a new
+  phone (it reports the relay as unreachable, and the pairing it had stays as
+  it was); set `OPENGROUND_PHONE_RELAY_APP_KEY` in its env to pair from it.
+  **How that looks:** Settings says only "Could not reach the relay (or work
+  mode is on)" — the same words as for a network failure. The server log tells
+  them apart: only when the relay answered the NEW room with `401` and the build
+  has no app key does it log
+  `[phone-link] pairing failed: the relay refused the new room (401) and this build has no OPENGROUND_PHONE_RELAY_APP_KEY …`.
+  Seeing it, the relay was reached: the missing app key is the cause. A network
+  failure, DNS error, timeout or a failed reset of the old room does not log
+  it (`pairPhone` in `src/lib/server/phoneLink.ts`).
+  **Rollout:** the deployed relay first runs with the var `ROOM_CREATE: "open"`
+  (`wrangler.phone.jsonc`) — any Mac may still create a room — because an older
+  build unlinks its old room BEFORE asking for the new one, so re-pairing from
+  it under the gate would lose the pairing. Once the owner's Mac runs a release
+  that carries the app key, delete that var and redeploy: the gate is then on.
+- **Nothing is kept for long.** An event is erased when the phone says it heard
+  it (`?heard=`) and after **7 days** at the latest; a room nobody connected to
+  for **30 days** is emptied (events, project list, held push token — the
+  room's alarm). Only the hash of its Mac's key and the position of the newest
+  event it stored (`cur`, what `resume` reports) stay, so the pairing itself
+  survives: its Mac (even a build without the app key) comes back to it, the
+  phone is never told "unlinked", and it follows the restarted `seq` — and the
+  Mac, told where it had got to, does not send its old talk again as new (up to
+  4 MB of it, waking the phone to read it out).
+  **Honestly, today:** "erased once heard" works only once the iOS app sends
+  `heard` — it does not yet, so in practice an event goes after 7 days, or
+  earlier when it falls out of the newest 200.
+  A room with a connection open is in use.
+- **Bounded per room:** at most **5** phone sockets (one that has not pinged for
+  90 s is closed first; then `429`), **60** connections a minute (`429`; counted
+  only once the keys passed, so a stranger cannot lock the owner out of a
+  room), **120** phone frames and **120** storing Mac frames (event / projects /
+  push-ready) a minute, counted apart (over it the sender is closed `4029` after
+  that frame and resumes on redial — the Mac waits 60 s, then resumes from the
+  newest stored event, so nothing is lost). Frames over 16 KB (phone) / 64 KB
+  (Mac) are dropped, as before.
+- **All the numbers live in one place**: `RELAY_LIMITS` in
+  `worker/src/phoneRelayAuth.ts`. The Worker var `RELAY_LIMITS` can override
+  them; only the local test does (short expiries).
+- **Cost stays at zero**: the operator's Cloudflare account is on the free plan
+  (no bill; over a daily limit the relay simply errors until 00:00 UTC). A
+  room's sweep is at most one alarm (one request + one row write) an hour —
+  events due within the hour are erased together, early rather than late — not
+  one per frame; the last-use time is written at most once a day per room.
+- **What the caps do NOT stop (accepted until launch):** the free plan's daily
+  limits (100k requests, 100k rows written) are per ACCOUNT. Someone who digs
+  the app key out of the app can create rooms and, at the per-room write cap
+  (~480 rows a minute per room), use up the day's writes; the relay is then down
+  for everyone until 00:00 UTC — an outage, never a bill. The subscription
+  check at the swap point below is what closes this; a per-IP limit was weighed
+  and not added (the Workers rate-limiting binding counts per Cloudflare
+  location, so a spread-out caller is barely slowed).
+- **Rooms that existed before 2026-10-03** have no sweep yet; the first
+  connection to one sweeps it at once (old events go), then it runs as above.
+
 **App Store, later (per user):** every pairing is already its own room, so users
-never share anything. What is missing is a gate on who may *create* rooms on the
-operator's relay (e.g. a subscription check in front of `fetch` in
-`phoneRelay.ts`) — today anyone can make their own pair of keys and use the
-relay as a pipe of their own. Add that gate before the app is public. The push
+never share anything. **The swap point** is `mayCreateRoom` in
+`worker/src/phoneRelay.ts`: today it compares the app key; at launch, replace
+its body with a subscription check (e.g. a signed entitlement the Mac sends in a
+header) — nothing else changes, and existing rooms keep working. The push
 must move too: each user's Mac would need the operator's APNs key, which cannot
 live on users' Macs — so the relay sends it, and the Mac only says "something new".
+
+**Rotating the app key** (it leaked, or on a schedule): put a new value in BOTH
+places — `cd worker && npx wrangler secret put ROOM_CREATE_KEY -c
+wrangler.phone.jsonc` and `gh secret set OPENGROUND_PHONE_RELAY_APP_KEY -R
+nannantown/open-ground` — then release. Existing pairings are unaffected;
+releases older than the rotation can no longer pair a NEW phone.
 
 ## Verifying
 
 - Relay, against a local workerd or the deployed one:
   `cd worker && node test/phoneRelay.local.mjs` /
   `RELAY=https://og-phone-relay.mindbrew.workers.dev node test/phoneRelay.local.mjs`
-  (33 checks: missing / wrong / swapped keys refused, frames pass, catch-up,
-  resume, push-ready / push-token, unlink retires both keys).
+  (59 checks: missing / wrong / swapped keys refused, a room only with the app
+  key (and none at all on a relay without one), frames pass, the phone frame cap,
+  catch-up, resume, sealed assistant frames passed on and never
+  kept, push-ready / push-token, `heard` erases,
+  unlink retires both keys; locally also expiry by its own alarm, idle erase
+  (an emptied room still knows its resume position), phone cap and the
+  per-minute limits on a second relay with short limits). Against the deployed
+  relay, pass its app key: `APP_KEY=<value> RELAY=… node test/phoneRelay.local.mjs`.
 - End to end, a stand-in for the phone:
   `node scripts/phone-link-say.mjs <pairing code> "text"` — prints every frame
   and exits 0 once the president answered after the line landed. `--key x`
   shows a wrong key is refused; no text = listen only.
 - The assistant: `node scripts/phone-link-say.mjs <code> "全体どう?" --project assistant`
   (exits 0 once its `assistant` event came after the `delivered`).
+- The assistant's memory with the REAL claude: `npx tsx scripts/verify-assistant-memory.mts`
+  (throwaway `OPENGROUND_HOME`, the signed-in claude, four short sonnet turns; exits 0
+  only when every `~/.claude/history.jsonl` line those turns added is the fixed
+  kickoff, none carries the talk or the memo, and step 4 leaves the memo empty).
+  Last run 2026-10-03, claude 2.1.288:
+  1. the screen route `POST /api/phone-link/assistant/say` 「うちの猫の名前はミケ。覚えておいて」
+     → 200 `{"reply":"了解、猫の名前はミケね。覚えたよ。"}`, memo `オーナーの猫の名前はミケ。`
+  2. after 32 lines from two days before, 「最近どう?」 (a turn the fold makes REQUIRED —
+     the memo must not come back empty) → 200, memo kept its line and gained
+     `コーヒーは浅煎りが好き。` and `来週の金曜15時に歯医者を予約している(2026-10-01に聞いた)。`
+     (small talk dropped), `state.json` folded pointer set
+  3. nobody talking, lines 1.5 days old → `foldIdleAssistantTalk()` true, memo gained
+     `妹の誕生日は12月3日。プレゼントは本がいい。`
+  4. log and memo emptied, memo set to its one fact 「オーナーは朝はコーヒー派。」, then
+     「朝はコーヒーのこと、忘れて」 → 200 `{"reply":"了解、コーヒーのことは忘れたよ。"}`, memo `""`
+  5. `history.jsonl`: 4 lines added by that run (one per claude run), all `Answer the
+     owner's latest line exactly as your system prompt says.` + the done-marker line;
+     0 carry the talk or the memo. (The script ran six times that day while it was
+     being written and reworked: 2 + 3 + 4 + 4 + 3 + 4 = 20 lines in all, every one
+     the fixed kickoff. The fifth run's step 4 timed out before claude took its
+     prompt — 「アシスタントが時間内に答えられませんでした。」, memo untouched, no
+     history line — and the sixth, run right after, passed as above.)
+- Sealing: `src/lib/server/phoneLinkSealed.test.ts` runs the REAL relay room
+  (`phoneRelay.ts`, in-memory storage) on what the real Mac end sends — the
+  relay holds and passes no word in plain; a relay-made say (plain, other key,
+  bounced, altered) is dropped; the same say twice (also after a restart) and a
+  stale one are refused; a replayed `select` is dropped and a say without its
+  project refused; a v1 pairing stops dialing at its date; the test vectors above.
+  `node scripts/phone-link-say.mjs` speaks v2 when given a v2 code.
+- The assistant's memory: `src/lib/server/assistantMemory.test.ts` (a 31-day-old
+  line is gone, the memo never passes its size, a freshly loaded assistant three
+  days later still has the memo and the talk, folding, deletes, 0600). Its records
+  and talk on the wire: the "the assistant and its records (v2)" block of
+  `src/lib/server/phoneLinkSealed.test.ts` (through the real relay room: sealed,
+  nothing kept, paging under the frame limit, v1 refused).
 - Unit guards: `src/lib/server/phoneLink.test.ts`, `src/lib/server/phoneAssistant.test.ts`
   (style change reaches the next prompt; a card lands complete in another project), `src/lib/server/phonePush.test.ts`
   (the APNs request as a real HTTP/2 server receives it, JWT, 410),

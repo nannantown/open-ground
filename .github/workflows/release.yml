@@ -177,6 +177,10 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           OPENGROUND_REALTIME: ${{ vars.OPENGROUND_REALTIME }}
           OPENGROUND_COLLAB_WS_URL: ${{ vars.OPENGROUND_COLLAB_WS_URL }}
+          # Phone link: the pass that lets this build create its relay room (the
+          # relay's ROOM_CREATE_KEY secret holds the same value; docs/PHONE_LINK.md
+          # "Security model"). Unset = this build cannot pair a new phone.
+          OPENGROUND_PHONE_RELAY_APP_KEY: ${{ secrets.OPENGROUND_PHONE_RELAY_APP_KEY }}
 
       - name: Build & publish (macOS, signed + notarized)
         if: matrix.platform == 'mac'

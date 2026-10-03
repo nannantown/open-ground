@@ -39,9 +39,10 @@ afterEach(async () => {
 })
 
 describe('runtimeConfig — bake allowlist', () => {
-  it('BAKED_KEYS is exactly the four PUBLIC keys (never a server-secret)', () => {
+  it('BAKED_KEYS is exactly the five PUBLIC keys (never a server-secret)', () => {
     expect([...BAKED_KEYS].sort()).toEqual([
       'OPENGROUND_COLLAB_WS_URL',
+      'OPENGROUND_PHONE_RELAY_APP_KEY',
       'OPENGROUND_REALTIME',
       'SUPABASE_ANON_KEY',
       'SUPABASE_URL',

@@ -176,6 +176,9 @@ const config: Config = {
         // sit below it) but UNDER app modals — panel popups that must beat the
         // frame are portaled to <body> at overlay-modal.
         'overlay-frame': '45',
+        // The owner's floating assistant (FloatingAssistant): over the panel and
+        // hosted frames, under app modals.
+        'overlay-float': '48',
         'overlay-modal': '50', // app-level centred modal (opens above the panel)
         'overlay-top': '60', // top-most full-screen surface (manual)
         'overlay-gate': '70', // first-run gate above everything (onboarding)

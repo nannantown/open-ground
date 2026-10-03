@@ -159,7 +159,7 @@ export interface FileTaskOpts {
   model?: string
   /** Launch overrides for a caller that must be tighter than a canvas job
    *  (the phone assistant: hidden, Write only, confined to the handoff dir). */
-  launch?: Pick<LaunchClaudeOpts, 'permissionMode' | 'tools' | 'restricted' | 'hidden' | 'name' | 'disallowedTools'>
+  launch?: Pick<LaunchClaudeOpts, 'permissionMode' | 'tools' | 'restricted' | 'hidden' | 'name' | 'disallowedTools' | 'systemPrompt'>
 }
 
 /** Run one file-handoff claude task: spawn a claude PTY session in the handoff

@@ -31,6 +31,7 @@ vi.mock('@/lib/api-client', () => ({
 }))
 
 import { BoardModule } from './BoardModule'
+import { ASSISTANT_WINDOW_ATTR } from '@/components/assistant/assistantWindow'
 
 const task: ProjectTask = {
   id: 't1',
@@ -163,6 +164,22 @@ describe('BoardModule drawer — layered Escape', () => {
       expect(appSawIt).toBe(true) // untouched — the overlay's own handler owns it
     } finally {
       overlay.remove()
+    }
+  })
+
+  it('7. leaves Esc from inside the floating assistant window to the assistant (drawer stays open)', () => {
+    const { onOpenDetail } = renderDrawer()
+    const win = document.createElement('section')
+    win.setAttribute(ASSISTANT_WINDOW_ATTR, '')
+    const send = document.createElement('button')
+    win.appendChild(send)
+    document.body.appendChild(win)
+    try {
+      send.focus()
+      pressEscape(send)
+      expect(onOpenDetail).not.toHaveBeenCalled()
+    } finally {
+      win.remove()
     }
   })
 

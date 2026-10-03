@@ -9,10 +9,13 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { BellRing, Check, Copy, Smartphone } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
+import { AssistantMemorySetting } from './AssistantMemorySetting'
 
 interface Status {
   paired: boolean
   online: boolean
+  /** false = a plaintext pairing from before encryption: pair again. */
+  sealed: boolean
   pushKeyId: string | null
   pushPhone: boolean
   pushRefused: string | null
@@ -79,6 +82,7 @@ export const PhoneLinkSetting = ({ frame }: { frame: (body: ReactNode) => ReactN
             ? {
                 paired: s.paired === true,
                 online: s.online === true,
+                sealed: s.sealed === true,
                 pushKeyId: typeof s.pushKeyId === 'string' ? s.pushKeyId : null,
                 pushPhone: s.pushPhone === true,
                 pushRefused: typeof s.pushRefused === 'string' ? s.pushRefused : null,
@@ -163,6 +167,7 @@ export const PhoneLinkSetting = ({ frame }: { frame: (body: ReactNode) => ReactN
           : status.online
             ? t('settings.phoneLink.online')
             : t('settings.phoneLink.offline')}
+        {status.paired && !status.sealed && ` · ${t('settings.phoneLink.unsealed')}`}
       </span>
       {failed && <span className="text-ui text-ink-muted">{t('settings.phoneLink.failed')}</span>}
       <span className="flex-1" />
@@ -280,6 +285,7 @@ export const PhoneLinkSetting = ({ frame }: { frame: (body: ReactNode) => ReactN
           </div>
         </div>
       )}
+      {style && <AssistantMemorySetting />}
     </div>
   )
 }

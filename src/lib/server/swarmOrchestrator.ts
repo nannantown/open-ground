@@ -318,6 +318,8 @@ export const RECOVER_MAX_REQUEUE = 1
  *  of the two 5s waits the teardown itself already performed — long enough for an
  *  ordinary unwind, short enough that a wedged worker does not hold a slot. */
 const MAX_TEARDOWN_RETRIES = 3
+/** Passes a committed branch may fail re-entry before its card is parked (runDispatchPass). */
+const REENTRY_MAX_FAILURES = 3
 
 /** How many times a Board COLUMN MOVE may be KEPT (its write rejected/failed) in a
  *  row before the engine ESCALATES instead of just logging + retrying forever. A
@@ -2147,6 +2149,10 @@ export interface ProjectEngine {
    *  (absent ⇒ empty, lazy-init) so a hand-written test engine literal keeps
    *  compiling. In-memory only. */
   teardownRetries?: Map<string, { tries: number; reason: WorkerRecoveryReason }>
+  /** Consecutive dispatch passes a todo card's re-entry into its own committed
+   *  branch has failed, keyed by taskId (see the NEVER MINT A FRESH BRANCH OVER
+   *  COMMITS guard in runDispatchPass). Optional, lazy-init, in-memory only. */
+  reentryFailures?: Map<string, number>
   /** How many times each card (taskId) has been sent review→doing on a 差し戻し
    *  (rework) — the {@link MAX_REWORKS} loop guard. Bumped on every rework; KEPT
    *  while the card is mid-cycle (doing/review) or PARKED past the budget (in
@@ -3138,6 +3144,9 @@ export interface OrchestratorDeps {
    *  existing dep literals keep compiling; the default resolver is used when
    *  absent. */
   resolveReusableWork?: (projectPath: string, card: ProjectTask) => Promise<ReusableWork | null>
+  /** Does the local branch exist? `null` = git could not answer. Absent ⇒ git
+   *  (see cardBranchHoldsWork). */
+  branchExists?: (projectPath: string, branch: string) => Promise<boolean | null>
   /** Commits the worker's `swarm/*` branch carries ahead of trunk — the
    *  "branch is ready" signal. 0 on any failure (conservative: no proof of
    *  work ⇒ no promotion). Probed from the shared repo by branch ref, so it
@@ -5057,6 +5066,30 @@ const defaultResolveReusableWork = async (
   const branch = typeof card.branch === 'string' ? card.branch.trim() : ''
   if (!branch || !isSwarmBranch(branch)) return null
   return ensureSwarmWorktreeForBranch(projectPath, branch)
+}
+
+/** Does a card's `swarm/*` branch possibly hold work a fresh dispatch would orphan?
+ *  `false` ONLY when it provably does not (0 commits ahead, or git positively
+ *  reports the branch gone); otherwise the count (> 0) or `null` (unreadable —
+ *  a git hiccup must not read as "nothing there", see defaultCountCommitsAhead).
+ *  Shared by runDispatchPass and the manual POST /api/swarm/worker door. */
+export const cardBranchHoldsWork = async (
+  projectPath: string,
+  branch: string,
+  count: (p: string, b: string) => Promise<number | null> = defaultCountCommitsAhead,
+  exists: (p: string, b: string) => Promise<boolean | null> = defaultBranchExists,
+): Promise<number | null | false> => {
+  const name = branch.trim()
+  if (!name || !isSwarmBranch(name)) return false
+  const ahead = await count(projectPath, name).catch(() => null)
+  if (ahead !== null) return ahead > 0 ? ahead : false
+  return (await exists(projectPath, name).catch(() => null)) === false ? false : null
+}
+
+/** `true`/`false` when git answered, `null` when it could not be asked. */
+const defaultBranchExists = async (projectPath: string, branch: string): Promise<boolean | null> => {
+  const out = await gitOut(projectPath, ['branch', '--list', branch])
+  return out === null ? null : out !== ''
 }
 
 /** Park a card in 'blocked' AND stamp it 「見送る」 in ONE board write. */
@@ -7542,7 +7575,8 @@ const collectUnownedDoing = async (
  *  stall escalation is driven deterministically by the unit test. */
 export const runDispatchPass = async (
   engine: ProjectEngine,
-  deps: OrchestratorDeps,
+  // `notify`: the re-entry park's bell (02 §5.3b). Both tick call sites pass the full deps.
+  deps: OrchestratorDeps & Pick<AnomalyDeps, 'notify'>,
   now: number = Date.now(),
 ): Promise<void> => {
   if (!engine.running) return
@@ -7558,6 +7592,11 @@ export const runDispatchPass = async (
   }
   const byId = new Map(tasks.map((t) => [t.id, t]))
   const todos = tasks.filter(isTodoCard)
+  // A card that left todo (moved by hand, deleted) starts its re-entry count over.
+  for (const id of Array.from(engine.reentryFailures?.keys() ?? [])) {
+    const t = byId.get(id)
+    if (!t || !isTodoCard(t)) engine.reentryFailures?.delete(id)
+  }
 
   // 1b. 着地台帳 sweep: stamp landedAt on engine-promoted cards the Board now
   //     shows done (the commander's merge + markDone is a Board write the engine
@@ -7804,7 +7843,7 @@ export const runDispatchPass = async (
       // behaviour and never worse than it.
       const reuse = await (deps.resolveReusableWork ?? defaultResolveReusableWork)(
         engine.path,
-        card,
+        fresh,
       ).catch(() => null)
       if (reuse) {
         logLine(
@@ -7817,6 +7856,57 @@ export const runDispatchPass = async (
         // spawnSwarmWorker itself (non-resume spawn into an existing worktree, after
         // its occupancy check) — shared with the manual POST /api/swarm/worker door.
       }
+      // ── NEVER MINT A FRESH BRANCH OVER COMMITS (2026-10-03, card d84bec79) ──
+      // The `null` above is only "nothing to lose" when the card's branch holds no
+      // work. When it HAS commits, a fresh dispatch stamps a new branch over
+      // `card.branch` and orphans them — the very loss re-entry exists to stop
+      // (measured: a stray dev server refilled the removed worktree's directory,
+      // git refused the re-add, and a 4-commit branch was abandoned). So: leave the
+      // card in todo and try again next pass; after REENTRY_MAX_FAILURES passes
+      // park it in blocked for a human. Only a branch with 0 commits ahead, or one
+      // git positively reports gone, still dispatches fresh, as before.
+      const priorBranch = typeof fresh.branch === 'string' ? fresh.branch.trim() : ''
+      if (!reuse && priorBranch) {
+        const ahead = await cardBranchHoldsWork(engine.path, priorBranch, deps.countCommitsAhead, deps.branchExists)
+        if (ahead !== false) {
+          const fails = (engine.reentryFailures ??= new Map())
+          const tries = (fails.get(card.id) ?? 0) + 1
+          fails.set(card.id, tries)
+          if (tries < REENTRY_MAX_FAILURES) {
+            logLine(
+              engine,
+              'warn',
+              `前回の作業場に戻れませんでした(${tries}/${REENTRY_MAX_FAILURES})— 新しい作業場は作らず次のパスでやり直します: ${shorten(title)} (${priorBranch}: ${ahead === null ? 'コミット数を確認できず' : `${ahead} コミット`})`,
+              'dispatch',
+            )
+            continue
+          }
+          fails.delete(card.id)
+          const parked = await deps.recoverCard(engine.path, card.id, 'blocked').catch(() => false)
+          logLine(
+            engine,
+            'error',
+            `前回の作業場に ${tries} 回続けて戻れませんでした — 作業を失わないよう新しい作業場は作らず、カードを「保留」へ${parked ? '退避しました' : '退避できませんでした(次のパスで再試行)'}: ${shorten(title)} (${priorBranch}: ${ahead === null ? 'コミット数を確認できず' : `${ahead} コミット`})`,
+            'dispatch',
+          )
+          // A park is a dead end for the unattended loop — say so on the bell like
+          // every other park, with the branch holding the work and the way out.
+          if (parked) {
+            deps.notify?.({
+              event: 'reentry-failed',
+              projectPath: engine.path,
+              taskId: card.id,
+              branch: priorBranch,
+              taskTitle: title,
+              detail: `途中まで進んだ作業の続きを ${tries} 回続けて始められなかったので、このカードを「保留」に移しました。ここまでの作業は消えずに残っています。`,
+              // Owner-facing first sentence, then the commander's technical way out.
+              logHint: `社長に「保留のカードを続きから再開して」と頼めば対応します。(司令官向け: ${priorBranch} に ${ahead === null ? '不明数の' : `${ahead} 件の`}コミット。元の作業場所のパスに .git の無いフォルダが残っていれば片付けて todo へ戻す。続きを諦めるなら card.branch を外して新規開始 — その場合このブランチのコミットは引き継がれない)`,
+            })
+          }
+          continue
+        }
+      }
+      engine.reentryFailures?.delete(card.id)
 
       let spawn: SpawnSwarmWorkerResponse
       try {

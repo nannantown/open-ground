@@ -83,6 +83,7 @@ const GATE_ENV_HERMETIC = [
   'SUPABASE_ANON_KEY',
   'OPENGROUND_REALTIME',
   'OPENGROUND_COLLAB_WS_URL',
+  'OPENGROUND_PHONE_RELAY_APP_KEY',
 ]
 
 /**
@@ -90,9 +91,13 @@ const GATE_ENV_HERMETIC = [
  * such. Kept deliberately tiny — each entry is a human decision, not a default.
  * SUPABASE_ANON_KEY: public by design; Row Level Security is the boundary
  * (electron/runtimeConfig.js header, audited in REPORT.md).
+ * OPENGROUND_PHONE_RELAY_APP_KEY: an install pass every copy of the app carries
+ * (it lets an OPEN GROUND Mac create its phone-link room); anyone can dig it out
+ * of the app, so it only keeps strangers from using the relay without the app.
+ * Each pairing's own keys are the boundary (docs/PHONE_LINK.md "Security model").
  * @type {readonly string[]}
  */
-const BAKE_PUBLIC_EXCEPTIONS = ['SUPABASE_ANON_KEY']
+const BAKE_PUBLIC_EXCEPTIONS = ['SUPABASE_ANON_KEY', 'OPENGROUND_PHONE_RELAY_APP_KEY']
 
 /**
  * Everything a VERIFIER child has stripped: both lists plus the pattern.
