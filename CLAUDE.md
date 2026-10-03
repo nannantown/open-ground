@@ -167,6 +167,8 @@ pruned at boot by `src/lib/server/retention.ts`.)
   `Chevron*` (the 「く」 shape), never a shafted arrow — no `Arrow*` / `Move*` /
   `Corner*` / `Shrink` / `Expand` icons, no ← → ↑ ↓ glyphs in screen text (use
   › or words).
+  Exception: the floating assistant's send button (lucide `ArrowUp`, owner
+  2026-10-04), allow-listed per file in `noEmojiGuard.test.ts`.
   Guarded by `src/noEmojiGuard.test.ts`.
 - **Never emoji** — not in the UI, not in copy, not in notifications. The app
   has none. Use lucide icons, or a custom SVG matching the app's stroke width

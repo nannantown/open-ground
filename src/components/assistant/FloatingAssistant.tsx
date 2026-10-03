@@ -5,8 +5,8 @@
 // iPhone (useAssistant). Renders nothing unless the routes let this machine in
 // (owner only) — and is held still and unclickable in work mode.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent } from 'react'
-import { ChevronUp } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
+import { ArrowUp } from 'lucide-react'
 import { AssistantMark, LOOK_COLOR } from './AssistantMark'
 import { ASSISTANT_WINDOW_ATTR } from './assistantWindow'
 import { useAssistant, type AssistantLook } from './useAssistant'
@@ -278,9 +278,10 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
               disabled={!text.trim() || a.pending !== null}
               aria-label={t('misc.assistant.send')}
               title={t('misc.assistant.send')}
-              className={`grid size-7 shrink-0 place-items-center rounded-full bg-ink text-bg transition-colors duration-150 hover:bg-ink-muted active:bg-ink-subtle disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
+              style={{ background: LOOK_COLOR[a.look] }}
+              className={`grid size-8 shrink-0 place-items-center rounded-full text-bg transition-[filter] duration-150 enabled:hover:brightness-90 enabled:active:brightness-75 disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
             >
-              <ChevronUp size={14} strokeWidth={3} />
+              <ArrowUp size={16} strokeWidth={2.5} />
             </button>
           </form>
         </section>

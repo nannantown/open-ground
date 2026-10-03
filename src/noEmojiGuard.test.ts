@@ -121,6 +121,12 @@ const LOG_CALL = /^(logLine|logAwaited|selfUpdateLog|log|console\.\w+|ulog\.\w+)
 
 // Exact text (a fragment of one string literal) that carries an arrow but never
 // reaches a screen. Each entry: why it is not on screen.
+// Owner exception 2026-10-04: the floating assistant's send button is an ArrowUp.
+// Only this file and only this icon; any other arrow icon there stays red.
+const ALLOWED_ARROW_ICON: Record<string, string[]> = {
+  'src/components/assistant/FloatingAssistant.tsx': ['icon ArrowUp'],
+}
+
 const ALLOWED_ARROW_TEXT: Record<string, string[]> = {
   'src/lib/screenSrcdoc.ts': [
     'Unknown module → inert', // JS comment inside the iframe bootstrap source
@@ -210,6 +216,7 @@ describe('no shafted arrows on screen', () => {
     for (const file of arrowFiles()) {
       const rel = relative(REPO, file).split('\\').join('/')
       for (const hit of arrowHits(readFileSync(file, 'utf8'), rel, ALLOWED_ARROW_TEXT[rel])) {
+        if (ALLOWED_ARROW_ICON[rel]?.includes(hit)) continue
         offenders.push(`${rel}:${hit.slice(0, 140)}`)
       }
     }
