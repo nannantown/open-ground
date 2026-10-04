@@ -6,9 +6,10 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, cleanup, fireEvent, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
-vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k }) }))
+const ui = vi.hoisted(() => ({ lang: 'ja' }))
+vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k, lang: ui.lang }) }))
 
-import { FloatingAssistant, clampPos, panelPlacement } from './FloatingAssistant'
+import { EXPANDED_KEY, FloatingAssistant, clampPos, panelPlacement } from './FloatingAssistant'
 
 interface Line { id: string; at: number; who: 'owner' | 'assistant'; text: string }
 let log: Line[]
@@ -58,10 +59,11 @@ describe('FloatingAssistant', () => {
     expect(container.innerHTML).toBe('')
   })
 
-  it('opens on a click, shows the shared log under the owner-given name, closes on Esc', async () => {
+  it('opens on a click, shows the shared log (once unfolded) under the owner-given name, closes on Esc', async () => {
     render(<FloatingAssistant disabled={false} />)
     fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
     const dialog = screen.getByRole('dialog', { name: 'ノノ' })
+    fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.showTalk' }))
     expect(await screen.findByText('昨日のつづきです')).toBeTruthy()
     expect(dialog.textContent).toContain('ノノ')
     fireEvent.keyDown(dialog, { key: 'Escape' })
@@ -161,6 +163,7 @@ describe('FloatingAssistant', () => {
   }
 
   it('a click on the talk keeps Esc for the window', async () => {
+    localStorage.setItem(EXPANDED_KEY, '1')
     const user = userEvent.setup()
     render(<FloatingAssistant disabled={false} />)
     await user.click(await screen.findByRole('button', { name: 'ノノ' }))
@@ -327,5 +330,205 @@ describe('the first read retries a failure, and stops', () => {
     // 3+6+12+24+48 s, then once a minute: ~14 reads in 10 minutes, not ~200.
     await advance(10 * 60_000)
     expect(reads()).toBeLessThanOrEqual(15)
+  })
+})
+
+// The window says what it is for in one faint line, keeps the talk folded until
+// the owner asks for it, and can be talked to by voice (owner 2026-10-04).
+describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
+  class FakeES {
+    static all: FakeES[] = []
+    closed = false
+    onmessage: ((m: { data: string }) => void) | null = null
+    onerror: (() => void) | null = null
+    constructor(public url: string) {
+      FakeES.all.push(this)
+    }
+    close() {
+      this.closed = true
+    }
+    emit(e: object) {
+      act(() => this.onmessage?.({ data: JSON.stringify(e) }))
+    }
+  }
+  const ears = () => FakeES.all.filter((e) => !e.closed)
+  class FakeUtterance {
+    lang = ''
+    onend: (() => void) | null = null
+    onerror: (() => void) | null = null
+    constructor(public text: string) {}
+  }
+  let synth: { speak: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn>; speaking: boolean; pending: boolean }
+  const spoken = () => synth.speak.mock.calls.map(([u]) => (u as FakeUtterance).text)
+
+  beforeEach(() => {
+    FakeES.all = []
+    ui.lang = 'ja'
+    synth = { speak: vi.fn(), cancel: vi.fn(), speaking: true, pending: false }
+    vi.stubGlobal('EventSource', FakeES)
+    vi.stubGlobal('speechSynthesis', synth)
+    vi.stubGlobal('SpeechSynthesisUtterance', FakeUtterance)
+    Object.assign(cfg, { voice: true })
+  })
+
+  const open = async () => {
+    render(<FloatingAssistant disabled={false} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
+    return screen.getByRole('dialog', { name: 'ノノ' })
+  }
+  const input = () => screen.getByRole('textbox', { name: 'misc.assistant.message' }) as HTMLInputElement
+  const mic = () => screen.getByRole('button', { name: /misc\.assistant\.voice(On|Off)/ })
+  const answerNow = async () => {
+    await waitFor(() => expect(answer).not.toBeNull())
+    await act(async () => answer!.resolve())
+    answer = null
+  }
+
+  it('an empty input shows only the faint "say something" line — no history, no greeting', async () => {
+    const dialog = await open()
+    expect(input().placeholder).toBe('misc.assistant.placeholder')
+    expect(input().className).toContain('placeholder:text-ink-faint')
+    expect(dialog.textContent).not.toContain('昨日のつづきです')
+    expect(screen.queryByTestId('assistant-talk')).toBeNull()
+  })
+
+  it('the talk unfolds only when asked, folds again, and the choice is kept', async () => {
+    await open()
+    fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.showTalk' }))
+    expect(await screen.findByText('昨日のつづきです')).toBeTruthy()
+    cleanup()
+    await open()
+    expect(screen.getByText('昨日のつづきです')).toBeTruthy() // remembered
+    fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.hideTalk' }))
+    expect(screen.queryByText('昨日のつづきです')).toBeNull()
+    cleanup()
+    await open()
+    expect(screen.queryByText('昨日のつづきです')).toBeNull()
+  })
+
+  it('folded, the window shows just the exchange made now, gone after closing', async () => {
+    await open()
+    fireEvent.change(input(), { target: { value: 'やあ' } })
+    fireEvent.submit(input().closest('form')!)
+    await answerNow()
+    expect(await screen.findByText('答え:やあ')).toBeTruthy()
+    expect(screen.queryByText('昨日のつづきです')).toBeNull()
+    fireEvent.click(character())
+    fireEvent.click(character())
+    expect(screen.queryByText('答え:やあ')).toBeNull()
+  })
+
+  it('no mic where this Mac cannot listen', async () => {
+    Object.assign(cfg, { voice: false })
+    await open()
+    expect(screen.queryByRole('button', { name: /misc\.assistant\.voice/ })).toBeNull()
+  })
+
+  it('voice is off until the mic is pressed; on, it listens, sends what was said, and reads the answer aloud', async () => {
+    await open()
+    expect(mic().getAttribute('aria-pressed')).toBe('false')
+    expect(FakeES.all).toHaveLength(0)
+
+    fireEvent.click(mic())
+    expect(mic().getAttribute('aria-pressed')).toBe('true')
+    expect(ears()).toHaveLength(1)
+    expect(ears()[0].url).toBe('/api/phone-link/assistant/listen?lang=ja')
+    ears()[0].emit({ type: 'ready' })
+    expect(mic().hasAttribute('data-hearing')).toBe(true)
+    ears()[0].emit({ type: 'partial', text: '明日の' })
+    expect(input().placeholder).toBe('明日の')
+
+    ears()[0].emit({ type: 'final', text: '明日の予定は?' })
+    expect(await screen.findByText('明日の予定は?')).toBeTruthy()
+    expect(ears()).toHaveLength(0) // the ears close while it answers…
+    await answerNow()
+    await waitFor(() => expect(spoken()).toEqual(['答え:明日の予定は?']))
+    expect(synth.cancel).not.toHaveBeenCalled() // whatever was already speaking (Research) is not cut
+    expect((synth.speak.mock.calls[0][0] as FakeUtterance).lang).toBe('ja-JP')
+    expect(ears()).toHaveLength(0) // …and while it speaks (the mic would hear it)
+    act(() => (synth.speak.mock.calls[0][0] as FakeUtterance).onend!())
+    expect(ears()).toHaveLength(1) // then listen again
+  })
+
+  it('with voice on, a typed line is still sent — and its answer is not read aloud', async () => {
+    await open()
+    fireEvent.click(mic())
+    fireEvent.change(input(), { target: { value: 'やあ' } })
+    fireEvent.submit(input().closest('form')!)
+    await answerNow()
+    expect(await screen.findByText('答え:やあ')).toBeTruthy()
+    expect(synth.speak).not.toHaveBeenCalled()
+  })
+
+  it('mute stops the reading and the listening at once', async () => {
+    await open()
+    fireEvent.click(mic())
+    ears()[0].emit({ type: 'final', text: 'やあ' })
+    await answerNow()
+    await waitFor(() => expect(synth.speak).toHaveBeenCalled())
+    fireEvent.click(mic())
+    expect(synth.cancel).toHaveBeenCalled()
+    expect(mic().getAttribute('aria-pressed')).toBe('false')
+    act(() => (synth.speak.mock.calls[0][0] as FakeUtterance).onend!())
+    expect(ears()).toHaveLength(0)
+  })
+
+  it('no permission: voice turns itself off and says so plainly (no reconnect loop)', async () => {
+    await open()
+    fireEvent.click(mic())
+    ears()[0].emit({ type: 'error', reason: 'denied' })
+    expect(screen.getByText('misc.assistant.voiceDenied')).toBeTruthy()
+    expect(mic().getAttribute('aria-pressed')).toBe('false')
+    expect(ears()).toHaveLength(0)
+    expect(FakeES.all).toHaveLength(1)
+  })
+
+  it('a Mac that cannot listen at all says so — without asking to try again', async () => {
+    await open()
+    fireEvent.click(mic())
+    ears()[0].emit({ type: 'error', reason: 'unavailable' })
+    expect(screen.getByText('misc.assistant.voiceUnavailable')).toBeTruthy()
+    expect(screen.queryByText('misc.assistant.voiceFailed')).toBeNull()
+  })
+
+  it('closing the window turns voice off — without silencing speech that is not its own', async () => {
+    await open()
+    fireEvent.click(mic())
+    fireEvent.click(character())
+    expect(ears()).toHaveLength(0)
+    expect(synth.cancel).not.toHaveBeenCalled() // e.g. a Research digest being read
+    fireEvent.click(character())
+    expect(mic().getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('listens in English when the app is in English', async () => {
+    ui.lang = 'en'
+    await open()
+    fireEvent.click(mic())
+    expect(ears()[0].url).toBe('/api/phone-link/assistant/listen?lang=en')
+  })
+
+  it('two utterances heard back to back send one line, not two', async () => {
+    await open()
+    fireEvent.click(mic())
+    act(() => {
+      ears()[0].onmessage?.({ data: JSON.stringify({ type: 'final', text: 'ひとつめ' }) })
+      ears()[0].onmessage?.({ data: JSON.stringify({ type: 'final', text: 'ふたつめ' }) })
+    })
+    await waitFor(() => expect(answer).not.toBeNull())
+    const says = vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/say'))
+    expect(says).toHaveLength(1)
+    await answerNow()
+  })
+
+  it('if the voice never reports its end, the ears still reopen once it falls quiet', async () => {
+    await open()
+    fireEvent.click(mic())
+    ears()[0].emit({ type: 'final', text: 'やあ' })
+    await answerNow()
+    await waitFor(() => expect(synth.speak).toHaveBeenCalled())
+    expect(ears()).toHaveLength(0)
+    synth.speaking = false // finished, but no onend came
+    await waitFor(() => expect(ears()).toHaveLength(1), { timeout: 2500 })
   })
 })

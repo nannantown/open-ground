@@ -798,6 +798,15 @@
   オーナー以外は描かない(`/api/phone-link/*` は ownerOnly)。名前と色 = `config.json` の `name`/`look`(`assistantMemory.ts`)→
   iPhone へは `projects` 先頭と `assistant-history` に載る。設計正典(iPhone 版もこれだけで作る)= `docs/ASSISTANT_DESIGN.md`。
   テスト `FloatingAssistant.test.tsx` / `AssistantMark.test.tsx`(20枚のかけらに戻す/切れ込みが小さいロゴ印とずれると赤)/ `assistantMemory.test.ts` / `phoneLink.test.ts`。
+- アシスタントの窓と声(2026-10-04): 空の入力欄は薄い「話しかける…」だけ。会話はふだん畳み(今のやりとり=`turn` だけ表示)、
+  `MessagesSquare` で広げる(`localStorage og.assistant.expanded`)。マイク = `useVoice.ts`(既定オフ・押すと聞く/もう一度でミュート)→
+  `GET /api/phone-link/assistant/listen`(SSE・ownerOnly)→ `src/lib/server/assistantListen.ts` が `bin/og-listen` を起動
+  (`native/og-listen/main.swift` = macOS の SFSpeechRecognizer・端末内・無料。`scripts/build-listen.mjs` が `npm run build` で universal を作り
+  `build.files` で同梱、electron-builder が署名)。話した行の返事だけ `speechSynthesis` で読む・答え待ち/読み上げ中は耳を閉じる(マイクが読み上げを拾うため)。
+  罠: macOS は**アプリ本体**(責任プロセス)の Info.plist で許可を聞く → `package.json` `mac.extendInfo` の `NSSpeechRecognitionUsageDescription`
+  が無いと tccd が補助を SIGABRT で殺す(=`denied` 扱い)。dev(`electron:dev`)や古い版のアプリの中からは聞き取りを確かめられない。
+  CI は macos-14 SDK なので SpeechAnalyzer(macOS 26)は未使用。テスト `FloatingAssistant.test.tsx` / `assistantListen.test.ts` /
+  `server/__tests__/assistantListenRoute.test.ts` / `macMicPermission.test.ts`。
 - 画面ロック中に起こす(Push to Talk, 2026-10-02): APNs 送信は `src/lib/server/phonePush.ts`(オーナーの .p8 を
   `~/.openground/phone-push-key.json` 0600 に保存・JWT ES256 を30分ごとに作り直し・`node:http2` で1回ずつ接続)。
   トークン受け取り・間隔(5秒)・say の最終 ack 待ち(最長2分)・410/BadDeviceToken で破棄・403 等の恒久拒否は鍵かトークンが変わるまで止めて設定に表示・無応答/429/5xx は間隔後に最大3回再送、は `phoneLink.ts` の

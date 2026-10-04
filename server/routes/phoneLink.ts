@@ -2,6 +2,7 @@
 // desks (src/lib/server/phoneLink.ts, docs/PHONE_LINK.md). Owner-only: the
 // president is an owner seat, and the pairing code is a key.
 import { Hono, type MiddlewareHandler } from 'hono'
+import { streamSSE } from 'hono/streaming'
 import { pushKeySaved, hasPhoneLinkAccess, pairPhone, pairingCode, phoneLinkStatus, readPhoneLinkConfig, unpairPhone } from '@/lib/server/phoneLink'
 import { savePushKey } from '@/lib/server/phonePush'
 import {
@@ -23,6 +24,7 @@ import {
   saveAssistantConfig,
 } from '@/lib/server/assistantMemory'
 import { getPromptLang } from '@/lib/server/promptLang'
+import { listenBinary, startListening } from '@/lib/server/assistantListen'
 import { isLockdownEnabledSync } from '@/lib/server/lockdown'
 import { hostIsLocal, originIsLocal } from '../loopback'
 
@@ -62,7 +64,7 @@ export const phoneLinkRoutes = new Hono()
   // The assistant's records, kept on this Mac only (assistantMemory.ts): the
   // screen reads them here, the phone through the link (`assistant-history`).
   .get('/api/phone-link/assistant/log', async (c) =>
-    c.json({ entries: await readAssistantLog(), memory: await readAssistantMemory(), ...(await readAssistantConfig()) }),
+    c.json({ entries: await readAssistantLog(), memory: await readAssistantMemory(), ...(await readAssistantConfig()), voice: listenBinary() !== null }),
   )
   .delete('/api/phone-link/assistant/log', async (c) => (await clearAssistantLog(), c.json({ ok: true })))
   .delete('/api/phone-link/assistant/log/:id', async (c) =>
@@ -73,6 +75,38 @@ export const phoneLinkRoutes = new Hono()
   .post('/api/phone-link/assistant/config', async (c) => {
     const r = await saveAssistantConfig(await c.req.json().catch(() => ({})))
     return 'error' in r ? c.json(r, 400) : c.json(r)
+  })
+  // Voice in (assistantListen.ts): what the owner says, as it is heard, while
+  // the screen keeps this stream open. Closing it stops the listening.
+  .get('/api/phone-link/assistant/listen', (c) => {
+    // A GET a foreign page can fire with no Origin and a local Host (an <img>
+    // pointed here) — and this one turns the mic on. The browser says where the
+    // request came from: only this app's own pages (or no browser at all) may.
+    const site = c.req.header('sec-fetch-site')
+    if (site !== undefined && site !== 'same-origin' && site !== 'none') return c.json({ error: 'forbidden' }, 403)
+    if (isLockdownEnabledSync()) return c.json({ error: 'work-mode' }, 409)
+    if (!listenBinary()) return c.json({ error: 'unavailable' }, 404)
+    const lang = c.req.query('lang') === 'en' ? 'en' : 'ja'
+    return streamSSE(c, async (stream) => {
+      // The window may hang up while the owner check above is still waiting —
+      // then the stream never sees an abort, and ears started now would stay
+      // open with nobody listening. The request's own signal does know.
+      const signal = c.req.raw.signal
+      if (signal.aborted) return
+      let stop = () => {}
+      await new Promise<void>((done) => {
+        stream.onAbort(done)
+        signal.addEventListener('abort', () => done(), { once: true })
+        // In order, and the stream ends only once the last (the reason) is out —
+        // closing with a write still in flight drops it.
+        let wrote = Promise.resolve()
+        stop = startListening(lang, (e) => {
+          wrote = wrote.then(() => stream.writeSSE({ data: JSON.stringify(e) })).catch(() => {})
+          if (e.type === 'error') void wrote.then(done)
+        })
+      })
+      stop()
+    })
   })
   // Talk to the assistant from the screen: the same assistant, the same log.
   .post('/api/phone-link/assistant/say', async (c) => {

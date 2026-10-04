@@ -6,12 +6,15 @@
 // (owner only) — and is held still and unclickable in work mode.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent } from 'react'
 import { useT } from '@/i18n/I18nContext'
-import { ArrowUp } from 'lucide-react'
+import { ArrowUp, Mic, MessagesSquare } from 'lucide-react'
 import { AssistantMark, LOOK_COLOR } from './AssistantMark'
 import { ASSISTANT_WINDOW_ATTR } from './assistantWindow'
 import { useAssistant, type AssistantLook } from './useAssistant'
+import { useVoice } from './useVoice'
 
 const POS_KEY = 'og.assistant.pos'
+/** '1' = the window shows the whole talk; otherwise only the input and the current exchange. */
+export const EXPANDED_KEY = 'og.assistant.expanded'
 const SIZE = 50
 const MARGIN = 12
 const GAP = 10
@@ -59,7 +62,7 @@ export const panelPlacement = (p: Pos, w: number, h: number) => {
 }
 
 export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
-  const { t } = useT()
+  const { t, lang } = useT()
   const [open, setOpen] = useState(false)
   const showPanel = open && !disabled
   const words = useMemo(
@@ -72,6 +75,11 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
     [t],
   )
   const a = useAssistant(showPanel, words)
+  const [expanded, setExpanded] = useState(() => localStorage.getItem(EXPANDED_KEY) === '1')
+  /** The exchange made in this opening of the window — all the folded window shows. */
+  const [turn, setTurn] = useState<{ said: string; reply: string } | null>(null)
+  const pendingRef = useRef(a.pending)
+  pendingRef.current = a.pending
   const [pos, setPos] = useState(readPos)
   const [view, setView] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }))
   const [editing, setEditing] = useState(false)
@@ -86,14 +94,33 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const nameRef = useRef<HTMLInputElement>(null)
   const lookRef = useRef<HTMLButtonElement>(null)
 
+  // Only a line SPOKEN is answered aloud (and only while voice is still on).
+  const sendLine = async (line: string, spoken: boolean) => {
+    setTurn(null)
+    const said = await a.say(line, (reply) => {
+      setTurn({ said: line, reply })
+      if (spoken) voice.speak(reply)
+    })
+    if (!said) setText((cur) => cur || line)
+  }
+  const voice = useVoice({
+    active: showPanel,
+    busy: a.pending !== null,
+    lang: lang === 'en' ? 'en' : 'ja',
+    onHeard: (line) => void sendLine(line, true),
+  })
+
   useEffect(() => {
     const onResize = () => setView({ w: window.innerWidth, h: window.innerHeight })
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
   useEffect(() => {
-    if (showPanel) inputRef.current?.focus()
-    else setEditing(false)
+    if (showPanel) return void inputRef.current?.focus()
+    setEditing(false)
+    // Closing ends the exchange — unless its answer is still coming (then it
+    // waits for the next opening, with the unread mark).
+    if (pendingRef.current === null) setTurn(null)
   }, [showPanel])
   useEffect(() => setDraftName(a.name), [a.name])
   // Work mode closes the window (it does not pop back up when work mode ends).
@@ -129,7 +156,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   useLayoutEffect(() => {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [a.lines.length, a.pending, a.error, showPanel])
+  }, [a.lines.length, a.pending, a.error, showPanel, expanded, turn])
 
   if (!a.ready) return null
   const at = clampPos(pos, view.w, view.h)
@@ -169,8 +196,20 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
     // A mouse send leaves focus on the send button, which disables — keep it in the window.
     inputRef.current?.focus()
     setText('')
-    if (!(await a.say(line))) setText((cur) => cur || line)
+    await sendLine(line, false)
   }
+  const toggleExpanded = () => {
+    localStorage.setItem(EXPANDED_KEY, expanded ? '0' : '1')
+    setExpanded(!expanded)
+  }
+  const voiceError =
+    voice.error &&
+    t(voice.error === 'denied' ? 'misc.assistant.voiceDenied' : voice.error === 'unavailable' ? 'misc.assistant.voiceUnavailable' : 'misc.assistant.voiceFailed')
+  const problem = voiceError || a.error
+  const showTalk = expanded || a.pending !== null || turn !== null || problem !== ''
+  const owned = 'max-w-[80%] self-end whitespace-pre-wrap rounded-[12px_12px_4px_12px] bg-plane px-2.5 py-1.5 text-ui leading-relaxed'
+  const answered = 'max-w-[88%] self-start whitespace-pre-wrap text-ui leading-relaxed'
+  const iconButton = 'grid size-8 shrink-0 place-items-center rounded-full transition-colors duration-150'
   const saveName = () => {
     if (editing && draftName.trim() !== a.name) void a.saveLook({ name: draftName })
   }
@@ -191,19 +230,33 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
           style={place}
           className="fixed z-overlay-float flex flex-col gap-2 rounded-[14px] border border-line bg-bg-card p-3 text-ink shadow-[0_14px_34px_rgb(var(--og-shadow)/0.2)] focus:outline-none"
         >
-          <header className="flex items-center gap-2">
-            <button
-              ref={lookRef}
-              type="button"
-              onClick={() => setEditing((v) => !v)}
-              aria-pressed={editing}
-              title={t('misc.assistant.look')}
-              className={`grid size-8 place-items-center rounded-full transition-colors duration-150 hover:bg-plane active:bg-line aria-pressed:bg-accent-soft ${focusRing}`}
-            >
-              <AssistantMark look={a.look} size={24} mode={a.pending !== null ? 'think' : 'idle'} />
-            </button>
-            {a.name && <span className="truncate text-ui font-semibold">{a.name}</span>}
-          </header>
+          {expanded && a.name && <header className="truncate px-1 text-ui font-semibold">{a.name}</header>}
+          {showTalk && (
+            <div ref={listRef} data-testid="assistant-talk" className="flex min-h-0 flex-auto flex-col gap-2 overflow-y-auto pr-1" aria-live="polite">
+              {expanded
+                ? a.lines.map((l) => (
+                    <p key={l.id} className={l.who === 'owner' ? owned : answered}>
+                      {l.text}
+                    </p>
+                  ))
+                : a.pending === null &&
+                  turn && (
+                    <>
+                      <p className={owned}>{turn.said}</p>
+                      <p className={answered}>{turn.reply}</p>
+                    </>
+                  )}
+              {a.pending !== null && (
+                <>
+                  <p className={owned}>{a.pending}</p>
+                  <span className="self-start" data-testid="assistant-thinking">
+                    <AssistantMark look={a.look} size={20} mode="think" />
+                  </span>
+                </>
+              )}
+              {problem && <p className="self-start text-ui text-accent">{problem}</p>}
+            </div>
+          )}
           {editing && (
             <div className="flex items-center gap-2">
               <input
@@ -236,54 +289,70 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
               ))}
             </div>
           )}
-          <div ref={listRef} className="flex min-h-0 flex-auto flex-col gap-2 overflow-y-auto pr-1" aria-live="polite">
-            {a.lines.map((l) =>
-              l.who === 'owner' ? (
-                <p key={l.id} className="max-w-[80%] self-end whitespace-pre-wrap rounded-[12px_12px_4px_12px] bg-plane px-2.5 py-1.5 text-ui leading-relaxed">
-                  {l.text}
-                </p>
-              ) : (
-                <p key={l.id} className="max-w-[88%] self-start whitespace-pre-wrap text-ui leading-relaxed">
-                  {l.text}
-                </p>
-              ),
-            )}
-            {a.pending !== null && (
-              <>
-                <p className="max-w-[80%] self-end whitespace-pre-wrap rounded-[12px_12px_4px_12px] bg-plane px-2.5 py-1.5 text-ui leading-relaxed">
-                  {a.pending}
-                </p>
-                <span className="self-start" data-testid="assistant-thinking">
-                  <AssistantMark look={a.look} size={20} mode="think" />
-                </span>
-              </>
-            )}
-            {a.error && <p className="self-start text-ui text-accent">{a.error}</p>}
-          </div>
-          <form onSubmit={submit} className="flex items-center gap-1.5 rounded-full border border-line-strong bg-bg py-1 pl-3 pr-1 transition-colors duration-150 hover:border-ink-subtle focus-within:border-accent">
-            <input
-              ref={inputRef}
-              value={text}
-              maxLength={SAY_MAX}
-              aria-label={t('misc.assistant.message')}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => {
-                // An IME's confirming Enter is not a send.
-                if (e.key === 'Enter' && (e.nativeEvent.isComposing || e.keyCode === 229)) e.preventDefault()
-              }}
-              className="min-w-0 flex-1 bg-transparent text-ui text-ink focus:outline-none"
-            />
+          <div className="flex items-center gap-1.5">
+              <button
+                ref={lookRef}
+                type="button"
+                onClick={() => setEditing((v) => !v)}
+                aria-pressed={editing}
+                title={t('misc.assistant.look')}
+                className={`grid size-8 place-items-center rounded-full transition-colors duration-150 hover:bg-plane active:bg-line aria-pressed:bg-accent-soft ${focusRing}`}
+              >
+                <AssistantMark look={a.look} size={24} mode={a.pending !== null ? 'think' : 'idle'} />
+              </button>
+            <form onSubmit={submit} className="flex min-w-0 flex-1 items-center gap-1 rounded-full border border-line-strong bg-bg py-1 pl-3 pr-1 transition-colors duration-150 hover:border-ink-subtle focus-within:border-accent">
+                <input
+                  ref={inputRef}
+                  value={text}
+                  maxLength={SAY_MAX}
+                  aria-label={t('misc.assistant.message')}
+                  // The one hint the window gives; while listening, what is being heard.
+                  placeholder={voice.partial || t('misc.assistant.placeholder')}
+                  onChange={(e) => setText(e.target.value)}
+                  onKeyDown={(e) => {
+                    // An IME's confirming Enter is not a send.
+                    if (e.key === 'Enter' && (e.nativeEvent.isComposing || e.keyCode === 229)) e.preventDefault()
+                  }}
+                  className="min-w-0 flex-1 bg-transparent text-ui text-ink placeholder:text-ink-faint focus:outline-none"
+                />
+              {a.voice && (
+                <button
+                  type="button"
+                  onClick={voice.toggle}
+                  aria-pressed={voice.on}
+                  aria-label={voice.on ? t('misc.assistant.voiceOff') : t('misc.assistant.voiceOn')}
+                  title={voice.on ? t('misc.assistant.voiceOff') : t('misc.assistant.voiceOn')}
+                  data-hearing={voice.hearing ? '' : undefined}
+                  className={`relative ${iconButton} ${
+                    voice.on ? 'bg-accent-soft text-accent hover:bg-accent-soft/70 active:bg-accent-soft/50' : 'text-ink-subtle hover:bg-plane hover:text-ink active:bg-line'
+                  } ${focusRing}`}
+                >
+                  {voice.hearing && <span aria-hidden className="absolute inset-0 rounded-full ring-2 ring-accent motion-safe:animate-pulse" />}
+                  <Mic size={16} strokeWidth={2.25} />
+                </button>
+              )}
+              <button
+                type="submit"
+                disabled={!text.trim() || a.pending !== null}
+                aria-label={t('misc.assistant.send')}
+                title={t('misc.assistant.send')}
+                style={{ background: LOOK_COLOR[a.look] }}
+                className={`grid size-8 shrink-0 place-items-center rounded-full text-bg transition-[filter] duration-150 enabled:hover:brightness-90 enabled:active:brightness-75 disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
+              >
+                <ArrowUp size={16} strokeWidth={2.5} />
+              </button>
+            </form>
             <button
-              type="submit"
-              disabled={!text.trim() || a.pending !== null}
-              aria-label={t('misc.assistant.send')}
-              title={t('misc.assistant.send')}
-              style={{ background: LOOK_COLOR[a.look] }}
-              className={`grid size-8 shrink-0 place-items-center rounded-full text-bg transition-[filter] duration-150 enabled:hover:brightness-90 enabled:active:brightness-75 disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
+              type="button"
+              onClick={toggleExpanded}
+              aria-pressed={expanded}
+              aria-label={expanded ? t('misc.assistant.hideTalk') : t('misc.assistant.showTalk')}
+              title={expanded ? t('misc.assistant.hideTalk') : t('misc.assistant.showTalk')}
+              className={`${iconButton} text-ink-subtle hover:bg-plane hover:text-ink active:bg-line aria-pressed:bg-accent-soft aria-pressed:text-accent ${focusRing}`}
             >
-              <ArrowUp size={16} strokeWidth={2.5} />
+              <MessagesSquare size={16} strokeWidth={2.25} />
             </button>
-          </form>
+          </div>
         </section>
       )}
       <button

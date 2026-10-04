@@ -3609,3 +3609,11 @@ export interface ResearchJobStateResponse {
   startedAt: string
   error?: string
 }
+
+/** One event on GET /api/phone-link/assistant/listen (assistantListen.ts → useVoice). */
+export interface AssistantListenEvent {
+  type: 'ready' | 'partial' | 'final' | 'error'
+  text?: string
+  /** On 'error': 'denied' (no permission) | 'unavailable' | 'failed'. */
+  reason?: string
+}

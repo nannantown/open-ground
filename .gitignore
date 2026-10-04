@@ -100,3 +100,6 @@ you-corpus-additions.json.corrupt-*
 # there would pass for the wrong reason — which is why they land at the repo
 # root. The test removes them in a finally; this covers a killed run.
 /.og-fence-probe-*
+
+# og-listen, built by scripts/build-listen.mjs
+/bin/

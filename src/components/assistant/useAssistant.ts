@@ -15,6 +15,8 @@ interface LogResponse {
   entries: AssistantLine[]
   name: string
   look: AssistantLook
+  /** This Mac can listen (macOS, og-listen built): show the mic. */
+  voice?: boolean
 }
 
 const API = '/api/phone-link/assistant'
@@ -36,9 +38,12 @@ export interface AssistantState {
   error: string
   /** An answer came while the window was closed. */
   unread: boolean
+  /** This Mac can listen: the mic button is offered. */
+  voice: boolean
   /** true = the line is in the log now (answered, or failed after it was logged);
-   *  false = it was refused before reaching the log — give it back to the input. */
-  say: (text: string) => Promise<boolean>
+   *  false = it was refused before reaching the log — give it back to the input.
+   *  onReply gets the answer's words, once the answer is in the log. */
+  say: (text: string, onReply?: (reply: string) => void) => Promise<boolean>
   saveLook: (patch: { name?: string; look?: AssistantLook }) => Promise<boolean>
 }
 
@@ -59,6 +64,9 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
   openRef.current = open
   // Only the newest read lands: an older poll answering late never rolls the talk back.
   const readSeq = useRef(0)
+  // One line at a time, decided synchronously: two lines in the same tick (two
+  // utterances heard back to back) must not both pass a stale `pending`.
+  const saying = useRef(false)
 
   /** 'failed' = no answer worth keeping (network, 5xx, bad body) — worth asking again. */
   const load = useCallback(async (): Promise<'ok' | 'refused' | 'failed' | 'stale'> => {
@@ -74,7 +82,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
     const d = (await r.json().catch(() => null)) as LogResponse | null
     if (n !== readSeq.current) return 'stale'
     if (!d) return 'failed'
-    setData({ entries: d.entries ?? [], name: d.name ?? '', look: d.look ?? 'verm' })
+    setData({ entries: d.entries ?? [], name: d.name ?? '', look: d.look ?? 'verm', voice: d.voice === true })
     return 'ok'
   }, [])
 
@@ -102,11 +110,13 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
   }, [open, load])
 
   const say = useCallback(
-    async (text: string) => {
+    async (text: string, onReply?: (reply: string) => void) => {
       const line = text.trim()
-      if (!line || pending !== null) return false
+      if (!line || saying.current) return false
+      saying.current = true
       setPending(line)
       setError('')
+      let reply = ''
       try {
         const r = await fetch(`${API}/say`, {
           method: 'POST',
@@ -121,6 +131,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
           // (502) has already logged the owner's line — giving it back would log it twice.
           return r.status >= 500
         }
+        reply = ((await r.json().catch(() => ({}))) as { reply?: unknown }).reply as string
         if (!openRef.current) setUnread(true)
         return true
       } catch {
@@ -130,9 +141,11 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
         // The log first, then drop the pending line: the line never blinks out.
         await load()
         setPending(null)
+        saying.current = false
+        if (typeof reply === 'string' && reply) onReply?.(reply)
       }
     },
-    [pending, load, words],
+    [load, words],
   )
 
   const saveLook = useCallback(
@@ -156,6 +169,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
     pending,
     error,
     unread,
+    voice: data?.voice === true,
     say,
     saveLook,
   }

@@ -50,6 +50,23 @@ pieces, and the same motions move those pieces (§4, §5).
 - A line refused before it reached the assistant (busy, too long, work mode)
   goes back into the input with a plain reason; a line that failed after it
   was logged is not given back (it is already in the talk).
+- The window is small by default (owner 2026-10-04): the character button,
+  the input and a "show the conversation" toggle. An empty input shows one
+  faint line, 「話しかける…」 / "Say something…" — no greeting, no example
+  buttons. Folded, it shows only the exchange made in this opening (the line
+  and its answer); closing clears it unless the answer is still coming. The
+  toggle unfolds the whole talk as a light chat and folds it again; the
+  choice is remembered (`localStorage` `og.assistant.expanded`).
+- Voice, both ways, free (owner 2026-10-04): a mic button inside the input
+  (only where the Mac can listen). Off by default; pressed = listening (the
+  button fills and pulses, what is heard so far shows as the faint line),
+  pressed again = mute (listening and reading stop). Each finished utterance
+  is sent as a line; the answer to a SPOKEN line is read aloud
+  (`speechSynthesis`); a typed line — even with voice on — is not. While an
+  answer is coming or being read, the mic is closed (it would hear the
+  reading). Closing the window turns voice off. Ears = macOS's own speech
+  recognizer (`native/og-listen`, on-device where the language allows); no
+  paid voice API.
 
 ## 2. The data both screens read
 
@@ -182,6 +199,11 @@ transitions beyond the system's own.
 - `src/components/assistant/useAssistant.ts` — the talk state, kept in the
   always-mounted button so closing never drops a line being answered; reads
   the log every 5 s while open (the phone talks into the same log).
+- `src/components/assistant/useVoice.ts` — voice on/off, the listen stream
+  (`GET /api/phone-link/assistant/listen` → `src/lib/server/assistantListen.ts`
+  → `bin/og-listen`, built by `scripts/build-listen.mjs`), reading answers
+  aloud. macOS asks the app itself for the mic and speech-recognition
+  permissions, so both usage strings sit in `package.json` `mac.extendInfo`.
 - `src/components/assistant/AssistantMark.tsx` — the character: the app icon's
   carved ring (`CarvedRingMask` from `OpenGroundMark.tsx`) split into 4
   pieces, each with its breathing direction and ring place as CSS variables.
