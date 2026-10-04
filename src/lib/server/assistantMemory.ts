@@ -15,6 +15,7 @@
 import { appendFile, mkdir, readFile, readdir, rm, unlink } from 'fs/promises'
 import { join } from 'path'
 import { newId } from '@/lib/ids'
+import type { PhoneCallRecord } from '@/lib/types'
 import { atomicWriteJson, atomicWriteText } from './atomicWrite'
 import { openGroundHome } from './paths'
 
@@ -28,13 +29,15 @@ export type AssistantLook = (typeof ASSISTANT_LOOKS)[number]
 const DAY_MS = 86_400_000
 const MODE = 0o600
 
-export interface AssistantEntry {
+export interface AssistantEntry extends Partial<PhoneCallRecord> {
   id: string
   at: number
   who: 'owner' | 'assistant'
   text: string
   /** Where the owner said it (both land in this one log). */
   via: 'phone' | 'screen'
+  /** Stable phone say id, for reconciling an optimistic owner line by identity. */
+  clientId?: string
   /** The card the assistant wrote in this answer. */
   card?: { projectId: string; taskId: string; title: string }
 }
@@ -165,6 +168,29 @@ export const appendAssistantEntries = (entries: Omit<AssistantEntry, 'id'>[]): P
     return out
   })
 
+/** Call receipts use the phone's stable id. Retrying one never appends twice,
+ * including after a restart or after its replay-window entry expired. */
+export const appendAssistantCall = (id: string, entry: Omit<AssistantEntry, 'id'> & PhoneCallRecord, compareTime = false): Promise<AssistantEntry> =>
+  locked(async () => {
+    const receiptId = `call:${id}`
+    for (const file of await dayFiles()) {
+      const found = parseLines(await readFile(join(logDir(), file), 'utf8')).find((e) => e.id === receiptId)
+      if (found) {
+        if (found.kind !== 'call' || found.projectId !== entry.projectId || found.seconds !== entry.seconds || compareTime && found.at !== entry.at)
+          throw new Error('call receipt conflict')
+        return found
+      }
+    }
+    await ensureDir(logDir())
+    const out = { id: receiptId, ...entry }
+    await appendFile(join(logDir(), `${dayOf(out.at)}.jsonl`), JSON.stringify(out) + '\n', { mode: MODE })
+    return out
+  })
+
+/** Scope shared history: absent legacy project ids mean assistant conversation. */
+export const assistantEntriesFor = (entries: AssistantEntry[], projectId = 'assistant'): AssistantEntry[] =>
+  entries.filter((e) => (e.projectId ?? 'assistant') === projectId)
+
 /** Everything said within the kept days, oldest first. Old days are deleted first. */
 export const readAssistantLog = async (now = Date.now()): Promise<AssistantEntry[]> => {
   const { logDays } = await readAssistantConfig()
@@ -178,13 +204,13 @@ export const readAssistantLog = async (now = Date.now()): Promise<AssistantEntry
 /** One line out of the log. What the memo already took from it stays there. */
 // Every delete bumps the epoch when it is ASKED, not when its turn at the lock
 // comes: a line finishing meanwhile then sees it under the lock (writeAssistantMemory).
-export const deleteAssistantEntry = (id: string): Promise<boolean> => {
+export const deleteAssistantEntry = (id: string, projectId?: string): Promise<boolean> => {
   bump()
   return locked(async () => {
     for (const f of await dayFiles()) {
       const path = join(logDir(), f)
       const entries = parseLines(await readFile(path, 'utf8').catch(() => ''))
-      const rest = entries.filter((e) => e.id !== id)
+      const rest = entries.filter((e) => e.id !== id || projectId !== undefined && (e.projectId ?? 'assistant') !== projectId)
       if (rest.length === entries.length) continue
       if (rest.length) await atomicWriteText(path, rest.map((e) => JSON.stringify(e) + '\n').join(''), { mode: MODE })
       else await rm(path, { force: true })
@@ -194,11 +220,19 @@ export const deleteAssistantEntry = (id: string): Promise<boolean> => {
   })
 }
 
-export const clearAssistantLog = (): Promise<void> => {
+export const clearAssistantLog = (projectId?: string): Promise<void> => {
   bump()
   return locked(async () => {
-    await rm(logDir(), { recursive: true, force: true })
-    await rm(stateFile(), { force: true })
+    if (projectId === undefined) await rm(logDir(), { recursive: true, force: true })
+    else for (const file of await dayFiles()) {
+      const path = join(logDir(), file)
+      const entries = parseLines(await readFile(path, 'utf8'))
+      const keep = entries.filter((e) => (e.projectId ?? 'assistant') !== projectId)
+      if (keep.length === entries.length) continue
+      if (keep.length) await atomicWriteText(path, keep.map((e) => JSON.stringify(e) + '\n').join(''), { mode: MODE })
+      else await rm(path, { force: true })
+    }
+    if (projectId === undefined || projectId === 'assistant') await rm(stateFile(), { force: true })
   })
 }
 

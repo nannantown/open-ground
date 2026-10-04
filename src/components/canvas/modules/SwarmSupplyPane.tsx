@@ -8,6 +8,7 @@
 // checkout, running /supply); this pane only attaches to the returned terminalId
 // and reports its close. Stopping it is a plain PTY kill (no worktree to remove).
 
+import { useEffect, useState } from 'react'
 import { Power } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { BEACON_SPRITE } from '@/lib/swarm/sprites'
@@ -16,6 +17,7 @@ import type { WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 
 interface Props {
+  projectPath: string
   /** PTY id the supply route assigned when it launched `claude` in the cwd. */
   terminalId: string
   /** Display status, derived by SwarmModule from the active-terminal poll +
@@ -32,8 +34,26 @@ interface Props {
   onRestart: () => void
 }
 
-export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRestart }: Props) => {
-  const { t } = useT()
+export const SwarmSupplyPane = ({ projectPath, terminalId, status, busy, onExit, onStop, onRestart }: Props) => {
+  const { t, lang } = useT()
+  const [calls, setCalls] = useState<{ id: string; at: number; text: string }[]>([])
+  useEffect(() => {
+    let alive = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    setCalls([])
+    const poll = async () => {
+      try {
+        const r = await fetch(`/api/phone-link/call-notes?path=${encodeURIComponent(projectPath)}`)
+        if (alive && r.ok) {
+          const data = await r.json()
+          if (alive) setCalls(Array.isArray(data.entries) ? data.entries.slice(-5) : [])
+        }
+      } catch { /* Reload or temporary connection loss: retain the last read. */ }
+      if (alive) timer = setTimeout(() => void poll(), 5000)
+    }
+    void poll()
+    return () => { alive = false; if (timer) clearTimeout(timer) }
+  }, [projectPath])
   const statusLabel: string = {
     working: t('projectPanel.swarm.statusWorking'),
     waiting: t('projectPanel.swarm.statusWaiting'),
@@ -62,6 +82,12 @@ export const SwarmSupplyPane = ({ terminalId, status, busy, onExit, onStop, onRe
           {busy ? t('projectPanel.swarm.supply.stopping') : t('projectPanel.swarm.supply.stop')}
         </button>
       </SwarmSeatHeader>
+
+      {calls.length > 0 && (
+        <ul className="max-h-24 shrink-0 overflow-y-auto border-b border-line-soft bg-bg-card px-3 py-1 text-meta text-ink-muted" aria-label={lang === 'ja' ? '通話の記録' : 'Call records'}>
+          {calls.map((call) => <li key={call.id}><time dateTime={new Date(call.at).toISOString()}>{new Date(call.at).toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' })}</time> · {call.text}</li>)}
+        </ul>
+      )}
 
       {/* The PTY itself — reused verbatim. onExit bubbles the close up so the
           module flips the session to 'exited' (our header shows it). */}

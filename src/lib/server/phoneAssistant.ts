@@ -355,6 +355,8 @@ export interface AssistantDeps {
   now?: () => Date
   /** Where the owner said it — both go into the same log. Default: the phone. */
   via?: AssistantEntry['via']
+  /** Metadata only: the sealed phone say id. Never part of the model prompt. */
+  clientId?: string
 }
 
 /** How each turn's claude starts (claude 2.1.287 --help): no pane, no beacon; the
@@ -422,7 +424,7 @@ const plan = async (now: Date, deps: AssistantDeps, idle = false) => {
   ])
   // Only the talk not yet in the memo is read verbatim; past FOLD_AT lines the
   // older part is folded into the memo this turn (compaction, fixed memo size).
-  const pending = unfolded(log, folded)
+  const pending = unfolded(log.filter((e) => e.kind !== 'call'), folded)
   const kept = pending.length > FOLD_AT || chars(pending) > FOLD_CHARS ? newest(pending, RECENT_MAX, RECENT_CHARS) : pending
   // Old enough to fold anyway (at most half the kept days): it would expire otherwise.
   const ageCut = now.getTime() - Math.min(FOLD_AGE_MS, (config.logDays * 86_400_000) / 2)
@@ -511,6 +513,7 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
   const clock = clockOf(deps)
   const now = clock()
   const via = deps.via ?? 'phone'
+  const ownerMeta = deps.clientId && deps.clientId.length <= 100 ? { clientId: deps.clientId } : {}
   const lang = await getPromptLang()
   // A delete while this turn runs: its memo is not written back (assistantEpoch).
   const epoch = assistantEpoch()
@@ -563,7 +566,7 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
     const ownerAt = now.getTime()
     logged = true
     await appendAssistantEntries([
-      { at: ownerAt, who: 'owner', text, via },
+      { at: ownerAt, who: 'owner', text, via, ...ownerMeta },
       { at: Math.max(ownerAt, clock().getTime()), who: 'assistant', text: reply, via, ...(card ? { card } : {}) },
     ])
     await keepMemo(a, p, epoch)
@@ -571,7 +574,7 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
   } catch (e) {
     // A line that got no answer is still part of the talk (the phone showed it):
     // logged, so the next answer can see it. Never under work mode.
-    if (!logged && !isLockdownEnabledSync()) await appendAssistantEntries([{ at: now.getTime(), who: 'owner', text, via }]).catch(() => {})
+    if (!logged && !isLockdownEnabledSync()) await appendAssistantEntries([{ at: now.getTime(), who: 'owner', text, via, ...ownerMeta }]).catch(() => {})
     throw e
   }
 }

@@ -44,7 +44,7 @@ import { getCustomTabRole } from './roles'
 import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assistantBusy, plainAssistantError, type AssistantAnswer } from './phoneAssistant'
 import { langOf, pick } from './promptLang'
 import { e2eKeyOf, open as openSealed, seal, sealTag } from './phoneLinkSeal'
-import { readAssistantConfig, readAssistantLog, readAssistantMemory } from './assistantMemory'
+import { appendAssistantCall, assistantEntriesFor, readAssistantConfig, readAssistantLog, readAssistantMemory } from './assistantMemory'
 
 /** The relay the owner deployed (worker/wrangler.phone.jsonc). Override with
  *  OPENGROUND_PHONE_RELAY_URL at pairing time (tests, a self-hosted relay). */
@@ -97,7 +97,7 @@ export const LEGACY_V1_UNTIL = Date.parse('2026-11-30T00:00:00Z')
  *  refused (a say is answered `stale`): the relay cannot hold a say and use it later. */
 export const SEALED_MAX_AGE_MS = 5 * 60_000
 /** Content frames sealed on a v2 pairing (control frames stay plain). */
-const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history'])
+const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history', 'call-note'])
 
 const EVENT_TEXT_MAX = 8000
 const TAIL_TICK_MS = 1000
@@ -432,6 +432,7 @@ const sendProjects = async (st: LinkState, force = false): Promise<void> => {
   const frame = {
     type: 'projects',
     selected: chosen?.id ?? null,
+    ...(st.cfg.v === 2 ? { callNote: true } : {}),
     projects: [assistant, ...all.map(({ id, name, desk }) => ({ id, name, desk }))],
   }
   const body = JSON.stringify(frame)
@@ -596,13 +597,16 @@ const HISTORY_PAGE_BYTES = 40_000
 const assistantHistory = async (st: LinkState, f: Record<string, unknown>, id: string | undefined): Promise<void> => {
   if (isLockdownEnabledSync()) return
   if (st.cfg.v !== 2) return void send(st, { type: 'assistant-history', ...(id !== undefined ? { id } : {}), error: 'pair-again' })
-  if (!st.cfg.assistantDirect) {
+  const before = typeof f.before === 'number' ? f.before : undefined
+  const projectId = typeof f.projectId === 'string' ? f.projectId : ASSISTANT_ID
+  if (projectId !== ASSISTANT_ID && !(await listProjects()).some((p) => p.id === projectId))
+    return void send(st, { type: 'assistant-history', id, projectId, error: 'no-project' })
+  if (projectId === ASSISTANT_ID && !st.cfg.assistantDirect) {
     st.cfg = { ...st.cfg, assistantDirect: true }
     if (!st.retired) await writeConfig(st.cfg).catch(() => {})
   }
-  const before = typeof f.before === 'number' ? f.before : undefined
-  const head = before === undefined ? { memory: await readAssistantMemory(), ...(await readAssistantConfig()) } : {}
-  const all = (await readAssistantLog()).filter((e) => before === undefined || e.at < before)
+  const head = before === undefined && projectId === ASSISTANT_ID ? { memory: await readAssistantMemory(), ...(await readAssistantConfig()) } : {}
+  const all = assistantEntriesFor(await readAssistantLog(), projectId).filter((e) => before === undefined || e.at < before)
   let bytes = Buffer.byteLength(JSON.stringify(head))
   let from = all.length
   while (from > 0) {
@@ -611,7 +615,7 @@ const assistantHistory = async (st: LinkState, f: Record<string, unknown>, id: s
     bytes += size
     from--
   }
-  const page = { entries: all.slice(from), more: from > 0, ...head }
+  const page = { projectId, entries: all.slice(from), more: from > 0, ...head }
   send(st, { type: 'assistant-history', ...(id !== undefined ? { id } : {}), ...page })
 }
 
@@ -653,7 +657,7 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
   // One final ack, whatever happens after the answer came back. The phone hears
   // plain words only (plainAssistantError), never an internal message.
   // Settings unreadable: English, but the final ack still goes.
-  const a = await (deps.assistant ?? askAssistant)(line).catch(async (e: unknown) =>
+  const a = await (deps.assistant ? deps.assistant(line) : askAssistant(line, { clientId: id })).catch(async (e: unknown) =>
     plainAssistantError(e, await getSettings().then(langOf, () => 'en' as const)),
   )
   if (a instanceof AssistantFailure) {
@@ -698,6 +702,30 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
     return selectProject(st, p.id)
   }
   if (f.type === 'assistant-history') return assistantHistory(st, f, id)
+  if (f.type === 'call-note') {
+    if (isLockdownEnabledSync() || st.cfg.v !== 2 || st.retired) return
+    const projectId = typeof f.projectId === 'string' ? f.projectId : ''
+    if (projectId !== ASSISTANT_ID && !(await listProjects()).some((p) => p.id === projectId))
+      return void ack('rejected', { reason: 'no-project' })
+    if (!id || f.kind !== undefined && f.kind !== 'call' || !Number.isInteger(f.seconds) || (f.seconds as number) < 0 || (f.seconds as number) > 86_400)
+      return void ack('rejected', { reason: 'bad-note', projectId })
+    const seconds = f.seconds as number
+    const now = Date.now()
+    const endedAt = f.endedAt ?? now
+    if (typeof endedAt !== 'number' || !Number.isSafeInteger(endedAt) || endedAt > now + SEALED_MAX_AGE_MS || endedAt < now - 365 * 86_400_000)
+      return void ack('rejected', { reason: 'bad-note', projectId })
+    const duration = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+    try {
+      const entry = await appendAssistantCall(id, {
+        at: endedAt, who: 'owner', via: 'phone', kind: 'call', seconds, projectId,
+        text: pick(langOf(await getSettings()), { en: `Call ${duration}`, ja: `通話 ${duration}` }),
+      }, f.endedAt !== undefined)
+      ack('delivered', { projectId, entry })
+    } catch {
+      ack('rejected', { reason: 'mac-error', projectId })
+    }
+    return
+  }
   if (f.type !== 'say') return
   const text = typeof f.text === 'string' ? f.text : ''
   if (f.projectId === ASSISTANT_ID) return assistantSay(st, id, text, deps)
@@ -768,7 +796,7 @@ let lastDropWarn = 0
  *  Logs never carry the content. */
 const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
   const inner = openSealed(key, 'p2m', f.box)
-  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history')) {
+  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history' || inner.type === 'call-note')) {
     // The relay can send these at will: one line a minute, never the frame.
     if (Date.now() - lastDropWarn > 60_000) {
       console.warn(
@@ -785,11 +813,11 @@ const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, un
   const now = Date.now()
   const ts = inner.ts
   if (!(typeof ts === 'number' && Math.abs(now - ts) <= SEALED_MAX_AGE_MS)) {
-    if (inner.type === 'say') send(st, { type: 'ack', id, state: 'rejected', reason: 'stale' })
+    if (inner.type === 'say' || inner.type === 'call-note') send(st, { type: 'ack', id, state: 'rejected', reason: 'stale' })
     return null
   }
   const seen = Object.fromEntries(Object.entries(st.cfg.seenIds ?? {}).filter(([, t]) => typeof t === 'number' && now - t <= SEALED_MAX_AGE_MS))
-  if (id in seen) return null // a second time: the first one was answered
+  if (id in seen && inner.type !== 'call-note') return null // a second time: the first one was answered
   st.cfg = { ...st.cfg, seenIds: { ...seen, [id]: ts } }
   // On disk before it acts: a restart right after must still know this id —
   // when it cannot be saved, the frame is not acted on (fail closed).
@@ -798,7 +826,7 @@ const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, un
     await writeConfig(st.cfg)
   } catch {
     // Not acted on — but a say is told so, or the phone waits for nothing.
-    if (inner.type === 'say') send(st, { type: 'ack', id, state: 'rejected', reason: 'mac-error' })
+    if (inner.type === 'say' || inner.type === 'call-note') send(st, { type: 'ack', id, state: 'rejected', reason: 'mac-error' })
     return null
   }
   if (inner.type === 'say' && typeof inner.projectId !== 'string') {

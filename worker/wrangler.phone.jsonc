@@ -20,10 +20,7 @@
   },
   // SQLite-backed: the only Durable Object storage the free plan allows.
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OgPhoneRelay"] }],
-  "observability": { "enabled": true },
-  // ROLLOUT — delete this var (and deploy) once the owner's Mac runs a release
-  // that carries the app key: until then any Mac may still create a room, because
-  // re-pairing from an older build would otherwise lose the pairing (it unlinks
-  // the old room before making the new one). Removed = the gate is on.
-  "vars": { "ROOM_CREATE": "open" }
+  "observability": { "enabled": true }
+  // Room creation is locked to builds carrying ROOM_CREATE_KEY. The temporary
+  // ROOM_CREATE=open rollout bypass was removed after owner release 0.11.170.
 }

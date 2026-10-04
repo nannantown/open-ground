@@ -1,3 +1,10 @@
+/** A call's metadata shared between the iPhone and this Mac; never model input. */
+export interface PhoneCallRecord {
+  kind: 'call'
+  seconds: number
+  projectId: string
+}
+
 export interface OpenApp {
   name: string
   /** Bundle path (e.g. /Applications/Cursor.app) — needed for cwd-mode launch. */

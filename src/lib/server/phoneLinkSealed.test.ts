@@ -34,7 +34,7 @@ import { e2eKeyOf, open, seal } from './phoneLinkSeal'
 import { openGroundHome } from './paths'
 import { setLockdownCache } from './lockdown'
 import { flushSupplyNotices, resetSupplyNoticeState } from './supplyNotice'
-import { appendAssistantEntries, clearAssistantLog, clearAssistantMemory, writeAssistantMemory } from './assistantMemory'
+import { appendAssistantEntries, readAssistantLog, clearAssistantLog, clearAssistantMemory, writeAssistantMemory } from './assistantMemory'
 
 const PROJECT = '/repo/alpha'
 const E2E = randomBytes(32).toString('base64url')
@@ -132,7 +132,7 @@ const relayRoom = async () => {
   }
   let alarm: number | null = null
   const room = new OgPhoneRelay(ctx, {})
-  return { store, phone, fromMac: (s: string) => room.webSocketMessage(mac, s) }
+  return { store, phone, mac, fromPhone: (s: string) => room.webSocketMessage(phone, s), fromMac: (s: string) => room.webSocketMessage(mac, s) }
 }
 
 const line = (o: unknown) => JSON.stringify(o) + '\n'
@@ -591,5 +591,75 @@ describe('sealed link — the assistant and its records (v2)', () => {
     await handleRelayFrame(st, frame)
     setLockdownCache(false)
     expect(wire).toEqual([])
+  })
+})
+
+
+describe('sealed call records', () => {
+  beforeEach(async () => { await clearAssistantLog(); await clearAssistantMemory() })
+  const note = (id = 'call1', projectId = 'assistant', seconds = 102) => ({ type: 'call-note', id, ts: Date.now(), endedAt: Date.now() - 60_000, projectId, seconds })
+
+  it('crosses the real relay sealed and acknowledges only a saved, scoped record; retry and restart do not duplicate', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState(CFG, sock)
+    const n = note()
+    const room = await relayRoom()
+    await room.fromPhone(JSON.stringify(phoneSays(n)))
+    expect(room.mac.got).toHaveLength(1)
+    expect(room.mac.got[0]).not.toContain('seconds')
+    await handleRelayFrame(st, JSON.parse(room.mac.got[0]), { assistant: async () => { throw Error('must not ask a model') } })
+    let entries = await readAssistantLog()
+    expect(entries).toEqual([expect.objectContaining({ id: 'call:call1', at: n.endedAt, kind: 'call', seconds: 102, projectId: 'assistant', text: 'Call 1:42' })])
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ type: 'ack', id: 'call1', state: 'delivered', entry: entries[0] })
+    await handleRelayFrame(st, phoneSays(n))
+    const resumed = __testLinkState((await readPhoneLinkConfig())!, sock)
+    await handleRelayFrame(resumed, phoneSays({ ...n, ts: Date.now() }))
+    entries = await readAssistantLog()
+    expect(entries).toHaveLength(1)
+    expect(opened(wire).filter((x) => x.inner?.state === 'delivered')).toHaveLength(3)
+    await handleRelayFrame(st, phoneSays(note('project-call', 'p1', 12)))
+    await handleRelayFrame(st, phoneSays({ type: 'assistant-history', id: 'history1', ts: Date.now() }))
+    const assistantPage = opened(wire).at(-1)?.inner as { entries: { projectId: string }[] }
+    expect(assistantPage.entries.map((e) => e.projectId)).toEqual(['assistant'])
+    await handleRelayFrame(st, phoneSays({ type: 'assistant-history', projectId: 'p1', id: 'history2', ts: Date.now() }))
+    const projectPage = opened(wire).at(-1)?.inner as { entries: { seconds: number }[]; memory?: string }
+    expect(projectPage.entries.map((e) => e.seconds)).toEqual([12])
+    expect(projectPage.memory).toBeUndefined()
+    await handleRelayFrame(st, phoneSays({ type: 'projects', id: 'capability', ts: Date.now() }))
+    expect(opened(wire).at(-1)?.inner?.callNote).toBe(true)
+  })
+
+  it('forged, plaintext, stale, unknown-project and invalid durations cannot append a record', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState(CFG, sock)
+    await handleRelayFrame(st, note('plain'))
+    await handleRelayFrame(st, phoneSays(note('forged'), randomBytes(32)))
+    await handleRelayFrame(st, phoneSays({ ...note('stale'), ts: Date.now() - SEALED_MAX_AGE_MS - 1000 }))
+    await handleRelayFrame(st, phoneSays(note('unknown', 'not-registered')))
+    for (const [i, seconds] of Array.from([-1, 1.5, 86401, '102', null].entries()))
+      await handleRelayFrame(st, phoneSays({ ...note(`bad${i}`), seconds }))
+    await handleRelayFrame(st, phoneSays({ ...note('future'), endedAt: Date.now() + SEALED_MAX_AGE_MS + 1000 }))
+    expect(await readAssistantLog()).toEqual([])
+    expect(opened(wire).some((x) => x.inner?.state === 'delivered')).toBe(false)
+    expect(opened(wire).some((x) => x.inner?.reason === 'stale')).toBe(true)
+    setLockdownCache(true)
+    await handleRelayFrame(st, phoneSays(note('work-mode')))
+    setLockdownCache(false)
+    expect(await readAssistantLog()).toEqual([])
+  })
+
+  it('a disk failure is rejected; fixing it permits same-id retry without a false delivered', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState(CFG, sock)
+    const log = join(openGroundHome(), 'assistant', 'log')
+    mkdirSync(join(openGroundHome(), 'assistant'), { recursive: true })
+    writeFileSync(log, 'not a directory')
+    const n = note('disk-fail')
+    await handleRelayFrame(st, phoneSays(n))
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ state: 'rejected', reason: 'mac-error' })
+    rmSync(log)
+    await handleRelayFrame(st, phoneSays(n))
+    expect(await readAssistantLog()).toEqual([expect.objectContaining({ id: 'call:disk-fail', seconds: 102 })])
+    expect(opened(wire).at(-1)?.inner?.state).toBe('delivered')
   })
 })

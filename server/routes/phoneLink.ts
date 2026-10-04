@@ -15,6 +15,7 @@ import {
   saveAssistantStyle,
 } from '@/lib/server/phoneAssistant'
 import {
+  assistantEntriesFor,
   clearAssistantLog,
   clearAssistantMemory,
   deleteAssistantEntry,
@@ -26,6 +27,7 @@ import {
 import { getPromptLang } from '@/lib/server/promptLang'
 import { listenBinary, startListening } from '@/lib/server/assistantListen'
 import { isLockdownEnabledSync } from '@/lib/server/lockdown'
+import { projectUUIDFromPath } from '@/lib/server/projectDataPath'
 import { hostIsLocal, originIsLocal } from '../loopback'
 
 // The pairing code is a WRITE credential (whoever holds it speaks as the owner),
@@ -64,11 +66,21 @@ export const phoneLinkRoutes = new Hono()
   // The assistant's records, kept on this Mac only (assistantMemory.ts): the
   // screen reads them here, the phone through the link (`assistant-history`).
   .get('/api/phone-link/assistant/log', async (c) =>
-    c.json({ entries: await readAssistantLog(), memory: await readAssistantMemory(), ...(await readAssistantConfig()), voice: listenBinary() !== null }),
+    c.json({ entries: assistantEntriesFor(await readAssistantLog()), memory: await readAssistantMemory(), ...(await readAssistantConfig()), voice: listenBinary() !== null }),
   )
-  .delete('/api/phone-link/assistant/log', async (c) => (await clearAssistantLog(), c.json({ ok: true })))
+  // President call metadata is owned by this app, never injected into Claude's
+  // transcript or prompts. The registry resolver validates the incoming path.
+  .get('/api/phone-link/call-notes', async (c) => {
+    const path = c.req.query('path')
+    if (!path) return c.json({ error: 'path required' }, 400)
+    let projectId: string
+    try { projectId = await projectUUIDFromPath(path) }
+    catch { return c.json({ error: 'forbidden' }, 403) }
+    return c.json({ entries: assistantEntriesFor(await readAssistantLog(), projectId).filter((e) => e.kind === 'call') })
+  })
+  .delete('/api/phone-link/assistant/log', async (c) => (await clearAssistantLog('assistant'), c.json({ ok: true })))
   .delete('/api/phone-link/assistant/log/:id', async (c) =>
-    (await deleteAssistantEntry(c.req.param('id'))) ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404),
+    (await deleteAssistantEntry(c.req.param('id'), 'assistant')) ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404),
   )
   .delete('/api/phone-link/assistant/memory', async (c) => (await clearAssistantMemory(), c.json({ ok: true })))
   // How many days the log is kept, how long the memo may be.

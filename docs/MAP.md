@@ -15,6 +15,14 @@
 
 ---
 
+- Phone call records (2026-10-04): canonical protocol `docs/PHONE_LINK.md`
+  "Call records"; `phoneLink.ts` sealed `call-note` admission/ack and scoped
+  history; `assistantMemory.ts` `appendAssistantCall` durable receipts;
+  `phoneAssistant.ts` excludes metadata from model history. President adjunct
+  display `SwarmSupplyPane.tsx` reads owner/path-gated `phoneLinkRoutes`
+  `/api/phone-link/call-notes`. Guards: `phoneLinkSealed.test.ts`,
+  `assistantMemory.test.ts`. No record is injected into Claude's own transcript.
+
 ## 0. 契約と骨格 — 全変更の起点
 - Songs/NENE development handoff (2026-09-22): `docs/SONGS-HANDOFF-2026-09-22.md`.
   Two local repository branches, delivered UI/recording changes, verification,

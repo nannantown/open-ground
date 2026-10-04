@@ -1547,6 +1547,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
           ) : supply ? (
             // The live president's desk — the owner's one conversation.
           <SwarmSupplyPane
+            projectPath={project.path}
             terminalId={supply.terminalId}
             status={statusOfPty(supply.terminalId)}
             busy={supplyBusy}

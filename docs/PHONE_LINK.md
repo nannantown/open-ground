@@ -75,7 +75,7 @@ than 120 phone frames this minute in the room — reconnect with backoff.
 
 All other frames are JSON text, one object per frame, with a `type`. On a v2
 pairing the frames below that carry words — `say`, `select`, `projects`,
-`event`, `ack`, `assistant`, `assistant-history` — travel **sealed**: the JSON shown in the next two sections is
+`event`, `ack`, `assistant`, `assistant-history`, `call-note` — travel **sealed**: the JSON shown in the next two sections is
 what is INSIDE the seal (see **Sealed frames** for the outside).
 
 ## Frames the phone receives
@@ -228,6 +228,61 @@ frames** — "goes to the selected project" below is v1 only).
 Frames over 16,384 characters or of any other `type` are refused (`bad-frame`), never
 forwarded to the Mac.
 
+## Call records (2026-10-04)
+
+The Mac advertises `callNote: true` inside its **sealed `projects`** frame.
+Do not trust a capability in the relay's plain `hello`: the relay cannot
+promise that the connected Mac can save a record. A phone paired to an older
+Mac keeps a pending record until this capability arrives.
+
+At the end of a hands-free call, send a sealed phone frame:
+
+```json
+{ "type": "call-note", "id": "<stable uuid>", "ts": 1790000000000, "endedAt": 1789999990000, "projectId": "assistant", "seconds": 102 }
+```
+
+`projectId` is `assistant` or a registered project's id (the call participant,
+not whatever project happened to be selected when reconnecting). `seconds` is
+an integer from 0 through 86,400. `endedAt` is the original end time in ms;
+`ts` is a fresh authentication timestamp on every retry, subject to the same
+five-minute window as other sealed phone frames. `endedAt` must be a safe
+integer, no more than five minutes in the future or 365 days in the past.
+Omitting it uses the Mac's current time. The phone durably queues the stable
+`id`, participant, duration and end time until the Mac confirms it.
+
+The Mac sends a sealed `ack` with that `id`, `projectId` and `state: delivered`
+**after the metadata was written**, plus `entry` (the saved record). A retry of
+the same id and duration/participant/end time returns the original receipt without
+appending again, including after restarting the Mac. No assistant/model turn
+runs and no words are typed into a president's desk. Invalid metadata is
+`rejected` with `bad-note`, an unregistered participant with `no-project`, and
+a failed write (or a reused id with different duration/participant/end time) with
+`mac-error`. The existing owner, work-mode, sealed-direction and timestamp
+gates apply. A plaintext v1 pairing cannot save a call record.
+
+Records share the Mac's existing log retention rules. Clearing or deleting
+assistant conversation affects only assistant entries, preserving president
+records from other projects. A president's notes are scoped by registry id. An entry has
+`kind: "call"`, `seconds`, `projectId`, `who: "owner"`, `via: "phone"` and
+localized `text` such as `Call 1:42` / `通話 1:42`; its `at` is `endedAt`.
+These metadata entries are excluded from model history and memory folding.
+Assistant owner lines from a phone `say` also carry optional `clientId` (the
+original say id) in Mac history. Reconcile pending lines by this identity, never
+by matching their text: two identical utterances are separate owner turns.
+Legacy lines without `clientId` cannot identify a pending phone say.
+The assistant's Mac conversation shows its own notes. A president's terminal
+shows its project-scoped call metadata beside the real transcript; OPEN
+GROUND owns that adjunct record and never edits Claude's own JSONL.
+
+Fetch through sealed `assistant-history` with optional `projectId`. Absent or
+`assistant` returns assistant conversation and assistant call notes only;
+a registered president id returns its call notes only, without assistant talk,
+memo or style. The response names `projectId`, and normal history paging
+applies. On the Mac, `/api/phone-link/call-notes?path=<registered project>`
+reads that president's notes under the same owner/loopback and project-path
+gates as other local app data. Call records stay on the Mac: the relay forwards
+sealed requests/acks/history and stores no new call data.
+
 ## Sealed frames (v2, 2026-10-03)
 
 Owner decision 2026-10-03: the relay (Cloudflare) must not be able to read what
@@ -301,7 +356,7 @@ looking at, `"assistant"` for the assistant):
 { "type": "projects", "id": "<uuid>", "ts": 1790000000000 }
 ```
 The Mac drops (silently, no reply — it cannot know who sent it):
-a frame that does not open (forged, altered, another key, the wrong direction), one that opens but is not a `say` / `select` / `projects` / `assistant-history`,
+a frame that does not open (forged, altered, another key, the wrong direction), one that opens but is not a `say` / `select` / `projects` / `assistant-history` / `call-note`,
 plain JSON in place of `box`, a frame without an `id`, and a frame whose `id`
 it has already accepted (kept for 5 min, across a Mac restart: the first one was
 answered). A frame whose `ts` is more than **5 min** from the Mac's clock is
@@ -752,11 +807,15 @@ both environments, where the developer site still offers that).
   Seeing it, the relay was reached: the missing app key is the cause. A network
   failure, DNS error, timeout or a failed reset of the old room does not log
   it (`pairPhone` in `src/lib/server/phoneLink.ts`).
-  **Rollout:** the deployed relay first runs with the var `ROOM_CREATE: "open"`
-  (`wrangler.phone.jsonc`) — any Mac may still create a room — because an older
-  build unlinks its old room BEFORE asking for the new one, so re-pairing from
-  it under the gate would lose the pairing. Once the owner's Mac runs a release
-  that carries the app key, delete that var and redeploy: the gate is then on.
+  **Rollout gate deployed (2026-10-04):** the owner's installed release 0.11.170
+  carries the app key and the Worker has `ROOM_CREATE_KEY`. The temporary
+  `ROOM_CREATE: "open"` bypass has been removed from `wrangler.phone.jsonc`;
+  relay version `be33d2e9-7336-4230-b1e8-b65359f72084` runs with the gate on.
+  Deployed probes confirmed a fresh Mac without the app key gets `401`, the
+  installed release's app key creates a room (`101`), and the existing owner's
+  phone credential reconnects (`101`). Existing pairings do not require
+  re-pairing. The Mac remained paired, online and sealed; acceptance on the
+  owner's physical iPhone remains pending (the probe was a stand-in client).
 - **Nothing is kept for long.** An event is erased when the phone says it heard
   it (`?heard=`) and after **7 days** at the latest; a room nobody connected to
   for **30 days** is emptied (events, project list, held push token — the

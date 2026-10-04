@@ -11,6 +11,7 @@ import { openGroundHome } from './paths'
 import { setLockdownCache } from './lockdown'
 import {
   appendAssistantEntries,
+  appendAssistantCall,
   assistantEpoch,
   charCount,
   clearAssistantLog,
@@ -478,4 +479,25 @@ describe('one log for the phone and the screen, owner-only files', () => {
     setLockdownCache(false)
     expect(await readAssistantLog()).toEqual([])
   })
+})
+
+
+it('call metadata remains in the shared reader but never enters assistant prompts or folding', async () => {
+  await appendAssistantCall('assistant-call', { at: Date.now(), who: 'owner', via: 'phone', text: 'Call 1:42 metadata-only', kind: 'call', seconds: 102, projectId: 'assistant' })
+  await appendAssistantCall('president-call', { at: Date.now(), who: 'owner', via: 'phone', text: 'President call private metadata-only', kind: 'call', seconds: 44, projectId: 'p1' })
+  expect(await readAssistantLog()).toHaveLength(2)
+  const m = model({ reply: 'ok' })
+  await askAssistant('hello', { run: m.run, digest: noProjects })
+  expect(m.prompts.join('')).not.toContain('metadata-only')
+})
+
+
+it('phone owner client ids survive authoritative history even for repeated identical text, never becoming model text', async () => {
+  const m = model({ reply: 'one' }, { reply: 'two' })
+  const now = Date.now()
+  await askAssistant('same words', { run: m.run, digest: noProjects, now: () => new Date(now - 1000), clientId: 'old-phone-id' })
+  await askAssistant('same words', { run: m.run, digest: noProjects, now: () => new Date(now), clientId: 'new-phone-id' })
+  const owners = (await readAssistantLog()).filter((e) => e.who === 'owner')
+  expect(owners.map((e) => [e.text, e.clientId])).toEqual([['same words', 'old-phone-id'], ['same words', 'new-phone-id']])
+  expect(m.prompts.join('')).not.toContain('phone-id')
 })

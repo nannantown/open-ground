@@ -311,3 +311,81 @@ runtime `sdk` / `sdkSessionId 7cb0f12f-8879-416e-a933-cc1a66a2d2a5` /
 (カード指示は `docs/RELEASE_REPORT.md` を指していたが、実体は本リポジトリ直下の
 `RELEASE_REPORT.md` のみでこのパスは存在しない。直下に追記した — 次にこのカードを書く人は
 同じ食い違いを踏まないこと。)
+
+
+## 0.11.171 — local release preparation (2026-10-04)
+
+**Status: local preparation only; no public snapshot, tag, workflow dispatch,
+release publication, or installation of this version has been performed.**
+The previous published version was confirmed as 0.11.170 and no 0.11.171 tag
+existed when preparing this checkpoint.
+
+### Change and scope
+
+- Code delivery: `141bd45a` and `f59b7a1f`, encrypted call metadata and
+  participant-scoped history, plus stable phone owner-line `clientId`.
+- The Mac saves a call receipt before acknowledging it, retries preserve the
+  original end time, and restarting does not append the same receipt twice.
+- Assistant conversation deletion preserves president records belonging to
+  other projects. Call metadata never enters assistant model history/folding.
+- President call metadata uses an OPEN GROUND-owned adjunct beside the real
+  terminal; Claude's own transcript is never altered.
+- This preparation changes `package.json` only for the version number (the
+  existing release convention leaves the lockfile version unchanged), commits
+  bilingual notes at `docs/release-notes/v0.11.171.md`, and appends this report.
+
+### Verification before the version checkpoint
+
+- Full suite at `f59b7a1f`: 474 files, 8419 passed, 2 skipped; exit 0.
+- Typecheck and build: exit 0. Lint: 0 errors, 204 existing warnings.
+- Meaningful red/green: reverting the Mac handler/model filter exposed two
+  failures (missing saved receipt and metadata entering a prompt); reverting
+  the assistant-clear route exposed deletion of an unrelated president record.
+  Both were restored and the final suite above passed.
+- Independent security/code review: CLEAN; canonical phone-link contract and
+  official Node crypto documentation were inspected before the verdict.
+- Real packaged runtime: a harness compiled with the production server bundle
+  options ran through the installed application's Electron 31.7.7 / Node
+  20.18.0 executable with an isolated app home. It saved 102 seconds with the
+  original end time, kept one row after a restarted handler retried it, read
+  it through the actual Hono route, refused an unregistered path (403), and
+  checked the log's 0600 permissions. This is a packaged-runtime check, not
+  an installation of a newly built 0.11.171 app or physical iPhone acceptance.
+
+### Remaining release actions
+
+Version-checkpoint validation: `npm run build` succeeded at 0.11.171;
+`runtimeConfig.test.ts`, `releaseNotesLang.test.ts` and `repoPiiGuard.test.ts`
+passed (3 files, 25 checks). Feature source is unchanged from the fully tested
+`f59b7a1f`. The commander must review and land this preparation on private
+`origin/main`. General public release remains
+pending an explicit release instruction; do not push a public snapshot/tag or
+trigger a publishing workflow from this preparation. The public snapshot must
+match the tested private source tree exactly and use the noreply identity
+specified in `docs/DISTRIBUTION.md` §0. After a published release, installation
+and restart follow the standing owner permission. The compatible iPhone build
+and a real-device end-of-call shared-record check are separate acceptance.
+
+### 日本語
+
+0.11.171 の番号と日英の変更説明を手元で準備しました。通話時間を Mac に保存してから
+電話へ受領確認を返し、アシスタントと各プロジェクトの記録を分けます。新しい Mac 版の
+一般公開・インストール・iPhone 実物での確認は、この準備では実行していません。
+
+
+### Separate relay delivery for call records
+
+The commander authorized an ordinary relay deployment from the integrated
+source using `cd worker && npx wrangler deploy -c wrangler.phone.jsonc`, without
+`--keep-vars`. Deployment succeeded with version
+`2f298447-cde5-4e29-b061-1e588cfee38e`.
+
+A real deployed-relay probe used an isolated throwaway room and confirmed:
+new Mac admission without the app key still returns 401; the installed app's
+key admits the fixture room; sealed `call-note` bytes reach its Mac unchanged;
+its acknowledgement reaches its phone; and the existing owner's phone
+credential still reconnects (101). The fixture room was reset, no owner words
+or model turn were sent, and the owner's pairing was unchanged. This does not
+substitute for acceptance on the physical iPhone. The installed 0.11.170 Mac
+still lacks the new encrypted `callNote` capability; the iPhone must retain its
+pending records until a compatible Mac version is installed.
