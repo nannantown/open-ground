@@ -524,9 +524,6 @@ a:focus-visible {
   animation: og-ast-breathe 4.2s ease-in-out infinite;
   animation-delay: calc(var(--k) * 0.24s);
 }
-.og-ast-shard.is-lead {
-  fill: var(--og-ast-look);
-}
 .og-ast-blink {
   transform-box: view-box;
   transform-origin: 50% 50%;
@@ -553,8 +550,8 @@ a:focus-visible {
 /* The running light also lifts its shard out of the dimmed rest, so it still
    reads when the owner's colour is ink itself. */
 @keyframes og-ast-glow {
-  0% { fill: var(--og-ast-look); opacity: 1; }
-  35%, 100% { fill: rgb(var(--og-ink)); opacity: 0.45; }
+  0% { opacity: 1; }
+  35%, 100% { opacity: 0.45; }
 }
 @media (prefers-reduced-motion: reduce) {
   .og-ast-shard,
@@ -562,8 +559,8 @@ a:focus-visible {
   .og-ast[data-mode='think'] .og-ast-shard {
     animation: none;
   }
-  /* Still while thinking: the mark dims, its coloured shard stays lit. */
-  .og-ast[data-mode='think'] .og-ast-shard:not(.is-lead) {
+  /* Still while thinking: the mark dims. */
+  .og-ast[data-mode='think'] .og-ast-shard {
     opacity: 0.45;
   }
 }

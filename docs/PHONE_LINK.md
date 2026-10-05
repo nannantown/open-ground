@@ -230,6 +230,14 @@ forwarded to the Mac.
 
 ## Call records (2026-10-04)
 
+Delivery: Mac release 0.11.171 was published and installed on 2026-10-04.
+The relay's `call-note` forwarding deployment is
+`2f298447-cde5-4e29-b061-1e588cfee38e`; room creation remains app-key gated.
+The installed Mac remained paired, online and sealed. The physical iPhone
+end-of-call shared-record acceptance remains pending; credential and packaged
+runtime checks do not stand in for it. See `RELEASE_REPORT.md` for delivery
+and verification evidence.
+
 The Mac advertises `callNote: true` inside its **sealed `projects`** frame.
 Do not trust a capability in the relay's plain `hello`: the relay cannot
 promise that the connected Mac can save a record. A phone paired to an older

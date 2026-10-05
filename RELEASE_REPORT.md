@@ -315,8 +315,9 @@ runtime `sdk` / `sdkSessionId 7cb0f12f-8879-416e-a933-cc1a66a2d2a5` /
 
 ## 0.11.171 — local release preparation (2026-10-04)
 
-**Status: local preparation only; no public snapshot, tag, workflow dispatch,
-release publication, or installation of this version has been performed.**
+**Preparation checkpoint (superseded by the publication record below): local
+preparation only; at this checkpoint no public snapshot, tag, workflow dispatch,
+release publication, or installation of this version had been performed.**
 The previous published version was confirmed as 0.11.170 and no 0.11.171 tag
 existed when preparing this checkpoint.
 
@@ -389,3 +390,48 @@ or model turn were sent, and the owner's pairing was unchanged. This does not
 substitute for acceptance on the physical iPhone. The installed 0.11.170 Mac
 still lacks the new encrypted `callNote` capability; the iPhone must retain its
 pending records until a compatible Mac version is installed.
+
+
+## 0.11.171 — published and installed (2026-10-04)
+
+**Status: release published and installed; physical iPhone call acceptance is
+still pending.** The owner explicitly authorized publication of the Mac version.
+The commander completed the outward operations after that authorization.
+
+- Shipped private source: `4fccc3ed2d47f2bad9129afa1166a62fd04d2fc3`.
+- Public snapshot/tag source: `51b4eebb93d6dd008d0b6ec6394bb566d092aadc`,
+  tree `bc4e33fee6397248882ffed1ad0c951170ffef8b`, exactly matching that private
+  source. The snapshot uses the required GitHub noreply identity.
+- Release workflow run `37207432401`: completed successfully, including the
+  macOS, Windows and publish jobs. The release is published (`isDraft: false`),
+  with the committed Japanese and English notes:
+  <https://github.com/nannantown/open-ground/releases/tag/v0.11.171>.
+- Published at 2026-10-04 23:06:36 JST (14:06:36 UTC).
+- The commander downloaded the 178 MB arm64 DMG and recorded
+  `verify-dmg` PASS: version 0.11.171, arm64 slice, seven `call-note` hits.
+  The local update nudge then installed it and restarted OPEN GROUND.
+- Independently reread after restart: app plist and `/api/health` both report
+  0.11.171; boot `942f8a58-2c11-463e-84d6-ac0499e504bc`, started
+  2026-10-04 23:07:51 JST (14:07:51 UTC).
+- Installed-app checks recorded by the commander: `codesign --verify --deep
+  --strict` succeeded; `spctl` accepted a notarized Developer ID app; packaged
+  Electron 31.7.7 / Node 20.18.0 imported the SDK successfully (12 exports).
+- Phone link remained paired, online and sealed (all true). The actual local
+  call-notes route returned 200 for the registered OPEN GROUND project (zero
+  records before a real call), while an unregistered temporary path returned
+  403 `forbidden`. No pairing keys, tokens or configuration values are included
+  in this report, and no owner phone utterance was sent for verification.
+
+The new Mac call-record card `d9290d44-f922-4666-b9c6-7697309ab5ff` is delivered
+through publication and installation. The physical iPhone end-of-call check
+remains on the existing iOS call card `184c5626-75e8-473b-95b5-853792b3ab37`.
+The original relay-lock card `97fd3279-d631-4a8f-bca9-bf86eeb775a1` remains
+blocked pending the owner's physical-device continuity confirmation. Neither
+credential probes nor an empty call history are treated as a real iPhone call.
+
+### 日本語
+
+オーナーの「Mac版は公開していいよ」を受け、0.11.171 を一般公開し、手元の Mac に
+インストールして再起動しました。版番号、署名・公証、SDK の読み込み、暗号化した電話の
+接続、登録プロジェクトの記録読み取りを確認しました。実物の iPhone で通話を終えた後に
+同じ通話時間が Mac と共有される確認は、iOS 側の既存カードに残しています。

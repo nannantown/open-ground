@@ -51,11 +51,11 @@ describe('AssistantMark', () => {
     }
   })
 
-  it('one piece wears the owner’s colour; the mode reaches the CSS', () => {
-    const { container } = render(<AssistantMark look="ochre" mode="think" />)
+  it('no piece is coloured; the mode reaches the CSS', () => {
+    const { container } = render(<AssistantMark look="verm" mode="think" />)
     const svg = container.querySelector('svg')!
-    expect(container.querySelectorAll('.is-lead')).toHaveLength(1)
-    expect(svg.style.getPropertyValue('--og-ast-look')).toBe('rgb(var(--og-ochre))')
+    expect(container.querySelectorAll('.is-lead')).toHaveLength(0)
+    expect(svg.style.getPropertyValue('--og-ast-look')).toBe('')
     expect(svg.dataset.mode).toBe('think')
   })
 })

@@ -29,8 +29,7 @@ export const LOOK_COLOR: Record<AssistantLook, string> = {
 // rest, the ring splitting open where the icon is solid when it breathes).
 // Pinned geometrically by ringGeometry.test.ts.
 export const RING_CUTS = [-137.5, -46.5, 43.5, 132.5] as const
-// The top piece (10:30 to 1:30) wears the owner's colour.
-const LEAD = 0
+// All pieces are the same ink — no coloured piece (owner decision 2026-10-05).
 
 const rad = (deg: number) => (deg * Math.PI) / 180
 const at = (deg: number, r = 200) =>
@@ -43,7 +42,6 @@ const PIECES = RING_CUTS.map((a0, k) => {
   const mid = (a0 + a1) / 2
   return {
     wedge: `${OG_RING_CX},${OG_RING_CY} ${at(a0)} ${at(mid)} ${at(a1)}`,
-    lead: k === LEAD,
     style: {
       '--dx': Math.cos(rad(mid)).toFixed(3),
       '--dy': Math.sin(rad(mid)).toFixed(3),
@@ -53,7 +51,6 @@ const PIECES = RING_CUTS.map((a0, k) => {
 })
 
 export const AssistantMark = ({
-  look,
   mode = 'idle',
   size = 40,
 }: {
@@ -70,7 +67,6 @@ export const AssistantMark = ({
       aria-hidden="true"
       data-mode={mode}
       className="og-ast overflow-visible"
-      style={{ '--og-ast-look': LOOK_COLOR[look] } as CSSProperties}
     >
       <defs>
         <CarvedRingMask id={`${id}m`} />
@@ -90,7 +86,7 @@ export const AssistantMark = ({
             mask={`url(#${id}m)`}
             clipPath={`url(#${id}c${k})`}
             style={p.style}
-            className={p.lead ? 'og-ast-shard is-lead' : 'og-ast-shard'}
+            className="og-ast-shard"
           />
         ))}
       </g>
