@@ -344,6 +344,13 @@ export const withCardMoved = (
         done: col === 'done',
         reviewedBy,
         integrationConflict,
+        // A drag is always a human's hand, and dragging a card back to todo
+        // (typically reviving one parked at the 差し戻し cap) is deciding to
+        // start over — reset the loop-guard counter, like the API's
+        // setColumn → todo. Only the engine's automatic requeue keeps it.
+        // Reordering WITHIN todo is a priority change, not a restart — a card
+        // the engine requeued with its count kept must not lose it to a drag.
+        reworkCount: col === 'todo' && columnOf(t) !== 'todo' ? undefined : t.reworkCount,
       }
     }
     if (orderById.has(t.id)) return { ...t, boardOrder: orderById.get(t.id) }

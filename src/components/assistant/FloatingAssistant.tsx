@@ -36,12 +36,19 @@ interface Pos {
 /** Clear of the agent-team bar folded along a project's bottom edge (~40px). */
 const DEFAULT_POS: Pos = { right: 20, bottom: 72 }
 
-const readPos = (): Pos => {
+/** On Ground the character sits level with the bottom-left edit (pen) button:
+ *  its centre is ~43px up (ToolPalette p-5 + frame), so bottom = 43 - SIZE/2. */
+export const GROUND_POS: Pos = { right: 20, bottom: 18 }
+/** The default (not yet dragged) spot: level with the pen on Ground, clear of the team bar in a project. */
+export const defaultPos = (onGround: boolean): Pos => (onGround ? GROUND_POS : DEFAULT_POS)
+
+/** The owner's dragged spot, or null while they never moved it. */
+const readPos = (): Pos | null => {
   try {
     const p = JSON.parse(localStorage.getItem(POS_KEY) ?? 'null') as Pos | null
-    return p && Number.isFinite(p.right) && Number.isFinite(p.bottom) ? p : DEFAULT_POS
+    return p && Number.isFinite(p.right) && Number.isFinite(p.bottom) ? p : null
   } catch {
-    return DEFAULT_POS
+    return null
   }
 }
 /** Kept on screen however small the window gets. */
@@ -64,7 +71,7 @@ export const panelPlacement = (p: Pos, w: number, h: number) => {
   }
 }
 
-export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
+export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: boolean; onGround?: boolean }) => {
   const { t, lang } = useT()
   const [open, setOpen] = useState(false)
   const showPanel = open && !disabled
@@ -289,7 +296,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   }, [a.lines.length, a.pending, a.error, showPanel, expanded, turn])
 
   if (!a.ready) return null
-  const at = clampPos(pos, view.w, view.h)
+  const at = clampPos(pos ?? defaultPos(onGround), view.w, view.h)
   const label = a.name || t('misc.assistant.label')
 
   const onPointerDown = (e: PointerEvent<HTMLButtonElement>) => {

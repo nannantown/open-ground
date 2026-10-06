@@ -779,3 +779,18 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     await waitFor(() => expect(ears()).toHaveLength(1), { timeout: 2500 })
   })
 })
+
+describe('default position', () => {
+  it('sits lower on Ground (level with the pen) than in a project', async () => {
+    const { defaultPos, GROUND_POS } = await import('./FloatingAssistant')
+    expect(defaultPos(true)).toEqual(GROUND_POS)
+    expect(defaultPos(true).bottom).toBeLessThan(defaultPos(false).bottom)
+  })
+  it('renders at the Ground spot until dragged', async () => {
+    localStorage.removeItem('og.assistant.pos')
+    const { FloatingAssistant: FA } = await import('./FloatingAssistant')
+    const { container } = render(<FA disabled={false} onGround />)
+    await act(async () => {})
+    expect((container.querySelector('button') as HTMLElement).style.bottom).toBe('18px')
+  })
+})

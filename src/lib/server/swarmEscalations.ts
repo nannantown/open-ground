@@ -1185,7 +1185,7 @@ export interface AnswerEscalationDeps {
     projectPath: string,
     taskId: string,
     line: string,
-    opts?: { workerAddressed?: boolean; answer?: string },
+    opts?: { workerAddressed?: boolean; answer?: string; byOwner?: boolean },
   ) => Promise<void>
   /** DI for tests: the registry allowlist check (default validateProjectPath). */
   isPathAllowed?: (p: string) => Promise<boolean>
@@ -1353,7 +1353,7 @@ const deliverAnswer = async (
       // option every time (measured 2026-08-04: 「B: このまま保留」 resolved as
       // resume, and the card moved anyway). The line stays what the worker
       // reads; the choice is read from the answer alone.
-      { workerAddressed, answer },
+      { workerAddressed, answer, byOwner: record.answeredBy !== 'commander' },
     )
     queued = true
   }

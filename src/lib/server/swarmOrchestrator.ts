@@ -2640,10 +2640,14 @@ export const recordEscalationAnswerForNextDispatch = async (
    *  raise ("this card has been stuck — what should I do?") carries no worker,
    *  so 'blocked' is the OWNER's placement and their 「このまま保留」 must not
    *  be the thing that moves it. Absent ⇒ false (never unpark on a guess). */
-  opts?: { workerAddressed?: boolean; answer?: string },
+  /** `byOwner` — the OWNER gave this answer (not the commander). Only then is
+   *  the unpark the owner deciding to start over, which resets the card's
+   *  差し戻し counter; a commander answer carries it over (2026-10-06). Absent ⇒
+   *  carried over (never reset the loop guard on a guess). */
+  opts?: { workerAddressed?: boolean; answer?: string; byOwner?: boolean },
   deps?: {
     fetchTasks?: (p: string) => Promise<ProjectTask[]>
-    unpark?: (p: string, id: string) => Promise<boolean>
+    unpark?: (p: string, id: string, keepReworkCount: boolean) => Promise<boolean>
     countCommitsAhead?: (p: string, branch: string) => Promise<number | null>
   },
 ): Promise<void> => {
@@ -2740,10 +2744,9 @@ export const recordEscalationAnswerForNextDispatch = async (
       )
       return
     }
-    const ok = await (deps?.unpark ?? ((p: string, id: string) => setCardColumn(p, id, 'todo', '')))(
-      engine.path,
-      taskId,
-    )
+    const ok = await (
+      deps?.unpark ?? ((p: string, id: string, keep: boolean) => setCardColumn(p, id, 'todo', '', keep))
+    )(engine.path, taskId, opts?.byOwner !== true)
     await logAwaited(
       ok ? 'info' : 'warn',
       ok
@@ -3565,13 +3568,15 @@ const setCardColumn = async (
   taskId: string,
   column: 'todo' | 'doing' | 'review',
   branch: string,
+  /** 'todo' only: carry the 差し戻し counter over instead of resetting it. */
+  keepReworkCount = false,
 ): Promise<boolean> => {
   const res = await fetch(`${loopbackOrigin()}/api/project/tasks`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       path: projectPath,
-      setColumn: [{ id: taskId, column }],
+      setColumn: [{ id: taskId, column, keepReworkCount }],
       // Record the branch on the card too (same as the manual dispatch), so the
       // Review column's "merged?" check / the integration stage can find it.
       // Skip when unknown.
@@ -5042,7 +5047,15 @@ const holdSdkSpawn = async (engine: ProjectEngine, reason: string, now: number):
 
 /** Move a lost/stopped worker's card to a recovery column through the project's
  *  own Board HTTP API (the same write seam as the dispatch/promotion moves —
- *  CAS-protected, shared-mode transparent). 'todo' requeues; 'blocked' parks. */
+ *  CAS-protected, shared-mode transparent). 'todo' requeues; 'blocked' parks.
+ *
+ *  A requeue to 'todo' KEEPS the card's 差し戻し counter (`keepReworkCount`).
+ *  Every caller is the engine or the commander — quota wall, crash retry,
+ *  orphan sweep, restart resume, the commander's review/resolve — never the
+ *  owner deciding to start over, and resetting here disarmed the maxReworks
+ *  loop guard (2026-10-06: a card reworked again and again showed 1, reset by
+ *  four quota requeues in between). The owner's reset paths are the Board drag
+ *  into todo and their own escalation answer's unpark. */
 const defaultRecoverCard = async (
   projectPath: string,
   taskId: string,
@@ -5051,7 +5064,10 @@ const defaultRecoverCard = async (
   const res = await fetch(`${loopbackOrigin()}/api/project/tasks`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path: projectPath, setColumn: [{ id: taskId, column }] }),
+    body: JSON.stringify({
+      path: projectPath,
+      setColumn: [{ id: taskId, column, keepReworkCount: true }],
+    }),
     signal: AbortSignal.timeout(15_000),
   })
   return res.ok

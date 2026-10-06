@@ -191,7 +191,10 @@ swarmQuota.ts:364-372。上から順に試し、**過去時刻は無視して次
 `lastQuotaRefusalText`)になり、確認は `QUOTA_STOP_DEBOUNCE_MS`(60秒)の沈黙
 1本だけ。成立したら**同一 pass 内で**: `markRateLimited(tier, …)`(冷却書込・
 model 不明なら mark しない)→ journal `worker quota-stopped` → `recoverLost('rate-limit')`
-で card を 'todo' へ・worker teardown(WIP コミットで作業保全)。再試行の速度は
+で card を 'todo' へ・worker teardown(WIP コミットで作業保全)。この 'todo' 戻しは
+カードの `reworkCount` を**引き継ぐ**(2026-10-06 — `recoverCard` が `setColumn` に
+`keepReworkCount:true` を付ける。以前は利用枠で止まるたびに 0 に戻り、差し戻し上限が
+効かなかった。05 章 §2.4)。再試行の速度は
 冷却時計そのもの — tier が温まれば自動で再配車される。20分 hold・
 `engine.rateLimited`/`limitScreen`/`endRateLimitHold`/`rateLimitHoldCredit`/
 `HOLD_CREDIT_CAP_MS`・early-confirm・scrape 間欠読みは**存在しない**。

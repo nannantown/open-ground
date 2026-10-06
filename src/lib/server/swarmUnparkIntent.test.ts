@@ -70,6 +70,24 @@ describe('recordEscalationAnswerForNextDispatch — the PRODUCTION line shape', 
     await run('そのままで大丈夫です、進めてください', true, unpark)
     expect(unpark).toHaveBeenCalledTimes(1)
   })
+
+  // 2026-10-06: only the OWNER's 「やり直す」 resets the 差し戻し loop guard. The
+  // same unpark run on a COMMANDER's answer (or an older caller that does not
+  // say who answered) carries the count over.
+  it('the unpark resets the rework count only when the owner answered', async () => {
+    const answer = 'A: 順番待ちの列に戻して、作業を再開させる'
+    for (const [byOwner, keep] of [[true, false], [false, true], [undefined, true]] as const) {
+      const unpark = vi.fn(async (_p: string, _id: string, _keep: boolean) => true)
+      await recordEscalationAnswerForNextDispatch(
+        `/tmp/og-line-${Math.random().toString(36).slice(2)}`,
+        't1',
+        queuedLine(S5_MENU, 'カードが blocked のまま滞留しています', answer),
+        { workerAddressed: true, answer, byOwner },
+        { fetchTasks: async () => [card('t1', 'blocked')], unpark },
+      )
+      expect(unpark.mock.calls.map((c) => c[2]), `byOwner=${byOwner}`).toEqual([keep])
+    }
+  })
 })
 
 describe('readUnparkIntent — the wordings owners actually type', () => {

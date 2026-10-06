@@ -294,6 +294,17 @@ describe('withCardMoved (drag/drop + merged-chip move — full-column renumberin
     const data = projectData([task({ id: 'a' })])
     expect(withCardMoved(data, 'nope', 'done', null)).toBe(data)
   })
+
+  it('dragging a card parked at the 差し戻し cap back to todo resets its count; other moves keep it', () => {
+    const parked = task({ id: 'p', boardColumn: 'blocked', reworkCount: 4 })
+    expect(withCardMoved(projectData([parked]), 'p', 'todo', null).tasks[0].reworkCount).toBeUndefined()
+    expect(withCardMoved(projectData([parked]), 'p', 'doing', null).tasks[0].reworkCount).toBe(4)
+    // Reordering within todo (an engine-requeued card keeps its count) is not a restart.
+    const queued = task({ id: 'q', boardColumn: 'todo', reworkCount: 3 })
+    const other = task({ id: 'o', boardColumn: 'todo' })
+    const moved = withCardMoved(projectData([other, queued]), 'q', 'todo', 'o')
+    expect(moved.tasks.find(t => t.id === 'q')!.reworkCount).toBe(3)
+  })
 })
 
 describe('reviewBranchesOf (merged-detection poll input — B018)', () => {

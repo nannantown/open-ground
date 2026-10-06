@@ -36,7 +36,8 @@ describe('recordEscalationAnswerForNextDispatch — unpark', () => {
     // The engine canonicalizes its path (/tmp → /private/tmp on macOS), so
     // match the id exactly and the path by its distinctive tail.
     expect(unpark).toHaveBeenCalledTimes(1)
-    expect(unpark).toHaveBeenCalledWith(expect.stringContaining('og-unpark-a'), 't1')
+    // Third arg: keep the 差し戻し count — true, since no byOwner was given.
+    expect(unpark).toHaveBeenCalledWith(expect.stringContaining('og-unpark-a'), 't1', true)
   })
 
   it('leaves a card in doing alone — a live worker must never be yanked', async () => {

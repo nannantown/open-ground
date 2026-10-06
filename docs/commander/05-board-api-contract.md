@@ -19,9 +19,11 @@ Any descriptions of the retired paths below are historical, not operating instru
    (`src/lib/server/projectData.ts:50-53`)。UI もエンジンも全員 HTTP API 経由でここを読む/書く。
 2. **カード操作の id は必ずフル UUID**。全 verb が `t.id === id` の完全一致
    (`server/routes/project.ts:940` ほか)。短縮 id は `unknown task id` — 0707 の誤診の根っこ。
-3. **列移動は 2 経路で意味が違う**: API の `setColumn` は done/todo 着地で `reworkCount` を
-   リセットする(`server/routes/project.ts:956-957`)が、**UI ドラッグはリセットしない**
-   (`src/components/canvas/BoardTab.tsx:214-254` — `reworkCount` に触れない)。
+3. **`reworkCount` が 0 に戻るのは「オーナーがやり直すと決めた」時だけ**(2026-10-06): API の
+   `setColumn` は done/todo 着地でリセット、UI ドラッグは **別の列から todo へ**の時だけ
+   リセット(`withCardMoved`、done へ・todo 内の並べ替えは保持)。エンジン/司令官の
+   todo 戻し(利用枠・異常終了・再起動・review 詰まり解決 — `recoverCard`)と司令官が
+   答えたエスカレーションの unpark は `keepReworkCount:true` で**引き継ぐ**(§2.4)。
 4. **書き込みは全部ロック/CAS 越し**: 読んで直したいなら `POST /api/project/tasks` の verb を使う
    (サーバ側 `mutateProjectData` がロック内 read-modify-write)。`PUT /api/project` の全量上書きは
    CAS トークン(`updatedAt`)必須 — 落とすと素通りで他人の書き込みを潰す(§4.2)。
@@ -97,9 +99,28 @@ Any descriptions of the retired paths below are historical, not operating instru
 
 - **増える**: `POST /api/project/tasks {rework:[{id}]}` だけが +1 する
   (`server/routes/project.ts:1000`)。
-- **消える(リセット)**: `setColumn` で `done`/`todo` に着地 (`project.ts:956-957`)、
-  `markDone` (`project.ts:881`)。
-- **保持**: UI ドラッグ(§3.3)、`review`/`doing`/`blocked` への setColumn。
+- **消える(リセット)= オーナーがやり直すと決めた時**(2026-10-06): `setColumn` で
+  `done`/`todo` に着地(`keepReworkCount` なし/false)、`markDone`、UI ドラッグで**別の列から**
+  todo へ(§3.3)。オーナーの「やり直す」はここに入る — 保留→todo のドラッグ、
+  **オーナーが答えた**エスカレーションの unpark(`recordEscalationAnswerForNextDispatch`
+  が `byOwner` を受け、`setCardColumn(…,'todo','',keep=false)`)、og-manage が
+  オーナーの「A: やり直す」を `setColumn todo` で実行する時。
+- **保持(引き継ぐ)= オーナーが決めていない戻し**: `recoverCard(…,'todo')` の全呼び出し —
+  利用枠の停止(`recoverLost('rate-limit')`)・異常終了の再試行・持ち主のいない doing の
+  回収・再起動からの再開・司令官の review 詰まり解決 `resolveOrchestratorReview(…,'todo')`
+  (UI からは呼ばれず司令官の経路)。`defaultRecoverCard` が `setColumn:[{…,
+  keepReworkCount:true}]` を送る(以前はここで 0 に戻り、差し戻しが続いたカードが
+  「1」のまま上限に届かなかった)。**司令官が答えた**エスカレーションの unpark も保持
+  (`answeredBy:'commander'` ⇒ `byOwner:false`、不明も保持側)。ほかに todo 内の並べ替え
+  ドラッグ、`review`/`doing`/`blocked` への setColumn。
+  - 副作用: 引き継いだカードは `promoteUnownedDelivered` の対象外になる(③ `reworkCount`
+    falsy の条件)— 差し戻し経験のあるカード一般と同じ扱いで、孤児掃除
+    (`collectUnownedDoing`)が todo へ戻す。配車1回分余計にかかるだけで詰まらない。
+  - 番人(本番側を戻して赤を実測済み): `server/routes/__tests__/tasks.test.ts`「engine
+    requeue vs the owner starting over」(実 `defaultDeps().recoverCard` を app に通す)、
+    `BoardTab.test.ts`(別列→todo はリセット・todo 内の並べ替えは保持)、
+    `swarmUnparkIntent.test.ts`(byOwner→keep の対応)、`swarmEscalations.test.ts`
+    (誰が答えたかを受け手へ渡す)。
 - **別物に注意 — カウンタは 3 系統ある**:
   - `card.reworkCount`(この文書の対象 — API verb が管理)
   - エンジン内部の `engine.reworks` Map(in-memory。エンジンの差し戻しは
@@ -156,7 +177,9 @@ Any descriptions of the retired paths below are historical, not operating instru
 
 UI のドラッグは `withCardMoved`(`src/components/canvas/BoardTab.tsx:214-254`)が
 クライアント側で `boardColumn`/`boardOrder`/`done` を書き換え、`reviewedBy`(active 列行き)と
-`integrationConflict`(review 外行き)は**クリアする**が **`reworkCount` は `...t` のまま保持**。
+`integrationConflict`(review 外行き)は**クリアする**。`reworkCount` は **別の列から todo
+へ入った時だけクリア**(ドラッグは常にオーナーの手 — 保留→todo の復活はやり直しの決定、
+2026-10-06。todo 内の並べ替えは優先度の変更なので保持)、それ以外の列行きは `...t` のまま保持。
 保存は debounce 350ms 後の `PUT /api/project`(全量、CAS 付き —
 `src/components/canvas/ProjectPanel.tsx:808-859`)。409 を食らうと**自分の draft を捨てて
 サーバ側を採用**する(`:831-846`)。
@@ -212,7 +235,7 @@ read-modify-write で実行される(`server/routes/project.ts:857`)。
 | `markDone: string[]` | — | `done:true, boardColumn:'done', reworkCount:undefined` (`project.ts:873-884`) | **なし — unknown id は今も黙殺**(§8) |
 | `setPrUrl: [{id,url}]` | http(s) のみ・500 文字 cap・`''` はクリア (`project.ts:886-903`) | `prUrl` 記録/クリア | **なし**(§8) |
 | `setBranch: [{id,branch}]` | `BRANCH_RE`(`project.ts:234`)・200 cap・`''` はクリア | `branch` 記録/クリア | あり (`project.ts:905-932`) |
-| `setColumn: [{id,column}]` | column は 5 列 enum (`project.ts:236, :936`) | 列移動 + `done` 同期 + review 外で `integrationConflict` クリア + done/todo で `reworkCount` クリア (`project.ts:944-961`) | あり (`project.ts:934-962`) |
+| `setColumn: [{id,column,abandoned?,keepReworkCount?}]` | column は 5 列 enum (`project.ts:236, :936`) | 列移動 + `done` 同期 + review 外で `integrationConflict` クリア + done/todo で `reworkCount` クリア(todo は `keepReworkCount:true` なら保持 — エンジンの自動戻し用) (`project.ts:944-961`) | あり (`project.ts:934-962`) |
 | `setIntegrationConflict: [{id,value}]` | boolean 必須 | フラグ設定(false は undefined 化) (`project.ts:964-978`) | あり |
 | `rework: [{id,maxReworks?}]` | maxReworks は非負整数・既定 3 (`project.ts:990-993`) | counter+1 → `doing`、`count > max` なら `blocked`。`done:false`・conflict クリア (`project.ts:984-1014`) | あり — `{column:'doing'|'blocked', count}` 付き (`project.ts:250-259`) |
 
@@ -401,8 +424,9 @@ saves the selection. Guards: `swarmWorkerLiveGoal.test.ts`,
    doc に知らせないと次の (re)connect で巻き戻された。今は書き込み成功ごとに
    `queueBoardMirrorSafe` が doc へミラー(`projectData.ts:270-280, :305, :352`)。
    それでも「動かしたのに戻る」を見たら共有状態(collab)をまず疑う。
-5. **reworkCount の消え方の非対称**(§3.3) — API setColumn done/todo はリセット、
-   UI ドラッグは保持。「counter がおかしい」の前にどちらの経路で動いたか確認。
+5. **reworkCount の消え方は経路で違う**(§2.4 / §3.3) — API setColumn done/todo はリセット
+   (`keepReworkCount:true` のエンジン自動戻しは保持)、UI ドラッグは todo 行きだけリセット。
+   「counter がおかしい」の前にどの経路で動いたか確認。
 6. **blocked/done カードへの taskId 指定 dispatch は「free」扱い**(`swarm.ts:164-167`) —
    409 にならず spawn まで走るが、**claim していないので列は動かず branch も記録されない**
    (`swarm.ts:329, :367` — claimed のときだけ recordCardBranch)。保留レーン(blocked)の

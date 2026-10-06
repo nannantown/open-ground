@@ -251,7 +251,7 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
       projectPath: string
       taskId: string
       line: string
-      opts?: { workerAddressed?: boolean; answer?: string }
+      opts?: { workerAddressed?: boolean; answer?: string; byOwner?: boolean }
     }> = []
     return {
       writes,
@@ -267,7 +267,7 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
           projectPath: string,
           taskId: string,
           line: string,
-          opts?: { workerAddressed?: boolean; answer?: string },
+          opts?: { workerAddressed?: boolean; answer?: string; byOwner?: boolean },
         ) => {
           queued.push({ projectPath, taskId, line, opts })
         },
@@ -439,6 +439,25 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     const call = h.queued[0]
     expect(readUnparkIntent(call.opts!.answer!)).toBe('resume') // what the owner said
     expect(readUnparkIntent(call.line)).not.toBe('resume') // what the line would say
+  })
+
+  it('says WHO answered — only the owner\'s answer may reset the card\'s 差し戻し count on unpark', async () => {
+    for (const [by, byOwner] of [['owner', true], ['commander', false]] as const) {
+      const { notify } = makeNotify()
+      // A commander-lane record — the only kind the commander may answer.
+      const { escalation } = await openEscalation(
+        openInput({
+          question: '日付の整形は既存の formatDate を使いますか、それとも新しく書きますか？',
+          context: 'worker swarm/x が blocked',
+          whyEscalated: 'policy',
+          askCommanderFirst: true,
+        }),
+        { notify },
+      )
+      const h = answerDeps()
+      await answerEscalation(escalation.id, 'A でお願いします', h.deps, { by })
+      expect(h.queued[0]?.opts?.byOwner, `by=${by}`).toBe(byOwner)
+    }
   })
 
   it('carries workerAddressed=false for a raise the worker did not author', async () => {

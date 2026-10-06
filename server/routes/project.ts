@@ -241,7 +241,12 @@ interface TasksBody {
    *  across two batches would make the outcome depend on the order the handlers
    *  happen to run in — a dependency that breaks silently when someone
    *  reorders them later. */
-  setColumn?: { id: string; column: BoardColumn; abandoned?: boolean }[]
+  /** `keepReworkCount` — a landing on 'todo' normally resets the 差し戻し
+   *  counter (a fresh start). The swarm engine's AUTOMATIC requeues (quota
+   *  wall, crash retry, restart) are not a fresh start — nobody decided to
+   *  begin again — so they send `true` and the counter carries over. Only
+   *  meaningful with column 'todo'; 'done' always resets. */
+  setColumn?: { id: string; column: BoardColumn; abandoned?: boolean; keepReworkCount?: boolean }[]
   /** Record the pull request opened for a task — claude calls this when its
    *  `gh pr create` succeeds. http(s) URLs only; anything else is ignored. */
   setPrUrl?: { id: string; url: string }[]
@@ -1051,8 +1056,15 @@ export const projectRoutes = new Hono()
                 // A fresh-start/success landing clears the 差し戻し loop-guard counter
                 // (same semantics as swarm-board.sh's _move_card) — a later reuse of
                 // this card id isn't pre-tripped by a past round of rework.
+                // EXCEPT the engine's own automatic requeue (keepReworkCount): a
+                // quota wall / crash / restart sending the card back to 'todo'
+                // is not anyone deciding to start over, and resetting there let
+                // the loop guard never trip (2026-10-06: a card reworked again
+                // and again showed 1, reset by four quota requeues in between).
                 reworkCount:
-                  mv.column === 'done' || mv.column === 'todo' ? undefined : t.reworkCount,
+                  mv.column === 'done' || (mv.column === 'todo' && mv.keepReworkCount !== true)
+                    ? undefined
+                    : t.reworkCount,
               }
             : t,
         )

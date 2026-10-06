@@ -478,6 +478,57 @@ describe('POST /api/project/tasks — rework (差し戻し loop-guard)', () => {
     expect(body.results.rework).toEqual([{ id: task.id, ok: true, column: 'doing', count: 1 }])
   })
 
+  // 2026-10-06: a card reworked again and again showed 「差し戻し 1」 — each quota
+  // wall made the engine requeue it to 'todo' (recoverCard), and that landing
+  // reset the counter, so maxReworks could never trip. Driven through the
+  // engine's REAL board writer (defaultDeps().recoverCard), with its loopback
+  // fetch routed into this app, so the pin covers both the sender and the route.
+  describe('engine requeue vs the owner starting over', () => {
+    const realFetch = globalThis.fetch
+    beforeEach(() => {
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+        return app.request(url.pathname + url.search, init)
+      }) as typeof fetch
+    })
+    afterEach(() => {
+      globalThis.fetch = realFetch
+    })
+
+    it('an automatic requeue to todo (quota wall / crash / restart) KEEPS the count, so the cap still parks', async () => {
+      const { defaultDeps } = await import('@/lib/server/swarmOrchestrator')
+      const recoverCard = defaultDeps().recoverCard
+      const dir = await makeRegisteredDir('rework-kept-over-quota')
+      const task = await addTask(dir, 'Reworked across quota walls')
+
+      for (let i = 1; i <= 3; i++) {
+        const rw = await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id }] }))
+        expect((await rw.json()).results.rework[0]).toMatchObject({ column: 'doing', count: i })
+        // The worker hits the 5-hour wall; the engine sends the card back to todo.
+        expect(await recoverCard(dir, task.id, 'todo')).toBe(true)
+        const after = await getTask(dir, task.id)
+        expect(after?.boardColumn).toBe('todo')
+        expect(after?.reworkCount).toBe(i)
+      }
+      const rw = await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id }] }))
+      expect((await rw.json()).results.rework[0]).toMatchObject({ column: 'blocked', count: 4 })
+    })
+
+    it('the owner starting over (their 「やり直す」 answer\'s unpark, a plain setColumn → todo) resets the count to 0', async () => {
+      const dir = await makeRegisteredDir('rework-reset-by-owner')
+      const task = await addTask(dir, 'Owner says redo')
+
+      // Parked at the cap, then revived by the owner: the unpark of an OWNER
+      // answer sends keepReworkCount:false; a commander's script sends none.
+      for (const item of [{ keepReworkCount: false }, {}]) {
+        await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id, maxReworks: 0 }] }))
+        expect((await getTask(dir, task.id))?.boardColumn).toBe('blocked')
+        await app.request('/api/project/tasks', json({ path: dir, setColumn: [{ id: task.id, column: 'todo', ...item }] }))
+        expect((await getTask(dir, task.id))?.reworkCount).toBeUndefined()
+      }
+    })
+  })
+
   it('markDone (the run-flow on-finish done landing) also resets the counter', async () => {
     // markDone is a first-class "done" landing (BoardModule's run-flow
     // on-finish curl) alongside setColumn{column:'done'} — the loop guard must
