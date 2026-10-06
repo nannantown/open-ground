@@ -56,11 +56,19 @@ const PTY_BY_DESIGN = [
   //                                          reads a screen, types /compact into it
   'src/lib/server/phoneLink.ts', //          asks which project has a live SUPPLY desk
   //                                          (PTY-only, above) by the supply label
-  'src/lib/server/phoneAssistant.ts', //     one-off PTY per assistant line (canvasAi's
+  'src/lib/server/phoneAssistant.ts', //     one-off PTY per memo fold run (canvasAi's
   //                                          runner); waits for it to die before rm cwd
   'server/routes/customModules.ts', //        custom tabs are PTY panes by design
   'server/routes/sse.ts', //                  the PTY output stream
   'server/index.ts', //                       starts/stops the PTY sweep loop
+]
+
+/** SDK-ONLY BY DESIGN — the mirror of PTY_BY_DESIGN: reaches the SDK module
+ *  and is still BANNED from the PTY pool. */
+const SDK_BY_DESIGN = [
+  'src/lib/server/assistantSession.ts', //   the assistant's ONE live session: needs only
+  //                                          the SDK loader (importSdkModule, for
+  //                                          createSdkMcpServer), never a desk of either pool
 ]
 
 /** DEBT. These reach BOTH pools directly today. Every one is a place where the
@@ -79,4 +87,4 @@ const BOTH_POOLS_DEBT = [
 ]
 
 
-module.exports = { SEAMS, PTY_BY_DESIGN, BOTH_POOLS_DEBT }
+module.exports = { SEAMS, PTY_BY_DESIGN, SDK_BY_DESIGN, BOTH_POOLS_DEBT }

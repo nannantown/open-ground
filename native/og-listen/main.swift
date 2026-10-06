@@ -4,11 +4,17 @@
 // object per line on stdout:
 //   {"type":"ready"}                 listening
 //   {"type":"partial","text":"…"}    what it has heard so far
-//   {"type":"final","text":"…"}      one finished utterance (after a pause)
+//   {"type":"final","text":"…"}      one finished utterance (after a pause —
+//                                    short after a finished sentence, long after
+//                                    a dangling particle: pauseFor)
 //   {"type":"error","reason":"denied"|"unavailable"|"failed"}  then exits
 // Keeps listening, utterance after utterance, until killed or stdin closes
 // (the parent died). `og-listen <locale> --file <audio>` recognizes one file
 // and exits — the only way to check recognition without speaking.
+// `og-listen <locale> --feed <audio>` listens as from the mic but to the file,
+// played in at real time and then silence, with {"type":"fed"} the moment its
+// last sample is in: how long the end of speech takes to become "final", on
+// this Mac's recognizer, without a speaker or a mic (scripts/measure-voice-latency.mjs).
 //
 // SFSpeechRecognizer, not SpeechAnalyzer: the release build runs on a macOS 14
 // SDK. ponytail: switch to SpeechTranscriber (no speech-recognition prompt)
@@ -41,14 +47,35 @@ if let i = args.firstIndex(of: "--choose"), i + 3 < args.count, let ch = Int(arg
   emit(["type": "choice", "device": chooseInput(defaultChannels: ch, defaultIsBuiltIn: defaultIsBuiltIn, hasBuiltIn: args[i + 2] == "1", lidClosed: args[i + 3] == "1")])
   exit(0)
 }
+// `--pause <words>` prints how long a pause would end them (no listening).
+if let i = args.firstIndex(of: "--pause"), i + 1 < args.count {
+  emit(["type": "pause", "seconds": String(pauseFor(args[i + 1]))])
+  exit(0)
+}
+let feedArg: String? = args.firstIndex(of: "--feed").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
 if args.contains("--which") {
   let d = pickInput()
   emit(["type": "which", "device": deviceName(d), "channels": String(inputChannels(d)), "lidClosed": String(lidClosed())])
   exit(0)
 }
 
-/** A pause this long after the last new word ends the utterance. */
-let pauseSeconds = 1.2
+/** How long a pause after the last new word ends the utterance, by how the
+ *  words end (owner 2026-10-07: answer as soon as a person would). A finished
+ *  sentence — a full stop, or a Japanese sentence ending — is answered after a
+ *  short pause; a dangling particle or conjunction (「〜で」「〜けど」, "and")
+ *  waits longer, the owner is still mid-thought; anything else in between.
+ *  The pause is counted from the last NEW word the recognizer reported, which
+ *  itself trails the voice by a moment, so the silence heard is a bit longer.
+ *  ponytail: a word list, not a model; a misread ending costs the middle value. */
+func pauseFor(_ text: String) -> Double {
+  let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  let lower = t.lowercased()
+  if t.range(of: "(、|,|けど|けれど|から|ので|のに|たら|れば|とか|[はがをにでとへもやし])$", options: .regularExpression) != nil { return 1.4 }
+  if lower.range(of: "\\b(and|but|so|or|because|the|a|an|to|of|with|um|uh|if|then)$", options: .regularExpression) != nil { return 1.4 }
+  // Not a lone 「ね」「か」: 「あのね」「なにか」「どこか」 are how a thought starts.
+  if t.range(of: "([。．？！?!.]|です|ます|ました|でした|ません|ですか|ますか|ください|ちょうだい|お願い|よね|かな|だっけ|だよ|だね|よ)$", options: .regularExpression) != nil { return 0.5 }
+  return 0.8
+}
 
 guard let recognizer = SFSpeechRecognizer(locale: locale) else { fail("unavailable") }
 
@@ -170,6 +197,7 @@ final class Listener {
   }
   var heard = ""
   var pause: DispatchWorkItem?
+  var task: SFSpeechRecognitionTask?
   var begunAt = Date()
   /** Failures right after starting, in a row: a recognizer that cannot work at all. */
   var quickFails = 0
@@ -199,6 +227,7 @@ final class Listener {
   }
 
   func start() {
+    if let feedArg { return feed(feedArg) }
     startEngine()
     watch()
     // Another mic plugged in (AirPods…) stops the engine silently: start it again.
@@ -246,10 +275,42 @@ final class Listener {
     request = r
     heard = ""
     begunAt = Date()
-    recognizer.recognitionTask(with: r) { [weak self] result, error in
+    task = recognizer.recognitionTask(with: r) { [weak self] result, error in
       DispatchQueue.main.async { self?.handle(r, result, error) }
     }
   }
+
+  /** --feed: the file instead of the mic, at real time in 0.1 s pieces, then silence. */
+  func feed(_ path: String) {
+    guard let file = try? AVAudioFile(forReading: URL(fileURLWithPath: path)),
+      let all = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
+      (try? file.read(into: all)) != nil,
+      let one = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: file.processingFormat.sampleRate, channels: 1, interleaved: false),
+      let m = mono(all, one), let src = m.floatChannelData?[0]
+    else { fail("failed") }
+    let step = AVAudioFrameCount(one.sampleRate / 10)
+    var at: AVAudioFrameCount = 0
+    var fed = false
+    let timer = DispatchSource.makeTimerSource(queue: .main)
+    timer.schedule(deadline: .now(), repeating: 0.1)
+    timer.setEventHandler { [weak self] in
+      guard let piece = AVAudioPCMBuffer(pcmFormat: one, frameCapacity: step), let dst = piece.floatChannelData?[0] else { return }
+      piece.frameLength = step
+      let n = at < m.frameLength ? min(step, m.frameLength - at) : 0
+      for i in 0..<Int(step) { dst[i] = i < Int(n) ? src[Int(at) + i] : 0 }
+      at += n
+      self?.request?.append(piece)
+      if !fed && at >= m.frameLength {
+        fed = true
+        emit(["type": "fed"])
+      }
+    }
+    timer.resume()
+    feeding = timer
+    begin()
+    emit(["type": "ready"])
+  }
+  var feeding: DispatchSourceTimer?
 
   func handle(_ r: SFSpeechAudioBufferRecognitionRequest, _ result: SFSpeechRecognitionResult?, _ error: Error?) {
     guard r === request else { return } // an utterance already handed on
@@ -261,17 +322,15 @@ final class Listener {
         heard = text
         emit(["type": "partial", "text": text])
         pause?.cancel()
-        // After the pause: close the utterance; if the recognizer never answers
-        // that, hand on what was heard anyway.
+        // After the pause the words heard so far ARE the utterance: handed on at
+        // once. (Before 2026-10-07 it then closed the audio and waited — up to
+        // 3 s — for the recognizer's own "final", which only re-says them.)
         let w = DispatchWorkItem { [weak self] in
-          r.endAudio()
-          DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self, r === self.request else { return }
-            self.finish(self.heard)
-          }
+          guard let self, r === self.request else { return }
+          self.finish(self.heard)
         }
         pause = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + pauseSeconds, execute: w)
+        DispatchQueue.main.asyncAfter(deadline: .now() + pauseFor(text), execute: w)
       }
     } else if error != nil {
       let text = heard
@@ -289,6 +348,9 @@ final class Listener {
 
   func finish(_ text: String) {
     pause?.cancel()
+    // The utterance is over: its recognition stops (what it would still say is not listened to).
+    request?.endAudio()
+    task?.cancel()
     let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
     if !line.isEmpty { emit(["type": "final", "text": line]) }
     begin()

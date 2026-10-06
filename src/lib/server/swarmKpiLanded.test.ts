@@ -36,6 +36,13 @@ describe('countLandedFromBoard', () => {
   it('does NOT count a done card the engine never promoted (hand-made work is not the swarm\'s)', () => {
     expect(countLandedFromBoard([card('hand fix', 'done')], [promoteLine('fix A')])).toBe(0)
   })
+
+  // 2026-10-07: a card called off (取りやめ / 見送り) is closed as done +
+  // abandoned — it never landed, so the dashboard must not count it.
+  it('does NOT count a promoted card closed as done + abandoned (called off, never landed)', () => {
+    const gone = { ...card('fix A', 'done'), abandoned: true } as ProjectTask
+    expect(countLandedFromBoard([gone], [promoteLine('fix A')])).toBe(0)
+  })
 })
 
 describe('computeSwarmKpis — commander-merges mode', () => {

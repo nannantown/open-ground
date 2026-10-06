@@ -41,7 +41,8 @@ import { alreadyStored, asCursor, asPushTarget, type Cursor, type PushTarget } f
 import { providerTokenExpired, renewStaleProviderToken, pushKeyFingerprint, pushRefusedForGood, pushTokenGone, pushTransient, refusalIsTheApp, readPushKey, sendPushToTalk, type PushKey, type PushResult } from './phonePush'
 import { isSwarmLocalOwnerUnlocked } from './swarmGate'
 import { getCustomTabRole } from './roles'
-import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assistantBusy, plainAssistantError, type AssistantAnswer } from './phoneAssistant'
+import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assistantBusy, dropAssistantProposal, plainAssistantError, pressProposal, warmAssistant, type AssistantAnswer } from './phoneAssistant'
+import { listProposals, onProposalsChanged } from './assistantProposals'
 import { langOf, pick } from './promptLang'
 import { e2eKeyOf, open as openSealed, seal, sealTag } from './phoneLinkSeal'
 import { appendAssistantCall, assistantEntriesFor, readAssistantConfig, readAssistantLog, readAssistantMemory } from './assistantMemory'
@@ -97,7 +98,7 @@ export const LEGACY_V1_UNTIL = Date.parse('2026-11-30T00:00:00Z')
  *  refused (a say is answered `stale`): the relay cannot hold a say and use it later. */
 export const SEALED_MAX_AGE_MS = 5 * 60_000
 /** Content frames sealed on a v2 pairing (control frames stay plain). */
-const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history', 'call-note'])
+const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history', 'call-note', 'assistant-proposals', 'assistant-proposal'])
 
 const EVENT_TEXT_MAX = 8000
 const TAIL_TICK_MS = 1000
@@ -298,6 +299,8 @@ interface LinkState {
    *  it was matched to, so a resend after a reconnect carries the same id.
    *  Capped at SAY_IDS_MAX, oldest dropped. */
   sayIds: { projectId: string; text: string; id: string; cur?: string }[]
+  /** Stops sending the proposal list (startPhoneLink subscribes). */
+  unwatchProposals?: () => void
 }
 
 declare global {
@@ -315,6 +318,9 @@ export interface PhoneLinkDeps {
   sendPush?: (key: PushKey, target: PushTarget) => Promise<PushResult>
   /** The cross-project assistant's turn (tests). */
   assistant?: (text: string) => Promise<AssistantAnswer>
+  /** Start the assistant's session ahead of a line — passed only by the live
+   *  link (connect), so a test's frame never starts a real claude. */
+  warm?: () => Promise<void>
 }
 
 /** Only the primary instance (fixed port 47776) holds the link: a second server
@@ -594,18 +600,22 @@ const HISTORY_PAGE_BYTES = 40_000
  *  only): newest first, a page at a time (`before` = the oldest `at` it has),
  *  the memo and the settings with the first page. v2 only — sealed by
  *  outerFrame; a v1 (plaintext) pairing is told to pair again and gets none. */
-const assistantHistory = async (st: LinkState, f: Record<string, unknown>, id: string | undefined): Promise<void> => {
+const assistantHistory = async (st: LinkState, f: Record<string, unknown>, id: string | undefined, deps: PhoneLinkDeps): Promise<void> => {
   if (isLockdownEnabledSync()) return
   if (st.cfg.v !== 2) return void send(st, { type: 'assistant-history', ...(id !== undefined ? { id } : {}), error: 'pair-again' })
   const before = typeof f.before === 'number' ? f.before : undefined
   const projectId = typeof f.projectId === 'string' ? f.projectId : ASSISTANT_ID
+  // The phone opened the assistant's talk (its first page): start its session
+  // now, so the first line said there skips the start-up (as the Mac's window does).
+  if (projectId === ASSISTANT_ID && before === undefined) void deps.warm?.().catch(() => {})
   if (projectId !== ASSISTANT_ID && !(await listProjects()).some((p) => p.id === projectId))
     return void send(st, { type: 'assistant-history', id, projectId, error: 'no-project' })
   if (projectId === ASSISTANT_ID && !st.cfg.assistantDirect) {
     st.cfg = { ...st.cfg, assistantDirect: true }
     if (!st.retired) await writeConfig(st.cfg).catch(() => {})
   }
-  const head = before === undefined && projectId === ASSISTANT_ID ? { memory: await readAssistantMemory(), ...(await readAssistantConfig()) } : {}
+  // The first page carries the proposals made from the phone (their frames and buttons).
+  const head = before === undefined && projectId === ASSISTANT_ID ? { memory: await readAssistantMemory(), ...(await readAssistantConfig()), proposals: listProposals({ via: 'phone' }) } : {}
   const all = assistantEntriesFor(await readAssistantLog(), projectId).filter((e) => before === undefined || e.at < before)
   let bytes = Buffer.byteLength(JSON.stringify(head))
   let from = all.length
@@ -645,6 +655,9 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
   const line = text.trim()
   if (!line) return void ack('rejected', { reason: 'empty' })
   if (line.length > ASSISTANT_SAY_MAX) return void ack('rejected', { reason: 'too-long', max: ASSISTANT_SAY_MAX })
+  // An old plaintext (v1) pairing never reaches the assistant: it reads files, and
+  // v1 frames are unsealed and replayable.
+  if (st.cfg.v !== 2) return void ack('rejected', { reason: 'pair-again' })
   // Work mode: nothing would go out, so nothing is asked either.
   if (isLockdownEnabledSync()) return
   // Full (one answering, one waiting): just `busy`, nothing queued or echoed.
@@ -665,11 +678,38 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
     if (st.says.delete(hold)) void flushPush(st, deps).catch(() => {})
     return
   }
-  ack('delivered', { projectId: ASSISTANT_ID, heard: true, ...(a.card ? { card: a.card } : {}) })
-  const sent = sendAssistant(st, assistantTalk(st, 'assistant', { text: a.reply, at: Date.now() }), deps)
+  ack('delivered', { projectId: ASSISTANT_ID, heard: true })
+  // `speak`: the part to read aloud (one or two sentences); `text` is all of it.
+  const sent = sendAssistant(st, assistantTalk(st, 'assistant', { text: a.reply, ...(a.speak ? { speak: a.speak } : {}), at: Date.now() }), deps)
   st.says.delete(hold)
   if (sent) owePush(st, deps)
   else void flushPush(st, deps).catch(() => {})
+}
+
+/** The proposals made from the phone, sent whenever they change (v2 only —
+ *  sealed; offline = not kept: the next `assistant-history` page carries them). */
+const sendProposals = (st: LinkState): void => {
+  if (st.cfg.v === 2) send(st, { type: 'assistant-proposals', proposals: listProposals({ via: 'phone' }) })
+}
+
+/** The phone pressed a frame's button: `{proposalId, action: "approve" | "drop",
+ *  hash}` — hash computed by the phone from what its frame shows. The same one
+ *  door as the Mac's window (pressProposal); a `say` never reaches it. */
+const proposalButton = async (st: LinkState, f: Record<string, unknown>, id: string | undefined, deps: PhoneLinkDeps): Promise<void> => {
+  const ack = (state: 'delivered' | 'rejected', extra: Record<string, unknown> = {}) =>
+    send(st, { type: 'ack', ...(id !== undefined ? { id } : {}), state, projectId: ASSISTANT_ID, ...extra })
+  if (st.cfg.v !== 2) return void ack('rejected', { reason: 'pair-again' })
+  if (isLockdownEnabledSync()) return
+  if (f.action === 'drop') {
+    const r = dropAssistantProposal(f.proposalId)
+    return void ('error' in r ? ack('rejected', { reason: r.error }) : ack('delivered'))
+  }
+  if (f.action !== 'approve') return void ack('rejected', { reason: 'bad-frame' })
+  const r = await pressProposal(f.proposalId, f.hash, { via: 'phone' }).catch(() => ({ error: 'mac-error' as const }))
+  if ('error' in r) return void ack('rejected', { reason: r.error })
+  ack('delivered', r.card ? { card: r.card } : {})
+  // What was done, in the app's words: shown and read aloud as it is.
+  sendAssistant(st, assistantTalk(st, 'assistant', { text: r.line, speak: r.line, at: Date.now() }), deps)
 }
 
 /** One frame relayed from the phone. Exported for tests. */
@@ -701,7 +741,8 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
     if (p.id === chosen?.id) return sendProjects(st, true)
     return selectProject(st, p.id)
   }
-  if (f.type === 'assistant-history') return assistantHistory(st, f, id)
+  if (f.type === 'assistant-history') return assistantHistory(st, f, id, deps)
+  if (f.type === 'assistant-proposal') return proposalButton(st, f, id, deps)
   if (f.type === 'call-note') {
     if (isLockdownEnabledSync() || st.cfg.v !== 2 || st.retired) return
     const projectId = typeof f.projectId === 'string' ? f.projectId : ''
@@ -796,7 +837,7 @@ let lastDropWarn = 0
  *  Logs never carry the content. */
 const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
   const inner = openSealed(key, 'p2m', f.box)
-  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history' || inner.type === 'call-note')) {
+  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history' || inner.type === 'call-note' || inner.type === 'assistant-proposal')) {
     // The relay can send these at will: one line a minute, never the frame.
     if (Date.now() - lastDropWarn > 60_000) {
       console.warn(
@@ -961,7 +1002,7 @@ const connect = (st: LinkState): void => {
     } catch {
       return
     }
-    if (f && typeof f === 'object') void handleRelayFrame(st, f as Record<string, unknown>).catch(() => {})
+    if (f && typeof f === 'object') void handleRelayFrame(st, f as Record<string, unknown>, { warm: warmAssistant }).catch(() => {})
   })
   ws.on('unexpected-response', (_req, res) => {
     // 401 = this pairing was reset elsewhere (or the keys are wrong): retrying
@@ -1027,6 +1068,7 @@ export const stopPhoneLink = (): void => {
   clearTimeout(st.retry)
   clearInterval(st.loop)
   clearTimeout(st.pushTimer)
+  st.unwatchProposals?.()
   st.ws?.close()
   globalThis.__openground_phone_link = undefined
 }
@@ -1043,6 +1085,7 @@ export const startPhoneLink = async (): Promise<boolean> => {
   const st = newLinkState(cfg, null)
   st.stopped = false
   globalThis.__openground_phone_link = st
+  st.unwatchProposals = onProposalsChanged(() => sendProposals(st))
   connect(st)
   st.loop = setInterval(() => void tick(st), TAIL_TICK_MS)
   st.loop.unref?.()

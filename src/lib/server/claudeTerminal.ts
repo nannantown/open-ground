@@ -58,6 +58,13 @@ import { CLAUDE_EFFORTS, type ClaudeEffort, type ProjectLaunchPrefs } from '../t
 //      quitting it leaves a live shell in the worktree.
 // Legs 3–4 are ours to change if we choose. Legs 1–2 are not.
 //
+// Accepted exceptions (Agent SDK, same subscription login): the SDK commander
+// and workers (swarmWorkerSdk.ts / swarmManagerSdk.ts — the supply desk the
+// phone drives stays PTY), and since 2026-10-06 the owner's assistant talk
+// (assistantSession.ts — one hidden session nobody drives by Remote Control or
+// reads off a screen, kept up between lines for speed). Leg 1 applies to them
+// as it does to the PTY path.
+//
 // The full survey — what a non-PTY (Agent SDK) path would gain and lose, with
 // the measurements behind all of the above — is docs/SDK_CLIENT_INVESTIGATION.md.
 // ════════════════════════════════════════════════════════════════════════════

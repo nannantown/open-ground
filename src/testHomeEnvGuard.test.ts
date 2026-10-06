@@ -1377,6 +1377,14 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'writes-elsewhere',
     why: 'Offline SDK CLI fixture: the caller pins HOME and capture to mkdtemp directories, and the fixture rejects canonical paths outside temporary roots before writing transcripts or captures.',
   },
+  'scripts/verify-assistant-live.mts': {
+    tier: 'writes-elsewhere',
+    why: "manual real-claude check of the assistant's live session: only READS ~/.claude/history.jsonl (to show that no talk was recorded there); every write goes to its own mkdtemp OPENGROUND_HOME under os.tmpdir(), removed at the end",
+  },
+  'src/lib/server/assistantTools.ts': {
+    tier: 'writes-elsewhere',
+    why: "the assistant's read-only tools name ~/.claude.json and ~/.claude/.credentials.json only to REFUSE reading them (HOME_SECRETS); the module writes nothing under any home — its only writes are a Board card through projectData and the memo through assistantMemory, both under OPENGROUND_HOME",
+  },
   'scripts/verify-assistant-memory.mts': {
     tier: 'writes-elsewhere',
     why: "manual real-claude check of the assistant's memory: only READS ~/.claude/history.jsonl (to show that no talk or memo was recorded there); every write goes to its own mkdtemp OPENGROUND_HOME under os.tmpdir(), removed at the end",

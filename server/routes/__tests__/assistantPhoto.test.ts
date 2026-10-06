@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Hono } from 'hono'
 import { phoneLinkRoutes } from '../phoneLink'
 import { readdir, readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { openGroundHome } from '@/lib/server/paths'
 import { setLockdownCache } from '@/lib/server/lockdown'
 import {
@@ -20,7 +20,8 @@ import {
   saveAssistantPhoto,
   sniffPhoto,
 } from '@/lib/server/assistantMemory'
-import { __resetAssistantMemory, assistantTools, type AssistantDeps } from '@/lib/server/phoneAssistant'
+import { __resetAssistantMemory, type AssistantDeps } from '@/lib/server/phoneAssistant'
+import type { AssistantAsk, AssistantModel } from '@/lib/server/assistantSession'
 
 const real = vi.hoisted(() => ({ ask: null as null | ((t: string, d: AssistantDeps) => Promise<unknown>) }))
 const seen = vi.hoisted(() => ({ calls: [] as { text: string; photo?: string }[] }))
@@ -34,7 +35,8 @@ vi.mock('@/lib/server/phoneAssistant', async (orig) => {
     // The route's call is recorded, then answered by a stand-in model.
     askAssistant: (text: string, deps: AssistantDeps = {}) => {
       seen.calls.push({ text, photo: deps.photo })
-      return m.askAssistant(text, { ...deps, run: async () => JSON.stringify({ reply: 'ok' }), digest: async () => ({ text: '(none)', projects: [] }) })
+      const model: AssistantModel = { warm: async () => {}, ask: async (o) => (await o.tools.status({}), 'ok') }
+      return m.askAssistant(text, { ...deps, model, digest: async () => ({ text: '(none)', projects: [] }) })
     },
   }
 })
@@ -97,27 +99,34 @@ describe('the say route with a photo', () => {
   })
 })
 
-describe('the model run gets the photo', () => {
-  it('a copy inside its own dir, named in the prompt, with Read allowed only then; later turns know a photo was sent', async () => {
+describe('the model gets the photo', () => {
+  it('its line names the kept photo and reading it gives the image; later lines know a photo was sent', async () => {
     const name = await saveAssistantPhoto(PNG, 'png')
-    const runs: { prompt: string; cwd: string; photo?: string; bytes?: Buffer }[] = []
-    const run: AssistantDeps['run'] = async (prompt, _file, cwd, photo) => {
-      runs.push({ prompt, cwd, photo, bytes: photo ? await readFile(photo) : undefined })
-      return JSON.stringify({ reply: '赤い四角だね' })
+    const asks: { line: string; system: string; image?: unknown }[] = []
+    const model: AssistantModel = {
+      warm: async () => {},
+      ask: async (o: AssistantAsk) => {
+        const path = /photo with this line: (.+?) —/.exec(o.line)?.[1]
+        asks.push({ line: o.line, system: await o.system(), image: path ? await o.tools.read_file({ path }) : undefined })
+        return '赤い四角だね'
+      },
     }
     const digest: AssistantDeps['digest'] = async () => ({ text: '(none)', projects: [] })
-    await real.ask!('これ何?', { run, digest, via: 'screen', photo: name })
-    expect(dirname(runs[0].photo!)).toBe(runs[0].cwd)
-    expect(runs[0].bytes).toEqual(PNG)
-    expect(runs[0].prompt).toContain(`sent a photo: ${runs[0].photo}`)
-    expect(runs[0].prompt).toContain('Read nothing but the photo')
-    expect(assistantTools(runs[0].photo)).toEqual(['Read', 'Write'])
-    expect(assistantTools(undefined)).toEqual(['Write'])
+    await real.ask!('これ何?', { model, digest, via: 'screen', photo: name })
+    expect(asks[0].image).toEqual({ image: { data: PNG.toString('base64'), mimeType: 'image/png' } })
+    expect(await readFile(join(openGroundHome(), 'assistant', 'photos', name))).toEqual(PNG)
 
-    await real.ask!('ありがとう', { run, digest, via: 'screen' })
-    expect(runs[1].photo).toBeUndefined()
-    expect(runs[1].prompt).toContain('Owner: これ何? [sent a photo]')
-    expect(runs[1].prompt).toContain('Do not read files')
+    await real.ask!('ありがとう', { model, digest, via: 'screen' })
+    expect(asks[1].line).not.toContain('photo with this line')
+    expect(asks[1].system).toContain('Owner: これ何? [sent a photo]')
+  })
+})
+
+describe('the floating window gets the "let me look" line before the answer', () => {
+  it('stream: one JSON per line — the interim first, then the answer with the part to read aloud', async () => {
+    const r = await say({ text: '状況どう?', stream: true })
+    expect(r.status).toBe(200)
+    expect((await r.text()).trim().split('\n').map((l) => JSON.parse(l))).toEqual([{ interim: expect.stringMatching(/^(One moment|Let me check|Let me look)\.$/) }, { reply: 'ok', speak: 'ok' }])
   })
 })
 

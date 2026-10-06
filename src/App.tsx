@@ -1618,7 +1618,6 @@ export default function App() {
         <FloatingAssistant
           key={`${authUser?.id ?? ''}:${settings?.lockdownMode === true}`}
           disabled={settings?.lockdownMode === true}
-          onGround={!singleSelected && !openShared}
         />
       )}
     </main>

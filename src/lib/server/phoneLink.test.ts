@@ -26,13 +26,18 @@ vi.mock('./terminal', async (orig) => ({
 }))
 
 import { AssistantFailure, askAssistant, __resetAssistantMemory } from './phoneAssistant'
+import { __resetProposals, openProposals, proposalHash, proposeMessage } from './assistantProposals'
+// A message any path sends to a commander lands here (never a real desk).
+const relayed = vi.hoisted(() => [] as string[])
+vi.mock('./commanderRelay', () => ({ relayToCommander: async (_path: string, text: string) => (relayed.push(text), { ok: true, delivered: true, runtime: 'sdk', woke: false }) }))
 import { __testConnect, flushAssistantOutbox, flushPush, PUSH_GAP_MS, PUSH_RETRY_MAX, SAY_HOLD_MAX_MS, handlePhoneFrame, handleRelayFrame, phoneEventsFromLine, pumpTranscript, pairingCode, pairPhone, readPhoneLinkConfig, relayUrlAllowed, startPhoneLink, stopPhoneLink, unpairPhone, tick, __testLinkState } from './phoneLink'
 import { alreadyStored, asCursor, type Cursor, type PushTarget } from '../../../worker/src/phoneRelayAuth'
 import { setLockdownCache } from './lockdown'
 import { saveAssistantConfig } from './assistantMemory'
 import { openGroundHome } from './paths'
 import { phoneLinkRoutes } from '../../../server/routes/phoneLink'
-import { generateKeyPairSync } from 'node:crypto'
+import { generateKeyPairSync, randomBytes } from 'node:crypto'
+import { e2eKeyOf, open as openSealed } from './phoneLinkSeal'
 import { statSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { WebSocketServer } from 'ws'
@@ -41,10 +46,15 @@ import { flushSupplyNotices, resetSupplyNoticeState, SUPPLY_OWNER_SAY_MAX, SUPPL
 
 const PROJECT = '/repo/alpha'
 const CFG = { v: 1 as const, relayUrl: 'https://relay.test', macKey: 'm'.repeat(43), phoneKey: 'p'.repeat(43), projectId: 'p1' }
+/** A sealed (v2) pairing — the only kind the assistant talks to. */
+const E2E = randomBytes(32).toString('base64url')
+const CFG2 = { ...CFG, v: 2 as const, e2eKey: E2E }
 
+/** What went out, a sealed frame read as the phone opens it (its sealing has its own tests). */
 const fakeSocket = () => {
   const sent: Record<string, unknown>[] = []
-  return { sent, sock: { readyState: 1, send: (s: string) => void sent.push(JSON.parse(s)) } }
+  const read = (f: Record<string, unknown>) => (typeof f.box === 'string' ? { ...f, ...(openSealed(e2eKeyOf(E2E)!, 'm2p', f.box) as Record<string, unknown>) } : f)
+  return { sent, sock: { readyState: 1, send: (s: string) => void sent.push(read(JSON.parse(s))) } }
 }
 // Like a real desk: a paste shows in the box, the Enter clears it.
 const fakeDesk = () => {
@@ -109,6 +119,31 @@ describe('phoneEventsFromLine — what the owner hears from a transcript line', 
     ['a torn line', '{"type":"user","mess'],
   ])('carries nothing for %s', (_l, l) => {
     expect(phoneEventsFromLine(l)).toEqual([])
+  })
+})
+
+describe('the phone opening the assistant warms its session', () => {
+  it('an assistant-history fetch starts the session ahead of the first line (the live link passes warm)', async () => {
+    const { sock } = fakeSocket()
+    const st = __testLinkState(CFG2, sock)
+    let warmed = 0
+    await handlePhoneFrame(st, { type: 'assistant-history', id: 'h1' }, { warm: async () => void warmed++ })
+    expect(warmed).toBe(1)
+    // Its older pages, and a project's call history, start nothing more.
+    await handlePhoneFrame(st, { type: 'assistant-history', id: 'h2', before: Date.now() }, { warm: async () => void warmed++ })
+    expect(warmed).toBe(1)
+  })
+
+  it('an old plaintext (v1) pairing never reaches the assistant: no say is asked, no history starts it', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    let warmed = 0
+    const asked: string[] = []
+    await handlePhoneFrame(st, { type: 'assistant-history', id: 'h1' }, { warm: async () => void warmed++ })
+    await handlePhoneFrame(st, { type: 'say', id: 'v1', text: 'うん', projectId: 'assistant' }, { assistant: async (t) => (asked.push(t), { reply: 'x' }) })
+    expect(warmed).toBe(0)
+    expect(asked).toEqual([])
+    expect(sent.filter((f) => f.type === 'ack').map((f) => [f.id, f.state, f.reason])).toEqual([['v1', 'rejected', 'pair-again']])
   })
 })
 
@@ -229,13 +264,12 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
   it('a say to it is answered to the phone and never typed into a president desk', async () => {
     const { sent, sock } = fakeSocket()
     const desk = fakeDesk()
-    const st = __testLinkState(CFG, sock)
+    const st = __testLinkState(CFG2, sock)
     const asked: string[] = []
-    const card = { projectId: 'p1', taskId: 't1', title: 'ログイン直す' }
     await handlePhoneFrame(st, { type: 'say', id: 'a1', text: 'alphaでログイン直して', projectId: 'assistant' }, {
       supply: desk.deps,
       wakeDesk: async () => 'must not wake a desk',
-      assistant: async (t) => (asked.push(t), { reply: 'alphaにカード積んだよ。', card }),
+      assistant: async (t) => (asked.push(t), { reply: 'alphaにカード案を出したよ。' }),
     })
     expect(asked).toEqual(['alphaでログイン直して'])
     expect(desk.writes).toEqual([])
@@ -243,19 +277,56 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
       ['a1', 'queued', 'assistant'],
       ['a1', 'delivered', 'assistant'],
     ])
-    expect(sent.find((f) => f.state === 'delivered')?.card).toEqual(card)
     expect(sent.filter((f) => f.type === 'event').map((f) => [f.projectId, f.kind, f.text])).toEqual([
       ['assistant', 'owner', 'alphaでログイン直して'],
-      ['assistant', 'assistant', 'alphaにカード積んだよ。'],
+      ['assistant', 'assistant', 'alphaにカード案を出したよ。'],
     ])
     expect(st.says.size).toBe(0) // the push hold is released once the answer is out
     // The phone matches the echo to its say by id, not by the words.
     expect(sent.find((f) => f.type === 'event' && f.kind === 'owner')?.id).toBe('a1')
   })
 
+  it('the phone sees its own proposals and presses them through the same one door: a say never carries one out', async () => {
+    __resetProposals()
+    relayed.length = 0
+    const ctx = (via: 'phone' | 'screen') => ({ lang: 'en' as const, now: Date.now(), via, projects: async () => [{ id: 'p1', name: 'alpha', path: PROJECT }] })
+    const mine = await proposeMessage('p1', 'tests first', ctx('phone'))
+    await proposeMessage('p1', 'from the Mac', ctx('screen'))
+    if (typeof mine === 'string') throw new Error(mine)
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG2, sock)
+    // Its frames come with the first page of the records — the phone's only.
+    await handlePhoneFrame(st, { type: 'assistant-history', id: 'h1' })
+    const page = sent.find((f) => f.type === 'assistant-history') as { proposals?: { id: string }[] } | undefined
+    expect(page?.proposals?.map((x) => x.id)).toEqual([mine.id])
+    // A yes said on the phone is only a line to the assistant.
+    await handlePhoneFrame(st, { type: 'say', id: 's1', text: 'うん、送って', projectId: 'assistant' }, { assistant: async () => ({ reply: '画面のボタンで決めてね' }) })
+    expect(relayed).toEqual([])
+    // A button press with a check of another text, or from an old pairing: nothing.
+    sent.length = 0
+    await handlePhoneFrame(st, { type: 'assistant-proposal', id: 'b1', proposalId: mine.id, action: 'approve', hash: proposalHash({ ...mine, body: mine.body + '!' }) })
+    expect(sent.find((f) => f.id === 'b1')).toMatchObject({ type: 'ack', state: 'rejected', reason: 'mismatch' })
+    await handlePhoneFrame(__testLinkState(CFG, fakeSocket().sock), { type: 'assistant-proposal', id: 'b2', proposalId: mine.id, action: 'approve', hash: proposalHash(mine) })
+    expect(relayed).toEqual([])
+    // The press with the shown text's check: the line the frame showed is sent, and the phone hears the app's line.
+    await handlePhoneFrame(st, { type: 'assistant-proposal', id: 'b3', proposalId: mine.id, action: 'approve', hash: proposalHash(mine) })
+    expect(relayed).toEqual([mine.body])
+    expect(sent.find((f) => f.id === 'b3')).toMatchObject({ type: 'ack', state: 'delivered' })
+    expect(sent.find((f) => f.kind === 'assistant')).toMatchObject({ text: "Passed to alpha's commander.", speak: "Passed to alpha's commander." })
+    // Pressed twice (the Mac's window first, say): once only.
+    await handlePhoneFrame(st, { type: 'assistant-proposal', id: 'b4', proposalId: mine.id, action: 'approve', hash: proposalHash(mine) })
+    expect(sent.find((f) => f.id === 'b4')).toMatchObject({ state: 'rejected', reason: 'closed' })
+    expect(relayed).toHaveLength(1)
+    // 「やめる」 from the phone.
+    const other = openProposals()[0]
+    await handlePhoneFrame(st, { type: 'assistant-proposal', id: 'b5', proposalId: other.id, action: 'drop' })
+    expect(sent.find((f) => f.id === 'b5')).toMatchObject({ state: 'delivered' })
+    expect(openProposals()).toEqual([])
+  })
+
   it('an answer that finds the relay socket closed is sent once it is back, in order', async () => {
     const { sent, sock } = fakeSocket()
-    const st = __testLinkState(CFG, sock)
+    const st = __testLinkState(CFG2, sock)
     sock.readyState = 3 // closed while the assistant was thinking
     await handlePhoneFrame(st, { type: 'say', id: 'o1', text: '全体どう?', projectId: 'assistant' }, {
       assistant: async () => ({ reply: '全部順調' }),
@@ -277,7 +348,7 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
 
   it('kept answers go out before a newer line, so the phone never hears them out of order', async () => {
     const { sent, sock } = fakeSocket()
-    const st = __testLinkState(CFG, sock)
+    const st = __testLinkState(CFG2, sock)
     sock.readyState = 3
     await handlePhoneFrame(st, { type: 'say', id: 'old', text: '一つ目', projectId: 'assistant' }, { assistant: async () => ({ reply: '古い答え' }) })
     sock.readyState = 1 // back, before any tick
@@ -288,7 +359,7 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
 
   it('at most 20 kept frames: the oldest go first', async () => {
     const { sock } = fakeSocket()
-    const st = __testLinkState(CFG, sock)
+    const st = __testLinkState(CFG2, sock)
     sock.readyState = 3
     for (let i = 1; i <= 6; i++)
       await handlePhoneFrame(st, { type: 'say', id: `k${i}`, text: `${i}`, projectId: 'assistant' }, { assistant: async () => ({ reply: `r${i}` }) })
@@ -299,7 +370,7 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
   it('work mode drops what was kept: it is never sent, not even once switched off', async () => {
     const sent: Record<string, unknown>[] = []
     const sock = { readyState: 3, send: (s: string) => void sent.push(JSON.parse(s)), terminate: () => {} }
-    const st = __testLinkState(CFG, sock)
+    const st = __testLinkState(CFG2, sock)
     await handlePhoneFrame(st, { type: 'say', id: 'z1', text: '全体どう?', projectId: 'assistant' }, { assistant: async () => ({ reply: '秘密の答え' }) })
     sock.readyState = 1
     setLockdownCache(true)
@@ -312,7 +383,7 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
 
   it('work mode met on the reconnect drops what was kept: nothing is sent after it is switched off', async () => {
     const { sent, sock } = fakeSocket()
-    const st = __testLinkState(CFG, sock)
+    const st = __testLinkState(CFG2, sock)
     sock.readyState = 3 // socket down: frames are kept, tick does nothing
     await handlePhoneFrame(st, { type: 'say', id: 'c1', text: '全体どう?', projectId: 'assistant' }, { assistant: async () => ({ reply: '秘密の答え' }) })
     expect(st.assistantOutbox.length).toBeGreaterThan(0)
@@ -330,7 +401,7 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
 
   it("a failure is told in the Mac's language, and still told when the settings cannot be read", async () => {
     const { sent, sock } = fakeSocket()
-    const st = __testLinkState(CFG, sock)
+    const st = __testLinkState(CFG2, sock)
     const timedOut = async () => {
       throw new Error('canvas AI session timed out')
     }
@@ -350,19 +421,20 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
     void askAssistant('1', never).catch(() => {})
     void askAssistant('2', never).catch(() => {})
     const { sent, sock } = fakeSocket()
-    const st = __testLinkState(CFG, sock)
+    const st = __testLinkState(CFG2, sock)
     const asked: string[] = []
     await handlePhoneFrame(st, { type: 'say', id: 'f3', text: '3', projectId: 'assistant' }, {
       assistant: async (t) => (asked.push(t), { reply: 'x' }),
     })
     __resetAssistantMemory()
     expect(asked).toEqual([])
-    expect(sent).toEqual([{ type: 'ack', id: 'f3', state: 'rejected', reason: 'busy' }])
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ type: 'ack', id: 'f3', state: 'rejected', reason: 'busy' })
   })
 
   it('a busy assistant and an internal failure reach the phone as a reason and plain words only', async () => {
     const { sent, sock } = fakeSocket()
-    const st = __testLinkState(CFG, sock)
+    const st = __testLinkState(CFG2, sock)
     await handlePhoneFrame(st, { type: 'say', id: 'b1', text: 'まだ?', projectId: 'assistant' }, {
       assistant: async () => {
         throw new AssistantFailure('busy', 'still answering')
@@ -383,7 +455,7 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
 
   it('an assistant that cannot answer is reported, not left queued', async () => {
     const { sent, sock } = fakeSocket()
-    const st = __testLinkState(CFG, sock)
+    const st = __testLinkState(CFG2, sock)
     await handlePhoneFrame(st, { type: 'say', id: 'a2', text: '全体どう?', projectId: 'assistant' }, {
       assistant: async () => {
         throw new Error('claude not ready')
@@ -945,7 +1017,7 @@ describe('waking the phone with a Push to Talk push', () => {
   const pushing = (reply: { status: number; reason?: string } = { status: 200 }) => {
     const pushes: (typeof T1)[] = []
     const { sent, sock } = fakeSocket()
-    const st = __testLinkState({ ...CFG, push: T1 }, sock)
+    const st = __testLinkState({ ...CFG2, push: T1 }, sock)
     const deps = { pushKey: async () => KEY, sendPush: async (_k: PushKey, t: typeof T1) => (pushes.push(t), reply) }
     return { st, sent, pushes, deps }
   }

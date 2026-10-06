@@ -18,7 +18,8 @@
 // for roomIdleS is emptied but for its Mac key hash and newest event position
 // (the alarm); a room holds at most
 // phonesMax phone sockets and takes connectsPerMin / macFramesPerMin / phoneFramesPerMin.
-// The assistant's frames (`assistant`, `assistant-history` — sealed on v2 like
+// The assistant's frames (`assistant`, `assistant-history`, `assistant-proposals`
+// and the phone's `assistant-proposal` button press — sealed on v2 like
 // every content frame) are passed on and never kept: its records live on the
 // Mac, the phone fetches them there.
 import { DurableObject } from 'cloudflare:workers'
@@ -247,7 +248,7 @@ export class OgPhoneRelay extends DurableObject<Env> {
     if (role === 'phone') {
       if (
         !f ||
-        (f.type !== 'say' && f.type !== 'select' && f.type !== 'projects' && f.type !== 'push-token' && f.type !== 'assistant-history' && f.type !== 'call-note')
+        (f.type !== 'say' && f.type !== 'select' && f.type !== 'projects' && f.type !== 'push-token' && f.type !== 'assistant-history' && f.type !== 'call-note' && f.type !== 'assistant-proposal')
       ) {
         this.send(ws, { type: 'error', code: 'bad-frame' })
         return
@@ -293,7 +294,7 @@ export class OgPhoneRelay extends DurableObject<Env> {
     } else if (f.type === 'projects') {
       await this.ctx.storage.put('projects', f)
       this.toPhones(f)
-    } else if (f.type === 'ack' || f.type === 'assistant' || f.type === 'assistant-history') {
+    } else if (f.type === 'ack' || f.type === 'assistant' || f.type === 'assistant-history' || f.type === 'assistant-proposals') {
       this.toPhones(f)
     } else if (f.type === 'push-ready') {
       await this.ctx.storage.put('push', f.on === true)

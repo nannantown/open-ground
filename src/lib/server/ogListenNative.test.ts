@@ -107,4 +107,47 @@ describe('og-listen (native)', () => {
     if (refused || signal === 'SIGABRT') return ctx.skip() // speech recognition not allowed here
     expect(lines.find((l) => l.type === 'final')?.text ?? lines).toMatch(/天気/)
   }, 120_000)
+
+  // When the owner has finished (owner 2026-10-07: answer as soon as a person
+  // would): a finished sentence is answered after a short pause, a dangling
+  // particle waits longer — they may be mid-thought.
+  it.runIf(canBuild)('how long a pause ends the words depends on how they end', () => {
+    build()
+    const pause = (words: string) => Number(JSON.parse(execFileSync(bin, ['--pause', words], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).seconds)
+    for (const done of ['今日の予定を教えてください', '資料ってどこにある？', '元気です', 'それでいいよ', 'What is the plan?']) expect(pause(done), done).toBeLessThanOrEqual(0.5)
+    for (const more of ['明日の会議ですが', '資料を', 'それで、', '雨だけど', 'I think that and']) expect(pause(more), more).toBeGreaterThanOrEqual(1.4)
+    expect(pause('今日の予定を教えて')).toBeLessThan(1.2) // anything else: still sooner than the old fixed 1.2 s
+    for (const start of ['あのね', 'なにか', 'どこか']) expect(pause(start), start).toBeGreaterThan(0.5) // how a thought starts, not ends
+  }, 120_000)
+
+  // Measured 2026-10-07 on the owner's Mac (scripts/measure-voice-latency.mjs,
+  // trailing silence cut): 1.60–1.83 s before (a fixed 1.2 s pause, then up to
+  // 3 s waiting for the recognizer's own final), 0.84–0.94 s after. Here with
+  // say's own ~0.2 s of trailing silence left in: about 1.4 s before, 0.65 after.
+  it.runIf(canRun)('a finished sentence is handed on within about a second of the voice ending', async (ctx) => {
+    build()
+    const file = join(dir, 'done.wav')
+    execFileSync('say', ['-v', 'Kyoko', '-o', file, '--file-format=WAVE', '--data-format=LEI16@16000', '今日の予定を教えてください'])
+    const got = await new Promise<{ s?: number; text?: string; refused?: boolean }>((resolve) => {
+      const child = spawn(bin, ['ja-JP', '--feed', file], { stdio: ['pipe', 'pipe', 'ignore'] })
+      let fed = 0
+      let buf = ''
+      const done = (r: { s?: number; text?: string; refused?: boolean }) => (child.kill(), resolve(r))
+      child.stdout.setEncoding('utf8').on('data', (c: string) => {
+        buf += c
+        for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) {
+          const e = JSON.parse(buf.slice(0, i)) as { type: string; text?: string; reason?: string }
+          buf = buf.slice(i + 1)
+          if (e.type === 'fed') fed = performance.now()
+          if (e.type === 'final' && fed) done({ s: (performance.now() - fed) / 1000, text: e.text })
+          if (e.type === 'error') done({ refused: e.reason === 'denied' || e.reason === 'unavailable' })
+        }
+      })
+      child.on('close', (_c, signal) => signal === 'SIGABRT' && done({ refused: true }))
+      setTimeout(() => done({}), 20_000)
+    })
+    if (got.refused) return ctx.skip() // speech recognition not allowed here
+    expect(got.text).toMatch(/予定/)
+    expect(got.s).toBeLessThan(1.1)
+  }, 120_000)
 })

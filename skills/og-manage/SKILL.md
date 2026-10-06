@@ -310,6 +310,7 @@ Everything else. **Read-only** (never touch a worker's session or write code); g
 - **`blocked` = human-judgment lane**, never auto-moved out; revive only via user `blocked`→`todo` (resets counter). Exception: orphan card already on main → finalize `done` after merge-base check.
 - **Reconcile mismatches** each "状況": READY but still `doing` (most common) → `move review`; on main but still `review` → confirm merge-base, `move done`; worktree gone+unmerged → investigate, usually `move blocked` + question inbox. STALL/silence → nudge only, don't move columns.
 - Engine ON handles ①②③ itself — don't duplicate, just bridge anomalies.
+- **Called off (取りやめ / 見送り / replaced by new cards) → `setColumn` to `done` with `"abandoned":true`, never plain `done`.** Plain `done` reads as landed: the engine tells the owner 「本体に取り込まれました」 for work that never reached main.
 
 ## Guardrails
 

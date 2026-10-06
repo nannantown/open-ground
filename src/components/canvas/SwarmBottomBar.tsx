@@ -26,7 +26,12 @@ import type { ProjectMeta } from '@/lib/types'
 import { useGroundLook } from '@/lib/useGroundLook'
 import { SwarmModule } from '@/components/canvas/modules/SwarmModule'
 import { StreamOwnerContext } from '@/lib/streamBudget'
+import { ASSISTANT_RESERVE_VAR } from '@/components/assistant/assistantWindow'
+import { AssistantFloor } from '@/components/assistant/AssistantFloor'
 
+/** The folded bar is at least this tall: SwarmModule's line (min-h-[38px]) +
+ *  this bar's border-t. A line that wraps taller only leaves more floor. */
+export const SWARM_BAR_FOLDED_H = 39
 export const SWARM_BAR_DEFAULT_H = 360
 export const SWARM_BAR_MIN_H = 180
 /** Space always left for the tab above the open bar (px). */
@@ -205,6 +210,11 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
   }, [])
 
   return (
+    <>
+    {/* Folded, the bar is lower than the assistant's character: the rest of
+        its height stays free above the bar so the tab's bottom-right controls
+        (Board drawer's Run, Canvas undo/redo) never sit under it. */}
+    {!open && <AssistantFloor under={SWARM_BAR_FOLDED_H} />}
     <div
       ref={rootRef}
       data-testid="swarm-bottom-bar"
@@ -212,7 +222,11 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
         'relative flex min-w-0 shrink-0 flex-col border-t border-line bg-bg',
         open ? 'min-h-0' : '',
       ].join(' ')}
-      style={open ? { height: shownH } : undefined}
+      // The assistant's character sits at the window's bottom-right corner at
+      // the same height on every screen; the bar keeps its own controls, seats
+      // and seat rail clear of it (FloatingAssistant sets the variable while
+      // the character is at its default spot; unset ⇒ no padding).
+      style={{ paddingRight: `var(${ASSISTANT_RESERVE_VAR}, 0px)`, ...(open ? { height: shownH } : {}) }}
     >
       {/* Every stream opened inside the bar counts as the BAR's, so the page
           (the open tab) keeps priority — streamBudget.ts. */}
@@ -235,5 +249,6 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
       />
       </StreamOwnerContext.Provider>
     </div>
+    </>
   )
 }

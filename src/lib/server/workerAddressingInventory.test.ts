@@ -490,6 +490,10 @@ const SDK_API_SKIP = new Set([
   'isSdkDeskRole',
   '__resetSdkSessionsForTests',
   '__setQuotaPrefixesForTests',
+  // Pure module loader — hands back the SDK itself, never a session, a desk or
+  // a pool listing. The assistant's
+  // own session (assistantSession.ts) needs only this.
+  'importSdkModule',
 ])
 
 const sdkFnsAll = (): string[] => {

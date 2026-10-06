@@ -31,6 +31,7 @@ const RELAY_MODULE = '../../../worker/src/phoneRelay'
 type Room = { webSocketMessage(ws: unknown, msg: string): Promise<void> }
 import { __testConnect, outerFrame, handleRelayFrame, LEGACY_V1_UNTIL, pairingCode, pumpTranscript, readPhoneLinkConfig, SEALED_MAX_AGE_MS, startPhoneLink, stopPhoneLink, tick, __testLinkState, type PhoneLinkConfig } from './phoneLink'
 import { e2eKeyOf, open, seal } from './phoneLinkSeal'
+import { __resetProposals, listProposals, proposeMessage } from './assistantProposals'
 import { openGroundHome } from './paths'
 import { setLockdownCache } from './lockdown'
 import { flushSupplyNotices, resetSupplyNoticeState } from './supplyNotice'
@@ -510,12 +511,24 @@ describe('sealed link — the assistant and its records (v2)', () => {
     expect((await readPhoneLinkConfig())?.assistantDirect).toBe(true)
   })
 
+  it('a proposal button the phone sealed is opened and pressed (the one door); the answer goes back sealed', async () => {
+    __resetProposals()
+    const p = await proposeMessage('p1', 'テスト先に', { lang: 'ja', now: Date.now(), via: 'phone', projects: async () => [{ id: 'p1', name: 'alpha', path: '/repo/alpha' }] })
+    if (typeof p === 'string') throw new Error(p)
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    await handleRelayFrame(st, phoneSays({ type: 'assistant-proposal', id: 'b1', ts: Date.now(), proposalId: p.id, action: 'drop' }))
+    expect(listProposals().map((x) => x.state)).toEqual(['dropped'])
+    const ack = opened(wire).find((f) => f.type === 'ack')
+    expect(ack?.box).toBeTypeOf('string')
+    expect(ack?.inner).toMatchObject({ id: 'b1', state: 'delivered' })
+  })
+
   it('after that, a say to the assistant and its answer cross sealed and the relay keeps none of it', async () => {
     const { wire, sock } = macSocket()
     const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
-    const card = { projectId: 'p1', taskId: 't1', title: RECORD[5] }
     await handleRelayFrame(st, phoneSays({ type: 'say', id: 'a1', ts: Date.now(), text: RECORD[3], projectId: 'assistant' }), {
-      assistant: async () => ({ reply: RECORD[4], card }),
+      assistant: async () => ({ reply: RECORD[4] }),
     })
     const room = await relayRoom()
     for (const s of wire) await room.fromMac(s)
@@ -540,7 +553,6 @@ describe('sealed link — the assistant and its records (v2)', () => {
     const eids = got.filter((f) => f.type === 'assistant').map((f) => f.inner?.eid)
     expect(eids).toEqual([expect.any(String), expect.any(String)])
     expect(new Set(eids).size).toBe(2)
-    expect(got.find((f) => f.inner?.state === 'delivered')?.inner?.card).toEqual(card)
   })
 
   it('before the phone ever fetched, the assistant still talks in sealed events (no plain word on the relay)', async () => {

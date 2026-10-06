@@ -83,7 +83,7 @@ describe('a photo in the assistant input', () => {
     await waitFor(() => expect(preview()).not.toBeNull())
     fireEvent.click(send())
     expect(await screen.findByText('見たよ')).toBeTruthy()
-    expect(sent).toEqual([{ text: '', photo: Buffer.from(PNG).toString('base64') }])
+    expect(sent).toEqual([{ text: '', stream: true, photo: Buffer.from(PNG).toString('base64') }])
     expect(preview()).toBeNull()
     expect(screen.getByTestId('assistant-talk').querySelector('img')).not.toBeNull()
     // The kept log shows it from the server once the talk is unfolded.
@@ -114,6 +114,6 @@ describe('a photo in the assistant input', () => {
     fireEvent.change(text, { target: { value: 'やあ' } })
     fireEvent.click(send())
     expect(await screen.findByText('見たよ')).toBeTruthy()
-    expect(sent).toEqual([{ text: 'やあ' }])
+    expect(sent).toEqual([{ text: 'やあ', stream: true }])
   })
 })

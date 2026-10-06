@@ -16,6 +16,10 @@ let log: Line[]
 let cfg: { name: string; look: string }
 let status: number
 let answer: { resolve: () => void } | null
+/** Extra fields of the next answers. */
+let sayExtra: Record<string, unknown> = {}
+/** The proposals the server lists with the log (the frames). */
+let proposals: Record<string, unknown>[] = []
 
 const json = (body: unknown, s = 200) => ({ ok: s < 400, status: s, json: async () => body }) as Response
 
@@ -27,19 +31,25 @@ beforeEach(() => {
   cfg = { name: 'ノノ', look: 'moss' }
   status = 200
   answer = null
+  sayExtra = {}
+  proposals = []
   localStorage.clear()
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (status !== 200) return json({ error: 'owner only' }, status)
-    if (url.endsWith('/log')) return json({ entries: log, ...cfg, logDays: 30, memoryChars: 4000 })
+    if (url.endsWith('/log')) return json({ entries: log, ...cfg, logDays: 30, memoryChars: 4000, proposals })
     if (url.endsWith('/config')) {
       Object.assign(cfg, JSON.parse(String(init?.body)))
       return json(cfg)
+    }
+    if (/\/proposals\/[^/]+\/(approve|drop)$/.test(url)) {
+      proposals = proposals.map((p) => ({ ...p, state: url.endsWith('/drop') ? 'dropped' : 'done' }))
+      return json({ ok: true, proposals })
     }
     if (url.endsWith('/say')) {
       const text = JSON.parse(String(init?.body)).text as string
       await new Promise<void>((resolve) => (answer = { resolve }))
       log = [...log, { id: `o${log.length}`, at: 2, who: 'owner', text }, { id: `r${log.length}`, at: 3, who: 'assistant', text: `答え:${text}` }]
-      return json({ reply: `答え:${text}` })
+      return json({ reply: `答え:${text}`, ...sayExtra })
     }
     return json({}, 404)
   }))
@@ -431,6 +441,138 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     expect(screen.queryByText('答え:やあ')).toBeNull()
   })
 
+  /** The layout jsdom does not do: the window has `room` px left for the frames'
+   *  box (less if the box is given a smaller max-height), which starts 500 px down
+   *  the screen; each frame is `frame` px tall, 10 px apart. */
+  const layout = (room: number, frame = 100) => {
+    const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 300, width: 300, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+    const real = Element.prototype.getBoundingClientRect
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get(this: HTMLElement) { return this.dataset.testid === 'assistant-proposals' ? Math.min(room, parseFloat(this.style.maxHeight) || Infinity) : 0 } })
+    Element.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      if (this.dataset?.testid === 'assistant-proposals') return rect(500, this.clientHeight)
+      if (this.dataset?.proposal) return rect(500 + Array.from(this.parentElement?.children ?? []).indexOf(this) * (frame + 10), frame)
+      return real.call(this)
+    }
+    return () => {
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientHeight
+      Element.prototype.getBoundingClientRect = real
+    }
+  }
+  const card = { id: 'prop-1', kind: 'card', projectId: 'p-beta', project: 'beta', title: 'ログインを直す', body: 'やること: 固まらない\n完了の条件:\n- テスト緑', at: 1, expiresAt: Date.now() + 600_000, state: 'open' }
+  const sha = async (parts: string[]) => (await import('crypto')).createHash('sha256').update(parts.join('\n')).digest('hex')
+  const presses = () => vi.mocked(fetch).mock.calls.filter(([u]) => /\/proposals\//.test(String(u)))
+
+  it('a proposal shows in its own frame above the input, outside the talk; 「出す」 sends the check of the text the frame shows — a typed yes sends nothing', async () => {
+    const undo = layout(300)
+    try {
+      proposals = [card]
+      await open()
+      fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.showTalk' }))
+      const frame = await screen.findByRole('region', { name: 'misc.assistant.proposalCard' })
+      expect(frame.textContent).toContain('ログインを直す')
+      expect(frame.textContent).toContain('- テスト緑')
+      expect(frame.closest('[data-testid="assistant-talk"]')).toBeNull()
+      // Right above the input row.
+      expect(screen.getByTestId('assistant-proposals').nextElementSibling?.contains(input())).toBe(true)
+      // A typed yes is only a line to the assistant.
+      fireEvent.change(input(), { target: { value: 'うん' } })
+      fireEvent.submit(input().closest('form')!)
+      await answerNow()
+      expect(Object.keys(JSON.parse(String(says()[0][1]?.body))).sort()).toEqual(['stream', 'text'])
+      expect(presses()).toEqual([])
+      fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.proposalAdd' }))
+      await waitFor(() => expect(presses()).toHaveLength(1))
+      expect(String(presses()[0][0])).toBe('/api/phone-link/assistant/proposals/prop-1/approve')
+      expect(JSON.parse(String(presses()[0][1]?.body))).toEqual({ hash: await sha(['card', 'p-beta', 'beta', 'ログインを直す', 'やること: 固まらない\n完了の条件:\n- テスト緑']) })
+      // Done: faded, no buttons.
+      // Done: one faded line, no frame, no buttons.
+      await waitFor(() => expect(document.querySelector('[data-proposal="prop-1"]')?.getAttribute('data-state')).toBe('closed'))
+      expect(screen.queryByRole('region', { name: 'misc.assistant.proposalCard' })).toBeNull()
+      expect(screen.queryByRole('button', { name: 'misc.assistant.proposalAdd' })).toBeNull()
+    } finally {
+      undo()
+    }
+  })
+
+  it('a frame not seen whole cannot be pressed (and says to ask the president); nor where the layout cannot be measured; an expired one has no buttons', async () => {
+    for (const room of [150, 0]) {
+      const undo = layout(room)
+      try {
+        proposals = [{ ...card, id: 'a' }, { ...card, id: 'b', title: '二つ目' }]
+        await open()
+        const adds = await screen.findAllByRole('button', { name: 'misc.assistant.proposalAdd' })
+        // 150 px: the first (0–100) fits, the second (110–210) is cut. 0: none can be measured.
+        expect([room, adds.map((b) => (b as HTMLButtonElement).disabled)]).toEqual([room, room ? [false, true] : [true, true]])
+        expect(screen.getByText('misc.assistant.proposalTooLong')).toBeTruthy()
+        // Still droppable.
+        expect(screen.getAllByRole('button', { name: 'misc.assistant.proposalDrop' }).every((b) => !(b as HTMLButtonElement).disabled)).toBe(true)
+      } finally {
+        undo()
+        cleanup()
+      }
+    }
+    // A line cut sideways (a long name running out of the frame): not pressable.
+    const undo = layout(300)
+    Object.defineProperty(HTMLElement.prototype, 'scrollWidth', { configurable: true, get(this: HTMLElement) { return this.dataset.part === 'project' ? 400 : 0 } })
+    try {
+      proposals = [card]
+      await open()
+      expect((await screen.findByRole('button', { name: 'misc.assistant.proposalAdd' }) as HTMLButtonElement).disabled).toBe(true)
+    } finally {
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollWidth
+      undo()
+      cleanup()
+    }
+    // No layout at all (nothing can be measured): not pressable.
+    proposals = [card]
+    await open()
+    expect((await screen.findByRole('button', { name: 'misc.assistant.proposalAdd' }) as HTMLButtonElement).disabled).toBe(true)
+    cleanup()
+    proposals = [{ ...card, expiresAt: Date.now() - 1 }]
+    await open()
+    await waitFor(() => expect(document.querySelector('[data-proposal]')?.getAttribute('data-state')).toBe('closed'))
+    expect(screen.queryByRole('button', { name: 'misc.assistant.proposalAdd' })).toBeNull()
+  })
+
+  it('the one faded line is the proposal that closed last (not the last made), and an added one carries the green check', async () => {
+    // A made, then B; B dropped first, then A added: the line is A, marked done.
+    proposals = [
+      { ...card, id: 'a', title: 'A を出した', state: 'done', closedAt: 200 },
+      { ...card, id: 'b', title: 'B をやめた', state: 'dropped', closedAt: 100 },
+    ]
+    await open()
+    await waitFor(() => expect(document.querySelector('[data-state="closed"]')?.getAttribute('data-proposal')).toBe('a'))
+    expect(screen.getByRole('img', { name: 'misc.assistant.proposalDone' })).toBeTruthy()
+    cleanup()
+    proposals = [{ ...card, id: 'b', state: 'dropped', closedAt: 100 }]
+    await open()
+    await waitFor(() => expect(document.querySelector('[data-state="closed"]')).toBeTruthy())
+    expect(screen.queryByRole('img', { name: 'misc.assistant.proposalDone' })).toBeNull()
+  })
+
+  it('「やめる」 drops it; in a call the frames show too — given the height the window really has left, so a 200 px card can be pressed — and what is said there is just a line', async () => {
+    // A two-condition card is ~200 px; the window has 260 px left for it during the call.
+    const undo = layout(260, 200)
+    try {
+      proposals = [card]
+      await open()
+      call()
+      ears()[0].emit({ type: 'ready' })
+      ears()[0].emit({ type: 'final', text: 'うん' })
+      await waitFor(() => expect(says()).toHaveLength(1))
+      expect(Object.keys(JSON.parse(String(says()[0][1]?.body))).sort()).toEqual(['stream', 'text'])
+      await answerNow()
+      expect(screen.getByTestId('assistant-call')).toBeTruthy()
+      await screen.findByRole('region', { name: 'misc.assistant.proposalCard' })
+      await waitFor(() => expect((screen.getByRole('button', { name: 'misc.assistant.proposalAdd' }) as HTMLButtonElement).disabled).toBe(false))
+      fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.proposalDrop' }))
+      await waitFor(() => expect(presses()).toHaveLength(1))
+      expect(String(presses()[0][0])).toBe('/api/phone-link/assistant/proposals/prop-1/drop')
+    } finally {
+      undo()
+    }
+  })
+
   it('no mic and no call where this Mac cannot listen', async () => {
     Object.assign(cfg, { voice: false })
     await open()
@@ -565,6 +707,35 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     expect(ears()).toHaveLength(0) // the mic would hear the reply
     act(() => (synth.speak.mock.calls[0][0] as FakeUtterance).onend!())
     expect(ears()).toHaveLength(1)
+  })
+
+  it('call: a "let me look" is read the moment it comes; the answer reads only its short spoken part', async () => {
+    let ctl: ReadableStreamDefaultController<Uint8Array> | undefined
+    const enc = new TextEncoder()
+    const line = (o: object) => enc.encode(JSON.stringify(o) + '\n')
+    const base = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation(async (url, init) =>
+      String(url).endsWith('/say') ? new Response(new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c) })) : base(url as never, init),
+    )
+    await open()
+    call()
+    ears()[0].emit({ type: 'ready' })
+    ears()[0].emit({ type: 'final', text: '記録どこ?' })
+    await waitFor(() => expect(ctl).toBeDefined())
+    act(() => ctl!.enqueue(line({ interim: 'ちょっと待ってね' })))
+    await waitFor(() => expect(spoken()).toEqual(['ちょっと待ってね']))
+    // The answer comes while that line is still being said: it waits its turn, nothing is cut.
+    act(() => {
+      ctl!.enqueue(line({ reply: 'assistant フォルダにあるよ。\n\nlog/ と memory.md', speak: 'assistant フォルダにあるよ。' }))
+      ctl!.close()
+    })
+    // The answer is in (no longer thinking) while the wait-line still plays.
+    await waitFor(() => expect(callState()).toBe('misc.assistant.callSpeaking'))
+    expect(spoken()).toEqual(['ちょっと待ってね'])
+    expect(synth.cancel).not.toHaveBeenCalled()
+    synth.speaking = false
+    act(() => (synth.speak.mock.calls[0][0] as FakeUtterance).onend!())
+    await waitFor(() => expect(spoken()).toEqual(['ちょっと待ってね', 'assistant フォルダにあるよ。']))
   })
 
   it('call: speaker off — the answer is not read aloud, and turning it off mid-reply stops the reading', async () => {
@@ -778,19 +949,190 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     synth.speaking = false // finished, but no onend came
     await waitFor(() => expect(ears()).toHaveLength(1), { timeout: 2500 })
   })
+
+  // Release 2 of the voice redesign (docs/research/voice-assistant-2026-10.md §1
+  // 「2 回目」, owner 2026-10-07): sentence by sentence as written, a stop key.
+  describe('call: read as it is written, and the stop key', () => {
+    let ctl: ReadableStreamDefaultController<Uint8Array> | undefined
+    const enc = new TextEncoder()
+    const put = (o: object) => act(() => ctl!.enqueue(enc.encode(JSON.stringify(o) + '\n')))
+    const finish = (o: object) =>
+      act(() => {
+        ctl!.enqueue(enc.encode(JSON.stringify(o) + '\n'))
+        ctl!.close()
+      })
+    const utter = (i: number) => synth.speak.mock.calls[i][0] as FakeUtterance
+    const hushes = () => vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/hush')).map(([, i]) => JSON.parse(String(i?.body)))
+    beforeEach(() => {
+      ctl = undefined
+      const base = vi.mocked(fetch).getMockImplementation()!
+      vi.mocked(fetch).mockImplementation(async (url, init) =>
+        String(url).endsWith('/say') ? new Response(new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c) })) : base(url as never, init),
+      )
+      synth.cancel.mockImplementation(() => void (synth.speaking = false))
+    })
+    const ask = async (text: string) => {
+      ctl = undefined
+      ears().at(-1)!.emit({ type: 'final', text })
+      await waitFor(() => expect(ctl).toBeDefined())
+    }
+
+    it('the first sentence is read the moment it comes, the next after it; the answer is not read again', async () => {
+      await open()
+      call()
+      ears()[0].emit({ type: 'ready' })
+      await ask('やあ')
+      put({ say: 'やあ、元気だよ。' })
+      await waitFor(() => expect(spoken()).toEqual(['やあ、元気だよ。']))
+      expect(callState()).toBe('misc.assistant.callSpeaking') // speaking while the answer is still written
+      put({ say: '今日は晴れ。' })
+      expect(spoken()).toEqual(['やあ、元気だよ。']) // its turn comes after, nothing is cut
+      finish({ reply: 'やあ、元気だよ。今日は晴れ。', speak: 'やあ、元気だよ。今日は晴れ。', said: true })
+      synth.speaking = false
+      act(() => utter(0).onend!())
+      await waitFor(() => expect(spoken()).toEqual(['やあ、元気だよ。', '今日は晴れ。']))
+      synth.speaking = false
+      act(() => utter(1).onend!())
+      await waitFor(() => expect(ears()).toHaveLength(1))
+      expect(spoken()).toHaveLength(2) // `said`: the pieces were the reading
+      expect(synth.cancel).not.toHaveBeenCalled()
+    })
+
+    it('a look-up starting after a piece went out hushes it; the finished answer is read instead', async () => {
+      await open()
+      call()
+      await ask('記録どこ?')
+      put({ say: '見てみるね。' })
+      await waitFor(() => expect(spoken()).toEqual(['見てみるね。']))
+      put({ hush: true })
+      await waitFor(() => expect(synth.cancel).toHaveBeenCalledTimes(1))
+      put({ interim: 'ちょっと待ってね。' })
+      await waitFor(() => expect(spoken()).toEqual(['見てみるね。', 'ちょっと待ってね。']))
+      finish({ reply: 'assistant フォルダにあるよ。', speak: 'assistant フォルダにあるよ。' })
+      synth.speaking = false
+      act(() => utter(1).onend!())
+      await waitFor(() => expect(spoken()).toEqual(['見てみるね。', 'ちょっと待ってね。', 'assistant フォルダにあるよ。']))
+      // Stopped now: what was heard is the answer's reading only, not the hushed piece.
+      fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.callStop' }))
+      await waitFor(() => expect(hushes()).toEqual([{ heard: 'assistant フォルダにあるよ。' }]))
+    })
+
+    it('pressing it while it speaks quiets it at once and listens — even before the answer is in; the server hears what was heard', async () => {
+      // The server's answer to the stop is held, to see that the held line waits for it.
+      let release: (() => void) | undefined
+      const before = vi.mocked(fetch).getMockImplementation()!
+      vi.mocked(fetch).mockImplementation(async (url, init) =>
+        String(url).endsWith('/hush') ? new Promise<Response>((r) => (release = () => r(new Response('{}')))) : before(url as never, init),
+      )
+      const dialog = await open()
+      call()
+      ears()[0].emit({ type: 'ready' })
+      await ask('長い話して')
+      put({ say: '昔々あるところに。' })
+      put({ say: 'おじいさんがいました。' })
+      await waitFor(() => expect(spoken()).toEqual(['昔々あるところに。']))
+      expect(ears()).toHaveLength(0)
+      const stopKey = screen.getByRole('button', { name: 'misc.assistant.callStop' })
+      stopKey.focus() // pressed by keyboard or click, the key had the focus
+      fireEvent.click(stopKey)
+      expect(synth.cancel).toHaveBeenCalledTimes(1)
+      expect(dialog.contains(document.activeElement)).toBe(true) // the key went; focus stays in the call
+      await waitFor(() => expect(ears()).toHaveLength(1)) // listening, though the answer is still being written
+      expect(screen.queryByRole('button', { name: 'misc.assistant.callStop' })).toBeNull()
+      ears()[0].emit({ type: 'ready' })
+      expect(callState()).toBe('misc.assistant.callHearing')
+      // Said meanwhile: it goes once the stopped line is answered.
+      ears()[0].emit({ type: 'final', text: 'やっぱり短く' })
+      expect(says()).toHaveLength(1)
+      const first = ctl!
+      ctl = undefined
+      act(() => {
+        first.enqueue(enc.encode(JSON.stringify({ reply: '昔々あるところに。おじいさんがいました。', speak: '昔々あるところに。おじいさんがいました。', said: true }) + '\n'))
+        first.close()
+      })
+      await waitFor(() => expect(hushes()).toEqual([{ heard: '昔々あるところに。' }]))
+      // The server hears of the stop before the held line goes: its note rides on that line.
+      await act(async () => {})
+      expect(says()).toHaveLength(1)
+      await act(async () => release!())
+      await waitFor(() => expect(says()).toHaveLength(2))
+      expect(JSON.parse(String(says()[1][1]?.body)).text).toBe('やっぱり短く')
+      expect(spoken()).toEqual(['昔々あるところに。']) // the piece after the stop was never read
+    })
+
+    it('a stop on a line that then gets no answer tells the server nothing (the note would land on an older answer)', async () => {
+      await open()
+      call()
+      await ask('記録どこ?')
+      put({ interim: 'ちょっと待ってね。' })
+      await waitFor(() => expect(spoken()).toEqual(['ちょっと待ってね。']))
+      fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.callStop' }))
+      finish({ error: 'assistant-failed', detail: 'だめでした' })
+      await waitFor(() => expect(callState()).not.toBe('misc.assistant.callThinking'))
+      await act(async () => {})
+      expect(hushes()).toEqual([])
+    })
+
+    it('Space quiets it too; a stop after the answer is in tells the server at once', async () => {
+      const dialog = await open()
+      call()
+      await ask('やあ')
+      finish({ reply: 'やあ。元気。', speak: 'やあ。元気。' })
+      await waitFor(() => expect(spoken()).toEqual(['やあ。元気。']))
+      fireEvent.keyDown(dialog, { key: ' ' })
+      expect(synth.cancel).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(hushes()).toEqual([{ heard: 'やあ。元気。' }]))
+      await waitFor(() => expect(ears()).toHaveLength(1))
+    })
+  })
 })
 
 describe('default position', () => {
-  it('sits lower on Ground (level with the pen) than in a project', async () => {
-    const { defaultPos, GROUND_POS } = await import('./FloatingAssistant')
-    expect(defaultPos(true)).toEqual(GROUND_POS)
-    expect(defaultPos(true).bottom).toBeLessThan(defaultPos(false).bottom)
+  // Owner 2026-10-06: the character must not jump when a project opens. It has
+  // ONE default spot (level with Ground's pen) and the agent-team bar makes room.
+  const reserve = () => document.documentElement.style.getPropertyValue('--og-assistant-reserve')
+  const reserveY = () => document.documentElement.style.getPropertyValue('--og-assistant-reserve-y')
+  it('renders level with the pen until dragged and asks the bar for room while there', async () => {
+    localStorage.removeItem('og.assistant.pos')
+    const { FloatingAssistant: FA, ASSISTANT_RESERVE_PX, ASSISTANT_RESERVE_Y_PX } = await import('./FloatingAssistant')
+    const { container, unmount } = render(<FA disabled={false} />)
+    await act(async () => {})
+    const b = container.querySelector('button') as HTMLElement
+    expect(b.style.bottom).toBe('18px')
+    expect(b.style.right).toBe('20px')
+    // the reserve covers the character's width plus its gap to the edge
+    expect(reserve()).toBe(`${ASSISTANT_RESERVE_PX}px`)
+    expect(ASSISTANT_RESERVE_PX).toBeGreaterThan(20 + 50)
+    // ...and the floor a project keeps free: its top (18 + 50) plus a gap
+    expect(reserveY()).toBe(`${ASSISTANT_RESERVE_Y_PX}px`)
+    expect(ASSISTANT_RESERVE_Y_PX).toBeGreaterThan(18 + 50)
+    unmount()
+    expect(reserve()).toBe('')
+    expect(reserveY()).toBe('')
   })
-  it('renders at the Ground spot until dragged', async () => {
+  it('the room stays while the character is dragged and goes once it is dropped elsewhere', async () => {
     localStorage.removeItem('og.assistant.pos')
     const { FloatingAssistant: FA } = await import('./FloatingAssistant')
-    const { container } = render(<FA disabled={false} onGround />)
+    const { container } = render(<FA disabled={false} />)
     await act(async () => {})
-    expect((container.querySelector('button') as HTMLElement).style.bottom).toBe('18px')
+    const b = container.querySelector('button') as HTMLElement
+    fireEvent.pointerDown(b, { clientX: 500, clientY: 500, pointerId: 1 })
+    fireEvent.pointerMove(b, { clientX: 400, clientY: 400, pointerId: 1 })
+    expect(b.style.bottom).not.toBe('18px') // it moves...
+    expect(reserveY()).not.toBe('') // ...the screen does not reflow under the drag
+    fireEvent.pointerUp(b, { pointerId: 1 })
+    await act(async () => {})
+    expect(reserve()).toBe('')
+    expect(reserveY()).toBe('')
+    localStorage.removeItem('og.assistant.pos')
+  })
+  it('a spot the owner dragged to is kept, and the bar takes its full width back', async () => {
+    localStorage.setItem('og.assistant.pos', JSON.stringify({ right: 300, bottom: 200 }))
+    const { FloatingAssistant: FA } = await import('./FloatingAssistant')
+    const { container } = render(<FA disabled={false} />)
+    await act(async () => {})
+    expect((container.querySelector('button') as HTMLElement).style.bottom).toBe('200px')
+    expect(reserve()).toBe('')
+    localStorage.removeItem('og.assistant.pos')
   })
 })

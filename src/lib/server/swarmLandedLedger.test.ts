@@ -389,6 +389,40 @@ describe('sweepLanded → the supply desk hears about it', () => {
     await sweepLanded(projDir, [{ id: 'c1', boardColumn: 'doing' }] as ProjectTask[])
     expect(peekSupplyNotices().size).toBe(0)
   })
+
+  // A card the owner CALLED OFF (取りやめ / 見送り / replaced by new cards) is
+  // closed as done + abandoned (og-manage "B"). Measured 2026-10-07: such a card
+  // drew 「本体に取り込まれました」 for work that never reached the trunk. It must
+  // not be stamped landed nor reported — while a real landing in the same pass
+  // still is.
+  // RED MEASURED 2026-10-07 (reverted after): dropping `&& t.abandoned !== true`
+  // from isLandedCard in swarmLandedLedger.ts → this test fails (2 件, 「取りやめ」 named).
+  it('a done card the owner called off (abandoned) is NOT reported as landed; a real landing still is', async () => {
+    await recordPromoted(projDir, { taskId: 'gone', title: '取りやめ', branch: 'swarm/x' })
+    await recordPromoted(projDir, { taskId: 'real', title: '本物', branch: 'swarm/y' })
+    expect(
+      await sweepLanded(projDir, [
+        { id: 'gone', boardColumn: 'done', done: true, abandoned: true },
+        { id: 'real', boardColumn: 'done', done: true },
+      ] as ProjectTask[]),
+    ).toBe(1)
+
+    const line = peekSupplyNotices().get(projDir) ?? ''
+    expect(line).toContain('1 件、本体に取り込まれました')
+    expect(line).toContain('「本物」')
+    expect(line).not.toContain('取りやめ')
+    const entries = await readLandedLedger(projDir)
+    expect(entries.find((e) => e.taskId === 'gone')?.landedAt).toBeUndefined()
+    expect(entries.find((e) => e.taskId === 'real')?.landedAt).toBeTruthy()
+  })
+
+  it('stays silent when the only done card was called off', async () => {
+    await recordPromoted(projDir, { taskId: 'gone', title: '取りやめ', branch: 'swarm/x' })
+    expect(
+      await sweepLanded(projDir, [{ id: 'gone', boardColumn: 'done', done: true, abandoned: true }] as ProjectTask[]),
+    ).toBe(0)
+    expect(peekSupplyNotices().size).toBe(0)
+  })
 })
 
 // The land is reported only once the record PERSISTED. A fail-open write that

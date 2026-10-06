@@ -25,11 +25,32 @@ import {
   saveAssistantConfig,
   writeAssistantMemory,
 } from './assistantMemory'
-import { __resetAssistantMemory, askAssistant, foldIdleAssistantTalk, saveAssistantStyle, type AssistantDeps } from './phoneAssistant'
+import { __resetAssistantMemory, askAssistant, assistantFoldsSettled, foldIdleAssistantTalk, saveAssistantStyle, type AssistantDeps } from './phoneAssistant'
+import type { AssistantAsk, AssistantModel } from './assistantSession'
 
 const DAY = 86_400_000
 const noProjects: AssistantDeps['digest'] = async () => ({ text: '(none)', projects: [] })
-/** A model stand-in: records each prompt, answers with the next canned JSON. */
+type Script = (o: AssistantAsk) => Promise<string> | string
+/** The conversation's stand-in: records the system prompt each line would
+ *  start a session with (`systems`), then plays the next script (default "ok"). */
+const talker = (...scripts: Script[]) => {
+  const systems: string[] = []
+  const model: AssistantModel = {
+    warm: async () => {},
+    ask: async (o) => {
+      systems.push(await o.system())
+      return (scripts.shift() ?? (() => 'ok'))(o)
+    },
+  }
+  return { systems, model }
+}
+/** A line, then the background fold it may have started. */
+const say = async (text: string, deps: AssistantDeps) => {
+  const a = await askAssistant(text, { digest: noProjects, ...deps })
+  await assistantFoldsSettled()
+  return a
+}
+/** A FOLD-run stand-in: records each prompt, answers with the next canned JSON. */
 const model = (...answers: unknown[]) => {
   const prompts: string[] = []
   const run: AssistantDeps['run'] = async (prompt) => {
@@ -62,10 +83,10 @@ describe('talk older than the kept days is deleted', () => {
     expect(files).toHaveLength(2)
     expect(files).not.toContain(new Date(now - 31 * DAY).toISOString().slice(0, 10) + '.jsonl')
     // ...and the model never sees it either.
-    const m = model({ reply: 'うん' })
-    await askAssistant('前の話覚えてる?', { run: m.run, digest: noProjects })
-    expect(m.prompts[0]).toContain('二十九日前の話')
-    expect(m.prompts[0]).not.toContain('三十一日前の話')
+    const t = talker()
+    await say('前の話覚えてる?', { model: t.model })
+    expect(t.systems[0]).toContain('二十九日前の話')
+    expect(t.systems[0]).not.toContain('三十一日前の話')
   })
 
   it('a shorter setting deletes the older days at once', async () => {
@@ -102,10 +123,10 @@ describe('the name and look the owner gives the assistant', () => {
   })
 
   it('a quote in the name stays inside the quoted name in the prompt', async () => {
-    const m = model({ reply: 'はい' })
+    const t = talker()
     await saveAssistantConfig({ name: 'No"no' })
-    await askAssistant('やあ', { run: m.run, digest: noProjects })
-    expect(m.prompts[0]).toContain('The owner named you "No\\"no". That is your name.')
+    await say('やあ', { model: t.model })
+    expect(t.systems[0]).toContain('The owner named you "No\\"no". That is your name.')
   })
 
   it('refuses a too-long name or an unknown look and keeps the old one', async () => {
@@ -117,12 +138,12 @@ describe('the name and look the owner gives the assistant', () => {
   })
 
   it('the assistant is told its name, and not told one before it has a name', async () => {
-    const m = model({ reply: 'はい' }, { reply: 'はい' })
-    await askAssistant('やあ', { run: m.run, digest: noProjects })
+    const t = talker()
+    await say('やあ', { model: t.model })
     await saveAssistantConfig({ name: 'ノノ' })
-    await askAssistant('やあ', { run: m.run, digest: noProjects })
-    expect(m.prompts[0]).not.toContain('named you')
-    expect(m.prompts[1]).toContain('The owner named you "ノノ"')
+    await say('やあ', { model: t.model })
+    expect(t.systems[0]).not.toContain('named you')
+    expect(t.systems[1]).toContain('The owner named you "ノノ"')
   })
 })
 
@@ -134,18 +155,20 @@ describe('the memo never goes over its size', () => {
     const before = 'き'.repeat(3998)
     await writeAssistantMemory(before, 4000)
     await appendAssistantEntries([{ at: Date.now() - 2 * DAY, who: 'owner', text: 'うちの猫はミケ', via: 'phone' }])
-    const m = model({ reply: 'ok', memory: before + '\n猫はミケ' }, { reply: 'ok' })
-    await askAssistant('やあ', { run: m.run, digest: noProjects })
-    expect(m.prompts[0]).toMatch(/Older talk leaving your view[\s\S]*うちの猫はミケ/)
+    const m = model({ reply: '-', memory: before + '\n猫はミケ' }, { reply: '-' })
+    await say('やあ', { model: talker().model, run: m.run })
+    expect(m.prompts[0]).toMatch(/older lines leaving the view[\s\S]*うちの猫はミケ/)
     expect(await readAssistantMemory()).toBe(before)
-    await askAssistant('それで', { run: m.run, digest: noProjects })
-    expect(m.prompts[1]).toMatch(/Older talk leaving your view[\s\S]*うちの猫はミケ/)
+    // The next try (half a day on — a fold that did not save waits that long).
+    expect(await foldIdleAssistantTalk({ run: m.run, now: () => new Date(Date.now() + 13 * 3_600_000) })).toBe(false)
+    expect(m.prompts[1]).toMatch(/older lines leaving the view[\s\S]*うちの猫はミケ/)
     expect(m.prompts[1]).toContain('REQUIRED')
   })
 
   it('the model is asked for a memo a tenth under the limit, so a slight overshoot still fits', async () => {
-    const m = model({ reply: 'ok' })
-    await askAssistant('やあ', { run: m.run, digest: noProjects })
+    await appendAssistantEntries([{ at: Date.now() - 2 * DAY, who: 'owner', text: '古い', via: 'phone' }])
+    const m = model({ reply: '-' })
+    await foldIdleAssistantTalk({ run: m.run })
     expect(m.prompts[0]).toContain('at most 4000 characters (aim for 3600')
   })
 
@@ -167,50 +190,35 @@ describe('the memo never goes over its size', () => {
   it('a memo over its size (edited by hand) is asked back rewritten, and what comes back is cut to the size', async () => {
     await saveAssistantConfig({ memoryChars: 1000 })
     await writeFile(join(openGroundHome(), 'assistant', 'memory.md'), 'い'.repeat(3000))
-    const m = model({ reply: 'ok', memory: 'う'.repeat(900) }, { reply: 'ok' })
-    await askAssistant('やあ', { run: m.run, digest: noProjects })
+    const m = model({ reply: '-', memory: 'う'.repeat(900) }, { reply: '-' })
+    await say('やあ', { model: talker().model, run: m.run })
     expect(m.prompts[0]).toContain('REQUIRED')
     expect(m.prompts[0]).toContain('at most 1000 characters')
     expect(await readAssistantMemory()).toBe('う'.repeat(900))
-    await askAssistant('また', { run: m.run, digest: noProjects })
-    expect(m.prompts[1]).not.toContain('REQUIRED')
+    // Back within its size, with nothing to fold: no further run.
+    await say('また', { model: talker().model, run: m.run })
+    expect(m.prompts).toHaveLength(1)
   })
 
-  it('a size lowered while a line is being answered still holds: that line\'s longer memo is not written', async () => {
-    let release!: () => void
-    const run: AssistantDeps['run'] = () => new Promise((r) => (release = () => r(JSON.stringify({ reply: 'ok', memory: 'え'.repeat(4000) }))))
-    const p = askAssistant('覚えて', { run, digest: noProjects })
-    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
-    await saveAssistantConfig({ memoryChars: 500 })
-    release()
-    await p
-    expect(await readAssistantMemory()).toBe('')
-  })
-
-  it('a malformed memo in the answer costs nothing else: the reply still comes and is logged', async () => {
-    const m = model({ reply: '了解', memory: ['not', 'text'] })
-    expect(await askAssistant('やあ', { run: m.run, digest: noProjects })).toEqual({ reply: '了解' })
-    expect(await readAssistantMemory()).toBe('')
-    expect((await readAssistantLog()).map((e) => e.text)).toEqual(['やあ', '了解'])
-  })
 })
 
 describe('the memory goes on after a restart, days later', () => {
   it('what was said and the memo are read by a freshly loaded assistant three days on', async () => {
-    const first = model({ reply: '覚えたよ', memory: 'オーナーの猫の名前はミケ' })
-    await askAssistant('うちの猫はミケって覚えておいて', { run: first.run, digest: noProjects })
-    expect(first.prompts[0]).toContain('remember or forget')
+    const first = talker(() => '覚えたよ')
+    await say('うちの猫はミケって覚えておいて', { model: first.model })
+    // The memo, as a fold run writes it from the owner's line.
+    await writeAssistantMemory('オーナーの猫の名前はミケ', 4000)
 
     // A restart: nothing in memory survives — a fresh copy of the code.
     __resetAssistantMemory()
     vi.resetModules()
     const fresh = await import('./phoneAssistant')
-    const later = model({ reply: 'ミケだよ' })
+    const later = talker(() => 'ミケだよ')
     const threeDays = new Date(Date.now() + 3 * DAY)
-    expect(await fresh.askAssistant('猫の名前なんだっけ', { run: later.run, digest: noProjects, now: () => threeDays })).toEqual({ reply: 'ミケだよ' })
-    expect(later.prompts[0]).toContain('オーナーの猫の名前はミケ') // the memo
-    expect(later.prompts[0]).toContain('うちの猫はミケって覚えておいて') // the recent talk
-    expect(later.prompts[0]).toContain('覚えたよ')
+    expect(await fresh.askAssistant('猫の名前なんだっけ', { model: later.model, digest: noProjects, now: () => threeDays })).toMatchObject({ reply: 'ミケだよ' })
+    expect(later.systems[0]).toContain('オーナーの猫の名前はミケ') // the memo
+    expect(later.systems[0]).toContain('うちの猫はミケって覚えておいて') // the talk not yet folded
+    expect(later.systems[0]).toContain('覚えたよ')
   })
 })
 
@@ -222,52 +230,61 @@ describe('old talk is folded into the one memo (compaction)', () => {
     )
   }
 
-  it('a short talk is read whole and the memo is not asked for', async () => {
+  it('a short talk is read whole and nothing is folded', async () => {
     await seed(10)
-    const m = model({ reply: 'ok' })
-    await askAssistant('やあ', { run: m.run, digest: noProjects })
-    expect(m.prompts[0]).toContain('L00')
-    expect(m.prompts[0]).not.toContain('REQUIRED')
-    expect(m.prompts[0]).not.toContain('Older talk leaving your view')
+    const t = talker()
+    const m = model()
+    await say('やあ', { model: t.model, run: m.run })
+    expect(t.systems[0]).toContain('L00')
+    expect(t.systems[0]).toContain('L09')
+    expect(m.prompts).toHaveLength(0)
   })
 
   it('past 30 lines the older part must be folded; once folded it is read only through the memo', async () => {
     await seed(32)
-    const m = model({ reply: 'ok', memory: 'まとめ: L00〜L11 の話' }, { reply: 'ok2' })
-    await askAssistant('一つ目', { run: m.run, digest: noProjects })
+    const t = talker()
+    const m = model({ reply: '-', memory: 'まとめ: L00〜L13 の話' })
+    // The fold runs right after the line (which by then is in the log too).
+    await say('一つ目', { model: t.model, run: m.run })
     expect(m.prompts[0]).toContain('REQUIRED')
-    expect(m.prompts[0]).toMatch(/Older talk leaving your view[\s\S]*L00[\s\S]*L11[\s\S]*Conversation so far[\s\S]*L12/)
-    expect(await readAssistantMemory()).toBe('まとめ: L00〜L11 の話')
-    await askAssistant('二つ目', { run: m.run, digest: noProjects })
-    expect(m.prompts[1]).toContain('まとめ: L00〜L11 の話')
-    expect(m.prompts[1]).not.toMatch(/Owner: L00|You: L11/)
-    expect(m.prompts[1]).toContain('L12')
-    expect(m.prompts[1]).toContain('一つ目')
+    // The owner's lines only (even L numbers); the assistant's (odd) never reach the fold.
+    expect(m.prompts[0]).toMatch(/older lines leaving the view[\s\S]*L00[\s\S]*L12[\s\S]*owner's recent lines[\s\S]*L14/)
+    expect(m.prompts[0]).not.toMatch(/L13|L15/)
+    expect(await readAssistantMemory()).toBe('まとめ: L00〜L13 の話')
+    await say('二つ目', { model: t.model, run: m.run })
+    expect(t.systems[1]).toContain('まとめ: L00〜L13 の話')
+    expect(t.systems[1]).not.toMatch(/Owner: L00|You: L13/)
+    expect(t.systems[1]).toContain('L14')
+    expect(t.systems[1]).toContain('一つ目')
     // The log itself still holds every line (deleted by days, not by folding).
     expect(await readAssistantLog()).toHaveLength(36)
   })
 
   it('talk waiting more than a day is folded at the next line, few lines or not — it would expire unfolded otherwise', async () => {
     await seed(4, 2 * DAY)
-    const m = model({ reply: 'ok', memory: 'おととい: L00〜L03' }, { reply: 'ok' })
-    await askAssistant('ひさしぶり', { run: m.run, digest: noProjects })
+    const t = talker()
+    const m = model({ reply: '-', memory: 'おととい: L00〜L03' })
+    await say('ひさしぶり', { model: t.model, run: m.run })
+    // The line itself still saw them (not yet folded when it started).
+    expect(t.systems[0]).toMatch(/Owner: L00/)
     expect(m.prompts[0]).toContain('REQUIRED')
-    expect(m.prompts[0]).toMatch(/Older talk leaving your view[\s\S]*L00[\s\S]*L03/)
-    await askAssistant('それで', { run: m.run, digest: noProjects })
-    expect(m.prompts[1]).not.toMatch(/(Owner|You): L03/)
-    expect(m.prompts[1]).toContain('おととい: L00〜L03')
+    expect(m.prompts[0]).toMatch(/older lines leaving the view[\s\S]*L00[\s\S]*L02/)
+    expect(m.prompts[0]).not.toContain('L03')
+    await say('それで', { model: t.model, run: m.run })
+    expect(t.systems[1]).not.toMatch(/(Owner|You): L03/)
+    expect(t.systems[1]).toContain('おととい: L00〜L03')
   })
 
   it('a fold too long to show at once shows the OLDEST part and marks only that folded', async () => {
     const t0 = Date.now() - 2 * DAY
     await appendAssistantEntries(Array.from({ length: 12 }, (_, i) => ({ at: t0 + i, who: 'owner' as const, text: `F${String(i).padStart(2, '0')}` + 'お'.repeat(1990), via: 'phone' as const })))
-    const m = model({ reply: 'ok', memory: 'm1' }, { reply: 'ok', memory: 'm2' })
-    await askAssistant('一つ目', { run: m.run, digest: noProjects })
+    const m = model({ reply: '-', memory: 'm1' }, { reply: '-', memory: 'm2' })
+    await say('一つ目', { model: talker().model, run: m.run })
     expect(m.prompts[0]).toContain('F00')
     expect(m.prompts[0]).not.toContain('F11')
-    await askAssistant('二つ目', { run: m.run, digest: noProjects })
+    await say('二つ目', { model: talker().model, run: m.run })
     expect(m.prompts[1]).not.toContain('F00')
-    expect(m.prompts[1]).toMatch(/Older talk leaving your view[\s\S]*F11/)
+    expect(m.prompts[1]).toMatch(/older lines leaving the view[\s\S]*F11/)
   })
 
   it('while nobody talks, old talk is folded before it can expire — claude runs only when there is something to fold', async () => {
@@ -277,8 +294,9 @@ describe('old talk is folded into the one memo (compaction)', () => {
     await seed(4, 2 * DAY)
     const m = model({ reply: '-', memory: 'おととい: L00〜L03' }, { reply: 'ok' })
     expect(await foldIdleAssistantTalk({ run: m.run })).toBe(true)
-    expect(m.prompts[0]).toMatch(/Older talk leaving your view[\s\S]*L00[\s\S]*L03/)
-    expect(m.prompts[0]).toContain('Nobody is talking')
+    expect(m.prompts[0]).toMatch(/older lines leaving the view[\s\S]*L00[\s\S]*L02/)
+    expect(m.prompts[0]).not.toContain('L03')
+    expect(m.prompts[0]).toContain('You keep the long-term memory')
     expect(m.prompts[0]).not.toContain('The owner now says')
     expect(await readAssistantMemory()).toBe('おととい: L00〜L03')
     // Folded: nothing left to fold, and the next line does not see them verbatim.
@@ -338,80 +356,47 @@ describe('old talk is folded into the one memo (compaction)', () => {
   })
 
   it('a line that got no answer is still logged, so the next answer sees it', async () => {
-    const run: AssistantDeps['run'] = async () => 'not json'
-    await expect(askAssistant('聞こえる?', { run, digest: noProjects })).rejects.toBeTruthy()
+    const failing: AssistantModel = { warm: async () => {}, ask: async () => Promise.reject(new Error('claude: not signed in')) }
+    await expect(askAssistant('聞こえる?', { model: failing, digest: noProjects })).rejects.toBeTruthy()
     expect((await readAssistantLog()).map((e) => [e.who, e.text])).toEqual([['owner', '聞こえる?']])
-    const m = model({ reply: 'うん' })
-    await askAssistant('もう一回', { run: m.run, digest: noProjects })
-    expect(m.prompts[0]).toContain('聞こえる?')
+    const t = talker()
+    await say('もう一回', { model: t.model })
+    expect(t.systems[0]).toContain('聞こえる?')
   })
 
-  it('a fold the model skipped is asked for again on the next line', async () => {
+  it('a fold the model skipped is asked for again — after half a day, not on every line (each try is a claude run)', async () => {
     await seed(32)
-    const m = model({ reply: 'ok' }, { reply: 'ok' })
-    await askAssistant('一つ目', { run: m.run, digest: noProjects })
-    await askAssistant('二つ目', { run: m.run, digest: noProjects })
+    const m = model({ reply: '-' }, { reply: '-' })
+    await say('一つ目', { model: talker().model, run: m.run })
+    await say('二つ目', { model: talker().model, run: m.run })
+    expect(m.prompts).toHaveLength(1)
+    await say('三つ目', { model: talker().model, run: m.run, now: () => new Date(Date.now() + 13 * 3_600_000) })
     expect(m.prompts[1]).toContain('REQUIRED')
-    expect(m.prompts[1]).toMatch(/Older talk leaving your view[\s\S]*L00/)
+    expect(m.prompts[1]).toMatch(/older lines leaving the view[\s\S]*L00/)
   })
 })
 
-describe('"remember" / "forget", and deleting', () => {
-  it('an empty memo is not a memo: the long-term memory stays unless the owner asked to forget everything', async () => {
-    await writeAssistantMemory('大事な長期記憶', 4000)
-    const m = model({ reply: 'ok', memory: '' }, { reply: 'ok', memory: '   ' })
-    await askAssistant('やあ', { run: m.run, digest: noProjects })
-    await askAssistant('それで', { run: m.run, digest: noProjects })
-    expect(await readAssistantMemory()).toBe('大事な長期記憶')
-    expect(m.prompts[0]).toContain('"forgetAll": true')
-  })
-
-  it('a memo returned without a fold due is kept; "forget" of its only fact really empties it', async () => {
-    // A stand-in that does exactly what the prompt says: it adds forgetAll to
-    // an empty memory only if the prompt asks for that whenever the memory
-    // comes out empty — the reviewer's case was a one-fact memo, "forget that",
-    // under a prompt that asked for forgetAll only on "forget EVERYTHING".
-    const prompts: string[] = []
-    const run: AssistantDeps['run'] = async (prompt) => {
-      prompts.push(prompt)
-      if (prompts.length === 1) return JSON.stringify({ reply: '覚えた', memory: '朝はコーヒー' })
-      const flag = prompt.includes('asks you to forget something and the memory then comes out EMPTY, add "forgetAll": true')
-      return JSON.stringify({ reply: '忘れた', memory: '', ...(flag ? { forgetAll: true } : {}) })
-    }
-    await askAssistant('朝はコーヒー派って覚えて', { run, digest: noProjects })
-    expect(await readAssistantMemory()).toBe('朝はコーヒー')
-    await askAssistant('朝はコーヒーのこと忘れて', { run, digest: noProjects })
-    expect(prompts[1]).toContain('朝はコーヒー') // it saw the memo it was asked to change
-    expect(await readAssistantMemory()).toBe('')
-  })
-
-  it('the flag is offered only for the owner\'s own "forget": a fold-due "最近どう?" cannot empty the memory', async () => {
+describe('the memo and deleting', () => {
+  it('a fold run (nobody asked to forget) cannot empty the memory, flag or not', async () => {
     await writeAssistantMemory('大事な長期記憶', 4000)
     await appendAssistantEntries([{ at: Date.now() - 2 * DAY, who: 'owner', text: '古い雑談', via: 'phone' }])
-    // A stand-in that empties the memory and sets the flag whenever the prompt
-    // lets it do so for ANY empty memory (the old wording did).
-    const prompts: string[] = []
-    const run: AssistantDeps['run'] = async (prompt) => {
-      prompts.push(prompt)
-      const anyEmpty = prompt.includes('Whenever the "memory" you return is EMPTY')
-      return JSON.stringify({ reply: '順調だよ', memory: '', ...(anyEmpty ? { forgetAll: true } : {}) })
-    }
-    await askAssistant('最近どう?', { run, digest: noProjects })
-    expect(prompts[0]).toContain('REQUIRED')
-    expect(prompts[0]).toContain('in the line above, asks you to forget something')
+    const m = model({ reply: '-', memory: '', forgetAll: true })
+    await say('最近どう?', { model: talker().model, run: m.run })
+    expect(m.prompts[0]).toContain('REQUIRED')
     expect(await readAssistantMemory()).toBe('大事な長期記憶')
   })
 
-  it('a memo deleted while a line is being answered is not written back by that line', async () => {
+  it('a memo changed meanwhile (another fold, a delete-and-rewrite) is not overwritten by the fold', async () => {
+    await writeAssistantMemory('前のメモ', 4000)
+    await appendAssistantEntries([{ at: Date.now() - 2 * DAY, who: 'owner', text: '古い雑談', via: 'phone' }])
     let release!: () => void
-    const run: AssistantDeps['run'] = () => new Promise((r) => (release = () => r(JSON.stringify({ reply: 'ok', memory: '古いメモ' }))))
-    await writeAssistantMemory('古いメモ', 4000)
-    const p = askAssistant('やあ', { run, digest: noProjects })
+    const run: AssistantDeps['run'] = () => new Promise((r) => (release = () => r(JSON.stringify({ reply: '-', memory: '前のメモ\n古い雑談' }))))
+    const fold = foldIdleAssistantTalk({ run })
     await vi.waitFor(() => expect(release).toBeTypeOf('function'))
-    await clearAssistantMemory()
+    await writeAssistantMemory('前のメモ\n犬はポチ', 4000)
     release()
-    await p
-    expect(await readAssistantMemory()).toBe('')
+    expect(await fold).toBe(false)
+    expect(await readAssistantMemory()).toBe('前のメモ\n犬はポチ')
   })
 
   it('a delete asked while the line is still writing its log wins over the memo that line brings back', async () => {
@@ -446,21 +431,21 @@ describe('"remember" / "forget", and deleting', () => {
 
 describe('one log for the phone and the screen, owner-only files', () => {
   it('both ends land in the same log, marked where they came from', async () => {
-    const m = model({ reply: 'はい' }, { reply: 'うん' })
-    await askAssistant('画面から', { run: m.run, digest: noProjects, via: 'screen' })
-    await askAssistant('電話から', { run: m.run, digest: noProjects })
+    const t = talker(() => 'はい', () => 'うん')
+    await say('画面から', { model: t.model, via: 'screen' })
+    await say('電話から', { model: t.model })
     expect((await readAssistantLog()).map((e) => [e.who, e.via, e.text])).toEqual([
       ['owner', 'screen', '画面から'],
       ['assistant', 'screen', 'はい'],
       ['owner', 'phone', '電話から'],
       ['assistant', 'phone', 'うん'],
     ])
-    expect(m.prompts[1]).toContain('画面から')
+    expect(t.systems[1]).toContain('画面から')
   })
 
   it('the folder is 0700 and every file in it 0600', async () => {
-    const m = model({ reply: 'ok', memory: 'メモ' })
-    await askAssistant('やあ', { run: m.run, digest: noProjects })
+    await say('やあ', { model: talker().model })
+    await writeAssistantMemory('メモ', 4000)
     const base = join(openGroundHome(), 'assistant')
     const mode = async (p: string) => (await stat(p)).mode & 0o777
     expect(await mode(base)).toBe(0o700)
@@ -471,11 +456,9 @@ describe('one log for the phone and the screen, owner-only files', () => {
   })
 
   it('a line under work mode is neither answered nor written down', async () => {
-    // (Settings reads re-mirror the stored switch, so it is turned on mid-turn, as in phoneAssistant.test.ts.)
-    const digest: AssistantDeps['digest'] = async () => (setLockdownCache(true), { text: '', projects: [] })
-    const m = model({ reply: 'ok' })
-    await expect(askAssistant('やあ', { run: m.run, digest })).rejects.toThrow()
-    expect(m.prompts).toHaveLength(0)
+    // Turned on while it thinks (settings reads re-mirror the stored switch).
+    const t = talker(() => (setLockdownCache(true), 'ok'))
+    await expect(askAssistant('やあ', { model: t.model, digest: noProjects })).rejects.toThrow()
     setLockdownCache(false)
     expect(await readAssistantLog()).toEqual([])
   })
@@ -486,18 +469,18 @@ it('call metadata remains in the shared reader but never enters assistant prompt
   await appendAssistantCall('assistant-call', { at: Date.now(), who: 'owner', via: 'phone', text: 'Call 1:42 metadata-only', kind: 'call', seconds: 102, projectId: 'assistant' })
   await appendAssistantCall('president-call', { at: Date.now(), who: 'owner', via: 'phone', text: 'President call private metadata-only', kind: 'call', seconds: 44, projectId: 'p1' })
   expect(await readAssistantLog()).toHaveLength(2)
-  const m = model({ reply: 'ok' })
-  await askAssistant('hello', { run: m.run, digest: noProjects })
-  expect(m.prompts.join('')).not.toContain('metadata-only')
+  const t = talker()
+  await say('hello', { model: t.model })
+  expect(t.systems.join('')).not.toContain('metadata-only')
 })
 
 
 it('phone owner client ids survive authoritative history even for repeated identical text, never becoming model text', async () => {
-  const m = model({ reply: 'one' }, { reply: 'two' })
+  const t = talker(() => 'one', () => 'two')
   const now = Date.now()
-  await askAssistant('same words', { run: m.run, digest: noProjects, now: () => new Date(now - 1000), clientId: 'old-phone-id' })
-  await askAssistant('same words', { run: m.run, digest: noProjects, now: () => new Date(now), clientId: 'new-phone-id' })
+  await say('same words', { model: t.model, now: () => new Date(now - 1000), clientId: 'old-phone-id' })
+  await say('same words', { model: t.model, now: () => new Date(now), clientId: 'new-phone-id' })
   const owners = (await readAssistantLog()).filter((e) => e.who === 'owner')
   expect(owners.map((e) => [e.text, e.clientId])).toEqual([['same words', 'old-phone-id'], ['same words', 'new-phone-id']])
-  expect(m.prompts.join('')).not.toContain('phone-id')
+  expect(t.systems.join('')).not.toContain('phone-id')
 })

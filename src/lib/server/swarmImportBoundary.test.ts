@@ -17,7 +17,7 @@
 import { describe, it, expect } from 'vitest'
 import { existsSync } from 'fs'
 import { join } from 'path'
-import { SEAMS, PTY_BY_DESIGN, BOTH_POOLS_DEBT } from '../../../scripts/importBoundary.cjs'
+import { SEAMS, PTY_BY_DESIGN, SDK_BY_DESIGN, BOTH_POOLS_DEBT } from '../../../scripts/importBoundary.cjs'
 
 const repoRoot = join(__dirname, '..', '..', '..')
 
@@ -32,7 +32,7 @@ describe('the desk-pool import boundary', () => {
     // reviewed and allowed", so the next reader trusts a list that is partly
     // fiction. It also hides a rename, which is exactly when a file's reason for
     // being exempt is most likely to have stopped being true.
-    const missing = [...SEAMS, ...PTY_BY_DESIGN, ...BOTH_POOLS_DEBT].filter(
+    const missing = [...SEAMS, ...PTY_BY_DESIGN, ...SDK_BY_DESIGN, ...BOTH_POOLS_DEBT].filter(
       (rel: string) => !existsSync(join(repoRoot, rel)),
     )
     expect(
@@ -72,7 +72,7 @@ describe('the desk-pool import boundary', () => {
     // from the other. DEBT is off entirely. A path in two lists gets whichever
     // override ESLint applies last, so the reason written beside it may not be
     // the rule actually in force.
-    const all = [...SEAMS, ...PTY_BY_DESIGN, ...BOTH_POOLS_DEBT]
+    const all = [...SEAMS, ...PTY_BY_DESIGN, ...SDK_BY_DESIGN, ...BOTH_POOLS_DEBT]
     const dupes = all.filter((p: string, i: number) => all.indexOf(p) !== i)
     expect(dupes, `exempted in more than one list: ${dupes.join(', ')}`).toEqual([])
   })

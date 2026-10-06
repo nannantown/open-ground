@@ -77,19 +77,34 @@ export const useListen = (opts: {
  *  only empties the queue once OUR utterance is the one speaking.
  *  `watchOthers` polls for that other speech (the call keeps its mic shut
  *  while it plays — it would hear the narration and send it as the owner's words). */
+interface Queued {
+  text: string
+  dropped?: (text: string) => void
+  onStart?: () => void
+}
+
 export const useSpeech = (watchOthers = false) => {
   const [speaking, setSpeaking] = useState(false)
   const [others, setOthers] = useState(false)
   // Held so the engine cannot drop the utterance (and its onend) mid-sentence.
   const utterance = useRef<{ u: SpeechSynthesisUtterance; started: boolean; dropped: boolean } | null>(null)
   const watchdog = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+  /** What speakAfter left to say once our current reading ends (and who to tell
+   *  if it then cannot be). One is enough: the mic is shut while it speaks, so a
+   *  reading is at most a wait-line or a sentence, then the next. */
+  const next = useRef<Queued | null>(null)
+  const speakRef = useRef<(text: string, onStart?: () => void) => boolean>(() => false)
 
   const quiet = useCallback(() => {
     clearInterval(watchdog.current)
     utterance.current = null
     setSpeaking(false)
+    const t = next.current
+    next.current = null
+    if (t) queueMicrotask(() => void (speakRef.current(t.text, t.onStart) || t.dropped?.(t.text)))
   }, [])
   const cancel = useCallback(() => {
+    next.current = null
     const cur = utterance.current
     if (!cur) return
     if (cur.started) synth()?.cancel()
@@ -118,9 +133,10 @@ export const useSpeech = (watchOthers = false) => {
     return () => clearInterval(id)
   }, [watchOthers])
 
-  /** false = not read (nothing to read, no voice, or someone else is speaking). */
+  /** false = not read (nothing to read, no voice, or someone else is speaking).
+   *  onStart: the moment it is really heard (the engine started it). */
   const speak = useCallback(
-    (text: string): boolean => {
+    (text: string, onStart?: () => void): boolean => {
       const s = synth()
       if (!s || !text.trim()) return false
       if (utterance.current) cancel()
@@ -129,8 +145,9 @@ export const useSpeech = (watchOthers = false) => {
       const cur = { u, started: false, dropped: false }
       u.lang = speechLang(text)
       u.onstart = () => {
-        if (cur.dropped) s.cancel()
-        else cur.started = true
+        if (cur.dropped) return s.cancel()
+        cur.started = true
+        onStart?.()
       }
       u.onend = u.onerror = () => {
         if (utterance.current === cur) quiet()
@@ -149,5 +166,18 @@ export const useSpeech = (watchOthers = false) => {
     [cancel, quiet],
   )
 
-  return { speaking, others, speak, cancel }
+  speakRef.current = speak
+  /** Like speak, but after OUR reading in progress (the assistant's "ちょっと待ってね",
+   *  the sentences before it) instead of cutting it — cutting a reading that has
+   *  not started yet would flush whatever was queued after it. */
+  const speakAfter = useCallback(
+    (text: string, dropped?: (text: string) => void, onStart?: () => void): boolean => {
+      if (!utterance.current) return speak(text, onStart)
+      next.current = { text, dropped, onStart }
+      return true
+    },
+    [speak],
+  )
+
+  return { speaking, others, speak, speakAfter, cancel }
 }

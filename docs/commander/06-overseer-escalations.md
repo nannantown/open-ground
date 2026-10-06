@@ -1629,3 +1629,28 @@ nothing. Measured, not inferred:
   chooser test; rework 1's first version → the description-row and status-line tests in
   `claudeMenu.test.ts`; rework 1's final version (7969c34b) → the Submit-row test; the chooser-hint
   condition removed → the mid-repaint owner-turn test.
+
+## §1.14 — A called-off card was announced as 「本体に取り込まれました」 (2026-10-07)
+
+Owner report: the owner called off a held card (取りやめ, replaced by new cards); the commander
+closed it as `done` + `abandoned: true` (og-manage "B: 分けて頼み直す" shape). About 20 minutes
+later the president told the owner 「お願いされていた作業が 1 件、本体に取り込まれました: 「…」」 —
+for work that never reached the trunk. Cause, measured on the owner's data: `sweepLanded`
+(`swarmLandedLedger.ts`) stamped `landedAt` on every promoted entry whose card read `done`,
+ignoring `abandoned`; the stamp drives the landing notice, the `work-landed` bell/toast, the
+`GET /api/swarm/kpi/landed` weekly count and the Ground mark (`groundMarks.ts`) alike. The 20 minutes
+was `SUPPLY_LANDING_GRACE_MS` — no commander report covered the card, so the held line was told.
+
+Fix: "landed" = `done` **and not `abandoned`** (`isLandedCard` in `swarmLandedLedger.ts`, and the
+same rule in `swarmOrchestrator.ts`'s `isLandedCard` behind `countLandedFromBoard` / lead time).
+A called-off card's ledger entry stays unstamped, so every reader above stays silent. Nothing is
+said instead — the commander's own report already tells the owner about the call-off. A human
+move out of `done` clears `abandoned` (`server/routes/project.ts`), so a revived card can still
+land later. Commander's duty: close a called-off card with `abandoned: true`, never as plain
+`done` (og-manage "Board lifecycle"). Not changed: a `done` + abandoned card still satisfies a
+`dependsOn` pointing at it (`selectDispatch`); ledger entries already stamped before the fix stay.
+
+Guards: `swarmLandedLedger.test.ts` (「a done card the owner called off…」, 「stays silent when the
+only done card was called off」) + `swarmKpiLanded.test.ts` (「…closed as done + abandoned…」).
+Red measured 2026-10-07 by dropping `&& t.abandoned !== true` from both `isLandedCard`s → 3 red;
+restored → green.

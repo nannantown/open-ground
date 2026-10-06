@@ -76,7 +76,24 @@ pieces, and the same motions move those pieces (§4, §5).
     other app speech playing; 聞いています only once the mic says it is ready) — the call's time (m:ss), and
     three round keys with tooltips only: speaker (`Volume2`, lit = answers
     read aloud; off mid-answer stops the reading), end (`PhoneOff`, accent),
-    mute (`MicOff`, lit = the mic is shut). Each finished utterance is sent;
+    mute (`MicOff`, lit = the mic is shut). Each finished utterance is sent —
+    finished = a pause after the last new word whose length depends on how
+    the words end (2026-10-07, og-listen `pauseFor`: 0.5 s after a finished
+    sentence, 1.4 s after a dangling particle or conjunction, 0.8 s else; the
+    heard words go at once, no waiting on the recognizer's own final);
+    only the answer's short spoken part is read (its first paragraph, at most
+    two sentences — the details stay as text in the talk), and a 「ちょっと待ってね」
+    said before a look-up is read the moment it comes (2026-10-06; in the chat it
+    shows beside the thinking character). A line without look-ups is read a
+    sentence at a time as it is written (2026-10-07): a sentence goes out once
+    more words follow it, so words written right before a tool call are never
+    said; once a tool is called nothing more streams and the finished answer is
+    read as before. While it speaks, the identity (name, character, state line)
+    is the stop key (tooltip 止める / Stop; Space does the same): the reading
+    stops at once, the mic opens even if the answer is still being written
+    (what is said then goes once it is in), and the model is told what of the
+    answer was heard — the rest counts as not said. What it does in the
+    background is not stopped;
     while an answer is made or read the mic is shut (it would hear the
     reading). A refused mic shows why, with a retry key (`Phone`) in place
     of speaker/mute; it never redials by itself. End, Esc or closing the

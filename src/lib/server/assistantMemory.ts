@@ -40,7 +40,7 @@ export interface AssistantEntry extends Partial<PhoneCallRecord> {
   via: 'phone' | 'screen'
   /** Stable phone say id, for reconciling an optimistic owner line by identity. */
   clientId?: string
-  /** The card the assistant wrote in this answer. */
+  /** The card the owner's button put on a Board (the app's line about it). */
   card?: { projectId: string; taskId: string; title: string }
   /** A photo the owner sent with this line: its file name under photos/. */
   photo?: string
@@ -314,10 +314,14 @@ const putMemo = async (text: string, max: number): Promise<string> => {
  *  set NOW (a turn may have read an older, larger one minutes ago). A turn passes
  *  the epoch it started at: if the owner deleted anything since, nothing is
  *  written (null) — checked under the lock, so the delete wins whenever it came.
- *  `folded` = how far this memo took in the log, written in the same step. */
-export const writeAssistantMemory = (text: string, max = Infinity, turn?: { epoch: number; folded?: Folded }): Promise<string | null> =>
+ *  `folded` = how far this memo took in the log, written in the same step.
+ *  `expect` = only over this memo (see below). */
+export const writeAssistantMemory = (text: string, max = Infinity, turn?: { epoch: number; folded?: Folded; expect?: string }): Promise<string | null> =>
   locked(async () => {
     if (turn && turn.epoch !== assistantEpoch()) return null
+    // `expect`: written only over the memo the caller read (compare-and-set,
+    // under the lock — a fold must not overwrite a "remember" that landed meanwhile).
+    if (turn?.expect !== undefined && (await readAssistantMemory()) !== turn.expect) return null
     const limit = Math.min(max, (await readAssistantConfig()).memoryChars)
     // A turn's memo over the size set NOW is not cut (its end — the newest
     // folded lines — would go while they are marked folded): nothing is written.

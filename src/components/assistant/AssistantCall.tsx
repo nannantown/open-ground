@@ -2,6 +2,9 @@
 // after the iPhone app's call screen (openground-ios App/CallView.swift): one
 // identity, a quiet state line with the call's time, and three round keys —
 // speaker, end, mute. No labels under the keys (owner rule: tooltips only).
+// While it speaks, the identity itself is the stop key (a press anywhere on it
+// quiets the reading and the call listens — docs/research/voice-assistant-2026-10.md
+// 「窓を押すかキーを押すと、すぐ黙って聞く側に回ります」); Space does the same.
 import { useEffect, useState } from 'react'
 import { MicOff, Phone, PhoneOff, Volume2 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
@@ -35,11 +38,15 @@ export const AssistantCall = (p: {
   problem: string
   /** The last answer that was not read aloud — shown instead. */
   reply: string
+  /** A proposal waits for its button above the call: the big character and the unread reply step aside for it. */
+  compact?: boolean
   since: number | null
   onSpeaker: () => void
   onMute: () => void
   onEnd: () => void
   onRetry: () => void
+  /** Quiet the reading now (offered only while speaking). */
+  onStop?: () => void
 }) => {
   const { t } = useT()
   const [now, setNow] = useState(() => Date.now())
@@ -65,18 +72,42 @@ export const AssistantCall = (p: {
         ))
   const speakerLabel = t('misc.assistant.speaker')
   const muteLabel = t('misc.assistant.mute')
-  return (
-    <div data-testid="assistant-call" className="flex flex-col items-center gap-4 px-2 pb-1 pt-2">
-      <p className="max-w-full truncate text-ui font-semibold">{p.name}</p>
-      <AssistantMark look={p.look} size={64} mode={p.error ? 'off' : p.phase === 'thinking' ? 'think' : 'idle'} />
-      <div className="flex flex-col items-center gap-1 text-center">
-        <p role="status" className={`text-ui font-medium ${p.error ? 'text-accent' : 'text-ink'}`}>
+  const stopLabel = t('misc.assistant.callStop')
+  const gap = p.compact ? 'gap-2' : 'gap-4'
+  const who = (
+    <>
+      <span className="block max-w-full truncate text-ui font-semibold">{p.name}</span>
+      {!p.compact && <AssistantMark look={p.look} size={64} mode={p.error ? 'off' : p.phase === 'thinking' ? 'think' : 'idle'} />}
+      <span className="flex flex-col items-center gap-1 text-center">
+        <span aria-hidden className={`block text-ui font-medium ${p.error ? 'text-accent' : 'text-ink'}`}>
           {state}
-        </p>
-        {p.since !== null && !p.error && <p className="text-ui tabular-nums text-ink-subtle">{callClock(Math.max(now, p.since) - p.since)}</p>}
-        {p.problem && !p.error && <p className="text-ui text-accent">{p.problem}</p>}
-        {p.reply && !p.error && <p className="line-clamp-4 max-w-full whitespace-pre-wrap text-ui text-ink-subtle">{p.reply}</p>}
-      </div>
+        </span>
+        {p.since !== null && !p.error && <span className="block text-ui tabular-nums text-ink-subtle">{callClock(Math.max(now, p.since) - p.since)}</span>}
+        {p.problem && !p.error && <span className="block text-ui text-accent">{p.problem}</span>}
+        {p.reply && !p.error && !p.compact && <span className="line-clamp-4 block max-w-full whitespace-pre-wrap text-ui text-ink-subtle">{p.reply}</span>}
+      </span>
+    </>
+  )
+  const stoppable = p.phase === 'speaking' && !p.error && p.onStop
+  return (
+    <div data-testid="assistant-call" className={`flex shrink-0 flex-col items-center px-2 pb-1 ${gap} ${p.compact ? 'pt-0' : 'pt-2'}`}>
+      {/* Announced from here, outside the stop key (a status inside a button is not read out), and never re-mounted. */}
+      <span role="status" className="sr-only">
+        {state}
+      </span>
+      {stoppable ? (
+        <button
+          type="button"
+          onClick={p.onStop}
+          aria-label={stopLabel}
+          title={stopLabel}
+          className={`flex max-w-full flex-col items-center rounded-lg px-3 py-1 transition-colors duration-150 hover:bg-plane active:bg-line ${gap} ${focusRing}`}
+        >
+          {who}
+        </button>
+      ) : (
+        <div className={`flex max-w-full flex-col items-center px-3 py-1 ${gap}`}>{who}</div>
+      )}
       <div className="flex items-center gap-6 pb-1">
         {p.error ? (
           <button type="button" onClick={p.onRetry} aria-label={t('misc.assistant.callRetry')} title={t('misc.assistant.callRetry')} className={`${key} ${toggleKey(false)} ${focusRing}`}>

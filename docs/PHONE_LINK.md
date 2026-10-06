@@ -440,7 +440,8 @@ erases the old room — with the plaintext it held — as unlinking always did.
 ## The assistant (talk partner across all projects, 2026-10-02)
 
 Owner request, 2026-10-02: one partner who looks across EVERY project, answers
-short, and — when asked — puts a work card on a project's Board. Its talk stays
+short, and — when asked — proposes a work card for a project's Board (put there
+only by the owner's button since 2026-10-06, see "Assistant proposals"). Its talk stays
 on the phone: it never reaches a president desk, the president's chat, the
 Board's notes or any screen on the Mac. Only the card it writes appears (on that
 project's Board, as an ordinary `todo` card).
@@ -465,15 +466,22 @@ nothing on the wire changes. Spec: docs/ASSISTANT_DESIGN.md §1.
   not typed into a desk, so the 473 limit and the dropped `!` `/` `#` do not
   apply. `empty` / `too-long` (+`max: 2000`) as for a desk.
 - Then: `ack queued` at once and an `event` `kind: "owner"` with the words and your `id`; the
-  answer comes as `ack delivered` (`heard: true`, plus `card` when it wrote one:
-  `{ "projectId", "taskId", "title" }`) followed by ONE `event` with
-  `kind: "assistant"` — read it aloud. Or `ack rejected` `reason:
+  answer comes as `ack delivered` (`heard: true`) followed by ONE `event` with
+  `kind: "assistant"` — read its `speak` aloud when it has one (the answer's first
+  paragraph, at most two sentences — since 2026-10-06 `text` can carry details
+  after it that are for reading, not hearing; an app that predates `speak` reads
+  `text`). A line that put up proposals has the app's own line as `speak`; the
+  proposals themselves come apart, as `assistant-proposals` (see "Assistant
+  proposals"). Or `ack rejected` `reason:
   "assistant-failed"` (+`detail`: one short plain sentence in the Mac's language,
   e.g. 「アシスタントが時間内に答えられませんでした。」 / "The assistant did not answer
   in time." — never an internal error) when it could not answer (Claude not
-  signed in, no answer in 3 min, work mode switched on meanwhile). An answer
-  takes roughly 5–40 s (a Claude session starts per line); lines wait their
-  turn, one at a time. With one line being answered and one waiting, a further
+  signed in, no answer in 2 min, work mode switched on meanwhile). Since
+  2026-10-06 one Claude session stays up between lines: small talk answers in
+  about 1 s, a look-up in a few seconds (a fresh session after 15 quiet minutes
+  adds its start-up once); lines wait their turn, one at a time. The short
+  "let me look" it says before a look-up goes to the Mac's window only (the
+  phone gets the answer) — a phone-side follow-up. With one line being answered and one waiting, a further
   line gets ONLY `ack rejected` `reason: "busy"` (no `queued`, no `owner` event,
   no `detail`) — say it again later.
 - Its events come **whatever project is selected**. Show them in the
@@ -481,8 +489,7 @@ nothing on the wire changes. Spec: docs/ASSISTANT_DESIGN.md §1.
   `projectId`). They are replayed with `?after=` like any other event, but a
   Mac connection that dies silently can lose one (they carry no transcript
   position) — the missing `ack delivered` / `event` then shows it; offer to ask again
-  (asking again does not make a second card: an open card of the same title in
-  that project is reported as already there, never as newly written). When the
+  (asking again makes no card: only a button does). When the
   Mac's socket to the relay is closed at the moment an answer is ready, the Mac
   keeps it (the newest 20 frames) and sends it, in order, once the socket is
   back — always before anything newer, so an older answer never follows a newer
@@ -491,55 +498,168 @@ nothing on the wire changes. Spec: docs/ASSISTANT_DESIGN.md §1.
 - The push rules are the president's: one push when the answer went out, none
   while a line waits for its answer — for at most 2 min, as for a desk.
 
-**What it does** (`src/lib/server/phoneAssistant.ts`):
-- Each line is one Claude Code session on the owner's subscription (no API key,
-  no cost), through canvasAi's file-handoff runner: a hidden PTY in a fresh temp
-  dir started with `--tools Write --restricted --permission-mode acceptEdits`
-  (`ASSISTANT_LAUNCH`): its only tool is Write, and `--restricted` confines it to
-  that dir — a write anywhere else is refused and creates nothing (measured
-  2026-10-02 on claude 2.1.287). MCP tools are kept out twice
-  (`--strict-mcp-config` and `--disallowed-tools mcp__*`; `--tools` covers only
-  built-in tools). It cannot read, run or change anything else; the card is
-  written by the Mac, not by the model. Guard: `phoneAssistantLaunch.test.ts`
-  (the argv of the claude a real line starts).
-- The Mac hands it the state of every registered project (Board counts, what is
-  being worked on, open questions for the owner), its long-term memo and the
-  recent talk not yet folded into the memo — kept on the Mac in text files that
-  survive a restart (see "What the assistant remembers"). The transcript Claude
-  Code keeps for the temp dir is deleted with it. All of that goes in as the
-  system prompt (`--append-system-prompt`); the typed prompt — the only thing
-  Claude Code records in its prompt history `~/.claude/history.jsonl`, kept with
-  no time limit — is one fixed line (`ASSISTANT_KICKOFF`), so no copy of the talk
-  or the memo outlives a delete or the kept days there.
-  The state handed over includes text others wrote (card titles, workers'
-  questions); it is quoted as data, and with no tools beyond its answer file an
-  injected line cannot act on the Mac — but it CAN shape the answer, including a
-  card: that card lands in `todo` and is dispatched like any other. The same
-  checks hold for it (a registered project, every field present, one card), and
-  it shows on the Board like any card. Whether the prompt holds the runner's
+**What it does** (`src/lib/server/phoneAssistant.ts`, owner request 2026-10-06:
+"全部調べられるアシスタントと喋るだけで全ての作業を終わらせたい", "人と会話してるぐらいの速さで"):
+- **One live session, a fast model** (`assistantSession.ts`). The talk is ONE
+  Claude Code session on the owner's subscription (no API key), driven through
+  the Agent SDK with streaming input, on `haiku`, thinking off. It stays up
+  between lines, so a line costs one model reply instead of a claude start-up;
+  the floating window warms it when it opens (`POST …/assistant/warm`). It
+  restarts after 15 quiet minutes, 40 lines, ~120k tokens of context, a failed
+  line, or when what it was started with changes (the style, its name, the
+  memo size, the language, or a delete of the log / memo). The system prompt —
+  style, where things live, a status snapshot, the memo and the talk not yet
+  folded into it — is built only at a (re)start; the owner's lines go in as
+  messages `[YYYY-MM-DD Tue HH:MM] words` (the weekday too — given the date alone it named the wrong day). No transcript is written
+  (`persistSession: false`) and `~/.claude/history.jsonl` gets nothing
+  (checked by `scripts/verify-assistant-live.mts`).
+- **What it can touch** — none of Claude Code's own tools (`tools: []`: no
+  Read, Bash, Write, Edit, web), no settings / hooks / MCP from disk
+  (`settingSources: []`, `strictMcpConfig`), `permissionMode: dontAsk`, and a
+  PreToolUse gate that allows only its own tools (`mcp__og__*`, in process) and
+  denies anything else — also when the gate itself errors. Guard:
+  `assistantSession.test.ts`. Its tools (`assistantTools.ts`):
+  - `read_file` / `list_dir` / `search` — READ ONLY, and only inside the
+    registered projects and OPEN GROUND's data (`~/.openground`), decided on the
+    real path (a symlink cannot lead out; search never follows one). Everything
+    else in the home (`~/.ssh`, other folders) is refused, and a registered
+    project at or above the home folder is not read at all (it would open the
+    whole home). `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`,
+    `~/.config/gh`, `~/Library/Keychains`, Claude's credentials … are refused
+    even inside a root. Inside the area the secrets are refused too (names
+    compared case-insensitively, as APFS does): OPEN GROUND's `auth.json`,
+    `research-auth.json`, `phone-link.json`, `phone-push-key.json`,
+    `chrome-profile/`, `backups/settings/`, and anywhere `.env*` (not
+    `.env.example`), `.envrc`, `.dev.vars`, private keys / certificates
+    (`id_*`, `*deploy_key*`, `.pem` `.key` `.p8` …), `*.tfstate`, `.netrc` /
+    `.npmrc` / `.git-credentials`, `credentials*`. Values under secret-looking
+    keys (password, token, secret, api key, `*_KEY`, cookie…) and the password in
+    a `user:password@` URL show as `[hidden]` — hidden before line numbers go
+    on, and search matches the hidden text (a match on a secret would tell it a
+    guess at a time). Search takes words literally (`a|b` = either; no regular
+    expressions, which could freeze the server), skips `node_modules`, `.git`,
+    build output and worktree copies; a read looks at most 200 KB into a file,
+    hands back at most 40 KB of it (one long line — a card's notes are one line
+    of `tasks.json` — is read whole up to that) and never reads a pipe or device.
+    The search `glob` (`*` / `?`) is matched by a plain two-pointer wildcard
+    match, never a regular expression (as one, `*a*a*a*a*a*a*a*b` took 18 s on a
+    64-character name). Well-known token shapes (`sk-ant-…`, `ghp_…`, `AKIA…`,
+    `xoxb-…`, `sk_live_…`, `AIza…`, `glpat-…`; JWTs found by a scan without a
+    backtracking regex — as one, 512 KB of `eyJ-` took 0.7 s), a value of 8+
+    token characters after `Basic` / `Bearer` unless it is one all-lowercase word
+    (「basic configuration」 stays, `Basic dXNlcjpwYXNz` is hidden),
+    `Authorization` / `extraheader` values, `…KeyValue` / `…KeyPem`
+    names, PGP private-key blocks and `const API_KEY = …` lines are hidden too.
+    A photo over 1 MB goes as a JPEG of at most 2000 px
+    (macOS `sips`; the session resends it with every later line and one request
+    is at most 32 MB). Not covered: a hard link to a secret under another name.
+    Guard: `assistantTools.test.ts`.
+  - `status` — every project's state at that moment (the digest below), so
+    「状況どう?」 is never answered from the snapshot the session started with.
+  - `make_card` / `tell_commander` only **PROPOSE**, and `withdraw` drops what
+    waits (「やめて」). There is no `remember` tool. See "Assistant proposals"
+    below: a proposal is shown in its own frame and carried out ONLY by the
+    owner's button on it — nothing said or typed to the assistant carries one
+    out, 「うん」 included (owner decision 2026-10-06, the parked voice-yes design
+    was reworked 4 times and dropped). A line made while proposals wait tells the
+    model so (an "App note"), and it answers a spoken yes with 「画面のボタンで決めてね」.
+  What was done is said by the app, never taken from the model's words: after a
+  line that put up proposals, `speak` is the app's fixed line (「カード案を出したよ。
+  よければ「出す」を押してね。」); after a button, the app's own outcome line goes into
+  the talk (「kiwiに「…」を積んだよ。」 / 「…の司令官に伝えたよ。」) and the model is
+  told before the owner's next line. The model's own words are kept as text.
+  It never changes code or files itself, and never dispatches, moves, merges or
+  answers anything on the owner's behalf. Text from files, cards and workers is
+  data to it — and since a line in a file could still steer it, nothing it
+  proposes happens without the owner pressing the button on what the frame shows.
+  Deleting talk (Settings → iPhone) ends the live session at once and drops the
+  proposals waiting; the line running then is not written back to the log and
+  not retried.
+- **Like talking on the phone.** Small talk is answered at once without tools.
+  When a look-up starts (`read_file` / `list_dir` / `search` / `status`), the
+  APP says a short wait-line — 「ちょっと待ってね。」「見てみるね。」「調べてみるね。」
+  in turn (English: One moment. / Let me check. / Let me look.) — the moment the
+  first look-up of the line starts, once per line; the model never writes one
+  (haiku wrote them into answers it gave without looking, and once said 「カード
+  作ったよ」 before making it). The window's `POST …/assistant/say` with
+  `stream: true` answers one JSON per line: `{interim}` then the answer —
+  and, on a line that calls no tool, `{say}` pieces before it (2026-10-07,
+  below). Only
+  the answer's first paragraph, at most two sentences, no paths or markup, is
+  read aloud (`speak`, `spokenPart`); the details follow as text in the window,
+  and the answer waits for the wait-line to finish (`speakAfter`) instead of
+  cutting it. Lines carry the weekday (given the date alone it named the wrong day).
+  Measured 2026-10-06 on the shipped app's Electron runtime (0.11.173's binary
+  running this build's server, `ELECTRON_RUN_AS_NODE`, docs/VERIFICATION.md
+  §4.1), sending to the answer:
+
+  | line | before (0.11.173) | after |
+  |---|---|---|
+  | やあ、元気? | 6.1 s | 1.0 s (0.6–1.1 s over three runs) |
+  | アシスタントの記録ってどこにある? | 5.3 s — "it is not in what I have" | 2.5 / 2.7 s, answered (spoken: 「アシスタント用のフォルダ内だね。」, the path as text) |
+  | OPEN GROUND の今のバージョンっていくつ? (a look-up) | — | 「ちょっと待ってね。」 at 1.7 s, 「0.11.173 だね。」 at 3.7 s |
+  | 今日は何曜日だっけ? | — | 0.7 s |
+
+  Time to the first word as heard adds the same speech recognition and system
+  voice start-up before and after. (`node scripts/measure-assistant-latency.mjs
+  [baseUrl] "line" …`.)
+- **Read as it is written; stop to listen (2026-10-07, the redesign's 2nd
+  release).** The session asks the SDK for the words as they are written
+  (`includePartialMessages`); `spokenSoFar` sends a `{say}` piece for each
+  sentence of the read-aloud part once more words follow it, and the answer
+  then carries `said: true` (the pieces joined = `speak`; the window does not
+  read it again). A tool call stops the pieces for the rest of the line
+  (`{hush}` if some already went out); such a line reads its finished answer
+  as before. The known edge (adversarial review 2026-10-07): a sentence goes
+  out once more words follow it, so a model that writes TWO sentences or more
+  before a tool call — against its prompt — has the first read before the call
+  is known. Contained, not closed: the pieces are hushed the moment the call
+  starts, and after a proposal what is read is the app's own line; the only
+  other way to close it is to read nothing until the answer is complete. The call's stop key / Space cuts the reading; the window then
+  posts `POST …/assistant/hush {heard}` and the model's next line carries an
+  app note with what was heard — accepted only when `heard` is how the last
+  answer's read-aloud part begins (409 otherwise), so it can only shorten what
+  the model believes was said. The ears end an utterance by how the words end
+  (og-listen `pauseFor`, `og-listen --pause <words>`) and hand the heard words
+  on at once. The phone still gets the whole answer in one frame, and the
+  iPhone app's own pause (`Endpoint.quiet`, 1.2 s) is the phone app's to change.
+  Measured 2026-10-07 on this Mac, the shipped app's runtime (0.11.174's
+  Electron as Node running the base and this build's server, throwaway homes,
+  the same lines alternating; the ears fed a Kyoko recording at real time with
+  `og-listen --feed` — this Mac's speakers go to an audio interface its mic
+  cannot hear, -47 dB, so no acoustic loop):
+
+  | part | before | after |
+  |---|---|---|
+  | end of speech → words handed on (`scripts/measure-voice-latency.mjs`) | 1.60–1.83 s | 0.84–1.37 s |
+  | words sent → first thing that can be read (median of 3) | 0.67–1.07 s | 0.70–0.83 s |
+  | 今日の予定を教えてください (sum) | 1.60 + 0.90 = 2.5 s | 0.84 + 0.72 = 1.6 s |
+  | やあ、元気? (sum) | 1.83 + 0.67 = 2.5 s | 1.37 + 0.70 = 2.1 s |
+
+  The system voice's own start (AVSpeechSynthesizer, what Chromium's
+  speechSynthesis calls on macOS) is the same before and after and not in the sums.
+- **Folding the memo is a separate run**, never on a line's clock: after a line
+  that left talk due for folding, and hourly, `foldIdleAssistantTalk` runs the
+  old file-handoff runner (a hidden PTY, `--tools Write --restricted
+  --permission-mode acceptEdits`, `ASSISTANT_LAUNCH`, sonnet) in its own queue.
+  Its prompt carries only the talk and the memo, as the system prompt; the typed
+  prompt is the fixed `ASSISTANT_KICKOFF` (nothing of the talk in
+  `~/.claude/history.jsonl`), and the completion-marker defences below apply to
+  it. It is given the OWNER's lines only — never the assistant's words, a file it
+  read or a worker's text (owner decision 2026-10-06: the memo is written from
+  the owner's own words). A memo changed while it ran is not overwritten. Guard:
+  `phoneAssistantLaunch.test.ts`.
+- Before 2026-10-06 every line started its own claude in a hidden PTY with
+  only Write and the status in its prompt (5–40 s a line, nothing to look
+  things up with); the fold run below is what remains of that runner.
+- Completion marker (fold runs): whether the prompt holds the runner's
   completion marker is decided by the runner's OWN detector (`containsDoneMarker`),
   never by a pattern of ours, and on the prompt AS CLAUDE'S SCREEN SHOWS IT: the
-  TUI drops every invisible format character (zero-width spaces and joiners,
-  soft hyphens, variation selectors, tag and bidi characters, Hangul fillers) and
-  the C1 control characters U+0080–009F, so those are removed before the check. When it fires, that turn is built again
-  with every `_` in ALL of its data (every project's titles and questions, the
-  owner's words, the style, the memo, the whole history) as a full-width `＿` — the marker
-  needs two ASCII `_` and the template has none — and a prompt the detector still
-  fires on is never started (the phone gets the plain "could not answer" failure).
-  So no text, however split by spaces, escape codes, invisible characters or
-  nesting, can end a line early. The price: while marker text sits in the status
-  or the history (until it is folded into the memo), the model sees `snake＿case` instead of
-  `snake_case` in that turn's data, and a card it writes may carry the `＿`
-  (seen: a card asked to be titled with the marker itself). A turn without
-  marker text keeps every `_` as written.
-- It answers as JSON `{reply, card}`. When the owner asks for work and both the
-  project and the request are clear, `card` = `{projectId, title, goal, judge,
-  done[], placement, tier}`; the Mac checks every field is there and the project
-  is registered, then writes ONE `todo` card whose notes carry Goal / How the
-  owner judges it / Done when / Final placement (headings follow the Mac's
-  language). An incomplete card is not written and the reply says so instead of
-  claiming it was. When either is unclear it asks one short question back.
-  It never dispatches, moves, merges or answers anything.
+  TUI drops every invisible format character and the C1 control characters
+  U+0080–009F, so those are removed before the check. When it fires, the run is
+  built again with every `_` in ALL of its data as a full-width `＿` — the
+  marker needs two ASCII `_` and the template has none — and a prompt the
+  detector still fires on is never started.
 - How it talks is the owner's free text: Settings → **iPhone** →
   「アシスタントの話し方」, stored as `~/.openground/assistant-style.md`
   (editable by hand too; empty = the default below). Read fresh on every line,
@@ -548,6 +668,100 @@ nothing on the wire changes. Spec: docs/ASSISTANT_DESIGN.md §1.
   waiting for the owner before progress.
 - Owner only and work mode as for the rest of the link: under work mode it is
   never asked.
+
+## Assistant proposals (2026-10-06)
+
+Owner decision, 2026-10-06 (「全部Aで進めて」, docs/research/voice-assistant-2026-10.md):
+the assistant only PROPOSES a card or a message for a commander; the owner's
+**button** on the proposal's frame is the only way one is carried out —
+「出す」 for a card, 「送る」 for a message, 「やめる」 to drop it. Nothing anyone says or
+types does (「うん」「出して」 included), on the Mac or the iPhone. The Mac and the
+iPhone use the same one door (`approveProposal` in `src/lib/server/assistantProposals.ts`).
+
+**A proposal** (kept in the Mac's memory only — never on a Board, never in the talk log):
+```json
+{ "id": "…", "kind": "card" | "commander", "projectId": "…", "project": "kiwi-shop",
+  "title": "送料を500円にする", "body": "やること: 送料を500円にする\n完了の条件:\n- テストが緑",
+  "at": 1790846484310, "expiresAt": 1790847084310, "state": "open" | "done" | "dropped" | "expired",
+  "closedAt": 1790846501234, "via": "phone" | "screen" }
+```
+- `project` is the project's name, `title` the card's title (`""` for a
+  message), `body` the card's notes **exactly as they will be written**, or the
+  line **exactly as the commander will get it** (prefixed 「アシスタント経由(オーナーの
+  言葉の要約):」 — the model wrote it, so it is never labelled as the owner's own
+  words). Show all three whole, as plain text (`body` has `\n`s), never cut,
+  shortened or scrolled — a frame that does not fit whole must not be
+  pressable (the Mac says 「長いので社長に頼んでね」 instead).
+- Small on purpose: at most **10 lines as the Mac's window draws them**
+  (project, title and body together; a line holds 21 full-width characters —
+  `frameLines`, counted on the wide side) and 400 characters, so a frame is seen
+  whole in the window's call view (262 px left for frames) as in chat (356 px) —
+  measured in Chromium on the real CSS, 2026-10-06. Title, goal and every done
+  condition one line; at most 3 open at once. While one waits, the Mac's call
+  view leaves out its big character so the frame gets the room. A proposal holding any character
+  that can be neither seen nor heard (zero-width, direction, BOM, Unicode TAG,
+  variation selectors, controls) is refused when it is made.
+- Open for 10 minutes (`expiresAt`); then `expired` — draw it faded, without
+  buttons, as for `done` / `dropped`. A closed one stays listed (faded) for 30
+  minutes after it was made. `closedAt` = when it closed (absent while open;
+  `expiresAt` for an expired one). The list is in the order made, so pick "the
+  one that closed last" by `closedAt` — the Mac shows only that one, as a single
+  faded line (a `done` one with the green check), and gives the talk the room.
+- The Mac's floating window shows every proposal; the iPhone gets the ones made
+  from the iPhone (`via: "phone"`). Whichever button is pressed first wins; the
+  other end then sees it closed.
+
+**The check (`hash`)** — the phone computes it FROM THE TEXT ITS FRAME SHOWS and
+sends it with 「出す」/「送る」: SHA-256, lowercase hex, of the UTF-8 of
+`kind + "\n" + projectId + "\n" + project + "\n" + title + "\n" + body`.
+Use the strings **exactly as received** — no Unicode normalization (NFC/NFKC),
+no trimming, no line-ending changes (Swift: `Data(s.utf8)` of the joined
+`String`, never a normalized form) — and draw exactly those strings.
+A press whose hash does not match what the Mac holds does nothing (`mismatch`).
+Test vector: kind `card`, projectId `8f0c2b1e-0000-4000-8000-000000000001`,
+project `kiwi-shop`, title `送料を500円にする`, body
+`やること: 送料を500円にする\n完了の条件:\n- テストが緑` →
+`55ae649371d4e0c8d07e3698f42b328d226d12f2628642ed9061cfd4d1b8c444`.
+
+**Frames (v2 pairings only; both sealed like every content frame):**
+- Mac → phone `{ "type": "assistant-proposals", "proposals": [ … ] }` — the whole
+  list of the phone's proposals, sent whenever it changes (made, pressed on
+  either end, dropped). Not kept anywhere: the first page of `assistant-history`
+  also carries `proposals`, so a phone that was offline catches up there.
+- phone → Mac `{ "type": "assistant-proposal", "id": "<frame id>", "proposalId": "…", "action": "approve", "hash": "…" }`
+  or `"action": "drop"` (no hash). Answered with `ack` (`projectId: "assistant"`):
+  `delivered` (`card: { projectId, taskId, title }` when a card was written), or
+  `rejected` with `reason`: `mismatch` | `closed` | `expired` | `not-found` |
+  `pair-again` (v1) | `bad-frame` | `mac-error`. After a carried-out press the Mac
+  also sends ONE `assistant` line with the app's own words in `text` and
+  `speak` (「kiwi-shopに「…」を積んだよ。」 / 「…の司令官に伝えたよ。」 / 「…まだ届いてない。
+  少ししてからもう一回押して。」 — a message the commander did not take stays open).
+- After a `say` that put up proposals, the answer's `speak` is the app's line
+  (「カード案を出したよ。よければ「出す」を押してね。」); read `speak` aloud, never `text`
+  whole.
+- **Relay redeploy needed** for both frame types (its frame-type allowlist):
+  `cd worker && npx wrangler deploy -c wrangler.phone.jsonc` — before the iPhone
+  build that uses them ships. Until then the old relay answers the phone's
+  `assistant-proposal` with `bad-frame` and drops `assistant-proposals`; the
+  proposals still show (and can be pressed) in the Mac's window.
+
+**On the Mac** — the floating window's frames (`ProposalFrames.tsx`) sit right
+above the input (in a call, above its keys), outside the talk. 「出す」/「送る」 send
+`POST /api/phone-link/assistant/proposals/:id/approve {hash}`, with the hash
+computed from the frame elements' own text (`textContent`); 「やめる」 sends
+`…/drop`. `GET …/assistant/proposals` (and `GET …/assistant/log` →
+`proposals`) list them. A frame not whole inside its box — or a box whose height
+cannot be measured — cannot be pressed. Guards: `assistantProposals.test.ts`,
+`phoneAssistant.test.ts`, `phoneLink.test.ts`, `FloatingAssistant.test.tsx`
+(each measured red with the production check removed, 2026-10-06).
+Checked on the shipped app's runtime (0.11.174's Electron running this build's
+server, isolated data, real claude; `node scripts/verify-assistant-proposals.mjs
+<baseUrl> <project> "<request>"`): a card request put up its frame in 2.8–2.9 s
+with nothing on the Board; 「うん」 / 「うん、出して」 left the Board empty and the
+proposal open; a press with a check one character off was refused (409); the
+press with the shown text's check wrote ONE todo card with exactly the frame's
+title and notes. Small talk answered in 0.64–1.1 s; a README look-up said
+「ちょっと待ってね。」 at 2.2 s and answered at 3.2 s.
 
 ## What the assistant remembers (2026-10-03)
 
@@ -580,7 +794,9 @@ record lives on the Mac only.
 - `state.json` — the last log line already folded into the memo, and the last fold-only run (`idleTried`: its first line and time). `config.json` — the two numbers.
 
 **What each answer reads** — the memo + the talk not yet folded into it, never
-the whole log. Once that unfolded talk passes 30 lines or 16,000 characters —
+the whole log (since 2026-10-06: what a session starts with; the session then
+carries the talk itself, and a fold run does the folding below in the background
+— "the turn" / "next line" below = the fold run after a line). Once that unfolded talk passes 30 lines or 16,000 characters —
 or a line of it is more than a day old (half the kept days if that is shorter),
 so recent talk does not expire unfolded after a quiet spell —
 the turn shows the older part as "leaving your view" and the model MUST return
@@ -589,8 +805,7 @@ threads, promises, what it was asked to remember; small talk and finished
 things dropped); the newest 20 lines / 8000 characters stay verbatim. At most
 16,000 characters are folded per turn, oldest first (only what was shown is
 marked folded; the rest goes next turn), and a fold the model skips is asked
-again next line. A memo the model returns in a wrong shape is ignored — the reply
-and the card still count. While nobody talks, the Mac folds talk that is old
+again after 12 hours (each try is a claude run). A memo the model returns in a wrong shape is ignored. While nobody talks, the Mac folds talk that is old
 enough on its own (`foldIdleAssistantTalk`, at boot and every hour — ONE run per
 tick — before the old days are deleted; a claude run only when there is something
 to fold, never under work mode, primary instance only; a run that saved nothing —
@@ -603,8 +818,9 @@ in. If folding keeps failing (Claude signed out, the memo always coming back too
 long), the lines still expire after the kept days, unfolded and without a notice. A line that got no answer is logged too (the owner's words only), so the
 next answer sees it. So the prompt stays bounded (memo + at most
 ~30 lines) however long the owner keeps talking, and the memo stays one fixed size.
-"覚えておいて" / "忘れて" — the model returns the memo with exactly that changed
-(forget = removed, and not brought up again). The log itself is only deleted by
+"覚えておいて" / "忘れて" — the owner's line goes into the memo at the next fold (the
+fold reads the owner's lines only; there is no tool with which the live
+assistant could write the memo — 2026-10-06). The log itself is only deleted by
 age (or by the owner) — folding does not delete it.
 
 **Seen and deleted by the owner** — Settings → **iPhone**, under 「アシスタントの話し方」:
@@ -617,7 +833,7 @@ answered is not undone by that line (it does not write its memo back).
 `GET /api/phone-link/assistant/log` → `{ entries, memory, logDays, memoryChars }`;
 `DELETE …/assistant/log` (all) and `…/assistant/log/<id>` (one); `DELETE …/assistant/memory`;
 `POST …/assistant/config` `{ logDays?, memoryChars? }` (out of range → 400, nothing changed);
-`POST …/assistant/say` `{ text }` → `{ reply, card? }` — talk from the screen,
+`POST …/assistant/say` `{ text, photo?, stream? }` → `{ reply, speak, card? }` (or, with `stream: true`, `{interim}` / `{say}` / `{hush}` lines first, then the answer with `said` when the pieces were its reading) — talk from the screen; `POST …/assistant/hush` `{ heard }` → `{ ok }` / 409 — the call's stop key: the model hears what of the last answer was heard; `POST …/assistant/warm` starts the session ahead of the first line,
 same assistant, same log (`via: "screen"`). The screen's one line for it sits
 above the talk log in Settings → iPhone (Enter or 送る; the answer shows in the
 log). The phone sees screen talk in its next `assistant-history`.
@@ -654,9 +870,11 @@ plays again, or one meant for another request, is dropped).
 
 **A v1 (plaintext) pairing never gets the records**: its `assistant-history` is
 answered `{ "type": "assistant-history", "id": "<same>", "error": "pair-again" }`
-(no entries, no memo) — ask the owner to link the iPhone again (v2). Its live
-assistant talk stays the old plain `event`s until `LEGACY_V1_UNTIL`, like
-everything else on a v1 pairing.
+(no entries, no memo) — ask the owner to link the iPhone again (v2). Since
+2026-10-06 a v1 pairing cannot talk to the assistant either: a `say` with
+`projectId: "assistant"` is acked `rejected` with `reason: "pair-again"` (the
+assistant reads files; v1 frames are plain and replayable). Its proposal buttons
+(`assistant-proposal`) are refused the same way. Its president-desk talk is unchanged until `LEGACY_V1_UNTIL`.
 
 **After the first `assistant-history` (v2), for good** (until linked again), the
 assistant's lines come as sealed `assistant` frames instead of `event`s. Inner:
@@ -667,7 +885,7 @@ assistant's lines come as sealed `assistant` frames instead of `event`s. Inner:
 The relay passes them on and stores nothing (no `seq`, no `?after=` replay) —
 what the phone missed it gets from `assistant-history`. Each carries its own
 `eid` (inside the seal): skip one you already read. Read `kind: "assistant"`
-aloud as before; `card` stays in the `ack delivered`. Before that first fetch a v2
+aloud as before (`speak` when there is one). Before that first fetch a v2
 pairing gets the assistant as sealed `event`s (`projectId: "assistant"`), which
 the relay keeps as ciphertext like any event (the newest 200 at most, erased once the phone has heard it or after 7 days). A `say` to the
 assistant is an ordinary sealed `say` with `projectId: "assistant"`.

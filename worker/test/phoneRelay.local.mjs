@@ -150,10 +150,15 @@ try {
         phone.frames.some((f) => f.type === 'assistant-history' && f.box === 'AAAA'),
     ),
   )
+  // A proposal's button (phone → Mac) and the proposal list (Mac → phone): passed on, never kept.
+  phone.ws.send(JSON.stringify({ type: 'assistant-proposal', box: 'DDDD' }))
+  check('assistant-proposal reaches the Mac', await until(() => mac2.frames.some((f) => f.type === 'assistant-proposal' && f.box === 'DDDD')))
+  mac2.ws.send(JSON.stringify({ type: 'assistant-proposals', box: 'EEEE' }))
+  check('assistant-proposals reach the phone', await until(() => phone.frames.some((f) => f.type === 'assistant-proposals' && f.box === 'EEEE')))
   const replay = await open('phone', room, phoneKey, '?after=0')
   await until(() => replay.frames.some((f) => f.type === 'event' && f.seq === 3))
   await new Promise((r) => setTimeout(r, 300))
-  check('...and are never kept for catch-up', !replay.frames.some((f) => f.type === 'assistant' || f.type === 'assistant-history'))
+  check('...and are never kept for catch-up', !replay.frames.some((f) => f.type === 'assistant' || f.type === 'assistant-history' || f.type === 'assistant-proposals'))
   replay.ws.close()
 
   // Waking the phone (Push to Talk): the Mac says it can push, then the phone

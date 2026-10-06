@@ -5,6 +5,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 export type AssistantLook = 'verm' | 'moss' | 'ochre' | 'ink'
+/** A proposal as the server lists it (assistantProposals.ts ShownProposal). */
+export interface AssistantProposalView {
+  id: string
+  kind: 'card' | 'commander'
+  projectId: string
+  project: string
+  title: string
+  body: string
+  at: number
+  expiresAt: number
+  state: 'open' | 'done' | 'dropped' | 'expired'
+  /** When it closed (absent while open). */
+  closedAt?: number
+}
 export interface AssistantLine {
   id: string
   at: number
@@ -24,6 +38,8 @@ interface LogResponse {
   look: AssistantLook
   /** This Mac can listen (macOS, og-listen built): show the mic. */
   voice?: boolean
+  /** The proposals the frames show. */
+  proposals?: AssistantProposalView[]
 }
 
 const API = '/api/phone-link/assistant'
@@ -43,17 +59,30 @@ export interface AssistantState {
   pending: string | null
   /** The photo (data URL) sent with the pending line, if any. */
   pendingPhoto: string | null
+  /** What it said while looking something up for the pending line ("ちょっと待ってね"); '' when nothing. */
+  interim: string
   /** A plain-words reason the last line failed; '' when none. */
   error: string
   /** An answer came while the window was closed. */
   unread: boolean
+  /** The proposals the frames show (open and recently closed). */
+  proposals: AssistantProposalView[]
+  /** A frame's button is being answered. */
+  pressing: boolean
+  /** 「出す」/「送る」: carried out only with the hash of what the frame shows. */
+  approve: (id: string, hash: string) => Promise<void>
+  /** 「やめる」. */
+  drop: (id: string) => Promise<void>
   /** This Mac can listen: the mic button is offered. */
   voice: boolean
   /** true = the line is in the log now (answered, or failed after it was logged);
    *  false = it was refused before reaching the log — give it back to the input.
-   *  onReply gets the answer's words, once the answer is in the log.
+   *  onReply gets the answer's words and the part of them to read aloud, once
+   *  the answer is in the log; onInterim each "let me look" the moment it is said.
    *  photo = a data URL sent with the line (the line may then be empty). */
-  say: (text: string, onReply?: (reply: string) => void, photo?: string) => Promise<boolean>
+  say: (text: string, onReply?: (reply: string, speak: string, said: boolean) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream) => Promise<boolean>
+  /** The owner stopped the reading of the last answer: what of it they heard ('' = none). */
+  hush: (heard: string) => Promise<void>
   saveLook: (patch: { name?: string; look?: AssistantLook }) => Promise<boolean>
 }
 
@@ -65,12 +94,50 @@ export interface AssistantWords {
   workMode: string
   photoType: string
   photoTooLarge: string
+  proposalGone: string
+}
+
+/** The part read aloud as it is written (phoneLink's say route, `{say}` / `{hush}` lines):
+ *  each piece the moment it is sure; hush = a look-up started after some went out, stop them.
+ *  The answer then carries `said` — those pieces were its reading. */
+export interface AnswerStream {
+  say?: (piece: string) => void
+  hush?: () => void
+}
+
+/** The answer of a streamed say: `{interim}` / `{say}` / `{hush}` lines as they come, then the answer (or `{error}`). */
+const readAnswer = async (r: Response, onInterim: (t: string) => void, stream?: AnswerStream): Promise<Record<string, unknown>> => {
+  if (!r.body) return ((await r.json().catch(() => ({}))) ?? {}) as Record<string, unknown>
+  const reader = r.body.getReader()
+  const dec = new TextDecoder()
+  let buf = ''
+  let last: Record<string, unknown> = {}
+  const take = (l: string) => {
+    if (!l.trim()) return
+    const o = JSON.parse(l) as Record<string, unknown>
+    if (typeof o.interim === 'string') onInterim(o.interim)
+    else if (typeof o.say === 'string') stream?.say?.(o.say)
+    else if (o.hush === true) stream?.hush?.()
+    else last = o
+  }
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (value) buf += dec.decode(value, { stream: true })
+    for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) {
+      take(buf.slice(0, i))
+      buf = buf.slice(i + 1)
+    }
+    if (done) break
+  }
+  take(buf)
+  return last
 }
 
 export const useAssistant = (open: boolean, words: AssistantWords): AssistantState => {
   const [data, setData] = useState<LogResponse | null>(null)
   const [pending, setPending] = useState<string | null>(null)
   const [pendingPhoto, setPendingPhoto] = useState<string | null>(null)
+  const [interim, setInterim] = useState('')
   const [error, setError] = useState('')
   const [unread, setUnread] = useState(false)
   const openRef = useRef(open)
@@ -95,7 +162,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
     const d = (await r.json().catch(() => null)) as LogResponse | null
     if (n !== readSeq.current) return 'stale'
     if (!d) return 'failed'
-    setData({ entries: d.entries ?? [], name: d.name ?? '', look: d.look ?? 'verm', voice: d.voice === true })
+    setData({ entries: d.entries ?? [], name: d.name ?? '', look: d.look ?? 'verm', voice: d.voice === true, proposals: Array.isArray(d.proposals) ? d.proposals : [] })
     return 'ok'
   }, [])
 
@@ -117,25 +184,30 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
   useEffect(() => {
     if (!open) return
     setUnread(false)
+    // Start the assistant's session now, so the first line skips its start-up.
+    void fetch(`${API}/warm`, { method: 'POST' }).catch(() => {})
     void load()
     const t = setInterval(() => void load(), OPEN_POLL_MS)
     return () => clearInterval(t)
   }, [open, load])
 
   const say = useCallback(
-    async (text: string, onReply?: (reply: string) => void, photo?: string) => {
+    async (text: string, onReply?: (reply: string, speak: string, said: boolean) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream) => {
       const line = text.trim()
       if ((!line && !photo) || saying.current) return false
       saying.current = true
       setPending(line)
       setPendingPhoto(photo ?? null)
       setError('')
+      setInterim('')
       let reply = ''
+      let speak = ''
+      let said = false
       try {
         const r = await fetch(`${API}/say`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(photo ? { text: line, photo: photo.slice(photo.indexOf(',') + 1) } : { text: line }),
+          body: JSON.stringify({ text: line, stream: true, ...(photo ? { photo: photo.slice(photo.indexOf(',') + 1) } : {}) }),
         })
         if (!r.ok) {
           const j = (await r.json().catch(() => ({}))) as { error?: string; detail?: string }
@@ -151,7 +223,22 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
           // (502) has already logged the owner's line — giving it back would log it twice.
           return r.status >= 500
         }
-        reply = ((await r.json().catch(() => ({}))) as { reply?: unknown }).reply as string
+        const a = await readAnswer(
+          r,
+          (t) => {
+            setInterim(t)
+            onInterim?.(t)
+          },
+          stream,
+        )
+        if (typeof a.error === 'string') {
+          setError((typeof a.detail === 'string' && a.detail) || (a.error === 'busy' ? words.busy : words.failed))
+          // Refused as busy it never reached the log: give it back. Otherwise it is logged.
+          return a.error !== 'busy'
+        }
+        reply = typeof a.reply === 'string' ? a.reply : ''
+        speak = typeof a.speak === 'string' && a.speak ? a.speak : reply
+        said = a.said === true
         if (!openRef.current) setUnread(true)
         return true
       } catch {
@@ -162,12 +249,44 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
         await load()
         setPending(null)
         setPendingPhoto(null)
+        setInterim('')
         saying.current = false
-        if (typeof reply === 'string' && reply) onReply?.(reply)
+        if (reply) onReply?.(reply, speak, said)
       }
     },
     [load, words],
   )
+
+  const [pressing, setPressing] = useState(false)
+  /** A frame's button: the answer's list replaces the frames, then the log is read (it holds the app's line). */
+  const button = useCallback(
+    async (id: string, action: 'approve' | 'drop', body: object = {}) => {
+      setPressing(true)
+      setError('')
+      try {
+        const r = await fetch(`${API}/proposals/${encodeURIComponent(id)}/${action}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        }).catch(() => null)
+        const j = ((await r?.json().catch(() => null)) ?? {}) as { proposals?: AssistantProposalView[]; error?: string }
+        // Already carried out (the other end, or a second press of this one): no error.
+        const done = j.error === 'closed' && j.proposals?.some((p) => p.id === id && p.state === 'done')
+        if (!r?.ok && !done) setError(j.error === 'work-mode' ? words.workMode : r && r.status < 500 ? words.proposalGone : words.failed)
+        if (Array.isArray(j.proposals)) setData((d) => (d ? { ...d, proposals: j.proposals } : d))
+        await load()
+      } finally {
+        setPressing(false)
+      }
+    },
+    [load, words],
+  )
+  const approve = useCallback((id: string, hash: string) => button(id, 'approve', { hash }), [button])
+  const drop = useCallback((id: string) => button(id, 'drop'), [button])
+
+  const hush = useCallback(async (heard: string) => {
+    await fetch(`${API}/hush`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ heard }) }).catch(() => null)
+  }, [])
 
   const saveLook = useCallback(
     async (patch: { name?: string; look?: AssistantLook }) => {
@@ -189,10 +308,16 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
     look: data?.look ?? 'verm',
     pending,
     pendingPhoto,
+    interim,
     error,
     unread,
     voice: data?.voice === true,
+    proposals: data?.proposals ?? [],
+    pressing,
+    approve,
+    drop,
     say,
+    hush,
     saveLook,
   }
 }

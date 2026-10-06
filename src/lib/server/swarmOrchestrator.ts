@@ -968,10 +968,13 @@ export const classifyMetricEvent = (line: {
   return null
 }
 
-/** A `done` Board card — the lead-time input. Mirrors isTodoCard's fold
- *  (undefined boardColumn → 'done' iff the card's `done` flag is set). */
-const isDoneCard = (t: ProjectTask): boolean =>
-  (t.boardColumn ?? (t.done ? 'done' : 'todo')) === 'done'
+/** A Board card whose work LANDED — the lead-time / landed-count input. Mirrors
+ *  isTodoCard's fold (undefined boardColumn → 'done' iff the card's `done` flag
+ *  is set), minus `abandoned`: a card called off (取りやめ / 見送り / replaced)
+ *  is closed as done + abandoned and never reached the trunk (owner report
+ *  2026-10-07; same rule as swarmLandedLedger's isLandedCard). */
+const isLandedCard = (t: ProjectTask): boolean =>
+  (t.boardColumn ?? (t.done ? 'done' : 'todo')) === 'done' && t.abandoned !== true
 
 /** Median of a number list (rounded for the even case), or null when empty. Pure. */
 export const medianOf = (xs: readonly number[]): number | null => {
@@ -1005,7 +1008,7 @@ export const computeLeadTimeStats = (
   }
   const samples: number[] = []
   for (const t of tasks) {
-    if (!isDoneCard(t)) continue
+    if (!isLandedCard(t)) continue
     const doneAt = doneAtByTitle.get(shorten(t.title ?? ''))
     if (doneAt === undefined) continue
     const createdAt = t.createdAt ? Date.parse(t.createdAt) : Number.NaN
@@ -1045,7 +1048,7 @@ export const countLandedFromBoard = (
   if (promoted.size === 0) return 0
   let landed = 0
   for (const t of tasks) {
-    if (!isDoneCard(t)) continue
+    if (!isLandedCard(t)) continue
     if (promoted.has(shorten(t.title ?? ''))) landed++
   }
   return landed

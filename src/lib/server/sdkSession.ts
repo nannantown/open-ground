@@ -432,6 +432,15 @@ const sdkNow = (): SdkModule => {
   throw new Error('@anthropic-ai/claude-agent-sdk is not loaded — await preloadSdk() before spawning')
 }
 
+/** The whole SDK module, loaded the same way as for a spawn, for a caller that
+ *  needs more than `query` — the assistant's own session (createSdkMcpServer).
+ *  Rejects with the load error. Reaches no session and no desk. */
+export const importSdkModule = async (): Promise<unknown> => {
+  await loadSdkModule()
+  if (!sdkModule) throw new Error(`claude sdk could not load: ${sdkLoadError ?? 'unknown'}`)
+  return sdkModule
+}
+
 // The SDK's own refusal vocabulary. Falls back to an EMPTY list — which makes
 // quota detection silent rather than wrong; a private copy of Anthropic's
 // wording is the thing sdkEvents exists to avoid.

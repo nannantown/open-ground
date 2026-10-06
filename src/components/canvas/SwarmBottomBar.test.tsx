@@ -79,6 +79,23 @@ describe('SwarmBottomBar', () => {
     expect(screen.queryByRole('separator')).toBeNull()
   })
 
+  it('keeps its right edge clear of the assistant character (folded and open)', () => {
+    render(<SwarmBottomBar project={project('p1')} />)
+    expect(bar().style.paddingRight).toBe('var(--og-assistant-reserve, 0px)')
+    fireEvent.click(toggle())
+    expect(bar().style.paddingRight).toBe('var(--og-assistant-reserve, 0px)')
+  })
+
+  it('folded, leaves the rest of the character\'s height free above itself; open, none', () => {
+    const { container } = render(<SwarmBottomBar project={project('p1')} />)
+    const floor = () => container.querySelector<HTMLElement>('[data-assistant-floor]')
+    // directly above the bar, in the same column (so the tab above ends higher)
+    expect(floor()?.nextElementSibling).toBe(bar())
+    expect(floor()?.getAttribute('style')).toContain('var(--og-assistant-reserve-y, 0px) - 39px')
+    fireEvent.click(toggle())
+    expect(floor()).toBeNull()
+  })
+
   it('opens upward to the height saved for THIS project', () => {
     localStorage.setItem(swarmBarKey('p1'), JSON.stringify({ h: 420 }))
     render(<SwarmBottomBar project={project('p1')} />)

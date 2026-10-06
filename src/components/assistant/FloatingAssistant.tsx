@@ -4,13 +4,14 @@
 // and it stays there. The talk is the one log on this Mac, shared with the
 // iPhone (useAssistant). Renders nothing unless the routes let this machine in
 // (owner only) — and is held still and unclickable in work mode.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import { ArrowUp, ImagePlus, Mic, MessagesSquare, Phone, X } from 'lucide-react'
 import { AssistantCall, type CallPhase } from './AssistantCall'
 import { AssistantMark, LOOK_COLOR } from './AssistantMark'
-import { ASSISTANT_WINDOW_ATTR } from './assistantWindow'
+import { ASSISTANT_RESERVE_VAR, ASSISTANT_RESERVE_Y_VAR, ASSISTANT_WINDOW_ATTR } from './assistantWindow'
 import { PHOTO_MAX_BYTES, PHOTO_TYPES, photoUrl, useAssistant, type AssistantLook } from './useAssistant'
+import { ProposalFrames } from './ProposalFrames'
 import { useListen, useSpeech } from './useVoice'
 
 const POS_KEY = 'og.assistant.pos'
@@ -21,6 +22,11 @@ const MARGIN = 12
 const GAP = 10
 const PANEL_W = 340
 const PANEL_H = 460
+/** While frames are shown the talk keeps at least this (its newest line and
+ *  answer stay seen, rework 3) — unless only that would keep an open frame from
+ *  fitting whole in a short window: then the frame comes first, a frame that
+ *  cannot be pressed being a dead end. */
+const TALK_MIN = 88
 /** What the mic heard, added to what is already typed (Japanese runs on, English gets a space). */
 export const joinHeard = (typed: string, heard: string) => (/[^\s\u3000-\u30ff\u3400-\u9fff\uff00-\uffef]$/.test(typed) && /^[A-Za-z0-9]/.test(heard) ? `${typed} ${heard}` : typed + heard)
 /** A press that moves less than this is a click, not a drag. */
@@ -33,14 +39,17 @@ interface Pos {
   right: number
   bottom: number
 }
-/** Clear of the agent-team bar folded along a project's bottom edge (~40px). */
-const DEFAULT_POS: Pos = { right: 20, bottom: 72 }
-
-/** On Ground the character sits level with the bottom-left edit (pen) button:
- *  its centre is ~43px up (ToolPalette p-5 + frame), so bottom = 43 - SIZE/2. */
-export const GROUND_POS: Pos = { right: 20, bottom: 18 }
-/** The default (not yet dragged) spot: level with the pen on Ground, clear of the team bar in a project. */
-export const defaultPos = (onGround: boolean): Pos => (onGround ? GROUND_POS : DEFAULT_POS)
+/** The default (not yet dragged) spot, the SAME on every screen (owner
+ *  2026-10-06: it must not jump when a project opens): level with Ground's
+ *  bottom-left edit (pen) button, whose centre is ~43px up (ToolPalette p-5 +
+ *  frame), so bottom = 43 - SIZE/2. In a project the screen makes room for it
+ *  (the two reserves below) — the character does not move for the screen. */
+export const DEFAULT_POS: Pos = { right: 20, bottom: 18 }
+/** While the character sits at DEFAULT_POS: the width the agent-team bar keeps
+ *  free at its right end, and the floor a project keeps free under its tab
+ *  content — the character's extent from the window edge + an 8px gap. */
+export const ASSISTANT_RESERVE_PX = DEFAULT_POS.right + SIZE + 8
+export const ASSISTANT_RESERVE_Y_PX = DEFAULT_POS.bottom + SIZE + 8
 
 /** The owner's dragged spot, or null while they never moved it. */
 const readPos = (): Pos | null => {
@@ -71,7 +80,7 @@ export const panelPlacement = (p: Pos, w: number, h: number) => {
   }
 }
 
-export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: boolean; onGround?: boolean }) => {
+export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const { t, lang } = useT()
   const [open, setOpen] = useState(false)
   const showPanel = open && !disabled
@@ -83,6 +92,7 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
       workMode: t('misc.assistant.workMode'),
       photoType: t('misc.assistant.photoType'),
       photoTooLarge: t('misc.assistant.photoTooLarge'),
+      proposalGone: t('misc.assistant.proposalGone'),
     }),
     [t],
   )
@@ -98,6 +108,21 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
   pendingRef.current = a.pending
   const [pos, setPos] = useState(readPos)
   const [view, setView] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }))
+  // Room is kept only while it is shown at the default spot: once the owner has
+  // DROPPED it elsewhere, the screen takes its full size back. Decided by the
+  // saved spot, not the live one, so the screen does not reflow mid-drag.
+  const [placed, setPlaced] = useState(() => readPos() !== null)
+  const reserve = a.ready && !placed
+  useEffect(() => {
+    if (!reserve) return
+    const s = document.documentElement.style
+    s.setProperty(ASSISTANT_RESERVE_VAR, `${ASSISTANT_RESERVE_PX}px`)
+    s.setProperty(ASSISTANT_RESERVE_Y_VAR, `${ASSISTANT_RESERVE_Y_PX}px`)
+    return () => {
+      s.removeProperty(ASSISTANT_RESERVE_VAR)
+      s.removeProperty(ASSISTANT_RESERVE_Y_VAR)
+    }
+  }, [reserve])
   const [editing, setEditing] = useState(false)
   const [draftName, setDraftName] = useState('')
   const [text, setText] = useState('')
@@ -127,26 +152,105 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
   const [voiceFail, setVoiceFail] = useState('')
   const live = useRef({ inCall, speaker })
   live.current = { inCall, speaker }
+  /** The line last spoken in this call: its reading stopped by the owner, the
+   *  read-aloud part of its answer they heard, whether its answer is in. */
+  const callTurn = useRef<{ stopped: boolean; heard: string; done: boolean; answered: boolean } | null>(null)
+  /** The owner stopped the reading of the line still being answered: the ears open meanwhile. */
+  const [hushed, setHushed] = useState(false)
+  /** What they said after that stop, while the stopped line is still answered — sent once it is. */
+  const held = useRef('')
   const drag = useRef<{ x: number; y: number; from: Pos; to: Pos | null } | null>(null)
   const dragged = useRef(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLElement>(null)
+  /** The height the proposals' frames get: the window's max height less everything
+   *  else in it but the talk (measured, never a guess). The frames' box never
+   *  shrinks below its content within that, the talk gives way instead (rework 2:
+   *  sharing the shrink by size cut a 182 px card by 1–2 px behind a long talk). */
+  const [framesRoom, setFramesRoom] = useState(0)
+  // Reads only refs: the observer below may keep the first copy.
+  const measureRoom = () => {
+    const panel = panelRef.current
+    const box = panel?.querySelector<HTMLElement>('[data-testid="assistant-proposals"]')
+    if (!panel || !box) return
+    const cs = getComputedStyle(panel)
+    const n = (v: string) => parseFloat(v) || 0
+    const kids = Array.from(panel.children) as HTMLElement[]
+    const others = kids.filter((k) => k !== box && k !== listRef.current).reduce((h, k) => h + k.offsetHeight, 0)
+    const all = n(panel.style.maxHeight) - n(cs.paddingTop) - n(cs.paddingBottom) - n(cs.borderTopWidth) - n(cs.borderBottomWidth) - n(cs.rowGap) * (kids.length - 1) - others
+    // The frames' box takes only its content's height, so the talk already gets
+    // everything the frames leave; the reserve only caps how far the frames may
+    // grow into the talk. Given up (down to what is left) when it alone would keep
+    // the FIRST open frame from fitting whole; kept when nothing makes it fit anyway.
+    // Only that frame counts (review E): the faded closed line and the frames stacked
+    // behind it sit later in the clipped box and are simply cut first.
+    const list = listRef.current
+    const first = box.querySelector<HTMLElement>('[data-state="open"]')
+    const need = first ? first.getBoundingClientRect().bottom - box.getBoundingClientRect().top : 0
+    const free = all - need
+    const talkKeeps = list ? Math.min(list.scrollHeight, free >= 0 ? Math.min(TALK_MIN, free) : TALK_MIN) : 0
+    const room = Math.max(0, all - talkKeeps)
+    setFramesRoom((cur) => (Math.abs(cur - room) > 0.5 ? room : cur))
+  }
+  // Again whenever a part of the window changes size on its own (a photo loading, the call screen).
+  const sizes = useRef<ResizeObserver | null>(null)
+  useLayoutEffect(() => {
+    measureRoom()
+    const panel = panelRef.current
+    if (!panel || typeof ResizeObserver === 'undefined') return
+    const ro = (sizes.current ??= new ResizeObserver(() => measureRoom()))
+    ro.disconnect()
+    for (const k of Array.from(panel.children)) ro.observe(k)
+  })
+  useEffect(() => () => sizes.current?.disconnect(), [])
   const nameRef = useRef<HTMLInputElement>(null)
   const lookRef = useRef<HTMLButtonElement>(null)
 
-  // Only a line SPOKEN in a call is answered aloud (still in the call, speaker on).
+  // Only a line SPOKEN in a call is answered aloud (still in the call, speaker on) —
+  // its short spoken part; the whole answer stays in the talk as text. A "let me
+  // look" said before a look-up is read the moment it comes.
+  // A line without look-ups is read a sentence at a time as it is written
+  // (`{say}` pieces, then the answer is marked `said`); the stop key cuts the
+  // reading, and the server is told what of the answer was heard.
   const sendLine = async (line: string, spoken: boolean, pic?: string) => {
     setTurn(null)
+    const cur = { stopped: false, heard: '', done: false, answered: false }
+    if (spoken) {
+      callTurn.current = cur
+      setHushed(false)
+    }
+    const aloud = () => spoken && live.current.inCall && live.current.speaker && !cur.stopped
+    const heard = (piece: string) => () => void (cur.heard += piece)
     const said = await a.say(
       line,
-      (reply) => {
+      (reply, speak, streamed) => {
         setTurn({ said: line, reply, photo: pic })
-        if (spoken && live.current.inCall) setUnspoken(live.current.speaker && speech.speak(reply) ? '' : reply)
+        cur.answered = true
+        if (!spoken || !live.current.inCall) return
+        if (cur.stopped) setUnspoken('')
+        else if (streamed) setUnspoken(aloud() ? '' : speak)
+        else setUnspoken(aloud() && speech.speakAfter(speak, setUnspoken, heard(speak)) ? '' : speak)
       },
       pic,
+      (interim) => void (aloud() && speech.speak(interim)),
+      {
+        say: (piece) => void (aloud() && speech.speakAfter(piece, undefined, heard(piece))),
+        // A look-up began: those pieces were not the answer (what was heard of them neither).
+        hush: () => {
+          cur.heard = ''
+          if (aloud()) speech.cancel()
+        },
+      },
     )
+    cur.done = true
+    // Told first, so the note rides on the very next line (the held one, if any).
+    // A line that got no answer has nothing to cut: the note would land on an older one.
+    if (cur.stopped && cur.answered) await a.hush(cur.heard)
+    const next = held.current
+    held.current = ''
+    if (next && callTurn.current === cur && live.current.inCall) void sendLine(next, true)
     // A refused typed line goes back into the input; a refused spoken one is
     // gone (the call screen says why) — it must not wait in the hidden input.
     if (!said && !spoken) {
@@ -168,14 +272,19 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
   // One pair of ears, serving whichever mode is on. In a call they close while
   // it answers or speaks (the mic would hear the reply and send it back) and
   // while muted — the mic is on only while it is really used.
-  const callHears = inCall && !muted && !voiceFail && a.pending === null && !speech.speaking && !speech.others
+  const callHears = inCall && !muted && !voiceFail && (a.pending === null || hushed) && !speech.speaking && !speech.others
   const ears = useListen({
     // a.ready: signed out mid-listen, the window leaves the screen — the mic goes with it.
     on: a.ready && showPanel && (inCall ? callHears : dictating),
     lang: lang === 'en' ? 'en' : 'ja',
     session: inCall ? 'call' : 'chat',
     onFinal: (heard) => {
-      if (live.current.inCall) return void sendLine(heard, true)
+      if (live.current.inCall) {
+        // Said after a stop while the stopped line is still answered: it goes next.
+        const cur = callTurn.current
+        if (cur?.stopped && !cur.done) return void (held.current = joinHeard(held.current, heard))
+        return void sendLine(heard, true)
+      }
       // Typing took over the start of this utterance: add only what follows.
       // ponytail: a final that revised those words (kana → kanji) is dropped
       // rather than doubled; the owner is typing anyway.
@@ -207,6 +316,19 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
     setInCall(false)
     setVoiceFail('')
     speech.cancel()
+    held.current = ''
+  }
+  /** The call's stop key (or Space): quiet at once, and listen. */
+  const stopReading = () => {
+    speech.cancel()
+    setUnspoken('')
+    const cur = callTurn.current
+    if (!cur || cur.stopped) return
+    cur.stopped = true
+    setHushed(true)
+    if (cur.done && cur.answered) void a.hush(cur.heard)
+    // The stop key leaves the screen: focus stays in the call (Space works next time too).
+    panelRef.current?.focus()
   }
   const startCall = () => {
     setDictating(false)
@@ -217,8 +339,24 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
     setCallSince(null)
     setRedial(false)
     setUnspoken('')
+    setHushed(false)
     setInCall(true)
   }
+  // Space quiets the reading too: the call screen holds the focus (a focused
+  // key or field keeps its own Space).
+  useEffect(() => {
+    if (!inCall || !speech.speaking) return
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== ' ' || e.isComposing || e.repeat) return
+      if (!(e.target instanceof Element) || !panelRef.current?.contains(e.target)) return
+      if (e.target.closest('button, input, textarea, select, [contenteditable="true"]')) return
+      e.preventDefault()
+      stopReading()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stopReading reads refs and stable callbacks
+  }, [inCall, speech.speaking])
 
   useEffect(() => {
     const onResize = () => setView({ w: window.innerWidth, h: window.innerHeight })
@@ -293,10 +431,11 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
   useLayoutEffect(() => {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [a.lines.length, a.pending, a.error, showPanel, expanded, turn])
+    // (also once a proposal's frame has taken its height from the talk)
+  }, [a.lines.length, a.pending, a.error, showPanel, expanded, turn, framesRoom, a.proposals.length])
 
   if (!a.ready) return null
-  const at = clampPos(pos ?? defaultPos(onGround), view.w, view.h)
+  const at = clampPos(pos ?? DEFAULT_POS, view.w, view.h)
   const label = a.name || t('misc.assistant.label')
 
   const onPointerDown = (e: PointerEvent<HTMLButtonElement>) => {
@@ -319,6 +458,7 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
     if (!d?.to) return
     dragged.current = true
     localStorage.setItem(POS_KEY, JSON.stringify(d.to))
+    setPlaced(true)
   }
   const onClick = () => {
     // The click that ends a drag is not a click.
@@ -350,7 +490,7 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
   // 聞いています only while the mic really listens (its ears said ready) — not
   // while other speech keeps it shut or it is reopening after a reply.
   const phase: CallPhase =
-    a.pending !== null ? 'thinking' : speech.speaking ? 'speaking' : callSince === null || redial ? 'connecting' : ears.ready ? 'hearing' : 'waiting'
+    speech.speaking ? 'speaking' : a.pending !== null && !hushed ? 'thinking' : callSince === null || redial ? 'connecting' : ears.ready ? 'hearing' : 'waiting'
   const toggleDictation = () => {
     if (dictating && partial) setText(shown) // stopping keeps the words heard so far
     setVoiceFail('')
@@ -363,9 +503,15 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
   const showTalk = expanded || a.pending !== null || turn !== null || problem !== ''
   const owned = 'max-w-[80%] self-end whitespace-pre-wrap rounded-[12px_12px_4px_12px] bg-plane px-2.5 py-1.5 text-ui leading-relaxed'
   /** The owner's line as the talk shows it: the photo above the words. */
+  const photoLoaded = () => {
+    measureRoom()
+    const el = listRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }
   const ownLine = (key: string, said: string, src?: string) => (
     <div key={key} className="flex max-w-[80%] flex-col items-end gap-1 self-end">
-      {src && <img src={src} alt={t('misc.assistant.photo')} className="max-h-40 max-w-full rounded-[10px] border border-line object-contain" />}
+      {/* A photo takes its height only once loaded: the talk's room and its scroll follow. */}
+      {src && <img src={src} alt={t('misc.assistant.photo')} onLoad={photoLoaded} className="max-h-40 max-w-full rounded-[10px] border border-line object-contain" />}
       {said && <p className={`${owned} max-w-full`}>{said}</p>}
     </div>
   )
@@ -376,6 +522,12 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
   }
 
   const place = panelPlacement(at, view.w, view.h)
+  // The proposals' frames: outside the talk, right above the input (or above the
+  // call). They get whatever height the window really has left — the talk gives
+  // way first — and a frame that still does not fit whole cannot be pressed.
+  const frames = <ProposalFrames proposals={a.proposals} room={framesRoom} busy={a.pressing} onApprove={a.approve} onDrop={(id) => void a.drop(id)} />
+  // While one waits for its button, the call screen leaves out its big character and the unread reply.
+  const proposalOpen = a.proposals.some((p) => p.state === 'open' && p.expiresAt > Date.now())
   const focusRing = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
   return (
@@ -392,7 +544,10 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
           className="fixed z-overlay-float flex flex-col gap-2 rounded-[14px] border border-line bg-bg-card p-3 text-ink shadow-[0_14px_34px_rgb(var(--og-shadow)/0.2)] focus:outline-none"
         >
           {inCall ? (
+            <>
+            {frames}
             <AssistantCall
+              compact={proposalOpen}
               name={label}
               look={a.look}
               phase={phase}
@@ -408,14 +563,16 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
               }}
               onMute={() => setMuted(!muted)}
               onEnd={endCall}
+              onStop={stopReading}
               onRetry={() => {
                 setVoiceFail('')
                 setRedial(true)
               }}
             />
+            </>
           ) : (
             <>
-          {expanded && a.name && <header className="truncate px-1 text-ui font-semibold">{a.name}</header>}
+          {expanded && a.name && <header className="shrink-0 truncate px-1 text-ui font-semibold">{a.name}</header>}
           {showTalk && (
             <div ref={listRef} data-testid="assistant-talk" className="flex min-h-0 flex-auto flex-col gap-2 overflow-y-auto pr-1" aria-live="polite">
               {expanded
@@ -423,23 +580,22 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
                     l.who === 'owner' ? (
                       ownLine(l.id, l.text, l.photo && photoUrl(l.photo))
                     ) : (
-                      <p key={l.id} className={answered}>
-                        {l.text}
-                      </p>
+                      <Fragment key={l.id}>{l.text && <p className={answered}>{l.text}</p>}</Fragment>
                     ),
                   )
                 : a.pending === null &&
                   turn && (
                     <>
                       {ownLine('said', turn.said, turn.photo)}
-                      <p className={answered}>{turn.reply}</p>
+                      {turn.reply && <p className={answered}>{turn.reply}</p>}
                     </>
                   )}
               {a.pending !== null && (
                 <>
                   {ownLine('pending', a.pending, a.pendingPhoto ?? undefined)}
-                  <span className="self-start" data-testid="assistant-thinking">
+                  <span className="self-start flex items-center gap-2" data-testid="assistant-thinking">
                     <AssistantMark look={a.look} size={20} mode="think" />
+                    {a.interim && <span className="text-ui text-ink-muted">{a.interim}</span>}
                   </span>
                 </>
               )}
@@ -495,6 +651,7 @@ export const FloatingAssistant = ({ disabled, onGround = false }: { disabled: bo
               </button>
             </div>
           )}
+          {frames}
           <div className="flex items-center gap-1.5">
               <button
                 ref={lookRef}

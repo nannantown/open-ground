@@ -158,19 +158,29 @@ export const recordPromoted = async (
   }
 }
 
-/** Same column fold as the orchestrator's isDoneCard (undefined boardColumn →
- *  'done' iff the card's `done` flag is set) — restated here, NOT imported, so
- *  the ledger never creates an import cycle with swarmOrchestrator. */
-const isDoneCard = (t: Pick<ProjectTask, 'done' | 'boardColumn'>): boolean =>
-  (t.boardColumn ?? (t.done ? 'done' : 'todo')) === 'done'
+/** Did this card's work actually LAND? Same column fold as the orchestrator's
+ *  isLandedCard (undefined boardColumn → 'done' iff the card's `done` flag is
+ *  set) — restated here, NOT imported, so the ledger never creates an import
+ *  cycle with swarmOrchestrator.
+ *
+ *  ⚠ `done` ALONE IS NOT A LANDING (owner report 2026-10-07). A card the owner
+ *  called off — 取りやめ / 見送り / replaced by new cards — is closed by moving
+ *  it to done WITH `abandoned: true` (og-manage "B: 分けて頼み直す"). Reading
+ *  done as landed told the owner 「本体に取り込まれました」 for work they had
+ *  stopped and that never reached the trunk. An abandoned card is never landed;
+ *  its ledger entry stays unstamped, so the notice, the bell, the weekly KPI and
+ *  the Ground mark all stay silent. (A human move out of done clears the flag —
+ *  server/routes/project.ts — so a revived card can still land later.) */
+const isLandedCard = (t: Pick<ProjectTask, 'done' | 'boardColumn' | 'abandoned'>): boolean =>
+  (t.boardColumn ?? (t.done ? 'done' : 'todo')) === 'done' && t.abandoned !== true
 
 /** Stamp `landedAt` on every promoted entry whose card the Board now shows
- *  done. Called once per dispatch pass with the pass's own fresh task list —
+ *  done and NOT abandoned (see isLandedCard). Called once per dispatch pass with the pass's own fresh task list —
  *  costs one small readFile when nothing is pending, one write only when a new
  *  land is found. Returns how many entries were newly stamped. Never throws. */
 export const sweepLanded = async (
   projectPath: string,
-  tasks: readonly Pick<ProjectTask, 'id' | 'done' | 'boardColumn'>[],
+  tasks: readonly Pick<ProjectTask, 'id' | 'done' | 'boardColumn' | 'abandoned'>[],
   nowIso: string = new Date().toISOString(),
 ): Promise<number> => {
   try {
@@ -178,7 +188,7 @@ export const sweepLanded = async (
     if (entries.length === 0) return 0
     const pending = entries.filter((e) => !e.landedAt)
     if (pending.length === 0) return 0
-    const doneIds = new Set(tasks.filter(isDoneCard).map((t) => t.id))
+    const doneIds = new Set(tasks.filter(isLandedCard).map((t) => t.id))
     let stamped = 0
     for (const e of pending) {
       if (doneIds.has(e.taskId)) {

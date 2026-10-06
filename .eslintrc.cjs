@@ -68,7 +68,7 @@ const banBoth = () => ({
   ],
 })
 
-const { SEAMS, PTY_BY_DESIGN, BOTH_POOLS_DEBT } = require('./scripts/importBoundary.cjs')
+const { SEAMS, PTY_BY_DESIGN, SDK_BY_DESIGN, BOTH_POOLS_DEBT } = require('./scripts/importBoundary.cjs')
 
 module.exports = {
   root: true,
@@ -112,6 +112,7 @@ module.exports = {
     },
     { files: SEAMS, rules: { 'no-restricted-imports': 'off' } },
     { files: PTY_BY_DESIGN, rules: { 'no-restricted-imports': ['error', ban('sdk')] } },
+    { files: SDK_BY_DESIGN, rules: { 'no-restricted-imports': ['error', ban('pty')] } },
     { files: BOTH_POOLS_DEBT, rules: { 'no-restricted-imports': 'off' } },
   ],
 }

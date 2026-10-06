@@ -499,6 +499,7 @@
   **仕上がりは1件1回**(2026-09-24): `sweepLanded` の「本体に取り込まれました」は
   `queueSupplyLanding` で20分保留され、`supply/say` の `landed:[カードID]`(明示IDのみ・題名一致は
   使わない)を含む返事が**届いた時点で**取り下げ。1回の検出ごとに1行・各自の保留時計。返事が来なければ保留明けに届く。§1.11。
+  **取りやめは着地ではない**(2026-10-07): done でも `abandoned:true` のカードは台帳に刻まれず、知らせ・ベル・KPI に出ない。§1.14。
 - **社長モデル(2026-09-23 オーナー決定「僕が喋るのは社長さんだけ」)**: 補給官の画面名は
   「社長 / President」(i18n と Remote Control 名のみ — 卓の識別キー `SUPPLY_DESK_LABEL='補給官'`
   は**変えない**)。① ワーカーの質問は **司令官レーン**(`Escalation.routedTo:'commander'`)
@@ -785,13 +786,31 @@
   置き直しは `forgetTail` がディスクの `floor` も消して保存する(再起動後に古い床へ戻らない)。起動時は
   `startPhoneLink` が先に `getSettings()` で業務モードの写しを温めてから繋ぐ(温まる前は「OFF」に見えるため)。
   番人 = `phoneLink.test.ts`(再起動をまたぐ業務モード3本)/ `phoneLinkBoot.test.ts`(起動時に中継へ1回も繋がない)。
-- アシスタント(全プロジェクトまとめ役, 2026-10-02): `src/lib/server/phoneAssistant.ts`(1行=隠し PTY の claude 1回・
-  canvasAi `runFileTask` のファイル受け渡し・状況は Mac が組んで渡す・カードは Mac が検証して `mutateProjectData` で1枚)/
-  `phoneLink.ts` の `assistantSay`(`projectId:"assistant"`・社長の卓には入れない)/ 話し方 = `~/.openground/assistant-style.md`
-  (設定 → iPhone の欄・route `/api/phone-link/assistant-style`)。テスト `phoneAssistant.test.ts` / `phoneAssistantLaunch.test.ts`(実際の起動 argv = Write のみ・閉じ込め・bypass 無し)/ `phoneLink.test.ts`。
+- アシスタント(全プロジェクトまとめ役, 2026-10-02 / 2026-10-06 から常駐セッション): `src/lib/server/phoneAssistant.ts`(1行の流れ・
+  状況まとめ `assistantDigest`・起動時の system prompt `buildSessionPrompt`・読み上げ部分 `spokenPart`・畳み込みは別キュー `foldIdleAssistantTalk`)/
+  `assistantSession.ts`(常駐 1 本の Agent SDK セッション・haiku・`tools: []`+自前道具だけを通す PreToolUse 門・15分無言/40行/鍵変化で張り直し・
+  道具の前の一言=`onInterim`)/ `assistantTools.ts`(読むだけの `read_file`/`list_dir`/`search` = 登録プロジェクトと ~/.openground だけ・実パス判定・
+  秘密ファイル拒否・秘密値は [hidden]・1回の読みは 40KB まで・1MB 超の写真は sips で縮小・`status`)/
+  **提案(2026-10-06 オーナー決定「全部Aで」)** = `assistantProposals.ts`: `make_card`/`tell_commander` は案を作るだけ(メモリ上・Board にも会話記録にも書かない)、
+  `withdraw` で「やめて」。実行の入口は `approveProposal(id, hash)` の1本だけ = 画面の枠が**表示している文字**(textContent)から作った SHA-256
+  (`proposalHash`)が一致した時だけ、枠の title/body そのままのカードを1枚書く/その行をそのまま司令官へ(`commanderRelay.ts`)。
+  **声・文字の「うん」は何も実行しない**(解釈もしない。モデルは「画面のボタンで決めてね」と返す)。見えない文字は拒否・400字まで・同時3件・10分で失効。
+  覚える道具は無い = 要約メモ(畳み込み)は**オーナーの行だけ**を読む(`runFold` の `owner()`)。
+  窓 = `ProposalFrames.tsx`(入力欄のすぐ上・会話の外・枠が箱に丸ごと収まらない/測れないと「出す」を押せない)・route
+  `GET /api/phone-link/assistant/proposals`・`POST …/proposals/:id/{approve,drop}`。iPhone = 封フレーム `assistant-proposals`(Mac→電話)/
+  `assistant-proposal`(電話→Mac・同じ入口 `pressProposal`)・仕様と照合印のテストベクタ = docs/PHONE_LINK.md「Assistant proposals」(中継 worker の再デプロイ要)。
+  `phoneLink.ts` の `assistantSay`(`projectId:"assistant"`・最終フレームに `speak`・v1 ペアリングは `pair-again` で断る)/ 窓の `POST /api/phone-link/assistant/say` `stream:true`
+  = `{interim}` 行(道具を使わない行は `{say}` = 書けた文から1文ずつ・`spokenSoFar`、道具が始まれば `{hush}`)→答え(`said`)・
+  `…/assistant/hush` = 通話の止めるキー(名前・キャラ・状態の行が読み上げ中だけボタン/Space)→ 聞こえた所までをモデルに伝える・`…/assistant/warm` = 窓を開いたら先に起こす / 話し方 = `~/.openground/assistant-style.md`。
+  テスト `assistantProposals.test.ts`(見えない文字・400字・照合印・二重押し)/ `assistantTools.test.ts`(~/.ssh 拒否・symlink・秘密・細工ファイルの線形時間)/
+  `assistantSession.test.ts`(起動オプション・門・常駐・一言)/ `phoneAssistant.test.ts`(うんでは何も起きない・ボタンだけ・メモはオーナーの行だけ)/
+  `phoneAssistantLaunch.test.ts`(畳み込み run の argv = Write のみ)/ `phoneLink.test.ts`(電話のボタン)/ `FloatingAssistant.test.tsx`(枠・隠れたら押せない)/
+  `e2e/assistant-proposal-frames.spec.ts`(実 Chromium・ビルド済みCSSで: 長い会話のチャット中も通話中も枠が切れず押せる=jsdom では flex の配分が見えない)。枠の箱は縮まない・上限は窓の最大高さ−会話以外の部品−会話に残す 88px(実測・ただし枠がそれでしか収まらない短い窓では枠を優先)。閉じた案は最後に閉じた1件(`closedAt`)だけ薄い1行・出した案は緑のチェック(会話の場所を取らない)。写真は読み込み後に測り直し・最下段へ。
+  実機確認 `npx tsx scripts/verify-assistant-live.mts`(本物の claude・使い捨て HOME)/ 秒数 `node scripts/measure-assistant-latency.mjs [baseUrl] "…"`。
+  罠: SDK 0.3.220 は `settingSources` 省略で**全設定を読む**(`[]` 必須)/ 門が throw すると fail-open なので catch で deny。
 - アシスタントの記憶(2026-10-03): `src/lib/server/assistantMemory.ts`(`~/.openground/assistant/` 0700 — 会話の記録 `log/YYYY-MM-DD.jsonl`
   を既定30日で日ごと削除・要約メモ `memory.md` 1本を既定4000字以下に保つ・`state.json` = どこまで要約に畳んだか・`config.json` = 日数/字数)。
-  毎回読むのは 要約メモ + まだ畳んでいない直近の会話だけ(30行/16000字を超えたら古い分を畳ませる = `phoneAssistant.ts` の `turn`)。
+  セッション起動時に読むのは 要約メモ + まだ畳んでいない会話だけ(30行/16000字・1日超えで古い分を畳む = 行の後に別キューの `foldIdleAssistantTalk`)。
   画面 = `AssistantMemorySetting.tsx`(設定 → iPhone・画面から話す1行/見る/1件消す/全部消す/日数と字数)・route `/api/phone-link/assistant/{log,memory,config,say}`。
   iPhone は `assistant-history` で Mac から取りに来る(v2 ペアリングのみ・v1 は `pair-again` で記録を出さない)。封は main の v2 封に一本化
   (`phoneLink.ts` の `SEALED_TYPES` に `assistant` / `assistant-history`)。取りに来た後の話は `type:"assistant"` で流し中継は保存しない
@@ -812,7 +831,10 @@
   ドラッグで移動 `localStorage og.assistant.pos`・クリック/Esc で会話窓・名前と色)/ `useAssistant.ts`(会話の状態は常駐ボタン側 =
   閉じても答えは届き未読の点が付く)/ `AssistantMark.tsx`(キャラクター = アプリアイコンの形 = 太い輪+8つの切れ込み `OpenGroundMark.tsx` の `CarvedRingMask` を穴まで届く4つの切れ込みで4片に分けて・片ごとに呼吸/まばたき/考え中は色が巡る = `globals.css` の `.og-ast*`)。`App.tsx` で1回マウント・業務モードは薄く押せない・
   オーナー以外は描かない(`/api/phone-link/*` は ownerOnly)。名前と色 = `config.json` の `name`/`look`(`assistantMemory.ts`)→
-  iPhone へは `projects` 先頭と `assistant-history` に載る。設計正典(iPhone 版もこれだけで作る)= `docs/ASSISTANT_DESIGN.md`。
+  iPhone へは `projects` 先頭と `assistant-history` に載る。既定の位置はどの画面でも同じ右下(`DEFAULT_POS` = Ground のペンと同じ高さ・2026-10-06)、
+  プロジェクトではエージェントチームのバーが右端を空け(`--og-assistant-reserve`)、タブの下にはロゴの上端+隙間までの床を空ける
+  (`--og-assistant-reserve-y` → `AssistantFloor.tsx`、畳んだバーの分は差し引く・バーが無ければ床だけ。名前は `assistantWindow.ts`、動かして離した後は空けない)。
+  実ブラウザ計測 = `e2e/assistant-corner.spec.ts`(ドロワーの実行・Canvas の元に戻す/やり直しがロゴに当たる割合 0%)。設計正典(iPhone 版もこれだけで作る)= `docs/ASSISTANT_DESIGN.md`。
   テスト `FloatingAssistant.test.tsx` / `AssistantMark.test.tsx`(20枚のかけらに戻す/切れ込みが小さいロゴ印とずれると赤)/ `assistantMemory.test.ts` / `phoneLink.test.ts`。
 - アシスタントの窓と声(2026-10-04): 空の入力欄は薄い「話しかける…」だけ。会話はふだん畳み(今のやりとり=`turn` だけ表示)、
   `MessagesSquare` で広げる(`localStorage og.assistant.expanded`)。2026-10-06 から2モード(`docs/ASSISTANT_DESIGN.md` §1):
@@ -829,6 +851,8 @@
   その既定入力だけを聞いて何も拾わなかった → og-listen は既定入力が3ch以上なら本体マイクを選び、全chを1本に足してから認識へ渡す。
   ただし MacBook のふたが閉じているとき(`AppleClamshellState`)は本体マイクを選ばない(一覧には出るが無音 = 同じ症状の再発)。既定入力が本体マイクでもふたが閉じていれば別のマイク、無ければ `unavailable`。
   ふたの開け閉めは音声の通知が来ないので、聞いている間は2秒ごとに選び直し、変わった時だけ再起動(`Listener.watch`)。
+  話し終わり = `pauseFor`(言い切り0.5秒・言いかけ1.4秒・他0.8秒、聞こえた文字を待たずにすぐ渡す)・確認 `og-listen --pause <言葉>`・
+  計測 `og-listen --feed <音声>`(録音を実時間で流す・マイク不要)= `scripts/measure-voice-latency.mjs`。
   判定 = `chooseInput`・確認 = `og-listen --choose <ch> <内蔵0|1> <ふた閉0|1> [<既定が内蔵0|1>]` / `og-listen --which`(いま選ぶ入力とふたの状態)。再起動は stderr に `restart (理由)` と出る(ループ確認用)。
   番人 `src/lib/server/ogListenNative.test.ts`(ソースからその場でビルド: 選び方の表 = swiftc があれば / 12ch の3本目にだけ声 → 文字になる = さらに Kyoko の声と音声認識の許可があれば)。
   テスト `FloatingAssistant.test.tsx` / `assistantListen.test.ts` /
