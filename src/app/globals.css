@@ -553,39 +553,43 @@ a:focus-visible {
   0% { opacity: 1; }
   35%, 100% { opacity: 0.45; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .og-ast-shard,
-  .og-ast-blink,
-  .og-ast[data-mode='think'] .og-ast-shard {
-    animation: none;
-  }
-  /* Still while thinking: the mark dims. */
-  .og-ast[data-mode='think'] .og-ast-shard {
-    opacity: 0.45;
-  }
+/* ── The STILL look ──────────────────────────────────────────────────────────
+   One set of rules for every moment the app holds still, so "still" can only
+   ever look one way. `html[data-motion='still']` is set by src/lib/presence.ts
+   when the OS asks for reduced motion (prefers-reduced-motion) OR when nobody
+   is looking at the window (not in front, or 2 min without input — a loop
+   nobody sees still costs a frame per refresh). The status beacons (terminal
+   pulse, the claude / swarm-worker scanning edge, the running dot, the playing
+   EQ bars, the thinking ring) are status hints, never load-bearing: the colour
+   still distinguishes the state; only the movement stops — each at its full,
+   resting look, never frozen mid-fade (a running dot stopped at its faint
+   half-beat reads like a faded idle seat). EQ bars rest at distinct static
+   heights so the pictogram still reads as an equalizer.
+   A NEW looping animation needs a rule here — guarded by
+   src/lib/stillMotion.test.ts. */
+html[data-motion='still'] .og-ast-shard,
+html[data-motion='still'] .og-ast-blink,
+html[data-motion='still'] .og-ast[data-mode='think'] .og-ast-shard {
+  animation: none;
 }
-
-/* Respect reduced-motion: the status beacons (terminal pulse, the claude /
-   swarm-worker scanning edge, the running dot, the playing EQ bars) are status
-   hints, never load-bearing — so honour the OS "reduce motion" preference by
-   holding them still. The colour still distinguishes the state; only the
-   movement stops (EQ bars freeze at distinct static heights so the pictogram
-   still reads as an equalizer). */
-@media (prefers-reduced-motion: reduce) {
-  .term-pulse,
-  .run-scan,
-  .run-pulse,
-  .jump-flash {
-    animation: none;
-  }
-  .eq-bars > span {
-    animation: none;
-    transform: scaleY(0.45);
-  }
-  .eq-bars > span:nth-child(2) {
-    transform: scaleY(0.9);
-  }
-  .eq-bars > span:nth-child(3) {
-    transform: scaleY(0.65);
-  }
+/* Still while thinking: the mark dims. */
+html[data-motion='still'] .og-ast[data-mode='think'] .og-ast-shard {
+  opacity: 0.45;
+}
+html[data-motion='still'] .og-spin,
+html[data-motion='still'] .term-pulse,
+html[data-motion='still'] .run-scan,
+html[data-motion='still'] .run-pulse,
+html[data-motion='still'] .jump-flash {
+  animation: none;
+}
+html[data-motion='still'] .eq-bars > span {
+  animation: none;
+  transform: scaleY(0.45);
+}
+html[data-motion='still'] .eq-bars > span:nth-child(2) {
+  transform: scaleY(0.9);
+}
+html[data-motion='still'] .eq-bars > span:nth-child(3) {
+  transform: scaleY(0.65);
 }

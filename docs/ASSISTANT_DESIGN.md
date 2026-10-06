@@ -57,16 +57,37 @@ pieces, and the same motions move those pieces (§4, §5).
   and its answer); closing clears it unless the answer is still coming. The
   toggle unfolds the whole talk as a light chat and folds it again; the
   choice is remembered (`localStorage` `og.assistant.expanded`).
-- Voice, both ways, free (owner 2026-10-04): a mic button inside the input
-  (only where the Mac can listen). Off by default; pressed = listening (the
-  button fills and pulses, what is heard so far shows as the faint line),
-  pressed again = mute (listening and reading stop). Each finished utterance
-  is sent as a line; the answer to a SPOKEN line is read aloud
-  (`speechSynthesis`); a typed line — even with voice on — is not. While an
-  answer is coming or being read, the mic is closed (it would hear the
-  reading). Closing the window turns voice off. Ears = macOS's own speech
-  recognizer (`native/og-listen`, on-device where the language allows); no
-  paid voice API.
+- Two modes, kept apart (owner 2026-10-06, replacing the 2026-10-04
+  "voice on / mute" mic), both only where the Mac can listen:
+  - **Chat — typing by voice.** The mic in the input is a toggle: pressed =
+    on (the button fills and pulses), what is said goes INTO the input as
+    text (the words being heard show live; finished ones stay), pressed
+    again or sending = off. It never sends by itself and nothing is read
+    aloud. Typing while it listens takes over the words heard so far. (The
+    iPhone's chat mic is hold-to-talk; the Mac's is press-on / press-off, as
+    the owner asked.)
+  - **Call — talking by voice** (iPhone `CallView.swift`). While the input is
+    empty and no photo is picked, the key where send sits is a call key
+    (`Phone`, the assistant's colour). The window becomes the call screen:
+    name, the character (thinking while an answer is made), one state line —
+    発信中 / 聞いています / 考えています / 話しています / 消音中 /
+    少しお待ちください (Calling… / Listening / Thinking / Speaking / Muted /
+    One moment — the mic is shut for a moment: reopening after a reply, or
+    other app speech playing; 聞いています only once the mic says it is ready) — the call's time (m:ss), and
+    three round keys with tooltips only: speaker (`Volume2`, lit = answers
+    read aloud; off mid-answer stops the reading), end (`PhoneOff`, accent),
+    mute (`MicOff`, lit = the mic is shut). Each finished utterance is sent;
+    while an answer is made or read the mic is shut (it would hear the
+    reading). A refused mic shows why, with a retry key (`Phone`) in place
+    of speaker/mute; it never redials by itself. End, Esc or closing the
+    window ends the call. Other app speech (a Research digest read aloud)
+    is never cut or queued behind: while it plays the call's mic stays shut,
+    and an answer that could not be read (that, or speaker off) is shown on
+    the call screen instead. Signing out (the routes refuse) ends the call and
+    its reading; signing back in returns to the chat with the mic off.
+  Ears = macOS's own speech recognizer (`native/og-listen`, on-device where
+  the language allows); no paid voice API. The mic is on only while one of
+  the two modes really listens.
 
 ## 2. The data both screens read
 
@@ -119,6 +140,13 @@ the app's `text-ui`), name 13 pt semibold.
 All motion is slow and small, and it is the ring's 4 pieces that move (§5 gives the
 geometry). With the system's "reduce motion" on, every loop stops and the
 character is drawn still.
+
+On the Mac the character is also drawn still — exactly as under reduce
+motion — while nobody is looking at the window (it is not in front, or there
+has been no mouse / key input for 2 minutes), and moves again on return
+(`src/lib/presence.ts`, 2026-10-06). A
+loop nobody sees still makes the renderer and GPU draw every refresh: measured,
+the breathing alone kept OPEN GROUND at ~20% CPU with nothing else running.
 
 | state | how it looks |
 |---|---|
@@ -199,10 +227,12 @@ transitions beyond the system's own.
 - `src/components/assistant/useAssistant.ts` — the talk state, kept in the
   always-mounted button so closing never drops a line being answered; reads
   the log every 5 s while open (the phone talks into the same log).
-- `src/components/assistant/useVoice.ts` — voice on/off, the listen stream
-  (`GET /api/phone-link/assistant/listen` → `src/lib/server/assistantListen.ts`
-  → `bin/og-listen`, built by `scripts/build-listen.mjs`), reading answers
-  aloud. macOS asks the app itself for the mic and speech-recognition
+- `src/components/assistant/useVoice.ts` — `useListen` (the listen stream
+  `GET /api/phone-link/assistant/listen` → `src/lib/server/assistantListen.ts`
+  → `bin/og-listen`, built by `scripts/build-listen.mjs`) and `useSpeech`
+  (reading answers aloud, cancelling only its own). Which mode the ears serve
+  is decided in `FloatingAssistant.tsx`; the call screen is
+  `src/components/assistant/AssistantCall.tsx`. macOS asks the app itself for the mic and speech-recognition
   permissions, so both usage strings sit in `package.json` `mac.extendInfo`.
 - `src/components/assistant/AssistantMark.tsx` — the character: the app icon's
   carved ring (`CarvedRingMask` from `OpenGroundMark.tsx`) split into 4

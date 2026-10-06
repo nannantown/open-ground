@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { mkdtemp, mkdir, symlink, stat } from 'fs/promises'
+import { mkdtemp, mkdir, rm, symlink, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join, sep } from 'path'
-import { projectUUIDFromPath, isValidProjectPath } from './projectDataPath'
+import { projectUUIDFromPath, isValidProjectPath, resetRegistryRootsMemo } from './projectDataPath'
+import { removeProjectEntry } from './registry'
+import { getSettings, setSettings } from './store'
 import { projectCentralDir, centralWorktreesDir } from './paths'
 import { readProjectData, writeProjectData } from './projectData'
 import { createCanvas } from './canvasData'
@@ -98,5 +100,44 @@ describe('no repo pollution', () => {
     // And it round-trips through the resolver.
     const back = await readProjectData(dir)
     expect(back.tasks[0].id).toBe('t1')
+  })
+})
+
+// The canonical roots of an unchanged registry are reused for a few seconds
+// (2026-10-06): GET /api/ground/lamps resolved ~5 paths per project every 5 s,
+// each re-realpathing every registered root — O(N²), ≈470 ms of CPU per poll on
+// the owner's machine. The REGISTRY itself is still read fresh on every call.
+describe('registry roots memo', () => {
+  // MUTATION that turns this red: key the memo on time alone (drop the entries
+  // from the key) — the removed project would still be accepted.
+  it('refuses a project the moment it is removed, even right after a lookup', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'og-memo-rm-'))
+    await registerTestProject(dir)
+    expect(await isValidProjectPath(dir)).toBe(true)
+    await removeProjectEntry(dir)
+    expect(await isValidProjectPath(dir)).toBe(false)
+  })
+
+  // The one thing that may age: the filesystem's answer for an UNCHANGED entry.
+  // A registered root stored as a symlink (hand-edited settings) keeps its old
+  // canonical form until the window passes. MUTATION that turns this red:
+  // remove the memo (every call re-realpaths, so the re-point shows at once).
+  it('reuses the canonical roots of an unchanged registry within the window', async () => {
+    const a = await mkdtemp(join(tmpdir(), 'og-memo-a-'))
+    const b = await mkdtemp(join(tmpdir(), 'og-memo-b-'))
+    const linkDir = await mkdtemp(join(tmpdir(), 'og-memo-link-'))
+    const link = join(linkDir, 'proj')
+    await symlink(a, link)
+    const projects = (await getSettings()).projects ?? []
+    await setSettings({ projects: [...projects, { id: 'memo-sym', path: link, addedAt: new Date().toISOString() }] })
+    resetRegistryRootsMemo()
+    expect(await projectUUIDFromPath(join(a, 'x'))).toBe('memo-sym')
+    await rm(link)
+    await symlink(b, link)
+    // Within the window: still the old canonical root.
+    await expect(projectUUIDFromPath(join(b, 'x'))).rejects.toThrow(/no registered project/)
+    resetRegistryRootsMemo()
+    expect(await projectUUIDFromPath(join(b, 'x'))).toBe('memo-sym')
+    expect(await isValidProjectPath(join(a, 'x'))).toBe(false)
   })
 })

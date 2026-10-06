@@ -1,6 +1,7 @@
-import { readdir, readFile, stat } from 'fs/promises'
+import type { Stats } from 'fs'
+import { open, readdir, stat } from 'fs/promises'
 import { homedir } from 'os'
-import { basename, join } from 'path'
+import { basename, join, sep } from 'path'
 import type { ClaudeUsage, UsageBreakdown, UsageBreakdownRow, UsageSourceKind } from '../types'
 
 /** Claude Code's max context window, in tokens. The auto-compact denominator for
@@ -30,7 +31,7 @@ const claudeProjectsDir = () => join(homedir(), '.claude', 'projects')
  *  ({@link collectClaudeUsage} and {@link collectUsageBreakdown}) and a second
  *  copy of this rule is how the two would silently drift into disagreeing about
  *  the same week. Returns false when the line has already been counted. */
-const countOnce = (seen: Set<string>, parsed: UsageLine): boolean => {
+const countOnce = (seen: Set<string>, parsed: { messageId?: string; requestId?: string }): boolean => {
   if (!parsed.messageId) return true // no id to dedupe on — count it
   const key = parsed.requestId ? `${parsed.messageId}|${parsed.requestId}` : parsed.messageId
   if (seen.has(key)) return false
@@ -130,6 +131,203 @@ const parseLine = (raw: string): UsageLine | null => {
   }
 }
 
+// ─── Incremental transcript reading (2026-10-06) ─────────────────────────────
+// WHY: every reader here used to `readFile` WHOLE transcripts on every call. The
+// beacon (GET /api/terminal/active, polled every 5 s by up to three panels)
+// resolves every live claude pane, and the HUD polls /api/usage every 60 s — on
+// the owner's machine that was 14 desk transcripts (≈160 MB) re-read and
+// re-decoded every few seconds, measured as the server's largest idle CPU cost
+// (CPU profile of the packaged app after 12 h: readFileHandle + string_decoder +
+// sessionContextTokens + parseLine + collectClaudeUsage ≈ the whole JS share of
+// a process sitting at 50–90% CPU with no work running).
+//
+// Transcripts are append-only JSONL, so each file is read ONCE and afterwards
+// only from where the last read stopped. An unchanged file costs one stat. The
+// bytes just before the resume point are kept and re-checked on every resume,
+// so a file that was rewritten instead of appended to is detected and re-read
+// from the start rather than parsed mid-line.
+
+/** One assistant turn's usage, as read from a transcript line. */
+interface UsageEntry {
+  ts: number // Date.parse(timestamp) — NaN when unparseable (callers skip it)
+  model?: string
+  messageId?: string
+  requestId?: string
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+/** What one line contributes: a usage entry and/or a new context fill
+ *  (undefined = the line says nothing about the fill). */
+interface LineRead {
+  entry: UsageEntry | null
+  fill: number | null | undefined
+}
+
+interface FileScan {
+  size: number
+  mtimeMs: number
+  /** Bytes consumed: the end of the last newline-terminated line. */
+  offset: number
+  /** The bytes just before `offset`, re-read on resume to prove an append. */
+  guard: Buffer
+  /** Every usage line in [0, offset), in file order. */
+  entries: UsageEntry[]
+  /** The context fill as of `offset` (see {@link sessionContextTokens}). */
+  fill: number | null | undefined
+  /** The unterminated last line (claude mid-write, or a fixture without a final
+   *  newline) — counted, but NOT consumed: it is re-read on the next change. */
+  tail: LineRead | null
+}
+
+const GUARD_BYTES = 64
+const scans = new Map<string, FileScan>()
+const scansInFlight = new Map<string, Promise<FileScan | null>>()
+
+const readLineUsage = (line: string): LineRead | null => {
+  const boundary = compactBoundaryPostTokens(line)
+  if (boundary !== undefined) return { entry: null, fill: boundary }
+  const parsed = parseLine(line)
+  if (!parsed) return null
+  const u = parsed.usage
+  const entry: UsageEntry = {
+    ts: Date.parse(parsed.timestamp),
+    model: parsed.model,
+    messageId: parsed.messageId,
+    requestId: parsed.requestId,
+    input: u.input_tokens ?? 0,
+    output: u.output_tokens ?? 0,
+    cacheRead: u.cache_read_input_tokens ?? 0,
+    cacheWrite: u.cache_creation_input_tokens ?? 0,
+  }
+  return { entry, fill: entry.input + entry.cacheRead + entry.cacheWrite }
+}
+
+const emptyScan = (): FileScan => ({
+  size: 0,
+  mtimeMs: 0,
+  offset: 0,
+  guard: Buffer.alloc(0),
+  entries: [],
+  fill: undefined,
+  tail: null,
+})
+
+const advanceScan = async (file: string, known?: Stats): Promise<FileScan | null> => {
+  let st: Stats
+  try {
+    st = known ?? (await stat(file))
+  } catch {
+    scans.delete(file)
+    return null
+  }
+  let s = scans.get(file)
+  if (s && s.size === st.size && s.mtimeMs === st.mtimeMs) return s
+  // Shrunk, or the same size with a new mtime: rewritten, not appended.
+  if (!s || st.size < s.offset || st.size === s.size) s = emptyScan()
+
+  let fh
+  try {
+    fh = await open(file, 'r')
+  } catch {
+    scans.delete(file)
+    return null
+  }
+  try {
+    for (;;) {
+      const start = s.offset - s.guard.length
+      const buf = Buffer.allocUnsafe(Math.max(0, st.size - start))
+      const { bytesRead } = await fh.read(buf, 0, buf.length, start)
+      const got = buf.subarray(0, bytesRead)
+      if (s.offset > 0 && !got.subarray(0, s.guard.length).equals(s.guard)) {
+        s = emptyScan() // the bytes before the resume point changed: rewritten
+        continue
+      }
+      const fresh = got.subarray(s.guard.length)
+      const lastNl = fresh.lastIndexOf(0x0a)
+      const done = lastNl < 0 ? 0 : lastNl + 1
+      if (done > 0) {
+        for (const line of fresh.toString('utf8', 0, done).split('\n')) {
+          const r = readLineUsage(line)
+          if (!r) continue
+          if (r.entry) s.entries.push(r.entry)
+          if (r.fill !== undefined) s.fill = r.fill
+        }
+        s.offset += done
+        const consumed = got.subarray(0, s.guard.length + done)
+        s.guard = Buffer.from(consumed.subarray(Math.max(0, consumed.length - GUARD_BYTES)))
+      }
+      s.tail = done < fresh.length ? readLineUsage(fresh.toString('utf8', done)) : null
+      break
+    }
+  } catch {
+    scans.delete(file)
+    return null
+  } finally {
+    await fh.close().catch(() => {})
+  }
+  s.size = st.size
+  s.mtimeMs = st.mtimeMs
+  scans.set(file, s)
+  return s
+}
+
+/** The file's scan, brought up to date. One read per file at a time: two
+ *  pollers landing together share it rather than reading the file twice (the
+ *  guard check would still catch a concurrent resume and re-read from 0). */
+const scanFile = (file: string, known?: Stats): Promise<FileScan | null> => {
+  const running = scansInFlight.get(file)
+  if (running) return running
+  const p = advanceScan(file, known).finally(() => scansInFlight.delete(file))
+  scansInFlight.set(file, p)
+  return p
+}
+
+const forEachEntry = (s: FileScan, fn: (e: UsageEntry) => void): void => {
+  for (const e of s.entries) fn(e)
+  if (s.tail?.entry) fn(s.tail.entry)
+}
+
+const fillOf = (s: FileScan): number | null =>
+  (s.tail && s.tail.fill !== undefined ? s.tail.fill : s.fill) ?? null
+
+/** `${root}\0${sessionId}` → transcript path, so a live pane's file is found
+ *  once rather than by walking ~/.claude/projects on every beacon poll. */
+const sessionPaths = new Map<string, string>()
+
+/** The widest window /api/usage/breakdown serves (its one caller, UsageHud,
+ *  asks for 7). It also bounds what the scans keep in memory: on the owner's
+ *  machine a 30-day keep held ~30–35 MB of entries on the heap for windows
+ *  nobody reads. */
+export const USAGE_BREAKDOWN_MAX_DAYS = 7
+const SCAN_KEEP_MS = USAGE_BREAKDOWN_MAX_DAYS * 24 * 60 * 60 * 1000 + FILE_MTIME_SLACK_MS
+
+/** Drop the scans under `root` that this walk no longer lists (deleted by
+ *  Claude Code's cleanup) or that aged past every reader's window, and the
+ *  entries too old for any reader inside a long-lived transcript — the app
+ *  runs for weeks, and each scan holds one entry per assistant turn. */
+const pruneScans = (root: string, listed: readonly string[], now: number): void => {
+  const keep = new Set(listed)
+  const cut = now - SCAN_KEEP_MS
+  scans.forEach((s, file) => {
+    if (!file.startsWith(root + sep)) return
+    if (!keep.has(file) || s.mtimeMs < cut) {
+      scans.delete(file)
+      return
+    }
+    // Lines are appended in time order, so a stale head is the cheap check.
+    if (s.entries.length > 0 && s.entries[0].ts < cut) s.entries = s.entries.filter((e) => !(e.ts < cut))
+  })
+}
+
+/** Forget every scan and resolved path — for tests that reuse paths. */
+export const resetTranscriptScans = (): void => {
+  scans.clear()
+  sessionPaths.clear()
+}
+
 // `projectsDir` defaults to the real ~/.claude/projects; tests pass a fixture
 // dir so the log-aggregation source can be exercised without touching the real
 // home (see claudeUsage.test.ts).
@@ -143,6 +341,7 @@ export const collectClaudeUsage = async (
   let files: string[] = []
   try {
     files = await walkJsonl(root)
+    pruneScans(root, files, Date.now())
   } catch {
     // ~/.claude/projects missing — empty usage.
   }
@@ -173,46 +372,31 @@ export const collectClaudeUsage = async (
     }
     if (st.mtimeMs < fileCutoffMs) continue
 
-    let raw: string
-    try {
-      raw = await readFile(file, 'utf8')
-    } catch {
-      continue
-    }
+    const scan = await scanFile(file, st)
+    if (!scan) continue
+    forEachEntry(scan, (e) => {
+      const ts = e.ts
+      if (!Number.isFinite(ts) || ts < cutoffMs) return
 
-    // Walk lines once; jsonl writes append-only so reading whole file is fine
-    // for the typical (small-to-mid) Claude session log.
-    const lines = raw.split('\n')
-    for (const line of lines) {
-      const parsed = parseLine(line)
-      if (!parsed) continue
-      const ts = Date.parse(parsed.timestamp)
-      if (!Number.isFinite(ts) || ts < cutoffMs) continue
+      if (!countOnce(seen, e)) return
 
-      if (!countOnce(seen, parsed)) continue
-
-      const u = parsed.usage
-      const ti = u.input_tokens ?? 0
-      const to = u.output_tokens ?? 0
-      const tcr = u.cache_read_input_tokens ?? 0
-      const tcw = u.cache_creation_input_tokens ?? 0
-      input += ti
-      output += to
-      cacheRead += tcr
-      cacheWrite += tcw
+      input += e.input
+      output += e.output
+      cacheRead += e.cacheRead
+      cacheWrite += e.cacheWrite
       messageCount += 1
       if (oldestMs === null || ts < oldestMs) oldestMs = ts
       if (newestMs === null || ts > newestMs) {
         newestMs = ts
-        if (parsed.model) currentModel = parsed.model
+        if (e.model) currentModel = e.model
       }
 
-      if (parsed.model) {
+      if (e.model) {
         // Bill model usage by the same metric as the headline total
         // (input + output + cache writes — cache reads are heavily discounted).
-        byModel[parsed.model] = (byModel[parsed.model] ?? 0) + ti + to + tcw
+        byModel[e.model] = (byModel[e.model] ?? 0) + e.input + e.output + e.cacheWrite
       }
-    }
+    })
   }
 
   const total = input + output + cacheWrite
@@ -266,48 +450,38 @@ export const sessionContextTokens = async (
   projectsDir: string = claudeProjectsDir(),
 ): Promise<number | null> => {
   if (!sessionId) return null
+  // The fill is the LAST fill-bearing line (readLineUsage): a reply's usage sum,
+  // or a COMPACTION newer than the last reply — the context the session now
+  // carries is what the compaction left, not what the last reply carried, and
+  // no reply may follow for hours on a quiet desk. Without that the fill read
+  // stays at the PRE-compaction size until the next turn, so the gauge shows a
+  // full desk that is not, and the desk context cap (supplyContextCap.ts) would
+  // re-send `compact` into a desk that already did it. Measured 2026-09-18:
+  // claude writes `{type:'system', subtype:'compact_boundary',
+  // compactMetadata:{preTokens, postTokens}}` for both auto and manual
+  // compaction (PTY and SDK alike). An unreadable postTokens ⇒ null
+  // ("unknown"), never the stale pre-compaction number.
+  const key = `${projectsDir}\0${sessionId}`
+  const known = sessionPaths.get(key)
+  if (known) {
+    const scan = await scanFile(known)
+    if (scan) return fillOf(scan)
+    sessionPaths.delete(key) // moved or deleted — look it up again below
+  }
   let files: string[]
   try {
-    // Memoised listing (see WALK_MEMO_MS): the beacon calls this once per live
-    // pane every few seconds, and they all want the same directory tree.
+    // Memoised listing (see WALK_MEMO_MS): only a session whose file has not
+    // been found yet walks, and several such panes share one listing.
     files = await walkJsonlMemo(projectsDir)
   } catch {
     return null
   }
   const target = files.find((f) => basename(f) === `${sessionId}.jsonl`)
   if (!target) return null
-
-  let raw: string
-  try {
-    raw = await readFile(target, 'utf8')
-  } catch {
-    return null
-  }
-  // Walk from the end so a long transcript costs one parse, not a full scan.
-  const lines = raw.split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    // A COMPACTION newer than the last reply: the context the session now
-    // carries is what the compaction left, not what the last reply carried —
-    // and no reply may follow for hours on a quiet desk. Without this the fill
-    // read stays at the PRE-compaction size until the next turn, so the gauge
-    // shows a full desk that is not, and the desk context cap
-    // (supplyContextCap.ts) would re-send `compact` into a desk that already
-    // did it. Measured 2026-09-18: claude writes `{type:'system',
-    // subtype:'compact_boundary', compactMetadata:{preTokens, postTokens}}` for
-    // both auto and manual compaction (PTY and SDK alike). An unreadable
-    // postTokens ⇒ null ("unknown"), never the stale pre-compaction number.
-    const boundary = compactBoundaryPostTokens(lines[i])
-    if (boundary !== undefined) return boundary
-    const parsed = parseLine(lines[i])
-    if (!parsed) continue
-    const u = parsed.usage
-    return (
-      (u.input_tokens ?? 0) +
-      (u.cache_read_input_tokens ?? 0) +
-      (u.cache_creation_input_tokens ?? 0)
-    )
-  }
-  return null
+  const scan = await scanFile(target)
+  if (!scan) return null
+  sessionPaths.set(key, target)
+  return fillOf(scan)
 }
 
 // ─── Who is burning the weekly budget (2026-09-02) ───────────────────────────
@@ -348,7 +522,7 @@ export const collectUsageBreakdown = async (opts: {
   deskSessions?: ReadonlyMap<string, 'manager' | 'supply'>
 } = {}): Promise<UsageBreakdown> => {
   const root = opts.projectsDir ?? claudeProjectsDir()
-  const days = opts.days && opts.days > 0 ? opts.days : 7
+  const days = opts.days && opts.days > 0 ? Math.min(opts.days, USAGE_BREAKDOWN_MAX_DAYS) : USAGE_BREAKDOWN_MAX_DAYS
   const now = opts.now ?? Date.now()
   const cutoffMs = now - days * 24 * 60 * 60 * 1000
   const fileCutoffMs = cutoffMs - FILE_MTIME_SLACK_MS
@@ -357,6 +531,7 @@ export const collectUsageBreakdown = async (opts: {
   let files: string[] = []
   try {
     files = await walkJsonl(root)
+    pruneScans(root, files, now)
   } catch {
     // no ~/.claude/projects — nothing to attribute
   }
@@ -371,12 +546,8 @@ export const collectUsageBreakdown = async (opts: {
       continue
     }
     if (st.mtimeMs < fileCutoffMs) continue
-    let raw: string
-    try {
-      raw = await readFile(file, 'utf8')
-    } catch {
-      continue
-    }
+    const scan = await scanFile(file, st)
+    if (!scan) continue
     const dirName = basename(join(file, '..'))
     // Desk first, by session id: a commander/supply transcript sits in the
     // project's dir, exactly where the owner's own sessions sit. Only the
@@ -391,19 +562,15 @@ export const collectUsageBreakdown = async (opts: {
         : projectDirs.has(dirName)
           ? 'project'
           : 'other'
-    for (const line of raw.split('\n')) {
-      const parsed = parseLine(line)
-      if (!parsed) continue
-      const ts = Date.parse(parsed.timestamp)
-      if (!Number.isFinite(ts) || ts < cutoffMs) continue
-      if (!countOnce(seen, parsed)) continue
-      if (!parsed.model) continue
-      const u = parsed.usage
-      const billed = (u.input_tokens ?? 0) + (u.output_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
-      if (billed <= 0) continue
-      const key = `${parsed.model}\u0000${source}`
+    forEachEntry(scan, (e) => {
+      if (!Number.isFinite(e.ts) || e.ts < cutoffMs) return
+      if (!countOnce(seen, e)) return
+      if (!e.model) return
+      const billed = e.input + e.output + e.cacheWrite
+      if (billed <= 0) return
+      const key = `${e.model}\u0000${source}`
       sums.set(key, (sums.get(key) ?? 0) + billed)
-    }
+    })
   }
 
   const rows: UsageBreakdownRow[] = Array.from(sums.entries())

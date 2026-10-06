@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'fs'
+import { appendFileSync, mkdtempSync, mkdirSync, statSync, writeFileSync, utimesSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -7,6 +7,8 @@ import {
   collectClaudeUsage,
   collectUsageBreakdown,
   resetJsonlWalkMemo,
+  resetTranscriptScans,
+  USAGE_BREAKDOWN_MAX_DAYS,
   sessionContextTokens,
 } from './claudeUsage'
 
@@ -376,5 +378,129 @@ describe('collectUsageBreakdown — model × source over a multi-day window', ()
     const b = await collectUsageBreakdown({ projectsDir: join(tmpdir(), 'og-nope-' + Date.now()), days: 7 })
     expect(b.rows).toEqual([])
     expect(b.total).toBe(0)
+  })
+})
+
+// ── Incremental reading (2026-10-06) ─────────────────────────────────────────
+// The beacon and the HUD poll these readers every few seconds; re-reading whole
+// transcripts on every call was the server's largest idle CPU cost (≈160 MB of
+// desk transcripts per beacon poll on the owner's machine). Each file is now
+// read once and then only from where the last read stopped.
+describe('transcripts are read incrementally', () => {
+  const opus = 'claude-opus-4-8'
+
+  // MUTATION that turns this red: drop the size/mtime early return in
+  // advanceScan (re-read every call). The file's bytes change under a restored
+  // size and mtime — only a reader that re-reads would see the new number.
+  it('does not re-read a transcript whose size and mtime are unchanged', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-inc-'))
+    resetTranscriptScans()
+    resetJsonlWalkMemo()
+    const file = join(dir, 'sess-still.jsonl')
+    // Whole-second mtime so it can be restored exactly after the rewrite.
+    const t = Math.floor(now / 1000) - 60
+    writeFileSync(file, rec(now, 'm1', 1, { input_tokens: 100 }, opus) + '\n')
+    utimesSync(file, t, t)
+    expect(await sessionContextTokens('sess-still', dir)).toBe(100)
+    const size = statSync(file).size
+    writeFileSync(file, rec(now, 'm1', 1, { input_tokens: 900 }, opus) + '\n')
+    utimesSync(file, t, t)
+    expect(statSync(file).size).toBe(size)
+    expect(await sessionContextTokens('sess-still', dir)).toBe(100)
+  })
+
+  it('picks up appended turns without counting earlier ones twice', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-inc-'))
+    resetTranscriptScans()
+    resetJsonlWalkMemo()
+    const file = join(dir, 'sess-grow.jsonl')
+    writeFileSync(file, rec(now, 'a1', 3, { input_tokens: 10, output_tokens: 1 }, opus) + '\n')
+    expect((await collectClaudeUsage(dir)).tokens.input).toBe(10)
+    // Half a line first (claude mid-write), then the rest.
+    const line = rec(now, 'a2', 1, { input_tokens: 20, cache_read_input_tokens: 5 }, opus)
+    appendFileSync(file, line.slice(0, 30))
+    expect((await collectClaudeUsage(dir)).tokens.input).toBe(10)
+    appendFileSync(file, line.slice(30) + '\n')
+    const u = await collectClaudeUsage(dir)
+    expect(u.tokens.input).toBe(30)
+    expect(u.messageCount).toBe(2)
+    expect(await sessionContextTokens('sess-grow', dir)).toBe(25)
+  })
+
+  it('counts an unterminated last line, and counts it once when it is finished', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-inc-'))
+    resetTranscriptScans()
+    resetJsonlWalkMemo()
+    const file = join(dir, 'sess-tail.jsonl')
+    writeFileSync(file, rec(now, 't1', 1, { input_tokens: 7 }, opus))
+    expect((await collectClaudeUsage(dir)).tokens.input).toBe(7)
+    appendFileSync(file, '\n' + rec(now, 't2', 0, { input_tokens: 8 }, opus) + '\n')
+    const u = await collectClaudeUsage(dir)
+    expect(u.tokens.input).toBe(15)
+    expect(u.messageCount).toBe(2)
+  })
+
+  // MUTATION that turns this red: skip the guard-bytes comparison — the resume
+  // offset then lands inside the rewritten content and the old turn survives.
+  it('re-reads from the start when a transcript is rewritten rather than appended to', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-inc-'))
+    resetTranscriptScans()
+    resetJsonlWalkMemo()
+    const file = join(dir, 'sess-rw.jsonl')
+    writeFileSync(file, rec(now, 'r1', 1, { input_tokens: 100 }, opus) + '\n')
+    expect((await collectClaudeUsage(dir)).tokens.input).toBe(100)
+    writeFileSync(
+      file,
+      rec(now, 'r9', 2, { input_tokens: 4 }, opus) + '\n' + rec(now, 'r10', 1, { input_tokens: 5 }, opus) + '\n',
+    )
+    const u = await collectClaudeUsage(dir)
+    expect(u.tokens.input).toBe(9)
+    expect(u.messageCount).toBe(2)
+  })
+
+  // MUTATION that turns this red: drop pruneScans — the deleted file's scan
+  // survives, and a new file at the same path with the same size and mtime is
+  // answered from it.
+  it('forgets a transcript once the walk no longer lists it', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-usage-inc-'))
+    resetTranscriptScans()
+    resetJsonlWalkMemo()
+    const file = join(dir, 'sess-gone.jsonl')
+    const t = Math.floor(now / 1000) - 60
+    writeFileSync(file, rec(now, 'g1', 1, { input_tokens: 100 }, opus) + '\n')
+    utimesSync(file, t, t)
+    expect((await collectClaudeUsage(dir)).tokens.input).toBe(100)
+    rmSync(file)
+    expect((await collectClaudeUsage(dir)).tokens.input).toBe(0)
+    writeFileSync(file, rec(now, 'g1', 1, { input_tokens: 900 }, opus) + '\n')
+    utimesSync(file, t, t)
+    expect((await collectClaudeUsage(dir)).tokens.input).toBe(900)
+  })
+})
+
+describe('breakdown window cap', () => {
+  // The scans keep entries for USAGE_BREAKDOWN_MAX_DAYS only, so a wider ask
+  // must be served as the capped window — never a silently partial wider one.
+  it('serves at most USAGE_BREAKDOWN_MAX_DAYS, however many days are asked for', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-breakdown-cap-'))
+    resetTranscriptScans()
+    const sub = join(dir, '-Users-k-other')
+    mkdirSync(sub)
+    writeFileSync(
+      join(sub, 's.jsonl'),
+      [
+        rec(now, 'old', 10 * 24 * 60, { input_tokens: 1_000 }, 'claude-opus-4-8'),
+        rec(now, 'new', 60, { input_tokens: 5 }, 'claude-opus-4-8'),
+      ].join('\n') + '\n',
+    )
+    const b = await collectUsageBreakdown({ projectsDir: dir, days: 30, now })
+    expect(b.days).toBe(USAGE_BREAKDOWN_MAX_DAYS)
+    expect(b.total).toBe(5)
   })
 })

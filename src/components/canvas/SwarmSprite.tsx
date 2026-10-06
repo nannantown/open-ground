@@ -21,6 +21,7 @@
 // than animating quietly — the states are still told apart by colour and mark.
 
 import { useEffect, useRef } from 'react'
+import { usePresent } from '@/lib/presence'
 import {
   SPRITES,
   SPRITE_COLORS,
@@ -50,6 +51,8 @@ const MARK_COLS = 6
 
 export const SwarmSprite = ({ role, state, scale = 1, label, className, still: stillProp = false }: SwarmSpriteProps) => {
   const ref = useRef<HTMLCanvasElement | null>(null)
+  // Nobody looking ⇒ hold one frame: an rAF loop repaints every refresh.
+  const present = usePresent()
 
   useEffect(() => {
     const cv = ref.current
@@ -62,6 +65,7 @@ export const SwarmSprite = ({ role, state, scale = 1, label, className, still: s
     const S = scale
     const still =
       stillProp ||
+      !present ||
       (typeof window !== 'undefined' &&
         typeof window.matchMedia === 'function' &&
         window.matchMedia('(prefers-reduced-motion: reduce)').matches)
@@ -150,7 +154,7 @@ export const SwarmSprite = ({ role, state, scale = 1, label, className, still: s
     }
     raf = requestAnimationFrame(loop)
     return () => cancelAnimationFrame(raf)
-  }, [role, state, scale, stillProp])
+  }, [role, state, scale, stillProp, present])
 
   const w = (SPRITE_SIZE + MARK_COLS) * scale
   const h = (SPRITE_SIZE + 2) * scale

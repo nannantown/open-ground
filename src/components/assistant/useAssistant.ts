@@ -10,7 +10,14 @@ export interface AssistantLine {
   at: number
   who: 'owner' | 'assistant'
   text: string
+  /** A photo the owner sent with the line (its kept name). */
+  photo?: string
 }
+
+/** What the server takes (assistantMemory.ts ASSISTANT_PHOTO_*). */
+export const PHOTO_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
+export const PHOTO_MAX_BYTES = 5 * 1024 * 1024
+export const photoUrl = (name: string) => `/api/phone-link/assistant/photo/${encodeURIComponent(name)}`
 interface LogResponse {
   entries: AssistantLine[]
   name: string
@@ -34,6 +41,8 @@ export interface AssistantState {
   look: AssistantLook
   /** The owner's line still being answered (shown at once, before the log has it). */
   pending: string | null
+  /** The photo (data URL) sent with the pending line, if any. */
+  pendingPhoto: string | null
   /** A plain-words reason the last line failed; '' when none. */
   error: string
   /** An answer came while the window was closed. */
@@ -42,8 +51,9 @@ export interface AssistantState {
   voice: boolean
   /** true = the line is in the log now (answered, or failed after it was logged);
    *  false = it was refused before reaching the log — give it back to the input.
-   *  onReply gets the answer's words, once the answer is in the log. */
-  say: (text: string, onReply?: (reply: string) => void) => Promise<boolean>
+   *  onReply gets the answer's words, once the answer is in the log.
+   *  photo = a data URL sent with the line (the line may then be empty). */
+  say: (text: string, onReply?: (reply: string) => void, photo?: string) => Promise<boolean>
   saveLook: (patch: { name?: string; look?: AssistantLook }) => Promise<boolean>
 }
 
@@ -53,11 +63,14 @@ export interface AssistantWords {
   busy: string
   tooLong: string
   workMode: string
+  photoType: string
+  photoTooLarge: string
 }
 
 export const useAssistant = (open: boolean, words: AssistantWords): AssistantState => {
   const [data, setData] = useState<LogResponse | null>(null)
   const [pending, setPending] = useState<string | null>(null)
+  const [pendingPhoto, setPendingPhoto] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [unread, setUnread] = useState(false)
   const openRef = useRef(open)
@@ -110,22 +123,29 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
   }, [open, load])
 
   const say = useCallback(
-    async (text: string, onReply?: (reply: string) => void) => {
+    async (text: string, onReply?: (reply: string) => void, photo?: string) => {
       const line = text.trim()
-      if (!line || saying.current) return false
+      if ((!line && !photo) || saying.current) return false
       saying.current = true
       setPending(line)
+      setPendingPhoto(photo ?? null)
       setError('')
       let reply = ''
       try {
         const r = await fetch(`${API}/say`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ text: line }),
+          body: JSON.stringify(photo ? { text: line, photo: photo.slice(photo.indexOf(',') + 1) } : { text: line }),
         })
         if (!r.ok) {
           const j = (await r.json().catch(() => ({}))) as { error?: string; detail?: string }
-          const reason: Record<string, string> = { busy: words.busy, 'too-long': words.tooLong, 'work-mode': words.workMode }
+          const reason: Record<string, string> = {
+            busy: words.busy,
+            'too-long': words.tooLong,
+            'work-mode': words.workMode,
+            'photo-type': words.photoType,
+            'photo-too-large': words.photoTooLarge,
+          }
           setError(j.detail || reason[j.error ?? ''] || words.failed)
           // 400 / 409 / 429 are refused before the assistant runs; a failed answer
           // (502) has already logged the owner's line — giving it back would log it twice.
@@ -141,6 +161,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
         // The log first, then drop the pending line: the line never blinks out.
         await load()
         setPending(null)
+        setPendingPhoto(null)
         saying.current = false
         if (typeof reply === 'string' && reply) onReply?.(reply)
       }
@@ -167,6 +188,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
     name: data?.name ?? '',
     look: data?.look ?? 'verm',
     pending,
+    pendingPhoto,
     error,
     unread,
     voice: data?.voice === true,

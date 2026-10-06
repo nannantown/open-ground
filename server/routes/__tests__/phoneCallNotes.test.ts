@@ -4,7 +4,7 @@ import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { phoneLinkRoutes } from '../phoneLink'
-import { appendAssistantCall, clearAssistantLog } from '@/lib/server/assistantMemory'
+import { appendAssistantCall, clearAssistantLog, readAssistantLog } from '@/lib/server/assistantMemory'
 import { openGroundHome } from '@/lib/server/paths'
 
 vi.mock('@/lib/server/swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => true }))
@@ -44,4 +44,18 @@ it('clearing assistant conversation or deleting by a president id preserves unre
   expect((await assistant.json()).entries).toEqual([])
   const president = await app.request(`/api/phone-link/call-notes?path=${encodeURIComponent(project)}`)
   expect((await president.json()).entries).toEqual([expect.objectContaining({ id: 'call:p', seconds: 25 })])
+})
+
+it('DELETE call-notes clears only that president\'s notes, behind the same path and loopback gates', async () => {
+  await appendAssistantCall('a', { at: Date.now(), kind: 'call', seconds: 102, projectId: 'assistant', who: 'owner', text: 'Call 1:42', via: 'phone' })
+  await appendAssistantCall('p', { at: Date.now(), kind: 'call', seconds: 25, projectId: 'p1', who: 'owner', text: 'Call 0:25', via: 'phone' })
+  await appendAssistantCall('q', { at: Date.now(), kind: 'call', seconds: 9, projectId: 'p2', who: 'owner', text: 'Call 0:09', via: 'phone' })
+  const url = `/api/phone-link/call-notes?path=${encodeURIComponent(project)}`
+  expect((await app.request('/api/phone-link/call-notes?path=%2Fetc', { method: 'DELETE' })).status).toBe(403)
+  expect((await app.request(url, { method: 'DELETE', headers: { host: 'attacker.example', origin: 'https://attacker.example' } })).status).toBe(403)
+  expect((await (await app.request(url)).json()).entries).toHaveLength(1)
+  expect((await app.request(url, { method: 'DELETE' })).status).toBe(200)
+  expect((await (await app.request(url)).json()).entries).toEqual([])
+  const all = (await readAssistantLog()).map((e) => e.id).sort()
+  expect(all).toEqual(['call:a', 'call:q'])
 })

@@ -14,7 +14,13 @@ import {
   readAssistantStyle,
   saveAssistantStyle,
 } from '@/lib/server/phoneAssistant'
+import { readFile } from 'fs/promises'
 import {
+  ASSISTANT_PHOTO_MAX_BYTES,
+  ASSISTANT_PHOTO_TYPES,
+  assistantPhotoPath,
+  saveAssistantPhoto,
+  sniffPhoto,
   assistantEntriesFor,
   clearAssistantLog,
   clearAssistantMemory,
@@ -78,10 +84,29 @@ export const phoneLinkRoutes = new Hono()
     catch { return c.json({ error: 'forbidden' }, 403) }
     return c.json({ entries: assistantEntriesFor(await readAssistantLog(), projectId).filter((e) => e.kind === 'call') })
   })
+  // Clear that president's call notes from the Mac — only that project's; the
+  // assistant's talk and other projects' notes stay (f59b7a1f).
+  .delete('/api/phone-link/call-notes', async (c) => {
+    const path = c.req.query('path')
+    if (!path) return c.json({ error: 'path required' }, 400)
+    let projectId: string
+    try { projectId = await projectUUIDFromPath(path) }
+    catch { return c.json({ error: 'forbidden' }, 403) }
+    await clearAssistantLog(projectId)
+    return c.json({ ok: true })
+  })
   .delete('/api/phone-link/assistant/log', async (c) => (await clearAssistantLog('assistant'), c.json({ ok: true })))
   .delete('/api/phone-link/assistant/log/:id', async (c) =>
     (await deleteAssistantEntry(c.req.param('id'), 'assistant')) ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404),
   )
+  // A photo the owner sent (only names assistantMemory made resolve).
+  .get('/api/phone-link/assistant/photo/:name', async (c) => {
+    const path = assistantPhotoPath(c.req.param('name'))
+    const bytes = path ? await readFile(path).catch(() => null) : null
+    const ext = bytes && sniffPhoto(bytes)
+    if (!bytes || !ext) return c.json({ error: 'not found' }, 404)
+    return c.body(bytes, 200, { 'content-type': ASSISTANT_PHOTO_TYPES[ext], 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' })
+  })
   .delete('/api/phone-link/assistant/memory', async (c) => (await clearAssistantMemory(), c.json({ ok: true })))
   // How many days the log is kept, how long the memo may be.
   .post('/api/phone-link/assistant/config', async (c) => {
@@ -121,15 +146,27 @@ export const phoneLinkRoutes = new Hono()
     })
   })
   // Talk to the assistant from the screen: the same assistant, the same log.
+  // A photo rides along as base64 (`photo`); its bytes decide its format.
   .post('/api/phone-link/assistant/say', async (c) => {
-    const text = ((await c.req.json().catch(() => ({}))) as { text?: unknown }).text
-    const line = typeof text === 'string' ? text.trim() : ''
-    if (!line) return c.json({ error: 'empty' }, 400)
+    const body = (await c.req.json().catch(() => ({}))) as { text?: unknown; photo?: unknown }
+    const line = typeof body.text === 'string' ? body.text.trim() : ''
+    let bytes: Buffer | null = null
+    if (body.photo !== undefined) {
+      if (typeof body.photo !== 'string') return c.json({ error: 'photo-type' }, 415)
+      // base64 is 4 chars per 3 bytes: refuse an oversized one before decoding it.
+      if (body.photo.length > Math.ceil(ASSISTANT_PHOTO_MAX_BYTES / 3) * 4 + 4) return c.json({ error: 'photo-too-large', max: ASSISTANT_PHOTO_MAX_BYTES }, 413)
+      bytes = Buffer.from(body.photo, 'base64')
+      if (bytes.length > ASSISTANT_PHOTO_MAX_BYTES) return c.json({ error: 'photo-too-large', max: ASSISTANT_PHOTO_MAX_BYTES }, 413)
+    }
+    const ext = bytes ? sniffPhoto(bytes) : null
+    if (bytes && !ext) return c.json({ error: 'photo-type' }, 415)
+    if (!line && !bytes) return c.json({ error: 'empty' }, 400)
     if (line.length > ASSISTANT_SAY_MAX) return c.json({ error: 'too-long', max: ASSISTANT_SAY_MAX }, 400)
     if (isLockdownEnabledSync()) return c.json({ error: 'work-mode' }, 409)
     if (assistantBusy()) return c.json({ error: 'busy' }, 429)
     try {
-      return c.json(await askAssistant(line, { via: 'screen' }))
+      const photo = bytes && ext ? await saveAssistantPhoto(bytes, ext) : undefined
+      return c.json(await askAssistant(line, { via: 'screen', ...(photo ? { photo } : {}) }))
     } catch (e) {
       const f: AssistantFailure = plainAssistantError(e, await getPromptLang().catch(() => 'en' as const))
       return c.json({ error: f.reason, detail: f.message }, f.reason === 'busy' ? 429 : 502)

@@ -14,9 +14,9 @@
 // What was said is kept on this Mac only (assistantMemory.ts): a text log kept
 // N days, and ONE memo of fixed size the model rewrites as old talk leaves its
 // view — each turn it reads the memo + the recent talk, never the whole log.
-import { mkdtemp, readFile, realpath, rm, unlink } from 'fs/promises'
+import { copyFile, mkdtemp, readFile, realpath, rm, unlink } from 'fs/promises'
 import { tmpdir } from 'os'
-import { basename, dirname, join } from 'path'
+import { basename, dirname, extname, join } from 'path'
 import { z } from 'zod'
 import { newId } from '@/lib/ids'
 import type { ProjectTask } from '../types'
@@ -34,6 +34,7 @@ import { sessionJsonlPath } from './transcript'
 import {
   appendAssistantEntries,
   assistantEpoch,
+  assistantPhotoPath,
   charCount,
   readAssistantConfig,
   readAssistantLog,
@@ -179,6 +180,7 @@ interface Turn {
   text: string
   at?: number
   card?: AssistantEntry['card']
+  photo?: string
 }
 const g = globalThis as typeof globalThis & {
   __openground_assistant?: { chain: Promise<unknown>; pending: number }
@@ -226,7 +228,8 @@ const stamp = (ms: number): string => {
 }
 const line = (t: Turn): string =>
   `${t.at !== undefined ? `[${stamp(t.at)}] ` : ''}${t.who === 'owner' ? 'Owner' : 'You'}: ${t.text}` +
-  (t.card ? ` [card written: ${JSON.stringify(t.card.title)} in projectId ${t.card.projectId}]` : '')
+  (t.card ? ` [card written: ${JSON.stringify(t.card.title)} in projectId ${t.card.projectId}]` : '') +
+  (t.photo ? ' [sent a photo]' : '')
 
 interface PromptParts {
   style: string
@@ -248,6 +251,8 @@ interface PromptParts {
   idle?: boolean
   /** The name the owner gave the assistant ('' = none yet). */
   name?: string
+  /** A photo sent with this line: its path inside the run's own temp dir. */
+  photo?: string
 }
 
 const assemblePrompt = (o: PromptParts): string =>
@@ -275,7 +280,12 @@ const assemblePrompt = (o: PromptParts): string =>
     ...(o.history.length ? ['## Conversation so far (recent)', ...o.history.map(line), ''] : []),
     ...(o.idle
       ? ['## Nobody is talking right now', 'This run only keeps your memory: fold the older talk above into it before it is deleted. Write "-" as the reply.', '']
-      : ['## The owner now says', o.text, '']),
+      : [
+          '## The owner now says',
+          o.text || (o.photo ? '(no words, only the photo below)' : ''),
+          ...(o.photo ? [`With this line the owner sent a photo: ${o.photo} — Read that one file to see it before you answer.`] : []),
+          '',
+        ]),
     '## Your answer',
     `Write exactly this JSON into the file ${o.file} (replace its content; nothing else in it):`,
     '{"reply": "<what you say back>", "card": null}',
@@ -292,7 +302,9 @@ const assemblePrompt = (o: PromptParts): string =>
       : [
           '- Only when the owner, in the line above, asks you to forget something and the memory then comes out EMPTY, add "forgetAll": true. In any other case never return an empty "memory": without that flag it is ignored and NOTHING is forgotten.',
         ]),
-    '- Do not read files, run commands or explore anything: everything you need is above.',
+    o.photo
+      ? '- Read nothing but the photo named above; do not run commands or explore anything: everything else you need is above.'
+      : '- Do not read files, run commands or explore anything: everything you need is above.',
     languageDirective(o.lang),
   ].join('\n')
 
@@ -350,13 +362,15 @@ export interface AssistantAnswer {
 
 export interface AssistantDeps {
   /** One model turn: prompt + handoff file → the file's content (tests). */
-  run?: (prompt: string, file: string, cwd: string) => Promise<string>
+  run?: (prompt: string, file: string, cwd: string, photo?: string) => Promise<string>
   digest?: () => Promise<{ text: string; projects: Known[] }>
   now?: () => Date
   /** Where the owner said it — both go into the same log. Default: the phone. */
   via?: AssistantEntry['via']
   /** Metadata only: the sealed phone say id. Never part of the model prompt. */
   clientId?: string
+  /** A photo sent with the line: its kept file name (saveAssistantPhoto). */
+  photo?: string
 }
 
 /** How each turn's claude starts (claude 2.1.287 --help): no pane, no beacon; the
@@ -381,14 +395,18 @@ export const ASSISTANT_LAUNCH = {
  *  log or the memo (or their expiry) leaves no copy behind. */
 export const ASSISTANT_KICKOFF = "Answer the owner's latest line exactly as your system prompt says.\n" + buildDonePromptLine()
 
-const defaultRun = (prompt: string, file: string, cwd: string): Promise<string> =>
+/** A line with a photo also gets Read — still confined by --restricted to the
+ *  temp dir, where the photo's copy is the only other file. */
+export const assistantTools = (photo?: string): string[] => (photo ? ['Read', ...ASSISTANT_LAUNCH.tools] : ASSISTANT_LAUNCH.tools)
+
+const defaultRun = (prompt: string, file: string, cwd: string, photo?: string): Promise<string> =>
   runFileTask({
     cwd,
     prompt: ASSISTANT_KICKOFF,
     file,
     salvage: true, // the answer is validated below (JSON + zod)
     model: 'sonnet', // structured output: canvasAi's measured floor for reliable JSON
-    launch: { ...ASSISTANT_LAUNCH, systemPrompt: prompt },
+    launch: { ...ASSISTANT_LAUNCH, tools: assistantTools(photo), systemPrompt: prompt },
     noProgressMs: 60_000,
     timeoutMs: 180_000,
   })
@@ -447,6 +465,11 @@ const runModel = async (p: Plan, text: string, now: Date, lang: PromptLang, deps
   const file = join(dir, 'answer.json')
   let raw: string
   try {
+    // The photo goes in as a copy in this run's own dir — the only place its
+    // Read can reach — and leaves with the dir.
+    const kept = deps.photo ? assistantPhotoPath(deps.photo) : null
+    const photo = kept ? join(dir, 'photo' + extname(kept)) : undefined
+    if (kept && photo) await copyFile(kept, photo)
     const prompt = buildAssistantPrompt({
       style: p.style,
       digest: p.digest.text,
@@ -461,10 +484,11 @@ const runModel = async (p: Plan, text: string, now: Date, lang: PromptLang, deps
       fold: p.fold,
       mustRewrite: p.mustRewrite,
       idle,
+      photo,
     })
     // Never start the runner on a prompt its own detector fires on.
     if (containsDoneMarker(echoed(prompt))) throw failure('assistant-failed', 'generic', lang)
-    raw = await (deps.run ?? defaultRun)(prompt, file, dir)
+    raw = await (deps.run ?? defaultRun)(prompt, file, dir, photo)
   } finally {
     if (!deps.run) {
       // claude must be gone before its cwd is removed (canvasAi: a deleted cwd
@@ -513,7 +537,10 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
   const clock = clockOf(deps)
   const now = clock()
   const via = deps.via ?? 'phone'
-  const ownerMeta = deps.clientId && deps.clientId.length <= 100 ? { clientId: deps.clientId } : {}
+  const ownerMeta = {
+    ...(deps.clientId && deps.clientId.length <= 100 ? { clientId: deps.clientId } : {}),
+    ...(deps.photo ? { photo: deps.photo } : {}),
+  }
   const lang = await getPromptLang()
   // A delete while this turn runs: its memo is not written back (assistantEpoch).
   const epoch = assistantEpoch()

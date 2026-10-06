@@ -7,12 +7,14 @@
 //     memory.md                         0600  the ONE long-term memo, kept under a fixed size
 //     state.json                        0600  which log lines are already folded into the memo
 //     config.json                       0600  how many days the log is kept, how long the memo may be
+//     photos/YYYY-MM-DD-<id>.<ext>      0600  a photo the owner sent from the screen (deleted
+//                                             with its log line, its day, or the whole log)
 //
 // The log is deleted day by day once older than `logDays`; what matters of it
 // lives on in the memo, which the assistant rewrites (phoneAssistant.ts) when
 // old lines leave its view or the owner says "remember" / "forget". Nothing
 // here is ever logged to the console or kept on the relay.
-import { appendFile, mkdir, readFile, readdir, rm, unlink } from 'fs/promises'
+import { appendFile, mkdir, readFile, readdir, rm, unlink, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { newId } from '@/lib/ids'
 import type { PhoneCallRecord } from '@/lib/types'
@@ -40,6 +42,8 @@ export interface AssistantEntry extends Partial<PhoneCallRecord> {
   clientId?: string
   /** The card the assistant wrote in this answer. */
   card?: { projectId: string; taskId: string; title: string }
+  /** A photo the owner sent with this line: its file name under photos/. */
+  photo?: string
 }
 export interface AssistantConfig {
   logDays: number
@@ -54,6 +58,7 @@ const logDir = () => join(dir(), 'log')
 const memoFile = () => join(dir(), 'memory.md')
 const stateFile = () => join(dir(), 'state.json')
 const configFile = () => join(dir(), 'config.json')
+const photoDir = () => join(dir(), 'photos')
 const ensureDir = async (d: string) => void (await mkdir(d, { recursive: true, mode: 0o700 }))
 const readJson = async (f: string): Promise<Record<string, unknown>> =>
   JSON.parse(await readFile(f, 'utf8').catch(() => '{}')) ?? {}
@@ -143,6 +148,42 @@ const parseLines = (raw: string): AssistantEntry[] =>
     }
   })
 
+// ── photos ─────────────────────────────────────────────────────────────────
+
+/** What the screen may send: the formats Claude reads (JPEG, PNG, GIF, WebP —
+ *  platform.claude.com/docs/en/build-with-claude/vision), at most 5 MB, well
+ *  under the API's 10 MB (base64) per image. */
+export const ASSISTANT_PHOTO_MAX_BYTES = 5 * 1024 * 1024
+export type AssistantPhotoExt = 'png' | 'jpg' | 'gif' | 'webp'
+export const ASSISTANT_PHOTO_TYPES: Record<AssistantPhotoExt, string> = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }
+const PHOTO_FILE = /^(\d{4}-\d{2}-\d{2})-[A-Za-z0-9_-]{1,64}\.(png|jpg|gif|webp)$/
+
+/** The format by the file's own bytes (never by what the sender claims); null = not one we take. */
+export const sniffPhoto = (b: Uint8Array): AssistantPhotoExt | null => {
+  const at = (o: number, ...xs: number[]) => xs.every((x, i) => b[o + i] === x)
+  if (at(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'png'
+  if (at(0, 0xff, 0xd8, 0xff)) return 'jpg'
+  if (at(0, 0x47, 0x49, 0x46, 0x38)) return 'gif'
+  if (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50)) return 'webp'
+  return null
+}
+
+/** Keeps one photo; returns its file name (the log line's `photo`). */
+export const saveAssistantPhoto = async (bytes: Uint8Array, ext: AssistantPhotoExt, at = Date.now()): Promise<string> => {
+  await ensureDir(photoDir())
+  const name = `${dayOf(at)}-${newId()}.${ext}`
+  await writeFile(join(photoDir(), name), bytes, { mode: MODE, flag: 'wx' })
+  return name
+}
+
+/** A kept photo's path, or null for any name this module did not make. */
+export const assistantPhotoPath = (name: string): string | null => (PHOTO_FILE.test(name) ? join(photoDir(), name) : null)
+
+const rmPhoto = async (name: string | undefined) => {
+  const p = name ? assistantPhotoPath(name) : null
+  if (p) await rm(p, { force: true })
+}
+
 /** Days that ended more than `days` ago are deleted, file and all (what is
  *  read is cut to the exact time at once — readAssistantLog). */
 export const pruneAssistantLog = (days?: number, now = Date.now()): Promise<number> =>
@@ -156,6 +197,10 @@ export const pruneAssistantLog = (days?: number, now = Date.now()): Promise<numb
         await rm(join(logDir(), f), { force: true })
         removed++
       }
+    }
+    for (const f of await readdir(photoDir()).catch(() => [] as string[])) {
+      const m = PHOTO_FILE.exec(f)
+      if (m && Date.parse(m[1] + 'T00:00:00Z') + DAY_MS <= cutoff) await rm(join(photoDir(), f), { force: true })
     }
     return removed
   })
@@ -214,6 +259,7 @@ export const deleteAssistantEntry = (id: string, projectId?: string): Promise<bo
       if (rest.length === entries.length) continue
       if (rest.length) await atomicWriteText(path, rest.map((e) => JSON.stringify(e) + '\n').join(''), { mode: MODE })
       else await rm(path, { force: true })
+      for (const e of entries) if (!rest.includes(e)) await rmPhoto(e.photo)
       return true
     }
     return false
@@ -223,6 +269,8 @@ export const deleteAssistantEntry = (id: string, projectId?: string): Promise<bo
 export const clearAssistantLog = (projectId?: string): Promise<void> => {
   bump()
   return locked(async () => {
+    // Photos only ever go to the assistant's own talk, never to a project's.
+    if (projectId === undefined || projectId === 'assistant') await rm(photoDir(), { recursive: true, force: true })
     if (projectId === undefined) await rm(logDir(), { recursive: true, force: true })
     else for (const file of await dayFiles()) {
       const path = join(logDir(), file)

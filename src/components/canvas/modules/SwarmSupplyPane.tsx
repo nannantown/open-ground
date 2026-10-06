@@ -9,7 +9,7 @@
 // and reports its close. Stopping it is a plain PTY kill (no worktree to remove).
 
 import { useEffect, useState } from 'react'
-import { Power } from 'lucide-react'
+import { Power, Trash2 } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
@@ -34,9 +34,19 @@ interface Props {
   onRestart: () => void
 }
 
+/** "14:05" today, "10/5 14:05" (month/day in `lang`) on any other day. */
+export const callStamp = (at: number, lang: string, now = Date.now()): string => {
+  const d = new Date(at)
+  const today = d.toDateString() === new Date(now).toDateString()
+  return d.toLocaleString(lang, today ? { hour: '2-digit', minute: '2-digit' } : { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+export const callDuration = (seconds: number): string => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+
 export const SwarmSupplyPane = ({ projectPath, terminalId, status, busy, onExit, onStop, onRestart }: Props) => {
   const { t, lang } = useT()
-  const [calls, setCalls] = useState<{ id: string; at: number; text: string }[]>([])
+  // `text` is the line as saved (in the language of that moment); shown only
+  // for an old record without `seconds`.
+  const [calls, setCalls] = useState<{ id: string; at: number; text: string; seconds?: number }[]>([])
   useEffect(() => {
     let alive = true
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -54,6 +64,14 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, status, busy, onExit,
     void poll()
     return () => { alive = false; if (timer) clearTimeout(timer) }
   }, [projectPath])
+  // Two presses: the first arms (the button turns solid), the second clears.
+  const [armed, setArmed] = useState(false)
+  const clearCalls = async () => {
+    if (!armed) return setArmed(true)
+    setArmed(false)
+    const r = await fetch(`/api/phone-link/call-notes?path=${encodeURIComponent(projectPath)}`, { method: 'DELETE' }).catch(() => null)
+    if (r?.ok) setCalls([])
+  }
   const statusLabel: string = {
     working: t('projectPanel.swarm.statusWorking'),
     waiting: t('projectPanel.swarm.statusWaiting'),
@@ -84,9 +102,26 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, status, busy, onExit,
       </SwarmSeatHeader>
 
       {calls.length > 0 && (
-        <ul className="max-h-24 shrink-0 overflow-y-auto border-b border-line-soft bg-bg-card px-3 py-1 text-meta text-ink-muted" aria-label={lang === 'ja' ? '通話の記録' : 'Call records'}>
-          {calls.map((call) => <li key={call.id}><time dateTime={new Date(call.at).toISOString()}>{new Date(call.at).toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' })}</time> · {call.text}</li>)}
-        </ul>
+        <div className="flex max-h-24 shrink-0 items-start gap-2 border-b border-line-soft bg-bg-card px-3 py-1">
+          <ul className="min-h-0 flex-1 self-stretch overflow-y-auto text-meta text-ink-muted" aria-label={t('projectPanel.swarm.supply.calls')}>
+            {calls.map((call) => (
+              <li key={call.id}>
+                <time dateTime={new Date(call.at).toISOString()}>{callStamp(call.at, lang)}</time> ·{' '}
+                {typeof call.seconds === 'number' ? t('projectPanel.swarm.supply.call', { duration: callDuration(call.seconds) }) : call.text}
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            onClick={() => void clearCalls()}
+            onBlur={() => setArmed(false)}
+            title={armed ? t('projectPanel.swarm.supply.clearCallsConfirm') : t('projectPanel.swarm.supply.clearCalls')}
+            aria-label={armed ? t('projectPanel.swarm.supply.clearCallsConfirm') : t('projectPanel.swarm.supply.clearCalls')}
+            className={`flex shrink-0 items-center rounded-[3px] border p-0.5 transition-colors active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 ${armed ? 'border-accent bg-accent text-bg-card hover:opacity-90' : 'border-transparent text-ink-muted hover:border-line hover:text-ink'}`}
+          >
+            <Trash2 size={11} strokeWidth={2.25} />
+          </button>
+        </div>
       )}
 
       {/* The PTY itself — reused verbatim. onExit bubbles the close up so the

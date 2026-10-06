@@ -6,8 +6,11 @@ import { AuthProvider } from '@/lib/auth/AuthContext'
 import { I18nProvider } from '@/i18n/I18nContext'
 import { RealtimeProvider } from '@/lib/collab/RealtimeContext'
 import { applyVersionTitle } from '@/lib/appTitle'
+import { watchPresence } from '@/lib/presence'
 
 void applyVersionTitle()
+// Looping motion runs only while someone is looking (src/lib/presence.ts).
+watchPresence()
 
 // AuthProvider wraps the whole app so useAuth() is the single seam any future
 // entitlement check reads (see docs/BILLING_PLAN.md). It is inert when the

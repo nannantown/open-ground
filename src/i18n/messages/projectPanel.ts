@@ -200,6 +200,10 @@ export const projectPanel = {
     'projectPanel.swarm.supply.hint':
       'The president hears your requests, files them as work, and tells you about progress, questions and finished work. The commander and workers stay behind the scenes.',
     'projectPanel.swarm.supply.stop': 'Stop',
+    'projectPanel.swarm.supply.calls': 'Call records',
+    'projectPanel.swarm.supply.call': 'Call {duration}',
+    'projectPanel.swarm.supply.clearCalls': 'Clear call records',
+    'projectPanel.swarm.supply.clearCallsConfirm': 'Click again to clear',
     'projectPanel.swarm.supply.stopping': 'Stopping…',
     // Manager (マネージャー) seat — since 2026-09-23 a nameplate only (running /
     // stopped / not there + a quiet start/stop); the owner talks only to the
@@ -721,6 +725,10 @@ export const projectPanel = {
     'projectPanel.swarm.supply.hint':
       '社長があなたの要望を聞いて仕事にし、進み具合・質問・完成品をあなたに伝えます。司令官やワーカーは裏で動きます。',
     'projectPanel.swarm.supply.stop': '停止',
+    'projectPanel.swarm.supply.calls': '通話の記録',
+    'projectPanel.swarm.supply.call': '通話 {duration}',
+    'projectPanel.swarm.supply.clearCalls': '通話の記録を消す',
+    'projectPanel.swarm.supply.clearCallsConfirm': 'もう一度押すと消えます',
     'projectPanel.swarm.supply.stopping': '停止中…',
     // マネージャーの席 — 2026-09-23 から名札だけ(動いている/止まっている/いない＋
     // 控えめな起動・停止)。オーナーが話すのは社長だけ。overseer* は上部バーの監視スイッチ。

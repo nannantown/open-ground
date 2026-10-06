@@ -43,7 +43,7 @@ import {
   removeProjectEntry,
 } from '@/lib/server/registry'
 import { ensureShareEvacuated, evacuateImportedProject } from '@/lib/server/shareEvac'
-import { collectClaudeUsage, collectUsageBreakdown } from '@/lib/server/claudeUsage'
+import { collectClaudeUsage, collectUsageBreakdown, USAGE_BREAKDOWN_MAX_DAYS } from '@/lib/server/claudeUsage'
 import { readDeskSessionMap } from '@/lib/server/swarmDeskLedger'
 import { claudeDirName } from '@/lib/server/claudeProjectDir'
 import {
@@ -535,7 +535,7 @@ export const miscRoutes = new Hono()
   // separate them. The UI says that; it never guesses.
   .get('/api/usage/breakdown', async (c) => {
     const raw = Number(c.req.query('days'))
-    const days = Number.isFinite(raw) && raw > 0 && raw <= 30 ? Math.floor(raw) : 7
+    const days = Number.isFinite(raw) && raw > 0 ? Math.min(Math.floor(raw), USAGE_BREAKDOWN_MAX_DAYS) : USAGE_BREAKDOWN_MAX_DAYS
     const now = Date.now()
     const cached = usageBreakdownCache
     if (cached && cached.days === days && now - cached.at < USAGE_BREAKDOWN_TTL_MS) {

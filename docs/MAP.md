@@ -67,7 +67,8 @@
 - `paths.ts`(`~/.openground/` 解決・旧名 home の一括 rename・**テスト中の fail-closed fence** →
   §12)/ `store.ts`(settings.json / canvas.json)
 - `projectDataPath.ts` — **セキュリティ境界**: `projectUUIDFromPath` / `validateProjectPath`。
-  per-project データは `~/.openground/projects/<uuid>/`(repo 内には何も書かない)
+  per-project データは `~/.openground/projects/<uuid>/`(repo 内には何も書かない)。登録ルートの正規化結果は
+  登録内容をキーに10秒だけ再利用(2026-10-06・lamps ポーリングが O(N²) の realpath で常時 ~9% CPU だった)
 - `retention.ts`(起動時の legacy prune)/ route: `server/routes/project.ts` / `misc.ts`
 - **データ保全2点セット**(2026-07-18 の registry 45→3 消失を受けて): `homeBackup.ts`
   (settings.json / canvas.json の世代バックアップ — `store.ts` の `writeJson` が上書き前に
@@ -252,7 +253,7 @@
 - **三役のキャラクター**(2026-08-15・オーナー承認): `src/lib/swarm/sprites.ts`(16×16 を
   **テキストのドット絵**で持つ — カワウソ=補給係 / フクロウ=司令官 / ウサギ=作業者。
   1枚の絵に状態ごとのパレットを塗る)+ `src/components/canvas/SwarmSprite.tsx`(canvas 描画・
-  状態ごとに**動き方が違う**・`prefers-reduced-motion` は静止1枚・rAF は unmount で cancel)。
+  状態ごとに**動き方が違う**・`prefers-reduced-motion` は静止1枚・誰も見ていない間も静止 = `usePresent()`・rAF は unmount で cancel)。
   出る場所: BoardCard の worker/commander 帯・Swarm タブの各席の名札 `SwarmSeatHeader`
   (社長/マネージャー/ワーカー全席・役ごとの背景色トークン `--og-seat-*` は globals.css 両パレット、
   文字コントラストは `themePalette.test.ts` の SURFACES で監査)。
@@ -800,6 +801,13 @@
   無人の畳み込みは1時間に1回・保存できなかった同じ行は12時間あけて再試行(`state.json` の `idleTried`・再起動をまたぐ。契約枠を無人で溶かさない)。
   中身(会話・メモ)は `--append-system-prompt` で渡し、打ち込む1行は固定(`ASSISTANT_KICKOFF`)= `~/.claude/history.jsonl` に残さない。
   テスト `assistantMemory.test.ts`(30日超え削除・字数上限・再起動後も続く・畳み込み)/ `phoneLinkSealed.test.ts`(実リレー室で封・保存なし・ページ分け・v1拒否)/ `worker/test/phoneRelay.local.mjs`。
+- Assistant photos (2026-10-06): the floating window's photo button → `POST /api/phone-link/assistant/say` `{text, photo: base64}`
+  (JPEG/PNG/GIF/WebP judged by bytes `sniffPhoto`, ≤5 MB, else 415 `photo-type` / 413 `photo-too-large`). Kept as
+  `~/.openground/assistant/photos/<UTC day>-<id>.<ext>` (0600), named on the owner's log line (`photo`), served by
+  `GET /api/phone-link/assistant/photo/:name`; deleted with its line / its day / the whole talk (`assistantMemory.ts`).
+  The turn copies it into its own temp dir and only then adds `Read` (`assistantTools`, still `--restricted`). Later turns see
+  only `[sent a photo]`. iPhone gets the name, not the image (empty bubble for a photo-only line — the phone app's follow-up).
+  Tests `server/routes/__tests__/assistantPhoto.test.ts` / `FloatingAssistant.photo.test.tsx`; a real claude turn with a photo was checked once by hand (2026-10-06: it read the text and colour back).
 - 浮いているアシスタント(Dots 風, 2026-10-03): `src/components/assistant/FloatingAssistant.tsx`(全画面の角に浮くキャラクター・
   ドラッグで移動 `localStorage og.assistant.pos`・クリック/Esc で会話窓・名前と色)/ `useAssistant.ts`(会話の状態は常駐ボタン側 =
   閉じても答えは届き未読の点が付く)/ `AssistantMark.tsx`(キャラクター = アプリアイコンの形 = 太い輪+8つの切れ込み `OpenGroundMark.tsx` の `CarvedRingMask` を穴まで届く4つの切れ込みで4片に分けて・片ごとに呼吸/まばたき/考え中は色が巡る = `globals.css` の `.og-ast*`)。`App.tsx` で1回マウント・業務モードは薄く押せない・
@@ -807,13 +815,23 @@
   iPhone へは `projects` 先頭と `assistant-history` に載る。設計正典(iPhone 版もこれだけで作る)= `docs/ASSISTANT_DESIGN.md`。
   テスト `FloatingAssistant.test.tsx` / `AssistantMark.test.tsx`(20枚のかけらに戻す/切れ込みが小さいロゴ印とずれると赤)/ `assistantMemory.test.ts` / `phoneLink.test.ts`。
 - アシスタントの窓と声(2026-10-04): 空の入力欄は薄い「話しかける…」だけ。会話はふだん畳み(今のやりとり=`turn` だけ表示)、
-  `MessagesSquare` で広げる(`localStorage og.assistant.expanded`)。マイク = `useVoice.ts`(既定オフ・押すと聞く/もう一度でミュート)→
+  `MessagesSquare` で広げる(`localStorage og.assistant.expanded`)。2026-10-06 から2モード(`docs/ASSISTANT_DESIGN.md` §1):
+  チャットのマイク = 声で文字入力だけ(押してオン→話した言葉が入力欄に入る→もう一度か送信でオフ・送らない・読まない)/
+  入力が空のとき送信の位置が通話キー → 通話画面 `AssistantCall.tsx`(スピーカー/終了/消音・状態=発信中/聞いています/考えています/話しています/消音中)。
+  耳 = `useVoice.ts` の `useListen`(声 = `useSpeech`)→
   `GET /api/phone-link/assistant/listen`(SSE・ownerOnly)→ `src/lib/server/assistantListen.ts` が `bin/og-listen` を起動
   (`native/og-listen/main.swift` = macOS の SFSpeechRecognizer・端末内・無料。`scripts/build-listen.mjs` が `npm run build` で universal を作り
   `build.files` で同梱、electron-builder が署名)。話した行の返事だけ `speechSynthesis` で読む・答え待ち/読み上げ中は耳を閉じる(マイクが読み上げを拾うため)。
   罠: macOS は**アプリ本体**(責任プロセス)の Info.plist で許可を聞く → `package.json` `mac.extendInfo` の `NSSpeechRecognitionUsageDescription`
   が無いと tccd が補助を SIGABRT で殺す(=`denied` 扱い)。dev(`electron:dev`)や古い版のアプリの中からは聞き取りを確かめられない。
-  CI は macos-14 SDK なので SpeechAnalyzer(macOS 26)は未使用。テスト `FloatingAssistant.test.tsx` / `assistantListen.test.ts` /
+  CI は macos-14 SDK なので SpeechAnalyzer(macOS 26)は未使用。
+  罠2(2026-10-06 実測・「声で言っても何も入らない」の真因): 既定入力が多チャンネルの音声 IF(RME Babyface = 12ch・誰もマイク前にいなければ全ch無音)だと
+  その既定入力だけを聞いて何も拾わなかった → og-listen は既定入力が3ch以上なら本体マイクを選び、全chを1本に足してから認識へ渡す。
+  ただし MacBook のふたが閉じているとき(`AppleClamshellState`)は本体マイクを選ばない(一覧には出るが無音 = 同じ症状の再発)。既定入力が本体マイクでもふたが閉じていれば別のマイク、無ければ `unavailable`。
+  ふたの開け閉めは音声の通知が来ないので、聞いている間は2秒ごとに選び直し、変わった時だけ再起動(`Listener.watch`)。
+  判定 = `chooseInput`・確認 = `og-listen --choose <ch> <内蔵0|1> <ふた閉0|1> [<既定が内蔵0|1>]` / `og-listen --which`(いま選ぶ入力とふたの状態)。再起動は stderr に `restart (理由)` と出る(ループ確認用)。
+  番人 `src/lib/server/ogListenNative.test.ts`(ソースからその場でビルド: 選び方の表 = swiftc があれば / 12ch の3本目にだけ声 → 文字になる = さらに Kyoko の声と音声認識の許可があれば)。
+  テスト `FloatingAssistant.test.tsx` / `assistantListen.test.ts` /
   `server/__tests__/assistantListenRoute.test.ts` / `macMicPermission.test.ts`。
 - 画面ロック中に起こす(Push to Talk, 2026-10-02): APNs 送信は `src/lib/server/phonePush.ts`(オーナーの .p8 を
   `~/.openground/phone-push-key.json` 0600 に保存・JWT ES256 を30分ごとに作り直し・`node:http2` で1回ずつ接続)。
@@ -955,8 +973,13 @@
 - feedback: `server/routes/feedback.ts` + `src/components/canvas/FeedbackModal.tsx` + `src/lib/feedbackImages.ts` —
   anon insert-only。**読み側 sanitize 必須**(anon は任意 JSON を書ける)
 - usage 予算: `src/components/canvas/UsageHud.tsx` + `src/lib/server/claudeUsage.ts` / `claudeUsageCli.ts` +
-  `src/lib/usageThresholds.ts`(80黄/100赤)— ゲージを新設しない・これを使う
+  `src/lib/usageThresholds.ts`(80黄/100赤)— ゲージを新設しない・これを使う。transcript は**追記分だけ読む**
+  増分スキャン(2026-10-06・全文再読みが放置時サーバー CPU の最大要因だった)
 - SSE 基盤: `server/routes/sse.ts` + `src/lib/sseReconnect.ts`
+- 放置時 CPU(2026-10-06): `src/lib/presence.ts` — 前面かつ2分以内に入力がある間だけ**ループするアニメ**を動かす
+  (`html[data-motion=still]` = reduce motion と同じ印・静止の見た目は globals.css の1か所。CSS で覆えないループは
+  WAAPI で0フレーム目に停止・canvas の rAF は `usePresent()`)。globals.css に無限アニメを足したら静止ルールも足す
+  (`src/lib/stillMotion.test.ts` が止める)
 - skills: `src/lib/server/projectSkills.ts`(per-project `.claude/skills/`)/ `generateSkill.ts`
   (グローバル生成)+ `src/components/canvas/` の `GlobalSkillsPanel` / `SkillsModal`
 - sandbox 実験: `src/lib/server/sandbox.ts`(sandbox-exec 包囲・experiments.sandbox)—

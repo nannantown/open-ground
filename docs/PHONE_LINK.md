@@ -288,7 +288,12 @@ a registered president id returns its call notes only, without assistant talk,
 memo or style. The response names `projectId`, and normal history paging
 applies. On the Mac, `/api/phone-link/call-notes?path=<registered project>`
 reads that president's notes under the same owner/loopback and project-path
-gates as other local app data. Call records stay on the Mac: the relay forwards
+gates as other local app data; `DELETE` on the same URL clears that
+president's notes only (assistant talk and other projects' notes stay), under
+the same gates. The president seat clears them with a two-press trash button.
+It renders each note from `seconds` in the CURRENT language (`Call 1:42` /
+`通話 1:42`; the stored `text` is used only when `seconds` is missing) and
+stamps notes from another day with month/day as well as the time. Call records stay on the Mac: the relay forwards
 sealed requests/acks/history and stores no new call data.
 
 ## Sealed frames (v2, 2026-10-03)
@@ -439,6 +444,11 @@ short, and — when asked — puts a work card on a project's Board. Its talk st
 on the phone: it never reaches a president desk, the president's chat, the
 Board's notes or any screen on the Mac. Only the card it writes appears (on that
 project's Board, as an ordinary `todo` card).
+
+On the Mac the same partner lives in the floating window, with the phone app's
+two modes since 2026-10-06 — chat (its mic only types by voice) and call
+(speaker / mute / end, the same states as `CallView.swift`). That is Mac-local:
+nothing on the wire changes. Spec: docs/ASSISTANT_DESIGN.md §1.
 
 **On the wire** — the same frames, with `projectId: "assistant"`:
 - `projects` always lists it FIRST: `{ "id": "assistant", "name": "アシスタント", "look": "verm", "desk": false, "assistant": true }`
