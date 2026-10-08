@@ -86,6 +86,7 @@ const stubDeps = (
   over: Partial<OrchestratorDeps>,
 ): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
   ...defaultDeps(),
+      hasAccess: async () => true,
   fetchTasks: async () => [],
   spawnWorker: async () => {
     throw new Error('spawnWorker not stubbed for this test')

@@ -27,11 +27,14 @@ cancellation remain accessible regardless of platform or lost Pro access.
 - Stripe and Supabase service-role secrets exist only in the billing Worker.
   Electron includes only `OPENGROUND_BILLING_URL` and existing public auth config.
   Never bake service-role keys, Stripe keys or webhook secrets into runtime config.
+  A shipped billing URL overrides the launch environment, using the existing
+  collab destination lock so launch variables cannot redirect the token relay.
 - `og_billing` maps one auth UID to a unique Stripe customer. RLS/revoked client
   privileges allow only the service role to read/write. Mapping must persist
   before Checkout is created. Existing customer/subscription/open-Checkout checks
   and Stripe idempotency prevent ordinary duplicate purchase requests.
 - Checkout validates an active JPY 2,980 monthly price before taking payment.
+  Reused open sessions must contain exactly one item for that same price.
   Card subscriptions only; there is no free trial or coupon promotion in this flow.
 - `/state` and verified webhooks re-read current Stripe subscriptions. Event
   payloads never supply entitlement state or create user/customer mappings.
@@ -114,5 +117,6 @@ Stripe when required. That business policy is an explicit remaining launch item.
 
 Stripe references: [subscription webhooks](https://docs.stripe.com/billing/subscriptions/webhooks),
 [Checkout API](https://docs.stripe.com/api/checkout/sessions/create),
+[Checkout line items](https://docs.stripe.com/api/checkout/sessions/line_items),
 [Customer Portal API](https://docs.stripe.com/api/customer_portal/sessions/create),
 [webhook endpoints](https://docs.stripe.com/events/manage-webhook-endpoints).

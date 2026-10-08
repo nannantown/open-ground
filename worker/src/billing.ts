@@ -171,9 +171,16 @@ export default {
       if (existing.has_more || existing.data.some(s => !['canceled', 'incomplete_expired'].includes(s.status))) return json({ error: 'use billing management' }, 409)
       // Reuse an open Checkout across concurrent requests/devices. Stripe handles
       // its single completion; a new hourly key alone would allow two charges.
-      const recent = await stripe<{ data: Array<{ id: string; url: string; status: string }> }>(env, `/checkout/sessions?customer=${encodeURIComponent(row.customer_id)}&limit=1`)
+      const recent = await stripe<{ data: Array<{ id: string; url: string; status: string; mode: string }> }>(env, `/checkout/sessions?customer=${encodeURIComponent(row.customer_id)}&limit=1`)
       const previous = recent.data[0]
-      if (previous?.status === 'open') return json({ url: previous.url })
+      if (previous?.status === 'open') {
+        // A changed price/config must never reuse a differently priced Checkout.
+        const items = await stripe<{ has_more: boolean; data: Array<{ quantity: number; price: { id: string } }> }>(env,
+          `/checkout/sessions/${encodeURIComponent(previous.id)}/line_items?limit=100`)
+        if (previous.mode !== 'subscription' || items.has_more || items.data.length !== 1 ||
+            items.data[0].quantity !== 1 || items.data[0].price.id !== env.STRIPE_PRO_PRICE_ID) return json({ error: 'existing checkout configuration differs' }, 503)
+        return json({ url: previous.url })
+      }
       // Checkout may have completed AFTER the first subscription read. Re-check
       // before using the completed session as the next idempotency generation.
       if (previous?.status === 'complete') {

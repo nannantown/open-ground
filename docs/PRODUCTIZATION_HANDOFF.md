@@ -77,7 +77,8 @@ VitestとPlaywright/buildは同時に実行しない。リポジトリ変更検�
    `audit --omit=dev` が0であることだけで公開可能と判定しない。
 5. **署名付きGUIとWindows**：新しい署名付きMacアプリのFinder起動、ログイン→Stripeの
    外部ブラウザ→アプリ復帰、PTY/SDK、更新、OwnerのSongs/Canvas/Research/ブログを
-   保存済みデータの複製で確認。実Windowsで同じ基本操作と安全装置を測定するまで
+   保存済みデータの複製で確認。Windowsの署名証明書・署名も整備する。
+   実Windowsで同じ基本操作と安全装置を測定するまで
    Windows Pro購入を開放しない。インストール済みアプリは置換していない。
 6. **事業者・販売資料**：運営者の正式名称・住所・問い合わせ先、特商法表記、利用規約、
    価格／税・返金／紛争処理・データ保存方針を確定し、公開サイト/Stripeに反映する。
@@ -91,13 +92,15 @@ VitestとPlaywright/buildは同時に実行しない。リポジトリ変更検�
 
 ### 今回の追加検証
 
-- Freeの全Playwright対象：25成功。Ownerの全対象：77件中66成功・11失敗を検出。
+- Freeの全Playwright対象：25成功。Ownerの初回全対象：77件中66成功・11失敗を検出。
   Assistantの正しい余白をテストに反映し、実際にはみ出した司令官幅をCSSの利用可能幅で
-  制約した後、該当11件を含む28件を再実行してすべて成功。1280/390pxのFree設定画面を目視確認。
+  制約した後、該当11件を含む28件が成功。最終のOwner全対象を再実行して77件すべて成功。
+  1280/390pxのFree設定画面を目視確認。landingの価格・決済復帰・privacyページも両幅で検査。
 - Cloudflareの実ローカルランタイム：collabの全チェックとPhone relayの全チェック成功。
   非OwnerのCanvas ticket拒否、Owner＋membershipの許可も実際のWorkerで確認。
 - 破壊テスト：Owner APIの判定、Proの期限判定、Checkoutの金額判定を一つずつ外して
   各回帰テストの失敗を確認。すべて復元した23件が成功。
+  追加で課金先URL固定と再利用Checkoutの価格判定を外して失敗を確認、復元した22件が成功。
 - インストール済みElectron 31.7.7 / Node 20.18.0で最新サーバーバンドルを3回起動。
   隔離HOME・dummy Owner・fake ClaudeでOwner→Free→OwnerのCanvas/WordPress/タブ設定保持、
   FreeのSwarm拒否、通常Claude PTYの起動/停止を確認。終了後の専用ポート解放も確認。
@@ -105,3 +108,7 @@ VitestとPlaywright/buildは同時に実行しない。リポジトリ変更検�
 - ESLint：0エラー・205警告。root/Workerの型検査成功。根本依存とWorkerのproduction監査は0件。
   配布/開発依存を含む監査は29件（moderate 6 / high 22 / critical 1）残る。
   tar/electron-builder系のmajor更新とElectron更新は公開前に必要。
+- 全ユニット初回では旧Freeローカル解除を許すfixture等が失敗し、最終の再開テストが
+  権限拒否で待ち続けたため中断。既存機能のテストには明示したライセンスを注入し、
+  実際のFree拒否・期限失効の検証は維持した。関連261件と残るAPI契約171件が成功。
+  全件の最終結果はPRの検証記録とCIを参照する。

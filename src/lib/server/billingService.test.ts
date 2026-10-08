@@ -160,3 +160,19 @@ it('Checkout completion during subscription reads cannot create a second subscri
   expect((await call('/checkout', 'POST')).status).toBe(409)
   expect(checkoutCreates).toBe(1)
 })
+
+it('reuses an open Pro Checkout and refuses a differently priced one without another charge', async () => {
+  await call('/checkout', 'POST')
+  const original = fetch
+  let itemPrice = 'price_pro'
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const url = new URL(input)
+    if (url.pathname === '/v1/checkout/sessions' && init?.method !== 'POST') return Response.json({ data: [{ id: 'cs_open', status: 'open', mode: 'subscription', url: 'https://checkout.stripe.com/c/open' }] })
+    if (url.pathname === '/v1/checkout/sessions/cs_open/line_items') return Response.json({ has_more: false, data: [{ quantity: 1, price: { id: itemPrice } }] })
+    return original(input, init)
+  }))
+  expect((await (await call('/checkout', 'POST')).json()).url).toBe('https://checkout.stripe.com/c/open')
+  itemPrice = 'price_old'
+  expect((await call('/checkout', 'POST')).status).toBe(503)
+  expect(checkoutCreates).toBe(1)
+})

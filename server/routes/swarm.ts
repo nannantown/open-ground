@@ -31,15 +31,10 @@
 // POST /api/swarm/quota/uncool    — release a cooled tier again.
 //
 // Thin adapters over src/lib/server/swarmWorker.ts + swarmSupply.ts +
-// swarmOrchestrator.ts. OWNER-ONLY:
-// every route gates on hasSwarmOwnerAccess (swarmGate.ts — the signed-in owner
-// role OR the explicit server-local unlock: env OPENGROUND_LOCAL_OWNER=1 /
-// settings.swarmLocalOwner, for login-disabled machines) at the very top, so
-// an unauthorized caller gets 403 before any body parse, path validation, or
-// git — closing the local curl/SDK direct-call hole (the UI hiding the tab is
-// NOT the only guard). The unlock never comes from the request itself (see
-// swarmGate.ts for why that is safe: this gate is a feature-visibility flag,
-// not a security boundary — POST /api/terminal is already ungated locally).
+// swarmOrchestrator.ts. Starting automation requires Owner or a current Pro
+// subscription; local unlock flags grant no access. Read/stop safety routes
+// remain available after expiry or sign-out so existing work can be stopped.
+// Paid gates run before body parse, path validation, or git.
 // Then every path-accepting route runs validateProjectPath (the registry
 // allowlist) BEFORE any work, and the spawn routes also run the shared claude
 // preflight so a missing/signed-out CLI fails fast (503) instead of orphaning

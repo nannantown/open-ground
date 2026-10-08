@@ -8,7 +8,7 @@ import { appendAssistantCall, clearAssistantLog, readAssistantLog } from '@/lib/
 import { openGroundHome } from '@/lib/server/paths'
 
 vi.mock('@/lib/server/swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => true }))
-vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => null }))
+vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => 'owner' }))
 const app = new Hono().route('/', phoneLinkRoutes)
 let project: string
 beforeEach(async () => {
