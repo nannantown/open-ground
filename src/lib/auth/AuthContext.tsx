@@ -2,8 +2,7 @@
 //
 // This hook is intentionally the one place the rest of the app asks "who is
 // signed in?". A future billing / entitlement check will read from HERE (and
-// from the /api/auth/* routes + the Session type) — DO NOT build any billing or
-// premium gating now; login is optional and gates nothing today. See
+// from the /api/auth/* routes + the Session type) — Free works signed out; Pro billing uses this account. See
 // docs/BILLING_PLAN.md.
 //
 // FLOW (server-side PKCE on the loopback Hono origin — see server/routes/auth.ts):
@@ -72,7 +71,7 @@ const bridge = (): OpenGroundBridge | undefined =>
 // failed. Under Electron we await the IPC handler: main.js returns false when
 // the URL fails its allow-list, and it can throw — both mean "didn't open", so
 // signIn can surface an error instead of silently polling for 3 minutes.
-const openInBrowser = async (url: string): Promise<boolean> => {
+export const openInBrowser = async (url: string): Promise<boolean> => {
   const og = bridge()
   if (og?.openExternal) {
     try {
@@ -227,17 +226,18 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const signOut = useCallback(async () => {
     try {
-      await api.api.auth.signout.$post()
+      const res = await api.api.auth.signout.$post()
+      if (!res.ok) throw new Error('sign-out failed')
     } catch {
-      // Even if the request fails, clear locally — the server route is
-      // best-effort too, and the next session probe will reconcile.
+      setAuthError(t('auth.error.signOut'))
+      return
     }
     stopPolling()
     attemptedSignIn.current = false
     setAuthError(null)
     setUser(null)
     setStatus('signed-out')
-  }, [stopPolling])
+  }, [stopPolling, t])
 
   return (
     <AuthContext.Provider

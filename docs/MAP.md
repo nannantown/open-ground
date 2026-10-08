@@ -24,6 +24,14 @@
   `assistantMemory.test.ts`. No record is injected into Claude's own transcript.
 
 ## 0. 契約と骨格 — 全変更の起点
+- Product subscriptions (2026-10-08): `docs/BILLING_PLAN.md` and
+  `docs/PRODUCTIZATION_HANDOFF.md`; local `billing.ts` + `server/routes/billing.ts`,
+  hosted `worker/src/billing.ts` + `worker/wrangler.billing.jsonc`, hosted-only
+  `supabase/migrations/0016_billing.sql`. `BillingSection.tsx` uses existing login
+  and browser helpers. `swarmGate.ts` and production engine passes enforce paid
+  access; Owner API middleware is in `server/app.ts`. Guards: `billing.test.ts`,
+  `billingService.test.ts`, `supabaseAuth.test.ts`, `productAccess.test.ts`,
+  `e2e/subscriptions.spec.ts`. Secrets never ship in the desktop app.
 - Songs/NENE development handoff (2026-09-22): `docs/SONGS-HANDOFF-2026-09-22.md`.
   Two local repository branches, delivered UI/recording changes, verification,
   preserved owner data and remaining hardware/packaged-app acceptance checks.
@@ -34,7 +42,7 @@
   two remaining implementation workers and asked to leave them running.
   The earlier unshipped/stopped snapshot is historical; check live state.
 - Public/owner surface contract: `docs/PUBLIC_PRODUCT_SCOPE.md`. Public Board,
-  Terminal and opt-in Swarm (a bottom bar under every tab, not a tab — see §5); owner-only per-project Canvas, Research, custom tabs
+  Terminal; licensed Pro/Owner Swarm (a bottom bar under every tab, not a tab — see §5); owner-only per-project Canvas, Research, custom tabs
   and WordPress/Skills UI. Owner display preview: Settings switch (`SettingsPanel.tsx` +
   `App.tsx`); Ground tools collapse in `ToolPalette.tsx`. Automatic fuel reports
   are owner-only (`dailyFuelReport.ts`); meters/safety remain public. Visibility

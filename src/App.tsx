@@ -780,6 +780,7 @@ export default function App() {
   // started on one canvas stays visible from anywhere, including Ground. Best-
   // effort: a failed poll keeps the last known count rather than flashing off.
   useEffect(() => {
+    if (!ownerFeatures) { setAiActiveCount(0); return }
     let cancelled = false
     const poll = async () => {
       if (document.hidden) return
@@ -802,7 +803,7 @@ export default function App() {
       window.clearInterval(id)
       window.removeEventListener('focus', onFocus)
     }
-  }, [])
+  }, [ownerFeatures])
 
   // One-shot probe of whether the optional app login is configured server-side
   // (same Supabase env as feedback). Gates the toolbar account entry; any
@@ -1535,6 +1536,7 @@ export default function App() {
         />
       )}
       <SettingsPanel
+        billingAccountId={authUser?.id ?? null}
         open={settingsOpen}
         settings={settings}
         onClose={() => setSettingsOpen(false)}
@@ -1614,7 +1616,7 @@ export default function App() {
       {/* The owner's assistant floats over every screen (docs/ASSISTANT_DESIGN.md).
           Not in the public-view preview. Re-mounted when the signed-in user or work
           mode changes, so it asks the owner-only routes again (they decide). */}
-      {!publicPreview && (
+      {ownerFeatures && (
         <FloatingAssistant
           key={`${authUser?.id ?? ''}:${settings?.lockdownMode === true}`}
           disabled={settings?.lockdownMode === true}

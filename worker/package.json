@@ -16,7 +16,7 @@
     "yjs": "^13.6.20"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20241127.0",
+    "@cloudflare/workers-types": "^4.20260702.1",
     "typescript": "^5.7.2",
     "wrangler": "^4.100.0",
     "ws": "^8.18.0"

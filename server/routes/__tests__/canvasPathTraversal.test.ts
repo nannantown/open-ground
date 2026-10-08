@@ -1,3 +1,5 @@
+// These data/AI contracts run as Owner; public denials are checked separately.
+vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => 'owner' }))
 // canvasPathTraversal.test.ts — security contract for the canvas id endpoints.
 //
 // The canvas id is echoed from the client (GET ?id / POST canvas.id / rename /
@@ -12,7 +14,7 @@
 //       (defense in depth — structural last line, not just the route guard)
 // HOME is the throwaway test home (setup-home.ts → OPENGROUND_HOME under tmp).
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, rm, realpath, readFile, writeFile, unlink, mkdir } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join, resolve } from 'path'

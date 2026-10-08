@@ -7,8 +7,7 @@
 // ALWAYS http://127.0.0.1:47776/api/auth/callback. We run the full
 // authorization-code + PKCE exchange HERE so the Supabase anon key and the
 // resulting tokens never enter the client bundle — same posture as the feedback
-// proxy. The login is entirely optional and gates nothing today; it is the seam
-// a future billing/entitlement check will read (see docs/BILLING_PLAN.md).
+// proxy. Free works signed out; Pro billing uses the authenticated account (see docs/BILLING_PLAN.md).
 //
 // IMPORTANT BOUNDARY: the session this route persists is the APP's account, NOT
 // the Claude CLI subscription token. See src/lib/server/authStore.ts.
@@ -34,6 +33,7 @@ import {
   type StoredSession,
 } from '@/lib/server/authStore'
 import {
+  getFreshAccessToken,
   readAuthConfig,
   postToken,
   toAuthUser,
@@ -280,33 +280,12 @@ export const authRoutes = new Hono()
     const config = readAuthConfig()
     if (!config) return c.json<AuthSessionResponse>({ user: null })
 
-    const stored = await readSession()
-    if (!stored) return c.json<AuthSessionResponse>({ user: null })
-
-    // 60s skew so we refresh just before a request would fail.
-    if (stored.expiresAt - 60_000 > Date.now()) {
-      return c.json<AuthSessionResponse>({ user: stored.user })
-    }
-
-    // Expired (or about to): refresh. On failure we clear the session and report
-    // signed-out rather than serving a dead one.
-    const token = await postToken(config, 'refresh_token', {
-      refresh_token: stored.refreshToken,
-    })
-    if (!token?.access_token || !token.refresh_token) {
-      await clearSession()
-      return c.json<AuthSessionResponse>({ user: null })
-    }
-
-    const refreshed: StoredSession = {
-      // Prefer the refreshed user object when present; else keep the stored one.
-      user: token.user?.id ? toAuthUser(token.user, stored.user.provider) : stored.user,
-      expiresAt: expiryFrom(token),
-      accessToken: token.access_token,
-      refreshToken: token.refresh_token, // rotated — persist the new one.
-    }
-    await writeSession(refreshed)
-    return c.json<AuthSessionResponse>({ user: refreshed.user })
+    const accessToken = await getFreshAccessToken()
+    const stored = accessToken ? await readSession() : null
+    // Temporary network/refresh failure suspends privileges, preserving login
+    // data for recovery. Refresh is shared with billing/roles, so rotated tokens
+    // cannot race independent refresh grants.
+    return c.json<AuthSessionResponse>({ user: stored?.user ?? null })
   })
 
   // NOTE: the v1 realtime endpoints (GET /api/auth/realtime-token and

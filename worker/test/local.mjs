@@ -162,6 +162,12 @@ function mockSupabaseHandler(req, res) {
     res.end(JSON.stringify({ keys: [esJwk, rsaJwk] }))
     return
   }
+  if (req.method === 'GET' && u.pathname === '/rest/v1/og_roles') {
+    const claims = decodeJwtPayload(req.headers.authorization)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify([{ role: claims?.sub === OWNER_SUB ? 'owner' : 'tester' }]))
+    return
+  }
   if (req.method === 'GET' && u.pathname === '/rest/v1/og_project_members') {
     const claims = decodeJwtPayload(req.headers['authorization'])
     const sub = claims?.sub
@@ -512,7 +518,11 @@ async function main() {
 
     // 5c) an email-seeded member (uid absent from roster, email present) → member.
     const emailMemberJwt = makeJwt({ sub: 'fresh-login-uuid', email: MEMBER_EMAIL, alg: 'ES256', iss: ISS })
-    const res5c = await postTicket(emailMemberJwt, { pid: ZPID, scope: 'canvas:abc' })
+    const deniedCanvas = await postTicket(emailMemberJwt, { pid: ZPID, scope: 'canvas:abc' })
+    check(deniedCanvas.status === 403, 'project membership alone cannot open Owner Canvas')
+    const allowedCanvas = await postTicket(ownerJwt, { pid: ZPID, scope: 'canvas:abc' })
+    check(allowedCanvas.status === 200, 'App Owner with membership can open Canvas')
+    const res5c = await postTicket(emailMemberJwt, { pid: ZPID, scope: 'board' })
     check(res5c.status === 200, `email-matched member issues a ticket (status=${res5c.status})`)
     check(
       verifyTicketNode((await res5c.json()).token, SECRET)?.role === 'member',

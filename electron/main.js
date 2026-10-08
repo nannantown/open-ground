@@ -589,7 +589,8 @@ function isAllowedOauthUrl(url) {
   } catch {
     return false
   }
-  if (parsed.protocol !== 'https:') return false
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return false
+  if (['checkout.stripe.com', 'billing.stripe.com'].includes(parsed.hostname)) return true
   const host = parsed.hostname.toLowerCase()
   const allowedSuffixes = [
     '.supabase.co', // the project's auth origin (authorize / callback)

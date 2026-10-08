@@ -104,10 +104,8 @@ afterEach(async () => {
 })
 
 describe('GET /api/custom-modules — role + list for any caller', () => {
-  it('signed out → role none, empty list', async () => {
-    const res = await app.request('/api/custom-modules')
-    expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ role: 'none', modules: [] })
+  it('signed out cannot list owner sources', async () => {
+    expect((await app.request('/api/custom-modules')).status).toBe(403)
   })
 
   it('owner sees role owner and the created modules', async () => {
@@ -117,12 +115,11 @@ describe('GET /api/custom-modules — role + list for any caller', () => {
     expect(body.modules).toEqual([def])
   })
 
-  it('existing modules stay listed for role none (read-only render)', async () => {
+  it('signed-out read is denied while sources remain intact', async () => {
     const def = await createAsOwner()
     await clearSession()
-    const body = await (await app.request('/api/custom-modules')).json()
-    expect(body.role).toBe('none')
-    expect(body.modules).toEqual([def])
+    expect((await app.request('/api/custom-modules')).status).toBe(403)
+    expect(await readFile(customModuleSourceFile(def.id), 'utf8')).toContain('export default function')
   })
 })
 
@@ -133,13 +130,9 @@ describe('POST /api/custom-modules — owner|tester create (none forbidden)', ()
     expect((await res.json()).error).toBe('forbidden')
   })
 
-  it('a tester MAY create a local module (authoring is open to testers)', async () => {
+  it('tester cannot create an Owner module', async () => {
     await signInAs(TESTER)
-    const res = await app.request('/api/custom-modules', json('POST', { label: 'Tester Tab' }))
-    expect(res.status).toBe(200)
-    const def: CustomModuleDef = await res.json()
-    expect(def.origin).toBe('local')
-    expect(def.label).toBe('Tester Tab')
+    expect((await app.request('/api/custom-modules', json('POST', { label: 'Tester Tab' }))).status).toBe(403)
   })
 
   it('validates label (required, ≤60) and description (≤4000)', async () => {
@@ -170,9 +163,8 @@ describe('POST /api/custom-modules — owner|tester create (none forbidden)', ()
 })
 
 describe('GET /api/custom-modules/:id/source', () => {
-  it('returns source + mtimeMs to any caller', async () => {
+  it('returns source + mtimeMs to Owner', async () => {
     const def = await createAsOwner()
-    await clearSession()
     const res = await app.request(`/api/custom-modules/${def.id}/source`)
     expect(res.status).toBe(200)
     const body = await res.json()
@@ -181,11 +173,13 @@ describe('GET /api/custom-modules/:id/source', () => {
   })
 
   it('404 for a non-uuid id (traversal rejected before the filesystem)', async () => {
+    await signInAs(OWNER)
     const res = await app.request('/api/custom-modules/..%2F..%2Fetc/source')
     expect(res.status).toBe(404)
   })
 
   it('404 for an unknown uuid', async () => {
+    await signInAs(OWNER)
     const res = await app.request(
       '/api/custom-modules/123e4567-e89b-42d3-a456-426614174000/source',
     )
@@ -202,20 +196,12 @@ describe('PUT /api/custom-modules/:id — owner any; tester local-only', () => {
     ).toBe(403)
   })
 
-  it('a tester MAY edit a local module (their own authored tab)', async () => {
-    // A tester-authored local module: the create gate is open to testers.
+  it('tester cannot overwrite a saved local module', async () => {
+    const def = await createAsOwner('Mine')
+    const before = await readFile(customModuleSourceFile(def.id), 'utf8')
     await signInAs(TESTER)
-    const def: CustomModuleDef = await (
-      await app.request('/api/custom-modules', json('POST', { label: 'Mine' }))
-    ).json()
-    const res = await app.request(
-      `/api/custom-modules/${def.id}`,
-      json('PUT', { label: 'Renamed', source: 'export default () => null\n' }),
-    )
-    expect(res.status).toBe(200)
-    expect((await res.json()).label).toBe('Renamed')
-    const src = await (await app.request(`/api/custom-modules/${def.id}/source`)).json()
-    expect(src.source).toBe('export default () => null\n')
+    expect((await app.request(`/api/custom-modules/${def.id}`, json('PUT', { source: 'changed' }))).status).toBe(403)
+    expect(await readFile(customModuleSourceFile(def.id), 'utf8')).toBe(before)
   })
 
   it('a tester may NOT edit an installed module (someone else’s artifact)', async () => {
@@ -278,11 +264,12 @@ describe('DELETE /api/custom-modules/:id — owner; tester for installed only', 
     expect(res.status).toBe(403)
   })
 
-  it('tester MAY delete an installed module', async () => {
+  it('tester cannot delete an installed module', async () => {
     const installed = await seedInstalledTab()
     await signInAs(TESTER)
     const res = await app.request(`/api/custom-modules/${installed.id}`, { method: 'DELETE' })
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(403)
+    expect(await readFile(customModuleSourceFile(installed.id), 'utf8')).toBe('export default () => null\n')
   })
 
   it('signed out → 403; unknown uuid as owner → 404', async () => {

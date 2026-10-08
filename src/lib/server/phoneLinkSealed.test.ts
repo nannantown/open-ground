@@ -18,7 +18,7 @@ vi.mock('cloudflare:workers', () => ({
   },
 }))
 vi.mock('./swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => true }))
-vi.mock('./roles', () => ({ getCustomTabRole: async () => null }))
+vi.mock('./roles', () => ({ getCustomTabRole: async () => 'owner' }))
 vi.mock('./store', async (orig) => ({ ...(await orig<typeof import('./store')>()), getSettings: async () => ({ projects: h.projects }) }))
 vi.mock('./swarmSessions', () => ({ readSwarmSessions: async (p: string) => ({ supply: { cwd: p, sessionId: 's1' } }) }))
 vi.mock('./transcript', () => ({ sessionJsonlPath: (cwd: string) => h.files[cwd] ?? h.file }))

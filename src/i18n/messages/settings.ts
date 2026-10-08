@@ -23,9 +23,9 @@ export const settings = {
     'settings.experiments.sandbox': 'Sandbox Claude (macOS)',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
-    // Public swarm opt-in (all users, macOS only) — "still being tuned"
-    'settings.swarmOptIn.heading': 'Agent Team (experimental)',
-    'settings.swarmOptIn.hint': 'Still being tuned. Off by default — turn it on only if you want it.',
+    // Licensed swarm consent (Pro/Owner, macOS only) — "still being tuned"
+    'settings.swarmOptIn.heading': 'Agent Team · Pro',
+    'settings.swarmOptIn.hint': 'Requires Pro or Owner on macOS. Off by default — enable it when you want automation.',
     'settings.publicPreview.label': 'Show as a public user sees it',
     'settings.swarmOptIn.label': 'Enable Agent Team',
     'settings.swarmOptIn.warning':
@@ -218,8 +218,8 @@ export const settings = {
     'settings.experiments.sandbox': 'Claude をサンドボックス化 (macOS)',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
-    'settings.swarmOptIn.heading': 'エージェントチーム(試験運用)',
-    'settings.swarmOptIn.hint': 'まだ調整中です。既定はオフ — 使いたい場合だけオンにしてください。',
+    'settings.swarmOptIn.heading': 'エージェントチーム · Pro',
+    'settings.swarmOptIn.hint': 'macOSでProまたはOwnerが必要です。既定はオフ — 自動運転を使う場合にオンにしてください。',
     'settings.publicPreview.label': '一般ユーザーの見え方で表示',
     'settings.swarmOptIn.label': 'エージェントチームを有効にする',
     'settings.swarmOptIn.warning':

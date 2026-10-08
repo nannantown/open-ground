@@ -1,23 +1,8 @@
-// experiments.ts — resolves which owner-only experiments are OPEN for the
-// caller (docs/CUSTOM_TABS_PLAN.md is the sibling role machinery).
-//
-// An experiment is a hidden feature gated behind TWO conditions, ANDed here so
-// the SERVER is the single authority:
-//   1. the caller is the OWNER (decided from the stored app-login session via
-//      the Supabase `og_roles` table — see roles.ts; the client never computes
-//      this), and
-//   2. the owner has turned that experiment ON in settings.json
-//      (settings.experiments.<id>, default off).
-//
-// Because the owner check is ANDed in, a non-owner who forges
-// `experiments.swarm: true` in their own settings.json STILL resolves to
-// `swarm: false` — the gate never opens for anyone but the owner. `eligible`
-// surfaces condition 1 alone so the client can show the owner the toggle
-// (without it, the toggle itself would betray the feature's existence).
-//
+// Owner experiments and licensed macOS Swarm consent. The server is authoritative.
 import { getCustomTabRole } from './roles'
-import { isSwarmLocalOwnerUnlocked, isSwarmOptInAvailable, isSwarmOptInEnabled } from './swarmGate'
+import { isSwarmLocalOwnerUnlocked, isSwarmOptInAvailable, isSwarmOptInEnabled, hasSwarmOwnerAccess } from './swarmGate'
 import { getSettings } from './store'
+import { getBillingState } from './billing'
 import type {
   CustomTabRole,
   ExperimentId,
@@ -29,13 +14,13 @@ import type {
 // mocking the session / Supabase / disk. `eligible` is owner-only; each flag is
 // `eligible && the stored toggle`, so non-owners get all-false regardless of
 // what their settings.json claims. `opts.swarmLocalOwner` (the resolved local
-// unlock — see the header) opens ONLY the swarm flag, bypassing both.
+// unlock) contributes only for an actual Owner. Pro uses the licensed opt-in.
 export const computeExperiments = (
   role: CustomTabRole,
   settings: Pick<Settings, 'experiments'>,
   opts?: {
     swarmLocalOwner?: boolean
-    /** The resolved PUBLIC opt-in (macOS && Settings.swarmOptIn) — opens swarm
+    /** The resolved licensed opt-in (macOS && paid && Settings.swarmOptIn) — opens swarm
      *  for a non-owner. See swarmGate.isSwarmOptInEnabled. */
     swarmOptInEnabled?: boolean
     /** Whether this machine can offer the opt-in at all (macOS) — drives the
@@ -49,7 +34,7 @@ export const computeExperiments = (
     flags: {
       swarm:
         (eligible && settings.experiments?.swarm === true) ||
-        opts?.swarmLocalOwner === true ||
+        (eligible && opts?.swarmLocalOwner === true) ||
         opts?.swarmOptInEnabled === true,
       sandbox: eligible && settings.experiments?.sandbox === true,
     },
@@ -69,7 +54,7 @@ export const resolveExperiments = async (): Promise<ExperimentsResponse> =>
   computeExperiments(await getCustomTabRole(), await getSettings(), {
     swarmLocalOwner: await isSwarmLocalOwnerUnlocked(),
     swarmOptInEnabled: await isSwarmOptInEnabled(),
-    swarmOptInAvailable: isSwarmOptInAvailable(),
+    swarmOptInAvailable: isSwarmOptInAvailable() && (await getBillingState()).plan !== 'free',
   })
 
 // Is ONE experiment open for the caller? Same gate as resolveExperiments (owner
@@ -81,11 +66,9 @@ export const resolveExperiments = async (): Promise<ExperimentsResponse> =>
 // server-authoritative: a non-owner with a forged toggle fails the role check.
 export const isExperimentEnabled = async (id: ExperimentId): Promise<boolean> => {
   // Keep the swarm flag consistent with resolveExperiments: the local unlock
-  // AND the public macOS opt-in (swarmGate.ts) open it without a login or the
-  // owner toggle — otherwise a hot launch path would see the flag closed while
+  // AND the licensed macOS opt-in (swarmGate.ts) retain the consent requirement — otherwise a hot launch path would see the flag closed while
   // the UI shows the tab.
-  if (id === 'swarm' && ((await isSwarmLocalOwnerUnlocked()) || (await isSwarmOptInEnabled())))
-    return true
+  if (id === 'swarm') return await hasSwarmOwnerAccess() && ((await isSwarmLocalOwnerUnlocked()) || (await isSwarmOptInEnabled()) || (await getSettings()).experiments?.swarm === true)
   const settings = await getSettings()
   if (settings.experiments?.[id] !== true) return false
   return (await getCustomTabRole()) === 'owner'

@@ -3624,3 +3624,13 @@ export interface AssistantListenEvent {
   /** On 'error': 'denied' (no permission) | 'unavailable' | 'failed'. */
   reason?: string
 }
+
+export interface BillingState {
+  /** Checkout rollout is macOS-only until Windows Swarm is verified. */
+  checkoutAvailable: boolean
+  plan: 'free' | 'pro' | 'owner'
+  configured: boolean
+  status: string
+  currentPeriodEnd: number | null
+  cancelAtPeriodEnd: boolean
+}

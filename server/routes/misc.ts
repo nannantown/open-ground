@@ -11,6 +11,7 @@
 // handlers depend on are hoisted above the chain (they used to be interleaved
 // between the per-route registrations).
 
+import { getCustomTabRole } from '@/lib/server/roles'
 import { Hono } from 'hono'
 import { mkdir, rmdir, stat, readFile } from 'fs/promises'
 import { basename, join, resolve } from 'path'
@@ -391,7 +392,9 @@ export const miscRoutes = new Hono()
   // --- GET / POST /api/settings ---------------------------------------------
   .get('/api/settings', async (c) => {
     const [settings, suggested] = await Promise.all([getSettings(), suggestedDisplayName()])
-    const body: SettingsResponse = { ...settings, suggestedDisplayName: suggested }
+    const visible = { ...settings }
+    if (await getCustomTabRole() !== 'owner') { delete visible.wordpress; delete visible.experiments }
+    const body: SettingsResponse = { ...visible, suggestedDisplayName: suggested }
     return c.json(body)
   })
   .post('/api/settings', async (c) => {
@@ -406,6 +409,11 @@ export const miscRoutes = new Hono()
     // (Cross-origin forgery of this route is additionally blocked by the CSRF /
     // Origin guard in server/app.ts.) A non-JSON body is treated as empty (no-op).
     const body = await c.req.json().catch(() => ({}))
+    if (body && typeof body === 'object' && await getCustomTabRole() !== 'owner') {
+      // Preserve hidden owner settings during ordinary saves.
+      delete body.wordpress
+      delete body.experiments
+    }
     await setUserSettings(body)
     return c.json({ ok: true })
   })

@@ -60,6 +60,7 @@
 // /api/swarm/*. By the time a call reaches this module the caller is the owner
 // and the path is a registered project.
 
+import { hasSwarmOwnerAccess } from './swarmGate'
 import { hasCompletionConditions, isDispatchableCard } from '@/lib/dispatchGate'
 import { observeBoardProgress } from './supplyProgress'
 import { kickCommanderQuestionSweep } from './commanderQuestions'
@@ -3114,6 +3115,8 @@ const stateOf = (
 // ── Injectable dependencies ──────────────────────────────────────────────────
 
 export interface OrchestratorDeps {
+  /** Production access check; pure engine tests may inject their own policy. */
+  hasAccess?: () => Promise<boolean>
   /** Read this project's full Board card list (any order — the pass derives the
    *  todo queue, and looks up each worker's card by id to monitor its column). */
   fetchTasks: (projectPath: string) => Promise<ProjectTask[]>
@@ -5533,6 +5536,9 @@ export const HIGH_RISK_PATHS: readonly RegExp[] = [
   // (authStore.ts, oauth2.ts, tokenRefresh.ts). author/authoring stay clear:
   // their next char is lowercase.
   /(^|[/._-])(o?auth|tokens?|secrets?)[A-Z0-9]/,
+  // Payments and shared API authorization always require independent review.
+  /billing/i,
+  /^server\/app\.ts$/,
   // authorization core — no auth-ish segment in the names, so listed explicitly
   /^src\/lib\/server\/(roles|swarmGate|swarmAllowedModels)\.ts$/,
 ]
@@ -5593,6 +5599,7 @@ const defaultReadConsumption = async (opts: {
 }
 
 export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
+  hasAccess: hasSwarmOwnerAccess,
   fetchTasks: defaultFetchTasks,
   moveToDoing: defaultMoveToDoing,
   moveToReview: defaultMoveToReview,
@@ -7598,7 +7605,7 @@ export const runDispatchPass = async (
   deps: OrchestratorDeps & Pick<AnomalyDeps, 'notify'>,
   now: number = Date.now(),
 ): Promise<void> => {
-  if (!engine.running) return
+  if (!engine.running || (deps.hasAccess && !await deps.hasAccess())) return
 
   // 1. Read the full board — the monitor needs each worker's current column, and
   //    dispatch/reconcile need the todo queue. One read feeds all three.
@@ -9548,6 +9555,12 @@ export const runEnginePass = async (
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps,
 ): Promise<void> => {
   if (engine.passInFlight) return
+  if (deps.hasAccess && !await deps.hasAccess()) {
+    // Pause in memory. Keep intent, worktrees, transcripts and in-flight work.
+    engine.running = false
+    engine.overseer.enabled = false
+    return
+  }
   engine.passInFlight = true
   try {
     // The dispatch pass (monitor → promote → recover → fill) shares the board + worker
@@ -9903,6 +9916,7 @@ export const maybeAutoStartDrain = async (
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps,
   now: number = Date.now(),
 ): Promise<boolean> => {
+  if (deps.hasAccess && !await deps.hasAccess()) return false
   // No auto-start when: already draining / mid-pass (the running loop owns refills — don't
   // double-drive), OR the owner explicitly paused (manualStop — OFF must stick, 条件2).
   if (engine.running || engine.passInFlight || engine.manualStop) return false
@@ -10746,6 +10760,7 @@ export const resumeEngines = async (
     spawnManager?: (o: { projectPath: string }) => Promise<unknown>
   },
 ): Promise<{ resumed: string[]; suppressed: boolean }> => {
+  if (deps.hasAccess && !await deps.hasAccess()) return { resumed: [], suppressed: true }
   const now = opts?.now ?? Date.now()
   const appVersion = opts?.appVersion ?? APP_VERSION
   // card 3 — reconcile-first probe set (built from deps so the module stays
