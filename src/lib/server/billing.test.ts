@@ -1,20 +1,28 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest'
-import { getBillingState, billingUrl } from './billing'
+import { getBillingState, billingUrl, billingRequest } from './billing'
 const h = vi.hoisted(() => ({
-  user: 'a', token: 'a-token', role: 'none', lockdown: false,
+  user: 'a', token: 'a-token', role: 'none', lockdown: false, changeDuringRefresh: false,
 }))
 vi.mock('./authStore', () => ({ readSession: async () => h.user ? { user: { id: h.user }, accessToken: h.token } : null }))
-vi.mock('./supabaseAuth', () => ({ getFreshAccessToken: async () => h.user ? h.token : null }))
+vi.mock('./supabaseAuth', () => ({ getFreshAccessToken: async () => { if (h.changeDuringRefresh) h.user = 'b'; return h.user ? h.token : null } }))
 vi.mock('./roles', () => ({ getCustomTabRole: async () => h.role }))
 vi.mock('./lockdown', () => ({ isLockdownEnabledSync: () => h.lockdown }))
 beforeEach(() => {
   h.user = 'a'; h.token = `token-${Math.random()}`; h.role = 'none'; h.lockdown = false
+  h.changeDuringRefresh = false
   vi.stubEnv('OPENGROUND_BILLING_URL', 'https://billing.example')
 })
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs() })
 const paid = () => ({ plan: 'pro', status: 'active', currentPeriodEnd: Date.now() + 60_000, cancelAtPeriodEnd: false })
 
 describe('paid entitlement', () => {
+  it('account changes during token refresh cannot send a billing action for a different user', async () => {
+    const fetcher = vi.fn(async () => Response.json({ url: 'https://checkout.stripe.com/c/b' }))
+    vi.stubGlobal('fetch', fetcher)
+    h.changeDuringRefresh = true
+    expect(await billingRequest('/checkout', 'POST')).toBeNull()
+    expect(fetcher).not.toHaveBeenCalled()
+  })
   it('defaults Free for missing config, sign-out and lockdown without network', async () => {
     const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher)
     vi.stubEnv('OPENGROUND_BILLING_URL', '')

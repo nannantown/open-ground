@@ -31,6 +31,7 @@
 | Phone/Assistant | ローカルSwarm解除がOwner権限を代替 | 実際のApp Ownerに統一。Freeの背景ポーリングも停止 |
 | Owner保存値 | 一般設定の読出しでWordPress秘密が見える、UI省略フィールドが失われ得る | 一般読出しで除外、書込みで既存値とタブ順・非表示・カスタムIDを保護 |
 | 認証更新 | 同時更新と遅延応答がログアウトを巻き戻す可能性 | 更新の共有、アカウント／トークン照合、保存失敗の伝達。通信障害でトークンを削除しない |
+| 課金のアカウント切替 | 更新中や遅れたCheckout/Portal応答が別アカウントへ混ざり得る | 送信前に同一アカウント／トークンを確認。切替後の旧応答で決済画面を開かない |
 | UI | 課金入口なし、Owner APIへの不要な背景アクセス | 設定のPlan欄と価格・期限・解約・再確認。FreeはBoard/Terminal固定、Swarmバーなし |
 | 配布設定 | 課金URLを配布バイナリへ引き渡せない | 公開URLだけをruntime configとrelease workflowの変数に追加 |
 | 公開サイト | Canvas高度機能と「追加料金なし」が一般機能のように掲載 | Free/Pro価格、Claude別契約、Pro準備中、復帰ページ、決済データ処理の説明 |
@@ -101,6 +102,7 @@ VitestとPlaywright/buildは同時に実行しない。リポジトリ変更検�
 - 破壊テスト：Owner APIの判定、Proの期限判定、Checkoutの金額判定を一つずつ外して
   各回帰テストの失敗を確認。すべて復元した23件が成功。
   追加で課金先URL固定と再利用Checkoutの価格判定を外して失敗を確認、復元した22件が成功。
+  支払・解約応答とトークン更新中のアカウント切替も修正前の失敗を観測し、修正した関連28件が成功。
 - インストール済みElectron 31.7.7 / Node 20.18.0で最新サーバーバンドルを3回起動。
   隔離HOME・dummy Owner・fake ClaudeでOwner→Free→OwnerのCanvas/WordPress/タブ設定保持、
   FreeのSwarm拒否、通常Claude PTYの起動/停止を確認。終了後の専用ポート解放も確認。

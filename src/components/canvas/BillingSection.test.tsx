@@ -32,3 +32,17 @@ it('changing accounts discards a late paid-state response', async () => {
   expect(screen.getByRole('button', { name: 'Pro · ¥2,980/month' })).toBeDisabled()
   expect(screen.queryByText('Pro · ¥2,980 / month')).not.toBeInTheDocument()
 })
+
+it('changing accounts cannot open the previous account billing URL', async () => {
+  let finish: (r: Response) => void = () => {}
+  vi.stubGlobal('fetch', vi.fn((url: string) => url.includes('/state')
+    ? Promise.resolve(Response.json({ plan: 'pro', configured: true, checkoutAvailable: true }))
+    : new Promise<Response>(resolve => { finish = resolve })))
+  const view = render(<BillingSection accountId="a" />)
+  const button = await screen.findByRole('button', { name: 'Manage billing / cancel' })
+  fireEvent.click(button)
+  view.rerender(<BillingSection accountId="b" />)
+  finish(Response.json({ url: 'https://billing.stripe.com/p/account-a' }))
+  await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Manage billing / cancel' })).not.toBeDisabled())
+  expect(open).not.toHaveBeenCalled()
+})

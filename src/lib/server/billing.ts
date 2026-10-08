@@ -27,8 +27,11 @@ let pending: { key: string; promise: Promise<BillingState> } | null = null
 export const billingRequest = async (path: string, method = 'GET'): Promise<Response | null> => {
   const base = billingUrl()
   if (!base || isLockdownEnabledSync()) return null
+  const account = await readSession()
+  if (!account) return null
   const token = await getFreshAccessToken()
-  if (!token) return null
+  const current = await readSession()
+  if (!token || current?.user.id !== account.user.id || current.accessToken !== token) return null
   return fetch(`${base}${path}`, {
     method, headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(10_000), redirect: 'error',

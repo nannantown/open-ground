@@ -33,14 +33,16 @@ export function BillingSection({ accountId }: { accountId?: string | null }) {
   }, [refresh])
 
   const openBilling = async (action: 'checkout' | 'portal') => {
+    const request = seq.current
     setBusy(true)
     setError('')
     try {
       const res = await fetch(`/api/billing/${action}`, { method: 'POST' })
       if (!res.ok) throw new Error('unavailable')
       const data = await res.json() as { url: string }
+      if (request !== seq.current) return
       if (!await openInBrowser(data.url)) throw new Error('browser')
-    } catch { setError(ja ? '決済画面を開けません。再確認してからお試しください。' : 'Could not open billing. Refresh and try again.') }
+    } catch { if (request === seq.current) setError(ja ? '決済画面を開けません。再確認してからお試しください。' : 'Could not open billing. Refresh and try again.') }
     finally { setBusy(false) }
   }
   const plan = state?.plan ?? 'free'
