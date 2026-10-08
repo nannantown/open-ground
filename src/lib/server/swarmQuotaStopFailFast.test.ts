@@ -94,6 +94,7 @@ const stubDeps = (
   over: Partial<OrchestratorDeps>,
 ): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
   ...defaultDeps(),
+      hasAccess: async () => true,
   fetchTasks: async () => [card('q1')],
   spawnWorker: async () => {
     throw new Error('spawnWorker must not run in these tests')

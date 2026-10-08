@@ -18,7 +18,7 @@ import type { SwarmOrchestratorState, AppNotificationsResponse, SwarmQuotaRespon
 
 // POST /api/swarm/worker + /worktree/remove against the real Hono app, with
 // OPENGROUND_HOME on a throwaway dir so the registry (the validateProjectPath
-// allowlist) starts empty. The in-app swarm is OWNER-ONLY: both routes gate on
+// allowlist) starts empty. Swarm starts require Owner or Pro: both routes gate on
 // the signed-in app-login role at the very top, so every test signs in as the
 // owner (env override below, network-free) before exercising the VALIDATION
 // branches — which all run BEFORE the claude preflight / any git, so no `claude`
@@ -185,7 +185,7 @@ describe('POST /api/swarm/worktree/remove (validation + central-only guard)', ()
   })
 })
 
-describe('owner gate — the in-app swarm is owner-only', () => {
+describe('Swarm access — Free cannot start, safety reads and stops stay accessible', () => {
   // The gate runs FIRST, before body parse / path validation. With the SAME
   // (empty) body, a non-owner gets 403 (gate) while the owner gets 400 (path
   // required) — proving the gate fires ahead of, and independently of, the
@@ -248,28 +248,28 @@ describe('owner gate — the in-app swarm is owner-only', () => {
     expect(res.status).toBe(400)
   })
 
-  it('GET /api/swarm/orchestrator → 403 when signed out', async () => {
+  it('GET /api/swarm/orchestrator → validates the path when signed out', async () => {
     await clearSession()
     const res = await app.request('/api/swarm/orchestrator')
-    expect(res.status).toBe(403)
+    expect(res.status).toBe(400)
   })
 
-  it('GET /api/swarm/orchestrator → 403 for a signed-in non-owner (tester)', async () => {
+  it('GET /api/swarm/orchestrator → validates the path for Free', async () => {
     await signInAs(TESTER)
     const res = await app.request('/api/swarm/orchestrator')
-    expect(res.status).toBe(403)
+    expect(res.status).toBe(400)
   })
 
-  it('GET /api/swarm/workers → 403 when signed out', async () => {
+  it('GET /api/swarm/workers → validates the path when signed out', async () => {
     await clearSession()
     const res = await app.request('/api/swarm/workers')
-    expect(res.status).toBe(403)
+    expect(res.status).toBe(400)
   })
 
-  it('GET /api/swarm/workers → 403 for a signed-in non-owner (tester)', async () => {
+  it('GET /api/swarm/workers → validates the path for Free', async () => {
     await signInAs(TESTER)
     const res = await app.request('/api/swarm/workers')
-    expect(res.status).toBe(403)
+    expect(res.status).toBe(400)
   })
 
   it('GET /api/swarm/workers → owner passes the gate (reaches validation: 400)', async () => {
@@ -290,10 +290,10 @@ describe('owner gate — the in-app swarm is owner-only', () => {
     expect(res.status).toBe(403)
   })
 
-  it('POST /api/swarm/orchestrator/stop → 403 when signed out', async () => {
+  it('POST /api/swarm/orchestrator/stop → validates the path when signed out', async () => {
     await clearSession()
     const res = await app.request('/api/swarm/orchestrator/stop', json({}))
-    expect(res.status).toBe(403)
+    expect(res.status).toBe(400)
   })
 
   it('POST /api/swarm/orchestrator/start → owner passes the gate (reaches validation: 400)', async () => {
@@ -811,9 +811,9 @@ describe('/api/swarm/quota — the model-tier cooling table', () => {
     expect(body.tiers.every((t) => !t.cooling)).toBe(true)
   })
 
-  it('403 for a non-owner — the control plane is owner-only', async () => {
+  it('Free can read quota status but cannot alter paid controls', async () => {
     await signInAs(TESTER)
-    expect((await app.request('/api/swarm/quota')).status).toBe(403)
+    expect((await app.request('/api/swarm/quota')).status).toBe(200)
     expect((await app.request('/api/swarm/quota/cool', json({ tier: 'fable', minutes: 30 }))).status).toBe(403)
     expect((await app.request('/api/swarm/quota/uncool', json({ tier: 'fable' }))).status).toBe(403)
   })

@@ -162,14 +162,12 @@ describe('POST /api/terminal/custom-module — role gate (owner|tester) + id val
     expect(opts.ownerDesk).toBe(true)
   })
 
-  it('a tester MAY launch one too (authoring is open to testers)', async () => {
+  it('tester cannot use Owner custom-module terminals', async () => {
     // Create as owner (deterministic), then act as the tester.
     const def = await createModuleAsOwner()
     await signInAs(TESTER)
     const res = await app.request('/api/terminal/custom-module', json({ moduleId: def.id }))
-    expect(res.status).toBe(200)
-    expect(launchClaude).toHaveBeenCalledTimes(1)
-    expect(launchClaude.mock.calls.at(-1)![0].cwd).toBe(customModuleDir(def.id))
+    expect(res.status).toBe(403)
   })
 
   it('400 when moduleId is missing', async () => {
@@ -280,7 +278,7 @@ describe('POST /api/terminal/:id/paste-custom-module', () => {
     expect(out).toContain('hot-reloads')
   })
 
-  it('a tester MAY paste into a session in the module dir', async () => {
+  it('tester cannot use Owner custom-module terminals', async () => {
     const def = await createModuleAsOwner('Tester Paste', 'paste me')
     await signInAs(TESTER)
     const writes: string[] = []
@@ -290,8 +288,6 @@ describe('POST /api/terminal/:id/paste-custom-module', () => {
       '/api/terminal/t-module/paste-custom-module',
       json({ moduleId: def.id }),
     )
-    expect(res.status).toBe(200)
-    expect(writes).toHaveLength(1)
-    expect(writes[0].startsWith('\x1b[200~')).toBe(true)
+    expect(res.status).toBe(403)
   })
 })

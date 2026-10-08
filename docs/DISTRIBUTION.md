@@ -216,6 +216,7 @@ so it works on **every user's** install, add two more repo Secrets in
 | Secret | What it is |
 | ------ | ---------- |
 | `SUPABASE_URL` | your project URL, e.g. `https://<ref>.supabase.co`. **Public.** |
+| `OPENGROUND_BILLING_URL` | Optional repository **Variable**: the HTTPS billing Worker endpoint. Unset disables Pro checkout. Configure only after the checks in `docs/BILLING_PLAN.md`; never ship payment/service-role secrets. |
 | `SUPABASE_ANON_KEY` | the project's **anon / public** key. Public by design — safe to ship in the binary; the security boundary is Supabase **Row Level Security** (audited — see `REPORT.md`). |
 
 > 🔒 **Never add `SUPABASE_SERVICE_ROLE_KEY` (or any other server-secret) to this

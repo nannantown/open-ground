@@ -10,6 +10,8 @@
 // its own `/api/...` paths so the mount prefix stays empty.
 
 import { Hono } from 'hono'
+import { billingRoutes } from './routes/billing'
+import { getCustomTabRole } from '@/lib/server/roles'
 import { logger } from 'hono/logger'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { existsSync } from 'node:fs'
@@ -68,6 +70,18 @@ export const createApp = () => {
     return next()
   })
 
+  // Owner surfaces are protected before any handler reads data or starts a job.
+  // /api/canvas itself is Ground layout and stays public; per-project Canvas is
+  // /api/project/canvases. Clipboard/task attachments also stay public.
+  const ownerPaths = [
+    '/api/research/*', '/api/custom-modules', '/api/custom-modules/*',
+    '/api/local-apps/*', '/api/project/canvases', '/api/canvas/asset', '/api/canvas/ai/*',
+    '/api/project/skills', '/api/skills/*', '/api/collab/shared-canvas',
+    '/api/terminal/custom-module', '/api/terminal/*/paste-custom-module',
+  ]
+  for (const path of ownerPaths) app.use(path, async (c, next) =>
+    await getCustomTabRole() === 'owner' ? next() : c.json({ error: 'forbidden' }, 403))
+
   // Centralized error handler. Route handlers may `throw` (or let
   // src/lib/server helpers throw); everything funnels here so we emit a
   // consistent JSON error shape instead of leaking a stack to the client.
@@ -113,6 +127,7 @@ export const createApp = () => {
     .route('/', sseRoutes)       // SSE — terminal stream
     .route('/', sdkSessionRoutes) // F3 — Agent SDK worker sessions (docs/SDK_WORKER_MIGRATION_PLAN.md)
     .route('/', feedbackRoutes)  // G — in-app feedback proxy (env-gated)
+    .route('/', billingRoutes)
     .route('/', authRoutes)      // H — optional app login (Supabase Auth, env-gated)
     .route('/', customModulesRoutes) // I — custom tab modules (role-gated; docs/CUSTOM_TABS_PLAN.md)
     .route('/', collabRoutes)    // K — realtime collab gating + per-project resolution (env-gated)

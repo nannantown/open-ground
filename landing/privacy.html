@@ -103,6 +103,8 @@
         <h2>2. Optional sign-in</h2>
         <p>OPEN GROUND has an <strong>optional</strong> account login (Google or GitHub). Login is not required to use the app on your own. If you sign in, authentication is handled by a <strong>third-party login &amp; membership service</strong>: your email address and a user ID are associated with your account. The OAuth flow opens in your real browser, and access tokens are held by the local OPEN GROUND process — never exposed to the web UI. Signing in by itself does not publish your project data.</p>
 
+        <h2>Paid subscription</h2>
+        <p>When you subscribe to OPEN GROUND Pro, Stripe processes your payment details. OPEN GROUND stores your account ID, Stripe customer ID, subscription status, current billing-period end and cancellation status in Supabase to control paid access. Card numbers are handled by Stripe and are never stored by the app. Billing requests do not contain your project files or terminal conversations. Billing records are retained independently of local projects; canceling Pro does not delete local project data.</p>
         <h2>3. Real-time collaboration (opt-in)</h2>
         <p>Collaboration is <strong>off unless you turn it on.</strong> When you invite a collaborator (as an owner) or join a shared project (as a member), OPEN GROUND enables real-time sync, and the data below is sent to and <strong>stored</strong> by third-party cloud infrastructure.</p>
 
@@ -163,6 +165,8 @@
         <h2>2. 任意のサインイン</h2>
         <p>OPEN GROUND には<strong>任意</strong>のアカウントログイン（Google / GitHub）があります。自分だけで使うのにログインは不要です。サインインした場合、認証は<strong>第三者のログイン・メンバー管理サービス</strong>が扱い、あなたのメールアドレスとユーザー ID がアカウントに紐づきます。OAuth フローは実ブラウザで開き、アクセストークンはローカルの OPEN GROUND プロセスが保持し、Web UI には渡されません。サインイン単体ではプロジェクトデータは公開されません。</p>
 
+        <h2>有料サブスクリプション</h2>
+        <p>OPEN GROUND Pro に申し込むと、支払い情報は Stripe が処理します。OPEN GROUND は有料機能の利用判定のため、アカウント ID、Stripe 顧客 ID、契約状態、契約期間終了日と解約状態を Supabase に保存します。カード番号は Stripe が扱い、アプリには保存しません。課金の通信にプロジェクトのファイルやターミナルの会話は含まれません。課金記録はローカルのプロジェクトとは別に保持され、Pro の解約でローカルデータが削除されることはありません。</p>
         <h2>3. リアルタイム共同編集（オプトイン）</h2>
         <p>共同編集は<strong>オンにしない限りオフ</strong>です。メンバーを招待する（オーナーとして）か、共有プロジェクトに参加する（メンバーとして）と、OPEN GROUND はリアルタイム同期を有効化し、以下のデータが下記の外部クラウド基盤に送信・<strong>保存</strong>されます。</p>
 

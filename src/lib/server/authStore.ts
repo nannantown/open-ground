@@ -5,8 +5,7 @@
 // Supabase Auth — the Google/GitHub login the user optionally signs into. It is
 // NOT, and must never be confused with, the Claude CLI subscription token: that
 // belongs to the user's `claude` install (~/.claude) and OPEN GROUND never reads
-// or writes it. The app login gates nothing today; it is the single seam a
-// future billing / entitlement check will read (see docs/BILLING_PLAN.md).
+// or writes it. The app login identifies the account used by Pro billing / entitlements (see docs/BILLING_PLAN.md).
 //
 // SHAPE ON DISK (auth.json): the public Session (user + expiresAt) PLUS the
 // Supabase tokens the server needs to refresh. The tokens stay server-side — the
@@ -14,7 +13,7 @@
 // the feedback proxy keeps the anon key off the client.
 //
 // FAILURE POSTURE (mirrors store.ts): reads never throw — a missing/garbled
-// auth.json simply means "signed out" (return null). Writes are best-effort and
+// auth.json simply means "signed out" (return null). Writes propagate failures and
 // land with mode 0600 (owner-only) since the file carries refresh tokens.
 
 import { readFile, unlink, chmod } from 'fs/promises'
@@ -51,8 +50,7 @@ export const readSession = async (): Promise<StoredSession | null> => {
 }
 
 // Persist (overwrite) the session. Writes 0600 so the refresh token is
-// owner-only. Best-effort: on failure we log and move on rather than throw, so a
-// flaky disk can't wedge the auth callback (the user can simply sign in again).
+// owner-only. Propagate failures so login is never reported before persistence.
 export const writeSession = async (session: StoredSession): Promise<void> => {
   await ensureOpenGroundHome()
   const path = authFile()
@@ -66,12 +64,13 @@ export const writeSession = async (session: StoredSession): Promise<void> => {
       '[openground:auth] failed to persist session',
       err instanceof Error ? err.message : err,
     )
+    throw new Error('Could not save app session')
   }
 }
 
 // Clear the session (sign out). ENOENT is success (already gone); any other
-// error is logged but swallowed — sign-out must always appear to succeed to the
-// client so a stuck file can't trap the user in a signed-in UI.
+// error propagates — a stuck file must not leave owner privileges active while
+// the UI claims the account was signed out.
 export const clearSession = async (): Promise<void> => {
   await ensureOpenGroundHome()
   try {
@@ -82,6 +81,7 @@ export const clearSession = async (): Promise<void> => {
         '[openground:auth] failed to clear session',
         err instanceof Error ? err.message : err,
       )
+      throw new Error('Could not sign out')
     }
   }
 }

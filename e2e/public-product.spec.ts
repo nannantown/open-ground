@@ -174,7 +174,7 @@ for (const width of [1280, 390]) {
   })
 }
 
-test('public Swarm opt-in follows the platform gate while owner settings stay hidden', async ({ page, request }) => {
+test('Owner public preview follows the licensed platform gate while owner settings stay hidden', async ({ page, request }) => {
   const available = process.platform === 'darwin'
   const project = await createAndImportProject(request, 'public-swarm')
   await request.post('/api/settings', { data: { swarmOptIn: false } })
@@ -186,6 +186,7 @@ test('public Swarm opt-in follows the platform gate while owner settings stay hi
   await page.goto('/', { waitUntil: 'domcontentloaded' })
   await expect(page.getByRole('button', { name: 'Board', exact: true })).toBeVisible()
   await expect(page.getByTestId('swarm-bottom-bar')).toHaveCount(0)
+  await setPublicView(page, true, project.name)
   await page.getByRole('button', { name: /^Back to Ground/ }).click()
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await expect(page.getByText('WordPress', { exact: true })).toHaveCount(0)
@@ -201,6 +202,7 @@ test('public Swarm opt-in follows the platform gate while owner settings stay hi
   await expect.poll(async () => (await (await request.get('/api/settings')).json()).swarmOptIn).toBe(true)
   await expect.poll(async () => (await (await request.get('/api/experiments')).json()).swarmOptIn.enabled).toBe(available)
   await page.reload({ waitUntil: 'domcontentloaded' })
+  await setPublicView(page, true, project.name)
   if (available) await expect(page.getByTestId('swarm-bottom-bar')).toBeVisible()
   else await expect(page.getByTestId('swarm-bottom-bar')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Canvas', exact: true })).toHaveCount(0)

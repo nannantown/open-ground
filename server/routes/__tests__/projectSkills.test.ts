@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => 'owner' }))
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, realpath, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'

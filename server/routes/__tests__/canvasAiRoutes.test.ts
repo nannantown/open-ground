@@ -1,3 +1,5 @@
+// These data/AI contracts run as Owner; public denials are checked separately.
+vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => 'owner' }))
 // canvasAiRoutes.test.ts — route-level contract for the Canvas AI job endpoints.
 // Exercised via app.request(...) (no TCP bind). claudeConnection is mocked so
 // the run-gate preflight is deterministic; the lifecycle endpoints (active /

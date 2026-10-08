@@ -26,7 +26,7 @@ import type { AssistantAsk, AssistantModel } from '@/lib/server/assistantSession
 const real = vi.hoisted(() => ({ ask: null as null | ((t: string, d: AssistantDeps) => Promise<unknown>) }))
 const seen = vi.hoisted(() => ({ calls: [] as { text: string; photo?: string }[] }))
 vi.mock('@/lib/server/swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => true }))
-vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => null }))
+vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => 'owner' }))
 vi.mock('@/lib/server/phoneAssistant', async (orig) => {
   const m = await orig<typeof import('@/lib/server/phoneAssistant')>()
   real.ask = m.askAssistant as never

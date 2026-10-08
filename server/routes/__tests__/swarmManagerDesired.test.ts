@@ -142,10 +142,14 @@ describe('POST /api/swarm/manager/stop — closing the desk clears the intent', 
     expect((await app.request('/api/swarm/manager/stop', json({ path: other }))).status).toBe(403)
   })
 
-  it('403 when signed out, and for a signed-in non-owner', async () => {
+  it('remains stoppable after sign-out or loss of paid access', async () => {
+    await patchEngineIntent(dir, { managerDesired: true })
     await clearSession()
-    expect((await app.request('/api/swarm/manager/stop', json({ path: dir }))).status).toBe(403)
+    expect((await app.request('/api/swarm/manager/stop', json({ path: dir }))).status).toBe(200)
+    expect((await readEngineIntent(dir)).managerDesired).toBeUndefined()
+    await patchEngineIntent(dir, { managerDesired: true })
     await signInAs(TESTER)
-    expect((await app.request('/api/swarm/manager/stop', json({ path: dir }))).status).toBe(403)
+    expect((await app.request('/api/swarm/manager/stop', json({ path: dir }))).status).toBe(200)
+    expect((await readEngineIntent(dir)).managerDesired).toBeUndefined()
   })
 })

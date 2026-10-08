@@ -52,6 +52,7 @@ const { assertBakeable } = require('./secretPolicy')
 //                                       room; every copy carries it (an install pass,
 //                                       not a secret — docs/PHONE_LINK.md "Security model")
 const BAKED_KEYS = [
+  'OPENGROUND_BILLING_URL',
   'SUPABASE_URL',
   'SUPABASE_ANON_KEY',
   'OPENGROUND_REALTIME',

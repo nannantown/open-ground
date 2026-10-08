@@ -5,30 +5,11 @@ import { join } from 'path'
 import { app } from '../../app'
 import { clearSession } from '@/lib/server/authStore'
 import { getSettings, setSettings } from '@/lib/server/store'
-import { addProjectEntry, __resetMigrationCacheForTests } from '@/lib/server/registry'
+import { __resetMigrationCacheForTests } from '@/lib/server/registry'
 import { __resetOrchestratorForTests } from '@/lib/server/swarmOrchestrator'
 import type { ExperimentsResponse } from '@/lib/types'
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SWARM LOCAL OWNER UNLOCK — the login-free gate (swarmGate.ts).
-//
-// A machine that runs login-disabled (業務モード) can still drive the swarm by
-// unlocking it with SERVER-LOCAL state: env OPENGROUND_LOCAL_OWNER=1 or a
-// hand-edited settings.json `swarmLocalOwner: true`. These tests pin, with NO
-// session and NO Supabase env at all:
-//   1. every /api/swarm route passes the gate under either unlock source
-//      (sweep — the mirror image of swarmSafety.routes.test.ts INVARIANT C,
-//      which pins the locked default),
-//   2. GET /api/experiments mirrors the unlock to the client (flags.swarm) so
-//      the Swarm tab appears — without widening `eligible` or `sandbox`,
-//   3. the unlock is SWARM-SCOPED: custom-tab creation still 403,
-//   4. the unlock can NEVER be set through a request: POST /api/settings drops
-//      the key (it is not in USER_SETTINGS_KEYS), and swarm stays 403 after,
-//   5. escalations actually read/write end-to-end while signed out + unlocked.
-//
-// HOME ISOLATION: OPENGROUND_HOME is pinned to a throwaway tmp dir per test.
-// ─────────────────────────────────────────────────────────────────────────────
-
+// Free local unlock flags are retained as data but grant no paid access.
 const json = (body: unknown): RequestInit => ({
   method: 'POST',
   headers: { 'content-type': 'application/json' },
@@ -55,9 +36,7 @@ const swarmRoutes: { method: string; path: string }[] = (() => {
 })()
 
 let home: string
-// Every identity/unlock input is cleared so the ONLY thing opening the gate in
-// these tests is the unlock under test — including the Supabase client env
-// ("no Supabase env at all" is part of the claim).
+// Clear identity and entitlement inputs so legacy local flags cannot grant Pro.
 const ENV_KEYS = [
   'OPENGROUND_HOME',
   'OPENGROUND_LOCAL_OWNER',
@@ -97,54 +76,53 @@ describe('swarm local owner unlock — env OPENGROUND_LOCAL_OWNER=1', () => {
   })
 
   it.each(swarmRoutes)(
-    '$method $path → passes the gate SIGNED OUT (reaches validation, not 403)',
+    '$method $path → Free remains denied despite local unlock',
     async ({ method, path }) => {
       process.env.OPENGROUND_LOCAL_OWNER = '1'
       const res = await fire(method, path)
-      expect(res.status).not.toBe(403)
+      const safety = ['/api/swarm/supply/stop','/api/swarm/manager/stop','/api/swarm/orchestrator/stop','/api/swarm/orchestrator/worker/stop','/api/swarm/orchestrator','/api/swarm/workers','/api/swarm/quota'].includes(path)
+      if (!safety) expect(res.status).toBe(403)
+      else expect(res.status).not.toBe(403)
     },
   )
 
-  it('GET /api/experiments mirrors the unlock: flags.swarm true, every other flag untouched', async () => {
+  it('GET /api/experiments keeps Free flags false despite the unlock', async () => {
     process.env.OPENGROUND_LOCAL_OWNER = '1'
     const res = await app.request('/api/experiments')
     expect(res.status).toBe(200)
     const body = (await res.json()) as ExperimentsResponse
-    // Exhaustive on purpose: the unlock is a SWARM control-plane convenience,
-    // so any other experiment resolving open here — persona, which reads the
-    // owner's personal corpus, most of all — is a leak this must catch.
     expect(body).toEqual({
       eligible: false,
-      flags: { swarm: true, sandbox: false },
-      // Public availability follows the host OS; the LOCAL unlock must never
-      // report itself as the user's opt-in.
-      swarmOptIn: { available: process.platform === 'darwin', enabled: false },
+      flags: { swarm: false, sandbox: false },
+      swarmOptIn: { available: false, enabled: false },
     })
   })
 
   it('the unlock is SWARM-SCOPED: custom-tab creation still 403 signed out', async () => {
     process.env.OPENGROUND_LOCAL_OWNER = '1'
-    // Role-'none'-forbidden route (tester or owner may pass — signed out may not).
+    // Custom modules require the actual Owner role.
     expect((await app.request('/api/custom-modules', json({}))).status).toBe(403)
   })
 })
 
 describe('swarm local owner unlock — hand-edited settings.json swarmLocalOwner', () => {
   it.each(swarmRoutes)(
-    '$method $path → passes the gate SIGNED OUT (reaches validation, not 403)',
+    '$method $path → Free remains denied despite local unlock',
     async ({ method, path }) => {
       // setSettings is the TRUSTED internal merge — stands in for the user
       // editing ~/.openground/settings.json by hand.
       await setSettings({ swarmLocalOwner: true })
       const res = await fire(method, path)
-      expect(res.status).not.toBe(403)
+      const safety = ['/api/swarm/supply/stop','/api/swarm/manager/stop','/api/swarm/orchestrator/stop','/api/swarm/orchestrator/worker/stop','/api/swarm/orchestrator','/api/swarm/workers','/api/swarm/quota'].includes(path)
+      if (!safety) expect(res.status).toBe(403)
+      else expect(res.status).not.toBe(403)
     },
   )
 
-  it('GET /api/experiments mirrors the unlock (Swarm tab appears)', async () => {
+  it('GET /api/experiments keeps the Swarm tab hidden for Free', async () => {
     await setSettings({ swarmLocalOwner: true })
     const body = (await (await app.request('/api/experiments')).json()) as ExperimentsResponse
-    expect(body.flags.swarm).toBe(true)
+    expect(body.flags.swarm).toBe(false)
     expect(body.eligible).toBe(false)
   })
 })
@@ -163,44 +141,7 @@ describe('the unlock can NEVER come from a request', () => {
   })
 })
 
-describe('escalations read/write end-to-end — signed out + unlocked, no Supabase env', () => {
-  it('open → list → answer all work against a registered project', async () => {
-    process.env.OPENGROUND_LOCAL_OWNER = '1'
-    const projectDir = await realpath(await mkdtemp(join(tmpdir(), 'og-local-owner-proj-')))
-    try {
-      await addProjectEntry(projectDir)
-
-      const open = await app.request(
-        '/api/swarm/escalations/open',
-        json({
-          path: projectDir,
-          question: 'may I delete the legacy config?',
-          context: 'worker hit an irreversible cleanup step',
-          whyEscalated: 'irreversible',
-        }),
-      )
-      expect(open.status).toBe(200)
-      const opened = (await open.json()) as { escalation: { id: string; status: string } }
-      expect(opened.escalation.status).toBe('open')
-
-      const list = await app.request(
-        `/api/swarm/escalations?path=${encodeURIComponent(projectDir)}&status=open`,
-      )
-      expect(list.status).toBe(200)
-      const listed = (await list.json()) as { escalations: Array<{ id: string }> }
-      expect(listed.escalations.map((e) => e.id)).toContain(opened.escalation.id)
-
-      const answer = await app.request(
-        '/api/swarm/escalations/answer',
-        json({ id: opened.escalation.id, answer: 'yes — delete it' }),
-      )
-      expect(answer.status).toBe(200)
-      const answered = (await answer.json()) as { escalation: { status: string } }
-      // No live PTY / queued dispatch in this fixture — delivery may be pending,
-      // but the decision is durably recorded past 'open'.
-      expect(answered.escalation.status).not.toBe('open')
-    } finally {
-      await rm(projectDir, { recursive: true, force: true })
-    }
-  })
+it('local unlock cannot start an escalation as Free', async () => {
+  process.env.OPENGROUND_LOCAL_OWNER = '1'
+  expect((await app.request('/api/swarm/escalations/open', json({}))).status).toBe(403)
 })

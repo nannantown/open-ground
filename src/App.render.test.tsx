@@ -412,7 +412,7 @@ describe('App — whole-render integration', () => {
   })
 
   it('surfaces the global "Claude is designing" beacon while a Canvas AI job is active', async () => {
-    installFetch({ projects: [], aiActiveJobs: 2 })
+    installFetch({ projects: [], aiActiveJobs: 2, experiments: { eligible: true, flags: { swarm: false, sandbox: false } } })
     await act(async () => {
       renderApp()
     })

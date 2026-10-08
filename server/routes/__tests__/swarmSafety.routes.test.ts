@@ -113,6 +113,14 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true })
 })
 
+// Downgrading must retain readback and stop controls for existing work.
+const safetyPaths = new Set([
+  '/api/swarm/supply/stop', '/api/swarm/manager/stop',
+  '/api/swarm/orchestrator/stop', '/api/swarm/orchestrator/worker/stop',
+  '/api/swarm/orchestrator', '/api/swarm/workers', '/api/swarm/quota',
+])
+const paidRoutes = swarmRoutes.filter(r => !safetyPaths.has(r.path))
+
 describe('INVARIANT C — every /api/swarm route is owner-gated', () => {
   it('the route table actually contains the swarm control plane (the sweep is non-empty)', () => {
     // A guard against a silently-empty it.each (which would make the sweep below a
@@ -134,19 +142,19 @@ describe('INVARIANT C — every /api/swarm route is owner-gated', () => {
     expect(Array.from(methods).sort()).toEqual(['GET', 'POST'])
   })
 
-  it.each(swarmRoutes)('$method $path → 403 when SIGNED OUT (before any body/path/git)', async ({ method, path }) => {
+  it.each(paidRoutes)('$method $path → 403 when SIGNED OUT (before any body/path/git)', async ({ method, path }) => {
     await clearSession()
     const res = await fire(method, path)
     expect(res.status).toBe(403)
   })
 
-  it.each(swarmRoutes)('$method $path → 403 for a signed-in NON-OWNER (tester)', async ({ method, path }) => {
+  it.each(paidRoutes)('$method $path → 403 for a signed-in NON-OWNER (tester)', async ({ method, path }) => {
     await signInAs(TESTER)
     const res = await fire(method, path)
     expect(res.status).toBe(403)
   })
 
-  it.each(swarmRoutes)('$method $path → OWNER passes the gate (NOT 403 — reaches validation)', async ({ method, path }) => {
+  it.each(paidRoutes)('$method $path → OWNER passes the gate (NOT 403 — reaches validation)', async ({ method, path }) => {
     // The same minimal request that 403s a non-owner reaches the path/body
     // validation (400) for the owner — proving the 403s above were the GATE, not a
     // blanket failure, and that the gate doesn't accidentally lock the owner out.
@@ -155,7 +163,7 @@ describe('INVARIANT C — every /api/swarm route is owner-gated', () => {
     expect(res.status).not.toBe(403)
   })
 
-  it.each(swarmRoutes.filter((r) => r.method === 'POST'))(
+  it.each(paidRoutes.filter((r) => r.method === 'POST'))(
     '$method $path → 403 for a MALFORMED body when signed out (the gate runs BEFORE body parse)',
     async ({ path }) => {
       await clearSession()

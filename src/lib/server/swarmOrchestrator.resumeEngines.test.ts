@@ -58,6 +58,7 @@ vi.mock('./claudePreflight', async (importOriginal) => {
 // moveToDoing, …), so nothing else needs stubbing.
 const safeDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
   ...defaultDeps(),
+      hasAccess: async () => true,
   fetchTasks: async () => [],
 })
 
@@ -342,6 +343,7 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
 
     const deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = {
       ...defaultDeps(),
+      hasAccess: async () => true,
       // The dispatch pass's FIRST act. If it ever runs before reconcile has resolved,
       // the freeze is broken — record that. One todo card, so the pass WOULD spawn.
       fetchTasks: async () => {
@@ -585,6 +587,7 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
     over: Partial<OrchestratorDeps & IntegrationDeps & AnomalyDeps> = {},
   ): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
     ...defaultDeps(),
+      hasAccess: async () => true,
     fetchTasks: async () => [],
     isAlive: () => true,
     moveToDoing: async () => true,

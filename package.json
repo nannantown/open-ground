@@ -164,5 +164,8 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true
     }
+  },
+  "overrides": {
+    "shell-quote": "^1.12.0"
   }
 }

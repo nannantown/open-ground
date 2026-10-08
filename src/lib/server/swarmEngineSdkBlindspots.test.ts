@@ -482,6 +482,7 @@ describe('③ boot resume under SDK-only fail-fast — no degrade notice, no str
     over: Partial<OrchestratorDeps & IntegrationDeps & AnomalyDeps> = {},
   ): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
     ...defaultDeps(),
+      hasAccess: async () => true,
     fetchTasks: async () => [],
     isAlive: () => true,
     moveToDoing: async () => true,

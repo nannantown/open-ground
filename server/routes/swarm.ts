@@ -31,15 +31,10 @@
 // POST /api/swarm/quota/uncool    — release a cooled tier again.
 //
 // Thin adapters over src/lib/server/swarmWorker.ts + swarmSupply.ts +
-// swarmOrchestrator.ts. OWNER-ONLY:
-// every route gates on hasSwarmOwnerAccess (swarmGate.ts — the signed-in owner
-// role OR the explicit server-local unlock: env OPENGROUND_LOCAL_OWNER=1 /
-// settings.swarmLocalOwner, for login-disabled machines) at the very top, so
-// an unauthorized caller gets 403 before any body parse, path validation, or
-// git — closing the local curl/SDK direct-call hole (the UI hiding the tab is
-// NOT the only guard). The unlock never comes from the request itself (see
-// swarmGate.ts for why that is safe: this gate is a feature-visibility flag,
-// not a security boundary — POST /api/terminal is already ungated locally).
+// swarmOrchestrator.ts. Starting automation requires Owner or a current Pro
+// subscription; local unlock flags grant no access. Read/stop safety routes
+// remain available after expiry or sign-out so existing work can be stopped.
+// Paid gates run before body parse, path validation, or git.
 // Then every path-accepting route runs validateProjectPath (the registry
 // allowlist) BEFORE any work, and the spawn routes also run the shared claude
 // preflight so a missing/signed-out CLI fails fast (503) instead of orphaning
@@ -549,7 +544,7 @@ export const swarmRoutes = new Hono()
   // closed, every restart, forever. Owner-gated + validated like every
   // /api/swarm/* write.
   .post('/api/swarm/supply/stop', async (c) => {
-    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    // Readback and stopping existing work remain available after downgrade.
     let body: any
     try {
       body = await c.req.json()
@@ -683,7 +678,7 @@ export const swarmRoutes = new Hono()
   // the owner just closed, every restart, forever. Owner-gated + validated like
   // every /api/swarm/* write.
   .post('/api/swarm/manager/stop', async (c) => {
-    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    // Readback and stopping existing work remain available after downgrade.
     let body: any
     try {
       body = await c.req.json()
@@ -830,7 +825,7 @@ export const swarmRoutes = new Hono()
   // the engine" contract). Autonomy is STRICT opt-in via POST /orchestrator/start
   // (the old drain-tick auto-start was removed — card eadb25e6).
   .get('/api/swarm/orchestrator', async (c) => {
-    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    // Readback and stopping existing work remain available after downgrade.
     const path = c.req.query('path') ?? ''
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
@@ -845,7 +840,7 @@ export const swarmRoutes = new Hono()
   // each missed. PURE READ-ONLY, polled by the Swarm worker tab. Owner-only +
   // validated, like the rest of /api/swarm/*.
   .get('/api/swarm/workers', async (c) => {
-    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    // Readback and stopping existing work remain available after downgrade.
     const path = c.req.query('path') ?? ''
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
@@ -955,7 +950,7 @@ export const swarmRoutes = new Hono()
   // LEFT ALONE (the manual control plane owns their teardown); the existing
   // manual spawn (POST /api/swarm/worker) is unaffected either way. Owner-only.
   .post('/api/swarm/orchestrator/stop', async (c) => {
-    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    // Readback and stopping existing work remain available after downgrade.
     let body: any
     try {
       body = await c.req.json()
@@ -976,7 +971,7 @@ export const swarmRoutes = new Hono()
   // only on its OWN workers; a manual worker is stopped via the existing
   // /api/swarm/worktree/remove. Returns the full SwarmOrchestratorState. Owner-only.
   .post('/api/swarm/orchestrator/worker/stop', async (c) => {
-    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    // Readback and stopping existing work remain available after downgrade.
     let body: any
     try {
       body = await c.req.json()
@@ -1268,7 +1263,7 @@ export const swarmRoutes = new Hono()
   // per-project — a quota belongs to the `claude` subscription, not a repo — so
   // there is no `path` and no validateProjectPath.
   .get('/api/swarm/quota', async (c) => {
-    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    // Readback and stopping existing work remain available after downgrade.
     const now = Date.now()
     // Fold in the PERSISTED cooling marks before answering. Boot kicks this too
     // (server/index.ts) and it is memoized, so this is a no-op after the first

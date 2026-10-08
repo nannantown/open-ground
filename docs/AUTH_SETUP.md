@@ -1,8 +1,8 @@
 # Optional login setup (Google / GitHub via Supabase Auth)
 
 OPEN GROUND ships with an **optional** "Sign in" entry in the toolbar. It is the
-app's own account (a seam for future, not-yet-built billing — see
-[BILLING_PLAN.md](./BILLING_PLAN.md)); it gates nothing today and the app works
+app's own account (used for Pro subscriptions and Owner privileges — see
+[BILLING_PLAN.md](./BILLING_PLAN.md)); Free works
 fully without it.
 
 The entry is **hidden** unless the server has Supabase env configured — exactly

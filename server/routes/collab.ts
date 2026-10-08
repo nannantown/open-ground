@@ -1,3 +1,4 @@
+import { getCustomTabRole } from '@/lib/server/roles'
 // server/routes/collab.ts — realtime-collab gating, per-project resolution, and
 // the Cloudflare-DO WebSocket TICKET minter.
 //
@@ -344,6 +345,8 @@ export const collabRoutes = new Hono()
     if (!isValidScope(scope)) {
       return c.json({ error: 'invalid scope' }, 400)
     }
+
+    if (scope.startsWith('canvas:') && await getCustomTabRole() !== 'owner') return c.json({ error: 'forbidden' }, 403)
 
     // Resolve by path (OWNER) or collabProjectId (MEMBER, no path). The member
     // flow's gate is membership; the owner flow's is path validation + ownership.

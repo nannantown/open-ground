@@ -1,3 +1,4 @@
+import { BillingSection } from './BillingSection'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   FolderOpen,
@@ -36,6 +37,7 @@ import { SwarmAllowedModelsSetting } from '@/components/canvas/SwarmAllowedModel
 import { PhoneLinkSetting } from '@/components/canvas/PhoneLinkSetting'
 
 interface Props {
+  billingAccountId?: string | null
   open: boolean
   settings: Settings
   onClose: () => void
@@ -145,6 +147,7 @@ export const SettingsPanel = ({
   swarmOptInAvailable = false,
   swarmOptInEnabled = false,
   swarmVisible = false,
+  billingAccountId,
 }: Props) => {
   const { t, lang, setLang } = useT()
   const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
@@ -452,6 +455,10 @@ export const SettingsPanel = ({
             </div>
           )}
 
+          <Section heading={lang === 'ja' ? 'プラン' : 'Plan'}>
+            {open && <BillingSection accountId={billingAccountId} />}
+          </Section>
+
           {/* Language */}
           <Section heading={t('settings.language.heading')} hint={t('settings.language.hint')}>
             <div
@@ -753,13 +760,13 @@ export const SettingsPanel = ({
                 )}
                 {/* iPhone ⇄ president — owner only: the component renders
                     nothing (section included) when its route answers 403. */}
-                <PhoneLinkSetting
+                {experimentsEligible && <PhoneLinkSetting
                   frame={(body) => (
                     <Section heading={t('settings.phoneLink.heading')} hint={t('settings.phoneLink.hint')}>
                       {body}
                     </Section>
                   )}
-                />
+                />}
                 {(swarmVisible || swarmOptIn || swarmExp) && (
                   <Section
                     heading={t('settings.workerTrial.heading')}

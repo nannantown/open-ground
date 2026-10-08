@@ -96,10 +96,10 @@ describe('isSwarmOptInAvailable', () => {
 })
 
 describe('isSwarmOptInEnabled', () => {
-  it('macOS + setting true → enabled', async () => {
+  it('Free + macOS + setting true remains disabled', async () => {
     await setSettings({ swarmOptIn: true })
     await withPlatform('darwin', async () => {
-      expect(await isSwarmOptInEnabled()).toBe(true)
+      expect(await isSwarmOptInEnabled()).toBe(false)
     })
   })
 
@@ -125,11 +125,11 @@ describe('hasSwarmOwnerAccess', () => {
     expect(await hasSwarmOwnerAccess()).toBe(false)
   })
 
-  it('signed out + macOS opt-in → access (the all-users path)', async () => {
+  it('signed out + macOS opt-in cannot grant paid access', async () => {
     await clearSession()
     await setSettings({ swarmOptIn: true })
     await withPlatform('darwin', async () => {
-      expect(await hasSwarmOwnerAccess()).toBe(true)
+      expect(await hasSwarmOwnerAccess()).toBe(false)
     })
   })
 
@@ -141,10 +141,10 @@ describe('hasSwarmOwnerAccess', () => {
     })
   })
 
-  it('signed out + local unlock → access (the login-free path)', async () => {
+  it('signed out + local unlock cannot grant paid access', async () => {
     await clearSession()
     process.env.OPENGROUND_LOCAL_OWNER = '1'
-    expect(await hasSwarmOwnerAccess()).toBe(true)
+    expect(await hasSwarmOwnerAccess()).toBe(false)
   })
 
   it('signed-in owner without any unlock → access (the existing login path is untouched)', async () => {
@@ -158,7 +158,7 @@ describe('hasSwarmOwnerAccess', () => {
     expect(await hasSwarmOwnerAccess()).toBe(true)
   })
 
-  it('signed-in NON-owner (tester) without unlock → no access; with unlock → access', async () => {
+  it('tester cannot grant themselves paid access using the local unlock', async () => {
     process.env.OPENGROUND_TESTER_EMAILS = 'tester@example.com'
     await writeSession({
       user: { id: 'test-user', email: 'tester@example.com', provider: 'google' },
@@ -168,6 +168,6 @@ describe('hasSwarmOwnerAccess', () => {
     })
     expect(await hasSwarmOwnerAccess()).toBe(false)
     process.env.OPENGROUND_LOCAL_OWNER = '1'
-    expect(await hasSwarmOwnerAccess()).toBe(true)
+    expect(await hasSwarmOwnerAccess()).toBe(false)
   })
 })
