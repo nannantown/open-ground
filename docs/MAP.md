@@ -24,6 +24,12 @@
   `assistantMemory.test.ts`. No record is injected into Claude's own transcript.
 
 ## 0. 契約と骨格 — 全変更の起点
+- Public launch plan (2026-10-15): `docs/PUBLIC_LAUNCH_PLAN.md`.
+  User-confirmed macOS small beta then Free/Pro public release; acceptance gates,
+  current evidence, external dependencies and unresolved AI authentication terms.
+- Product feature/settings audit (2026-10-15): `docs/PRODUCT_FEATURE_AUDIT.md`.
+  Current feature inventory, settings ownership, reproduced settings/blog defects,
+  phased remediation and explicit verification limits. Audit findings remain unfixed.
 - Product subscriptions (2026-10-08): `docs/BILLING_PLAN.md` and
   `docs/PRODUCTIZATION_HANDOFF.md`; local `billing.ts` + `server/routes/billing.ts`,
   hosted `worker/src/billing.ts` + `worker/wrangler.billing.jsonc`, hosted-only
