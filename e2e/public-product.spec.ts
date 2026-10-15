@@ -149,6 +149,9 @@ for (const width of [1280, 390]) {
     await page.getByRole('dialog', { name: 'Settings' }).getByRole('button', { name: 'Close' }).click()
     await expect(page.getByRole('button', { name: 'Skills', exact: true })).toHaveCount(0)
     await expect(page.getByTitle('Text (T)', { exact: true })).toBeHidden()
+    // Search persisted the new card's initial layout; wait for that autosave
+    // before measuring whether entering/leaving edit mode changes the layout.
+    await expect.poll(async () => (await (await request.get('/api/canvas')).json()).positions[project.id]).toBeDefined()
     const before = await (await request.get('/api/canvas')).json()
     await page.getByRole('button', { name: 'Edit layout', exact: true }).click()
     await page.getByTitle('Text (T)', { exact: true }).click()

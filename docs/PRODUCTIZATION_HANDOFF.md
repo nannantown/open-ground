@@ -1,8 +1,15 @@
-# OpenGround 製品化引き継ぎ — 2026-10-08
+# OpenGround 製品化引き継ぎ — 2026-10-08（2026-10-15追記）
 
 **公開判定：未完了。課金と権限制御を実装したレビュー用ブランチ。**
 外部設定・実決済・署名付き配布アプリの受け入れ検証を完了するまで、Proを一般販売しない。
 既存ユーザーのデータ削除、設定移行、本番DB変更、デプロイ、リリース、インストールは行っていない。
+
+2026-10-15：設定・ブログ台帳・Owner情報の保護、通知の言語切替、資料の整合、
+Ground配置、Electron更新と複製復元検証を追加した。最新の証拠と未完了項目は
+[PRODUCTIZATION_PROGRESS.md](./PRODUCTIZATION_PROGRESS.md)、保存場所と復旧手順は
+[DATA_BACKUP_RECOVERY.md](./DATA_BACKUP_RECOVERY.md) を参照する。
+Freeの複数プロジェクト・複数ターミナルは保持し、新しい有料差分は利用者の指示で後回しにした。
+以下の検証ログのうち日付を明記した過去の結果を、今回の新しい実機検証と混同しない。
 
 ## ブランチと基準
 
@@ -72,9 +79,9 @@ VitestとPlaywright/buildは同時に実行しない。リポジトリ変更検�
 3. **実Claude・Pro機能受け入れ**：有効ProでSDK Worker配車、監視／復旧、独立レビュー、
    差し戻しを実Claudeで実行し、失効後の自動再開拒否と既存ジョブ停止・データ保持を確認。
    fake CLIやpure engineテストを実モデルの完了証拠にしない。
-4. **配布基盤の更新**：Electron 31と旧electron-builder/rebuild系は古い。
-   全依存監査に残る開発／配布ツール脆弱性の更新、互換性・署名・notarization・
-   自動更新を別途検証する。ElectronはdevDependencyでも配布ランタイムなので、
+4. **配布基盤の残検証**：Electron 43.7.11、electron-builder 26.15.3、rebuild 4.2.1へ更新済み。
+   開発／配布依存の監査は17件（critical 0 / high 7 / moderate 10）が残る。
+   互換性・署名・notarization・自動更新の実受け入れを別途完了する。ElectronはdevDependencyでも配布ランタイムなので、
    `audit --omit=dev` が0であることだけで公開可能と判定しない。
 5. **署名付きGUIとWindows**：新しい署名付きMacアプリのFinder起動、ログイン→Stripeの
    外部ブラウザ→アプリ復帰、PTY/SDK、更新、OwnerのSongs/Canvas/Research/ブログを
@@ -91,7 +98,7 @@ VitestとPlaywright/buildは同時に実行しない。リポジトリ変更検�
 未設定時はFreeを使える。支払秘密はデスクトップへ配布しない。決済完了URLやローカル設定を
 根拠にProを付与しない。本番データを消す手順はない。
 
-### 今回の追加検証
+### 2026-10-08の追加検証（過去の記録）
 
 - Freeの全Playwright対象：25成功。Ownerの初回全対象：77件中66成功・11失敗を検出。
   Assistantの正しい余白をテストに反映し、実際にはみ出した司令官幅をCSSの利用可能幅で

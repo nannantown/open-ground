@@ -102,3 +102,16 @@ Use a fixture inventory with hashes/counts before and after:
 
 Record what actually ran. Fake CLI/service tests and a server process under Electron
 do not replace real-service tests or a new signed packaged-GUI acceptance run.
+
+## Maintainer fixture check
+
+After building, run `node scripts/verify-product-data.mjs` from the repository.
+Optionally pass the absolute path of a locally packaged `.app` as its only argument;
+this exercises that candidate's Electron executable, bundled server and dependencies
+in Node mode. It does not launch/replace the installed application.
+
+The check makes its own canonical temporary homes and project, copies a stopped data
+root, compares all copied files, restarts across Owner/Free/Owner, verifies protected
+hashes and API readback, then executes a shell marker through the native PTY and SSE.
+It removes only its temporary fixture. This is a reproducible fixture check, not a
+backup tool or proof of real NENE/Claude/Phone data recovery or signed-GUI updates.

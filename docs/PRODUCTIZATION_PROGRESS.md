@@ -1,6 +1,7 @@
 # Productization implementation progress
 
-2026-10-15. Work in progress on `codex/productize-subscriptions`, PR #2.
+2026-10-15. Implementation validated on `codex/productize-subscriptions`, draft PR #2.
+External release acceptance is still outstanding.
 This records implementation evidence, not public-release acceptance.
 The feature inventory and original findings remain in [PRODUCT_FEATURE_AUDIT.md](./PRODUCT_FEATURE_AUDIT.md).
 
@@ -34,7 +35,7 @@ The feature inventory and original findings remain in [PRODUCT_FEATURE_AUDIT.md]
   Electron 43 preserves the existing clipboard API while using a patched supported release.
   [Electron breaking changes](https://www.electronjs.org/docs/latest/breaking-changes) reviewed.
   Native dependency installation returned 0 but warned about spaces in the checkout path;
-  actual runtime and packaged candidate checks must decide compatibility.
+  runtime/native/candidate checks are recorded below; signed main-GUI acceptance remains required.
 
 ## Further quality fixes
 
@@ -74,18 +75,27 @@ The feature inventory and original findings remain in [PRODUCT_FEATURE_AUDIT.md]
   The next full run including placement had 8,583 passed / 1 timing failure / 4 skipped: an unchanged
   512 KB secret-filter performance assertion took 101.44 ms against its 100 ms limit during parallel
   checks. The isolated 110-test settings/performance/isolation set passed without relaxing the limit.
-  Final full run on ecfa68f3: 488 files, 8,586 passed / 4 skipped, with four workers and no
+  Full run on ecfa68f3: 488 files, 8,586 passed / 4 skipped, with four workers and no
   competing build/type/lint jobs; no assertion changed.
 - Root and Worker typecheck passed. ESLint: 0 errors, 205 existing warnings.
 - `npm run build` passed (existing large-chunk warnings). Free Playwright: 25 passed before the
   final placement fix. Public-display/Owner-return E2E after search navigation repair: 5 passed.
-  Final Free/Owner full runs remain pending.
+  Final full Playwright runs: Owner 77 passed, Free 25 passed. One earlier Owner run found
+  an initial-position autosave racing the preservation assertion; the test now waits for that
+  real save, and the complete rerun passed without weakening the data-equality assertions.
 - Copy/restore acceptance passed: 13 copied files, 7 protected project/custom-module files with identical
   SHA-256 hashes; Owner → Free → Owner across three Electron server boots; Board/Canvas/custom source/
   research/WordPress/trials read back; non-Owner API denial; native PTY launched. Original copy unchanged.
   Fixture-copy mtimes can round below a millisecond; content hashes, not identical mtime floats, verify data.
 - Native dependency installation returned 0. PTY passed under Node 22 and Electron 43.7.11 / Node 24.21.0.
-  The restored server check is not packaged-GUI, installed-app-update or real-Claude acceptance.
+  Local unsigned arm64 `.app` packaging also passed (`identity=null`, notarization disabled,
+  `--publish never`). Its bundled server/dependencies and own executable passed the same 13-file /
+  7-hash / three-boot restore check, including a shell-generated marker streamed through native PTY/SSE.
+  Required server/web/SDK/native resources were present; root `.env` files were absent. The subsequent
+  plain Node 22 native-shell smoke also passed after the packaging rebuild. Candidate metadata is
+  0.11.175 / minimum macOS 12.0; older macOS and Intel hardware were not tested.
+  This is not signed main-GUI, Finder, installed-app-update or real-Claude acceptance.
+- Landing/pricing/privacy English and Japanese at 1280/390px passed overflow checks and visual review.
 - Cloudflare local collab and Phone relay runtime checks passed. Billing Wrangler dry-run passed;
   no Worker deployed and no production database touched.
 
@@ -97,7 +107,9 @@ the per-file temporary home was removed. An adversarial child-process fixture qu
 sensor saves without awaiting; the old cleanup left a resurrected sandbox and failed the
 existing no-residue assertion. Setup now drains the already-loaded quota persistence tail
 before deleting its sandbox. No error suppression or timeout increase. The repaired quota,
-cleanup and isolation set passed 122 tests. A full rerun/CI is required for the teardown change.
+cleanup and isolation set passed 122 tests. The final full rerun also passed 488 files /
+8,586 tests / 4 skipped. CI quality (lint/types/build/unit), Worker and Free/Owner E2E checks all passed on eebd445a;
+final PR check results are available directly on [PR #2](https://github.com/nannantown/open-ground/pull/2).
 
 ## Dependency risk still open
 
@@ -117,22 +129,21 @@ Do not treat these 17 findings as fixed or claim the whole dependency audit is c
 
 ## Remaining release work
 
-1. Finish the final Free/Owner E2E and local distribution-candidate checks, then update this evidence.
-2. Real Supabase Auth/RLS/RPC, Stripe test/live checkout/portal/webhook and cross-account/device
+1. Real Supabase Auth/RLS/RPC, Stripe test/live checkout/portal/webhook and cross-account/device
    cancellation/expiry/recovery remain unconfigured/unverified; follow BILLING_PLAN.md.
-3. Run a non-Owner Pro user's real Claude SDK dispatch → independent review → return → completion,
+2. Run a non-Owner Pro user's real Claude SDK dispatch → independent review → return → completion,
    stop/crash/restart/expiry acceptance with that person's subscription. Fake CLI tests do not replace it.
-4. A new signed/notarized candidate must pass Finder launch, browser auth/billing return, native/SDK,
+3. A new signed/notarized candidate must pass Finder launch, browser auth/billing return, native/SDK,
    safe update/rollback and copied Owner-data checks on supported macOS hardware. The existing installed
    app is running on its fixed primary port and was not stopped or replaced for this work.
-5. Real NENE/Songs, WordPress, iPhone and deployed collaboration acceptance remain distinct from
+4. Real NENE/Songs, WordPress, iPhone and deployed collaboration acceptance remain distinct from
    fixture and local relay tests. Backup instructions include their separate stores; their real data
    was not copied, restored, altered or deleted.
-6. Resolve dependency findings above and the individual operator's actual sales/legal/support details.
+5. Resolve dependency findings above and the individual operator's actual sales/legal/support details.
    Do not invent a company, contact policy, refund rules or business registration details.
-7. Provider conditions remain unresolved. The submitted OpenAI inquiry is not approval. No AI API-key
+6. Provider conditions remain unresolved. The submitted OpenAI inquiry is not approval. No AI API-key
    migration or Codex/MCP rewrite was introduced; Codex is not a first-release requirement.
-8. Review the draft PR and CI. Do not merge, tag, deploy, publish or replace the installed application
+7. Review the draft PR and CI. Do not merge, tag, deploy, publish or replace the installed application
    as a side effect of these checks. Public launch follows the macOS small beta and explicit release decision.
 
 New paid workspace differences (A09), connection-test convenience and per-report sync pause are

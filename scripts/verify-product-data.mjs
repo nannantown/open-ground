@@ -132,7 +132,11 @@ try {
   // Exercise the shipped native node-pty binding under Electron's Node runtime.
   const term = await api('/api/terminal', 'POST', { cwd: entry.path, cols: 80, rows: 24 })
   assert(term.id, 'Electron native terminal must launch')
-  await api(`/api/terminal/${term.id}`, 'DELETE')
+  const stream = await fetch(`${base}/api/terminal/${term.id}/stream`, { signal: AbortSignal.timeout(5000) })
+  assert.equal(stream.status, 200)
+  // The input does not contain the joined marker, so echo alone cannot pass.
+  await api(`/api/terminal/${term.id}/input`, 'POST', { data: "printf '%s_%s\\n' OG_NATIVE RUNTIME_OK\nexit\n" })
+  assert((await stream.text()).includes('OG_NATIVE_RUNTIME_OK'), 'Native shell must execute and stream output')
   await stop()
   const after = await hashes(restored)
   const protectedNames = Object.keys(before).filter(name => name.startsWith('projects/') || name.startsWith('custom-modules/'))
