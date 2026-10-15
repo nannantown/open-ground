@@ -61,6 +61,7 @@ describe('setup-home removes what a test file leaves in the temp dir', () => {
         { cwd: process.cwd(), env, encoding: 'utf8', timeout: 120_000 },
       )
       expect(r.status, r.stdout + r.stderr).toBe(0)
+      expect(r.stdout + r.stderr).not.toContain('failed to persist the cooling table')
       // node-compile-cache is Node's own shared module cache (reused, not a leak).
       expect(readdirSync(root).filter((n) => n !== 'node-compile-cache')).toEqual([])
     } finally {

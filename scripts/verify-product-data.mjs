@@ -1,5 +1,5 @@
 // Real bundled-server acceptance under Electron's Node runtime. No live services.
-// Run after npm run build: node scripts/verify-product-data.mjs
+// Run after npm run build: node scripts/verify-product-data.mjs [path/to/OPEN GROUND.app]
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -11,6 +11,10 @@ import { createServer } from 'node:net'
 import { once } from 'node:events'
 const require = createRequire(import.meta.url)
 const root = resolve(import.meta.dirname, '..')
+// Optional local candidate: exercise its bundled server, dependencies and Electron.
+const candidate = process.argv[2] ? resolve(process.argv[2]) : null
+const runtimeRoot = candidate ? join(candidate, 'Contents/Resources/app') : root
+const executable = candidate ? join(candidate, 'Contents/MacOS/OPEN GROUND') : require('electron')
 const sandbox = await realpath(await mkdtemp(join(tmpdir(), 'og-product-restore-')))
 const rel = relative(await realpath(tmpdir()), sandbox)
 assert(rel && !rel.startsWith('..') && !isAbsolute(rel), 'Acceptance requires an isolated temp directory')
@@ -36,8 +40,8 @@ async function start(dataHome, isOwner) {
   await new Promise(resolve => probe.close(resolve))
   base = `http://127.0.0.1:${port}`
   output = ''
-  child = spawn(require('electron'), [join(root, 'server/dist/index.cjs')], {
-    cwd: root,
+  child = spawn(executable, [join(runtimeRoot, 'server/dist/index.cjs')], {
+    cwd: runtimeRoot,
     env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: join(home, '.claude'),
       ELECTRON_RUN_AS_NODE: '1', OPENGROUND_HOME: dataHome,
       OPENGROUND_OWNER_EMAILS: isOwner ? 'restore-owner@example.invalid' : 'other@example.invalid',
@@ -45,7 +49,7 @@ async function start(dataHome, isOwner) {
       OPENGROUND_CLAUDE_BIN: join(root, 'e2e/fixtures/fake-claude.sh'),
       OPENGROUND_TERMINAL_SHELL: '/bin/sh', OPENGROUND_FUEL_REPORT: '0',
       OPENGROUND_WORKER_REAP: '0', OPENGROUND_BOOT_ID: 'isolated-restore',
-      OPENGROUND_WEB_ROOT: join(root, 'dist-web'), PORT: String(port), HOSTNAME: '127.0.0.1' },
+      OPENGROUND_WEB_ROOT: join(runtimeRoot, 'dist-web'), PORT: String(port), HOSTNAME: '127.0.0.1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   child.stdout.on('data', b => { output += b })
@@ -135,6 +139,7 @@ try {
   for (const name of protectedNames) assert.equal(after[name], before[name], `Protected bytes changed: ${name}`)
   assert.deepEqual(await hashes(original), before, 'Original backup must remain unchanged')
   console.log(`PASS: ${Object.keys(before).length} copied files; ${protectedNames.length} protected files unchanged; Owner → Free → Owner across three Electron server boots; native PTY launched.`)
+  console.log(candidate ? 'Runtime: local packaged candidate (Node mode; not GUI acceptance).' : 'Runtime: workspace Electron and built server.')
   console.log('No real Claude, Stripe, Supabase, WordPress, NENE, signed app or installed-app update was tested.')
 } finally {
   await stop()

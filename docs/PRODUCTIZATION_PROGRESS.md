@@ -74,10 +74,12 @@ The feature inventory and original findings remain in [PRODUCT_FEATURE_AUDIT.md]
   The next full run including placement had 8,583 passed / 1 timing failure / 4 skipped: an unchanged
   512 KB secret-filter performance assertion took 101.44 ms against its 100 ms limit during parallel
   checks. The isolated 110-test settings/performance/isolation set passed without relaxing the limit.
-  Final full run remains pending.
+  Final full run on ecfa68f3: 488 files, 8,586 passed / 4 skipped, with four workers and no
+  competing build/type/lint jobs; no assertion changed.
 - Root and Worker typecheck passed. ESLint: 0 errors, 205 existing warnings.
 - `npm run build` passed (existing large-chunk warnings). Free Playwright: 25 passed before the
-  final placement fix; final Free/Owner runs remain pending for that fix.
+  final placement fix. Public-display/Owner-return E2E after search navigation repair: 5 passed.
+  Final Free/Owner full runs remain pending.
 - Copy/restore acceptance passed: 13 copied files, 7 protected project/custom-module files with identical
   SHA-256 hashes; Owner → Free → Owner across three Electron server boots; Board/Canvas/custom source/
   research/WordPress/trials read back; non-Owner API denial; native PTY launched. Original copy unchanged.
@@ -86,6 +88,16 @@ The feature inventory and original findings remain in [PRODUCT_FEATURE_AUDIT.md]
   The restored server check is not packaged-GUI, installed-app-update or real-Claude acceptance.
 - Cloudflare local collab and Phone relay runtime checks passed. Billing Wrangler dry-run passed;
   no Worker deployed and no production database touched.
+
+## CI teardown repair
+
+The ecfa68f3 CI run passed 8,578 tests (12 platform skips) but failed on a late console RPC
+rejection attributed to swarmQuota. Logs showed queued cooling-table saves running after
+the per-file temporary home was removed. An adversarial child-process fixture queues 20
+sensor saves without awaiting; the old cleanup left a resurrected sandbox and failed the
+existing no-residue assertion. Setup now drains the already-loaded quota persistence tail
+before deleting its sandbox. No error suppression or timeout increase. The repaired quota,
+cleanup and isolation set passed 122 tests. A full rerun/CI is required for the teardown change.
 
 ## Dependency risk still open
 
