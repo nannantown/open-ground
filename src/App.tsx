@@ -1062,15 +1062,14 @@ export default function App() {
 
   // Persist settings WITHOUT closing the panel — SettingsPanel autosaves
   // (debounced) while open; closing is only the X button / overlay click.
-  const saveSettings = async (s: Settings) => {
+  const saveSettings = async (s: Partial<Settings>) => {
     const res = await api.api.settings.$post({ json: s })
     if (!res.ok) {
       // Don't load() on failure — that would refetch the OLD settings and
       // silently roll back the toggle the user just changed, with no
       // indication anything went wrong.
       const e = (await res.json().catch(() => ({}))) as { error?: string }
-      alert(t('misc.ground.saveSettingsFailed', { error: e.error ?? res.statusText }))
-      return
+      throw new Error(e.error ?? res.statusText)
     }
     await load()
     // Re-resolve the experiment gate: toggling an experiment in Settings must

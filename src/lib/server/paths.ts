@@ -228,7 +228,7 @@ export const ensureOpenGroundHome = async () => {
         }
       }
     }
-    await mkdir(fresh, { recursive: true })
+    await mkdir(fresh, { recursive: true, mode: 0o700 })
     // The pre-server.json launcher tracked PID and port in separate dotfiles.
     // server.json (atomic, ready-gated) replaces them — sweep the legacy
     // sidecars on every boot so a downgrade-then-upgrade can't leave a stale

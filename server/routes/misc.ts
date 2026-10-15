@@ -393,7 +393,7 @@ export const miscRoutes = new Hono()
   .get('/api/settings', async (c) => {
     const [settings, suggested] = await Promise.all([getSettings(), suggestedDisplayName()])
     const visible = { ...settings }
-    if (await getCustomTabRole() !== 'owner') { delete visible.wordpress; delete visible.experiments }
+    if (await getCustomTabRole() !== 'owner') { delete visible.wordpress; delete visible.experiments; delete visible.workerTrials }
     const body: SettingsResponse = { ...visible, suggestedDisplayName: suggested }
     return c.json(body)
   })
@@ -413,6 +413,7 @@ export const miscRoutes = new Hono()
       // Preserve hidden owner settings during ordinary saves.
       delete body.wordpress
       delete body.experiments
+      delete body.workerTrials
     }
     await setUserSettings(body)
     return c.json({ ok: true })

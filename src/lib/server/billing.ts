@@ -16,8 +16,8 @@ export const billingUrl = (): string | null => {
 
 const free = (): BillingState => ({
   checkoutAvailable: process.platform === 'darwin' && !!billingUrl() && !isLockdownEnabledSync(),
-  plan: 'free', configured: !!billingUrl() && !isLockdownEnabledSync(),
-  status: 'none', currentPeriodEnd: null, cancelAtPeriodEnd: false,
+  plan: 'free', configured: !!billingUrl(),
+  status: isLockdownEnabledSync() ? 'lockdown' : 'none', currentPeriodEnd: null, cancelAtPeriodEnd: false,
 })
 // Cache only successful, validated answers, by account AND token. Never use stale
 // paid access on network failure. A bounded 30s refresh also covers cancellation.

@@ -36,7 +36,8 @@
 //
 // Failure posture: per-report, recorded on the ledger ('failed' + a scrubbed
 // reason — the app password never appears in any error, log line, or ledger),
-// retried on later sweeps. The sweep never throws, caps its per-project
+// retried only when a failed create is known not to have committed. Ledger
+// faults stop the sweep rather than risk duplicate posts. Caps its per-project
 // network work, does NOTHING while lockdown is on (the fetch floor would
 // refuse the egress anyway — this just makes the skip deliberate), and an
 // unchanged report costs zero requests.
@@ -69,6 +70,7 @@ export interface BlogLedgerEntry {
 }
 
 interface BlogLedger {
+  site?: string
   entries: Record<string, BlogLedgerEntry>
   /** WHERE THIS SITE'S wp-admin ACTUALLY LIVES — WordPress's own `siteurl`,
    *  read once from `/wp/v2/settings` and remembered (2026-09-02).
@@ -93,42 +95,59 @@ interface BlogLedger {
 
 const LEDGER_FILE = 'blog-publish.json'
 
-const readLedger = async (projectPath: string): Promise<BlogLedger> => {
-  try {
-    const raw = await readFile(await projectDataFile(projectPath, LEDGER_FILE), 'utf8')
-    const parsed = JSON.parse(raw) as Partial<BlogLedger>
-    if (parsed && typeof parsed === 'object' && parsed.entries && typeof parsed.entries === 'object') {
-      const wanted =
-        parsed.wanted && typeof parsed.wanted === 'object' && !Array.isArray(parsed.wanted)
-          ? parsed.wanted
-          : undefined
-      const adminBase =
-        typeof parsed.adminBase === 'string' && parsed.adminBase ? parsed.adminBase : undefined
-      return {
-        entries: parsed.entries,
-        ...(wanted ? { wanted } : {}),
-        ...(adminBase ? { adminBase } : {}),
-      }
-    }
-  } catch {
-    /* absent / torn ⇒ empty — worst case a report is re-pushed as a new draft */
+class BlogLedgerError extends Error {}
+class BlogTargetUnconfirmed extends Error {}
+const blogChains = new Map<string, Promise<unknown>>()
+const withBlogLock = async <T>(projectPath: string, fn: () => Promise<T>): Promise<T> => {
+  const key = await projectDataFile(projectPath, LEDGER_FILE)
+  const run = (blogChains.get(key) ?? Promise.resolve()).then(fn)
+  const tail = run.catch(() => {})
+  blogChains.set(key, tail)
+  try { return await run } finally {
+    // Leave a newer waiter in place.
+    if (blogChains.get(key) === tail) blogChains.delete(key)
   }
-  return { entries: {} }
 }
 
-const writeLedger = async (projectPath: string, ledger: BlogLedger): Promise<void> => {
-  try {
-    // The central data dir may not exist yet for a project that has never held
-    // board/canvas data — atomicWriteJson's sibling-temp rename needs it there
-    // (the same ensure-then-write shape as swarmEnginePersistence, and measured
-    // here first: the ledger silently never persisted and every sweep re-created
-    // the same draft).
-    await mkdir(await projectDataDir(projectPath), { recursive: true })
-    await atomicWriteJson(await projectDataFile(projectPath, LEDGER_FILE), ledger)
-  } catch {
-    /* fail-open: a ledger that cannot persist costs a duplicate draft later,
-       never a crashed sweep */
+const readLedger = async (projectPath: string, name = LEDGER_FILE): Promise<BlogLedger> => {
+  let raw: string
+  try { raw = await readFile(await projectDataFile(projectPath, name), 'utf8') }
+  catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { entries: {} }
+    throw new BlogLedgerError('ledger')
   }
+  try {
+    const p = JSON.parse(raw) as BlogLedger
+    if (!p || typeof p !== 'object' || !p.entries || typeof p.entries !== 'object' || Array.isArray(p.entries)) throw new Error('shape')
+    for (const e of Object.values(p.entries)) {
+      if (!e || typeof e !== 'object' || !Number.isInteger(e.postId) || e.postId < 0 || typeof e.contentHash !== 'string' ||
+          !['draft', 'failed', 'edited-on-wp', 'deleted-on-wp', 'needs-check'].includes(e.state)) throw new Error('entry')
+    }
+    if (p.site !== undefined && typeof p.site !== 'string') throw new Error('site')
+    if (p.wanted !== undefined && (!p.wanted || typeof p.wanted !== 'object' || Array.isArray(p.wanted) || Object.values(p.wanted).some((v) => v !== true))) throw new Error('wanted')
+    return p
+  } catch { throw new BlogLedgerError('ledger') }
+}
+
+const writeLedger = async (projectPath: string, ledger: BlogLedger, name = LEDGER_FILE): Promise<void> => {
+  try {
+    await mkdir(await projectDataDir(projectPath), { recursive: true })
+    await atomicWriteJson(await projectDataFile(projectPath, name), ledger, { mode: 0o600, fsync: true })
+  } catch { throw new BlogLedgerError('ledger') }
+}
+
+const ledgerForSite = async (projectPath: string, site: string, confirmTarget = false): Promise<BlogLedger> => {
+  let ledger = await readLedger(projectPath)
+  const changed = ledger.site !== site
+  if (!ledger.site && Object.keys(ledger.entries).length && !confirmTarget) throw new BlogTargetUnconfirmed('target-unconfirmed')
+  if (ledger.site && ledger.site !== site) {
+    await writeLedger(projectPath, ledger, `blog-publish-${sha1(ledger.site)}.json`)
+    ledger = await readLedger(projectPath, `blog-publish-${sha1(site)}.json`)
+    if (ledger.site && ledger.site !== site) throw new BlogLedgerError('ledger')
+  }
+  ledger.site = site
+  if (changed) await writeLedger(projectPath, ledger)
+  return ledger
 }
 
 /** The Research tab's read of the ledger (route enrichment) — never throws. */
@@ -136,12 +155,14 @@ export const readBlogInfo = async (
   projectPath: string,
 ): Promise<Record<string, ResearchReportBlogInfo>> => {
   const ledger = await readLedger(projectPath)
+  const wp = (await getSettings()).wordpress
+  if (ledger.site && wp?.baseUrl && ledger.site !== wp.baseUrl) return {}
   const out: Record<string, ResearchReportBlogInfo> = {}
   for (const [file, e] of Object.entries(ledger.entries)) {
     out[file] = {
-      state: e.state,
+      state: ledger.site ? e.state : 'target-unconfirmed',
       ...(e.link ? { link: e.link } : {}),
-      ...(e.state === 'failed' && e.error ? { error: e.error } : {}),
+      ...((e.state === 'failed' || e.state === 'needs-check') && e.error ? { error: e.error } : {}),
     }
   }
   return out
@@ -196,7 +217,7 @@ const wpFetchJson = async (
     clearTimeout(timer)
   }
   if (res.status === 404) throw new WpGoneError(`${method} ${path}: 404`)
-  if (!res.ok) throw new Error(`${method} ${path}: HTTP ${res.status}`)
+  if (!res.ok) throw new WpHttpError(`${method} ${path}: HTTP ${res.status}`, res.status)
   return await res.json().catch(() => null)
 }
 
@@ -240,6 +261,7 @@ const fetchAdminBase = async (
  *  trashed post also 404s on the plain endpoint). Its own class so the sweep
  *  can tell "gone" from "broken". */
 class WpGoneError extends Error {}
+class WpHttpError extends Error { constructor(message: string, readonly status: number) { super(message) } }
 
 // ─── report → draft payload ──────────────────────────────────────────────────
 
@@ -267,7 +289,7 @@ const editLink = (adminBase: string, postId: number): string =>
 
 /** Sweep ONE project's reports against the ledger. Exported for tests; the
  *  loop below drives it across every registered project. Never throws. */
-export const sweepProjectBlogPublish = async (
+const sweepUnlocked = async (
   projectPath: string,
   wp: WordPressSettings,
   deps: BlogPublishDeps = {},
@@ -287,7 +309,7 @@ export const sweepProjectBlogPublish = async (
   }
   if (opts.only) reports = reports.filter((r) => r.file === opts.only)
   if (!reports.length) return
-  const ledger = await readLedger(projectPath)
+  const ledger = await ledgerForSite(projectPath, wp.baseUrl)
   let dirty = false
   let pushes = 0
 
@@ -308,7 +330,7 @@ export const sweepProjectBlogPublish = async (
     adminBase = found
     dirty = true
   }
-  if (!ledger.adminBase && Object.keys(ledger.entries).length > 0) await learnAdminBase()
+  if (!ledger.adminBase && Object.values(ledger.entries).some((e) => e.postId > 0)) await learnAdminBase()
   // Repair every stored link against the resolved base (pure, no requests): a
   // link is display-only, so recomputing it from the post id can never lose
   // anything, and it is the only way an ALREADY-pushed report gets its fixed
@@ -352,7 +374,7 @@ export const sweepProjectBlogPublish = async (
     // owns the WP copy from then on. (Deleting the WP post does NOT re-open it
     // either: we deliberately never GET these, so we cannot tell — and guessing
     // would put a surprise draft next to work the owner curated by hand.)
-    if (entry?.state === 'edited-on-wp') continue
+    if (entry?.state === 'edited-on-wp' || entry?.state === 'needs-check') continue
 
     const { title, html } = draftPayload(meta.file, md)
     pushes++
@@ -362,6 +384,8 @@ export const sweepProjectBlogPublish = async (
       // post 0 would 404 and mis-record the failure as a WP-side delete).
       if (!entry || entry.state === 'deleted-on-wp' || !entry.postId) {
         // CREATE — always a draft (contract #1).
+        ledger.entries[meta.file] = { postId: 0, contentHash: hash, pushedAt: nowIso(), state: 'needs-check' }
+        await writeLedger(projectPath, ledger)
         const post = await wpRequest(wp, 'POST', '/posts', { title, content: html, status: 'draft' }, fetchImpl)
         // First draft for this site: learn where wp-admin is before the link is
         // built (a fresh ledger had nothing to repair above).
@@ -410,7 +434,9 @@ export const sweepProjectBlogPublish = async (
         }
       }
       dirty = true
+      await writeLedger(projectPath, ledger)
     } catch (e) {
+      if (e instanceof BlogLedgerError) throw e
       // Scrubbed by construction (wpRequest writes its own messages), but belt
       // and braces: never let the password through even if a dep changes.
       // A Node fetch failure says only "fetch failed" — the code that tells
@@ -422,7 +448,7 @@ export const sweepProjectBlogPublish = async (
       const msg = withCause.split(wp.appPassword).join('***')
       ledger.entries[meta.file] = {
         ...(entry ?? { postId: 0, contentHash: '', pushedAt: '' }),
-        state: 'failed',
+        state: !entry?.postId && !(e instanceof WpGoneError || (e instanceof WpHttpError && e.status >= 400 && e.status < 500)) ? 'needs-check' : 'failed',
         error: msg.slice(0, 300),
       }
       dirty = true
@@ -439,28 +465,35 @@ export const sweepProjectBlogPublish = async (
  *   - 'lockdown'       — lockdown mode is on; egress is off by policy.
  *  The MARK persists either way once configured — a push that fails here is
  *  retried by every later sweep (the ledger's 'failed' path). */
+export const sweepProjectBlogPublish = (projectPath: string, wp: WordPressSettings, deps: BlogPublishDeps = {}, opts: { only?: string } = {}): Promise<void> =>
+  withBlogLock(projectPath, () => sweepUnlocked(projectPath, wp, deps, opts))
+
 export const markResearchForBlog = async (
   projectPath: string,
   file: string,
   deps: BlogPublishDeps = {},
-): Promise<{ ok: true; blog?: ResearchReportBlogInfo } | { ok: false; error: 'not-configured' | 'lockdown' }> => {
+  opts: { confirmTarget?: boolean; confirmRetry?: boolean } = {},
+): Promise<{ ok: true; blog?: ResearchReportBlogInfo } | { ok: false; error: 'not-configured' | 'lockdown' | 'target-unconfirmed' | 'ledger'; site?: string }> => {
   if (isLockdownEnabledSync()) return { ok: false, error: 'lockdown' }
-  let settings: Settings
-  try {
-    settings = await getSettings()
-  } catch {
-    return { ok: false, error: 'not-configured' }
-  }
-  const wp = settings.wordpress
-  if (!wp?.baseUrl || !wp.username || !wp.appPassword) return { ok: false, error: 'not-configured' }
-  const ledger = await readLedger(projectPath)
-  if (!ledger.wanted?.[file]) {
-    ledger.wanted = { ...ledger.wanted, [file]: true }
-    await writeLedger(projectPath, ledger)
-  }
-  await sweepProjectBlogPublish(projectPath, wp, deps, { only: file })
-  const info = await readBlogInfo(projectPath)
-  return { ok: true, ...(info[file] ? { blog: info[file] } : {}) }
+  return withBlogLock(projectPath, async () => {
+    const wp = (await getSettings()).wordpress
+    if (!wp?.baseUrl || !wp.username || !wp.appPassword) return { ok: false, error: 'not-configured' }
+    try {
+      const ledger = await ledgerForSite(projectPath, wp.baseUrl, opts.confirmTarget)
+      ledger.wanted = { ...ledger.wanted, [file]: true }
+      if (opts.confirmRetry && ledger.entries[file]?.state === 'needs-check') {
+        ledger.entries[file] = { ...ledger.entries[file], state: 'failed' }
+      }
+      await writeLedger(projectPath, ledger)
+      await sweepUnlocked(projectPath, wp, deps, { only: file })
+      const info = await readBlogInfo(projectPath)
+      return { ok: true, ...(info[file] ? { blog: info[file] } : {}) }
+    } catch (e) {
+      return e instanceof BlogTargetUnconfirmed
+        ? { ok: false, error: 'target-unconfirmed', site: wp.baseUrl }
+        : { ok: false, error: 'ledger' }
+    }
+  })
 }
 
 /** One pass over every registered project. Inert without owner access or Settings.wordpress;

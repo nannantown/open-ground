@@ -6,6 +6,22 @@ vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ lang: 'en' }) }))
 const open = vi.hoisted(() => vi.fn(async () => true))
 vi.mock('@/lib/auth/AuthContext', () => ({ openInBrowser: open }))
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); open.mockClear() })
+it('shows an unverified plan without suggesting that an existing subscription was cancelled', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ plan: 'free', status: 'unavailable', configured: true, checkoutAvailable: true })))
+  render(<BillingSection accountId="a" />)
+  expect(await screen.findByText('Plan not verified')).toBeInTheDocument()
+  expect(await screen.findByText(/does not cancel a subscription/)).toBeInTheDocument()
+  expect(screen.queryByText('Free · ¥0 / month')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Pro · ¥2,980/month' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Manage billing / cancel' })).toBeEnabled()
+})
+it('keeps billing management discoverable while work mode blocks it', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ plan: 'free', status: 'lockdown', configured: true, checkoutAvailable: false })))
+  render(<BillingSection accountId="a" />)
+  expect(await screen.findByText(/Turn work mode off to manage billing/)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Manage billing / cancel' })).toBeDisabled()
+  expect(screen.queryByText(/not available yet/)).toBeNull()
+})
 it('Pro opens the existing external-browser helper for cancellation and surfaces upstream failures', async () => {
   let available = true
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {

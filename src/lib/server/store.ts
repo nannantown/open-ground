@@ -139,7 +139,7 @@ const writeJson = async (path: string, data: unknown) => {
   // (its own invariant) — a failed backup logs and the save proceeds — so this
   // cannot turn a backup problem into a save problem.
   await snapshotBeforeWrite(path)
-  await atomicWriteJson(path, data)
+  await atomicWriteJson(path, data, { mode: 0o600 })
 }
 
 /** `getSettings` plus WHY the values are what they are — see ConfigReadHealth.

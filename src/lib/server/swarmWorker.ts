@@ -1,3 +1,4 @@
+import { getCustomTabRole } from './roles'
 // swarmWorker — the in-app, tmux-free replacement for the shell swarm's
 // `swarm-new.sh` (worktree) + `swarm-dispatch.sh` (/order injection). It is the
 // "worker spawn" primitive of the OPEN GROUND swarm port (docs / auto-memory
@@ -1069,7 +1070,7 @@ export const spawnSwarmWorker = async (
     // Off-by-default trial flags (docs/trending/TRIALS.md §Trial 4). Read here,
     // at the one spawn site, so a trial is turned on and off from Settings
     // without a release — and so all-off produces byte-identical order text.
-    trials: await getWorkerTrials(),
+    trials: await getCustomTabRole() === 'owner' ? await getWorkerTrials() : {},
     resume: !!opts.resumeSessionId,
     me,
     claudeBin: pre.claudeBin,

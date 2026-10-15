@@ -3,6 +3,15 @@
 // language so the panel is never half-translated. English is the source of truth.
 export const settings = {
   en: {
+    'settings.save.busy': 'Saving…',
+    'settings.save.done': 'Saved',
+    'settings.save.failed': 'Changes have not been saved. Retry before closing the app.',
+    'settings.save.retry': 'Retry',
+    'settings.sound.failed': 'Could not play the test sound.',
+    'settings.sound.sent': 'Test sound requested.',
+    'settings.research.failed': 'Could not check research channels. Re-check to try again.',
+    'settings.research.empty': 'No research channels found.',
+    'settings.experiments.sandboxHint': 'OS isolation applies to supported manual Claude launches on macOS. Agent Team SDK workers are not OS-sandboxed; their separate command guards still apply.',
     'settings.eyebrow': 'Preferences',
     // Feedback entry
     // Language
@@ -90,7 +99,7 @@ export const settings = {
     'settings.wordpress.appPasswordHint':
       'WP admin › Users › Profile › Application Passwords. Not your login password — revocable there at any time.',
     'settings.wordpress.save': 'Save',
-    'settings.wordpress.saved': 'Connected',
+    'settings.wordpress.saved': 'Saved',
     'settings.wordpress.clear': 'Disconnect',
     'settings.wordpress.invalid': 'Fill in all three fields; the URL must start with https://',
     'settings.sound.heading': 'Completion sound',
@@ -204,6 +213,15 @@ export const settings = {
     'settings.inbox.imageAlt': 'Attached image',
   } as Record<string, string>,
   ja: {
+    'settings.save.busy': '保存中…',
+    'settings.save.done': '保存しました',
+    'settings.save.failed': '変更を保存できていません。アプリを閉じる前に再試行してください。',
+    'settings.save.retry': '再試行',
+    'settings.sound.failed': '試聴できませんでした。',
+    'settings.sound.sent': '試聴を要求しました。',
+    'settings.research.failed': '調査チャンネルを確認できませんでした。「再確認」でやり直してください。',
+    'settings.research.empty': '調査チャンネルがありません。',
+    'settings.experiments.sandboxHint': 'OS隔離はmacOSの対応する手動Claude起動に適用されます。Agent TeamのSDK WorkerはOS隔離されません。別のコマンドガードは適用されます。',
     'settings.eyebrow': '環境設定',
     'settings.language.heading': '言語',
     'settings.language.hint': 'システム言語から自動判定します。ここで手動変更できます。',

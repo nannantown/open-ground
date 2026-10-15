@@ -45,7 +45,7 @@ const baseSettings: Settings = {
   displayName: '',
 }
 
-const renderPanel = (onSave: (s: Settings) => void, open = true) =>
+const renderPanel = (onSave: (s: Partial<Settings>) => void, open = true) =>
   render(
     <SettingsPanel
       open={open}
@@ -56,6 +56,32 @@ const renderPanel = (onSave: (s: Settings) => void, open = true) =>
   )
 
 describe('SettingsPanel autosave', () => {
+  it('saves only changed preferences when two switches change before a reload', async () => {
+    let saved = { ...baseSettings, autoUpdate: false, soundOnDone: false }
+    const onSave = vi.fn(async (patch: Partial<Settings>) => { saved = { ...saved, ...patch } })
+    render(<SettingsPanel open settings={saved} onClose={() => {}} onSave={onSave} />)
+    const updates = screen.getByRole('group', { name: 'settings.autoUpdate.label' })
+    const sound = screen.getByRole('group', { name: 'settings.sound.label' })
+    fireEvent.click(within(updates).getByRole('button', { name: 'settings.experiments.on' }))
+    fireEvent.click(within(sound).getByRole('button', { name: 'settings.experiments.on' }))
+    await act(async () => {})
+    expect(saved).toMatchObject({ autoUpdate: true, soundOnDone: true })
+    expect(onSave.mock.calls.flatMap(([patch]) => Object.keys(patch))).not.toContain('projects')
+  })
+
+  it('keeps a failed preference available for an explicit retry', async () => {
+    const onSave = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined)
+    renderPanel(onSave)
+    const updates = screen.getByRole('group', { name: 'settings.autoUpdate.label' })
+    await act(async () => {
+      fireEvent.click(within(updates).getByRole('button', { name: 'settings.experiments.off' }))
+    })
+    expect(screen.getByText('settings.save.failed').closest('[role=alert]')).not.toBeNull()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'settings.save.retry' })) })
+    expect(onSave.mock.calls).toEqual([[{ autoUpdate: false }], [{ autoUpdate: false }]])
+    expect(screen.queryByText('settings.save.failed')).toBeNull()
+  })
+
   it('hides owner settings without erasing their values during a public settings edit', () => {
     const wordpress = { baseUrl: 'https://saved.example', username: 'saved', appPassword: 'fixture' }
     const onSave = vi.fn()
@@ -65,17 +91,17 @@ describe('SettingsPanel autosave', () => {
     const input = screen.getByRole('textbox', { name: 'settings.displayName.heading' })
     fireEvent.change(input, { target: { value: 'Public user' } })
     fireEvent.blur(input)
-    expect(onSave.mock.calls[0][0].wordpress).toEqual(wordpress)
+    expect(onSave.mock.calls[0][0]).toEqual({ displayName: 'Public user' })
   })
 
-  it('keeps the public Swarm opt-in available and saves its value with legacy settings intact', () => {
+  it('keeps the public Swarm opt-in available and saves its value with legacy settings intact', async () => {
     const onSave = vi.fn()
     render(<SettingsPanel open settings={baseSettings} swarmOptInAvailable onClose={() => {}} onSave={onSave} />)
     fireEvent.click(screen.getByText('settings.advanced'))
     const group = screen.getByRole('group', { name: 'settings.swarmOptIn.label' })
     fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.on' }))
     expect(onSave.mock.calls.at(-1)?.[0].swarmOptIn).toBe(true)
-    fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.off' }))
+    await act(async () => { fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.off' })) })
     expect(onSave.mock.calls.at(-1)?.[0].swarmOptIn).toBe(false)
   })
 
@@ -90,12 +116,13 @@ describe('SettingsPanel autosave', () => {
     expect(screen.queryByText('settings.workerTrial.heading')).toBeNull()
   })
 
-  it('appears and persists once the swarm is on', () => {
+  it('appears and persists once the swarm is on for the owner', async () => {
     const onSave = vi.fn()
     render(
       <SettingsPanel
         open
         settings={{ ...baseSettings, swarmOptIn: true }}
+        experimentsEligible
         swarmOptInAvailable
         swarmOptInEnabled
         onClose={() => {}}
@@ -106,7 +133,7 @@ describe('SettingsPanel autosave', () => {
     const group = screen.getByRole('group', { name: 'settings.workerTrial.thinkInCode' })
     fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.on' }))
     expect(onSave.mock.calls.at(-1)?.[0].workerTrials).toEqual({ thinkInCode: true })
-    fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.off' }))
+    await act(async () => { fireEvent.click(within(group).getByRole('button', { name: 'settings.experiments.off' })) })
     expect(onSave.mock.calls.at(-1)?.[0].workerTrials).toEqual({ thinkInCode: false })
   })
 
@@ -119,6 +146,7 @@ describe('SettingsPanel autosave', () => {
       <SettingsPanel
         open
         settings={{ ...baseSettings, swarmOptIn: true, workerTrials: { brevity: true } }}
+        experimentsEligible
         swarmOptInAvailable
         swarmOptInEnabled
         onClose={() => {}}
@@ -136,6 +164,7 @@ describe('SettingsPanel autosave', () => {
       <SettingsPanel
         open
         settings={{ ...baseSettings, swarmOptIn: true, workerTrials: { thinkInCode: true } }}
+        experimentsEligible
         swarmOptInAvailable
         swarmOptInEnabled
         onClose={() => {}}

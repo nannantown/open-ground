@@ -37,10 +37,13 @@ it('Free and Pro are denied Owner APIs before reading files or starting jobs', a
 })
 it('public settings reads/writes cannot expose or overwrite owner credentials', async () => {
   const wordpress = { baseUrl: 'https://blog.example', username: 'owner', appPassword: 'fixture-password' }
-  await setSettings({ wordpress, experiments: { swarm: true } })
+  await setSettings({ wordpress, experiments: { swarm: true }, workerTrials: { thinkInCode: true } })
   expect((await (await app.request('/api/settings')).json()).wordpress).toBeUndefined()
+  expect((await (await app.request('/api/settings')).json()).workerTrials).toBeUndefined()
   await app.request('/api/settings', json({ displayName: 'Public', wordpress: null, experiments: {} }))
   expect((await getSettings()).wordpress).toEqual(wordpress)
+  await app.request('/api/settings', json({ workerTrials: { thinkInCode: false } }))
+  expect((await getSettings()).workerTrials).toEqual({ thinkInCode: true })
   expect((await getSettings()).experiments).toEqual({ swarm: true })
 })
 it('public Board writes retain saved owner layout and existing Canvas bytes', async () => {

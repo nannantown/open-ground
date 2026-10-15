@@ -35,13 +35,14 @@ import { useT } from '@/i18n/I18nContext'
 import type { Lang } from '@/i18n/messages'
 import { SwarmAllowedModelsSetting } from '@/components/canvas/SwarmAllowedModelsSetting'
 import { PhoneLinkSetting } from '@/components/canvas/PhoneLinkSetting'
+import { useSettingsSave } from '@/lib/useSettingsSave'
 
 interface Props {
   billingAccountId?: string | null
   open: boolean
   settings: Settings
   onClose: () => void
-  onSave: (s: Settings) => void
+  onSave: (s: Partial<Settings>) => void | Promise<void>
   /** Re-fetch projects/settings after the registered-project list changes. */
   onReload?: () => void
   /** When true the server has a service-role key, so the owner-only "Incoming
@@ -150,6 +151,8 @@ export const SettingsPanel = ({
   billingAccountId,
 }: Props) => {
   const { t, lang, setLang } = useT()
+  const persistence = useSettingsSave(onSave)
+  const [soundTest, setSoundTest] = useState<'idle' | 'busy' | 'sent' | 'error'>('idle')
   const [defaultWorkspace, setDefaultWorkspace] = useState(settings.defaultWorkspace ?? '')
   const [displayName, setDisplayName] = useState(settings.displayName ?? '')
   // Owner-only experiment toggles. Local state for instant feedback; persisted
@@ -203,8 +206,8 @@ export const SettingsPanel = ({
   latest.current = { defaultWorkspace, displayName }
   const settingsRef = useRef(settings)
   settingsRef.current = settings
-  const onSaveRef = useRef(onSave)
-  onSaveRef.current = onSave
+  const onSaveRef = useRef(persistence.save)
+  onSaveRef.current = persistence.save
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Persist now (if anything actually changed). Stable identity so effects
@@ -220,7 +223,10 @@ export const SettingsPanel = ({
     // setting through the server's merge-on-write.
     const nextName = latest.current.displayName.trim()
     if (nextWorkspace === (s.defaultWorkspace ?? null) && nextName === (s.displayName ?? '')) return
-    onSaveRef.current({ ...s, defaultWorkspace: nextWorkspace, displayName: nextName })
+    const patch: Partial<Settings> = {}
+    if (nextWorkspace !== (s.defaultWorkspace ?? null)) patch.defaultWorkspace = nextWorkspace
+    if (nextName !== (s.displayName ?? '')) patch.displayName = nextName
+    onSaveRef.current(patch)
   }, [])
 
   const schedulePersist = useCallback(() => {
@@ -259,10 +265,7 @@ export const SettingsPanel = ({
     setSwarmExp(next)
     const s = settingsRef.current
     onSaveRef.current({
-      ...s,
-      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
-      displayName: latest.current.displayName.trim(),
-      experiments: { ...s.experiments, swarm: next },
+      experiments: { ...s.experiments, swarm: next, sandbox: sandboxExp },
     })
   }
 
@@ -271,10 +274,7 @@ export const SettingsPanel = ({
     setSandboxExp(next)
     const s = settingsRef.current
     onSaveRef.current({
-      ...s,
-      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
-      displayName: latest.current.displayName.trim(),
-      experiments: { ...s.experiments, sandbox: next },
+      experiments: { ...s.experiments, swarm: swarmExp, sandbox: next },
     })
   }
 
@@ -284,11 +284,7 @@ export const SettingsPanel = ({
   const setSwarmOptIn = (next: boolean) => {
     if (next === swarmOptIn) return
     setSwarmOptInState(next)
-    const s = settingsRef.current
     onSaveRef.current({
-      ...s,
-      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
-      displayName: latest.current.displayName.trim(),
       swarmOptIn: next,
     })
   }
@@ -306,9 +302,6 @@ export const SettingsPanel = ({
     setThinkInCodeState(next)
     const s = settingsRef.current
     onSaveRef.current({
-      ...s,
-      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
-      displayName: latest.current.displayName.trim(),
       workerTrials: { ...s.workerTrials, thinkInCode: next },
     })
   }
@@ -318,11 +311,7 @@ export const SettingsPanel = ({
   const setLockdown = (next: boolean) => {
     if (next === lockdown) return
     setLockdownState(next)
-    const s = settingsRef.current
     onSaveRef.current({
-      ...s,
-      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
-      displayName: latest.current.displayName.trim(),
       lockdownMode: next,
     })
   }
@@ -330,11 +319,7 @@ export const SettingsPanel = ({
   const setAutoUpdate = (next: boolean) => {
     if (next === autoUpdateOn) return
     setAutoUpdateState(next)
-    const s = settingsRef.current
     onSaveRef.current({
-      ...s,
-      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
-      displayName: latest.current.displayName.trim(),
       autoUpdate: next,
     })
   }
@@ -342,31 +327,27 @@ export const SettingsPanel = ({
   const setSoundOn = (next: boolean) => {
     if (next === soundOn) return
     setSoundOnState(next)
-    const s = settingsRef.current
     onSaveRef.current({
-      ...s,
-      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
-      displayName: latest.current.displayName.trim(),
       soundOnDone: next,
     })
   }
 
   const commitSoundVolume = (v: number) => {
-    const s = settingsRef.current
     onSaveRef.current({
-      ...s,
-      defaultWorkspace: latest.current.defaultWorkspace.trim() || null,
-      displayName: latest.current.displayName.trim(),
       soundOnDoneVolume: v,
     })
   }
 
-  const testSound = () => {
-    void fetch('/api/sound/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ volume: soundVolume }),
-    }).catch(() => {})
+  const testSound = async () => {
+    setSoundTest('busy')
+    try {
+      const res = await fetch('/api/sound/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ volume: soundVolume }),
+      })
+      if (!res.ok || !(await res.json() as { played?: boolean }).played) throw new Error('sound')
+      setSoundTest('sent')
+    } catch { setSoundTest('error') }
   }
 
   // Fetch the display-name suggestion when the drawer opens (cheap: the server
@@ -445,6 +426,12 @@ export const SettingsPanel = ({
         />
 
         <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
+          {persistence.state !== 'idle' && (
+            <div className="mb-4 flex items-center gap-2 text-meta text-ink-muted" role={persistence.state === 'error' ? 'alert' : 'status'}>
+              <span>{t(persistence.state === 'error' ? 'settings.save.failed' : persistence.state === 'saving' ? 'settings.save.busy' : 'settings.save.done')}</span>
+              {persistence.state === 'error' && <Btn size="sm" onClick={persistence.retry}>{t('settings.save.retry')}</Btn>}
+            </div>
+          )}
           {/* Work mode (lockdown) badge — the quiet, always-visible reminder
               that non-Anthropic egress is blocked, shown only while it is on
               (the toggle itself lives under Advanced). */}
@@ -538,7 +525,7 @@ export const SettingsPanel = ({
               (normalizeWordPressSettings). Explicit save button, not the
               debounced text flow: a half-typed password must never be
               persisted by a blur. */}
-          {open && experimentsEligible && <WordPressSection settings={settings} onSave={onSave} />}
+          {open && experimentsEligible && <WordPressSection settings={settings} onSave={persistence.save} busy={persistence.state === 'saving'} />}
 
           {/* Completion chime — ON/OFF + volume + test-play. The sound itself is
               played by the managed Stop hook (attended desks only); the server
@@ -578,11 +565,13 @@ export const SettingsPanel = ({
                   </label>
                   <button
                     type="button"
-                    onClick={testSound}
-                    className="shrink-0 rounded-[3px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                    onClick={() => void testSound()} disabled={soundTest === 'busy'}
+                    className="shrink-0 rounded-[3px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:bg-plane hover:text-accent active:bg-line active:text-ink disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
                   >
                     {t('settings.sound.test')}
                   </button>
+                    {soundTest === 'error' && <span role="alert" className="text-meta text-ink-muted">{t('settings.sound.failed')}</span>}
+                    {soundTest === 'sent' && <span role="status" className="text-meta text-ink-muted">{t('settings.sound.sent')}</span>}
                 </div>
               )}
             </div>
@@ -767,7 +756,7 @@ export const SettingsPanel = ({
                     </Section>
                   )}
                 />}
-                {(swarmVisible || swarmOptIn || swarmExp) && (
+                {experimentsEligible && (swarmVisible || swarmOptIn || swarmExp) && (
                   <Section
                     heading={t('settings.workerTrial.heading')}
                     hint={t('settings.workerTrial.hint')}
@@ -804,6 +793,7 @@ export const SettingsPanel = ({
                       />
                       <ExperimentToggle
                         label={t('settings.experiments.sandbox')}
+                        hint={t('settings.experiments.sandboxHint')}
                         value={sandboxExp}
                         onChange={setSandbox}
                         offLabel={t('settings.experiments.off')}
@@ -865,9 +855,11 @@ const RESEARCH_STATUS_CHIP: Record<ResearchChannelStatus, string> = {
 const WordPressSection = ({
   settings,
   onSave,
+  busy,
 }: {
   settings: Settings
-  onSave: (s: Settings) => void | Promise<void>
+  busy: boolean
+  onSave: (s: Partial<Settings>) => void | Promise<void>
 }) => {
   const { t } = useT()
   const wp = settings.wordpress ?? null
@@ -896,7 +888,6 @@ const WordPressSection = ({
     'w-full rounded-[3px] border border-line bg-bg-card px-2.5 py-1.5 text-ui text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none'
   const save = () => {
     void onSave({
-      ...settings,
       wordpress: {
         baseUrl: baseUrl.trim().replace(/\/+$/, ''),
         username: username.trim(),
@@ -909,7 +900,7 @@ const WordPressSection = ({
     setUsername('')
     setAppPassword('')
     // Explicit null on the wire = clear (setUserSettings drops the key).
-    void onSave({ ...settings, wordpress: null })
+    void onSave({ wordpress: null })
   }
   return (
     <Section heading={t('settings.wordpress.heading')} hint={t('settings.wordpress.hint')}>
@@ -951,11 +942,11 @@ const WordPressSection = ({
           <p className="text-meta text-accent">{t('settings.wordpress.invalid')}</p>
         ) : null}
         <div className="flex items-center gap-2">
-          <Btn variant="primary" size="sm" disabled={!valid || !dirty} onClick={save}>
+          <Btn variant="primary" size="sm" disabled={busy || !valid || !dirty} onClick={save}>
             {t('settings.wordpress.save')}
           </Btn>
           {wp && (
-            <Btn variant="subtle" size="sm" onClick={clear}>
+            <Btn variant="subtle" size="sm" disabled={busy} onClick={clear}>
               {t('settings.wordpress.clear')}
             </Btn>
           )}
@@ -972,6 +963,7 @@ const ResearchChannelsSection = () => {
   const { t } = useT()
   const [channels, setChannels] = useState<ResearchChannelState[] | null>(null)
   const [channelsLoading, setChannelsLoading] = useState(false)
+  const [channelsError, setChannelsError] = useState(false)
   const [twitterConfigured, setTwitterConfigured] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [xOpen, setXOpen] = useState(false)
@@ -992,6 +984,7 @@ const ResearchChannelsSection = () => {
 
   const loadChannels = useCallback(() => {
     setChannelsLoading(true)
+    setChannelsError(false)
     api.api.research.channels
       .$get()
       .then(async (res) => {
@@ -1002,8 +995,7 @@ const ResearchChannelsSection = () => {
         if (mounted.current) setChannels(data.channels ?? [])
       })
       .catch(() => {
-        /* No error copy exists for this list — keep the last known rows
-           (nothing on first load); Re-check retries. */
+        if (mounted.current) setChannelsError(true)
       })
       .finally(() => {
         if (mounted.current) setChannelsLoading(false)
@@ -1090,6 +1082,8 @@ const ResearchChannelsSection = () => {
         </button>
       }
     >
+      {channelsError && <p role="alert" className="text-meta text-ink-muted">{t('settings.research.failed')}</p>}
+      {channels?.length === 0 && !channelsError && <p className="text-meta text-ink-subtle">{t('settings.research.empty')}</p>}
       {!channels && channelsLoading && (
         <span className="inline-flex items-center text-ink-subtle">
           <Loader2 size={12} className="animate-spin" />
@@ -1124,7 +1118,7 @@ const ResearchChannelsSection = () => {
                       <button
                         type="button"
                         onClick={() => copyCommand(ch.id, cmd)}
-                        className="shrink-0 rounded-[3px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                        className="shrink-0 rounded-[3px] border border-line px-2 py-1 text-meta text-ink-muted transition-colors hover:border-accent hover:bg-plane hover:text-accent active:bg-line active:text-ink disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
                       >
                         {copiedId === ch.id
                           ? t('settings.research.copied')

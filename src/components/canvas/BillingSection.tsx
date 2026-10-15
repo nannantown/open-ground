@@ -46,17 +46,21 @@ export function BillingSection({ accountId }: { accountId?: string | null }) {
     finally { setBusy(false) }
   }
   const plan = state?.plan ?? 'free'
+  const unknown = !state || state.status === 'unavailable' || state.status === 'lockdown'
   return (
     <div className="space-y-3" aria-busy={busy || !state}>
-      <p className="text-ui text-ink">{plan === 'owner' ? 'Owner' : plan === 'pro' ? 'Pro · ¥2,980 / ' + (ja ? '月' : 'month') : 'Free · ¥0 / ' + (ja ? '月' : 'month')}</p>
+      <p className="text-ui text-ink">{plan === 'owner' ? 'Owner' : unknown ? (ja ? '契約状態を未確認' : 'Plan not verified') : plan === 'pro' ? 'Pro · ¥2,980 / ' + (ja ? '月' : 'month') : 'Free · ¥0 / ' + (ja ? '月' : 'month')}</p>
+      {unknown && plan !== 'owner' && <p role="status" className="text-ui text-ink-muted">{state?.status === 'lockdown'
+        ? (ja ? '業務モード中は契約を確認できません。契約・請求は継続する場合があります。支払い管理・解約は業務モードをOFFにして開いてください。' : 'Work mode blocks billing checks. An existing subscription may still be billed. Turn work mode off to manage billing or cancel.')
+        : (ja ? '契約を確認できていません。請求停止や解約を意味しません。再確認するか、支払い管理を開いてください。' : 'Your plan has not been verified. This does not cancel a subscription or stop billing. Refresh or open billing management.')}</p>}
       {plan !== 'owner' && <p className="text-ui text-ink-muted">{ja ? 'Pro：AI Worker自動配車・監視・復旧・司令官レビュー' : 'Pro: AI Worker dispatch, monitoring, recovery and commander review'}</p>}
       {state?.currentPeriodEnd && <p className="text-ui text-ink-muted">{state.cancelAtPeriodEnd ? (ja ? '利用期限：' : 'Access until: ') : (ja ? '契約期間終了：' : 'Current period ends: ')}{new Date(state.currentPeriodEnd).toLocaleDateString(ja ? 'ja-JP' : 'en-US')}</p>}
       {!accountId && plan !== 'owner' && <p className="text-ui text-ink-muted">{ja ? 'Proの利用にはサインインが必要です。' : 'Sign in to use Pro.'}</p>}
       {state?.configured === false && <p className="text-ui text-ink-muted">{ja ? 'Proの申し込みは準備中です。Freeは利用できます。' : 'Pro checkout is not available yet. Free is available.'}</p>}
-      {state?.configured && !state.checkoutAvailable && plan !== 'owner' && <p className="text-ui text-ink-muted">{ja ? 'Proの新規申し込みは現在macOSのみ対応しています。' : 'Pro checkout is currently available on macOS only.'}</p>}
+      {state?.configured && !unknown && !state.checkoutAvailable && plan !== 'owner' && <p className="text-ui text-ink-muted">{ja ? 'Proの新規申し込みは現在macOSのみ対応しています。' : 'Pro checkout is currently available on macOS only.'}</p>}
       <div className="flex flex-wrap gap-2">
-        {plan === 'free' && <Btn variant="primary" disabled={busy || !accountId || !state?.checkoutAvailable} onClick={() => void openBilling('checkout')}>{ja ? 'Pro · 月額2,980円' : 'Pro · ¥2,980/month'}</Btn>}
-        {accountId && state?.configured && plan !== 'owner' && <Btn disabled={busy} onClick={() => void openBilling('portal')}>{ja ? '支払い・解約' : 'Manage billing / cancel'}</Btn>}
+        {plan === 'free' && <Btn variant="primary" disabled={busy || unknown || !accountId || !state?.checkoutAvailable} onClick={() => void openBilling('checkout')}>{ja ? 'Pro · 月額2,980円' : 'Pro · ¥2,980/month'}</Btn>}
+        {accountId && state?.configured && plan !== 'owner' && <Btn disabled={busy || state.status === 'lockdown'} onClick={() => void openBilling('portal')}>{ja ? '支払い・解約' : 'Manage billing / cancel'}</Btn>}
         <Btn disabled={busy} onClick={() => { setError(''); void refresh() }}>{ja ? '再確認' : 'Refresh'}</Btn>
       </div>
       {error && <p role="alert" className="text-ui text-ink">{error}</p>}
