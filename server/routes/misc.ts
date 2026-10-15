@@ -64,6 +64,7 @@ import type {
   ReleaseNote,
   ReleaseNotesResponse,
   SettingsResponse,
+  Settings,
 } from '@/lib/types'
 import { validateName } from './_shared'
 
@@ -161,6 +162,17 @@ const suggestedDisplayName = (): Promise<string | null> => {
 const USAGE_BREAKDOWN_TTL_MS = 5 * 60_000
 let usageBreakdownCache: { days: number; at: number; body: unknown } | null = null
 
+// Every public response carrying settings must apply the same Owner boundary.
+const visibleSettings = async (settings: Settings): Promise<Settings> => {
+  const visible = { ...settings }
+  if (await getCustomTabRole() !== 'owner') {
+    delete visible.wordpress
+    delete visible.experiments
+    delete visible.workerTrials
+  }
+  return visible
+}
+
 export const miscRoutes = new Hono()
   // --- GET /api/home-integrity ----------------------------------------------
   // The home-data damage report: what the boot check found, and — the part the
@@ -229,7 +241,7 @@ export const miscRoutes = new Hono()
     const settings = await getSettings()
     const canvas = await getCanvas()
     const projects = await scanProjects(settings)
-    const body: ProjectsResponse = { settings, projects, canvas }
+    const body: ProjectsResponse = { settings: await visibleSettings(settings), projects, canvas }
     return c.json(body)
   })
   // --- POST /api/projects/new -----------------------------------------------
@@ -392,8 +404,7 @@ export const miscRoutes = new Hono()
   // --- GET / POST /api/settings ---------------------------------------------
   .get('/api/settings', async (c) => {
     const [settings, suggested] = await Promise.all([getSettings(), suggestedDisplayName()])
-    const visible = { ...settings }
-    if (await getCustomTabRole() !== 'owner') { delete visible.wordpress; delete visible.experiments; delete visible.workerTrials }
+    const visible = await visibleSettings(settings)
     const body: SettingsResponse = { ...visible, suggestedDisplayName: suggested }
     return c.json(body)
   })
@@ -415,8 +426,8 @@ export const miscRoutes = new Hono()
       delete body.experiments
       delete body.workerTrials
     }
-    await setUserSettings(body)
-    return c.json({ ok: true })
+    const applied = await setUserSettings(body)
+    return c.json({ ok: true, applied })
   })
   // --- GET /api/notifications · POST /api/notifications/read -----------------
   // In-app notification READ-STATE (the Ground お知らせ bell). GET returns the set

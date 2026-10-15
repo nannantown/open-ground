@@ -14,7 +14,11 @@
 //   • NEVER throws — a dep fault is swallowed + logged, the pass still returns.
 //   • Every threshold read from OVERSEER_THRESHOLDS (no re-literalised constants).
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
+import { setSettings } from './store'
+
+// Existing wording assertions exercise the Japanese user setting.
+beforeEach(() => setSettings({ language: 'ja' }))
 import {
   runOverseerPass,
   initOverseerRuntime,
@@ -1088,4 +1092,11 @@ describe('overseer janitor — fired, not awaited', () => {
     await runOverseerPass(engine, [], () => {}, deps)
     expect(started).toBe(1)
   })
+})
+
+it('uses the selected English language for a new usage notice', async () => {
+  await setSettings({ language: 'en' })
+  const calls = makeCalls()
+  await runOverseerPass(makeEngine(), [], () => {}, makeDeps(calls, { peekUsagePct: () => 100 }))
+  expect(calls.notifyInfo.find((n) => n.event === 'overseer-throttled')?.detail).toContain('The usage limit has been reached')
 })

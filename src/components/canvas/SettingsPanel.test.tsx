@@ -82,6 +82,40 @@ describe('SettingsPanel autosave', () => {
     expect(screen.queryByText('settings.save.failed')).toBeNull()
   })
 
+  it('retries the newest switch value after an older in-flight write fails', async () => {
+    let rejectFirst!: (reason: Error) => void
+    const onSave = vi.fn().mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject }))
+      .mockResolvedValue(undefined)
+    renderPanel(onSave)
+    const updates = screen.getByRole('group', { name: 'settings.autoUpdate.label' })
+    fireEvent.click(within(updates).getByRole('button', { name: 'settings.experiments.off' }))
+    fireEvent.click(within(updates).getByRole('button', { name: 'settings.experiments.on' }))
+    await act(async () => { rejectFirst(new Error('offline')) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'settings.save.retry' })) })
+    expect(onSave.mock.calls).toEqual([[{ autoUpdate: false }], [{ autoUpdate: true }]])
+  })
+
+  it('keeps a failed text edit visible after closing and reopening the panel', async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error('offline'))
+    const view = renderPanel(onSave)
+    const name = screen.getByRole('textbox', { name: 'settings.displayName.heading' })
+    fireEvent.change(name, { target: { value: 'Retain my edit' } })
+    await act(async () => { fireEvent.blur(name) })
+    await act(async () => { view.rerender(<SettingsPanel open={false} settings={baseSettings} onClose={() => {}} onSave={onSave} />) })
+    await act(async () => { view.rerender(<SettingsPanel open settings={baseSettings} onClose={() => {}} onSave={onSave} />) })
+    expect(screen.getByRole('textbox', { name: 'settings.displayName.heading' })).toHaveValue('Retain my edit')
+    expect(screen.getByText('settings.save.failed')).toBeInTheDocument()
+  })
+
+  it('refreshes sound and update switches from saved settings when reopened', async () => {
+    const onSave = vi.fn()
+    const view = renderPanel(onSave, false)
+    await act(async () => { view.rerender(<SettingsPanel open settings={{ ...baseSettings, autoUpdate: false, soundOnDone: true, soundOnDoneVolume: 35 }} onClose={() => {}} onSave={onSave} />) })
+    expect(within(screen.getByRole('group', { name: 'settings.autoUpdate.label' })).getByRole('button', { name: 'settings.experiments.off' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(screen.getByRole('group', { name: 'settings.sound.label' })).getByRole('button', { name: 'settings.experiments.on' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('slider')).toHaveValue('35')
+  })
+
   it('hides owner settings without erasing their values during a public settings edit', () => {
     const wordpress = { baseUrl: 'https://saved.example', username: 'saved', appPassword: 'fixture' }
     const onSave = vi.fn()

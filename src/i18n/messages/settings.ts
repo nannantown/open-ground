@@ -38,7 +38,7 @@ export const settings = {
     'settings.publicPreview.label': 'Show as a public user sees it',
     'settings.swarmOptIn.label': 'Enable Agent Team',
     'settings.swarmOptIn.warning':
-      'Agent Team runs autonomous Claude workers for you. Before turning it on, know: it uses your own Claude subscription and can run several sessions at once, so it may consume your quota heavily; workers run Claude with tool-permission prompts skipped, inside isolated copies of your project; and its notifications are currently in Japanese only. It is still being tuned and is not covered by support.',
+      'Agent Team runs autonomous Claude workers for you. Before turning it on, know: it uses your own Claude subscription and can run several sessions at once, so it may consume your quota heavily; workers run Claude with tool-permission prompts skipped, inside isolated copies of your project; core status notifications follow the app language, while some Owner reports retain their original wording. It is still being tuned and is not covered by support.',
     // Worker-directive TRIALS (Settings.workerTrials) — docs/trending/TRIALS.md.
     // Owner-facing wording deliberately states that the effect is UNPROVEN: the
     // measurement so far (-7.6% cost) sat inside the baseline's own 22% spread,
@@ -241,7 +241,7 @@ export const settings = {
     'settings.publicPreview.label': '一般ユーザーの見え方で表示',
     'settings.swarmOptIn.label': 'エージェントチームを有効にする',
     'settings.swarmOptIn.warning':
-      'エージェントチームはあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。通知は当面日本語のみです。まだ調整中で、サポート対象外です。',
+      'エージェントチームはあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。主な状態通知はアプリの言語に従いますが、一部のOwner向けレポートは元の文言を保持します。まだ調整中で、サポート対象外です。',
     'settings.phoneLink.heading': 'iPhone',
     'settings.phoneLink.hint': 'Mac から離れていても、iPhone から社長と話せます。コードがコピーされるので iPhone のアプリに貼り付けてください。解除すると古いコードは使えなくなります。',
     'settings.phoneLink.unpaired': '未接続',

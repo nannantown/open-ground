@@ -77,6 +77,7 @@ beforeEach(async () => {
   await writeFile(
     settingsFile(),
     JSON.stringify({
+      language: 'ja',
       projects: [
         { id: uuidA, path: projA, addedAt: '2026-01-01T00:00:00.000Z' },
         { id: uuidB, path: projB, addedAt: '2026-01-01T00:00:00.000Z' },

@@ -84,134 +84,49 @@
     <div class="container legal-inner">
       <p class="eyebrow"><span data-lang="en">Privacy</span><span data-lang="ja">プライバシー</span></p>
       <h1><span data-lang="en">Privacy Policy</span><span data-lang="ja">プライバシーポリシー</span></h1>
-      <p class="updated"><span data-lang="en">Last updated: 2026-06-21</span><span data-lang="ja">最終更新：2026-06-21</span></p>
+      <p class="updated"><span data-lang="en">Last updated: 2026-10-15</span><span data-lang="ja">最終更新：2026-10-15</span></p>
 
-      <!-- ============ ENGLISH ============ -->
       <div data-lang="en">
-        <p>OPEN GROUND is a <strong>local, single-user tool</strong> that runs on your own machine. <strong>By default, nothing you do in OPEN GROUND leaves your computer.</strong> Data only goes to the cloud when you take two specific, opt-in actions: signing in, and turning on real-time collaboration. This page explains exactly what is sent, where, and why.</p>
-
-        <h2>1. The default: everything stays local</h2>
-        <p>When you simply use OPEN GROUND — adding projects, opening terminals, editing Boards and Canvases on your own — <strong>no project data is transmitted anywhere.</strong> It all lives on your machine under <code>~/.openground/</code>. OPEN GROUND drives the <code>claude</code> CLI you already have; it never sends your code or prompts to an Anthropic API on your behalf, and it uses no API key of its own.</p>
-        <p>The following <strong>never leave your machine</strong>, in any mode:</p>
-        <ul>
-          <li>Your repository's source files and git history.</li>
-          <li>Your terminal sessions and command history.</li>
-          <li>Your Claude Code conversations and transcripts.</li>
-          <li>Your local file paths (when collaboration is on, a project is identified by a one-way hash, not its path).</li>
-        </ul>
-
-        <h2>2. Optional sign-in</h2>
-        <p>OPEN GROUND has an <strong>optional</strong> account login (Google or GitHub). Login is not required to use the app on your own. If you sign in, authentication is handled by a <strong>third-party login &amp; membership service</strong>: your email address and a user ID are associated with your account. The OAuth flow opens in your real browser, and access tokens are held by the local OPEN GROUND process — never exposed to the web UI. Signing in by itself does not publish your project data.</p>
-
-        <h2>Paid subscription</h2>
-        <p>When you subscribe to OPEN GROUND Pro, Stripe processes your payment details. OPEN GROUND stores your account ID, Stripe customer ID, subscription status, current billing-period end and cancellation status in Supabase to control paid access. Card numbers are handled by Stripe and are never stored by the app. Billing requests do not contain your project files or terminal conversations. Billing records are retained independently of local projects; canceling Pro does not delete local project data.</p>
-        <h2>3. Real-time collaboration (opt-in)</h2>
-        <p>Collaboration is <strong>off unless you turn it on.</strong> When you invite a collaborator (as an owner) or join a shared project (as a member), OPEN GROUND enables real-time sync, and the data below is sent to and <strong>stored</strong> by third-party cloud infrastructure.</p>
-
-        <h3>Login &amp; membership service — membership &amp; control plane</h3>
-        <table>
-          <thead><tr><th>Data</th><th>When</th></tr></thead>
-          <tbody>
-            <tr><td>Your email, and the emails of collaborators you invite</td><td>On invite / on join</td></tr>
-            <tr><td>A user ID (UUID) per member</td><td>On join</td></tr>
-            <tr><td>The shared project's display name</td><td>When the owner sets it</td></tr>
-            <tr><td>Invite codes, mode (open / approval), limits, expiry (7 days default)</td><td>When the owner mints a link</td></tr>
-            <tr><td>Join requests (email + status) for approval-mode links</td><td>When a member requests to join</td></tr>
-          </tbody>
-        </table>
-        <p>Member emails are visible to the project owner and to other members of the same project. Your <strong>local file path is not sent</strong> — a project is keyed by a one-way hash.</p>
-
-        <h3>Real-time sync server &amp; cloud storage</h3>
-        <p>The contents of the shared project's <strong>Board and Canvas</strong> travel through a <strong>real-time sync server</strong> (the live sync hub) and are <strong>persisted</strong> in cloud storage so collaborators can reconnect and work offline:</p>
-        <ul>
-          <li><strong>Board:</strong> task titles, descriptions, notes, status, ordering, and project configuration — such as assignees, the Review column, completion flow, target branch, and any verify commands you set.</li>
-          <li><strong>Canvas:</strong> every element — sticky notes, text, frames, comments, images, and <strong>mock / screen elements including their source code</strong> (the live HTML/React you write into them).</li>
-          <li><strong>Images</strong> you place on a Canvas are uploaded to cloud object storage (images only, up to 10 MB each).</li>
-        </ul>
-        <p class="note"><strong>In plain terms:</strong> turning on collaboration means your Board and Canvas content — including any source code in mock/screen elements and any images — is stored in the cloud, not just on your machine. Your repository's own files, terminal, and Claude chats are still never sent.</p>
-
-        <h2>4. Retention &amp; deletion</h2>
-        <ul>
-          <li><strong>Membership data</strong> (held by the login &amp; membership service) is kept until the owner removes a member or deletes the project.</li>
-          <li><strong>Board/Canvas content and images</strong> (held by the sync server &amp; cloud storage) are kept while the project is shared. Stopping sharing halts further sync; deleting the project removes its shared state.</li>
-          <li><strong>Invite codes</strong> expire automatically (7 days by default) and can be revoked by the owner at any time.</li>
-        </ul>
-
-        <h2>5. Infrastructure providers</h2>
-        <p>Real-time collaboration runs on third-party cloud infrastructure, used purely to operate collaboration: a <strong>login &amp; membership service</strong> (authentication and membership storage) and a <strong>real-time sync server with cloud object storage</strong> (live sync &amp; persistence of Board/Canvas content, and image storage). OPEN GROUND does not sell your data, does not use it for advertising, and sends it to no third parties other than the infrastructure described here for the purpose of running collaboration. For questions about the specific providers we use, contact us through the in-app feedback form or the home page.</p>
-
-        <h2>6. Your choices</h2>
-        <ul>
-          <li>Use OPEN GROUND fully <strong>without signing in and without collaboration</strong> — then nothing is sent off your machine.</li>
-          <li><strong>Stop sharing</strong> any time; owners can revoke invite links and remove members.</li>
-          <li>Questions or removal requests: use the in-app feedback form or the contact on the home page.</li>
-        </ul>
+        <p>OPEN GROUND is a desktop workspace. Local project metadata is stored on your computer. AI use and optional integrations also make network connections; local storage does not mean that every action stays off-network.</p>
+        <h2>1. Local files and AI use</h2>
+        <p>The project registry, preferences, Board and Canvas data, assets, custom modules, blog records and Assistant records are stored under <code>~/.openground/</code>, or the configured data root. Source files and research reports remain in project folders. Electron keeps additional UI state in its app profile; Claude and NENE own separate data stores.</p>
+        <p>Claude Code and Agent SDK sessions use your own installed Claude and account. Prompts, files read by the model and tool requests may be sent to the AI provider under that account. OPEN GROUND does not include an AI subscription, a shared provider account or an AI API-key setup. Terminal commands and custom content may also contact services you use.</p>
+        <h2>2. Optional app account and billing</h2>
+        <p>Free local project and terminal use does not require an OPEN GROUND login. Optional Google/GitHub login uses Supabase; account identifiers and membership information are processed there. App login is separate from your Claude login.</p>
+        <p>For OPEN GROUND Pro, Stripe processes payment details. Subscription records in Supabase include the account ID, Stripe customer ID, status, billing-period end and cancellation status. Card numbers are handled by Stripe, not stored by the desktop app. Billing requests do not include project files or terminal conversations.</p>
+        <p>Cancellation is managed through the app's billing portal. An unavailable contract check, work mode, uninstalling the app or deleting local data does not cancel an existing subscription. Local project data is retained when Pro expires. Cloud billing records are separate from local backups.</p>
+        <h2>3. Sharing and Owner integrations</h2>
+        <p>When configured and enabled, collaboration sends the shared Board and eligible Canvas data to the collaboration service (Supabase and Cloudflare). This can include notes, images, and source you put in a mock/screen element. It is not a repository-code sync, but shared content may itself contain code or personal information.</p>
+        <p>Owner WordPress integration sends selected research reports to the configured site as drafts and authenticates with its application password. Phone linking uses a separate relay and optional Apple push notifications. External media, research tools and custom frames may contact their content providers. Songs uses the separately installed NENE application.</p>
+        <h2>4. Updates and feedback</h2>
+        <p>Update checks and downloads contact GitHub release infrastructure. Sending feedback submits the message, any attached images and included app/platform/contact information to the configured feedback service. Do not submit passwords, tokens, private conversations or unredacted backups.</p>
+        <h2>5. Controls and backups</h2>
+        <p>Work mode blocks app-managed non-Anthropic connections, including sign-in, billing checks, updates and sharing. It is not a universal network sandbox for arbitrary commands. Turn it off to use those connections again, including billing management.</p>
+        <p>Settings and their automatic generations can contain WordPress credentials. File permissions restrict them, but they are not an encrypted full-workspace backup. Disconnecting WordPress removes the active setting; old generations may retain it. Revoke the password at WordPress when it should no longer work.</p>
+        <p>Automatic generations cover the registry/settings and Ground layout only. Back up the full app data, profile and required project/external data separately. Share only redacted diagnostics with support. Use the in-app feedback form when configured, or the project's GitHub page for public questions; do not post private removal requests or secrets in public issues.</p>
       </div>
-
-      <!-- ============ 日本語 ============ -->
       <div data-lang="ja">
-        <p>OPEN GROUND は、あなたのマシンで動く<strong>ローカルな単一ユーザー向けツール</strong>です。<strong>既定では、OPEN GROUND での操作は何もあなたのパソコンの外に出ません。</strong>データがクラウドへ行くのは、2 つのオプトイン操作（サインインと、リアルタイム共同編集の有効化）をしたときだけです。このページは、何が・どこに・なぜ送られるのかを正確に説明します。</p>
-
-        <h2>1. 既定：すべてローカルに留まる</h2>
-        <p>OPEN GROUND を普通に使う限り（プロジェクトの追加、ターミナルの利用、自分だけで Board や Canvas を編集する等）、<strong>プロジェクトのデータはどこにも送信されません。</strong>すべてはマシン内の <code>~/.openground/</code> 配下に保存されます。OPEN GROUND は既にお使いの <code>claude</code> CLI を動かすだけで、あなたのコードやプロンプトを代わりに Anthropic API へ送ることはなく、独自の API キーも使いません。</p>
-        <p>以下は<strong>どのモードでもマシンの外に出ません</strong>：</p>
-        <ul>
-          <li>リポジトリのソースファイルと git 履歴</li>
-          <li>ターミナルのセッションとコマンド履歴</li>
-          <li>Claude Code との会話・トランスクリプト</li>
-          <li>ローカルのファイルパス（共有時、プロジェクトはパスではなく一方向ハッシュで識別）</li>
-        </ul>
-
-        <h2>2. 任意のサインイン</h2>
-        <p>OPEN GROUND には<strong>任意</strong>のアカウントログイン（Google / GitHub）があります。自分だけで使うのにログインは不要です。サインインした場合、認証は<strong>第三者のログイン・メンバー管理サービス</strong>が扱い、あなたのメールアドレスとユーザー ID がアカウントに紐づきます。OAuth フローは実ブラウザで開き、アクセストークンはローカルの OPEN GROUND プロセスが保持し、Web UI には渡されません。サインイン単体ではプロジェクトデータは公開されません。</p>
-
-        <h2>有料サブスクリプション</h2>
-        <p>OPEN GROUND Pro に申し込むと、支払い情報は Stripe が処理します。OPEN GROUND は有料機能の利用判定のため、アカウント ID、Stripe 顧客 ID、契約状態、契約期間終了日と解約状態を Supabase に保存します。カード番号は Stripe が扱い、アプリには保存しません。課金の通信にプロジェクトのファイルやターミナルの会話は含まれません。課金記録はローカルのプロジェクトとは別に保持され、Pro の解約でローカルデータが削除されることはありません。</p>
-        <h2>3. リアルタイム共同編集（オプトイン）</h2>
-        <p>共同編集は<strong>オンにしない限りオフ</strong>です。メンバーを招待する（オーナーとして）か、共有プロジェクトに参加する（メンバーとして）と、OPEN GROUND はリアルタイム同期を有効化し、以下のデータが下記の外部クラウド基盤に送信・<strong>保存</strong>されます。</p>
-
-        <h3>ログイン・メンバー管理サービスへ ── メンバー管理・コントロールプレーン</h3>
-        <table>
-          <thead><tr><th>データ</th><th>タイミング</th></tr></thead>
-          <tbody>
-            <tr><td>あなたのメールアドレス、招待した相手のメールアドレス</td><td>招待時 / 参加時</td></tr>
-            <tr><td>メンバーごとのユーザー ID (UUID)</td><td>参加時</td></tr>
-            <tr><td>共有プロジェクトの表示名</td><td>オーナーが設定したとき</td></tr>
-            <tr><td>招待コード、モード（オープン / 承認）、上限、有効期限（既定 7 日）</td><td>オーナーがリンク発行時</td></tr>
-            <tr><td>参加リクエスト（メール + 状態）※承認モード</td><td>メンバーが参加申請時</td></tr>
-          </tbody>
-        </table>
-        <p>メンバーのメールアドレスは、オーナーと同じプロジェクトの他メンバーに表示されます。<strong>ローカルのファイルパスは送信されません</strong> ── プロジェクトは一方向ハッシュをキーとします。</p>
-
-        <h3>リアルタイム同期サーバ・クラウドストレージへ</h3>
-        <p>共有プロジェクトの <strong>Board と Canvas の中身</strong>は<strong>リアルタイム同期サーバ</strong>（ライブ同期のハブ）を通り、再接続やオフライン作業のためにクラウドストレージに<strong>保存され続けます</strong>：</p>
-        <ul>
-          <li><strong>Board：</strong> タスクのタイトル、説明、メモ、状態、並び順、プロジェクト設定（担当者、レビュー列、完了フロー、対象ブランチ、設定した検証コマンドなど）。</li>
-          <li><strong>Canvas：</strong> すべての要素 ── 付箋、テキスト、フレーム、コメント、画像、そして <strong>mock / screen 要素（書き込んだ HTML/React のソースコードを含む）</strong>。</li>
-          <li>Canvas に置いた<strong>画像</strong>はクラウドオブジェクトストレージにアップロードされます（画像のみ・1 枚あたり最大 10 MB）。</li>
-        </ul>
-        <p class="note"><strong>平たく言うと：</strong> 共同編集をオンにすると、Board と Canvas の中身 ── mock/screen 要素のソースコードや画像を含む ── が、あなたのマシンだけでなくクラウドにも保存されます。リポジトリのファイル・ターミナル・Claude との会話は、依然として一切送信されません。</p>
-
-        <h2>4. 保持と削除</h2>
-        <ul>
-          <li><strong>メンバー情報</strong>（ログイン・メンバー管理サービスが保持）は、オーナーがメンバーを削除するかプロジェクトを削除するまで保持されます。</li>
-          <li><strong>Board/Canvas の中身と画像</strong>（同期サーバ・クラウドストレージが保持）は、プロジェクトが共有されている間保持されます。共有を停止すると以後の同期は止まり、プロジェクトを削除すると共有状態は削除されます。</li>
-          <li><strong>招待コード</strong>は自動的に失効し（既定 7 日）、オーナーはいつでも無効化できます。</li>
-        </ul>
-
-        <h2>5. インフラ提供者</h2>
-        <p>リアルタイム共同編集は、共同編集を動かす目的だけに使う第三者のクラウド基盤の上で動作します：<strong>ログイン・メンバー管理サービス</strong>（認証とメンバー情報の保存）と、<strong>リアルタイム同期サーバ＋クラウドオブジェクトストレージ</strong>（Board/Canvas の中身のライブ同期・保存と、画像の保存）。OPEN GROUND はあなたのデータを販売せず、広告に使わず、共同編集を動かす目的で上記のインフラ以外の第三者に送信しません。利用している具体的な提供者についてのお問い合わせは、アプリ内のフィードバックフォームまたはホームページからご連絡ください。</p>
-
-        <h2>6. あなたの選択肢</h2>
-        <ul>
-          <li><strong>サインインも共同編集もせず</strong>に OPEN GROUND をフルに使えます ── その場合、何もマシンの外に出ません。</li>
-          <li>いつでも<strong>共有を停止</strong>できます。オーナーは招待リンクの無効化やメンバーの削除が可能です。</li>
-          <li>お問い合わせ・削除のご依頼：アプリ内のフィードバックフォーム、またはトップページの連絡先までご連絡ください。</li>
-        </ul>
+        <p>OPEN GROUNDはデスクトップの作業環境です。プロジェクトの管理データは手元に保存しますが、AI利用や任意の連携には外部通信もあります。ローカル保存は、すべての操作が通信しないことを意味しません。</p>
+        <h2>1. ローカルデータとAI利用</h2>
+        <p>登録一覧、設定、Board・Canvas、画像、自作タブ、ブログ記録、Assistant記録は、<code>~/.openground/</code>または設定した保存先に置きます。コードや調査レポートは各プロジェクト内に保存します。画面の状態はElectronのアプリ用プロファイルにも保存され、ClaudeとNENEは別にデータを管理します。</p>
+        <p>Claude CodeとAgent SDKのセッションは、本人のインストール済みClaudeとアカウントを使います。プロンプト、モデルが読むファイル、ツールへの指示は、そのアカウントを通じてAI提供元へ送られる場合があります。OPEN GROUNDにAIサブスクや共用アカウントは含まれず、AI用APIキーの設定方式も提供しません。ターミナルのコマンドやカスタムコンテンツも、利用するサービスと通信する場合があります。</p>
+        <h2>2. 任意のアカウントと課金</h2>
+        <p>Freeのローカルなプロジェクト管理・ターミナル利用に、OPEN GROUNDのログインは必須ではありません。任意のGoogle・GitHubログインにはSupabaseを使い、アカウント識別情報やメンバー情報を扱います。アプリへのログインとClaudeへのログインは別です。</p>
+        <p>OPEN GROUND Proの決済はStripeが処理します。Supabaseの契約記録には、アカウントID、Stripe顧客ID、契約状態、契約期間終了日、解約状態を保持します。カード番号はStripeが扱い、デスクトップアプリには保存しません。課金の通信にプロジェクトファイルやターミナルの会話は含まれません。</p>
+        <p>解約はアプリから開く支払い管理画面で行います。契約確認の通信失敗、業務モード、アンインストール、ローカルデータの削除だけでは、継続中の契約は解約されません。Proが失効してもローカルのプロジェクトデータを保持します。クラウドの課金記録とローカルのバックアップは別です。</p>
+        <h2>3. 共有とOwner向け連携</h2>
+        <p>共同編集が設定・有効化されている場合、共有するBoardと利用権限のあるCanvasのデータを、SupabaseとCloudflareを使う共同編集サービスへ送ります。メモ、画像、mock・screen要素に入れたソースが含まれる場合があります。リポジトリ全体のコード同期ではありませんが、共有内容そのものにコードや個人情報を含めることはできます。</p>
+        <p>OwnerのWordPress連携は、選んだ調査レポートを指定サイトへ下書きとして送り、アプリケーションパスワードで認証します。iPhone連携は別の中継サービスと任意のAppleプッシュ通知を使います。外部メディア、調査ツール、カスタム画面は、各提供元へ通信する場合があります。Songsには別途インストールされたNENEを使います。</p>
+        <h2>4. 更新とフィードバック</h2>
+        <p>更新確認・ダウンロードはGitHubの配布基盤へ接続します。フィードバックを送信すると、本文、添付画像、含めたアプリ・OS・連絡先の情報が、設定された受付サービスへ送られます。パスワード、トークン、非公開の会話、未加工のバックアップは送らないでください。</p>
+        <h2>5. 操作とバックアップ</h2>
+        <p>業務モードは、アプリが管理するAnthropic以外への接続を制限します。ログイン、契約確認、更新、共有も対象です。任意のコマンドを完全に隔離するネットワークサンドボックスではありません。支払い管理などの接続を使うには、業務モードをOFFにしてください。</p>
+        <p>設定と世代バックアップにはWordPressの認証情報が含まれる場合があります。ファイル権限で制限していますが、暗号化された全体バックアップではありません。WordPressの接続を解除しても、古い世代には値が残る場合があります。使えなくしたいパスワードはWordPress側で失効させてください。</p>
+        <p>自動世代バックアップの対象は、登録一覧・設定とGroundの配置です。アプリ全体のデータ、画面のプロファイル、必要なプロジェクトや外部アプリのデータは別に保存してください。サポートには必要部分を伏せた診断情報を使ってください。設定されているアプリ内フィードバック、または公開の質問にはGitHubを利用できます。秘密情報や非公開の削除依頼を公開Issueに書かないでください。</p>
       </div>
 
       <a class="back" href="index.html">
-        <span data-lang="en">← Back to OPEN GROUND</span><span data-lang="ja">← OPEN GROUND に戻る</span>
+        <span data-lang="en">Back to OPEN GROUND</span><span data-lang="ja">OPEN GROUNDに戻る</span>
       </a>
     </div>
   </main>

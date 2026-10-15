@@ -13,7 +13,7 @@
   <!-- Open Graph -->
   <meta property="og:type" content="website" />
   <meta property="og:title" content="OPEN GROUND — every Claude Code terminal, on one canvas" />
-  <meta property="og:description" content="Stop juggling terminal windows. Every project is a card on an infinite canvas; one click drops you into a real claude terminal in that folder. Free project management and Terminal. Pro automation for ¥2,980/month." />
+  <meta property="og:description" content="Stop juggling terminal windows. Every project is a card on an infinite canvas; one click drops you into a real claude terminal in that folder. Multiple projects, Board tasks and terminal panes. Free and Pro plans." />
   <meta property="og:image" content="https://open-ground.app/og.png" />
   <meta property="og:url" content="https://open-ground.app/" />
   <meta property="og:site_name" content="OPEN GROUND" />
@@ -146,8 +146,8 @@
         </p>
 
         <p class="hero-note win-note">
-          <span data-lang="en">The first time you open OPEN GROUND on Windows, a blue <strong>"Windows protected your PC"</strong> screen appears and says the publisher is unrecognized. That's because we haven't bought a code-signing certificate for the app — nothing is wrong with the app itself. Click <strong>More info</strong>, then <strong>Run anyway</strong>, and it starts. You only see this once.</span>
-          <span data-lang="ja">Windows で OPEN GROUND を初めて開くと、<strong>「WindowsによってPCが保護されました」</strong> という青い警告画面が出て、発行元が不明だと表示されます。これは開発元の署名証明書を取得していないためで、アプリ自体に問題はありません。<strong>「詳細情報」</strong>→<strong>「実行」</strong> の順に押せば起動します。この画面が出るのは最初の1回だけです。</span>
+          <span data-lang="en">Windows builds are experimental and unsigned. Windows Pro automation is not available yet. Check the release notes and test with disposable projects before relying on this build.</span>
+          <span data-lang="ja">Windows版は実験段階で未署名です。WindowsでのPro自動化はまだ利用できません。リリースノートを確認し、まず使い捨てのプロジェクトで動作を確認してください。</span>
         </p>
 
         <p class="hero-note">
@@ -298,7 +298,7 @@
               <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">One click on a card opens <code>claude</code> in that folder.</span><span data-lang="ja">カードをワンクリックで、そのフォルダの <code>claude</code> が開く。</span></li>
               <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">Several <code>claude</code> windows in one project, lined up side by side.</span><span data-lang="ja">1つのプロジェクトに、<code>claude</code> を何枚も並べて表示。</span></li>
               <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">A live <strong>Terminal beacon</strong> on every card where Claude is at work.</span><span data-lang="ja">Claude が働いているカードには、<strong>Terminal ビーコン</strong>が灯る。</span></li>
-              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">Built to stay <strong>smooth</strong> — run several <code>claude</code> windows at once and the screen never freezes, even when output pours in.</span><span data-lang="ja">動きはずっと<strong>なめらか</strong> ── <code>claude</code> を何枚も同時に走らせても、出力があふれても、画面が固まりません。</span></li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">Run several <code>claude</code> windows side by side. Output rendering uses flow control to keep large streams manageable.</span><span data-lang="ja"><code>claude</code>を複数並べて実行できます。大量の出力はフロー制御で扱い、画面への描画を調整します。</span></li>
               <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-lang="en">Jump straight to your editor — Cursor · VS Code · Windsurf · Zed — or see exactly what changed, right from the project header.</span><span data-lang="ja">エディタ（Cursor・VS Code・Windsurf・Zed）へ直行、変更点もその場で ── プロジェクトのヘッダから。</span></li>
             </ul>
           </div>
@@ -333,12 +333,12 @@
         <div class="section-head section-head--center">
           <span class="kicker"><span data-lang="en">Per-project spaces</span><span data-lang="ja">プロジェクトごとの空間</span></span>
           <h2 class="section-title">
-            <span data-lang="en">Open any card. Three rooms inside.</span>
-            <span data-lang="ja">カードを開けば、3つの部屋。</span>
+            <span data-lang="en">Your work and tasks, in one place.</span>
+            <span data-lang="ja">作業とタスクを、一つの場所に。</span>
           </h2>
           <p class="section-lead section-lead--center">
-            <span data-lang="en">Every project unfolds into Terminal, Board, and Canvas — the work, the plan, and the thinking, all in the same place. The tab row isn't fixed, either: add your own with <code>+</code>.</span>
-            <span data-lang="ja">どのプロジェクトも Terminal・Board・Canvas に展開する ── 作業と、計画と、思考が、同じ場所に。タブ列も固定じゃない ── <code>+</code> から自分のタブを足せる。</span>
+            <span data-lang="en">Free includes Board and Terminal for every project, with multiple terminal panes. Project Canvas, Research and custom tabs are existing Owner features.</span>
+            <span data-lang="ja">Freeでは、どのプロジェクトでもBoardとTerminalを利用でき、複数のターミナルを並べられます。プロジェクトCanvas、Research、カスタムタブは既存のOwner専用機能です。</span>
           </p>
         </div>
 
@@ -387,13 +387,13 @@
     <section class="section" id="pricing">
       <div class="container">
         <div class="section-head section-head--center">
-          <h2 class="section-title"><span data-lang="en">Start Free. Automate with Pro.</span><span data-lang="ja">Free で始める。Pro で自動化する。</span></h2>
+          <h2 class="section-title"><span data-lang="en">Choose the plan for your work.</span><span data-lang="ja">自分の作業に合うプランを。</span></h2>
         </div>
         <div class="feature-grid">
           <article class="feature"><div class="feature-body">
             <h3>Free</h3>
             <p><strong><span data-lang="en">¥0 / month</span><span data-lang="ja">月額0円</span></strong></p>
-            <p><span data-lang="en">Project overview, manual Board tasks and your usual Claude Code terminal.</span><span data-lang="ja">プロジェクト一覧、手動タスク管理（Board）、通常の Claude Code 操作。</span></p>
+            <p><span data-lang="en">Multiple projects and terminal panes, manual Board tasks and your usual Claude Code operation.</span><span data-lang="ja">複数プロジェクト・複数ターミナル、手動タスク管理（Board）、通常のClaude Code操作。</span></p>
           </div></article>
           <article class="feature"><div class="feature-body">
             <h3>Pro</h3>
@@ -411,22 +411,22 @@
         <div class="section-head">
           <span class="kicker"><span data-lang="en">Your repos, your rules</span><span data-lang="ja">リポジトリとの距離感</span></span>
           <h2 class="section-title">
-            <span data-lang="en">Untouched by default. Shared when you say so.</span>
-            <span data-lang="ja">基本は、何も書き込まない。共有したい時だけ、クラウドで。</span>
+            <span data-lang="en">Local project data. Clear connections.</span>
+            <span data-lang="ja">管理データは手元に。連携先も確認できる。</span>
           </h2>
           <p class="section-lead">
-            <span data-lang="en">Add any folder, from anywhere on your computer. By default, all of OPEN GROUND's data is kept in one place (<code>~/.openground</code>) — your project folders never get a single extra file, and nothing leaves your machine. When you invite teammates, the project's Board and Canvas sync in real time through the cloud (a real-time sync server for live updates, a login service for membership).</span>
-            <span data-lang="ja">パソコンのどこにあるフォルダでも追加できる。標準では、OPEN GROUND のデータはすべて1か所（<code>~/.openground</code>）に保存され、プロジェクトフォルダには余計なファイルが1つも増えず、何もマシンの外に出ない。仲間を招待すると、そのプロジェクトの Board と Canvas はクラウド経由でリアルタイムに同期される（ライブ更新はリアルタイム同期サーバ、メンバー管理はログイン基盤）。</span>
+            <span data-lang="en">Register existing folders from your computer. App metadata is centralized under <code>~/.openground</code>; your code and research reports stay in their project folders. Claude sends model requests using your own account. Optional account, billing, feedback, sharing and Owner integrations use their configured services. See the privacy page for details.</span>
+            <span data-lang="ja">パソコン内の既存フォルダを登録できます。アプリの管理データは<code>~/.openground</code>に集約し、コードや調査レポートは各プロジェクトに保存します。Claudeは本人のアカウントでモデルへ通信します。任意の認証・課金・フィードバック・共有・Owner連携にも設定したサービスとの通信があります。詳細はプライバシーページで確認できます。</span>
           </p>
         </div>
 
         <div class="mode-grid">
           <article class="mode-card">
             <span class="mode-tag"><span data-lang="en">Default — solo</span><span data-lang="ja">デフォルト ── ソロ</span></span>
-            <h3><span data-lang="en">Zero files written into your projects.</span><span data-lang="ja">プロジェクトには1ファイルも書き込まない。</span></h3>
-            <p><span data-lang="en">Everything lives in <code>~/.openground</code>, keyed by a stable ID that survives renames and moves. Your git history never sees us.</span><span data-lang="ja">すべて <code>~/.openground</code> に置かれ、リネームや移動に耐える安定 ID で紐づく。git 履歴に痕跡は残らない。</span></p>
+            <h3><span data-lang="en">Keep project management in one place.</span><span data-lang="ja">プロジェクトの管理をひとつの場所で。</span></h3>
+            <p><span data-lang="en">Board data and app-managed files live in <code>~/.openground</code>, keyed by project ID. Source, research reports and files created by your tools remain in their project folders.</span><span data-lang="ja">Boardやアプリの管理データは<code>~/.openground</code>でプロジェクトIDに紐づけます。コード、調査レポート、ツールが作成したファイルは各プロジェクトに残ります。</span></p>
             <ul class="mode-points">
-              <li><span data-lang="en">It all runs on your own computer (macOS &amp; Windows) — your code and your work never leave your machine.</span><span data-lang="ja">すべてあなたのパソコンの中だけで動く（macOS・Windows）── コードも作業内容も、マシンの外には出ない。</span></li>
+              <li><span data-lang="en">Your desktop manages the workspace. Claude sends context to its model provider, and optional integrations connect to their configured services.</span><span data-lang="ja">作業環境はデスクトップで管理します。Claudeは文脈をモデル提供元へ送り、任意の連携機能は設定したサービスと通信します。</span></li>
               <li><span data-lang="en">Runs on your subscription: it uses the <code>claude</code> you already pay for. No API key, no usage-based bill.</span><span data-lang="ja">サブスクで動く：すでに払っている <code>claude</code> をそのまま使う。API キーも従量課金も無し。</span></li>
               <li><span data-lang="en">You pick what's on the canvas — it never scans your disk. Remove a card and the folder stays untouched.</span><span data-lang="ja">キャンバスに何を置くかはあなたが選ぶ ── ディスクを勝手に探し回らない。カードを外しても、フォルダはそのまま。</span></li>
             </ul>
@@ -435,12 +435,12 @@
           <article class="mode-card mode-card--share">
             <span class="mode-tag mode-tag--share"><span data-lang="en">Opt-in — Live collaboration</span><span data-lang="ja">任意で ── リアルタイム共有</span></span>
             <h3><span data-lang="en">Build the board together, in real time.</span><span data-lang="ja">ボードもキャンバスも、リアルタイムでチーム共有。</span></h3>
-            <p><span data-lang="en">Turn on sharing and invite teammates with a link (or by email). Your Board and Canvas sync live over the cloud — everyone sees the same cards and edits as they happen: who's assigned, a Review column, a finish-the-task flow. Nothing to set up on their side.</span><span data-lang="ja">共有をオンにして、リンク（またはメール）で仲間を招待。Board と Canvas はクラウド経由でライブ同期され、カードも編集も起きたそばから全員に見える ── 担当者も、レビュー列も、タスク完了の流れも。相手側の設定は不要。</span></p>
+            <p><span data-lang="en">When collaboration is configured, invite teammates to share Board cards and edits in real time. Shared projects can be opened without a local folder; running code requires linking a local copy. Project Canvas sharing additionally requires App Owner access.</span><span data-lang="ja">共同編集が設定されている場合、仲間を招待してBoardのカードと編集をリアルタイムに共有できます。共有プロジェクトはローカルフォルダなしで開けます。コードを実行するには自分のローカルコピーを紐づけます。プロジェクトCanvasの共有には、別途App Owner権限が必要です。</span></p>
             <ul class="mode-points">
               <li><span data-lang="en"><strong>Invite by link.</strong> Mint an invite link (or add a teammate by email) and they join with one click. Sharing needs a quick sign-in; live sync runs over a real-time sync server, with membership in a login service.</span><span data-lang="ja"><strong>リンクで招待。</strong>招待リンクを発行（またはメールで追加）すれば、相手はワンクリックで参加。共有にはかんたんなサインインが必要で、ライブ同期はリアルタイム同期サーバ、メンバー管理はログイン基盤で動く。</span></li>
               <li><span data-lang="en"><strong>Shared work, personal settings.</strong> Who's assigned, the Review column, and how each task finishes (merge it, or open a pull request for review) are synced to everyone. Your own preferences — how much you let Claude do, which model — stay on your machine.</span><span data-lang="ja"><strong>共有は仕事の進め方、個人は自分の設定。</strong>担当者・レビュー列・各タスクの終わり方（そのままマージするか、レビュー用にプルリクエストを出すか）はチーム全員に同期。一方で、Claude にどこまで任せるか・どのモデルを使うかといった自分の設定は、あなたの端末だけに残る。</span></li>
               <li><span data-lang="en"><strong>Made for a team.</strong> Assign cards, filter to just yours, watch the Review column — when the work is merged in, its card shows <em>Merged</em> and a clear <em>→ Done</em>.</span><span data-lang="ja"><strong>チームのために。</strong>カードに担当を付け、自分のぶんだけ絞り込み、レビュー列で進み具合を追う ── 作業がマージされると、カードに <em>Merged</em> と、はっきりした <em>→ 完了</em> が出る。</span></li>
-              <li><span data-lang="en"><strong>Board &amp; Canvas only — never your code.</strong> Sharing syncs your Board and Canvas (including images and any mock/screen source you put on the canvas) to the cloud. Your repository's files, your terminal, and your Claude chats never leave your machine. Stop sharing any time. <a href="privacy.html" target="_blank" rel="noopener">See what's shared →</a></span><span data-lang="ja"><strong>共有されるのは Board と Canvas だけ ── コードには触れない。</strong>共有で同期されるのは Board と Canvas（Canvas に置いた画像や mock/screen のソースを含む）で、クラウドに保存される。リポジトリのファイル・ターミナル・Claude との会話はマシンの外に出ない。共有はいつでも解除できる。<a href="privacy.html" target="_blank" rel="noopener">何が共有されるか →</a></span></li>
+              <li><span data-lang="en"><strong>Choose what you share.</strong> Collaboration syncs selected Board and eligible Canvas content, including images and mock/screen source. Claude and terminal tools make their own network requests. Stop sharing any time. <a href="privacy.html" target="_blank" rel="noopener">See what's shared →</a></span><span data-lang="ja"><strong>共有する内容を選べます。</strong>共同編集では、選んだBoardと権限のあるCanvasの内容（画像やmock・screenのソースを含む）を同期します。Claudeやターミナルのツールは、それぞれ外部と通信する場合があります。共有はいつでも解除できます。<a href="privacy.html" target="_blank" rel="noopener">何が共有されるか →</a></span></li>
             </ul>
           </article>
         </div>
@@ -462,7 +462,7 @@
           <li class="step">
             <span class="step-num">1</span>
             <h3><span data-lang="en">Put your projects on the ground</span><span data-lang="ja">プロジェクトを大地に並べる</span></h3>
-            <p><span data-lang="en">Create a new project or add any folder you already have, from anywhere on your computer. Each one becomes a card on the canvas — and nothing is written inside the folder itself.</span><span data-lang="ja">新しいプロジェクトを作るか、パソコンのどこにあるフォルダでも追加するだけ。それぞれがキャンバス上のカードになる ── フォルダの中には何も書き込まれない。</span></p>
+            <p><span data-lang="en">Create a new project or add any folder you already have, from anywhere on your computer. Each becomes a Ground card. App metadata stays in its central data directory; work you run can change project files.</span><span data-lang="ja">新しいプロジェクトを作るか、パソコンのどこにあるフォルダでも追加するだけ。それぞれがGroundのカードになります。管理データは中央の保存先に置き、実行した作業はプロジェクトのファイルを変更する場合があります。</span></p>
           </li>
           <li class="step">
             <span class="step-num">2</span>
@@ -520,8 +520,8 @@
             <span data-lang="ja">ターミナルたちに、ホームグラウンドを。</span>
           </h2>
           <p class="cta-sub">
-            <span data-lang="en">OPEN GROUND is a local desktop app for macOS &amp; Windows — solo by default, ready for real-time team collaboration live over the cloud. Grab the free beta above, or leave your email and we'll ping you when big updates land.</span>
-            <span data-lang="ja">OPEN GROUND はローカルで動く macOS・Windows 対応のデスクトップアプリ ── 基本はソロ、必要なときはクラウド経由でリアルタイムにチーム共同編集。上のボタンから無料ベータを入手するか、メールを残せば大きな更新時にお知らせします。</span>
+            <span data-lang="en">OPEN GROUND is a desktop workspace. The first public Free/Pro release targets macOS; Windows builds are experimental. Cloud collaboration is optional and requires configuration. Grab the free beta above, or leave your email and we'll ping you when big updates land.</span>
+            <span data-lang="ja">OPEN GROUND はデスクトップの作業環境です。初回のFree／Pro一般公開はmacOSを対象とし、Windows版は実験段階です。クラウド共同編集は任意で、設定が必要です。上のボタンから無料ベータを入手するか、メールを残せば大きな更新時にお知らせします。</span>
           </p>
 
           <form class="waitlist-form" action="/api/waitlist" method="POST" onsubmit="return handleWaitlist(event)">

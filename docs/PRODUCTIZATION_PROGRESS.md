@@ -36,40 +36,92 @@ The feature inventory and original findings remain in [PRODUCT_FEATURE_AUDIT.md]
   Native dependency installation returned 0 but warned about spaces in the checkout path;
   actual runtime and packaged candidate checks must decide compatibility.
 
-## Latest verification
+## Further quality fixes
 
-- Settings lost-update test failed on old production UI before implementation.
-- Blog overlapping-send, destination-switch and corrupt-ledger tests failed on old production code.
-- Removing private-file modes and restoring the old billing UI produced three expected failures;
-  fixed sources were restored immediately.
-- Latest checkpoint: 22 files / 296 tests passed, exit 0. This predates the additional local
-  acknowledgement-failure test and the final verification below.
-- Root typecheck passed. Lint: 0 errors, 205 existing warnings (before the latest small changes).
-- npm audit after dependency update: 18 total, critical 0, high 8, moderate 10.
-  Remaining development/distribution chains still need assessment; no blanket clean-audit claim.
-- `patch-package` applied the existing node-pty patch. Native PTY smoke passed under Node 22 and
-  the new Electron 43.7.11 / Node 24.21.0 runtime. This is not packaged-GUI acceptance.
-- After the additional acknowledgement-failure test, blog / Research UI / Owner API tests:
-  3 files, 68 passed, exit 0. Root typecheck passed again.
-- Full tests, build, E2E, newly packaged GUI, real Claude, Stripe/Supabase, WordPress,
-  NENE and iPhone acceptance are not completed for this implementation checkpoint.
+- All API responses carrying settings now apply the same Owner filter. A regression test
+  exposed WordPress/experiments/trials in `/api/projects` before the fix; Free/Pro reads no
+  longer return them, while Owner reads and saved bytes remain intact.
+- Settings saves require an applied-key receipt, so HTTP 200 with a dropped preference is
+  not described as saved. Retry keeps the newest value when an older request fails. Failed/in-flight
+  drafts survive closing/reopening the drawer; saved sound/update preferences refresh on reopen.
+  Both reopen regressions failed before the fix and passed afterward.
+- A10: README, landing, privacy and the in-app storage/plan help now describe actual local
+  and external storage, model/integration network traffic, Owner-only project tabs,
+  Free multi-terminal access, automatic update/resume limits and Windows experimental status.
+  Removed blanket no-files/no-network claims and Windows warning-bypass instructions.
+- A12: generated core orchestrator/overseer questions and notifications, resume/failure notices,
+  SDK/PTY usage-limit notices, process/integrity warnings and update notices use Settings.language.
+  Existing records and user/AI-authored questions are preserved, not rewritten. Some Owner-only
+  reports/internal diagnostics retain their original wording; this is not complete app-wide translation.
+- A13: [DATA_BACKUP_RECOVERY.md](./DATA_BACKUP_RECOVERY.md) covers central files, project folders,
+  Electron profile, NENE and Claude-owned storage. Automatic generations still protect only two files.
+  `node scripts/verify-product-data.mjs` uses copied fixtures and the built server under Electron;
+  it pins every writable home/project to a canonical temporary sandbox, never the installed app.
+- Ground placement: new cards now avoid saved card geometry rather than assuming card count equals
+  occupied grid cells. Existing user positions stay unchanged. Two new geometric regressions failed
+  on the old code; the fixed layout plus App/search regression set passed (37 tests).
+- CI's imported-project search could press Enter before its result appeared. The E2E now waits
+  for the actual row before exercising keyboard navigation; no force-click or fixed sleep was added.
 
-## Open work
+## Verification evidence
 
-1. Finish regression coverage for failure/retry, legacy blog confirmation and Owner preservation;
-   review the save queue's nested preferences and close/unmount behavior.
-2. A10: align README, landing/pricing/privacy/manual, current storage and update behavior;
-   remove stale current-tense claims. Keep Owner-only functionality described accurately.
-3. A12: make generated user-facing notifications/questions follow the chosen language.
-   Preserve historic records; do not rewrite user-authored questions.
-4. A13: document full backup/recovery boundaries and verify copied fixture data across roles/restart.
-5. Finish dependency risk assessment and Electron 43 runtime/native/GUI acceptance.
-6. Run meaningful tests, full unit suite, lint/typecheck/build, Free/Owner E2E sequentially;
-   do not overlap Vitest with build/Playwright artifact generation.
-7. Update audit/launch-plan/handoff completion states with evidence, commit, push and update draft PR.
-8. External configuration/real acceptance and legal/operator details remain explicit release gates.
-   The submitted OpenAI inquiry is not an approval. No live credentials or provider-terms approval
-   have been assumed; no live services or production DB were changed.
+- Negative controls: old settings UI lost a fast change; old blog code failed overlap/site/corruption
+  cases; removing private modes and restoring old billing display failed three cases; old overseer
+  failed the English notice; old `/api/projects` exposed the Owner secret; old placement failed two cases.
+  Fixed production sources are restored. No real WordPress posts or charges were made.
+- Full unit run after localization: 487 files, 8,581 passed, 4 skipped. The first run found 6 failures
+  (locale-specific expectations, script types, isolation inventory); the corrected set passed 141 tests.
+  The next full run including placement had 8,583 passed / 1 timing failure / 4 skipped: an unchanged
+  512 KB secret-filter performance assertion took 101.44 ms against its 100 ms limit during parallel
+  checks. The isolated 110-test settings/performance/isolation set passed without relaxing the limit.
+  Final full run remains pending.
+- Root and Worker typecheck passed. ESLint: 0 errors, 205 existing warnings.
+- `npm run build` passed (existing large-chunk warnings). Free Playwright: 25 passed before the
+  final placement fix; final Free/Owner runs remain pending for that fix.
+- Copy/restore acceptance passed: 13 copied files, 7 protected project/custom-module files with identical
+  SHA-256 hashes; Owner → Free → Owner across three Electron server boots; Board/Canvas/custom source/
+  research/WordPress/trials read back; non-Owner API denial; native PTY launched. Original copy unchanged.
+  Fixture-copy mtimes can round below a millisecond; content hashes, not identical mtime floats, verify data.
+- Native dependency installation returned 0. PTY passed under Node 22 and Electron 43.7.11 / Node 24.21.0.
+  The restored server check is not packaged-GUI, installed-app-update or real-Claude acceptance.
+- Cloudflare local collab and Phone relay runtime checks passed. Billing Wrangler dry-run passed;
+  no Worker deployed and no production database touched.
 
-Connection testing and per-report blog pause would be new convenience features, not required to fix
-the confirmed defects. Do not add them while the user has prioritized existing-feature quality.
+## Dependency risk still open
+
+`npm audit`: 29 → 17 findings (critical 1 → 0, high 22 → 7, moderate 6 → 10).
+Production-only audit: 0. Electron is a shipped runtime despite being a devDependency;
+its upgrade is covered separately above, not excluded by that production-only number.
+Picomatch was patched within its existing major versions.
+
+Remaining chains are build/distribution tools: Tailwind 3 / patch-package use braces 3.0.3;
+Tailwind/PostCSS use selector-parser 6; electron-builder download logging uses sprintf-js 1.1.3.
+The npm registry currently has no newer braces or sprintf-js release. Audit suggestions include
+major framework changes or tool downgrades; those are not a verified repair. These parsing/logging
+packages are not imported by the shipped server for public request handling. Build only reviewed
+repository CSS/globs/config with trusted tool configuration. Complete compatible upstream updates
+or a separately validated framework/tool migration before declaring the distribution chain cleared.
+Do not treat these 17 findings as fixed or claim the whole dependency audit is clean.
+
+## Remaining release work
+
+1. Finish the final Free/Owner E2E and local distribution-candidate checks, then update this evidence.
+2. Real Supabase Auth/RLS/RPC, Stripe test/live checkout/portal/webhook and cross-account/device
+   cancellation/expiry/recovery remain unconfigured/unverified; follow BILLING_PLAN.md.
+3. Run a non-Owner Pro user's real Claude SDK dispatch → independent review → return → completion,
+   stop/crash/restart/expiry acceptance with that person's subscription. Fake CLI tests do not replace it.
+4. A new signed/notarized candidate must pass Finder launch, browser auth/billing return, native/SDK,
+   safe update/rollback and copied Owner-data checks on supported macOS hardware. The existing installed
+   app is running on its fixed primary port and was not stopped or replaced for this work.
+5. Real NENE/Songs, WordPress, iPhone and deployed collaboration acceptance remain distinct from
+   fixture and local relay tests. Backup instructions include their separate stores; their real data
+   was not copied, restored, altered or deleted.
+6. Resolve dependency findings above and the individual operator's actual sales/legal/support details.
+   Do not invent a company, contact policy, refund rules or business registration details.
+7. Provider conditions remain unresolved. The submitted OpenAI inquiry is not approval. No AI API-key
+   migration or Codex/MCP rewrite was introduced; Codex is not a first-release requirement.
+8. Review the draft PR and CI. Do not merge, tag, deploy, publish or replace the installed application
+   as a side effect of these checks. Public launch follows the macOS small beta and explicit release decision.
+
+New paid workspace differences (A09), connection-test convenience and per-report sync pause are
+explicitly deferred. Free multi-project/multi-terminal limits were not changed.

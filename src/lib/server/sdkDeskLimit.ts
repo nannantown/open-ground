@@ -32,6 +32,7 @@ import {
   type StoppedDesk,
 } from './ownerDeskLimit'
 import { createSwarmInfoNotification } from './swarmNotifications'
+import { getPromptLang } from './promptLang'
 import type { SwarmInfoNotification } from '../types'
 
 export interface SdkDeskLimitDeps {
@@ -82,7 +83,7 @@ export const watchSdkDeskForLimit = (opts: {
           desk: opts.deskLabel,
           kind,
         }
-        await notify(buildOwnerDeskLimitNotification([stopped]))
+        await notify(buildOwnerDeskLimitNotification([stopped], await getPromptLang()))
       } catch {
         // A failed bell must never take down the session's event pump. The desk
         // keeps running; the owner just was not told, which is the state this

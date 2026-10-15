@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { setSettings } from './store'
 import {
   parseElapsedSeconds,
   isUninterruptible,
@@ -110,7 +111,7 @@ describe('owner-facing message', () => {
   })
 
   it('says what happened, what it costs, and the ONE thing that works', () => {
-    const detail = describeStuckProcesses(parseStuckProcesses(many))
+    const detail = describeStuckProcesses(parseStuckProcesses(many), 'ja')
     expect(detail).toContain('41個')
     expect(detail).toContain('git×41')
     expect(detail).toContain('再起動')
@@ -181,7 +182,10 @@ describe('findStuckProcesses — safe on any machine', () => {
 // scan reports yesterday's news and then goes blind for the session; it would
 // NOT have caught the 2026-07-28 incident, which built up over hours of uptime.
 describe('periodic watch — speaks once, then only when the leak GROWS', () => {
-  beforeEach(() => __resetStuckWatchForTests())
+  beforeEach(async () => {
+    await setSettings({ language: 'ja' })
+    __resetStuckWatchForTests()
+  })
   afterEach(() => {
     stopStuckProcessWatchLoop()
     __resetStuckWatchForTests()

@@ -8,7 +8,8 @@
 // everything else — the wording, the message, the never-touch-the-desk rule —
 // is still shared with the PTY watch.
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { setSettings } from './store'
 import { watchSdkDeskForLimit } from './sdkDeskLimit'
 import type { SdkStreamFrame } from './sdkSession'
 import type { SwarmInfoNotification } from '../types'
@@ -33,6 +34,7 @@ const MODEL_SWITCHABLE =
 const settle = () => new Promise((r) => setImmediate(r))
 
 describe('watchSdkDeskForLimit', () => {
+  beforeEach(async () => { await setSettings({ language: 'ja' }) })
   it('tells the owner ONCE, naming the desk and the project', async () => {
     const f = fakeAttach()
     const notify = vi.fn(async (_n: SwarmInfoNotification) => {})
@@ -44,7 +46,7 @@ describe('watchSdkDeskForLimit', () => {
     })
     f.emit(frame(MODEL_SWITCHABLE))
     await settle()
-    expect(notify).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce())
     const n = notify.mock.calls[0][0]
     expect(n.event).toBe('session-limit')
     expect(n.detail).toContain('司令官')
@@ -65,7 +67,7 @@ describe('watchSdkDeskForLimit', () => {
     f.emit(frame(ACCOUNT_WIDE, 1))
     f.emit(frame(ACCOUNT_WIDE, 2))
     await settle()
-    expect(notify).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce())
   })
 
   it('ignores every event that is not a quota refusal', async () => {
@@ -94,7 +96,7 @@ describe('watchSdkDeskForLimit', () => {
       deps: { attach: f.attach, notify, project: async () => null },
     })
     await settle()
-    expect(notify).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce())
     expect(f.attach).toHaveBeenCalledWith('s1', 0, expect.any(Function))
   })
 
@@ -116,7 +118,7 @@ describe('watchSdkDeskForLimit', () => {
     }
     // The two stops give DIFFERENT advice — that difference is the whole reason
     // the kind is classified rather than assumed.
-    expect(seen).toHaveLength(2)
+    await vi.waitFor(() => expect(seen).toHaveLength(2))
     expect(seen[0]).not.toBe(seen[1])
   })
 
@@ -136,6 +138,17 @@ describe('watchSdkDeskForLimit', () => {
     })
     expect(() => f.emit(frame(ACCOUNT_WIDE))).not.toThrow()
     await settle()
+  })
+
+  it('uses the selected English language for a real SDK refusal', async () => {
+    await setSettings({ language: 'en' })
+    const f = fakeAttach()
+    const notify = vi.fn(async (_n: SwarmInfoNotification) => {})
+    watchSdkDeskForLimit({ sdkSessionId: 'english', cwd: '/repo', deskLabel: null,
+      deps: { attach: f.attach, notify, project: async () => null } })
+    f.emit(frame(MODEL_SWITCHABLE))
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce())
+    expect(notify.mock.calls[0][0].detail).toContain('Enter /model')
   })
 
   it('returns null when the session cannot be subscribed to', () => {

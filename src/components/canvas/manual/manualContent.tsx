@@ -541,6 +541,7 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'bullets',
         items: [
+          { en: 'Plan — current subscription, payment management and cancellation. An unavailable check does not stop existing billing.', ja: 'プラン —— 契約確認、支払い管理と解約。確認できない場合も、既存の請求が止まるわけではありません。' },
           { en: 'Language — EN / JA (it also steers the language claude replies in).', ja: '言語 —— EN / JA（claude が返信する言語にも反映されます）。' },
           { en: 'Display name — your name on shared boards.', ja: '表示名 —— 共有ボードでのあなたの名前。' },
           { en: 'Advanced — default workspace, and a Claude CLI re-check.', ja: '詳細 —— 既定ワークスペースと、Claude CLI の再チェック。' },
@@ -743,8 +744,8 @@ export const MANUAL_SECTIONS: Section[] = [
       {
         kind: 'p',
         text: {
-          en: 'OPEN GROUND keeps per-project data centrally, mirroring how Claude Code keeps state under `~/.claude/` — never inside your repo.',
-          ja: 'OPEN GROUND はプロジェクトごとのデータを中央に保ちます —— Claude Code が `~/.claude/` に状態を置くのと同じ流儀で、リポジトリの中には置きません。',
+          en: 'OPEN GROUND stores its project metadata centrally. Code and research reports remain in project folders; Claude, NENE and the Electron profile have separate stores. Automatic generations protect settings.json and the Ground layout only. Copy the complete data directories before an update or restore.',
+          ja: 'アプリの管理データは中央に保存します。コードや調査レポートは各プロジェクトに、Claude・NENE・画面のプロファイルは別に保存されます。自動世代バックアップの対象はsettings.jsonとGroundの配置です。更新・復元の前に、必要な保存先全体をコピーしてください。',
         },
       },
       {

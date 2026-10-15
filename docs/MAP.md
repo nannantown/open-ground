@@ -210,7 +210,7 @@
   only; all right-edge terminal docks and their auto-launch UI are removed.
 - テスト: `terminal.test.ts` / `claudeTerminal.test.ts` / `routes/__tests__/paste*.test.ts` / `runTaskLaunch.test.ts`
 - 罠: **正典 = `claudeTerminal.ts` 冒頭「THE TWO RULES」**(8つの launcher が全部ここを指す)。
-  **①subscription-only**(API key 経路を作らない・提案しない)と**②PTY-only**(`claude -p` を
+  **①subscription-only**(API key 経路を作らない・提案しない)と**②通常TerminalはPTY-only**(`claude -p` を
   実行経路にしない)は**別のルール・別の理由**。⚠ 0730 以前は「PTY だからサブスクに課金される」と
   1つに融合させていたが**それは誤り** — 実測で `-p` もサブスク(`apiKeySource:"none"` /
   `/usage` が "using your subscription" / seven_day rate_limit_event)。②が生きている理由は

@@ -245,13 +245,18 @@ export const SettingsPanel = ({
   // note kept below) so an in-session load() can't wipe unsaved edits.
   useEffect(() => {
     if (!open) return
-    setDefaultWorkspace(settings.defaultWorkspace ?? '')
-    setDisplayName(settings.displayName ?? '')
-    setSwarmExp(settings.experiments?.swarm === true)
-    setSandboxExp(settings.experiments?.sandbox === true)
-    setSwarmOptInState(settings.swarmOptIn === true)
-    setThinkInCodeState(settings.workerTrials?.thinkInCode === true)
-    setLockdownState(settings.lockdownMode === true)
+    // Failed or in-flight edits remain the draft when the drawer reopens.
+    const current = { ...settings, ...persistence.getUnsavedPatch() }
+    setDefaultWorkspace(current.defaultWorkspace ?? '')
+    setDisplayName(current.displayName ?? '')
+    setSwarmExp(current.experiments?.swarm === true)
+    setSandboxExp(current.experiments?.sandbox === true)
+    setSwarmOptInState(current.swarmOptIn === true)
+    setThinkInCodeState(current.workerTrials?.thinkInCode === true)
+    setLockdownState(current.lockdownMode === true)
+    setAutoUpdateState(current.autoUpdate !== false)
+    setSoundOnState(current.soundOnDone === true)
+    setSoundVolume(typeof current.soundOnDoneVolume === 'number' ? current.soundOnDoneVolume : 100)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
@@ -712,8 +717,7 @@ export const SettingsPanel = ({
                 {/* Public swarm opt-in — ALL users, macOS only (the guard is
                     unmeasured on Windows, so swarmOptInAvailable is false there).
                     "Still being tuned": the note discloses the real properties
-                    (subscription cost, permission-bypass claude, Japanese
-                    notifications) so opting in is an informed choice. Distinct
+                    (subscription cost and permission-bypass claude) so opting in is an informed choice. Distinct
                     from the owner-only Experiments section below. */}
                 {swarmOptInAvailable && (
                   <Section

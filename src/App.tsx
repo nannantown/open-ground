@@ -1071,6 +1071,11 @@ export default function App() {
       const e = (await res.json().catch(() => ({}))) as { error?: string }
       throw new Error(e.error ?? res.statusText)
     }
+    const receipt = await res.json() as { applied?: string[] }
+    const applied = receipt.applied
+    if (!Array.isArray(applied) || Object.keys(s).some((key) => !applied.includes(key))) {
+      throw new Error('Settings were not applied')
+    }
     await load()
     // Re-resolve the experiment gate: toggling an experiment in Settings must
     // show/hide its module right away, not on the next window focus.

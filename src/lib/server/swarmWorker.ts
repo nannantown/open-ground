@@ -48,7 +48,7 @@ import { sdkWorkerLaunchPlan, sdkWorkerPreflight, SdkWorkerUnavailableError } fr
 import { spawnSdkSession, preloadSdk } from './sdkSession'
 import { DECISION_ROUTING_RULES } from './swarmDecisionRouting'
 import { SPECIALIST_REVIEW_RULES } from './swarmSpecialistReview'
-import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
+import { getPromptLang, pick as pickLang, languageDirective, type PromptLang } from './promptLang'
 import { researchWorkerEnv } from './researchAuth'
 import type {
   RemoveSwarmWorktreeResponse,
@@ -880,11 +880,10 @@ const notifyGuardUnwired = async (
   await createSwarmFatalNotification({
     event: 'guard-unwired',
     detail:
-      'L4ガード(PreToolUse veto)の配線検証に失敗したため、worker の起動を拒否しました(fail-closed)。' +
-      `詳細: ${problems.join(' / ')}`,
+      pickLang(await getPromptLang(), { en: `Worker launch was refused (fail-closed) because the L4 command guard could not be verified: ${problems.join(' / ')}`, ja: 'L4ガード(PreToolUse veto)の配線検証に失敗したため、worker の起動を拒否しました(fail-closed)。' + `詳細: ${problems.join(' / ')}` }),
     projectPath,
     logHint:
-      '~/.claude/settings.json と ~/.openground/guard/ を確認してください(OPEN GROUND 再起動で再インストールが走ります)。',
+      pickLang(await getPromptLang(), { en: 'Check ~/.claude/settings.json and ~/.openground/guard/. Restarting OPEN GROUND reinstalls its managed guard files.', ja: '~/.claude/settings.json と ~/.openground/guard/ を確認してください(OPEN GROUND 再起動で再インストールが走ります)。' }),
   }).catch(() => {})
 }
 
