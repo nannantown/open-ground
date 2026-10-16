@@ -1,3 +1,4 @@
+import { getPromptLang, pick as pickLang } from './promptLang'
 // selfUpdateOnIntegrate — reconnects the engine self-update trigger to the
 // COMMANDER's manual integration flow (the 2026-07-15 manager-only rework).
 //
@@ -142,7 +143,7 @@ export const fireSelfUpdateIfIntegrated = async (
       // a failed write never disturbs the removal that called us.
       await createSwarmInfoNotification({
         event: 'self-update-requested',
-        detail: `マネージャーの統合を検知（${snap.branch} が ${trunk} に到達済み）— エンジン自己入替サイクル（rebuild・canary・切替）を要求しました`,
+        detail: pickLang(await getPromptLang(), { en: `Commander integration detected (${snap.branch} reached ${trunk}). Requested the engine rebuild, canary and switch cycle.`, ja: `マネージャーの統合を検知（${snap.branch} が ${trunk} に到達済み）— エンジン自己入替サイクル（rebuild・canary・切替）を要求しました` }),
         projectPath,
         branch: snap.branch,
       }).catch(() => {})

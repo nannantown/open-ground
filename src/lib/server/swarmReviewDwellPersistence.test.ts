@@ -103,6 +103,7 @@ const intDeps = (
   over: Partial<IntegrationDeps> = {},
 ): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
   ...defaultDeps(),
+      hasAccess: async () => true,
   fetchTasks: async () => [],
   fetchReview: async () => reviews,
   prepareTarget: async () => 'main',

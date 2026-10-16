@@ -76,16 +76,16 @@ describe('computeExperiments', () => {
 // never widen `eligible` (the experiments toggle UI stays owner-only) nor any
 // other experiment — sandbox and persona keep requiring owner && toggle.
 describe('computeExperiments — swarm local owner unlock', () => {
-  it('signed out + unlock → swarm opens; eligible and every other flag stay closed', () => {
+  it('signed out + unlock → swarm stays closed; eligible and every other flag stay closed', () => {
     expect(computeExperiments('none', {}, { swarmLocalOwner: true })).toEqual(
-      res(false, open({ swarm: true })),
+      res(false, ALL_CLOSED),
     )
   })
 
   it('the unlock does NOT leak to sandbox — even with a forged sandbox toggle', () => {
     expect(
       computeExperiments('none', { experiments: { sandbox: true } }, { swarmLocalOwner: true }),
-    ).toEqual(res(false, open({ swarm: true })))
+    ).toEqual(res(false, ALL_CLOSED))
   })
 
   it('unlock false/absent changes nothing (the locked default)', () => {

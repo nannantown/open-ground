@@ -3,6 +3,15 @@
 // language so the panel is never half-translated. English is the source of truth.
 export const settings = {
   en: {
+    'settings.save.busy': 'Saving…',
+    'settings.save.done': 'Saved',
+    'settings.save.failed': 'Changes have not been saved. Retry before closing the app.',
+    'settings.save.retry': 'Retry',
+    'settings.sound.failed': 'Could not play the test sound.',
+    'settings.sound.sent': 'Test sound requested.',
+    'settings.research.failed': 'Could not check research channels. Re-check to try again.',
+    'settings.research.empty': 'No research channels found.',
+    'settings.experiments.sandboxHint': 'OS isolation applies to supported manual Claude launches on macOS. Agent Team SDK workers are not OS-sandboxed; their separate command guards still apply.',
     'settings.eyebrow': 'Preferences',
     // Feedback entry
     // Language
@@ -23,13 +32,13 @@ export const settings = {
     'settings.experiments.sandbox': 'Sandbox Claude (macOS)',
     'settings.experiments.off': 'Off',
     'settings.experiments.on': 'On',
-    // Public swarm opt-in (all users, macOS only) — "still being tuned"
-    'settings.swarmOptIn.heading': 'Agent Team (experimental)',
-    'settings.swarmOptIn.hint': 'Still being tuned. Off by default — turn it on only if you want it.',
+    // Licensed swarm consent (Pro/Owner, macOS only) — "still being tuned"
+    'settings.swarmOptIn.heading': 'Agent Team · Pro',
+    'settings.swarmOptIn.hint': 'Requires Pro or Owner on macOS. Off by default — enable it when you want automation.',
     'settings.publicPreview.label': 'Show as a public user sees it',
     'settings.swarmOptIn.label': 'Enable Agent Team',
     'settings.swarmOptIn.warning':
-      'Agent Team runs autonomous Claude workers for you. Before turning it on, know: it uses your own Claude subscription and can run several sessions at once, so it may consume your quota heavily; workers run Claude with tool-permission prompts skipped, inside isolated copies of your project; and its notifications are currently in Japanese only. It is still being tuned and is not covered by support.',
+      'Agent Team runs autonomous Claude workers for you. Before turning it on, know: it uses your own Claude subscription and can run several sessions at once, so it may consume your quota heavily; workers run Claude with tool-permission prompts skipped, inside isolated copies of your project; core status notifications follow the app language, while some Owner reports retain their original wording. It is still being tuned and is not covered by support.',
     // Worker-directive TRIALS (Settings.workerTrials) — docs/trending/TRIALS.md.
     // Owner-facing wording deliberately states that the effect is UNPROVEN: the
     // measurement so far (-7.6% cost) sat inside the baseline's own 22% spread,
@@ -90,7 +99,7 @@ export const settings = {
     'settings.wordpress.appPasswordHint':
       'WP admin › Users › Profile › Application Passwords. Not your login password — revocable there at any time.',
     'settings.wordpress.save': 'Save',
-    'settings.wordpress.saved': 'Connected',
+    'settings.wordpress.saved': 'Saved',
     'settings.wordpress.clear': 'Disconnect',
     'settings.wordpress.invalid': 'Fill in all three fields; the URL must start with https://',
     'settings.sound.heading': 'Completion sound',
@@ -204,6 +213,15 @@ export const settings = {
     'settings.inbox.imageAlt': 'Attached image',
   } as Record<string, string>,
   ja: {
+    'settings.save.busy': '保存中…',
+    'settings.save.done': '保存しました',
+    'settings.save.failed': '変更を保存できていません。アプリを閉じる前に再試行してください。',
+    'settings.save.retry': '再試行',
+    'settings.sound.failed': '試聴できませんでした。',
+    'settings.sound.sent': '試聴を要求しました。',
+    'settings.research.failed': '調査チャンネルを確認できませんでした。「再確認」でやり直してください。',
+    'settings.research.empty': '調査チャンネルがありません。',
+    'settings.experiments.sandboxHint': 'OS隔離はmacOSの対応する手動Claude起動に適用されます。Agent TeamのSDK WorkerはOS隔離されません。別のコマンドガードは適用されます。',
     'settings.eyebrow': '環境設定',
     'settings.language.heading': '言語',
     'settings.language.hint': 'システム言語から自動判定します。ここで手動変更できます。',
@@ -218,12 +236,12 @@ export const settings = {
     'settings.experiments.sandbox': 'Claude をサンドボックス化 (macOS)',
     'settings.experiments.off': 'オフ',
     'settings.experiments.on': 'オン',
-    'settings.swarmOptIn.heading': 'エージェントチーム(試験運用)',
-    'settings.swarmOptIn.hint': 'まだ調整中です。既定はオフ — 使いたい場合だけオンにしてください。',
+    'settings.swarmOptIn.heading': 'エージェントチーム · Pro',
+    'settings.swarmOptIn.hint': 'macOSでProまたはOwnerが必要です。既定はオフ — 自動運転を使う場合にオンにしてください。',
     'settings.publicPreview.label': '一般ユーザーの見え方で表示',
     'settings.swarmOptIn.label': 'エージェントチームを有効にする',
     'settings.swarmOptIn.warning':
-      'エージェントチームはあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。通知は当面日本語のみです。まだ調整中で、サポート対象外です。',
+      'エージェントチームはあなたの代わりに自律的な Claude ワーカーを走らせます。オンにする前に確認してください: あなた自身の Claude サブスクを使い、複数セッションを同時に走らせることがあるため、消費が大きくなる場合があります。ワーカーはツールの許可確認をスキップした Claude を、プロジェクトの隔離コピーの中で実行します。主な状態通知はアプリの言語に従いますが、一部のOwner向けレポートは元の文言を保持します。まだ調整中で、サポート対象外です。',
     'settings.phoneLink.heading': 'iPhone',
     'settings.phoneLink.hint': 'Mac から離れていても、iPhone から社長と話せます。コードがコピーされるので iPhone のアプリに貼り付けてください。解除すると古いコードは使えなくなります。',
     'settings.phoneLink.unpaired': '未接続',

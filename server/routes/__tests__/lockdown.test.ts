@@ -239,6 +239,8 @@ describe('lockdown ON — collab config reports disabled; every other collab rou
 
 describe('lockdown ON — retired distribution stays absent; LOCAL custom-module CRUD stays available', () => {
   it('local custom modules remain listed without distribution capability', async () => {
+    vi.stubEnv('OPENGROUND_OWNER_EMAILS', 'owner@example.com')
+    await writeSession({ user: { id: 'owner', email: 'owner@example.com', provider: 'google' }, expiresAt: Date.now() + 3_600_000, accessToken: 'tok', refreshToken: 'r' })
     await lockdownOn()
     const res = await app.request('/api/custom-modules')
     expect(res.status).toBe(200)
@@ -248,6 +250,8 @@ describe('lockdown ON — retired distribution stays absent; LOCAL custom-module
   })
 
   it('retired marketplace routes stay 404 without fetch', async () => {
+    vi.stubEnv('OPENGROUND_OWNER_EMAILS', 'owner@example.com')
+    await writeSession({ user: { id: 'owner', email: 'owner@example.com', provider: 'google' }, expiresAt: Date.now() + 3_600_000, accessToken: 'tok', refreshToken: 'r' })
     await lockdownOn()
     const spy = trapFetch()
     expect((await app.request('/api/marketplace')).status).toBe(404)

@@ -39,7 +39,6 @@ import {
 import { isLockdownEnabledSync } from './lockdown'
 import { alreadyStored, asCursor, asPushTarget, type Cursor, type PushTarget } from '../../../worker/src/phoneRelayAuth'
 import { providerTokenExpired, renewStaleProviderToken, pushKeyFingerprint, pushRefusedForGood, pushTokenGone, pushTransient, refusalIsTheApp, readPushKey, sendPushToTalk, type PushKey, type PushResult } from './phonePush'
-import { isSwarmLocalOwnerUnlocked } from './swarmGate'
 import { getCustomTabRole } from './roles'
 import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assistantBusy, dropAssistantProposal, plainAssistantError, pressProposal, warmAssistant, type AssistantAnswer } from './phoneAssistant'
 import { listProposals, onProposalsChanged } from './assistantProposals'
@@ -131,7 +130,7 @@ const pushRefusal = (cfg: PhoneLinkConfig, key: PushKey): string | null => {
  *  NOT the public Agent Team opt-in, which opens the rest of the swarm. The relay
  *  is the owner's; per-user rooms for App Store users come with their own gate. */
 export const hasPhoneLinkAccess = async (): Promise<boolean> =>
-  (await isSwarmLocalOwnerUnlocked()) || (await getCustomTabRole()) === 'owner'
+  (await getCustomTabRole()) === 'owner'
 
 const configFile = (): string => join(openGroundHome(), 'phone-link.json')
 const key = (): string => randomBytes(32).toString('base64url')

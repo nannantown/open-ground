@@ -29,6 +29,7 @@ import {
   type TerminalInfo,
 } from './terminal'
 import type { SwarmInfoNotification } from '../types'
+import { setSettings } from './store'
 
 // The owner-desk model-limit watch, driven entirely by SYNTHETIC PTY screens +
 // an injected clock — no node-pty, no real claude, no disk. What is pinned here
@@ -169,7 +170,8 @@ const toldAt = (t: number): number => t + OWNER_DESK_MERGE_QUIET_MS
 /** Run the pass that flushes a stop confirmed at `t` (nothing else joined it). */
 const settle = (h: Harness, t: number) => runOwnerDeskLimitPass({ now: toldAt(t), deps: h.deps })
 
-beforeEach(() => {
+beforeEach(async () => {
+  await setSettings({ language: 'ja' })
   resetOwnerDeskLimitState()
 })
 
@@ -582,7 +584,7 @@ describe('ownerDeskLimit — the message the owner reads', () => {
 
   it('carries no worktree/branch stamp when the project IS named', () => {
     const n = buildOwnerDeskLimitNotification(
-      one({ label: 'OPEN GROUND', path: '/Users/me/projects/OPEN GROUND' }, null, 'model-switchable'),
+      one({ label: 'OPEN GROUND', path: '/Users/me/projects/OPEN GROUND' }, null, 'model-switchable'), 'ja'
     )
     expect(n.detail).toContain('OPEN GROUND')
     expect(n.detail).not.toMatch(/swarm-|worktrees|[0-9a-f]{12}/)
@@ -594,7 +596,7 @@ describe('ownerDeskLimit — the message the owner reads', () => {
     // A custom-module desk's cwd is `~/.openground/custom-modules/<uuid>`, which
     // resolves to no registered project. The shipped version fell back to that cwd,
     // so the row offered to "open" a machine directory the owner never opened.
-    const n = buildOwnerDeskLimitNotification(one(null, null, 'model-switchable'))
+    const n = buildOwnerDeskLimitNotification(one(null, null, 'model-switchable'), 'ja')
     expect(n.projectPath).toBeUndefined()
     expect(n.detail).toContain('上限に達しました') // still actionable without it
   })
@@ -626,7 +628,7 @@ describe('ownerDeskLimit — the message the owner reads', () => {
 
   it('points at the conversation without proposing to change it for them', () => {
     const n = buildOwnerDeskLimitNotification(
-      one({ label: 'test', path: '/Users/me/projects/test' }, null, 'model-switchable'),
+      one({ label: 'test', path: '/Users/me/projects/test' }, null, 'model-switchable'), 'ja'
     )
     expect(n.event).toBe('session-limit')
     expect(n.projectPath).toBe('/Users/me/projects/test')

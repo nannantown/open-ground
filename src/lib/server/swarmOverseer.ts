@@ -1,3 +1,4 @@
+import { getPromptLang, pick as pickLang } from './promptLang'
 // Deterministic monitoring: raise questions to the owner, report failures and
 // usage limits, and run bounded cleanup. Never answer on the owner's behalf.
 
@@ -390,7 +391,7 @@ export const runOverseerPass = async (
       await deps
         .notifyInfo({
           event: 'overseer-throttled',
-          detail: '使用量が上限に達しています。確認が必要な質問は引き続き受信箱に届きます。',
+          detail: pickLang(await getPromptLang(), { en: 'The usage limit has been reached. Questions needing your decision will still reach the inbox.', ja: '使用量が上限に達しています。確認が必要な質問は引き続き受信箱に届きます。' }),
           projectPath: engine.path,
         })
         .catch(() => {})
@@ -584,12 +585,12 @@ const detectStateAnomalies = async (
     const who = a.taskTitle ? `"${a.taskTitle}"` : a.ref
     const ok = await raiseToInbox(deps, now, ov, {
       projectPath: engine.path,
-      question: `差し戻し上限を超えて blocked 入りしたカード ${who} をどうしますか？（設計見直し / 諦めて放置 / 分割して再依頼）`,
+      question: pickLang(await getPromptLang(), { en: `How should we handle ${who}, which reached its rework limit? Revise the task, leave it paused, or split it into smaller tasks?`, ja: `差し戻し上限を超えて blocked 入りしたカード ${who} をどうしますか？（設計見直し / 諦めて放置 / 分割して再依頼）` }),
       context: `review から doing への差し戻しが ${a.attempts ?? '?'} 回で上限超過し 'blocked' に退避。本人の方針判断が要ります。`,
       plainQuestion:
-        `${who} の作業をAIに${a.attempts ?? '数'}回やり直させましたが、検査に合格しませんでした。この作業をどうするか決めてください。\n` +
+        pickLang(await getPromptLang(), { en: `${who} did not pass review after ${a.attempts ?? "several"} rework attempts. What would you like to do?\nA: Revise the instructions or split the task and try again.\nB: Leave this task paused; other work continues.`, ja: `${who} の作業をAIに${a.attempts ?? '数'}回やり直させましたが、検査に合格しませんでした。この作業をどうするか決めてください。\n` +
         'A: 頼み方や作業の分け方を見直して、もう一度やらせる（やり方を変えて再挑戦します）\n' +
-        'B: この作業はいったん諦めて保留のままにする（ほかの作業はそのまま続きます）',
+        'B: この作業はいったん諦めて保留のままにする（ほかの作業はそのまま続きます）' }),
       whyEscalated: 'policy',
       receiptKey: `S1:${engine.path}:${a.ref}:${a.attempts ?? 0}`,
       taskId: a.ref,
@@ -612,12 +613,12 @@ const detectStateAnomalies = async (
     if (ov.seen.get(signalKey) !== fp) {
       const ok = await raiseToInbox(deps, now, ov, {
         projectPath: engine.path,
-        question: '全ワーカーが停止し doing が宙吊りです。どう復旧しますか？（原因を調べて再依頼 / 一旦停止）',
+        question: pickLang(await getPromptLang(), { en: 'All workers stopped while work was in progress. Restart the work or keep it paused?', ja: '全ワーカーが停止し doing が宙吊りです。どう復旧しますか？（原因を調べて再依頼 / 一旦停止）' }),
         context: '稼働中のワーカーが0になり doing のカードが進みません（全員 crash/stall）。auto-drain で復旧しない場合は本人判断が要ります。',
         plainQuestion:
-          '作業していたAIが全員止まってしまい、やりかけの仕事が宙に浮いています。どうしますか？\n' +
+          pickLang(await getPromptLang(), { en: 'All AI workers stopped with unfinished tasks. What would you like to do?\nA: Restart the workers and continue; existing work is preserved.\nB: Keep the work paused and resume later; data is preserved.', ja: '作業していたAIが全員止まってしまい、やりかけの仕事が宙に浮いています。どうしますか？\n' +
           'A: もう一度AIを動かして、続きをやらせる（これまでの成果は残っています）\n' +
-          'B: いったんこのまま止めておく（あとで再開できます。データは消えません）',
+          'B: いったんこのまま止めておく（あとで再開できます。データは消えません）' }),
         whyEscalated: 'policy',
         receiptKey: `S2:${engine.path}:all-workers-down`,
       })
@@ -730,7 +731,7 @@ const detectEdgeFatals = async (
       // dispatch as a directive, so that answer would order a fresh worker to redo
       // finished work. The owner's only real call is whether to abandon it.
       question:
-        c.id === 'S3'
+        pickLang(await getPromptLang(), { en: c.id === 'S3' ? c.f.execTimeoutKind === 'integration-wait' ? `The worker for "${c.f.taskTitle ?? c.ref}" stopped after reaching its ${c.f.execTimeoutShape === 'capped-wait' ? 'integration-wait credit' : c.f.execTimeoutShape === 'work' ? 'actual work' : 'rework'} limit. Its branch remains available for commander review. Leave it for review or skip this task?` : `The worker for "${c.f.taskTitle ?? c.ref}" reached its time limit. Split and retry, or skip the task?` : `An engine update failed (${c.f.event}); the previous version is running. Investigate or keep using it?`, ja: c.id === 'S3'
           ? c.f.execTimeoutKind === 'integration-wait'
             ? c.f.execTimeoutShape === 'capped-wait'
               ? `カード "${c.f.taskTitle ?? c.ref}" は ready 到達後、統合待ちが控除上限を超えて長引いたため停止しました（再作業はしていません）。成果はブランチに残り、カードは review にあります（統合の可否は司令官が判断します）。この作業自体を見送りますか？`
@@ -738,10 +739,14 @@ const detectEdgeFatals = async (
                 ? `カード "${c.f.taskTitle ?? c.ref}" は ready 到達後、実作業が作業上限に達して停止しました（待ち時間が原因ではありません）。成果はブランチに残り、カードは review にあります（統合の可否は司令官が判断します）。この作業自体を見送りますか？`
                 : `カード "${c.f.taskTitle ?? c.ref}" は一度 ready に到達した後、差し戻し後の再作業で作業上限に達して停止しました。成果はブランチに残り、カードは review にあります（統合の可否は司令官が判断します）。この作業自体を見送りますか？`
             : `カード "${c.f.taskTitle ?? c.ref}" が実行時間上限を超えました。分割して再依頼しますか、それとも見送りますか？`
-          : `エンジン自己入替が失敗し旧版で動作中です（${c.f.event}）。どう対応しますか？`,
+          : `エンジン自己入替が失敗し旧版で動作中です（${c.f.event}）。どう対応しますか？` }),
       context: c.f.detail,
       plainQuestion:
-        c.id === 'S3'
+        pickLang(await getPromptLang(), { en: c.id === 'S3'
+ ? c.f.execTimeoutKind === 'integration-wait'
+ ? `Work on "${c.f.taskTitle ?? c.ref}" stopped after the ${c.f.execTimeoutShape === 'capped-wait' ? 'integration queue exceeded its waiting credit; this was not runaway work' : c.f.execTimeoutShape === 'work' ? 'actual work time reached its limit; waiting did not cause this stop' : 'rework time limit was reached; the latest rework is unfinished'}. Existing work is preserved. The commander will inspect it before integration.\nA: Leave the work with the commander for review.\nB: Skip this task and leave its changes unmerged.`
+ : `Work on "${c.f.taskTitle ?? c.ref}" ran out of time before completion. Unfinished work is saved.\nA: Split the task into smaller pieces and try again.\nB: Skip this task; its changes will not be integrated.`
+ : 'The app update failed and the previous version was restored automatically. Recent improvements are not active yet.\nA: Ask the AI to investigate the update failure as a new task.\nB: Keep using the current version until an update succeeds.' , ja: c.id === 'S3'
           ? c.f.execTimeoutKind === 'integration-wait'
             ? c.f.execTimeoutShape === 'capped-wait'
               ? // 手直しはしていない。順番待ちが長かっただけ、と正確に言う。
@@ -762,7 +767,7 @@ const detectEdgeFatals = async (
               'B: この作業は見送る（今回の変更は取り込まれません）'
           : 'このアプリ自身を新しい版に入れ替えようとして失敗したため、自動で元の版に戻して動いています。故障ではありませんが、直近の改善分は反映されていません。どうしますか？\n' +
             'A: 入れ替えに失敗した原因の調査を、新しい作業としてAIに頼む\n' +
-            'B: このまま様子を見る（次に入れ替えが成功するまで、今の版のまま動き続けます）',
+            'B: このまま様子を見る（次に入れ替えが成功するまで、今の版のまま動き続けます）' }),
       whyEscalated: 'policy',
       // Only the integration-wait shape offers 「できあがった分も取り込みません」.
       // The runaway branch of S3 says 「今回の変更は取り込まれません」 about a card
@@ -824,12 +829,12 @@ const detectBlockedDwell = async (
     // overseer never moves it back itself (§6 S5). Set `seen` only on a successful raise.
     const ok = await raiseToInbox(deps, now, ov, {
       projectPath: engine.path,
-      question: `カード "${t.title ?? t.id}" が blocked のまま30分以上滞留しています。依存は解けましたか？（todo へ戻す / このまま保留）`,
+      question: pickLang(await getPromptLang(), { en: `The card "${t.title ?? t.id}" has been paused for over 30 minutes. Requeue it if its dependencies are resolved, or keep it paused?`, ja: `カード "${t.title ?? t.id}" が blocked のまま30分以上滞留しています。依存は解けましたか？（todo へ戻す / このまま保留）` }),
       context: 'blocked 列で長く止まっているカード。列移動は本人の判断です（監督は自動で動かしません）。',
       plainQuestion:
-        `「${t.title ?? t.id}」の作業が「保留」の置き場に入ったまま、30分以上動いていません。保留にした理由（何かの順番待ちなど）がもう解決していれば、戻すと作業が再開されます。どうしますか？\n` +
+        pickLang(await getPromptLang(), { en: `"${t.title ?? t.id}" has been paused for over 30 minutes. If the reason for the pause is resolved, requeueing allows work to resume.\nA: Return it to the queue and resume work.\nB: Keep it paused; it will not start automatically.`, ja: `「${t.title ?? t.id}」の作業が「保留」の置き場に入ったまま、30分以上動いていません。保留にした理由（何かの順番待ちなど）がもう解決していれば、戻すと作業が再開されます。どうしますか？\n` +
         'A: 順番待ちの列に戻して、作業を再開させる\n' +
-        'B: このまま保留にしておく（勝手に動かすことはありません）',
+        'B: このまま保留にしておく（勝手に動かすことはありません）' }),
       whyEscalated: 'policy',
       receiptKey: `S5:${engine.path}:${t.id}`,
       taskId: t.id,
@@ -880,7 +885,7 @@ const detectReviewIdle = async (
   await deps
     .notifyInfo({
       event: 'review-idle',
-      detail: `統合可能な review カードが ${mergeable.length} 件、30分以上溜まっています。`,
+      detail: pickLang(await getPromptLang(), { en: `${mergeable.length} review cards have been waiting for integration for over 30 minutes.`, ja: `統合可能な review カードが ${mergeable.length} 件、30分以上溜まっています。` }),
       projectPath: engine.path,
     })
     .catch(() => {})
@@ -928,7 +933,7 @@ const detectInboxStale = async (
         event: 'escalation-reminder',
         // Names the question: the president's desk retells this line, and since
         // the 監督 tab is gone (2026-09-23) there is no inbox screen to point at.
-        detail: `答えを待っている質問が ${Math.round((now - created) / 3_600_000)} 時間そのままです: ${(e.plainQuestion || e.question || '').slice(0, 80)}`,
+        detail: pickLang(await getPromptLang(), { en: `A question has been waiting for ${Math.round((now - created) / 3_600_000)} hours: ${(e.plainQuestion || e.question || "").slice(0, 80)}`, ja: `答えを待っている質問が ${Math.round((now - created) / 3_600_000)} 時間そのままです: ${(e.plainQuestion || e.question || '').slice(0, 80)}` }),
         projectPath: engine.path,
         escalationId: e.id,
       })

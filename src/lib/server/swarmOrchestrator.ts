@@ -1,3 +1,4 @@
+import { getPromptLang, pick as pickLang, type PromptLang } from './promptLang'
 // swarmOrchestrator — the COMMANDER (司令官) engine: the in-app, server-side
 // replacement for what the tmux `/manage` cockpit does BY HAND every few
 // minutes — pull the oldest Board:todo card and dispatch it to a fresh worker.
@@ -60,6 +61,7 @@
 // /api/swarm/*. By the time a call reaches this module the caller is the owner
 // and the path is a registered project.
 
+import { hasSwarmOwnerAccess } from './swarmGate'
 import { hasCompletionConditions, isDispatchableCard } from '@/lib/dispatchGate'
 import { observeBoardProgress } from './supplyProgress'
 import { kickCommanderQuestionSweep } from './commanderQuestions'
@@ -3114,6 +3116,8 @@ const stateOf = (
 // ── Injectable dependencies ──────────────────────────────────────────────────
 
 export interface OrchestratorDeps {
+  /** Production access check; pure engine tests may inject their own policy. */
+  hasAccess?: () => Promise<boolean>
   /** Read this project's full Board card list (any order — the pass derives the
    *  todo queue, and looks up each worker's card by id to monitor its column). */
   fetchTasks: (projectPath: string) => Promise<ProjectTask[]>
@@ -4572,7 +4576,7 @@ const defaultWakeManager = async (
     projectPath,
     branch: cards[0]?.branch,
     taskTitle: cards[0]?.title || undefined,
-    detail: `review に ${n} 件の統合待ち — マネージャーを起こしました。統合を判断してください (${list})`,
+    detail: pickLang(await getPromptLang(), { en: `The commander was woken to review ${n} waiting integrations (${list}).`, ja: `review に ${n} 件の統合待ち — マネージャーを起こしました。統合を判断してください (${list})` }),
   }).catch(() => {})
   return true
 }
@@ -5036,10 +5040,10 @@ const holdSdkSpawn = async (engine: ProjectEngine, reason: string, now: number):
     // a notification-store fault from ever disturbing the pass itself.
     await createSwarmFatalNotification({
       event: 'worker-spawn-failed',
-      detail: `worker を起動できません: ${reason}`,
+      detail: pickLang(await getPromptLang(), { en: `Workers could not start: ${reason}`, ja: `worker を起動できません: ${reason}` }),
       projectPath: engine.path,
       logHint:
-        'claude へのサインインし直し(または CLI の更新)で直ることが多いです。原因が解消すれば自動で再開します — 再操作は不要。',
+        pickLang(await getPromptLang(), { en: "Signing in to Claude again or updating the CLI may resolve this. Dispatch resumes automatically once the cause is resolved.", ja: 'claude へのサインインし直し(または CLI の更新)で直ることが多いです。原因が解消すれば自動で再開します — 再操作は不要。' }),
     }).catch(() => {})
   }
 }
@@ -5533,6 +5537,9 @@ export const HIGH_RISK_PATHS: readonly RegExp[] = [
   // (authStore.ts, oauth2.ts, tokenRefresh.ts). author/authoring stay clear:
   // their next char is lowercase.
   /(^|[/._-])(o?auth|tokens?|secrets?)[A-Z0-9]/,
+  // Payments and shared API authorization always require independent review.
+  /billing/i,
+  /^server\/app\.ts$/,
   // authorization core — no auth-ish segment in the names, so listed explicitly
   /^src\/lib\/server\/(roles|swarmGate|swarmAllowedModels)\.ts$/,
 ]
@@ -5593,6 +5600,7 @@ const defaultReadConsumption = async (opts: {
 }
 
 export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
+  hasAccess: hasSwarmOwnerAccess,
   fetchTasks: defaultFetchTasks,
   moveToDoing: defaultMoveToDoing,
   moveToReview: defaultMoveToReview,
@@ -6623,25 +6631,31 @@ const monitorWorkers = async (
         // zero minutes and worked the whole time.
         execTimeoutShape: reason === 'integration-wait' ? shape : undefined,
         detail:
-          reason !== 'integration-wait'
+          pickLang(await getPromptLang(), { en: reason !== 'integration-wait'
+ ? `Worker exceeded its ${limitMin}-minute work limit (${workedMin} minutes of work, ${ranMin} elapsed, ${waitedMin} integration-wait minutes deducted). Uncommitted work is preserved in an unverified WIP commit.`
+ : shape === 'rework'
+ ? `Worker reached its ${limitMin}-minute limit during rework after previously completing work (${workedMin} work minutes, ${ranMin} elapsed, ${waitedMin} waiting deducted). The card returns to review. Rework was interrupted; the tip of ${w.branch}, including any WIP commit, is unverified. Inspect the diff before integrating.`
+ : shape === 'capped-wait'
+ ? `Worker stopped after a long integration queue: ${rawWaitedMin} waiting minutes exceeded the ${capMin}-minute credit cap (${workedMin} counted minutes, ${limitMin}-minute limit, ${ranMin} elapsed). Rework used only ${reworkedMin} minutes. This was a wait limit, not runaway work. The ready result remains on ${w.branch}; check the engine log for any extra WIP commit before deciding integration. The card stays in review.`
+ : `Worker reached its ${limitMin}-minute work limit after completing work (${workedMin} work minutes, ${ranMin} elapsed, all ${rawWaitedMin} waiting minutes deducted, ${reworkedMin} rework minutes). Waiting did not cause this stop. The card returns to review; the interrupted tip of ${w.branch} is unverified. Inspect the diff before integrating.`, ja: reason !== 'integration-wait'
             ? `ワーカーが実行時間上限 ${limitMin}分 を超過（実作業 ${workedMin}分・通算 ${ranMin}分／うち統合待ち ${waitedMin}分は控除済み）のため強制回収。未コミットの作業はブランチに WIP コミットで保全されます（未検証）。`
             : shape === 'rework'
               ? `一度 ready に到達したワーカーが、差し戻し後の再作業で作業上限 ${limitMin}分 に到達（実作業 ${workedMin}分・通算 ${ranMin}分／うち統合待ち ${waitedMin}分は控除済み）のため停止。暴走ではありません（統合可能な成果を一度出しています）。カードは review へ戻します。ただし再作業は途中で打ち切られ、未コミット分は WIP コミットで保全されるだけなので、ブランチ ${w.branch} の先端は未検証です — そのまま統合せず、まず差分を確認してください。`
               : shape === 'capped-wait'
                 ? `一度 ready に到達したワーカーが、統合待ちが長引いたため停止しました（統合待ち ${rawWaitedMin}分 のうち控除できるのは上限 ${capMin}分 まで。超過分が計上され、判定時間 ${workedMin}分 が上限 ${limitMin}分 に達しました／通算 ${ranMin}分）。上限に達した原因は待ち時間であって作業ではありません — このワーカーの再作業は ${reworkedMin}分 です。暴走でもありません。ブランチ ${w.branch} の先端は ready 到達時のままなので、そのまま統合を判断できます（停止時に未コミットの変更があった場合のみ WIP コミットが 1 つ乗ります — engine log の WIP 行で分かります）。カードは review に残ります。`
-                : `一度 ready に到達したワーカーが、作業上限 ${limitMin}分 に到達したため停止しました（実作業 ${workedMin}分・通算 ${ranMin}分／統合待ち ${rawWaitedMin}分 は全額控除済み・再作業 ${reworkedMin}分）。待ち時間が原因ではありません — 上限に達したのは実作業です。暴走でもありません（統合可能な成果を一度出しています）。カードは review へ移します。ブランチ ${w.branch} の先端は打ち切り時点のもので未検証です — そのまま統合せず、まず差分を確認してください。`,
+                : `一度 ready に到達したワーカーが、作業上限 ${limitMin}分 に到達したため停止しました（実作業 ${workedMin}分・通算 ${ranMin}分／統合待ち ${rawWaitedMin}分 は全額控除済み・再作業 ${reworkedMin}分）。待ち時間が原因ではありません — 上限に達したのは実作業です。暴走でもありません（統合可能な成果を一度出しています）。カードは review へ移します。ブランチ ${w.branch} の先端は打ち切り時点のもので未検証です — そのまま統合せず、まず差分を確認してください。` }),
         projectPath: engine.path,
         taskId: card?.id,
         branch: w.branch,
         taskTitle: w.taskTitle,
         logHint:
-          reason !== 'integration-wait'
+          pickLang(await getPromptLang(), { en: reason !== 'integration-wait' ? 'Check the worker-runaway warning in the engine log.' : shape === 'rework' ? 'Check the RE-WORKING execution-budget warning in the engine log.' : shape === 'capped-wait' ? 'Check the LONG integration queue warning in the engine log.' : 'Check the REAL WORK execution-budget warning in the engine log.' , ja: reason !== 'integration-wait'
             ? '司令塔の engine log を確認してください（worker runaway の警告行）。'
             : shape === 'rework'
               ? '司令塔の engine log を確認してください（worker over execution budget while RE-WORKING の警告行）。'
               : shape === 'capped-wait'
                 ? '司令塔の engine log を確認してください（worker stopped after a LONG integration queue の警告行）。'
-                : '司令塔の engine log を確認してください（worker over execution budget doing REAL WORK の警告行）。',
+                : '司令塔の engine log を確認してください（worker over execution budget doing REAL WORK の警告行）。' }),
       })
       // Pass the SAME discriminator the ceiling line used, so the two journal lines
       // this one stop emits cannot disagree (02章 §5.6).
@@ -6689,7 +6703,7 @@ const monitorWorkers = async (
           branch: w.branch,
           taskTitle: w.taskTitle || undefined,
           ...(card?.id ? { taskId: card.id } : {}),
-          detail: `worker が完了を申告しましたが、成果のコミットが見つかりません(${where}・入れ子リポ 0)。成果の所在を確認してください。`,
+          detail: pickLang(await getPromptLang(), { en: `A worker reported completion, but no result commits were found (${where}; no nested repositories). Check where its work was saved.`, ja: `worker が完了を申告しましたが、成果のコミットが見つかりません(${where}・入れ子リポ 0)。成果の所在を確認してください。` }),
         }).catch(() => {})
       } else if (now - seen.since >= READY_WITHOUT_WORK_GRACE_MS) {
         engine.readyWithoutWork.delete(key)
@@ -7113,9 +7127,9 @@ const raiseNoAllowedModelTier = async (
         'レビュアーのいずれも起動できず、dispatch を停止しています。cooling と違い期限で自然回復しません — ' +
         '最低1つの tier を ON に戻すまでエージェントチームは動きません。',
       plainQuestion:
-        'AIを動かすための「使えるモデル」の設定が、すべてオフになっています。どうしますか？\n' +
+        pickLang(await getPromptLang(), { en: "All usable AI models are disabled. What would you like to do?\nA: Enable at least one model in Settings to resume automatic work.\nB: Keep automatic work paused until a model is enabled.", ja: 'AIを動かすための「使えるモデル」の設定が、すべてオフになっています。どうしますか？\n' +
         'A: 設定画面（使用可能モデル）で、どれか1つ以上をオンに戻す（すぐに作業が再開できます）\n' +
-        'B: このままにしておく（オンに戻すまで、すべての自動作業が止まったままです）',
+        'B: このままにしておく（オンに戻すまで、すべての自動作業が止まったままです）' }),
       whyEscalated: 'policy',
       receiptKey: defaultReceiptKey({ projectPath: engine.path, question }),
     })
@@ -7598,7 +7612,7 @@ export const runDispatchPass = async (
   deps: OrchestratorDeps & Pick<AnomalyDeps, 'notify'>,
   now: number = Date.now(),
 ): Promise<void> => {
-  if (!engine.running) return
+  if (!engine.running || (deps.hasAccess && !await deps.hasAccess())) return
 
   // 1. Read the full board — the monitor needs each worker's current column, and
   //    dispatch/reconcile need the todo queue. One read feeds all three.
@@ -7917,9 +7931,9 @@ export const runDispatchPass = async (
               taskId: card.id,
               branch: priorBranch,
               taskTitle: title,
-              detail: `途中まで進んだ作業の続きを ${tries} 回続けて始められなかったので、このカードを「保留」に移しました。ここまでの作業は消えずに残っています。`,
+              detail: pickLang(await getPromptLang(), { en: `This card was paused after ${tries} unsuccessful attempts to resume its unfinished work. Existing work is preserved.`, ja: `途中まで進んだ作業の続きを ${tries} 回続けて始められなかったので、このカードを「保留」に移しました。ここまでの作業は消えずに残っています。` }),
               // Owner-facing first sentence, then the commander's technical way out.
-              logHint: `社長に「保留のカードを続きから再開して」と頼めば対応します。(司令官向け: ${priorBranch} に ${ahead === null ? '不明数の' : `${ahead} 件の`}コミット。元の作業場所のパスに .git の無いフォルダが残っていれば片付けて todo へ戻す。続きを諦めるなら card.branch を外して新規開始 — その場合このブランチのコミットは引き継がれない)`,
+              logHint: pickLang(await getPromptLang(), { en: `Ask the president to resume the paused card. Commander: inspect ${priorBranch} (${ahead === null ? "unknown number of" : ahead} commits), remove only an empty stale worktree, and requeue. Starting fresh without card.branch does not carry these commits forward.`, ja: `社長に「保留のカードを続きから再開して」と頼めば対応します。(司令官向け: ${priorBranch} に ${ahead === null ? '不明数の' : `${ahead} 件の`}コミット。元の作業場所のパスに .git の無いフォルダが残っていれば片付けて todo へ戻す。続きを諦めるなら card.branch を外して新規開始 — その場合このブランチのコミットは引き継がれない)` }),
             })
           }
           continue
@@ -8102,13 +8116,15 @@ export const managerUnresponsiveDetail = (input: {
   waitedMs: number
   /** How many swarm cards are waiting to be integrated. */
   waiting: number
-}): string =>
-  `司令官の卓は動いていますが、統合が ${Math.round(input.waitedMs / 60_000)} 分止まっています` +
+}, lang: PromptLang = 'en'): string => pickLang(lang, {
+  en: `The commander is running, but integration has been stalled for ${Math.round(input.waitedMs / 60_000)} minutes (${input.waiting} waiting cards; ${MAX_MANAGER_NUDGES} ${input.cause === 'ignored' ? 'unanswered reminders' : 'unsuccessful delivery attempts'}). Ask the commander to merge, or restart it.`,
+  ja:   `司令官の卓は動いていますが、統合が ${Math.round(input.waitedMs / 60_000)} 分止まっています` +
   `(統合待ち ${input.waiting} 件・` +
   (input.cause === 'ignored'
     ? `声かけ ${MAX_MANAGER_NUDGES} 回に応答なし`
     : `${MAX_MANAGER_NUDGES} 回続けて声をかけられませんでした`) +
-  ')。司令官に「マージ」と声をかけるか、司令官を再起動してください'
+  ')。司令官に「マージ」と声をかけるか、司令官を再起動してください',
+})
 
 /** THE ESCALATION for a commander desk that is present but not integrating — the bell the
  *  two dead ends above never rang, plus the one recovery attempt that is safe to make
@@ -8194,8 +8210,8 @@ const escalateUnresponsiveManager = async (
     projectPath: engine.path,
     ...(ctx.branch ? { branch: ctx.branch } : {}),
     ...(ctx.taskTitle ? { taskTitle: ctx.taskTitle } : {}),
-    detail: managerUnresponsiveDetail({ cause: ctx.cause, waitedMs: ctx.waitedMs, waiting: ctx.waiting }),
-    logHint: 'エージェントチームのバー › マネージャー / engine log の integrate 行',
+    detail: managerUnresponsiveDetail({ cause: ctx.cause, waitedMs: ctx.waitedMs, waiting: ctx.waiting }, await getPromptLang()),
+    logHint: pickLang(await getPromptLang(), { en: 'Agent Team bar › Commander; integrate entries in the engine log', ja: 'エージェントチームのバー › マネージャー / engine log の integrate 行' }),
   })
 }
 
@@ -8831,8 +8847,8 @@ export const runIntegratePass = async (
         projectPath: engine.path,
         branch: swarmCards[0]?.branch,
         taskTitle: swarmCards[0]?.title || undefined,
-        detail: `マネージャーが ${rs.attempts} 回連続で落ちています(統合待ち ${swarmCards.length} 件)。手動で確認を`,
-        logHint: 'エージェントチームのバー › マネージャー / engine log の integrate 行',
+        detail: pickLang(await getPromptLang(), { en: `The commander stopped ${rs.attempts} times in a row while ${swarmCards.length} integrations were waiting. Check the commander.`, ja: `マネージャーが ${rs.attempts} 回連続で落ちています(統合待ち ${swarmCards.length} 件)。手動で確認を` }),
+        logHint: pickLang(await getPromptLang(), { en: 'Agent Team bar › Commander; integrate entries in the engine log', ja: 'エージェントチームのバー › マネージャー / engine log の integrate 行' }),
       })
     }
     // GIVE UP THE LOOP, NOT RECOVERY (完了条件2, 2026-07-20). Returning here forever is
@@ -9410,6 +9426,7 @@ export const fireFatalNotifications = (
   // dep set) — runEnginePass's full deps satisfy this. `notify` is optional.
   deps: Pick<OrchestratorDeps, 'isAlive'> & Pick<AnomalyDeps, 'notify'>,
   now: number,
+  lang: PromptLang = 'en',
 ): void => {
   const notify = deps.notify
   const push = (n: SwarmFatalNotification): void => {
@@ -9436,12 +9453,12 @@ export const fireFatalNotifications = (
     if (a.kind !== 'rework-exhausted') continue
     current.set(`rework-exhausted:${a.ref}`, {
       event: 'rework-exhausted',
-      detail: `差し戻し上限を超過し 'blocked' に退避しました（review と doing の間を ${a.attempts ?? '?'} 回往復）。`,
+      detail: pickLang(lang, { en: `The card was paused after reaching its rework limit (${a.attempts ?? "?"} review/rework cycles).`, ja: `差し戻し上限を超過し 'blocked' に退避しました（review と doing の間を ${a.attempts ?? '?'} 回往復）。` }),
       projectPath: engine.path,
       taskId: a.ref,
       branch: a.branch,
       taskTitle: a.taskTitle,
-      logHint: "Board の 'blocked' 列のカードを確認し、手動で対応してください。",
+      logHint: pickLang(lang, { en: 'Check the paused card on the Board and decide how to continue.', ja: "Board の 'blocked' 列のカードを確認し、手動で対応してください。" }),
     })
   }
 
@@ -9453,13 +9470,13 @@ export const fireFatalNotifications = (
     if (a.kind !== 'review-panel-failed') continue
     current.set(`review-panel-failed:${a.ref}`, {
       event: 'review-panel-failed',
-      detail: `敵対レビューのパネルが ${a.attempts ?? '?'} 回連続で決着せず(decisive 0票/過半数未達)、統合を保留して review に凍結しました(worker の差し戻しカウントは消費しません)。`,
+      detail: pickLang(lang, { en: `The review panel was inconclusive ${a.attempts ?? "?"} times (no decisive votes or no majority). Integration is withheld and the card stays in review; this does not consume worker rework attempts.`, ja: `敵対レビューのパネルが ${a.attempts ?? '?'} 回連続で決着せず(decisive 0票/過半数未達)、統合を保留して review に凍結しました(worker の差し戻しカウントは消費しません)。` }),
       projectPath: engine.path,
       taskId: a.ref,
       branch: a.branch,
       taskTitle: a.taskTitle,
       logHint:
-        'commander の reviews(棄権内訳 abstainSummary)と engine log を確認してください。新しいコミットが積まれると再レビューが自動再開します。',
+        pickLang(lang, { en: 'Check commander reviews, abstention details and the engine log. New commits allow a fresh review.', ja: 'commander の reviews(棄権内訳 abstainSummary)と engine log を確認してください。新しいコミットが積まれると再レビューが自動再開します。' }),
     })
   }
 
@@ -9475,13 +9492,13 @@ export const fireFatalNotifications = (
     const shown = files.slice(0, 3).join(', ') + (files.length > 3 ? ` 他${files.length - 3}件` : '')
     current.set(`high-risk-hold:${a.ref}`, {
       event: 'high-risk-hold',
-      detail: `高リスクパス(リリース/CI/署名/依存/secrets 系)に触れるため自動統合を保留しました: ${shown}`,
+      detail: pickLang(lang, { en: `Automatic integration is withheld for high-risk release, CI, signing, dependency or secret-related changes: ${shown}`, ja: `高リスクパス(リリース/CI/署名/依存/secrets 系)に触れるため自動統合を保留しました: ${shown}` }),
       projectPath: engine.path,
       taskId: a.ref,
       branch: a.branch,
       taskTitle: a.taskTitle,
       logHint:
-        '差分を確認し、問題なければ社長に「マージして」と伝えてください(社長がマネージャーに手動統合を頼みます)。エンジンはこのカードを自動では統合しません。',
+        pickLang(lang, { en: 'Inspect the diff and ask the president to merge if appropriate. The engine will not integrate this card automatically.', ja: '差分を確認し、問題なければ社長に「マージして」と伝えてください(社長がマネージャーに手動統合を頼みます)。エンジンはこのカードを自動では統合しません。' }),
     })
   }
 
@@ -9513,9 +9530,9 @@ export const fireFatalNotifications = (
     if (doing.length > 0) {
       current.set('all-workers-down', {
         event: 'all-workers-down',
-        detail: `稼働中のワーカーが0になりました（doing ${doing.length}件が宙吊り — 全ワーカーが crash/stall で停止）。`,
+        detail: pickLang(lang, { en: `All workers stopped; ${doing.length} in-progress cards have no active worker.`, ja: `稼働中のワーカーが0になりました（doing ${doing.length}件が宙吊り — 全ワーカーが crash/stall で停止）。` }),
         projectPath: engine.path,
-        logHint: '司令塔ペインの engine log と Board の doing 列を確認してください。',
+        logHint: pickLang(lang, { en: 'Check the commander engine log and in-progress Board cards.', ja: '司令塔ペインの engine log と Board の doing 列を確認してください。' }),
       })
     }
   }
@@ -9548,6 +9565,12 @@ export const runEnginePass = async (
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps,
 ): Promise<void> => {
   if (engine.passInFlight) return
+  if (deps.hasAccess && !await deps.hasAccess()) {
+    // Pause in memory. Keep intent, worktrees, transcripts and in-flight work.
+    engine.running = false
+    engine.overseer.enabled = false
+    return
+  }
   engine.passInFlight = true
   try {
     // The dispatch pass (monitor → promote → recover → fill) shares the board + worker
@@ -9589,7 +9612,7 @@ export const runEnginePass = async (
       // and fully guarded, so a notification fault can never disturb dispatch /
       // integrate / detect (and a NORMAL pass with no fatal event notifies nothing).
       try {
-        fireFatalNotifications(engine, tasks, deps, Date.now())
+        fireFatalNotifications(engine, tasks, deps, Date.now(), await getPromptLang())
       } catch {
         /* belt-and-suspenders: never let escalation break a pass */
       }
@@ -9903,6 +9926,7 @@ export const maybeAutoStartDrain = async (
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps,
   now: number = Date.now(),
 ): Promise<boolean> => {
+  if (deps.hasAccess && !await deps.hasAccess()) return false
   // No auto-start when: already draining / mid-pass (the running loop owns refills — don't
   // double-drive), OR the owner explicitly paused (manualStop — OFF must stick, 条件2).
   if (engine.running || engine.passInFlight || engine.manualStop) return false
@@ -10746,6 +10770,7 @@ export const resumeEngines = async (
     spawnManager?: (o: { projectPath: string }) => Promise<unknown>
   },
 ): Promise<{ resumed: string[]; suppressed: boolean }> => {
+  if (deps.hasAccess && !await deps.hasAccess()) return { resumed: [], suppressed: true }
   const now = opts?.now ?? Date.now()
   const appVersion = opts?.appVersion ?? APP_VERSION
   // card 3 — reconcile-first probe set (built from deps so the module stays
@@ -10784,7 +10809,7 @@ export const resumeEngines = async (
     await createSwarmFatalNotification({
       event: 'engine-resume-suppressed',
       detail:
-        '起動履歴を保存できなかったため(ディスク書き込み失敗)、安全のためエージェントチームの自動再開を見送りました(手動でオンにできます)。',
+        pickLang(await getPromptLang(), { en: 'Automatic restart was skipped because startup history could not be saved. Check local storage; you can enable the Agent Team manually.', ja: '起動履歴を保存できなかったため(ディスク書き込み失敗)、安全のためエージェントチームの自動再開を見送りました(手動でオンにできます)。' }),
     }).catch(() => {})
     return { resumed: [], suppressed: true }
   }
@@ -10792,7 +10817,7 @@ export const resumeEngines = async (
     const recent = items.filter((r) => r.appVersion === appVersion && now - r.at <= 10 * 60 * 1000)
     await createSwarmFatalNotification({
       event: 'engine-resume-suppressed',
-      detail: `同じバージョンで短時間に${recent.length}回起動したため、念のためエージェントチームの自動再開を見送りました。アプリを開き直しただけの場合は問題ありません — 手動でオンにできます。`,
+      detail: pickLang(await getPromptLang(), { en: `Automatic restart was skipped after ${recent.length} rapid starts of the same version. Reopening the app alone is not an error; you can enable the Agent Team manually.`, ja: `同じバージョンで短時間に${recent.length}回起動したため、念のためエージェントチームの自動再開を見送りました。アプリを開き直しただけの場合は問題ありません — 手動でオンにできます。` }),
     }).catch(() => {})
     return { resumed: [], suppressed: true }
   }
@@ -10879,8 +10904,8 @@ export const resumeEngines = async (
               event: 'engine-resume-suppressed',
               projectPath,
               detail:
-                'claude をすぐに使えなかったため、司令官の卓を復帰できませんでした' +
-                `(${pre.body?.error ?? '理由不明'})。worker が動いていても、完了分を統合する司令官がいない状態です — 画面下のエージェントチームのバーから司令官を立て直してください。`,
+                pickLang(await getPromptLang(), { en: `The commander could not be restored because Claude was unavailable (${pre.body?.error ?? "unknown reason"}). Workers may still be running without a commander to integrate their work. Restart the commander from the Agent Team bar.`, ja: 'claude をすぐに使えなかったため、司令官の卓を復帰できませんでした' +
+                `(${pre.body?.error ?? '理由不明'})。worker が動いていても、完了分を統合する司令官がいない状態です — 画面下のエージェントチームのバーから司令官を立て直してください。` }),
             }).catch(() => {})
           }
         } catch (e) {
@@ -10888,8 +10913,8 @@ export const resumeEngines = async (
             event: 'engine-resume-suppressed',
             projectPath,
             detail:
-              `司令官の卓を復帰できませんでした(${e instanceof Error ? e.message : String(e)})。` +
-              'worker が動いていても、完了分を統合する司令官がいない状態です — 画面下のエージェントチームのバーから司令官を立て直してください。',
+              pickLang(await getPromptLang(), { en: `The commander could not be restored (${e instanceof Error ? e.message : String(e)}). Workers may still be running without a commander to integrate their work. Restart the commander from the Agent Team bar.`, ja: `司令官の卓を復帰できませんでした(${e instanceof Error ? e.message : String(e)})。` +
+              'worker が動いていても、完了分を統合する司令官がいない状態です — 画面下のエージェントチームのバーから司令官を立て直してください。' }),
           }).catch(() => {})
         }
       }
@@ -10912,8 +10937,8 @@ export const resumeEngines = async (
           event: 'engine-resume-suppressed',
           projectPath,
           detail:
-            'claude をすぐに使えなかったため、このプロジェクトのエージェントチームの自動再開を見送りました' +
-            `(${pre.body?.error ?? '理由不明'})。画面下のエージェントチームのバーから手動でオンにできます。`,
+            pickLang(await getPromptLang(), { en: `Automatic restart was skipped because Claude was unavailable (${pre.body?.error ?? "unknown reason"}). Enable the Agent Team manually from the bottom bar when ready.`, ja: 'claude をすぐに使えなかったため、このプロジェクトのエージェントチームの自動再開を見送りました' +
+            `(${pre.body?.error ?? '理由不明'})。画面下のエージェントチームのバーから手動でオンにできます。` }),
         }).catch(() => {})
         continue
       }
@@ -11007,7 +11032,7 @@ export const resumeEngines = async (
   if (resumed.length) {
     await createSwarmInfoNotification({
       event: 'engine-resumed',
-      detail: `再起動後、${resumed.length}件のプロジェクトで自動運転を再開しました。`,
+      detail: pickLang(await getPromptLang(), { en: `Automatic work resumed in ${resumed.length} projects after restart.`, ja: `再起動後、${resumed.length}件のプロジェクトで自動運転を再開しました。` }),
     }).catch(() => {})
   }
   return { resumed, suppressed: false }

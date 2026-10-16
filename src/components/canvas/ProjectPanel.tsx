@@ -2793,6 +2793,7 @@ export const ProjectPanel = (props: Props) => {
       // an id swap can never inherit the prior project's doc/adopted/cache state.
       <SharedProjectBody
         key={props.shared.id}
+        ownerFeatures={props.ownerFeatures}
         collabProjectId={props.shared.id}
         label={props.shared.label}
         onClose={props.onClose}

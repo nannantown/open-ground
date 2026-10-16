@@ -106,7 +106,8 @@ const SEAT_STYLE = { flex: '1 0 360px', minWidth: 360, minHeight: 220 } as const
 const WORKER_SEAT_STYLE = { flex: '1 0 240px', minWidth: 240, minHeight: 260 } as const
 // The manager's seat shows its recent conversation (2026-09-24) — same shape
 // as a folded worker seat, a little wider for the start/stop button.
-const MANAGER_SEAT_STYLE = { flex: '1 0 280px', minWidth: 280, minHeight: 220 } as const
+// Fit the actual row width, including the Owner assistant's reserved corner.
+const MANAGER_SEAT_STYLE = { flex: '1 1 280px', minWidth: 'min(280px, 100%)', minHeight: 220 } as const
 
 // The single commander (司令官) CONVERSATION session, remembered client-side —
 // the exact same shape + lifecycle as the supply session (no worktree; it runs

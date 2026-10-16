@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { setSettings } from './store'
 import { mkdtemp, mkdir, rm, writeFile, readdir, readFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -35,6 +36,7 @@ beforeEach(async () => {
   realHome = process.env.HOME
   realEnv = process.env.DISABLE_AUTO_COMPACT
   process.env.HOME = home
+  await setSettings({ language: 'ja' })
   // Literal key, never `delete process.env[someVar]`: a COMPUTED delete is
   // exactly what the repo guard (testHomeEnvGuard) forbids, because the same
   // shape could resolve to HOME / OPENGROUND_HOME and silently un-isolate the

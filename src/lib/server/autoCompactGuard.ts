@@ -1,3 +1,4 @@
+import { getPromptLang } from './promptLang'
 // Native auto-compact non-interference check.
 //
 // The context design delegates compression ENTIRELY to Claude Code's own
@@ -96,9 +97,12 @@ export const checkAutoCompact = async (): Promise<AutoCompactStatus> => {
     disabledBy.push('env')
   }
 
+  const lang = await getPromptLang()
   if (disabledBy.length === 0) {
-    return { ok: true, disabledBy, detail: OK_DETAIL }
+    return { ok: true, disabledBy, detail: lang === 'ja' ? OK_DETAIL : 'Native auto-compaction is enabled. OPEN GROUND does not replace it.' }
   }
+  if (lang === 'en') return { ok: false, disabledBy, detail: `Claude auto-compaction is disabled by ${disabledBy.map((source) => source === 'env' ? AUTO_COMPACT_ENV : `~/.claude/settings.json (${AUTO_COMPACT_SETTING})`).join(' and ')}. Long conversations will not compact automatically. OPEN GROUND only clears context at task boundaries; it does not provide replacement compaction.` }
+
 
   const where =
     disabledBy.length === 2

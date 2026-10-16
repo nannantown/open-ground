@@ -1,3 +1,4 @@
+import { getPromptLang, type PromptLang } from './promptLang'
 // ownerDeskLimit — "your own conversation stopped, and nobody was going to tell
 // you". The model-limit watch for the OWNER'S conversation desks: the Terminal
 // tab's panes, Board 実行, the commander / supply desks — every claude PTY the
@@ -325,6 +326,7 @@ export const buildOwnerDeskLimitMergedDetail = (stopped: readonly StoppedDesk[])
  *  whether that is one desk or six. Pure + exported for the test. */
 export const buildOwnerDeskLimitNotification = (
   stopped: readonly StoppedDesk[],
+  lang: PromptLang,
 ): SwarmInfoNotification => {
   const one = stopped.length === 1 ? stopped[0] : null
   // The PROJECT root, so the bell row can open the right project — a worktree path
@@ -337,7 +339,9 @@ export const buildOwnerDeskLimitNotification = (
   const projectPath = paths.size === 1 ? (stopped[0]?.project?.path ?? '') : ''
   return {
     event: 'session-limit',
-    detail: one
+    detail: lang === 'en'
+      ? `The AI model reached its usage limit. ${stopped.length} conversation(s) stopped (${stopped.map((d) => [d.project?.label, d.desk].filter(Boolean).join(' / ')).filter(Boolean).join(', ')}). They will not resume simply by waiting. ` + (stopped.every((d) => d.kind === 'model-switchable') ? 'Enter /model in each stopped conversation and choose another model to continue.' : 'Try another model if one is available, or wait for your usage allowance to recover. Check the conversation for the provider’s reset information.')
+      : one
       ? buildOwnerDeskLimitDetail(one.project?.label ?? null, one.desk, one.kind)
       : buildOwnerDeskLimitMergedDetail(stopped),
     ...(projectPath ? { projectPath } : {}),
@@ -550,7 +554,7 @@ const runOwnerDeskLimitPassInner = async (
       })),
     )
     try {
-      await deps.notify(buildOwnerDeskLimitNotification(stopped))
+      await deps.notify(buildOwnerDeskLimitNotification(stopped, await getPromptLang()))
     } catch {
       // A FAILED write is not a delivered notification. `notified` is set before
       // the await so a concurrent pass cannot double-fire — but leaving it set

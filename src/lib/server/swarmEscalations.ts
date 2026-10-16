@@ -1,3 +1,4 @@
+import { getPromptLang, type PromptLang } from './promptLang'
 // Human questions are persisted until explicitly answered or dismissed.
 // Answers are persisted before delivery to a live worker or its next-dispatch queue.
 // No Persona training or proxy answer is involved.
@@ -670,9 +671,9 @@ export const openEscalation = async (
  *  what the president's desk is told when it opens with the question still
  *  waiting (supplyNotice.catchUpSupplyDesks). Leads with the plain-language text
  *  when the raiser supplied one. Pure. */
-export const ownerQuestionDetail = (e: Pick<Escalation, 'plainQuestion' | 'question'>): string => {
+export const ownerQuestionDetail = (e: Pick<Escalation, 'plainQuestion' | 'question'>, lang: PromptLang = 'en'): string => {
   const teaser = e.plainQuestion || e.question
-  return `質問が届いています: ${teaser.length > 120 ? `${teaser.slice(0, 120)}…` : teaser}`
+  return `${lang === 'ja' ? '質問が届いています' : 'A question needs your answer'}: ${teaser.length > 120 ? `${teaser.slice(0, 120)}…` : teaser}`
 }
 
 const notifyOwnerOfQuestion = async (e: Escalation, deps?: OpenEscalationDeps): Promise<void> => {
@@ -680,7 +681,7 @@ const notifyOwnerOfQuestion = async (e: Escalation, deps?: OpenEscalationDeps): 
     const notify = deps?.notify ?? createSwarmInfoNotification
     await notify({
       event: 'escalation-open',
-      detail: ownerQuestionDetail(e),
+      detail: ownerQuestionDetail(e, await getPromptLang()),
       projectPath: e.projectPath,
       ...(e.taskId ? { taskId: e.taskId } : {}),
       ...(e.branch ? { branch: e.branch } : {}),

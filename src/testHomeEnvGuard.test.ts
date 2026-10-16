@@ -1393,6 +1393,10 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'writes-elsewhere',
     why: "this scanner: quotes ~/.claude paths in the table above and in its own prose, and reads sources to check them. Its ONLY mutations are the repo-root listing fence's teeth — a mkdtemp under REPO_PROBE_PREFIX at the repo root, removed in a finally — so nothing it writes is under any home. Declared rather than exempted: the raw-write rule runs on this tier too, so it still cannot grow a write aimed at the real Claude home",
   },
+  'scripts/verify-product-data.mjs': {
+    tier: 'writes-elsewhere',
+    why: 'Bundled-server restore acceptance: HOME, CLAUDE_CONFIG_DIR, OPENGROUND_HOME and project paths all descend from a canonical mkdtemp sandbox; child servers use fake Claude and lockdown mode. Only that sandbox is copied or removed; the installed app and real user data are untouched.',
+  },
   'scripts/sandbox-probe.ts': {
     tier: 'writes-elsewhere',
     why: 'seeds do-not-clobber fixtures into a THROWAWAY $HOME so the sandbox deny-probes land on fakes; the real ~/.claude is never a write target (see its header)',
@@ -1461,10 +1465,6 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
   'src/components/canvas/Toolbar.tsx': {
     tier: 'read-only',
     why: 'JSX comment naming ~/.claude/skills next to the button that opens the global-skills panel',
-  },
-  'src/components/canvas/manual/manualContent.tsx': {
-    tier: 'read-only',
-    why: "the in-app manual's bilingual prose: 'Claude Code keeps state under ~/.claude, never inside your repo'",
   },
   'src/i18n/messages/projectPanel.ts': {
     tier: 'read-only',

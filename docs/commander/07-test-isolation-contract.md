@@ -244,6 +244,12 @@ tier と理由付きで載っていなければならない。**各 tier の主�
 | `read-only` | 14 | 読むだけで、どこにも書かない | fs 変異呼び出しが**ゼロ** かつ **import 節に変異名が無い**こと(別名 import 対策) |
 | `writes-elsewhere` | 19(うち 1 は sweep 自身) | 変異はするが実 `~/.claude` には向かない(使い捨て $HOME / choke point 配下の OG home / sanctioned probe prefix 配下の repo 作業ツリー) | 下の全 tier 共通ルールのみ(理由文が残りを担う) |
 
+2026-10-15: `scripts/verify-product-data.mjs` を `writes-elsewhere` に追加。
+canonicalな使い捨てディレクトリ配下へHOME・Claude設定・アプリデータ・プロジェクトを固定し、
+fake Claudeと業務モードで複製復元を検証する。実データ・インストール済みアプリは触らない。
+旧保存場所の説明を修正したmanualはhome anchorでなくなったため表から除外した。
+上表の件数は初回記録で、現行の集合はテストの `CLAUDE_ANCHORS` が正典。
+
 > **sweep 自身の tier は 2026-07-21 に `read-only` → `writes-elsewhere` へ動いた**。
 > origin/main へ rebase した時点で、main 側の repo-root listing フェンス teeth が
 > 同じファイルに実 `mkdtempSync` を持ち込み、「fs 変異ゼロ」の申告が成立しなくなった
