@@ -24,6 +24,9 @@
   `assistantMemory.test.ts`. No record is injected into Claude's own transcript.
 
 ## 0. 契約と骨格 — 全変更の起点
+- Free/Pro/Owner feature classification (2026-10-16): `docs/PRODUCT_PLAN_FEATURES.md`.
+  Owner-facing list of existing capabilities, settings and deferred decisions;
+  this proposal does not change runtime permissions or add new paid limits.
 - Productization implementation progress (2026-10-15): `docs/PRODUCTIZATION_PROGRESS.md`.
   Current fixes and verification supersede the audit's initial unfixed status;
   release gates remain separate from implementation completion.
