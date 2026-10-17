@@ -90,7 +90,6 @@ import {
   type TabDef,
 } from '@/components/canvas/moduleRegistry'
 import { SwarmBottomBar } from '@/components/canvas/SwarmBottomBar'
-import { AssistantFloor } from '@/components/assistant/AssistantFloor'
 import { STREAM_BUDGET } from '@/lib/streamBudget'
 import { ResearchModule } from '@/components/canvas/modules/ResearchModule'
 import { customTabId, customModuleIdFromTab, isCustomTabId, type ModuleId } from '@/lib/modules/ids'
@@ -2572,9 +2571,7 @@ const OwnedProjectBody = ({
           its open/closed state and live seats survive the switch. Keyed by
           project so another project never inherits this one's seats. Gated
           here by the same predicate the Board's swarm vocabulary uses. */}
-      {/* Without the bar, the assistant's floor alone keeps the tab's
-          bottom-right controls clear of the character. */}
-      {isSwarmVisible(moduleGate) ? <SwarmBottomBar key={project.id} project={project} /> : <AssistantFloor />}
+      {isSwarmVisible(moduleGate) && <SwarmBottomBar key={project.id} project={project} />}
       </div>
       </div>
 

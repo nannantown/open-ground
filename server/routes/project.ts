@@ -1038,6 +1038,10 @@ export const projectRoutes = new Hono()
                 ...t,
                 boardColumn: mv.column,
                 done: mv.column === 'done',
+                // review→doing by hand is a send-back too: restamp, or the engine
+                // would read the worker's previous ready beat as a fresh one.
+                reworkedAt:
+                  mv.column === 'doing' && t.boardColumn === 'review' ? new Date().toISOString() : t.reworkedAt,
                 // Leaving review invalidates the commander engine's conflict stamp
                 // (Card③) — a rework or completion supersedes it, mirroring reviewedBy.
                 integrationConflict: mv.column === 'review' ? t.integrationConflict : undefined,
@@ -1116,6 +1120,9 @@ export const projectRoutes = new Hono()
                 boardColumn: column,
                 done: false,
                 reworkCount: count,
+                // The send-back instant — the engine's only persisted way to tell
+                // the worker's NEXT ready beat from the stale one (types.ts).
+                reworkedAt: new Date().toISOString(),
                 integrationConflict: undefined,
                 // THE THIRD CLEAR SITE. A 差し戻し puts the card back into play,
                 // which is the owner changing their mind about 「見送る」 just as

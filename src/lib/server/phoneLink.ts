@@ -45,7 +45,8 @@ import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assist
 import { listProposals, onProposalsChanged } from './assistantProposals'
 import { langOf, pick } from './promptLang'
 import { e2eKeyOf, open as openSealed, seal, sealTag } from './phoneLinkSeal'
-import { appendAssistantCall, assistantEntriesFor, readAssistantConfig, readAssistantLog, readAssistantMemory } from './assistantMemory'
+import { appendAssistantCall, assistantEntriesFor, readAssistantConfig, readAssistantLog, readAssistantMemory, saveAssistantPhoto, sniffPhoto } from './assistantMemory'
+import { awaitPhoto, dropAllPhotos, dropPhoto, PHOTO_PARTS_MAX, takePhotoPart } from './phonePhoto'
 
 /** The relay the owner deployed (worker/wrangler.phone.jsonc). Override with
  *  OPENGROUND_PHONE_RELAY_URL at pairing time (tests, a self-hosted relay). */
@@ -98,7 +99,7 @@ export const LEGACY_V1_UNTIL = Date.parse('2026-11-30T00:00:00Z')
  *  refused (a say is answered `stale`): the relay cannot hold a say and use it later. */
 export const SEALED_MAX_AGE_MS = 5 * 60_000
 /** Content frames sealed on a v2 pairing (control frames stay plain). */
-const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history', 'call-note', 'assistant-proposals', 'assistant-proposal'])
+const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history', 'call-note', 'assistant-proposals', 'assistant-proposal', 'photo-part'])
 
 const EVENT_TEXT_MAX = 8000
 const TAIL_TICK_MS = 1000
@@ -317,7 +318,9 @@ export interface PhoneLinkDeps {
   pushKey?: () => Promise<PushKey | null>
   sendPush?: (key: PushKey, target: PushTarget) => Promise<PushResult>
   /** The cross-project assistant's turn (tests). */
-  assistant?: (text: string) => Promise<AssistantAnswer>
+  assistant?: (text: string, photo?: string) => Promise<AssistantAnswer>
+  /** How long a say waits for its photo's missing parts (tests). */
+  photoWaitMs?: number
   /** Start the assistant's session ahead of a line — passed only by the live
    *  link (connect), so a test's frame never starts a real claude. */
   warm?: () => Promise<void>
@@ -438,7 +441,8 @@ const sendProjects = async (st: LinkState, force = false): Promise<void> => {
   const frame = {
     type: 'projects',
     selected: chosen?.id ?? null,
-    ...(st.cfg.v === 2 ? { callNote: true } : {}),
+    // `photo`: this Mac puts a phone's `photo-part`s together (docs/PHONE_LINK.md "Photos").
+    ...(st.cfg.v === 2 ? { callNote: true, photo: true } : {}),
     projects: [assistant, ...all.map(({ id, name, desk }) => ({ id, name, desk }))],
   }
   const body = JSON.stringify(frame)
@@ -616,7 +620,14 @@ const assistantHistory = async (st: LinkState, f: Record<string, unknown>, id: s
   }
   // The first page carries the proposals made from the phone (their frames and buttons).
   const head = before === undefined && projectId === ASSISTANT_ID ? { memory: await readAssistantMemory(), ...(await readAssistantConfig()), proposals: listProposals({ via: 'phone' }) } : {}
-  const all = assistantEntriesFor(await readAssistantLog(), projectId).filter((e) => before === undefined || e.at < before)
+  // Which model wrote an answer stays in the Mac's log: the phone's frames keep their shape.
+  const all = assistantEntriesFor(await readAssistantLog(), projectId)
+    .filter((e) => before === undefined || e.at < before)
+    .map((e) => {
+      const { model, ...shown } = e
+      void model
+      return shown
+    })
   let bytes = Buffer.byteLength(JSON.stringify(head))
   let from = all.length
   while (from > 0) {
@@ -649,28 +660,51 @@ export const flushAssistantOutbox = (st: LinkState, deps: PhoneLinkDeps = {}): v
 
 /** A say to the assistant (phoneAssistant.ts): answered on the Mac and sent to
  *  the phone only — never typed into a desk, never shown on a screen. */
-const assistantSay = async (st: LinkState, id: string | undefined, text: string, deps: PhoneLinkDeps): Promise<void> => {
+const assistantSay = async (st: LinkState, id: string | undefined, text: string, deps: PhoneLinkDeps, photoParts?: unknown): Promise<void> => {
   const ack = (state: 'queued' | 'delivered' | 'rejected', extra: Record<string, unknown> = {}) =>
     sendAssistant(st, { type: 'ack', ...(id !== undefined ? { id } : {}), state, ...extra }, deps)
   const line = text.trim()
-  if (!line) return void ack('rejected', { reason: 'empty' })
-  if (line.length > ASSISTANT_SAY_MAX) return void ack('rejected', { reason: 'too-long', max: ASSISTANT_SAY_MAX })
+  // A photo comes in `photoParts` parts sent ahead under this say's id (phonePhoto.ts).
+  const withPhoto = photoParts !== undefined
+  const refuse = (reason: string, extra: Record<string, unknown> = {}) => {
+    if (withPhoto && id !== undefined) dropPhoto(id)
+    ack('rejected', { reason, ...extra })
+  }
+  if (!line && !withPhoto) return refuse('empty')
+  if (line.length > ASSISTANT_SAY_MAX) return refuse('too-long', { max: ASSISTANT_SAY_MAX })
   // An old plaintext (v1) pairing never reaches the assistant: it reads files, and
   // v1 frames are unsealed and replayable.
-  if (st.cfg.v !== 2) return void ack('rejected', { reason: 'pair-again' })
+  if (st.cfg.v !== 2) return refuse('pair-again')
+  if (withPhoto && (id === undefined || !Number.isInteger(photoParts) || (photoParts as number) < 1 || (photoParts as number) > PHOTO_PARTS_MAX)) return refuse('photo-bad')
   // Work mode: nothing would go out, so nothing is asked either.
-  if (isLockdownEnabledSync()) return
+  if (isLockdownEnabledSync()) return withPhoto && id !== undefined ? dropPhoto(id) : undefined
   // Full (one answering, one waiting): just `busy`, nothing queued or echoed.
-  if (assistantBusy()) return void ack('rejected', { reason: 'busy' })
+  if (assistantBusy()) return refuse('busy')
+  let photo: string | undefined
+  if (withPhoto) {
+    const got = await awaitPhoto(id!, photoParts as number, deps.photoWaitMs)
+    // The wait can be long: what was checked before it is checked again.
+    if (st.retired || isLockdownEnabledSync()) return
+    if (assistantBusy()) return void ack('rejected', { reason: 'busy' })
+    if ('error' in got) return void ack('rejected', { reason: got.error })
+    // Its bytes decide what it is (never what the phone says), as from the screen.
+    const ext = sniffPhoto(got.bytes)
+    if (!ext) return void ack('rejected', { reason: 'photo-bad' })
+    try {
+      photo = await saveAssistantPhoto(got.bytes, ext)
+    } catch {
+      return void ack('rejected', { reason: 'mac-error' })
+    }
+  }
   // The owner has just spoken: no push until the answer is out (see flushPush).
   const hold = { at: Date.now() }
   st.says.add(hold)
   ack('queued', { projectId: ASSISTANT_ID })
-  sendAssistant(st, assistantTalk(st, 'owner', { text: line, at: Date.now() }, id), deps)
+  sendAssistant(st, assistantTalk(st, 'owner', { text: line, ...(photo ? { photo } : {}), at: Date.now() }, id), deps)
   // One final ack, whatever happens after the answer came back. The phone hears
   // plain words only (plainAssistantError), never an internal message.
   // Settings unreadable: English, but the final ack still goes.
-  const a = await (deps.assistant ? deps.assistant(line) : askAssistant(line, { clientId: id })).catch(async (e: unknown) =>
+  const a = await (deps.assistant ? deps.assistant(line, photo) : askAssistant(line, { clientId: id, ...(photo ? { photo } : {}) })).catch(async (e: unknown) =>
     plainAssistantError(e, await getSettings().then(langOf, () => 'en' as const)),
   )
   if (a instanceof AssistantFailure) {
@@ -767,9 +801,19 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
     }
     return
   }
+  if (f.type === 'photo-part') {
+    // Sealed only (v2): on v1 the parts would cross the relay readable.
+    if (st.cfg.v === 2 && !st.retired && !isLockdownEnabledSync()) takePhotoPart(f)
+    return
+  }
   if (f.type !== 'say') return
   const text = typeof f.text === 'string' ? f.text : ''
-  if (f.projectId === ASSISTANT_ID) return assistantSay(st, id, text, deps)
+  if (f.projectId === ASSISTANT_ID) return assistantSay(st, id, text, deps, f.photoParts)
+  // Photos go to the assistant only (the president's desk takes one typed line).
+  if (f.photoParts !== undefined) {
+    if (id !== undefined) dropPhoto(id)
+    return void ack('rejected', { reason: 'photo-assistant-only' })
+  }
   // Empty once the mode characters are dropped ('/', '!!'): it would never land.
   if (!ownerSayLine(text)) return void ack('rejected', { reason: 'empty' })
   if (ownerSayTooLong(text)) return void ack('rejected', { reason: 'too-long', max: SUPPLY_OWNER_SAY_MAX })
@@ -837,7 +881,7 @@ let lastDropWarn = 0
  *  Logs never carry the content. */
 const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
   const inner = openSealed(key, 'p2m', f.box)
-  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history' || inner.type === 'call-note' || inner.type === 'assistant-proposal')) {
+  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history' || inner.type === 'call-note' || inner.type === 'assistant-proposal' || inner.type === 'photo-part')) {
     // The relay can send these at will: one line a minute, never the frame.
     if (Date.now() - lastDropWarn > 60_000) {
       console.warn(
@@ -849,14 +893,23 @@ const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, un
     }
     return null
   }
+  // The relay counts photo parts apart by the OUTER type: a frame labelled one
+  // way outside and the other inside is not the phone's (it never sends one).
+  if ((f.type === 'photo-part') !== (inner.type === 'photo-part')) return null
   const id = typeof inner.id === 'string' && inner.id.length > 0 && inner.id.length <= 100 ? inner.id : null
   if (!id) return null
+  // A say refused here never reaches assistantSay: its photo's parts go now.
+  const dropParts = () => inner.type === 'say' && inner.photoParts !== undefined && dropPhoto(id)
   const now = Date.now()
   const ts = inner.ts
   if (!(typeof ts === 'number' && Math.abs(now - ts) <= SEALED_MAX_AGE_MS)) {
     if (inner.type === 'say' || inner.type === 'call-note') send(st, { type: 'ack', id, state: 'rejected', reason: 'stale' })
+    dropParts()
     return null
   }
+  // A photo part is not written down: kept by (sayId, part), a second copy only
+  // replaces itself, and its say (whose id IS written down) is what acts.
+  if (inner.type === 'photo-part') return st.retired ? null : inner
   const seen = Object.fromEntries(Object.entries(st.cfg.seenIds ?? {}).filter(([, t]) => typeof t === 'number' && now - t <= SEALED_MAX_AGE_MS))
   if (id in seen && inner.type !== 'call-note') return null // a second time: the first one was answered
   st.cfg = { ...st.cfg, seenIds: { ...seen, [id]: ts } }
@@ -868,10 +921,12 @@ const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, un
   } catch {
     // Not acted on — but a say is told so, or the phone waits for nothing.
     if (inner.type === 'say' || inner.type === 'call-note') send(st, { type: 'ack', id, state: 'rejected', reason: 'mac-error' })
+    dropParts()
     return null
   }
   if (inner.type === 'say' && typeof inner.projectId !== 'string') {
     send(st, { type: 'ack', id, state: 'rejected', reason: 'no-project' })
+    dropParts()
     return null
   }
   return inner
@@ -1065,6 +1120,7 @@ export const stopPhoneLink = (): void => {
   if (!st) return
   st.stopped = true
   st.retired = true
+  dropAllPhotos()
   clearTimeout(st.retry)
   clearInterval(st.loop)
   clearTimeout(st.pushTimer)

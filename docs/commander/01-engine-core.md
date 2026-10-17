@@ -409,11 +409,31 @@ worker は2種類ある:
   **生きた worker のカードを奪えない**理由が3つ揃っている:
   ①数えられた worker のカードは対象外(そのカードは monitor が持つ)
   ②`readyToMerge` + commit(引き渡しの合図と実体の両方)
-  ③`reworkCount` が 0 のものだけ — 心拍の ready は **粘る**(`swarm-beat.sh` は
-  一度書いたら消さない)ので、差し戻されたカードは再作業中でも ready を返し続ける。
-  live monitor はこれを `reworkAt` の時刻で見分けるが、**それは in-memory なので
-  再起動で消える** — つまりこの掃除が必要な場面ではまさに使えない。だから
-  「一度も差し戻されていない」という**永続する回数**を判別に使っている。
+  ③差し戻されたことのあるカード(`reworkedAt` あり)は、心拍が**最後の差し戻し時刻
+  `reworkedAt` より新しい** ready のときだけ(`readySinceSendBack`)— 差し戻しは心拍ファイルに
+  触れないので、worker が次に打つまで前の回の ready が残る。live monitor はこれを in-memory の
+  `reworkAt` で見分けるが、それは再起動で消え、**数えられていない worker には最初から無い**。
+  だから時刻はカードに持たせる — `{rework}` API・`setColumn` の review→doing・Board の
+  review→doing ドラッグの3経路が刻む(swarm-board.sh は刻まない)。`reworkCount` があって
+  `reworkedAt` の無いカード(2026-10-07 以前)は従来どおり対象外。
+  ⚠ **2026-10-07 実測(カード a1a3d9ea)**: 以前の③は「`reworkCount` が 0 のものだけ」だった。
+  司令官が手で立てた worker(`POST /api/swarm/worker` — 数えられない)の 1 回目の完了は
+  この掃除が 12:10 に回収、12:18 に差し戻し、12:22 に再完了(新しい ready + 2 commit)——
+  そこから 14:18 にオーナーが聞くまで doing のまま、司令官には何も届かなかった。
+- **`noticeStrandedReady`**(2d、取りこぼしの網・2026-10-07)— 上の道筋のどれが漏れても
+  結果で捕まえる: doing の swarm カードで `readySinceSendBack` が真のまま
+  `STRANDED_READY_NOTICE_MS`(3分)動かず、branch に commit があれば、司令官の卓へ
+  一言知らせる(`deps.tellManager` = `defaultNotifyManagerReady` の `{text}` 形 —
+  完了通知と同じ「生成中・打ちかけ・メニュー表示中には書かない」規則)。見るのは
+  `STRANDED_READY_CHECK_MS`(30秒)に1回(心拍の読みは repo キーがキャッシュされるので軽いが、取りこぼし確定後の
+  commit 数の git と卓の記録読みを、通知を受け取れない卓のために 3 秒ごとに回さないため)、
+  届かなければ次の回に再試行、届いたら `STRANDED_READY_RENOTICE_MS`(15分)ごとに繰り返す。
+  数えられた worker で monitor が差し戻しを見ている(`reworkAt`)ものは、それより新しい心拍で
+  なければ数えない(カードの刻印を通らない差し戻しへの「review に移して」を防ぐ)。同じく
+  同じ branch に再配車された worker(`reenteredAt`)は、再配車より古い心拍を前任のものとして
+  無視する(monitor と同じ `heartbeatPredatesReentry`)。
+  **カードは動かさない**(動かすべき道が動かさなかったのは司令官が見るべき不具合)。
+  commit 数は 3 分経ってからだけ読む。
 - **`unowned-doing` 異常**(`orphan-doing` の兄弟)— 同じ「誰も居ない doing」で、
   **worktree が残っている**側。届いていない残りがここに出る。
   ⚠ `AnomalyDeps.deskOccupies`(両プールに生きた卓が居るか)で必ず絞ること。

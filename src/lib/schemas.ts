@@ -162,6 +162,10 @@ export const ProjectTaskSchema = z.object({
   // (e.g. -99 never crosses maxReworks). .catch(undefined): junk → field drops,
   // card survives (同じ drop-the-field-never-the-card 契約)。
   reworkCount: z.number().int().nonnegative().optional().catch(undefined),
+  // When the latest 差し戻し happened (types.ts). MUST be here or the read→write
+  // round-trip strips it and a reworked card's fresh ready beat is ignored again.
+  // .catch(undefined): junk drops the field (falls back to "ignore the beat").
+  reworkedAt: z.string().optional().catch(undefined),
   // 日次燃費日報が blocked に置く改善提案カードの目印 兼 重複起票ガード
   // (types.ts参照)。MUST be in this schema: stripped on the read→write
   // round-trip, the report's Board 走査は毎回「提案なし」を見て同じカードを

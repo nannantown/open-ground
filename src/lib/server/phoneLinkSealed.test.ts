@@ -3,7 +3,7 @@
 // the REAL Mac end sends, and asserts what the relay ends up holding and what
 // reaches the desk — never "a function was called".
 import { describe, it, expect, vi, beforeEach, afterAll, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHmac, hkdfSync, randomBytes } from 'node:crypto'
@@ -35,7 +35,8 @@ import { __resetProposals, listProposals, proposeMessage } from './assistantProp
 import { openGroundHome } from './paths'
 import { setLockdownCache } from './lockdown'
 import { flushSupplyNotices, resetSupplyNoticeState } from './supplyNotice'
-import { appendAssistantEntries, readAssistantLog, clearAssistantLog, clearAssistantMemory, writeAssistantMemory } from './assistantMemory'
+import { dropAllPhotos, pendingPhotos } from './phonePhoto'
+import { appendAssistantEntries, assistantPhotoPath, readAssistantLog, clearAssistantLog, clearAssistantMemory, writeAssistantMemory } from './assistantMemory'
 
 const PROJECT = '/repo/alpha'
 const E2E = randomBytes(32).toString('base64url')
@@ -111,7 +112,7 @@ const opened = (wire: string[]) => wire.map((s) => JSON.parse(s)).map((f) => (f.
 const relayRoom = async () => {
   const { OgPhoneRelay } = (await import(/* @vite-ignore */ RELAY_MODULE)) as { OgPhoneRelay: new (ctx: unknown, env: unknown) => Room }
   const store = new Map<string, unknown>()
-  const mk = (tag: string) => ({ tag, got: [] as string[], send(s: string) { this.got.push(s) }, close() {} })
+  const mk = (tag: string) => ({ tag, got: [] as string[], closed: [] as number[], send(s: string) { this.got.push(s) }, close(code: number) { this.closed.push(code) } })
   const mac = mk('mac')
   const phone = mk('phone')
   const ctx = {
@@ -673,5 +674,186 @@ describe('sealed call records', () => {
     await handleRelayFrame(st, phoneSays(n))
     expect(await readAssistantLog()).toEqual([expect.objectContaining({ id: 'call:disk-fail', seconds: 102 })])
     expect(opened(wire).at(-1)?.inner?.state).toBe('delivered')
+  })
+})
+
+describe('sealed photos (docs/PHONE_LINK.md "Photos")', () => {
+  beforeEach(async () => { await clearAssistantLog(); await clearAssistantMemory() })
+  /** A JPEG's bytes (what sniffPhoto reads) of `size` bytes. */
+  const jpeg = (size: number) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), randomBytes(size - 4)])
+  /** What the iPhone app sends for a photo with words (PhoneLinkCore Photo.swift /
+   *  Frames.swift): 8 KB parts, each with its OWN fresh id and the say's `sayId`, then the say. */
+  const phonePhoto = (sayId: string, bytes: Buffer, text = 'これ何?') => {
+    const parts = Math.ceil(bytes.length / 8192)
+    return [
+      ...Array.from({ length: parts }, (_, i) =>
+        phoneSays({ type: 'photo-part', id: `${sayId}-p${i}`, sayId, part: i, parts, data: bytes.subarray(i * 8192, (i + 1) * 8192).toString('base64'), ts: Date.now() }),
+      ),
+      phoneSays({ type: 'say', id: sayId, ts: Date.now(), text, projectId: 'assistant', photoParts: parts }),
+    ].map((f) => JSON.stringify(f))
+  }
+  const asked = () => {
+    const got: { line: string; bytes: Buffer | null }[] = []
+    return {
+      got,
+      assistant: async (line: string, photo?: string) => {
+        got.push({ line, bytes: photo ? readFileSync(assistantPhotoPath(photo)!) : null })
+        return { reply: '見たよ' }
+      },
+    }
+  }
+
+  it('the largest photo the phone sends crosses the real relay in parts and reaches the assistant whole', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const room = await relayRoom()
+    const photo = jpeg(48 * 8192)
+    const frames = phonePhoto('s1', photo)
+    expect(frames).toHaveLength(49)
+    for (const s of frames) expect(s.length).toBeLessThanOrEqual(16 * 1024)
+    for (const s of frames) await room.fromPhone(s)
+    expect(room.phone.got.join('\n')).not.toContain('bad-frame')
+    expect(room.mac.got).toHaveLength(49)
+    // Passed on, never kept: the room holds nothing of the photo.
+    expect(Array.from(room.store.keys()).filter((k) => k.startsWith('ev:'))).toEqual([])
+    const a = asked()
+    for (const s of room.mac.got) await handleRelayFrame(st, JSON.parse(s), { assistant: a.assistant })
+    expect(a.got).toHaveLength(1)
+    expect(a.got[0].line).toBe('これ何?')
+    expect(a.got[0].bytes?.equals(photo)).toBe(true)
+    const said = opened(wire)
+    expect(said.find((f) => f.inner?.kind === 'owner')?.inner?.photo).toMatch(/^\d{4}-\d{2}-\d{2}-.+\.jpg$/)
+    expect(said.at(-2)?.inner).toMatchObject({ type: 'ack', id: 's1', state: 'delivered' })
+  })
+
+  it('three full photos in a minute: the relay counts parts apart and cuts no one off; each arrives whole', async () => {
+    const { sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const room = await relayRoom()
+    const photos = [jpeg(48 * 8192), jpeg(48 * 8192 - 5000), jpeg(48 * 8192)]
+    for (let i = 0; i < photos.length; i++) for (const s of phonePhoto(`m${i}`, photos[i], i === 1 ? '' : `写真${i}`)) await room.fromPhone(s)
+    expect(room.phone.closed).toEqual([])
+    const a = asked()
+    for (const s of room.mac.got) await handleRelayFrame(st, JSON.parse(s), { assistant: a.assistant })
+    expect(a.got.map((g) => g.line)).toEqual(['写真0', '', '写真2'])
+    expect(a.got.map((g, i) => g.bytes?.equals(photos[i]))).toEqual([true, true, true])
+  })
+
+  it('parts that come after their say are waited for; a part that never comes refuses the say plainly', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const a = asked()
+    const photo = jpeg(20_000)
+    const [p0, p1, p2, say] = phonePhoto('late', photo).map((s) => JSON.parse(s))
+    const answered = handleRelayFrame(st, say, { assistant: a.assistant })
+    for (const p of [p2, p0, p1]) await handleRelayFrame(st, p)
+    await answered
+    expect(a.got[0]?.bytes?.equals(photo)).toBe(true)
+    const [q0, , q2, say2] = phonePhoto('lost', photo).map((s) => JSON.parse(s))
+    for (const p of [q0, q2]) await handleRelayFrame(st, p)
+    await handleRelayFrame(st, say2, { assistant: a.assistant, photoWaitMs: 50 })
+    expect(a.got).toHaveLength(1)
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ type: 'ack', id: 'lost', state: 'rejected', reason: 'photo-incomplete' })
+  })
+
+  it('what the Mac cannot take is refused, never half-done: not an image, a president, a v1 pairing', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const a = asked()
+    for (const s of phonePhoto('txt', Buffer.from('not an image at all'))) await handleRelayFrame(st, JSON.parse(s), { assistant: a.assistant })
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'txt', state: 'rejected', reason: 'photo-bad' })
+    const toPresident = phonePhoto('pres', jpeg(9000)).map((s) => JSON.parse(s))
+    toPresident[toPresident.length - 1] = phoneSays({ type: 'say', id: 'pres', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 2 })
+    const desk = fakeDesk()
+    for (const f of toPresident) await handleRelayFrame(st, f, { assistant: a.assistant, supply: desk.deps })
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'pres', state: 'rejected', reason: 'photo-assistant-only' })
+    expect(desk.writes).toEqual([])
+    expect(a.got).toEqual([])
+    // v1: plain frames, so no photo — its parts are not even kept — and its projects list never offers one.
+    const v1 = macSocket()
+    const old = __testLinkState({ v: 1, relayUrl: CFG.relayUrl, macKey: CFG.macKey, phoneKey: CFG.phoneKey, projectId: 'p1' }, v1.sock)
+    const kept = pendingPhotos()
+    await handleRelayFrame(old, { type: 'photo-part', id: 'x0', sayId: 'x', part: 0, parts: 1, data: jpeg(100).toString('base64') })
+    expect(pendingPhotos()).toBe(kept)
+    await handleRelayFrame(old, { type: 'say', id: 'x', text: '', projectId: 'assistant', photoParts: 1 }, { assistant: a.assistant })
+    expect(JSON.parse(v1.wire.at(-1)!)).toMatchObject({ id: 'x', state: 'rejected', reason: 'pair-again' })
+    await handleRelayFrame(old, { type: 'projects' })
+    expect(JSON.parse(v1.wire.at(-1)!).photo).toBeUndefined()
+    await handleRelayFrame(st, phoneSays({ type: 'projects', id: 'cap', ts: Date.now() }))
+    expect(opened(wire).at(-1)?.inner?.photo).toBe(true)
+    expect(a.got).toEqual([])
+  })
+
+  it('parts whose count disagrees with their say make the photo bad', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const frames = phonePhoto('odd', jpeg(9000)).map((s) => JSON.parse(s))
+    frames[frames.length - 1] = phoneSays({ type: 'say', id: 'odd', ts: Date.now(), text: '', projectId: 'assistant', photoParts: 3 })
+    for (const f of frames) await handleRelayFrame(st, f, { assistant: async () => ({ reply: 'x' }) })
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'odd', state: 'rejected', reason: 'photo-bad' })
+  })
+
+  it('full of waiting photos: the oldest waiting say is refused at once, never left to time out', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const a = asked()
+    dropAllPhotos() // nothing left over from an earlier case
+    const waits: Promise<void>[] = []
+    for (let i = 0; i < 4; i++) {
+      const [p0, , say] = phonePhoto(`w${i}`, jpeg(9000)).map((s) => JSON.parse(s))
+      await handleRelayFrame(st, p0)
+      waits.push(handleRelayFrame(st, say, { assistant: a.assistant, photoWaitMs: 20_000 }))
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    const t0 = Date.now()
+    // A fifth photo arrives whole: the oldest waiting say makes room, refused now.
+    const fifth = phonePhoto('w4', jpeg(9000)).map((s) => JSON.parse(s))
+    for (const f of fifth) await handleRelayFrame(st, f, { assistant: a.assistant })
+    await waits[0]
+    expect(Date.now() - t0).toBeLessThan(5000)
+    expect(opened(wire).find((f) => f.inner?.id === 'w0' && f.inner?.state === 'rejected')?.inner?.reason).toBe('photo-incomplete')
+    // ...and the fifth, complete photo is answered (not pushed out in turn).
+    expect(opened(wire).some((f) => f.inner?.id === 'w4' && f.inner?.state === 'delivered')).toBe(true)
+    dropAllPhotos()
+    await Promise.all(waits)
+  })
+
+  it('full before any say waits (the says still being recorded): a pushed-out photo never pushes out the others in turn', async () => {
+    // What the loaded full suite did (2026-10-16): the says of w0..w3 were still
+    // being written down as seen when w4's parts came, so nothing was "waiting".
+    // Here that order is fixed instead of left to timing: all parts first, then the says.
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const a = asked()
+    dropAllPhotos()
+    const photos = Array.from({ length: 5 }, (_, i) => phonePhoto(`q${i}`, jpeg(9000)).map((s) => JSON.parse(s)))
+    for (let i = 0; i < 4; i++) await handleRelayFrame(st, photos[i][0]) // half of q0..q3
+    for (const f of photos[4].slice(0, 2)) await handleRelayFrame(st, f) // all of q4
+    const t0 = Date.now()
+    const says = photos.map((f) => handleRelayFrame(st, f[2], { assistant: a.assistant, photoWaitMs: 20_000 }))
+    await Promise.all([says[0], says[4]]) // q1..q3 still wait for their missing halves
+    expect(Date.now() - t0).toBeLessThan(5000) // nobody waited out the 20 s
+    const final = (id: string) => opened(wire).find((f) => f.inner?.type === 'ack' && f.inner?.id === id && f.inner?.state !== 'queued')?.inner
+    expect(final('q4')).toMatchObject({ state: 'delivered' })
+    expect(final('q0')).toMatchObject({ state: 'rejected', reason: 'photo-incomplete' })
+    expect(a.got).toHaveLength(1)
+    dropAllPhotos()
+    await Promise.all(says)
+  })
+
+  it('parts played again after their say was answered change nothing; a say labelled a part outside is dropped', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const a = asked()
+    const frames = phonePhoto('again', jpeg(20_000)).map((s) => JSON.parse(s))
+    for (const f of frames) await handleRelayFrame(st, f, { assistant: a.assistant })
+    for (const f of frames) await handleRelayFrame(st, f, { assistant: a.assistant })
+    expect(a.got).toHaveLength(1)
+    expect(opened(wire).filter((f) => f.inner?.state === 'delivered')).toHaveLength(1)
+    const n = wire.length
+    const say = phoneSays({ type: 'say', id: 'disguised', ts: Date.now(), text: 'やあ', projectId: 'assistant' })
+    await handleRelayFrame(st, { ...say, type: 'photo-part' }, { assistant: a.assistant })
+    expect(wire.length).toBe(n)
+    dropAllPhotos()
   })
 })

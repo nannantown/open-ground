@@ -2263,6 +2263,13 @@ export interface ProjectEngine {
    *  (capped — see ORPHAN_UNKNOWN_HOLD_CAP_MS). Drives the once-per-hold
    *  start/release log lines and the 'unowned-doing' anomaly. In-memory only. */
   unownedOrphanHold?: Map<string, { since: number; unknownSince?: number }>
+  /** Per-CARD (taskId) 'doing' cards whose worker has declared itself done (a ready
+   *  beat newer than the latest 差し戻し) yet the card has not moved on — see
+   *  {@link noticeStrandedReady}. `since` = first pass seen so; `notifiedAt` = when
+   *  the commander was last told. In-memory only. */
+  strandedReady?: Map<string, { since: number; notifiedAt?: number }>
+  /** When {@link noticeStrandedReady} last looked (its throttle). In-memory only. */
+  strandedCheckedAt?: number
   /** Drain/dispatch/integrate journal (ring buffer, oldest-first). */
   log: OrchestratorLogLine[]
   /** State inconsistencies detected on the latest pass (read-only — see
@@ -3184,6 +3191,10 @@ export interface OrchestratorDeps {
     projectPath: string,
     branch: string,
   ) => Promise<HeartbeatSign | null>
+  /** Say a ready-made line to the commander desk — same delivery rules and return
+   *  contract as IntegrationDeps.notifyManagerReady (true = landed, false = retry
+   *  later). Used by {@link noticeStrandedReady}. MUST NOT throw. */
+  tellManager?: (projectPath: string, text: string) => Promise<boolean>
   /** Move a LOST/STOPPED worker's card to a recovery column — 'todo' to requeue
    *  a crashed worker for one more attempt, 'blocked' to park one needing a human
    *  (a reported blocker, an exhausted retry budget, or an owner stop). False on a
@@ -4490,7 +4501,8 @@ export { noticeDeliverable }
  *  screen, or the write missed. False always means "still queued", never "give up". */
 export const defaultNotifyManagerReady = async (
   projectPath: string,
-  notice: { branches: readonly string[]; total: number },
+  // `{ text }` = a ready-made line (the stranded-ready re-notice), same delivery rules.
+  notice: { branches: readonly string[]; total: number } | { text: string },
   // Injected on the same seam defaultNudgeManager / defaultManagerPresence use, so the
   // whole path is unit-testable against a screen literal with no PTY pool and no
   // registered project in sight.
@@ -4523,7 +4535,7 @@ export const defaultNotifyManagerReady = async (
     // reintroduce a queue that never drains.)
     const res = (deps?.say ?? sayToManagerDesk)(
       desk,
-      managerNoticeText(notice.branches, notice.total),
+      'text' in notice ? notice.text : managerNoticeText(notice.branches, notice.total),
       {
         screen: getScreen,
         deliverable: noticeDeliverable,
@@ -5624,6 +5636,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   nudgeManager: defaultNudgeManager,
   isOnline: () => probeOnline(),
   notifyManagerReady: (p, notice) => defaultNotifyManagerReady(p, notice),
+  tellManager: (p, text) => defaultNotifyManagerReady(p, { text }),
   // The DELIVERY evidence behind the stall check (2026-07-22) — read only once the queue
   // has already waited past MANAGER_INTEGRATION_STALL_MS, never on an ordinary tick.
   managerDeliveryAt: (p) => defaultManagerDeliveryAt(p),
@@ -7264,6 +7277,102 @@ const syncRoster = async (
 
 // ── The drain pass (the heart — exported for the unit test) ──────────────────
 
+/** Has this card's worker declared itself done FOR THE CURRENT ROUND? A ready beat,
+ *  and — once the card has ever been sent back (`reworkedAt`: the {rework} API, a
+ *  setColumn or a Board drag review→doing) — one written after the latest send-back.
+ *  A card with a `reworkCount` but no `reworkedAt` (reworked before the stamp
+ *  existed), or an unparsable time on either side, answers false: the beat may be
+ *  the previous round's. */
+export const readySinceSendBack = (t: ProjectTask, hb: HeartbeatSign | null): boolean => {
+  if (!hb?.ready) return false
+  if (t.reworkedAt) return Date.parse(hb.at ?? '') > Date.parse(t.reworkedAt) // NaN ⇒ false
+  return !t.reworkCount
+}
+
+/** How long a worker's "done" may sit on a card still in 'doing' before the engine
+ *  tells the commander itself, and how often it repeats while that stays true. */
+export const STRANDED_READY_NOTICE_MS = 3 * 60_000
+export const STRANDED_READY_RENOTICE_MS = 15 * 60_000
+/** The net looks at most this often. Not for the heartbeat read (the repo key is
+ *  cached — heartbeatKeyCache — so that is one small file read per doing card):
+ *  for what follows once a card is stranded — a desk that will not take the line
+ *  must not cost a git commit count plus a session-store read on every 3s tick. */
+export const STRANDED_READY_CHECK_MS = 30_000
+
+/** The line {@link noticeStrandedReady} types into the commander desk. */
+export const strandedReadyText = (title: string, branch: string): string =>
+  `worker の完了が届いていないカードがあります — 「${sanitizeNoticeText(title)}」(${sanitizeNoticeText(branch)}) ` +
+  `は worker が完了(ready)を報告済みなのに作業中のままです。差分を確認して review に移し、統合の判断をしてください。`
+
+/** THE CATCH-ALL NET (2026-10-07): a worker said "done" and nobody picked it up.
+ *
+ *  Every road from a worker's ready beat to the commander is a special case —
+ *  monitorWorkers for counted workers, promoteUnownedDelivered for the rest, the
+ *  review-column notice after either — and the 2026-10-07 stall was a card that
+ *  fell between them (see promoteUnownedDelivered's header). This does not try to
+ *  be one more road; it watches the RESULT: a 'doing' swarm card whose worker has
+ *  declared the current round done ({@link readySinceSendBack}) and that is still
+ *  'doing' {@link STRANDED_READY_NOTICE_MS} later, with commits on its branch, gets
+ *  the commander told — again every {@link STRANDED_READY_RENOTICE_MS} while it
+ *  stays so. It only SPEAKS (never moves the card): a road that should have moved
+ *  it and did not is a bug the commander should look at, not one to paper over.
+ *  Runs at most every {@link STRANDED_READY_CHECK_MS}; the commit count is read
+ *  only once a card has been stranded that long. A counted worker the monitor
+ *  saw sent back (`reworkAt`) is judged by that too, so a Board send-back the
+ *  card stamp missed (swarm-board.sh) cannot draw "move it to review" against
+ *  the decision. A RE-ENTERED counted worker (`reenteredAt` — 「やり直す」 / quota
+ *  requeue onto the same branch) is judged the way monitorWorkers judges it
+ *  (heartbeatPredatesReentry): the previous worker's ready beat on that branch is
+ *  not this worker's "done". Never throws. */
+const noticeStrandedReady = async (
+  engine: ProjectEngine,
+  deps: OrchestratorDeps,
+  tasks: readonly ProjectTask[],
+  now: number,
+): Promise<void> => {
+  if (now - (engine.strandedCheckedAt ?? -Infinity) < STRANDED_READY_CHECK_MS) return
+  engine.strandedCheckedAt = now
+  const stranded = (engine.strandedReady ??= new Map())
+  const present = new Set<string>()
+  const countedByTask = new Map(engine.workers.map((w) => [w.taskId, w]))
+  for (const t of tasks) {
+    if (columnOf(t) !== 'doing' || t.abandoned === true) continue
+    const branch = typeof t.branch === 'string' ? t.branch : ''
+    if (!branch || !isSwarmBranch(branch)) continue
+    let hb: HeartbeatSign | null = null
+    try {
+      hb = await deps.readHeartbeat(engine.path, branch)
+    } catch {
+      continue
+    }
+    if (!readySinceSendBack(t, hb)) continue
+    const counted = countedByTask.get(t.id)
+    if (counted?.reworkAt && !(Date.parse(hb?.at ?? '') > Date.parse(counted.reworkAt))) continue
+    if (counted && hb && heartbeatPredatesReentry(hb, counted.reenteredAt)) continue // the previous worker's beat
+    present.add(t.id)
+    const rec = stranded.get(t.id) ?? { since: now }
+    stranded.set(t.id, rec)
+    if (now - rec.since < STRANDED_READY_NOTICE_MS) continue
+    if (rec.notifiedAt !== undefined && now - rec.notifiedAt < STRANDED_READY_RENOTICE_MS) continue
+    const ahead = await Promise.resolve()
+      .then(() => deps.countCommitsAhead(engine.path, branch))
+      .catch(() => null)
+    if (!ahead || ahead <= 0) continue // nothing delivered — ready-without-work has its own path
+    const told = await Promise.resolve()
+      .then(() => deps.tellManager?.(engine.path, strandedReadyText(t.title ?? '', branch)) ?? false)
+      .catch(() => false)
+    if (!told) continue // no desk / desk busy — retried next check
+    rec.notifiedAt = now
+    logLine(
+      engine,
+      'warn',
+      `worker の完了が ${Math.round((now - rec.since) / 60_000)} 分届いていないカードを司令官に知らせました: ${shorten(t.title ?? '')} → ${branch}`,
+      'promote',
+    )
+  }
+  for (const id of Array.from(stranded.keys())) if (!present.has(id)) stranded.delete(id)
+}
+
 /** A `doing` swarm card that NO counted worker owns, whose branch nevertheless
  *  holds delivered work → promote it to `review` so the commander is woken.
  *
@@ -7295,14 +7404,22 @@ const syncRoster = async (
  *   · `readyToMerge` on the heartbeat AND commits ahead — the worker's own
  *     hand-over sign plus real work on the branch. A worker mid-task has written
  *     neither.
- *   · `reworkCount` falsy — the ONE case where a ready heartbeat lies. The beat
- *     is STICKY (swarm-beat.sh never unsets readyToMerge), so a card sent back
- *     review→doing still reports ready while its worker re-works. A card that has
- *     never been sent back cannot be in that state, so restricting to
- *     reworkCount 0 excludes the ambiguity entirely rather than guessing at it.
+ *   · on a card that has been SENT BACK (`reworkCount` set), the ready beat must
+ *     be NEWER than the send-back (`reworkedAt`, stamped on the card by the
+ *     {rework} call) — the ONE case where a ready heartbeat lies: the 差し戻し
+ *     does not touch the heartbeat file, so until the worker beats again it still
+ *     reports the previous round's ready. A reworked card WITHOUT `reworkedAt`
+ *     (written before 2026-10-07) stays excluded, as every reworked card was.
  *     (`reworkAt`, the timestamp the live monitor compares against, is in-memory
- *     only — it does not survive the restart this sweep exists for, which is why
- *     the count is the discriminator here and not the clock.)
+ *     only — it does not survive a restart and does not exist at all for a
+ *     worker the engine never counted — which is why the clock lives on the card.)
+ *
+ *  ⚠ 2026-10-07 (measured, OPEN GROUND card a1a3d9ea): that exclusion used to be
+ *  `reworkCount` alone. The commander started the worker by hand (POST
+ *  /api/swarm/worker — never counted), this sweep collected its first delivery
+ *  at 12:10, the commander sent it back at 12:18, the worker re-delivered at
+ *  12:22 with a fresh ready beat + 2 new commits — and the card sat in 'doing',
+ *  invisible to both this sweep and the monitor, until the owner asked at 14:18.
  *
  *  Read-then-write per card, never throws: a card that cannot be moved is left
  *  for the next pass (and the anomaly feed already names it).
@@ -7323,7 +7440,6 @@ const promoteUnownedDelivered = async (
     if (columnOf(t) !== 'doing') continue
     if (countedIds.has(t.id)) continue
     if (t.abandoned === true) continue // 見送る means見送る — never re-offer it
-    if (t.reworkCount) continue // sticky-ready ambiguity — see the header
     const branch = typeof t.branch === 'string' ? t.branch : ''
     if (!branch || !isSwarmBranch(branch)) continue
     let hb: HeartbeatSign | null = null
@@ -7332,7 +7448,7 @@ const promoteUnownedDelivered = async (
     } catch {
       continue // no sign, no claim
     }
-    if (!hb?.ready) continue
+    if (!readySinceSendBack(t, hb)) continue // incl. the stale-ready case — see the header
     let ahead = 0
     try {
       const counted = await deps.countCommitsAhead(engine.path, branch)
@@ -7648,6 +7764,13 @@ export const runDispatchPass = async (
   //     'todo', branch preserved, so the cooling clock — not a human — decides
   //     when it re-runs. See collectUnownedDoing's header (2026-09-01).
   await collectUnownedDoing(engine, deps, tasks, claimedDelivered, now)
+  if (!engine.running) return
+
+  // 2d. The catch-all: a worker's "done" that none of the roads above picked up
+  //     reaches the commander anyway (2026-10-07). See noticeStrandedReady.
+  //     ponytail: reads the pass-start board, so a card moved THIS pass after 3+
+  //     stranded minutes can draw one redundant notice; harmless, it says "look".
+  await noticeStrandedReady(engine, deps, tasks, now)
   if (!engine.running) return
 
   // 3. Reconcile: a counted worker whose card is STILL in todo means an earlier
@@ -9849,6 +9972,8 @@ export const stopOrchestrator = async (
   engine.autonomyResumed = false
   engine.resumeGraceUntil = undefined // boot-resume grace no longer applies
   engine.unattendedDoingSince = undefined // time spent OFF is not "nobody on the card"
+  engine.strandedReady = undefined // same: the stranded clock only counts time ON
+  engine.strandedCheckedAt = undefined
   // card 2 — persist `desiredRunning:false` and the explicitly disarmed overseer.
   await persistEngineIntent(engine, projectPath)
   // autonomyRemembered:false — the marker was just cleared above; manualStopPersisted:

@@ -286,6 +286,18 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
     expect(sent.find((f) => f.type === 'event' && f.kind === 'owner')?.id).toBe('a1')
   })
 
+  it("the phone's history frames keep their shape: which model wrote an answer stays in the Mac's log", async () => {
+    const { appendAssistantEntries, clearAssistantLog } = await import('./assistantMemory')
+    await clearAssistantLog()
+    await appendAssistantEntries([{ at: Date.now(), who: 'assistant', text: '先にクレカだね。', via: 'phone', model: 'claude-opus-x' }])
+    const { sent, sock } = fakeSocket()
+    await handlePhoneFrame(__testLinkState(CFG2, sock), { type: 'assistant-history', id: 'h1' })
+    const page = sent.find((f) => f.type === 'assistant-history') as { entries?: Record<string, unknown>[] } | undefined
+    expect(page?.entries?.map((e) => e.text)).toEqual(['先にクレカだね。'])
+    expect(page?.entries?.[0]).not.toHaveProperty('model')
+    await clearAssistantLog()
+  })
+
   it('the phone sees its own proposals and presses them through the same one door: a say never carries one out', async () => {
     __resetProposals()
     relayed.length = 0

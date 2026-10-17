@@ -8,30 +8,38 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 vi.mock('./swarmWorkerSdk', async (orig) => ({ ...(await orig<typeof import('./swarmWorkerSdk')>()), resolveUserClaudeBin: () => '/usr/local/bin/claude' }))
 
 import { __setSdkImporterForTests } from './sdkSession'
+import { setSettings } from './store'
+import { __resetQuotaForTest, isTierCooling } from './swarmQuota'
 import { ASSISTANT_TOOL_NAMES, assistantToolGate, closeAssistantSession, liveAssistantModel, type AssistantToolSet } from './assistantSession'
 
 type Msg = Record<string, unknown>
-/** A fake SDK: each query records its options, and answers each user message with the scripted messages. */
-const fakeSdk = (script: (line: string, tools: Record<string, (a: unknown) => Promise<unknown>>) => Promise<Msg[]>) => {
+/** A fake SDK: each query records its options, and answers each user message
+ *  with the scripted messages. `model` = what the query is on now (setModel
+ *  switches it; each switch is recorded in `switches`). */
+const fakeSdk = (script: (line: string, tools: Record<string, (a: unknown) => Promise<unknown>>, model: () => string) => Promise<Msg[]>) => {
   const queries: { options: Record<string, unknown> }[] = []
+  const switches: string[] = []
   /** Each session's message stream — returning one is the claude process dying. */
   const streams: AsyncGenerator<unknown>[] = []
   const toolDefs: Record<string, (a: unknown) => Promise<unknown>> = {}
   const mod = {
+    USAGE_LIMIT_ERROR_PREFIXES: ["You've hit your", "You've reached your"],
     tool: (name: string, _d: string, _s: unknown, handler: (a: unknown) => Promise<unknown>) => ((toolDefs[name] = handler), { name }),
     createSdkMcpServer: (o: unknown) => ({ type: 'sdk', instance: o }),
     query: ({ prompt, options }: { prompt: AsyncIterable<{ message: { content: string } }>; options: Record<string, unknown> }) => {
       queries.push({ options })
+      let model = String(options.model)
       async function* run() {
-        for await (const m of prompt) for (const out of await script(m.message.content, toolDefs)) yield out
+        for await (const m of prompt) for (const out of await script(m.message.content, toolDefs, () => model)) yield out
       }
       const gen = run()
       streams.push(gen)
-      return Object.assign(gen, { close: () => void gen.return(undefined) })
+      const setModel = async (m?: string) => void (switches.push(m ?? ''), (model = m ?? ''))
+      return Object.assign(gen, { close: () => void gen.return(undefined), setModel })
     },
   }
   __setSdkImporterForTests(async () => mod)
-  return { queries, toolDefs, streams }
+  return { queries, toolDefs, streams, switches }
 }
 const said = (text: string): Msg => ({ type: 'assistant', message: { content: [{ type: 'text', text }] } })
 const toolUse = (): Msg => ({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__og__status' }] } })
@@ -48,7 +56,7 @@ describe('what the claude behind the assistant may touch', () => {
     await ask('やあ')
     const o = sdk.queries[0].options
     expect(o).toMatchObject({
-      model: 'haiku',
+      model: 'sonnet',
       tools: [],
       settingSources: [],
       strictMcpConfig: true,
@@ -60,7 +68,7 @@ describe('what the claude behind the assistant may touch', () => {
     expect(o.allowedTools).toEqual(ASSISTANT_TOOL_NAMES)
     expect(Object.keys(o.mcpServers as object)).toEqual(['og'])
     expect(o).not.toHaveProperty('allowDangerouslySkipPermissions')
-    expect(Object.keys(sdk.toolDefs).sort()).toEqual(['list_dir', 'make_card', 'read_file', 'search', 'status', 'tell_commander', 'withdraw'])
+    expect(Object.keys(sdk.toolDefs).sort()).toEqual(['list_dir', 'make_card', 'read_file', 'search', 'status', 'tell_commander', 'think_deeper', 'withdraw'])
   })
 
   it('the gate lets only its own tools through — anything else, or a malformed call, is denied', async () => {
@@ -101,6 +109,90 @@ describe('the words as they are written (read aloud a sentence at a time)', () =
     expect(await liveAssistantModel.ask({ key: 'k', system: async () => 'SYSTEM', line: 'どう?', tools: noTools, onStream: (e) => seen.push(e) })).toBe('順調だよ。')
     expect(sdk.queries[0].options.includePartialMessages).toBe(true)
     expect(seen).toEqual([{ text: '見て' }, { text: '見てみるね。' }, { tool: true }, { text: '順調' }, { text: '順調だよ。' }])
+  })
+})
+
+describe('every line on sonnet; a line it hands to think_deeper finishes on opus, in the same session', () => {
+  /** Answers name the model they were written on, as the SDK's assistant messages do. */
+  const switching = (deep: (line: string) => boolean) =>
+    fakeSdk(async (line, tools, model) => {
+      if (deep(line)) await tools.think_deeper({})
+      const text = `${model()}:${line}`
+      return [{ type: 'assistant', parent_tool_use_id: null, message: { model: model(), content: [{ type: 'text', text }] } }, result(text)]
+    })
+  const tools = { think_deeper: async () => ({ text: 'think' }) } as unknown as AssistantToolSet
+  const askWith = (line: string, seen: string[] = []) => liveAssistantModel.ask({ key: 'k', system: async () => 'S', line, tools, onModel: (m) => seen.push(m) })
+
+  afterEach(async () => {
+    __resetQuotaForTest()
+    await setSettings({ swarmAllowedModels: undefined })
+  })
+
+  it('think_deeper moves the line to opus; the next line is back on sonnet; the model that answered is told', async () => {
+    const sdk = switching((l) => l === '深い')
+    const seen: string[] = []
+    expect(await askWith('やあ', seen)).toBe('sonnet:やあ')
+    expect(await askWith('深い', seen)).toBe('opus:深い')
+    expect(await askWith('またね', seen)).toBe('sonnet:またね')
+    expect(sdk.switches).toEqual(['opus', 'sonnet'])
+    expect(seen).toEqual(['sonnet', 'opus', 'sonnet'])
+    expect(sdk.queries).toHaveLength(1)
+  })
+
+  it("opus's limit is spent: the line is answered again on sonnet (the refusal is never the answer), opus cools, the next deep line stays on sonnet", async () => {
+    const sdk = fakeSdk(async (line, tools, model) => {
+      await tools.think_deeper({})
+      if (model() !== 'opus') return [said(`${model()}:${line}`), result(`${model()}:${line}`)]
+      // The CLI's refusal as it really comes (sdkEvents.test): a failed result, subtype still 'success'.
+      const no = "You've reached your Opus limit · resets 5pm"
+      return [said(no), { type: 'result', subtype: 'success', is_error: true, terminal_reason: 'api_error', result: no }]
+    })
+    expect(await askWith('深い')).toBe('sonnet:深い')
+    expect(isTierCooling('opus', Date.now())).toBe(true)
+    expect(await askWith('もう一つ深い')).toBe('sonnet:もう一つ深い')
+    // One move to opus (refused), none after it cooled.
+    expect(sdk.switches).toEqual(['opus'])
+  })
+
+  it("an answer that only starts like a refusal is an answer: nothing cools", async () => {
+    const sdk2 = fakeSdk(async (_line, tools) => {
+      await tools.think_deeper({})
+      return [said("You've hit your September target."), result("You've hit your September target.")]
+    })
+    expect(await askWith('どう?')).toBe("You've hit your September target.")
+    expect(isTierCooling('opus', Date.now())).toBe(false)
+    expect(sdk2.switches).toEqual(['opus'])
+  })
+
+  it('sonnet and haiku both off: every line on opus, never on fable; no move', async () => {
+    await setSettings({ swarmAllowedModels: { fable: true, opus: true, sonnet: false, haiku: false } })
+    const sdk = switching(() => true)
+    expect(await askWith('深い')).toBe('opus:深い')
+    expect(sdk.queries[0].options.model).toBe('opus')
+    expect(sdk.switches).toEqual([])
+  })
+
+  it('opus switched off in the usable models: the deep line stays on sonnet (no switch at all)', async () => {
+    await setSettings({ swarmAllowedModels: { fable: true, opus: false, sonnet: true, haiku: true } })
+    const sdk = switching(() => true)
+    expect(await askWith('深い')).toBe('sonnet:深い')
+    expect(sdk.switches).toEqual([])
+  })
+
+  it('sonnet switched off: the session starts on the next usable model down', async () => {
+    await setSettings({ swarmAllowedModels: { fable: true, opus: true, sonnet: false, haiku: true } })
+    const sdk = switching(() => false)
+    expect(await askWith('やあ')).toBe('haiku:やあ')
+    expect(sdk.queries[0].options.model).toBe('haiku')
+  })
+
+  it('the mask changed while the session was up: the next line moves to what is allowed now', async () => {
+    const sdk = switching(() => false)
+    expect(await askWith('やあ')).toBe('sonnet:やあ')
+    await setSettings({ swarmAllowedModels: { fable: true, opus: true, sonnet: false, haiku: true } })
+    expect(await askWith('まだいる?')).toBe('haiku:まだいる?')
+    expect(sdk.switches).toEqual(['haiku'])
+    expect(sdk.queries).toHaveLength(1)
   })
 })
 

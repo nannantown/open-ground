@@ -44,6 +44,8 @@ export interface AssistantEntry extends Partial<PhoneCallRecord> {
   card?: { projectId: string; taskId: string; title: string }
   /** A photo the owner sent with this line: its file name under photos/. */
   photo?: string
+  /** The model that wrote an assistant answer (e.g. claude-opus-…: the line went deep). */
+  model?: string
 }
 export interface AssistantConfig {
   logDays: number

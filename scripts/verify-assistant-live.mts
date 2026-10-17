@@ -5,8 +5,8 @@
 //
 // OPEN GROUND's data goes to a throwaway OPENGROUND_HOME with one registered
 // throwaway project (the real ~/.openground is never touched); claude is the
-// REAL signed-in CLI, so this spends a few short haiku turns of the
-// subscription. Through the screen's streamed route it prints, per line, the
+// REAL signed-in CLI, so this spends a few short turns of the
+// subscription (sonnet; opus for a line it hands to think_deeper). Through the screen's streamed route it prints, per line, the
 // seconds to the first thing said (a "let me look" or the answer) and to the
 // answer, and what was said — small talk, "where are your records", a look
 // into the project, a read outside the allowed area (~/.ssh), and a card.
@@ -25,7 +25,10 @@ for (const k of Object.keys(process.env)) {
 const home = mkdtempSync(join(tmpdir(), 'og-assistant-live-'))
 process.env.OPENGROUND_HOME = home
 writeFileSync(join(home, 'settings.json'), JSON.stringify({ language: 'ja', swarmLocalOwner: true }))
-const proj = join(home, 'work', 'kiwi-shop')
+// Outside the OPEN GROUND home: the assistant never reads its data folder's
+// unlisted places, so a project inside it would be refused as a secret.
+const work = mkdtempSync(join(tmpdir(), 'og-assistant-live-work-'))
+const proj = join(work, 'kiwi-shop')
 mkdirSync(proj, { recursive: true })
 writeFileSync(join(proj, 'README.md'), '# kiwi-shop\nA small shop site. The checkout lives in src/checkout.ts and takes PayPay.\n')
 mkdirSync(join(proj, 'src'))
@@ -72,4 +75,5 @@ closeAssistantSession()
 const added = histText().slice(before)
 console.log('\nhistory.jsonl grew by', added.length, 'chars; holds the talk:', /kiwi|送料|アシスタントの記録/.test(added))
 rmSync(home, { recursive: true, force: true })
+rmSync(work, { recursive: true, force: true })
 process.exit(0)

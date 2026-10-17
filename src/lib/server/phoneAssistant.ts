@@ -7,7 +7,8 @@
 // Mac; it goes to the relay as `projectId: "assistant"` events only.
 //
 // How it runs (2026-10-06, owner: "人と会話してるぐらいの速さで"): ONE live Claude
-// session on a fast model that stays up between lines (assistantSession.ts), so
+// session that stays up between lines (sonnet; opus for a line that needs real
+// thought — assistantSession.ts), so
 // a line costs one model reply, not a claude start-up. It looks things up with
 // its own read-only tools — registered projects and OPEN GROUND's data only,
 // secrets refused (assistantTools.ts) — and reads the live status. A card or a
@@ -418,6 +419,7 @@ export const buildSessionPrompt = (o: {
     '- Small talk and what you already know: answer at once, no tools.',
     '- When you must look something up, call the tool right away. Never write a "let me look / ちょっと待ってね" line yourself — the app says one for you while you look. Your answer starts with the conclusion.',
     '- Look things up yourself instead of guessing or saying you cannot. Never say you have no access when a tool can find it.',
+    '- think_deeper: when the line needs real thought — advice or a decision with trade-offs, comparing options, planning, a why about their work, or digging through several files — call think_deeper FIRST, before writing or looking up anything: a stronger model then answers this line (the app says a short "let me think" for you). A line asking what you think, which is better, what to do or why (「どう思う?」「どっちがいい?」「どうすべき?」「なんで?」) about their work or plans IS such a line — call it even when you could answer it yourself; when unsure, call it. Small talk, simple facts and one quick look-up you answer yourself, fast. After think_deeper: think it through, look up what you need, and still answer like a person on the phone — the conclusion first, then why.',
     '',
     '## What you can do',
     '- read_file / list_dir / search: read anything in the registered projects and OPEN GROUND\'s data (read only; secrets are refused). Use absolute paths.',
@@ -601,11 +603,13 @@ const sessionKey = (p: Plan, lang: PromptLang, epoch: number): string => JSON.st
 
 /** What the app says when a look-up starts, like a person would — varied, in the Mac's language. */
 const WAIT_LINES = { en: ['One moment.', 'Let me check.', 'Let me look.'], ja: ['ちょっと待ってね。', '見てみるね。', '調べてみるね。'] }
+/** …and when it hands the line to the deeper model. */
+const THINK_LINES = { en: ['Let me think.', 'Let me think about that.'], ja: ['ちょっと考えるね。', '少し考えさせてね。'] }
 let waitLine = 0
 
 /** The tools of one turn. Reading tools read (assistantTools.ts decides what);
  *  make_card / tell_commander only PROPOSE (assistantProposals.ts). */
-const turnTools = (ctx: ProposeContext & { digest: () => Promise<string> }, made: ShownProposal[], look: () => void): AssistantToolSet => {
+const turnTools = (ctx: ProposeContext & { digest: () => Promise<string> }, made: ShownProposal[], look: (lines?: typeof WAIT_LINES) => void): AssistantToolSet => {
   const propose = async (p: Promise<ShownProposal | string>) => {
     const r = await p
     if (typeof r === 'string') return { text: r }
@@ -623,6 +627,7 @@ const turnTools = (ctx: ProposeContext & { digest: () => Promise<string> }, made
       const n = withdrawProposals()
       return { text: n ? `Dropped ${n} waiting proposal(s).` : 'Nothing was waiting.' }
     },
+    think_deeper: async () => (look(THINK_LINES), { text: 'Now think it through and look up what you need. Then answer like a person on the phone: the conclusion first, then why.' }),
   }
 }
 
@@ -675,6 +680,8 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
   // A delete while this turn runs: its memo is not written back (assistantEpoch).
   const epoch = assistantEpoch()
   let logged = false
+  /** Which model wrote the answer (the session tells), kept in the log next to it. */
+  let answeredBy = ''
   const log = async (reply: string) => {
     const ownerAt = now.getTime()
     logged = true
@@ -682,7 +689,7 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
     if (assistantEpoch() !== epoch) return
     await appendAssistantEntries([
       { at: ownerAt, who: 'owner', text, via, ...ownerMeta },
-      { at: Math.max(ownerAt, clock().getTime()), who: 'assistant', text: reply, via },
+      { at: Math.max(ownerAt, clock().getTime()), who: 'assistant', text: reply, via, ...(answeredBy ? { model: answeredBy } : {}) },
     ])
   }
   try {
@@ -729,13 +736,14 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
         [...notes, ...waitingNote(now.getTime()), `[${stamp(now.getTime())}] ${text || '(no words, only a photo)'}`].join('\n') +
         (photo ? `\n(The owner sent a photo with this line: ${photo} — read_file it to see it.)` : ''),
       // The first look-up of the line says a wait-line, the moment it starts.
-      tools: turnTools(ctx, made, () => {
+      tools: turnTools(ctx, made, (set = WAIT_LINES) => {
         if (looked) return
         looked = true
-        const lines = pick(lang, WAIT_LINES)
+        const lines = pick(lang, set)
         deps.onInterim?.(lines[waitLine++ % lines.length])
       }),
       onStream,
+      onModel: (m) => (answeredBy = m),
     })
     // Work mode came on while it was thinking: nothing goes out.
     if (isLockdownEnabledSync()) throw workModeOn(lang)

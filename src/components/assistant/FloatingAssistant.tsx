@@ -9,10 +9,10 @@ import { useT } from '@/i18n/I18nContext'
 import { ArrowUp, ImagePlus, Mic, MessagesSquare, Phone, X } from 'lucide-react'
 import { AssistantCall, type CallPhase } from './AssistantCall'
 import { AssistantMark, LOOK_COLOR } from './AssistantMark'
-import { ASSISTANT_RESERVE_VAR, ASSISTANT_RESERVE_Y_VAR, ASSISTANT_WINDOW_ATTR } from './assistantWindow'
+import { ASSISTANT_WINDOW_ATTR } from './assistantWindow'
 import { PHOTO_MAX_BYTES, PHOTO_TYPES, photoUrl, useAssistant, type AssistantLook } from './useAssistant'
 import { ProposalFrames } from './ProposalFrames'
-import { useListen, useSpeech } from './useVoice'
+import { useCallVoice, useListen, useOtherSpeech } from './useVoice'
 
 const POS_KEY = 'og.assistant.pos'
 /** '1' = the window shows the whole talk; otherwise only the input and the current exchange. */
@@ -42,14 +42,9 @@ interface Pos {
 /** The default (not yet dragged) spot, the SAME on every screen (owner
  *  2026-10-06: it must not jump when a project opens): level with Ground's
  *  bottom-left edit (pen) button, whose centre is ~43px up (ToolPalette p-5 +
- *  frame), so bottom = 43 - SIZE/2. In a project the screen makes room for it
- *  (the two reserves below) — the character does not move for the screen. */
+ *  frame), so bottom = 43 - SIZE/2. It floats OVER the screen and the layout
+ *  never makes room for it (owner 2026-10-07: the bar and seats stay put). */
 export const DEFAULT_POS: Pos = { right: 20, bottom: 18 }
-/** While the character sits at DEFAULT_POS: the width the agent-team bar keeps
- *  free at its right end, and the floor a project keeps free under its tab
- *  content — the character's extent from the window edge + an 8px gap. */
-export const ASSISTANT_RESERVE_PX = DEFAULT_POS.right + SIZE + 8
-export const ASSISTANT_RESERVE_Y_PX = DEFAULT_POS.bottom + SIZE + 8
 
 /** The owner's dragged spot, or null while they never moved it. */
 const readPos = (): Pos | null => {
@@ -108,21 +103,6 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   pendingRef.current = a.pending
   const [pos, setPos] = useState(readPos)
   const [view, setView] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }))
-  // Room is kept only while it is shown at the default spot: once the owner has
-  // DROPPED it elsewhere, the screen takes its full size back. Decided by the
-  // saved spot, not the live one, so the screen does not reflow mid-drag.
-  const [placed, setPlaced] = useState(() => readPos() !== null)
-  const reserve = a.ready && !placed
-  useEffect(() => {
-    if (!reserve) return
-    const s = document.documentElement.style
-    s.setProperty(ASSISTANT_RESERVE_VAR, `${ASSISTANT_RESERVE_PX}px`)
-    s.setProperty(ASSISTANT_RESERVE_Y_VAR, `${ASSISTANT_RESERVE_Y_PX}px`)
-    return () => {
-      s.removeProperty(ASSISTANT_RESERVE_VAR)
-      s.removeProperty(ASSISTANT_RESERVE_Y_VAR)
-    }
-  }, [reserve])
   const [editing, setEditing] = useState(false)
   const [draftName, setDraftName] = useState('')
   const [text, setText] = useState('')
@@ -150,8 +130,8 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const [unspoken, setUnspoken] = useState('')
   /** Why the ears stopped: 'denied' | 'unavailable' | 'failed' ('' = none). */
   const [voiceFail, setVoiceFail] = useState('')
-  const live = useRef({ inCall, speaker })
-  live.current = { inCall, speaker }
+  const live = useRef({ inCall, speaker, others: false })
+  live.current = { inCall, speaker, others: live.current.others }
   /** The line last spoken in this call: its reading stopped by the owner, the
    *  read-aloud part of its answer they heard, whether its answer is in. */
   const callTurn = useRef<{ stopped: boolean; heard: string; done: boolean; answered: boolean } | null>(null)
@@ -221,7 +201,8 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
       callTurn.current = cur
       setHushed(false)
     }
-    const aloud = () => spoken && live.current.inCall && live.current.speaker && !cur.stopped
+    // Not over another app's reading either (a Research digest): never cut, never queued behind.
+    const aloud = () => spoken && live.current.inCall && live.current.speaker && !live.current.others && !cur.stopped
     const heard = (piece: string) => () => void (cur.heard += piece)
     const said = await a.say(
       line,
@@ -268,18 +249,27 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
     reader.onerror = () => setPhotoError(words.failed)
     reader.readAsDataURL(file)
   }
-  const speech = useSpeech(inCall && showPanel)
-  // One pair of ears, serving whichever mode is on. In a call they close while
-  // it answers or speaks (the mic would hear the reply and send it back) and
-  // while muted — the mic is on only while it is really used.
-  const callHears = inCall && !muted && !voiceFail && (a.pending === null || hushed) && !speech.speaking && !speech.others
+  // The call's voice is the ears' own (useCallVoice): talking over it stops it
+  // (the server decides — 'barge'), exactly as the stop key does. A stop, never
+  // a yes: it runs nothing, the words heard go on as an ordinary line.
+  // The owner may be typing elsewhere (a Terminal, the Board): focus stays there.
+  const speech = useCallVoice(() => stopReading(true))
+  const others = useOtherSpeech(inCall && showPanel)
+  live.current.others = others
+  // One pair of ears, serving whichever mode is on; in a call they stay open the
+  // whole call (they are its voice too). Muted — or another app reading aloud,
+  // whose sound echo removal does not take out — they hear nothing.
   const ears = useListen({
     // a.ready: signed out mid-listen, the window leaves the screen — the mic goes with it.
-    on: a.ready && showPanel && (inCall ? callHears : dictating),
+    on: a.ready && showPanel && (inCall ? !voiceFail : dictating),
     lang: lang === 'en' ? 'en' : 'ja',
     session: inCall ? 'call' : 'chat',
+    onVoice: speech.onEvent,
     onFinal: (heard) => {
       if (live.current.inCall) {
+        // While it thinks (no stop from the owner) the words are not taken, as
+        // when the mic used to close then: a line is answered one at a time.
+        if (pendingRef.current !== null && !callTurn.current?.stopped) return
         // Said after a stop while the stopped line is still answered: it goes next.
         const cur = callTurn.current
         if (cur?.stopped && !cur.done) return void (held.current = joinHeard(held.current, heard))
@@ -302,6 +292,16 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   })
   const composingRef = useRef(composing)
   composingRef.current = composing
+  const callMuted = inCall && (muted || others)
+  useEffect(() => {
+    if (inCall && ears.ready) speech.mute(callMuted)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- speech.mute is stable
+  }, [callMuted, inCall && ears.ready])
+  // The ears gone (an error): so is the voice.
+  useEffect(() => {
+    if (voiceFail) speech.cancel()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- speech.cancel is stable
+  }, [voiceFail])
   useEffect(() => {
     if (ears.ready && inCall) {
       setCallSince((s) => s ?? Date.now())
@@ -319,7 +319,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
     held.current = ''
   }
   /** The call's stop key (or Space): quiet at once, and listen. */
-  const stopReading = () => {
+  const stopReading = (byVoice = false) => {
     speech.cancel()
     setUnspoken('')
     const cur = callTurn.current
@@ -328,7 +328,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
     setHushed(true)
     if (cur.done && cur.answered) void a.hush(cur.heard)
     // The stop key leaves the screen: focus stays in the call (Space works next time too).
-    panelRef.current?.focus()
+    if (!byVoice) panelRef.current?.focus()
   }
   const startCall = () => {
     setDictating(false)
@@ -458,7 +458,6 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
     if (!d?.to) return
     dragged.current = true
     localStorage.setItem(POS_KEY, JSON.stringify(d.to))
-    setPlaced(true)
   }
   const onClick = () => {
     // The click that ends a drag is not a click.
@@ -563,7 +562,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
               }}
               onMute={() => setMuted(!muted)}
               onEnd={endCall}
-              onStop={stopReading}
+              onStop={() => stopReading()}
               onRetry={() => {
                 setVoiceFail('')
                 setRedial(true)

@@ -109,6 +109,18 @@ try {
   check('unknown phone frame is refused, not forwarded', await until(() => phone.frames.filter((f) => f.type === 'error' && f.code === 'bad-frame').length === 2))
   check('...and never reached the Mac', !mac.frames.some((f) => f.type === 'hack'))
 
+  // A photo part (docs/PHONE_LINK.md "Photos"): as large as the phone makes one
+  // (8 KB of JPEG, base64'd in the sealed inner frame, base64'd again in `box`
+  // ≈ 14.9 KB) passes to the Mac unchanged; the relay reads nothing in it.
+  const partBox = crypto.randomBytes(11_150).toString('base64')
+  const refusedBefore = phone.frames.filter((f) => f.type === 'error').length
+  const part = JSON.stringify({ type: 'photo-part', id: 'pp-0', box: partBox })
+  check('a full-size photo part fits the phone frame cap', part.length > 14_800 && part.length <= 16 * 1024)
+  phone.ws.send(part)
+  check('a photo part reaches the Mac unchanged', await until(() => mac.frames.some((f) => f.type === 'photo-part' && f.id === 'pp-0' && f.box === partBox)))
+  await sleep(300)
+  check('...and the phone is told nothing about it', phone.frames.filter((f) => f.type === 'error').length === refusedBefore)
+
   mac.ws.send(JSON.stringify({ type: 'event', kind: 'president', text: '承知しました' }))
   check('Mac event reaches the phone with seq 1', await until(() => phone.frames.some((f) => f.type === 'event' && f.seq === 1 && f.text === '承知しました')))
 
@@ -216,7 +228,7 @@ try {
       ROOM_CREATE: 'gated',
       // The idle limit is far from the event lifetime: an event gone within it
       // can only have gone by its own alarm, not by the idle sweep.
-      RELAY_LIMITS: JSON.stringify({ eventTtlS: 3, roomIdleS: IDLE_S, phonesMax: 2, connectsPerMin: 12, macFramesPerMin: 20, phoneFramesPerMin: 10 }),
+      RELAY_LIMITS: JSON.stringify({ eventTtlS: 3, roomIdleS: IDLE_S, phonesMax: 2, connectsPerMin: 12, macFramesPerMin: 20, phoneFramesPerMin: 10, photoPartsPerMin: 30 }),
     })
     workers.push(w)
     const short = opener(`ws://${w.address}:${w.port}`)
@@ -279,6 +291,15 @@ try {
     const rateMac = await short('mac', rate.r, rate.m, '', { appKey: true })
     for (let i = 0; i < 25; i++) rateMac.ws.send(JSON.stringify({ type: 'event', kind: 'president', text: `n${i}` }))
     check('a sender over the frame rate is cut off (4029)', await until(() => rateMac.closed === 4029))
+    // Photo parts are counted apart from the phone's other frames: 20 parts pass
+    // a phoneFramesPerMin of 10; past photoPartsPerMin (30) the phone is cut off too.
+    const pm = await short('mac', rate.r, rate.m)
+    const pp = await short('phone', rate.r, rate.p)
+    for (let i = 0; i < 20; i++) pp.ws.send(JSON.stringify({ type: 'photo-part', id: `r${i}`, box: 'AAAA' }))
+    check('photo parts are not counted as phone frames', (await until(() => pm.frames.filter((f) => f.type === 'photo-part').length === 20)) && pp.closed === null)
+    for (let i = 20; i < 35; i++) pp.ws.send(JSON.stringify({ type: 'photo-part', id: `r${i}`, box: 'AAAA' }))
+    check('...but past their own rate the phone is cut off (4029)', await until(() => pp.closed === 4029))
+    await shut(pm)
     // Connection rate: over connectsPerMin a new connection is refused.
     let refused = false
     for (let i = 0; i < 15 && !refused; i++) {

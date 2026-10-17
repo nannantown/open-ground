@@ -37,6 +37,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (status !== 200) return json({ error: 'owner only' }, status)
     if (url.endsWith('/log')) return json({ entries: log, ...cfg, logDays: 30, memoryChars: 4000, proposals })
+    if (url.endsWith('/voice')) return json({ ok: true })
     if (url.endsWith('/config')) {
       Object.assign(cfg, JSON.parse(String(init?.body)))
       return json(cfg)
@@ -370,7 +371,16 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     constructor(public text: string) {}
   }
   let synth: { speak: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn>; speaking: boolean; pending: boolean }
-  const spoken = () => synth.speak.mock.calls.map(([u]) => (u as FakeUtterance).text)
+  /** What the window asked og-listen to do (POST …/voice): read, stop, mute. */
+  const voice = () =>
+    vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/voice')).map(([, i]) => JSON.parse(String(i?.body)) as { stop?: boolean; say?: string; id?: string; mute?: boolean })
+  const spoken = () => voice().flatMap((b) => (b.say ? [b.say] : []))
+  /** Stops on their own (the stop key, speaker off, a hush) — a reading itself starts with a stop. */
+  const stops = () => voice().filter((b) => b.stop && !b.say).length
+  const lineId = (i: number) => voice().filter((b) => b.say)[i].id
+  /** og-listen: line i is heard now / read to the end. */
+  const heardNow = (i: number) => ears()[0].emit({ type: 'speak', id: lineId(i) })
+  const readOut = (i: number) => ears()[0].emit({ type: 'spoke', id: lineId(i) })
 
   beforeEach(() => {
     FakeES.all = []
@@ -685,31 +695,35 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     expect(screen.getByRole('button', { name: 'misc.assistant.send' })).toBeTruthy()
   })
 
-  it('call: what is said is sent and the answer comes back aloud; the mic is shut while it thinks and speaks', async () => {
+  it('call: what is said is sent and the answer comes back aloud — in og-listen\'s own voice, the ears open all along', async () => {
     await open()
     call()
     expect(screen.getByTestId('assistant-call')).toBeTruthy()
     expect(screen.queryByRole('textbox')).toBeNull()
     expect(callState()).toBe('misc.assistant.callConnecting')
     expect(ears()).toHaveLength(1)
-    ears()[0].emit({ type: 'ready' })
+    expect(ears()[0].url).toBe('/api/phone-link/assistant/listen?lang=ja&call=1')
+    ears()[0].emit({ type: 'ready', echo: 'on' })
     expect(callState()).toBe('misc.assistant.callHearing')
 
     ears()[0].emit({ type: 'final', text: '明日の予定は?' })
     await waitFor(() => expect(says()).toHaveLength(1))
     expect(callState()).toBe('misc.assistant.callThinking')
-    expect(ears()).toHaveLength(0)
+    // Words while it thinks are not taken: one line is answered at a time.
+    ears()[0].emit({ type: 'final', text: 'それと' })
     await answerNow()
     await waitFor(() => expect(spoken()).toEqual(['答え:明日の予定は?']))
+    expect(says()).toHaveLength(1)
+    expect(stops()).toBe(0)
+    expect(synth.speak).not.toHaveBeenCalled() // never the browser's voice (echo removal would not know it)
     expect(synth.cancel).not.toHaveBeenCalled() // whatever was already speaking (Research) is not cut
-    expect((synth.speak.mock.calls[0][0] as FakeUtterance).lang).toBe('ja-JP')
     expect(callState()).toBe('misc.assistant.callSpeaking')
-    expect(ears()).toHaveLength(0) // the mic would hear the reply
-    act(() => (synth.speak.mock.calls[0][0] as FakeUtterance).onend!())
-    expect(ears()).toHaveLength(1)
+    readOut(0)
+    expect(callState()).toBe('misc.assistant.callHearing')
+    expect(FakeES.all).toHaveLength(1) // never closed and reopened: no word is lost in between
   })
 
-  it('call: a "let me look" is read the moment it comes; the answer reads only its short spoken part', async () => {
+  it('call: a "let me look" is read the moment it comes; the answer follows it, nothing is cut', async () => {
     let ctl: ReadableStreamDefaultController<Uint8Array> | undefined
     const enc = new TextEncoder()
     const line = (o: object) => enc.encode(JSON.stringify(o) + '\n')
@@ -724,18 +738,14 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     await waitFor(() => expect(ctl).toBeDefined())
     act(() => ctl!.enqueue(line({ interim: 'ちょっと待ってね' })))
     await waitFor(() => expect(spoken()).toEqual(['ちょっと待ってね']))
-    // The answer comes while that line is still being said: it waits its turn, nothing is cut.
     act(() => {
       ctl!.enqueue(line({ reply: 'assistant フォルダにあるよ。\n\nlog/ と memory.md', speak: 'assistant フォルダにあるよ。' }))
       ctl!.close()
     })
-    // The answer is in (no longer thinking) while the wait-line still plays.
-    await waitFor(() => expect(callState()).toBe('misc.assistant.callSpeaking'))
-    expect(spoken()).toEqual(['ちょっと待ってね'])
-    expect(synth.cancel).not.toHaveBeenCalled()
-    synth.speaking = false
-    act(() => (synth.speak.mock.calls[0][0] as FakeUtterance).onend!())
     await waitFor(() => expect(spoken()).toEqual(['ちょっと待ってね', 'assistant フォルダにあるよ。']))
+    // Queued after the wait-line (og-listen reads in order), not cutting it.
+    expect(voice().at(-1)?.stop).toBeUndefined()
+    expect(callState()).toBe('misc.assistant.callSpeaking')
   })
 
   it('call: speaker off — the answer is not read aloud, and turning it off mid-reply stops the reading', async () => {
@@ -743,33 +753,30 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     call()
     ears()[0].emit({ type: 'final', text: 'ひとつ' })
     await answerNow()
-    await waitFor(() => expect(synth.speak).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(spoken()).toHaveLength(1))
     const speakerKey = screen.getByRole('button', { name: 'misc.assistant.speaker' })
     expect(speakerKey.getAttribute('aria-pressed')).toBe('true')
     fireEvent.click(speakerKey)
     expect(speakerKey.getAttribute('aria-pressed')).toBe('false')
-    expect(synth.cancel).toHaveBeenCalledTimes(1)
-    synth.speaking = false
-    expect(ears()).toHaveLength(1)
+    await waitFor(() => expect(stops()).toBe(1))
     ears()[0].emit({ type: 'final', text: 'ふたつ' })
     await answerNow()
-    await waitFor(() => expect(ears()).toHaveLength(1))
-    expect(synth.speak).toHaveBeenCalledTimes(1)
-    expect(screen.getByTestId('assistant-call').textContent).toContain('答え:ふたつ') // shown, not read
+    await waitFor(() => expect(screen.getByTestId('assistant-call').textContent).toContain('答え:ふたつ')) // shown, not read
+    expect(spoken()).toHaveLength(1)
   })
 
-  it('call: mute shuts the mic and says so; unmute opens it again', async () => {
+  it('call: mute — the mic hears nothing (og-listen is told) and the screen says so; unmute hears again', async () => {
     await open()
     call()
     ears()[0].emit({ type: 'ready' })
     const muteKey = screen.getByRole('button', { name: 'misc.assistant.mute' })
     fireEvent.click(muteKey)
     expect(muteKey.getAttribute('aria-pressed')).toBe('true')
-    expect(ears()).toHaveLength(0)
     expect(callState()).toBe('misc.assistant.callMuted')
+    await waitFor(() => expect(voice().at(-1)).toEqual({ mute: true }))
     fireEvent.click(muteKey)
-    expect(ears()).toHaveLength(1)
     expect(callState()).not.toBe('misc.assistant.callMuted')
+    await waitFor(() => expect(voice().at(-1)).toEqual({ mute: false }))
   })
 
   it('call: end returns to the chat with the mic off and its own reading stopped', async () => {
@@ -777,12 +784,12 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     call()
     ears()[0].emit({ type: 'final', text: 'やあ' })
     await answerNow()
-    await waitFor(() => expect(synth.speak).toHaveBeenCalled())
+    await waitFor(() => expect(spoken()).toHaveLength(1))
     fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.callEnd' }))
     expect(screen.queryByTestId('assistant-call')).toBeNull()
     expect(input()).toBeTruthy()
-    expect(ears()).toHaveLength(0)
-    expect(synth.cancel).toHaveBeenCalled()
+    expect(ears()).toHaveLength(0) // og-listen goes with the stream: its voice and its echo removal too
+    await waitFor(() => expect(stops()).toBe(1))
     expect(mic().getAttribute('aria-pressed')).toBe('false')
   })
 
@@ -813,11 +820,10 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     ears()[0].emit({ type: 'ready' })
     ears()[0].emit({ type: 'final', text: 'ひとつ' })
     await answerNow()
-    await waitFor(() => expect(synth.speak).toHaveBeenCalled())
+    await waitFor(() => expect(spoken()).toHaveLength(1))
     status = 403 // the next read of the log is refused (signed out)
     await waitFor(() => expect(container.innerHTML).toBe(''), { timeout: 7000 })
-    expect(synth.cancel).toHaveBeenCalled() // the reply stops with it
-    expect(ears()).toHaveLength(0)
+    expect(ears()).toHaveLength(0) // the reply stops with it
     const opened = FakeES.all.length
     status = 200 // signed in again: the window comes back…
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'ノノ' })).toBeTruthy(), { timeout: 7000 })
@@ -826,27 +832,20 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     expect(FakeES.all).toHaveLength(opened) // the mic never came on
   }, 20_000)
 
-  it('call: the assistant going away (re-mounted on sign-out) stops its reading', async () => {
+  it('call: the assistant going away (re-mounted on sign-out) takes its voice with it', async () => {
     await open()
     call()
     ears()[0].emit({ type: 'final', text: 'やあ' })
     await answerNow()
-    await waitFor(() => expect(synth.speak).toHaveBeenCalled())
+    await waitFor(() => expect(spoken()).toHaveLength(1))
     cleanup()
-    expect(synth.cancel).toHaveBeenCalled()
+    expect(ears()).toHaveLength(0)
   })
 
-  it('call: 聞いています only once the mic says it is ready — not while it reopens after a reply', async () => {
+  it('call: 聞いています only once the mic says it is ready', async () => {
     await open()
     call()
-    ears()[0].emit({ type: 'ready' })
-    expect(callState()).toBe('misc.assistant.callHearing')
-    ears()[0].emit({ type: 'final', text: 'やあ' })
-    await answerNow()
-    await waitFor(() => expect(synth.speak).toHaveBeenCalled())
-    act(() => (synth.speak.mock.calls[0][0] as FakeUtterance).onend!())
-    expect(ears()).toHaveLength(1)
-    expect(callState()).toBe('misc.assistant.callWaiting') // reopening: words now would be lost
+    expect(callState()).toBe('misc.assistant.callConnecting')
     ears()[0].emit({ type: 'ready' })
     expect(callState()).toBe('misc.assistant.callHearing')
   })
@@ -874,20 +873,21 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     expect(input().value).toBe('') // the refused second line does not wait in the input
   })
 
-  it('call: other speech (a Research digest) is never cut or queued behind — the mic stays shut while it plays', async () => {
+  it('call: other speech (a Research digest) is never cut or read over — the mic hears nothing while it plays', async () => {
     synth.speaking = true // someone else is reading
     await open()
     call()
-    await act(async () => {})
-    expect(ears()).toHaveLength(0) // it would hear the narration
+    ears()[0].emit({ type: 'ready' })
+    await waitFor(() => expect(voice().at(-1)).toEqual({ mute: true })) // echo removal does not take out another app's sound
     synth.speaking = false
-    await waitFor(() => expect(ears()).toHaveLength(1), { timeout: 1500 })
+    await waitFor(() => expect(voice().at(-1)).toEqual({ mute: false }), { timeout: 1500 })
     ears()[0].emit({ type: 'final', text: 'やあ' })
     await waitFor(() => expect(answer).not.toBeNull())
     synth.speaking = true // the digest starts again while the answer is made
+    await waitFor(() => expect(voice().at(-1)).toEqual({ mute: true }), { timeout: 1500 })
     await answerNow()
     await waitFor(() => expect(screen.getByTestId('assistant-call').textContent).toContain('答え:やあ'))
-    expect(synth.speak).not.toHaveBeenCalled() // not queued behind it…
+    expect(spoken()).toEqual([]) // not read over it…
     fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.callEnd' }))
     expect(synth.cancel).not.toHaveBeenCalled() // …and never cut
   })
@@ -902,6 +902,7 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     call()
     expect(FakeES.all).toHaveLength(2)
     expect(FakeES.all[0].closed).toBe(true)
+    expect(FakeES.all[0].url).not.toContain('call=1') // typing by voice: no echo removal, no ducking
     expect(callState()).toBe('misc.assistant.callConnecting')
   })
 
@@ -939,20 +940,21 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     expect(input().value).toBe('テスト')
   })
 
-  it('call: if the voice never reports its end, the mic still reopens once it falls quiet', async () => {
+  it('call: the ears failing mid-reading end the reading state with them', async () => {
     await open()
     call()
     ears()[0].emit({ type: 'final', text: 'やあ' })
     await answerNow()
-    await waitFor(() => expect(synth.speak).toHaveBeenCalled())
-    expect(ears()).toHaveLength(0)
-    synth.speaking = false // finished, but no onend came
-    await waitFor(() => expect(ears()).toHaveLength(1), { timeout: 2500 })
+    await waitFor(() => expect(callState()).toBe('misc.assistant.callSpeaking'))
+    ears()[0].emit({ type: 'error', reason: 'failed' })
+    expect(callState()).toBe('misc.assistant.voiceFailed')
+    expect(screen.queryByRole('button', { name: 'misc.assistant.callStop' })).toBeNull()
   })
 
   // Release 2 of the voice redesign (docs/research/voice-assistant-2026-10.md §1
-  // 「2 回目」, owner 2026-10-07): sentence by sentence as written, a stop key.
-  describe('call: read as it is written, and the stop key', () => {
+  // 「2 回目」, owner 2026-10-07): sentence by sentence as written, a stop key —
+  // and (§8.3, owner "A") talking over it does what the stop key does.
+  describe('call: read as it is written, the stop key, and talking over it', () => {
     let ctl: ReadableStreamDefaultController<Uint8Array> | undefined
     const enc = new TextEncoder()
     const put = (o: object) => act(() => ctl!.enqueue(enc.encode(JSON.stringify(o) + '\n')))
@@ -961,7 +963,6 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
         ctl!.enqueue(enc.encode(JSON.stringify(o) + '\n'))
         ctl!.close()
       })
-    const utter = (i: number) => synth.speak.mock.calls[i][0] as FakeUtterance
     const hushes = () => vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/hush')).map(([, i]) => JSON.parse(String(i?.body)))
     beforeEach(() => {
       ctl = undefined
@@ -969,7 +970,6 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
       vi.mocked(fetch).mockImplementation(async (url, init) =>
         String(url).endsWith('/say') ? new Response(new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c) })) : base(url as never, init),
       )
-      synth.cancel.mockImplementation(() => void (synth.speaking = false))
     })
     const ask = async (text: string) => {
       ctl = undefined
@@ -986,16 +986,13 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
       await waitFor(() => expect(spoken()).toEqual(['やあ、元気だよ。']))
       expect(callState()).toBe('misc.assistant.callSpeaking') // speaking while the answer is still written
       put({ say: '今日は晴れ。' })
-      expect(spoken()).toEqual(['やあ、元気だよ。']) // its turn comes after, nothing is cut
-      finish({ reply: 'やあ、元気だよ。今日は晴れ。', speak: 'やあ、元気だよ。今日は晴れ。', said: true })
-      synth.speaking = false
-      act(() => utter(0).onend!())
       await waitFor(() => expect(spoken()).toEqual(['やあ、元気だよ。', '今日は晴れ。']))
-      synth.speaking = false
-      act(() => utter(1).onend!())
-      await waitFor(() => expect(ears()).toHaveLength(1))
+      finish({ reply: 'やあ、元気だよ。今日は晴れ。', speak: 'やあ、元気だよ。今日は晴れ。', said: true })
+      readOut(0)
+      readOut(1)
+      await waitFor(() => expect(callState()).toBe('misc.assistant.callHearing'))
       expect(spoken()).toHaveLength(2) // `said`: the pieces were the reading
-      expect(synth.cancel).not.toHaveBeenCalled()
+      expect(stops()).toBe(0) // nothing was cut
     })
 
     it('a look-up starting after a piece went out hushes it; the finished answer is read instead', async () => {
@@ -1004,14 +1001,15 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
       await ask('記録どこ?')
       put({ say: '見てみるね。' })
       await waitFor(() => expect(spoken()).toEqual(['見てみるね。']))
+      heardNow(0)
       put({ hush: true })
-      await waitFor(() => expect(synth.cancel).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(stops()).toBe(1))
       put({ interim: 'ちょっと待ってね。' })
       await waitFor(() => expect(spoken()).toEqual(['見てみるね。', 'ちょっと待ってね。']))
       finish({ reply: 'assistant フォルダにあるよ。', speak: 'assistant フォルダにあるよ。' })
-      synth.speaking = false
-      act(() => utter(1).onend!())
       await waitFor(() => expect(spoken()).toEqual(['見てみるね。', 'ちょっと待ってね。', 'assistant フォルダにあるよ。']))
+      readOut(1)
+      heardNow(2)
       // Stopped now: what was heard is the answer's reading only, not the hushed piece.
       fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.callStop' }))
       await waitFor(() => expect(hushes()).toEqual([{ heard: 'assistant フォルダにあるよ。' }]))
@@ -1030,17 +1028,15 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
       await ask('長い話して')
       put({ say: '昔々あるところに。' })
       put({ say: 'おじいさんがいました。' })
-      await waitFor(() => expect(spoken()).toEqual(['昔々あるところに。']))
-      expect(ears()).toHaveLength(0)
+      await waitFor(() => expect(spoken()).toEqual(['昔々あるところに。', 'おじいさんがいました。']))
+      heardNow(0)
       const stopKey = screen.getByRole('button', { name: 'misc.assistant.callStop' })
       stopKey.focus() // pressed by keyboard or click, the key had the focus
       fireEvent.click(stopKey)
-      expect(synth.cancel).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(stops()).toBe(1))
       expect(dialog.contains(document.activeElement)).toBe(true) // the key went; focus stays in the call
-      await waitFor(() => expect(ears()).toHaveLength(1)) // listening, though the answer is still being written
       expect(screen.queryByRole('button', { name: 'misc.assistant.callStop' })).toBeNull()
-      ears()[0].emit({ type: 'ready' })
-      expect(callState()).toBe('misc.assistant.callHearing')
+      expect(callState()).toBe('misc.assistant.callHearing') // listening, though the answer is still being written
       // Said meanwhile: it goes once the stopped line is answered.
       ears()[0].emit({ type: 'final', text: 'やっぱり短く' })
       expect(says()).toHaveLength(1)
@@ -1057,7 +1053,54 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
       await act(async () => release!())
       await waitFor(() => expect(says()).toHaveLength(2))
       expect(JSON.parse(String(says()[1][1]?.body)).text).toBe('やっぱり短く')
-      expect(spoken()).toEqual(['昔々あるところに。']) // the piece after the stop was never read
+      expect(spoken()).toEqual(['昔々あるところに。', 'おじいさんがいました。']) // nothing read after the stop
+    })
+
+    // Owner 2026-10-07 ("A"): talking over it = the stop key. og-listen and the
+    // server already stopped the reading ('barge'); the screen listens, and the
+    // words go on as an ordinary line. A stop, never a yes: an open proposal stays
+    // open and its button is the only way to send it.
+    it('talking over it quiets it and listens like the stop key — and runs nothing, not even the proposal on screen', async () => {
+      proposals = [card]
+      await open()
+      call()
+      ears()[0].emit({ type: 'ready', echo: 'on' })
+      await ask('カード作って')
+      put({ say: 'カード案を出したよ。' })
+      await waitFor(() => expect(spoken()).toEqual(['カード案を出したよ。']))
+      heardNow(0)
+      finish({ reply: 'カード案を出したよ。中身を見てね。', speak: 'カード案を出したよ。中身を見てね。', said: true })
+      ears()[0].emit({ type: 'barge' })
+      expect(callState()).not.toBe('misc.assistant.callSpeaking')
+      expect(screen.queryByRole('button', { name: 'misc.assistant.callStop' })).toBeNull()
+      await waitFor(() => expect(hushes()).toEqual([{ heard: 'カード案を出したよ。' }]))
+      expect(stops()).toBe(0) // og-listen stopped itself; nothing more to tell it
+      // What they said over it: a line to the assistant, nothing else — even a yes.
+      ears()[0].emit({ type: 'final', text: 'うん、それで出して' })
+      await waitFor(() => expect(says()).toHaveLength(2))
+      expect(JSON.parse(String(says()[1][1]?.body)).text).toBe('うん、それで出して')
+      expect(presses()).toEqual([]) // no approve, no drop
+      expect(screen.getByRole('region', { name: 'misc.assistant.proposalCard' })).toBeTruthy()
+    })
+
+    // Review 2026-10-07: the owner may be typing in a Terminal or the Board while
+    // talking over it — a voice must not pull the focus into the window.
+    it('talking over it leaves the focus where the owner is typing', async () => {
+      await open()
+      call()
+      ears()[0].emit({ type: 'ready', echo: 'on' })
+      await ask('今日の予定は?')
+      put({ say: '本日の予定です。' })
+      await waitFor(() => expect(spoken()).toEqual(['本日の予定です。']))
+      heardNow(0)
+      finish({ reply: '本日の予定です。', speak: '本日の予定です。', said: true })
+      const outside = document.createElement('input')
+      document.body.appendChild(outside)
+      outside.focus()
+      ears()[0].emit({ type: 'barge' })
+      await waitFor(() => expect(hushes()).toEqual([{ heard: '本日の予定です。' }]))
+      expect(document.activeElement).toBe(outside)
+      outside.remove()
     })
 
     it('a stop on a line that then gets no answer tells the server nothing (the note would land on an older answer)', async () => {
@@ -1079,60 +1122,37 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
       await ask('やあ')
       finish({ reply: 'やあ。元気。', speak: 'やあ。元気。' })
       await waitFor(() => expect(spoken()).toEqual(['やあ。元気。']))
+      heardNow(0)
       fireEvent.keyDown(dialog, { key: ' ' })
-      expect(synth.cancel).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(stops()).toBe(1))
       await waitFor(() => expect(hushes()).toEqual([{ heard: 'やあ。元気。' }]))
-      await waitFor(() => expect(ears()).toHaveLength(1))
+      expect(screen.queryByRole('button', { name: 'misc.assistant.callStop' })).toBeNull()
     })
   })
 })
 
 describe('default position', () => {
-  // Owner 2026-10-06: the character must not jump when a project opens. It has
-  // ONE default spot (level with Ground's pen) and the agent-team bar makes room.
-  const reserve = () => document.documentElement.style.getPropertyValue('--og-assistant-reserve')
-  const reserveY = () => document.documentElement.style.getPropertyValue('--og-assistant-reserve-y')
-  it('renders level with the pen until dragged and asks the bar for room while there', async () => {
-    localStorage.removeItem('og.assistant.pos')
-    const { FloatingAssistant: FA, ASSISTANT_RESERVE_PX, ASSISTANT_RESERVE_Y_PX } = await import('./FloatingAssistant')
-    const { container, unmount } = render(<FA disabled={false} />)
-    await act(async () => {})
-    const b = container.querySelector('button') as HTMLElement
-    expect(b.style.bottom).toBe('18px')
-    expect(b.style.right).toBe('20px')
-    // the reserve covers the character's width plus its gap to the edge
-    expect(reserve()).toBe(`${ASSISTANT_RESERVE_PX}px`)
-    expect(ASSISTANT_RESERVE_PX).toBeGreaterThan(20 + 50)
-    // ...and the floor a project keeps free: its top (18 + 50) plus a gap
-    expect(reserveY()).toBe(`${ASSISTANT_RESERVE_Y_PX}px`)
-    expect(ASSISTANT_RESERVE_Y_PX).toBeGreaterThan(18 + 50)
-    unmount()
-    expect(reserve()).toBe('')
-    expect(reserveY()).toBe('')
-  })
-  it('the room stays while the character is dragged and goes once it is dropped elsewhere', async () => {
+  // Owner 2026-10-06: the character must not jump when a project opens — ONE
+  // default spot (level with Ground's pen). Owner 2026-10-07: it floats OVER
+  // the screen; the layout makes no room for it (no variable on <html>).
+  const htmlStyle = () => document.documentElement.getAttribute('style') ?? ''
+  it('renders level with the pen until dragged, floating, and asks the layout for no room', async () => {
     localStorage.removeItem('og.assistant.pos')
     const { FloatingAssistant: FA } = await import('./FloatingAssistant')
     const { container } = render(<FA disabled={false} />)
     await act(async () => {})
     const b = container.querySelector('button') as HTMLElement
-    fireEvent.pointerDown(b, { clientX: 500, clientY: 500, pointerId: 1 })
-    fireEvent.pointerMove(b, { clientX: 400, clientY: 400, pointerId: 1 })
-    expect(b.style.bottom).not.toBe('18px') // it moves...
-    expect(reserveY()).not.toBe('') // ...the screen does not reflow under the drag
-    fireEvent.pointerUp(b, { pointerId: 1 })
-    await act(async () => {})
-    expect(reserve()).toBe('')
-    expect(reserveY()).toBe('')
-    localStorage.removeItem('og.assistant.pos')
+    expect(b.style.bottom).toBe('18px')
+    expect(b.style.right).toBe('20px')
+    expect(b.className).toContain('fixed')
+    expect(htmlStyle()).not.toContain('--og-assistant')
   })
-  it('a spot the owner dragged to is kept, and the bar takes its full width back', async () => {
+  it('a spot the owner dragged to is kept', async () => {
     localStorage.setItem('og.assistant.pos', JSON.stringify({ right: 300, bottom: 200 }))
     const { FloatingAssistant: FA } = await import('./FloatingAssistant')
     const { container } = render(<FA disabled={false} />)
     await act(async () => {})
     expect((container.querySelector('button') as HTMLElement).style.bottom).toBe('200px')
-    expect(reserve()).toBe('')
     localStorage.removeItem('og.assistant.pos')
   })
 })

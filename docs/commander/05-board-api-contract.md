@@ -75,6 +75,7 @@ Any descriptions of the retired paths below are historical, not operating instru
 | `selfSupplyKey` / `selfSupplyApproved` | `.optional().catch(undefined)` | drop。approved が落ちる方向は**ゲート閉**で安全 (`schemas.ts:148-149`) |
 | `draft` | `z.boolean().optional().catch(true)` | junk reads as **`true`** (the card stays held by dispatch gate ⑧, fail-closed). On write, `PUT /api/project` answers **400** for a non-boolean `draft` or a non-array `dependsOn` (`cardFieldTypeError`, 2026-09-26: a string `dependsOn` used to answer 200 and vanish); `POST /api/project/tasks` refuses both keys, since it cannot set them |
 | `reworkCount` | `z.number().int().nonnegative().optional().catch(undefined)` | drop(負数/小数でループガードを無効化できない `schemas.ts:150-155`) |
+| `reworkedAt` | `z.string().optional().catch(undefined)` | drop(落ちると差し戻し済みカードの ready は信じない側 — §2.4) |
 
 ### 2.2 「不正 1 フィールドでカードが消えない」二段構え
 
@@ -113,9 +114,14 @@ Any descriptions of the retired paths below are historical, not operating instru
   「1」のまま上限に届かなかった)。**司令官が答えた**エスカレーションの unpark も保持
   (`answeredBy:'commander'` ⇒ `byOwner:false`、不明も保持側)。ほかに todo 内の並べ替え
   ドラッグ、`review`/`doing`/`blocked` への setColumn。
-  - 副作用: 引き継いだカードは `promoteUnownedDelivered` の対象外になる(③ `reworkCount`
-    falsy の条件)— 差し戻し経験のあるカード一般と同じ扱いで、孤児掃除
-    (`collectUnownedDoing`)が todo へ戻す。配車1回分余計にかかるだけで詰まらない。
+  - 副作用: 引き継いだカードを `promoteUnownedDelivered` が回収するのは、心拍が最後の
+    差し戻し時刻 `reworkedAt` より新しい ready のときだけ(01 章 §7.4c ③・2026-10-07)。
+    `reworkedAt` の無い古いカードは対象外のままで、孤児掃除(`collectUnownedDoing`)が
+    todo へ戻す。配車1回分余計にかかるだけで詰まらない。
+  - `reworkedAt`(ISO): 「最後に差し戻した時刻」。`{rework}`(`reworkCount` +1 と同じ書き込み)・
+    `setColumn` の review→doing・Board の review→doing ドラッグが刻む。消さない(次の差し戻しで
+    上書き。やり直しの再配車は前任の心拍ファイルを消すので古い時刻は害にならない)。
+    swarm-board.sh の移動は刻まない(数えられた worker なら monitor の `reworkAt` が代わりに効く)。
   - 番人(本番側を戻して赤を実測済み): `server/routes/__tests__/tasks.test.ts`「engine
     requeue vs the owner starting over」(実 `defaultDeps().recoverCard` を app に通す)、
     `BoardTab.test.ts`(別列→todo はリセット・todo 内の並べ替えは保持)、

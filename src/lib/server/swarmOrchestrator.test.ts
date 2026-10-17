@@ -98,6 +98,10 @@ import {
   __resetOrchestratorForTests,
   __seedEngineForTests,
   isCardDispatchInFlight,
+  STRANDED_READY_NOTICE_MS,
+  STRANDED_READY_RENOTICE_MS,
+  STRANDED_READY_CHECK_MS,
+  readySinceSendBack,
   type OrchestratorDeps,
   type IntegrationDeps,
   type AnomalyDeps,
@@ -8501,14 +8505,26 @@ describe('promoteUnownedDelivered — a delivered card nobody owns still reaches
     expect(deps.reviews).toEqual([])
   })
 
-  it('will not move one that has been SENT BACK — the ready beat is sticky and lies there', async () => {
-    // ⚠ THE ONE CASE A READY HEARTBEAT MEANS NOTHING. swarm-beat.sh writes
-    // readyToMerge once and never unsets it, so a card returned review→doing by
-    // a 差し戻し still reports ready while its worker re-works. The live monitor
-    // compares the beat against `reworkAt` — in-memory, and therefore gone across
-    // exactly the restart this sweep exists for — so the persisted COUNT is the
-    // discriminator here: a card that has never been sent back cannot be in that
-    // state at all.
+  it('will not move a SENT-BACK card on a ready beat older than the send-back — that beat is the last round', async () => {
+    // ⚠ THE ONE CASE A READY HEARTBEAT MEANS NOTHING. A 差し戻し does not touch
+    // the heartbeat file, so until the worker beats again it still reports the
+    // previous round's ready while it re-works.
+    const c = card('r', {
+      boardColumn: 'doing',
+      branch: 'swarm/r',
+      reworkCount: 1,
+      reworkedAt: new Date(NOW + 1_000).toISOString(),
+    })
+    const deps = makeDeps({
+      cards: [c],
+      heartbeats: new Map([['r', beat()]]),
+      commits: new Map([['r', 4]]),
+    })
+    await runDispatchPass(newEngine({ running: true, workers: [] }), deps, NOW + 2_000)
+    expect(deps.reviews).toEqual([])
+  })
+
+  it('will not move a SENT-BACK card with no send-back time — a card from before the stamp stays ambiguous', async () => {
     const c = card('r', { boardColumn: 'doing', branch: 'swarm/r', reworkCount: 1 })
     const deps = makeDeps({
       cards: [c],
@@ -8517,6 +8533,26 @@ describe('promoteUnownedDelivered — a delivered card nobody owns still reaches
     })
     await runDispatchPass(newEngine({ running: true, workers: [] }), deps, NOW)
     expect(deps.reviews).toEqual([])
+  })
+
+  it('DOES move a SENT-BACK card whose worker beat ready AFTER the send-back (2026-10-07 stall)', async () => {
+    // The measured case: a commander-started worker (never counted) re-delivered a
+    // reworked card at 12:22 and the card sat in 'doing' until 14:18, because this
+    // sweep skipped every card with a reworkCount.
+    const c = card('r', {
+      boardColumn: 'doing',
+      branch: 'swarm/r',
+      reworkCount: 1,
+      reworkedAt: new Date(NOW - 4 * 60_000).toISOString(),
+    })
+    const deps = makeDeps({
+      cards: [c],
+      heartbeats: new Map([['r', beat()]]),
+      commits: new Map([['r', 6]]),
+    })
+    await runDispatchPass(newEngine({ running: true, workers: [] }), deps, NOW)
+    expect(deps.reviews).toEqual([{ taskId: 'r', branch: 'swarm/r' }])
+    expect(deps.board.get('r')?.boardColumn).toBe('review')
   })
 
   it('will not move an ABANDONED card — 見送る means 見送る', async () => {
@@ -10555,5 +10591,135 @@ describe('runDispatchPass → supply desk progress', () => {
     deps.board.set('p', { ...deps.board.get('p')!, boardColumn: 'blocked' })
     await runDispatchPass(engine, deps)
     expect((peekSupplyImportant().get('/proj-progress') ?? [])[0]).toContain('「決済画面」が途中で止まり')
+  })
+})
+
+describe('noticeStrandedReady — a worker said done and nobody picked it up', () => {
+  // The catch-all net behind every promote road (2026-10-07). The fixture makes
+  // the review move ALWAYS fail, so the card stays 'doing' however correct the
+  // roads are — what is pinned is that the commander still hears about it.
+  const T0 = Date.parse('2026-10-07T03:22:44Z')
+  const beatAt = (at: number): HeartbeatSign => ({ ready: true, blocked: false, at: new Date(at).toISOString() })
+  const setup = (over: Partial<ProjectTask> = {}, hbAt = T0) => {
+    const c = card('s', { boardColumn: 'doing', branch: 'swarm/s', title: 'Mac 読み上げ', ...over })
+    const deps = makeDeps({
+      cards: [c],
+      heartbeats: new Map([['s', beatAt(hbAt)]]),
+      commits: new Map([['s', 2]]),
+      reviewAlwaysFails: new Set(['s']),
+    })
+    const told: string[] = []
+    deps.tellManager = async (_p, text) => {
+      told.push(text)
+      return true
+    }
+    return { deps, told, engine: newEngine({ running: true, workers: [] }) }
+  }
+
+  it('tells the commander once the done has sat unmoved for the notice window, then repeats on the re-notice window', async () => {
+    const { deps, told, engine } = setup()
+    await runDispatchPass(engine, deps, T0)
+    await runDispatchPass(engine, deps, T0 + STRANDED_READY_NOTICE_MS - STRANDED_READY_CHECK_MS)
+    expect(told).toEqual([])
+    await runDispatchPass(engine, deps, T0 + STRANDED_READY_NOTICE_MS)
+    expect(told).toHaveLength(1)
+    expect(told[0]).toContain('swarm/s')
+    expect(told[0]).toContain('Mac 読み上げ')
+    await runDispatchPass(engine, deps, T0 + STRANDED_READY_NOTICE_MS + 60_000)
+    expect(told).toHaveLength(1)
+    await runDispatchPass(engine, deps, T0 + STRANDED_READY_NOTICE_MS + STRANDED_READY_RENOTICE_MS)
+    expect(told).toHaveLength(2)
+  })
+
+  it('keeps retrying when the desk could not take it, instead of marking it told', async () => {
+    const { deps, told, engine } = setup()
+    let accept = false
+    deps.tellManager = async (_p, text) => {
+      if (accept) told.push(text)
+      return accept
+    }
+    await runDispatchPass(engine, deps, T0)
+    await runDispatchPass(engine, deps, T0 + STRANDED_READY_NOTICE_MS)
+    expect(told).toEqual([])
+    accept = true
+    await runDispatchPass(engine, deps, T0 + STRANDED_READY_NOTICE_MS + 3_000)
+    expect(told).toEqual([]) // throttled: a refusing desk is not re-asked every tick
+    await runDispatchPass(engine, deps, T0 + STRANDED_READY_NOTICE_MS + STRANDED_READY_CHECK_MS)
+    expect(told).toHaveLength(1)
+  })
+
+  it('stays quiet on a RE-ENTERED worker while the branch still carries its predecessor\'s ready beat', async () => {
+    // Review must-fix (2026-10-07): commander parks a ready card review→blocked
+    // (setColumn — no reworkedAt), the owner's 「やり直す」 re-dispatches onto the
+    // SAME branch (reenteredAt, no reworkAt), and the old ready:true beat is still
+    // on disk (its delete is best-effort). That beat is not the new worker's done.
+    const { deps, told } = setup()
+    const engine = newEngine({
+      running: true,
+      workers: [
+        worker({
+          terminalId: 'pty-s',
+          branch: 'swarm/s',
+          taskId: 's',
+          worktree: '/wt/s',
+          reenteredAt: new Date(T0 + 1_000).toISOString(),
+        }),
+      ],
+    })
+    await runDispatchPass(engine, deps, T0 + 2_000)
+    await runDispatchPass(engine, deps, T0 + 2_000 + STRANDED_READY_NOTICE_MS)
+    expect(engine.workers).toHaveLength(1) // still counted — the mask, not a reclaim, kept it quiet
+    expect(told).toEqual([])
+  })
+
+  it('stays quiet on a counted worker the monitor saw sent back, even when the card stamp missed it', async () => {
+    // swarm-board.sh moves the card without the API's stamp; the monitor's own
+    // reworkAt is then the only record of the send-back.
+    const { deps, told } = setup()
+    const engine = newEngine({
+      running: true,
+      workers: [
+        worker({
+          terminalId: 'pty-s',
+          branch: 'swarm/s',
+          taskId: 's',
+          worktree: '/wt/s',
+          reworkAt: new Date(T0 + 1_000).toISOString(),
+        }),
+      ],
+    })
+    await runDispatchPass(engine, deps, T0 + 2_000)
+    await runDispatchPass(engine, deps, T0 + 2_000 + STRANDED_READY_NOTICE_MS)
+    expect(engine.workers).toHaveLength(1) // still counted — the guard, not a reclaim, kept it quiet
+    expect(told).toEqual([])
+  })
+
+  it('stays quiet on a reworked card whose ready beat predates the send-back — the worker is still re-working', async () => {
+    const { deps, told, engine } = setup({ reworkCount: 1, reworkedAt: new Date(T0 + 1_000).toISOString() })
+    await runDispatchPass(engine, deps, T0 + 2_000)
+    await runDispatchPass(engine, deps, T0 + 2_000 + STRANDED_READY_NOTICE_MS)
+    expect(told).toEqual([])
+  })
+
+  it('stays quiet on a card whose worker has not declared done', async () => {
+    const { deps, told, engine } = setup()
+    deps.readHeartbeat = async () => ({ ready: false, blocked: false, at: new Date(T0).toISOString() })
+    await runDispatchPass(engine, deps, T0)
+    await runDispatchPass(engine, deps, T0 + STRANDED_READY_NOTICE_MS)
+    expect(told).toEqual([])
+  })
+})
+
+describe('readySinceSendBack — only this round\'s ready counts', () => {
+  const hb = (at: string, ready = true): HeartbeatSign => ({ ready, blocked: false, at })
+  it('reads the send-back stamp whenever the card has one, count or not (a Board drag keeps the count at 0)', () => {
+    const t = card('x', { reworkedAt: '2026-10-07T03:18:05.000Z' })
+    expect(readySinceSendBack(t, hb('2026-10-07T03:10:28Z'))).toBe(false)
+    expect(readySinceSendBack(t, hb('2026-10-07T03:22:37Z'))).toBe(true)
+    expect(readySinceSendBack(t, hb('2026-10-07T03:22:37Z', false))).toBe(false)
+  })
+  it('a never-sent-back card trusts its ready; a reworked card with no stamp does not', () => {
+    expect(readySinceSendBack(card('x'), hb('2026-10-07T03:22:37Z'))).toBe(true)
+    expect(readySinceSendBack(card('x', { reworkCount: 1 }), hb('2026-10-07T03:22:37Z'))).toBe(false)
   })
 })

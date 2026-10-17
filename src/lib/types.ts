@@ -2082,6 +2082,16 @@ export interface ProjectTask {
    *  再利用されても差し戻し回数が持ち越されないように — 3点セット: types.ts /
    *  ProjectTaskSchema / server/routes/project.ts rework loop + setColumn done/todo)。 */
   reworkCount?: number
+  /** ISO time of the LATEST 差し戻し — stamped by the same {rework} call that bumps
+   *  `reworkCount` (2026-10-07), and by a setColumn / Board drag review→doing.
+   *  Read WHENEVER present (readySinceSendBack): a ready heartbeat written AFTER it
+   *  is a real hand-over, one written before it is the stale beat from the previous
+   *  round; a card with `reworkCount` but no stamp trusts no ready beat at all. It is what lets the engine collect a
+   *  reworked card whose worker it does not count (a commander-started worker) —
+   *  without it such a card sat in 'doing' for two hours. Never cleared — not even by
+   *  「やり直す」: the next send-back restamps it, and a re-dispatched worker's own
+   *  beats are newer than it anyway. */
+  reworkedAt?: string
   /** Set by the DAILY FUEL REPORT (`dailyFuelReport.ts`) on the improvement
    *  proposal it files into `blocked` on a degraded day. Its presence marks
    *  provenance AND is the dedup key: the report scans the target Board for an
@@ -3619,8 +3629,23 @@ export interface ResearchJobStateResponse {
 
 /** One event on GET /api/phone-link/assistant/listen (assistantListen.ts → useVoice). */
 export interface AssistantListenEvent {
-  type: 'ready' | 'partial' | 'final' | 'error'
+  /** In a call the stream also carries the voice: 'speak' (reading `id` is heard
+   *  now), 'spoke' (`id` read to the end), 'barge' (the owner talked over it: it
+   *  stopped, the words follow as partial/final). 'fed': measuring only (og-listen --call --feed).
+   *  'level': og-listen → server only, the mic every 0.1 s while it reads;
+   *  'paused'/'resumed': the reading held while someone may be talking, then going on. */
+  type: 'ready' | 'partial' | 'final' | 'error' | 'speak' | 'spoke' | 'barge' | 'fed' | 'level' | 'paused' | 'resumed'
   text?: string
   /** On 'error': 'denied' (no permission) | 'unavailable' | 'failed'. */
   reason?: string
+  /** On 'partial'/'final' in a call: the mic's level after echo removal, dBFS (loudest 0.1 s of the last 0.5 s); on 'level' that 0.1 s. */
+  level?: number
+  id?: string
+  /** On 'level': how loud it is reading now (dBFS before the system volume; -120 = not playing). */
+  play?: number
+  /** On 'fed'/'paused' (measuring): og-listen's clock, seconds. */
+  t?: number
+  /** On 'ready' in a call: 'on' = echo removal; 'apart' = none, the mic is not in the box the voice
+   *  comes out of (an interface's stand-in mic); 'off' = neither — nothing heard while it reads counts. */
+  echo?: 'on' | 'apart' | 'off'
 }

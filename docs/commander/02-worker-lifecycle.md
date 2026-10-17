@@ -597,8 +597,9 @@ door (never in `engine.workers`), or a restart where the boot declined the resum
 (no session id, transcript unproven — typically an orphaned claude still holds the
 session — or autonomy switched off during the proof) or never resumed at all (engine
 off at restart and switched on later, crash-loop breaker, failed preflight, Board
-read failure). There `promoteUnownedDelivered`, whose only stale-ready guard is
-`reworkCount` (which 「やり直す」 clears), would read the previous worker's ready +
+read failure). There `promoteUnownedDelivered`, whose only stale-ready guard is the
+card's send-back stamp `reworkedAt` (kept by 「やり直す」, which clears only `reworkCount` —
+and the previous worker's last ready beat may well be newer than it), would read the previous worker's ready +
 commits as a delivery. With the file gone it finds no ready, and the card stays in
 `doing` for `collectUnownedDoing`'s ordinary path (01 章 §7.4d: grace, orphan hold
 while a claude process still holds the session, salvage, requeue to `todo`) — the

@@ -8,6 +8,29 @@
 //                                    short after a finished sentence, long after
 //                                    a dangling particle: pauseFor)
 //   {"type":"error","reason":"denied"|"unavailable"|"failed"}  then exits
+// `og-listen <locale> --call` is also the call's VOICE (owner 2026-10-07, talking
+// over the assistant): it reads aloud what stdin asks, one JSON per line —
+//   {"say":"…","id":"3","lang":"ja-JP"}  read it after what is already queued
+//   {"stop":true}  quiet now (then a "say" in the same line starts afresh)
+//   {"mute":true|false}  hear nothing / hear again
+//   {"pause":true} / {"resume":true}  hold the reading (someone may be talking) / go on
+//   {"forget":true}  drop the words being heard (scraps of its own voice)
+// through the SAME audio engine it listens on, with Apple's voice processing on,
+// so its own voice is taken out of what the mic hears (WWDC19 510: only audio
+// that engine plays is the echo reference; another app's is only ducked —
+// WWDC23 10235). It then also prints
+//   {"type":"ready","echo":"on"|"apart"|"off"}   see Listener.echoMode
+//   {"type":"speak","id":"3"} / {"type":"spoke","id":"3"}   heard now / read to the end
+//   {"type":"level","level":-31}   the mic every 0.1 s while it reads (dBFS)
+//   {"type":"paused"} / {"type":"resumed"}   as asked
+// and partial/final carry "level": the mic's recent peak after echo removal, in
+// dBFS. `--call --feed <audio>` (a mono file at the mic's rate) adds the file to
+// what the mic hears from the moment stdin says {"feed":true} ({"type":"fed"}
+// then): a voice talking over the reading, on a Mac where nobody can speak
+// (scripts/measure-barge-in.mts). Whether heard words count while it reads is the server's call
+// (assistantListen.ts isBargeIn). Plain listening (typing by voice) never turns
+// voice processing on: it ducks other apps' sound (music production), so it is
+// on only while a call is.
 // Keeps listening, utterance after utterance, until killed or stdin closes
 // (the parent died). `og-listen <locale> --file <audio>` recognizes one file
 // and exits — the only way to check recognition without speaking.
@@ -27,7 +50,7 @@ import Speech
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
-func emit(_ obj: [String: String]) {
+func emit(_ obj: [String: Any]) {
   guard let data = try? JSONSerialization.data(withJSONObject: obj), let line = String(data: data, encoding: .utf8) else { return }
   print(line)
 }
@@ -39,6 +62,7 @@ func fail(_ reason: String) -> Never {
 
 let args = CommandLine.arguments
 let locale = Locale(identifier: args.count > 1 && !args[1].hasPrefix("-") ? args[1] : "ja-JP")
+let callMode = args.contains("--call")
 let fileArg: String? = args.firstIndex(of: "--file").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
 // Checks without listening: `--choose <default channels> <built-in 0|1> <lid shut 0|1> [<default is built-in 0|1>]`
 // prints the rule's answer; `--which` prints what this Mac would listen on now.
@@ -79,9 +103,13 @@ func pauseFor(_ text: String) -> Double {
 
 guard let recognizer = SFSpeechRecognizer(locale: locale) else { fail("unavailable") }
 
-// The parent going away closes our stdin: stop listening with it.
+// The parent going away closes our stdin: stop listening with it. In a call
+// stdin also carries what to say (Voice.handle).
 DispatchQueue.global().async {
-  while readLine() != nil {}
+  while let line = readLine() {
+    guard callMode, let data = line.data(using: .utf8), let cmd = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+    DispatchQueue.main.async { listener.command(cmd) }
+  }
   exit(0)
 }
 
@@ -185,6 +213,203 @@ func mono(_ buf: AVAudioPCMBuffer, _ format: AVAudioFormat) -> AVAudioPCMBuffer?
   return out
 }
 
+/** The call's voice: the system voice (what Chromium's speechSynthesis used on
+ *  macOS — the same voices) rendered to buffers and played on the listening
+ *  engine, so echo removal knows it. One line at a time, in order. Main thread. */
+final class Voice {
+  let synth = AVSpeechSynthesizer() // held: its buffers stop if it goes
+  let player = AVAudioPlayerNode()
+  var format: AVAudioFormat?
+  typealias Line = (id: String, text: String, lang: String)
+  var queue: [Line] = []
+  /** The lines begun (being rendered or played), by id: what a restart reads again. */
+  var begun: [String: Line] = [:]
+  var writingId: String?
+  /** Ids with sound scheduled, in playing order (the first is being heard). */
+  var ahead: [String] = []
+  var writing = false
+  /** Bumped by halt(): what was underway for an older one is dropped. */
+  var gen = 0
+  var converter: AVAudioConverter?
+  /** The speaker side's loudness per tap buffer, newest last (audio thread, under lock). */
+  let lock = NSLock()
+  var played: [Float] = []
+  /** The loudest of what it played over the last `seconds` (echo arrives a little late and rings on). */
+  func playing(_ seconds: Double, rate: Double) -> Int {
+    lock.lock(); defer { lock.unlock() }
+    let n = max(1, Int(seconds * rate / 1024))
+    return Int((played.suffix(n).max() ?? -120).rounded())
+  }
+
+  /** Without echo removal the voice plays on its own engine: one engine driving a
+   *  mic and a speaker of different boxes at different rates will not start
+   *  (measured: built-in mic 48 kHz + an interface at 44.1 kHz). */
+  let own = AVAudioEngine()
+  private var watchingOwn = false
+
+  func attach(to engine: AVAudioEngine) {
+    // Its own engine, still playing across a restart of the listening one: left as it is.
+    if player.engine === engine && engine.isRunning { return next() }
+    if engine === own && !watchingOwn {
+      watchingOwn = true
+      // Headphones in or out stop it silently: the lines go (said so), it starts again.
+      NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: own, queue: .main) { [weak self] _ in
+        guard let self, self.player.engine === self.own else { return }
+        self.again { try? self.own.start() }
+      }
+    }
+    if let old = player.engine, old !== engine {
+      // The listening engine no longer plays: nothing of it left driving the speaker
+      // (an engine on a mic and a speaker of different boxes will not start).
+      old.stop()
+      old.mainMixerNode.removeTap(onBus: 0)
+      old.detach(player)
+      old.disconnectNodeOutput(old.mainMixerNode)
+    }
+    if player.engine == nil { engine.attach(player) }
+    // The mixer at the output's own rate: with voice processing on, a mixer left
+    // at the device's old rate keeps the engine from starting (-10875, measured).
+    let out = engine.outputNode.outputFormat(forBus: 0)
+    engine.connect(engine.mainMixerNode, to: engine.outputNode, format: out.sampleRate > 0 ? out : nil)
+    let f = AVAudioFormat(standardFormatWithSampleRate: out.sampleRate > 0 ? out.sampleRate : 48000, channels: 1)!
+    format = f
+    converter = nil
+    engine.connect(player, to: engine.mainMixerNode, format: f)
+    // How loud it is reading right now (what goes to the speaker, before the
+    // system volume): the server weighs the mic against it — what leaks back of
+    // its own voice rises and falls with it.
+    engine.mainMixerNode.removeTap(onBus: 0)
+    engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buf, _ in
+      guard let self, let x = buf.floatChannelData?[0], buf.frameLength > 0 else { return }
+      var sum: Float = 0
+      for i in 0..<Int(buf.frameLength) { sum += x[i] * x[i] }
+      let db = 10 * log10(max(sum / Float(buf.frameLength), 1e-12))
+      self.lock.lock(); self.played.append(db); if self.played.count > 32 { self.played.removeFirst() }; self.lock.unlock()
+    }
+    next() // a line asked for before the engine was up
+  }
+
+  func say(_ text: String, id: String, lang: String) {
+    queue.append((id, text, lang))
+    next()
+  }
+
+  /** A restart (another device): the lines underway are gone — said so, or the
+   *  server would wait for them, not counting what it hears, for good. */
+  func drop() {
+    for id in ahead + (writingId.map { ahead.contains($0) ? [] : [$0] } ?? []) + queue.map(\.id) { emit(["type": "spoke", "id": id]) }
+    halt()
+  }
+
+  /** Paused for someone who may be talking: a line arriving meanwhile must not start it again. */
+  var held = false
+
+  /** The engine under it restarted (a device change): the lines underway are read
+   *  again from their start once `start` has it running — not dropped unheard. */
+  func again(_ start: () -> Void) {
+    let ids = ahead + (writingId.map { ahead.contains($0) ? [] : [$0] } ?? [])
+    let lines = ids.compactMap { begun[$0] } + queue
+    halt()
+    start()
+    for l in lines { say(l.text, id: l.id, lang: l.lang) }
+  }
+
+  func halt() {
+    gen += 1
+    begun = [:]
+    writingId = nil
+    held = false
+    queue = []
+    ahead = []
+    writing = false
+    synth.stopSpeaking(at: .immediate)
+    if player.engine != nil { player.stop() }
+  }
+
+  /** Renders the next line; its buffers are scheduled as they come. */
+  func next() {
+    guard !writing, !queue.isEmpty, let format else { return }
+    let (id, text, lang) = queue.removeFirst()
+    begun[id] = (id, text, lang)
+    writingId = id
+    writing = true
+    let g = gen
+    var started = false
+    let u = AVSpeechUtterance(string: text)
+    u.voice = AVSpeechSynthesisVoice(language: lang)
+    synth.write(u) { [weak self] buffer in
+      guard let pcm = buffer as? AVAudioPCMBuffer else { return }
+      DispatchQueue.main.async {
+        guard let self, g == self.gen else { return }
+        if !started {
+          started = true
+          self.ahead.append(id)
+          if self.ahead.count == 1 { emit(["type": "speak", "id": id]) }
+        }
+        if pcm.frameLength == 0 {
+          // Its end: a moment of silence whose playing-out marks the line heard.
+          if let tail = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1) {
+            tail.frameLength = 1
+            self.play(tail) { [weak self] in self?.done(id, g) }
+          }
+          self.writing = false
+          self.writingId = nil
+          self.next()
+        } else if let b = self.convert(pcm, to: format) {
+          self.play(b, nil)
+        }
+      }
+    }
+  }
+
+  func play(_ b: AVAudioPCMBuffer, _ then: (() -> Void)?) {
+    // The engine stopped under it (a device change): the lines are gone — said so,
+    // or the server and the window would wait for their end for good.
+    guard player.engine?.isRunning == true else { return drop() }
+    // Called on stop() too (AVAudioPlayerNode.h): gen tells the two apart.
+    player.scheduleBuffer(b, completionCallbackType: .dataPlayedBack) { _ in
+      if let then { DispatchQueue.main.async(execute: then) }
+    }
+    if !player.isPlaying && !held { player.play() }
+  }
+
+  func done(_ id: String, _ g: Int) {
+    // Also called when the player stops under it — its engine stopped by a device
+    // change (the restart reads the line again): only a player still playing has
+    // played it to the end.
+    guard g == gen, ahead.first == id, player.isPlaying, player.engine?.isRunning == true else { return }
+    ahead.removeFirst()
+    begun[id] = nil
+    emit(["type": "spoke", "id": id])
+    if let n = ahead.first { emit(["type": "speak", "id": n]) }
+  }
+
+  func convert(_ pcm: AVAudioPCMBuffer, to format: AVAudioFormat) -> AVAudioPCMBuffer? {
+    if pcm.format == format { return pcm }
+    if converter?.inputFormat != pcm.format { converter = AVAudioConverter(from: pcm.format, to: format) }
+    guard let converter else { return nil }
+    let cap = AVAudioFrameCount(Double(pcm.frameLength) * format.sampleRate / pcm.format.sampleRate) + 32
+    guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: cap) else { return nil }
+    var fed = false
+    var err: NSError?
+    converter.convert(to: out, error: &err) { _, status in
+      if fed { status.pointee = .noDataNow; return nil }
+      fed = true
+      status.pointee = .haveData
+      return pcm
+    }
+    return err == nil ? out : nil
+  }
+}
+
+func firstChannel(_ buf: AVAudioPCMBuffer, _ format: AVAudioFormat) -> AVAudioPCMBuffer? {
+  guard buf.format.channelCount > 1 else { return buf }
+  guard let src = buf.floatChannelData?[0], let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buf.frameLength), let dst = out.floatChannelData?[0] else { return nil }
+  out.frameLength = buf.frameLength
+  dst.update(from: src, count: Int(buf.frameLength))
+  return out
+}
+
 final class Listener {
   let recognizer: SFSpeechRecognizer
   let engine = AVAudioEngine()
@@ -204,6 +429,44 @@ final class Listener {
 
   /** The device the engine was last started on. */
   var using: AudioDeviceID = 0
+  /** A call: voice processing (echo removal) is on — the voice reads through this engine. */
+  var echo = false
+  /** What the server is told: "on" | "apart" | "off" (startEngine). */
+  var echoMode = "off"
+  /** This device would not take voice processing: not tried again. */
+  var echoRefused = false
+  var muted = false
+  let voice = Voice()
+  /** Loudness of the mic per 0.1 s, dBFS, the last five (the audio thread writes, under lock). */
+  private var levels = [Float](repeating: -120, count: 5)
+  private var levelAt = 0
+  private var sum: Float = 0
+  private var frames = 0
+  var level: Int {
+    lock.lock(); defer { lock.unlock() }
+    return Int((levels.max() ?? -120).rounded())
+  }
+  /** Every 0.1 s of mic: its level, and — while the voice is heard — told as
+   *  {"type":"level"}: the server pauses the reading on a loud one at once (the
+   *  recognizer's first word comes ~0.8 s after the voice, measured), then
+   *  stops it or lets it go on by the words. */
+  func note(_ buf: AVAudioPCMBuffer) {
+    guard let x = buf.floatChannelData?[0], buf.frameLength > 0 else { return }
+    lock.lock()
+    for i in 0..<Int(buf.frameLength) { sum += x[i] * x[i] }
+    frames += Int(buf.frameLength)
+    guard Double(frames) >= buf.format.sampleRate / 10 else { return lock.unlock() }
+    let db = 10 * log10(max(sum / Float(frames), 1e-12))
+    sum = 0
+    frames = 0
+    levels[levelAt] = db
+    levelAt = (levelAt + 1) % levels.count
+    lock.unlock()
+    DispatchQueue.main.async { [weak self] in
+      guard let self, !self.voice.ahead.isEmpty else { return }
+      emit(["type": "level", "level": Int(db.rounded()), "play": self.voice.player.isPlaying ? self.voice.playing(0.25, rate: self.voice.format?.sampleRate ?? 48000) : -120])
+    }
+  }
 
   init(_ recognizer: SFSpeechRecognizer) { self.recognizer = recognizer }
 
@@ -211,9 +474,14 @@ final class Listener {
     // On stderr (the app ignores it): lets a check count restarts — setting the
     // device must not raise another change and loop.
     FileHandle.standardError.write(Data("og-listen: restart (\(why))\n".utf8))
-    engine.stop()
-    engine.inputNode.removeTap(onBus: 0)
-    startEngine()
+    let go = {
+      self.engine.stop()
+      self.engine.inputNode.removeTap(onBus: 0)
+      self.startEngine()
+    }
+    if callMode { voice.again(go) } else { go() }
+    // Another device may change what echo removal can do: the server hears it again.
+    if callMode { emit(["type": "ready", "echo": echoMode]) }
   }
 
   /** Shutting the lid raises no audio notification (the built-in mic stays
@@ -227,7 +495,8 @@ final class Listener {
   }
 
   func start() {
-    if let feedArg { return feed(feedArg) }
+    if let feedArg, !callMode { return feed(feedArg) }
+    if let feedArg, callMode { mix = loadMono(feedArg) }
     startEngine()
     watch()
     // Another mic plugged in (AirPods…) stops the engine silently: start it again.
@@ -235,7 +504,7 @@ final class Listener {
       self?.restart("audio configuration changed")
     }
     begin()
-    emit(["type": "ready"])
+    emit(callMode ? ["type": "ready", "echo": echoMode] : ["type": "ready"])
   }
 
   func startEngine() {
@@ -246,7 +515,30 @@ final class Listener {
     // Nothing that can hear (no mic, or only a shut lid's): say so, not "ready".
     guard device != 0 else { fail("unavailable") }
     using = device
-    if let unit = input.audioUnit {
+    // A call: echo removal (voice processing) — set while stopped, before the
+    // formats are read (it changes them). It covers both ends: what this engine
+    // plays is the reference. It only ever uses the system's DEFAULT input and
+    // output (AVAudioIONode.h; set to another mic it hands over no audio at all,
+    // measured 2026-10-07), so it is on only when the mic picked IS the default.
+    let system = AudioObjectID(kAudioObjectSystemObject)
+    let defaultIn = prop(system, kAudioHardwarePropertyDefaultInputDevice)
+    let wantEcho = callMode && !echoRefused && device == defaultIn
+    if input.isVoiceProcessingEnabled != wantEcho, (try? input.setVoiceProcessingEnabled(wantEcho)) == nil, wantEcho { echoRefused = true }
+    echo = input.isVoiceProcessingEnabled
+    // Its gain control lifts what is left of its own voice too (to -28 dBFS on a
+    // MacBook's speakers at half volume; -45 without it, measured 2026-10-07).
+    if echo { input.isVoiceProcessingAGCEnabled = false }
+    if echo, #available(macOS 14, *) {
+      // Other apps' sound as loud as voice processing allows (the owner makes music).
+      input.voiceProcessingOtherAudioDuckingConfiguration = AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+    }
+    // No echo removal: "apart" when the mic is an interface's stand-in (pickInput)
+    // and the voice comes out of that interface (measured: the built-in mic hears
+    // it at -47 dB); "off" otherwise — a display's or a Bluetooth speaker next to
+    // the Mac is heard loud (the server then lets nothing heard while it reads count).
+    let speaker = prop(system, kAudioHardwarePropertyDefaultOutputDevice)
+    echoMode = echo ? "on" : callMode && device != defaultIn && speaker == defaultIn ? "apart" : "off"
+    if !echo, let unit = input.audioUnit {
       var current: AudioDeviceID = 0
       var size = UInt32(MemoryLayout<AudioDeviceID>.size)
       AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &current, &size)
@@ -254,17 +546,88 @@ final class Listener {
         AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, UInt32(MemoryLayout<AudioDeviceID>.size))
       }
     }
+    // After the mic is set: the output side touched first leaves the input unit on no device.
+    if callMode { voice.attach(to: echo ? engine : voice.own) }
     // inputFormat, not outputFormat: after a device switch only it is current.
     let format = input.inputFormat(forBus: 0)
+    if let unit = input.audioUnit {
+      var now: AudioDeviceID = 0
+      var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+      AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &now, &size)
+      FileHandle.standardError.write(Data("og-listen: wanted \(deviceName(device)), unit on \(deviceName(now)), echo \(echo), \(format.channelCount) ch \(format.sampleRate)\n".utf8))
+    }
     // No input device at all (a desktop Mac without a mic): not a permission problem.
     guard format.sampleRate > 0, format.channelCount > 0,
       let one = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: format.sampleRate, channels: 1, interleaved: false)
     else { fail("unavailable") }
+    // Voice processing hands over its own odd layout: the one processed voice
+    // copied onto every channel (9 on a MacBook, measured) — the first is taken.
     input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
-      if let m = mono(buf, one) { self?.request?.append(m) }
+      guard let self, let m = self.echo ? firstChannel(buf, one) : mono(buf, one) else { return }
+      if callMode { self.add(m); self.note(m) }
+      if !self.muted { self.request?.append(m) }
     }
     engine.prepare()
-    do { try engine.start() } catch { fail("failed") }
+    if callMode && !echo { try? voice.own.start() }
+    do { try engine.start() } catch {
+      // The device would not take echo removal: listen without it (the server then
+      // lets nothing heard while it reads count) rather than not at all.
+      guard echo else { fail("failed") }
+      FileHandle.standardError.write(Data("og-listen: no echo removal (\(error))\n".utf8))
+      input.removeTap(onBus: 0)
+      engine.stop()
+      echoRefused = true
+      return startEngine()
+    }
+  }
+
+  /** --call --feed: the file's samples, mixed in from `mixAt` once fed (audio thread, under lock). */
+  var mix: [Float] = []
+  private var mixAt: Int?
+  func add(_ m: AVAudioPCMBuffer) {
+    lock.lock(); defer { lock.unlock() }
+    guard let at = mixAt, at < mix.count, let x = m.floatChannelData?[0] else { return }
+    if at == 0 {
+      let t = ProcessInfo.processInfo.systemUptime
+      DispatchQueue.main.async { emit(["type": "fed", "t": t]) }
+    }
+    let n = min(Int(m.frameLength), mix.count - at)
+    for i in 0..<n { x[i] += mix[at + i] }
+    mixAt = at + n
+  }
+
+  /** stdin in a call: what to say, stop, mute. */
+  func command(_ cmd: [String: Any]) {
+    if cmd["feed"] as? Bool == true { lock.lock(); mixAt = 0; lock.unlock() }
+    if let m = cmd["mute"] as? Bool, m != muted {
+      muted = m
+      if echo { engine.inputNode.isVoiceProcessingInputMuted = m }
+      forget()
+    }
+    if cmd["stop"] as? Bool == true { voice.halt() }
+    if cmd["forget"] as? Bool == true { forget() }
+    if cmd["pause"] as? Bool == true, voice.player.isPlaying {
+      voice.held = true
+      voice.player.pause()
+      emit(["type": "paused", "t": ProcessInfo.processInfo.systemUptime])
+    }
+    if cmd["resume"] as? Bool == true, voice.held {
+      voice.held = false
+      if voice.player.engine?.isRunning == true { voice.player.play() }
+      emit(["type": "resumed"])
+    }
+    if let text = cmd["say"] as? String, let id = cmd["id"] as? String {
+      voice.say(text, id: id, lang: cmd["lang"] as? String ?? "ja-JP")
+    }
+  }
+
+  /** Drops what is being heard without handing it on: the scraps of its own
+   *  voice once it has read to the end (they would be sent as the owner's words). */
+  func forget() {
+    pause?.cancel()
+    request?.endAudio()
+    task?.cancel()
+    begin()
   }
 
   func begin() {
@@ -320,7 +683,7 @@ final class Listener {
       if result.isFinal { return finish(text) }
       if text != heard {
         heard = text
-        emit(["type": "partial", "text": text])
+        emit(callMode ? ["type": "partial", "text": text, "level": level] : ["type": "partial", "text": text])
         pause?.cancel()
         // After the pause the words heard so far ARE the utterance: handed on at
         // once. (Before 2026-10-07 it then closed the audio and waited — up to
@@ -352,9 +715,17 @@ final class Listener {
     request?.endAudio()
     task?.cancel()
     let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !line.isEmpty { emit(["type": "final", "text": line]) }
+    if !line.isEmpty { emit(callMode ? ["type": "final", "text": line, "level": level] : ["type": "final", "text": line]) }
     begin()
   }
+}
+
+func loadMono(_ path: String) -> [Float] {
+  guard let file = try? AVAudioFile(forReading: URL(fileURLWithPath: path)),
+    let all = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
+    (try? file.read(into: all)) != nil, let x = all.floatChannelData?[0]
+  else { fail("failed") }
+  return Array(UnsafeBufferPointer(start: x, count: Int(all.frameLength)))
 }
 
 // Fed through mono() like the mic, so a test can check that a voice on any

@@ -4,7 +4,7 @@
 // never saw that abort, so og-listen kept the mic on).
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const h = vi.hoisted(() => ({ starts: 0, stops: 0, emit: null as null | ((e: object) => void), lockdown: false }))
+const h = vi.hoisted(() => ({ starts: 0, stops: 0, emit: null as null | ((e: object) => void), lockdown: false, opts: [] as unknown[], cmds: [] as unknown[], inCall: true }))
 vi.mock('@/lib/server/lockdown', async (orig) => ({
   ...(await orig<object>()),
   isLockdownEnabledSync: () => h.lockdown,
@@ -15,8 +15,10 @@ vi.mock('@/lib/server/phoneLink', async (orig) => ({
 }))
 vi.mock('@/lib/server/assistantListen', () => ({
   listenBinary: () => '/fake/og-listen',
-  startListening: (_lang: string, onEvent: (e: object) => void) => {
+  voiceCommand: (cmd: unknown) => (h.cmds.push(cmd), h.inCall),
+  startListening: (_lang: string, onEvent: (e: object) => void, _bin: unknown, opts: unknown) => {
     h.starts++
+    h.opts.push(opts)
     h.emit = onEvent
     return () => void h.stops++
   },
@@ -33,6 +35,9 @@ beforeEach(() => {
   h.stops = 0
   h.emit = null
   h.lockdown = false
+  h.opts = []
+  h.cmds = []
+  h.inCall = true
 })
 
 describe('assistant listen route', () => {
@@ -98,5 +103,44 @@ describe('assistant listen route', () => {
     expect(body).toContain('"text":"やあ"')
     expect(body).toContain('"reason":"denied"')
     expect(h.stops).toBe(1)
+  })
+})
+
+describe('the call voice route', () => {
+  const voice = (body: unknown) =>
+    phoneLinkRoutes.request('/api/phone-link/assistant/voice', { method: 'POST', headers: { host: '127.0.0.1:47776', 'content-type': 'application/json' }, body: JSON.stringify(body) })
+
+  it('a call opens the ears as its voice too; typing by voice does not (no echo removal, no ducking)', async () => {
+    for (const q of ['&call=1', '']) {
+      const ac = new AbortController()
+      await phoneLinkRoutes.request(`/api/phone-link/assistant/listen?lang=ja${q}`, { headers: { host: '127.0.0.1:47776', 'sec-fetch-site': 'same-origin' }, signal: ac.signal })
+      await tick()
+      ac.abort()
+      await tick()
+    }
+    expect(h.opts).toEqual([{ call: true }, { call: false }])
+  })
+
+  it('passes on only a stop, a line with its id, a mute — nothing else', async () => {
+    expect((await voice({ stop: true, say: 'やあ。', id: 'v1', approve: true, mute: false })).status).toBe(200)
+    expect((await voice({ say: 'やあ。', id: '../x' })).status).toBe(200)
+    expect(h.cmds).toEqual([{ stop: true, say: 'やあ。', id: 'v1', mute: false }, {}])
+  })
+
+  it('no call listening: 409', async () => {
+    h.inCall = false
+    expect((await voice({ stop: true })).status).toBe(409)
+  })
+
+  it("og-listen's level reports (ten a second) stay on the server; a barge reaches the screen", async () => {
+    const ac = new AbortController()
+    const r = await listen(ac.signal, { 'sec-fetch-site': 'same-origin' })
+    await tick()
+    h.emit!({ type: 'level', level: -20 })
+    h.emit!({ type: 'barge' })
+    h.emit!({ type: 'error', reason: 'failed' })
+    const text = await r.text()
+    expect(text).not.toContain('level')
+    expect(text).toContain('barge')
   })
 })

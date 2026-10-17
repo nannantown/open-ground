@@ -422,6 +422,30 @@ describe('POST /api/project/tasks — rework (差し戻し loop-guard)', () => {
     expect(after?.reworkCount).toBe(1)
   })
 
+  it('stamps WHEN it sent the card back, and the stamp survives the Board round-trip', async () => {
+    // The engine tells a reworked card's fresh ready beat from the previous round's
+    // by this stamp (readySinceSendBack). Read back through the production reader,
+    // so a schema that strips the field fails here, not silently in the engine.
+    const dir = await makeRegisteredDir('rework-stamp')
+    const task = await addTask(dir, 'Needs fixes')
+    const before = Date.now()
+    await app.request('/api/project/tasks', json({ path: dir, rework: [{ id: task.id }] }))
+    const at = Date.parse((await getTask(dir, task.id))?.reworkedAt ?? '')
+    expect(at).toBeGreaterThanOrEqual(before)
+    expect(at).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('a hand move review→doing (setColumn) stamps the send-back too; other moves leave it alone', async () => {
+    const dir = await makeRegisteredDir('rework-stamp-setcolumn')
+    const task = await addTask(dir, 'Needs fixes')
+    await app.request('/api/project/tasks', json({ path: dir, setColumn: [{ id: task.id, column: 'doing' }] }))
+    expect((await getTask(dir, task.id))?.reworkedAt).toBeUndefined()
+    await app.request('/api/project/tasks', json({ path: dir, setColumn: [{ id: task.id, column: 'review' }] }))
+    const before = Date.now()
+    await app.request('/api/project/tasks', json({ path: dir, setColumn: [{ id: task.id, column: 'doing' }] }))
+    expect(Date.parse((await getTask(dir, task.id))?.reworkedAt ?? '')).toBeGreaterThanOrEqual(before)
+  })
+
   it('parks in blocked once the count exceeds maxReworks (default 3)', async () => {
     const dir = await makeRegisteredDir('rework-limit')
     const task = await addTask(dir, 'Chronically broken')

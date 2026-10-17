@@ -351,6 +351,9 @@ export const withCardMoved = (
         // Reordering WITHIN todo is a priority change, not a restart — a card
         // the engine requeued with its count kept must not lose it to a drag.
         reworkCount: col === 'todo' && columnOf(t) !== 'todo' ? undefined : t.reworkCount,
+        // Dragging review→doing is a send-back: stamp it so the engine ignores the
+        // worker's previous-round ready beat (readySinceSendBack, 2026-10-07).
+        reworkedAt: col === 'doing' && columnOf(t) === 'review' ? new Date().toISOString() : t.reworkedAt,
       }
     }
     if (orderById.has(t.id)) return { ...t, boardOrder: orderById.get(t.id) }

@@ -225,6 +225,8 @@ frames** — "goes to the selected project" below is v1 only).
   with `bad-frame`. No reply on success. With the Mac offline the relay holds the
   newest one and hands it to the Mac when it is back (no `mac-offline`).
 
+- `photo-part` (v2, to the assistant only) — one piece of a photo sent with a `say`; see "Photos".
+
 Frames over 16,384 characters or of any other `type` are refused (`bad-frame`), never
 forwarded to the Mac.
 
@@ -344,6 +346,7 @@ let json = try AES.GCM.open(sealed, using: key, authenticating: aad("m2p"))  // 
 | → phone | `{ "type": "event", "seq": 43, "at": <relay ms>, "box": "…" }` — `seq` (for `?after=`) and `at` are the relay's; the event's own `at`, `projectId`, `kind`, `text`, `id`, `eid`, `sent` are inside |
 | → phone | `{ "type": "ack", "box": "…" }`, `{ "type": "projects", "box": "…" }` (also as `hello.projects`) |
 | phone → | `{ "type": "assistant-history", "box": "…" }` (inner: `id`, `ts` as for every phone frame, optional `before`) |
+| phone → | `{ "type": "photo-part", "id": "<the part's own id>", "box": "…" }` — passed on, never stored, counted apart (see "Photos") |
 | → phone | `{ "type": "assistant", "box": "…" }`, `{ "type": "assistant-history", "box": "…" }` — passed on, never stored by the relay, no `seq` (see "What the assistant remembers") |
 
 Plain (no words in them, the relay must read them): `hello`, `mac`, `error`,
@@ -502,7 +505,8 @@ nothing on the wire changes. Spec: docs/ASSISTANT_DESIGN.md §1.
 "全部調べられるアシスタントと喋るだけで全ての作業を終わらせたい", "人と会話してるぐらいの速さで"):
 - **One live session, a fast model** (`assistantSession.ts`). The talk is ONE
   Claude Code session on the owner's subscription (no API key), driven through
-  the Agent SDK with streaming input, on `haiku`, thinking off. It stays up
+  the Agent SDK with streaming input, on `sonnet`, thinking off (`haiku` until
+  2026-10-07; opus for a line that needs real thought — "Two models" below). It stays up
   between lines, so a line costs one model reply instead of a claude start-up;
   the floating window warms it when it opens (`POST …/assistant/warm`). It
   restarts after 15 quiet minutes, 40 lines, ~120k tokens of context, a failed
@@ -638,6 +642,116 @@ nothing on the wire changes. Spec: docs/ASSISTANT_DESIGN.md §1.
 
   The system voice's own start (AVSpeechSynthesizer, what Chromium's
   speechSynthesis calls on macOS) is the same before and after and not in the sums.
+- **Two models: sonnet for every line, opus when it must think (2026-10-07,
+  owner decision "A": 「頭の良さで、なるべく速さもキープ」「考えるときは opus 使っても
+  いいよ」).** Every line starts on `sonnet` (`ASSISTANT_MODEL`, thinking off). A
+  line that needs real thought — advice or a decision with trade-offs, comparing
+  options, planning, a why, digging through several files; 「どう思う?」「どっちが
+  いい?」 about their work — the model hands on itself: it calls `think_deeper`
+  first, the app says 「ちょっと考えるね。」/「少し考えさせてね。」 at once (English: Let
+  me think.), and the SAME session moves to `opus` (`ASSISTANT_DEEP_MODEL`) for
+  the rest of that line — `Query.setModel` applies to the turn's next API call
+  (measured: SDK 0.3.220, CLI 2.1.292), so opus sees the whole talk and thinks
+  (it writes a thinking block although the session started with thinking off).
+  The next line starts back on sonnet. Small talk, simple facts and one quick
+  look-up stay on sonnet, so opus is spent only on lines that need it. Both go
+  through Settings' usable models (`swarmAllowedModels`) and the swarm's limit
+  table, read at every line (`resolveAvailableTier`): opus switched off or spent
+  ⇒ `think_deeper` changes nothing and sonnet answers (the wait-line still
+  goes out); sonnet off ⇒ the next one down. Which model wrote an answer goes
+  into the talk log next to it (`model`, e.g. `claude-opus-5-5`; the phone's
+  `assistant-history` frames leave it out, so they keep their shape) and to the
+  server log (`[assistant] answered by … (thought deeper)`). Opus's words arrive
+  all at once when its thinking ends (measured), so a deep line is read when it
+  is finished, like any line with a tool call.
+  Measured 2026-10-07 with `scripts/measure-assistant-lines.mts` (tsx, a
+  throwaway home and shop project, the same six lines, a fresh talk per run;
+  before = the commit before this change on `haiku`), seconds from sending to
+  the first thing that can be read aloud (→ the answer, where they differ). The
+  "after" of the three deep lines is with the final prompt, where all six of
+  their runs went to opus and every ordinary line stayed on sonnet (with the
+  first prompt only one of three went):
+
+  | line | before (haiku) | after |
+  |---|---|---|
+  | やあ、元気? | 0.72 / 0.70 | 1.19 / 1.35 / 1.39 |
+  | 今日は何曜日だっけ? | 0.56 / 0.62 | 1.04 / 1.16 / 1.36 |
+  | kiwi-shop の送料っていくらになってる? (a look-up) | wait 1.91 / 1.94 → 5.6 / 3.2 | wait 1.52 / 1.58 / 1.74 → 3.0 / 2.9 / 3.0 |
+  | 送料無料ラインを作るべきかな?どう思う? | 0.99 / 0.77 | 「考えるね」 2.45 / 1.46 → opus 14.8 / 12.7 |
+  | 9月の数字を見て、先に手を打つべきところは?理由も | wait 1.52 / 1.37 → 3.1 / 2.8 | 「考えるね」 2.28 / 1.96 → opus 5.8 / 7.6 |
+  | 決済を足すならクレカとコンビニ払いどっち? | 0.64 / 0.70 | 「考えるね」 1.24 / 1.29 → opus 6.7 / 7.2 |
+
+  An ordinary line costs +0.5–0.75 s (the owner's bound was +1.5 s); with the
+  ears' 0.84–1.37 s to hand the words on, the end of speech to the first sound is
+  about 1.9–2.8 s instead of 1.4–2.1 s. A look-up got faster (sonnet picks the
+  right file at once). A deep line says its 「考えるね」 within 1.2–2.5 s and
+  answers in 6–15 s (opus thinking — the price of the owner's "smarts first").
+  What it bought — the same question, before / after:
+  「問い合わせが 9 件もあるから、作るといいと思う。いくらからにしたい?」 /
+  「作るのはありだと思う。ただ、もっと効きそうなのはクレカ対応だから、そっちを先に
+  やって、送料無料は「2個買えば届く」4,000円くらいのラインがいいと思うよ。」 — with why
+  (12 card questions against 9 about shipping, the 2,150 円 average, 18 % buying
+  two) and the margin to check. Opus's limit spent while the table did not know
+  yet: the deep line ends in the CLI's refusal (「You've reached your Opus limit」,
+  told by the SDK's own `USAGE_LIMIT_ERROR_PREFIXES`) — it is never the answer:
+  opus is marked cooling (`markRateLimited`, so later lines and the swarm stay
+  off it until the reset) and the line is answered again on sonnet in a fresh
+  session, with no second wait-line.
+- **Talking over it (2026-10-07, owner decision "A"; research
+  `docs/research/voice-assistant-2026-10.md` §8.3).** In a call the window opens
+  the ears with `listen?call=1`, and `og-listen --call` is also the voice: it
+  renders the line with `AVSpeechSynthesizer.write` (the same system voices
+  Chromium used) and plays it through the very `AVAudioEngine` that listens,
+  with Apple's voice processing on — echo removal only takes out what that
+  engine plays (WWDC19 510; another app's sound is only ducked, WWDC23 10235).
+  The window drives it with `POST …/assistant/voice` `{stop?, say+id?, mute?}`
+  (409 with no call); the listen stream carries `speak`/`spoke` per line and
+  `barge`. The ears stay open the whole call. While it reads, the server
+  (`assistantListen.ts`) gates what the mic hears: og-listen reports the mic
+  every 0.1 s (with how loud it is reading, `play`), and a window loud enough
+  **pauses** the reading at once — the recognizer's first word trails the voice
+  by ~0.8 s, too late for "quiet within 0.5 s". "Loud enough" = `BARGE.holdDb`
+  (-40 dBFS) and `overEchoDb` (8 dB) over its own voice coming back: `play` plus
+  how much of it the mic hears, learnt while it reads from the quiet windows
+  (the loudest lately, fading 0.3 dB per 0.1 s, starting at -20 dB). A pause
+  also drops what the recognizer had open (its own voice until then), so the
+  words after it are heard on their own. Then `isBargeIn` decides on the latest
+  eight words: ① three units of words or more (kana/kanji 1, an English word
+  3 — "wait" counts as 「待って」), ② that same loudness, ③ at most half of the
+  heard pairs (of kana/kanji, of English words) in what it is reading, and not a
+  nod (うん/はい/yeah…). All three → `stop` + `barge`: the window does what the
+  stop key does (listens; `hush` tells the model what was heard; the words go
+  on as an ordinary line), except that focus stays where the owner is typing
+  (the stop key keeps it in the call; a voice over it moves nothing). While
+  paused, muting or echo removal going away (`off` on a restart) resumes the
+  reading at once. Nothing for `holdMs` (1.5 s) → it goes on from
+  where it paused. **A barge-in only quiets** — it approves nothing; proposals
+  still run only by their button (guard: `FloatingAssistant.test.tsx` "talking
+  over it … runs nothing"). While it thinks (no stop) heard words are not taken,
+  as when the mic used to close then.
+  Echo removal is on only in a call and only when the mic chosen is the system's
+  default input (`echo: on`): voice processing uses the default devices only —
+  pointed at another mic it handed over no audio at all (measured). A
+  multi-channel interface as default (the owner's Babyface) keeps the built-in
+  mic and no echo removal (`apart`: the voice comes out of the interface on an
+  engine of its own; the built-in mic hears it at -47 dB) — so no ducking there.
+  Otherwise without it (`off`) nothing heard while it reads counts (the stop key
+  still works). Its gain control is off (it lifted the leftover echo from -45 to
+  -28 dBFS). Ducking of other apps is `.min` and lives as long as og-listen —
+  the call's stream; typing by voice never turns it on. Muted (or another app
+  reading aloud, e.g. a Research digest) → og-listen hears nothing.
+  Measured 2026-10-07 on this Mac (`npx tsx scripts/measure-barge-in.mts
+  <og-listen> echo|barge`; nobody can speak here, so a recorded voice is mixed
+  into what the mic hears after echo removal — `--call --feed`):
+
+  | check | result |
+  |---|---|
+  | its own voice, MacBook speakers at 50/75/100 %, 10 long lines each | 0 stops by its own voice. Every stop (16 of 30) heard a person in the room (「反応速度は」「やっぱり」… — nothing it was reading); with nobody talking the mic's loudest 0.1 s while it read was -51 to -66 dBFS (one -35) vs the -40 threshold (measured before the learnt threshold below, which only raises the bar) |
+  | its own voice after the review fixes (learnt threshold), 5 long lines each: MacBook speakers at 75 % with echo removal (`on`); the Babyface (`apart`) | `on`: 0/5 stops, 1 pause, loudest 0.1 s -33 to -61 dBFS. `apart`: 0/5 stops, 1 pause, loudest -35 to -37 dBFS — over the fixed -40, so without learning its own level each of these would have paused it |
+  | voice → quiet (paused) | 0.010–0.027 s on og-listen's clock (8 runs of 10; in the other 2 a person in the room had paused it first), plus the device's own buffers |
+  | voice → stopped and listening | `on` (MacBook speakers 75 %): 0.91–1.23 s (5/5). `apart` (Babyface): 0.82–1.02 s (5/5). Before the review fixes: 0.82–1.00 s on the Babyface with the shipped runtime (0.11.175's Electron 31.7.7 as Node) driving a Developer-ID-signed, hardened og-listen with the app's entitlements. The 0.5 s is met by the pause (it falls quiet); stopping for good waits for the recognizer's words |
+  | other apps after the call | the audio side effect present during a call (another app's mic input on the built-in mic fell -48 → -75 dB) was gone at once when it ended (-52 dB); typing by voice changed nothing (-53 / -51 / -53). Other apps' OUTPUT level could not be measured here (no loopback device) |
+  | not measured | AirPods (not paired), the lid shut (cannot be shut from here), the full packaged .app (the owner's app holds the single-instance lock and port 47776) |
 - **Folding the memo is a separate run**, never on a line's clock: after a line
   that left talk due for folding, and hourly, `foldIdleAssistantTalk` runs the
   old file-handoff runner (a hidden PTY, `--tools Write --restricted
@@ -690,8 +804,11 @@ iPhone use the same one door (`approveProposal` in `src/lib/server/assistantProp
   line **exactly as the commander will get it** (prefixed 「アシスタント経由(オーナーの
   言葉の要約):」 — the model wrote it, so it is never labelled as the owner's own
   words). Show all three whole, as plain text (`body` has `\n`s), never cut,
-  shortened or scrolled — a frame that does not fit whole must not be
-  pressable (the Mac says 「長いので社長に頼んでね」 instead).
+  or shortened. On the iPhone, frames that do not all fit scroll (each still
+  whole, with its buttons); the Mac's own window still draws a frame that does not fit
+  whole (cut off), turns off that frame's 出す/送る (やめる stays pressable) and
+  shows 「長いので社長に頼んでね」 below the frames. (2026-10-16: changed from "a frame
+  that does not fit is not pressable" by the iPhone fix 429164e, 「画面に入りきりません」 → scroll.)
 - Small on purpose: at most **10 lines as the Mac's window draws them**
   (project, title and body together; a line holds 21 full-width characters —
   `frameLines`, counted on the wide side) and 400 characters, so a frame is seen
@@ -763,6 +880,155 @@ press with the shown text's check wrote ONE todo card with exactly the frame's
 title and notes. Small talk answered in 0.64–1.1 s; a README look-up said
 「ちょっと待ってね。」 at 2.2 s and answered at 3.2 s.
 
+## Photos (2026-10-16)
+
+The owner can send the assistant a photo from the phone: one picked from the
+library or pasted from the clipboard, with or without words. The Mac shows it
+in its assistant chat, and the assistant looks at it before answering. This
+replaces the phone repo's proposal `docs/PHOTO.md`, which this section follows
+exactly. Photos go **to the assistant only**, and **only on a sealed (v2)
+pairing**.
+
+**Capability.** The Mac puts `"photo": true` in its **sealed `projects`** frame,
+next to `callNote`. The phone shows its attach button only when it sees this.
+An older Mac never sends it, so the button stays hidden there. A v1 pairing
+never gets it: its `projects` is plain, and a relay could forge the flag.
+
+**What the phone sends.** The phone first shrinks the photo to a JPEG. It tries
+1600, 1280, 1024 and 768 px on the longest side, each at JPEG quality 0.7, 0.5
+and 0.35, and keeps the first result that is at most 384 KB (48 × 8 KB). It
+cuts that JPEG into **8 KB parts**. Each part is one sealed frame (`p2m`, like a
+`say`):
+
+```json
+outside: { "type": "photo-part", "id": "<the part's own id>", "box": "…" }
+inside:  { "type": "photo-part", "id": "<same>", "sayId": "<the say's id>", "part": 0, "parts": 33, "data": "<base64 of the part's bytes>", "ts": 1790000000000 }
+```
+
+After the parts comes the say, on the same socket:
+
+```json
+{ "type": "say", "id": "<sayId>", "ts": 1790000000000, "text": "これ何?", "projectId": "assistant", "photoParts": 33 }
+```
+
+- Every part has a **fresh id of its own**, never the say's id. `sayId` ties
+  the part to its say. The phone's earlier build reused the say's id for every
+  part, and the Mac's resend check dropped every part after the first. That was
+  the "most of the photo is thrown away" bug, fixed on the phone side.
+- The phone writes a part's inner JSON without escaping `/`. A full sealed part
+  is then about 15 KB on the wire, under the relay's 16 KB phone-frame cap
+  (measured from the app's own `PhoneLinkCore` with real JPEGs on 2026-10-16:
+  15,112–15,134 characters).
+- `text` may be empty when only a photo goes.
+
+**What the Mac does** (`src/lib/server/phonePhoto.ts`, used by `phoneLink.ts`):
+
+1. It keeps the parts by `sayId`. Parts are not written to `seenIds`: a second
+   copy of a part only replaces itself, and the say's id *is* recorded. The usual
+   checks still apply to every part: it must open under the pairing key in the
+   `p2m` direction, and its `ts` must be within 5 minutes of the Mac's clock.
+2. It answers the say once all `photoParts` parts have arrived. It does not
+   count on the order: parts that come after their say are waited for, up to
+   30 s.
+3. It joins the parts and checks the result:
+   - its bytes must be JPEG, PNG, GIF or WebP (`sniffPhoto`; the phone's word is
+     never taken for it);
+   - it must be at most 5 MB (`ASSISTANT_PHOTO_MAX_BYTES`);
+   - a part may be at most 12 KB of bytes;
+   - a photo may have at most 64 parts (the phone sends at most 48).
+4. It keeps the photo the way a photo from the Mac's own window is kept:
+   `~/.openground/assistant/photos/` (0600), named on the owner's log line
+   (`photo`). The Mac chat shows it, and the photo is deleted with that line.
+   The turn lets the assistant `Read` its own copy.
+5. The owner echo (`assistant` / `event`, `kind: "owner"`) and the
+   `assistant-history` entries carry that `photo` name. The image itself is
+   never sent back.
+6. The Mac holds at most 4 photos in progress. When it is full, it drops the
+   oldest unfinished photo ("oldest" = kept first). A complete photo is dropped
+   only when all four are complete, since its say normally follows right
+   behind its last part.
+   - A dropped photo **ends**. If its say is waiting, the say is woken and
+     refused at once with `photo-incomplete`.
+   - An ended photo's `sayId` is remembered for 5 minutes. A say that comes for
+     it later is refused at once, and late or replayed parts are not kept.
+     Without this memory, a say whose photo was dropped before it started
+     waiting would build a fresh, empty photo. That would drop the next photo,
+     and so on down the line, until a complete photo was dropped and its say
+     waited the full 30 s. This was measured on 2026-10-16 under load.
+   - The same applies to a photo its say has taken, a photo that turned out
+     bad (no further parts are kept), and parts whose say never came (after 5
+     minutes).
+   - It also applies to the parts of a say refused before its photo was taken
+     (`stale`, `no-project`, `mac-error`).
+
+**Refusals** (`ack` `rejected`, `reason`). The phone shows its generic
+「届きませんでした」 for reasons it does not know.
+
+| Reason | Meaning |
+|---|---|
+| `photo-incomplete` | some parts never came within 30 s → send it again |
+| `photo-bad` | the parts did not make a photo: not an image, over 5 MB, malformed parts, or a part count that disagrees with `photoParts` |
+| `photo-assistant-only` | `photoParts` on a say to a president. Nothing is typed into the desk |
+| `pair-again` | a v1 pairing. Its plain `photo-part`s are ignored |
+| `busy` / `too-long` / `mac-error` | as for any say to the assistant |
+
+Under work mode, parts and the say are dropped silently, as every assistant
+line is.
+
+**The relay** (`worker/src/phoneRelay.ts`) passes `photo-part` on to the Mac
+like a `say`. It never keeps one: with the Mac offline, each part gets
+`mac-offline`, and the phone keeps quiet about part refusals. It counts parts
+**apart** from the other phone frames: `photoPartsPerMin` is 150 a minute, about
+3 full photos. Over it, the phone is closed with `4029`, as for
+`phoneFramesPerMin`. The 120-a-minute limit for other frames is unchanged, so
+three full photos in a minute (147 frames) no longer cut the phone off.
+
+**Relay redeploy needed, and the order matters: deploy the relay FIRST, then
+release the Mac.** Run `cd worker && npx wrangler deploy -c wrangler.phone.jsonc`
+before a Mac that sends `photo: true` is released. The new relay is harmless to
+an older Mac or iPhone: it only adds a type and a counter. Released the other
+way round, the phone shows its attach button as soon as the new Mac says
+`photo: true`, while the old relay still refuses every part. An old relay answers each part with
+`bad-frame`, the parts never reach the Mac, and the say ends with
+`photo-incomplete` after 30 s. Nothing crashes on either end.
+
+**Free-plan budget** (Cloudflare Workers / Durable Objects free plan, docs read
+2026-10-16; the daily limits reset at 00:00 UTC):
+
+- **Per photo.** A full photo is at most 48 parts + 1 say = 49 incoming
+  WebSocket messages of about 15 KB each. The messages the relay sends on
+  to the Mac are free ("no charge for outgoing WebSocket messages").
+- **Size.** Each message is far under the platform's 32 MiB message limit and
+  the relay's own 16 KB phone-frame cap.
+- **Requests.** Cloudflare states the 20:1 ratio for incoming WebSocket
+  messages as a footnote on the Requests row of its Durable Objects billing table, a row that lists both plans (re-read 2026-10-16). The page does not say
+  outright that the free 100,000 a day is counted that way, so the estimate here counts each message as a full request: 49
+  per photo — even so, 100,000 requests a day is more than
+  2,000 full photos a day (at 20:1 a photo would be about 2.5 requests).
+- **Storage.** Nothing is stored: no rows are written and no storage is used.
+- **Duration.** It is negligible (hibernating sockets).
+- **If a limit is exceeded,** the relay stops for the rest of that UTC day (no
+  bill), and so do the account's other Workers. The per-room rate
+  (`photoPartsPerMin`, 3 photos a minute) caps a burst. It does not cap a whole
+  day: a phone sending photos nonstop for hours could still reach the daily
+  limit, as it could already with ordinary frames. Ordinary use (tens of photos
+  a day) stays at a few percent of the limit.
+
+Verified 2026-10-16 (real `claude`, throwaway home):
+`scripts/verify-phone-photo-live.mts`. Its frames were made by the iPhone app's
+own `PhoneLinkCore`, sealing and cutting real JPEGs shrunk as above:
+
+- one photo: 33 parts;
+- two photos sent back to back: 33 and 44 parts;
+- a 8000×6000 picture, which shrank to 343 KB: 43 parts.
+
+Each photo arrived byte-identical, and the assistant described what was in it
+(colours, shapes, the words written on it). The relay's half was checked on a
+real workerd (`worker/test/phoneRelay.local.mjs`): a full-size part passes
+unchanged, and parts are counted apart. Not yet checked: a send from a physical
+iPhone through the deployed relay. That waits for the relay redeploy and the
+phone build with the fixed part ids.
+
 ## What the assistant remembers (2026-10-03)
 
 Owner decision, 2026-10-03: "delete the talk after some days, but remember roughly
@@ -833,7 +1099,7 @@ answered is not undone by that line (it does not write its memo back).
 `GET /api/phone-link/assistant/log` → `{ entries, memory, logDays, memoryChars }`;
 `DELETE …/assistant/log` (all) and `…/assistant/log/<id>` (one); `DELETE …/assistant/memory`;
 `POST …/assistant/config` `{ logDays?, memoryChars? }` (out of range → 400, nothing changed);
-`POST …/assistant/say` `{ text, photo?, stream? }` → `{ reply, speak, card? }` (or, with `stream: true`, `{interim}` / `{say}` / `{hush}` lines first, then the answer with `said` when the pieces were its reading) — talk from the screen; `POST …/assistant/hush` `{ heard }` → `{ ok }` / 409 — the call's stop key: the model hears what of the last answer was heard; `POST …/assistant/warm` starts the session ahead of the first line,
+`POST …/assistant/voice` `{ stop?, say?, id?, mute? }` → `{ ok }` / 409 `no-call` — the call's voice (og-listen; "Talking over it" above); `POST …/assistant/say` `{ text, photo?, stream? }` → `{ reply, speak, card? }` (or, with `stream: true`, `{interim}` / `{say}` / `{hush}` lines first, then the answer with `said` when the pieces were its reading) — talk from the screen; `POST …/assistant/hush` `{ heard }` → `{ ok }` / 409 — the call's stop key: the model hears what of the last answer was heard; `POST …/assistant/warm` starts the session ahead of the first line,
 same assistant, same log (`via: "screen"`). The screen's one line for it sits
 above the talk log in Settings → iPhone (Enter or 送る; the answer shows in the
 log). The phone sees screen talk in its next `assistant-history`.

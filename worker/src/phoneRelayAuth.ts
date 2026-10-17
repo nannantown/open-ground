@@ -100,6 +100,10 @@ export const RELAY_LIMITS = {
   /** Phone frames per room per minute, counted apart so a Mac catching up never
    *  cuts the phone off; over it the phone is closed (4029) after that frame. */
   phoneFramesPerMin: 120,
+  /** A photo's `photo-part` frames per room per minute, counted apart from
+   *  phoneFramesPerMin (one photo is up to 48 parts of ~15 KB): 3 full photos a
+   *  minute. Over it the phone is closed (4029) after that frame. */
+  photoPartsPerMin: 150,
 }
 export type RelayLimits = typeof RELAY_LIMITS
 

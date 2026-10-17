@@ -35,7 +35,7 @@ import {
   saveAssistantConfig,
 } from '@/lib/server/assistantMemory'
 import { getPromptLang } from '@/lib/server/promptLang'
-import { listenBinary, startListening } from '@/lib/server/assistantListen'
+import { listenBinary, startListening, voiceCommand } from '@/lib/server/assistantListen'
 import { closeAssistantSession } from '@/lib/server/assistantSession'
 import { clearProposals, listProposals } from '@/lib/server/assistantProposals'
 import { isLockdownEnabledSync } from '@/lib/server/lockdown'
@@ -145,13 +145,27 @@ export const phoneLinkRoutes = new Hono()
         // In order, and the stream ends only once the last (the reason) is out —
         // closing with a write still in flight drops it.
         let wrote = Promise.resolve()
+        // In a call (`call=1`) the ears are its voice too (POST …/voice).
         stop = startListening(lang, (e) => {
+          if (e.type === 'level') return
           wrote = wrote.then(() => stream.writeSSE({ data: JSON.stringify(e) })).catch(() => {})
           if (e.type === 'error') void wrote.then(done)
-        })
+        }, undefined, { call: c.req.query('call') === '1' })
       })
       stop()
     })
+  })
+  // The call's voice (og-listen --call): read a line, stop, mute. 409 when no call is listening.
+  .post('/api/phone-link/assistant/voice', async (c) => {
+    const b = ((await c.req.json().catch(() => null)) ?? {}) as Record<string, unknown>
+    const say = typeof b.say === 'string' ? b.say.slice(0, 2000) : undefined
+    const id = typeof b.id === 'string' && /^[\w-]{1,64}$/.test(b.id) ? b.id : undefined
+    const ok = voiceCommand({
+      ...(b.stop === true ? { stop: true } : {}),
+      ...(say && id ? { say, id } : {}),
+      ...(typeof b.mute === 'boolean' ? { mute: b.mute } : {}),
+    })
+    return ok ? c.json({ ok: true }) : c.json({ error: 'no-call' }, 409)
   })
   // Talk to the assistant from the screen: the same assistant, the same log.
   // A photo rides along as base64 (`photo`); its bytes decide its format.

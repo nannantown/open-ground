@@ -640,6 +640,10 @@
   ⚠ **蘇生の nudge(`defaultNudgeManager`)と混同しない** — あちらは ESC を先に送る破壊的な操作で、
   4本のゲート(10分/5分/10分/3回)はその破壊性の代償。ここを「遅いから」と短くするのは
   2026-07-18 の事故(生きた卓を3回蘇生し誤 fatal)の再発。正典 = commander/03 §2.3
+- **数えられていない worker の完了**(司令官の手動 `POST /api/swarm/worker`・再起動の取りこぼし)は
+  `promoteUnownedDelivered` が review へ回収する。差し戻し済みカードはカードの `reworkedAt`(`{rework}`
+  API が刻む)より新しい ready だけを信じる(`readySinceSendBack`)。それでも doing に 3 分残った完了は
+  `noticeStrandedReady` が司令官に知らせ直す(取りこぼしの網・2026-10-07)。正典 = commander/01 §7.4c
 - **worker の「成果あり」は親ブランチ + worktree 直下の入れ子リポ**(`swarmOrchestrator.ts` `probeHasWork` / `defaultCountNestedCommits`、2026-09-13)。親フォルダ型プロジェクトの worker は子リポの linked worktree に成果を出すので、親だけ数えると完成品が stall に化ける。ready なのにどこにもコミットが無いときは `ready-without-work`(nudge せず 3 分保持 → blocked、初見で通知)。例外は Canvas が成果のカード(`hasCanvasDeliverable`、2026-10-01): カードに明暗 2 枚の写真(`…-canvas-light/dark.png`)が配車後に書かれ、worktree が clean なら 0 コミットでも promote(未コミットがあれば従来どおり停める)。
 - **stall 判定の生存チャネルは 4 本**(すべて `swarmOrchestrator.ts` 内。①心拍 ②PTY 出力
   ③transcript/sub-agent mtime = `sessionAgentActivityAt`(2026-07-23) ④**実行中の背景タスク** =
@@ -788,7 +792,7 @@
   番人 = `phoneLink.test.ts`(再起動をまたぐ業務モード3本)/ `phoneLinkBoot.test.ts`(起動時に中継へ1回も繋がない)。
 - アシスタント(全プロジェクトまとめ役, 2026-10-02 / 2026-10-06 から常駐セッション): `src/lib/server/phoneAssistant.ts`(1行の流れ・
   状況まとめ `assistantDigest`・起動時の system prompt `buildSessionPrompt`・読み上げ部分 `spokenPart`・畳み込みは別キュー `foldIdleAssistantTalk`)/
-  `assistantSession.ts`(常駐 1 本の Agent SDK セッション・haiku・`tools: []`+自前道具だけを通す PreToolUse 門・15分無言/40行/鍵変化で張り直し・
+  `assistantSession.ts`(常駐 1 本の Agent SDK セッション・ふだん sonnet、`think_deeper` を呼んだ行だけ同じセッションのまま opus(`setModel`・使えるモデルの設定に従う)・`tools: []`+自前道具だけを通す PreToolUse 門・15分無言/40行/鍵変化で張り直し・
   道具の前の一言=`onInterim`)/ `assistantTools.ts`(読むだけの `read_file`/`list_dir`/`search` = 登録プロジェクトと ~/.openground だけ・実パス判定・
   秘密ファイル拒否・秘密値は [hidden]・1回の読みは 40KB まで・1MB 超の写真は sips で縮小・`status`)/
   **提案(2026-10-06 オーナー決定「全部Aで」)** = `assistantProposals.ts`: `make_card`/`tell_commander` は案を作るだけ(メモリ上・Board にも会話記録にも書かない)、
@@ -820,6 +824,12 @@
   無人の畳み込みは1時間に1回・保存できなかった同じ行は12時間あけて再試行(`state.json` の `idleTried`・再起動をまたぐ。契約枠を無人で溶かさない)。
   中身(会話・メモ)は `--append-system-prompt` で渡し、打ち込む1行は固定(`ASSISTANT_KICKOFF`)= `~/.claude/history.jsonl` に残さない。
   テスト `assistantMemory.test.ts`(30日超え削除・字数上限・再起動後も続く・畳み込み)/ `phoneLinkSealed.test.ts`(実リレー室で封・保存なし・ページ分け・v1拒否)/ `worker/test/phoneRelay.local.mjs`。
+- Phone photos (2026-10-16): the iPhone sends a photo to the assistant as sealed `photo-part` frames (8 KB each, own id + `sayId`)
+  then the `say` with `photoParts: n` — `src/lib/server/phonePhoto.ts` keeps parts by sayId (≤4 photos, ≤64 parts, 30 s wait, sniffed; an ended/pushed-out photo's sayId is remembered 5 min so its say is refused at once — no push-out cascade) and
+  `phoneLink.ts` `assistantSay` saves it like a screen photo (`saveAssistantPhoto`) → `askAssistant(line, {photo})`. Mac says `photo: true` in sealed
+  `projects` (v2 only). Relay passes `photo-part`, counts it apart (`photoPartsPerMin`, `phoneRelayAuth.ts`) — **redeploy before release**.
+  Tests `phoneLinkSealed.test.ts` "sealed photos" (real relay room) / `worker/test/phoneRelay.local.mjs`; live `scripts/verify-phone-photo-live.mts`.
+  Canon: docs/PHONE_LINK.md "Photos".
 - Assistant photos (2026-10-06): the floating window's photo button → `POST /api/phone-link/assistant/say` `{text, photo: base64}`
   (JPEG/PNG/GIF/WebP judged by bytes `sniffPhoto`, ≤5 MB, else 415 `photo-type` / 413 `photo-too-large`). Kept as
   `~/.openground/assistant/photos/<UTC day>-<id>.<ext>` (0600), named on the owner's log line (`photo`), served by
@@ -832,18 +842,26 @@
   閉じても答えは届き未読の点が付く)/ `AssistantMark.tsx`(キャラクター = アプリアイコンの形 = 太い輪+8つの切れ込み `OpenGroundMark.tsx` の `CarvedRingMask` を穴まで届く4つの切れ込みで4片に分けて・片ごとに呼吸/まばたき/考え中は色が巡る = `globals.css` の `.og-ast*`)。`App.tsx` で1回マウント・業務モードは薄く押せない・
   オーナー以外は描かない(`/api/phone-link/*` は ownerOnly)。名前と色 = `config.json` の `name`/`look`(`assistantMemory.ts`)→
   iPhone へは `projects` 先頭と `assistant-history` に載る。既定の位置はどの画面でも同じ右下(`DEFAULT_POS` = Ground のペンと同じ高さ・2026-10-06)、
-  プロジェクトではエージェントチームのバーが右端を空け(`--og-assistant-reserve`)、タブの下にはロゴの上端+隙間までの床を空ける
-  (`--og-assistant-reserve-y` → `AssistantFloor.tsx`、畳んだバーの分は差し引く・バーが無ければ床だけ。名前は `assistantWindow.ts`、動かして離した後は空けない)。
-  実ブラウザ計測 = `e2e/assistant-corner.spec.ts`(ドロワーの実行・Canvas の元に戻す/やり直しがロゴに当たる割合 0%)。設計正典(iPhone 版もこれだけで作る)= `docs/ASSISTANT_DESIGN.md`。
+  画面の上に浮いて重なるだけでレイアウトは場所を空けない(2026-10-07 オーナー: バーと席の列はアイコン導入前の配置)。
+  実ブラウザ計測 = `e2e/assistant-corner.spec.ts`(位置・すぐ横のクリックは下に通る・畳んだバーが右端と下端まで届く)。設計正典(iPhone 版もこれだけで作る)= `docs/ASSISTANT_DESIGN.md`。
   テスト `FloatingAssistant.test.tsx` / `AssistantMark.test.tsx`(20枚のかけらに戻す/切れ込みが小さいロゴ印とずれると赤)/ `assistantMemory.test.ts` / `phoneLink.test.ts`。
 - アシスタントの窓と声(2026-10-04): 空の入力欄は薄い「話しかける…」だけ。会話はふだん畳み(今のやりとり=`turn` だけ表示)、
   `MessagesSquare` で広げる(`localStorage og.assistant.expanded`)。2026-10-06 から2モード(`docs/ASSISTANT_DESIGN.md` §1):
   チャットのマイク = 声で文字入力だけ(押してオン→話した言葉が入力欄に入る→もう一度か送信でオフ・送らない・読まない)/
   入力が空のとき送信の位置が通話キー → 通話画面 `AssistantCall.tsx`(スピーカー/終了/消音・状態=発信中/聞いています/考えています/話しています/消音中)。
-  耳 = `useVoice.ts` の `useListen`(声 = `useSpeech`)→
+  耳 = `useVoice.ts` の `useListen`(通話の声 = `useCallVoice` = og-listen 自身・ほかのアプリの読み上げ監視 = `useOtherSpeech`)→
   `GET /api/phone-link/assistant/listen`(SSE・ownerOnly)→ `src/lib/server/assistantListen.ts` が `bin/og-listen` を起動
   (`native/og-listen/main.swift` = macOS の SFSpeechRecognizer・端末内・無料。`scripts/build-listen.mjs` が `npm run build` で universal を作り
-  `build.files` で同梱、electron-builder が署名)。話した行の返事だけ `speechSynthesis` で読む・答え待ち/読み上げ中は耳を閉じる(マイクが読み上げを拾うため)。
+  `build.files` で同梱、electron-builder が署名)。話した行の返事だけ読む(2026-10-07 から og-listen の声・下の「声で遮る」)。
+  **声で遮る(2026-10-07 オーナー決定「A」)**: 通話中は `listen?call=1` → `og-listen --call` が**聞く部品と同じ音声エンジンから読み上げる**
+  (`AVSpeechSynthesizer.write` → `AVAudioPlayerNode`・Apple の voice processing = エコー除去は同じエンジンで鳴らした音しか消さない)。
+  読む/止める/消音 = `POST /api/phone-link/assistant/voice {stop?, say+id?, mute?}` → `voiceCommand` → og-listen の stdin。耳は通話中ずっと開いたまま。
+  判定はサーバー(`assistantListen.ts`): 読み上げ中に 0.1 秒のマイク音量が `BARGE.holdDb` 以上かつ自分の声の戻り(読み上げ音量+学習した回り込み)より `overEchoDb` 大きい → **すぐ一時停止**(認識が開いていた分も捨てる)(認識の最初の文字は声から約0.8秒遅れるため)、
+  `isBargeIn`(①3文字以上 ②音量 ③読み上げ中の文と違う言葉・相づちは除く)がそろえば止めて `barge` → 画面は止めるキーと同じ(`hush` で聞こえた所まで)、
+  そろわず `holdMs` 過ぎれば続きから(一時停止中の消音・エコー除去切れも即続きから)。声の遮りはフォーカスを動かさない(窓へ移すのは止めるキー/Space だけ)。遮りは「黙る」だけ — 何も実行しない(案の枠はボタンでだけ)。
+  エコー除去は**既定の入力 = 選んだマイク**のときだけ(`echo:on`・既定装置しか使えない・別マイク指定は無音になる実測)。音声IFが既定で本体マイクを選ぶ時は除去なし
+  (`apart` = 声は IF 側から出る・独立エンジン)、それ以外で除去できない時は `off` = 読み上げ中の声は数えない(止めるキーだけ)。除去の自動音量調整(AGC)は切る(自分の声の残りを持ち上げる)。
+  他アプリの音を下げる副作用は通話中だけ・最小(`duckingLevel .min`)・通話終了で og-listen ごと消える。計測 `npx tsx scripts/measure-barge-in.mts <og-listen> echo|barge`。
   罠: macOS は**アプリ本体**(責任プロセス)の Info.plist で許可を聞く → `package.json` `mac.extendInfo` の `NSSpeechRecognitionUsageDescription`
   が無いと tccd が補助を SIGABRT で殺す(=`denied` 扱い)。dev(`electron:dev`)や古い版のアプリの中からは聞き取りを確かめられない。
   CI は macos-14 SDK なので SpeechAnalyzer(macOS 26)は未使用。
@@ -855,8 +873,8 @@
   計測 `og-listen --feed <音声>`(録音を実時間で流す・マイク不要)= `scripts/measure-voice-latency.mjs`。
   判定 = `chooseInput`・確認 = `og-listen --choose <ch> <内蔵0|1> <ふた閉0|1> [<既定が内蔵0|1>]` / `og-listen --which`(いま選ぶ入力とふたの状態)。再起動は stderr に `restart (理由)` と出る(ループ確認用)。
   番人 `src/lib/server/ogListenNative.test.ts`(ソースからその場でビルド: 選び方の表 = swiftc があれば / 12ch の3本目にだけ声 → 文字になる = さらに Kyoko の声と音声認識の許可があれば)。
-  テスト `FloatingAssistant.test.tsx` / `assistantListen.test.ts` /
-  `server/__tests__/assistantListenRoute.test.ts` / `macMicPermission.test.ts`。
+  テスト `FloatingAssistant.test.tsx`(遮り = 止めるキーと同じ・案は実行されない)/ `assistantListen.test.ts`(3条件・一時停止→停止/続き・`off` で数えない・消音)/
+  `server/__tests__/assistantListenRoute.test.ts`(voice は stop/say/mute だけ通す・level は画面に出さない)/ `macMicPermission.test.ts`。
 - 画面ロック中に起こす(Push to Talk, 2026-10-02): APNs 送信は `src/lib/server/phonePush.ts`(オーナーの .p8 を
   `~/.openground/phone-push-key.json` 0600 に保存・JWT ES256 を30分ごとに作り直し・`node:http2` で1回ずつ接続)。
   トークン受け取り・間隔(5秒)・say の最終 ack 待ち(最長2分)・410/BadDeviceToken で破棄・403 等の恒久拒否は鍵かトークンが変わるまで止めて設定に表示・無応答/429/5xx は間隔後に最大3回再送、は `phoneLink.ts` の

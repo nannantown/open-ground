@@ -17,7 +17,8 @@
 // it (`?heard=`) or after eventTtlS at the latest; a room nobody connected to
 // for roomIdleS is emptied but for its Mac key hash and newest event position
 // (the alarm); a room holds at most
-// phonesMax phone sockets and takes connectsPerMin / macFramesPerMin / phoneFramesPerMin.
+// phonesMax phone sockets and takes connectsPerMin / macFramesPerMin / phoneFramesPerMin
+// (a photo's `photo-part`s are counted apart, photoPartsPerMin — passed on, never kept).
 // The assistant's frames (`assistant`, `assistant-history`, `assistant-proposals`
 // and the phone's `assistant-proposal` button press — sealed on v2 like
 // every content frame) are passed on and never kept: its records live on the
@@ -102,6 +103,7 @@ export class OgPhoneRelay extends DurableObject<Env> {
   private connects = new MinuteCounter()
   private macFrames = new MinuteCounter()
   private phoneFrames = new MinuteCounter()
+  private photoParts = new MinuteCounter()
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -229,7 +231,9 @@ export class OgPhoneRelay extends DurableObject<Env> {
     const lim = this.limits
     const over =
       role === 'phone'
-        ? !this.phoneFrames.hit(Date.now(), lim.phoneFramesPerMin)
+        ? f?.type === 'photo-part'
+          ? !this.photoParts.hit(Date.now(), lim.photoPartsPerMin)
+          : !this.phoneFrames.hit(Date.now(), lim.phoneFramesPerMin)
         : (f?.type === 'event' || f?.type === 'projects' || f?.type === 'push-ready') &&
           !this.macFrames.hit(Date.now(), lim.macFramesPerMin)
     await this.handle(ws, role, f)
@@ -248,7 +252,7 @@ export class OgPhoneRelay extends DurableObject<Env> {
     if (role === 'phone') {
       if (
         !f ||
-        (f.type !== 'say' && f.type !== 'select' && f.type !== 'projects' && f.type !== 'push-token' && f.type !== 'assistant-history' && f.type !== 'call-note' && f.type !== 'assistant-proposal')
+        (f.type !== 'say' && f.type !== 'select' && f.type !== 'projects' && f.type !== 'push-token' && f.type !== 'assistant-history' && f.type !== 'call-note' && f.type !== 'assistant-proposal' && f.type !== 'photo-part')
       ) {
         this.send(ws, { type: 'error', code: 'bad-frame' })
         return
