@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useState } from 'react'
 import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent, within } from '@testing-library/react'
 import type { CanvasSummary } from '@/lib/types'
@@ -29,7 +30,21 @@ const handlers = () => ({
 
 const renderPages = (canvases: CanvasSummary[], activeId: string | null = canvases[0]?.id ?? null) => {
   const h = handlers()
-  const r = render(<PagesSection canvases={canvases} activeId={activeId} {...h} />)
+  // Fold state is owned by CanvasSidebarSplit in the app; a tiny stateful host
+  // stands in for it here.
+  const Host = () => {
+    const [collapsed, setCollapsed] = useState(false)
+    return (
+      <PagesSection
+        canvases={canvases}
+        activeId={activeId}
+        {...h}
+        collapsed={collapsed}
+        onToggleCollapsed={() => setCollapsed((v) => !v)}
+      />
+    )
+  }
+  const r = render(<Host />)
   return { ...r, h }
 }
 

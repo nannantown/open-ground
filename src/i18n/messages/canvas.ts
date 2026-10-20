@@ -66,6 +66,7 @@ export const canvas = {
     'canvas.expand': 'Expand',
     'canvas.collapse': 'Collapse',
     'canvas.layers': 'Layers',
+    'canvas.sidebarSplit': 'Drag to resize',
     // AlignBar — multi-select align / distribute
     'canvas.align.left': 'Align left',
     'canvas.align.hcenter': 'Align horizontal centers',
@@ -262,6 +263,7 @@ export const canvas = {
     'canvas.expand': '展開',
     'canvas.collapse': '折りたたみ',
     'canvas.layers': 'レイヤー',
+    'canvas.sidebarSplit': 'ドラッグで高さを変える',
     // AlignBar — multi-select align / distribute
     'canvas.align.left': '左揃え',
     'canvas.align.hcenter': '左右中央揃え',

@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { ChevronDown, ChevronRight, Plus, X } from 'lucide-react'
+import { Plus, X } from 'lucide-react'
+import { SectionToggle } from '@/components/canvas/CanvasSidebarSplit'
 import { CollabPresence, type PresenceChannel } from '@/components/canvas/CollabPresence'
 import { useT } from '@/i18n/I18nContext'
 import type { CanvasSummary } from '@/lib/types'
@@ -16,6 +17,9 @@ interface Props {
    *  here — ProjectCanvas publishes the owner's presence; this just shows who
    *  else is in the project. null when collab is OFF / not shared. */
   presence?: PresenceChannel | null
+  /** Folded to its header — owned by CanvasSidebarSplit (remembered per project). */
+  collapsed: boolean
+  onToggleCollapsed: () => void
 }
 
 // Figma-style "Pages" section at the top of the Canvas left sidebar — the
@@ -26,8 +30,8 @@ interface Props {
 //  • hover ✕ (or right-click the row) arms an inline "Delete?" confirm —
 //    deleting the last remaining Canvas is not offered
 //  • drag a row onto another to reorder
-// Collapsible; the list scrolls and the section caps at ~40% of the sidebar so
-// the Layers section below always keeps the lion's share.
+// Collapsible; the list scrolls inside whatever height CanvasSidebarSplit gives
+// it (the border below drags to share the sidebar with Layers).
 export const PagesSection = ({
   canvases,
   activeId,
@@ -37,9 +41,10 @@ export const PagesSection = ({
   onRename,
   onReorder,
   presence,
+  collapsed,
+  onToggleCollapsed,
 }: Props) => {
   const { t } = useT()
-  const [collapsed, setCollapsed] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [dragId, setDragId] = useState<string | null>(null)
@@ -65,22 +70,9 @@ export const PagesSection = ({
   }
 
   return (
-    <section className="flex max-h-[40%] shrink-0 flex-col">
+    <section className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center justify-between gap-1 py-1.5 pl-1.5 pr-2">
-        <button
-          type="button"
-          onClick={() => setCollapsed((v) => !v)}
-          aria-expanded={!collapsed}
-          title={collapsed ? t('canvas.expand') : t('canvas.collapse')}
-          className="flex min-w-0 items-center gap-1 rounded-[4px] px-1 py-0.5 text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        >
-          {collapsed ? (
-            <ChevronRight size={12} strokeWidth={2.25} className="shrink-0" />
-          ) : (
-            <ChevronDown size={12} strokeWidth={2.25} className="shrink-0" />
-          )}
-          <span className="label-cap">{t('canvas.pages')}</span>
-        </button>
+        <SectionToggle label={t('canvas.pages')} collapsed={collapsed} onToggle={onToggleCollapsed} />
         <div className="flex shrink-0 items-center gap-1.5">
           {/* Presence (u15) — who else is in this project (display only; the
               owner publishes via ProjectCanvas). Renders nothing when alone. */}

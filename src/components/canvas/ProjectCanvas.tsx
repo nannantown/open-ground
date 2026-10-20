@@ -4,6 +4,7 @@ import { useBoardCollab, useCanvasCollab } from '@/lib/collab/RealtimeContext'
 import { usePublishPresence } from '@/components/canvas/CollabPresence'
 import { useT } from '@/i18n/I18nContext'
 import { PagesSection } from './PagesSection'
+import { CanvasSidebarSplit } from './CanvasSidebarSplit'
 import { CanvasWorkspace } from './CanvasWorkspace'
 import type {
   CanvasElement,
@@ -188,7 +189,7 @@ export async function saveCanvasWithOcc(
 //  • debounced persistence + flush-on-unmount
 //  • the ⌘\ both-sidebars toggle (focus mode), persisted to localStorage
 export const ProjectCanvas = ({ projectPath }: Props) => {
-  const { t, lang } = useT()
+  const { lang } = useT()
   const [canvases, setCanvases] = useState<CanvasSummary[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [active, setActive] = useState<CanvasFile | null>(null)
@@ -779,24 +780,26 @@ export const ProjectCanvas = ({ projectPath }: Props) => {
     <div className="relative flex h-full w-full overflow-hidden bg-bg">
       {sidebarsVisible && (
         <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-bg-card">
-          <PagesSection
-            canvases={canvases}
-            activeId={activeId}
-            onSelect={switchTo}
-            onCreate={createCanvas}
-            onDelete={deleteCanvas}
-            onRename={renameCanvas}
-            onReorder={reorderCanvases}
-            // Presence avatars in the Pages header (display only — ProjectCanvas
-            // publishes the owner's presence above so it survives focus mode).
-            presence={boardCollab}
+          <CanvasSidebarSplit
+            projectPath={projectPath}
+            layersHostRef={setLayersHost}
+            pages={(collapsed, onToggleCollapsed) => (
+              <PagesSection
+                canvases={canvases}
+                activeId={activeId}
+                onSelect={switchTo}
+                onCreate={createCanvas}
+                onDelete={deleteCanvas}
+                onRename={renameCanvas}
+                onReorder={reorderCanvases}
+                // Presence avatars in the Pages header (display only — ProjectCanvas
+                // publishes the owner's presence above so it survives focus mode).
+                presence={boardCollab}
+                collapsed={collapsed}
+                onToggleCollapsed={onToggleCollapsed}
+              />
+            )}
           />
-          <section className="flex min-h-0 flex-1 flex-col border-t border-line">
-            <div className="label-cap shrink-0 px-3 py-2 text-ink-muted">
-              {t('canvas.layers')}
-            </div>
-            <div ref={setLayersHost} className="min-h-0 flex-1" />
-          </section>
         </aside>
       )}
       <div className="min-h-0 min-w-0 flex-1">

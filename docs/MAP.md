@@ -233,7 +233,7 @@
 - UI 本体: `src/components/canvas/` の `CanvasWorkspace.tsx`(タブ・複数キャンバス・ドック)/
   `InfiniteCanvas.tsx`(pan・zoom・marquee)/
   `ElementView.tsx`(要素 dispatch)+ `ShapeView` / `FrameView` / `ImageView` / `ScreenView` / `CommentPin` / `StrokeOverlay`
-- パネル: `LayersPanel.tsx` / `SelectionInspector.tsx` / `ToolPalette.tsx` / `ElementBar.tsx` / `PagesSection.tsx`
+- パネル: `LayersPanel.tsx` / `SelectionInspector.tsx` / `ToolPalette.tsx` / `ElementBar.tsx` / `PagesSection.tsx` / `CanvasSidebarSplit.tsx`(左欄 Pages/Layers の畳み+境目ドラッグ・プロジェクト毎に localStorage 記憶)
 - 純関数 lib: `src/lib/canvas*.ts` 群(transform / snap / group / align / textSizing / merge …)+
   `useCanvasHistory.ts`(undo)
 - データ: `src/lib/server/canvasData.ts`(per-canvas JSON・OCC rev)/ `canvasImages.ts`(アセット)。
