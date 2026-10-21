@@ -367,6 +367,16 @@ export const auditSessionFile = async (path: string): Promise<SessionTokenAudit 
 /** Compact token display: 336_000 → '336k', 900 → '900'. */
 const k = (n: number): string => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n))
 
+/** 中身のない起動 — a session that never did any work: at most one main-loop
+ *  response, zero output tokens, no subagent turns. Measured 2026-10-21: 57 of
+ *  101 worker sessions were exactly this (1 turn / 0 context / 0 output — a
+ *  worker relaunched right after a usage-limit hit and dropped at once), and
+ *  they dragged the per-card median to 1. The ONE definition shared by the
+ *  daily fuel report and `npm run swarm:audit`, so the two never disagree:
+ *  both leave these out of cards / median / max and count them apart. */
+export const isEmptyLaunch = (a: SessionTokenAudit): boolean =>
+  a.turns <= 1 && a.outputTokens === 0 && a.sidechainTurns === 0
+
 /** The one-line summary the engine journal records on a worker's done —
  *  mirrors the goal's example: 「consumption: 手数191 束ね1.0 文脈max336k 出力347k」. */
 export const formatConsumptionLine = (audit: SessionTokenAudit): string => {

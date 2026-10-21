@@ -226,6 +226,36 @@ describe('dailyFuelReport', () => {
     expect(empty.bundleRate).toBeNull()
   })
 
+  it('summarizeAudits: empty launches (≤1 turn, 0 output) are counted apart, not in the stats', () => {
+    // Measured 2026-10-21: 57 of 101 worker sessions were 1-turn / 0-output
+    // relaunches after a usage-limit hit, dragging the median to 1.
+    const blank = () =>
+      audit({ turns: 1, toolUses: 0, toolTurns: 0, bundleRate: null, maxContext: 0, outputTokens: 0 })
+    const s = summarizeAudits([
+      audit({ turns: 60 }),
+      audit({ turns: 75 }),
+      audit({ turns: 90, maxContext: 250_000 }),
+      blank(),
+      blank(),
+      blank(),
+      blank(),
+    ])
+    expect(s.cards).toBe(3)
+    expect(s.medianTurns).toBe(75)
+    expect(s.maxContext).toBe(250_000)
+    expect(s.emptyLaunches).toBe(4)
+    expect(buildReportDetail(s, '', '', 26)).toContain('4回')
+
+    // A real 1-turn answer (output > 0) is NOT an empty launch.
+    expect(summarizeAudits([audit({ turns: 1, outputTokens: 30 })]).cards).toBe(1)
+
+    // A day of nothing but empty launches still says so.
+    const allBlank = summarizeAudits([blank(), blank()])
+    expect(allBlank.cards).toBe(0)
+    expect(buildReportDetail(allBlank, '', '', 26)).toContain('2回')
+    expect(buildReportDetail(allBlank, '', '', 26)).not.toContain('含めていません')
+  })
+
   it('shouldReportNow: once per local day, at/after the fixed hour', () => {
     const at = (h: number, m = 0) => new Date(2026, 6, 18, h, m, 0).getTime()
     expect(shouldReportNow(null, at(8, 59))).toBe(false) // before the hour
@@ -259,8 +289,12 @@ describe('dailyFuelReport', () => {
   it('trendLine: direction in plain language, keyed on median turns', () => {
     const base: DailyFuelSummary = {
       cards: 3, medianTurns: 100, bundleRate: 1.5, maxContext: 1, outputTokens: 1, sidechainOutputTokens: 0,
+      emptyLaunches: 0,
     }
     expect(trendLine(null, base)).toBe('')
+    // prev counted the OLD way (no emptyLaunches, median dragged to 1): no fake "worse".
+    const { emptyLaunches: _old, ...legacy } = base
+    expect(trendLine({ ...legacy, cards: 74, medianTurns: 1 }, base)).toBe('')
     expect(trendLine({ ...base, cards: 0 }, base)).toBe('')
     expect(trendLine(base, { ...base, medianTurns: 80 })).toContain('良く')
     expect(trendLine(base, { ...base, medianTurns: 130 })).toContain('悪く')

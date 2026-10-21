@@ -35,6 +35,7 @@ import {
   collectSwarmSessionFiles,
   defaultClaudeProjectsRoot,
   describeAuditScope,
+  isEmptyLaunch,
   localDayEdgeMs,
   mainRepoForWorktreeCwd,
   resolveAuditScope,
@@ -289,7 +290,10 @@ const main = async () => {
   // rows only. Desk sessions (commander / supply) are long interactive drivers,
   // not attempts — folding them in silently shifted the very number this table
   // exists to report. Same test as the row label: a card runs in a worktree.
-  const cardRows = rows.filter((r) => r.audit.cwd?.includes('/worktrees/'))
+  // Empty launches (isEmptyLaunch — the same rule the daily fuel report uses)
+  // are left out too and counted on their own line below.
+  const workerRows = rows.filter((r) => r.audit.cwd?.includes('/worktrees/'))
+  const cardRows = workerRows.filter((r) => !isEmptyLaunch(r.audit))
   const med = (f: (a: SessionTokenAudit) => number) => median(cardRows.map((r) => f(r.audit)))
   console.log(
     `${pad(`median of ${cardRows.length} card(s)`, CARD_W)}  ` +
@@ -298,7 +302,11 @@ const main = async () => {
       `${padL(k(med((a) => a.maxContext) ?? 0), 8)} ` +
       `${padL(k(med((a) => a.outputTokens) ?? 0), 7)}`,
   )
-  const deskShown = rows.length - cardRows.length
+  const emptyShown = workerRows.length - cardRows.length
+  if (emptyShown > 0) {
+    console.log(`(${emptyShown} empty launch(es) — ≤1 turn, 0 output — listed above are excluded from the median)`)
+  }
+  const deskShown = rows.length - workerRows.length
   if (deskShown > 0) {
     console.log(`(${deskShown} desk session(s) listed above are excluded from the median — interactive, not card attempts)`)
   }

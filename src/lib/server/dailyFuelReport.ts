@@ -10,6 +10,7 @@ import { createSwarmInfoNotification } from './swarmNotifications'
 import {
   auditSessionFile,
   collectSwarmSessionFiles,
+  isEmptyLaunch,
   type SessionTokenAudit,
 } from './swarmTokenAudit'
 
@@ -100,6 +101,10 @@ export interface DailyFuelSummary {
   outputTokens: number
   /** Σ sidechain (subagent) output tokens — kept apart, same as the meter. */
   sidechainOutputTokens: number
+  /** Empty launches (isEmptyLaunch) left OUT of every number above, counted
+   *  here so the spinning itself stays visible. Optional: sentinels written
+   *  before 2026-10-21 lack it. */
+  emptyLaunches?: number
 }
 
 /** The improvement-proposal card the LAST degraded day filed — the dedup
@@ -144,7 +149,8 @@ export const shouldReportNow = (
 /** Aggregate per-session audits into the day's summary. Pure. Bundle rate is
  *  the WEIGHTED aggregate (Σ toolUses / Σ toolTurns), not a mean of ratios —
  *  a 3-turn card must not outvote a 300-turn card. */
-export const summarizeAudits = (audits: SessionTokenAudit[]): DailyFuelSummary => {
+export const summarizeAudits = (all: SessionTokenAudit[]): DailyFuelSummary => {
+  const audits = all.filter((a) => !isEmptyLaunch(a))
   const turns = audits.map((a) => a.turns).sort((a, b) => a - b)
   const mid = Math.floor(turns.length / 2)
   const medianTurns =
@@ -168,8 +174,15 @@ export const summarizeAudits = (audits: SessionTokenAudit[]): DailyFuelSummary =
     maxContext,
     outputTokens,
     sidechainOutputTokens,
+    emptyLaunches: all.length - audits.length,
   }
 }
+
+/** Owner-facing note for the empty launches left out of the numbers ('' when none). */
+const emptyLaunchNote = (s: DailyFuelSummary): string =>
+  s.emptyLaunches
+    ? `このほかに、すぐ止まって何もしなかった起動が${s.emptyLaunches}回ありました(上の数字には含めていません)。`
+    : ''
 
 /** Which thresholds a summary breaks — [] means healthy. Plain-language, each
  *  entry readable on its own (they go into the notification + the card). A
@@ -202,6 +215,10 @@ export const trendLine = (
   cur: DailyFuelSummary,
 ): string => {
   if (!prev || prev.cards === 0 || cur.cards === 0) return ''
+  // A prev without emptyLaunches was counted the OLD way (empty launches still
+  // in the median — e.g. cards 74 / median 1). Comparing it with the new count
+  // would announce a fake "worse" the morning after the change; skip once.
+  if (prev.emptyLaunches === undefined) return ''
   if (prev.medianTurns <= 0) return ''
   const ratio = cur.medianTurns / prev.medianTurns
   if (ratio <= 0.9) return '前回より少ない手数で終わっており、燃費は良くなっています。'
@@ -241,7 +258,9 @@ export const buildReportDetail = (
     // "no work finished" apart from "the loop silently died". (It costs no bell
     // slot from the fatal lane — see capNotificationsByKind in
     // swarmNotifications.ts, which caps info and fatal independently.)
-    return `${span}のエージェントチームの燃費: 終わったカードはありませんでした。`
+    // No numbers above to be "left out of" — just state the count.
+    const empty = summary.emptyLaunches ? ` すぐ止まって何もしなかった起動が${summary.emptyLaunches}回ありました。` : ''
+    return `${span}のエージェントチームの燃費: 終わったカードはありませんでした。${empty}`
   }
   const bundle = summary.bundleRate === null ? '—' : summary.bundleRate.toFixed(2)
   // Spelled out, not parenthesised jargon: 「…は別枠」 told the owner a number was
@@ -255,6 +274,8 @@ export const buildReportDetail = (
     `1枚あたりの手数(中央値)${fmtNum(summary.medianTurns)}手・道具の束ね率${bundle}・文脈の最大${plainCount(summary.maxContext)}・文章の出力合計${plainCount(summary.outputTokens)}。`,
   ]
   if (side) parts.push(side)
+  const empty = emptyLaunchNote(summary)
+  if (empty) parts.push(empty)
   if (trend) parts.push(trend)
   if (proposalNote) parts.push(proposalNote)
   return parts.join(' ')
@@ -468,6 +489,7 @@ const buildProposalTask = (
       (summary.sidechainOutputTokens > 0
         ? `(このほかに下請けの調査役が${plainCount(summary.sidechainOutputTokens)}。合計には含めていません)`
         : ''),
+    ...(summary.emptyLaunches ? [`- すぐ止まって何もしなかった起動(上の数字から除外): ${summary.emptyLaunches}回`] : []),
     ``,
     `## 超えた基準`,
     ...reasons.map((r) => `- ${r}`),
@@ -560,7 +582,8 @@ export const runDailyFuelReport = async (
     if (!Number.isFinite(lastMs)) continue
     if (lastMs < windowStart || lastMs >= cutoff) continue
     audits.push(audit)
-    auditDirs.push(f.dir)
+    // Empty launches are not cards: they must not steer the proposal target.
+    if (!isEmptyLaunch(audit)) auditDirs.push(f.dir)
   }
   const summary = summarizeAudits(audits)
 
