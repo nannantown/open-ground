@@ -10014,7 +10014,17 @@ describe('fireFatalNotifications — fatal events push, normal passes are silent
 //   • computeSwarmKpis     — counters + cards + journal → the dashboard rates.
 describe('KPI: classifyMetricEvent (line → counter)', () => {
   it('maps each structured kind to its counter', () => {
-    expect(classifyMetricEvent({ kind: 'dispatch', level: 'info', message: 'x' })).toBe('dispatched')
+    expect(classifyMetricEvent({ kind: 'dispatch', level: 'info', message: 'dispatch: x → swarm/x' })).toBe('dispatched')
+    expect(
+      classifyMetricEvent({ kind: 'dispatch', level: 'info', message: 'worker resumed (--resume): x → swarm/x' }),
+    ).toBe('dispatched')
+    // A dispatch-stage NOTE is not a spawn: the re-entry line precedes the real
+    // "dispatch:" line, so counting it made each re-entry two workers (sns-hub
+    // 2026-10-20: 133 vs a budget of 50 during a quota spin).
+    expect(
+      classifyMetricEvent({ kind: 'dispatch', level: 'info', message: '前回の作業場に戻ります: x — 途中まで…(swarm/x)' }),
+    ).toBeNull()
+    expect(classifyMetricEvent({ kind: 'dispatch', level: 'warn', message: 'quota park: every enabled model tier is cooling' })).toBeNull()
     expect(classifyMetricEvent({ kind: 'promote', level: 'info', message: 'x' })).toBe('promoted')
     // integrate is guarded by the land-shaped message (see the dedicated test below).
     expect(

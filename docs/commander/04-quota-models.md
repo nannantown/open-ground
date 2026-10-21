@@ -545,13 +545,13 @@ worker/reviewer が付かないのは無人だから。ここでエンジンの�
 
 - `isTierSpawnable(tier, now, allowed) = isTierAllowed && !isTierCooling`(97-101)。**すべての起動 tier 決定はこの1述語を通る**。
 - `highestSpawnableTier`(106-109): 梯子を best→cheapest に歩いて最初の spawnable。「fable OFF」は単に opus から歩き始めるのと同じ。
-- `resolveAvailableTier(desired, now, allowed)`(swarmLaunch.ts:205-220)の契約:
-  1. desired から**下へ**歩いて spawnable を探す(212-214)。未知モデル文字列は梯子先頭扱い(210-211)。
-  2. 無ければ**上も含め**最良 spawnable(215-216)。
-  3. それも無い(=何も spawnable でない): desired が **allowed なら** desired を返す(全部単に cooling のケース — どうせ park で spawn されない。217-218)。
-  4. else 最良 **allowed** tier(219)— **OFF tier は最後の手段としても絶対返さない**(旧 `?? desired` がまさに OFF tier を返すバグで、d1485ea が塞いだ穴。196-198)。
-  5. 全 tier OFF なら **null**(219→ `highestAllowedTier` が null)。
-- `resolveSwarmModelEffort(mode, role, card?, now?, allowed?)`(257-267): 実行モード(max/economy/optimize)の希望 tier(`desiredModelEffort`、148-174)を resolveAvailableTier に通す。**null 契約: null が返ったら呼出側は spawn してはならない**(254-256)。effort はフォールバックで**不変**(model だけが quota に従う。239)。
+- `resolveAvailableTier(desired, now, allowed, usage)`(swarmLaunch.ts:448-483 — 2026-10-21 時点。行番号はずれるので関数名で引くこと)の契約:
+  1. desired から**下へ**歩いて spawnable を探す(465-467)。未知モデル文字列は梯子先頭扱い(463-464)。
+  2. 無ければ**上も含め**最良 spawnable(471-473)。
+  3. それも無い(=何も spawnable でない): desired が **allowed なら** desired を返す(全部単に cooling のケース。476-481)。⚠「どうせ park で spawn されない」は**偽だった**(2026-10-20 sns-hub 実測 — §5.5.1)。この cooling な戻り値は worker 経路では spawn 側の門(`TierCoolingError`)が止める。
+  4. else 最良 **allowed** tier(482)— **OFF tier は最後の手段としても絶対返さない**(旧 `?? desired` がまさに OFF tier を返すバグで、d1485ea が塞いだ穴)。⚠この戻り値も cooling でありうる — worker 経路では同じく `TierCoolingError` が止める。
+  5. 全 tier OFF なら **null**(482 → `highestAllowedTier` が null)。
+- `resolveSwarmModelEffort(mode, role, card?, now?, allowed?, usage?)`(606-617): 実行モード(max/economy/optimize)の希望 tier(`desiredModelEffort`、298-)を resolveAvailableTier に通す。**null 契約: null が返ったら呼出側は spawn してはならない**(docコメント参照)。effort はフォールバックで**不変**(model だけが quota に従う)。
 
 ### 5.4 全 spawn 経路の fail-closed(5+1経路)
 
@@ -580,6 +580,20 @@ worker/reviewer が付かないのは無人だから。ここでエンジンの�
 - `none-allowed` は加えて **T3 escalation を1回 raise**(4459 → raiseNoAllowedModelTier 4342-4370)。
 - dashboard 用に `engine.parkUntil`(cooling の期限のみ。1494-1500、GET /api/swarm/orchestrator のレスポンス types.ts:1360)と `spawnBlockSig`(両種を表せる。1501-1506)。
 - review 再パネル点火も同じ門を per-card で通る(5047 — verify が数分走る間に park 状態が変わり得るため tick 冒頭でなく直前に評価)。
+
+### 5.5.1 spawn 側の門 — 冷却中の tier には worker を座らせない(2026-10-21)
+
+**実測(sns-hub 2026-10-20 08:44Z〜09:13Z)**: 2枚の `design` カード(optimize ⇒ 希望 opus)が **5時間セッション上限**(`You've hit your session limit · resets 8:30pm` — 全モデル共通の枠。週の Fable 枠ではない)に当たった。エンジンは opus → sonnet → haiku を1回ずつ冷やした後、**冷却中の opus に約1分おきに計54回**座らせ直した(`前回の作業場に戻ります` → 約30秒後に再び quota-stopped)。09:12Z に /usage キャッシュ(30分 TTL)が切れて fable が選ばれ、そこで fable も冷えて初めて park した。
+
+**原因 = 2つの門の食い違い**: 起動 tier の解決(`resolveAvailableTier`)は層D(/usage キャッシュの session ≥100%)で fable を外し、他が全部 cooling なので §5.3-3 の「desired(=冷却中の opus)を返す」に落ちた。一方 park の門 `spawnBlock`(§5.5)は**冷却表 + mask しか見ない** — 冷却表では fable は未冷却なので「使える tier がある」と判定し park しなかった。re-entry(`前回の作業場に戻ります`)経路固有の欠陥ではない(re-entry も同じ spawnWorker を通る — 見えていたのが re-entry だっただけ)。
+
+**直し方**: `spawnSwarmWorker` が解決済み model を見て、**ladder tier が冷却中なら `TierCoolingError(tier, until)` を throw**(worktree 作成・guard 配線検査より前 — 何も残さない)。worker の全ドア(エンジン dispatch・re-entry・手動 `POST /api/swarm/worker`・restart)を1箇所で塞ぐ。エンジン側はさらに手前で同じ判定をする: runDispatchPass の fill 段が各カードの解決 tier(`resolveSwarmModelEffort` — 同じリゾルバ)を **re-entry の git 作業より前**に見て、冷却中なら spawn を呼ばずに待たせる(`TierCoolingError` はその取りこぼしと手動/restart ドア用の後ろ盾)。どちらで止まっても失敗ではなく**待機**: カードは todo のまま、journal は `dispatch deferred — tier <t> is cooling until <ISO> …` を **カードごと・wall ごとに1回**(`engine.coolingDefers: Map<cardId, 'tier@until'>`、そのカードの spawn 成功で削除。共有の1署名だと別 tier を待つ2枚が毎パス交互に書き換えて毎回ログが出た)。spawnBlock が null のままなので、待機中は fill 段が `engine.parkUntil` を待機カードの最早 `until` に毎パス設定する(ダッシュボード/社長の「〜まで停止中」表示用 — 待機が無ければ undefined に戻る)。事前判定は同期版リゾルバ、spawn 側は probed 版で、**判定が一致するとは限らない**: 事前判定が非冷却 tier を返しても、spawn 側の probe がその tier で wall を踏むとそれを冷やして歩き直し、何も無ければ desired(冷却中)に落ちる。その場合は事前判定を通過したカードを spawn 側の `TierCoolingError`(後ろ盾)が捕まえ、**結果は同じく待機**(同じ deferOnCooling — 1行・parkUntil)になる。逆向き(事前判定が待機なのに spawn なら別 tier)は起きない — probed は冷却中 tier を probe せずそのまま返すため。`前回の作業場に戻ります` は spawn **成功後**にだけ書く(待機中に毎パス出さない)。冷却明け(lazy expiry)の最初のパスで普通に spawn する — 再アームは不要。他に使える tier があれば解決がそちらを選ぶので「そちらで1回」は従来どおり。
+
+`spawnBlock` 自体に層Dを足すのはやめた: swarmAllowedModels.ts は HIGH_RISK_PATHS(自動統合の force-hold 対象)で、spawn 側の門だけで欠陥は閉じる(残るのは待機中のパスごとのボード再読と re-entry 解決の軽い空回りだけ — claude は起動しない)。manager/supply/overseer の desk 経路は対象外(常駐で再起動ループを作らない)。
+
+**同時に直した数え方**: 「アプリを開いてから worker を N 回動かしました(目安 50 回)」の N(`metrics.dispatched`)は `kind:'dispatch'` の**全ログ行**を数えていた — re-entry 1回が `前回の作業場に戻ります` + `dispatch:` の **2回**、park / park lifted / skipped / re-entry 再試行の行も1回。`classifyMetricEvent` は今 **起動直後に書かれる2種の行**(`dispatch: <title> → <branch>` と `worker resumed (--resume): …`)だけを `dispatched` に数える(`SPAWN_LINE_RE`)。
+
+テスト: `swarmQuotaCoolingRespawn.test.ts`(本物のリゾルバ + 冷却表で sns-hub の状態を再構成 — spawnBlock は null のまま spawn が拒まれること・冷却明けに通ること)、`swarmQuotaReentry.test.ts` 末尾(エンジンが todo で待ち・1行・カウント0・明けに re-entry)、`swarmOrchestrator.test.ts` の classifyMetricEvent。3つとも修正を外して赤を実測済み。
 
 ### 5.6 ⚠ 実行中のアプリに載るのは再ビルド後
 

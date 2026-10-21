@@ -39,6 +39,7 @@ import { claudeDirName } from './claudeProjectDir'
 import { isExperimentEnabled } from './experiments'
 import { resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
+import { coolingSnapshot, isModelTier, isTierCooling } from './swarmQuota'
 import { ensureGuardWiring } from './hooksInstall'
 import { createSwarmFatalNotification } from './swarmNotifications'
 import { snapshotWorktreeBranch, fireSelfUpdateIfIntegrated } from './selfUpdateOnIntegrate'
@@ -826,6 +827,21 @@ export class GuardWiringError extends Error {
   }
 }
 
+/** Thrown when the only tier a worker could launch on is COOLING (a usage wall
+ *  already seen and not yet reset). Launching would hit the same wall within
+ *  seconds and burn a session; the card stays queued until `until`. Raised before
+ *  any worktree exists, like {@link NoAllowedModelTierError}. */
+export class TierCoolingError extends Error {
+  readonly tier: string
+  readonly until: number
+  constructor(tier: string, until: number) {
+    super(`model tier '${tier}' is cooling until ${new Date(until).toISOString()} — worker spawn deferred`)
+    this.name = 'TierCoolingError'
+    this.tier = tier
+    this.until = until
+  }
+}
+
 /** Thrown when a RESTART would put a second desk into a worktree that a live one
  *  — on EITHER runtime — is still working in. Refusing is the whole point: two
  *  claudes sharing a worktree share its files and its `swarm/*` branch, and the
@@ -923,6 +939,19 @@ export const spawnSwarmWorker = async (
     await getAllowedModelTiers(),
   )
   if (!me) throw new NoAllowedModelTierError()
+  // NEVER SEAT A WORKER ON A KNOWN-DRY TIER (2026-10-21). With no tier spawnable
+  // the resolver keeps the DESIRED tier even while it is COOLING (its "nothing
+  // has headroom" fallback, left for the engine's park gate to catch). The park
+  // gate (spawnBlock) counts cooling + the owner's mask but NOT the /usage veto
+  // on the top tier, so "opus cooling + fable usage-vetoed" slipped past it and
+  // every pass re-seated the requeued card on opus. Refusing here, before any
+  // worktree or session exists, covers every worker door (engine dispatch incl.
+  // re-entry, the manual route, restart). The card waits; the first spawn after
+  // `until` launches normally (lazy expiry — nothing to re-arm).
+  if (isModelTier(me.model) && isTierCooling(me.model, Date.now())) {
+    const until = coolingSnapshot(Date.now()).find((r) => r.tier === me.model)?.until ?? Date.now()
+    throw new TierCoolingError(me.model, until)
+  }
   // L4 WIRING GATE (GAP-2) — fail-closed, and like the model mask above it runs
   // BEFORE the worktree exists so a refusal leaves no orphan worktree/branch.
   // A worker runs bypass inside a worktree that SHARES the main repo's .git,

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { runDispatchPass, __seedEngineForTests } from './swarmOrchestrator'
 import type { ProjectTask, SpawnSwarmWorkerResponse, SwarmFatalNotification } from '@/lib/types'
+import { TierCoolingError } from './swarmWorker'
 
 // THE ORPHANED COMMITS (measured 2026-08-04).
 //
@@ -367,5 +368,50 @@ describe('re-entry — the previous worker’s ready is not this worker’s', ()
 
     expect(h.spawned).toEqual([{ worktree: undefined }])
     expect(h.promoted).toEqual(['a'])
+  })
+})
+
+// THE QUOTA RESPAWN SPIN (sns-hub, 2026-10-20). With the only usable tier cooling,
+// spawnSwarmWorker refuses with TierCoolingError (pinned against the real resolver
+// in swarmQuotaCoolingRespawn.test.ts). This pins the engine's half: the card
+// just WAITS in todo — no worker, no "dispatched" count toward the 目安 notice,
+// one journal line per wall instead of one per 3-second pass — and the first
+// pass after the reset re-enters its work exactly as before.
+describe('re-entry — a spawn deferred on a cooling tier waits quietly', () => {
+  it('stays in todo, is said once, counts nothing, then re-enters after the reset', async () => {
+    const engine = engineLiteral('/proj-cooling-defer') as unknown as {
+      log: { message: string; kind?: string }[]
+      workers: unknown[]
+      metrics?: { dispatched: number }
+    }
+    __seedEngineForTests(engine as never)
+    const h = harness([card({ id: 'a', branch: 'swarm/existing' })], { 'swarm/existing': '/wt/existing' })
+    let cooling = true
+    const deps = {
+      ...(h.deps as object),
+      spawnWorker: async (opts: { worktree?: string }) => {
+        if (cooling) throw new TierCoolingError('opus', Date.parse('2026-10-20T11:30:00Z'))
+        return (h.deps as { spawnWorker: (o: { worktree?: string }) => Promise<SpawnSwarmWorkerResponse> }).spawnWorker(opts)
+      },
+    } as never
+
+    for (let i = 0; i < 3; i++) await runDispatchPass(engine as never, deps)
+
+    expect(h.board.get('a')?.boardColumn).toBe('todo')
+    expect(engine.workers).toHaveLength(0)
+    expect(h.spawned).toHaveLength(0)
+    expect(engine.metrics?.dispatched ?? 0).toBe(0)
+    expect(engine.log.filter((l) => l.message.startsWith('dispatch deferred'))).toHaveLength(1)
+    expect(engine.log.some((l) => l.message.startsWith('前回の作業場に戻ります'))).toBe(false)
+    expect(engine.log.some((l) => l.message.startsWith('dispatch failed'))).toBe(false)
+
+    cooling = false // the wall reset
+    await runDispatchPass(engine as never, deps)
+
+    expect(h.spawned).toEqual([{ worktree: '/wt/existing' }])
+    expect(h.board.get('a')?.branch).toBe('swarm/existing')
+    expect(engine.log.filter((l) => l.message.startsWith('前回の作業場に戻ります'))).toHaveLength(1)
+    // One real launch = one count (the re-entry note is not a second worker).
+    expect(engine.metrics?.dispatched).toBe(1)
   })
 })

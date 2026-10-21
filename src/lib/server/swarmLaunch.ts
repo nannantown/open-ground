@@ -500,7 +500,8 @@ export const resolveAvailableTier = (
  *  honest: a NON-ladder model string is returned as-is (never probe arbitrary
  *  strings), and a tier the walk returned WHILE COOLING (the nothing-spawnable
  *  "keep desired" fallback) is returned unprobed — it is already known-dry and
- *  the engine's park gate owns that case, exactly as before.
+ *  the caller owns that case (spawnSwarmWorker refuses it with TierCoolingError;
+ *  the engine's park gate alone missed it — 04-quota-models.md §5.5.1).
  *
  *  `probe` is injectable for tests; production always means ensureTierProbed. */
 export const resolveAvailableTierProbed = async (
@@ -514,7 +515,9 @@ export const resolveAvailableTierProbed = async (
     const tier = resolveAvailableTier(desired, now, allowed, usage)
     if (tier == null) return null
     if (!isModelTier(tier)) return tier // not a ladder tier — nothing to probe
-    if (isTierCooling(tier, now)) return tier // known-dry fallback (park's case) — don't probe
+    // known-dry fallback — don't probe. A worker spawn refuses it (TierCoolingError
+    // in spawnSwarmWorker): the park gate does not catch every such state.
+    if (isTierCooling(tier, now)) return tier
     const verdict = await probe(tier)
     if (verdict !== 'wall') return tier // ok / unknown ⇒ fail-open: launch here
     // wall ⇒ the probe cooled `tier`; the next resolve walks one rung down.

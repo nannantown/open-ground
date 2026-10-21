@@ -60,6 +60,7 @@ import {
   spawnSwarmWorker,
   removeSwarmWorktree,
   WorktreeOccupiedError,
+  TierCoolingError,
   ensureSwarmWorktreeForBranch,
 } from '@/lib/server/swarmWorker'
 import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
@@ -462,6 +463,11 @@ export const swarmRoutes = new Hono()
       // worktree, and the right answer is the same 409 the card-claim gates use.
       // A 500 would read as "the server fell over" and invite a retry loop
       // against a healthy, occupied worktree.
+      // Every tier this card could launch on is cooling (a usage wall not yet
+      // reset): not a breakage — say when it can start instead of a 500.
+      if (e instanceof TierCoolingError) {
+        return c.json({ error: e.message, cooling: true, tier: e.tier, until: new Date(e.until).toISOString() }, 503)
+      }
       if (e instanceof WorktreeOccupiedError) {
         return c.json({ error: e.message, worktree: e.worktree, occupied: true }, 409)
       }

@@ -149,7 +149,7 @@ import {
   type WorkerHandle,
   type WorkerRuntimeKind,
 } from './workerRuntime'
-import { execModeMaxWorkers } from './swarmLaunch'
+import { execModeMaxWorkers, resolveSwarmModelEffort } from './swarmLaunch'
 // [Quota] the engine is BOTH sides of the quota loop now: the rate-limit
 // sighting in monitorWorkers is the swarm's SENSOR (markRateLimited — the one
 // production write into the cooling table, attributing the sighting to the tier
@@ -157,7 +157,14 @@ import { execModeMaxWorkers } from './swarmLaunch'
 // park gate). MODEL_TIER_LADDER narrows the recorded
 // launch model to a known tier; an off-ladder / unrecorded model holds the
 // worker exactly as before but marks nothing (never poison a tier by guess).
-import { markRateLimited, MODEL_TIER_LADDER, ensureCoolingTableLoaded } from './swarmQuota'
+import {
+  markRateLimited,
+  MODEL_TIER_LADDER,
+  ensureCoolingTableLoaded,
+  coolingSnapshot,
+  isModelTier,
+  isTierCooling,
+} from './swarmQuota'
 // [Allowed] the owner's PERMANENT per-tier ON/OFF switch — the second, independent
 // veto. `spawnBlock` ANDs it with the cooling table and is the ONE gate both
 // actuators (dispatch + reviewer panel) consult, so a tier the owner retired can
@@ -173,6 +180,7 @@ import {
   removeSwarmWorktree,
   swarmWorktreeDirName,
   ensureSwarmWorktreeForBranch,
+  TierCoolingError,
   type ReusableWork,
 } from './swarmWorker'
 import { SdkWorkerUnavailableError } from './swarmWorkerSdk'
@@ -878,7 +886,7 @@ const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(
  *  In-memory on the engine (a restart resets them — a per-session roll-up, never
  *  persisted to disk). The rate denominators the KPI roll-up divides. */
 export interface SwarmMetricsCounters {
-  /** Workers launched (a 'dispatch' line at info level — a spawned PTY). */
+  /** Workers launched (a 'dispatch'-kind spawn line — SPAWN_LINE_RE). */
   dispatched: number
   /** Dispatch attempts that FAILED to spawn (a 'dispatch' line at error level). */
   dispatchFailed: number
@@ -929,6 +937,11 @@ export const REWORK_LOG_MARKER = '差し戻し review→'
  *  pairing agree on what "a real land" is. */
 const INTEGRATE_TITLE_RE = /^integrated \([^)]*\): (.+?) → /
 
+/** The journal lines written right after a worker session actually launched:
+ *  the fill stage's `dispatch: <title> → <branch>` and the boot resume's
+ *  `worker resumed (--resume): …`. */
+const SPAWN_LINE_RE = /^(dispatch: |worker resumed \(--resume\): )/
+
 /** Which lifetime counter (if any) a journal line increments — PURE so the whole
  *  mapping is unit-tested without an engine. Structured `kind` events map
  *  directly; a dispatch's level splits spawned vs failed; rework (which carries
@@ -941,7 +954,14 @@ export const classifyMetricEvent = (line: {
 }): keyof SwarmMetricsCounters | null => {
   switch (line.kind) {
     case 'dispatch':
-      return line.level === 'error' ? 'dispatchFailed' : 'dispatched'
+      if (line.level === 'error') return 'dispatchFailed'
+      // Count SPAWNS, not dispatch-stage lines (2026-10-21). kind:'dispatch' also
+      // tags the 「前回の作業場に戻ります」 re-entry note, park / park-lifted,
+      // "skipped", re-entry retries … — counting all of them made every re-entry
+      // two "workers" and inflated the DISPATCH_BUDGET notice (sns-hub showed 133
+      // against 50 during a quota spin). Only the two lines written right after a
+      // worker actually launched count.
+      return SPAWN_LINE_RE.test(line.message) ? 'dispatched' : null
     case 'promote':
       return 'promoted'
     case 'integrate':
@@ -1946,6 +1966,12 @@ export interface ProjectEngine {
    *  rest of the engine's cognition — a restart retries immediately, which is
    *  the right bias (the cause may have been fixed while we were down). */
   sdkSpawnHold?: { until: number; failures: number; reason: string; notifiedAt: number }
+  /** Per todo card: the `tier@until` its dispatch was last deferred on (its only
+   *  launchable tier is COOLING — the fill stage's pre-check or spawnSwarmWorker's
+   *  TierCoolingError). Logs each card's deferral once per wall instead of on every
+   *  3-second pass; a card's entry is dropped when it spawns. Per card because two
+   *  cards can wait on different tiers — one shared signature flip-flopped. */
+  coolingDefers?: Map<string, string>
   /** Read-only integration readiness of the review-column swarm cards, refreshed
    *  each integration pass (the "統合可" display). */
   reviews: OrchestratorReview[]
@@ -7911,6 +7937,30 @@ export const runDispatchPass = async (
   const reserved = picks.filter((card) => !pending.has(card.id)).map((card) => card.id)
   for (const id of reserved) pending.add(id)
 
+  // QUOTA DEFER (2026-10-21, sns-hub spin): a card whose only launchable tier is
+  // COOLING waits in todo. The park gate above can miss this state (it does not
+  // see the /usage veto on the top tier — 04-quota-models.md §5.5.1), so each card
+  // is checked before any git work; spawnSwarmWorker's TierCoolingError is the
+  // backstop for the same state (and for the manual / restart doors).
+  const execMode = picks.length ? await getExecutionMode() : undefined
+  // This state is a park the spawnBlock gate cannot see, so mirror its earliest
+  // deadline into `parkUntil` (what the dashboard / president read as "paused
+  // until") — recomputed every pass, assigned once in `finally`.
+  let deferUntil: number | undefined
+  const deferOnCooling = (cardId: string, title: string, tier: string, until: number): void => {
+    deferUntil = Math.min(deferUntil ?? until, until)
+    const defers = (engine.coolingDefers ??= new Map())
+    const sig = `${tier}@${until}`
+    if (defers.get(cardId) === sig) return
+    defers.set(cardId, sig)
+    logLine(
+      engine,
+      'warn',
+      `dispatch deferred — tier ${tier} is cooling until ${new Date(until).toISOString()} and no other enabled tier can take the card; it stays in todo and starts after the reset: ${shorten(title)}`,
+      'dispatch',
+    )
+  }
+
   try {
     for (const card of picks) {
       if (!engine.running) return // a stop mid-pass halts promptly (finally releases)
@@ -7970,6 +8020,21 @@ export const runDispatchPass = async (
         continue
       }
 
+      if (execMode) {
+        const want = resolveSwarmModelEffort(
+          execMode,
+          'worker',
+          { title: fresh.title ?? '', notes: typeof fresh.notes === 'string' ? fresh.notes : undefined, tier: fresh.tier },
+          now,
+          await getAllowedModelTiers(),
+        )
+        if (want && isModelTier(want.model) && isTierCooling(want.model, now)) {
+          const until = coolingSnapshot(now).find((r) => r.tier === want.model)?.until ?? now
+          deferOnCooling(card.id, title, want.model, until)
+          continue
+        }
+      }
+
       // ── GO BACK TO WHERE THIS CARD'S WORK ALREADY IS (2026-08-04) ────────
       // A worker reclaimed at a quota wall returns to 'todo' with `card.branch`
       // still set (the recover write only sets the column). Minting a fresh
@@ -7987,17 +8052,11 @@ export const runDispatchPass = async (
         engine.path,
         fresh,
       ).catch(() => null)
-      if (reuse) {
-        logLine(
-          engine,
-          'info',
-          `前回の作業場に戻ります: ${shorten(title)} — 途中まで進んだ内容はそのまま残っています(${reuse.branch})`,
-          'dispatch',
-        )
-        // The previous worker's heartbeat file on this branch is deleted by
-        // spawnSwarmWorker itself (non-resume spawn into an existing worktree, after
-        // its occupancy check) — shared with the manual POST /api/swarm/worker door.
-      }
+      // (The previous worker's heartbeat file on this branch is deleted by
+      // spawnSwarmWorker itself — non-resume spawn into an existing worktree, after
+      // its occupancy check — shared with the manual POST /api/swarm/worker door.
+      // The 「前回の作業場に戻ります」 line is written only once the spawn succeeded:
+      // a spawn deferred on a cooling tier must not print it every pass.)
       // ── NEVER MINT A FRESH BRANCH OVER COMMITS (2026-10-03, card d84bec79) ──
       // The `null` above is only "nothing to lose" when the card's branch holds no
       // work. When it HAS commits, a fresh dispatch stamps a new branch over
@@ -8067,6 +8126,13 @@ export const runDispatchPass = async (
           ...(reuse ? { worktree: reuse.worktree } : {}),
         })
       } catch (e) {
+        // QUOTA DEFER (2026-10-21): the only tier this card could launch on is
+        // cooling. Not a failure — the card simply waits in todo and the first pass
+        // after the reset launches it. Said once per wall, not every 3s.
+        if (e instanceof TierCoolingError) {
+          deferOnCooling(card.id, title, e.tier, e.until)
+          continue
+        }
         logLine(engine, 'error', `dispatch failed: ${shorten(title)} — ${errMsg(e)}`, 'dispatch')
         // SDK-only workers (2026-08-13): an environment that cannot start an SDK
         // session will not heal in 3 seconds — back off + tell the owner, and
@@ -8079,6 +8145,15 @@ export const runDispatchPass = async (
         continue
       }
       if (priorFailure) engine.reworkReasons.delete(card.id) // consumed — injected into this /order
+      engine.coolingDefers?.delete(card.id)
+      if (reuse && spawn.branch === reuse.branch) {
+        logLine(
+          engine,
+          'info',
+          `前回の作業場に戻ります: ${shorten(title)} — 途中まで進んだ内容はそのまま残っています(${reuse.branch})`,
+          'dispatch',
+        )
+      }
       // Dispatch works again — retire any spawn-failure hold (self-recovery: the
       // owner fixed the cause, e.g. signed back in; nothing to re-arm by hand).
       if (engine.sdkSpawnHold) {
@@ -8143,6 +8218,7 @@ export const runDispatchPass = async (
     // keeps holding it without the reservation. A card we skipped or whose spawn
     // threw goes back to being freely dispatchable, which is correct.
     for (const id of reserved) pending.delete(id)
+    engine.parkUntil = deferUntil // past the spawnBlock gate: no real park is live here
   }
 
   // card 3 — WRITE-THROUGH the roster ONCE per pass, AFTER every mutation (monitor
