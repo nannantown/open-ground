@@ -12,12 +12,13 @@
 //
 // See docs/SDK_WORKER_MIGRATION_PLAN.md §3.6.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Square, SendHorizontal, Power, Trash2, AlertTriangle, Hand, RotateCcw, X, Wrench, ChevronDown, ChevronRight } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { holdStream, useStreamOwner } from '@/lib/streamBudget'
 import type { SpriteState } from '@/lib/swarm/sprites'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
+import { assistantClearance, useAssistantSpot } from '@/components/assistant/assistantWindow'
 import type { SdkEvent, SdkSessionStatus } from '@/lib/server/sdkEvents'
 import {
   groupSdkFrames,
@@ -104,6 +105,9 @@ interface Props {
   projectPath: string
   branch: string
   taskTitle: string
+  /** Shown in the Board card drawer, which prints the title in full above the
+   *  pane — the nameplate then leaves it out rather than repeat it. */
+  inDrawer?: boolean
   /** Engine-owned workers are read-only here, exactly as in SwarmWorkerPane. */
   source?: 'manual' | 'engine'
   onExit?: () => void
@@ -161,6 +165,7 @@ export const SdkWorkerPane = ({
   projectPath,
   branch,
   taskTitle,
+  inDrawer = false,
   source = 'manual',
   onExit,
   busy = false,
@@ -211,6 +216,28 @@ export const SdkWorkerPane = ({
     !finished && !closed && status !== 'exited' && status !== 'failed'
   const [truncated, setTruncated] = useState(false)
   const [draft, setDraft] = useState('')
+  // The floating assistant sits over the screen and the layout never moves for
+  // it — so the composer pads its own right side whenever the character
+  // actually covers it (wherever the owner dragged it; 0 when it is elsewhere
+  // or not on screen at all).
+  const assistantSpot = useAssistantSpot()
+  const composerRef = useRef<HTMLDivElement>(null)
+  const [assistantRoom, setAssistantRoom] = useState(0)
+  useLayoutEffect(() => {
+    const el = composerRef.current
+    if (!el) return
+    const measure = () =>
+      setAssistantRoom(assistantClearance(el.getBoundingClientRect(), assistantSpot, window.innerWidth, window.innerHeight))
+    measure()
+    window.addEventListener('resize', measure)
+    // The pane's own box: a drawer / seat resize moves the composer.
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    if (el.parentElement) ro?.observe(el.parentElement)
+    return () => {
+      window.removeEventListener('resize', measure)
+      ro?.disconnect()
+    }
+  }, [assistantSpot, accepting])
   // ── The open-question banner (2026-08-03, owner-requested) ─────────────────
   // The 0.11.52 acceptance put the owner in front of this exact pane while
   // their worker sat waiting on a question — and the pane said only 「待機中」.
@@ -531,7 +558,7 @@ export const SdkWorkerPane = ({
         sprite={sprite}
         statusLabel={statusLabel}
         tone={showsQuestion ? 'ask' : status === 'working' ? 'run' : undefined}
-        detail={taskTitle || branch}
+        detail={inDrawer ? undefined : taskTitle || branch}
         detailTitle={taskTitle ? `${taskTitle} — ${branch}` : branch}
       >
         {isEngine ? null : (
@@ -593,9 +620,15 @@ export const SdkWorkerPane = ({
               <div className="text-meta font-medium text-status-ask">
                 {t('projectPanel.swarm.sdk.questionBanner')}
               </div>
-              <div className="mt-0.5 line-clamp-3 text-ui leading-snug text-ink" title={openQuestion}>
-                {openQuestion}
-              </div>
+              {/* Opened, the question scrolls inside a capped box: the banner
+                  does not shrink, so uncapped it pushed the fold chevron and
+                  the composer out of a short seat. */}
+              <ClampedText
+                text={openQuestion}
+                clamp="line-clamp-3"
+                openClass="max-h-32 overflow-y-auto"
+                className="mt-0.5 text-ui leading-snug text-ink"
+              />
               <div className="mt-1 text-micro text-ink-muted">
                 {questionHint ?? t('projectPanel.swarm.sdk.questionBannerHint')}
               </div>
@@ -708,7 +741,11 @@ export const SdkWorkerPane = ({
           — never on liveness: a desk that was asked to stop is still ALIVE for
           a while, and it refuses every word of it. */}
       {accepting ? (
-        <div className="flex shrink-0 items-center gap-1.5 border-t border-line-soft bg-bg-card px-2 py-1.5">
+        <div
+          ref={composerRef}
+          className="flex shrink-0 items-center gap-1.5 border-t border-line-soft bg-bg-card px-2 py-1.5"
+          style={assistantRoom ? { paddingRight: assistantRoom } : undefined}
+        >
           <input
             value={draft}
             onChange={(e) => {
@@ -889,6 +926,57 @@ export const ToolCard = ({ item }: { item: Extract<SdkRenderItem, { kind: 'tool'
   )
 }
 
+/** Text cut to a few lines, with a chevron that opens it in full (and closes
+ *  it again) — shown only when something is actually cut. `clamp` is a literal
+ *  line-clamp class so Tailwind sees it. */
+const ClampedText = ({
+  text,
+  clamp,
+  openClass = '',
+  className = '',
+}: {
+  text: string
+  clamp: string
+  /** Applied while open (e.g. a height cap where the host does not scroll). */
+  openClass?: string
+  className?: string
+}) => {
+  const { t } = useT()
+  const ref = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false)
+  const [cut, setCut] = useState(false)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || open) return
+    const check = () => setCut(el.scrollHeight > el.clientHeight + 1)
+    check()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [text, open])
+  const label = t(open ? 'projectPanel.swarm.feed.less' : 'projectPanel.swarm.feed.more')
+  return (
+    <div className={className}>
+      <div ref={ref} className={`whitespace-pre-wrap break-words ${open ? openClass : clamp}`}>
+        {text}
+      </div>
+      {cut || open ? (
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          aria-label={label}
+          title={label}
+          className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-[3px] text-ink-faint transition-colors duration-150 hover:bg-plane hover:text-ink active:bg-ink/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+        >
+          <ChevronDown size={13} strokeWidth={2} className={`transition-transform duration-150 ${open ? 'rotate-180' : ''}`} aria-hidden />
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
 export const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) => {
   switch (ev.kind) {
     case 'input':
@@ -897,9 +985,7 @@ export const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) 
       return (
         <div className="my-2 rounded-[3px] border-l-2 border-accent/60 bg-bg-inset px-2 py-1 text-meta text-ink-muted">
           <div className="text-micro text-ink-faint">{t('projectPanel.swarm.feed.input')}</div>
-          <div className="line-clamp-4 whitespace-pre-wrap break-words" title={ev.text}>
-            {ev.text}
-          </div>
+          <ClampedText text={ev.text} clamp="line-clamp-4" />
         </div>
       )
     case 'text':

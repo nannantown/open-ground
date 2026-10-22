@@ -583,3 +583,84 @@ describe('SdkWorkerPane — the open-question banner (2026-08-03)', () => {
     }
   })
 })
+
+// ④ The order a worker received was clamped to four lines with no way to read
+//    the rest (owner 2026-10-22: 「指示文がみきれている」). Cut text must offer
+//    one press that shows all of it.
+describe('EventRow — a cut instruction opens in full', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it('shows a chevron only when the text is cut, and one press lifts the clamp', async () => {
+    const { EventRow } = await import('./SdkWorkerPane')
+    // jsdom lays nothing out: pretend the clamped box hides part of its text.
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(200)
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(80)
+    const text = 'line\n'.repeat(20)
+    const t = (k: string) => k
+    const { getByRole, container } = render(<EventRow ev={{ kind: 'input', text } as never} t={t} />)
+    const box = container.querySelector('.whitespace-pre-wrap') as HTMLElement
+    expect(box.className).toContain('line-clamp-4')
+    fireEvent.click(getByRole('button', { name: 'projectPanel.swarm.feed.more' }))
+    expect(box.className).not.toContain('line-clamp-4')
+    expect(getByRole('button', { name: 'projectPanel.swarm.feed.less' }).getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('offers no chevron when everything already fits', async () => {
+    const { EventRow } = await import('./SdkWorkerPane')
+    const { queryByRole } = render(<EventRow ev={{ kind: 'input', text: 'short' } as never} t={(k) => k} />)
+    expect(queryByRole('button')).toBeNull()
+  })
+})
+
+// ⑤ The question banner does not shrink: opened without a cap, a long question
+//    pushed its own fold chevron and the composer out of a short seat (~300px
+//    in the agent-team bar) and nothing brought them back.
+describe('SdkWorkerPane — an opened question stays inside the pane', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('scrolls inside a capped box once opened', () => {
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900)
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(60)
+    const { getByRole, getByText } = mount({ question: '長い質問 '.repeat(200).trim() })
+    fireEvent.click(getByRole('button', { name: 'projectPanel.swarm.feed.more' }))
+    const box = getByText(/^長い質問/)
+    expect(box.className).toContain('max-h-32')
+    expect(box.className).toContain('overflow-y-auto')
+  })
+})
+
+// ⑥ The composer keeps its send button out from under the floating assistant —
+//    wherever the character actually is, and only while it is on screen.
+describe('SdkWorkerPane — composer and the floating assistant', () => {
+  afterEach(async () => {
+    const { publishAssistantSpot } = await import('@/components/assistant/assistantWindow')
+    act(() => publishAssistantSpot(null))
+    vi.restoreAllMocks()
+  })
+
+  it('pads its right side only while the character covers it', async () => {
+    const { publishAssistantSpot } = await import('@/components/assistant/assistantWindow')
+    // A 1000×800 window; the composer spans its bottom 32px, full width.
+    vi.stubGlobal('innerWidth', 1000)
+    vi.stubGlobal('innerHeight', 800)
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(
+      { left: 600, right: 1000, top: 768, bottom: 800, width: 400, height: 32, x: 600, y: 768, toJSON: () => ({}) } as DOMRect,
+    )
+    const { getByPlaceholderText } = mount()
+    const row = getByPlaceholderText('projectPanel.swarm.sdk.placeholder').parentElement as HTMLElement
+    // Not on screen (signed out / public preview): no room taken.
+    expect(row.style.paddingRight).toBe('')
+    // The default corner: character spans x 930–980 → 1000 - 930 + 8.
+    act(() => publishAssistantSpot({ right: 20, bottom: 18 }))
+    expect(row.style.paddingRight).toBe('78px')
+    // Dragged further in: the room follows it.
+    act(() => publishAssistantSpot({ right: 200, bottom: 10 }))
+    expect(row.style.paddingRight).toBe('258px')
+    // Dragged up, clear of the row: no room.
+    act(() => publishAssistantSpot({ right: 20, bottom: 400 }))
+    expect(row.style.paddingRight).toBe('')
+  })
+})

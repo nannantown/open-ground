@@ -31,6 +31,9 @@ interface Props {
   branch: string
   /** The dispatched card's title — shown in the header tooltip for context. */
   taskTitle: string
+  /** Shown in the Board card drawer, which prints the title in full above
+   *  the pane — the nameplate then leaves it out rather than repeat it. */
+  inDrawer?: boolean
   status: WorkerStatus
   /** Who owns this worker's lifecycle:
    *  - 'manual' = the user dispatched it from the worker tab; it owns its
@@ -65,6 +68,7 @@ export const SwarmWorkerPane = ({
   terminalId,
   branch,
   taskTitle,
+  inDrawer = false,
   status,
   source = 'manual',
   retainedReason,
@@ -94,7 +98,7 @@ export const SwarmWorkerPane = ({
         sprite={BEACON_SPRITE[status]}
         statusLabel={statusLabel}
         tone={status === 'working' ? 'run' : undefined}
-        detail={taskTitle || branch}
+        detail={inDrawer ? undefined : taskTitle || branch}
         detailTitle={taskTitle ? `${taskTitle} — ${branch}` : branch}
       >
         {isEngine ? null : (

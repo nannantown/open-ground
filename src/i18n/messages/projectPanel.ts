@@ -234,6 +234,8 @@ export const projectPanel = {
     // box (SwarmSeatSay) — the owner rarely needs either, so both stay small.
     'projectPanel.swarm.feed.empty': 'Nothing said yet.',
     'projectPanel.swarm.feed.input': 'Told',
+    'projectPanel.swarm.feed.more': 'Show all',
+    'projectPanel.swarm.feed.less': 'Show less',
     'projectPanel.swarm.say.open': 'Send a word',
     'projectPanel.swarm.say.managerPlaceholder': 'A word to the manager (usually not needed)',
     'projectPanel.swarm.say.workerPlaceholder': 'A word to this worker (usually not needed)',
@@ -756,6 +758,8 @@ export const projectPanel = {
       'マネージャーは社長が受けた仕事をワーカーに割り振り、仕上がりを統合します。動いている間は、ここに直近のやりとりが出ます。',
     'projectPanel.swarm.feed.empty': 'まだやりとりはありません。',
     'projectPanel.swarm.feed.input': '受け取った指示',
+    'projectPanel.swarm.feed.more': '続きを見る',
+    'projectPanel.swarm.feed.less': '畳む',
     'projectPanel.swarm.say.open': '一言送る',
     'projectPanel.swarm.say.managerPlaceholder': 'マネージャーへの一言(ふだんは不要です)',
     'projectPanel.swarm.say.workerPlaceholder': 'このワーカーへの一言(ふだんは不要です)',

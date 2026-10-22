@@ -9,7 +9,7 @@ import { useT } from '@/i18n/I18nContext'
 import { ArrowUp, ImagePlus, Mic, MessagesSquare, Phone, X } from 'lucide-react'
 import { AssistantCall, type CallPhase } from './AssistantCall'
 import { AssistantMark, LOOK_COLOR } from './AssistantMark'
-import { ASSISTANT_WINDOW_ATTR } from './assistantWindow'
+import { ASSISTANT_DEFAULT_POS, ASSISTANT_SIZE, ASSISTANT_WINDOW_ATTR, publishAssistantSpot } from './assistantWindow'
 import { PHOTO_MAX_BYTES, PHOTO_TYPES, photoUrl, useAssistant, type AssistantLook } from './useAssistant'
 import { ProposalFrames } from './ProposalFrames'
 import { useCallVoice, useListen, useOtherSpeech } from './useVoice'
@@ -17,7 +17,7 @@ import { useCallVoice, useListen, useOtherSpeech } from './useVoice'
 const POS_KEY = 'og.assistant.pos'
 /** '1' = the window shows the whole talk; otherwise only the input and the current exchange. */
 export const EXPANDED_KEY = 'og.assistant.expanded'
-const SIZE = 50
+const SIZE = ASSISTANT_SIZE
 const MARGIN = 12
 const GAP = 10
 const PANEL_W = 340
@@ -44,7 +44,7 @@ interface Pos {
  *  bottom-left edit (pen) button, whose centre is ~43px up (ToolPalette p-5 +
  *  frame), so bottom = 43 - SIZE/2. It floats OVER the screen and the layout
  *  never makes room for it (owner 2026-10-07: the bar and seats stay put). */
-export const DEFAULT_POS: Pos = { right: 20, bottom: 18 }
+export const DEFAULT_POS: Pos = ASSISTANT_DEFAULT_POS
 
 /** The owner's dragged spot, or null while they never moved it. */
 const readPos = (): Pos | null => {
@@ -433,6 +433,15 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
     if (el) el.scrollTop = el.scrollHeight
     // (also once a proposal's frame has taken its height from the talk)
   }, [a.lines.length, a.pending, a.error, showPanel, expanded, turn, framesRoom, a.proposals.length])
+
+  // Tell control rows where the character sits (or that it is gone), so they
+  // can keep their buttons out from under it.
+  const spotRight = a.ready ? clampPos(pos ?? DEFAULT_POS, view.w, view.h).right : null
+  const spotBottom = a.ready ? clampPos(pos ?? DEFAULT_POS, view.w, view.h).bottom : null
+  useEffect(() => {
+    publishAssistantSpot(spotRight === null || spotBottom === null ? null : { right: spotRight, bottom: spotBottom })
+  }, [spotRight, spotBottom])
+  useEffect(() => () => publishAssistantSpot(null), [])
 
   if (!a.ready) return null
   const at = clampPos(pos ?? DEFAULT_POS, view.w, view.h)

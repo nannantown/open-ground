@@ -2191,17 +2191,11 @@ export const BoardModule = ({
                   to the draft drawer below — never a dead black screen. */
             <>
               <div className="shrink-0 border-b border-line-soft px-5 py-2">
-                <div
-                  className="truncate text-ui text-ink"
-                  title={detailTask.title.trim() || undefined}
-                >
+                <div className="whitespace-pre-wrap break-words text-ui text-ink">
                   {detailTask.title.trim() || t('board.card.untitled')}
                 </div>
                 {screenWorker.note && (
-                  <div
-                    className="mt-0.5 truncate text-meta text-ink-faint"
-                    title={screenWorker.note}
-                  >
+                  <div className="mt-0.5 whitespace-pre-wrap break-words text-meta text-ink-faint">
                     {screenWorker.note}
                   </div>
                 )}
@@ -2216,6 +2210,7 @@ export const BoardModule = ({
                     projectPath={project.path}
                     branch={screenWorker.branch}
                     taskTitle={detailTask.title}
+                    inDrawer
                     source="engine"
                     onExit={() => markWorkerScreenExited(workerScreenId)}
                   />
@@ -2224,6 +2219,7 @@ export const BoardModule = ({
                     terminalId={workerScreenId}
                     branch={screenWorker.branch}
                     taskTitle={detailTask.title}
+                    inDrawer
                     status={workerScreenStatus}
                     source="engine"
                     onExit={() => markWorkerScreenExited(workerScreenId)}
