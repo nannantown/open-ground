@@ -26,7 +26,11 @@ const canBuild = process.platform === 'darwin' && has('xcrun', ['--find', 'swift
 const canRun = canBuild && /^Kyoko\b/m.test(has('say', ['-v', '?']) ?? '')
 let built = false
 const build = () => {
-  if (!built) execFileSync('swiftc', ['-O', '-swift-version', '5', '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', 'native/og-listen/Info.plist', 'native/og-listen/main.swift', '-o', bin], { stdio: 'ignore' })
+  // Keep compiler writes inside this fixture, and retain stderr on failure.
+  if (!built) execFileSync('swiftc', ['-O', '-swift-version', '5', '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', 'native/og-listen/Info.plist', 'native/og-listen/main.swift', '-o', bin], {
+    env: { ...process.env, CLANG_MODULE_CACHE_PATH: join(dir, 'module-cache') },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
   built = true
 }
 afterAll(() => rmSync(dir, { recursive: true, force: true }))

@@ -768,6 +768,13 @@
   **必ず mirror 経由**(直書きは Y.Doc に巻き戻される)。
 
 ## 6b. Phone link — iPhone から社長窓口と話す(2026-10-01)
+- Sourced assistant status: `assistantStatus.ts` (`assistantDigest`, re-exported
+  by `phoneAssistant.ts`) reads current Board columns and owner questions with
+  observation time and source identities. Missing/invalid data stays unknown;
+  optional project/card IDs follow the exact approved request. Project briefings
+  name retained engine evidence without expanding transcript access. Guards:
+  `assistantStatus.test.ts`, `phoneAssistant.test.ts`. Internal SDK tool only;
+  the Mac/iOS sealed protocol and proposal confirmation hash are unchanged.
 - 契約(iPhone アプリ係はこれだけ見る): `docs/PHONE_LINK.md`
 - 中継: `worker/src/phoneRelay.ts`(DO・1ペア1部屋・ハイバネーション・部屋作成は app key 必須 `mayCreateRoom`=サブスク差し替え点・alarm で7日/30日消去)/ `phoneRelayAuth.ts`(鍵判定・`RELAY_LIMITS`=期限と上限の唯一の置き場・純関数)/
   `worker/wrangler.phone.jsonc`(og-collab とは別 Worker。`cd worker && npx wrangler deploy -c wrangler.phone.jsonc`)

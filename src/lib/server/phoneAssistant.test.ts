@@ -443,6 +443,20 @@ describe('the assistant only PROPOSES a card or a message; only the frame\'s but
     expect((await readAssistantLog()).at(-1)).toMatchObject({ who: 'assistant', text: done && 'line' in done ? done.line : '?' })
     await askAssistant('ありがと', { model: m.model })
     expect(m.lines[1]).toContain('the owner pressed the button')
+    expect(m.lines[1]).toContain(`taskId: ${tasks[1].id}`)
+    expect(m.lines[1]).toContain('creation is not completion')
+    // The live line and the rebuilt session history retain the exact receipt.
+    expect(m.systems[1]).toContain(`taskId ${tasks[1].id}`)
+    const tracked: string[] = []
+    await askAssistant('さっきの依頼は今どう?', { model: talker(async o => {
+      const r = await o.tools.status({ projectId: betaId, taskId: tasks[1].id })
+      tracked.push('text' in r ? r.text : '')
+      return 'Still queued.'
+    }).model })
+    expect(tracked[0]).toContain(`Requested card ${tasks[1].id}`)
+    expect(tracked[0]).toContain('state: todo')
+    expect(tracked[0]).toContain('ログインで固まらない')
+    expect((await readProjectData(beta)).tasks).toHaveLength(2)
   })
 
   it('a yes — said, typed, heard back as a question, from the phone, a call or the Settings field — carries nothing out', async () => {

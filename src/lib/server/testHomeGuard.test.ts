@@ -965,7 +965,6 @@ describe('a poisoned TMPDIR at process start does not disarm the homedir anchors
 describe('NODE_ENV=test alone does not arm the fence', () => {
   it('isTestProcess() is false, and the real home stays writable, with only NODE_ENV=test set', () => {
     const probe = fileURLToPath(new URL('./__fixtures__/nodeEnvOnlyProbe.ts', import.meta.url))
-    const tsx = fileURLToPath(new URL('../../../node_modules/.bin/tsx', import.meta.url))
     const env = { ...process.env, NODE_ENV: 'test' } as Record<string, string>
     // Strip every marker detectTestProcess() would otherwise legitimately see —
     // this suite's own vitest process has them all set, and they inherit into
@@ -973,7 +972,9 @@ describe('NODE_ENV=test alone does not arm the fence', () => {
     delete env.VITEST
     delete env.VITEST_WORKER_ID
     delete env.VITEST_POOL_ID
-    const out = execFileSync(tsx, [probe], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'ignore'] })
+    // Use the runner's Node and the standard loader: the CLI selects PATH's
+    // Node and starts an unrelated IPC server before this pure probe runs.
+    const out = execFileSync(process.execPath, ['--import', 'tsx', probe], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] })
     const r = JSON.parse(out) as { isTestProcess: boolean; armedAgainstRealHome: 'REFUSED' | 'ALLOWED' }
     expect(r.isTestProcess).toBe(false)
     // 'REFUSED' would mean the fence armed for a plain NODE_ENV=test process and

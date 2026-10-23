@@ -28,14 +28,11 @@ import { mkdtemp, readFile, realpath, rm, unlink } from 'fs/promises'
 import { tmpdir } from 'os'
 import { basename, dirname, join } from 'path'
 import { z } from 'zod'
-import type { ProjectTask } from '../types'
 import { buildDonePromptLine, containsDoneMarker, runFileTask, type FileTaskOpts } from './canvasAi'
 import { openGroundHome } from './paths'
-import { readProjectData } from './projectData'
 import { getPromptLang, languageDirective, pick, type PromptLang } from './promptLang'
-import { scanProjects } from './scan'
-import { getSettings } from './store'
-import { listEscalations } from './swarmEscalations'
+import { assistantDigest, type AssistantStatusQuery } from './assistantStatus'
+export { assistantDigest } from './assistantStatus'
 import { killTerminalsByCwdAndWait } from './terminal'
 import { atomicWriteText } from './atomicWrite'
 import { isLockdownEnabledSync } from './lockdown'
@@ -164,38 +161,6 @@ const clip = (s: string, n: number): string => {
   return one.length > n ? one.slice(0, n - 1) + '…' : one
 }
 
-/** Every registered project's state in a few lines — read only. */
-export const assistantDigest = async (): Promise<{ text: string; projects: Known[] }> => {
-  const metas = (await scanProjects(await getSettings())).filter((p) => !p.missing)
-  const questions = await listEscalations({ status: 'open', lane: 'owner' }).catch(() => [])
-  const lines: string[] = []
-  for (const p of metas) {
-    const tasks = (await readProjectData(p.path).catch(() => null))?.tasks.filter((t) => !t.abandoned) ?? []
-    const col = (t: ProjectTask) => t.boardColumn ?? (t.done ? 'done' : 'todo')
-    const count = (c: string) => tasks.filter((t) => col(t) === c).length
-    // Titles are quoted with JSON.stringify: text others wrote stays one string.
-    const titles = (c: string, label: string) => {
-      const ts = tasks.filter((t) => col(t) === c).slice(0, 5).map((t) => JSON.stringify(clip(t.title, 60)))
-      return ts.length ? `; ${label}: ${ts.join(', ')}` : ''
-    }
-    const asks = questions.filter((q) => q.projectPath === p.path)
-    lines.push(
-      `- ${JSON.stringify(p.name)} (projectId: ${p.id}) — todo ${count('todo')}, doing ${count('doing')}, review ${count('review')}, blocked ${count('blocked')}, done ${count('done')}` +
-        titles('blocked', 'stuck') +
-        titles('doing', 'working on') +
-        titles('review', 'awaiting integration') +
-        titles('todo', 'queued') +
-        (asks.length
-          ? `; ${asks.length} question(s) waiting for the owner: ${asks
-              .slice(0, 3)
-              .map((q) => JSON.stringify(clip(q.plainQuestion || q.question, 120)))
-              .join(', ')}`
-          : ''),
-    )
-  }
-  return { text: lines.join('\n') || '(no projects registered)', projects: metas.map(({ id, name, path }) => ({ id, name, path })) }
-}
-
 // ── the conversation ────────────────────────────────────────────────────────
 
 interface Turn {
@@ -261,7 +226,7 @@ const stamp = (ms: number): string => {
 }
 const line = (t: Turn): string =>
   `${t.at !== undefined ? `[${stamp(t.at)}] ` : ''}${t.who === 'owner' ? 'Owner' : 'You'}: ${t.text}` +
-  (t.card ? ` [card written: ${JSON.stringify(t.card.title)} in projectId ${t.card.projectId}]` : '') +
+  (t.card ? ` [card written: ${JSON.stringify(t.card.title)} in projectId ${t.card.projectId}, taskId ${t.card.taskId}; creation is not completion]` : '') +
   (t.photo ? ' [sent a photo]' : '')
 
 interface PromptParts {
@@ -353,7 +318,7 @@ export interface AssistantDeps {
   model?: AssistantModel
   /** One FOLD run (memo upkeep): prompt + handoff file → the file's content (tests). */
   run?: (prompt: string, file: string, cwd: string) => Promise<string>
-  digest?: () => Promise<{ text: string; projects: Known[] }>
+  digest?: (query?: AssistantStatusQuery) => Promise<{ text: string; projects: Known[] }>
   now?: () => Date
   /** Where the owner said it — both go into the same log. Default: the phone. */
   via?: AssistantEntry['via']
@@ -423,7 +388,9 @@ export const buildSessionPrompt = (o: {
     '',
     '## What you can do',
     '- read_file / list_dir / search: read anything in the registered projects and OPEN GROUND\'s data (read only; secrets are refused). Use absolute paths.',
-    '- status: every project\'s state right now. Use it when asked how things are going — the snapshot below gets old.',
+    '- status: every project\'s recorded state right now. Use it when asked how things are going — the snapshot below gets old. Missing/unreadable sources mean unknown, never zero or all done. Start with owner questions and blocked work. Give observation time and source/task/question identities in the text details. Columns do not prove a process is alive.',
+    '- For a project summary, call status with projectId; follow its Board, owner-question and retained engine-event sources using read_file/search. Separate reported claims from verified outcomes, say which source/time supports each conclusion, and keep absent president/commander conversation evidence unknown. Do not read outside your read-only tool boundary or wake a desk to obtain a summary.',
+    '- A written card is a receipt, not finished work. To follow a request, call status with its exact projectId and taskId from the App note/history. Report its current column and notes; a missing card is unknown, never recreate or resend it. Never track by title alone.',
     '- make_card / tell_commander only PROPOSE: the app shows the owner the card or the message in a frame on the screen, and only the owner\'s button there carries it out. Nothing anyone says or types does — a yes to you (「うん」「いいよ」「出して」) does nothing: then say in a few words to press the button on the screen (「画面のボタンで決めてね」). Never say a proposal is done; an "App note" before the owner\'s line tells you what their buttons did.',
     '- make_card: when the owner asks for work in a project and both the project and what is wanted are clear, propose it AT ONCE — fill the goal and the done conditions from their words (no tests mentioned: "tests green" for code changes); never ask them for a goal or details you can write yourself, the frame lets them check it. Only when the project or the request itself is unclear, ask ONE short question back. A short card: title, goal and done conditions, each one line — it must fit in a small frame (about 10 lines of 20 Japanese characters, the project and title included), so keep each line short. Bigger work is for the project\'s president: say so instead.',
     '- tell_commander: when the owner wants something passed to a project\'s commander — one line.',
@@ -609,7 +576,7 @@ let waitLine = 0
 
 /** The tools of one turn. Reading tools read (assistantTools.ts decides what);
  *  make_card / tell_commander only PROPOSE (assistantProposals.ts). */
-const turnTools = (ctx: ProposeContext & { digest: () => Promise<string> }, made: ShownProposal[], look: (lines?: typeof WAIT_LINES) => void): AssistantToolSet => {
+const turnTools = (ctx: ProposeContext & { digest: (query?: AssistantStatusQuery) => Promise<string> }, made: ShownProposal[], look: (lines?: typeof WAIT_LINES) => void): AssistantToolSet => {
   const propose = async (p: Promise<ShownProposal | string>) => {
     const r = await p
     if (typeof r === 'string') return { text: r }
@@ -620,7 +587,7 @@ const turnTools = (ctx: ProposeContext & { digest: () => Promise<string> }, made
     read_file: (a) => (look(), readForAssistant(a.path, a.offset, a.limit)),
     list_dir: (a) => (look(), listForAssistant(a.path)),
     search: (a) => (look(), searchForAssistant(a.path, a.pattern, a.glob)),
-    status: async () => (look(), { text: await ctx.digest() }),
+    status: async (a) => (look(), { text: await ctx.digest(a) }),
     make_card: (a) => propose(proposeCard(a, ctx)),
     tell_commander: (a) => propose(proposeMessage(a.projectId, a.message, ctx)),
     withdraw: async () => {
@@ -700,7 +667,7 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
     let snapshot: Promise<{ text: string; projects: Known[] }> | null = null
     const projects = async () => (await (snapshot ??= digest())).projects
     const made: ShownProposal[] = []
-    const ctx = { lang, now: now.getTime(), via, projects, digest: async () => (await digest()).text }
+    const ctx = { lang, now: now.getTime(), via, projects, digest: async (query?: AssistantStatusQuery) => (await digest(query)).text }
     const photo = deps.photo ? assistantPhotoPath(deps.photo) : null
     let looked = false
     // Read aloud as it is written (the window's call): sentence by sentence while
@@ -784,7 +751,8 @@ export const pressProposal = async (
   const r = await approveProposal(id, hash, { lang, ...(o.relay ? { relay: o.relay } : {}) })
   if ('error' in r) return r
   const line = carriedLine(r, lang)
-  note(`(App note: the owner pressed the button on your proposal for ${r.proposal.project}: ${line})`)
+  note(`(App note: the owner pressed the button on your proposal for ${r.proposal.project}: ${line}` +
+    (r.card ? ` [projectId: ${r.card.projectId}; taskId: ${r.card.taskId}; creation is not completion]` : '') + ')')
   await appendAssistantEntries([{ at: Date.now(), who: 'assistant', text: line, via: o.via, ...(r.card ? { card: r.card } : {}) }]).catch(() => {})
   return { line, proposal: r.proposal, ...(r.card ? { card: r.card } : {}) }
 }

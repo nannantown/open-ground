@@ -55,7 +55,7 @@ export interface AssistantToolSet {
   read_file(a: { path: string; offset?: number; limit?: number }): Promise<ToolResult>
   list_dir(a: { path: string }): Promise<ToolResult>
   search(a: { path: string; pattern: string; glob?: string }): Promise<ToolResult>
-  status(a: Record<string, never>): Promise<ToolResult>
+  status(a: { projectId?: string; taskId?: string }): Promise<ToolResult>
   make_card(a: CardInput): Promise<ToolResult>
   tell_commander(a: { projectId: string; message: string }): Promise<ToolResult>
   withdraw(a: Record<string, never>): Promise<ToolResult>
@@ -91,7 +91,7 @@ const SHAPES = {
   read_file: { path: z.string(), offset: z.number().optional(), limit: z.number().optional() },
   list_dir: { path: z.string() },
   search: { path: z.string(), pattern: z.string(), glob: z.string().optional() },
-  status: {},
+  status: { projectId: z.string().optional(), taskId: z.string().optional() },
   make_card: { projectId: z.string(), title: z.string(), goal: z.string(), done: z.array(z.string()) },
   tell_commander: { projectId: z.string(), message: z.string() },
   withdraw: {},
@@ -102,7 +102,7 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   read_file: 'Read a file (absolute path) in a registered project or OPEN GROUND data. Text comes with line numbers, at most 400 lines from `offset`; images come as the image. A directory is listed.',
   list_dir: 'List a directory (absolute path) in a registered project or OPEN GROUND data.',
   search: 'Find lines holding `pattern` (words taken literally, case-insensitive; "a|b" = either) in the files under a directory or in one file (absolute path). `glob` limits file names, e.g. "*.ts". node_modules, .git and build output are skipped. Code is mostly in English: when a word in the owner\'s language finds nothing, search its English words too (for 送料, try "shipping|fee").',
-  status: "Every project's state right now: Board columns, what is stuck / worked on / awaiting integration, and questions waiting for the owner.",
+  status: "Current recorded Board columns and owner questions with observation time/source identities. Optional projectId narrows the briefing and names retained engine evidence; taskId with projectId looks up the exact created card, including its current state and notes. Unknown is not empty; never starts a desk or work.",
   make_card: "PROPOSE one short work card for a project's Board: shown to the owner in a frame; only their button puts it on the Board. title, goal and done are each one short line; about 10 lines of 20 Japanese characters in all, or it is refused.",
   tell_commander: "PROPOSE one message for a project's commander: shown to the owner in a frame; only their button sends it. One line, plain words.",
   withdraw: 'Drop every proposal still waiting (the owner said stop / never mind).',

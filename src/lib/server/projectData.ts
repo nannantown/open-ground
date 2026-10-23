@@ -30,7 +30,7 @@ const isLegacyBoardCard = (t: unknown): boolean => {
   return o.kind == null && o.boardColumn != null
 }
 
-const dropLegacyNonBoardTasks = (parsed: unknown): unknown => {
+export const dropLegacyNonBoardTasks = (parsed: unknown): unknown => {
   if (!parsed || typeof parsed !== 'object') return parsed
   const obj = parsed as Record<string, unknown>
   if (!Array.isArray(obj.tasks)) return parsed
