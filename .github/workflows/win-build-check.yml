@@ -84,6 +84,7 @@ jobs:
         # Keep statically verified bytes for diagnosis if native acceptance fails.
         # The run stays red and manifest.nativeSmokeVerified remains false.
         if: always() && steps.inspect.outcome == 'success'
+        timeout-minutes: 3
         uses: actions/upload-artifact@v4
         with:
           name: windows-candidate-0.11.182-${{ github.sha }}-${{ github.run_id }}
@@ -92,10 +93,12 @@ jobs:
           compression-level: 0
           retention-days: 7
       - name: Save candidate-owned failure evidence
-        if: failure()
+        # Cancellation is not failure(); always retain the last flushed phase.
+        if: always()
+        timeout-minutes: 3
         uses: actions/upload-artifact@v4
         with:
           name: windows-candidate-diagnostics-${{ github.sha }}-${{ github.run_id }}
           path: ${{ runner.temp }}/windows-${{ github.run_id }}/diagnostics/
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 7

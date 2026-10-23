@@ -14,6 +14,11 @@ const hash = (bytes, algorithm = 'sha256', encoding = 'hex') => crypto.createHas
 const sourceRequire = source => createRequire(path.join(path.resolve(source), 'package.json'))
 const inside = (root, target) => path.resolve(target).startsWith(path.resolve(root) + path.sep)
 
+function smokeTools(source) {
+  const req = sourceRequire(source)
+  return { _electron: req('playwright')._electron, expect: req('@playwright/test').expect }
+}
+
 function smokeEnvironments(base, profile) {
   // NSIS uses the real Windows shell-folder/registry context of this disposable
   // runner account. Only the application receives a new isolated profile.
@@ -52,15 +57,22 @@ function assertWorkflow(workflow) {
       JSON.stringify(workflow.permissions) !== JSON.stringify({ contents: 'read' }) ||
       workflow.env.APP_SOURCE_SHA !== SOURCE_SHA || workflow.concurrency['cancel-in-progress'] !== false) throw new Error('Unsafe Windows workflow boundary.')
   const jobs = Object.values(workflow.jobs)
-  if (jobs.length !== 1 || jobs[0]['runs-on'] !== 'windows-2022' || jobs[0].permissions ||
+  if (jobs.length !== 1 || jobs[0]['runs-on'] !== 'windows-2022' || jobs[0].permissions || jobs[0]['continue-on-error'] ||
       !jobs[0].if.includes("github.repository == 'nannantown/open-ground'") ||
       !jobs[0].if.includes(`github.ref == 'refs/heads/${BRANCH}'`)) throw new Error('Unexpected Windows runner/ref.')
   const steps = jobs[0].steps
   const native = steps.find(step => (step.run || '').includes('windows-candidate-smoke.cjs'))
   if (native?.['timeout-minutes'] !== 8) throw new Error('Native acceptance must have its own bounded deadline.')
+  const evidence = steps.find(step => step.with?.name?.startsWith('windows-candidate-diagnostics-'))
+  const artifacts = steps.find(step => step.with?.name?.startsWith('windows-candidate-0.11.182-'))
+  if (evidence?.if !== 'always()' || evidence['timeout-minutes'] !== 3 ||
+      evidence.with.path !== '${{ runner.temp }}/windows-${{ github.run_id }}/diagnostics/' ||
+      artifacts?.if !== "always() && steps.inspect.outcome == 'success'" || artifacts['timeout-minutes'] !== 3 ||
+      jobs[0]['timeout-minutes'] !== 40) throw new Error('Cancellation diagnostics and upload margin must be retained.')
   const source = steps.find(step => step.uses === 'actions/checkout@v4' && step.with.path === 'source')
   if (source?.with.ref !== '${{ env.APP_SOURCE_SHA }}') throw new Error('Application checkout must pin the verified SHA.')
   for (const step of steps) {
+    if (step['continue-on-error']) throw new Error('Candidate failures cannot be ignored.')
     if (step.uses === 'actions/checkout@v4' && step.with['persist-credentials'] !== false) throw new Error('Checkout credentials must not persist.')
     if (Object.keys(step.env || {}).some(k => /^(GH_TOKEN|GITHUB_TOKEN|CSC_|APPLE_)/.test(k))) throw new Error('Unexpected publisher/signing environment.')
     if (step.permissions || /upload-release|release-action/.test(step.uses || '')) throw new Error('Unexpected publication action.')
@@ -159,5 +171,5 @@ async function cli() {
     console.log('Windows payload/config/feed/blockmap/updater contract verified; no configuration values printed.')
   } else throw new Error('Unknown candidate operation.')
 }
-module.exports = { SOURCE_SHA, VERSION, BRANCH, PUBLIC_EXE, hash, candidateConfig, assertWorkflow, peMachine, inspectWindowsFeed, verifyUpdater, smokeEnvironments }
+module.exports = { SOURCE_SHA, VERSION, BRANCH, PUBLIC_EXE, hash, candidateConfig, assertWorkflow, peMachine, inspectWindowsFeed, verifyUpdater, smokeEnvironments, smokeTools }
 if (require.main === module) cli().catch(error => { console.error(error.message); process.exitCode = 1 })

@@ -9,6 +9,66 @@ const candidate = require('./windows-candidate.cjs')
 const source = path.resolve(process.env.APP_SOURCE_DIR || path.join(__dirname, '..'))
 const req = createRequire(path.join(source, 'package.json'))
 const yaml = req('js-yaml')
+const { createDiagnostics } = require('./windows-smoke-diagnostics.cjs')
+
+test('smoke assertions use the real Playwright test entry point and enforce mismatch failures', () => {
+  const tools = candidate.smokeTools(source)
+  assert.equal(tools._electron, req('playwright')._electron)
+  tools.expect({ ready: true }).toEqual({ ready: true })
+  assert.throws(() => tools.expect({ ready: false }).toEqual({ ready: true }))
+})
+
+function diagnosticsFixture(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'og-windows-diagnostics-'))
+  const output = path.join(dir, 'progress.txt')
+  const fd = fs.openSync(output, 'w')
+  t.after(() => { fs.closeSync(fd); fs.rmSync(dir, { recursive: true, force: true }) })
+  return { dir, output, probe: createDiagnostics(dir, candidate.SOURCE_SHA, fd) }
+}
+
+test('stalled stage fails by its deadline and immediately retains progress/failure evidence', async t => {
+  const { dir, output, probe } = diagnosticsFixture(t)
+  let cancelled = false
+  const started = Date.now()
+  const pending = probe.stage('stalled', 30, () => new Promise(() => {}), () => { cancelled = true })
+  assert.match(fs.readFileSync(output, 'utf8'), /stalled-start/)
+  await assert.rejects(pending, { code: 'STAGE_TIMEOUT' })
+  assert.ok(Date.now() - started < 1000, 'The short stalled-stage deadline must actually bound the wait.')
+  assert.equal(cancelled, true)
+  const events = fs.readFileSync(path.join(dir, 'phases.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  assert.deepEqual(events.map(e => e.phase), ['stalled-start', 'stalled-deadline', 'stalled-failed'])
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'stalled-failure.json'))).code, 'STAGE_TIMEOUT')
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'phase.json'))).phase, 'stalled-failed')
+})
+
+test('real child success requires exit zero and retains its output and result', async t => {
+  const { dir, probe } = diagnosticsFixture(t)
+  const result = await probe.child('passing-child', process.execPath, ['-e', 'console.log("completed child")'], {}, 10000)
+  assert.equal(result.code, 0)
+  assert.match(fs.readFileSync(path.join(dir, 'passing-child-stdout.txt'), 'utf8'), /completed child/)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'phase.json'))).phase, 'passing-child-finished')
+  assert.equal(fs.existsSync(path.join(dir, 'passing-child-failure.json')), false)
+})
+
+test('real child failure retains exit code and output rather than reporting stage success', async t => {
+  const { dir, probe } = diagnosticsFixture(t)
+  await assert.rejects(probe.child('failing-child', process.execPath, ['-e', 'console.log("before failure"); process.exit(7)'], {}, 10000), { code: 'CHILD_FAILED' })
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'failing-child-result.json'))).code, 7)
+  assert.match(fs.readFileSync(path.join(dir, 'failing-child-stdout.txt'), 'utf8'), /before failure/)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'phase.json'))).phase, 'failing-child-failed')
+})
+
+test('a hanging owned child has a parent deadline and its partial output survives', async t => {
+  const { dir, probe } = diagnosticsFixture(t)
+  await assert.rejects(probe.child('hanging-child', process.execPath, ['-e', 'console.log("before hang"); setInterval(() => {}, 1000)'], {}, 1500), { code: 'STAGE_TIMEOUT' })
+  assert.match(fs.readFileSync(path.join(dir, 'hanging-child-stdout.txt'), 'utf8'), /before hang/)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'hanging-child-failure.json'))).code, 'STAGE_TIMEOUT')
+  // The child kill is asynchronous. Await its recorded exit before removing its fixture.
+  const until = Date.now() + 5000
+  while (!fs.existsSync(path.join(dir, 'hanging-child-result.json')) && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(fs.existsSync(path.join(dir, 'hanging-child-result.json')), true)
+  assert.notEqual(JSON.parse(fs.readFileSync(path.join(dir, 'hanging-child-result.json'))).code, 0)
+})
 
 test('NSIS retains its runner OS profile while the app alone gets isolated credentials-free state', () => {
   const base = { USERPROFILE: 'runner-os-profile', APPDATA: 'runner-roaming', LOCALAPPDATA: 'runner-local', SystemDrive: 'system-drive',
@@ -62,7 +122,12 @@ test('workflow rejects publisher mode, source drift, wrong runner, credential pe
     x => { x.permissions.contents = 'write' },
     x => { x.on.push.tags = ['v*'] },
     x => { x.jobs.windows['runs-on'] = 'windows-latest' },
+    x => { x.jobs.windows['continue-on-error'] = true },
     x => { delete x.jobs.windows.steps.find(s => (s.run || '').includes('windows-candidate-smoke.cjs'))['timeout-minutes'] },
+    x => { x.jobs.windows.steps.find(s => s.with?.name?.startsWith('windows-candidate-diagnostics-')).if = 'failure()' },
+    x => { x.jobs.windows.steps.find(s => s.with?.name?.startsWith('windows-candidate-diagnostics-')).with.path = 'source/**' },
+    x => { x.jobs.windows.steps.find(s => s.with?.name?.startsWith('windows-candidate-0.11.182-'))['timeout-minutes'] = 40 },
+    x => { x.jobs.windows.steps.find(s => (s.run || '').includes('windows-candidate-smoke.cjs'))['continue-on-error'] = true },
     x => { x.jobs.windows.steps[0].with['persist-credentials'] = true },
     x => { x.jobs.windows.steps.find(s => /electron-builder/.test(s.run || '')).run = 'npx electron-builder --win --publish always' },
     x => { x.jobs.windows.steps.push({ run: 'gh release create v0.11.182' }) },

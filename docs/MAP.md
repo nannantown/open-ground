@@ -18,7 +18,8 @@
 - Windows candidate orchestration (2026-10-23): `.github/workflows/win-build-check.yml`
   pins the verified182 app source in a separate checkout; `scripts/windows-candidate.cjs`,
   `windows-candidate.test.cjs` and `windows-candidate-smoke.cjs` check publication
-  boundaries, payload/feed integrity and real Windows packaged runtime/UI. No
+  boundaries, payload/feed integrity and real Windows packaged runtime/UI;
+  `windows-smoke-diagnostics.cjs` bounds stages and flushes child/phase evidence. No
   Release/tag/main writes or Mac rebuild. Scope: `docs/WINDOWS-CANDIDATE.md`.
 
 - Isolated candidate CI (2026-10-23): `.github/workflows/candidate-validation.yml`
