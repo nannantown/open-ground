@@ -77,6 +77,8 @@ jobs:
           OPENGROUND_REALTIME: ${{ vars.OPENGROUND_REALTIME }}
           OPENGROUND_COLLAB_WS_URL: ${{ vars.OPENGROUND_COLLAB_WS_URL }}
       - name: Per-user install, packaged Electron ABI/PTY and isolated native GUI
+        # Fail before the job deadline so candidate diagnostics can be retained.
+        timeout-minutes: 8
         run: node tooling/scripts/windows-candidate-smoke.cjs source "$env:RUNNER_TEMP/windows-$env:GITHUB_RUN_ID"
       - name: Save verified Actions artifacts only
         # Keep statically verified bytes for diagnosis if native acceptance fails.

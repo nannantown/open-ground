@@ -56,6 +56,8 @@ function assertWorkflow(workflow) {
       !jobs[0].if.includes("github.repository == 'nannantown/open-ground'") ||
       !jobs[0].if.includes(`github.ref == 'refs/heads/${BRANCH}'`)) throw new Error('Unexpected Windows runner/ref.')
   const steps = jobs[0].steps
+  const native = steps.find(step => (step.run || '').includes('windows-candidate-smoke.cjs'))
+  if (native?.['timeout-minutes'] !== 8) throw new Error('Native acceptance must have its own bounded deadline.')
   const source = steps.find(step => step.uses === 'actions/checkout@v4' && step.with.path === 'source')
   if (source?.with.ref !== '${{ env.APP_SOURCE_SHA }}') throw new Error('Application checkout must pin the verified SHA.')
   for (const step of steps) {

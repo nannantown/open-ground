@@ -62,6 +62,7 @@ test('workflow rejects publisher mode, source drift, wrong runner, credential pe
     x => { x.permissions.contents = 'write' },
     x => { x.on.push.tags = ['v*'] },
     x => { x.jobs.windows['runs-on'] = 'windows-latest' },
+    x => { delete x.jobs.windows.steps.find(s => (s.run || '').includes('windows-candidate-smoke.cjs'))['timeout-minutes'] },
     x => { x.jobs.windows.steps[0].with['persist-credentials'] = true },
     x => { x.jobs.windows.steps.find(s => /electron-builder/.test(s.run || '')).run = 'npx electron-builder --win --publish always' },
     x => { x.jobs.windows.steps.push({ run: 'gh release create v0.11.182' }) },

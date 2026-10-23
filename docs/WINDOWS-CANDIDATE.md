@@ -14,4 +14,6 @@ Artifacts are the installer, matching blockmap, `latest.yml`, provenance manifes
 
 Public promotion/main integration is a separate reviewed stage. Do not run `release.yml` (even publish=false writes draft/assets), create a version tag, or invoke `publish-draft.yml` from this validation workflow. The owner app and resumed sessions remain untouched.
 
+The native step has an eight-minute hard deadline inside the forty-minute job, leaving time to retain failure evidence. Installer, packaged-PTY and each GUI/quit phase are recorded as they happen. A deadline is failure, never a skipped or successful test; the last phase identifies the result that remains unestablished.
+
 Local pure regressions: `APP_SOURCE_DIR=<preserved7651991c-checkout> node --test scripts/windows-candidate.test.cjs`. Native packaging/smoke runs only on the dedicated Windows Actions runner. Existing production config/signing/privacy regressions are also executed from the frozen source checkout.

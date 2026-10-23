@@ -25,6 +25,12 @@ async function main() {
   const { _electron, expect } = req('playwright')
   const verified = path.join(root, 'verified'), diagnostics = path.join(root, 'diagnostics')
   fs.mkdirSync(diagnostics, { recursive: true })
+  const checkpoint = (phase, details = {}) => {
+    const value = { phase, atUtc: new Date().toISOString(), sourceSha: SOURCE_SHA, ...details }
+    fs.writeFileSync(path.join(diagnostics, 'phase.json'), JSON.stringify(value))
+    fs.appendFileSync(path.join(diagnostics, 'phases.jsonl'), JSON.stringify(value) + '\n')
+    console.log('Windows candidate phase: ' + phase)
+  }
   const manifest = JSON.parse(fs.readFileSync(path.join(verified, 'manifest.json')))
   assert.equal(manifest.sourceSha, SOURCE_SHA)
   const installer = manifest.files.find(file => file.name.endsWith('.exe'))
@@ -38,7 +44,7 @@ async function main() {
   for (const dir of [env.APPDATA, env.LOCALAPPDATA, userData]) fs.mkdirSync(dir, { recursive: true })
   await portFree()
   const install = path.join(root, 'installed')
-  fs.writeFileSync(path.join(diagnostics, 'phase.json'), JSON.stringify({ phase: 'installer-start', sourceSha: SOURCE_SHA, perUser: true, profileOverridesForInstaller: false }))
+  checkpoint('installer-start', { perUser: true, profileOverridesForInstaller: false })
   // Assisted NSIS /S does not launch unless --force-run is explicitly supplied.
   try {
     execFileSync(installerPath, ['/S', `/D=${install}`], { env: installerEnv, timeout: 120000, stdio: 'pipe' })
@@ -50,7 +56,7 @@ async function main() {
     console.error(JSON.stringify({ phase: failure.phase, status: failure.status, signal: failure.signal, code: failure.code }))
     throw error
   }
-  fs.writeFileSync(path.join(diagnostics, 'phase.json'), JSON.stringify({ phase: 'installer-finished', sourceSha: SOURCE_SHA, status: 0 }))
+  checkpoint('installer-finished', { status: 0 })
   await portFree()
   const exe = path.join(install, 'OPEN GROUND.exe')
   assert.equal(peMachine(fs.readFileSync(exe)), 0x8664)
@@ -68,6 +74,7 @@ const timeout=setTimeout(()=>{term.kill();console.error('PTY timed out');process
 term.onData(x=>out+=x); term.onExit(({exitCode})=>{clearTimeout(timeout);if(exitCode!==0||!out.includes('OPENGROUND_WINDOWS_PTY_OK')){console.error('PTY echo failed');process.exitCode=1}else{fs.writeFileSync(process.env.OG_PTY_RESULT,JSON.stringify({electron:process.versions.electron,modules:process.versions.modules,arch:process.arch,nativeModules:Object.keys(require.cache).filter(x=>x.endsWith('.node')).map(x=>path.relative(process.env.OG_RESOURCES,x)),echo:true,exitCode}))}});
 `)
   const ptyResult = path.join(diagnostics, 'native-pty.json')
+  checkpoint('native-pty-start')
   await new Promise((resolve, reject) => {
     const child = spawn(exe, [ptyProbe], { env: { ...env, ELECTRON_RUN_AS_NODE: '1', OG_PTY_MODULE: path.join(resources, 'app/node_modules/node-pty'), OG_PTY_RESULT: ptyResult, OG_RESOURCES: resources }, stdio: ['ignore', 'pipe', 'pipe'] })
     let errorOutput = ''
@@ -80,13 +87,16 @@ term.onData(x=>out+=x); term.onExit(({exitCode})=>{clearTimeout(timeout);if(exit
     })
   })
   const native = JSON.parse(fs.readFileSync(ptyResult))
+  checkpoint('native-pty-process-exited')
   assert.equal(native.electron, req('electron/package.json').version)
   assert.equal(native.arch, 'x64'); assert.ok(native.nativeModules.length > 0)
   for (const file of native.nativeModules) assert.equal(peMachine(fs.readFileSync(path.join(resources, file))), 0x8664)
   const gui = []
   for (let round = 1; round <= 2; round++) {
     await portFree()
+    checkpoint(`gui-${round}-launch-start`)
     const app = await _electron.launch({ executablePath: exe, args: [`--user-data-dir=${userData}`], env, timeout: 60000, chromiumSandbox: true })
+    checkpoint(`gui-${round}-launched`)
     try {
       const identity = await app.evaluate(({ app }) => ({ version: app.getVersion(), packaged: app.isPackaged, userData: app.getPath('userData') }))
       assert.equal(identity.version, VERSION); assert.equal(identity.packaged, true)
@@ -117,7 +127,12 @@ term.onData(x=>out+=x); term.onExit(({exitCode})=>{clearTimeout(timeout);if(exit
       const unexpected = consoleErrors.filter(e => e.url !== url || e.text !== 'Failed to load resource: the server responded with a status of 403 (Forbidden)')
       assert.deepEqual(runtimeErrors, []); assert.deepEqual(unexpected, []); assert.deepEqual(external, [])
       gui.push({ round, version: identity.version, packaged: true, emptyHomeVisible: true, settingsOpenedAndClosed: true, ownerOnlyApiRefused: true })
-    } finally { await app.close() }
+      checkpoint(`gui-${round}-checks-passed`)
+    } finally {
+      checkpoint(`gui-${round}-quit-start`)
+      await app.close()
+      checkpoint(`gui-${round}-quit-finished`)
+    }
     assert.equal(app.process().exitCode, 0)
     await portFree()
   }
@@ -130,6 +145,7 @@ term.onData(x=>out+=x); term.onExit(({exitCode})=>{clearTimeout(timeout);if(exit
   manifest.nativeSmokeVerified = true
   manifest.nativeSmokeResultSha256 = hash(fs.readFileSync(path.join(verified, 'windows-smoke.json')))
   fs.writeFileSync(path.join(verified, 'manifest.json'), JSON.stringify(manifest, null, 2))
+  checkpoint('native-acceptance-passed')
   console.log('Unsigned NSIS install, packaged Electron ABI/native PTY, native UI and normal relaunch passed.')
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1 })
