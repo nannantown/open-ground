@@ -1,0 +1,152 @@
+name: candidate-validation
+
+# A branch push is intentional: a new workflow_dispatch definition cannot be
+# dispatched before it exists on the default branch. Never trigger on tags.
+on:
+  push:
+    branches: [codex/validation-0.11.181-20261023]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-validation-${{ github.ref }}
+  # Do not interrupt an uncertain Apple submission when a new commit arrives.
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'nannantown/open-ground' && github.ref == 'refs/heads/codex/validation-0.11.181-20261023'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run check:screens
+      - run: npm test
+      - run: npx playwright install chromium --with-deps
+      - run: npm run test:e2e
+      - name: Failed-test diagnostics only
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-diagnostics-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  worker:
+    if: github.repository == 'nannantown/open-ground' && github.ref == 'refs/heads/codex/validation-0.11.181-20261023'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+        working-directory: worker
+      - run: npx tsc --noEmit
+        working-directory: worker
+      - run: node test/local.mjs
+        working-directory: worker
+      - run: node test/phoneRelay.local.mjs
+        working-directory: worker
+
+  notarize:
+    needs: [validate, worker]
+    if: github.repository == 'nannantown/open-ground' && github.ref == 'refs/heads/codex/validation-0.11.181-20261023'
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # Dependency install/build have no signing or product-service credentials.
+      - run: npm ci
+      - run: npx vitest run src/repoPiiGuard.test.ts server/__tests__/macDistributionSigning.test.ts server/__tests__/candidateBuildConfig.test.ts
+      - run: npm run build
+      - name: Prepare isolated candidate configuration
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/candidate-$GITHUB_SHA-$GITHUB_RUN_ID"
+          mkdir -p "$root/verified"
+          node scripts/candidate-build-config.cjs "$root/builder.json" "$root/build"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+      - name: Sign and notarize source candidate without a publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx electron-builder --mac --arm64 --x64 --publish never --config "${{ steps.prepare.outputs.root }}/builder.json"
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Verify signatures, architecture and stapled Apple tickets without launching
+        shell: bash
+        env:
+          CANDIDATE_ROOT: ${{ steps.prepare.outputs.root }}
+        run: |
+          set -euo pipefail
+          for arch in x64 arm64; do
+            folder=mac
+            expected=x86_64
+            if [ "$arch" = arm64 ]; then folder=mac-arm64; expected=arm64; fi
+            app="$CANDIDATE_ROOT/build/$folder/OPEN GROUND.app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            xcrun stapler validate "$app"
+            test "$(lipo -archs "$app/Contents/MacOS/OPEN GROUND")" = "$expected"
+            test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "$(node -p 'require("./package.json").version')"
+          done
+          node <<'NODE'
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const crypto = require('node:crypto')
+          const root = process.env.CANDIDATE_ROOT
+          const build = path.join(root, 'build')
+          const files = fs.readdirSync(build).filter(n => /\.(dmg|zip)$/.test(n))
+          if (files.length !== 4 || ['x64', 'arm64'].some(a => files.filter(n => n.includes(`-${a}.`)).length !== 2)) throw new Error('Expected one DMG and ZIP per architecture')
+          const artifacts = files.map(name => {
+            const bytes = fs.readFileSync(path.join(build, name))
+            fs.copyFileSync(path.join(build, name), path.join(root, 'verified', name), fs.constants.COPYFILE_EXCL)
+            return {name, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex')}
+          })
+          fs.writeFileSync(path.join(root, 'verified', 'manifest.json'), JSON.stringify({sourceSha: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, version: require('./package.json').version, signaturesVerified: true, stapledTicketsValidated: true, appExecuted: false, artifacts}, null, 2) + '\n', {flag: 'wx'})
+          if (fs.readdirSync(path.join(root, 'verified')).some(n => /latest.*\.ya?ml$/i.test(n))) throw new Error('Update feeds are forbidden candidate artifacts')
+          NODE
+      - name: Save only verified run-specific Actions artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-mac-0.11.181-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ steps.prepare.outputs.root }}/verified/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error

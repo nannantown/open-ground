@@ -2,11 +2,10 @@
 
 How to ship OPEN GROUND to other people's machines (macOS + Windows).
 
-The `.app` you get from `npm run dist` runs **on your own machine**
-fine because macOS doesn't quarantine apps you built locally. The moment
-that bundle is downloaded by another user, however, Gatekeeper will block
-it as "from an unidentified developer" — they need a signed + notarized
-version.
+Mac distribution requires a verified Developer ID signature and Apple
+notarization. Building locally does not establish safety or justify bypassing
+a macOS alert. Keep a warned-about app held while its detection is investigated;
+correct signing is a separate packaging requirement.
 
 This doc walks through the **recommended CI-based release flow** (§0), the
 one-time Apple setup it relies on (§1), the local/manual `npm run dist`

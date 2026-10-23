@@ -15,6 +15,14 @@
 
 ---
 
+- Isolated candidate CI (2026-10-23): `.github/workflows/candidate-validation.yml`
+  validates the named branch before using existing Mac signing/notarization
+  assets. `scripts/candidate-build-config.cjs` removes publishing and pins
+  output to runner temp; `candidateBuildConfig.test.ts` guards the boundary.
+  No Release/tag/feed writes. Scope/limitations: `CANDIDATE-VALIDATION.md`.
+  Public boot keeps the real owner-only assistant refusal: `e2e/smoke.spec.ts`,
+  `e2e/fixtures/publicBootConsole.ts`, `publicBootConsole.test.ts`.
+
 - Phone call records (2026-10-04): canonical protocol `docs/PHONE_LINK.md`
   "Call records"; `phoneLink.ts` sealed `call-note` admission/ack and scoped
   history; `assistantMemory.ts` `appendAssistantCall` durable receipts;

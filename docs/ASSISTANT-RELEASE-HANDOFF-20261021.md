@@ -1,10 +1,17 @@
 # Assistant release candidate — 2026-10-21
 
+Integration update (2026-10-23): the validation branch starts at public
+`7cf1bf9` and applies the preserved `2b6d62af` assistant and `f8e88d5f` signing
+patches. Public Board fixes remain intact. See `CANDIDATE-VALIDATION.md` for the
+new exact-commit CI boundary. The branch/suite observations below are historical
+records of the original candidate; they are not the new integration's results
+or permission to publish or resume automation.
+
 The assistant distinguishes unavailable evidence from an empty Board, cites
 observed records, and follows the exact card created through an owner button.
 This is a local review candidate. Release acceptance is incomplete.
 
-## Branch and scope
+## Original branch and scope (historical)
 
 - Base and current HEAD: `ddfce3896f888808788cfbe70aae6caf402cb630`
   (`0.11.179`). Branch: `codex/assistant-release-candidate-20261021`.
