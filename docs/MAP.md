@@ -22,6 +22,14 @@
   No Release/tag/feed writes. Scope/limitations: `CANDIDATE-VALIDATION.md`.
   Public boot keeps the real owner-only assistant refusal: `e2e/smoke.spec.ts`,
   `e2e/fixtures/publicBootConsole.ts`, `publicBootConsole.test.ts`.
+- Production-configured candidate (2026-10-23):
+  `.github/workflows/production-candidate.yml`,
+  `scripts/production-candidate-config.cjs` and
+  `scripts/verify-production-candidate.cjs`; regression
+  `server/__tests__/productionCandidate.test.ts`. Existing public login/install
+  configuration and updater metadata are present before signing, while the
+  workflow retains artifacts only and never publishes. Scope:
+  `docs/PRODUCTION-CANDIDATE.md`.
 
 - Phone call records (2026-10-04): canonical protocol `docs/PHONE_LINK.md`
   "Call records"; `phoneLink.ts` sealed `call-note` admission/ack and scoped

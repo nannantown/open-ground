@@ -1,0 +1,154 @@
+name: production-candidate
+
+# A branch push is intentional: a new workflow_dispatch definition cannot be
+# dispatched before it exists on the default branch. Never trigger on tags.
+on:
+  push:
+    branches: [codex/production-candidate-0.11.182-20261023]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-candidate-${{ github.ref }}
+  # Do not interrupt an uncertain Apple submission when a new commit arrives.
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'nannantown/open-ground' && github.ref == 'refs/heads/codex/production-candidate-0.11.182-20261023'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run check:screens
+      - run: npm test
+      - run: npx playwright install chromium --with-deps
+      - run: npm run test:e2e
+      - name: Failed-test diagnostics only
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-candidate-diagnostics-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  worker:
+    if: github.repository == 'nannantown/open-ground' && github.ref == 'refs/heads/codex/production-candidate-0.11.182-20261023'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+        working-directory: worker
+      - run: npx tsc --noEmit
+        working-directory: worker
+      - run: node test/local.mjs
+        working-directory: worker
+      - run: node test/phoneRelay.local.mjs
+        working-directory: worker
+
+  notarize:
+    needs: [validate, worker]
+    if: github.repository == 'nannantown/open-ground' && github.ref == 'refs/heads/codex/production-candidate-0.11.182-20261023'
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # Dependency installation and tests receive no signing or product-service credentials.
+      - run: npm ci
+      - run: npx vitest run src/repoPiiGuard.test.ts server/__tests__/macDistributionSigning.test.ts server/__tests__/candidateBuildConfig.test.ts server/__tests__/productionCandidate.test.ts server/__tests__/runtimeConfig.test.ts src/lib/server/phoneRelayAuth.test.ts
+      - name: Build with existing distribution configuration
+        run: |
+          node -e "const r=require('./electron/runtimeConfig');require('./scripts/production-candidate-config.cjs').assertProductionRuntimeConfig(Object.fromEntries(r.BAKED_KEYS.map(k=>[k,(process.env[k]||'').trim()]).filter(([,v])=>v)))"
+          npm run build
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          OPENGROUND_REALTIME: ${{ vars.OPENGROUND_REALTIME }}
+          OPENGROUND_COLLAB_WS_URL: ${{ vars.OPENGROUND_COLLAB_WS_URL }}
+          OPENGROUND_PHONE_RELAY_APP_KEY: ${{ secrets.OPENGROUND_PHONE_RELAY_APP_KEY }}
+      - name: Prepare isolated candidate configuration
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/candidate-$GITHUB_SHA-$GITHUB_RUN_ID"
+          mkdir -p "$root/verified"
+          node scripts/production-candidate-config.cjs "$root/builder.json" "$root/build"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+      - name: Sign and notarize without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx electron-builder --mac --arm64 --x64 --publish never --config "${{ steps.prepare.outputs.root }}/builder.json"
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Verify signatures, architecture and stapled Apple tickets without launching
+        shell: bash
+        env:
+          CANDIDATE_ROOT: ${{ steps.prepare.outputs.root }}
+        run: |
+          set -euo pipefail
+          for arch in x64 arm64; do
+            folder=mac
+            expected=x86_64
+            if [ "$arch" = arm64 ]; then folder=mac-arm64; expected=arm64; fi
+            app="$CANDIDATE_ROOT/build/$folder/OPEN GROUND.app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            xcrun stapler validate "$app"
+            test "$(lipo -archs "$app/Contents/MacOS/OPEN GROUND")" = "$expected"
+            test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "$(node -p 'require("./package.json").version')"
+          done
+      - name: Verify actual packaged configuration and update assets without executing
+        run: node scripts/verify-production-candidate.cjs
+        env:
+          CANDIDATE_ROOT: ${{ steps.prepare.outputs.root }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          OPENGROUND_REALTIME: ${{ vars.OPENGROUND_REALTIME }}
+          OPENGROUND_COLLAB_WS_URL: ${{ vars.OPENGROUND_COLLAB_WS_URL }}
+          OPENGROUND_PHONE_RELAY_APP_KEY: ${{ secrets.OPENGROUND_PHONE_RELAY_APP_KEY }}
+      - name: Save only verified run-specific Actions artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-candidate-mac-0.11.182-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ steps.prepare.outputs.root }}/verified/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
