@@ -965,6 +965,11 @@
   `empty-import-meta` の沈黙は、追加した当時は正しかった(唯一の読み手が死んだ枝だった)が、
   後から生えた生きた読み手をそのまま覆った。番人 = `src/lib/server/sdkGuardBundleShape.test.ts`
 - 配布: `docs/DISTRIBUTION.md` — 2リポ構成(origin=PMmap 開発・open-ground 公開、tag vX.Y.Z で CI)
+- Mac signing: `scripts/check-mac-signing.cjs` refuses disabled/ad-hoc signing
+  before packing; `scripts/verify-mac-signature.cjs` verifies the final signed
+  bundle without mutation before installer generation. Test:
+  `server/__tests__/macDistributionSigning.test.ts`. Local signed candidates
+  disable notarization/publication; warning resolution remains a separate gate.
 - テスト: `server/__tests__/`(selfUpdate / autoUpdate / forkEnv / startup / electronLockdown …)
 - 罠: `electron/*.js` は純 CommonJS — 触ったら `node --check`。asar:false は node-pty の制約で
   意図的。ポート 5174/47776 は不可侵 — 2本目の dev は `npm run dev:alt`。
@@ -980,6 +985,11 @@
   Electron 31 に対する XProtect の誤検知で、**署名+notarize 済みの配布 .app は無関係**。
   つまり `npm run electron:dev` はこの機体では起動しない — メニューまわりの検証は
   Electron を起動せず純関数テストで行う(それが `updateMenu.js` を純関数に割った理由でもある)。
+- Security hold (2026-10-22): the preceding July observation is historical,
+  not evidence that a new malware warning is a false positive or that a signed
+  installed app is unaffected. Preserve evidence, do not relaunch/restore or
+  bypass OS protections, and identify the current warning independently of
+  signature repairs. Signing success is not a malware-safety verdict.
 
 ## 9. i18n — 日英バイリンガル
 - `src/i18n/I18nContext.tsx`(provider)+ `src/i18n/messages/`(領域別辞書: board / canvas /

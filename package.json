@@ -24,7 +24,7 @@
     "electron:dev": "concurrently -k \"PORT=47776 tsx watch --env-file-if-exists=.env.local server/index.ts\" \"vite\" \"wait-on http://127.0.0.1:47776/api/health http://127.0.0.1:5174 && OPENGROUND_ELECTRON_MODE=dev electron electron/main.js\"",
     "electron:prod": "npm run build && OPENGROUND_ELECTRON_MODE=prod electron electron/main.js",
     "dist": "npm run build && electron-builder --mac --arm64 --x64",
-    "dist:local": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --config.mac.notarize=false --config.mac.identity=null",
+    "dist:local": "npm run build && electron-builder --mac --arm64 --publish never --config.mac.notarize=false",
     "dist:win": "npm run build && electron-builder --win",
     "verify:dmg": "scripts/verify-dmg.sh",
     "deploy:landing": "rm -rf /tmp/og-landing-deploy && cp -R landing /tmp/og-landing-deploy && cd /tmp/og-landing-deploy && npx wrangler pages deploy . --project-name=open-ground",
@@ -84,6 +84,8 @@
     "wait-on": "^8.0.1"
   },
   "build": {
+    "beforePack": "scripts/check-mac-signing.cjs",
+    "afterSign": "scripts/verify-mac-signature.cjs",
     "appId": "local.openground.app",
     "productName": "OPEN GROUND",
     "protocols": [
@@ -114,6 +116,7 @@
       "skills/research/SKILL.md",
       "src/designs/**",
       "node_modules/node-pty/**",
+      "!node_modules/node-pty/build/node_gyp_bins/**",
       "bin/og-listen"
     ],
     "asar": false,
@@ -123,6 +126,8 @@
       "repo": "open-ground"
     },
     "mac": {
+      "forceCodeSigning": true,
+      "type": "distribution",
       "target": [
         {
           "target": "dmg",

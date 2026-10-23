@@ -199,10 +199,11 @@ secrets** (it ships unsigned).
 `GITHUB_TOKEN` is **auto-provided** by Actions — there is no manual secret to
 add for publishing the Release.
 
-> **dev / CI safety:** if the Apple secrets are absent, the macOS job still
-> builds an **unsigned** `.dmg` (electron-builder logs `skipped macOS
-> notarization`) instead of failing the whole release. Add the secrets above
-> to get a Gatekeeper-clean build.
+> **Signing is required:** macOS distribution uses `forceCodeSigning: true`,
+> `type: distribution` and strict verification. Missing or disabled signing fails
+> the build; an unsigned installer is not an acceptable release fallback.
+> The signing identity and notarization credentials above are separate needs.
+> Signature success alone does not resolve a macOS malware detection.
 
 <a id="app-login-secrets"></a>
 ### App-login secrets (optional — enables "Sign in" for all users)
@@ -321,15 +322,26 @@ export GH_TOKEN="ghp_…"
 npm run dist -- --publish always
 ```
 
-`npm run dist` alone (no `--publish`) builds + signs + notarizes locally
-without uploading — useful for a dry run. Drop the `--publish always` to
-keep the artifacts in `dist-electron/` only.
+`npm run dist -- --publish never` builds, signs and may submit to Apple's
+notary service when its credentials are available. `--publish never` prevents
+GitHub release uploads; it does not disable notarization's external submission.
+It is not an offline dry run.
 
-**dev / CI safety:** when the signing certificate or the Apple env vars are
-absent (e.g. a CI machine, or a plain local build), electron-builder logs
-`skipped macOS notarization` and produces an unsigned bundle instead of
-failing. Set `CSC_IDENTITY_AUTO_DISCOVERY=false` to force-skip signing on a
-machine that happens to have a cert but shouldn't use it.
+For a separately authorized **signed local candidate without external
+submission**, use `npm run dist:local -- --config.directories.output=<NEW_OUTPUT>`.
+It disables notarization and GitHub publication, but still requires a valid
+Developer ID Application identity. Use a new output directory and the matching
+Electron runtime/architecture; never reuse or re-sign a warned/quarantined app.
+Do not launch or distribute the candidate until the warning and notarization
+decisions are resolved.
+
+The pipeline's `beforePack` hook refuses disabled/ad-hoc signing. Branding,
+Info.plist changes, native builds and resource copies precede electron-builder's
+final signing. `afterSign` only verifies the final bundle with system codesign
+and requires Developer ID metadata; it never changes bundle contents. A failed
+verification stops before DMG/ZIP generation. `node-pty`'s build-only
+`build/node_gyp_bins` executables are excluded. Windows remains unsigned by its
+existing policy. Guards: `server/__tests__/macDistributionSigning.test.ts`.
 
 ### Removed: the shell launcher and its signer (2026-08-06)
 
