@@ -1,0 +1,15 @@
+# Windows candidate for the preserved Mac182 source
+
+`win-build-check.yml` builds exact application source7651991cc6a320beb4e4af903f17828046dc9f36 in a separate checkout. The candidate branch contains orchestration/verification only; it does not change the frozen application source, version or installed owner Mac. The manifest records both source and workflow SHAs.
+
+The job is branch-restricted, uses Windows2022/Node20/Python3.11, `contents:read`, non-persisted checkout credentials and explicit `--publish never`. Existing production configuration is validated without printing values. Apple/signing/publisher credentials are absent. Only run-specific Actions artifacts are saved. No Release, tag, feed, main or Mac notarization operation exists in this workflow.
+
+`windows-candidate.cjs` validates the packaging boundary and actual payload/config/PE architecture, installer SHA-512/size, blockmap coverage, legacy updater fields and installed electron-updater180→182 selection/file resolution. Its tests reject publisher credentials, unsafe workflow changes, altered bytes, stale versions and foreign asset URLs. `windows-candidate-smoke.cjs` runs on Windows only: ordinary per-user silent NSIS installation without force-run, packaged Electron/native-addon ABI and a real local ConPTY echo, then two native UI starts with normal quits in a new empty home. It checks onboarding persistence, Settings navigation and explicit owner-only403/hidden assistant behavior. No real Claude, login, cloud service or project task is used. The native smoke never substitutes a Node/browser-only test for packaged Electron.
+
+Windows remains **unsigned**, matching the established release policy; Authenticode must report NotSigned, not a fabricated signature success. The NSIS bootstrap may be32-bit while its app/addon payload is verified64-bit. CI smoke does not certify physical-device SmartScreen, every Windows environment or a real installed-client update transaction. Any security warning must be reported without bypassing protection.
+
+Artifacts are the installer, matching blockmap, `latest.yml`, provenance manifest and smoke result. Combine with the previously verified Mac artifact only after exact-source/version/hash checks; never relabel or rebuild the preserved Mac files merely for orchestration changes. Any required application/build-input fix invalidates the same-source assumption and must be reconciled with Mac revalidation first.
+
+Public promotion/main integration is a separate reviewed stage. Do not run `release.yml` (even publish=false writes draft/assets), create a version tag, or invoke `publish-draft.yml` from this validation workflow. The owner app and resumed sessions remain untouched.
+
+Local pure regressions: `APP_SOURCE_DIR=<preserved7651991c-checkout> node --test scripts/windows-candidate.test.cjs`. Native packaging/smoke runs only on the dedicated Windows Actions runner. Existing production config/signing/privacy regressions are also executed from the frozen source checkout.

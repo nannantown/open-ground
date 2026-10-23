@@ -1,44 +1,95 @@
-# Windows compile check — proves the node-pty native addon builds on
-# windows-latest WITHOUT publishing anything. Run via workflow_dispatch before
-# tagging a release (the release workflow's Windows leg publishes on success,
-# so a broken native build is better caught here first).
-#
-# Why this exists: node-pty 1.2.0-beta.13 uses std::erase_if (C++20) in
-# conpty.cc, but Electron 31 gyp headers compile with /std:c++17 on MSVC.
-# patches/node-pty+1.2.0-beta.13.patch appends /std:c++20 (last /std: wins);
-# this workflow is the regression net for that patch.
+name: windows-candidate
 
-name: win-build-check
-
+# A branch push starts one candidate only; never create a Release or version tag.
 on:
   workflow_dispatch:
   push:
-    branches:
-      - "ci/win-build-check"
+    branches: [codex/windows-candidate-0.11.182-20261023]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_SOURCE_SHA: 7651991cc6a320beb4e4af903f17828046dc9f36
 
 jobs:
-  build:
-    runs-on: windows-latest
+  windows:
+    if: github.repository == 'nannantown/open-ground' && github.ref == 'refs/heads/codex/windows-candidate-0.11.182-20261023'
+    runs-on: windows-2022
+    timeout-minutes: 40
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
         with:
-          node-version: 20
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.APP_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
           cache: npm
-
-      - name: Setup Python (node-gyp needs distutils)
-        uses: actions/setup-python@v5
+          cache-dependency-path: source/package-lock.json
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Install dependencies (postinstall applies node-pty patch + rebuilds)
+          python-version: '3.11'
+      # Installation/tests receive no product or signing/publisher credentials.
+      - name: Install exact source dependencies and native addon
         run: npm ci
-
-      - name: Build (web + server)
-        run: npm run build
-
-      - name: Package (no publish)
-        run: npx electron-builder --win --publish never
+        working-directory: source
+      - name: Candidate boundary and tamper regressions
+        run: node --test tooling/scripts/windows-candidate.test.cjs
+        env:
+          APP_SOURCE_DIR: ${{ github.workspace }}/source
+      - name: Source privacy and configuration regressions
+        run: npx vitest run src/repoPiiGuard.test.ts server/__tests__/productionCandidate.test.ts server/__tests__/candidateBuildConfig.test.ts server/__tests__/macDistributionSigning.test.ts
+        working-directory: source
+      - name: Build exact source with existing production configuration
+        working-directory: source
+        run: |
+          node ../tooling/scripts/windows-candidate.cjs validate-env . "$env:RUNNER_TEMP/windows-$env:GITHUB_RUN_ID"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run build
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          OPENGROUND_PHONE_RELAY_APP_KEY: ${{ secrets.OPENGROUND_PHONE_RELAY_APP_KEY }}
+          OPENGROUND_REALTIME: ${{ vars.OPENGROUND_REALTIME }}
+          OPENGROUND_COLLAB_WS_URL: ${{ vars.OPENGROUND_COLLAB_WS_URL }}
+      - name: Prepare isolated Windows packaging
+        run: node tooling/scripts/windows-candidate.cjs prepare source "$env:RUNNER_TEMP/windows-$env:GITHUB_RUN_ID"
+      - name: Package unsigned Windows NSIS without publishing
+        working-directory: source
+        run: npx electron-builder --win --x64 --publish never --config "$env:RUNNER_TEMP/windows-$env:GITHUB_RUN_ID/builder.json"
+      - name: Inspect payload, config, feed and stable updater contract
+        run: node tooling/scripts/windows-candidate.cjs verify source "$env:RUNNER_TEMP/windows-$env:GITHUB_RUN_ID"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          OPENGROUND_PHONE_RELAY_APP_KEY: ${{ secrets.OPENGROUND_PHONE_RELAY_APP_KEY }}
+          OPENGROUND_REALTIME: ${{ vars.OPENGROUND_REALTIME }}
+          OPENGROUND_COLLAB_WS_URL: ${{ vars.OPENGROUND_COLLAB_WS_URL }}
+      - name: Per-user install, packaged Electron ABI/PTY and isolated native GUI
+        run: node tooling/scripts/windows-candidate-smoke.cjs source "$env:RUNNER_TEMP/windows-$env:GITHUB_RUN_ID"
+      - name: Save verified Actions artifacts only
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-candidate-0.11.182-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/windows-${{ github.run_id }}/verified/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Save candidate-owned failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-candidate-diagnostics-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/windows-${{ github.run_id }}/diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
