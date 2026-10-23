@@ -14,6 +14,19 @@ const hash = (bytes, algorithm = 'sha256', encoding = 'hex') => crypto.createHas
 const sourceRequire = source => createRequire(path.join(path.resolve(source), 'package.json'))
 const inside = (root, target) => path.resolve(target).startsWith(path.resolve(root) + path.sep)
 
+function smokeEnvironments(base, profile) {
+  // NSIS uses the real Windows shell-folder/registry context of this disposable
+  // runner account. Only the application receives a new isolated profile.
+  const installerEnv = Object.fromEntries(Object.entries(base).filter(([key]) =>
+    /^(Path|SystemRoot|SystemDrive|WINDIR|COMSPEC|TEMP|TMP|PATHEXT|PROCESSOR_.*|NUMBER_OF_PROCESSORS|OS|USERPROFILE|USERNAME|USERDOMAIN|HOMEDRIVE|HOMEPATH|APPDATA|LOCALAPPDATA|ALLUSERSPROFILE|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|PROGRAMW6432|COMMONPROGRAMFILES(?:\(X86\))?|COMMONPROGRAMW6432|PUBLIC)$/i.test(key)))
+  const home = path.join(profile, 'home')
+  const env = { ...installerEnv, HOME: home, USERPROFILE: home,
+    APPDATA: path.join(profile, 'roaming'), LOCALAPPDATA: path.join(profile, 'local'),
+    OPENGROUND_HOME: path.join(home, '.openground'), OPENGROUND_SELF_UPDATE: '0',
+    OPENGROUND_SWARM_AUTODRAIN: '0', OPENGROUND_CLAUDE_BIN: path.join(profile, 'no-real-claude.exe') }
+  return { installerEnv, env }
+}
+
 function assertSource(source) {
   const sha = execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
   if (sha !== SOURCE_SHA || sourceRequire(source)('./package.json').version !== VERSION) throw new Error('Unexpected application source/version.')
@@ -139,10 +152,10 @@ async function cli() {
     fs.writeFileSync(path.join(verified, 'manifest.json'), JSON.stringify({ sourceSha: SOURCE_SHA, workflowSha: process.env.GITHUB_SHA,
       runId: process.env.GITHUB_RUN_ID, version: VERSION, platform: 'win32', architecture: 'x64',
       signed: false, signaturePolicy: 'Existing unsigned Windows NSIS distribution; no signing credential introduced.',
-      published: false, runtime, updater, files: inspected.files, installerBootstrapMachine: inspected.installerBootstrapMachine,
+      published: false, nativeSmokeVerified: false, runtime, updater, files: inspected.files, installerBootstrapMachine: inspected.installerBootstrapMachine,
       blockmapChunks: inspected.blockmapChunks }, null, 2), { flag: 'wx' })
     console.log('Windows payload/config/feed/blockmap/updater contract verified; no configuration values printed.')
   } else throw new Error('Unknown candidate operation.')
 }
-module.exports = { SOURCE_SHA, VERSION, BRANCH, PUBLIC_EXE, hash, candidateConfig, assertWorkflow, peMachine, inspectWindowsFeed, verifyUpdater }
+module.exports = { SOURCE_SHA, VERSION, BRANCH, PUBLIC_EXE, hash, candidateConfig, assertWorkflow, peMachine, inspectWindowsFeed, verifyUpdater, smokeEnvironments }
 if (require.main === module) cli().catch(error => { console.error(error.message); process.exitCode = 1 })

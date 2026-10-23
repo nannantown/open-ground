@@ -8,6 +8,8 @@ The job is branch-restricted, uses Windows2022/Node20/Python3.11, `contents:read
 
 Windows remains **unsigned**, matching the established release policy; Authenticode must report NotSigned, not a fabricated signature success. The NSIS bootstrap may be32-bit while its app/addon payload is verified64-bit. CI smoke does not certify physical-device SmartScreen, every Windows environment or a real installed-client update transaction. Any security warning must be reported without bypassing protection.
 
+NSIS runs in the disposable runner account's normal OS shell-folder/registry context with a credentials-free environment. The application alone receives the new HOME/USERPROFILE/app-data directories. Spoofing OS profile variables for NSIS itself is not a valid per-user installer check. Installer status/signal/output and phase are retained on failure. Statically checked packages are preserved even if native acceptance fails; the run remains failed and the manifest's `nativeSmokeVerified` stays false until the real smoke completes.
+
 Artifacts are the installer, matching blockmap, `latest.yml`, provenance manifest and smoke result. Combine with the previously verified Mac artifact only after exact-source/version/hash checks; never relabel or rebuild the preserved Mac files merely for orchestration changes. Any required application/build-input fix invalidates the same-source assumption and must be reconciled with Mac revalidation first.
 
 Public promotion/main integration is a separate reviewed stage. Do not run `release.yml` (even publish=false writes draft/assets), create a version tag, or invoke `publish-draft.yml` from this validation workflow. The owner app and resumed sessions remain untouched.

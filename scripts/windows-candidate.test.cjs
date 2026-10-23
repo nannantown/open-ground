@@ -10,6 +10,19 @@ const source = path.resolve(process.env.APP_SOURCE_DIR || path.join(__dirname, '
 const req = createRequire(path.join(source, 'package.json'))
 const yaml = req('js-yaml')
 
+test('NSIS retains its runner OS profile while the app alone gets isolated credentials-free state', () => {
+  const base = { USERPROFILE: 'runner-os-profile', APPDATA: 'runner-roaming', LOCALAPPDATA: 'runner-local', SystemDrive: 'system-drive',
+    ComSpec: 'system-cmd', PATH: 'system-path', GITHUB_TOKEN: 'must-not-forward', SUPABASE_ANON_KEY: 'must-not-forward', APPLE_ID: 'must-not-forward' }
+  const { installerEnv, env } = candidate.smokeEnvironments(base, path.join(os.tmpdir(), 'owned-smoke'))
+  assert.equal(installerEnv.USERPROFILE, base.USERPROFILE)
+  assert.equal(installerEnv.APPDATA, base.APPDATA)
+  assert.equal(installerEnv.LOCALAPPDATA, base.LOCALAPPDATA)
+  assert.equal(installerEnv.SystemDrive, base.SystemDrive)
+  assert.notEqual(env.USERPROFILE, base.USERPROFILE)
+  assert.equal(env.OPENGROUND_SELF_UPDATE, '0')
+  for (const value of [installerEnv, env]) for (const key of ['GITHUB_TOKEN', 'SUPABASE_ANON_KEY', 'APPLE_ID']) assert.equal(value[key], undefined)
+})
+
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'og-windows-feed-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))

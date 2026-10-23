@@ -68,6 +68,7 @@ jobs:
         working-directory: source
         run: npx electron-builder --win --x64 --publish never --config "$env:RUNNER_TEMP/windows-$env:GITHUB_RUN_ID/builder.json"
       - name: Inspect payload, config, feed and stable updater contract
+        id: inspect
         run: node tooling/scripts/windows-candidate.cjs verify source "$env:RUNNER_TEMP/windows-$env:GITHUB_RUN_ID"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -78,6 +79,9 @@ jobs:
       - name: Per-user install, packaged Electron ABI/PTY and isolated native GUI
         run: node tooling/scripts/windows-candidate-smoke.cjs source "$env:RUNNER_TEMP/windows-$env:GITHUB_RUN_ID"
       - name: Save verified Actions artifacts only
+        # Keep statically verified bytes for diagnosis if native acceptance fails.
+        # The run stays red and manifest.nativeSmokeVerified remains false.
+        if: always() && steps.inspect.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: windows-candidate-0.11.182-${{ github.sha }}-${{ github.run_id }}

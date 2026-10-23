@@ -5,7 +5,7 @@ const net = require('node:net')
 const assert = require('node:assert/strict')
 const { createRequire } = require('node:module')
 const { execFileSync, spawn } = require('node:child_process')
-const { SOURCE_SHA, VERSION, peMachine, hash } = require('./windows-candidate.cjs')
+const { SOURCE_SHA, VERSION, peMachine, hash, smokeEnvironments } = require('./windows-candidate.cjs')
 
 async function portFree() {
   return new Promise((resolve, reject) => {
@@ -34,15 +34,23 @@ async function main() {
   fs.mkdirSync(appHome, { recursive: true })
   const userData = path.join(profile, 'electron-user-data')
   fs.writeFileSync(path.join(appHome, 'settings.json'), JSON.stringify({ projects: [], projectsMigratedAt: new Date().toISOString(), lockdownMode: true, autoUpdate: false, language: 'en' }))
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(Path|PATH|SystemRoot|SYSTEMROOT|WINDIR|COMSPEC|ComSpec|TEMP|TMP|PATHEXT|PROCESSOR_ARCHITECTURE|NUMBER_OF_PROCESSORS)$/i.test(key)))
-  Object.assign(env, { HOME: home, USERPROFILE: home, APPDATA: path.join(profile, 'roaming'), LOCALAPPDATA: path.join(profile, 'local'),
-    OPENGROUND_HOME: appHome, OPENGROUND_SELF_UPDATE: '0', OPENGROUND_SWARM_AUTODRAIN: '0',
-    OPENGROUND_CLAUDE_BIN: path.join(profile, 'no-real-claude.exe') })
+  const { installerEnv, env } = smokeEnvironments(process.env, profile)
   for (const dir of [env.APPDATA, env.LOCALAPPDATA, userData]) fs.mkdirSync(dir, { recursive: true })
   await portFree()
   const install = path.join(root, 'installed')
+  fs.writeFileSync(path.join(diagnostics, 'phase.json'), JSON.stringify({ phase: 'installer-start', sourceSha: SOURCE_SHA, perUser: true, profileOverridesForInstaller: false }))
   // Assisted NSIS /S does not launch unless --force-run is explicitly supplied.
-  execFileSync(installerPath, ['/S', `/D=${install}`], { env, timeout: 120000, stdio: 'pipe' })
+  try {
+    execFileSync(installerPath, ['/S', `/D=${install}`], { env: installerEnv, timeout: 120000, stdio: 'pipe' })
+  } catch (error) {
+    const failure = { phase: 'installer-failed', status: error.status, signal: error.signal,
+      code: error.code, stdout: error.stdout?.toString(), stderr: error.stderr?.toString(),
+      installedExeExists: fs.existsSync(path.join(install, 'OPEN GROUND.exe')) }
+    fs.writeFileSync(path.join(diagnostics, 'installer-result.json'), JSON.stringify(failure, null, 2))
+    console.error(JSON.stringify({ phase: failure.phase, status: failure.status, signal: failure.signal, code: failure.code }))
+    throw error
+  }
+  fs.writeFileSync(path.join(diagnostics, 'phase.json'), JSON.stringify({ phase: 'installer-finished', sourceSha: SOURCE_SHA, status: 0 }))
   await portFree()
   const exe = path.join(install, 'OPEN GROUND.exe')
   assert.equal(peMachine(fs.readFileSync(exe)), 0x8664)
@@ -119,6 +127,9 @@ term.onData(x=>out+=x); term.onExit(({exitCode})=>{clearTimeout(timeout);if(exit
     normalQuitAndRelaunch: true, realClaudeUsed: false, profileIsolated: true,
     limitation: 'CI Windows native/installer smoke, not physical-device SmartScreen or a real user update transaction.' }
   fs.writeFileSync(path.join(verified, 'windows-smoke.json'), JSON.stringify(result, null, 2))
+  manifest.nativeSmokeVerified = true
+  manifest.nativeSmokeResultSha256 = hash(fs.readFileSync(path.join(verified, 'windows-smoke.json')))
+  fs.writeFileSync(path.join(verified, 'manifest.json'), JSON.stringify(manifest, null, 2))
   console.log('Unsigned NSIS install, packaged Electron ABI/native PTY, native UI and normal relaunch passed.')
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1 })
