@@ -7,6 +7,11 @@
 // picker, via TabDef.labelKey) — renaming the tab is a two-line edit here.
 export const research = {
   en: {
+    'research.blog.targetUnconfirmed': 'Confirm the destination of existing blog records before syncing',
+    'research.blog.needsCheck': 'Delivery uncertain — check WordPress before retrying',
+    'research.blog.ledgerError': 'The blog record could not be read or saved. No automatic resend will be attempted. Check local storage before retrying.',
+    'research.blog.confirmTarget': 'Confirm that your existing blog records belong to {site}. Check the old draft links before continuing. Confirm this destination?',
+    'research.blog.confirmRetry': 'Check WordPress first. The last draft may already exist. Only retry if you have confirmed that no draft was created; otherwise a duplicate could be made. Retry?',
     'research.tabLabel': 'Research',
 
     // --- Empty state (no reports yet): what this tab is, and how to feed it --
@@ -72,6 +77,11 @@ export const research = {
     'research.fulltext': 'Full text',
   } as Record<string, string>,
   ja: {
+    'research.blog.targetUnconfirmed': '自動同期の前に、既存ブログ記録の送信先を確認してください',
+    'research.blog.needsCheck': '送信結果が不明です。再試行前にWordPressを確認してください',
+    'research.blog.ledgerError': 'ブログ記録を読み取るか保存することができませんでした。自動で再送しません。ローカルの保存先を確認してください。',
+    'research.blog.confirmTarget': '既存のブログ記録の送信先は {site} で合っていますか。以前の下書きリンクを確認してから、送信先を確定してください。',
+    'research.blog.confirmRetry': '先にWordPressを確認してください。前の下書きが作成済みの可能性があります。下書きがないことを確認した場合だけ再試行してください。作成済みなら重複する可能性があります。再試行しますか。',
     // Deliberately ENGLISH in the ja locale too — the tab strip is a row of
     // English wordmarks (BOARD / SWARM / CANVAS / TERMINAL), and 「調査」 sat in
     // it as the one Japanese label (owner, 2026-08-18: 「他のタブは日本語設定でも

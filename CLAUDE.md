@@ -224,12 +224,11 @@ English (owner decision, 2026-08-13).
 **Exception — owner-facing text follows Settings.language, not this policy.**
 Anything a non-programmer owner reads directly (conversational replies,
 escalation questions / `plainQuestion`, UI copy — and notification `detail`
-strings, today hardcoded Japanese in `swarmOrchestrator.ts`,
-`swarmOverseer.ts`, `swarmEscalations.ts`, and `selfUpdateOnIntegrate.ts`;
-language switching is wired NOWHERE for these yet, so write new ones in
-Japanese to match until it is) keeps following `Settings.language` (unset ⇒
+strings) follows `Settings.language` (unset ⇒
 English, per `src/lib/types.ts` and `src/lib/server/promptLang.ts`) — this
-policy neither overrides nor changes that resolution. See the worker rule
+policy neither overrides nor changes that resolution. Core orchestrator/overseer,
+escalation prefixes and update notifications now select English/Japanese through
+`promptLang`; preserve existing records and user/AI-authored question bodies. See the worker rule
 ("質問は平易文で") in `src/lib/server/swarmWorker.ts` and the `plainQuestion`
 contract comment in `src/lib/types.ts` for the plain-language obligation on
 these surfaces, and `docs/commander/06` §2.2 for the same.

@@ -25,9 +25,9 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          # Node 20 LTS. Pin a major to avoid surprise from new LTS lines
+          # Node 22. Pin a major to avoid surprise from new LTS lines
           # while staying in a still-supported window.
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       # node-pty's native rebuild (postinstall: electron-builder install-app-deps)
@@ -94,7 +94,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           # The worker has its own lockfile — key the npm cache off it.
           cache-dependency-path: worker/package-lock.json
@@ -108,6 +108,10 @@ jobs:
 
       - name: Typecheck worker (tsc --noEmit)
         run: npx tsc --noEmit
+        working-directory: worker
+
+      - name: Build billing Worker without deploying
+        run: npx wrangler deploy --config wrangler.billing.jsonc --dry-run
         working-directory: worker
 
       - name: Worker collab test (miniflare, in-process)
@@ -143,7 +147,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Setup Python (node-gyp needs distutils)
@@ -166,6 +170,11 @@ jobs:
         # the production build and isolated server, then waits for the port, so
         # we don't need a separate background job here.
         run: npm run test:e2e
+
+      - name: Run Owner e2e with isolated dummy identity
+        run: npm run test:e2e
+        env:
+          OPENGROUND_E2E_OWNER: '1'
 
       - name: Upload Playwright report on failure
         if: failure()

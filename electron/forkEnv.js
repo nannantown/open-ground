@@ -3,7 +3,7 @@
 // layering is unit-testable without spawning a process
 // (server/__tests__/forkEnv.test.ts).
 //
-// THE INVARIANT THIS LOCKS — collab token-relay destination lock: the collab
+// THE INVARIANT THIS LOCKS — billing/collab token-relay destination lock: the collab
 // Worker WS endpoint (OPENGROUND_COLLAB_WS_URL) is where the signed-in user's
 // Supabase access token is relayed (server-to-server) to mint a ticket. In a
 // SHIPPED build that destination must be the value we baked and NOTHING the local
@@ -59,9 +59,12 @@ function buildServerForkEnv(opts) {
     OPENGROUND_PROJECT_DIR: projectDir,
     ...(webRoot ? { OPENGROUND_WEB_ROOT: webRoot } : {}),
     PATH: enrichedPath,
-    // …EXCEPT the collab WS URL: when baked, re-apply it AFTER processEnv so a
+    // …EXCEPT billing and collab URLs: when baked, re-apply AFTER processEnv so a
     // tampered OPENGROUND_COLLAB_WS_URL in the launch env can't redirect the token
     // relay. No baked value → processEnv's (dev-only) override survives.
+    ...(bakedAuthEnv.OPENGROUND_BILLING_URL
+      ? { OPENGROUND_BILLING_URL: bakedAuthEnv.OPENGROUND_BILLING_URL }
+      : {}),
     ...(bakedAuthEnv.OPENGROUND_COLLAB_WS_URL
       ? { OPENGROUND_COLLAB_WS_URL: bakedAuthEnv.OPENGROUND_COLLAB_WS_URL }
       : {}),

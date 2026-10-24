@@ -8,7 +8,7 @@
 // HOME is isolated per test via mkdtemp + OPENGROUND_HOME.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, readFile, readdir, realpath, rm, mkdtemp, stat, writeFile } from 'fs/promises'
+import { mkdir, readFile, readdir, realpath, rm, mkdtemp, stat, writeFile, chmod } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -21,6 +21,7 @@ import {
   protectedKindOf,
   pruneBackups,
   snapshotBeforeWrite,
+  secureSettingsPermissions,
 } from './homeBackup'
 import { canvasFile, notificationsFile, settingsFile } from './paths'
 import { getCanvas, getSettings, markNotificationsRead, setCanvas, setSettings } from './store'
@@ -54,6 +55,18 @@ afterEach(async () => {
 })
 
 describe('snapshotBeforeWrite', () => {
+  it('keeps WordPress credentials private in both current settings and retained generations', async () => {
+    await setSettings({ wordpress: { baseUrl: 'https://fixture.example', username: 'fixture', appPassword: 'fixture-secret' } })
+    await setSettings({ displayName: 'new name' })
+    const files = [settingsFile(), ...(await listGenerations('settings')).map((g) => g.path)]
+    for (const path of files) expect((await stat(path)).mode & 0o777).toBe(0o600)
+    const before = await Promise.all(files.map((path) => readFile(path, 'utf8')))
+    for (const path of files) await chmod(path, 0o644)
+    await secureSettingsPermissions()
+    expect(await Promise.all(files.map((path) => readFile(path, 'utf8')))).toEqual(before)
+    for (const path of files) expect((await stat(path)).mode & 0o777).toBe(0o600)
+  })
+
   it('preserves the content that is about to be overwritten', async () => {
     await writeFile(settingsFile(), JSON.stringify(settingsWith(45)))
     const path = await snapshotBeforeWrite(settingsFile())

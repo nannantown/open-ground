@@ -11,7 +11,7 @@ import { WebSocketServer } from 'ws'
 
 const h = vi.hoisted(() => ({ owner: true }))
 vi.mock('./swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => h.owner }))
-vi.mock('./roles', () => ({ getCustomTabRole: async () => null }))
+vi.mock('./roles', () => ({ getCustomTabRole: async () => h.owner ? 'owner' : 'none' }))
 
 import { startPhoneLink, stopPhoneLink } from './phoneLink'
 import { setSettings } from './store'

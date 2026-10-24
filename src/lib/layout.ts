@@ -18,16 +18,26 @@ export const autoLayout = (
   const positions = { ...existing }
   const missing = projects.filter((p) => !positions[p.id])
   if (missing.length === 0) return positions
-  const placed = Object.keys(positions).filter((id) =>
-    projects.some((p) => p.id === id),
-  ).length
-  missing.forEach((p, i) => {
-    const idx = placed + i
-    positions[p.id] = {
-      x: ORIGIN_X + (idx % PER_ROW) * (CARD_W + GAP),
-      y: ORIGIN_Y + Math.floor(idx / PER_ROW) * (CARD_H + GAP),
-    }
-  })
+  const occupied = projects.map(p => positions[p.id]).filter(
+    p => p && Number.isFinite(p.x) && Number.isFinite(p.y),
+  )
+  let idx = occupied.length
+  for (const p of missing) {
+    let candidate: { x: number; y: number }
+    do {
+      candidate = {
+        x: ORIGIN_X + (idx % PER_ROW) * (CARD_W + GAP),
+        y: ORIGIN_Y + Math.floor(idx / PER_ROW) * (CARD_H + GAP),
+      }
+      idx++
+      // Card count cannot tell which grid cells a user has dragged cards into.
+      // Reserve their actual boxes; never move a saved card to make room.
+    } while (occupied.some(o =>
+      Math.abs(o.x - candidate.x) < CARD_W + GAP && Math.abs(o.y - candidate.y) < CARD_H + GAP,
+    ))
+    positions[p.id] = candidate
+    occupied.push(candidate)
+  }
   return positions
 }
 

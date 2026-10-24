@@ -169,7 +169,7 @@ vi.mock('./claudeUsageCli', async (importOriginal) => {
 // file-wide to test the historical full-band behaviour; the per-mode caps are covered
 // in swarmLaunch.test.ts (execModeMaxWorkers). Written to the isolated tmp HOME.
 beforeAll(async () => {
-  await setSettings({ executionMode: 'max' })
+  await setSettings({ executionMode: 'max', language: 'ja' })
 })
 
 const card = (id: string, over: Partial<ProjectTask> = {}): ProjectTask => ({
@@ -6603,7 +6603,7 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
   it('managerUnresponsiveDetail names what is stuck and what the OWNER can do (plain Japanese)', () => {
     // Owner-facing text, so it follows the owner-facing rule rather than the
     // English default: this string is read by a non-programmer in a bell.
-    const d = managerUnresponsiveDetail({ cause: 'ignored', waitedMs: 45 * 60_000, waiting: 2 })
+    const d = managerUnresponsiveDetail({ cause: 'ignored', waitedMs: 45 * 60_000, waiting: 2 }, 'ja')
     expect(d).toContain('45 分')
     expect(d).toContain('統合待ち 2 件')
     expect(d).toContain('司令官に「マージ」と声をかけるか、司令官を再起動してください')
@@ -9790,7 +9790,7 @@ describe('fireFatalNotifications — fatal events push, normal passes are silent
       isAlive: (w: { terminalId?: string }) => alive.has(w.terminalId!),
       notify: opts.withNotify === false ? undefined : (n: SwarmFatalNotification) => fired.push(n),
     }
-    fireFatalNotifications(engine, tasks, deps, 0)
+    fireFatalNotifications(engine, tasks, deps, 0, 'ja')
     return fired
   }
 

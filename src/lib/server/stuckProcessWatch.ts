@@ -1,3 +1,4 @@
+import { getPromptLang, type PromptLang } from './promptLang'
 // stuckProcessWatch — notice the ONE machine state OPEN GROUND can create and
 // nobody can clean up: ORPHANED processes wedged in uninterruptible sleep.
 //
@@ -151,8 +152,9 @@ export const summarizeByCommand = (procs: StuckProcess[]): string => {
  *  list, no jargon, and NO suggestion to "kill" anything — that does not work
  *  (§7.3). The executable summary is included because it is the one detail that
  *  points at the cause when someone does investigate. */
-export const describeStuckProcesses = (procs: StuckProcess[]): string => {
+export const describeStuckProcesses = (procs: StuckProcess[], lang: PromptLang): string => {
   const oldestMin = Math.floor(Math.max(...procs.map((p) => p.ageSeconds)) / 60)
+  if (lang === 'en') return `${procs.length} stuck processes are accumulating (${summarizeByCommand(procs)}; oldest ${oldestMin} minutes). They can slow down the computer and cannot be terminated normally. Restarting the computer clears them.`
   return (
     `動かなくなった処理が${procs.length}個たまっています(${summarizeByCommand(procs)}、最長${oldestMin}分)。` +
     `放置するとマシン全体が重くなります。これは終了させることができないため、` +
@@ -173,7 +175,7 @@ export const checkStuckProcessesOnce = async (opts?: {
 }): Promise<StuckProcess[]> => {
   const procs = await findStuckProcesses({ minAgeSeconds: opts?.minAgeSeconds })
   if (procs.length < (opts?.minCount ?? STUCK_MIN_COUNT)) return []
-  if (opts?.notify) await opts.notify(describeStuckProcesses(procs)).catch(() => {})
+  if (opts?.notify) await opts.notify(describeStuckProcesses(procs, await getPromptLang())).catch(() => {})
   return procs
 }
 
@@ -240,7 +242,7 @@ export const runStuckProcessWatchPass = async (opts?: {
   ) {
     watch.lastNotifiedCount = procs.length
     watch.lastNotifiedAt = now
-    if (opts?.notify) await opts.notify(describeStuckProcesses(procs)).catch(() => {})
+    if (opts?.notify) await opts.notify(describeStuckProcesses(procs, await getPromptLang())).catch(() => {})
   }
   if (procs.length < STUCK_MIN_COUNT) __resetStuckWatchForTests() // episode over — re-arm
   return procs

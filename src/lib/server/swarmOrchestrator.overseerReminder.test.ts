@@ -61,6 +61,7 @@ vi.mock('./claudePreflight', async (importOriginal) => {
 // / monitor / integrate never spawn, move or verify anything.
 const safeDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
   ...defaultDeps(),
+      hasAccess: async () => true,
   fetchTasks: async () => [],
 })
 

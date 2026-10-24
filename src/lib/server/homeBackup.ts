@@ -52,7 +52,8 @@
 // filename and silently overwrite an older generation.
 
 import { createHash } from 'crypto'
-import { lstat, mkdir, readFile, readdir, stat, unlink } from 'fs/promises'
+import { lstat, mkdir, readFile, readdir, stat, unlink, open } from 'fs/promises'
+import { constants } from 'fs'
 import { basename, join } from 'path'
 import { atomicWriteText } from './atomicWrite'
 import { backupsRootDir, canvasFile, openGroundHome, settingsFile } from './paths'
@@ -328,7 +329,7 @@ export const snapshotBeforeWrite = async (
     const n = encodeCounts(countEntriesFor(kind, current))
     const seq = (snapshotSeq++).toString(36)
     const path = join(dir, `${compactIso(opts.now ?? Date.now())}-${hash}-n${n}-${seq}.json`)
-    await atomicWriteText(path, current)
+    await atomicWriteText(path, current, { mode: 0o600 })
     // Amortised: nothing can be over the policy until the count passes it, so
     // most writes skip the (comparatively costly) prune entirely.
     if (existing.length + 1 > KEEP_RECENT + PRUNE_SLACK || current.length > PRUNE_ALWAYS_ABOVE_BYTES) {
@@ -677,3 +678,17 @@ export const highWaterFromGenerations = async (
 /** Epoch ms → the filename stamp form, so callers can compare against a
  *  generation's `stamp` without re-deriving the encoding. */
 export const stampFor = (ms: number): string => compactIso(ms)
+
+/** Restrict existing secret-bearing settings generations without changing bytes. */
+export const secureSettingsPermissions = async (): Promise<void> => {
+  const candidates = [settingsFile(), ...(await listGenerations('settings')).map((g) => g.path)]
+  for (const path of candidates) {
+    let handle
+    try {
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      if ((await handle.stat()).isFile()) await handle.chmod(0o600)
+    } catch (e) {
+      if (!['ENOENT', 'ELOOP'].includes((e as NodeJS.ErrnoException).code ?? '')) throw e
+    } finally { await handle?.close() }
+  }
+}

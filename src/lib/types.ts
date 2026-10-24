@@ -3493,7 +3493,7 @@ export interface WordPressSettings {
  *   - 'deleted-on-wp' — the owner deleted the draft; not re-created unless the
  *                       REPORT itself is rewritten (a redo earns a new draft).
  *   - 'failed'        — the last attempt failed; `error` says why (scrubbed). */
-export type ResearchBlogState = 'draft' | 'edited-on-wp' | 'deleted-on-wp' | 'failed'
+export type ResearchBlogState = 'draft' | 'edited-on-wp' | 'deleted-on-wp' | 'failed' | 'needs-check' | 'target-unconfirmed'
 
 /** GET /api/usage/breakdown — "what used the budget" over a multi-day window
  *  (2026-09-02). Billed tokens grouped by model × where the session ran. The
@@ -3547,6 +3547,7 @@ export interface ResearchReportMeta {
 }
 
 export interface ResearchReportsResponse {
+  blogRecordError?: boolean
   reports: ResearchReportMeta[]
 }
 
@@ -3648,4 +3649,14 @@ export interface AssistantListenEvent {
   /** On 'ready' in a call: 'on' = echo removal; 'apart' = none, the mic is not in the box the voice
    *  comes out of (an interface's stand-in mic); 'off' = neither — nothing heard while it reads counts. */
   echo?: 'on' | 'apart' | 'off'
+}
+
+export interface BillingState {
+  /** Checkout rollout is macOS-only until Windows Swarm is verified. */
+  checkoutAvailable: boolean
+  plan: 'free' | 'pro' | 'owner'
+  configured: boolean
+  status: string
+  currentPeriodEnd: number | null
+  cancelAtPeriodEnd: boolean
 }

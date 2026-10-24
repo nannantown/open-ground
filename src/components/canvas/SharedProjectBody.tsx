@@ -220,10 +220,12 @@ export const SharedProjectBody = ({
   collabProjectId,
   label,
   onClose,
+  ownerFeatures = false,
 }: {
   collabProjectId: string
   /** The owner-set shared name (member-visible). */
   label: string
+  ownerFeatures?: boolean
   /** Back to Ground. */
   onClose: () => void
 }) => {
@@ -485,7 +487,7 @@ export const SharedProjectBody = ({
               {(linkedPath
                 ? (['board', 'canvas', 'terminal'] as const)
                 : (['board', 'canvas'] as const)
-              ).map((tk) => (
+              ).filter(tk => tk !== 'canvas' || ownerFeatures).map((tk) => (
                 <button
                   key={tk}
                   type="button"
@@ -536,7 +538,7 @@ export const SharedProjectBody = ({
           <div className="flex h-full flex-col bg-[#1a1a1a]">
             <TerminalPane projectPath={linkedPath} slotKey="default" />
           </div>
-        ) : tab === 'canvas' ? (
+        ) : tab === 'canvas' && ownerFeatures ? (
           activeCanvasId ? (
             <div className="flex h-full flex-col">
               <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-1.5">

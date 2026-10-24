@@ -1,3 +1,4 @@
+import { getPromptLang, type PromptLang } from './promptLang'
 // homeIntegrity — the BOOT-TIME DAMAGE CHECK for the two irreplaceable home
 // files (settings.json = the project registry, canvas.json = the card layout).
 //
@@ -342,6 +343,7 @@ export const buildWarningMessage = (
 export const notificationDetail = (
   findings: IntegrityFinding[],
   candidates: Partial<Record<ProtectedKind, RestoreCandidate[]>>,
+  lang: PromptLang,
 ): string => {
   const first = findings[0]
   if (!first) return ''
@@ -355,6 +357,13 @@ export const notificationDetail = (
   const best = (candidates[first.file] ?? []).find(
     (c) => (c.entryCounts[Math.max(d, 0)] ?? 0) > 0,
   )
+  if (lang === 'en') {
+    const name = first.file === 'settings' ? 'Project registry' : `Ground layout (${first.dimension ?? 'entries'})`
+    const backup = best ? `A backup with ${best.entryCounts[Math.max(d, 0)]} entries is available; it has not been restored automatically.` : 'No backup candidate was found.'
+    if (first.kind === 'shrink') return `${name} decreased from ${first.previous} to ${first.current}. Intentional cleanup is fine; otherwise inspect the saved data. ${backup}`
+    if (first.kind === 'unreadable') return `${name} could not be read. ${backup}`
+    return `${name} contains a test marker (${first.value}). Inspect the saved data.`
+  }
   const rescue = best
     ? `${best.entryCounts[Math.max(d, 0)]} ${unit}ぶんの控えが残っています（自動では戻しません）。`
     : '控えは見つかりませんでした。'
@@ -376,7 +385,12 @@ export const dimensionIndex = (f: IntegrityFinding): number =>
  *  button yet — this is the導線 or there is none. */
 export const restoreHint = (
   candidates: Partial<Record<ProtectedKind, RestoreCandidate[]>>,
+  lang: PromptLang,
 ): string => {
+  if (lang === 'en') {
+    const available = PROTECTED_KINDS.filter((kind) => (candidates[kind]?.length ?? 0) > 0)
+    return available.length ? `Backup locations: ${available.map((kind) => `${kind}: ${backupDirFor(kind)}`).join(' / ')}` : `Backup location: ${backupsRootDirLabel()} (no matching backup found)`
+  }
   const parts: string[] = []
   for (const kind of PROTECTED_KINDS) {
     const list = candidates[kind] ?? []
@@ -659,12 +673,12 @@ export const checkHomeIntegrity = async (
       await createSwarmFatalNotification(
         {
           event: 'data-integrity',
-          detail: notificationDetail(findings, candidates),
+          detail: notificationDetail(findings, candidates, await getPromptLang()),
           // `logHint` is the row's second line. This is the ONLY place the owner
           // is told WHERE their backups are, so it carries an absolute path
           // rather than a hint: telling someone "you can restore" without
           // telling them from what is not a warning, it is a taunt.
-          logHint: restoreHint(candidates),
+          logHint: restoreHint(candidates, await getPromptLang()),
         },
         { now },
       ).catch((e) => console.error('[homeIntegrity] notification failed', e))

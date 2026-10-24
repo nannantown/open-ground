@@ -161,8 +161,11 @@ test.describe('Click-to-place a new Ground card', () => {
     await expect(boardTab).toHaveCount(0)
 
     await page.keyboard.press('ControlOrMeta+k')
-    await page.getByRole('dialog', { name: 'Find a project', exact: true }).getByRole('textbox').fill(dir.split('/').pop()!)
-    await page.keyboard.press('Enter')
+    const search = page.getByRole('dialog', { name: 'Find a project', exact: true })
+    await search.getByRole('textbox').fill(dir.split('/').pop()!)
+    // Import finishes asynchronously; Enter must target a rendered result.
+    await expect(search.getByRole('button').filter({ hasText: dir.split('/').pop()! })).toBeVisible()
+    await search.getByRole('textbox').press('Enter')
     await expect(page.getByRole('dialog', { name: 'Find a project', exact: true })).toBeHidden()
     await expect(boardTab).toHaveCount(0)
     await page.keyboard.press('Enter')

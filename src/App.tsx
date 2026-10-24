@@ -780,6 +780,7 @@ export default function App() {
   // started on one canvas stays visible from anywhere, including Ground. Best-
   // effort: a failed poll keeps the last known count rather than flashing off.
   useEffect(() => {
+    if (!ownerFeatures) { setAiActiveCount(0); return }
     let cancelled = false
     const poll = async () => {
       if (document.hidden) return
@@ -802,7 +803,7 @@ export default function App() {
       window.clearInterval(id)
       window.removeEventListener('focus', onFocus)
     }
-  }, [])
+  }, [ownerFeatures])
 
   // One-shot probe of whether the optional app login is configured server-side
   // (same Supabase env as feedback). Gates the toolbar account entry; any
@@ -1061,15 +1062,19 @@ export default function App() {
 
   // Persist settings WITHOUT closing the panel — SettingsPanel autosaves
   // (debounced) while open; closing is only the X button / overlay click.
-  const saveSettings = async (s: Settings) => {
+  const saveSettings = async (s: Partial<Settings>) => {
     const res = await api.api.settings.$post({ json: s })
     if (!res.ok) {
       // Don't load() on failure — that would refetch the OLD settings and
       // silently roll back the toggle the user just changed, with no
       // indication anything went wrong.
       const e = (await res.json().catch(() => ({}))) as { error?: string }
-      alert(t('misc.ground.saveSettingsFailed', { error: e.error ?? res.statusText }))
-      return
+      throw new Error(e.error ?? res.statusText)
+    }
+    const receipt = await res.json() as { applied?: string[] }
+    const applied = receipt.applied
+    if (!Array.isArray(applied) || Object.keys(s).some((key) => !applied.includes(key))) {
+      throw new Error('Settings were not applied')
     }
     await load()
     // Re-resolve the experiment gate: toggling an experiment in Settings must
@@ -1535,6 +1540,7 @@ export default function App() {
         />
       )}
       <SettingsPanel
+        billingAccountId={authUser?.id ?? null}
         open={settingsOpen}
         settings={settings}
         onClose={() => setSettingsOpen(false)}
@@ -1614,7 +1620,7 @@ export default function App() {
       {/* The owner's assistant floats over every screen (docs/ASSISTANT_DESIGN.md).
           Not in the public-view preview. Re-mounted when the signed-in user or work
           mode changes, so it asks the owner-only routes again (they decide). */}
-      {!publicPreview && (
+      {ownerFeatures && (
         <FloatingAssistant
           key={`${authUser?.id ?? ''}:${settings?.lockdownMode === true}`}
           disabled={settings?.lockdownMode === true}

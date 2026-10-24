@@ -325,6 +325,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     const { col, boardDeps } = makeBoard([todoCard('a')])
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(),
+      hasAccess: async () => true,
       ...boardDeps,
       ...wake.deps,
       spawnWorker: makeSpawn(proj, alive, { file: (b) => `${b.replace(/[^a-z0-9]/gi, '_')}.txt`, scratch: true }),
@@ -386,6 +387,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     const { col, boardDeps } = makeBoard([todoCard('m')])
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(),
+      hasAccess: async () => true,
       ...boardDeps,
       ...wake.deps,
       spawnWorker: makeSpawn(proj, alive, { file: (b) => `${b.replace(/[^a-z0-9]/gi, '_')}.txt`, scratch: true }),
@@ -430,6 +432,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     const baseSpawn = makeSpawn(proj, alive, { file: (b) => `${b.replace(/[^a-z0-9]/gi, '_')}.txt`, scratch: false })
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(),
+      hasAccess: async () => true,
       ...boardDeps,
       spawnWorker: async (o) => {
         spawned.push(o.title)
@@ -466,6 +469,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     }) as OrchestratorDeps['spawnWorker']
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(), // REAL recoverWorker ⇒ REAL commitWipBeforeTeardown
+      hasAccess: async () => true,
       ...boardDeps,
       spawnWorker: spawn,
       isAlive: (w) => alive.has(w.terminalId!),
@@ -528,6 +532,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     }) as OrchestratorDeps['spawnWorker']
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(), // REAL countCommitsAhead + REAL countNestedCommits
+      hasAccess: async () => true,
       ...boardDeps,
       spawnWorker: spawn,
       isAlive: (w) => alive.has(w.terminalId!),
@@ -568,6 +573,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     }) as OrchestratorDeps['spawnWorker']
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(), // REAL recoverWorker (removeSwarmWorktree) + countCommitsAhead
+      hasAccess: async () => true,
       ...boardDeps, // board-backed recoverCard (no HTTP server in the test)
       spawnWorker: spawn,
       isAlive: (w) => alive.has(w.terminalId!),
@@ -611,6 +617,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     }) as OrchestratorDeps['spawnWorker']
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(), // REAL recoverWorker ⇒ REAL commitWipBeforeTeardown + worktree removal
+      hasAccess: async () => true,
       ...boardDeps,
       spawnWorker: spawn,
       isAlive: () => true, // BUSY throughout — only the runaway ceiling can stop it
@@ -668,6 +675,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     }) as OrchestratorDeps['spawnWorker']
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(),
+      hasAccess: async () => true,
       ...boardDeps,
       spawnWorker: spawn,
       isAlive: (w) => alive.has(w.terminalId!),
@@ -787,6 +795,7 @@ describe('swarmOrchestrator — REAL git end-to-end', () => {
     }) as OrchestratorDeps['spawnWorker']
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(), // REAL recoverWorker (removeSwarmWorktree)
+      hasAccess: async () => true,
       ...boardDeps,
       spawnWorker: spawn,
       isAlive: () => true, // ALIVE throughout — exercises the STALL path, not the crash path
@@ -884,6 +893,7 @@ describe('runIntegratePass — RESURRECTION reflex, REAL manager heartbeat (受�
     const { boardDeps } = makeBoard([todoCard('a', { boardColumn: 'review', branch: 'swarm/a' })])
     const deps: OrchestratorDeps & IntegrationDeps = {
       ...defaultDeps(),
+      hasAccess: async () => true,
       ...boardDeps,
       // Part A readiness runs on the real repo; swarm/a isn't a real ref, so pin the
       // seams the resurrection reflex doesn't exercise.

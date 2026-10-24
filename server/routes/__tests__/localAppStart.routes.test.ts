@@ -1,3 +1,4 @@
+vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => 'owner' }))
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CustomModuleDef } from '@/lib/types'
 

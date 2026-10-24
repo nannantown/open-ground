@@ -11,7 +11,7 @@ import {
 console.log('--- live machine (should be silent when healthy) ---')
 const live = await findStuckProcesses()
 console.log(`stuck now: ${live.length}  → ${live.length >= STUCK_MIN_COUNT ? 'WOULD NOTIFY' : 'silent'}`)
-if (live.length) console.log(describeStuckProcesses(live))
+if (live.length) console.log(describeStuckProcesses(live, 'en'))
 
 // The real shape captured during the incident (ps -axo pid=,ppid=,stat=,etime=,comm=).
 const incident = [
@@ -29,7 +29,7 @@ console.log('\n--- replay of the 2026-07-28 table ---')
 const found = parseStuckProcesses(incident)
 console.log(`detected: ${found.length} (expected 4 — the orphaned+wedged git only)`)
 console.log(`would notify: ${found.length >= STUCK_MIN_COUNT}`)
-console.log(`message: ${describeStuckProcesses(found)}`)
+console.log(`message: ${describeStuckProcesses(found, 'en')}`)
 
 const ok = live.length === 0 && found.length === 4
 console.log(`\nverdict: ${ok ? 'PASS' : 'FAIL'}`)

@@ -1,3 +1,5 @@
+// These data/AI contracts run as Owner; public denials are checked separately.
+vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => 'owner' }))
 // canvasSaveOcc.test.ts — route-level contract for the optimistic-concurrency
 // canvas SAVE path (POST /api/project/canvases, default action). Exercised via
 // app.request(...) (no TCP bind). Proves the HTTP boundary returns 200 + the
@@ -5,7 +7,7 @@
 // save (so a client can refetch, merge, and retry). HOME is the throwaway test
 // home (setup-home.ts).
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, rm, realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
