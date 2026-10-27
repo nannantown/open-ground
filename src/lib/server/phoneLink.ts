@@ -45,7 +45,7 @@ import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assist
 import { listProposals, onProposalsChanged } from './assistantProposals'
 import { langOf, pick } from './promptLang'
 import { e2eKeyOf, open as openSealed, seal, sealTag } from './phoneLinkSeal'
-import { appendAssistantCall, assistantEntriesFor, readAssistantConfig, readAssistantLog, readAssistantMemory, saveAssistantPhoto, sniffPhoto } from './assistantMemory'
+import { appendAssistantCall, assistantEntriesFor, readAssistantConfig, readAssistantLog, readAssistantMemory, saveAssistantPhoto, sniffPhoto, type AssistantConfig } from './assistantMemory'
 import { awaitPhoto, dropAllPhotos, dropPhoto, PHOTO_PARTS_MAX, takePhotoPart } from './phonePhoto'
 
 /** The relay the owner deployed (worker/wrangler.phone.jsonc). Override with
@@ -424,6 +424,8 @@ const selectedProject = async (st: LinkState) => {
   return { all, chosen }
 }
 
+const withoutVoice = ({ voiceChoice: _mine, ...rest }: AssistantConfig) => (void _mine, rest)
+
 const sendProjects = async (st: LinkState, force = false): Promise<void> => {
   const { all, chosen } = await selectedProject(st)
   // The assistant first: a talk partner of its own, never `selected` (its events
@@ -619,7 +621,8 @@ const assistantHistory = async (st: LinkState, f: Record<string, unknown>, id: s
     if (!st.retired) await writeConfig(st.cfg).catch(() => {})
   }
   // The first page carries the proposals made from the phone (their frames and buttons).
-  const head = before === undefined && projectId === ASSISTANT_ID ? { memory: await readAssistantMemory(), ...(await readAssistantConfig()), proposals: listProposals({ via: 'phone' }) } : {}
+  // The voice is picked per device: the Mac's pick stays here (docs/ASSISTANT_DESIGN.md "Voice").
+  const head = before === undefined && projectId === ASSISTANT_ID ? { memory: await readAssistantMemory(), ...withoutVoice(await readAssistantConfig()), proposals: listProposals({ via: 'phone' }) } : {}
   // Which model wrote an answer stays in the Mac's log: the phone's frames keep their shape.
   const all = assistantEntriesFor(await readAssistantLog(), projectId)
     .filter((e) => before === undefined || e.at < before)

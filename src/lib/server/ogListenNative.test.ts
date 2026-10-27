@@ -26,7 +26,7 @@ const canBuild = process.platform === 'darwin' && has('xcrun', ['--find', 'swift
 const canRun = canBuild && /^Kyoko\b/m.test(has('say', ['-v', '?']) ?? '')
 let built = false
 const build = () => {
-  if (!built) execFileSync('swiftc', ['-O', '-swift-version', '5', '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', 'native/og-listen/Info.plist', 'native/og-listen/main.swift', '-o', bin], { stdio: 'ignore' })
+  if (!built) execFileSync('swiftc', ['-O', '-swift-version', '5', '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', 'native/og-listen/Info.plist', '-import-objc-header', 'native/og-listen/voicevox.h', 'native/og-listen/main.swift', '-o', bin], { stdio: 'ignore' })
   built = true
 }
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
@@ -107,6 +107,98 @@ describe('og-listen (native)', () => {
     if (refused || signal === 'SIGABRT') return ctx.skip() // speech recognition not allowed here
     expect(lines.find((l) => l.type === 'final')?.text ?? lines).toMatch(/天気/)
   }, 120_000)
+
+  // The call's voices without the speaker (--tts writes what a call would play).
+  // The system voice always; VOICEVOX when OG_VOICEVOX_DIR points at its files
+  // (src/lib/server/voicevox.ts puts them in ~/.openground/voicevox; tests never
+  // download ~250 MB): read back by the recognizer, it is the sentence.
+  it.runIf(canRun)('the system voice makes the sentence', async (ctx) => {
+    build()
+    const file = join(dir, 'tts-system.caf')
+    expect(JSON.parse(execFileSync(bin, ['ja-JP', '--tts', '今日は良い天気ですね', file], { encoding: 'utf8' }).trim())).toMatchObject({ type: 'tts', voice: 'system' })
+    const { lines, signal } = await hear(file)
+    if (signal === 'SIGABRT' || lines.some((l) => l.reason === 'denied' || l.reason === 'unavailable')) return ctx.skip()
+    expect(lines.find((l) => l.type === 'final')?.text ?? lines).toMatch(/天気/)
+  }, 120_000)
+
+  it.runIf(canBuild)('VOICEVOX that cannot start (no library) fails the line — the call then reads it with the system voice', () => {
+    build()
+    const r = (() => {
+      try {
+        return execFileSync(bin, ['ja-JP', '--tts', 'あ', join(dir, 'x.wav'), '--voicevox', join(dir, 'nowhere'), '--vv', 'n0.vvm', '10005'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      } catch (e) {
+        return String((e as { stdout?: string }).stdout)
+      }
+    })()
+    expect(JSON.parse(r.trim())).toEqual({ type: 'error', reason: 'failed' })
+  }, 120_000)
+
+  // A render cannot be cancelled: a stop leaves the piece being made, and the next answer waits
+  // behind it. Short pieces keep that wait short (measured: scripts/measure-voice-first.mts).
+  it.runIf(canBuild)('VOICEVOX gets a line in short pieces, cut after punctuation; a long stretch with no break goes to the system voice', () => {
+    build()
+    const parts = (text: string) => JSON.parse(execFileSync(bin, ['--parts', text], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).parts as string[] | null
+    expect(parts('了解しました。')).toEqual(['了解しました。'])
+    expect(parts('今日の作業は三つ終わりました。残っているのは、通話画面のボタンの見直しと、読み上げの声の調査です。')).toEqual([
+      '今日の作業は三つ終わりました。',
+      '残っているのは、',
+      '通話画面のボタンの見直しと、',
+      '読み上げの声の調査です。',
+    ])
+    expect(parts('一、二、三、四、五、六、七、八、九、十、十一、十二、十三、十四、十五。')).toEqual(['一、二、三、四、五、六、', '七、八、九、十、十一、', '十二、十三、十四、十五。'])
+    // Half-width marks inside a number or a time are not breaks (they would be read apart).
+    expect(parts('合計は1,234,567円になりました。')).toEqual(['合計は1,234,567円になりました。'])
+    expect(parts('会議は明日の10:30からです。')).toEqual(['会議は明日の10:30からです。'])
+    expect(parts('円周率は3.14です。')).toEqual(['円周率は3.14です。'])
+    // A closing bracket stays with what it closes: never alone, never at the start of a piece.
+    const quoted = parts('「了解しました。」と言いました。')!
+    expect(quoted).toEqual(['「了解しました。」', 'と言いました。'])
+    for (const q of quoted) expect(q.startsWith('」')).toBe(false)
+    expect(parts('あ'.repeat(49))).toBeNull()
+    expect(parts('あ'.repeat(48))).toEqual(['あ'.repeat(48)])
+    // Half-width ! ? are never inside a number: a break even with Japanese right after.
+    expect(parts('本当?それは困る。')).toEqual(['本当?', 'それは困る。'])
+    expect(parts('本当!それは困る。')).toEqual(['本当!', 'それは困る。'])
+    expect(parts('本当?' + 'あ'.repeat(46))).toEqual(['本当?', 'あ'.repeat(46)])
+  }, 120_000)
+
+  // A switch mid-line: the line's next piece asks while the new voice loads (1–4 s on the one
+  // queue). It must not wait behind that load: nil at once, the system voice reads the rest.
+  it.runIf(canBuild && !!process.env.OG_VOICEVOX_DIR)('a piece asked while another voice is loading gets nothing at once (never waits for the load)', () => {
+    build()
+    const out = execFileSync(bin, ['ja-JP', '--tts', '了解しました。', join(dir, 'unused.caf'), '--voicevox', process.env.OG_VOICEVOX_DIR!, '--vv', 'n0.vvm', '10005', '--switch', '1.vvm'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const e = JSON.parse(out.trim()) as { type: string; made: boolean; ms: number }
+    expect(e).toMatchObject({ type: 'switch', made: false })
+    expect(e.ms).toBeLessThan(300)
+  }, 120_000)
+
+  // Only a warm loads a voice (1–4 s): a line asking for one not loaded — a switch underway —
+  // gets nothing from VOICEVOX and is read by the system voice, instead of waiting for a load.
+  it.runIf(canBuild && !!process.env.OG_VOICEVOX_DIR)('a line in a voice that is not the loaded one is not made by VOICEVOX (no load on the way)', () => {
+    build()
+    // The line is 冥鳴ひまり's (1.vvm, style 14); the voice loaded is the line's own, or Nemo's.
+    const tts = (loaded: string) => {
+      try {
+        return execFileSync(bin, ['ja-JP', '--tts', '了解しました。', join(dir, 'switch.caf'), '--voicevox', process.env.OG_VOICEVOX_DIR!, '--vv', '1.vvm', '14', '--warmed', loaded], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      } catch (e) {
+        return String((e as { stdout?: string }).stdout)
+      }
+    }
+    expect(JSON.parse(tts('1.vvm').trim())).toMatchObject({ type: 'tts', voice: 'voicevox' })
+    expect(JSON.parse(tts('n0.vvm').trim())).toEqual({ type: 'error', reason: 'failed' })
+  }, 120_000)
+
+  it.runIf(canRun && !!process.env.OG_VOICEVOX_DIR)('VOICEVOX Nemo and 冥鳴ひまり make the sentence', async (ctx) => {
+    build()
+    for (const [model, style] of [['n0.vvm', '10005'], ['1.vvm', '14']]) {
+      const file = join(dir, `tts-${model}.caf`)
+      const out = execFileSync(bin, ['ja-JP', '--tts', '今日は、とても良い天気ですね。散歩に出かけましょう。', file, '--voicevox', process.env.OG_VOICEVOX_DIR!, '--vv', model, style], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      expect(JSON.parse(out.trim())).toMatchObject({ type: 'tts', voice: 'voicevox', pieces: 3 })
+      const { lines, signal } = await hear(file)
+      if (signal === 'SIGABRT' || lines.some((l) => l.reason === 'denied' || l.reason === 'unavailable')) return ctx.skip()
+      expect(lines.find((l) => l.type === 'final')?.text ?? lines, model).toMatch(/天気/)
+    }
+  }, 180_000)
 
   // When the owner has finished (owner 2026-10-07: answer as soon as a person
   // would): a finished sentence is answered after a short pause, a dangling

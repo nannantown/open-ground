@@ -65,7 +65,7 @@ beforeEach(async () => {
   __resetAssistantMemory()
   await clearAssistantLog()
   await clearAssistantMemory()
-  await saveAssistantConfig({ logDays: 30, memoryChars: 4000, name: '', look: 'verm' })
+  await saveAssistantConfig({ logDays: 30, memoryChars: 4000, name: '', look: 'verm', voiceChoice: 'nemo' })
   await saveAssistantStyle('')
   setLockdownCache(false)
 })
@@ -104,14 +104,22 @@ describe('talk older than the kept days is deleted', () => {
     expect(await saveAssistantConfig({ logDays: 0 })).toHaveProperty('error')
     expect(await saveAssistantConfig({ memoryChars: 100_000 })).toHaveProperty('error')
     expect(await saveAssistantConfig({ logDays: '30' })).toHaveProperty('error')
-    expect(await readAssistantConfig()).toEqual({ logDays: 30, memoryChars: 4000, name: '', look: 'verm' })
+    expect(await readAssistantConfig()).toEqual({ logDays: 30, memoryChars: 4000, name: '', look: 'verm', voiceChoice: 'nemo' })
   })
 })
 
 describe('the name and look the owner gives the assistant', () => {
   it('are kept, read back, and leave the numbers alone', async () => {
     expect(await saveAssistantConfig({ name: '  ノノ ', look: 'moss' })).toMatchObject({ name: 'ノノ', look: 'moss', logDays: 30 })
-    expect(await readAssistantConfig()).toEqual({ logDays: 30, memoryChars: 4000, name: 'ノノ', look: 'moss' })
+    expect(await readAssistantConfig()).toEqual({ logDays: 30, memoryChars: 4000, name: 'ノノ', look: 'moss', voiceChoice: 'nemo' })
+  })
+
+  it('the call voice: Nemo until picked, a pick read back, an unknown one refused', async () => {
+    expect((await readAssistantConfig()).voiceChoice).toBe('nemo')
+    expect(await saveAssistantConfig({ voiceChoice: 'himari' })).toMatchObject({ voiceChoice: 'himari', look: 'verm' })
+    expect((await readAssistantConfig()).voiceChoice).toBe('himari')
+    expect(await saveAssistantConfig({ voiceChoice: 'kyoko' })).toHaveProperty('error')
+    expect((await readAssistantConfig()).voiceChoice).toBe('himari')
   })
 
   it('a name is one line: line breaks become spaces, control characters go', async () => {

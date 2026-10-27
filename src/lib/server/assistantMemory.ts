@@ -28,6 +28,10 @@ export const ASSISTANT_MEMORY_CHARS = { default: 4000, min: 500, max: 8000 }
 export const ASSISTANT_NAME_MAX = 24
 export const ASSISTANT_LOOKS = ['verm', 'moss', 'ochre', 'ink'] as const
 export type AssistantLook = (typeof ASSISTANT_LOOKS)[number]
+/** Who reads the call aloud: a VOICEVOX voice made on this Mac (voicevox.ts) or the system voice.
+ *  Chosen per device: the iPhone keeps its own pick (docs/ASSISTANT_DESIGN.md "Voice"). */
+export const ASSISTANT_VOICES = ['nemo', 'himari', 'system'] as const
+export type AssistantVoice = (typeof ASSISTANT_VOICES)[number]
 const DAY_MS = 86_400_000
 const MODE = 0o600
 
@@ -53,6 +57,7 @@ export interface AssistantConfig {
   /** '' = not named yet. */
   name: string
   look: AssistantLook
+  voiceChoice: AssistantVoice
 }
 
 const dir = () => join(openGroundHome(), 'assistant')
@@ -94,6 +99,7 @@ const cleanName = (v: unknown): string | null => {
   return Array.from(n).length <= ASSISTANT_NAME_MAX ? n : null
 }
 const isLook = (v: unknown): v is AssistantLook => (ASSISTANT_LOOKS as readonly unknown[]).includes(v)
+const isVoice = (v: unknown): v is AssistantVoice => (ASSISTANT_VOICES as readonly unknown[]).includes(v)
 
 export const readAssistantConfig = async (): Promise<AssistantConfig> => {
   const c = await readJson(configFile()).catch(() => ({}) as Record<string, unknown>)
@@ -102,6 +108,7 @@ export const readAssistantConfig = async (): Promise<AssistantConfig> => {
     memoryChars: inRange(c.memoryChars, ASSISTANT_MEMORY_CHARS) ? c.memoryChars : ASSISTANT_MEMORY_CHARS.default,
     name: cleanName(c.name) ?? '',
     look: isLook(c.look) ? c.look : 'verm',
+    voiceChoice: isVoice(c.voiceChoice) ? c.voiceChoice : 'nemo',
   }
 }
 
@@ -116,6 +123,7 @@ export const saveAssistantConfig = async (patch: unknown): Promise<AssistantConf
   const name = p.name === undefined ? undefined : cleanName(p.name)
   if (name === null) return { error: `name must be text of at most ${ASSISTANT_NAME_MAX} characters` }
   if (p.look !== undefined && !isLook(p.look)) return { error: `look must be one of ${ASSISTANT_LOOKS.join(', ')}` }
+  if (p.voiceChoice !== undefined && !isVoice(p.voiceChoice)) return { error: `voiceChoice must be one of ${ASSISTANT_VOICES.join(', ')}` }
   // One locked step (read included, so two saves at once keep both changes): a
   // memo written or deleted meanwhile is neither lost nor brought back.
   const next = await locked(async () => {
@@ -124,6 +132,7 @@ export const saveAssistantConfig = async (patch: unknown): Promise<AssistantConf
     if (p.memoryChars !== undefined) next.memoryChars = p.memoryChars as number
     if (name !== undefined) next.name = name
     if (p.look !== undefined) next.look = p.look as AssistantLook
+    if (p.voiceChoice !== undefined) next.voiceChoice = p.voiceChoice as AssistantVoice
     await ensureDir(dir())
     await atomicWriteJson(configFile(), next, { mode: MODE })
     const memo = await readAssistantMemory()

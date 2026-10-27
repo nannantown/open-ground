@@ -13,6 +13,13 @@
 > Talk data and wire frames: `docs/PHONE_LINK.md` ("The assistant", "What the
 > assistant remembers"). Proposals and the owner's choice: OPEN GROUND project Canvas
 > 「浮いているアシスタント(案)」 (案A 輪 / 案B 灯 / 案C 粒 — not chosen; 案D かけら — chosen).
+>
+> **Superseded in part (2026-10-27):** the chat window, its words and its colours
+> (§1, §3, §6 here) now follow [docs/CHAT_SPEC.md](CHAT_SPEC.md) — one spec for
+> the iPhone and the Mac chat. This page keeps the character (§4, §5) and,
+> from §1, the floating character itself: where it sits, dragging it, the
+> unread dot, and the call's turn ending by how the words end (og-listen
+> `pauseFor`).
 
 **Chosen look (owner, 2026-10-03): none of the three proposals — the real
 logo.** "The proposals are roundish; the real OPEN GROUND logo is angular
@@ -105,6 +112,42 @@ pieces, and the same motions move those pieces (§4, §5).
   Ears = macOS's own speech recognizer (`native/og-listen`, on-device where
   the language allows); no paid voice API. The mic is on only while one of
   the two modes really listens.
+- **Voice (owner 2026-10-27: the iPhone's voices on the Mac too).** A call
+  reads Japanese lines with VOICEVOX Nemo (女声1, style 10005 — the default),
+  冥鳴ひまり (style 14), or the Mac's system voice; English lines always with
+  the system voice. Picked in the talk window's name/colour row (buttons + the
+  credits the terms require: 「VOICEVOX Nemo」「VOICEVOX:冥鳴ひまり」, the same
+  text as the iPhone). Stored per device in `~/.openground/assistant/config.json`
+  `voiceChoice` and NOT sent to the phone: docs/CHAT_SPEC.md (D14 / C5) does not
+  decide whether the pick is shared, so each device keeps its own (the iPhone
+  already does — UserDefaults `voice`). Made on this Mac by og-listen (`Vox`, VOICEVOX core
+  0.17.0 opened by path) — nothing ships in the app: core, ONNX Runtime 1.23.2,
+  the Open JTalk dictionary and the voice file come on first use (a call or a
+  pick) into `~/.openground/voicevox/`, pinned by SHA-256
+  (`src/lib/server/voicevox.ts`, the iPhone's pins for the dictionary and
+  voices). Until they are there, when a fetch fails, offline, or when a line
+  cannot be made, that line is read with the system voice — never silent.
+  Apple Silicon only (elsewhere the choice is not shown; the system voice reads).
+  No line waits for a voice to load (1–4 s): it is loaded as the call starts
+  and whenever the pick changes or its files arrive, and lines go to it only
+  after og-listen says `warmed` for the voice last asked for (a late `warmed` of
+  an older ask, A→B→A, is ignored) — until then the system voice reads them. Only
+  a warm loads a voice (a newer warm waiting skips an older one); a line or piece
+  asking for another voice than the loaded one, or asking while a warm is waiting
+  or loading (a switch in the middle of a line), is read by the system voice at
+  once, never held up by a load.
+  VOICEVOX makes a line in pieces of up to 12 characters cut after 、。！？ and
+  half-width ! ? (`vvParts`; half-width , . ; : only before a space, so 1,234 / 10:30 / 3.14 stay
+  whole; a closing 」 stays with what it closes; a stretch over 48 characters
+  with no break is read by the system voice), each piece only once whole — so a stop leaves at most one short piece
+  being made (a render cannot be cancelled) and the next answer is not held up
+  behind a long line. The cost: the system voice streams, a VOICEVOX piece sounds
+  only once made, so the first sentence starts about 0.35 s later. Measured
+  2026-10-27 on an M3 Pro (load average 6–12, warm, median of 5;
+  `npx tsx scripts/measure-voice-first.mts`): first sound — system 85 ms,
+  Nemo 445 ms, 冥鳴ひまり 470 ms; the next answer's first sound right after a
+  barge-in — behind a short line Nemo 853 ms / 冥鳴ひまり 1041 ms, behind a long
+  one 850 / 834 ms (made whole, before the pieces: 1913 / 2070 ms).
 
 ## 2. The data both screens read
 
@@ -247,7 +290,8 @@ transitions beyond the system's own.
 - `src/components/assistant/useVoice.ts` — `useListen` (the listen stream
   `GET /api/phone-link/assistant/listen` → `src/lib/server/assistantListen.ts`
   → `bin/og-listen`, built by `scripts/build-listen.mjs`) and `useSpeech`
-  (reading answers aloud, cancelling only its own). Which mode the ears serve
+  (reading answers aloud, cancelling only its own; in a call og-listen reads,
+  with VOICEVOX from `src/lib/server/voicevox.ts`'s files — §1 "Voice"). Which mode the ears serve
   is decided in `FloatingAssistant.tsx`; the call screen is
   `src/components/assistant/AssistantCall.tsx`. macOS asks the app itself for the mic and speech-recognition
   permissions, so both usage strings sit in `package.json` `mac.extendInfo`.

@@ -769,6 +769,7 @@
 
 ## 6b. Phone link — iPhone から社長窓口と話す(2026-10-01)
 - 契約(iPhone アプリ係はこれだけ見る): `docs/PHONE_LINK.md`
+- チャットの見た目と操作(iPhone と Mac で1冊。変えるときは先にこれを直し、両方に対のカード): `docs/CHAT_SPEC.md`(共通ファイル `spec/chat/chat-spec.json` の設計は §12・未実装)/ 比較の画面撮りと Canvas 「チャットの違い」の作図 `docs/design/chat-spec/`
 - 中継: `worker/src/phoneRelay.ts`(DO・1ペア1部屋・ハイバネーション・部屋作成は app key 必須 `mayCreateRoom`=サブスク差し替え点・alarm で7日/30日消去)/ `phoneRelayAuth.ts`(鍵判定・`RELAY_LIMITS`=期限と上限の唯一の置き場・純関数)/
   `worker/wrangler.phone.jsonc`(og-collab とは別 Worker。`cd worker && npx wrangler deploy -c wrangler.phone.jsonc`)
 - Mac 側: `src/lib/server/phoneLink.ts`(外向き WS・社長の transcript を tail して event 送出・say を
@@ -855,6 +856,13 @@
   `build.files` で同梱、electron-builder が署名)。話した行の返事だけ読む(2026-10-07 から og-listen の声・下の「声で遮る」)。
   **声で遮る(2026-10-07 オーナー決定「A」)**: 通話中は `listen?call=1` → `og-listen --call` が**聞く部品と同じ音声エンジンから読み上げる**
   (`AVSpeechSynthesizer.write` → `AVAudioPlayerNode`・Apple の voice processing = エコー除去は同じエンジンで鳴らした音しか消さない)。
+  **声の種類(2026-10-27)**: 日本語の行は VOICEVOX Nemo(既定)/冥鳴ひまり/Mac の声から選ぶ(会話窓の名前・色の行・`assistant/config` の `voiceChoice`・端末ごと=電話へ送らない)。
+  VOICEVOX は og-listen の `Vox`(`native/og-listen/voicevox.h` の宣言で core 0.17.0 を dlopen・同梱しない)、ファイルは `src/lib/server/voicevox.ts` が初回に
+  `~/.openground/voicevox/` へ取得し SHA-256 で確かめる(通話開始・選んだとき・無通信60秒で打ち切り)。揃っていない/失敗した行はシステムの声。Apple Silicon のみ。
+  読み込み待ちで黙らない: 行に `vv` を付けるのは og-listen の `warmed` の後だけ(それまではシステムの声)・声を読み込むのは `warm` だけ(`Vox.wav` は読み込み済みの声以外は作らない・確認 `og-listen --tts … --warmed <m>`)。数字・時刻の , : . では区切らない。割り込み後に待たせない: 12字ごと(句読点で区切る・`vvParts`・確認 `og-listen --parts <文>`)に作る。
+  最初の音までの計測 = `OPENGROUND_HOME=<作業用> npx tsx scripts/measure-voice-first.mts <og-listen>`(`og-listen --tts` はスピーカーを使わずファイルに書く)。
+  テスト `voicevox.test.ts`(SHA 不一致は残さない・アーカイブから1ファイル・同時取得は1回)/ `assistantListen.test.ts`(日本語行だけ `vv`・`warmed` までシステムの声)/
+  `ogListenNative.test.ts`(`--tts` の声を認識で読み戻す・VOICEVOX は `OG_VOICEVOX_DIR=<ファイルの場所>` のときだけ)/ `phoneLink.test.ts`(声の選択は電話へ送らない)。
   読む/止める/消音 = `POST /api/phone-link/assistant/voice {stop?, say+id?, mute?}` → `voiceCommand` → og-listen の stdin。耳は通話中ずっと開いたまま。
   判定はサーバー(`assistantListen.ts`): 読み上げ中に 0.1 秒のマイク音量が `BARGE.holdDb` 以上かつ自分の声の戻り(読み上げ音量+学習した回り込み)より `overEchoDb` 大きい → **すぐ一時停止**(認識が開いていた分も捨てる)(認識の最初の文字は声から約0.8秒遅れるため)、
   `isBargeIn`(①3文字以上 ②音量 ③読み上げ中の文と違う言葉・相づちは除く)がそろえば止めて `barge` → 画面は止めるキーと同じ(`hush` で聞こえた所まで)、

@@ -134,6 +134,20 @@ describe('the phone opening the assistant warms its session', () => {
     expect(warmed).toBe(1)
   })
 
+  it("the Mac's voice pick stays on the Mac: the phone's first page carries the name and look, not the voice", async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG2, sock)
+    try {
+      await saveAssistantConfig({ look: 'moss', voiceChoice: 'himari' })
+      await handlePhoneFrame(st, { type: 'assistant-history', id: 'h1' }, { warm: async () => {} })
+      const page = sent.find((f) => f.type === 'assistant-history') as Record<string, unknown>
+      expect(page).toMatchObject({ look: 'moss' })
+      expect(page).not.toHaveProperty('voiceChoice')
+    } finally {
+      await saveAssistantConfig({ look: 'verm', voiceChoice: 'nemo' })
+    }
+  })
+
   it('an old plaintext (v1) pairing never reaches the assistant: no say is asked, no history starts it', async () => {
     const { sent, sock } = fakeSocket()
     const st = __testLinkState(CFG, sock)

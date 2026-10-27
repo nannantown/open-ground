@@ -209,6 +209,78 @@ describe('a call: the voice and the gate', () => {
     stop2()
   })
 
+  // A voice load takes 1.7–4 s on og-listen's one queue: a line sent to a voice not yet loaded
+  // would wait that long in silence. So a line goes to VOICEVOX only after og-listen's 'warmed'.
+  it('a VOICEVOX voice: loaded as the call starts; a line goes to it only once og-listen says it is loaded — a voice picked mid-call is read by the system voice until then; English always by the system voice', async () => {
+    const cmds = join(dir, 'vv.cmds')
+    const argv = join(dir, 'vv.args')
+    // Says 'warmed' for every warm it is asked (the model echoed back), after recording the command.
+    const bin = fake('vv', [
+      `echo "$@" > '${argv}'`,
+      `warmed() { echo "{\\"type\\":\\"warmed\\",\\"model\\":\\"$(echo "$1" | sed 's/.*"warm":"\\([^"]*\\)".*/\\1/')\\"}"; }`,
+      // The first command (the start's warm) is answered before 'ready'.
+      `read -r l; echo "$l" >> '${cmds}'; warmed "$l"`,
+      `echo '{"type":"ready","echo":"on"}'`,
+      `while read -r l; do echo "$l" >> '${cmds}'; case "$l" in *'"warm"'*) warmed "$l" ;; esac; done`,
+    ].join('\n'))
+    let line: { model: string; style: number } | null = { model: 'n0.vvm', style: 10005 }
+    const read = () => (existsSync(cmds) ? readFileSync(cmds, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>) : [])
+    const got: AssistantListenEvent[] = []
+    const stop = startListening('ja', (e) => {
+      got.push(e)
+      if (e.type !== 'ready') return
+      voiceCommand({ say: '本日の予定です。', id: '1' })
+      line = { model: '1.vvm', style: 14 } // picked mid-call: not loaded yet
+      voiceCommand({ say: '明日です。', id: '2' })
+    }, bin, { call: true, voicevox: { dir: '/vv', line: () => line } })
+    await vi.waitFor(() => expect(got.filter((e) => e.type === 'warmed').map((e) => e.model)).toEqual(['n0.vvm', '1.vvm']), { timeout: 10_000 })
+    voiceCommand({ say: 'あさってです。', id: '3' })
+    voiceCommand({ say: 'See you.', id: '4' })
+    await vi.waitFor(() => expect(read()).toHaveLength(6), { timeout: 10_000 })
+    stop()
+    expect(readFileSync(argv, 'utf8').trim()).toBe('ja-JP --call --voicevox /vv')
+    expect(read()).toEqual([
+      { warm: 'n0.vvm' },
+      { forget: true, say: '本日の予定です。', id: '1', lang: 'ja-JP', vv: { model: 'n0.vvm', style: 10005 } },
+      { warm: '1.vvm' },
+      { say: '明日です。', id: '2', lang: 'ja-JP' },
+      { say: 'あさってです。', id: '3', lang: 'ja-JP', vv: { model: '1.vvm', style: 14 } },
+      { say: 'See you.', id: '4', lang: 'en-US' },
+    ])
+  })
+
+  // A→B→A: B's load was already under way when A was asked again, so its 'warmed' comes late.
+  // It is not the voice asked for: no line may go to B on its word.
+  it('a late warmed for a voice no longer asked for is not believed', async () => {
+    const cmds = join(dir, 'late.cmds')
+    // Answers the start's warm, and the third warm (A again) with the second's model (B, late).
+    const bin = fake('late', [
+      `n=0`,
+      `echo '{"type":"ready","echo":"on"}'`,
+      `while read -r l; do echo "$l" >> '${cmds}'; case "$l" in *'"warm"'*) n=$((n+1))`,
+      `  [ $n = 1 ] && echo '{"type":"warmed","model":"n0.vvm"}'`,
+      `  [ $n = 3 ] && echo '{"type":"warmed","model":"1.vvm"}' ;; esac; done`,
+    ].join('\n'))
+    const A = { model: 'n0.vvm', style: 10005 }
+    const B = { model: '1.vvm', style: 14 }
+    let line = A
+    const read = () => (existsSync(cmds) ? readFileSync(cmds, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>) : [])
+    const got: AssistantListenEvent[] = []
+    const stop = startListening('ja', (e) => got.push(e), bin, { call: true, voicevox: { dir: '/vv', line: () => line } })
+    await vi.waitFor(() => expect(got.filter((e) => e.type === 'warmed').map((e) => e.model)).toEqual(['n0.vvm']), { timeout: 10_000 })
+    line = B
+    voiceCommand({ say: '一。', id: '1' })
+    line = A
+    voiceCommand({ say: '二。', id: '2' })
+    await vi.waitFor(() => expect(got.filter((e) => e.type === 'warmed').map((e) => e.model)).toEqual(['n0.vvm', '1.vvm']), { timeout: 10_000 })
+    line = B
+    voiceCommand({ say: '三。', id: '3' })
+    await vi.waitFor(() => expect(read().filter((c) => c.say)).toHaveLength(3), { timeout: 10_000 })
+    stop()
+    expect(read().filter((c) => c.say).map((c) => c.vv)).toEqual([undefined, undefined, undefined])
+    expect(read().filter((c) => c.warm).map((c) => c.warm)).toEqual(['n0.vvm', '1.vvm', 'n0.vvm', '1.vvm'])
+  })
+
   it('og-listen is the call\'s voice (--call) only in a call', async () => {
     const bin = fake('args', `echo "{\\"type\\":\\"ready\\",\\"echo\\":\\"$2\\"}"; exec sleep 5`)
     const ready = (o: { call?: boolean }) =>

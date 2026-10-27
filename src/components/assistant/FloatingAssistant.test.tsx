@@ -246,6 +246,29 @@ describe('FloatingAssistant', () => {
     expect(await screen.findByRole('button', { name: 'ハル' })).toBeTruthy()
   })
 
+  it('the call voice: Nemo first, a pick saved, the credits shown; a Mac that cannot make VOICEVOX shows no choice', async () => {
+    Object.assign(cfg, { voice: true, voiceChoice: 'nemo', voicevox: 'missing' })
+    const { unmount } = render(<FloatingAssistant disabled={false} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
+    fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.lookVoice' }))
+    expect(screen.getByRole('button', { name: 'Nemo' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: '冥鳴ひまり' }).getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByText('VOICEVOX Nemo / VOICEVOX:冥鳴ひまり')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '冥鳴ひまり' }))
+    await waitFor(() => expect((cfg as Record<string, unknown>).voiceChoice).toBe('himari'))
+    await waitFor(() => expect(screen.getByRole('button', { name: '冥鳴ひまり' }).getAttribute('aria-pressed')).toBe('true'))
+    unmount()
+
+    // The pick still says Nemo (the default), but this Mac reads with its own voice: nothing to pick, the button says so.
+    Object.assign(cfg, { voicevox: null, voiceChoice: 'nemo' })
+    render(<FloatingAssistant disabled={false} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
+    fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.look' }))
+    expect(screen.getByRole('textbox', { name: 'misc.assistant.name' })).toBeTruthy()
+    expect(screen.queryByRole('group', { name: 'misc.assistant.voice' })).toBeNull()
+    expect(screen.queryByText(/VOICEVOX/)).toBeNull()
+  })
+
   it('is held still and cannot be opened in work mode', async () => {
     render(<FloatingAssistant disabled />)
     const b = (await screen.findByRole('button', { name: 'ノノ' })) as HTMLButtonElement

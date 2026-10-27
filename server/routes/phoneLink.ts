@@ -36,6 +36,7 @@ import {
 } from '@/lib/server/assistantMemory'
 import { getPromptLang } from '@/lib/server/promptLang'
 import { listenBinary, startListening, voiceCommand } from '@/lib/server/assistantListen'
+import { noteVoiceChoice, voiceFilesState, voicevoxDir, voicevoxLine, voicevoxSupported } from '@/lib/server/voicevox'
 import { closeAssistantSession } from '@/lib/server/assistantSession'
 import { clearProposals, listProposals } from '@/lib/server/assistantProposals'
 import { isLockdownEnabledSync } from '@/lib/server/lockdown'
@@ -77,9 +78,18 @@ export const phoneLinkRoutes = new Hono()
   })
   // The assistant's records, kept on this Mac only (assistantMemory.ts): the
   // screen reads them here, the phone through the link (`assistant-history`).
-  .get('/api/phone-link/assistant/log', async (c) =>
-    c.json({ entries: assistantEntriesFor(await readAssistantLog()), memory: await readAssistantMemory(), ...(await readAssistantConfig()), voice: listenBinary() !== null, proposals: listProposals() }),
-  )
+  .get('/api/phone-link/assistant/log', async (c) => {
+    const config = await readAssistantConfig()
+    return c.json({
+      entries: assistantEntriesFor(await readAssistantLog()),
+      memory: await readAssistantMemory(),
+      ...config,
+      voice: listenBinary() !== null,
+      // The call's voices (voicevox.ts): whether this Mac can make them, and where the pick's files are.
+      voicevox: voicevoxSupported() ? voiceFilesState(config.voiceChoice) : null,
+      proposals: listProposals(),
+    })
+  })
   // President call metadata is owned by this app, never injected into Claude's
   // transcript or prompts. The registry resolver validates the incoming path.
   .get('/api/phone-link/call-notes', async (c) => {
@@ -118,8 +128,12 @@ export const phoneLinkRoutes = new Hono()
   .delete('/api/phone-link/assistant/memory', async (c) => (await clearAssistantMemory(), closeAssistantSession(), c.json({ ok: true })))
   // How many days the log is kept, how long the memo may be.
   .post('/api/phone-link/assistant/config', async (c) => {
-    const r = await saveAssistantConfig(await c.req.json().catch(() => ({})))
-    return 'error' in r ? c.json(r, 400) : c.json(r)
+    const patch = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+    const r = await saveAssistantConfig(patch)
+    if ('error' in r) return c.json(r, 400)
+    // A voice pick fetches its files now (a call in progress reads its next line with it once there).
+    if (patch.voiceChoice !== undefined) noteVoiceChoice(r.voiceChoice)
+    return c.json(r)
   })
   // Voice in (assistantListen.ts): what the owner says, as it is heard, while
   // the screen keeps this stream open. Closing it stops the listening.
@@ -132,7 +146,10 @@ export const phoneLinkRoutes = new Hono()
     if (isLockdownEnabledSync()) return c.json({ error: 'work-mode' }, 409)
     if (!listenBinary()) return c.json({ error: 'unavailable' }, 404)
     const lang = c.req.query('lang') === 'en' ? 'en' : 'ja'
+    const call = c.req.query('call') === '1'
     return streamSSE(c, async (stream) => {
+      // A call reads with the owner's pick; its files are fetched now when missing (voicevox.ts).
+      if (call) noteVoiceChoice((await readAssistantConfig()).voiceChoice)
       // The window may hang up while the owner check above is still waiting —
       // then the stream never sees an abort, and ears started now would stay
       // open with nobody listening. The request's own signal does know.
@@ -147,10 +164,10 @@ export const phoneLinkRoutes = new Hono()
         let wrote = Promise.resolve()
         // In a call (`call=1`) the ears are its voice too (POST …/voice).
         stop = startListening(lang, (e) => {
-          if (e.type === 'level') return
+          if (e.type === 'level' || e.type === 'warmed') return
           wrote = wrote.then(() => stream.writeSSE({ data: JSON.stringify(e) })).catch(() => {})
           if (e.type === 'error') void wrote.then(done)
-        }, undefined, { call: c.req.query('call') === '1' })
+        }, undefined, { call, ...(call && voicevoxSupported() ? { voicevox: { dir: voicevoxDir(), line: voicevoxLine } } : {}) })
       })
       stop()
     })

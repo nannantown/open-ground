@@ -5,6 +5,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 export type AssistantLook = 'verm' | 'moss' | 'ochre' | 'ink'
+/** Who reads a call aloud (assistantMemory.ts ASSISTANT_VOICES): VOICEVOX made on this Mac, or the system voice. */
+export type AssistantVoice = 'nemo' | 'himari' | 'system'
+/** Where the pick's VOICEVOX files are (voicevox.ts); null = this Mac cannot make them. */
+export type VoiceFiles = 'ready' | 'getting' | 'missing' | null
 /** A proposal as the server lists it (assistantProposals.ts ShownProposal). */
 export interface AssistantProposalView {
   id: string
@@ -36,6 +40,8 @@ interface LogResponse {
   entries: AssistantLine[]
   name: string
   look: AssistantLook
+  voiceChoice?: AssistantVoice
+  voicevox?: VoiceFiles
   /** This Mac can listen (macOS, og-listen built): show the mic. */
   voice?: boolean
   /** The proposals the frames show. */
@@ -55,6 +61,8 @@ export interface AssistantState {
   lines: AssistantLine[]
   name: string
   look: AssistantLook
+  voiceChoice: AssistantVoice
+  voicevox: VoiceFiles
   /** The owner's line still being answered (shown at once, before the log has it). */
   pending: string | null
   /** The photo (data URL) sent with the pending line, if any. */
@@ -83,7 +91,7 @@ export interface AssistantState {
   say: (text: string, onReply?: (reply: string, speak: string, said: boolean) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream) => Promise<boolean>
   /** The owner stopped the reading of the last answer: what of it they heard ('' = none). */
   hush: (heard: string) => Promise<void>
-  saveLook: (patch: { name?: string; look?: AssistantLook }) => Promise<boolean>
+  saveLook: (patch: { name?: string; look?: AssistantLook; voiceChoice?: AssistantVoice }) => Promise<boolean>
 }
 
 /** Plain words for a refused or failed line, by the server's reason. */
@@ -162,7 +170,15 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
     const d = (await r.json().catch(() => null)) as LogResponse | null
     if (n !== readSeq.current) return 'stale'
     if (!d) return 'failed'
-    setData({ entries: d.entries ?? [], name: d.name ?? '', look: d.look ?? 'verm', voice: d.voice === true, proposals: Array.isArray(d.proposals) ? d.proposals : [] })
+    setData({
+      entries: d.entries ?? [],
+      name: d.name ?? '',
+      look: d.look ?? 'verm',
+      voiceChoice: d.voiceChoice ?? 'nemo',
+      voicevox: d.voicevox ?? null,
+      voice: d.voice === true,
+      proposals: Array.isArray(d.proposals) ? d.proposals : [],
+    })
     return 'ok'
   }, [])
 
@@ -289,7 +305,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
   }, [])
 
   const saveLook = useCallback(
-    async (patch: { name?: string; look?: AssistantLook }) => {
+    async (patch: { name?: string; look?: AssistantLook; voiceChoice?: AssistantVoice }) => {
       const r = await fetch(`${API}/config`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -306,6 +322,8 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
     lines: data?.entries ?? [],
     name: data?.name ?? '',
     look: data?.look ?? 'verm',
+    voiceChoice: data?.voiceChoice ?? 'nemo',
+    voicevox: data?.voicevox ?? null,
     pending,
     pendingPhoto,
     interim,

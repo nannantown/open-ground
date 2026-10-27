@@ -10,7 +10,7 @@ import { ArrowUp, ImagePlus, Mic, MessagesSquare, Phone, X } from 'lucide-react'
 import { AssistantCall, type CallPhase } from './AssistantCall'
 import { AssistantMark, LOOK_COLOR } from './AssistantMark'
 import { ASSISTANT_DEFAULT_POS, ASSISTANT_SIZE, ASSISTANT_WINDOW_ATTR, publishAssistantSpot } from './assistantWindow'
-import { PHOTO_MAX_BYTES, PHOTO_TYPES, photoUrl, useAssistant, type AssistantLook } from './useAssistant'
+import { PHOTO_MAX_BYTES, PHOTO_TYPES, photoUrl, useAssistant, type AssistantLook, type AssistantVoice } from './useAssistant'
 import { ProposalFrames } from './ProposalFrames'
 import { useCallVoice, useListen, useOtherSpeech } from './useVoice'
 
@@ -32,6 +32,7 @@ export const joinHeard = (typed: string, heard: string) => (/[^\s\u3000-\u30ff\u
 /** A press that moves less than this is a click, not a drag. */
 const DRAG_PX = 4
 const LOOKS: AssistantLook[] = ['verm', 'moss', 'ochre', 'ink']
+const VOICES: AssistantVoice[] = ['nemo', 'himari', 'system']
 /** The server's limit for one line (ASSISTANT_SAY_MAX in phoneAssistant.ts). */
 const SAY_MAX = 2000
 
@@ -642,6 +643,27 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
               ))}
             </div>
           )}
+          {/* The call's voice (owner 2026-10-27: the iPhone's — Nemo first). The credits are the voices' terms. */}
+          {/* No VOICEVOX here (not Apple Silicon): the Mac's voice is the only one — nothing to pick. */}
+          {editing && a.voice && a.voicevox !== null && (
+            <div className="flex flex-col gap-1" data-testid="assistant-voice">
+              <div role="group" aria-label={t('misc.assistant.voice')} className="flex flex-wrap items-center gap-1">
+                {VOICES.map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    aria-pressed={a.voiceChoice === v}
+                    onClick={() => void a.saveLook({ voiceChoice: v })}
+                    className={`rounded-full border border-line-strong px-2.5 py-0.5 text-ui text-ink-muted transition-colors duration-150 hover:border-ink-subtle hover:bg-plane hover:text-ink active:bg-line aria-pressed:border-ink aria-pressed:bg-ink aria-pressed:text-bg aria-pressed:hover:bg-ink-muted disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
+                  >
+                    {v === 'nemo' ? 'Nemo' : v === 'himari' ? '冥鳴ひまり' : t('misc.assistant.voice.system')}
+                  </button>
+                ))}
+                {a.voicevox === 'getting' && a.voiceChoice !== 'system' && <span className="text-ui text-ink-muted">{t('misc.assistant.voice.getting')}</span>}
+              </div>
+              <span className="text-ui text-ink-muted">VOICEVOX Nemo / VOICEVOX:冥鳴ひまり</span>
+            </div>
+          )}
           {photo && (
             <div className="relative self-start" data-testid="assistant-photo-preview">
               <img src={photo} alt={t('misc.assistant.photo')} className="size-16 rounded-[10px] border border-line object-cover" />
@@ -666,7 +688,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
                 type="button"
                 onClick={() => setEditing((v) => !v)}
                 aria-pressed={editing}
-                title={t('misc.assistant.look')}
+                title={t(a.voice && a.voicevox !== null ? 'misc.assistant.lookVoice' : 'misc.assistant.look')}
                 className={`grid size-8 place-items-center rounded-full transition-colors duration-150 hover:bg-plane active:bg-line aria-pressed:bg-accent-soft ${focusRing}`}
               >
                 <AssistantMark look={a.look} size={24} mode={a.pending !== null ? 'think' : 'idle'} />

@@ -3633,8 +3633,9 @@ export interface AssistantListenEvent {
    *  now), 'spoke' (`id` read to the end), 'barge' (the owner talked over it: it
    *  stopped, the words follow as partial/final). 'fed': measuring only (og-listen --call --feed).
    *  'level': og-listen → server only, the mic every 0.1 s while it reads;
-   *  'paused'/'resumed': the reading held while someone may be talking, then going on. */
-  type: 'ready' | 'partial' | 'final' | 'error' | 'speak' | 'spoke' | 'barge' | 'fed' | 'level' | 'paused' | 'resumed'
+   *  'paused'/'resumed': the reading held while someone may be talking, then going on.
+   *  'warmed': og-listen → server only, VOICEVOX voice `model` is loaded and reads without a wait. */
+  type: 'ready' | 'partial' | 'final' | 'error' | 'speak' | 'spoke' | 'barge' | 'fed' | 'level' | 'paused' | 'resumed' | 'warmed'
   text?: string
   /** On 'error': 'denied' (no permission) | 'unavailable' | 'failed'. */
   reason?: string
@@ -3648,4 +3649,6 @@ export interface AssistantListenEvent {
   /** On 'ready' in a call: 'on' = echo removal; 'apart' = none, the mic is not in the box the voice
    *  comes out of (an interface's stand-in mic); 'off' = neither — nothing heard while it reads counts. */
   echo?: 'on' | 'apart' | 'off'
+  /** On 'warmed': the voice file (n0.vvm …). */
+  model?: string
 }

@@ -20,7 +20,7 @@ try {
     const out = `bin/.og-listen-${arch}`
     execFileSync(
       'swiftc',
-      ['-O', '-swift-version', '5', '-target', `${arch}-apple-macos12`, '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', plist, src, '-o', out],
+      ['-O', '-swift-version', '5', '-target', `${arch}-apple-macos12`, '-Xlinker', '-sectcreate', '-Xlinker', '__TEXT', '-Xlinker', '__info_plist', '-Xlinker', plist, '-import-objc-header', 'native/og-listen/voicevox.h', src, '-o', out],
       { stdio: 'inherit' },
     )
     return out

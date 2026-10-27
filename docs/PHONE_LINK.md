@@ -6,6 +6,12 @@ the president's replies as they happen, and talk back (push-to-talk) — plus, s
 2026-10-02, an **assistant** that looks across all projects (see "The assistant"). This page
 is the **whole contract for the iPhone app** — build against it alone.
 
+**Look and operation are not here.** How the chat looks and is used on both
+the iPhone and the Mac (parts, words, colours, type, call keys, states) is
+[docs/CHAT_SPEC.md](CHAT_SPEC.md); this page is only the wire between them.
+A chat change that needs a new frame or field edits both: the behaviour there,
+the frame here (2026-10-27).
+
 Free to run: a Cloudflare Workers free-plan relay, the owner's Claude
 subscription (the president is an ordinary OPEN GROUND desk), and the iPhone's
 built-in speech recognition / text-to-speech. No API keys anywhere.
@@ -701,7 +707,13 @@ nothing on the wire changes. Spec: docs/ASSISTANT_DESIGN.md §1.
   `docs/research/voice-assistant-2026-10.md` §8.3).** In a call the window opens
   the ears with `listen?call=1`, and `og-listen --call` is also the voice: it
   renders the line with `AVSpeechSynthesizer.write` (the same system voices
-  Chromium used) and plays it through the very `AVAudioEngine` that listens,
+  Chromium used) — or, for a Japanese line when the owner's pick is a VOICEVOX
+  voice whose files are in place, with VOICEVOX core (`say` carries
+  `vv:{model,style}` only once og-listen has said `warmed` for that voice after
+  a `{warm}` — sent as the call starts and whenever the voice changes — and it
+  is made in short pieces; any failure reads that line with the system voice —
+  docs/ASSISTANT_DESIGN.md §1 "Voice") —
+  and plays it through the very `AVAudioEngine` that listens,
   with Apple's voice processing on — echo removal only takes out what that
   engine plays (WWDC19 510; another app's sound is only ducked, WWDC23 10235).
   The window drives it with `POST …/assistant/voice` `{stop?, say+id?, mute?}`

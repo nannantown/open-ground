@@ -4,7 +4,7 @@
 // never saw that abort, so og-listen kept the mic on).
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const h = vi.hoisted(() => ({ starts: 0, stops: 0, emit: null as null | ((e: object) => void), lockdown: false, opts: [] as unknown[], cmds: [] as unknown[], inCall: true }))
+const h = vi.hoisted(() => ({ starts: 0, stops: 0, emit: null as null | ((e: object) => void), lockdown: false, opts: [] as unknown[], cmds: [] as unknown[], inCall: true, picked: [] as string[] }))
 vi.mock('@/lib/server/lockdown', async (orig) => ({
   ...(await orig<object>()),
   isLockdownEnabledSync: () => h.lockdown,
@@ -24,6 +24,15 @@ vi.mock('@/lib/server/assistantListen', () => ({
   },
 }))
 
+// The VOICEVOX files are never fetched here (voicevox.test.ts covers fetching).
+vi.mock('@/lib/server/voicevox', () => ({
+  noteVoiceChoice: (v: string) => void h.picked.push(v),
+  voiceFilesState: () => 'ready',
+  voicevoxDir: () => '/vv',
+  voicevoxLine: () => null,
+  voicevoxSupported: () => true,
+}))
+
 import { phoneLinkRoutes } from '../routes/phoneLink'
 
 const listen = (signal?: AbortSignal, headers: Record<string, string> = {}) =>
@@ -36,6 +45,7 @@ beforeEach(() => {
   h.emit = null
   h.lockdown = false
   h.opts = []
+  h.picked = []
   h.cmds = []
   h.inCall = true
 })
@@ -118,7 +128,9 @@ describe('the call voice route', () => {
       ac.abort()
       await tick()
     }
-    expect(h.opts).toEqual([{ call: true }, { call: false }])
+    // A call reads with the owner's voice pick (the VOICEVOX folder handed on); typing by voice reads nothing.
+    expect(h.opts).toEqual([{ call: true, voicevox: { dir: '/vv', line: expect.any(Function) } }, { call: false }])
+    expect(h.picked).toEqual(['nemo'])
   })
 
   it('passes on only a stop, a line with its id, a mute — nothing else', async () => {

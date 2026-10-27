@@ -66,6 +66,7 @@ export const misc = {
     // FloatingAssistant (the owner's assistant, floating over every screen)
     'misc.assistant.label': 'Assistant',
     'misc.assistant.look': 'Name and colour',
+    'misc.assistant.lookVoice': 'Name, colour and voice',
     'misc.assistant.name': 'Name',
     'misc.assistant.send': 'Send',
     'misc.assistant.failed': 'The assistant could not answer. Try again.',
@@ -110,6 +111,9 @@ export const misc = {
     'misc.assistant.color.moss': 'Moss',
     'misc.assistant.color.ochre': 'Ochre',
     'misc.assistant.color.ink': 'Ink',
+    'misc.assistant.voice': 'Voice',
+    'misc.assistant.voice.system': 'Mac',
+    'misc.assistant.voice.getting': 'Downloading',
   } as Record<string, string>,
   ja: {
     // SkillPicker
@@ -169,6 +173,7 @@ export const misc = {
     // FloatingAssistant
     'misc.assistant.label': 'アシスタント',
     'misc.assistant.look': '名前と色',
+    'misc.assistant.lookVoice': '名前・色・声',
     'misc.assistant.name': '名前',
     'misc.assistant.send': '送る',
     'misc.assistant.failed': 'アシスタントが答えられませんでした。もう一度どうぞ。',
@@ -213,5 +218,8 @@ export const misc = {
     'misc.assistant.color.moss': '苔',
     'misc.assistant.color.ochre': '黄土',
     'misc.assistant.color.ink': '墨',
+    'misc.assistant.voice': '声',
+    'misc.assistant.voice.system': 'Mac',
+    'misc.assistant.voice.getting': 'ダウンロード中',
   } as Record<string, string>,
 }

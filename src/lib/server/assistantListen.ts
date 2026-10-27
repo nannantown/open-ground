@@ -124,14 +124,24 @@ export const voiceCommand = (cmd: VoiceCommand): boolean => call?.(cmd) ?? false
 
 /** Starts listening; every event goes to onEvent, ending with at most one 'error'.
  *  `call`: also the call's voice (echo removal on, the reading gated by isBargeIn).
+ *  `voicevox`: the call's VOICEVOX voices (voicevox.ts) — the folder og-listen loads
+ *  them from, and the voice a Japanese line is read with right now (null = the system voice).
  *  Returns stop (idempotent; a stopped listener reports nothing more). */
-export const startListening = (lang: 'ja' | 'en', onEvent: (e: ListenEvent) => void, bin = listenBinary(), opts: { call?: boolean } = {}): (() => void) => {
+export const startListening = (
+  lang: 'ja' | 'en',
+  onEvent: (e: ListenEvent) => void,
+  bin = listenBinary(),
+  opts: { call?: boolean; voicevox?: { dir: string; line: () => { model: string; style: number } | null } } = {},
+): (() => void) => {
   if (!bin) {
     onEvent({ type: 'error', reason: 'unavailable' })
     return () => {}
   }
   current?.kill()
-  const child = spawn(bin, [lang === 'en' ? 'en-US' : 'ja-JP', ...(opts.call ? ['--call'] : [])], { stdio: ['pipe', 'pipe', 'ignore'] })
+  const vv = opts.call ? opts.voicevox : undefined
+  const child = spawn(bin, [lang === 'en' ? 'en-US' : 'ja-JP', ...(opts.call ? ['--call'] : []), ...(vv ? ['--voicevox', vv.dir] : [])], {
+    stdio: ['pipe', 'pipe', 'ignore'],
+  })
   current = child
   let ended = false
   const end = (reason: string) => {
@@ -169,8 +179,24 @@ export const startListening = (lang: 'ja' | 'en', onEvent: (e: ListenEvent) => v
     g.holdOffUntil = Date.now() + BARGE.holdOffMs
     tell({ resume: true })
   }
+  // The VOICEVOX voice is loaded ahead (as the call starts, and whenever it changes — picked
+  // mid-call, or its files just arrived), and a line goes to it only once og-listen says it is
+  // loaded ('warmed'): until then the system voice reads, so no line waits seconds for a load.
+  let loaded: string | undefined
+  let asked: string | undefined
+  const line = () => {
+    const l = vv?.line() ?? undefined
+    if (!l) return undefined
+    if (l.model === loaded) return l
+    if (l.model !== asked && tell({ warm: l.model })) {
+      asked = l.model
+      loaded = undefined // og-listen keeps one voice: the loaded one goes when this one comes
+    }
+    return undefined
+  }
   const drive = (cmd: VoiceCommand): boolean => {
     if (ended) return false
+    line()
     if (cmd.mute !== undefined) g.muted = cmd.mute
     // Muted, nothing heard can stop it nor end a pause (levels are skipped): go on now.
     if (g.muted && g.held && !cmd.stop) unhold()
@@ -198,12 +224,13 @@ export const startListening = (lang: 'ja' | 'en', onEvent: (e: ListenEvent) => v
     return tell({
       ...(cmd.stop ? { stop: true } : {}),
       ...(forget ? { forget: true } : {}),
-      ...(say !== undefined ? { say, id: cmd.id, lang } : {}),
+      ...(say !== undefined ? { say, id: cmd.id, lang, ...(vv && lang === 'ja-JP' ? { vv: line() } : {}) } : {}),
       ...(cmd.mute !== undefined ? { mute: cmd.mute } : {}),
       ...(cmd.feed ? { feed: true } : {}),
     })
   }
   if (opts.call) call = drive
+  line()
   /** Heard words while it reads: dropped unless the owner is talking over it. */
   const pass = (e: ListenEvent): boolean => {
     if (g.muted) return false
@@ -233,7 +260,11 @@ export const startListening = (lang: 'ja' | 'en', onEvent: (e: ListenEvent) => v
       }
       if (e.type === 'error') end(e.reason ?? 'failed')
       else if (ended) continue
-      else if (e.type === 'ready') {
+      else if (e.type === 'warmed') {
+        // Only the voice asked for: a late 'warmed' of an older ask (A→B→A) is not the one coming.
+        if (e.model === asked) loaded = e.model
+        onEvent(e) // for a test or a measurement; the route does not pass it on
+      } else if (e.type === 'ready') {
         // No echo removal (the device would not take it): nothing heard while it reads counts.
         g.echoOff = opts.call === true && e.echo === 'off'
         // Same for a pause when echo removal went away (a restart on another device).

@@ -64,6 +64,8 @@ let args = CommandLine.arguments
 let locale = Locale(identifier: args.count > 1 && !args[1].hasPrefix("-") ? args[1] : "ja-JP")
 let callMode = args.contains("--call")
 let fileArg: String? = args.firstIndex(of: "--file").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+/** `--voicevox <dir>`: the call's VOICEVOX voices are made from there (Vox). */
+let vox: Vox? = args.firstIndex(of: "--voicevox").flatMap { $0 + 1 < args.count ? Vox(dir: args[$0 + 1]) : nil }
 // Checks without listening: `--choose <default channels> <built-in 0|1> <lid shut 0|1> [<default is built-in 0|1>]`
 // prints the rule's answer; `--which` prints what this Mac would listen on now.
 if let i = args.firstIndex(of: "--choose"), i + 3 < args.count, let ch = Int(args[i + 1]) {
@@ -76,6 +78,12 @@ if let i = args.firstIndex(of: "--pause"), i + 1 < args.count {
   emit(["type": "pause", "seconds": String(pauseFor(args[i + 1]))])
   exit(0)
 }
+// `--parts <text>` prints the pieces VOICEVOX would make it in (vvParts; null = the system voice reads it).
+if let i = args.firstIndex(of: "--parts"), i + 1 < args.count {
+  emit(["type": "parts", "parts": vvParts(args[i + 1]) as Any? ?? NSNull()])
+  exit(0)
+}
+
 let feedArg: String? = args.firstIndex(of: "--feed").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
 if args.contains("--which") {
   let d = pickInput()
@@ -104,13 +112,15 @@ func pauseFor(_ text: String) -> Double {
 guard let recognizer = SFSpeechRecognizer(locale: locale) else { fail("unavailable") }
 
 // The parent going away closes our stdin: stop listening with it. In a call
-// stdin also carries what to say (Voice.handle).
-DispatchQueue.global().async {
-  while let line = readLine() {
-    guard callMode, let data = line.data(using: .utf8), let cmd = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-    DispatchQueue.main.async { listener.command(cmd) }
+// stdin also carries what to say (Voice.handle). --tts listens to nothing and ends by itself.
+if !args.contains("--tts") {
+  DispatchQueue.global().async {
+    while let line = readLine() {
+      guard callMode, let data = line.data(using: .utf8), let cmd = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+      DispatchQueue.main.async { listener.command(cmd) }
+    }
+    exit(0)
   }
-  exit(0)
 }
 
 
@@ -213,6 +223,239 @@ func mono(_ buf: AVAudioPCMBuffer, _ format: AVAudioFormat) -> AVAudioPCMBuffer?
   return out
 }
 
+/** VOICEVOX core 0.17.0 — the call's Nemo / 冥鳴ひまり (owner 2026-10-27: the
+ *  iPhone's voices, made on this Mac). Not linked nor shipped: opened by path
+ *  from `dir`, where src/lib/server/voicevox.ts puts the library, ONNX Runtime,
+ *  the dictionary and the voices (voicevox.h has the declarations). Everything
+ *  native runs on its own queue, one call at a time (a model is never used twice
+ *  at once); `wav` takes about a short sentence. One voice resident (about
+ *  0.5 GB), two for a moment while a switch loads the new one. Only `warm` loads:
+ *  `wav` reads with the loaded voice or not at all, so no line ever waits seconds
+ *  for a load. nil = not now: the system voice reads that line, never silence. */
+final class Vox {
+  let dir: String
+  private let queue = DispatchQueue(label: "voicevox", qos: .userInitiated)
+  /** The newest warm asked for (main thread writes, the queue reads): an older one still waiting is
+   *  skipped. `settled` = the last one through the queue; while they differ a load is waiting or under
+   *  way, and `wav` answers nil at once instead of queueing behind it. */
+  private let asked = NSLock()
+  private var newest = 0
+  private var settled = 0
+  // `queue` only:
+  private var api: API?
+  private var broken = false // the library, ONNX Runtime, the dictionary or the engine would not start: the system voice until the call ends
+  private var ort: OpaquePointer?
+  private var jtalk: OpaquePointer?
+  private var synth: OpaquePointer?
+  private var model: String?
+  /** Voices that would not load: not tried again this call (each try costs seconds before the system voice reads). */
+  private var failed: Set<String> = []
+
+  init(dir: String) { self.dir = dir }
+
+  struct API {
+    let ortOptions: vv_make_default_load_onnxruntime_options
+    let ortLoad: vv_onnxruntime_load_once
+    let jtalkNew: vv_open_jtalk_rc_new
+    let initOptions: vv_make_default_initialize_options
+    let synthNew: vv_synthesizer_new
+    let synthDelete: vv_synthesizer_delete
+    let fileOpen: vv_voice_model_file_open
+    let fileDelete: vv_voice_model_file_delete
+    let modelOptions: vv_make_default_load_voice_model_options
+    let loadModel: vv_synthesizer_load_voice_model
+    let ttsOptions: vv_make_default_tts_options
+    let tts: vv_synthesizer_tts
+    let wavFree: vv_wav_free
+    let message: vv_error_result_to_message
+
+    init?(_ h: UnsafeMutableRawPointer) {
+      func f<T>(_ name: String) -> T? { dlsym(h, name).map { unsafeBitCast($0, to: T.self) } }
+      guard let a: vv_make_default_load_onnxruntime_options = f("voicevox_make_default_load_onnxruntime_options"),
+        let b: vv_onnxruntime_load_once = f("voicevox_onnxruntime_load_once"),
+        let c: vv_open_jtalk_rc_new = f("voicevox_open_jtalk_rc_new"),
+        let d: vv_make_default_initialize_options = f("voicevox_make_default_initialize_options"),
+        let e: vv_synthesizer_new = f("voicevox_synthesizer_new"),
+        let g: vv_synthesizer_delete = f("voicevox_synthesizer_delete"),
+        let i: vv_voice_model_file_open = f("voicevox_voice_model_file_open"),
+        let j: vv_voice_model_file_delete = f("voicevox_voice_model_file_delete"),
+        let k: vv_make_default_load_voice_model_options = f("voicevox_make_default_load_voice_model_options"),
+        let l: vv_synthesizer_load_voice_model = f("voicevox_synthesizer_load_voice_model"),
+        let m: vv_make_default_tts_options = f("voicevox_make_default_tts_options"),
+        let n: vv_synthesizer_tts = f("voicevox_synthesizer_tts"),
+        let o: vv_wav_free = f("voicevox_wav_free"),
+        let p: vv_error_result_to_message = f("voicevox_error_result_to_message")
+      else { return nil }
+      (ortOptions, ortLoad, jtalkNew, initOptions, synthNew, synthDelete) = (a, b, c, d, e, g)
+      (fileOpen, fileDelete, modelOptions, loadModel, ttsOptions, tts, wavFree, message) = (i, j, k, l, m, n, o, p)
+    }
+  }
+
+  /** Loads `name` (seconds) — the only way a voice gets loaded — then says {"type":"warmed"} (or
+   *  calls `done`): the server sends lines to a voice only after that (assistantListen.ts). A warm
+   *  with a newer one behind it is skipped (quick switches A→B→A: no stale load, no stale warmed). */
+  func warm(_ name: String, _ done: ((Bool) -> Void)? = nil) {
+    asked.lock()
+    newest += 1
+    let mine = newest
+    asked.unlock()
+    queue.async {
+      self.asked.lock()
+      let stale = mine != self.newest
+      self.asked.unlock()
+      let ok = !stale && self.load(name)
+      self.asked.lock()
+      self.settled = mine
+      self.asked.unlock()
+      DispatchQueue.main.async {
+        if let done { return done(ok) }
+        if ok { emit(["type": "warmed", "model": name]) }
+      }
+    }
+  }
+
+  /** One line in `name`'s voice `style`, as a WAV, on the main thread. nil = not now — also when
+   *  `name` is not the loaded voice or a warm is waiting (a switch underway): never loaded here, never
+   *  queued behind a load — the system voice reads it. */
+  func wav(_ text: String, model name: String, style: UInt32, _ done: @escaping (Data?) -> Void) {
+    asked.lock()
+    let switching = settled != newest
+    asked.unlock()
+    if switching { return DispatchQueue.main.async { done(nil) } }
+    queue.async {
+      var out: Data?
+      if !self.broken, self.model == name, let api = self.api, let synth = self.synth {
+        var length: UInt = 0
+        var bytes: UnsafeMutablePointer<UInt8>?
+        let r = text.withCString { api.tts(synth, $0, style, api.ttsOptions(), &length, &bytes) }
+        if r == 0, let bytes {
+          out = Data(bytes: bytes, count: Int(length))
+          api.wavFree(bytes)
+        } else { self.note("tts", r) }
+      }
+      DispatchQueue.main.async { done(out) }
+    }
+  }
+
+  private func note(_ what: String, _ r: Int32) {
+    let m = api.flatMap { $0.message(r) }.map { String(cString: $0) } ?? "\(r)"
+    FileHandle.standardError.write("voicevox \(what): \(m)\n".data(using: .utf8)!)
+  }
+
+  /** `queue` only. The synthesizer with `name` in it; false = cannot now. */
+  private func load(_ name: String) -> Bool {
+    if broken { return false }
+    if api == nil {
+      guard let h = dlopen("\(dir)/libvoicevox_core.dylib", RTLD_NOW | RTLD_LOCAL), let a = API(h) else {
+        broken = true
+        FileHandle.standardError.write("voicevox: \(String(cString: dlerror()))\n".data(using: .utf8)!)
+        return false
+      }
+      api = a
+    }
+    guard let api else { return false }
+    if ort == nil {
+      var o = api.ortOptions()
+      let r = "\(dir)/libvoicevox_onnxruntime.dylib".withCString { path -> Int32 in
+        o.filename = path
+        return api.ortLoad(o, &ort)
+      }
+      guard r == 0, ort != nil else { broken = true; note("onnxruntime", r); return false }
+    }
+    if jtalk == nil {
+      let r = api.jtalkNew("\(dir)/open_jtalk_dic_utf_8-1.11", &jtalk)
+      guard r == 0 else { broken = true; note("dictionary", r); return false }
+    }
+    if synth != nil, model == name { return true }
+    if failed.contains(name) { return false }
+    // Into a synthesizer of its own: the loaded voice (another picked mid-call) is let go only once
+    // this one is in, so a voice that cannot be read leaves it in place.
+    var file: OpaquePointer?
+    var r = api.fileOpen("\(dir)/\(name)", &file)
+    defer { if let file { api.fileDelete(file) } }
+    guard r == 0 else { failed.insert(name); note("model \(name)", r); return false }
+    var fresh: OpaquePointer?
+    r = api.synthNew(ort, jtalk, api.initOptions(), &fresh)
+    guard r == 0, let fresh else { broken = true; note("engine", r); return false }
+    r = api.loadModel(fresh, file, api.modelOptions())
+    guard r == 0 else { api.synthDelete(fresh); failed.insert(name); note("model \(name)", r); return false }
+    if let synth { api.synthDelete(synth) }
+    synth = fresh
+    model = name
+    return true
+  }
+}
+
+/** A VOICEVOX line in pieces of at most `VVPiece.part` characters, cut after 、。！？ and the like: each
+ *  piece is made on its own, so a stop leaves at most one short piece being made (a render cannot
+ *  be cancelled) and the next answer is not kept waiting behind a long line. nil = a stretch with
+ *  no break longer than `VVPiece.longest`: the system voice reads the line. ponytail: fixed lengths,
+ *  measured 2026-10-27 (scripts/measure-voice-first.mts); a setting if another Mac needs another. */
+enum VVPiece {
+  static let part = 12
+  /// A stretch with no break longer than this goes to the system voice (its render would hold a stop up).
+  static let longest = 48
+}
+func vvParts(_ text: String) -> [String]? {
+  let chars = Array(text)
+  var clauses: [String] = []
+  var cur = ""
+  for (i, ch) in chars.enumerated() {
+    // A closing bracket right after a break belongs to the piece it closes (「了解しました。」).
+    if cur.isEmpty, !clauses.isEmpty, "」』）)】〉》\"'”’".contains(ch) {
+      clauses[clauses.count - 1].append(ch)
+      continue
+    }
+    cur.append(ch)
+    // Full-width marks and ! ? always (never inside a number); half-width , . ; : only before a space
+    // or the end, so 1,234 / 10:30 / 3.5 stay whole.
+    let last = i + 1 == chars.count || chars[i + 1].isWhitespace
+    if "、。，．！？；：\n!?".contains(ch) || (",.;:".contains(ch) && last) {
+      clauses.append(cur)
+      cur = ""
+    }
+  }
+  if !cur.isEmpty { clauses.append(cur) }
+  var parts: [String] = []
+  for c in clauses {
+    if c.count > VVPiece.longest { return nil }
+    // Joined up to VVPiece.part, never across a sentence end (its fall in pitch belongs at the end of a piece).
+    if let last = parts.last, let end = last.last, !"。．！？!?\n".contains(end), last.count + c.count <= VVPiece.part {
+      parts[parts.count - 1] = last + c
+    } else {
+      parts.append(c)
+    }
+  }
+  parts = parts.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+  return parts.isEmpty ? nil : parts
+}
+
+/** A 16-bit mono WAV (what VOICEVOX makes: 24 kHz) as a float buffer at its own rate. */
+func pcm(wav: Data) -> AVAudioPCMBuffer? {
+  let b = [UInt8](wav)
+  func u16(_ i: Int) -> Int { Int(b[i]) | Int(b[i + 1]) << 8 }
+  func u32(_ i: Int) -> Int { u16(i) | u16(i + 2) << 16 }
+  guard b.count >= 12, b[8..<12].elementsEqual("WAVE".utf8) else { return nil }
+  var at = 12, rate = 0, channels = 0, bits = 0
+  while at + 8 <= b.count {
+    let size = u32(at + 4), body = at + 8
+    if b[at..<at + 4].elementsEqual("fmt ".utf8), body + 16 <= b.count {
+      (channels, rate, bits) = (u16(body + 2), u32(body + 4), u16(body + 14))
+    } else if b[at..<at + 4].elementsEqual("data".utf8) {
+      guard channels == 1, bits == 16, rate > 0,
+        let f = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Double(rate), channels: 1, interleaved: false)
+      else { return nil }
+      let n = max(0, min(size, b.count - body)) / 2
+      guard n > 0, let buf = AVAudioPCMBuffer(pcmFormat: f, frameCapacity: AVAudioFrameCount(n)), let x = buf.floatChannelData?[0] else { return nil }
+      for i in 0..<n { x[i] = Float(Int16(bitPattern: UInt16(u16(body + 2 * i)))) / 32768 }
+      buf.frameLength = AVAudioFrameCount(n)
+      return buf
+    }
+    at = body + size + (size & 1)
+  }
+  return nil
+}
+
 /** The call's voice: the system voice (what Chromium's speechSynthesis used on
  *  macOS — the same voices) rendered to buffers and played on the listening
  *  engine, so echo removal knows it. One line at a time, in order. Main thread. */
@@ -220,7 +463,8 @@ final class Voice {
   let synth = AVSpeechSynthesizer() // held: its buffers stop if it goes
   let player = AVAudioPlayerNode()
   var format: AVAudioFormat?
-  typealias Line = (id: String, text: String, lang: String)
+  /** `vv`: the VOICEVOX voice to read it with (Vox), nil = the system voice. */
+  typealias Line = (id: String, text: String, lang: String, vv: (model: String, style: UInt32)?)
   var queue: [Line] = []
   /** The lines begun (being rendered or played), by id: what a restart reads again. */
   var begun: [String: Line] = [:]
@@ -289,8 +533,8 @@ final class Voice {
     next() // a line asked for before the engine was up
   }
 
-  func say(_ text: String, id: String, lang: String) {
-    queue.append((id, text, lang))
+  func say(_ text: String, id: String, lang: String, vv: (model: String, style: UInt32)? = nil) {
+    queue.append((id, text, lang, vv))
     next()
   }
 
@@ -311,7 +555,7 @@ final class Voice {
     let lines = ids.compactMap { begun[$0] } + queue
     halt()
     start()
-    for l in lines { say(l.text, id: l.id, lang: l.lang) }
+    for l in lines { say(l.text, id: l.id, lang: l.lang, vv: l.vv) }
   }
 
   func halt() {
@@ -328,13 +572,54 @@ final class Voice {
 
   /** Renders the next line; its buffers are scheduled as they come. */
   func next() {
-    guard !writing, !queue.isEmpty, let format else { return }
-    let (id, text, lang) = queue.removeFirst()
-    begun[id] = (id, text, lang)
-    writingId = id
+    guard !writing, !queue.isEmpty, format != nil else { return }
+    let line = queue.removeFirst()
+    begun[line.id] = line
+    writingId = line.id
     writing = true
     let g = gen
-    var started = false
+    // A VOICEVOX piece comes whole (vvParts); while one plays the next is made.
+    if let vv = line.vv, vox != nil, let parts = vvParts(line.text) { return render(line, vv, parts[...], g, begun: false) }
+    system(line, g)
+  }
+
+  /** The VOICEVOX pieces of `line`, one after another. Anything that fails: the rest in the system voice. */
+  func render(_ line: Line, _ vv: (model: String, style: UInt32), _ parts: ArraySlice<String>, _ g: Int, begun: Bool) {
+    guard let part = parts.first, let vox else { return }
+    vox.wav(part, model: vv.model, style: vv.style) { [weak self] wav in
+      // A stop meanwhile (gen): nothing more of this line is made.
+      guard let self, g == self.gen, let format = self.format else { return }
+      guard let wav, let p = pcm(wav: wav), let b = self.convert(p, to: format, whole: true) else {
+        return self.system((line.id, parts.joined(), line.lang, nil), g, begun: begun)
+      }
+      if !begun { self.started(line.id) }
+      self.play(b, nil)
+      if parts.count > 1 { self.render(line, vv, parts.dropFirst(), g, begun: true) } else { self.ended(line.id, g, format) }
+    }
+  }
+
+  /** Someone began to be heard: told when it is the first in line. */
+  func started(_ id: String) {
+    ahead.append(id)
+    if ahead.count == 1 { emit(["type": "speak", "id": id]) }
+  }
+
+  /** All of `id` is scheduled: a moment of silence whose playing-out marks it heard; the next line is made. */
+  func ended(_ id: String, _ g: Int, _ format: AVAudioFormat) {
+    if let tail = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1) {
+      tail.frameLength = 1
+      play(tail) { [weak self] in self?.done(id, g) }
+    }
+    writing = false
+    writingId = nil
+    next()
+  }
+
+  /** The system voice, its buffers scheduled as they come. `begun`: the line is already being heard (its rest). */
+  func system(_ line: Line, _ g: Int, begun: Bool = false) {
+    guard let format else { return }
+    let (id, text, lang) = (line.id, line.text, line.lang)
+    var started = begun
     let u = AVSpeechUtterance(string: text)
     u.voice = AVSpeechSynthesisVoice(language: lang)
     synth.write(u) { [weak self] buffer in
@@ -343,18 +628,10 @@ final class Voice {
         guard let self, g == self.gen else { return }
         if !started {
           started = true
-          self.ahead.append(id)
-          if self.ahead.count == 1 { emit(["type": "speak", "id": id]) }
+          self.started(id)
         }
         if pcm.frameLength == 0 {
-          // Its end: a moment of silence whose playing-out marks the line heard.
-          if let tail = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1) {
-            tail.frameLength = 1
-            self.play(tail) { [weak self] in self?.done(id, g) }
-          }
-          self.writing = false
-          self.writingId = nil
-          self.next()
+          self.ended(id, g, format)
         } else if let b = self.convert(pcm, to: format) {
           self.play(b, nil)
         }
@@ -384,16 +661,17 @@ final class Voice {
     if let n = ahead.first { emit(["type": "speak", "id": n]) }
   }
 
-  func convert(_ pcm: AVAudioPCMBuffer, to format: AVAudioFormat) -> AVAudioPCMBuffer? {
+  /** `whole`: all of a line in one buffer (VOICEVOX) — converted on its own and flushed to its last sample. */
+  func convert(_ pcm: AVAudioPCMBuffer, to format: AVAudioFormat, whole: Bool = false) -> AVAudioPCMBuffer? {
     if pcm.format == format { return pcm }
-    if converter?.inputFormat != pcm.format { converter = AVAudioConverter(from: pcm.format, to: format) }
-    guard let converter else { return nil }
+    if !whole, converter?.inputFormat != pcm.format { converter = AVAudioConverter(from: pcm.format, to: format) }
+    guard let converter = whole ? AVAudioConverter(from: pcm.format, to: format) : converter else { return nil }
     let cap = AVAudioFrameCount(Double(pcm.frameLength) * format.sampleRate / pcm.format.sampleRate) + 32
     guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: cap) else { return nil }
     var fed = false
     var err: NSError?
     converter.convert(to: out, error: &err) { _, status in
-      if fed { status.pointee = .noDataNow; return nil }
+      if fed { status.pointee = whole ? .endOfStream : .noDataNow; return nil }
       fed = true
       status.pointee = .haveData
       return pcm
@@ -599,6 +877,7 @@ final class Listener {
   /** stdin in a call: what to say, stop, mute. */
   func command(_ cmd: [String: Any]) {
     if cmd["feed"] as? Bool == true { lock.lock(); mixAt = 0; lock.unlock() }
+    if let m = cmd["warm"] as? String { vox?.warm(m) }
     if let m = cmd["mute"] as? Bool, m != muted {
       muted = m
       if echo { engine.inputNode.isVoiceProcessingInputMuted = m }
@@ -617,7 +896,11 @@ final class Listener {
       emit(["type": "resumed"])
     }
     if let text = cmd["say"] as? String, let id = cmd["id"] as? String {
-      voice.say(text, id: id, lang: cmd["lang"] as? String ?? "ja-JP")
+      let vv = (cmd["vv"] as? [String: Any]).flatMap { v -> (model: String, style: UInt32)? in
+        guard let m = v["model"] as? String, let s = v["style"] as? Int, s >= 0 else { return nil }
+        return (m, UInt32(s))
+      }
+      voice.say(text, id: id, lang: cmd["lang"] as? String ?? "ja-JP", vv: vv)
     }
   }
 
@@ -748,6 +1031,91 @@ func recognizeFile(_ path: String) {
   }
   r.append(m)
   r.endAudio()
+}
+
+/** `--tts <text> <out.wav> [--voicevox <dir> --vv <model> <style> [--after <text>] [--whole] [--warmed <m>] [--switch <m>]]`: makes one line into a file, never
+ *  through the speaker, and prints how long the first sound took (ms) — the call's first-sentence wait,
+ *  per voice (scripts/measure-voice-first.mts). `load`: VOICEVOX's one-time start, before the line. */
+if let i = args.firstIndex(of: "--tts"), i + 2 < args.count {
+  let (text, out) = (args[i + 1], URL(fileURLWithPath: args[i + 2]))
+  let t0 = Date()
+  let ms = { Int(Date().timeIntervalSince(t0) * 1000) }
+  if let v = args.firstIndex(of: "--vv"), v + 2 < args.count, let style = UInt32(args[v + 2]), let vox {
+    let model = args[v + 1]
+    let whole = args.contains("--whole")
+    let after = args.firstIndex(of: "--after").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+    // `--warmed <m>`: the voice loaded is another than the line's (a switch underway).
+    let warmed = args.firstIndex(of: "--warmed").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? model
+    // `--switch <m>`: once loaded, a warm of another voice is asked, then the line's first piece —
+    // how long that piece waits (a switch mid-line), and whether VOICEVOX made it. Nothing written.
+    let switchTo = args.firstIndex(of: "--switch").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+    guard let parts = whole ? [text] : vvParts(text) else { fail("failed") }
+    vox.warm(warmed) { ok in
+      guard ok else { fail("failed") }
+      if let switchTo {
+        vox.warm(switchTo) { _ in }
+        let t = Date()
+        return vox.wav(parts[0], model: model, style: style) { wav in
+          emit(["type": "switch", "made": wav != nil, "ms": Int(Date().timeIntervalSince(t) * 1000)])
+          exit(0)
+        }
+      }
+      let load = ms()
+      // A stop left this being made (a render cannot be cancelled): the next line waits behind it.
+      if let after { vox.wav(whole ? after : vvParts(after)?.first ?? after, model: model, style: style) { _ in } }
+      let t1 = Date()
+      var first = 0
+      var made: [AVAudioPCMBuffer] = []
+      func make(_ k: Int) {
+        vox.wav(parts[k], model: model, style: style) { wav in
+          if k == 0 { first = Int(Date().timeIntervalSince(t1) * 1000) }
+          guard let wav, let p = pcm(wav: wav) else { fail("failed") }
+          made.append(p)
+          if k + 1 < parts.count { return make(k + 1) }
+          // Through the call's own steps (read each WAV, convert it whole to the speaker's rate): the file is what a call plays.
+          guard let f = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1),
+            let file = try? AVAudioFile(forWriting: out, settings: f.settings, commonFormat: f.commonFormat, interleaved: f.isInterleaved)
+          else { fail("failed") }
+          for p in made {
+            guard let b = Voice().convert(p, to: f, whole: true), (try? file.write(from: b)) != nil else { fail("failed") }
+          }
+          emit(["type": "tts", "voice": "voicevox", "load": load, "first": first, "pieces": parts.count])
+          exit(0)
+        }
+      }
+      make(0)
+    }
+  } else {
+    // Warmed first, as in a call (its voice is up long before the answer): only the line is timed.
+    let synth = AVSpeechSynthesizer()
+    let utter = { (t: String) -> AVSpeechUtterance in
+      let u = AVSpeechUtterance(string: t)
+      u.voice = AVSpeechSynthesisVoice(language: locale.identifier)
+      return u
+    }
+    synth.write(utter("あ")) { warm in
+      guard (warm as? AVAudioPCMBuffer)?.frameLength == 0 else { return }
+      DispatchQueue.main.async {
+        let t1 = Date()
+        var file: AVAudioFile?
+        var first: Int?
+        synth.write(utter(text)) { buffer in
+          guard let pcm = buffer as? AVAudioPCMBuffer else { return }
+          if pcm.frameLength == 0 {
+            guard let first, file != nil else { fail("failed") }
+            file = nil // closed
+            emit(["type": "tts", "voice": "system", "first": first])
+            exit(0)
+          }
+          if first == nil { first = Int(Date().timeIntervalSince(t1) * 1000) }
+          if file == nil { file = try? AVAudioFile(forWriting: out, settings: pcm.format.settings, commonFormat: pcm.format.commonFormat, interleaved: pcm.format.isInterleaved) }
+          try? file?.write(from: pcm)
+        }
+      }
+    }
+    withExtendedLifetime(synth) { dispatchMain() }
+  }
+  dispatchMain()
 }
 
 let listener = Listener(recognizer)
