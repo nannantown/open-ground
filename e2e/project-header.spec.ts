@@ -89,7 +89,8 @@ for (const width of [1600, 1280, 1024, 700, 640, 390, 320]) {
     expect(barBox.y + barBox.height).toBeGreaterThanOrEqual(height - 1)
     expect(barBox.y + barBox.height).toBeLessThanOrEqual(height + 1)
     expect(iframeBox.y + iframeBox.height).toBeLessThanOrEqual(barBox.y + 1)
-    expect(iframeBox.height).toBeGreaterThanOrEqual(height - 50 - barBox.height)
+    const floor = (await page.locator('[data-assistant-floor]').boundingBox())?.height ?? 0
+    expect(iframeBox.height).toBeGreaterThanOrEqual(height - 50 - barBox.height - floor)
     expect(iframeBox.width).toBeGreaterThanOrEqual(width - 2)
     await expect(page.getByTitle('Open Terminal', { exact: true })).toHaveCount(0)
     // The back button's name carries its chord hint ("Back to Ground ⌘[").

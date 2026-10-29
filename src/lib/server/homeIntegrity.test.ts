@@ -34,6 +34,7 @@ let warn: ReturnType<typeof vi.spyOn>
 
 /** A settings.json with `n` registered projects. */
 const settingsWith = (n: number, extra: Record<string, unknown> = {}) => ({
+  language: 'ja' as const,
   projects: Array.from({ length: n }, (_, i) => ({
     id: `uuid-${i}`,
     path: `/Users/someone/projects/p${i}`,

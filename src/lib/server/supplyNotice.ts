@@ -1,3 +1,4 @@
+import { getPromptLang } from './promptLang'
 // supplyNotice — the engine→SUPPLY-DESK channel (owner decision 2026-09-22).
 //
 // WHY IT EXISTS. Inside a project the owner wants to talk to ONE seat — the
@@ -353,11 +354,12 @@ const defaultDeps: SupplyNoticeDeps = {
   openQuestions: async (projectPath) => {
     const { listOpenOwnerQuestionsStrict, ownerQuestionDetail } = await import('./swarmEscalations')
     const open = await listOpenOwnerQuestionsStrict(projectPath)
+    const lang = await getPromptLang()
     return open.map((e) => {
       // When it became the OWNER's question (a commander-lane one handed on
       // later is told by that time, not by when a worker first asked it).
       const at = Date.parse(e.raisedToOwnerAt ?? e.createdAt)
-      return { id: e.id, detail: ownerQuestionDetail(e), ...(Number.isFinite(at) ? { at } : {}) }
+      return { id: e.id, detail: ownerQuestionDetail(e, lang), ...(Number.isFinite(at) ? { at } : {}) }
     })
   },
   log: logToEngine,

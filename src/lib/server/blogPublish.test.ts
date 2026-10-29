@@ -16,6 +16,7 @@ import { setLockdownCache } from './lockdown'
 import { projectDataFile } from './projectDataPath'
 import type { WordPressSettings } from '../types'
 import { getCustomTabRole } from './roles'
+import * as atomic from './atomicWrite'
 
 vi.mock('./roles', () => ({ getCustomTabRole: vi.fn(async () => 'owner') }))
 
@@ -50,7 +51,7 @@ const fakeWp = () => {
     // The fixture uses the OWNER'S SHAPE (2026-09-02): core in a subdirectory
     // (`/wp`) while the REST API answers at the site root. A fake that returned
     // the same string as baseUrl could not tell the fixed link from the old one.
-    if (/\/wp-json\/wp\/v2\/settings\b/.test(url)) return json(200, { url: `${WP.baseUrl}/wp` })
+    if (/\/wp-json\/wp\/v2\/settings\b/.test(url)) return json(200, { url: `${new URL(url).origin}/wp` })
     const m = /\/wp-json\/wp\/v2\/posts(?:\/(\d+))?/.exec(url)
     if (!m) return json(404, {})
     const id = m[1] ? Number(m[1]) : null
@@ -88,6 +89,7 @@ beforeEach(async () => {
   await addImportedProjectEntry(proj)
 })
 afterEach(async () => {
+  vi.restoreAllMocks()
   await setSettings({ wordpress: undefined })
   await rm(proj, { recursive: true, force: true })
 })
@@ -106,6 +108,119 @@ const press = async (fetchImpl: typeof fetch, ...files: string[]) => {
 }
 
 describe('sweepProjectBlogPublish — the five promises, on the wire', () => {
+  it('does not create another draft when the acknowledgement cannot be saved locally', async () => {
+    await report('a.md', '# A\n\ncontent\n')
+    await setSettings({ wordpress: WP })
+    const write = atomic.atomicWriteJson
+    let full = false
+    vi.spyOn(atomic, 'atomicWriteJson').mockImplementation(async (path, data, opts) => {
+      if (full && path.endsWith('/blog-publish.json')) throw new Error('ENOSPC')
+      return write(path, data, opts)
+    })
+    const wp = fakeWp()
+    const fetchImpl = (async (url, init) => {
+      const res = await wp.fetchImpl(url, init)
+      if (init?.method === 'POST') full = true
+      return res
+    }) as typeof fetch
+    expect(await markResearchForBlog(proj, 'a.md', { fetchImpl })).toMatchObject({ ok: false, error: 'ledger' })
+    full = false
+    expect((await readBlogInfo(proj))['a.md']?.state).toBe('needs-check')
+    await sweepProjectBlogPublish(proj, WP, { fetchImpl })
+    expect(wp.reqs.filter((r) => r.method === 'POST')).toHaveLength(1)
+  })
+
+  it('preserves an old unbound ledger until its destination is explicitly confirmed', async () => {
+    await report('a.md', '# A\n\noriginal\n')
+    const wp = fakeWp()
+    await press(wp.fetchImpl, 'a.md')
+    const ledgerPath = await projectDataFile(proj, 'blog-publish.json')
+    const ledger = JSON.parse(await readFile(ledgerPath, 'utf8'))
+    delete ledger.site
+    await writeFile(ledgerPath, JSON.stringify(ledger))
+    const before = await readFile(ledgerPath, 'utf8')
+    await setSettings({ wordpress: WP })
+    wp.reqs.length = 0
+    expect(await markResearchForBlog(proj, 'a.md', { fetchImpl: wp.fetchImpl })).toMatchObject({ ok: false, error: 'target-unconfirmed' })
+    expect(await readFile(ledgerPath, 'utf8')).toBe(before)
+    expect(wp.reqs).toHaveLength(0)
+    expect((await readBlogInfo(proj))['a.md']?.state).toBe('target-unconfirmed')
+    await markResearchForBlog(proj, 'a.md', { fetchImpl: wp.fetchImpl }, { confirmTarget: true })
+    expect((await readBlogInfo(proj))['a.md']?.state).toBe('draft')
+  })
+
+  it('restores the original site records after switching away and back', async () => {
+    await report('a.md', '# A\n\noriginal\n')
+    const a = fakeWp()
+    await press(a.fetchImpl, 'a.md')
+    const before = (await readBlogInfo(proj))['a.md']
+    const b = { ...WP, baseUrl: 'https://replacement.example' }
+    await setSettings({ wordpress: b })
+    const remoteB = fakeWp()
+    await markResearchForBlog(proj, 'a.md', { fetchImpl: remoteB.fetchImpl })
+    expect(remoteB.reqs.filter((r) => r.method === 'POST').every((r) => r.url === b.baseUrl + '/wp-json/wp/v2/posts')).toBe(true)
+    await setSettings({ wordpress: WP })
+    a.reqs.length = 0
+    await sweepProjectBlogPublish(proj, WP, { fetchImpl: a.fetchImpl })
+    expect(a.reqs).toHaveLength(0)
+    expect((await readBlogInfo(proj))['a.md']).toEqual(before)
+  })
+
+  it('does not automatically recreate a draft after an ambiguous remote failure', async () => {
+    await report('a.md', '# A\n\ncontent\n')
+    await press((async () => new Response('{}', { status: 503 })) as typeof fetch, 'a.md')
+    expect((await readBlogInfo(proj))['a.md']?.state).toBe('needs-check')
+    const wp = fakeWp()
+    await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
+    expect(wp.reqs).toHaveLength(0)
+    await setSettings({ wordpress: WP })
+    await markResearchForBlog(proj, 'a.md', { fetchImpl: wp.fetchImpl }, { confirmRetry: true })
+    expect((await readBlogInfo(proj))['a.md']?.state).toBe('draft')
+  })
+
+  it('overlapping manual requests create one draft and retain its ledger', async () => {
+    await report('a.md', '# A\n\ncontent\n')
+    await setSettings({ wordpress: WP })
+    const wp = fakeWp()
+    let release!: () => void
+    let started!: () => void
+    const held = new Promise<void>((r) => { release = r })
+    const ready = new Promise<void>((r) => { started = r })
+    const fetchImpl = (async (url, init) => {
+      if (init?.method === 'POST' && String(url).endsWith('/posts')) { started(); await held }
+      return wp.fetchImpl(url, init)
+    }) as typeof fetch
+    const first = markResearchForBlog(proj, 'a.md', { fetchImpl })
+    await ready
+    const second = markResearchForBlog(proj, 'a.md', { fetchImpl })
+    await new Promise((r) => setTimeout(r, 20))
+    release()
+    await Promise.all([first, second])
+    expect(wp.reqs.filter((r) => r.method === 'POST' && r.url.endsWith('/posts'))).toHaveLength(1)
+    expect((await readBlogInfo(proj))['a.md']?.state).toBe('draft')
+  })
+
+  it('never sends an old site post id to a replacement destination', async () => {
+    await report('a.md', '# A\n\noriginal\n')
+    const wp = fakeWp()
+    await press(wp.fetchImpl, 'a.md')
+    await report('a.md', '# A\n\nchanged\n')
+    wp.reqs.length = 0
+    await sweepProjectBlogPublish(proj, { ...WP, baseUrl: 'https://replacement.example' }, { fetchImpl: wp.fetchImpl })
+    expect(wp.reqs.filter((r) => r.url.includes('/posts/100'))).toEqual([])
+  })
+
+  it('keeps a corrupt ledger intact and refuses new outbound posts', async () => {
+    await report('a.md', '# A\n\ncontent\n')
+    await setSettings({ wordpress: WP })
+    const ledger = await projectDataFile(proj, 'blog-publish.json')
+    await mkdir(join(ledger, '..'), { recursive: true })
+    await writeFile(ledger, '{broken')
+    const wp = fakeWp()
+    expect(await markResearchForBlog(proj, 'a.md', { fetchImpl: wp.fetchImpl })).toMatchObject({ ok: false, error: 'ledger' })
+    expect(await readFile(ledger, 'utf8')).toBe('{broken')
+    expect(wp.reqs).toHaveLength(0)
+  })
   it('contract #5: a report NOBODY chose is never pushed — by the sweep or the tick', async () => {
     // ⚠ The reversal that makes this feature shippable to every user. The
     // research library holds internal ops reports next to publishable ones;
@@ -290,11 +405,11 @@ describe('sweepProjectBlogPublish — the five promises, on the wire', () => {
 
   it('a failure is recorded scrubbed — the app password appears NOWHERE — and retried', async () => {
     await report('a.md', '# A\n\nv1\n')
-    const failing = (async () => ({ ok: false, status: 500, json: async () => ({}) }) as Response) as typeof fetch
+    const failing = (async () => ({ ok: false, status: 403, json: async () => ({}) }) as Response) as typeof fetch
     await press(failing, 'a.md')
     const info = await readBlogInfo(proj)
     expect(info['a.md']?.state).toBe('failed')
-    expect(info['a.md']?.error).toContain('500')
+    expect(info['a.md']?.error).toContain('403')
     expect(JSON.stringify(info)).not.toContain(WP.appPassword)
 
     // The retry happens on the SWEEP even though the file has not changed —
@@ -311,7 +426,7 @@ describe('sweepProjectBlogPublish — the five promises, on the wire', () => {
       files.push(`r${i}.md`)
     }
     // Choose them all while WP is down — the marks persist, the pushes fail.
-    const failing = (async () => ({ ok: false, status: 599, json: async () => ({}) }) as Response) as typeof fetch
+    const failing = (async () => ({ ok: false, status: 403, json: async () => ({}) }) as Response) as typeof fetch
     await press(failing, ...files)
     const wp = fakeWp()
     await sweepProjectBlogPublish(proj, WP, { fetchImpl: wp.fetchImpl })
@@ -329,7 +444,7 @@ describe('markResearchForBlog — the button itself', () => {
     // the report the owner is LOOKING AT unpushed — a button that visibly does
     // nothing. The `only` filter is what makes the press about this report.
     await report('pressed.md', '# 押した記事\n\nbody\n')
-    const failing = (async () => ({ ok: false, status: 599, json: async () => ({}) }) as Response) as typeof fetch
+    const failing = (async () => ({ ok: false, status: 403, json: async () => ({}) }) as Response) as typeof fetch
     const newer: string[] = []
     for (let i = 0; i < MAX_PUSHES_PER_SWEEP + 1; i++) {
       const f = `newer${i}.md`
@@ -388,7 +503,7 @@ describe('markResearchForBlog — the button itself', () => {
 describe('blogPublishTick — the gates', () => {
   it.each(['none', 'tester'] as const)('leaves saved reports, credentials and pending publication untouched for %s', async role => {
     await report('saved.md', '# Saved report\n\nKeep this body.\n')
-    const failing = (async () => ({ ok: false, status: 599, json: async () => ({}) }) as Response) as typeof fetch
+    const failing = (async () => ({ ok: false, status: 403, json: async () => ({}) }) as Response) as typeof fetch
     await press(failing, 'saved.md')
     await setSettings({ wordpress: WP })
     const before = await readBlogInfo(proj)
@@ -413,7 +528,7 @@ describe('blogPublishTick — the gates', () => {
 
   it('does nothing in lockdown, even fully configured with chosen reports', async () => {
     await report('a.md', '# A\n\nbody\n')
-    const failing = (async () => ({ ok: false, status: 599, json: async () => ({}) }) as Response) as typeof fetch
+    const failing = (async () => ({ ok: false, status: 403, json: async () => ({}) }) as Response) as typeof fetch
     await press(failing, 'a.md') // chosen, push pending
     const wp = fakeWp()
     await setSettings({ wordpress: WP })
@@ -429,7 +544,7 @@ describe('blogPublishTick — the gates', () => {
 
   it('configured ⇒ a CHOSEN report sweeps through the tick', async () => {
     await report('a.md', '# A\n\nbody\n')
-    const failing = (async () => ({ ok: false, status: 599, json: async () => ({}) }) as Response) as typeof fetch
+    const failing = (async () => ({ ok: false, status: 403, json: async () => ({}) }) as Response) as typeof fetch
     await press(failing, 'a.md')
     const wp = fakeWp()
     await setSettings({ wordpress: WP })

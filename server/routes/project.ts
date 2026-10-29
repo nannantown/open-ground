@@ -7,6 +7,7 @@
 // Declares FULL /api/... paths; app.ts mounts with app.route('/', projectRoutes)
 // so the prefix stays empty. The Integration phase owns the mount.
 
+import { getCustomTabRole } from '@/lib/server/roles'
 import { Hono } from 'hono'
 import { execFile as execFileCb, spawn } from 'child_process'
 import { promisify } from 'util'
@@ -334,6 +335,12 @@ export const projectRoutes = new Hono()
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
     const body = (await c.req.json()) as ProjectData
+    if (await getCustomTabRole() !== 'owner') {
+      const current = await readProjectData(path)
+      // Protect saved owner layout even from forged public PUT requests.
+      for (const key of ['tabOrder', 'customTabs', 'disabledModules'] as const) body[key] = current[key]
+      body.updatedAt ??= current.updatedAt
+    }
     const bad = cardFieldTypeError(body)
     if (bad) return c.json({ error: bad }, 400)
     try {

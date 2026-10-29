@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
+import { setSettings } from './store'
+beforeEach(async () => { await setSettings({ language: 'ja' }) })
 import { runDispatchPass, __seedEngineForTests } from './swarmOrchestrator'
 import type { ProjectTask, SpawnSwarmWorkerResponse, SwarmFatalNotification } from '@/lib/types'
 import { TierCoolingError } from './swarmWorker'

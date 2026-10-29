@@ -1,3 +1,4 @@
+import { getPromptLang, type PromptLang } from './promptLang'
 // swarmNotifications — the in-app half of the escalation safety valve. A FATAL
 // event of the unmanned swarm / self-improvement loop (see {@link SwarmFatalEvent})
 // becomes (1) a PERSISTED in-app notification the Ground お知らせ bell renders, and
@@ -305,11 +306,11 @@ const INFO_EVENT_LABEL: Record<SwarmInfoEvent, string> = {
 }
 
 /** The OS toast (title + body) for an info event — same shape as the fatal one. */
-export const formatInfoNotification = (n: SwarmInfoNotification): OsNotification => {
+export const formatInfoNotification = (n: SwarmInfoNotification, lang: PromptLang = 'en'): OsNotification => {
   const ref = n.taskTitle ? `「${n.taskTitle}」` : ''
   const branch = n.branch ? ` (${n.branch})` : ''
   return {
-    title: `OPEN GROUND — ${INFO_EVENT_LABEL[n.event] ?? 'Agent Team info'}`,
+    title: `OPEN GROUND — ${(lang === 'ja' ? ({ 'escalation-open': '回答が必要な質問があります', 'session-limit': 'Claudeの会話が利用上限で停止しました', 'stuck-processes': '停止できない処理が増えています' } as Partial<Record<SwarmInfoEvent, string>>)[n.event] : undefined) ?? INFO_EVENT_LABEL[n.event] ?? 'Agent Team info'}`,
     body: `${n.detail}${ref}${branch}`,
   }
 }
@@ -346,7 +347,7 @@ export const createSwarmInfoNotification = async (
   const app = buildInfoAppNotification(n, createdAt)
   await appendSwarmNotification(app)
   if (opts?.os !== false && shouldRaiseOsNotification(n.event)) {
-    sendOsNotification(formatInfoNotification(n))
+    sendOsNotification(formatInfoNotification(n, await getPromptLang()))
   }
   // Same supply-desk route as the fatal path — but filtered: only the info
   // events on SUPPLY_NOTICE_INFO_EVENTS get through, because most of this lane

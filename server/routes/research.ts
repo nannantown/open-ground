@@ -59,8 +59,10 @@ export const researchRoutes = new Hono()
     // Join the blog-publish ledger (blogPublish.ts) so the tab can say where
     // each report stands on the owner's blog. One cheap JSON read; additive —
     // reports without an entry carry no `blog` key and old clients ignore it.
-    const blog = await readBlogInfo(path).catch(() => ({}) as Record<string, never>)
+    let blogRecordError = false
+    const blog = await readBlogInfo(path).catch(() => { blogRecordError = true; return {} as Record<string, never> })
     const body: ResearchReportsResponse = {
+      blogRecordError,
       reports: reports.map((r) => (blog[r.file] ? { ...r, blog: blog[r.file] } : r)),
     }
     return c.json(body)
@@ -109,7 +111,7 @@ export const researchRoutes = new Hono()
   .post('/api/research/digest', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
-    const raw = (await c.req.json().catch(() => ({}))) as { file?: string }
+    const raw = (await c.req.json().catch(() => ({}))) as { file?: string; confirmTarget?: boolean; confirmRetry?: boolean }
     const file = typeof raw.file === 'string' ? raw.file : ''
     try {
       await readResearchReport(path, file) // 404 before any spawn
@@ -131,15 +133,15 @@ export const researchRoutes = new Hono()
   .post('/api/research/blog-publish', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
-    const raw = (await c.req.json().catch(() => ({}))) as { file?: string }
+    const raw = (await c.req.json().catch(() => ({}))) as { file?: string; confirmTarget?: boolean; confirmRetry?: boolean }
     const file = typeof raw.file === 'string' ? raw.file : ''
     try {
       await readResearchReport(path, file) // 404 on a report that is not there
     } catch (e) {
       return c.json({ error: String((e as Error)?.message ?? e) }, 404)
     }
-    const res = await markResearchForBlog(path, file)
-    if (!res.ok) return c.json({ error: res.error }, 409)
+    const res = await markResearchForBlog(path, file, {}, { confirmTarget: raw.confirmTarget === true, confirmRetry: raw.confirmRetry === true })
+    if (!res.ok) return c.json({ error: res.error, ...('site' in res ? { site: res.site } : {}) }, 409)
     const body: ResearchBlogPublishResponse = { file, ...(res.blog ? { blog: res.blog } : {}) }
     return c.json(body)
   })

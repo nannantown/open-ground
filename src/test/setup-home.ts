@@ -67,7 +67,11 @@ process.env.OPENGROUND_HOME = tmpHome
 for (const key of ['TMPDIR', 'TMP', 'TEMP']) process.env[key] = sandbox
 // Registered first, so under vitest's 'stack' hook order it runs LAST — after
 // every afterAll of the file itself.
-afterAll(() => {
+afterAll(async () => {
+  // Sensors intentionally queue mirror writes without blocking their callers.
+  // Drain that queue before removing its home or closing Vitest's console RPC.
+  // Read only an already-loaded singleton; do not import server code into DOM tests.
+  await globalThis.__openground_swarm_quota?.persist
   try {
     rmSync(sandbox, { recursive: true, force: true, maxRetries: 3 })
   } catch {

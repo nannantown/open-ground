@@ -2,11 +2,13 @@
 // 'auth.*'. English is the source of truth. (Code comments are NOT translated.)
 export const auth = {
   en: {
+    'auth.error.signOut': 'Could not sign out. Please try again.',
     'auth.error.start': 'Could not start sign-in. Please wait a moment and try again.',
     'auth.error.openBrowser':
       "Couldn't open the browser. Check your pop-up settings, or try again.",
   } as Record<string, string>,
   ja: {
+    'auth.error.signOut': 'サインアウトできませんでした。もう一度お試しください。',
     'auth.error.start': 'サインインを開始できませんでした。時間をおいて再度お試しください。',
     'auth.error.openBrowser':
       'ブラウザを開けませんでした。ポップアップ設定を確認するか、もう一度お試しください。',

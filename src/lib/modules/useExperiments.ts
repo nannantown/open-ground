@@ -1,7 +1,7 @@
 // Client-side mirror of the server's experiment gate (src/lib/server/
 // experiments.ts). ONE GET /api/experiments returns both `eligible` (may this
 // user toggle experiments at all — owner) and the resolved per-experiment
-// `flags` (including Swarm's independent public/local unlock). The client never
+// `flags` (including Swarm's paid macOS opt-in). The client never
 // infers owner access from an open Swarm flag: only `eligible` opens owner UI.
 //
 // Owned by App, which passes `eligible` to the Settings panel (to reveal the
@@ -16,16 +16,16 @@ import type { ExperimentFlags, ExperimentsResponse } from '@/lib/types'
 // signed-out / non-owner state until the first fetch resolves.
 const NO_FLAGS: ExperimentFlags = { swarm: false, sandbox: false }
 
-/** The PUBLIC swarm opt-in state (all users). Fail-closed until first fetch. */
+/** The licensed macOS Swarm opt-in state. Fail-closed until first fetch. */
 const NO_OPT_IN = { available: false, enabled: false }
 
 export interface ExperimentsState {
   /** The user may toggle experiments at all (owner). Gates the settings toggle. */
   eligible: boolean
-  /** Resolved per-experiment open state, including Swarm's public/local unlock. */
+  /** Resolved per-experiment open state, including Swarm's paid macOS opt-in. */
   flags: ExperimentFlags
   /** The public swarm opt-in: `available` (this machine — macOS) gates the
-   *  Settings toggle's visibility for ALL users; `enabled` reflects the choice. */
+   *  Settings toggle's visibility for licensed users; `enabled` reflects the choice. */
   swarmOptIn: { available: boolean; enabled: boolean }
   /** True once a fetch has succeeded at least once. */
   loaded: boolean
@@ -105,7 +105,13 @@ export function useExperiments(sessionId?: string): ExperimentsState {
       void refresh()
     }
     window.addEventListener('focus', onFocus)
-    return () => window.removeEventListener('focus', onFocus)
+    window.addEventListener('openground:billing-changed', onFocus)
+    const timer = setInterval(() => void refresh(), 30_000)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('openground:billing-changed', onFocus)
+    }
   }, [refresh])
 
   const currentSession = resolvedSession === sessionId

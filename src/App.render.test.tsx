@@ -76,6 +76,7 @@ interface MockOpts {
   /** Non-2xx status for POST /api/settings, to exercise the save-failure path. */
   settingsPostStatus?: number
   settingsPostError?: string
+  settingsApplied?: string[]
   /** GET /api/experiments — the owner-only gate, resolved SERVER-side. Omitted ⇒
    *  the shipped/non-owner answer (nothing eligible, every flag closed). */
   experiments?: { eligible: boolean; flags: Record<string, boolean> }
@@ -94,7 +95,7 @@ function installFetch(opts: MockOpts = {}) {
     const url = urlOf(input)
     if (url.includes('/api/settings') && methodOf(input, init) === 'POST') {
       const status = opts.settingsPostStatus ?? 200
-      return reply(status, status >= 300 ? { error: opts.settingsPostError ?? 'save failed' } : { ok: true })
+      return reply(status, status >= 300 ? { error: opts.settingsPostError ?? 'save failed' } : { ok: true, applied: opts.settingsApplied ?? Object.keys(JSON.parse(String(init?.body ?? '{}'))) })
     }
     if (url.includes('/api/settings')) return reply(200, { ...SETTINGS, suggestedDisplayName: null })
     if (url.includes('/api/projects'))
@@ -412,7 +413,7 @@ describe('App — whole-render integration', () => {
   })
 
   it('surfaces the global "Claude is designing" beacon while a Canvas AI job is active', async () => {
-    installFetch({ projects: [], aiActiveJobs: 2 })
+    installFetch({ projects: [], aiActiveJobs: 2, experiments: { eligible: true, flags: { swarm: false, sandbox: false } } })
     await act(async () => {
       renderApp()
     })
@@ -447,6 +448,16 @@ describe('App - retired Persona', () => {
 })
 
 describe('App - retired tab submissions', () => {
+  it('does not claim a dropped preference was saved after an HTTP 200', async () => {
+    installFetch({ settingsApplied: [] })
+    await act(async () => { renderApp() })
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }))
+    const input = await screen.findByRole('textbox', { name: 'Display name' })
+    fireEvent.change(input, { target: { value: 'Unsaved' } })
+    fireEvent.blur(input)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Changes have not been saved')
+  })
+
   it('does not load or poll the removed review queue', async () => {
     const calls = installFetch()
     await act(async () => { renderApp() })
@@ -484,8 +495,9 @@ describe('App — saveSettings failure handling (audit 856daefb)', () => {
     fireEvent.blur(nameInput) // triggers the panel's immediate flush() → onSave
 
     // The failed save must be surfaced to the user…
-    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1))
-    expect(alertSpy.mock.calls[0][0]).toContain('disk full')
+    expect(await screen.findByText('Changes have not been saved. Retry before closing the app.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled()
+    expect(alertSpy).not.toHaveBeenCalled()
     // …and must NOT reload /api/projects (which would refetch the stale
     // settings and silently overwrite the user's edit with no explanation —
     // the exact bug from audit 856daefb).

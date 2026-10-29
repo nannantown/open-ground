@@ -1,5 +1,8 @@
 # Public Product Scope
 
+Updated for Free/Pro/Owner, 2026-10-08. Earlier verification entries below are historical.
+See [BILLING_PLAN.md](./BILLING_PLAN.md) and [PRODUCTIZATION_HANDOFF.md](./PRODUCTIZATION_HANDOFF.md).
+
 Owner decision, 2026-09-21. This is a source change, not a release or a data
 migration. New experimental features should start owner-only; public promotion
 is an explicit product decision after verification.
@@ -18,8 +21,10 @@ is an explicit product decision after verification.
   a Swarm worker (not whether the autonomous engine is currently running).
   Disabling Swarm restores the saved defaults and disclosure preference; this
   visibility change does not alter launch settings or runtime controls.
-- Swarm availability: unchanged. The existing public macOS opt-in remains optional, with its
-  warning. Existing owner/local unlocks remain. Windows availability is unchanged.
+- Swarm requires active Pro on macOS or the existing App Owner role. The macOS
+  opt-in is consent, with its warning; it never grants paid access by itself.
+  Free cannot enable Swarm through settings or a local unlock. Windows Pro
+  checkout/automation stay closed until real Windows acceptance; Owner is retained.
 - All new Swarm managers and workers use SDK. There is no runtime selector for
   either audience. Legacy manager settings remain inert and existing conversation
   data is preserved. Supply/ordinary terminals and public Swarm opt-in are unchanged.
@@ -40,7 +45,11 @@ Login changes invalidate the prior account's gate before a new response arrives.
 
 ## Preservation
 
-This is visibility control, not deletion or a new API security boundary.
+Visibility and API access are both enforced; this is not a data deletion.
+Owner files/jobs are guarded before their handlers. Public settings omit and
+preserve WordPress/experiment values; public project writes retain saved Owner
+layouts. Shared Canvas caches/tickets require App Owner plus membership. Phone
+access uses the App Owner role; a Swarm local-unlock setting does not grant it.
 Existing local storage formats remain. In particular,
 no Canvas files/assets, research reports/credentials, custom-module sources or
 metadata, WordPress credentials/ledger, or project attachments are migrated or
@@ -51,7 +60,7 @@ rewriting them. Those preferences and attachments survive public-user edits;
 an inaccessible saved active tab falls back visually without overwriting that
 preference. Owner view restores the saved layout, including hidden public tabs.
 
-Public sessions do not load the custom-tab library or mount the Research/Canvas
+Public sessions do not poll Canvas AI/Assistant or load the custom-tab library or mount the Research/Canvas
 surfaces or research settings checks. Closing owner access destroys hosted
 iframes/playback, not their source files. WordPress background sweeps re-check
 the actual owner role and pause otherwise, leaving the pending ledger intact.
@@ -90,14 +99,15 @@ return to Ground to switch display mode from a shared project.
 ## Verification
 
 - Registry and tab-order unit tests cover public/owner visibility and hidden IDs.
-- Settings tests cover owner-only controls, public Swarm opt-in and preserving
+- Settings tests cover owner-only controls, licensed macOS Swarm opt-in and preserving
   hidden WordPress values during unrelated saves.
 - `useExperiments.test.tsx` covers account changes and stale owner responses.
 - `CustomFrameHost.test.tsx` covers closing background playback on access loss.
 - `blogPublish.test.ts` covers no background requests or saved-data loss for
   public/tester sessions, and resuming the same pending report as owner.
 - `e2e/public-product.spec.ts` checks real project/Canvas readback at desktop and
-  narrow widths, saved-view restoration for the owner, and the public Swarm toggle.
+  narrow widths, saved-view restoration for the owner, and the former public Swarm toggle (historical fixture); current Free checkout/API
+  coverage is `e2e/subscriptions.spec.ts`.
 - `e2e/local-custom-tabs.spec.ts` and `e2e/canvas.spec.ts` retain owner UI coverage.
 
 Role responses in browser fixtures are controlled; live account-provider behavior

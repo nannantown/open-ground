@@ -123,6 +123,8 @@ export const postToken = async (
 // unconfigured, or the refresh fails. Unlike GET /api/auth/session this NEVER
 // clears the stored session on failure — a transient network error during a
 // background check must not sign the user out; the session route decides that.
+let refreshInFlight: { token: string; promise: Promise<{ accessToken: string; expiresAt: number } | null> } | null = null
+
 export const getFreshSession = async (): Promise<{
   accessToken: string
   expiresAt: number
@@ -140,18 +142,22 @@ export const getFreshSession = async (): Promise<{
   if (stored.expiresAt - 60_000 > Date.now()) {
     return { accessToken: stored.accessToken, expiresAt: stored.expiresAt }
   }
-  const token = await postToken(config, 'refresh_token', {
-    refresh_token: stored.refreshToken,
-  })
-  if (!token?.access_token || !token.refresh_token) return null
-  const refreshed: StoredSession = {
-    user: token.user?.id ? toAuthUser(token.user, stored.user.provider) : stored.user,
-    expiresAt: expiryFrom(token),
-    accessToken: token.access_token,
-    refreshToken: token.refresh_token, // rotated — persist the new one.
-  }
-  await writeSession(refreshed)
-  return { accessToken: refreshed.accessToken, expiresAt: refreshed.expiresAt }
+  if (refreshInFlight?.token === stored.refreshToken) return refreshInFlight.promise
+  const promise = (async () => {
+    const token = await postToken(config, 'refresh_token', { refresh_token: stored.refreshToken })
+    if (!token?.access_token || !token.refresh_token || (token.user?.id && token.user.id !== stored.user.id)) return null
+    const current = await readSession()
+    // Sign-out/account change wins over a late refresh. Never resurrect its tokens.
+    if (current?.refreshToken !== stored.refreshToken || current.user.id !== stored.user.id) return null
+    const refreshed: StoredSession = {
+      user: token.user?.id ? toAuthUser(token.user, stored.user.provider) : stored.user,
+      expiresAt: expiryFrom(token), accessToken: token.access_token, refreshToken: token.refresh_token,
+    }
+    await writeSession(refreshed)
+    return { accessToken: refreshed.accessToken, expiresAt: refreshed.expiresAt }
+  })()
+  refreshInFlight = { token: stored.refreshToken, promise }
+  try { return await promise } finally { if (refreshInFlight?.promise === promise) refreshInFlight = null }
 }
 
 // Back-compat helper: just the access token (used by the custom-tab role

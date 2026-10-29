@@ -133,12 +133,21 @@ describe('GET /api/collab/ticket?collabProjectId= (member, no path)', () => {
     await signIn()
     stubSupabase([{ project_id: PID, user_id: 'u-mem', role: 'member' }])
     const res = await collabRoutes.request(
-      `/api/collab/ticket?collabProjectId=${PID}&scope=canvas:abc`,
+      `/api/collab/ticket?collabProjectId=${PID}&scope=board`,
     )
     expect(res.status).toBe(200)
     const body = (await res.json()) as { room: string; wsUrl: string; token: string }
-    expect(body.room).toBe(`${PID}:canvas:abc`)
+    expect(body.room).toBe(`${PID}:board`)
     expect(body.wsUrl).toBe(WS)
     expect(body.token).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)
+  })
+
+  it('membership alone cannot grant an Owner Canvas ticket', async () => {
+    enableCollab()
+    await signIn()
+    const spy = stubSupabase([{ project_id: PID, user_id: 'u-mem', role: 'member' }])
+    const res = await collabRoutes.request(`/api/collab/ticket?collabProjectId=${PID}&scope=canvas:abc`)
+    expect(res.status).toBe(403)
+    expect(spy.mock.calls.some(([url]) => url.includes('/ticket'))).toBe(false)
   })
 })

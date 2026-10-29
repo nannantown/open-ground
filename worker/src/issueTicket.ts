@@ -99,6 +99,18 @@ export async function handleTicketRequest(
   const role = await resolveMembership(env, token, pid, identity)
   if (!role) return json({ error: 'forbidden' }, 403)
 
+  // App Owner access is separate from owning/joining a shared project.
+  if (scope.startsWith('canvas:')) {
+    try {
+      const response = await fetch(`${env.SUPABASE_URL!.replace(/\/+$/, '')}/rest/v1/og_roles?select=role`, {
+        headers: { apikey: env.SUPABASE_ANON_KEY!, Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      })
+      const roles = response.ok ? await response.json() as Array<{ role?: string }> : []
+      if (!Array.isArray(roles) || !roles.some(r => r.role === 'owner')) return json({ error: 'forbidden' }, 403)
+    } catch { return json({ error: 'forbidden' }, 403) }
+  }
+
   // 3) Issue: mint the existing HMAC ticket the WS/asset gates verify.
   const { token: ticket, expiresAt } = await mintTicket(
     { pid, scope, sub: identity.sub, role },

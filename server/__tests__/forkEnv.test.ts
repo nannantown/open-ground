@@ -117,3 +117,8 @@ describe('forkEnv — env layering preserved (faithful to the old inline object)
     expect(env.OPENGROUND_BOOT_ID).toBe('boot-xyz')
   })
 })
+
+it('baked billing destination cannot be redirected by the launch environment', () => {
+  const env = buildServerForkEnv({ ...base, bakedAuthEnv: { OPENGROUND_BILLING_URL: 'https://billing.example' }, processEnv: { OPENGROUND_BILLING_URL: 'https://attacker.example' } })
+  expect(env.OPENGROUND_BILLING_URL).toBe('https://billing.example')
+})

@@ -8,6 +8,10 @@ import { defineConfig, devices } from '@playwright/test'
 // being hammered from parallel test contexts.
 export default defineConfig({
   testDir: './e2e',
+  // Separate isolated server identities; production authorization is never mocked.
+  testIgnore: process.env.OPENGROUND_E2E_OWNER === '1'
+    ? ['**/subscriptions.spec.ts']
+    : ['**/{canvas,local-custom-tabs,public-product,project-header,assistant-proposal-frames,assistant-corner,nene-recording-frame,swarm-manager}.spec.ts'],
   // Per-file parallelism is fine; cross-file is not (shared dev-server
   // state). Workers=1 enforces the serial outer loop.
   fullyParallel: false,
@@ -56,6 +60,9 @@ export default defineConfig({
     command:
       'npm run build && ' +
       'H="$(mktemp -d)" && mkdir -p "$H/.openground" "$H/.claude" && ' +
+      (process.env.OPENGROUND_E2E_OWNER === '1'
+        ? 'node e2e/fixtures/seed-owner.cjs "$H/.openground" && OPENGROUND_OWNER_EMAILS=e2e-owner@example.invalid '
+        : '') +
       'HOME="$H" OPENGROUND_HOME="$H/.openground" ' +
       'OPENGROUND_CLAUDE_BIN="$PWD/e2e/fixtures/fake-claude.sh" ' +
       'OPENGROUND_TERMINAL_SHELL=/bin/sh ' +

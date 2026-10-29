@@ -24,6 +24,26 @@
   `assistantMemory.test.ts`. No record is injected into Claude's own transcript.
 
 ## 0. 契約と骨格 — 全変更の起点
+- Free/Pro/Owner feature classification (2026-10-16): `docs/PRODUCT_PLAN_FEATURES.md`.
+  Owner-facing list of existing capabilities, settings and deferred decisions;
+  this proposal does not change runtime permissions or add new paid limits.
+- Productization implementation progress (2026-10-15): `docs/PRODUCTIZATION_PROGRESS.md`.
+  Current fixes and verification supersede the audit's initial unfixed status;
+  release gates remain separate from implementation completion.
+- Public launch plan (2026-10-15): `docs/PUBLIC_LAUNCH_PLAN.md`.
+  User-confirmed macOS small beta then Free/Pro public release; acceptance gates,
+  current evidence, external dependencies and unresolved AI authentication terms.
+- Product feature/settings audit (2026-10-15): `docs/PRODUCT_FEATURE_AUDIT.md`.
+  Current feature inventory, settings ownership, reproduced settings/blog defects,
+  phased remediation and explicit verification limits. Audit findings remain unfixed.
+- Product subscriptions (2026-10-08): `docs/BILLING_PLAN.md` and
+  `docs/PRODUCTIZATION_HANDOFF.md`; local `billing.ts` + `server/routes/billing.ts`,
+  hosted `worker/src/billing.ts` + `worker/wrangler.billing.jsonc`, hosted-only
+  `supabase/migrations/0016_billing.sql`. `BillingSection.tsx` uses existing login
+  and browser helpers. `swarmGate.ts` and production engine passes enforce paid
+  access; Owner API middleware is in `server/app.ts`. Guards: `billing.test.ts`,
+  `billingService.test.ts`, `supabaseAuth.test.ts`, `productAccess.test.ts`,
+  `e2e/subscriptions.spec.ts`. Secrets never ship in the desktop app.
 - Songs/NENE development handoff (2026-09-22): `docs/SONGS-HANDOFF-2026-09-22.md`.
   Two local repository branches, delivered UI/recording changes, verification,
   preserved owner data and remaining hardware/packaged-app acceptance checks.
@@ -34,7 +54,7 @@
   two remaining implementation workers and asked to leave them running.
   The earlier unshipped/stopped snapshot is historical; check live state.
 - Public/owner surface contract: `docs/PUBLIC_PRODUCT_SCOPE.md`. Public Board,
-  Terminal and opt-in Swarm (a bottom bar under every tab, not a tab — see §5); owner-only per-project Canvas, Research, custom tabs
+  Terminal; licensed Pro/Owner Swarm (a bottom bar under every tab, not a tab — see §5); owner-only per-project Canvas, Research, custom tabs
   and WordPress/Skills UI. Owner display preview: Settings switch (`SettingsPanel.tsx` +
   `App.tsx`); Ground tools collapse in `ToolPalette.tsx`. Automatic fuel reports
   are owner-only (`dailyFuelReport.ts`); meters/safety remain public. Visibility
@@ -193,7 +213,7 @@
   only; all right-edge terminal docks and their auto-launch UI are removed.
 - テスト: `terminal.test.ts` / `claudeTerminal.test.ts` / `routes/__tests__/paste*.test.ts` / `runTaskLaunch.test.ts`
 - 罠: **正典 = `claudeTerminal.ts` 冒頭「THE TWO RULES」**(8つの launcher が全部ここを指す)。
-  **①subscription-only**(API key 経路を作らない・提案しない)と**②PTY-only**(`claude -p` を
+  **①subscription-only**(API key 経路を作らない・提案しない)と**②通常TerminalはPTY-only**(`claude -p` を
   実行経路にしない)は**別のルール・別の理由**。⚠ 0730 以前は「PTY だからサブスクに課金される」と
   1つに融合させていたが**それは誤り** — 実測で `-p` もサブスク(`apiKeySource:"none"` /
   `/usage` が "using your subscription" / seven_day rate_limit_event)。②が生きている理由は

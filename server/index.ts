@@ -1,3 +1,4 @@
+import { secureSettingsPermissions } from '@/lib/server/homeBackup'
 // Hono node-server entry — the process Electron forks in production and that
 // `tsx server/index.ts` runs in dev. This file owns exactly two things: the
 // port/host contract and starting the listener. All routing lives in
@@ -107,6 +108,7 @@ registerIncomingNotifications()
 // treat the read as "roughly at boot", never as "before the migration writes".
 // Correctness does not depend on that ordering: the backup hook snapshots
 // whatever any later writer replaces.
+void secureSettingsPermissions().catch(() => console.error('[openground] could not restrict settings file permissions'))
 void checkHomeIntegrity().catch((e) =>
   console.error('[openground:hono] home integrity check failed', e),
 )

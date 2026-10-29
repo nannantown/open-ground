@@ -180,6 +180,8 @@ const BLOG_STATE_LABEL: Record<NonNullable<ResearchReportMeta['blog']>['state'],
   'edited-on-wp': 'research.blog.editedOnWp',
   'deleted-on-wp': 'research.blog.deletedOnWp',
   failed: 'research.blog.failed',
+  'needs-check': 'research.blog.needsCheck',
+  'target-unconfirmed': 'research.blog.targetUnconfirmed',
 }
 /** The plain-language line above a failed blog post's raw reason — keyed by
  *  classifyBlogError so the list chip's tooltip and the reader panel agree. */
@@ -411,6 +413,7 @@ type KnowledgeFail = 'error' | 'claudeMissing' | 'claudeLoggedOut'
 export const ResearchModule = ({ project }: ResearchModuleProps) => {
   const { t, lang } = useT()
   const [reports, setReports] = useState<ResearchReportMeta[]>([])
+  const [blogRecordError, setBlogRecordError] = useState(false)
   // "No research yet" is a CLAIM — only make it once a list read has finished
   // (same rule as PersonaModule's showNotes: never claim empty on a failed or
   // still-pending read).
@@ -466,7 +469,7 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
       const res = await api.api.research.reports.$get({ query: { path: project.path } })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = (await res.json()) as ResearchReportsResponse
-      if (alive.current) setReports(data.reports ?? [])
+      if (alive.current) { setReports(data.reports ?? []); setBlogRecordError(data.blogRecordError === true) }
     } catch {
       /* Keep the last known list (nothing on first load); Reload retries. */
     } finally {
@@ -605,34 +608,32 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
   const [blogBusy, setBlogBusy] = useState(false)
   const [blogError, setBlogError] = useState<string | null>(null)
   const sendToBlog = useCallback(async (file: string) => {
+    const uncertain = reports.find((r) => r.file === file)?.blog?.state === 'needs-check'
+    if (uncertain && !window.confirm(t('research.blog.confirmRetry'))) return
     setBlogBusy(true)
     setBlogError(null)
     try {
-      const res = await fetch('/api/research/blog-publish', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path: project.path, file }),
+      const send = (confirmTarget = false) => fetch('/api/research/blog-publish', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: project.path, file, confirmTarget, confirmRetry: uncertain }),
       })
+      let res = await send()
       if (res.status === 409) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string }
-        setBlogError(body.error === 'lockdown' ? 'research.blog.lockdown' : 'research.blog.notConfigured')
-        return
+        const reason = await res.json() as { error?: string; site?: string }
+        if (reason.error === 'target-unconfirmed') {
+          if (!window.confirm(t('research.blog.confirmTarget', { site: reason.site ?? '' }))) return
+          res = await send(true)
+        } else {
+          setBlogError(reason.error === 'lockdown' ? 'research.blog.lockdown' : reason.error === 'ledger' ? 'research.blog.ledgerError' : 'research.blog.notConfigured')
+          return
+        }
       }
-      if (!res.ok) {
-        setBlogError('research.blog.sendFailed')
-        return
-      }
-      const body = (await res.json()) as ResearchBlogPublishResponse
-      // Fold the fresh state into the list so the chip + button flip at once.
-      setReports((prev) =>
-        prev.map((r) => (r.file === file ? { ...r, ...(body.blog ? { blog: body.blog } : {}) } : r)),
-      )
-    } catch {
-      setBlogError('research.blog.sendFailed')
-    } finally {
-      setBlogBusy(false)
-    }
-  }, [project.path])
+      if (!res.ok) throw new Error('blog')
+      const body = await res.json() as ResearchBlogPublishResponse
+      setReports((prev) => prev.map((r) => r.file === file ? { ...r, ...(body.blog ? { blog: body.blog } : {}) } : r))
+    } catch { setBlogError('research.blog.sendFailed') }
+    finally { setBlogBusy(false) }
+  }, [project.path, reports, t])
 
   const copyMarkdown = useCallback(() => {
     if (content === null) return
@@ -888,6 +889,7 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
       </aside>
       {/* Right: the reader. */}
       <section className="flex min-h-0 flex-1 flex-col">
+        {blogRecordError && <p role="alert" className="px-4 py-2 text-meta text-ink-muted">{t('research.blog.ledgerError')}</p>}
         <div className="min-h-0 flex-1 overflow-y-auto">
           {selected === null ? (
             <div className="px-8 py-6 text-ui text-ink-subtle">{t('research.select')}</div>
@@ -984,7 +986,7 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
                     // A FAILED push falls through to the button: pressing it again
                     // is the retry (markResearchForBlog is idempotent and pushes at
                     // once), and the reason panel below the row says what to fix.
-                    if (blog && blog.state !== 'failed') {
+                    if (blog && blog.state !== 'failed' && blog.state !== 'needs-check' && blog.state !== 'target-unconfirmed') {
                       return blog.link ? (
                         <a
                           href={blog.link}
@@ -999,6 +1001,8 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
                       )
                     }
                     return (
+                      <>
+                      {blog?.state === 'target-unconfirmed' && blog.link && <a href={blog.link} target="_blank" rel="noreferrer" className="text-meta text-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">{t('research.blog.openDraft')}</a>}
                       <Btn
                         variant="ghost"
                         size="xs"
@@ -1008,6 +1012,7 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
                       >
                         {t(blogBusy ? 'research.blog.sending' : 'research.blog.send')}
                       </Btn>
+                      </>
                     )
                   })()}
                   <Btn variant="ghost" size="xs" onClick={copyMarkdown}>
@@ -1017,7 +1022,7 @@ export const ResearchModule = ({ project }: ResearchModuleProps) => {
               </div>
               {(() => {
                 const blog = reports.find((r) => r.file === selected)?.blog
-                if (!blog || blog.state !== 'failed') return null
+                if (!blog || (blog.state !== 'failed' && blog.state !== 'needs-check')) return null
                 // WHY THIS IS A PANEL AND NOT A TOOLTIP (2026-09-02): the reason
                 // used to live only in the chip's `title`. The owner pressed
                 // 「ブログへ」, saw 「ブログ投稿に失敗」 and nothing else — a hover
