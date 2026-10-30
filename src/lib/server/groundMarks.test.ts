@@ -8,7 +8,7 @@ import {
   promptAuthor,
   readPresidentAskedAtFile,
 } from './groundMarks'
-import { SUPPLY_NOTICE_PREFIX, SUPPLY_REPLY_PREFIX } from './supplyNotice'
+import { SUPPLY_NOTICE_PREFIX, SUPPLY_REPLY_PREFIX, assistantRelayLine } from './supplyNotice'
 import { groundLamp } from '@/lib/groundLamp'
 
 const ms = (hh: string) => Date.parse(`2026-09-26T${hh}:00.000Z`)
@@ -30,6 +30,11 @@ const compactSummary = () =>
   })
 
 describe('presidentAskedAtFromJsonl — is the president waiting on the owner?', () => {
+  it('a message the assistant passed on does not clear a standing question, and a question asked back to it lights the hand', () => {
+    expect(presidentAskedAtFromJsonl([owner('進めて'), assistant('A と B、どちらにしますか？', '03:00'), owner(assistantRelayLine('進み具合は？')), assistant('半分です。', '03:05')])).toBe(ms('03:00'))
+    expect(presidentAskedAtFromJsonl([owner(assistantRelayLine('新機能を入れたい')), assistant('どの画面に入れますか？', '03:05')])).toBe(ms('03:05'))
+  })
+
   it('a reply to the owner ending in ？ ⇒ its timestamp', () => {
     expect(presidentAskedAtFromJsonl([owner('進めて'), assistant('A と B、どちらにしますか？')])).toBe(ms('03:00'))
   })

@@ -30,7 +30,7 @@ import { __resetProposals, openProposals, proposalHash, proposeMessage } from '.
 // A message any path sends to a commander lands here (never a real desk).
 const relayed = vi.hoisted(() => [] as string[])
 vi.mock('./commanderRelay', () => ({ relayToCommander: async (_path: string, text: string) => (relayed.push(text), { ok: true, delivered: true, runtime: 'sdk', woke: false }) }))
-import { __testConnect, flushAssistantOutbox, flushPush, PUSH_GAP_MS, PUSH_RETRY_MAX, SAY_HOLD_MAX_MS, handlePhoneFrame, handleRelayFrame, phoneEventsFromLine, pumpTranscript, pairingCode, pairPhone, readPhoneLinkConfig, relayUrlAllowed, startPhoneLink, stopPhoneLink, unpairPhone, tick, __testLinkState } from './phoneLink'
+import { __testConnect, flushAssistantOutbox, flushPush, PUSH_GAP_MS, PUSH_RETRY_MAX, SAY_HOLD_MAX_MS, handlePhoneFrame, handleRelayFrame, phoneEventsFromLine, pumpTranscript, sendAppLine, sendPresidentTalk, sendRelayState, pairingCode, pairPhone, readPhoneLinkConfig, relayUrlAllowed, startPhoneLink, stopPhoneLink, unpairPhone, tick, __testLinkState } from './phoneLink'
 import { alreadyStored, asCursor, type Cursor, type PushTarget } from '../../../worker/src/phoneRelayAuth'
 import { setLockdownCache } from './lockdown'
 import { saveAssistantConfig } from './assistantMemory'
@@ -42,7 +42,7 @@ import { statSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { WebSocketServer } from 'ws'
 import { JWT_MIN_AGE_MS, savePushKey, type PushKey } from './phonePush'
-import { flushSupplyNotices, resetSupplyNoticeState, SUPPLY_OWNER_SAY_MAX, SUPPLY_NOTICE_PREFIX, supplyNoticeLine, supplyReplyLine } from './supplyNotice'
+import { flushSupplyNotices, resetSupplyNoticeState, SUPPLY_OWNER_SAY_MAX, SUPPLY_NOTICE_PREFIX, supplyNoticeLine, supplyReplyLine, assistantRelayLine } from './supplyNotice'
 
 const PROJECT = '/repo/alpha'
 const CFG = { v: 1 as const, relayUrl: 'https://relay.test', macKey: 'm'.repeat(43), phoneKey: 'p'.repeat(43), projectId: 'p1' }
@@ -119,6 +119,43 @@ describe('phoneEventsFromLine — what the owner hears from a transcript line', 
     ['a torn line', '{"type":"user","mess'],
   ])('carries nothing for %s', (_l, l) => {
     expect(phoneEventsFromLine(l)).toEqual([])
+  })
+})
+
+describe('a message the assistant passed to a president (2026-10-30)', () => {
+  it('shows in the president\'s conversation as the owner side, marked as the assistant\'s — the tail meant for the president is not shown', () => {
+    expect(phoneEventsFromLine(user(assistantRelayLine('進み具合は?')))).toEqual([
+      { kind: 'owner', text: '【アシスタントからの伝言】進み具合は?', via: 'assistant', at: Date.parse('2026-10-01T00:00:00Z') },
+    ])
+  })
+  it('its states go to the phone as the ack of the message\'s own id (v2, the phone\'s own proposals only); the answer goes as an assistant line', () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG2, sock)
+    sendRelayState(st, { id: 'm1', projectId: 'p1', state: 'replying', about: 'say-1', via: 'phone' })
+    sendRelayState(st, { id: 'm2', projectId: 'p1', state: 'replying', via: 'screen' })
+    const acks = sent.filter((f) => f.type === 'ack')
+    expect(acks).toMatchObject([{ type: 'ack', id: 'm1', projectId: 'p1', state: 'replying', about: 'say-1' }])
+    expect(acks[0]).not.toHaveProperty('via')
+    sendAppLine(st, { text: 'betaの社長から返事: 半分だって。', speak: 'betaの社長から返事: 半分だって。', at: 5 })
+    expect(sent.filter((f) => f.kind === 'assistant')).toMatchObject([{ text: 'betaの社長から返事: 半分だって。', speak: 'betaの社長から返事: 半分だって。' }])
+    const v1 = fakeSocket()
+    void v1
+    sendRelayState(__testLinkState(CFG, v1.sock), { id: 'm1', projectId: 'p1', state: 'replying', via: 'phone' })
+    expect(v1.sent).toEqual([])
+  })
+})
+
+describe('the exchange reaches that president\'s conversation on the phone even when another project is selected', () => {
+  it('another project: the passed-on line and the answer go as its events; the selected one: left to the transcript tail (no double)', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG2, sock) // p1 selected
+    await sendPresidentTalk(st, { projectId: 'other', kind: 'owner', text: '【アシスタントからの伝言】進み具合は?', via: 'assistant', at: 7 })
+    await sendPresidentTalk(st, { projectId: 'other', kind: 'president', text: '半分です。', at: 8 })
+    await sendPresidentTalk(st, { projectId: 'p1', kind: 'president', text: '二重にしない', at: 9 })
+    expect(sent.filter((f) => f.type === 'event')).toMatchObject([
+      { type: 'event', projectId: 'other', kind: 'owner', text: '【アシスタントからの伝言】進み具合は?', via: 'assistant' },
+      { type: 'event', projectId: 'other', kind: 'president', text: '半分です。' },
+    ])
   })
 })
 

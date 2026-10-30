@@ -155,6 +155,7 @@ Any descriptions of the retired paths below are historical, not operating instru
 | 断り方 | §1.4 と同一(`noticeDeliverable` の3拒否。ESC も Ctrl-U も送らない) |
 | 落ちないこと | cap 溢れの返事は**ベルに回す**(info `commander-reply`)。**TTL は無い**(2026-09-24 撤廃 — 遅れた返事は「(約N分前の返事)」付きで社長に届ける。§1.10)。答えは落とすとオーナーが待ち続ける |
 | 頭の印 | `SUPPLY_REPLY_PREFIX = '【司令官からの返事】'` — 知らせ(`【エンジンからの知らせ】`)と**別**。凍結(コード照合文字列) |
+| 3つ目の印(2026-10-30) | `ASSISTANT_RELAY_PREFIX = '【アシスタントからの伝言】'` — オーナーのアシスタントが「送る」ボタンで社長へ渡す1行(`presidentRelay.ts`、オーナーの言葉と同じレーン `queueSupplyOwnerSay`)。この返事レーンとは無関係。社長の質問ランプでは、これへの問い返しは点くが、既に立っている質問は消さない(groundMarks `stepPresidentAsk` の `relayTurn`)。凍結 |
 | 話者の指定 | **させない。** body に「誰から」は無く、印はサーバ側で固定。可変にすると `【本人からの回答(escalation)】` を騙れる — payload の `【】` は `REDACTIONS` で除去する(2026-09-22 実測: 通知 `detail` に `【】` を含むものはツリーに1件も無い) |
 
 **司令官が居なければ起こす**(同日・オーナー決定「いいよ。おこして。」)。`manager/say` は以前

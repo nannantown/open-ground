@@ -1,6 +1,8 @@
 // assistantProposals — what the owner's assistant may only PROPOSE: one card for
-// a project's Board, or one message for a project's commander (owner decision
-// 2026-10-06 「全部Aで進めて」, docs/research/voice-assistant-2026-10.md §3).
+// a project's Board, one message for a project's commander, or one message for a
+// project's president whose answer comes back to the assistant (owner decision
+// 2026-10-06 「全部Aで進めて」, docs/research/voice-assistant-2026-10.md §3;
+// president messages 2026-10-30, presidentRelay.ts).
 //
 // A proposal lives in this process's memory only — never on a Board, never in
 // the talk. The window (and the iPhone) shows it in its own frame, and the ONE
@@ -21,6 +23,7 @@ import { mutateProjectData } from './projectData'
 import { pick, type PromptLang } from './promptLang'
 import { isLockdownEnabledSync } from './lockdown'
 import { relayToCommander } from './commanderRelay'
+import { presidentWordsFit, relayToPresident, type PresidentReply } from './presidentRelay'
 import { getSettings } from './store'
 
 /** An open proposal waits this long for its button. */
@@ -56,7 +59,7 @@ export interface KnownProject {
   path: string
 }
 
-export type ProposalKind = 'card' | 'commander'
+export type ProposalKind = 'card' | 'commander' | 'president'
 export type ProposalState = 'open' | 'done' | 'dropped' | 'expired'
 
 /** What a screen shows — and the only thing it may carry out. */
@@ -66,9 +69,11 @@ export interface ShownProposal {
   projectId: string
   /** The project's name. */
   project: string
-  /** card: its title; commander: ''. */
+  /** card: its title; commander: ''; president: who gets it (「社長へ」 — the
+   *  frame shows it, so a message for the president never looks like one for the commander). */
   title: string
-  /** card: its notes, exactly as written; commander: the line, exactly as sent. */
+  /** card: its notes, exactly as written; commander: the line, exactly as sent;
+   *  president: the message, exactly as written (typed in as assistantRelayLine(body)). */
   body: string
   at: number
   expiresAt: number
@@ -81,6 +86,8 @@ export interface ShownProposal {
 }
 interface Held extends ShownProposal {
   path: string
+  /** The phone say id of the owner line it came from (message states' `about`). Not shown. */
+  about?: string
   /** Its button is being carried out (closed meanwhile; may reopen if it did not get through). */
   pressing?: boolean
   /** 「やめて」 / 「やめる」 / a delete came while it was being pressed: it never reopens. */
@@ -140,7 +147,7 @@ const sweep = (now: number): boolean => {
   return moved
 }
 
-const shown = ({ path: _path, pressing: _pressing, cancel: _cancel, ...p }: Held): ShownProposal => ({ ...p })
+const shown = ({ path: _path, pressing: _pressing, cancel: _cancel, about: _about, ...p }: Held): ShownProposal => ({ ...p })
 
 /** What the screens show: oldest first. `via: 'phone'` = only those made from the iPhone. */
 export const listProposals = (o: { now?: number; via?: 'phone' } = {}): ShownProposal[] => {
@@ -217,6 +224,8 @@ export interface ProposeContext {
   now: number
   via: 'phone' | 'screen'
   projects: () => Promise<KnownProject[]>
+  /** The phone say id of the owner line being answered, when there is one. */
+  about?: string
 }
 
 /** One card for a registered project → its proposal, or why not (for the model). */
@@ -233,6 +242,25 @@ export const proposeCard = async (c: CardInput, ctx: ProposeContext): Promise<Sh
   const goal = flat(c.goal)
   if (!title || !goal || !items.length) return 'Not proposed: title, goal and at least one done condition are all required. Ask the owner for what is missing.'
   return add({ kind: 'card', projectId: project.id, project: projectLabel(project, all), path: project.path, title, body: cardBody(goal, items, ctx.lang), via: ctx.via }, ctx.now)
+}
+
+/** The title of a president frame: who gets the message. */
+export const presidentTitle = (lang: PromptLang): string => pick(lang, { en: 'To the president', ja: '社長へ' })
+
+/** One message (or question) for a project's president → its proposal. The
+ *  owner's button passes it on and the president's answer comes back to the
+ *  assistant (presidentRelay.ts). One line, short enough to be typed in unfolded. */
+export const proposePresident = async (projectId: string, message: string, ctx: ProposeContext): Promise<ShownProposal | string> => {
+  if (isLockdownEnabledSync()) return workMode(ctx.lang)
+  if (typeof message === 'string' && !visible(message)) return UNSEEN_REFUSED
+  const all = await ctx.projects()
+  const project = all.find((p) => p.id === projectId)
+  if (!project) return 'No such projectId. Use one from the project list.'
+  if (!visible(project.name) || !visible(project.path)) return UNSEEN_REFUSED
+  const words = flat(message)
+  if (!words) return 'Nothing to say: give the message.'
+  if (!presidentWordsFit(words)) return TOO_LONG
+  return add({ kind: 'president', projectId: project.id, project: projectLabel(project, all), path: project.path, title: presidentTitle(ctx.lang), body: words, via: ctx.via, ...(ctx.about ? { about: ctx.about } : {}) }, ctx.now)
 }
 
 /** One message for a project's commander → its proposal. One line (a multi-line say wedges a desk). */
@@ -269,6 +297,10 @@ export interface Carried {
   proposal: ShownProposal
   card?: { projectId: string; taskId: string; title: string }
   told?: { delivered: boolean; woke: boolean; error?: string }
+  /** president: passed on (`waiting` = lines still ahead of it in the window), or why not. */
+  president?: { woke: boolean; waiting: number } | { error: string }
+  /** The phone say id of the owner line it came from, when there is one. */
+  about?: string
 }
 
 /** The owner pressed 「出す」/「送る」 on the frame that showed `hash`. Carried
@@ -276,7 +308,15 @@ export interface Carried {
 export const approveProposal = async (
   id: unknown,
   hash: unknown,
-  o: { now?: number; lang: PromptLang; relay?: typeof relayToCommander },
+  o: {
+    now?: number
+    lang: PromptLang
+    relay?: typeof relayToCommander
+    president?: typeof relayToPresident
+    /** president: told once it is typed into the window, and once with the
+     *  answer (or why none) — both after the press returned. */
+    onPresident?: { landed?: (p: ShownProposal, about?: string) => void; reply: (p: ShownProposal, r: PresidentReply, about?: string) => void }
+  },
 ): Promise<Carried | { error: ButtonRefusal }> => {
   if (isLockdownEnabledSync()) return { error: 'work-mode' }
   const now = o.now ?? Date.now()
@@ -312,6 +352,16 @@ export const approveProposal = async (
       await mutateProjectData(p.path, (d) => void d.tasks.push(task))
       return { proposal: shown(p), card: { projectId: p.projectId, taskId: task.id, title: task.title } }
     }
+    if (p.kind === 'president') {
+      const passed = shown(p)
+      const r = await (o.president ?? relayToPresident)(p.path, p.body, {
+        landed: () => o.onPresident?.landed?.(passed, p.about),
+        reply: (reply) => o.onPresident?.reply(passed, reply, p.about),
+      })
+      // Could not open the window: it stays open, to be pressed again.
+      if (!r.ok) reopen()
+      return { proposal: shown(p), president: r.ok ? { woke: r.woke, waiting: r.waiting } : { error: r.error }, ...(p.about ? { about: p.about } : {}) }
+    }
     const r = await (o.relay ?? relayToCommander)(p.path, p.body)
     const told = r.ok ? { delivered: r.delivered, woke: r.woke } : { delivered: false, woke: false, error: String(r.body.error ?? 'unreachable') }
     // Not delivered: it stays open, to be pressed again.
@@ -342,6 +392,14 @@ export const dropProposal = (id: unknown, now = Date.now()): ShownProposal | { e
 export const carriedLine = (c: Carried, lang: PromptLang): string => {
   const name = c.proposal.project
   if (c.card) return pick(lang, { en: `Done — "${c.card.title}" is on ${name}'s Board.`, ja: `${name}に「${c.card.title}」を積んだよ。` })
+  const pr = c.president
+  if (pr) {
+    if ('error' in pr) return pick(lang, { en: `I couldn't open ${name}'s president's window, so it did not get the message.`, ja: `${name}の社長の窓口を開けなくて、伝えられなかった。` })
+    if (pr.woke) return pick(lang, { en: `${name}'s president's window was closed, so I opened it; it gets the message once it is up. I'll tell you the answer.`, ja: `${name}の社長の窓口が閉じてたから開いたよ。開いたらすぐ渡して、返事が来たら教えるね。` })
+    return pr.waiting > 0
+      ? pick(lang, { en: `${name}'s president is busy; it gets the message as soon as it is free. I'll tell you the answer.`, ja: `${name}の社長は今手が離せないから、空いたらすぐ渡すね。返事が来たら教えるよ。` })
+      : pick(lang, { en: `Passed to ${name}'s president. I'll tell you the answer.`, ja: `${name}の社長に伝えたよ。返事が来たら教えるね。` })
+  }
   const t = c.told
   if (!t || t.error) return pick(lang, { en: `I couldn't reach ${name}'s commander.`, ja: `${name}の司令官に届けられなかった。` })
   return t.delivered
@@ -353,6 +411,6 @@ export const carriedLine = (c: Carried, lang: PromptLang): string => {
 export const proposedLine = (kinds: ProposalKind[], lang: PromptLang): string =>
   kinds.every((k) => k === 'card')
     ? pick(lang, { en: 'I put up a card proposal. Press "Add" if it looks right.', ja: 'カード案を出したよ。よければ「出す」を押してね。' })
-    : kinds.every((k) => k === 'commander')
+    : kinds.every((k) => k !== 'card')
       ? pick(lang, { en: 'I put up the message. Press "Send" if it looks right.', ja: '伝言の案を出したよ。よければ「送る」を押してね。' })
       : pick(lang, { en: 'I put up the proposals. Press their buttons if they look right.', ja: '案を出したよ。よければボタンを押してね。' })

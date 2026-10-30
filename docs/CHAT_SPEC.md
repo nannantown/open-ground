@@ -281,6 +281,39 @@ composer. The iPhone only shows them.
 ### 9.8 The conversation's fold (Mac)
 The Mac window can fold to the last exchange (§10 A3).
 
+### 9.9 Messages to a president through the assistant (2026-10-30)
+The owner asks the assistant 「〇〇の社長に△△と伝えて」 or 「〇〇の進み具合を聞いてきて」. The
+same on both screens (the wire: PHONE_LINK.md "Assistant → president messages").
+- **A frame first.** The assistant puts up one proposal frame (§9.5) of the kind
+  `president`: the project (muted), the title **社長へ** (name), the message (body,
+  verbatim), and やめる / 送る. As with every frame, only 送る sends it; a 「うん」 does
+  nothing.
+- **After 送る**, one assistant line in the app's own words says what happened:
+  - passed on: 「〇〇の社長に伝えたよ。返事が来たら教えるね。」
+  - the president's window was closed and was opened: 「〇〇の社長の窓口が閉じてたから開いたよ。開いたらすぐ渡して、返事が来たら教えるね。」
+  - the president is busy: 「〇〇の社長は今手が離せないから、空いたらすぐ渡すね。返事が来たら教えるよ。」
+  - the window could not be opened: 「〇〇の社長の窓口を開けなくて、伝えられなかった。」 — the frame stays open, to be pressed again.
+- **The answer** comes back as ONE more assistant line, read aloud like any answer:
+  the assistant's retelling of what the president wrote (「〇〇の社長から返事: …」).
+  When the assistant cannot retell it, the app shows the president's own words
+  after 「〇〇の社長から返事:」. When nothing comes within 10 minutes, the app says so
+  (「〇〇の社長から10分たっても返事がないよ。社長の会話を直接見てみて。」), and when the
+  message could not even be handed over in that time, it says that instead. The
+  assistant is never silent about a message it passed on.
+- **The president's conversation keeps it** (the iPhone's partner list, §9.1, and
+  the Mac's president seat): the passed-on line shows on the owner's side,
+  beginning with 【アシスタントからの伝言】, followed by the president's answer.
+- **States of the message** (sending → delivered → replying → replied, or refused)
+  use the shapes of §5b "Message states" (being added by the message-state card,
+  2026-10-30; not written here). On the iPhone they belong to the frame's message,
+  not to the owner's own line. The Mac's window shows the frame's closed line and
+  then the answer; it has no separate waiting caption yet (until §5b lands on the
+  Mac too).
+- **What the president does with it is the president's to decide.** It is the
+  assistant's summary of the owner's words, never the owner's OK; a decision only
+  the owner can make comes back as the president's question, which the assistant
+  retells — the owner answers it in the president's conversation.
+
 ## 10. Allowed differences (each with its reason)
 
 | # | Difference | Why it may differ |

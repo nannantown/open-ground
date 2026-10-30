@@ -681,6 +681,12 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     ptyFns: [],
     sdkCalls: ['listAllActiveDesks', 'listDeskIdsByRole'],
   },
+  'src/lib/server/presidentRelay.ts': {
+    tier: 'both-pools',
+    why: '(2026-10-30) The assistant passes a message to a project\'s president: "is the president\'s window up?" decides whether it is opened first, so it asks listDeskIdsByRole + listAllActiveDesks (both pools) — a one-pool answer would open a second desk over an SDK president. The "is it still writing?" check goes through groundLamps.presidentWorkingCwds (both pools too). Delivery itself is the owner-say lane in supplyNotice.ts.',
+    ptyFns: [],
+    sdkCalls: ['listAllActiveDesks', 'listDeskIdsByRole'],
+  },
   'server/routes/misc.ts': {
     tier: 'both-pools',
     why: 'GET /api/update/restart-safety — the Electron shell asks "may I restart the app RIGHT NOW to apply a downloaded update?" and the answer must come from the liveDesks seam (both pools in one call): a one-pool answer here authorises an unattended restart on top of a live SDK worker — the same authorises-destruction shape as worktreeCleanup 0731.',

@@ -34,14 +34,16 @@ import {
   supplyLineBody,
   SUPPLY_NOTICE_PREFIX,
   SUPPLY_REPLY_PREFIX,
+  ASSISTANT_RELAY_PREFIX,
   type SupplyNoticeDeps,
 } from './supplyNotice'
+import { wakePresidentDesk } from './presidentRelay'
 import { isLockdownEnabledSync } from './lockdown'
 import { alreadyStored, asCursor, asPushTarget, type Cursor, type PushTarget } from '../../../worker/src/phoneRelayAuth'
 import { providerTokenExpired, renewStaleProviderToken, pushKeyFingerprint, pushRefusedForGood, pushTokenGone, pushTransient, refusalIsTheApp, readPushKey, sendPushToTalk, type PushKey, type PushResult } from './phonePush'
 import { isSwarmLocalOwnerUnlocked } from './swarmGate'
 import { getCustomTabRole } from './roles'
-import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assistantBusy, dropAssistantProposal, plainAssistantError, pressProposal, warmAssistant, type AssistantAnswer } from './phoneAssistant'
+import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assistantBusy, dropAssistantProposal, onAssistantAppLine, onPresidentTalk, onRelayState, plainAssistantError, pressProposal, warmAssistant, type AppLine, type AssistantAnswer, type PresidentTalk, type RelayState } from './phoneAssistant'
 import { listProposals, onProposalsChanged } from './assistantProposals'
 import { langOf, pick } from './promptLang'
 import { e2eKeyOf, open as openSealed, seal, sealTag } from './phoneLinkSeal'
@@ -91,6 +93,10 @@ export interface PhoneEvent {
   text: string
   /** ms from the transcript line, when it has one. */
   at?: number
+  /** An owner-kind line the owner's assistant passed on (ASSISTANT_RELAY_PREFIX):
+   *  its text keeps the prefix, so a phone that does not know this field still
+   *  shows where it came from. */
+  via?: 'assistant'
 }
 
 /** A plaintext (v1) pairing stops connecting after this: pair again to get v2. */
@@ -220,6 +226,7 @@ export const phoneEventsFromLine = (line: string): PhoneEvent[] => {
   if (ev.origin?.kind === 'task-notification') return []
   const raw = (queued ? texts(ev.attachment?.prompt) : texts(ev.message?.content)).join('\n').trim()
   if (!raw) return []
+  if (raw.startsWith(ASSISTANT_RELAY_PREFIX)) return [{ kind: 'owner', text: clip(ASSISTANT_RELAY_PREFIX + supplyLineBody(raw)), via: 'assistant', ...at }]
   if (promptAuthor(raw) === 'owner') return [{ kind: 'owner', text: clip(raw), ...at }]
   const kind = raw.startsWith(SUPPLY_NOTICE_PREFIX) ? 'notice' : raw.startsWith(SUPPLY_REPLY_PREFIX) ? 'commander' : null
   return kind ? [{ kind, text: clip(supplyLineBody(raw)), ...at }] : []
@@ -396,20 +403,6 @@ const send = (st: LinkState, frame: Record<string, unknown>): boolean => {
   if (!out) return false
   st.ws.send(JSON.stringify(out))
   return true
-}
-
-/** Same steps as POST /api/swarm/supply: preflights, spawn (resuming the
- *  stored conversation), remember the intent. Returns an error string or null. */
-const defaultWakeDesk = async (path: string): Promise<string | null> => {
-  const { claudeRunPreflight } = await import('./claudePreflight')
-  const { swarmEnvPreflight } = await import('./swarmEnvPreflight')
-  const { spawnSwarmSupply } = await import('./swarmSupply')
-  const { patchEngineIntent } = await import('./swarmEnginePersistence')
-  if (!(await claudeRunPreflight()).ok) return 'claude-unavailable'
-  if (!(await swarmEnvPreflight(path, { force: true, requireGit: false, requireGitRepo: false })).ok) return 'env-unavailable'
-  await spawnSwarmSupply({ projectPath: path })
-  await patchEngineIntent(path, { supplyDesired: true }).catch(() => {})
-  return null
 }
 
 const selectedProject = async (st: LinkState) => {
@@ -729,6 +722,36 @@ const sendProposals = (st: LinkState): void => {
   if (st.cfg.v === 2) send(st, { type: 'assistant-proposals', proposals: listProposals({ via: 'phone' }) })
 }
 
+/** A line the app added to the assistant's talk on its own (a president's
+ *  answer retold): sent and read aloud like an answer, with a push when the
+ *  phone is away. Exported for tests. */
+export const sendAppLine = (st: LinkState, e: AppLine, deps: PhoneLinkDeps = {}): void => {
+  if (isLockdownEnabledSync()) return
+  if (sendAssistant(st, assistantTalk(st, 'assistant', { text: e.text, ...(e.speak ? { speak: e.speak } : {}), at: e.at }), deps)) owePush(st, deps)
+}
+
+/** A message the phone's proposal passed on to a president: its state, as the
+ *  `ack` of that message's own id (docs/PHONE_LINK.md "Message states" — no
+ *  other state frame). v2 only; the Mac's own proposals are not the phone's. Exported for tests. */
+export const sendRelayState = (st: LinkState, e: RelayState): void => {
+  if (st.cfg.v !== 2 || e.via !== 'phone' || isLockdownEnabledSync()) return
+  const { via: _via, ...ack } = e
+  send(st, { type: 'ack', ...ack })
+}
+
+/** The passed-on line or the president's answer, for that president's
+ *  conversation on the phone. The selected project's are already sent by the
+ *  transcript tail (with their cursor), so only another project's go from here
+ *  — filed by `projectId` like any event. Exported for tests.
+ *  ponytail: a selection switched mid-wait can repeat or miss one line there;
+ *  the assistant's talk carries the answer either way. */
+export const sendPresidentTalk = async (st: LinkState, e: PresidentTalk): Promise<void> => {
+  if (isLockdownEnabledSync()) return
+  const { chosen } = await selectedProject(st)
+  if (chosen?.id === e.projectId) return
+  send(st, { type: 'event', ...e })
+}
+
 /** The phone pressed a frame's button: `{proposalId, action: "approve" | "drop",
  *  hash}` — hash computed by the phone from what its frame shows. The same one
  *  door as the Mac's window (pressProposal); a `say` never reaches it. */
@@ -833,7 +856,7 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
   }
   let starting = false
   if (!p.desk) {
-    const err = await (deps.wakeDesk ?? defaultWakeDesk)(p.path).catch((e) => String(e?.message ?? e))
+    const err = await (deps.wakeDesk ?? wakePresidentDesk)(p.path).catch((e) => String(e?.message ?? e))
     if (err) {
       ack('rejected', { reason: 'desk-failed', detail: err.slice(0, 200) })
       return release()
@@ -1144,7 +1167,8 @@ export const startPhoneLink = async (): Promise<boolean> => {
   const st = newLinkState(cfg, null)
   st.stopped = false
   globalThis.__openground_phone_link = st
-  st.unwatchProposals = onProposalsChanged(() => sendProposals(st))
+  const unwatch = [onProposalsChanged(() => sendProposals(st)), onAssistantAppLine((e) => sendAppLine(st, e)), onRelayState((e) => sendRelayState(st, e)), onPresidentTalk((e) => void sendPresidentTalk(st, e).catch(() => {}))]
+  st.unwatchProposals = () => unwatch.forEach((u) => u())
   connect(st)
   st.loop = setInterval(() => void tick(st), TAIL_TICK_MS)
   st.loop.unref?.()

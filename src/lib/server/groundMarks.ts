@@ -24,7 +24,7 @@ import { projectDataFile } from './projectDataPath'
 import { readSwarmSessions } from './swarmSessions'
 import { sessionJsonlPath } from './transcript'
 import { readLandedLedger } from './swarmLandedLedger'
-import { SUPPLY_NOTICE_PREFIX, SUPPLY_REPLY_PREFIX } from './supplyNotice'
+import { ASSISTANT_RELAY_PREFIX, SUPPLY_NOTICE_PREFIX, SUPPLY_REPLY_PREFIX } from './supplyNotice'
 
 const SEEN_FILE = 'ground-seen.json'
 
@@ -137,6 +137,9 @@ export const promptAuthor = (text: string): 'owner' | 'other' => {
 export interface PresidentAskState {
   asked?: number
   ownerTurn: boolean
+  /** The turn answers a message the owner's assistant passed on: a question in
+   *  it is raised, but nothing in it clears one already standing. */
+  relayTurn?: boolean
 }
 
 export const freshAskState = (): PresidentAskState => ({ ownerTurn: false })
@@ -172,16 +175,19 @@ export const stepPresidentAsk = (st: PresidentAskState, line: string): President
   if (ev.type === 'user' || queued) {
     const text = queued ? textOf(ev.attachment?.prompt) : textOf(ev.message?.content)
     if (!text.trim()) return st // a tool_result — still inside the turn
+    // A message the owner's ASSISTANT passed on (2026-10-30): a question the
+    // president asks back is one for the owner (it opens an owner turn), but the
+    // assistant is not the owner answering — a question already standing stays.
+    if (text.trimStart().startsWith(ASSISTANT_RELAY_PREFIX)) return { ...st, ownerTurn: true, relayTurn: true }
     const isOwner = ev.origin?.kind !== 'task-notification' && promptAuthor(text) === 'owner'
     return isOwner ? { ownerTurn: true } : { ...st, ownerTurn: false }
   }
   if (ev.type !== 'assistant' || ev.isApiErrorMessage || !st.ownerTurn) return st
   const last = blocks(ev.message?.content).at(-1)
-  if (last?.type !== 'text') return { ownerTurn: true } // mid-turn — the reply is not finished
+  if (last?.type !== 'text') return st.relayTurn ? st : { ownerTurn: true } // mid-turn — the reply is not finished
   const t = Date.parse(ev.timestamp ?? '')
-  return closesOnQuestion(last.text ?? '') && Number.isFinite(t)
-    ? { ownerTurn: true, asked: t }
-    : { ownerTurn: true }
+  if (closesOnQuestion(last.text ?? '') && Number.isFinite(t)) return { ownerTurn: true, asked: t, ...(st.relayTurn ? { relayTurn: true } : {}) }
+  return st.relayTurn ? st : { ownerTurn: true }
 }
 
 /** Fold a whole transcript (or its tail): the standing question's ms, or undefined. */

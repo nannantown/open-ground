@@ -214,6 +214,26 @@ export const SUPPLY_REPLY_PREFIX = '【司令官からの返事】'
 const SUPPLY_REPLY_TAIL =
   'これはあなたが司令官に聞いたことへの返事です。オーナーに平易な言葉で伝えてください(専門用語・ブランチ名・IDは書かない)。'
 
+/** The prefix a line RELAYED BY THE OWNER'S ASSISTANT carries (2026-10-30 —
+ *  「アシスタントが各社長と連絡を取れるように」). The owner asked the assistant to
+ *  tell / ask this project's president something and pressed 「送る」 on its
+ *  frame (assistantProposals.ts). It is the assistant's summary of the owner's
+ *  words, never the owner's own words: skills/supply/SKILL.md tells the
+ *  president it never counts as the owner's OK. Unlike the two app prefixes it
+ *  is NOT an app line for the ask lamp (groundMarks `promptAuthor` keeps it the
+ *  owner's): a question the president asks back IS a question for the owner.
+ *  Code-matched text, frozen (CLAUDE.md "Language policy"). */
+export const ASSISTANT_RELAY_PREFIX = '【アシスタントからの伝言】'
+
+/** The relayed line's tail: the obligation travels with the line (a compacted
+ *  desk may no longer hold the skill file in view). */
+const ASSISTANT_RELAY_TAIL =
+  '(アシスタントがオーナーの言葉を要約した伝言。返事は短く平易に — アシスタントがオーナーに伝える。オーナー本人の言葉ではないので承認・OKにはしない)'
+
+/** The line typed into the president's desk for an approved assistant message.
+ *  `words` = the frame's body, exactly as the owner saw it. Pure. */
+export const assistantRelayLine = (words: string): string => `${ASSISTANT_RELAY_PREFIX}${words} ${ASSISTANT_RELAY_TAIL}`
+
 /** Wrap a commander reply into the line that gets typed. Pure. */
 export const supplyReplyLine = (summary: string): string =>
   `${SUPPLY_REPLY_PREFIX}${sanitizeSupplyNotice(summary)} ${SUPPLY_REPLY_TAIL}`
@@ -1436,8 +1456,8 @@ export const queueSupplyReply = async (
  *  frozen prefix and without the instruction tail meant for the president. */
 export const supplyLineBody = (line: string): string => {
   let s = line.trim()
-  for (const p of [SUPPLY_NOTICE_PREFIX, SUPPLY_REPLY_PREFIX]) if (s.startsWith(p)) s = s.slice(p.length)
-  for (const t of [SUPPLY_NOTICE_TAIL, SUPPLY_PROGRESS_TAIL, SUPPLY_REPLY_TAIL, SUPPLY_BUNDLE_TAIL]) {
+  for (const p of [SUPPLY_NOTICE_PREFIX, SUPPLY_REPLY_PREFIX, ASSISTANT_RELAY_PREFIX]) if (s.startsWith(p)) s = s.slice(p.length)
+  for (const t of [SUPPLY_NOTICE_TAIL, SUPPLY_PROGRESS_TAIL, SUPPLY_REPLY_TAIL, SUPPLY_BUNDLE_TAIL, ASSISTANT_RELAY_TAIL]) {
     if (s.endsWith(t)) s = s.slice(0, -t.length)
   }
   return s.trim()
@@ -1485,6 +1505,20 @@ export const queueSupplyOwnerSay = async (
   ownerSays.set(key, q)
   await flushSupplyNotices(deps).catch(() => [])
   return ownerSays.get(key)?.length ?? 0
+}
+
+/** Take back an owner line still waiting for its desk (found by its `onDone`) —
+ *  the assistant's relay gave up on it (presidentRelay.ts), so it must not land
+ *  days later when the desk reopens. True = it was still waiting and is gone.
+ *  A line already being typed is not stopped (its pass removes it by identity). */
+export const cancelSupplyOwnerSay = (projectPath: string, onDone: (heard: boolean) => void): boolean => {
+  const key = deskKey(projectPath)
+  const q = ownerSays.get(key)
+  const i = q ? q.findIndex((o) => o.onDone === onDone) : -1
+  if (!q || i < 0) return false
+  q.splice(i, 1)
+  if (q.length === 0) ownerSays.delete(key)
+  return true
 }
 
 /**

@@ -813,6 +813,12 @@
   `e2e/assistant-proposal-frames.spec.ts`(実 Chromium・ビルド済みCSSで: 長い会話のチャット中も通話中も枠が切れず押せる=jsdom では flex の配分が見えない)。枠の箱は縮まない・上限は窓の最大高さ−会話以外の部品−会話に残す 88px(実測・ただし枠がそれでしか収まらない短い窓では枠を優先)。閉じた案は最後に閉じた1件(`closedAt`)だけ薄い1行・出した案は緑のチェック(会話の場所を取らない)。写真は読み込み後に測り直し・最下段へ。
   実機確認 `npx tsx scripts/verify-assistant-live.mts`(本物の claude・使い捨て HOME)/ 秒数 `node scripts/measure-assistant-latency.mjs [baseUrl] "…"`。
   罠: SDK 0.3.220 は `settingSources` 省略で**全設定を読む**(`[]` 必須)/ 門が throw すると fail-open なので catch で deny。
+- アシスタント → 社長の伝言(2026-10-30): 道具 `tell_president` = 提案(`assistantProposals.ts` `proposePresident`・kind `president`・題 「社長へ」)→ 「送る」で `presidentRelay.ts`
+  (`relayToPresident`: 窓口が閉じていれば `wakePresidentDesk` で開く=電話の say と共用・`queueSupplyOwnerSay` へ `【アシスタントからの伝言】`(凍結・`supplyNotice.ts` `assistantRelayLine`)付きの1行 →
+  `watchPresidentReply`: 社長の transcript でこの伝言の写し(印+本文)を探し、その後の社長の文だけ・次に誰かが窓口に打った行で終わり・最後が text で卓が2回静かなら返事・10分で打ち切り、着地しなければ `cancelSupplyOwnerSay` で取り下げ)→ `phoneAssistant.ts` `presidentAnswered`(アシスタントが要約した1行を会話へ・失敗時は社長の言葉そのまま・
+  `onAssistantAppLine` → `phoneLink.ts` `sendAppLine` で電話へ+push / 状態は `onRelayState` → `sendRelayState` = 既存 ack に `about`)。社長の会話では owner 側 `via:"assistant"`。
+  社長の線引き = `skills/supply/SKILL.md`「Messages through the owner's assistant」。仕様 = docs/PHONE_LINK.md「Assistant → president messages」/ docs/CHAT_SPEC.md §9.9。
+  テスト `presidentRelay.test.ts` / `phoneAssistant.test.ts`・`phoneLink.test.ts`・`FloatingAssistant.test.tsx` の president 系(赤実測済み)。罠: 待ちはメモリだけ(再起動で返事は戻らない・社長の会話には残る)。
 - アシスタントの記憶(2026-10-03): `src/lib/server/assistantMemory.ts`(`~/.openground/assistant/` 0700 — 会話の記録 `log/YYYY-MM-DD.jsonl`
   を既定30日で日ごと削除・要約メモ `memory.md` 1本を既定4000字以下に保つ・`state.json` = どこまで要約に畳んだか・`config.json` = 日数/字数)。
   セッション起動時に読むのは 要約メモ + まだ畳んでいない会話だけ(30行/16000字・1日超えで古い分を畳む = 行の後に別キューの `foldIdleAssistantTalk`)。

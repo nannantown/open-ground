@@ -35,6 +35,7 @@ import {
   queueSupplyReply,
   peekSupplyReplies,
   SUPPLY_REPLY_PREFIX,
+  ASSISTANT_RELAY_PREFIX,
   SUPPLY_REPLY_CAP,
   SUPPLY_NOTICE_CAP,
   SUPPLY_PROGRESS_MAX_ITEMS,
@@ -675,6 +676,10 @@ describe('the desks’ skills match the code-matched strings they depend on', ()
     const text = read('supply', 'SKILL.md')
     expect(text).toContain(SUPPLY_REPLY_PREFIX)
     expect(text).toContain(SUPPLY_NOTICE_PREFIX)
+  })
+
+  it('skills/supply/SKILL.md names the assistant relay prefix, byte for byte', async () => {
+    expect(read('supply', 'SKILL.md')).toContain(ASSISTANT_RELAY_PREFIX)
   })
 
   it('skills/og-manage/SKILL.md names the route it is obliged to answer on', async () => {

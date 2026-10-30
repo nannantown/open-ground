@@ -12,7 +12,7 @@ export type VoiceFiles = 'ready' | 'getting' | 'missing' | null
 /** A proposal as the server lists it (assistantProposals.ts ShownProposal). */
 export interface AssistantProposalView {
   id: string
-  kind: 'card' | 'commander'
+  kind: 'card' | 'commander' | 'president'
   projectId: string
   project: string
   title: string

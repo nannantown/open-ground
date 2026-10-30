@@ -115,11 +115,11 @@ export const ProposalFrames = ({
             key={p.id}
             data-proposal={p.id}
             data-state="open"
-            aria-label={p.kind === 'card' ? t('misc.assistant.proposalCard') : t('misc.assistant.proposalMessage')}
+            aria-label={p.kind === 'card' ? t('misc.assistant.proposalCard') : p.kind === 'president' ? t('misc.assistant.proposalPresident') : t('misc.assistant.proposalMessage')}
             className="shrink-0 rounded-[10px] border border-line-strong bg-plane px-2.5 py-2 text-ui text-ink"
           >
             <p data-part="project" className="break-words text-ink-subtle">{p.project}</p>
-            {p.kind === 'card' && <p data-part="title" className="mt-0.5 break-words font-semibold">{p.title}</p>}
+            {p.title && <p data-part="title" className="mt-0.5 break-words font-semibold">{p.title}</p>}
             <p data-part="body" className="mt-1 whitespace-pre-wrap break-words">{p.body}</p>
               <div className="mt-2 flex items-center justify-end gap-2">
                 <button
@@ -150,7 +150,7 @@ export const ProposalFrames = ({
             </CircleCheck>
           )}
           <span className="min-w-0 truncate">
-            {closed.project} · {closed.title || closed.body}
+            {closed.project} · {closed.kind === 'card' ? closed.title : closed.body}
           </span>
         </p>
       )}

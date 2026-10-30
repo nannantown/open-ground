@@ -892,6 +892,107 @@ press with the shown text's check wrote ONE todo card with exactly the frame's
 title and notes. Small talk answered in 0.64–1.1 s; a README look-up said
 「ちょっと待ってね。」 at 2.2 s and answered at 3.2 s.
 
+## Assistant → president messages (2026-10-30)
+
+Owner, 2026-10-30: 「ちゃんとアシスタントが各社長と連絡を取れたりできるようにしよう」. The
+assistant can pass ONE message (news, a request or a question) to a registered
+project's president and bring the president's answer back into the assistant's
+talk. iPhone and Mac behave the same (docs/CHAT_SPEC.md §9.9).
+
+**It is a proposal first** (the owner decision of "Assistant proposals" holds):
+the assistant's tool `tell_president` makes a proposal of `kind: "president"`;
+only the owner's 送る carries it out (same frames, same `assistant-proposal`
+press, same `hash` rule — nothing new on the wire for this part):
+```json
+{ "id": "…", "kind": "president", "projectId": "…", "project": "kiwi-shop",
+  "title": "社長へ", "body": "進み具合を教えて", "at": …, "expiresAt": …, "state": "open", "via": "phone" }
+```
+- `title` is who gets it — 「社長へ」 / "To the president" in the Mac's language —
+  so a president message never looks like a commander one. Draw it like a card's
+  title; it is part of the `hash` like every shown string.
+- `body` is the message exactly as it will be passed on. It must fit, with the
+  prefix and the president's instruction tail, in one line the president's window
+  takes unfolded (`SUPPLY_OWNER_SAY_MAX`), or it is refused when it is made.
+- Button: 送る (as for a commander message).
+
+**What 送る does (Mac):** `presidentRelay.ts` types one line into the project's
+president window — `【アシスタントからの伝言】<body> (…tail for the president…)` —
+through the same lane the iPhone's own words use (held while the desk is busy,
+half-typed or showing a menu; never typed over). A closed window is opened first
+(the same steps as a phone `say` to a closed desk). The `ack` of the press and
+the ONE `assistant` line after it are as in "Assistant proposals", with these
+texts: 「…の社長に伝えたよ。返事が来たら教えるね。」 / 「…窓口が閉じてたから開いたよ。…」 /
+「…今手が離せないから、空いたらすぐ渡すね。…」 / 「…の社長の窓口を開けなくて、伝えられなかった。」
+(this last one leaves the proposal open, to be pressed again).
+
+**The answer:** the Mac reads the president's own transcript: it finds the
+line's own echo (the prefix + the words) and takes the president's text after
+it, up to the next line anyone types into that window (a notice, a commander
+reply, the owner, another message — that is another conversation). It is done
+when the last block written was text (not a "let me look" before a tool) and the
+desk has been idle for two looks (3 s apart), for at most 10 minutes. A line
+that was never typed in by then is taken back from the window's queue (it never
+lands later). It then sends ONE more line, like an answer:
+```json
+{ "type": "assistant", "kind": "assistant", "text": "kiwi-shopの社長から返事: 半分できたって。", "speak": "…", "at": … }
+```
+(`type: "event"` with `projectId: "assistant"` before the phone fetched records —
+the same two shapes as every assistant line.) It is the assistant retelling the
+president's words; if the assistant cannot, the app's own 「…の社長から返事:<the
+president's words>」. No answer in 10 minutes → 「…の社長から10分たっても返事がないよ。…」;
+never handed over in that time (a desk busy throughout) → 「…伝言はまだ渡せていないよ。…」.
+This line comes whether or not the phone is in the assistant's talk, and wakes
+the phone with a push like an answer does. The log keeps it with
+`president: { projectId, project }` (the history page carries it as is; an app
+that does not know the field ignores it).
+
+**States of the message:** the message's own `id` is the proposal's `id`. Its
+states go as `ack` frames of that id with `projectId` = the president's project
+and `about` = the `id` of the owner's `say` that led to it (when there was one),
+using the states of "Message states" (being added by the message-state card,
+2026-10-30 — that section is the canon for their meaning and order; it is not
+copied here): `queued` (still waiting behind a busy desk) → `delivered`
+(`heard: true`) → `replying` → `replied` when the answer line comes, or
+`rejected` with `reason: "no-reply" | "not-landed"`. Sent only for proposals made
+from the phone (`via: "phone"`), v2 pairings only.
+
+**In the president's conversation** (the phone's partner = that project): the
+line arrives as an `owner` event whose `text` starts with 【アシスタントからの伝言】
+(the president's tail is not sent) and carries `"via": "assistant"`; then the
+president's own `president` events. An app that does not know `via` still shows
+the marker in the text. **Whatever project is selected:** for the selected one
+these come from the transcript tail as usual (with `cur`); for any other project
+the Mac sends the same two as `{ "type": "event", "projectId": "<that project>",
+"kind": "owner", "text": "【アシスタントからの伝言】…", "via": "assistant", "at": … }`
+when the line lands, and ONE `{ …, "kind": "president", "text": "<the answer>" }`
+when the answer is read (no `cur`; the relay keeps them like any event). File them
+by `projectId`. A selection switched mid-wait can repeat or miss one of them in
+that conversation; the assistant's talk carries the answer either way. Do not
+read aloud a `president` event of a project that is not the selected one: the
+assistant's retelling is what is heard (otherwise it sounds as if the president
+on screen said it).
+
+**The president's side** (`skills/supply/SKILL.md` "Messages through the owner's
+assistant"): it answers briefly; the line is the assistant's summary of the
+owner's words, never the owner's OK (no card to `todo`, no escalation answer, no
+setting on it alone); its boundaries do not move; a decision only the owner can
+make is asked of the owner as usual. The president's question lamp (yellow hand,
+`groundMarks.stepPresidentAsk`): a question asked back to the line lights it as
+one for the owner, and the line never clears a question already standing (only
+the owner's own words do).
+
+**The assistant's retelling turn** reads the president's words as DATA and has no
+acting tools in that turn (no proposal, no withdraw, no deep model); a talk
+deleted while it waits gets nothing written back.
+
+Not built: the wait survives no Mac restart (the line still lands and the
+president still answers in its own conversation). Code: `src/lib/server/presidentRelay.ts`,
+`assistantProposals.ts` (`proposePresident`), `phoneAssistant.ts`
+(`presidentAnswered`, `onAssistantAppLine`, `onRelayState`), `phoneLink.ts`
+(`sendAppLine`, `sendRelayState`). Guards: `presidentRelay.test.ts`,
+`phoneAssistant.test.ts` / `phoneLink.test.ts` / `FloatingAssistant.test.tsx`
+("president" cases) — each measured red with its production check removed.
+
 ## Photos (2026-10-16)
 
 The owner can send the assistant a photo from the phone: one picked from the

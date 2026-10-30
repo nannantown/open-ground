@@ -50,6 +50,9 @@ export interface AssistantEntry extends Partial<PhoneCallRecord> {
   photo?: string
   /** The model that wrote an assistant answer (e.g. claude-opus-…: the line went deep). */
   model?: string
+  /** An assistant line retelling a president's answer to a message the owner's
+   *  button passed on (presidentRelay.ts): whose answer it is. */
+  president?: { projectId: string; project: string }
 }
 export interface AssistantConfig {
   logDays: number

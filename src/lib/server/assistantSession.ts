@@ -58,6 +58,7 @@ export interface AssistantToolSet {
   status(a: Record<string, never>): Promise<ToolResult>
   make_card(a: CardInput): Promise<ToolResult>
   tell_commander(a: { projectId: string; message: string }): Promise<ToolResult>
+  tell_president(a: { projectId: string; message: string }): Promise<ToolResult>
   withdraw(a: Record<string, never>): Promise<ToolResult>
   /** The line needs real thought: the session moves to the deep model first (here). */
   think_deeper(a: Record<string, never>): Promise<ToolResult>
@@ -94,6 +95,7 @@ const SHAPES = {
   status: {},
   make_card: { projectId: z.string(), title: z.string(), goal: z.string(), done: z.array(z.string()) },
   tell_commander: { projectId: z.string(), message: z.string() },
+  tell_president: { projectId: z.string(), message: z.string() },
   withdraw: {},
   think_deeper: {},
 } satisfies Record<ToolName, z.ZodRawShape>
@@ -105,6 +107,8 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   status: "Every project's state right now: Board columns, what is stuck / worked on / awaiting integration, and questions waiting for the owner.",
   make_card: "PROPOSE one short work card for a project's Board: shown to the owner in a frame; only their button puts it on the Board. title, goal and done are each one short line; about 10 lines of 20 Japanese characters in all, or it is refused.",
   tell_commander: "PROPOSE one message for a project's commander: shown to the owner in a frame; only their button sends it. One line, plain words.",
+  tell_president:
+    "PROPOSE one message or question for a project's president: shown to the owner in a frame; only their button sends it, and the president's answer comes back to you as an App note. One line, plain words.",
   withdraw: 'Drop every proposal still waiting (the owner said stop / never mind).',
   think_deeper:
     'Hand THIS line to a stronger, slower model before answering. Call it FIRST — nothing written before it — when the line needs real thought: advice or a decision with trade-offs, comparing options, planning, a why about their work, or digging through several files to answer. Never for small talk, a simple fact or one quick look-up.',

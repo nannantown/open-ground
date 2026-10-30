@@ -527,6 +527,22 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
     }
   })
 
+  it('a message for a president names who gets it (「社長へ」) — and 「送る」 sends the check of that shown text too', async () => {
+    const undo = layout(300)
+    try {
+      proposals = [{ ...card, id: 'prop-p', kind: 'president', title: '社長へ', body: '進み具合を教えて' }]
+      await open()
+      fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.showTalk' }))
+      const frame = await screen.findByRole('region', { name: 'misc.assistant.proposalPresident' })
+      expect(frame.textContent).toContain('社長へ')
+      fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.proposalSend' }))
+      await waitFor(() => expect(presses()).toHaveLength(1))
+      expect(JSON.parse(String(presses()[0][1]?.body))).toEqual({ hash: await sha(['president', 'p-beta', 'beta', '社長へ', '進み具合を教えて']) })
+    } finally {
+      undo()
+    }
+  })
+
   it('a frame not seen whole cannot be pressed (and says to ask the president); nor where the layout cannot be measured; an expired one has no buttons', async () => {
     for (const room of [150, 0]) {
       const undo = layout(room)
