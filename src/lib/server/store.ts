@@ -256,6 +256,8 @@ export const setSettings = async (patch: Partial<Settings>): Promise<void> => {
   const run = settingsChain.then(async () => {
     const current = await readSettingsForWrite()
     const merged = { ...current, ...patch }
+    // Work mode switched off: remember when, on disk (phoneLink's president talk).
+    if (current.lockdownMode === true && merged.lockdownMode !== true) merged.lockdownOffAt = Date.now()
     await writeJson(settingsFile(), merged)
     // Re-mirror the model mask from the value we just PERSISTED (getSettings above
     // mirrored the pre-patch one). Without this a freshly-toggled tier would stay

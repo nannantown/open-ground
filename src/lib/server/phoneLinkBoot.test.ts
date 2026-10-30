@@ -5,7 +5,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { WebSocketServer } from 'ws'
 
@@ -55,6 +55,14 @@ const boot = async (lockdownMode: boolean) => {
 const settle = () => new Promise((r) => setTimeout(r, 500))
 
 describe('startPhoneLink at boot', () => {
+  it('a pairing from before the work-mode mark gets one at start (no past president talk is offered)', async () => {
+    await recordingRelay()
+    const before = Date.now()
+    await boot(false)
+    const cfg = JSON.parse(readFileSync(join(openGroundHome(), 'phone-link.json'), 'utf8'))
+    expect(cfg.quiet).toBeGreaterThanOrEqual(before)
+  })
+
   it('with work mode ON in settings, never dials the relay', async () => {
     const seen = await recordingRelay()
     await boot(true)

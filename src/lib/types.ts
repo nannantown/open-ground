@@ -245,6 +245,10 @@ export interface Settings {
    *  the user's Anthropic subscription — is deliberately NOT touched. Absent ⇒
    *  off (existing behaviour, nothing changes). User-settable. */
   lockdownMode?: boolean
+  /** ms when lockdownMode last went from on to off (setSettings writes it; NOT
+   *  user-settable). What a president said before then is never handed to the
+   *  phone (phoneLink.ts presidentTalk) — on disk, so it holds across restarts. */
+  lockdownOffAt?: number
 }
 
 /** Owner-only experiment ids — hidden features gated behind the owner role AND

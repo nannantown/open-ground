@@ -221,6 +221,13 @@ record does not exist; the 24 h rule below ends its keys anyway).
   messages"): it answers that message, not the owner line before it.
 - Proof for a president: an `owner` event carrying the line's `id` (⇒
   delivered) and a `president` event after it (⇒ replied).
+- **Coming back to a president** (owner, 2026-10-30): switching to a
+  president's conversation (and every reconnect while it is open) fetches that
+  president's recent talk from the Mac (PHONE_LINK "A president's talk"). What
+  the president said while another conversation was open shows in the talk at
+  its own time, and the proof above applies to it: the reply that came meanwhile
+  is there and the line is replied — no thinking row, no 「返事がまだ来ていません」.
+  Same on both screens: the Mac's president seat shows the desk itself.
 - An owner entry in the record without a following reply (an answer failed) is
   failed 「返事なし」 on BOTH screens, whoever sent it, for 24 h. Call records
   (`kind: "call"`) are not lines and never count.

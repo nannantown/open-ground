@@ -156,7 +156,9 @@ relay drops what it already has — the phone sees each event once. Text can con
 ```
 `desk` = that project's president desk is running now. Events only come from
 the `selected` project — and from the assistant, which is always the first
-entry (`"assistant": true`, never `selected`; see "The assistant").
+entry (`"assistant": true`, never `selected`; see "The assistant"). What a
+president said while another project was selected is fetched on coming back
+(sealed `projects` has `presidentTalk: true`; see "A president's talk").
 
 **`ack`** — what happened to a `say`:
 ```json
@@ -366,7 +368,8 @@ GROUND owns that adjunct record and never edits Claude's own JSONL.
 Fetch through sealed `assistant-history` with optional `projectId`. Absent or
 `assistant` returns assistant conversation and assistant call notes only;
 a registered president id returns its call notes only, without assistant talk,
-memo or style. The response names `projectId`, and normal history paging
+memo or style (plus, with `talk: true`, that president's recent talk — "A
+president's talk"). The response names `projectId`, and normal history paging
 applies. On the Mac, `/api/phone-link/call-notes?path=<registered project>`
 reads that president's notes under the same owner/loopback and project-path
 gates as other local app data; `DELETE` on the same URL clears that
@@ -1079,6 +1082,65 @@ president still answers in its own conversation). Code: `src/lib/server/presiden
 (`sendAppLine`, `sendRelayState`). Guards: `presidentRelay.test.ts`,
 `phoneAssistant.test.ts` / `phoneLink.test.ts` / `FloatingAssistant.test.tsx`
 ("president" cases) — each measured red with its production check removed.
+
+## A president's talk (2026-10-30)
+
+Owner, 2026-10-30 (answer A to the iOS commander's question): after saying
+something to president A and switching to president B, coming back to A must
+show A's reply that came meanwhile — the line must not just lose its replying
+mark and read 「返事がまだ来ていません」. Live `event`s only come from the
+`selected` project (a selection is "no replay of its past"), so the reply that
+came while another project was selected is fetched when the phone comes back.
+
+**Ask:** the sealed `assistant-history` with that project's id and `talk: true`
+(v2 only, like every `assistant-history`):
+```json
+{ "type": "assistant-history", "id": "…", "ts": …, "projectId": "<project id>", "talk": true }
+```
+Only when this Mac's sealed `projects` carries `presidentTalk: true` (do not
+trust a capability in the plain `hello`). Send it when the phone switches to a
+president's conversation (with its `select`, or a `say` that selects it) and on
+every reconnect while one is open. Without `talk` the page is exactly as before
+(call notes only), so an older phone sees no change.
+
+**Answer:** the first page (no `before`) also carries `talk`: the newest events
+of that president's current transcript, oldest first, each shaped like the
+inner part of a live `event` frame:
+```json
+{ "type": "assistant-history", "id": "…", "projectId": "<id>", "entries": [ …call notes… ], "more": false,
+  "talk": [ { "projectId": "<id>", "kind": "owner", "text": "進めて", "at": …, "id": "<your say id>", "eid": "…" },
+            { "projectId": "<id>", "kind": "president", "text": "できました", "at": …, "eid": "…" } ] }
+```
+- `kind` / `text` / `at` / `via` as for `event`. `eid` is the SAME mark the live
+  event of that transcript line carries (or would have carried): skip what you
+  already have, file the rest in the conversation by `at`.
+- An `owner` entry carries the say `id` it echoes, as an `owner` event does —
+  also for a say made just before the phone switched away (the Mac matches it by
+  its words and time: the same words said after the say). With it, CHAT_SPEC
+  §5b's president proof works on the page: the say's `owner` entry ⇒ delivered,
+  a `president` entry after it ⇒ replied (the mark goes, the words show).
+  A say left before its echo was read never gets its `id` on a LIVE echo after
+  coming back (the words may have landed unseen meanwhile; the same words typed
+  later at the Mac must not take its id). So while such a line is still waiting
+  and a `president` event of that project arrives, fetch the page again: it
+  matches the echo by words and time and carries the `id`.
+- Read from the last 2 MB of the current session file, at most about 24 KB of
+  events (older talk is not offered; a new desk session starts a new file).
+- Nothing said under work mode is in it: talk before the moment the Mac saw work
+  mode switched off is left out for good (seen by the link, or — kept in settings as
+  `lockdownOffAt`, so across a restart too — by the app while the link was down). Nor anything from before the link's own start mark: set by
+  a new pairing, and — for a pairing made before this — the first time the link
+  starts on this version. Without a mark nothing from the past is offered.
+- A say is matched to one `owner` line only; the same words said again later
+  (at the Mac) carry no `id`.
+- The whole page stays under the relay's 64 KB Mac frame once sealed (talk is
+  at most about 24 KB of the page's 40 KB).
+- Do not read these aloud — they are what was said while the owner was elsewhere.
+- No push or live event for a project that is not selected (except the
+  assistant's passed-on messages above); the page is how the phone catches up.
+
+Code: `phoneLink.ts` (`presidentTalk`, `assistantHistory`). Tests:
+`phoneLinkSealed.test.ts` "a president's talk for the phone coming back".
 
 ## Photos (2026-10-16)
 

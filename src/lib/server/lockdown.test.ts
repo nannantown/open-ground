@@ -9,7 +9,7 @@ import {
 import { getFreshSession, postToken } from './supabaseAuth'
 import { createBoardMirror, type MirrorDeps, type BoardMirror } from './collabMirror'
 import { openScopedDoc } from './collabMirrorCore'
-import { setSettings } from './store'
+import { getSettings, setSettings, setUserSettings } from './store'
 import { writeSession, clearSession } from './authStore'
 import * as Y from 'yjs'
 import type { ProjectData } from '../types'
@@ -103,6 +103,23 @@ describe('installLockdownFetchGuard — the floor around global fetch', () => {
     } finally {
       uninstall()
     }
+  })
+})
+
+describe('lockdownOffAt — when work mode went off, on disk', () => {
+  it('setSettings writes it on on→off only; an HTTP body cannot set it; it survives the memory mirror', async () => {
+    await setSettings({ lockdownMode: false })
+    const start = (await getSettings()).lockdownOffAt
+    await setSettings({ lockdownMode: false }) // off→off: no change
+    expect((await getSettings()).lockdownOffAt).toBe(start)
+    await setSettings({ lockdownMode: true })
+    const before = Date.now()
+    await setSettings({ lockdownMode: false })
+    const at = (await getSettings()).lockdownOffAt
+    expect(at).toBeGreaterThanOrEqual(before)
+    await setUserSettings({ lockdownOffAt: 1 })
+    ;(globalThis as { __openground_lockdown?: unknown }).__openground_lockdown = undefined
+    expect((await getSettings()).lockdownOffAt).toBe(at)
   })
 })
 

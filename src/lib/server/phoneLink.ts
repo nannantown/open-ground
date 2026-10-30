@@ -85,6 +85,10 @@ export interface PhoneLinkConfig {
    *  out as that (sealed, passed on by the relay and never kept) instead of as
    *  `event`s the relay keeps (sealed) for catch-up. */
   assistantDirect?: boolean
+  /** Work mode: -1 while it is on, then the ms it was seen off. A president's
+   *  talk from before then is never handed to the phone by `assistant-history`
+   *  (what is said in work mode never leaves this Mac). */
+  quiet?: number
 }
 
 export type PhoneEventKind = 'notice' | 'commander' | 'owner' | 'president'
@@ -306,7 +310,7 @@ interface LinkState {
    *  it came from (docs/PHONE_LINK.md `event`). `cur` = the transcript position
    *  it was matched to, so a resend after a reconnect carries the same id.
    *  Capped at SAY_IDS_MAX, oldest dropped. */
-  sayIds: { projectId: string; text: string; id: string; cur?: string; reply?: 'waiting' | 'sent' }[]
+  sayIds: { projectId: string; text: string; id: string; cur?: string; reply?: 'waiting' | 'sent'; at?: number; away?: true }[]
   /** Stops sending the proposal list (startPhoneLink subscribes). */
   unwatchProposals?: () => void
 }
@@ -437,7 +441,8 @@ const sendProjects = async (st: LinkState, force = false): Promise<void> => {
     type: 'projects',
     selected: chosen?.id ?? null,
     // `photo`: this Mac puts a phone's `photo-part`s together (docs/PHONE_LINK.md "Photos").
-    ...(st.cfg.v === 2 ? { callNote: true, photo: true } : {}),
+    // `presidentTalk`: `assistant-history` with `talk: true` returns a president's talk.
+    ...(st.cfg.v === 2 ? { callNote: true, photo: true, presidentTalk: true } : {}),
     projects: [assistant, ...all.map(({ id, name, desk }) => ({ id, name, desk }))],
   }
   const body = JSON.stringify(frame)
@@ -450,21 +455,30 @@ const sendProjects = async (st: LinkState, force = false): Promise<void> => {
  *  no pending resume or persisted floor can reach back past it — the floor is
  *  dropped ON DISK too, or the first read after a restart would rewind to it
  *  (work-mode talk, or talk of a project left before it was unregistered). */
-const forgetTail = async (st: LinkState): Promise<void> => {
+const forgetTail = async (st: LinkState, workMode = false): Promise<void> => {
   st.tail = { offset: 0 }
   st.resume = undefined
   st.firstTail = false
-  // A say not echoed yet never will be now (project left, or work mode): left
-  // waiting, a later say with the same words would get its id.
-  st.sayIds = st.sayIds.filter((x) => x.cur)
+  // A say not echoed yet is never matched by the tail now (project left, or
+  // work mode): left waiting, a later say with the same words would get its id.
+  // A project left keeps it `away` — only for that project's talk page
+  // (presidentTalk), which matches it by its words AND time.
+  st.sayIds = workMode ? st.sayIds.filter((x) => x.cur) : st.sayIds.map((x) => (x.cur ? x : { ...x, away: true as const }))
   const { floor: _gone, ...rest } = st.cfg
-  st.cfg = rest
+  st.cfg = workMode ? { ...rest, quiet: -1 } : rest
   if (!st.retired) await writeConfig(st.cfg).catch(() => {})
 }
 
 const persistFloor = async (st: LinkState, f: string, o: number): Promise<void> => {
   st.cfg = { ...st.cfg, floor: { f, o } }
   if (!st.retired) await writeConfig(st.cfg).catch(() => {})
+}
+
+/** Work mode seen off: its talk stays before `quiet` for good. */
+const endQuiet = (st: LinkState): void => {
+  if (st.cfg.quiet !== -1 || isLockdownEnabledSync()) return
+  st.cfg = { ...st.cfg, quiet: Date.now() }
+  if (!st.retired) void writeConfig(st.cfg).catch(() => {})
 }
 
 /** Hear `projectId` from now on (no replay of its past). */
@@ -575,7 +589,7 @@ const sayKey = (s: string): string => clip(s.replace(INVISIBLE, ''))
 const sayIdFor = (st: LinkState, projectId: string, text: string, cur: string): string | undefined => {
   const key = sayKey(text)
   const e =
-    st.sayIds.find((x) => x.cur === cur) ?? st.sayIds.find((x) => !x.cur && x.projectId === projectId && x.text === key)
+    st.sayIds.find((x) => x.cur === cur) ?? st.sayIds.find((x) => !x.cur && !x.away && x.projectId === projectId && x.text === key)
   if (e) {
     e.cur = cur
     // Its echo is in: the president's next words are its reply (ack replied, once).
@@ -622,6 +636,85 @@ const assistantTalk = (st: LinkState, kind: 'owner' | 'assistant', body: Record<
  *  maximum included). */
 const HISTORY_PAGE_BYTES = 40_000
 
+/** A president's talk read back for its page: up to this much of the newest
+ *  transcript, and this many bytes of events (the page budget keeps the rest). */
+const TALK_READ_MAX = 2 * READ_MAX
+const TALK_BYTES = 24_000
+
+/** The newest talk of a president's current transcript, oldest first, each
+ *  shaped like the live `event` it was (or would have been): `eid` from its
+ *  position, so the phone skips what it already heard; an owner line carries
+ *  the id of the phone say it echoes. For the phone coming back to a project it
+ *  had left (docs/PHONE_LINK.md "A president's talk"). Not after work mode's
+ *  end mark. ponytail: only the current session file's last 2 MB — older talk is
+ *  not offered; read further back if the phone ever pages it. */
+const presidentTalk = async (st: LinkState, p: { id: string; path: string }): Promise<Record<string, unknown>[]> => {
+  endQuiet(st) // work mode is off here (assistantHistory returns under it)
+  const key = e2eKeyOf(st.cfg.e2eKey)
+  const sess = (await readSwarmSessions(p.path)).supply
+  if (!key || !sess) return []
+  const file = sessionJsonlPath(sess.cwd, sess.sessionId)
+  let buf: Buffer
+  let base: number
+  try {
+    const size = (await stat(file)).size
+    base = Math.max(0, size - TALK_READ_MAX)
+    const fh = await open(file, 'r')
+    try {
+      buf = Buffer.alloc(size - base)
+      buf = buf.subarray(0, (await fh.read(buf, 0, buf.length, base)).bytesRead)
+    } finally {
+      await fh.close()
+    }
+  } catch {
+    return []
+  }
+  // No mark yet (a pairing or a config from before it): from now, never the past.
+  if (st.cfg.quiet === undefined) {
+    st.cfg = { ...st.cfg, quiet: Date.now() }
+    if (!st.retired) await writeConfig(st.cfg).catch(() => {})
+  }
+  // Also a work-mode switch this link never saw (socket down, then a restart):
+  // the app keeps when work mode last went off in settings.
+  const quiet = st.cfg.quiet === -1 ? Infinity : Math.max(st.cfg.quiet ?? Infinity, (await getSettings()).lockdownOffAt ?? 0)
+  const fid = `${p.id}:${basename(file)}`
+  const out: Record<string, unknown>[] = []
+  // Read from mid-file: the first (partial) line is skipped.
+  let at = 0
+  if (base > 0) {
+    const first = buf.indexOf(0x0a)
+    if (first < 0) return []
+    at = first + 1
+  }
+  for (let nl = buf.indexOf(0x0a, at); nl >= 0; nl = buf.indexOf(0x0a, at)) {
+    const o = base + at
+    const events = phoneEventsFromLine(buf.subarray(at, nl).toString('utf8'))
+    at = nl + 1
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i]
+      if ((ev.at ?? 0) <= quiet) continue
+      const cur = `${fid}:${o}:${i}`
+      let id: string | undefined
+      if (ev.kind === 'owner') {
+        const k = sayKey(ev.text)
+        const said =
+          st.sayIds.find((x) => x.cur === cur) ??
+          st.sayIds.find((x) => !x.cur && x.projectId === p.id && x.text === k && ev.at !== undefined && x.at !== undefined && ev.at >= x.at - 2000)
+        // Matched once for good: never lent to a later line with the same words.
+        if (said) {
+          id = said.id
+          said.cur = cur
+        }
+      }
+      out.push({ projectId: p.id, ...ev, ...(id !== undefined ? { id } : {}), eid: sealTag(key, 'eid', `${fid}:${o}:${i}`) })
+    }
+  }
+  let bytes = 0
+  let from = out.length
+  while (from > 0 && (bytes += Buffer.byteLength(JSON.stringify(out[from - 1])) + 1) <= TALK_BYTES) from--
+  return out.slice(from)
+}
+
 /** The phone fetches the assistant's records from the Mac (they are kept here
  *  only): newest first, a page at a time (`before` = the oldest `at` it has),
  *  the memo and the settings with the first page. v2 only — sealed by
@@ -634,15 +727,20 @@ const assistantHistory = async (st: LinkState, f: Record<string, unknown>, id: s
   // The phone opened the assistant's talk (its first page): start its session
   // now, so the first line said there skips the start-up (as the Mac's window does).
   if (projectId === ASSISTANT_ID && before === undefined) void deps.warm?.().catch(() => {})
-  if (projectId !== ASSISTANT_ID && !(await listProjects()).some((p) => p.id === projectId))
-    return void send(st, { type: 'assistant-history', id, projectId, error: 'no-project' })
+  const president = projectId === ASSISTANT_ID ? undefined : (await listProjects()).find((p) => p.id === projectId)
+  if (projectId !== ASSISTANT_ID && !president) return void send(st, { type: 'assistant-history', id, projectId, error: 'no-project' })
   if (projectId === ASSISTANT_ID && !st.cfg.assistantDirect) {
     st.cfg = { ...st.cfg, assistantDirect: true }
     if (!st.retired) await writeConfig(st.cfg).catch(() => {})
   }
   // The first page carries the proposals made from the phone (their frames and buttons).
   // The voice is picked per device: the Mac's pick stays here (docs/ASSISTANT_DESIGN.md "Voice").
-  const head = before === undefined && projectId === ASSISTANT_ID ? { memory: await readAssistantMemory(), ...withoutVoice(await readAssistantConfig()), proposals: listProposals({ via: 'phone' }) } : {}
+  const head =
+    before === undefined && projectId === ASSISTANT_ID
+      ? { memory: await readAssistantMemory(), ...withoutVoice(await readAssistantConfig()), proposals: listProposals({ via: 'phone' }) }
+      : before === undefined && president && f.talk === true
+        ? { talk: await presidentTalk(st, president) }
+        : {}
   // Which model wrote an answer stays in the Mac's log: the phone's frames keep their shape.
   const all = assistantEntriesFor(await readAssistantLog(), projectId)
     .filter((e) => before === undefined || e.at < before)
@@ -899,7 +997,7 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
     starting = true
   }
   ack('queued', { projectId: p.id, ...(starting ? { desk: 'starting' } : {}) })
-  const said: LinkState['sayIds'][number] | undefined = id !== undefined ? { projectId: p.id, text: sayKey(ownerSayLine(text)), id } : undefined
+  const said: LinkState['sayIds'][number] | undefined = id !== undefined ? { projectId: p.id, text: sayKey(ownerSayLine(text)), id, at: Date.now() } : undefined
   if (said) st.sayIds = [...st.sayIds, said].slice(-SAY_IDS_MAX)
   await queueSupplyOwnerSay(
     p.path,
@@ -1090,11 +1188,12 @@ const connect = (st: LinkState): void => {
   if (isLockdownEnabledSync()) {
     // Work mode refuses every non-Anthropic host; look again later — and what
     // is said meanwhile never leaves this Mac, not even once it is switched off.
-    void forgetTail(st)
+    void forgetTail(st, true)
     st.assistantOutbox = []
     later(st, 60_000)
     return
   }
+  endQuiet(st)
   const ws = new WebSocket(roomUrl(st.cfg, 'mac'), { headers: macHeaders(st.cfg) })
   st.ws = ws
   ws.on('open', () => {
@@ -1153,10 +1252,11 @@ export const tick = async (st: LinkState): Promise<void> => {
     // streaming the president's words out (connect waits under lockdown).
     if (isLockdownEnabledSync()) {
       st.ws.terminate()
-      await forgetTail(st)
+      await forgetTail(st, true)
       st.assistantOutbox = [] // unsent assistant talk goes the way of the desk's
       return
     }
+    endQuiet(st)
     const now = Date.now()
     if (now - st.lastHeard > PING_EVERY_MS * 3) {
       st.ws.terminate() // half-open socket: no pong for 90 s
@@ -1200,6 +1300,11 @@ export const startPhoneLink = async (): Promise<boolean> => {
   if (!isPhoneLinkPrimary()) return false
   const cfg = await readPhoneLinkConfig()
   if (!cfg || (cfg.v === 1 && Date.now() >= LEGACY_V1_UNTIL)) return false
+  // A config from before the work-mode mark: from now on (docs/PHONE_LINK.md "A president's talk").
+  if (cfg.quiet === undefined) {
+    cfg.quiet = Date.now()
+    await writeConfig(cfg).catch(() => {})
+  }
   // Warm the work-mode mirror first: isLockdownEnabledSync() reads false until
   // the first settings read, and at boot this can be the first one to finish.
   await getSettings()
@@ -1289,6 +1394,7 @@ export const pairPhone = async (): Promise<{ code: string } | { error: PhoneLink
     phoneKey: key(),
     e2eKey: key(),
     ...(old?.projectId ? { projectId: old.projectId } : {}),
+    quiet: Date.now(), // a president's talk from before this pairing is never handed over
   }
   // The new room first (the relay may refuse it: no app key), then the old phone
   // is cut off — and only then is the new code handed out. Either step failing

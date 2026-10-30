@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHmac, hkdfSync, randomBytes } from 'node:crypto'
 
-const h = vi.hoisted(() => ({ file: '', files: {} as Record<string, string>, projects: [] as { id: string; path: string; displayName?: string }[] }))
+const h = vi.hoisted(() => ({ file: '', files: {} as Record<string, string>, projects: [] as { id: string; path: string; displayName?: string }[], offAt: undefined as number | undefined }))
 vi.mock('cloudflare:workers', () => ({
   DurableObject: class {
     constructor(
@@ -19,7 +19,7 @@ vi.mock('cloudflare:workers', () => ({
 }))
 vi.mock('./swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => true }))
 vi.mock('./roles', () => ({ getCustomTabRole: async () => null }))
-vi.mock('./store', async (orig) => ({ ...(await orig<typeof import('./store')>()), getSettings: async () => ({ projects: h.projects }) }))
+vi.mock('./store', async (orig) => ({ ...(await orig<typeof import('./store')>()), getSettings: async () => ({ projects: h.projects, lockdownOffAt: h.offAt }) }))
 vi.mock('./swarmSessions', () => ({ readSwarmSessions: async (p: string) => ({ supply: { cwd: p, sessionId: 's1' } }) }))
 vi.mock('./transcript', () => ({ sessionJsonlPath: (cwd: string) => h.files[cwd] ?? h.file }))
 vi.mock('./terminal', async (orig) => ({ ...(await orig<typeof import('./terminal')>()), listLiveDesksIn: () => [{ id: 'd1' }] }))
@@ -52,6 +52,7 @@ beforeEach(() => {
   setLockdownCache(false)
   h.projects = [{ id: 'p1', path: PROJECT, displayName: '極秘プロジェクト' }]
   h.files = {}
+  h.offAt = undefined
   h.file = join(dir, `${Math.random()}.jsonl`)
   writeFileSync(h.file, '')
 })
@@ -677,6 +678,106 @@ describe('sealed call records', () => {
     await handleRelayFrame(st, phoneSays(n))
     expect(await readAssistantLog()).toEqual([expect.objectContaining({ id: 'call:disk-fail', seconds: 102 })])
     expect(opened(wire).at(-1)?.inner?.state).toBe('delivered')
+  })
+})
+
+describe("a president's talk for the phone coming back (docs/PHONE_LINK.md \"A president's talk\")", () => {
+  const now = () => new Date().toISOString()
+  const user = (text: string) => line({ type: 'user', timestamp: now(), message: { content: text } })
+  const president = (text: string) => line({ type: 'assistant', timestamp: now(), message: { content: [{ type: 'text', text }] } })
+  const deps = { supply: fakeDesk().deps, wakeDesk: async () => null }
+  const setup = (cfg: PhoneLinkConfig = { ...CFG, quiet: Date.now() - 1000 }) => {
+    h.projects = [
+      { id: 'p1', path: PROJECT },
+      { id: 'p2', path: '/repo/beta' },
+    ]
+    h.files = { [PROJECT]: join(dir, `${Math.random()}-a.jsonl`), '/repo/beta': join(dir, `${Math.random()}-b.jsonl`) }
+    for (const f of Object.values(h.files)) writeFileSync(f, '')
+    const { wire, sock } = macSocket()
+    return { wire, st: __testLinkState(cfg, Object.assign(sock, { terminate: () => {} })) }
+  }
+  const page = async (st: ReturnType<typeof __testLinkState>, wire: string[], extra: Record<string, unknown> = { talk: true }) => {
+    await handleRelayFrame(st, phoneSays({ type: 'assistant-history', id: `h${Math.random()}`, ts: Date.now(), projectId: 'p1', ...extra }))
+    return opened(wire).at(-1)?.inner as { talk?: Record<string, unknown>[]; entries: unknown[] }
+  }
+
+  it("the reply that came while another project was selected is in the left project's page, with the say id and the live eid", async () => {
+    const { wire, st } = setup()
+    await pumpTranscript(st)
+    appendFileSync(h.files[PROJECT], president('前の話'))
+    await pumpTranscript(st)
+    const heard = opened(wire).find((f) => f.inner?.kind === 'president')?.inner?.eid
+    await handleRelayFrame(st, phoneSays({ type: 'say', id: 'a1', ts: Date.now(), text: '進めて', projectId: 'p1' }), deps)
+    await handleRelayFrame(st, phoneSays({ type: 'select', id: 'sel', ts: Date.now(), projectId: 'p2' }))
+    appendFileSync(h.files[PROJECT], user('進めて') + president('できました'))
+    await pumpTranscript(st) // reads p2 now: nothing of p1 goes out live
+    expect(opened(wire).some((f) => f.inner?.text === 'できました')).toBe(false)
+    const { talk } = await page(st, wire)
+    expect(talk?.map((e) => [e.kind, e.text, e.id, e.projectId])).toEqual([
+      ['president', '前の話', undefined, 'p1'],
+      ['owner', '進めて', 'a1', 'p1'],
+      ['president', 'できました', undefined, 'p1'],
+    ])
+    expect(talk?.[0].eid).toBe(heard) // the phone skips what it already heard
+  })
+
+  it('a link with no work-mode mark (a fresh pairing, a config from before it) offers nothing from the past', async () => {
+    const { wire, st } = setup(CFG) // CFG has no quiet
+    appendFileSync(h.files[PROJECT], president('作業モード中だったかもしれない話'))
+    await new Promise((r) => setTimeout(r, 5))
+    expect((await page(st, wire)).talk).toEqual([])
+    expect(st.cfg.quiet).toEqual(expect.any(Number))
+    await new Promise((r) => setTimeout(r, 5))
+    appendFileSync(h.files[PROJECT], president('そのあとの話'))
+    expect((await page(st, wire)).talk?.map((e) => e.text)).toEqual(['そのあとの話'])
+  })
+
+  it('work mode switched on and off while the socket was down is never offered, also after a restart', async () => {
+    const { wire, st } = setup()
+    appendFileSync(h.files[PROJECT], president('作業モード中の話')) // no tick saw work mode
+    await new Promise((r) => setTimeout(r, 5))
+    h.offAt = Date.now() // settings.lockdownOffAt, as setSettings writes it on on→off
+    ;(globalThis as { __openground_lockdown?: unknown }).__openground_lockdown = undefined // the restart: memory gone
+    expect((await page(st, wire)).talk).toEqual([])
+  })
+
+  it('a say matched once is never lent to a later line with the same words', async () => {
+    const { wire, st } = setup()
+    await handleRelayFrame(st, phoneSays({ type: 'say', id: 'once', ts: Date.now(), text: '進めて', projectId: 'p1' }), deps)
+    await handleRelayFrame(st, phoneSays({ type: 'select', id: 'sel2', ts: Date.now(), projectId: 'p2' }))
+    appendFileSync(h.files[PROJECT], user('進めて'))
+    expect((await page(st, wire)).talk?.map((e) => e.id)).toEqual(['once'])
+    // Push the first echo out of the page, then the same words typed at the Mac.
+    for (let i = 0; i < 5; i++) appendFileSync(h.files[PROJECT], president('長'.repeat(2000)))
+    appendFileSync(h.files[PROJECT], user('進めて'))
+    const talk = (await page(st, wire)).talk!
+    expect(talk.some((e) => e.id === 'once')).toBe(false)
+    expect(talk.at(-1)).toMatchObject({ kind: 'owner', text: '進めて' })
+    expect(talk.at(-1)?.id).toBeUndefined()
+  })
+
+  it('a page full of long talk still fits the relay frame', async () => {
+    const { wire, st } = setup()
+    for (let i = 0; i < 12; i++) appendFileSync(h.files[PROJECT], president('長'.repeat(2000)))
+    await page(st, wire)
+    expect(wire.at(-1)!.length).toBeLessThan(64 * 1024)
+  })
+
+  it('an old phone (no talk flag) gets call notes only; work-mode talk is never offered', async () => {
+    const { wire, st } = setup()
+    appendFileSync(h.files[PROJECT], president('ふつうの話'))
+    expect((await page(st, wire, {})).talk).toBeUndefined()
+    st.lastHeard = Date.now()
+    setLockdownCache(true)
+    await tick(st)
+    appendFileSync(h.files[PROJECT], president('作業モード中の話'))
+    setLockdownCache(false)
+    await new Promise((r) => setTimeout(r, 5))
+    await tick(st) // the link sees work mode off
+    await new Promise((r) => setTimeout(r, 5))
+    appendFileSync(h.files[PROJECT], president('あとの話'))
+    const { talk } = await page(st, wire)
+    expect(talk?.map((e) => e.text)).toEqual(['あとの話'])
   })
 })
 
