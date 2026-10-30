@@ -123,10 +123,20 @@ describe('the model gets the photo', () => {
 })
 
 describe('the floating window gets the "let me look" line before the answer', () => {
-  it('stream: one JSON per line — the interim first, then the answer with the part to read aloud', async () => {
+  it('stream: one JSON per line — replying as its turn begins, the interim, then the answer with the part to read aloud', async () => {
     const r = await say({ text: '状況どう?', stream: true })
     expect(r.status).toBe(200)
-    expect((await r.text()).trim().split('\n').map((l) => JSON.parse(l))).toEqual([{ interim: expect.stringMatching(/^(One moment|Let me check|Let me look)\.$/) }, { reply: 'ok', speak: 'ok' }])
+    expect((await r.text()).trim().split('\n').map((l) => JSON.parse(l))).toEqual([{ state: 'replying' }, { interim: expect.stringMatching(/^(One moment|Let me check|Let me look)\.$/) }, { reply: 'ok', speak: 'ok' }])
+  })
+})
+
+describe('message states: the window names its line', () => {
+  it('the window\'s clientId is kept on its line in the log (the startup check finds it there); a bad one is not', async () => {
+    await say({ text: 'ひとつ', clientId: 'w-1' })
+    await say({ text: 'ふたつ', clientId: 'x'.repeat(101) })
+    const owner = (await readAssistantLog()).filter((e) => e.who === 'owner')
+    expect(owner.find((e) => e.text === 'ひとつ')?.clientId).toBe('w-1')
+    expect(owner.find((e) => e.text === 'ふたつ')?.clientId).toBeUndefined()
   })
 })
 

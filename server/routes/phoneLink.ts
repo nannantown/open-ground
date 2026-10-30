@@ -29,6 +29,7 @@ import {
   clearAssistantLog,
   clearAssistantMemory,
   deleteAssistantEntry,
+  deleteUnansweredLine,
   readAssistantConfig,
   readAssistantLog,
   readAssistantMemory,
@@ -117,6 +118,11 @@ export const phoneLinkRoutes = new Hono()
   .delete('/api/phone-link/assistant/log/:id', async (c) =>
     (await deleteAssistantEntry(c.req.param('id'), 'assistant')) ? (closeAssistantSession(), clearProposals(), c.json({ ok: true })) : c.json({ error: 'not found' }, 404),
   )
+  // 削除 on a line that got no answer (CHAT_SPEC §5b): only that line — a turn
+  // running now, the session and the proposals are left alone (unlike the delete above).
+  .delete('/api/phone-link/assistant/failed/:id', async (c) =>
+    (await deleteUnansweredLine(c.req.param('id'))) ? c.json({ ok: true }) : c.json({ error: 'not-failed' }, 409),
+  )
   // A photo the owner sent (only names assistantMemory made resolve).
   .get('/api/phone-link/assistant/photo/:name', async (c) => {
     const path = assistantPhotoPath(c.req.param('name'))
@@ -187,8 +193,11 @@ export const phoneLinkRoutes = new Hono()
   // Talk to the assistant from the screen: the same assistant, the same log.
   // A photo rides along as base64 (`photo`); its bytes decide its format.
   .post('/api/phone-link/assistant/say', async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { text?: unknown; photo?: unknown; stream?: unknown }
+    const body = (await c.req.json().catch(() => ({}))) as { text?: unknown; photo?: unknown; stream?: unknown; clientId?: unknown }
     const line = typeof body.text === 'string' ? body.text.trim() : ''
+    // The window's own id for the line: kept in the log, so the window knows its
+    // line there (CHAT_SPEC §5b startup check).
+    const clientId = typeof body.clientId === 'string' && body.clientId.length > 0 && body.clientId.length <= 100 ? body.clientId : undefined
     let bytes: Buffer | null = null
     if (body.photo !== undefined) {
       if (typeof body.photo !== 'string') return c.json({ error: 'photo-type' }, 415)
@@ -219,6 +228,7 @@ export const phoneLinkRoutes = new Hono()
     // "let me look" said before a look-up, the moment it is said; `{say}` for each
     // sentence of the part read aloud as it is written (a line without tools),
     // `{hush}` if a tool call then starts; then the answer (or `{error, detail}`).
+    // `{state: "replying"}` the moment this line's turn begins (CHAT_SPEC §5b).
     // The status is 200 once the stream has started.
     if (body.stream === true) {
       c.header('content-type', 'application/x-ndjson; charset=utf-8')
@@ -229,6 +239,8 @@ export const phoneLinkRoutes = new Hono()
         const a = await askAssistant(line, {
           via: 'screen',
           ...(photo ? { photo } : {}),
+          ...(clientId ? { clientId } : {}),
+          onStart: () => send({ state: 'replying' }),
           onInterim: (t) => send({ interim: t }),
           onSay: (t) => send({ say: t }),
           onHush: () => send({ hush: true }),
@@ -238,7 +250,7 @@ export const phoneLinkRoutes = new Hono()
       })
     }
     try {
-      return c.json(await askAssistant(line, { via: 'screen', ...(photo ? { photo } : {}) }))
+      return c.json(await askAssistant(line, { via: 'screen', ...(photo ? { photo } : {}), ...(clientId ? { clientId } : {}) }))
     } catch (e) {
       const f = await failed(e)
       return c.json({ error: f.error, detail: f.detail }, f.status)

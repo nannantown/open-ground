@@ -382,6 +382,8 @@ export interface AssistantDeps {
   /** Not an owner line: something the APP tells the model (a president's answer).
    *  Only the answer is logged (with `entry`'s fields); nothing is logged as the owner's. */
   app?: { note: string; entry?: Partial<AssistantEntry> }
+  /** This line's turn began (it may have waited behind one other): "replying". */
+  onStart?: () => void
 }
 
 /** A paragraph's sentences as they are read aloud. Markup is not read (a stray
@@ -702,6 +704,7 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
   const clock = clockOf(deps)
   const now = clock()
   const via = deps.via ?? 'phone'
+  deps.onStart?.()
   const ownerMeta = {
     ...(deps.clientId && deps.clientId.length <= 100 ? { clientId: deps.clientId } : {}),
     ...(deps.photo ? { photo: deps.photo } : {}),
@@ -838,7 +841,7 @@ export const pressProposal = async (
   }
   const line = carriedLine(r, lang)
   note(`(App note: the owner pressed the button on your proposal for ${r.proposal.project}: ${line})`)
-  await appendAssistantEntries([{ at: Date.now(), who: 'assistant', text: line, via: o.via, ...(r.card ? { card: r.card } : {}) }]).catch(() => {})
+  await appendAssistantEntries([{ at: Date.now(), who: 'assistant', text: line, via: o.via, app: true, ...(r.card ? { card: r.card } : {}) }]).catch(() => {})
   return { line, proposal: r.proposal, ...(r.card ? { card: r.card } : {}) }
 }
 

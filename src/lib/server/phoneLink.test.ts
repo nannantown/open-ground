@@ -199,7 +199,7 @@ describe('the phone opening the assistant warms its session', () => {
 })
 
 describe('handlePhoneFrame — the phone speaks', () => {
-  it('a say lands in the president desk as the owner words and the phone hears queued then delivered', async () => {
+  it('a say lands in the president desk as the owner words and the phone hears queued, delivered, then replying', async () => {
     const { sent, sock } = fakeSocket()
     const desk = fakeDesk()
     const st = __testLinkState(CFG, sock)
@@ -212,6 +212,7 @@ describe('handlePhoneFrame — the phone speaks', () => {
     expect(sent.filter((f) => f.type === 'ack').map((f) => [f.id, f.state])).toEqual([
       ['c1', 'queued'],
       ['c1', 'delivered'],
+      ['c1', 'replying'], // in the desk: Claude Code works on it (CHAT_SPEC §5b)
     ])
     expect(woke).toEqual([PROJECT]) // no live desk in the pool ⇒ it was started first
   })
@@ -327,6 +328,7 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
     expect(sent.filter((f) => f.type === 'ack').map((f) => [f.id, f.state, f.projectId])).toEqual([
       ['a1', 'queued', 'assistant'],
       ['a1', 'delivered', 'assistant'],
+      ['a1', 'replied', 'assistant'],
     ])
     expect(sent.filter((f) => f.type === 'event').map((f) => [f.projectId, f.kind, f.text])).toEqual([
       ['assistant', 'owner', 'alphaでログイン直して'],
@@ -417,7 +419,8 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
     sock.readyState = 1 // back, before any tick
     await handlePhoneFrame(st, { type: 'say', id: 'new', text: '二つ目', projectId: 'assistant' }, { assistant: async () => ({ reply: '新しい答え' }) })
     expect(sent.filter((f) => f.kind === 'assistant').map((f) => f.text)).toEqual(['古い答え', '新しい答え'])
-    expect(sent.filter((f) => f.type === 'ack').map((f) => f.id)).toEqual(['old', 'old', 'new', 'new'])
+    // The kept line's replied is not kept (live only); the live line's goes out.
+    expect(sent.filter((f) => f.type === 'ack').map((f) => [f.id, f.state])).toEqual([['old', 'queued'], ['old', 'delivered'], ['new', 'queued'], ['new', 'delivered'], ['new', 'replied']])
   })
 
   it('at most 20 kept frames: the oldest go first', async () => {
@@ -516,6 +519,22 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
     expect(JSON.stringify(final)).not.toMatch(/projectUUIDFromPath|\/Users\//)
   })
 
+  it('message states: replying when its turn begins (between queued and delivered), replied after the answer', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG2, sock)
+    await handlePhoneFrame(st, { type: 'say', id: 'm1', text: '全体どう?', projectId: 'assistant' }, {
+      assistant: async (_t, _p, onStart) => (onStart?.(), { reply: '順調です。' }),
+    })
+    expect(sent.filter((f) => f.type === 'ack' || f.kind === 'assistant').map((f) => (f.type === 'ack' ? f.state : 'answer'))).toEqual([
+      'queued',
+      'replying',
+      'delivered',
+      'answer',
+      'replied',
+    ])
+    expect(sent.filter((f) => f.state === 'replying' || f.state === 'replied').every((f) => f.id === 'm1' && f.projectId === 'assistant')).toBe(true)
+  })
+
   it('an assistant that cannot answer is reported, not left queued', async () => {
     const { sent, sock } = fakeSocket()
     const st = __testLinkState(CFG2, sock)
@@ -572,6 +591,30 @@ describe('the owner echo carries the id of the phone say it came from', () => {
       ['owner', 'Macで打った', undefined],
       ['owner', '進めて', 's2'],
     ])
+  })
+
+  it('message states: the president\'s first words after the echo send ack replied once — not before the echo, not again on a resend', async () => {
+    h.file = join(dir, 'say-replied.jsonl')
+    writeFileSync(h.file, '')
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    await pumpTranscript(st)
+    await handlePhoneFrame(st, { type: 'say', id: 'r1', text: '進めて' }, { supply: fakeDesk().deps, wakeDesk: async () => null })
+    const replied = () => sent.filter((f) => f.type === 'ack' && f.state === 'replied').map((f) => [f.id, f.projectId])
+    // Words from before the echo (the end of an older reply) are not its reply —
+    // also when a resume reads them again after the echo was matched.
+    appendFileSync(h.file, [asst([{ type: 'text', text: '前の話の続き' }]), user('進めて')].join('\n') + '\n')
+    await pumpTranscript(st)
+    st.tail.offset = 0
+    await pumpTranscript(st)
+    expect(replied()).toEqual([])
+    appendFileSync(h.file, [asst([{ type: 'text', text: '了解です' }]), asst([{ type: 'text', text: '続きです' }])].join('\n') + '\n')
+    await pumpTranscript(st)
+    expect(replied()).toEqual([['r1', 'p1']])
+    // The relay asks for a resend from before the echo: the reply is not told twice.
+    st.tail.offset = 0
+    await pumpTranscript(st)
+    expect(replied()).toEqual([['r1', 'p1']])
   })
 
   it('claude drops lone invisible characters from the transcript: the echo still gets the id', async () => {
@@ -1169,7 +1212,7 @@ describe('waking the phone with a Push to Talk push', () => {
     expect(pushes).toEqual([]) // held: the owner just spoke
     busy = false
     await flushSupplyNotices(supply)
-    expect(sent.filter((f) => f.type === 'ack').map((f) => f.state)).toEqual(['queued', 'delivered'])
+    expect(sent.filter((f) => f.type === 'ack').map((f) => f.state)).toEqual(['queued', 'delivered', 'replying'])
     await vi.waitFor(() => expect(pushes).toEqual([T1]))
     clearTimeout(st.pushTimer)
   })

@@ -21,12 +21,13 @@
 // mid-wait turn out to matter.
 import { open, stat } from 'fs/promises'
 import { resolve } from 'path'
-import { ASSISTANT_RELAY_PREFIX, assistantRelayLine, cancelSupplyOwnerSay, queueSupplyOwnerSay, SUPPLY_OWNER_SAY_MAX } from './supplyNotice'
+import { ASSISTANT_RELAY_PREFIX, assistantRelayLine, cancelSupplyOwnerSay, ownerSayLine, queueSupplyOwnerSay, SUPPLY_OWNER_SAY_MAX, supplyLineBody } from './supplyNotice'
 import { canonicalize } from './canonicalize'
 import { listAllActiveDesks, listDeskIdsByRole } from './liveDesks'
 import { SUPPLY_DESK_LABEL } from './swarmSupply'
 import { readSwarmSessions } from './swarmSessions'
 import { sessionJsonlPath } from './transcript'
+import { isTaskNotification } from './groundMarks'
 
 /** How long the assistant waits for the line to land and the president to answer. */
 export const PRESIDENT_REPLY_WAIT_MS = 10 * 60_000
@@ -119,6 +120,27 @@ const FIRST_LOOK_BYTES = 256 * 1024
 const ECHO_SLACK_MS = 60_000
 
 type Block = { type?: string; text?: string }
+type TranscriptLine = {
+  type?: string
+  isMeta?: boolean
+  isCompactSummary?: boolean
+  isApiErrorMessage?: boolean
+  message?: { content?: unknown }
+  origin?: { kind?: string } | null
+  attachment?: { type?: string; prompt?: unknown; origin?: { kind?: string } | null; commandMode?: string }
+}
+
+/** Someone typed this line into the window — the owner, a notice, a commander
+ *  reply, another message, a slash command (/model, /compact, a resume line).
+ *  Not: a tool result, a background task's notification, a meta line (a skill
+ *  loading mid-turn) or a compaction summary. */
+const typedIn = (ev: TranscriptLine): boolean => {
+  if (ev.isMeta || ev.isCompactSummary || isTaskNotification(ev)) return false
+  const queued = ev.type === 'attachment' && ev.attachment?.type === 'queued_command'
+  if (ev.type !== 'user' && !queued) return false
+  const c = queued ? ev.attachment?.prompt : ev.message?.content
+  return typeof c === 'string' ? c.trim() !== '' : Array.isArray(c) && c.some((b) => (b as Block)?.type !== 'tool_result')
+}
 
 /** Read the president's answer to THIS line: find the line's own echo in its
  *  transcript (ASSISTANT_RELAY_PREFIX + the words), take the president's text
@@ -128,7 +150,10 @@ type Block = { type?: string; text?: string }
  *  not a "let me look" before a tool) and the desk has been idle for two looks. */
 export const watchPresidentReply = async (path: string, words: string, from: number, until: number, d: PresidentRelayDeps): Promise<PresidentReply> => {
   const { phoneEventsFromLine } = await import('./phoneLink')
-  const echo = ASSISTANT_RELAY_PREFIX + words.slice(0, 40)
+  // The WHOLE line as the phone link reads it back (typed via ownerSayLine, then
+  // prefix + body): two messages that open alike are not mistaken for each
+  // other. Never longer than the phone's event clip (SUPPLY_OWNER_SAY_MAX < 8000).
+  const echo = ASSISTANT_RELAY_PREFIX + supplyLineBody(ownerSayLine(assistantRelayLine(words)))
   const said: string[] = []
   let file: string | null = null
   let offset = 0
@@ -142,7 +167,7 @@ export const watchPresidentReply = async (path: string, words: string, from: num
   // follows the line's own echo counts either way.
   let first = true
   const take = (line: string): boolean => {
-    let ev: { type?: string; isMeta?: boolean; isApiErrorMessage?: boolean; message?: { content?: unknown } }
+    let ev: TranscriptLine
     try {
       ev = JSON.parse(line)
     } catch {
@@ -157,11 +182,10 @@ export const watchPresidentReply = async (path: string, words: string, from: num
       said.push(...texts)
       return true
     }
-    for (const e of phoneEventsFromLine(line)) {
-      if (!anchored) {
-        if (e.kind === 'owner' && e.via === 'assistant' && e.text.startsWith(echo) && (e.at === undefined || e.at >= from - ECHO_SLACK_MS)) anchored = true
-      } else closed = true // someone else spoke into the window: the answer is over
-    }
+    if (!anchored) {
+      for (const e of phoneEventsFromLine(line))
+        if (e.kind === 'owner' && e.via === 'assistant' && e.text === echo && (e.at === undefined || e.at >= from - ECHO_SLACK_MS)) anchored = true
+    } else if (typedIn(ev)) closed = true // anything typed into the window ends the answer
     return false
   }
   const read = async () => {
@@ -175,6 +199,11 @@ export const watchPresidentReply = async (path: string, words: string, from: num
       offset = atStart ? Math.max(0, size - FIRST_LOOK_BYTES) : 0
       file = f
       rest = ''
+      // A window made anew while waiting: what it says (a resume report, a
+      // greeting) answers nothing until the line's own echo is found in it.
+      anchored = closed = endedOnText = false
+      said.length = 0
+      idle = 0
     }
     if (size < offset) offset = size
     if (size === offset) return false
@@ -196,13 +225,15 @@ export const watchPresidentReply = async (path: string, words: string, from: num
   }
   const answer = () => clip(said.join('\n\n'))
   await read().catch(() => false)
-  while (d.now() < until) {
-    if (closed && said.length) return { kind: 'answered', text: answer() }
+  for (;;) {
+    // Someone typed in before the president wrote a word: nothing is coming.
+    if (closed) return said.length ? { kind: 'answered', text: answer() } : { kind: 'no-reply' }
+    if (said.length && endedOnText && idle >= 2) return { kind: 'answered', text: answer() }
+    if (d.now() >= until) break
     await d.sleep(d.pollMs)
     const grew = await read().catch(() => false)
     const busy = await d.working(path).catch(() => true)
     idle = grew || busy ? 0 : idle + 1
-    if (said.length && (closed || (endedOnText && idle >= 2))) return { kind: 'answered', text: answer() }
   }
   return said.length ? { kind: 'no-reply', text: answer() } : { kind: 'no-reply' }
 }
@@ -253,8 +284,10 @@ export const relayToPresident = async (
     } catch {
       /* the listener's own failure */
     }
+    // The answer gets its own full wait from the landing: a desk busy for most
+    // of the landing wait must not leave the president seconds to answer.
     const from = d.now()
-    void watchPresidentReply(path, words, from, until, d).then(answer, () => answer({ kind: 'no-reply' }))
+    void watchPresidentReply(path, words, from, from + d.waitMs, d).then(answer, () => answer({ kind: 'no-reply' }))
   }
   const waiting = await d.say(path, assistantRelayLine(words), onLanded)
   if (!landed)

@@ -4,13 +4,13 @@
 // and it stays there. The talk is the one log on this Mac, shared with the
 // iPhone (useAssistant). Renders nothing unless the routes let this machine in
 // (owner only) — and is held still and unclickable in work mode.
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent, type ReactNode } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import { ArrowUp, ImagePlus, Mic, MessagesSquare, Phone, X } from 'lucide-react'
 import { AssistantCall, type CallPhase } from './AssistantCall'
 import { AssistantMark, LOOK_COLOR } from './AssistantMark'
 import { ASSISTANT_DEFAULT_POS, ASSISTANT_SIZE, ASSISTANT_WINDOW_ATTR, publishAssistantSpot } from './assistantWindow'
-import { PHOTO_MAX_BYTES, PHOTO_TYPES, photoUrl, useAssistant, type AssistantLook, type AssistantVoice } from './useAssistant'
+import { PHOTO_MAX_BYTES, PHOTO_TYPES, photoData, photoUrl, useAssistant, type AssistantLine, type AssistantLook, type AssistantVoice, type FailedLine } from './useAssistant'
 import { ProposalFrames } from './ProposalFrames'
 import { useCallVoice, useListen, useOtherSpeech } from './useVoice'
 
@@ -100,6 +100,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const [photo, setPhoto] = useState<string | null>(null)
   const [photoError, setPhotoError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
+  const resending = useRef(false)
   const pendingRef = useRef(a.pending)
   pendingRef.current = a.pending
   const [pos, setPos] = useState(readPos)
@@ -433,7 +434,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
     // (also once a proposal's frame has taken its height from the talk)
-  }, [a.lines.length, a.pending, a.error, showPanel, expanded, turn, framesRoom, a.proposals.length])
+  }, [a.lines.length, a.pending, a.pendingState, a.failed.length, a.error, showPanel, expanded, turn, framesRoom, a.proposals.length])
 
   // Tell control rows where the character sits (or that it is gone), so they
   // can keep their buttons out from under it.
@@ -495,7 +496,9 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const voiceError =
     voiceFail &&
     t(voiceFail === 'denied' ? 'misc.assistant.voiceDenied' : voiceFail === 'unavailable' ? 'misc.assistant.voiceUnavailable' : 'misc.assistant.voiceFailed')
-  const problem = photoError || (inCall ? '' : voiceError) || a.error
+  // In the chat a bare failure is said by the line's own 未送信 / 返事なし (CHAT_SPEC §5b);
+  // only a reason worth reading gets its line. The call screen has no lines: it keeps them all.
+  const problem = photoError || (inCall ? '' : voiceError) || (a.quiet ? '' : a.error)
   // 聞いています only while the mic really listens (its ears said ready) — not
   // while other speech keeps it shut or it is reopening after a reply.
   const phase: CallPhase =
@@ -509,7 +512,24 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   }
   /** The input is empty: its right-hand key places a call instead of sending (as on the phone). */
   const callKey = a.voice && !shown.trim() && !photo
-  const showTalk = expanded || a.pending !== null || turn !== null || problem !== ''
+  const showTalk = expanded || a.pending !== null || turn !== null || problem !== '' || a.failed.length > 0
+  /** The line in flight is being answered: the thinking row (CHAT_SPEC §5b replying). */
+  const replying = a.pending !== null && a.pendingState === 'replying'
+  /** 再送: the same words (and photo) again as a new line; the failed one goes. */
+  const resend = async (f: FailedLine) => {
+    // A double click passes the pending check twice (pending is set after the awaits).
+    if (a.pending !== null || resending.current) return
+    resending.current = true
+    try {
+      const pic = f.photo ? await photoData(f.photo) : undefined
+      // Its photo is gone (pruned): never send the words without it, nor delete the line.
+      if (f.photo && !pic) return
+      await a.forget(f)
+      await sendLine(f.text, false, pic)
+    } finally {
+      resending.current = false
+    }
+  }
   const owned = 'max-w-[80%] self-end whitespace-pre-wrap rounded-[12px_12px_4px_12px] bg-plane px-2.5 py-1.5 text-ui leading-relaxed'
   /** The owner's line as the talk shows it: the photo above the words. */
   const photoLoaded = () => {
@@ -517,13 +537,32 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }
-  const ownLine = (key: string, said: string, src?: string) => (
+  const ownLine = (key: string, said: string, src?: string, note?: ReactNode) => (
     <div key={key} className="flex max-w-[80%] flex-col items-end gap-1 self-end">
       {/* A photo takes its height only once loaded: the talk's room and its scroll follow. */}
       {src && <img src={src} alt={t('misc.assistant.photo')} onLoad={photoLoaded} className="max-h-40 max-w-full rounded-[10px] border border-line object-contain" />}
       {said && <p className={`${owned} max-w-full`}>{said}</p>}
+      {note}
     </div>
   )
+  const focusRing = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
+  const noteText = 'text-meta leading-snug text-ink-subtle'
+  const textKey = `rounded-full px-2 py-0.5 text-meta leading-snug text-ink-subtle transition-colors duration-150 enabled:hover:bg-plane enabled:hover:text-ink enabled:active:bg-line disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`
+  /** 「未送信」/「返事なし」 and its two keys (§5b failed). */
+  const failedNote = (f: FailedLine) => (
+    <span data-testid="assistant-failed" data-key={f.key} className="flex items-center gap-1">
+      <span className="text-meta leading-snug text-accent">{t(f.kind === 'notSent' ? 'misc.assistant.notSent' : 'misc.assistant.noReply')}</span>
+      <button type="button" className={textKey} disabled={a.pending !== null} onClick={() => void resend(f)}>{t('misc.assistant.resend')}</button>
+      <button type="button" className={textKey} onClick={() => void a.forget(f)}>{t('misc.assistant.delete')}</button>
+    </span>
+  )
+  const failedById = new Map(a.failed.flatMap((f) => (f.entryId ? [[f.entryId, f] as const] : [])))
+  /** The window's own failed lines, never in the log: in the talk at their own time. */
+  const heldRows = a.failed.filter((f) => !f.entryId)
+  const talkRows: ({ at: number; line: AssistantLine } | { at: number; held: FailedLine })[] = [
+    ...a.lines.map((line) => ({ at: line.at, line })),
+    ...heldRows.map((held) => ({ at: held.at, held })),
+  ].sort((x, y) => x.at - y.at)
   const answered = 'max-w-[88%] self-start whitespace-pre-wrap text-ui leading-relaxed'
   const iconButton = 'grid size-8 shrink-0 place-items-center rounded-full transition-colors duration-150'
   const saveName = () => {
@@ -537,7 +576,6 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const frames = <ProposalFrames proposals={a.proposals} room={framesRoom} busy={a.pressing} onApprove={a.approve} onDrop={(id) => void a.drop(id)} />
   // While one waits for its button, the call screen leaves out its big character and the unread reply.
   const proposalOpen = a.proposals.some((p) => p.state === 'open' && p.expiresAt > Date.now())
-  const focusRing = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
   return (
     <>
@@ -585,27 +623,46 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
           {showTalk && (
             <div ref={listRef} data-testid="assistant-talk" className="flex min-h-0 flex-auto flex-col gap-2 overflow-y-auto pr-1" aria-live="polite">
               {expanded
-                ? a.lines.map((l) =>
-                    l.who === 'owner' ? (
-                      ownLine(l.id, l.text, l.photo && photoUrl(l.photo))
+                ? talkRows.map((r) => {
+                    if ('held' in r) return ownLine(r.held.key, r.held.text, r.held.photo, failedNote(r.held))
+                    const l = r.line
+                    const f = failedById.get(l.id)
+                    return l.who === 'owner' ? (
+                      ownLine(l.id, l.text, l.photo && photoUrl(l.photo), f && failedNote(f))
                     ) : (
                       <Fragment key={l.id}>{l.text && <p className={answered}>{l.text}</p>}</Fragment>
-                    ),
-                  )
-                : a.pending === null &&
-                  turn && (
+                    )
+                  })
+                : (
                     <>
-                      {ownLine('said', turn.said, turn.photo)}
-                      {turn.reply && <p className={answered}>{turn.reply}</p>}
+                      {/* Folded: the lines still waiting for 再送 / 削除, then this opening's exchange. */}
+                      {a.failed.map((f) => ownLine(`failed-${f.key}`, f.text, f.photo, failedNote(f)))}
+                      {a.pending === null && turn && (
+                        <>
+                          {ownLine('said', turn.said, turn.photo)}
+                          {turn.reply && <p className={answered}>{turn.reply}</p>}
+                        </>
+                      )}
                     </>
                   )}
               {a.pending !== null && (
                 <>
-                  {ownLine('pending', a.pending, a.pendingPhoto ?? undefined)}
-                  <span className="self-start flex items-center gap-2" data-testid="assistant-thinking">
-                    <AssistantMark look={a.look} size={20} mode="think" />
-                    {a.interim && <span className="text-ui text-ink-muted">{a.interim}</span>}
-                  </span>
+                  {ownLine(
+                    'pending',
+                    a.pending,
+                    a.pendingPhoto ?? undefined,
+                    !replying && (
+                      <span data-testid="assistant-delivery" className={noteText}>
+                        {t(a.pendingState === 'delivered' ? 'misc.assistant.delivered' : 'misc.assistant.sending')}
+                      </span>
+                    ),
+                  )}
+                  {replying && (
+                    <span className="self-start flex items-center gap-2" data-testid="assistant-thinking" role="status" aria-label={t('misc.assistant.callThinking')}>
+                      <AssistantMark look={a.look} size={20} mode="think" />
+                      {a.interim && <span className="text-ui text-ink-muted">{a.interim}</span>}
+                    </span>
+                  )}
                 </>
               )}
               {problem && <p className="self-start text-ui text-accent">{problem}</p>}
@@ -691,7 +748,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
                 title={t(a.voice && a.voicevox !== null ? 'misc.assistant.lookVoice' : 'misc.assistant.look')}
                 className={`grid size-8 place-items-center rounded-full transition-colors duration-150 hover:bg-plane active:bg-line aria-pressed:bg-accent-soft ${focusRing}`}
               >
-                <AssistantMark look={a.look} size={24} mode={a.pending !== null ? 'think' : 'idle'} />
+                <AssistantMark look={a.look} size={24} mode={replying ? 'think' : 'idle'} />
               </button>
             <form onSubmit={submit} className="flex min-w-0 flex-1 items-center gap-1 rounded-full border border-line-strong bg-bg py-1 pl-3 pr-1 transition-colors duration-150 hover:border-ink-subtle focus-within:border-accent">
                 <input
@@ -813,7 +870,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
           showPanel ? 'border-accent bg-accent-soft' : 'border-line bg-bg-card enabled:hover:border-line-strong enabled:hover:bg-bg-elevated'
         } enabled:hover:scale-105 enabled:active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`}
       >
-        <AssistantMark look={a.look} mode={disabled ? 'off' : a.pending !== null ? 'think' : 'idle'} />
+        <AssistantMark look={a.look} mode={disabled ? 'off' : a.pending !== null && a.pendingState === 'replying' ? 'think' : 'idle'} />
         {a.unread && !showPanel && (
           <span className="absolute right-0.5 top-0.5 size-2.5 rounded-full bg-accent ring-2 ring-bg-card" data-testid="assistant-unread" />
         )}

@@ -17,6 +17,7 @@ import {
   clearAssistantLog,
   clearAssistantMemory,
   deleteAssistantEntry,
+  deleteUnansweredLine,
   readAssistantConfig,
   readAssistantLog,
   readAssistantMemory,
@@ -68,6 +69,27 @@ beforeEach(async () => {
   await saveAssistantConfig({ logDays: 30, memoryChars: 4000, name: '', look: 'verm', voiceChoice: 'nemo' })
   await saveAssistantStyle('')
   setLockdownCache(false)
+})
+
+describe('message states: 削除 of a line that got no answer (CHAT_SPEC §5b)', () => {
+  it('only an unanswered owner line goes — an answered one, an answer and a call record are refused; nothing else is touched (no epoch bump)', async () => {
+    const t = Date.now()
+    const [asked, answer, lost, app, call] = await appendAssistantEntries([
+      { at: t, who: 'owner', text: '答えあり', via: 'screen' },
+      { at: t + 1, who: 'assistant', text: 'はい', via: 'screen' },
+      { at: t + 2, who: 'owner', text: '返事なし', via: 'phone', clientId: 'p1' },
+      // A proposal's button line is the app's, not an answer to the line before it.
+      { at: t + 3, who: 'assistant', text: '出しました', via: 'screen', app: true },
+      { at: t + 4, who: 'owner', text: '通話 1:00', via: 'phone', kind: 'call', seconds: 60, projectId: 'assistant' },
+      // A president's answer retold is not an answer to the line before it either.
+      { at: t + 5, who: 'assistant', text: 'kiwiの社長から返事', via: 'phone', president: { projectId: 'k', project: 'kiwi' } },
+    ])
+    const epoch = assistantEpoch()
+    for (const e of [asked, answer, app, call]) expect(await deleteUnansweredLine(e.id)).toBe(false)
+    expect(await deleteUnansweredLine(lost.id)).toBe(true)
+    expect(assistantEpoch()).toBe(epoch) // a turn running now still writes its line and answer
+    expect((await readAssistantLog()).map((e) => e.text)).toEqual(['答えあり', 'はい', '出しました', '通話 1:00', 'kiwiの社長から返事'])
+  })
 })
 
 describe('talk older than the kept days is deleted', () => {

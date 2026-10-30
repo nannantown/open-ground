@@ -35,6 +35,12 @@ describe('presidentAskedAtFromJsonl — is the president waiting on the owner?',
     expect(presidentAskedAtFromJsonl([owner(assistantRelayLine('新機能を入れたい')), assistant('どの画面に入れますか？', '03:05')])).toBe(ms('03:05'))
   })
 
+  it('in a relayed turn the LAST text decides too: its own question, then tools, then a statement ⇒ no hand; one standing before stays', () => {
+    const relayed = [owner(assistantRelayLine('進み具合は？')), assistant('調べますか？', '03:05'), toolUse(), toolResult(), assistant('半分です。', '03:06')]
+    expect(presidentAskedAtFromJsonl(relayed)).toBeUndefined()
+    expect(presidentAskedAtFromJsonl([owner('進めて'), assistant('A と B、どちらにしますか？', '03:00'), ...relayed])).toBe(ms('03:00'))
+  })
+
   it('a reply to the owner ending in ？ ⇒ its timestamp', () => {
     expect(presidentAskedAtFromJsonl([owner('進めて'), assistant('A と B、どちらにしますか？')])).toBe(ms('03:00'))
   })

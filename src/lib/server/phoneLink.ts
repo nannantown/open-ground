@@ -306,7 +306,7 @@ interface LinkState {
    *  it came from (docs/PHONE_LINK.md `event`). `cur` = the transcript position
    *  it was matched to, so a resend after a reconnect carries the same id.
    *  Capped at SAY_IDS_MAX, oldest dropped. */
-  sayIds: { projectId: string; text: string; id: string; cur?: string }[]
+  sayIds: { projectId: string; text: string; id: string; cur?: string; reply?: 'waiting' | 'sent' }[]
   /** Stops sending the proposal list (startPhoneLink subscribes). */
   unwatchProposals?: () => void
 }
@@ -325,7 +325,7 @@ export interface PhoneLinkDeps {
   pushKey?: () => Promise<PushKey | null>
   sendPush?: (key: PushKey, target: PushTarget) => Promise<PushResult>
   /** The cross-project assistant's turn (tests). */
-  assistant?: (text: string, photo?: string) => Promise<AssistantAnswer>
+  assistant?: (text: string, photo?: string, onStart?: () => void) => Promise<AssistantAnswer>
   /** How long a say waits for its photo's missing parts (tests). */
   photoWaitMs?: number
   /** Start the assistant's session ahead of a line — passed only by the live
@@ -576,8 +576,32 @@ const sayIdFor = (st: LinkState, projectId: string, text: string, cur: string): 
   const key = sayKey(text)
   const e =
     st.sayIds.find((x) => x.cur === cur) ?? st.sayIds.find((x) => !x.cur && x.projectId === projectId && x.text === key)
-  if (e) e.cur = cur
+  if (e) {
+    e.cur = cur
+    // Its echo is in: the president's next words are its reply (ack replied, once).
+    e.reply ??= 'waiting'
+  }
   return e?.id
+}
+
+/** `file:offset:index` (pumpTranscript's cur) → its parts. */
+const curParts = (cur: string) => {
+  const m = /^(.*):(\d+):(\d+)$/.exec(cur)
+  return m ? { f: m[1], o: Number(m[2]), i: Number(m[3]) } : null
+}
+/** The president's words AFTER a phone say's echo (in the transcript, not in
+ *  time — a resume re-reads words from before it): that say is replied
+ *  (docs/PHONE_LINK.md "Message states"). Sent once per say, also across a
+ *  resend of the transcript after a reconnect. */
+const repliedTo = (st: LinkState, projectId: string, at: string): void => {
+  const p = curParts(at)
+  for (const e of st.sayIds) {
+    const echo = e.cur ? curParts(e.cur) : null
+    if (e.projectId === projectId && e.reply === 'waiting' && p && echo && p.f === echo.f && (p.o > echo.o || (p.o === echo.o && p.i > echo.i))) {
+      e.reply = 'sent'
+      send(st, { type: 'ack', id: e.id, state: 'replied', projectId })
+    }
+  }
 }
 
 const isAssistantAnswer = (f: Record<string, unknown>) => (f.type === 'event' || f.type === 'assistant') && f.kind === 'assistant'
@@ -700,7 +724,13 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
   // One final ack, whatever happens after the answer came back. The phone hears
   // plain words only (plainAssistantError), never an internal message.
   // Settings unreadable: English, but the final ack still goes.
-  const a = await (deps.assistant ? deps.assistant(line, photo) : askAssistant(line, { clientId: id, ...(photo ? { photo } : {}) })).catch(async (e: unknown) =>
+  // replying / replied (CHAT_SPEC §5b) go out live only — never kept for a closed
+  // socket: the answer they stand beside is the proof, and the kept room is its.
+  const live = (state: 'replying' | 'replied') =>
+    void (!st.assistantOutbox.length && send(st, { type: 'ack', ...(id !== undefined ? { id } : {}), state, projectId: ASSISTANT_ID }))
+  // Its turn began (it may have waited behind one other line).
+  const onStart = () => live('replying')
+  const a = await (deps.assistant ? deps.assistant(line, photo, onStart) : askAssistant(line, { clientId: id, ...(photo ? { photo } : {}), onStart })).catch(async (e: unknown) =>
     plainAssistantError(e, await getSettings().then(langOf, () => 'en' as const)),
   )
   if (a instanceof AssistantFailure) {
@@ -711,6 +741,7 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
   ack('delivered', { projectId: ASSISTANT_ID, heard: true })
   // `speak`: the part to read aloud (one or two sentences); `text` is all of it.
   const sent = sendAssistant(st, assistantTalk(st, 'assistant', { text: a.reply, ...(a.speak ? { speak: a.speak } : {}), at: Date.now() }), deps)
+  if (sent) live('replied')
   st.says.delete(hold)
   if (sent) owePush(st, deps)
   else void flushPush(st, deps).catch(() => {})
@@ -775,7 +806,7 @@ const proposalButton = async (st: LinkState, f: Record<string, unknown>, id: str
 /** One frame relayed from the phone. Exported for tests. */
 export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>, deps: PhoneLinkDeps = {}): Promise<void> => {
   const id = typeof f.id === 'string' ? f.id.slice(0, 100) : undefined
-  const ack = (state: 'queued' | 'delivered' | 'rejected', extra: Record<string, unknown> = {}) =>
+  const ack = (state: 'queued' | 'delivered' | 'replying' | 'replied' | 'rejected', extra: Record<string, unknown> = {}) =>
     send(st, { type: 'ack', ...(id !== undefined ? { id } : {}), state, ...extra })
   // The president is an owner seat: no owner access, nothing is answered.
   if (!(await hasPhoneLinkAccess())) return void ack('rejected', { reason: 'forbidden' })
@@ -874,6 +905,9 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
       // yet, so a later say with the same words must not get this id.
       if (!heard && said && !said.cur) st.sayIds = st.sayIds.filter((x) => x !== said)
       ack('delivered', { projectId: p.id, heard })
+      // In the desk, so Claude Code works on it now (CHAT_SPEC §5b replying).
+      // Not once its reply was already read (the landing check can lag the transcript).
+      if (heard && said?.reply !== 'sent') ack('replying', { projectId: p.id })
       release()
     },
     deps.supply ?? {},
@@ -1030,6 +1064,7 @@ export const pumpTranscript = async (st: LinkState, deps: PhoneLinkDeps = {}): P
       const sayId = ev.kind === 'owner' ? sayIdFor(st, chosen.id, ev.text, `${fid}:${base + at}:${i}`) : undefined
       if (!send(st, { type: 'event', projectId: chosen.id, ...ev, ...(sayId !== undefined ? { id: sayId } : {}), cur: { f: fid, o: base + at, i } })) return n
       n++
+      if (ev.kind === 'president') repliedTo(st, chosen.id, `${fid}:${base + at}:${i}`)
       // What the phone reads aloud wakes it (the owner's own words do not).
       if (events[i].kind !== 'owner' && !alreadyStored(st.pushFloor, { f: fid, o: base + at, i })) owePush(st, deps)
     }

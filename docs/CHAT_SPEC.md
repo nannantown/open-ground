@@ -111,13 +111,115 @@ Keyboard (the Mac, and an iPhone with a hardware keyboard):
 
 | State | Shows | Words |
 |---|---|---|
-| Thinking | Mark (thinking) as the last row, plus the interim line in muted text | VoiceOver 「考えています」 |
-| Sending / not sent | small note under the own line | 送信中 · 未送信 |
-| Refused | 「未送信」 plus one line with the reason under the own line, in the danger colour; the text goes back into the field (§8 errors) | — |
+| Thinking | Mark (thinking) as the last row, plus the interim line in muted text. Shown while a line is **replying** (§5b), for the assistant AND for a president | VoiceOver 「考えています」 |
+| Own line's state | small note under the own line (§5b) | 送信中 · 届きました · 未送信 · 返事なし |
+| Refused | §5b "Failed": a line that resending can fix stays in the talk with 再送 / 削除 (its note says it; a reason line only when it tells the owner what to do — busy, work mode; a call has no lines, so it says every reason); a line that resending cannot fix (too long, photo type / size) goes back into the field with the reason | §8 errors |
 | Offline (iPhone) | link status under the name; send, call, mic and + disabled; typing allowed | 確認中 · 接続中 · 再接続中 · 起動中 · Macが停止中 |
 | Work mode (Mac) | character greyed; the window cannot open | 業務モード中は使えません |
 | Not paired (iPhone) | pairing screen | Macとつなぐ |
 | Call | §9.3 | 発信中 · 聞いています · 考えています · 話しています · 消音中 · 返事がまだ来ていません · 再接続中 · 接続できません · Macが停止中 · イヤホンが外れました |
+
+## 5b. Message states (メッセージの状態, 2026-10-30)
+
+Owner request, 2026-10-30: 「社長とかに送っても『今応答中ですよ』のアニメーションとか出ない…動いてるか
+動いてないのかわかんない。うまく送信できなかったメッセージとかがずっと下に溜まっていってるから、それは再送信できたり
+消せるようにしたいな」. Both screens, both partners (the assistant and every
+president), same states, same words, same clocks. Written by the desktop card
+first; the iPhone card follows it. The wire is PHONE_LINK.md "Message states".
+
+**The five states of an own line**
+
+| State | Means | Shows (note under the own line, `note` role, muted) |
+|---|---|---|
+| **sending** | the line left this screen; the Mac has not said it took it | 「送信中」 |
+| **delivered** | the Mac took it and will hand it to the partner (the assistant: in its queue; a president: being typed into the desk, which waits while the president is writing) | 「届きました」 |
+| **replying** | the partner is working on it | no note. The thinking row (§5 Thinking: the Mark animating as the last row of the talk). A president only: after **30 min** with no words, the thinking row goes and the note reads 「返事がまだ来ていません」 (muted, not the danger colour, no keys — it is not failed) |
+| **replied** | the partner's reply came | nothing (the reply is the proof) |
+| **failed** | it did not reach the partner, or reached it and got no reply | 「未送信」 (did not reach) or 「返事なし」 (reached, no reply), in the danger colour, then two text keys: 「再送」 「削除」 |
+
+Only the newest own line of a conversation shows sending / delivered (an
+older one that is still in flight shows them too; a replied line never does).
+Failed lines keep their note and keys wherever they are.
+
+**How a line moves** (never backwards; `failed` and `replied` end it, except
+that later proof lifts a `failed`, below):
+
+```
+sending ──Mac took it──▶ delivered ──partner starts──▶ replying ──reply──▶ replied
+   │                         │                            │
+   └────────── failed ◀──────┴────────────────────────────┘
+```
+
+| From | To | When (iPhone: PHONE_LINK `ack`; Mac window: the say stream) |
+|---|---|---|
+| sending | delivered | `ack queued` · the Mac window's say request accepted (HTTP 200 stream opened) |
+| delivered | replying | `ack replying` · the stream's `{state:"replying"}` (the assistant's turn for this line started; a president's desk received the words) |
+| replying | replied | `ack replied` or the reply itself (an `assistant` answer for this line; a president's first words after the line) · the stream's answer |
+| replying (president) | replying, note 「返事がまだ来ていません」 | 30 min after `ack replying` with no `replied` and no words from that president (iPhone; the Mac has no president chat, [C3]) |
+| replying, note 「返事がまだ来ていません」 | replied | `ack replied` or the president's words: the note goes |
+| sending | failed 「未送信」 | no `ack` within **15 s** on a live link, the link dropped before any `ack`, `error mac-offline`, or `ack rejected` with a reason resending can fix (below) · the request failed (network, 5xx before the stream, 429 busy) |
+| delivered / replying | failed 「返事なし」 | `ack rejected` (`assistant-failed`, `desk-failed`, a passed-on message's `no-reply`; its `not-landed` is 「未送信」), the assistant gave no answer within **200 s of `replying`** (the clock starts at its turn, never at a wait in the queue: a waiting line may sit behind one other turn of up to 2 min), or the Mac restarted (`mac` offline→online) before a reply · the stream ended with an error, or no answer 200 s after `{state:"replying"}` |
+| failed | delivered / replying / replied | later proof: an `owner` echo carrying the line's `id`, or a reply to it, or the record (startup check, below) shows it landed |
+
+A president has no failure clock: delivered may last while the desk is busy, and
+replying may last long (it works on the order). After **30 min** of replying
+with no words, the thinking row goes and the note under the line reads
+「返事がまだ来ていません」 / "No reply yet" (the word `call.noReply`, §8). It is not
+failed: muted note colour, no 再送 / 削除. When the president's reply comes, the
+note goes and the line is replied (owner, 2026-10-30, with the iPhone card).
+
+**Refusals resending cannot fix** do not leave a failed line: `too-long`,
+`empty`, `photo-type`, `photo-too-large`, and on the iPhone `photo-bad`,
+`photo-assistant-only`, `pair-again`. The words (and photo) go back into
+the field with the reason line (§8 errors), exactly as before; nothing was
+sent. Every other refusal (`busy`, `mac-offline`, `mac-error`, `stale`,
+`work-mode`, `desk-failed`, `assistant-failed`, a network error) leaves the line
+in the talk as failed.
+
+**再送 (Resend)** sends the same words (and the same photo, when the line had
+one) again as a **new** line with a new `id` (the Mac drops an `id` it already
+took, PHONE_LINK "Sealed frames"). The failed line goes away and the new line
+appears at the bottom as sending. Disabled while another line from this screen
+to the same partner is still sending / delivered / replying, or offline. A line
+whose photo can no longer be fetched is not resent (never the words without
+it).
+
+**削除 (Delete)** removes the failed line at once. A line that never reached
+the Mac lives only on that screen and just goes. A line in the assistant's
+record (it reached the assistant and got no answer) is deleted from the record
+on the Mac window — that line only (`DELETE …/assistant/failed/:id`, refused
+unless the line is an owner line with no answer after it): unlike the whole-talk
+delete it leaves a turn running now, the live session and the proposals alone.
+The iPhone hides it on the phone only (a phone frame that deletes from the
+record does not exist; the 24 h rule below ends its keys anyway).
+
+**Does not pile up.**
+- A failed line sits at its own time in the talk, never pinned to the bottom (a
+  line without the Mac's time sorts by its own send time).
+- At most **5** failed lines per conversation: a sixth pushes the oldest out.
+- After **24 h** a failed line's note and keys go. A line that never reached
+  the Mac goes with them; a line in the record stays as a plain own line.
+
+**Startup check (起動時の突き合わせ).** On launch, and on every reconnect:
+- A line left sending / delivered / replying from before becomes failed unless
+  the record proves otherwise.
+- Proof for the assistant: its record (iPhone `assistant-history`, Mac window
+  `GET …/assistant/log`) holds an owner entry whose `clientId` is the line's
+  `id`. Followed by an assistant entry ⇒ replied. Not followed by one (the next
+  entry is another owner line, or none) ⇒ failed 「返事なし」, kept under the 24 h
+  rule. The app's own line after a proposal button (`app: true`, 「出しました」)
+  is not an answer and is skipped, like call records.
+- Proof for a president: an `owner` event carrying the line's `id` (⇒
+  delivered) and a `president` event after it (⇒ replied).
+- An owner entry in the record without a following reply (an answer failed) is
+  failed 「返事なし」 on BOTH screens, whoever sent it, for 24 h. Call records
+  (`kind: "call"`) are not lines and never count.
+- The line being answered right now is not in the record yet (an answer is
+  written together with its line), so it is never mistaken for failed.
+
+The Mac window keeps a line that never reached the Mac in memory only: a reload
+of the app forgets it (it was never sent). The iPhone keeps them in its saved
+talk, under the 5-line / 24 h rules.
 
 ## 6. Type (both screens follow the same roles)
 
@@ -212,7 +314,7 @@ Target words (ja / en). **Bold** in "Today" = differs on that screen today.
 | call.dialing | 発信中 | Calling | |
 | call.listening | 聞いています | Listening | Mac shows 「**少しお待ちください**」 while the mic reopens (the iPhone shows 聞いています then); target: 聞いています |
 | call.thinking / call.speaking | 考えています / 話しています | Thinking / Speaking | |
-| call.noReply | 返事がまだ来ていません | No reply yet | Mac: **none** (new on the Mac) |
+| call.noReply | 返事がまだ来ていません | No reply yet | Mac: **none** (new on the Mac). Also §5b: a president's line 30 min into replying with no words (iPhone; the Mac has no president chat) |
 | call.cannotConnect | 接続できません | Can't connect | |
 | call.retry / call.close | 再試行 / 閉じる | Try again / Close | Mac: retry is an **icon key**, no close |
 | call.earphonesOut | イヤホンが外れました | Earphones out | iPhone only |
@@ -221,7 +323,9 @@ Target words (ja / en). **Bold** in "Today" = differs on that screen today.
 | proposal.card / proposal.commander | カード案 / 司令官へ | Card / To the commander | Mac: **not shown** (aria-label 「カード案」 / 「伝言の案」) |
 | proposal.drop / add / send | やめる / 出す / 送信 | Drop / Add / Send | both 「**送る**」 today |
 | proposal.added / sent / dropped / expired | 出しました / 送りました / やめました / 時間切れ | Added / Sent / Dropped / Expired | Mac: **done = check + project · title; dropped / expired = project · title only** |
-| delivery.sending / delivery.failed | 送信中 / 未送信 | Sending / Not sent | Mac: none |
+| delivery.sending / delivery.delivered | 送信中 / 届きました | Sending / Delivered | §5b. Mac: none; iPhone has no 届きました |
+| delivery.failed / delivery.noReply | 未送信 / 返事なし | Not sent / No reply | §5b. Mac: none; iPhone has no 返事なし |
+| delivery.resend / delivery.delete | 再送 / 削除 | Resend / Delete | §5b. New on both |
 | error.failed | アシスタントが答えられませんでした。もう一度送ってください | The assistant couldn't answer. Send it again | Mac 「**…もう一度どうぞ。**」, iPhone 「**アシスタントが答えられませんでした**」 |
 | error.busy | まだ前の話に答えています。少し待ってから送ってください | Still answering the last one. Send again in a moment | Mac 「**…少し待ってからもう一度どうぞ。**」, iPhone 「**アシスタントが手一杯です。少しあとでもう一度言ってください**」 |
 | error.tooLong | 長すぎます。2000字までにしてください | Too long. Keep it under 2000 characters | Mac 「**1回に送れるのは2000字までです。**」, iPhone 「**長すぎます。分けて話してください**」 |
@@ -304,11 +408,11 @@ same on both screens (the wire: PHONE_LINK.md "Assistant → president messages"
   the Mac's president seat): the passed-on line shows on the owner's side,
   beginning with 【アシスタントからの伝言】, followed by the president's answer.
 - **States of the message** (sending → delivered → replying → replied, or refused)
-  use the shapes of §5b "Message states" (being added by the message-state card,
-  2026-10-30; not written here). On the iPhone they belong to the frame's message,
-  not to the owner's own line. The Mac's window shows the frame's closed line and
-  then the answer; it has no separate waiting caption yet (until §5b lands on the
-  Mac too).
+  use the shapes of §5b "Message states" (not repeated here; PHONE_LINK "Message
+  states" lists the message's reasons). On the iPhone they belong to the frame's
+  message, not to the owner's own line. The Mac's window shows the frame's closed
+  line and then the answer; it has no waiting caption on the frame yet (§5b's
+  notes are on own lines only — a follow-up card).
 - **What the president does with it is the president's to decide.** It is the
   assistant's summary of the owner's words, never the owner's OK; a decision only
   the owner can make comes back as the president's question, which the assistant
@@ -354,7 +458,8 @@ Measured 2026-10-27; screenshots are on the Canvas 「チャットの違い」. 
 | D15 | When it reads aloud | call, locked, background | call only | 可 (A9) |
 | D16 | Proposal frames | kind label; scrolls when long; 4 closed words | no kind label; cut with 「長いので社長に頼んでね」; closed = check + project · title, no word | iOS (wire) |
 | D17 | Thinking | Mark only | Mark + interim line | Mac (wire) |
-| D18 | A line that did not go | 「未送信」 under the bubble; the field is already cleared; the reason is spoken | red reason line; the text goes back into the field | 新 (§5 Refused) |
+| D18 | A line that did not go | 「未送信」 under the bubble; the field is already cleared; the reason is spoken; failed lines pile up at the bottom, no resend / delete | red reason line; the text goes back into the field | 新 (§5b, 2026-10-30) |
+| D28 | Thinking for a president | none (only the assistant) | no president chat ([C3]) | 新 (§5b: replying shows the thinking row for every partner) |
 | D19 | Empty conversation | heading + 3 shortcuts | composer only | 可 (A4) |
 | D20 | Link status | under the name | none | 可 (A7) |
 | D21 | Fold | none | folds to the last exchange | 可 (A3) |

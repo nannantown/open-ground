@@ -184,6 +184,71 @@ An `ack` is never sent twice: if the Mac's connection silently died, a
 `delivered` can be missing even though the line landed — the `owner` event with
 your words (which IS sent again) is the proof that it was heard.
 
+**Message states (2026-10-30)** — two more `ack` states, so the phone can show
+the owner's line as delivered → replying → replied for the assistant AND for a
+president (the screen side: docs/CHAT_SPEC.md §5b "Message states"):
+```json
+{ "type": "ack", "id": "<your id>", "state": "replying", "projectId": "<id or assistant>" }
+{ "type": "ack", "id": "<your id>", "state": "replied",  "projectId": "<id or assistant>" }
+```
+- `replying` — the partner started on that line. The assistant: its turn for
+  the line began (the line waited behind at most one other, so this can come a
+  little after `queued`). A president: sent right after `delivered` with
+  `heard: true` (the words are in the desk and Claude Code works on them); never
+  after `heard: false`.
+- `replied` — the partner's reply to that line came. The assistant: right after
+  its answer (`event` / `assistant` `kind: "assistant"`). A president: right
+  after the first `president` event that follows the `owner` echo carrying that
+  say's `id` (the Mac matched the echo to the say; no echo with an `id` ⇒ no
+  `replied` — the reply itself still comes).
+- Same `id` as the say, same seal and outer frame `{ "type": "ack", "box": "…" }`
+  as every `ack`. Like every `ack` it lives in the Mac's memory: it is never sent
+  twice and can be missing after a silent drop or a Mac restart — the reply
+  itself, the `owner` echo and the assistant's record are the proofs
+  (CHAT_SPEC §5b "Startup check"). The assistant's `replying` / `replied` go out
+  only on an open socket with nothing kept ahead of them — never kept for later
+  like its answers (the 20 kept frames stay for answers). A president's
+  `replying` is not sent once its `replied` went out, and `replied` counts only
+  the president's words that come AFTER the echo in the transcript (a resume
+  re-reads older words; they never count).
+- A message passed on to a president (`kind: "president"` proposal, "Assistant →
+  president messages") uses these states under the proposal's `id` with `about`:
+  `queued` (only when the desk is busy) → `delivered` (`heard: true`) →
+  `replying` → `replied`, or `rejected` with `reason: "not-landed"` (never
+  handed over: shown as 「未送信」) or `"no-reply"` (handed over, no words in 10
+  minutes: 「返事なし」). Never `rejected` after `replied` — words that came
+  late but before the 10 minutes are `replied`.
+- For CHAT_SPEC §5b's record check, `assistant-history` entries carry
+  `clientId` (the say id — or the Mac window's own id — of an owner line) and
+  `app: true` on the app's own line after a proposal button (「出しました」):
+  that line is NOT an answer to the owner line before it.
+- Order per line: assistant `queued` → `replying` → `delivered` → answer →
+  `replied` (or `rejected` at any point before the answer); president `queued`
+  → `delivered` → `replying` → words → `replied`. The phone shows the HIGHEST
+  stage reached and never steps back: sending < delivered (`queued`, or
+  `delivered` with `heard: false`) < replying < replied; `rejected` ends it,
+  but never after `replied`. A `delivered` with `heard: true` changes nothing on
+  the screen (the assistant's answer or the president's `replying` follows).
+- The final ack is now `replied` or `rejected` (`delivered` is not final any
+  more). An app that predates this keeps treating `delivered` as final; that is
+  fine — it never sees the new states (below).
+- **One message, one state frame, whoever answers.** A message the Mac sends
+  for the owner to someone else later (e.g. the assistant passing words on to a
+  president) uses these same `ack` states with that message's own `id` and the
+  `projectId` of the partner whose reply is awaited (`"assistant"` or a
+  project id), plus optional `"about": "<id of the owner line it came from>"`.
+  No other state frame is added for it.
+
+Old phone apps do not break: an older iPhone app decodes `ack.state` as a
+strict enum of `queued` / `delivered` / `rejected`
+(`openground-ios` origin/main 078f1e2, `Core/Sources/PhoneLinkCore/Frames.swift:72`);
+a frame that fails to decode becomes `.unknown` (`Frames.swift:212`), which the
+feed drops without effect (`Core/Sources/PhoneLinkCore/Feed.swift:514`) — no
+crash, no disconnect, the line keeps its old caption. The relay needs no
+redeploy: it passes a Mac `ack` on whatever is inside the seal
+(`worker/src/phoneRelay.ts`, the `f.type === 'ack'` branch of `handle`), and
+nothing new is added to `SEALED_TYPES` (the Mac seals `ack` already).
+
 **`mac`** — `{ "type": "mac", "online": false }` when the Mac drops / comes back.
 
 **`error`** — `{ "type": "error", "code": "mac-offline", "id": "<your id>" }` or
@@ -411,8 +476,10 @@ The phone:
   can play an old list again, also as `hello.projects`); its OWN choice of
   project is what counts — every `say` names it in `projectId`, never "whatever
   `selected` says";
-- ignores an `ack` for an `id` that already had its final ack (`delivered` /
-  `rejected`) — e.g. a `stale` provoked by the relay playing an old say again.
+- ignores an `ack` for an `id` that already had its final ack (`replied` /
+  `rejected`; before 2026-10-30 `delivered` too), or one that would step that
+  line back (see "Message states") — e.g. a `stale` provoked by the relay
+  playing an old say again.
 
 **What this does not cover.** The relay can still see who talks when and how
 long a frame is, drop or delay frames, and re-send a Mac → phone frame it stored
@@ -806,16 +873,22 @@ iPhone use the same one door (`approveProposal` in `src/lib/server/assistantProp
 
 **A proposal** (kept in the Mac's memory only — never on a Board, never in the talk log):
 ```json
-{ "id": "…", "kind": "card" | "commander", "projectId": "…", "project": "kiwi-shop",
+{ "id": "…", "kind": "card" | "commander" | "president", "projectId": "…", "project": "kiwi-shop",
   "title": "送料を500円にする", "body": "やること: 送料を500円にする\n完了の条件:\n- テストが緑",
   "at": 1790846484310, "expiresAt": 1790847084310, "state": "open" | "done" | "dropped" | "expired",
   "closedAt": 1790846501234, "via": "phone" | "screen" }
 ```
 - `project` is the project's name, `title` the card's title (`""` for a
-  message), `body` the card's notes **exactly as they will be written**, or the
+  commander message, 「社長へ」 / "To the president" for a `president` one — see
+  "Assistant → president messages"), `body` the card's notes **exactly as they will be written**, or the
   line **exactly as the commander will get it** (prefixed 「アシスタント経由(オーナーの
   言葉の要約):」 — the model wrote it, so it is never labelled as the owner's own
-  words). Show all three whole, as plain text (`body` has `\n`s), never cut,
+  words), or the message exactly as the president will get it.
+- `kind: "president"` is newer (2026-10-30). An iPhone app from before it decodes
+  each proposal on its own (`Lenient<Proposal>`, `openground-ios` origin/main
+  078f1e2 `Core/Sources/PhoneLinkCore/Proposals.swift:65-66`, used at
+  `Frames.swift:147` / `:207`; `Proposal.Kind` there is only `card` / `commander`):
+  it leaves out just that one proposal and still shows the rest. Show all three whole, as plain text (`body` has `\n`s), never cut,
   or shortened. On the iPhone, frames that do not all fit scroll (each still
   whole, with its buttons); the Mac's own window still draws a frame that does not fit
   whole (cut off), turns off that frame's 出す/送る (やめる stays pressable) and
@@ -1232,7 +1305,7 @@ it out for the newest page. The Mac answers (only while it is online; work mode 
 no answer) with one sealed `assistant-history` frame whose inner JSON is
 ```json
 { "type": "assistant-history", "id": "<same>", "sent": 1790000000001,
-  "entries": [ { "id", "at", "who", "text", "via", "card"? } ], "more": false,
+  "entries": [ { "id", "at", "who", "text", "via", "card"?, "clientId"?, "app"? } ], "more": false,
   "memory": "…", "logDays": 30, "memoryChars": 4000, "name": "ノノ", "look": "verm" }
 ```
 `entries` oldest first; `memory` / `logDays` / `memoryChars` / `name` / `look` only on the page

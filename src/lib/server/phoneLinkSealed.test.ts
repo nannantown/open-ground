@@ -164,7 +164,7 @@ describe('sealed link — what the relay holds', () => {
     const got = opened(room.phone.got)
     expect(got.find((f) => f.type === 'event')?.inner).toMatchObject({ kind: 'president', text: SECRETS[0], projectId: 'p1', eid: expect.any(String) })
     expect(got.find((f) => f.type === 'projects')?.inner).toMatchObject({ selected: 'p1', projects: expect.arrayContaining([expect.objectContaining({ name: SECRETS[1] })]) })
-    expect(got.filter((f) => f.type === 'ack').map((f) => f.inner?.state)).toEqual(['queued', 'delivered'])
+    expect(got.filter((f) => f.type === 'ack').map((f) => f.inner?.state)).toEqual(['queued', 'delivered', 'replying'])
     expect(open(KEY, 'm2p', (room.store.get('projects') as { box: string }).box)).toMatchObject({ type: 'projects' })
   })
 })
@@ -199,6 +199,7 @@ describe('sealed link — the Mac refuses what the phone did not say', () => {
     expect(opened(a.wire).map((f) => [f.inner?.id, f.inner?.state])).toEqual([
       ['r1', 'queued'],
       ['r1', 'delivered'],
+      ['r1', 'replying'],
     ])
     // A fresh link (the app restarted) still knows that id.
     await vi.waitFor(async () => expect((await readPhoneLinkConfig())?.seenIds).toHaveProperty('r1'))
@@ -545,7 +546,9 @@ describe('sealed link — the assistant and its records (v2)', () => {
       ['assistant', 'box,type'],
       ['ack', 'box,type'],
       ['assistant', 'box,type'],
+      ['ack', 'box,type'], // replied (CHAT_SPEC §5b): sealed, passed on by the real relay as any ack
     ])
+    expect(got.filter((f) => f.type === 'ack').map((f) => f.inner?.state)).toEqual(['queued', 'delivered', 'replied'])
     expect(got.filter((f) => f.type === 'assistant').map((f) => [f.inner?.kind, f.inner?.text, f.inner?.id])).toEqual([
       ['owner', RECORD[3], 'a1'],
       ['assistant', RECORD[4], undefined],
@@ -723,7 +726,8 @@ describe('sealed photos (docs/PHONE_LINK.md "Photos")', () => {
     expect(a.got[0].bytes?.equals(photo)).toBe(true)
     const said = opened(wire)
     expect(said.find((f) => f.inner?.kind === 'owner')?.inner?.photo).toMatch(/^\d{4}-\d{2}-\d{2}-.+\.jpg$/)
-    expect(said.at(-2)?.inner).toMatchObject({ type: 'ack', id: 's1', state: 'delivered' })
+    expect(said.at(-3)?.inner).toMatchObject({ type: 'ack', id: 's1', state: 'delivered' })
+    expect(said.at(-1)?.inner).toMatchObject({ type: 'ack', id: 's1', state: 'replied' })
   })
 
   it('three full photos in a minute: the relay counts parts apart and cuts no one off; each arrives whole', async () => {

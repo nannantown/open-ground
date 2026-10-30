@@ -844,6 +844,14 @@
   The turn copies it into its own temp dir and only then adds `Read` (`assistantTools`, still `--restricted`). Later turns see
   only `[sent a photo]`. iPhone gets the name, not the image (empty bubble for a photo-only line — the phone app's follow-up).
   Tests `server/routes/__tests__/assistantPhoto.test.ts` / `FloatingAssistant.photo.test.tsx`; a real claude turn with a photo was checked once by hand (2026-10-06: it read the text and colour back).
+- Message states (2026-10-30, canon docs/CHAT_SPEC.md §5b + PHONE_LINK.md "Message states"): sending / delivered / replying / replied / failed
+  for every own line. Wire = two more sealed `ack` states `replying` / `replied` (no relay redeploy; old iPhones drop them): assistant in
+  `phoneLink.ts` `assistantSay` (`onStart` from `phoneAssistant.ts` turn start; live only, never kept), president = `replying` after
+  `delivered heard:true`, `replied` by `repliedTo` on the first `president` event after the id-carrying echo (`sayIds[].reply`, once).
+  Window: say stream `{state:"replying"}`, `clientId` kept in the log; `useAssistant.ts` `failedLines` (log owner line with no answer
+  = 返事なし, window-only = 未送信; 5 max, 24 h) + `forget` (DELETE log entry); `FloatingAssistant.tsx` notes + 再送/削除.
+  Tests `phoneLink.test.ts` "message states", `useAssistant.test.ts`, `FloatingAssistant.test.tsx` "message states", `assistantPhoto.test.ts`.
+  Shots: `docs/design/chat-spec/states-shots.mjs` (isolated server; falls back to the installed Chrome).
 - 浮いているアシスタント(Dots 風, 2026-10-03): `src/components/assistant/FloatingAssistant.tsx`(全画面の角に浮くキャラクター・
   ドラッグで移動 `localStorage og.assistant.pos`・クリック/Esc で会話窓・名前と色)/ `useAssistant.ts`(会話の状態は常駐ボタン側 =
   閉じても答えは届き未読の点が付く)/ `AssistantMark.tsx`(キャラクター = アプリアイコンの形 = 太い輪+8つの切れ込み `OpenGroundMark.tsx` の `CarvedRingMask` を穴まで届く4つの切れ込みで4片に分けて・片ごとに呼吸/まばたき/考え中は色が巡る = `globals.css` の `.og-ast*`)。`App.tsx` で1回マウント・業務モードは薄く押せない・

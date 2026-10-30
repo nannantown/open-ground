@@ -11,7 +11,7 @@ vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k, lang:
 
 import { EXPANDED_KEY, FloatingAssistant, clampPos, panelPlacement } from './FloatingAssistant'
 
-interface Line { id: string; at: number; who: 'owner' | 'assistant'; text: string }
+interface Line { id: string; at: number; who: 'owner' | 'assistant'; text: string; clientId?: string; kind?: 'call' }
 let log: Line[]
 let cfg: { name: string; look: string }
 let status: number
@@ -48,9 +48,24 @@ beforeEach(() => {
     }
     if (url.endsWith('/say')) {
       const text = JSON.parse(String(init?.body)).text as string
-      await new Promise<void>((resolve) => (answer = { resolve }))
-      log = [...log, { id: `o${log.length}`, at: 2, who: 'owner', text }, { id: `r${log.length}`, at: 3, who: 'assistant', text: `答え:${text}` }]
-      return json({ reply: `答え:${text}`, ...sayExtra })
+      // As the server streams it: its turn begins at once (replying), the answer when released.
+      const line = (o: unknown) => new TextEncoder().encode(JSON.stringify(o) + '\n')
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start: async (c) => {
+            c.enqueue(line({ state: 'replying' }))
+            await new Promise<void>((resolve) => (answer = { resolve }))
+            log = [...log, { id: `o${log.length}`, at: 2, who: 'owner', text }, { id: `r${log.length}`, at: 3, who: 'assistant', text: `答え:${text}` }]
+            c.enqueue(line({ reply: `答え:${text}`, ...sayExtra }))
+            c.close()
+          },
+        }),
+      )
+    }
+    if (/\/failed\/[^/]+$/.test(url) && init?.method === 'DELETE') {
+      const id = decodeURIComponent(url.slice(url.lastIndexOf('/') + 1))
+      log = log.filter((l) => l.id !== id)
+      return json({ ok: true })
     }
     return json({}, 404)
   }))
@@ -102,7 +117,7 @@ describe('FloatingAssistant', () => {
     expect(screen.queryByTestId('assistant-unread')).toBeNull()
   })
 
-  it('a failed line comes back into the input with a plain reason', async () => {
+  it('message states: a line that did not go stays in the talk as 未送信 with 再送 / 削除 — 再送 sends it again as a new line, the failed one goes', async () => {
     render(<FloatingAssistant disabled={false} />)
     fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
     const input = screen.getByRole('textbox', { name: 'misc.assistant.message' }) as HTMLInputElement
@@ -110,7 +125,96 @@ describe('FloatingAssistant', () => {
     fireEvent.change(input, { target: { value: 'やあ' } })
     fireEvent.submit(input.closest('form')!)
     expect(await screen.findByText('いま手がふさがっています')).toBeTruthy()
-    expect(input.value).toBe('やあ')
+    expect(input.value).toBe('') // not given back: the line itself has the keys
+    const failed = await screen.findByTestId('assistant-failed')
+    expect(failed.textContent).toContain('misc.assistant.notSent')
+    expect(screen.getByText('やあ')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.resend' }))
+    expect(await screen.findByTestId('assistant-thinking')).toBeTruthy()
+    expect(screen.queryByTestId('assistant-failed')).toBeNull()
+    await waitFor(() => expect(answer).not.toBeNull())
+    await act(async () => answer!.resolve())
+    expect(await screen.findByText('答え:やあ')).toBeTruthy()
+    const says = vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/say')).map(([, i]) => JSON.parse(String(i?.body)))
+    expect(says.map((b) => b.text)).toEqual(['やあ', 'やあ'])
+    expect(says[0].clientId).not.toBe(says[1].clientId) // a resend is a new line (a new id)
+  })
+
+  it('message states: 削除 removes a failed line; one in the log (no answer after it) is deleted from the log', async () => {
+    log = [
+      { id: 'a', at: Date.now() - 60_000, who: 'assistant', text: '昨日のつづきです' },
+      { id: 'lost', at: Date.now() - 30_000, who: 'owner', text: '届いたけど返事なし', clientId: 'x1' },
+      { id: 'call', at: Date.now() - 20_000, who: 'owner', text: '通話 1:00', kind: 'call' },
+    ]
+    render(<FloatingAssistant disabled={false} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
+    // Folded, the failed line still shows (with its keys); a call record is never failed.
+    const failed = await screen.findAllByTestId('assistant-failed')
+    expect(failed).toHaveLength(1)
+    expect(failed[0].textContent).toContain('misc.assistant.noReply')
+    fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.delete' }))
+    await waitFor(() => expect(screen.queryByTestId('assistant-failed')).toBeNull())
+    // Only that line (never the whole-talk delete, which would end a turn running now).
+    expect(vi.mocked(fetch).mock.calls.filter(([, i]) => i?.method === 'DELETE').map(([u]) => String(u))).toEqual(['/api/phone-link/assistant/failed/lost'])
+    expect(log.map((l) => l.id)).toEqual(['a', 'call'])
+  })
+
+  it('message states: the 200 s answer clock runs from its turn (replying), never from a wait in the queue', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let ctl!: ReadableStreamDefaultController<Uint8Array>
+      const base = vi.mocked(fetch).getMockImplementation()!
+      vi.mocked(fetch).mockImplementation(async (url, init) =>
+        String(url).endsWith('/say')
+          ? new Response(
+              new ReadableStream<Uint8Array>({
+                start: (c) => {
+                  ctl = c
+                  // As a real fetch: an abort errors the body being read.
+                  init?.signal?.addEventListener('abort', () => c.error(new DOMException('aborted', 'AbortError')))
+                },
+              }),
+            )
+          : base(url as never, init),
+      )
+      render(<FloatingAssistant disabled={false} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
+      const input = screen.getByRole('textbox', { name: 'misc.assistant.message' })
+      fireEvent.change(input, { target: { value: '待たされる' } })
+      fireEvent.submit(input.closest('form')!)
+      await screen.findByTestId('assistant-delivery')
+      await act(async () => void vi.advanceTimersByTime(250_000)) // queued behind another line
+      expect(screen.queryByTestId('assistant-failed')).toBeNull()
+      await act(async () => ctl.enqueue(new TextEncoder().encode('{"state":"replying"}\n')))
+      await screen.findByTestId('assistant-thinking')
+      await act(async () => void vi.advanceTimersByTime(201_000))
+      expect((await screen.findByTestId('assistant-failed')).textContent).toContain('misc.assistant.noReply')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('message states: 届きました while it waits for its turn, the thinking row only once replying', async () => {
+    let ctl!: ReadableStreamDefaultController<Uint8Array>
+    const base = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation(async (url, init) =>
+      String(url).endsWith('/say') ? new Response(new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c) })) : base(url as never, init),
+    )
+    render(<FloatingAssistant disabled={false} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
+    const input = screen.getByRole('textbox', { name: 'misc.assistant.message' })
+    fireEvent.change(input, { target: { value: '順番待ち' } })
+    fireEvent.submit(input.closest('form')!)
+    expect((await screen.findByTestId('assistant-delivery')).textContent).toBe('misc.assistant.delivered')
+    expect(screen.queryByTestId('assistant-thinking')).toBeNull()
+    await act(async () => ctl.enqueue(new TextEncoder().encode('{"state":"replying"}\n')))
+    expect(await screen.findByTestId('assistant-thinking')).toBeTruthy()
+    expect(screen.queryByTestId('assistant-delivery')).toBeNull()
+    await act(async () => {
+      ctl.enqueue(new TextEncoder().encode('{"reply":"どうぞ"}\n'))
+      ctl.close()
+    })
+    await waitFor(() => expect(screen.queryByTestId('assistant-thinking')).toBeNull())
   })
 
   it('a line that failed after it was logged is not given back (no double line); a refused one is', async () => {
@@ -120,7 +224,9 @@ describe('FloatingAssistant', () => {
     vi.mocked(fetch).mockImplementationOnce(async () => json({ error: 'timeout', detail: '時間内に答えられませんでした' }, 502))
     fireEvent.change(input, { target: { value: 'ひとつめ' } })
     fireEvent.submit(input.closest('form')!)
-    expect(await screen.findByText('時間内に答えられませんでした')).toBeTruthy()
+    // Kept as a failed line: its note says it, the bare reason line is left out (§5b).
+    expect((await screen.findByTestId('assistant-failed')).textContent).toContain('misc.assistant.notSent')
+    expect(screen.queryByText('時間内に答えられませんでした')).toBeNull()
     expect(input.value).toBe('')
     vi.mocked(fetch).mockImplementationOnce(async () => json({ error: 'too-long', max: 2000 }, 400))
     fireEvent.change(input, { target: { value: 'ふたつめ' } })
@@ -511,7 +617,7 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
       fireEvent.change(input(), { target: { value: 'うん' } })
       fireEvent.submit(input().closest('form')!)
       await answerNow()
-      expect(Object.keys(JSON.parse(String(says()[0][1]?.body))).sort()).toEqual(['stream', 'text'])
+      expect(Object.keys(JSON.parse(String(says()[0][1]?.body))).sort()).toEqual(['clientId', 'stream', 'text'])
       expect(presses()).toEqual([])
       fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.proposalAdd' }))
       await waitFor(() => expect(presses()).toHaveLength(1))
@@ -609,7 +715,7 @@ describe('FloatingAssistant: the faint line, the folded talk, voice', () => {
       ears()[0].emit({ type: 'ready' })
       ears()[0].emit({ type: 'final', text: 'うん' })
       await waitFor(() => expect(says()).toHaveLength(1))
-      expect(Object.keys(JSON.parse(String(says()[0][1]?.body))).sort()).toEqual(['stream', 'text'])
+      expect(Object.keys(JSON.parse(String(says()[0][1]?.body))).sort()).toEqual(['clientId', 'stream', 'text'])
       await answerNow()
       expect(screen.getByTestId('assistant-call')).toBeTruthy()
       await screen.findByRole('region', { name: 'misc.assistant.proposalCard' })

@@ -52,6 +52,8 @@ import {
   supplyProgressLine,
   queueSupplyLanding,
   SUPPLY_LANDING_GRACE_MS,
+  queueSupplyOwnerSay,
+  cancelSupplyOwnerSay,
 } from './supplyNotice'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1410,5 +1412,22 @@ describe('rework 1: every card keeps its own clock, and only an explicit report 
     expect(all).toContain('確認が止まっています')
     expect(all).toContain('止まりました')
     expect(all).toContain('質問が1件')
+  })
+})
+
+describe('cancelSupplyOwnerSay — a line taken back before it landed never lands', () => {
+  it('cancelled while the window is closed: the window opens later and only the other line goes in', async () => {
+    const closed = { ...harness(IDLE).deps, desks: () => [] }
+    const heard: string[] = []
+    const gaveUp = (h: boolean) => heard.push(`gave-up:${h}`)
+    await queueSupplyOwnerSay(PROJECT, '取り消す伝言', gaveUp, closed)
+    await queueSupplyOwnerSay(PROJECT, '残る伝言', (h) => heard.push(`kept:${h}`), closed)
+    expect(cancelSupplyOwnerSay(PROJECT, gaveUp)).toBe(true)
+    expect(cancelSupplyOwnerSay(PROJECT, gaveUp)).toBe(false) // already gone
+    const open = harness(IDLE)
+    await flushSupplyNotices(open.deps)
+    await flushSupplyNotices(open.deps)
+    expect(open.writes.map(([, l]) => l)).toEqual(['残る伝言'])
+    expect(heard).toEqual(['kept:true'])
   })
 })

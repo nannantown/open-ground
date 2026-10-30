@@ -95,9 +95,18 @@ type JsonlEvent = {
   isApiErrorMessage?: boolean
   timestamp?: string
   message?: { content?: unknown }
-  origin?: { kind?: string }
-  attachment?: { type?: string; prompt?: unknown }
+  origin?: { kind?: string } | null
+  attachment?: { type?: string; prompt?: unknown; origin?: { kind?: string } | null; commandMode?: string }
 }
+
+/** A background task's notification, not anyone typing. Arrives as a user line
+ *  with a top-level origin, or — mid-turn — as a queued_command attachment whose
+ *  origin sits INSIDE the attachment (measured 2026-10-30 on a real transcript:
+ *  `{"type":"attachment","origin":null,"attachment":{"origin":{"kind":"task-notification"},"commandMode":"task-notification",…}}`). */
+export const isTaskNotification = (ev: Pick<JsonlEvent, 'origin' | 'attachment'>): boolean =>
+  ev.origin?.kind === 'task-notification' ||
+  ev.attachment?.origin?.kind === 'task-notification' ||
+  ev.attachment?.commandMode === 'task-notification'
 
 const blocks = (content: unknown): Array<{ type?: string; text?: string }> =>
   typeof content === 'string'
@@ -140,6 +149,9 @@ export interface PresidentAskState {
   /** The turn answers a message the owner's assistant passed on: a question in
    *  it is raised, but nothing in it clears one already standing. */
   relayTurn?: boolean
+  /** The question standing when the relay turn began — what a relay turn that
+   *  ends on a statement falls back to. */
+  relayHeld?: number
 }
 
 export const freshAskState = (): PresidentAskState => ({ ownerTurn: false })
@@ -178,16 +190,21 @@ export const stepPresidentAsk = (st: PresidentAskState, line: string): President
     // A message the owner's ASSISTANT passed on (2026-10-30): a question the
     // president asks back is one for the owner (it opens an owner turn), but the
     // assistant is not the owner answering — a question already standing stays.
-    if (text.trimStart().startsWith(ASSISTANT_RELAY_PREFIX)) return { ...st, ownerTurn: true, relayTurn: true }
-    const isOwner = ev.origin?.kind !== 'task-notification' && promptAuthor(text) === 'owner'
+    if (text.trimStart().startsWith(ASSISTANT_RELAY_PREFIX))
+      return { ownerTurn: true, relayTurn: true, ...(st.asked !== undefined ? { asked: st.asked, relayHeld: st.asked } : {}) }
+    const isOwner = !isTaskNotification(ev) && promptAuthor(text) === 'owner'
     return isOwner ? { ownerTurn: true } : { ...st, ownerTurn: false }
   }
   if (ev.type !== 'assistant' || ev.isApiErrorMessage || !st.ownerTurn) return st
   const last = blocks(ev.message?.content).at(-1)
   if (last?.type !== 'text') return st.relayTurn ? st : { ownerTurn: true } // mid-turn — the reply is not finished
   const t = Date.parse(ev.timestamp ?? '')
-  if (closesOnQuestion(last.text ?? '') && Number.isFinite(t)) return { ownerTurn: true, asked: t, ...(st.relayTurn ? { relayTurn: true } : {}) }
-  return st.relayTurn ? st : { ownerTurn: true }
+  if (closesOnQuestion(last.text ?? '') && Number.isFinite(t)) return { ...(st.relayTurn ? st : { ownerTurn: true }), asked: t }
+  if (!st.relayTurn) return { ownerTurn: true }
+  // A relay turn's LAST text wins too, but only over its own question: the one
+  // standing before the relay came in stays.
+  const { asked: _own, ...rest } = st
+  return st.relayHeld === undefined ? rest : { ...rest, asked: st.relayHeld }
 }
 
 /** Fold a whole transcript (or its tail): the standing question's ms, or undefined. */

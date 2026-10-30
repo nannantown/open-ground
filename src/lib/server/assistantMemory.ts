@@ -53,6 +53,8 @@ export interface AssistantEntry extends Partial<PhoneCallRecord> {
   /** An assistant line retelling a president's answer to a message the owner's
    *  button passed on (presidentRelay.ts): whose answer it is. */
   president?: { projectId: string; project: string }
+  /** The app's own line (a proposal's button was pressed) — not an answer to the line before it. */
+  app?: true
 }
 export interface AssistantConfig {
   logDays: number
@@ -279,6 +281,29 @@ export const deleteAssistantEntry = (id: string, projectId?: string): Promise<bo
     return false
   })
 }
+
+/** CHAT_SPEC §5b 削除: an owner line of the assistant's talk that got no answer
+ *  (the next line that is not a call record, the app's own or a president's retold answer is not an answer)
+ *  goes, with its photo — and nothing else: no epoch bump, so a turn running now
+ *  still writes its line and answer; the session and the proposals stay.
+ *  False = no such line (answered, a call record, already gone). */
+export const deleteUnansweredLine = (id: string): Promise<boolean> =>
+  locked(async () => {
+    const all: { file: string; e: AssistantEntry }[] = []
+    for (const file of await dayFiles())
+      for (const e of parseLines(await readFile(join(logDir(), file), 'utf8').catch(() => '')))
+        // A president's retold answer is not an answer to the owner line before it either.
+        if ((e.projectId ?? 'assistant') === 'assistant' && e.kind !== 'call' && !e.app && !e.president) all.push({ file, e })
+    const i = all.findIndex((x) => x.e.id === id)
+    if (i < 0 || all[i].e.who !== 'owner' || all[i + 1]?.e.who === 'assistant') return false
+    const path = join(logDir(), all[i].file)
+    const entries = parseLines(await readFile(path, 'utf8'))
+    const rest = entries.filter((e) => e.id !== id)
+    if (rest.length) await atomicWriteText(path, rest.map((e) => JSON.stringify(e) + '\n').join(''), { mode: MODE })
+    else await rm(path, { force: true })
+    await rmPhoto(all[i].e.photo)
+    return true
+  })
 
 export const clearAssistantLog = (projectId?: string): Promise<void> => {
   bump()

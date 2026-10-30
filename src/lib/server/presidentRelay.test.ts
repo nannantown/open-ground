@@ -163,3 +163,97 @@ describe('a message reaches the president marked as the assistant’s, and the a
     expect(r.typed).toEqual([])
   })
 })
+
+describe('no mix-ups, no early "no reply" (integration review 2026-10-30)', () => {
+  it('a window made anew while waiting: its resume report / greeting is not taken for the answer', async () => {
+    const fresh = join(await mkdtemp(join(tmpdir(), 'og-pres-')), 'new.jsonl')
+    let swapped = false
+    const r = await rig({ transcript: async () => (swapped ? fresh : r.file) }, async (t) => {
+      if (t === 1_002_000) {
+        await writeFile(fresh, said('おはようございます、再開しました。', t))
+        swapped = true
+      }
+    })
+    const reply = replyOf()
+    await relayToPresident('/p', '進み具合は?', reply.on, r.deps)
+    expect(await reply.done).toEqual({ kind: 'no-reply' })
+  })
+
+  it('a slash command typed into the window (/compact, /model) ends the answer: what follows it is left out', async () => {
+    let file = ''
+    const r = await rig({}, async (t) => {
+      if (t === 1_001_000) await appendFile(file, said('半分です。', t, true))
+      if (t === 1_002_000) await appendFile(file, typedIn('<command-name>/compact</command-name>', t) + said('要約しました。', t + 1))
+    })
+    file = r.file
+    const reply = replyOf()
+    await relayToPresident('/p', '進み具合は?', reply.on, r.deps)
+    expect(await reply.done).toEqual({ kind: 'answered', text: '半分です。' })
+  })
+
+  it('someone else types in before the president wrote a word: "no reply" at once, not after the whole wait', async () => {
+    let file = ''
+    const r = await rig({}, async (t) => {
+      if (t === 1_002_000) await appendFile(file, typedIn('別件ですが', t))
+    })
+    file = r.file
+    const reply = replyOf()
+    await relayToPresident('/p', '進み具合は?', reply.on, r.deps)
+    expect(await reply.done).toEqual({ kind: 'no-reply' })
+    expect(r.at()).toBe(1_002_000)
+  })
+
+  it('landing just before the landing wait ran out still leaves the president a full wait to answer', async () => {
+    let file = ''
+    let late: ((heard: boolean) => void) | undefined
+    const r = await rig({ say: async (_p, line, onDone) => ((late = () => (appendFileSync(file, typedIn(line, r.at())), onDone?.(true))), 1) }, async (t) => {
+      if (t === 1_059_000) late?.(true)
+      if (t === 1_070_000) await appendFile(file, said('明日できます。', t))
+    })
+    file = r.file
+    const reply = replyOf()
+    await relayToPresident('/p', 'いつできる?', reply.on, r.deps)
+    expect(await reply.done).toEqual({ kind: 'answered', text: '明日できます。' })
+  })
+
+  it('two messages that open alike within a minute: the answer to the OTHER one is not taken', async () => {
+    const head = 'あ'.repeat(40)
+    let file = ''
+    const r = await rig({}, async (t) => {
+      if (t === 1_002_000) await appendFile(file, said('B の返事', t))
+    })
+    file = r.file
+    await appendFile(file, typedIn(assistantRelayLine(`${head}A`), 990_000) + said('A の返事', 990_500))
+    const reply = replyOf()
+    await relayToPresident('/p', `${head}B`, reply.on, r.deps)
+    expect(await reply.done).toEqual({ kind: 'answered', text: 'B の返事' })
+  })
+})
+
+describe('a background task finishing mid-answer is not someone typing in (rework 2026-10-30)', () => {
+  it('a queued task-notification (origin INSIDE the attachment, as a real transcript has it) does not end the answer', async () => {
+    // The exact shape measured on a real president transcript.
+    const taskDone = (at: number) =>
+      JSON.stringify({
+        type: 'attachment',
+        origin: null,
+        timestamp: new Date(at).toISOString(),
+        attachment: {
+          type: 'queued_command',
+          origin: { kind: 'task-notification', producer: 'session-task' },
+          commandMode: 'task-notification',
+          prompt: '<task-notification><task-id>b1</task-id><status>completed</status></task-notification>',
+        },
+      }) + '\n'
+    let file = ''
+    const r = await rig({}, async (t) => {
+      if (t === 1_001_000) await appendFile(file, said('調べます。', t, true))
+      if (t === 1_002_000) await appendFile(file, taskDone(t))
+      if (t === 1_003_000) await appendFile(file, said('半分できています。', t))
+    })
+    file = r.file
+    const reply = replyOf()
+    await relayToPresident('/p', '進み具合は?', reply.on, r.deps)
+    expect(await reply.done).toEqual({ kind: 'answered', text: '調べます。\n\n半分できています。' })
+  })
+})

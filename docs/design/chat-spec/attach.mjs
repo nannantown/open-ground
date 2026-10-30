@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 
 const OG = process.env.OG || 'http://127.0.0.1:47776'
-const PREFIX = 'チャットの違い-'
+const PREFIX = process.env.PREFIX ?? 'チャットの違い-' // PREFIX=メッセージの状態- for states-shots.mjs
 const [card, ...files] = process.argv.slice(2)
 if (!card || !files.length) throw new Error('usage: attach.mjs <card id> <png> …')
 const reg = await (await fetch(`${OG}/api/projects`)).json()
