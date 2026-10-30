@@ -221,10 +221,16 @@ president (the screen side: docs/CHAT_SPEC.md §5b "Message states"):
 - For CHAT_SPEC §5b's record check, `assistant-history` entries carry
   `clientId` (the say id — or the Mac window's own id — of an owner line) and
   `app: true` on the app's own line after a proposal button (「出しました」):
-  that line is NOT an answer to the owner line before it.
+  that line is NOT an answer to the owner line before it. Neither is a line
+  carrying `president: { projectId, project }` (the assistant retelling a
+  president's answer, "Assistant → president messages"). Skip both, like call
+  records, and look at the next entry.
 - Order per line: assistant `queued` → `replying` → `delivered` → answer →
   `replied` (or `rejected` at any point before the answer); president `queued`
-  → `delivered` → `replying` → words → `replied`. The phone shows the HIGHEST
+  → `delivered` → `replying` → words → `replied`. This order is NOT guaranteed
+  for a president: the Mac confirms the hand-over by watching the desk's input
+  box, and that check can lag the transcript, so `replied` may arrive BEFORE
+  `delivered` (and then no `replying` is sent at all). The phone shows the HIGHEST
   stage reached and never steps back: sending < delivered (`queued`, or
   `delivered` with `heard: false`) < replying < replied; `rejected` ends it,
   but never after `replied`. A `delivered` with `heard: true` changes nothing on

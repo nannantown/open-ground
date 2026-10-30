@@ -182,7 +182,14 @@ took, PHONE_LINK "Sealed frames"). The failed line goes away and the new line
 appears at the bottom as sending. Disabled while another line from this screen
 to the same partner is still sending / delivered / replying, or offline. A line
 whose photo can no longer be fetched is not resent (never the words without
-it).
+it): its 再送 shows disabled once the Mac answers 404 for the photo (削除 still
+works). A photo that fails to load for another reason (the Mac restarting, no
+connection) leaves 再送 as it is.
+On the Mac window, resend deletes the old line from the record first
+(`DELETE …/assistant/failed/:id`) and sends only when that succeeded — never the
+same words twice. 409 means the line got its answer meanwhile (or is gone): the
+reloaded record shows it answered, nothing is sent. No connection: nothing is
+sent, the line stays failed, and the general failure line says so.
 
 **削除 (Delete)** removes the failed line at once. A line that never reached
 the Mac lives only on that screen and just goes. A line in the assistant's
@@ -208,7 +215,10 @@ record does not exist; the 24 h rule below ends its keys anyway).
   `id`. Followed by an assistant entry ⇒ replied. Not followed by one (the next
   entry is another owner line, or none) ⇒ failed 「返事なし」, kept under the 24 h
   rule. The app's own line after a proposal button (`app: true`, 「出しました」)
-  is not an answer and is skipped, like call records.
+  is not an answer and is skipped, like call records. So is the assistant's
+  line retelling a president's answer to a passed-on message (it carries
+  `president: { projectId, project }`, PHONE_LINK "Assistant → president
+  messages"): it answers that message, not the owner line before it.
 - Proof for a president: an `owner` event carrying the line's `id` (⇒
   delivered) and a `president` event after it (⇒ replied).
 - An owner entry in the record without a following reply (an answer failed) is

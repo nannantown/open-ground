@@ -133,7 +133,8 @@ export interface AssistantState {
   /** Lines that did not get through, with 再送 / 削除 (§5b). */
   failed: FailedLine[]
   /** 削除: a failed line goes (out of the log too, when it is there). */
-  forget: (f: FailedLine) => Promise<void>
+  /** Deletes a failed line; false when the Mac refused (409: answered meanwhile) or was unreachable — the line stays. */
+  forget: (f: FailedLine) => Promise<boolean>
   /** `error` is said by a failed line's own note: the chat leaves it out (the call screen has no lines). */
   quiet: boolean
   /** What it said while looking something up for the pending line ("ちょっと待ってね"); '' when nothing. */
@@ -412,12 +413,15 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
     async (f: FailedLine) => {
       setHeld((h) => h.filter((x) => x.key !== f.key))
       setError('')
-      if (!f.entryId) return
+      if (!f.entryId) return true
       // Only that line: never the whole-talk delete (it would end a turn running now).
-      await fetch(`${API}/failed/${encodeURIComponent(f.entryId)}`, { method: 'DELETE' }).catch(() => null)
+      const r = await fetch(`${API}/failed/${encodeURIComponent(f.entryId)}`, { method: 'DELETE' }).catch(() => null)
+      // Unreachable: say so (the line stays). A 409 needs no word — the reload shows its answer.
+      if (!r) setError(words.failed)
       await load()
+      return !!r?.ok
     },
-    [load],
+    [load, words],
   )
 
   const hush = useCallback(async (heard: string) => {

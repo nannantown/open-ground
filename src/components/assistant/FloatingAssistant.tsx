@@ -101,6 +101,13 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const [photoError, setPhotoError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
   const resending = useRef(false)
+  /** Photos that could not be fetched (pruned): a failed line carrying one cannot be resent (§5b). */
+  const [photosGone, setPhotosGone] = useState<ReadonlySet<string>>(new Set())
+  /** Gone only when the Mac says so (404): a restarting server or a dropped connection is not "gone". */
+  const checkPhotoGone = async (src: string) => {
+    if (!src.startsWith('data:') && !(await fetch(src).then((r) => r.status === 404).catch(() => false))) return
+    setPhotosGone((s) => (s.has(src) ? s : new Set(s).add(src)))
+  }
   const pendingRef = useRef(a.pending)
   pendingRef.current = a.pending
   const [pos, setPos] = useState(readPos)
@@ -523,8 +530,13 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
     try {
       const pic = f.photo ? await photoData(f.photo) : undefined
       // Its photo is gone (pruned): never send the words without it, nor delete the line.
-      if (f.photo && !pic) return
-      await a.forget(f)
+      if (f.photo && !pic) {
+        await checkPhotoGone(f.photo)
+        return
+      }
+      // The old line must be gone first: resent while it stays (409 — answered meanwhile —
+      // or the Mac unreachable), the same words would be in the talk twice.
+      if (!(await a.forget(f))) return
       await sendLine(f.text, false, pic)
     } finally {
       resending.current = false
@@ -540,7 +552,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const ownLine = (key: string, said: string, src?: string, note?: ReactNode) => (
     <div key={key} className="flex max-w-[80%] flex-col items-end gap-1 self-end">
       {/* A photo takes its height only once loaded: the talk's room and its scroll follow. */}
-      {src && <img src={src} alt={t('misc.assistant.photo')} onLoad={photoLoaded} className="max-h-40 max-w-full rounded-[10px] border border-line object-contain" />}
+      {src && <img src={src} alt={t('misc.assistant.photo')} onLoad={photoLoaded} onError={() => void checkPhotoGone(src)} className="max-h-40 max-w-full rounded-[10px] border border-line object-contain" />}
       {said && <p className={`${owned} max-w-full`}>{said}</p>}
       {note}
     </div>
@@ -552,7 +564,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const failedNote = (f: FailedLine) => (
     <span data-testid="assistant-failed" data-key={f.key} className="flex items-center gap-1">
       <span className="text-meta leading-snug text-accent">{t(f.kind === 'notSent' ? 'misc.assistant.notSent' : 'misc.assistant.noReply')}</span>
-      <button type="button" className={textKey} disabled={a.pending !== null} onClick={() => void resend(f)}>{t('misc.assistant.resend')}</button>
+      <button type="button" className={textKey} disabled={a.pending !== null || (!!f.photo && photosGone.has(f.photo))} onClick={() => void resend(f)}>{t('misc.assistant.resend')}</button>
       <button type="button" className={textKey} onClick={() => void a.forget(f)}>{t('misc.assistant.delete')}</button>
     </span>
   )

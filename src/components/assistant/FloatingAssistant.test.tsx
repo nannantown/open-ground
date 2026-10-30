@@ -11,7 +11,7 @@ vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k, lang:
 
 import { EXPANDED_KEY, FloatingAssistant, clampPos, panelPlacement } from './FloatingAssistant'
 
-interface Line { id: string; at: number; who: 'owner' | 'assistant'; text: string; clientId?: string; kind?: 'call' }
+interface Line { id: string; at: number; who: 'owner' | 'assistant'; text: string; clientId?: string; kind?: 'call'; photo?: string }
 let log: Line[]
 let cfg: { name: string; look: string }
 let status: number
@@ -157,6 +157,68 @@ describe('FloatingAssistant', () => {
     // Only that line (never the whole-talk delete, which would end a turn running now).
     expect(vi.mocked(fetch).mock.calls.filter(([, i]) => i?.method === 'DELETE').map(([u]) => String(u))).toEqual(['/api/phone-link/assistant/failed/lost'])
     expect(log.map((l) => l.id)).toEqual(['a', 'call'])
+  })
+
+  it('message states: 再送 does not send when the old line could not be deleted (409 / Mac unreachable) — the words are never in the talk twice', async () => {
+    log = [
+      { id: 'a', at: Date.now() - 60_000, who: 'assistant', text: '昨日のつづきです' },
+      { id: 'lost', at: Date.now() - 30_000, who: 'owner', text: '届いたけど返事なし', clientId: 'x1' },
+    ]
+    const base = vi.mocked(fetch).getMockImplementation()!
+    let refuse: 'conflict' | 'network' = 'network'
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (init?.method === 'DELETE' && String(url).includes('/failed/')) {
+        if (refuse === 'network') throw new TypeError('Failed to fetch')
+        // As the server: 409 because the line got its answer meanwhile.
+        log = [...log, { id: 'late', at: Date.now(), who: 'assistant', text: '遅れた答え' }]
+        return json({ error: 'not-failed' }, 409)
+      }
+      return base(url as string, init)
+    })
+    const deletes = () => vi.mocked(fetch).mock.calls.filter(([, i]) => i?.method === 'DELETE').length
+    const says = () => vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/say')).length
+    render(<FloatingAssistant disabled={false} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
+
+    // The Mac cannot be reached: nothing sent, the line stays failed, the failure line says so.
+    fireEvent.click(await screen.findByRole('button', { name: 'misc.assistant.resend' }))
+    await waitFor(() => expect(deletes()).toBe(1))
+    expect(await screen.findByText('misc.assistant.failed')).toBeTruthy()
+    expect(says()).toBe(0)
+    expect((await screen.findByTestId('assistant-failed')).textContent).toContain('misc.assistant.noReply')
+    expect(screen.queryByTestId('assistant-thinking')).toBeNull()
+
+    // 409 (answered meanwhile): nothing sent; the reloaded record shows it answered.
+    refuse = 'conflict'
+    fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.resend' }))
+    await waitFor(() => expect(screen.queryByTestId('assistant-failed')).toBeNull())
+    expect(deletes()).toBe(2)
+    expect(says()).toBe(0)
+    expect(screen.queryByTestId('assistant-thinking')).toBeNull()
+  })
+
+  it('message states: a failed line whose photo is gone (pruned) shows 再送 disabled; 削除 still works', async () => {
+    log = [
+      { id: 'a', at: Date.now() - 60_000, who: 'assistant', text: '昨日のつづきです' },
+      { id: 'lost', at: Date.now() - 30_000, who: 'owner', text: 'これ見て', clientId: 'x1', photo: 'gone.jpg' },
+    ]
+    let photo = 503
+    const base = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation(async (url, init) => (String(url).endsWith('/photo/gone.jpg') ? json({}, photo) : base(url as string, init)))
+    render(<FloatingAssistant disabled={false} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
+    const resend = (await screen.findByRole('button', { name: 'misc.assistant.resend' })) as HTMLButtonElement
+    const img = screen.getByRole('img', { name: 'misc.assistant.photo' })
+    // A load error that is not "gone" (the Mac restarting) leaves 再送 alone.
+    fireEvent.error(img)
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).endsWith('/photo/gone.jpg'))).toBe(true))
+    await act(async () => {})
+    expect(resend.disabled).toBe(false)
+    // The Mac says 404: the photo is gone, 再送 cannot run.
+    photo = 404
+    fireEvent.error(img)
+    await waitFor(() => expect(resend.disabled).toBe(true))
+    expect((screen.getByRole('button', { name: 'misc.assistant.delete' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('message states: the 200 s answer clock runs from its turn (replying), never from a wait in the queue', async () => {

@@ -592,7 +592,10 @@ const curParts = (cur: string) => {
 /** The president's words AFTER a phone say's echo (in the transcript, not in
  *  time — a resume re-reads words from before it): that say is replied
  *  (docs/PHONE_LINK.md "Message states"). Sent once per say, also across a
- *  resend of the transcript after a reconnect. */
+ *  resend of the transcript after a reconnect. Positions compare only within
+ *  one transcript file: if the president's session moves to a new file, a say
+ *  echoed in the old one never gets `replied` — left so, the words themselves
+ *  are the proof of a reply. */
 const repliedTo = (st: LinkState, projectId: string, at: string): void => {
   const p = curParts(at)
   for (const e of st.sayIds) {
