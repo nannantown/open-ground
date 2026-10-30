@@ -775,8 +775,14 @@ describe('the assistant passes a message to a president and tells the owner the 
     const lines: AppLine[] = []
     const states: RelayState[] = []
     const talk: { projectId: string; kind: string; text: string; via?: string }[] = []
-    const off = [onAssistantAppLine((e) => lines.push(e)), onRelayState((e) => states.push(e)), onPresidentTalk((e) => talk.push(e))]
-    return { lines, states, talk, off: () => off.forEach((f) => f()) }
+    /** Lines and states as one timeline, to check which went first. */
+    const order: string[] = []
+    const off = [
+      onAssistantAppLine((e) => (lines.push(e), order.push('line'))),
+      onRelayState((e) => (states.push(e), order.push(e.state))),
+      onPresidentTalk((e) => talk.push(e)),
+    ]
+    return { lines, states, talk, order, off: () => off.forEach((f) => f()) }
   }
 
   it('only the button passes it on; the answer comes back as ONE assistant line retold by the model — never logged as the owner', async () => {
@@ -801,7 +807,11 @@ describe('the assistant passes a message to a president and tells the owner the 
     expect(m.lines[1]).not.toContain('] betaの')
     const log = await readAssistantLog()
     expect(log.slice(before).map((e) => [e.who, e.text, e.president?.projectId])).toEqual([['assistant', 'betaの社長から返事: 半分できたって。', betaId]])
-    expect(seen.lines[0]).toMatchObject({ text: 'betaの社長から返事: 半分できたって。' })
+    // The live line carries whose answer it is, like its log entry.
+    expect(seen.lines[0]).toMatchObject({ text: 'betaの社長から返事: 半分できたって。', president: { projectId: betaId, project: basename(beta) } })
+    // `replied` only once the retold line went out — not when the president's words came.
+    await vi.waitFor(() => expect(seen.states).toHaveLength(3))
+    expect(seen.order).toEqual(['delivered', 'replying', 'line', 'replied'])
     // The phone's message states: the message's own id, the president's project, the owner line it came from.
     expect(seen.states.map((x) => [x.state, x.id, x.projectId, x.about])).toEqual([
       ['delivered', shown.id, betaId, 'say-1'],

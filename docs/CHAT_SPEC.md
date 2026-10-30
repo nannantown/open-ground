@@ -217,7 +217,7 @@ record does not exist; the 24 h rule below ends its keys anyway).
   rule. The app's own line after a proposal button (`app: true`, 「出しました」)
   is not an answer and is skipped, like call records. So is the assistant's
   line retelling a president's answer to a passed-on message (it carries
-  `president: { projectId, project }`, PHONE_LINK "Assistant → president
+  `president: { projectId, project }` live and in the record, PHONE_LINK "Assistant → president
   messages"): it answers that message, not the owner line before it.
 - Proof for a president: an `owner` event carrying the line's `id` (⇒
   delivered) and a `president` event after it (⇒ replied).

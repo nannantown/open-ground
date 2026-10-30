@@ -214,7 +214,9 @@ president (the screen side: docs/CHAT_SPEC.md §5b "Message states"):
 - A message passed on to a president (`kind: "president"` proposal, "Assistant →
   president messages") uses these states under the proposal's `id` with `about`:
   `queued` (only when the desk is busy) → `delivered` (`heard: true`) →
-  `replying` → `replied`, or `rejected` with `reason: "not-landed"` (never
+  `replying` → `replied` (right after the assistant's line retelling the
+  answer, which carries `president` — so the waiting mark goes with the answer,
+  not before it), or `rejected` with `reason: "not-landed"` (never
   handed over: shown as 「未送信」) or `"no-reply"` (handed over, no words in 10
   minutes: 「返事なし」). Never `rejected` after `replied` — words that came
   late but before the 10 minutes are `replied`.
@@ -1013,7 +1015,7 @@ desk has been idle for two looks (3 s apart), for at most 10 minutes. A line
 that was never typed in by then is taken back from the window's queue (it never
 lands later). It then sends ONE more line, like an answer:
 ```json
-{ "type": "assistant", "kind": "assistant", "text": "kiwi-shopの社長から返事: 半分できたって。", "speak": "…", "at": … }
+{ "type": "assistant", "kind": "assistant", "text": "kiwi-shopの社長から返事: 半分できたって。", "speak": "…", "at": …, "president": { "projectId": "<id>", "project": "kiwi-shop" } }
 ```
 (`type: "event"` with `projectId: "assistant"` before the phone fetched records —
 the same two shapes as every assistant line.) It is the assistant retelling the
@@ -1021,9 +1023,11 @@ president's words; if the assistant cannot, the app's own 「…の社長から�
 president's words>」. No answer in 10 minutes → 「…の社長から10分たっても返事がないよ。…」;
 never handed over in that time (a desk busy throughout) → 「…伝言はまだ渡せていないよ。…」.
 This line comes whether or not the phone is in the assistant's talk, and wakes
-the phone with a push like an answer does. The log keeps it with
-`president: { projectId, project }` (the history page carries it as is; an app
-that does not know the field ignores it).
+the phone with a push like an answer does. The live line and the log both carry
+`president: { projectId, project }` (2026-10-30: the live line had lacked it, so
+the phone could not tell it from an answer to the owner's last line); the history
+page carries it as is; an app that does not know the field ignores it (Swift
+`Decodable` skips unknown keys).
 
 **States of the message:** the message's own `id` is the proposal's `id`. Its
 states go as `ack` frames of that id with `projectId` = the president's project
@@ -1031,8 +1035,12 @@ and `about` = the `id` of the owner's `say` that led to it (when there was one),
 using the states of "Message states" (being added by the message-state card,
 2026-10-30 — that section is the canon for their meaning and order; it is not
 copied here): `queued` (still waiting behind a busy desk) → `delivered`
-(`heard: true`) → `replying` → `replied` when the answer line comes, or
-`rejected` with `reason: "no-reply" | "not-landed"`. Sent only for proposals made
+(`heard: true`) → `replying` → `replied`, or
+`rejected` with `reason: "no-reply" | "not-landed"`. The final state (`replied`
+or `rejected`) goes right AFTER the line above was sent — never on the
+president's words alone (2026-10-30: it had gone first, so the phone dropped the
+waiting mark seconds before the retold answer showed). When no line goes (work
+mode, or the talk was deleted meanwhile) it goes as soon as that is known. Sent only for proposals made
 from the phone (`via: "phone"`), v2 pairings only.
 
 **In the president's conversation** (the phone's partner = that project): the

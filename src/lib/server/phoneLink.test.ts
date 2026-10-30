@@ -138,6 +138,9 @@ describe('a message the assistant passed to a president (2026-10-30)', () => {
     expect(acks[0]).not.toHaveProperty('via')
     sendAppLine(st, { text: 'betaの社長から返事: 半分だって。', speak: 'betaの社長から返事: 半分だって。', at: 5 })
     expect(sent.filter((f) => f.kind === 'assistant')).toMatchObject([{ text: 'betaの社長から返事: 半分だって。', speak: 'betaの社長から返事: 半分だって。' }])
+    // Whose answer it retells rides on the live line too (the log's mark).
+    sendAppLine(st, { text: 'gammaの社長から返事: 了解。', speak: 'gammaの社長から返事: 了解。', at: 6, president: { projectId: 'g1', project: 'gamma' } })
+    expect(sent.filter((f) => f.kind === 'assistant').at(-1)).toMatchObject({ text: 'gammaの社長から返事: 了解。', president: { projectId: 'g1', project: 'gamma' } })
     const v1 = fakeSocket()
     void v1
     sendRelayState(__testLinkState(CFG, v1.sock), { id: 'm1', projectId: 'p1', state: 'replying', via: 'phone' })

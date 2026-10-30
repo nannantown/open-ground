@@ -758,10 +758,11 @@ const sendProposals = (st: LinkState): void => {
 
 /** A line the app added to the assistant's talk on its own (a president's
  *  answer retold): sent and read aloud like an answer, with a push when the
- *  phone is away. Exported for tests. */
+ *  phone is away. Carries `president` like its log entry, so the phone knows
+ *  whose answer it is. Exported for tests. */
 export const sendAppLine = (st: LinkState, e: AppLine, deps: PhoneLinkDeps = {}): void => {
   if (isLockdownEnabledSync()) return
-  if (sendAssistant(st, assistantTalk(st, 'assistant', { text: e.text, ...(e.speak ? { speak: e.speak } : {}), at: e.at }), deps)) owePush(st, deps)
+  if (sendAssistant(st, assistantTalk(st, 'assistant', { text: e.text, ...(e.speak ? { speak: e.speak } : {}), at: e.at, ...(e.president ? { president: e.president } : {}) }), deps)) owePush(st, deps)
 }
 
 /** A message the phone's proposal passed on to a president: its state, as the

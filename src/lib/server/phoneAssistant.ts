@@ -828,8 +828,12 @@ export const pressProposal = async (
       reply: (p, reply, about) => {
         const got = 'text' in reply && !!reply.text
         if ('text' in reply && reply.text) presidentTalk({ projectId: p.projectId, kind: 'president', text: reply.text, at: Date.now() })
-        relayState(p, got ? 'replied' : 'rejected', about, got ? {} : { reason: reply.kind })
-        void presidentAnswered(p, reply, epoch, { via: o.via, ...o.deps }).catch(() => {})
+        // The state goes AFTER the retold line (docs/PHONE_LINK.md "Message states"):
+        // sent first, the phone dropped its waiting mark seconds before the answer
+        // showed, and a line typed in that gap was taken as answered by it.
+        void presidentAnswered(p, reply, epoch, { via: o.via, ...o.deps })
+          .catch(() => {})
+          .then(() => relayState(p, got ? 'replied' : 'rejected', about, got ? {} : { reason: reply.kind }))
       },
     },
   })
@@ -903,6 +907,8 @@ export interface AppLine {
   text: string
   speak: string
   at: number
+  /** Whose answer it retells — the same mark as its log entry. */
+  president?: { projectId: string; project: string }
 }
 
 /** Told of every line the app adds to the talk on its own. Returns the unsubscribe. */
@@ -932,9 +938,10 @@ export const presidentAnswered = async (p: ShownProposal, reply: PresidentReply,
   if (isLockdownEnabledSync() || assistantEpoch() !== epoch) return
   const lang = await getPromptLang()
   const name = p.project
-  const entry: Partial<AssistantEntry> = { president: { projectId: p.projectId, project: name } }
+  const president = { projectId: p.projectId, project: name }
+  const entry: Partial<AssistantEntry> = { president }
   const said = (text: string) => {
-    toldApp({ text, speak: spokenPart(text), at: Date.now() })
+    toldApp({ text, speak: spokenPart(text), at: Date.now(), president })
   }
   const appLine = async (text: string) => {
     if (isLockdownEnabledSync() || assistantEpoch() !== epoch) return
