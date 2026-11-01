@@ -782,6 +782,15 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
                     if (partial) setAbsorbed(took + partial)
                     setText(e.target.value)
                   }}
+                  onPaste={(e) => {
+                    // A copied screenshot goes in like a picked photo; a paste with no image stays plain text.
+                    const file = Array.from(e.clipboardData.files).find((f) => f.type.startsWith('image/'))
+                    if (!file) return
+                    // Words copied with the picture (Office) still land; an image alone types nothing (no file name).
+                    if (!e.clipboardData.getData('text/plain')) e.preventDefault()
+                    // Like the photo button, no attaching while a reply is pending.
+                    if (a.pending === null) pickPhoto(file)
+                  }}
                   onKeyDown={(e) => {
                     // An IME's confirming Enter is not a send.
                     if (e.key === 'Enter' && (e.nativeEvent.isComposing || e.keyCode === 229)) e.preventDefault()

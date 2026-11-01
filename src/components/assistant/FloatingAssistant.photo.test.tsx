@@ -108,6 +108,51 @@ describe('a photo in the assistant input', () => {
     expect((text as HTMLInputElement).value).toBe('これ何?')
   })
 
+  it('a copied screenshot pasted into the input is previewed and sent; a text paste is left to the input', async () => {
+    await open()
+    const text = screen.getByRole('textbox', { name: 'misc.assistant.message' })
+    // A text-only paste: not taken over (the default paste goes through), no preview.
+    expect(fireEvent.paste(text, { clipboardData: { files: [], getData: () => 'やあ' } })).toBe(true)
+    expect(preview()).toBeNull()
+    // A screenshot on the clipboard: taken as the photo, not pasted as text.
+    const shot = new File([PNG], 'image.png', { type: 'image/png' })
+    expect(fireEvent.paste(text, { clipboardData: { files: [shot], getData: () => '' } })).toBe(false)
+    await waitFor(() => expect(preview()).not.toBeNull())
+    fireEvent.click(send())
+    expect(await screen.findByText('見たよ')).toBeTruthy()
+    expect(sent[0].photo).toBe(Buffer.from(PNG).toString('base64'))
+  })
+
+  it('a paste carrying words and a picture (Office) keeps the words and attaches the picture', async () => {
+    await open()
+    const text = screen.getByRole('textbox', { name: 'misc.assistant.message' })
+    const pic = new File([PNG], 'image.png', { type: 'image/png' })
+    // Not swallowed: the browser's own paste puts the words into the input.
+    expect(fireEvent.paste(text, { clipboardData: { files: [pic], getData: (k: string) => (k === 'text/plain' ? '売上表' : '') } })).toBe(true)
+    fireEvent.change(text, { target: { value: '売上表' } }) // what that default paste does (jsdom does not perform it)
+    await waitFor(() => expect(preview()).not.toBeNull())
+    expect((text as HTMLInputElement).value).toBe('売上表')
+  })
+
+  it('while a reply is pending a pasted picture is not attached, and an image-only paste types nothing', async () => {
+    let release: (r: Response) => void = () => {}
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      if (String(url).endsWith('/log')) return json({ entries: log, name: 'ノノ', look: 'moss' })
+      if (String(url).endsWith('/say')) return new Promise<Response>((r) => { release = r })
+      return json({}, 404)
+    })
+    await open()
+    const text = screen.getByRole('textbox', { name: 'misc.assistant.message' })
+    fireEvent.change(text, { target: { value: 'やあ' } })
+    fireEvent.click(send())
+    await waitFor(() => expect((screen.getByRole('button', { name: 'misc.assistant.photoAdd' }) as HTMLButtonElement).disabled).toBe(true))
+    const pic = new File([PNG], 'image.png', { type: 'image/png' })
+    expect(fireEvent.paste(text, { clipboardData: { files: [pic], getData: () => '' } })).toBe(false)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(preview()).toBeNull()
+    release(json({ reply: 'うん' }))
+  })
+
   it('words alone are sent as before, with no photo field', async () => {
     await open()
     const text = screen.getByRole('textbox', { name: 'misc.assistant.message' })
