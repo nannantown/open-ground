@@ -20,7 +20,8 @@
 // PTY (Remote Control, screen sensors) do not apply to a session nobody sees.
 //
 // What it can touch: NOTHING of Claude Code's own (`tools: []` — no Read, Bash,
-// Write, Edit, web), no settings, hooks or MCP from disk (`settingSources: []`,
+// Write, Edit, web — links go through its own read_link, assistantLinks.ts), no
+// settings, hooks or MCP from disk (`settingSources: []`,
 // `strictMcpConfig`), no transcript on disk (`persistSession: false`). Its only
 // tools are the in-process ones below (assistantTools.ts decides what they may
 // read and do), and a PreToolUse gate denies every other name — a hook that
@@ -34,6 +35,7 @@ import { importSdkModule } from './sdkSession'
 import { resolveUserClaudeBin, sdkSessionEnv } from './swarmWorkerSdk'
 import type { ToolResult } from './assistantTools'
 import type { CardInput } from './assistantProposals'
+import { SEARCH_WHERE, type SearchWhere } from './assistantLinks'
 import { getAllowedModelTiers } from './store'
 import { resolveAvailableTier } from './swarmLaunch'
 import { MODEL_TIER_LADDER, isModelTier, markRateLimited, type ModelTier } from './swarmQuota'
@@ -56,6 +58,10 @@ export interface AssistantToolSet {
   list_dir(a: { path: string }): Promise<ToolResult>
   search(a: { path: string; pattern: string; glob?: string }): Promise<ToolResult>
   status(a: Record<string, never>): Promise<ToolResult>
+  /** A link the owner gave: a YouTube video's subtitles, or a page's text (assistantLinks.ts). */
+  read_link(a: { url: string; feed?: boolean }): Promise<ToolResult>
+  /** Look something up on the web, Reddit or GitHub — read only (assistantLinks.ts). */
+  web_search(a: { where: SearchWhere; query: string }): Promise<ToolResult>
   make_card(a: CardInput): Promise<ToolResult>
   tell_commander(a: { projectId: string; message: string }): Promise<ToolResult>
   tell_president(a: { projectId: string; message: string }): Promise<ToolResult>
@@ -93,6 +99,8 @@ const SHAPES = {
   list_dir: { path: z.string() },
   search: { path: z.string(), pattern: z.string(), glob: z.string().optional() },
   status: {},
+  read_link: { url: z.string(), feed: z.boolean().optional() },
+  web_search: { where: z.enum(SEARCH_WHERE), query: z.string() },
   make_card: { projectId: z.string(), title: z.string(), goal: z.string(), done: z.array(z.string()) },
   tell_commander: { projectId: z.string(), message: z.string() },
   tell_president: { projectId: z.string(), message: z.string() },
@@ -105,6 +113,10 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   list_dir: 'List a directory (absolute path) in a registered project or OPEN GROUND data.',
   search: 'Find lines holding `pattern` (words taken literally, case-insensitive; "a|b" = either) in the files under a directory or in one file (absolute path). `glob` limits file names, e.g. "*.ts". node_modules, .git and build output are skipped. Code is mostly in English: when a word in the owner\'s language finds nothing, search its English words too (for 送料, try "shipping|fee").',
   status: "Every project's state right now: Board columns, what is stuck / worked on / awaiting integration, and questions waiting for the owner.",
+  read_link:
+    "Read a link the owner wrote in their own words: a YouTube video comes as its subtitles, a Reddit thread with its comments, a GitHub repo (README) or issue, a feed's items (`feed: true` when it is a feed without .rss/.xml in its name), any other page as its text. Read only; long ones are cut. Says so plainly when it can't be read (no subtitles, page unreachable, channel not set up on this computer).",
+  web_search:
+    'Search, read only: `where` "web" (the web), "reddit" (Reddit threads) or "github" (GitHub repositories); `query` is one short line of words. Use it when the owner asks what is out there, what people say, or for news. Says so plainly when that channel is not set up on this computer.',
   make_card: "PROPOSE one short work card for a project's Board: shown to the owner in a frame; only their button puts it on the Board. title, goal and done are each one short line; about 10 lines of 20 Japanese characters in all, or it is refused.",
   tell_commander: "PROPOSE one message for a project's commander: shown to the owner in a frame; only their button sends it. One line, plain words.",
   tell_president:

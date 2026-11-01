@@ -796,6 +796,8 @@
   `assistantSession.ts`(常駐 1 本の Agent SDK セッション・ふだん sonnet、`think_deeper` を呼んだ行だけ同じセッションのまま opus(`setModel`・使えるモデルの設定に従う)・`tools: []`+自前道具だけを通す PreToolUse 門・15分無言/40行/鍵変化で張り直し・
   道具の前の一言=`onInterim`)/ `assistantTools.ts`(読むだけの `read_file`/`list_dir`/`search` = 登録プロジェクトと ~/.openground だけ・実パス判定・
   秘密ファイル拒否・秘密値は [hidden]・1回の読みは 40KB まで・1MB 超の写真は sips で縮小・`status`)/
+  `assistantLinks.ts`(2026-11-01: 読むだけの `read_link`=オーナーが自分の行に書いたリンクだけ・YouTube字幕(yt-dlp・字幕1本だけ)/X は断る(twitter-cli が保存クッキー失敗時にブラウザのクッキーへ落ちるため)/Reddit公開JSON/GitHub REST/RSS/他は Jina→直接取得(Jina は公開URLだけ・非公開/資格情報付きは直接・自分自身=ループバックは拒否)、
+  `web_search`=web(mcporter Exa)/reddit/github・1行200字まで。可否は `listResearchChannels()`、結果は 20,000字で切りDATA扱い。テスト `assistantLinks.test.ts`)/
   **提案(2026-10-06 オーナー決定「全部Aで」)** = `assistantProposals.ts`: `make_card`/`tell_commander` は案を作るだけ(メモリ上・Board にも会話記録にも書かない)、
   `withdraw` で「やめて」。実行の入口は `approveProposal(id, hash)` の1本だけ = 画面の枠が**表示している文字**(textContent)から作った SHA-256
   (`proposalHash`)が一致した時だけ、枠の title/body そのままのカードを1枚書く/その行をそのまま司令官へ(`commanderRelay.ts`)。
