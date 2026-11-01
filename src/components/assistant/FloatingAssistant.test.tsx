@@ -3,7 +3,7 @@
 // this Mac (shared with the iPhone), and closing the window never drops a line
 // that is still being answered.
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, cleanup, fireEvent, screen, waitFor, act } from '@testing-library/react'
+import { render, cleanup, fireEvent, screen, waitFor, act, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 const ui = vi.hoisted(() => ({ lang: 'ja' }))
@@ -412,6 +412,31 @@ describe('FloatingAssistant', () => {
     fireEvent.blur(name)
     await waitFor(() => expect(cfg.name).toBe('ハル'))
     expect(await screen.findByRole('button', { name: 'ハル' })).toBeTruthy()
+  })
+
+  it('model and effort: auto by default, only usable models offered, a pick saved to settings', async () => {
+    const posted: unknown[] = []
+    const base = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url) === '/api/settings') {
+        if (init?.method === 'POST') return posted.push(JSON.parse(String(init.body))), json({ ok: true })
+        // opus was picked, then turned off in the usable models: shows as auto.
+        return json({ assistantModel: 'opus', assistantEffort: 'high', swarmAllowedModels: { fable: true, opus: false, sonnet: true, haiku: true } })
+      }
+      return base(url, init)
+    })
+    render(<FloatingAssistant disabled={false} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
+    fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.pick' }))
+    const models = within(screen.getByRole('group', { name: 'misc.assistant.model' }))
+    await waitFor(() => expect(models.getByRole('button', { name: 'misc.assistant.auto' }).getAttribute('aria-pressed')).toBe('true'))
+    expect(models.queryByRole('button', { name: 'Opus' })).toBeNull()
+    const efforts = within(screen.getByRole('group', { name: 'misc.assistant.effort' }))
+    expect(efforts.getByRole('button', { name: 'high' }).getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(models.getByRole('button', { name: 'Haiku' }))
+    fireEvent.click(efforts.getByRole('button', { name: 'misc.assistant.auto' }))
+    await waitFor(() => expect(posted).toEqual([{ assistantModel: 'haiku' }, { assistantEffort: null }]))
+    expect(models.getByRole('button', { name: 'Haiku' }).getAttribute('aria-pressed')).toBe('true')
   })
 
   it('the call voice: Nemo first, a pick saved, the credits shown; a Mac that cannot make VOICEVOX shows no choice', async () => {

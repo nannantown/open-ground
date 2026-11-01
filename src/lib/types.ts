@@ -128,6 +128,13 @@ export interface Settings {
    *  for the week" stays told. At least one tier must stay ON — `setUserSettings`
    *  refuses an all-OFF patch (a swarm with no model can only park). User-settable. */
   swarmAllowedModels?: Partial<SwarmAllowedModels>
+  /** The floating assistant's model, picked by the owner (absent = auto: the fast
+   *  model, moving to the deep one by itself — assistantSession.ts). A tier the
+   *  usable-models mask turns off reads as auto. Shared by the Mac and the iPhone
+   *  (the session runs here). User-settable. */
+  assistantModel?: SwarmModelTier
+  /** The assistant's effort (absent = auto: thinking off on the fast model). */
+  assistantEffort?: ClaudeEffort
   /* NOTE (2026-08-13): `swarmWorkerRuntime` — the worker runtime dial + its
    * `sdkMaxWorkers` slot cap — was DELETED from this type. Workers are
    * SDK-only: the PTY worker runtime is gone, so there is nothing for a dial

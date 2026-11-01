@@ -14,6 +14,9 @@
 // API call — measured 2026-10-07, SDK 0.3.220 / CLI 2.1.292). The next line
 // starts back on the fast one. Both go through the owner's usable-models mask
 // (and the swarm's limit table): no opus allowed ⇒ the line stays on sonnet.
+// That is "auto". The owner can instead pick one model and/or an effort
+// (Settings.assistantModel / assistantEffort, owner 2026-11-01): a picked model
+// answers every line (no move); a picked effort starts the session at it.
 //
 // Subscription only (claudeTerminal RULE 1): the SDK runs the owner's own claude
 // CLI on their login, as the SDK commander and workers do. RULE 2's reasons for a
@@ -35,8 +38,9 @@ import { importSdkModule } from './sdkSession'
 import { resolveUserClaudeBin, sdkSessionEnv } from './swarmWorkerSdk'
 import type { ToolResult } from './assistantTools'
 import type { CardInput } from './assistantProposals'
+import type { ClaudeEffort } from '../types'
 import { SEARCH_WHERE, type SearchWhere } from './assistantLinks'
-import { getAllowedModelTiers } from './store'
+import { getAllowedModelTiers, getSettings } from './store'
 import { resolveAvailableTier } from './swarmLaunch'
 import { MODEL_TIER_LADDER, isModelTier, markRateLimited, type ModelTier } from './swarmQuota'
 import { matchesQuotaRefusal } from './sdkEvents'
@@ -143,7 +147,7 @@ export const assistantToolGate = async (input: unknown) => {
 }
 
 /** The SDK options a session starts with (exported for the launch guard test). */
-export const assistantSessionOptions = (o: { cwd: string; claudeBin: string; system: string; server: unknown; model?: string }): Record<string, unknown> => ({
+export const assistantSessionOptions = (o: { cwd: string; claudeBin: string; system: string; server: unknown; model?: string; effort?: ClaudeEffort }): Record<string, unknown> => ({
   cwd: o.cwd,
   model: o.model ?? ASSISTANT_MODEL,
   pathToClaudeCodeExecutable: o.claudeBin,
@@ -157,9 +161,11 @@ export const assistantSessionOptions = (o: { cwd: string; claudeBin: string; sys
   permissionMode: 'dontAsk',
   hooks: { PreToolUse: [{ hooks: [assistantToolGate] }] },
   persistSession: false,
-  // Off for the fast model's turns. The deep model thinks anyway once the
+  // Auto: off for the fast model's turns. The deep model thinks anyway once the
   // session is switched to it (seen 2026-10-07: opus wrote a thinking block).
-  thinking: { type: 'disabled' },
+  // An effort the owner picked: thinking is left to the CLI's default for the
+  // model (adaptive where supported), guided by that effort.
+  ...(o.effort ? { effort: o.effort } : { thinking: { type: 'disabled' } }),
   // The words as they are written (stream_event), so the first sentence can be
   // read aloud before the last is written (phoneAssistant's spokenSoFar).
   includePartialMessages: true,
@@ -198,6 +204,8 @@ interface Live {
   model: string
   /** Where `think_deeper` moves this line (= `model` when nothing better is usable). */
   deep: string
+  /** The effort the session was started at (fixed for its life). */
+  effort?: ClaudeEffort
   it: AsyncIterator<unknown>
   box: ReturnType<typeof inbox>
   dir: string
@@ -240,14 +248,22 @@ const armIdle = (live: Live) => {
 /** The two models as the owner's usable-models mask (and the swarm's limit table)
  *  allow them right now: the fast one, and the one a deep line moves to — opus
  *  switched off or spent ⇒ sonnet, i.e. no move. */
-export const assistantModels = async (now = Date.now()): Promise<{ base: string; deep: string }> => {
+export const assistantModels = async (now = Date.now()): Promise<{ base: string; deep: string; effort?: ClaudeEffort }> => {
   const allowed = await getAllowedModelTiers()
+  // The owner's pick (Settings.assistantModel / assistantEffort): one model for
+  // the whole line, no move. A pick the mask turns off reads as auto; a spent one
+  // walks down like any launch.
+  const { assistantModel: pick, assistantEffort: effort } = await getSettings()
+  if (pick && allowed[pick]) {
+    const m = resolveAvailableTier(pick, now, allowed) ?? pick
+    return { base: m, deep: m, effort }
+  }
   const deep = resolveAvailableTier(ASSISTANT_DEEP_MODEL, now, allowed) ?? ASSISTANT_MODEL
   const fast = resolveAvailableTier(ASSISTANT_MODEL, now, allowed) ?? deep
   // Never above the deep one: with sonnet and haiku both off or spent the walk
   // goes UP (to fable) — then every line is on the deep model instead.
   const rank = (t: string) => MODEL_TIER_LADDER.indexOf(t as ModelTier)
-  return { base: rank(fast) < rank(deep) ? deep : fast, deep }
+  return { base: rank(fast) < rank(deep) ? deep : fast, deep, effort }
 }
 
 /** `think_deeper`: the rest of the line on the deep model. A failed switch
@@ -263,13 +279,13 @@ const deepen = async (live: Live) => {
 }
 
 const start = async (key: string, system: string): Promise<Live> => {
-  const { base } = await assistantModels()
+  const { base, effort } = await assistantModels()
   const sdk = (await importSdkModule()) as typeof Sdk & { USAGE_LIMIT_ERROR_PREFIXES?: string[] }
   const claudeBin = resolveUserClaudeBin()
   if (!claudeBin) throw new Error('claude CLI not found')
   const dir = await mkdtemp(join(tmpdir(), 'openground-assistant-'))
   const box = inbox()
-  const live = { key, box, dir, turns: 0, tokens: 0, tools: null, dead: false, model: base, deep: base, refusals: sdk.USAGE_LIMIT_ERROR_PREFIXES ?? [] } as unknown as Live
+  const live = { key, box, dir, turns: 0, tokens: 0, tools: null, dead: false, model: base, deep: base, effort, refusals: sdk.USAGE_LIMIT_ERROR_PREFIXES ?? [] } as unknown as Live
   g.__openground_assistant_gen = assistantSessionGen() + 1
   const server = sdk.createSdkMcpServer({
     name: 'og',
@@ -286,7 +302,7 @@ const start = async (key: string, system: string): Promise<Live> => {
       }),
     ),
   })
-  const q = sdk.query({ prompt: box as AsyncIterable<Sdk.SDKUserMessage>, options: assistantSessionOptions({ cwd: dir, claudeBin, system, server, model: base }) as Sdk.Options })
+  const q = sdk.query({ prompt: box as AsyncIterable<Sdk.SDKUserMessage>, options: assistantSessionOptions({ cwd: dir, claudeBin, system, server, model: base, effort }) as Sdk.Options })
   live.q = q
   live.it = q[Symbol.asyncIterator]()
   g.__openground_assistant_live = live
@@ -345,7 +361,8 @@ const usable = (live: Live | null | undefined, key: string): live is Live =>
 
 const current = async (o: Pick<AssistantAsk, 'key' | 'system'>): Promise<Live> => {
   const live = g.__openground_assistant_live
-  if (usable(live, o.key)) return live
+  // A changed effort needs a new session (it is set at start).
+  if (usable(live, o.key) && live.effort === (await assistantModels()).effort) return live
   if (live) close(live)
   return start(o.key, await o.system())
 }

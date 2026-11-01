@@ -196,6 +196,51 @@ describe('every line on sonnet; a line it hands to think_deeper finishes on opus
   })
 })
 
+describe("the owner's pick: one model and/or an effort instead of auto", () => {
+  const tools = { think_deeper: async () => ({ text: 'think' }) } as unknown as AssistantToolSet
+  const answering = () =>
+    fakeSdk(async (line, t, model) => {
+      if (line === '深い') await t.think_deeper({})
+      return [{ type: 'assistant', parent_tool_use_id: null, message: { model: model(), content: [{ type: 'text', text: model() }] } }, result(model())]
+    })
+  const askWith = (line: string) => liveAssistantModel.ask({ key: 'k', system: async () => 'S', line, tools })
+
+  afterEach(async () => {
+    __resetQuotaForTest()
+    await setSettings({ swarmAllowedModels: undefined, assistantModel: undefined, assistantEffort: undefined })
+  })
+
+  it('a picked model answers every line, even one handed to think_deeper (no move)', async () => {
+    await setSettings({ assistantModel: 'haiku' })
+    const sdk = answering()
+    expect(await askWith('やあ')).toBe('haiku')
+    expect(await askWith('深い')).toBe('haiku')
+    expect(sdk.queries[0].options.model).toBe('haiku')
+    expect(sdk.switches).toEqual([])
+  })
+
+  it('a picked model the usable models turn off reads as auto', async () => {
+    await setSettings({ assistantModel: 'opus', swarmAllowedModels: { fable: true, opus: false, sonnet: true, haiku: true } })
+    const sdk = answering()
+    expect(await askWith('やあ')).toBe('sonnet')
+    expect(sdk.queries[0].options.model).toBe('sonnet')
+  })
+
+  it('auto effort keeps thinking off; a picked effort starts the session at it, and a change starts a fresh one', async () => {
+    const sdk = answering()
+    await askWith('やあ')
+    expect(sdk.queries[0].options).toMatchObject({ thinking: { type: 'disabled' } })
+    expect(sdk.queries[0].options).not.toHaveProperty('effort')
+    await setSettings({ assistantEffort: 'high' })
+    await askWith('もう一つ')
+    expect(sdk.queries).toHaveLength(2)
+    expect(sdk.queries[1].options.effort).toBe('high')
+    expect(sdk.queries[1].options).not.toHaveProperty('thinking')
+    await askWith('まだ')
+    expect(sdk.queries).toHaveLength(2)
+  })
+})
+
 describe('the answer is the final text of the line', () => {
   it('text written before a tool call is not part of the answer (the app says its own wait-line)', async () => {
     fakeSdk(async () => [said('ちょっと待ってね'), toolUse(), said('もう少し'), toolUse(), said('全部順調だよ。'), result('全部順調だよ。')])
@@ -248,11 +293,15 @@ describe('how long a session lives — each bound is what keeps a process, its c
   it('a line not answered in 2 minutes fails (no second try — it took its time) and the next line starts afresh', async () => {
     vi.useFakeTimers()
     let hang = false
-    const sdk = fakeSdk(async () => (hang ? new Promise<Msg[]>(() => {}) : [result('ok')]))
+    let reached = () => {}
+    const sdk = fakeSdk(async () => (hang ? (reached(), new Promise<Msg[]>(() => {})) : [result('ok')]))
     expect(await ask('一つ目')).toBe('ok')
     hang = true
+    // The clock moves only once the line is in (settings are read from disk first).
+    const inLine = new Promise<void>((r) => (reached = r))
     const late = ask('二つ目')
     const seen = expect(late).rejects.toThrow(/timed out/)
+    await inLine
     await vi.advanceTimersByTimeAsync(120_001)
     await seen
     hang = false

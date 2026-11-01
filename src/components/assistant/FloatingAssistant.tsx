@@ -6,7 +6,8 @@
 // (owner only) — and is held still and unclickable in work mode.
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent, type ReactNode } from 'react'
 import { useT } from '@/i18n/I18nContext'
-import { ArrowUp, ImagePlus, Mic, MessagesSquare, Phone, X } from 'lucide-react'
+import { ArrowUp, ImagePlus, Mic, MessagesSquare, Phone, SlidersHorizontal, X } from 'lucide-react'
+import { AssistantPickRows, modelLabel, useAssistantPick } from './AssistantPick'
 import { AssistantCall, type CallPhase } from './AssistantCall'
 import { AssistantMark, LOOK_COLOR } from './AssistantMark'
 import { ASSISTANT_DEFAULT_POS, ASSISTANT_SIZE, ASSISTANT_WINDOW_ATTR, publishAssistantSpot } from './assistantWindow'
@@ -113,6 +114,12 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const [pos, setPos] = useState(readPos)
   const [view, setView] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }))
   const [editing, setEditing] = useState(false)
+  const [picking, setPicking] = useState(false)
+  const { pick, load: loadPick, save: savePick } = useAssistantPick()
+  // Read each time the window opens: the usable models may have changed in Settings.
+  useEffect(() => {
+    if (showPanel) void loadPick()
+  }, [showPanel, loadPick])
   const [draftName, setDraftName] = useState('')
   const [text, setText] = useState('')
   // Chat mode's mic only types (owner 2026-10-06): on → what is said goes into
@@ -733,6 +740,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
               <span className="text-ui text-ink-muted">VOICEVOX Nemo / VOICEVOX:冥鳴ひまり</span>
             </div>
           )}
+          {picking && <AssistantPickRows pick={pick} save={savePick} focusRing={focusRing} />}
           {photo && (
             <div className="relative self-start" data-testid="assistant-photo-preview">
               <img src={photo} alt={t('misc.assistant.photo')} className="size-16 rounded-[10px] border border-line object-cover" />
@@ -808,6 +816,16 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
                   e.target.value = '' // the same photo can be picked again after removing it
                 }}
               />
+              <button
+                type="button"
+                onClick={() => setPicking((v) => !v)}
+                aria-pressed={picking}
+                aria-label={t('misc.assistant.pick')}
+                title={`${t('misc.assistant.model')}: ${modelLabel(pick.model) ?? t('misc.assistant.auto')} · ${t('misc.assistant.effort')}: ${pick.effort ?? t('misc.assistant.auto')}`}
+                className={`${iconButton} text-ink-subtle hover:bg-plane hover:text-ink active:bg-line aria-pressed:bg-accent-soft aria-pressed:text-accent ${focusRing}`}
+              >
+                <SlidersHorizontal size={16} strokeWidth={2.25} />
+              </button>
               <button
                 type="button"
                 onClick={() => fileRef.current?.click()}

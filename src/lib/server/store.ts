@@ -17,7 +17,7 @@ import type {
   WordPressSettings,
   WorkerTrialFlags,
 } from '../types'
-import { DEFAULT_DESK_CONTEXT_CAP_TOKENS } from '../types'
+import { CLAUDE_EFFORTS, DEFAULT_DESK_CONTEXT_CAP_TOKENS, SWARM_MODEL_TIERS } from '../types'
 
 const DEFAULT_SETTINGS: Settings = {
   projects: [],
@@ -324,6 +324,9 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   'experiments',
   'executionMode',
   'swarmAllowedModels',
+  // The floating assistant's model / effort pick; narrowed to known literals below.
+  'assistantModel',
+  'assistantEffort',
   // NOTE `swarmPaneOrder` is DELIBERATELY ABSENT since 2026-09-23: the Swarm tab
   // lost its sub-tab strip (one screen, every seat side by side), so there is no
   // order left to set. A stale key in settings.json is never read, and an old
@@ -404,6 +407,23 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
     const mask = normalizeAllowedModels(safe.swarmAllowedModels)
     if (anyTierAllowed(mask)) safe.swarmAllowedModels = mask
     else delete safe.swarmAllowedModels
+  }
+  // The assistant's pick: a known literal, or null / '' = back to auto
+  // (undefined is dropped by the merged write); anything else is refused.
+  if (Object.prototype.hasOwnProperty.call(safe, 'assistantModel')) {
+    const v = safe.assistantModel as unknown
+    if (v === null || v === '') safe.assistantModel = undefined
+    else if (!(SWARM_MODEL_TIERS as readonly unknown[]).includes(v)) delete safe.assistantModel
+  }
+  if (Object.prototype.hasOwnProperty.call(safe, 'assistantEffort')) {
+    const v = safe.assistantEffort as unknown
+    if (v === null || v === '') safe.assistantEffort = undefined
+    else if (!(CLAUDE_EFFORTS as readonly unknown[]).includes(v)) delete safe.assistantEffort
+  }
+  // A mask that turns off the assistant's picked model puts it back on auto.
+  if (safe.swarmAllowedModels && !Object.prototype.hasOwnProperty.call(safe, 'assistantModel')) {
+    const picked = (await getSettings()).assistantModel
+    if (picked && !safe.swarmAllowedModels[picked]) safe.assistantModel = undefined
   }
   // Store the lockdown switch as a REAL boolean: only a literal `true` turns it
   // on (a forged truthy string must not), everything else persists `false`.
