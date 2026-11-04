@@ -222,12 +222,23 @@ read-modify-write で実行される(`server/routes/project.ts:857`)。
 ### 4.2 PUT /api/project — 全量上書きの CAS
 
 - body の `updatedAt` が「最後に読んだスナップショットの token」として
-  `expectUpdatedAt` に渡る(`server/routes/project.ts:275-294`)。ズレたら 409。
-- **⚠️ 落とし穴**: `typeof body.updatedAt === 'string'` でないと `expectUpdatedAt` は
-  `undefined` = **trusting write(CAS スキップ)** (`project.ts:285`,
-  `projectData.ts:246-250`)。curl で全量 PUT するとき `updatedAt` を落とすと、
+  `expectUpdatedAt` に渡る(`server/routes/project.ts:333-362`)。ズレたら 409。
+- **⚠️ 落とし穴**: `updatedAt` も `ifUpdatedAt` も文字列で無いと `expectUpdatedAt` は
+  `undefined` = **trusting write(CAS スキップ)** (`project.ts:345-348`,
+  `projectData.ts:299-305`)。curl で全量 PUT するとき両方を落とすと、
   並行して動いている UI / エンジンの直近の書き込みを**黙って潰せてしまう**。
   司令塔は原則 PUT を使わず verb(POST tasks)を使うこと。
+- **Omitted fields are kept (2026-11-04).** A top-level ProjectData field absent from
+  the body keeps its stored value (`keepOmittedFields` in `projectData.ts`, applied
+  inside `writeCasGuarded`, so it covers every `writeProjectData` AND
+  `mutateProjectData`). Before this, a president PUT of `{ path, ifUpdatedAt, tasks }`
+  erased the project's `customTabs` / `tabOrder` / `description` — the owner's
+  attached tabs vanished on the next launch. A sent value (even `[]`) still wins;
+  omission means "unchanged", never "delete".
+- **CAS token:** PUT takes `updatedAt` as the token, or `ifUpdatedAt` when
+  `updatedAt` is absent (`server/routes/project.ts`); a stale token → 409. `path` /
+  `ifUpdatedAt` are stripped from the body, never written to tasks.json.
+  Guard: `server/routes/__tests__/projectPutKeepsOmitted.test.ts`.
 
 ### 4.3 POST /api/project/tasks — verb ごとの入力検証と結果
 

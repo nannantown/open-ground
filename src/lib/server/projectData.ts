@@ -209,7 +209,7 @@ const nextUpdatedAt = (current: string | undefined): string => {
  *  recoverable data. */
 const readCasState = async (
   dir: string,
-): Promise<{ stamp: string | undefined; corrupt: boolean; damaged: boolean }> => {
+): Promise<{ stamp: string | undefined; corrupt: boolean; damaged: boolean; stored?: unknown }> => {
   let raw: string
   try {
     raw = await readFile(join(dir, TASKS_FILE), 'utf8')
@@ -231,7 +231,7 @@ const readCasState = async (
   // Legitimate files (extra/legacy keys, .catch() fields) still pass, so the
   // happy path never quarantines.
   const damaged = !ProjectDataSchema.safeParse(dropLegacyNonBoardTasks(parsed)).success
-  return { stamp, corrupt: false, damaged }
+  return { stamp, corrupt: false, damaged, stored: parsed }
 }
 
 /** Move a damaged tasks.json aside to a timestamped sibling so the write that
@@ -242,6 +242,45 @@ const readCasState = async (
  *  Best-effort: a quarantine failure must never block the write. */
 const quarantineDamagedTasks = async (dir: string): Promise<void> => {
   await rename(join(dir, TASKS_FILE), join(dir, `tasks.corrupt-${Date.now()}.json`))
+}
+
+/** A whole-file write must never erase a field the writer simply did not send.
+ *
+ *  Owner report 2026-11-04: 「アップデートしたら、プロジェクトに追加したタブが外れて
+ *  いる」. Root cause, measured in the sns-hub project: the president agent added
+ *  a Board card with `PUT /api/project` carrying only `{ path, ifUpdatedAt,
+ *  tasks }`. PUT used to write the body as the WHOLE file, so the project's
+ *  personal fields — customTabs (the attached "SNS" tab), tabOrder,
+ *  description, config, launch — were silently erased. The open panel kept the
+ *  old copy in memory, so the tab vanished only on the next launch (an update /
+ *  restart), which is why it looked tied to updates.
+ *
+ *  So: every top-level ProjectData field ABSENT from `data` keeps its stored
+ *  value. Shape-driven (ProjectDataSchema.shape), so a field added later is
+ *  covered without a list to maintain; each stored value is re-validated
+ *  through its own field schema so a damaged value is not carried forward.
+ *  Presence wins: a writer that sends a field (even `[]` / `''`) still sets
+ *  it — the app's own saves always send the full object, and its clears are
+ *  explicit values (detachCustomTab sends `customTabs: []`). Omission now
+ *  means "unchanged", never "delete". */
+const keepOmittedFields = (data: ProjectData, stored: unknown): ProjectData => {
+  if (!stored || typeof stored !== 'object') return data
+  const prev = dropLegacyNonBoardTasks(stored) as Record<string, unknown>
+  const out = { ...data } as Record<string, unknown>
+  for (const [key, fieldSchema] of Object.entries(ProjectDataSchema.shape)) {
+    if (key === 'updatedAt' || out[key] !== undefined || prev[key] === undefined) continue
+    if (key === 'tasks') {
+      // Per-card recovery, same as the read path: keep every stored card that validates.
+      out.tasks = Array.isArray(prev.tasks)
+        ? prev.tasks.filter(t => ProjectTaskSchema.safeParse(t).success)
+        : []
+      continue
+    }
+    const r = (fieldSchema as { safeParse: (v: unknown) => { success: boolean; data?: unknown } })
+      .safeParse(prev[key])
+    if (r.success && r.data !== undefined) out[key] = r.data
+  }
+  return out as unknown as ProjectData
 }
 
 /** The CAS compare + the atomic single-file write as one indivisible unit.
@@ -272,7 +311,7 @@ const writeCasGuarded = async (
   if (current.corrupt || current.damaged) {
     await quarantineDamagedTasks(dir).catch(() => {})
   }
-  const next = { ...data, updatedAt: nextUpdatedAt(current.stamp) }
+  const next = { ...keepOmittedFields(data, current.stored), updatedAt: nextUpdatedAt(current.stamp) }
   // fsync: tasks.json is the user's irreplaceable WORK data (board cards +
   // notes). Pay the fsync(+dir fsync) cost so a power cut right after a save
   // can't resurrect an empty/zero file (see atomicWrite's durability note).
@@ -311,6 +350,10 @@ export const writeProjectData = async (
   // The single-file write, under the per-project lock when (and only when) a CAS
   // check rides along — the compare and the write must be atomic against a
   // concurrent writer.
+  // ponytail: a write WITHOUT a CAS token still runs outside the board lock, so
+  // keepOmittedFields may carry a slightly stale stored value into a field the
+  // writer did not send (strictly better than the old erase). Upgrade path: take
+  // the lock for tokenless writes too.
   const write = () => writeCasGuarded(dir, data, opts?.expectUpdatedAt)
   // Lock on the RESOLVED central dir (not projectPath) so two CAS writes issued
   // under different spellings of the same project serialize instead of racing —

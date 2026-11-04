@@ -333,17 +333,25 @@ export const projectRoutes = new Hono()
   .put('/api/project', async (c) => {
     const path = await requireProjectPath(c)
     if (path instanceof Response) return path
-    const body = (await c.req.json()) as ProjectData
+    // `path` / `ifUpdatedAt` are not ProjectData: agents have sent the CAS token
+    // as `ifUpdatedAt` (incident 2026-11-04), which used to be ignored — a
+    // trusting write — and then written into tasks.json. Accept it as the token.
+    const { path: _path, ifUpdatedAt, ...body } = (await c.req.json()) as ProjectData & {
+      path?: unknown
+      ifUpdatedAt?: unknown
+    }
     const bad = cardFieldTypeError(body)
     if (bad) return c.json({ error: bad }, 400)
+    const token =
+      typeof body.updatedAt === 'string' ? body.updatedAt
+        : typeof ifUpdatedAt === 'string' ? ifUpdatedAt
+          : undefined
     try {
       // The body's updatedAt is the snapshot token the client last READ —
       // writeProjectData refuses the write (CAS) when the store has moved on,
       // so a stale window can never wipe newer data (incident 2026-06-10:
       // a pre-share empty board overwrote freshly-shared card files).
-      const saved = await writeProjectData(path, body, {
-        expectUpdatedAt: typeof body.updatedAt === 'string' ? body.updatedAt : undefined,
-      })
+      const saved = await writeProjectData(path, body, { expectUpdatedAt: token })
       return c.json(saved)
     } catch (e) {
       if (e instanceof ProjectDataConflictError) {
