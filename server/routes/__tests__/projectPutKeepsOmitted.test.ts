@@ -5,6 +5,7 @@ import { join } from 'path'
 import { app } from '../../app'
 import { __resetMigrationCacheForTests } from '@/lib/server/registry'
 import type { ProjectData } from '@/lib/types'
+import { resolveSaveConflict } from '@/lib/modules/tabLayoutConflict'
 
 // Owner report 2026-11-04: 「アップデートしたら、追加したタブ(SNSハブの SNS)が
 // 外れている」. Measured cause: the president agent added a card with a PUT
@@ -126,5 +127,79 @@ describe('PUT /api/project never erases a field the writer did not send', () => 
     const after = await get(dir)
     expect(after.customTabs).toEqual([])
     expect(after.tabOrder).toEqual(['board', 'terminal'])
+  })
+
+  // Owner follow-up 2026-11-05: 「タブの並び替えした順序が更新後も継続されるか」.
+  // Every board writer in a row — POST /api/project/tasks add + setColumn
+  // (engine / president), a tasks-only PUT (president / commander), the app's
+  // own full save — each followed by a fresh read (= a restart / update), must
+  // leave the reordered row and the hidden tabs exactly as the owner set them.
+  it('reordered + hidden tabs survive every board writer across restarts', async () => {
+    const { dir } = await setup()
+    const order = ['custom:d4ede482-8cfa-490f-a932-a563b9b95bb3', 'board', 'terminal']
+    const check = async () => {
+      const d = await get(dir) // fresh read from disk = next launch
+      expect(d.tabOrder).toEqual(order)
+      expect(d.disabledModules).toEqual(['canvas'])
+      expect(d.customTabs).toEqual(['d4ede482-8cfa-490f-a932-a563b9b95bb3'])
+      return d
+    }
+    const url = `/api/project?path=${encodeURIComponent(dir)}`
+    for (let round = 0; round < 3; round++) {
+      const r1 = await app.request('/api/project/tasks', req('POST', { path: dir, add: [`card ${round}`] }))
+      expect(r1.status).toBe(200)
+      let d = await check()
+      const id = d.tasks[d.tasks.length - 1].id
+      const r2 = await app.request(
+        '/api/project/tasks',
+        req('POST', { path: dir, setColumn: [{ id, column: 'doing' }] }),
+      )
+      expect(r2.status).toBe(200)
+      d = await check()
+      const r3 = await app.request(url, req('PUT', { path: dir, ifUpdatedAt: d.updatedAt, tasks: d.tasks }))
+      expect(r3.status).toBe(200)
+      d = await check()
+      const r4 = await app.request(url, req('PUT', { ...d, notes: `n${round}` }))
+      expect(r4.status).toBe(200)
+      expect((await check()).tasks).toHaveLength(round + 1)
+    }
+  })
+
+  // Commander rework 2026-11-05: the panel's own save 409s when the engine
+  // wrote the Board between its poll and its debounced save. Adopting the
+  // fresh copy wholesale dropped a just-made reorder. The panel's real 409
+  // resolver must land the new layout on disk; cards stay server-wins.
+  it('a reorder saved with a stale token after an engine add still lands on disk', async () => {
+    const { dir, saved: loaded } = await setup()
+    const url = `/api/project?path=${encodeURIComponent(dir)}`
+    const add = await app.request('/api/project/tasks', req('POST', { path: dir, add: ['engine card'] }))
+    expect(add.status).toBe(200)
+    const newOrder = ['board', 'custom:d4ede482-8cfa-490f-a932-a563b9b95bb3', 'terminal']
+    const draft: ProjectData = { ...loaded, tabOrder: newOrder, disabledModules: [] }
+    const put = (body: ProjectData) => app.request(url, req('PUT', body))
+    expect((await put(draft)).status).toBe(409)
+    const out = await resolveSaveConflict(draft, JSON.stringify(loaded), { get: () => app.request(url), put })
+    const disk = await get(dir)
+    expect(disk.tabOrder).toEqual(newOrder)
+    expect(disk.disabledModules).toEqual([])
+    expect(disk.customTabs).toEqual(['d4ede482-8cfa-490f-a932-a563b9b95bb3'])
+    expect(disk.tasks.map(t => t.title)).toEqual(['engine card'])
+    expect(out?.tabOrder).toEqual(newOrder)
+    expect(out?.updatedAt).toBe(disk.updatedAt)
+  })
+
+  it('a 409 with no layout change adopts the server copy and writes nothing', async () => {
+    const { dir, saved: loaded } = await setup()
+    const url = `/api/project?path=${encodeURIComponent(dir)}`
+    await app.request('/api/project/tasks', req('POST', { path: dir, add: ['engine card'] }))
+    const before = await get(dir)
+    let puts = 0
+    const out = await resolveSaveConflict({ ...loaded, notes: 'stale edit' }, JSON.stringify(loaded), {
+      get: () => app.request(url),
+      put: async b => { puts++; return app.request(url, req('PUT', b)) },
+    })
+    expect(puts).toBe(0)
+    expect(out).toEqual(before)
+    expect((await get(dir)).notes).toBe('memo')
   })
 })

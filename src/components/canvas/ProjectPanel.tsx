@@ -97,6 +97,7 @@ import { usePlayback } from '@/lib/playback/playbackStore'
 import { PlaybackEq } from '@/components/canvas/PlaybackEq'
 import { effectiveTabOrder, moveTab, preserveHiddenTabs } from '@/lib/modules/tabOrder'
 import { attachCustomTab, detachCustomTab } from '@/lib/modules/customTabAttach'
+import { resolveSaveConflict } from '@/lib/modules/tabLayoutConflict'
 import { disableNativeModule, enableNativeModule } from '@/lib/modules/nativeEnable'
 import { useCustomModules } from '@/lib/modules/useCustomModules'
 import { CustomModuleView } from '@/components/canvas/modules/CustomModuleView'
@@ -884,6 +885,9 @@ const OwnedProjectBody = ({
         if (!current) return
         const body = JSON.stringify(current)
         if (body === lastSavedJson.current) return
+        // Captured before any await: by the time a leave-flush's 409 lands, the
+        // next project's load may already have replaced lastSavedJson.
+        const lastJson = lastSavedJson.current
         savingRef.current = true
         try {
           const res = await api.api.project
@@ -894,12 +898,19 @@ const OwnedProjectBody = ({
             // The store moved on under us (another window, another client, a
             // pull). Newer data wins: drop this draft and adopt theirs —
             // clobbering the store with a stale snapshot is how a shared
-            // board gets wiped (incident 2026-06-10).
-            const fresh = await api.api.project
-              .$get({ query: { path: project.path } }, { init: { cache: 'no-store' } })
-              .catch(() => null)
-            if (fresh?.ok) {
-              const d = (await fresh.json()) as ProjectData
+            // board gets wiped (incident 2026-06-10). The owner's tab layout is
+            // the exception: no server writer sets it, so a changed layout is
+            // re-saved on top of theirs (tabLayoutConflict.ts) — the leave-flush
+            // included, so a reorder made just before leaving is not lost.
+            const d = await resolveSaveConflict(current, lastJson, {
+              get: () => api.api.project
+                .$get({ query: { path: project.path } }, { init: { cache: 'no-store' } })
+                .catch(() => null),
+              put: json => api.api.project
+                .$put({ query: { path: project.path }, json })
+                .catch(() => null),
+            })
+            if (d) {
               // A leave-flush answers for a project no longer on screen: never
               // adopt it into the panel's state (Ground / the next project).
               if (!snapshot) {
