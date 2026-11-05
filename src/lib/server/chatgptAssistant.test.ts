@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { readdir } from 'fs/promises'
+import { mkdir, mkdtemp, readdir, realpath } from 'fs/promises'
 import { join } from 'path'
 const auth = vi.hoisted(() => ({
   account: 'synthetic-account-a', provider: 'chatgpt', denied: false,
@@ -17,6 +17,12 @@ vi.mock('./chatgptRuntime', () => ({
 import { chatGptAssistantModel, closeChatGptAssistant } from './chatgptAssistant'
 import { ASSISTANT_TOOL_SHAPES, type AssistantAsk, type AssistantToolSet } from './assistantSession'
 import { openGroundHome } from './paths'
+import { registerTestProject } from '../../test/registerProject'
+import { __resetAssistantMemory, askAssistant, pressProposal } from './phoneAssistant'
+import { __resetProposals, openProposals, proposalHash } from './assistantProposals'
+import { clearAssistantLog, clearAssistantMemory } from './assistantMemory'
+import { setLockdownCache } from './lockdown'
+import { setSettings } from './store'
 
 const message = (text: string) => ({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] })
 const call = (name: string, args: object, id = 'call-1') => ({ type: 'function_call', namespace: 'openground', name, call_id: id, arguments: JSON.stringify(args) })
@@ -108,5 +114,51 @@ describe('the ChatGPT assistant wrapper with the real stateless transport', () =
     }))
     expect(await chatGptAssistantModel.ask(ask({ tools: turnTools }))).toBe('I can see the image.')
     expect(requests[1].input).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'function_call_output', output: [{ type: 'input_image', image_url: 'data:image/png;base64,aGVsbG8=' }] })]))
+  })
+
+  it('keeps a real president proposal visible across a typed yes and relays exactly its shown words only after its button check', async () => {
+    __resetAssistantMemory()
+    __resetProposals()
+    setLockdownCache(false)
+    await clearAssistantLog()
+    await clearAssistantMemory()
+    await setSettings({ language: 'en' })
+    await mkdir(openGroundHome(), { recursive: true })
+    const cwd = await realpath(await mkdtemp(join(openGroundHome(), 'president-handoff-')))
+    const projectId = await registerTestProject(cwd)
+    const words = 'Please explain the current progress.'
+    const requests: Record<string, unknown>[] = []
+    const digest = async () => ({ text: 'A registered synthetic project.', projects: [{ id: projectId, name: 'Fixture', path: cwd }] })
+    const president = vi.fn(async () => ({ ok: true as const, woke: false, waiting: 0 }))
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe('https://api.openai.com/v1/responses')
+      const body = requestBody(init)
+      requests.push(body)
+      const namespace = (body.tools as { name: string; tools: { name: string }[] }[])[0]
+      expect(namespace.tools.some((tool) => tool.name === 'tell_president')).toBe(true)
+      return requests.length === 1
+        ? response([call('tell_president', { projectId, message: words })])
+        : response([message('The message is ready. Press Send if it looks right.')])
+    }))
+    try {
+      const answer = await askAssistant('Ask the Fixture president about its progress.', { model: chatGptAssistantModel, digest, via: 'screen' })
+      const shown = answer.proposals?.[0]
+      expect(shown).toMatchObject({ kind: 'president', projectId, title: 'To the president', body: words, state: 'open', via: 'screen' })
+      expect(president).not.toHaveBeenCalled()
+      expect(requests).toHaveLength(2)
+      expect(requests[1].input).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'function_call_output', output: expect.stringContaining('only if they press its button') })]))
+      await askAssistant('Yes, please send it.', { model: chatGptAssistantModel, digest, via: 'screen' })
+      expect(openProposals().map((proposal) => proposal.id)).toContain(shown!.id)
+      expect(president).not.toHaveBeenCalled()
+      expect(await pressProposal(shown!.id, 'wrong-shown-text-check', { via: 'screen', president })).toEqual({ error: 'mismatch' })
+      expect(president).not.toHaveBeenCalled()
+      expect(await pressProposal(shown!.id, proposalHash(shown!), { via: 'screen', president })).toMatchObject({ proposal: { kind: 'president', state: 'done', body: words } })
+      expect(president).toHaveBeenCalledExactlyOnceWith(cwd, words, expect.objectContaining({ reply: expect.any(Function), landed: expect.any(Function) }))
+      expect(await pressProposal(shown!.id, proposalHash(shown!), { via: 'screen', president })).toEqual({ error: 'closed' })
+      expect(president).toHaveBeenCalledOnce()
+    } finally {
+      __resetAssistantMemory()
+      __resetProposals()
+    }
   })
 })

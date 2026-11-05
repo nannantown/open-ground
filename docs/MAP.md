@@ -27,7 +27,8 @@
 - Owner ChatGPT plan runtime: `docs/CHATGPT_RUNTIME.md`; `chatgptAuth.ts`
   (independent subscription OAuth, no API-key fallback), `chatgptAccess.ts`
   (signed-in owner role only; local unlock and general opt-in do not qualify), `chatgptResponses.ts`
-  (account-bound streaming/tool loop), `chatgptTools.ts` (guarded host tools and
+  (account-bound streaming/tool loop; onText deltas are separate from complete
+  SDK text blocks, so the seat's 80-frame tail retains prose), `chatgptTools.ts` (guarded host tools and
   mandatory credential sandbox and server-exit group reaper; regression
   `chatgptShutdown.test.ts`), `chatgptQuery.ts` (role skills and pool adapter),
   `chatgptReview.ts` (independent read-only review, fixed Git and parent abort),
@@ -44,6 +45,8 @@
   `assistantAccess.ts` shares the legacy owner/local assistant permission between
   phone routes and the `experiments.assistantEligible` client capability;
   ChatGPT controls require the separate real-owner `experiments.eligible`.
+  Browser regression: `e2e/swarm-chatgpt-transcript.spec.ts` feeds real transport
+  events into president/manager seats at desktop and narrow widths.
 - Songs/NENE development handoff (2026-09-22): `docs/SONGS-HANDOFF-2026-09-22.md`.
   Two local repository branches, delivered UI/recording changes, verification,
   preserved owner data and remaining hardware/packaged-app acceptance checks.

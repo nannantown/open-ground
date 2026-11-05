@@ -290,7 +290,7 @@ export class ChatGptConversation {
           const addedItems = new Map<number, Item>()
           const completedItems = new Map<number, Item>()
           for await (const event of readChatGptSse(response.body, requestSignal)) {
-            if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') { deltaText += event.delta; run.onText?.(event.delta); run.onEvent?.({ kind: 'text', text: event.delta }) }
+            if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') { deltaText += event.delta; run.onText?.(event.delta) }
             if (event.type === 'response.reasoning_summary_text.delta' && typeof event.delta === 'string') run.onEvent?.({ kind: 'thinking', chars: event.delta.length })
             if (event.type === 'response.failed' || event.type === 'response.incomplete' || event.type === 'error') throw responseError(event.response ?? event)
             if (event.type === 'response.output_item.added') {
@@ -338,12 +338,22 @@ export class ChatGptConversation {
         this.checkSize([...this.history, ...output])
         this.history.push(...output)
         await this.save()
+        // SdkEvent.text is one COMPLETE prose block, just as in the Claude SDK
+        // adapter. Token deltas belong only to onText (the live assistant).
+        // Emitting each delta as a block makes the shared transcript render a
+        // paragraph per character and spends its bounded tail on a few words.
+        const prose = output.filter((item) => item.type === 'message').flatMap((item) => Array.isArray(item.content) ? item.content : [])
+          .filter((item): item is Item => object(item) && ((item.type === 'output_text' && typeof item.text === 'string') || (item.type === 'refusal' && typeof item.refusal === 'string')))
+          .map((item) => (item.type === 'refusal' ? item.refusal : item.text) as string)
+        for (const text of prose) if (text) run.onEvent?.({ kind: 'text', text })
         const calls = output.filter((item) => item.type === 'function_call')
         if (!calls.length) {
+          // Preserve the accepted delta-only completion fallback as one block.
+          if (!prose.length && deltaText) run.onEvent?.({ kind: 'text', text: deltaText })
           let finalRoundText = deltaText
           if (!deltaText) {
-            const finalText = output.filter((item) => item.type === 'message').flatMap((item) => Array.isArray(item.content) ? item.content : []).filter((item): item is Item => object(item) && ((item.type === 'output_text' && typeof item.text === 'string') || (item.type === 'refusal' && typeof item.refusal === 'string'))).map((item) => (item.type === 'refusal' ? item.refusal : item.text) as string).join('')
-            if (finalText) { finalRoundText = finalText; run.onText?.(finalText); run.onEvent?.({ kind: 'text', text: finalText }) }
+            const finalText = prose.join('')
+            if (finalText) { finalRoundText = finalText; run.onText?.(finalText) }
           }
           run.onEvent?.({ kind: 'turn_end', reason: 'completed', isError: false, usage })
           return { text: finalRoundText, usage, model: typeof completed.model === 'string' ? completed.model : this.options.model }

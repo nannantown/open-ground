@@ -36,6 +36,10 @@ index and waits for `response.completed` before running any tool. Failed,
 incomplete, duplicate or unfinished output never authorizes a host action.
 Subscription-limit failures stop parent and child conversations without another
 continuation request, and cool only ChatGPT.
+Text deltas continue to stream to the assistant's `onText` callback. SDK seat
+events follow Claude's completed-text-block contract: each validated completed
+content block emits one text event, preserving paragraphs without filling the
+80-frame seat tail with individual tokens.
 Request deadlines retain their controller and cancellable timer through body
 consumption, including under garbage collection in the packaged Node 20 runtime.
 
@@ -49,6 +53,10 @@ Primary specifications, checked 2026-11-05:
 ## Settings and conversations
 
 The owner independently selects the assistant and automatic-work provider.
+One ChatGPT model/effort pair is shared by both selections, including memo
+maintenance and automatic-work roles. Independent reviews retain the parent's
+launch configuration. Existing automatic seats keep their launch settings;
+new assistant turns and newly launched seats read the latest selection.
 Claude's model/effort settings remain intact. Dedicated preference writes prevent
 an older full Settings snapshot from undoing a newer provider choice.
 The UI waits for the server's assistant capability before loading history. The

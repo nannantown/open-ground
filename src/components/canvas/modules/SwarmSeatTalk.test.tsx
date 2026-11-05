@@ -38,6 +38,28 @@ describe('mergeTail', () => {
 })
 
 describe('SwarmSeatFeed', () => {
+  it('renders complete Japanese blocks with their paragraph and tool boundaries', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const text = '切り替えは\nこのまま進めます。\n\n次の段落です。' + '確認を続けます。'.repeat(12)
+    const answers = [
+      { frames: [{ seq: 1, ev: { kind: 'input', text: '調べてください。' } }], reaped: false },
+      { frames: [f(2, text),
+        { seq: 3, ev: { kind: 'tool_use', name: 'Read', detail: 'file.ts' } },
+        { seq: 4, ev: { kind: 'tool_result', ok: true, head: '読みました' } },
+        f(5, '確認しました。'), { seq: 6, ev: { kind: 'turn_end', reason: 'completed', isError: false } }], reaped: true },
+    ]
+    let polls = 0
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify(answers[Math.min(polls++, 1)]))))
+    const { container, findByText, getByText } = render(<SwarmSeatFeed sdkSessionId="streamed" projectPath="/p" />)
+    await findByText('調べてください。')
+    await vi.advanceTimersByTimeAsync(3000)
+    await findByText('切り替えは このまま進めます。')
+    expect(Array.from(container.querySelectorAll('p')).map((p) => p.textContent)).toEqual([
+      '切り替えは\nこのまま進めます。', '次の段落です。' + '確認を続けます。'.repeat(12), '確認しました。',
+    ])
+    getByText('Read file.ts')
+  })
+
   it('asks again from the last seq it holds, shows what the desk was told, and stops once reaped', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const urls: string[] = []

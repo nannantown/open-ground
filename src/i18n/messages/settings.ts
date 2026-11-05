@@ -13,6 +13,10 @@ export const settings = {
     'settings.chatgpt.workMode': 'ChatGPT is unavailable in work mode.',
     'settings.chatgpt.assistant': 'Assistant',
     'settings.chatgpt.automation': 'Automatic work',
+    'settings.chatgpt.model': 'ChatGPT model (shared)',
+    'settings.chatgpt.effort': 'Thinking effort',
+    'settings.chatgpt.scope': 'Shared by the assistant and automatic work (president, manager, workers and reviews) when ChatGPT is selected above.',
+    'settings.chatgpt.appliesNext': 'Changes apply to the next assistant message and newly started automatic work. Running seats keep their current settings until restarted.',
     // Feedback entry
     // Language
     'settings.language.heading': 'Language',
@@ -223,6 +227,10 @@ export const settings = {
     'settings.chatgpt.workMode': '業務モード中は ChatGPT を使えません。',
     'settings.chatgpt.assistant': 'アシスタント',
     'settings.chatgpt.automation': '自動作業',
+    'settings.chatgpt.model': 'ChatGPT の共通モデル',
+    'settings.chatgpt.effort': '考える量（エフォート）',
+    'settings.chatgpt.scope': '上で ChatGPT を選んだアシスタントと、自動作業（社長・マネージャー・ワーカー・レビュー）で共通の設定です。',
+    'settings.chatgpt.appliesNext': '変更はアシスタントの次の発言と、新しく起動する自動作業から反映されます。起動中の席は、停止して呼び直すまで現在の設定を使います。',
     'settings.language.heading': '言語',
     'settings.language.hint': 'システム言語から自動判定します。ここで手動変更できます。',
     'settings.displayName.heading': '表示名',

@@ -60,7 +60,7 @@ describe('owner ChatGPT controls', () => {
   it('resetting the model sends an explicit null and preserves Claude settings', async () => {
     status.preferences.chatgptModel = 'from-authorized-catalog'
     render(<ChatGptSetting enabled lockdown={false} />)
-    const model = await screen.findByRole('combobox', { name: 'misc.assistant.model' })
+    const model = await screen.findByRole('combobox', { name: 'settings.chatgpt.model' })
     fireEvent.change(model, { target: { value: '' } })
     await waitFor(() => expect(posted).toEqual([{ chatgptModel: null }]))
     await waitFor(() => expect(model).toHaveValue(''))

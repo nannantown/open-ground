@@ -85,17 +85,25 @@ export const ChatGptSetting = ({ enabled, lockdown }: { enabled: boolean; lockdo
       <div className="mt-3 flex flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-ui text-ink-muted">{t('settings.chatgpt.assistant')}</span><AiProviderPick label={t('settings.chatgpt.assistant')} value={prefs.assistantProvider} disabled={busy} chatgptAvailable={available} onChange={(assistantProvider) => save({ assistantProvider })} /></div>
         <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-ui text-ink-muted">{t('settings.chatgpt.automation')}</span><AiProviderPick label={t('settings.chatgpt.automation')} value={prefs.swarmProvider} disabled={busy} chatgptAvailable={available} onChange={(swarmProvider) => save({ swarmProvider })} /></div>
-        <div className="flex flex-wrap gap-2">
-          <select aria-label={t('misc.assistant.model')} value={prefs.chatgptModel ?? ''} disabled={busy || !available} className={selectClass} onChange={(e) => save({ chatgptModel: e.target.value || null })}>
-            <option value="">{t('misc.assistant.auto')}</option>
-            {prefs.chatgptModel && !model && <option value={prefs.chatgptModel} disabled>{prefs.chatgptModel}</option>}
-            {models.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-          </select>
-          <select aria-label={t('misc.assistant.effort')} value={prefs.chatgptEffort ?? ''} disabled={busy || !available} className={selectClass} onChange={(e) => save({ chatgptEffort: CHATGPT_EFFORTS.find((v) => v === e.target.value) ?? null })}>
-            <option value="">{t('misc.assistant.auto')}</option>
-            {efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
-          </select>
+        <p className="text-meta leading-relaxed text-ink-muted">{t('settings.chatgpt.scope')}</p>
+        <div className="flex flex-wrap gap-3">
+          <label className="flex min-w-0 flex-col gap-1 text-meta text-ink-muted">
+            <span>{t('settings.chatgpt.model')}</span>
+            <select value={prefs.chatgptModel ?? ''} disabled={busy || !available} className={selectClass} onChange={(e) => save({ chatgptModel: e.target.value || null })}>
+              <option value="">{t('misc.assistant.auto')}</option>
+              {prefs.chatgptModel && !model && <option value={prefs.chatgptModel} disabled>{prefs.chatgptModel}</option>}
+              {models.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+          </label>
+          <label className="flex min-w-0 flex-col gap-1 text-meta text-ink-muted">
+            <span>{t('settings.chatgpt.effort')}</span>
+            <select value={prefs.chatgptEffort ?? ''} disabled={busy || !available} className={selectClass} onChange={(e) => save({ chatgptEffort: CHATGPT_EFFORTS.find((v) => v === e.target.value) ?? null })}>
+              <option value="">{t('misc.assistant.auto')}</option>
+              {efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+            </select>
+          </label>
         </div>
+        <p className="text-meta leading-relaxed text-ink-muted">{t('settings.chatgpt.appliesNext')}</p>
       </div>
     </section>
   )

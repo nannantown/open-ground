@@ -11,6 +11,7 @@ import { ChatGptConversation, chatGptConversationExists, chatGptConversationFile
 import { ChatGptQuotaError, chatGptCoolingUntil, clearChatGptCooling } from './chatgptQuota'
 import { coolingSnapshot } from './swarmQuota'
 import type { SdkEvent } from './sdkEvents'
+import { groupSdkFrames } from '../sdkTranscript'
 
 const roots: string[] = []
 afterEach(async () => { clearChatGptCooling(); await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
@@ -24,6 +25,61 @@ const message = (text: string) => ({ type: 'message', role: 'assistant', content
 const tool: ChatGptTool = { name: 'look', description: 'Test read', parameters: { type: 'object', properties: {}, additionalProperties: false }, invoke: async () => ({ value: 'a fact' }) }
 
 describe('ChatGPT stateless function harness', () => {
+  it('normalizes Japanese deltas to complete SDK prose blocks while keeping live onText deltas', async () => {
+    const input = '切り替えは\nこのまま進めます。\n\n次の段落です。' + '確認を続けます。'.repeat(12)
+    const events: SdkEvent[] = []
+    const live: string[] = []
+    const second = '別の発言です。'
+    let completed = false
+    const conversation = new ChatGptConversation({ persist: false, model: 'test-model', tools: [], accountKey: async () => 'test-account', accessToken: async () => 'test-token', fetch: (async () => sse([
+      ...Array.from(input, (delta) => ({ type: 'response.output_text.delta', item_id: 'message-1', output_index: 0, content_index: 0, delta })),
+      { type: 'response.output_text.delta', item_id: 'message-2', output_index: 1, content_index: 0, delta: second },
+      { type: 'response.output_item.done', output_index: 0, item: message(input) },
+      { type: 'response.output_item.done', output_index: 1, item: message(second) },
+      done([]),
+    ], 1)) as typeof fetch })
+    const answer = await conversation.run('次の確認', { onText: (delta) => { live.push(delta); expect(events.filter((event) => event.kind === 'text')).toHaveLength(0) }, onEvent: (event) => {
+      events.push(event)
+      if (event.kind === 'turn_end') completed = true
+    } })
+    expect(completed).toBe(true)
+    expect(live.length).toBeGreaterThan(80)
+    expect(live.join('')).toBe(input + second)
+    expect(answer.text).toBe(input + second)
+    expect(events).toEqual([
+      { kind: 'text', text: input }, { kind: 'text', text: second },
+      expect.objectContaining({ kind: 'turn_end', reason: 'completed' }),
+    ])
+    expect(groupSdkFrames(events.map((ev, i) => ({ seq: i + 1, ev })))).toHaveLength(3)
+  })
+
+  it('emits completed prose before its tool call, preserves content-block boundaries, and never duplicates the final block', async () => {
+    const events: SdkEvent[] = []
+    const call = { type: 'function_call', namespace: 'openground', name: 'look', call_id: 'prose-call', arguments: '{}' }
+    const fetcher = vi.fn(async () => fetcher.mock.calls.length === 1 ? sse([
+      { type: 'response.output_text.delta', delta: '調べます。' },
+      done([message('調べます。'), call]),
+    ]) : sse([done([{ ...message(''), content: [{ type: 'output_text', text: '確認しました。' }, { type: 'refusal', refusal: 'ここで終わります。' }] }])]))
+    const conversation = new ChatGptConversation({ persist: false, model: 'test-model', tools: [tool], accountKey: async () => 'test-account', accessToken: async () => 'test-token', fetch: fetcher as unknown as typeof fetch })
+    expect((await conversation.run('次の確認', { onEvent: (event) => events.push(event) })).text).toBe('確認しました。ここで終わります。')
+    expect(events.map((event) => event.kind)).toEqual(['text', 'tool_use', 'tool_result', 'text', 'text', 'turn_end'])
+    expect(events.filter((event) => event.kind === 'text').map((event) => event.text)).toEqual(['調べます。', '確認しました。', 'ここで終わります。'])
+  })
+
+  it('keeps the accepted delta-only completion as one SDK block when the completed response has no output items', async () => {
+    const text = '切り替えは\nこのまま進めます。\n\n最後まで表示します。'
+    const events: SdkEvent[] = []
+    const live: string[] = []
+    const conversation = new ChatGptConversation({ persist: false, model: 'test-model', tools: [], accountKey: async () => 'test-account', accessToken: async () => 'test-token', fetch: (async () => sse([
+      ...Array.from(text, delta => ({ type: 'response.output_text.delta', delta })),
+      done([]),
+    ], 1)) as typeof fetch })
+    const result = await conversation.run('確認', { onText: delta => { live.push(delta); expect(events).toHaveLength(0) }, onEvent: event => events.push(event) })
+    expect(result.text).toBe(text)
+    expect(live).toEqual(Array.from(text))
+    expect(events).toEqual([{ kind: 'text', text }, expect.objectContaining({ kind: 'turn_end', reason: 'completed' })])
+  })
+
   it('assembles completed streamed items by output_index when terminal output is empty, then executes tools and returns final text', async () => {
     const requests: Record<string, unknown>[] = []
     const invoke = vi.fn(tool.invoke)
