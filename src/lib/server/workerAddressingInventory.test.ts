@@ -1721,8 +1721,8 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
   },
   'server/routes/swarm.ts::compared': {
     tier: 'pty-only-by-design',
-    count: 2,
-    why: "Body validation — `typeof body?.terminalId === 'string'`, i.e. is this field present and of the right shape. Not a worker identity test: the handle it validates is passed on WHOLE (with runtime + sdkSessionId beside it) for the engine to dispatch on.",
+    count: 3,
+    why: "Body shape validation — `typeof body?.terminalId === 'string'`. The worker routes pass the whole runtime/handle pairing to the engine. The president composer route separately requires the selected live desk to be PTY and match this handle before entering its guarded owner queue; SDK presidents retain the independently authorized SDK input route.",
   },
   'src/components/canvas/modules/SwarmModule.tsx::compared': {
     tier: 'pty-only-by-design',

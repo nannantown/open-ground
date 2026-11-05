@@ -175,7 +175,9 @@ const SeatBorder = ({ leftKey }: { leftKey: string }) => {
   const fit = (d: { min: number; max: number }, w: number) => Math.min(d.max, Math.max(d.min, w))
   const measure = (el: HTMLElement) => {
     const seat = left(el)
-    const min = Number(seat?.style.minWidth.replace('px', '')) || 0
+    // Container queries can lower the president's minimum on a narrow row.
+    // Read the resolved length, not its inline CSS variable expression.
+    const min = seat ? Number.parseFloat(getComputedStyle(seat).minWidth) || 0 : 0
     const row = el.parentElement?.clientWidth || Infinity
     return { w: seat?.offsetWidth || min, min, max: Math.max(min, row) }
   }
@@ -261,7 +263,11 @@ export const SizedSeat = ({
         data-seat-key={seatKey}
         data-seat-wide={api?.sizes.wide === seatKey || undefined}
         className={`h-full overflow-hidden ${api?.dragging ? '' : 'transition-[flex] duration-200 ease-out motion-reduce:transition-none'}`}
-        style={seatSizedStyle(seatKey, style, api)}
+        style={seatKey === 'supply' ? {
+          ...seatSizedStyle(seatKey, style, api),
+          minWidth: `var(--president-seat-min, ${Number(style.minWidth) || 360}px)`,
+          maxWidth: 'var(--president-seat-max, none)',
+        } : seatSizedStyle(seatKey, style, api)}
       >
         {children}
       </div>

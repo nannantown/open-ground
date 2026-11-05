@@ -66,7 +66,8 @@ import { listSwarmWorkers } from '@/lib/server/swarmWorkerRegistry'
 import { spawnSwarmSupply, stopSwarmSupplyDesks } from '@/lib/server/swarmSupply'
 import { patchEngineIntent } from '@/lib/server/swarmEnginePersistence'
 import { spawnSwarmManager } from '@/lib/server/swarmManager'
-import { queueSupplyReply } from '@/lib/server/supplyNotice'
+import { ownerSayLine, ownerSayTooLong, queueSupplyOwnerSay, queueSupplyReply } from '@/lib/server/supplyNotice'
+import { listLiveSupplyDesks } from '@/lib/server/swarmSupplyRuntime'
 import { relayToCommander } from '@/lib/server/commanderRelay'
 import { listManagerDesks, sayToManagerDesk, stopManagerDesks } from '@/lib/server/swarmManagerRuntime'
 
@@ -564,6 +565,29 @@ export const swarmRoutes = new Hono()
     const stopped = stopSwarmSupplyDesks(path)
     await patchEngineIntent(path, { supplyDesired: false }).catch(() => {})
     return c.json({ ok: true, stopped })
+  })
+  // The Claude PTY conversation composer uses the same guarded lane as iOS.
+  // This never wakes a desk and never writes raw terminal keystrokes.
+  // SDK presidents retain their separately authorized SDK input route.
+  .post('/api/swarm/supply/input', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    const body = await c.req.json().catch(() => null) as { path?: unknown; terminalId?: unknown; text?: unknown } | null
+    const path = typeof body?.path === 'string' ? body.path : ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    const id = typeof body?.terminalId === 'string' ? body.terminalId : ''
+    if (!id) return c.json({ error: 'terminalId is required' }, 400)
+    // The queue addresses the project's newest president. A stale composer
+    // must never silently submit its line to a different desk or role.
+    const desk = listLiveSupplyDesks(path).find((candidate) => !candidate.stopping)
+    if (!desk || desk.runtime !== 'pty' || desk.handleId !== id) return c.json({ error: 'president is no longer accepting input; refresh the desk' }, 409)
+    const raw = typeof body?.text === 'string' ? body.text : ''
+    const text = ownerSayLine(raw)
+    if (!text) return c.json({ error: 'text is required' }, 400)
+    if (ownerSayTooLong(raw)) return c.json({ error: 'text too large' }, 400)
+    let delivered = false
+    await queueSupplyOwnerSay(path, text, (heard) => { delivered = heard })
+    return c.json({ queued: true, delivered })
   })
   // --- POST /api/swarm/supply/say — the COMMANDER answers the supply desk ----
   // Body: { path, text }. The return leg of `/api/swarm/manager/say`, and the

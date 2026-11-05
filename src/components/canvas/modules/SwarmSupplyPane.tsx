@@ -1,12 +1,7 @@
-// SwarmSupplyPane — the supply officer (補給官) tile: a thin header (live status
-// · identity · stop) wrapping the EXISTING ClaudeTerminalPane, exactly like
-// SwarmWorkerPane. The PTY, its SSE stream, xterm rendering, flow-control ACK
-// and clipboard chords all come from ClaudeTerminalPane verbatim (chrome={false}
-// so our header replaces its built-in one) — this file adds NO terminal logic,
-// only the supply-specific chrome. The supply PTY is spawned by SwarmModule via
-// POST /api/swarm/supply (NO worktree — it runs in the project's primary
-// checkout, running /supply); this pane only attaches to the returned terminalId
-// and reports its close. Stopping it is a plain PTY kill (no worktree to remove).
+// The owner's president seat: SDK transcript or legacy Claude terminal, with
+// one conversation composer shared across runtime/session changes. The parent
+// owns launch/stop/restart. SDK input uses its session route; Claude PTY input
+// uses the guarded president queue and retains the native terminal controls.
 
 import { useEffect, useState } from 'react'
 import { Power, Trash2 } from 'lucide-react'
@@ -15,26 +10,27 @@ import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
-import { SwarmSeatFeed, SwarmSeatSay, sayToWorker } from './SwarmSeatTalk'
+import { SwarmSeatFeed, SwarmSeatSay, sayToWorker, sayToPresidentPty, type SeatDraftState } from './SwarmSeatTalk'
 
 interface Props {
   projectPath: string
-  /** PTY id the supply route assigned when it launched `claude` in the cwd. */
+  /** The legacy Claude PTY address; empty for an SDK desk. */
   terminalId: string
   runtime?: 'pty' | 'sdk'
   sdkSessionId?: string
-  /** Display status, derived by SwarmModule from the active-terminal poll +
+  /** Display status, derived by SwarmModule from the active-session poll +
    *  this pane's exit signal — the SAME vocabulary the worker tiles use. */
   status: WorkerStatus
-  /** A stop request is in flight (the PTY kill round-trip). */
+  /** A launch, stop or restart request is in flight. */
   busy: boolean
-  /** The PTY closed (claude /quit, Ctrl-D, …) — SwarmModule marks it exited. */
+  /** The attached desk closed — SwarmModule marks it exited. */
   onExit: () => void
-  /** Kill the PTY (there is no worktree to tear down for supply). */
+  /** Stop this desk (there is no president worktree to tear down). */
   onStop: () => void
-  /** Relaunch the supply PTY after it exits — wired to the exit overlay's
-   *  Restart button inside ClaudeTerminalPane (POST /api/swarm/supply again). */
+  /** Relaunch an exited desk through POST /api/swarm/supply. */
   onRestart: () => void
+  /** Owned by the project module so closing this surface keeps unsent words. */
+  draftState?: SeatDraftState
 }
 
 /** "14:05" today, "10/5 14:05" (month/day in `lang`) on any other day. */
@@ -45,7 +41,7 @@ export const callStamp = (at: number, lang: string, now = Date.now()): string =>
 }
 export const callDuration = (seconds: number): string => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 
-export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkSessionId, status, busy, onExit, onStop, onRestart }: Props) => {
+export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkSessionId, status, busy, onExit, onStop, onRestart, draftState }: Props) => {
   const { t, lang } = useT()
   // `text` is the line as saved (in the language of that moment); shown only
   // for an old record without `seconds`.
@@ -127,23 +123,29 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkS
         </div>
       )}
 
-      {/* The PTY itself — reused verbatim. onExit bubbles the close up so the
-          module flips the session to 'exited' (our header shows it). */}
+      {/* Closing either surface reports the same desk lifecycle to the parent. */}
       {runtime === 'sdk' && sdkSessionId ? <>
         <SwarmSeatFeed sdkSessionId={sdkSessionId} projectPath={projectPath} onExit={onExit} />
         {status === 'exited' ? <button type="button" onClick={onRestart} disabled={busy}
           className="m-2 rounded border border-line bg-bg-card px-2 py-1 text-ui text-ink transition-colors hover:bg-bg-hover active:bg-accent active:text-bg-card disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
           {t('projectPanel.swarm.restart')}
-        </button> : <SwarmSeatSay placeholder={t('projectPanel.swarm.say.managerPlaceholder')}
-          onSend={(text) => sayToWorker(projectPath, sdkSessionId, text, t)} />}
+        </button> : null}
       </> : <div className="min-h-0 flex-1">
         <ClaudeTerminalPane
           terminalId={terminalId}
           chrome={false}
+          autoFocus={false}
           onExit={() => onExit()}
           onRestart={onRestart}
         />
       </div>}
+      {/* One composer across runtime/handle changes, so an unsent draft stays. */}
+      <SwarmSeatSay alwaysOpen draftState={draftState}
+        disabled={busy || (status !== 'waiting' && status !== 'working') || !(runtime === 'sdk' ? sdkSessionId : terminalId)}
+        placeholder={t('projectPanel.swarm.say.presidentPlaceholder')}
+        onSend={(text) => runtime === 'sdk' && sdkSessionId
+          ? sayToWorker(projectPath, sdkSessionId, text, t)
+          : sayToPresidentPty(projectPath, terminalId, text, t)} />
     </div>
   )
 }

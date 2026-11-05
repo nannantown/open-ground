@@ -9,21 +9,79 @@ vi.mock('@/i18n/I18nContext', () => ({
 }))
 vi.mock('@/components/canvas/ClaudeTerminalPane', () => ({ ClaudeTerminalPane: () => <div>real terminal surface</div> }))
 vi.mock('./SwarmSeatHeader', () => ({ SwarmSeatHeader: () => <div>president</div> }))
-vi.mock('./SwarmSeatTalk', () => ({
+vi.mock('./SwarmSeatTalk', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./SwarmSeatTalk')>(),
   SwarmSeatFeed: ({ sdkSessionId }: { sdkSessionId: string }) => <div>structured president {sdkSessionId}</div>,
-  SwarmSeatSay: () => <div>president composer</div>,
-  sayToWorker: vi.fn(),
 }))
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); h.lang = 'en' })
 const pane = () => <SwarmSupplyPane projectPath="/p one" terminalId="t1" status="waiting" busy={false} onExit={() => {}} onStop={() => {}} onRestart={() => {}} />
 
-it('attaches an SDK president to its own transcript/composer and preserves the PTY surface for Claude', () => {
+it('attaches an SDK president to its own transcript and always-visible composer, preserving the legacy PTY surface', () => {
   vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ entries: [] }))))
   const view = render(<SwarmSupplyPane projectPath="/p one" terminalId="" runtime="sdk" sdkSessionId="sdk-president"
     status="waiting" busy={false} onExit={() => {}} onStop={() => {}} onRestart={() => {}} />)
   expect(view.getByText('structured president sdk-president')).toBeInTheDocument()
-  expect(view.getByText('president composer')).toBeInTheDocument()
+  expect(view.getByRole('textbox', { name: 'projectPanel.swarm.say.presidentPlaceholder' })).toBeInTheDocument()
   expect(view.queryByText('real terminal surface')).toBeNull()
+})
+
+it('keeps an unsent president draft across exit and SDK restart, refusing input until the new desk is ready', async () => {
+  const posts: { url: string; text: string }[] = []
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    if (init?.method === 'POST') posts.push({ url, text: JSON.parse(init.body as string).text })
+    return Promise.resolve(new Response(JSON.stringify(init?.method === 'POST' ? { ok: true, queued: true } : { entries: [] })))
+  })
+  const props = { projectPath: '/p one', terminalId: '', runtime: 'sdk' as const, sdkSessionId: 'sdk-old', status: 'waiting' as const,
+    busy: false, onExit: vi.fn(), onStop: vi.fn(), onRestart: vi.fn() }
+  const view = render(<SwarmSupplyPane {...props} />)
+  const box = view.getByRole('textbox')
+  fireEvent.change(box, { target: { value: '再起動しても残す' } })
+  view.rerender(<SwarmSupplyPane {...props} status="exited" />)
+  expect(box).toBeInTheDocument()
+  expect(box).toHaveValue('再起動しても残す')
+  expect(box).toBeDisabled()
+  fireEvent.keyDown(box, { key: 'Enter' })
+  expect(posts).toHaveLength(0)
+  fireEvent.click(view.getByRole('button', { name: 'projectPanel.swarm.restart' }))
+  expect(props.onRestart).toHaveBeenCalledOnce()
+  view.rerender(<SwarmSupplyPane {...props} sdkSessionId="sdk-new" status="starting" />)
+  expect(box).toBeDisabled()
+  expect(box).toHaveValue('再起動しても残す')
+  view.rerender(<SwarmSupplyPane {...props} sdkSessionId="sdk-new" status="waiting" />)
+  expect(box).toBeEnabled()
+  expect(box).toHaveValue('再起動しても残す')
+  fireEvent.keyDown(box, { key: 'Enter' })
+  await waitFor(() => expect(posts).toEqual([{ url: '/api/sdk-session/sdk-new/input?path=%2Fp%20one', text: '再起動しても残す' }]))
+  await waitFor(() => expect(box).toHaveValue(''))
+  expect(box).toBeInTheDocument()
+})
+
+it('keeps the same draft across PTY and SDK desks, posting the live PTY address through the president queue', async () => {
+  const posts: { url: string; body: unknown }[] = []
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    if (init?.method === 'POST') posts.push({ url, body: JSON.parse(init.body as string) })
+    return Promise.resolve(new Response(JSON.stringify(init?.method === 'POST' ? { queued: true, delivered: false } : { entries: [] })))
+  })
+  const props = { projectPath: '/p one', terminalId: 'pty-old', runtime: 'pty' as const, status: 'waiting' as const,
+    busy: false, onExit: vi.fn(), onStop: vi.fn(), onRestart: vi.fn() }
+  const view = render(<SwarmSupplyPane {...props} />)
+  const box = view.getByRole('textbox')
+  expect(view.getByText('real terminal surface')).toBeInTheDocument()
+  fireEvent.change(box, { target: { value: 'どちらの接続でも残す' } })
+  view.rerender(<SwarmSupplyPane {...props} runtime="sdk" terminalId="" sdkSessionId="sdk-swapped" />)
+  expect(box).toBeInTheDocument()
+  expect(box).toHaveValue('どちらの接続でも残す')
+  view.rerender(<SwarmSupplyPane {...props} terminalId="pty-new" busy />)
+  expect(box).toBeDisabled()
+  fireEvent.keyDown(box, { key: 'Enter' })
+  expect(posts).toHaveLength(0)
+  view.rerender(<SwarmSupplyPane {...props} terminalId="pty-new" />)
+  expect(box).toBeInTheDocument()
+  expect(box).toHaveValue('どちらの接続でも残す')
+  fireEvent.keyDown(box, { key: 'Enter' })
+  await view.findByText('projectPanel.swarm.say.queued')
+  expect(posts).toEqual([{ url: '/api/swarm/supply/input', body: { path: '/p one', terminalId: 'pty-new', text: 'どちらの接続でも残す' } }])
+  expect(box).toHaveValue('')
 })
 
 it('shows durable project call notes next to the real terminal using its registered path', async () => {

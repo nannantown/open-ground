@@ -523,6 +523,19 @@
   `queueSupplyLanding` で20分保留され、`supply/say` の `landed:[カードID]`(明示IDのみ・題名一致は
   使わない)を含む返事が**届いた時点で**取り下げ。1回の検出ごとに1行・各自の保留時計。返事が来なければ保留明けに届く。§1.11。
   **取りやめは着地ではない**(2026-10-07): done でも `abandoned:true` のカードは台帳に刻まれず、知らせ・ベル・KPI に出ない。§1.14。
+- **常時社長入力(2026-11-05)**: `SwarmSupplyPane` が PTY/SDK 表示の外に同じ
+  `SwarmSeatSay alwaysOpen` を保持。Enter 送信・Shift+Enter 改行・IME 確定では送信しない。
+  下書きと送信中の状態は project ID 別に `SwarmModule` がメモリ上で所有し、席の終了や
+  バーの折り畳みによる unmount をまたぐ。狭幅は named container `swarm-seat-row` と
+  `globals.css` の container query で社長席を可視幅へ収める（通常幅の保存 resize は維持）。
+  Claude PTY は `POST /api/swarm/supply/input` → iPhone と同じ
+  `queueSupplyOwnerSay` の owner lane（busy/入力途中/menu は保留）。manager 返信専用
+  `/supply/say` や raw stdin は使わない。ChatGPT は既存 SDK input。
+  設計判断・Claude SDK 移行を今回は有効化しない根拠・iOS と Native Remote Control の区別:
+  `PRESIDENT_CONVERSATION.md`。UI 回帰: `SwarmSeatTalk.test.tsx` / `SwarmSupplyPane.test.tsx` /
+  `SwarmModule.presidentDraft.test.tsx` / `e2e/supply-conversation.spec.ts`。
+  SDK 社長と iOS の wire 互換: `phoneLinkSdk.test.ts`（合成 Responses で実 pool → owner lane →
+  暗号化返答・再接続履歴、working queue・duplicate・closed を確認、実機/実モデル不使用）。
 - **社長モデル(2026-09-23 オーナー決定「僕が喋るのは社長さんだけ」)**: 補給官の画面名は
   「社長 / President」(i18n と Remote Control 名のみ — 卓の識別キー `SUPPLY_DESK_LABEL='補給官'`
   は**変えない**)。① ワーカーの質問は **司令官レーン**(`Escalation.routedTo:'commander'`)

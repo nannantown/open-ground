@@ -4,6 +4,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/* A narrow row must show the president's whole conversation box beside the
+   folded-seat rail. Wider rows keep their normal/saved seat widths; only the
+   president is capped when even its usual 360px minimum cannot fit. */
+@container swarm-seat-row (max-width: 360px) {
+  [data-seat-key='supply'] {
+    --president-seat-min: 100cqw;
+    --president-seat-max: 100cqw;
+  }
+}
+
 /* ---------------------------------------------------------------------------
    Theme palettes (2026-08-03, 第三弾「計器盤」). Every Tailwind colour token in
    tailwind.config.ts reads `rgb(var(--og-*) / <alpha-value>)`, so the WHOLE app

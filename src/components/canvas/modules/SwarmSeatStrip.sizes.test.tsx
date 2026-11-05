@@ -28,8 +28,8 @@ const Row = ({ id = 'p1', seats = ['a', 'b'] }: { id?: string; seats?: string[] 
     <SeatSizeContext.Provider value={{ ...sizes, order: seats }}>
       <div>
         {seats.map((k, i) =>
-          k === 'a' ? (
-            <SizedSeat key={k} seatKey="a" style={A}>
+          k === 'a' || k === 'supply' ? (
+            <SizedSeat key={k} seatKey={k} style={A}>
               <SwarmSeatHeader role="supply" sprite={null} statusLabel="idle">
                 <button type="button">stop</button>
               </SwarmSeatHeader>
@@ -176,5 +176,28 @@ describe('seat widths', () => {
     expect(seat('a').style.flex).toBe('0 0 384px')
     fireEvent.keyDown(border(), { key: 'Enter' })
     expect(seat('a').style.flex).toBe('1 0 360px')
+  })
+
+  it('uses the resolved president minimum for drag limits while keeping the saved width independent of the CSS clamp', () => {
+    render(<Row seats={['supply', 'b']} />)
+    const president = seat('supply')
+    expect(president.style.minWidth).toBe('var(--president-seat-min, 360px)')
+    expect(president.style.maxWidth).toBe('var(--president-seat-max, none)')
+    expect(seat('b').style.minWidth).toBe('280px')
+    // jsdom has no container-query layout. The real browser regression measures
+    // 318px from its CSS; give this event test that same CSSOM result.
+    const read = window.getComputedStyle.bind(window)
+    const spy = vi.spyOn(window, 'getComputedStyle').mockImplementation((el, pseudo) => {
+      const css = read(el, pseudo)
+      if (el === president) Object.defineProperty(css, 'minWidth', { value: '318px', configurable: true })
+      return css
+    })
+    try {
+      gesture(border(), -400)
+      expect(saved().w.supply).toBe(318)
+      // The underlying flex/saved-width protocol stays as before. CSS owns
+      // only the narrow-screen clamp, so widening restores the normal sizing.
+      expect(president.style.flex).toBe('0 0 360px')
+    } finally { spy.mockRestore() }
   })
 })

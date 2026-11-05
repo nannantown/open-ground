@@ -43,6 +43,7 @@ import {
   useState,
   type CSSProperties,
   type ReactNode,
+  type SetStateAction,
 } from 'react'
 import { X, Power, ChevronUp, ChevronDown, Network, Hand, CircleCheck } from 'lucide-react'
 import { api } from '@/lib/api-client'
@@ -282,6 +283,21 @@ interface SwarmModuleProps {
 
 export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, barHandle }: SwarmModuleProps) => {
   const { t } = useT()
+
+  // Seats unmount when collapsed or when reconcile clears an exited desk.
+  // Keep unsent words above those branches, scoped by project and in memory.
+  const [presidentDrafts, setPresidentDrafts] = useState<Record<string, string>>({})
+  const [presidentSending, setPresidentSending] = useState<Record<string, boolean>>({})
+  const changePresidentDraft = useCallback((value: SetStateAction<string>) => {
+    setPresidentDrafts(previous => ({ ...previous,
+      [project.id]: typeof value === 'function' ? value(previous[project.id] ?? '') : value,
+    }))
+  }, [project.id])
+  const changePresidentSending = useCallback((value: SetStateAction<boolean>) => {
+    setPresidentSending(previous => ({ ...previous,
+      [project.id]: typeof value === 'function' ? value(previous[project.id] ?? false) : value,
+    }))
+  }, [project.id])
 
   // PTY id → live status from GET /api/terminal/active (working|waiting).
   const [statusByPty, setStatusByPty] = useState<ReadonlyMap<string, ClaudeBeaconStatus>>(new Map())
@@ -1527,7 +1543,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
       <div className="flex min-h-0 min-w-0 flex-1">
       <SeatSizeContext.Provider value={{ ...seatSizes, order: openOrder }}>
       {/* No gap: the 1px line between seats is the drag border (SeatBorder). */}
-      <div className="flex min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-auto bg-bg">
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-auto bg-bg" style={{ containerType: 'inline-size', containerName: 'swarm-seat-row' }}>
         <SizedSeat seatKey="supply" style={SEAT_STYLE}>
           {supply && !supplyStreams ? (
             // The desk is up but the connection budget is spent: its
@@ -1548,6 +1564,8 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
             // The live president's desk — the owner's one conversation.
           <SwarmSupplyPane
             projectPath={project.path}
+            draftState={{ value: presidentDrafts[project.id] ?? '', onChange: changePresidentDraft,
+              pending: presidentSending[project.id] ?? false, onPendingChange: changePresidentSending }}
             terminalId={supply.terminalId}
             runtime={supply.runtime}
             sdkSessionId={supply.sdkSessionId}

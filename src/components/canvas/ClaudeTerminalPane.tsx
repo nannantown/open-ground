@@ -37,6 +37,8 @@ interface Props {
    *  Set false when embedded under the split-pane's own header — Ctrl-C still
    *  works by typing it into the terminal, so no affordance is lost. */
   chrome?: boolean
+  /** The president's adjacent conversation must not lose focus on mounting. */
+  autoFocus?: boolean
   /** Re-launch this PTY after it exits. When provided, an exited/dead-probe PTY
    *  shows a centred "session ended · Restart" OVERLAY (instead of leaving a dead
    *  black screen with only a raw error). Clicking Restart calls this — the parent
@@ -65,7 +67,7 @@ const ACK_THRESHOLD = 65536
 //     entry.terminalId is the source of truth)
 //   - exposes a "Ctrl-C" affordance for soft-cancelling claude in place
 //   - hides itself / signals exit when the PTY closes
-export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrome = true }: Props) => {
+export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrome = true, autoFocus = true }: Props) => {
   const { t } = useT()
   // Which side of the window this stream counts against (streamBudget.ts).
   const streamOwnerRef = useRef(useStreamOwner())
@@ -458,7 +460,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
         resizeObs.observe(hostRef.current)
       }
 
-      setTimeout(() => term?.focus(), 0)
+      if (autoFocus) setTimeout(() => term?.focus(), 0)
     })()
 
     return () => {
@@ -476,7 +478,7 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
       fitRef.current = null
       esRef.current = null
     }
-  }, [terminalId, sendInput, reconnectKey])
+  }, [terminalId, sendInput, reconnectKey, autoFocus])
 
   return (
     <div className="flex h-full w-full min-h-0 flex-col bg-[#1a1a1a]">

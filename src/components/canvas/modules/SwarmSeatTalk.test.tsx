@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { useT } from '@/i18n/I18nContext'
 import { FEED_FRAMES, SwarmSeatFeed, SwarmSeatSay, mergeTail, sayToWorker } from './SwarmSeatTalk'
 
@@ -122,5 +123,84 @@ describe('the worker send box', () => {
       { url: '/api/sdk-session/s1/input?path=%2Fp', body: JSON.stringify({ text: 'use the other API' }) },
     ])
     await waitFor(() => expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('use the other API'))
+  })
+})
+
+describe('the president conversation composer', () => {
+  it('stays visible after sending with Enter and never takes focus on mount', async () => {
+    const onSend = vi.fn(async () => ({ ok: true as const, note: 'delivered' }))
+    const view = render(<><input aria-label="another field" autoFocus /><SwarmSeatSay alwaysOpen placeholder="社長に話す" onSend={onSend} /></>)
+    expect(view.getByLabelText('another field')).toHaveFocus()
+    const box = view.getByRole('textbox', { name: '社長に話す' })
+    expect(view.getByRole('button', { name: 'projectPanel.swarm.say.send' })).toBeDisabled()
+    fireEvent.change(box, { target: { value: 'このまま進めて' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    await view.findByText('delivered')
+    expect(onSend).toHaveBeenCalledExactlyOnceWith('このまま進めて')
+    expect(box).toBeInTheDocument()
+    expect(box).toHaveValue('')
+    expect(box).toHaveFocus()
+    expect(view.queryByText('projectPanel.swarm.say.cancel')).toBeNull()
+    fireEvent.keyDown(box, { key: 'Escape' })
+    expect(box).toBeInTheDocument()
+  })
+
+  it('keeps Shift+Enter as a newline and IME confirmation as composition, then sends the complete draft', async () => {
+    const onSend = vi.fn(async () => ({ ok: true as const, note: 'delivered' }))
+    const user = userEvent.setup()
+    const view = render(<SwarmSeatSay alwaysOpen placeholder="社長に話す" onSend={onSend} />)
+    const box = view.getByRole('textbox')
+    await user.click(box)
+    await user.type(box, '一行目')
+    await user.keyboard('{Shift>}{Enter}{/Shift}二行目')
+    expect(box).toHaveValue('一行目\n二行目')
+    fireEvent.keyDown(box, { key: 'Enter', isComposing: true })
+    fireEvent.keyDown(box, { key: 'Enter', keyCode: 229 })
+    fireEvent.compositionStart(box)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    fireEvent.keyDown(box, { key: 'Escape' })
+    expect(onSend).not.toHaveBeenCalled()
+    expect(box).toHaveValue('一行目\n二行目')
+    fireEvent.compositionEnd(box)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    await waitFor(() => expect(onSend).toHaveBeenCalledExactlyOnceWith('一行目\n二行目'))
+  })
+
+  it('keeps the refused draft and prevents duplicate sends while pending or disabled', async () => {
+    let finish!: (result: { ok: false; error: string }) => void
+    const onSend = vi.fn(() => new Promise<{ ok: false; error: string }>(resolve => { finish = resolve }))
+    const view = render(<SwarmSeatSay alwaysOpen placeholder="社長に話す" onSend={onSend} />)
+    const box = view.getByRole('textbox')
+    fireEvent.change(box, { target: { value: '消さないで' } })
+    fireEvent.click(view.getByRole('button', { name: 'projectPanel.swarm.say.send' }))
+    expect(box).toHaveAttribute('readonly')
+    expect(box).toHaveFocus()
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(onSend).toHaveBeenCalledTimes(1)
+    finish({ ok: false, error: 'not accepted' })
+    await view.findByText('not accepted')
+    expect(box).toHaveValue('消さないで')
+    view.rerender(<SwarmSeatSay alwaysOpen disabled placeholder="社長に話す" onSend={onSend} />)
+    expect(box).toBeDisabled()
+    expect(view.getByRole('button', { name: 'projectPanel.swarm.say.send' })).toBeDisabled()
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(onSend).toHaveBeenCalledTimes(1)
+    expect(box).toHaveValue('消さないで')
+  })
+
+  it('keeps the other seats folded by default, with plain Enter as a newline and Cmd/Ctrl+Enter as send', async () => {
+    const onSend = vi.fn(async () => ({ ok: true as const, note: 'delivered' }))
+    const view = render(<SwarmSeatSay placeholder="worker" onSend={onSend} />)
+    expect(view.queryByRole('textbox')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: 'projectPanel.swarm.say.open' }))
+    const box = view.getByRole('textbox')
+    expect(box).toHaveFocus()
+    fireEvent.change(box, { target: { value: 'worker draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(onSend).not.toHaveBeenCalled()
+    fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })
+    await view.findByText('delivered')
+    expect(onSend).toHaveBeenCalledExactlyOnceWith('worker draft')
+    expect(view.queryByRole('textbox')).toBeNull()
   })
 })

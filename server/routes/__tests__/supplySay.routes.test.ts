@@ -21,9 +21,10 @@
 //     held-desk test fails (a parked reply reported as delivered)
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtemp, rm, realpath } from 'fs/promises'
+import { mkdir, mkdtemp, rm, realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import type { SdkSessionInfo } from '@/lib/server/sdkSession'
 
 const DESK = 'term-supply-1'
 const RULE = '─'.repeat(40)
@@ -41,13 +42,21 @@ const IDLE_BOX = (text: string) =>
  *  consulted lazily, so a `let` read inside the mock is correct). */
 let deskCwd = ''
 let screen = IDLE
+let deskLabel = '補給官'
+let deskAlive = true
+let sdkDesks: SdkSessionInfo[] = []
+vi.mock('@/lib/server/sdkSession', async (original) => ({
+  ...(await original<typeof import('@/lib/server/sdkSession')>()),
+  listSdkSessions: () => sdkDesks,
+}))
 
 vi.mock('@/lib/server/terminal', async (orig) => {
   const actual = await orig<typeof import('@/lib/server/terminal')>()
   return {
     ...actual,
-    listOwnerDeskTerminals: () => [{ id: DESK, cwd: deskCwd, deskLabel: '補給官', startedAtMs: 5_000 }],
-    isTerminalProcessAlive: () => true,
+    listOwnerDeskTerminals: () => [{ id: DESK, cwd: deskCwd, deskLabel, startedAtMs: 5_000 }],
+    listLiveDesksIn: (cwd: string, label: string) => cwd === deskCwd && label === deskLabel ? [{ id: DESK, cwd: deskCwd, deskLabel, startedAtMs: 5_000 }] : [],
+    isTerminalProcessAlive: () => deskAlive,
     // Like a real desk: a paste shows in the box, the Enter clears it.
     getTerminalScreen: (id: string) => (typedBox.has(id) ? IDLE_BOX(typedBox.get(id)!) : screen),
     terminalForeignInput: () => ({ seq: 0, at: 0 }),
@@ -70,7 +79,7 @@ vi.mock('@/lib/server/terminal', async (orig) => {
 import { app } from '../../app'
 import { writeSession, clearSession } from '@/lib/server/authStore'
 import { __resetMigrationCacheForTests, addProjectEntry } from '@/lib/server/registry'
-import { resetSupplyNoticeState, SUPPLY_REPLY_PREFIX } from '@/lib/server/supplyNotice'
+import { flushSupplyNotices, resetSupplyNoticeState, SUPPLY_OWNER_SAY_MAX, SUPPLY_REPLY_PREFIX } from '@/lib/server/supplyNotice'
 
 const OWNER = 'owner@example.com'
 const ENV_KEYS = ['OPENGROUND_HOME', 'OPENGROUND_OWNER_EMAILS', 'OPENGROUND_LOCAL_OWNER'] as const
@@ -84,6 +93,9 @@ const say = (body: unknown) =>
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
+const input = (body: unknown) => app.request('/api/swarm/supply/input', {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+})
 
 beforeEach(async () => {
   home = await realpath(await mkdtemp(join(tmpdir(), 'og-supply-say-')))
@@ -95,6 +107,9 @@ beforeEach(async () => {
   __resetMigrationCacheForTests()
   await addProjectEntry(project)
   deskCwd = project
+  deskLabel = '補給官'
+  deskAlive = true
+  sdkDesks = []
   screen = IDLE
   writes.length = 0
   enters.length = 0
@@ -105,6 +120,85 @@ beforeEach(async () => {
     expiresAt: Date.now() + 3_600_000,
     accessToken: 'a',
     refreshToken: 'r',
+  })
+})
+
+describe('POST /api/swarm/supply/input — the owner speaking to the selected president', () => {
+  it('submits plain owner words through the guarded owner lane, without a commander prefix', async () => {
+    const response = await input({ path: project, terminalId: DESK, text: ' /# 今日の予定\nを教えて\\' })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ queued: true, delivered: true })
+    expect(writes).toEqual([[DESK, '今日の予定 を教えて']])
+    expect(enters).toEqual([DESK])
+  })
+
+  it.each([
+    ['busy', BUSY], ['draft', frame('本人の編集中の言葉', false)],
+    ['menu', ['Select a model:', '❯ 1. Opus', '  2. Sonnet', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')],
+  ])('accepts and holds a %s desk without overwriting its input, then delivers once', async (_reason, heldFrame) => {
+    screen = heldFrame
+    const response = await input({ path: project, terminalId: DESK, text: '次の予定を教えて' })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ queued: true, delivered: false })
+    expect(writes).toEqual([])
+    expect(enters).toEqual([])
+    expect(screen).toBe(heldFrame)
+    screen = IDLE
+    await flushSupplyNotices()
+    await flushSupplyNotices()
+    expect(writes).toEqual([[DESK, '次の予定を教えて']])
+    expect(enters).toEqual([DESK])
+  })
+
+  it('rejects a signed-out caller before parsing its body', async () => {
+    await clearSession()
+    const response = await app.request('/api/swarm/supply/input', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' })
+    expect(response.status).toBe(403)
+    expect(writes).toEqual([])
+  })
+
+  it('rejects unregistered paths, missing IDs and a same-project non-president', async () => {
+    expect((await input({ path: '/etc', terminalId: DESK, text: 'hello' })).status).toBe(403)
+    expect((await input({ path: project, text: 'hello' })).status).toBe(400)
+    expect((await input({ path: project, terminalId: 'missing', text: 'hello' })).status).toBe(409)
+    deskLabel = '司令官'
+    expect((await input({ path: project, terminalId: DESK, text: 'hello' })).status).toBe(409)
+    expect(writes).toEqual([])
+  })
+
+  it('rejects another project’s live president and an already dead president', async () => {
+    const other = join(home, 'other-project')
+    await mkdir(other)
+    await addProjectEntry(other)
+    expect((await input({ path: other, terminalId: DESK, text: 'hello' })).status).toBe(409)
+    deskAlive = false
+    expect((await input({ path: project, terminalId: DESK, text: 'hello' })).status).toBe(409)
+    expect(writes).toEqual([])
+  })
+
+  it('refuses empty/control-only and overlong input before queuing anything', async () => {
+    for (const text of ['', '  /!#  ', '\n\r', 'あ'.repeat(SUPPLY_OWNER_SAY_MAX + 1)]) {
+      expect((await input({ path: project, terminalId: DESK, text })).status).toBe(400)
+    }
+    expect(writes).toEqual([])
+  })
+
+  it('refuses closed/failed SDK presidents while their pump is still occupied', async () => {
+    deskAlive = false
+    for (const state of [{ status: 'waiting', closed: true }, { status: 'failed', closed: false }]) {
+      sdkDesks = [{ id: 'sdk-closing', cwd: project, role: 'supply', startedAt: 1, seq: 0, lastEventAt: 1, ...state }] as SdkSessionInfo[]
+      expect((await input({ path: project, terminalId: 'sdk-closing', text: 'hello' })).status).toBe(409)
+    }
+    expect(writes).toEqual([])
+  })
+
+  it('cannot use a local unlock to route around an SDK president’s separate authorization', async () => {
+    await clearSession()
+    process.env.OPENGROUND_LOCAL_OWNER = '1'
+    deskAlive = false
+    sdkDesks = [{ id: 'sdk-chatgpt', cwd: project, role: 'supply', provider: 'chatgpt', agentSessionId: 'chatgpt-00000000-0000-4000-8000-000000000001', startedAt: 1, status: 'waiting', seq: 0, lastEventAt: 1 }] as SdkSessionInfo[]
+    expect((await input({ path: project, terminalId: 'sdk-chatgpt', text: 'hello' })).status).toBe(409)
+    expect(writes).toEqual([])
   })
 })
 
