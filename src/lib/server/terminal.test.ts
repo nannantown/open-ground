@@ -1076,6 +1076,25 @@ describe('startTerminalSweepLoop — the server-side sweep is actually wired to 
 // foreground group when the session leader dies. The leader leaving the process
 // table is therefore the evidence that hangup was delivered.
 describe('killTerminalsByCwdAndWait / waitForTerminalGone', () => {
+  const originalKill = process.kill
+  let killSpy: import('vitest').MockInstance<typeof process.kill> | undefined
+  beforeEach(() => {
+    // The deadline is checked before escalation: a delayed real 5ms poll can
+    // jump past both on a busy runner. Advance this contract's clock explicitly.
+    vi.useFakeTimers()
+    // A fixture pid can belong to this worker or another real CI process.
+    // Injecting isAlive does not stub the halfway SIGKILL escalation.
+    expect(process.kill).toBe(originalKill)
+    killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    // Fail before a fixture body if this isolation is accidentally removed.
+    expect(vi.isMockFunction(process.kill), 'fixture pids must never reach the OS signal primitive').toBe(true)
+  })
+  afterEach(() => {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+    killSpy?.mockRestore()
+    expect(process.kill).toBe(originalKill)
+  })
   const withPid = (id: string, cwd: string, pid: number) => {
     const s = fakeSession(id, cwd)
     ;(s.pty as Record<string, unknown>).pid = pid
@@ -1091,44 +1110,50 @@ describe('killTerminalsByCwdAndWait / waitForTerminalGone', () => {
     // caller simply proceeded to delete the directory at this instant.
     let settled = false
     void p.then(() => (settled = true))
-    await new Promise((r) => setTimeout(r, 30))
+    await vi.advanceTimersByTimeAsync(30)
     expect(settled).toBe(false)
 
     alive = false // the shell finally exits
+    await vi.advanceTimersByTimeAsync(5)
     expect(await p).toBe(true)
+    expect(killSpy).not.toHaveBeenCalled()
   })
 
   it('returns FALSE on timeout — the caller must not delete the directory', async () => {
     state().sessions.set('t2', withPid('t2', '/w2', 4243))
-    expect(await killTerminalsByCwdAndWait('/w2', { timeoutMs: 40, pollMs: 5, isAlive: () => true })).toBe(false)
+    const p = killTerminalsByCwdAndWait('/w2', { timeoutMs: 40, pollMs: 5, isAlive: () => true })
+    await vi.advanceTimersByTimeAsync(40)
+    expect(await p).toBe(false)
+    expect(killSpy?.mock.calls).toEqual([[4243, 'SIGKILL']])
   })
 
   it('escalates to SIGKILL once at the halfway mark', async () => {
     state().sessions.set('t3', withPid('t3', '/w3', 4244))
-    const kills: [number, string][] = []
-    const realKill = process.kill.bind(process)
-    const spy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, sig?: string) => {
-      kills.push([pid, String(sig)])
-      return true
-    }) as typeof realKill)
-    try {
-      await killTerminalsByCwdAndWait('/w3', { timeoutMs: 60, pollMs: 5, isAlive: () => true })
-    } finally {
-      spy.mockRestore()
-    }
+    const p = killTerminalsByCwdAndWait('/w3', { timeoutMs: 60, pollMs: 5, isAlive: () => true })
+    await vi.advanceTimersByTimeAsync(29)
+    expect(killSpy).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(killSpy?.mock.calls).toEqual([[4244, 'SIGKILL']])
+    await vi.advanceTimersByTimeAsync(30)
+    expect(await p).toBe(false)
     // Exactly one escalation, aimed at the pid (never a negative/group pid —
     // pid reuse would make that a loaded gun, and it does not reach claude anyway).
-    expect(kills.filter(([, sig]) => sig === 'SIGKILL')).toEqual([[4244, 'SIGKILL']])
+    expect(killSpy?.mock.calls).toEqual([[4244, 'SIGKILL']])
   })
 
   it('no matching session ⇒ true immediately (nothing to wait for is not a failure)', async () => {
     expect(await killTerminalsByCwdAndWait('/nobody', { isAlive: () => true })).toBe(true)
     expect(await waitForTerminalGone('no-such-id', { isAlive: () => true })).toBe(true)
+    expect(killSpy).not.toHaveBeenCalled()
   })
 
   it('waitForTerminalGone follows the same rule for a single terminal', async () => {
     state().sessions.set('t4', withPid('t4', '/w4', 4245))
-    expect(await waitForTerminalGone('t4', { timeoutMs: 40, pollMs: 5, isAlive: () => true })).toBe(false)
+    const p = waitForTerminalGone('t4', { timeoutMs: 40, pollMs: 5, isAlive: () => true })
+    await vi.advanceTimersByTimeAsync(40)
+    expect(await p).toBe(false)
+    expect(killSpy?.mock.calls).toEqual([[4245, 'SIGKILL']])
     expect(await waitForTerminalGone('t4', { pollMs: 5, isAlive: () => false })).toBe(true)
+    expect(killSpy?.mock.calls).toEqual([[4245, 'SIGKILL']])
   })
 })

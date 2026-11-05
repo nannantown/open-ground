@@ -16,7 +16,7 @@
 // injected before it will warm, so a suite that injects neither bin nor connect still
 // can't shell out to the developer's real CLI — that guard is exercised here too.
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest'
 
 // The claude-connection cache, made mutable so a probe's own preflight can WARM it.
 // resolvedClaudeBin() starts null (cold, the engine path); an injected `connect` is what
@@ -38,7 +38,7 @@ vi.mock('./claudeConnection', async (importOriginal) => {
 })
 
 import { ensureTierProbed, __resetTierProbeForTest, type TierProbeExec } from './swarmTierProbe'
-import { isTierCooling, __resetQuotaForTest } from './swarmQuota'
+import { isTierCooling, flushQuotaPersist, __resetQuotaForTest } from './swarmQuota'
 
 const NOW = 1_760_000_000_000
 const FABLE_NOTICE =
@@ -48,6 +48,12 @@ beforeEach(() => {
   __resetTierProbeForTest()
   __resetQuotaForTest()
   conn.bin = null // cold — nobody has preflighted (the engine's resuscitation path)
+})
+
+// The probe's wall result precedes its queued disk mirror. Finish that mirror
+// before setup-home removes the sandbox and Vitest closes the worker RPC.
+afterAll(async () => {
+  expect(await flushQuotaPersist()).toEqual({ persisted: true, error: null })
 })
 
 describe('swarmTierProbe — the cold engine path warms the binary ITSELF (2026-07-19 root cause)', () => {

@@ -87,29 +87,20 @@ export default defineConfig(async () => {
     testTimeout: 60_000,
     hookTimeout: 60_000,
     // ── Fork teardown (the 0.11.49 public-CI failure) ─────────────────────
-    // vitest 4's forks pool tears a worker down after its file; a worker that
-    // does not exit inside `teardownTimeout` is force-killed, and the kill
-    // RACES the IPC flush of results already produced — the file is then
-    // counted failed with "Worker exited unexpectedly" even though every test
-    // in it passed. Measured 2026-08-02/03 on the public 4-vCPU runner, twice
-    // on one commit, same victim file (terminal.test.ts — untouched by the
-    // release that surfaced it), lost-test counts DIFFERENT between the two
-    // runs (58 vs ~10 short) — the signature of a kill landing at random
-    // points of the flush, not of a test failing. Not reproducible on this
-    // repo's private 2-vCPU CI, on macOS, or in a Linux/Node-20 Docker rig
-    // (4 attempts). Upstream this is a known vitest-4 pool class:
-    // vitest-dev/vitest#8766 / #9762 / discussion #6285 — no fixed version.
+    // Public Linux runs have lost terminal.test.ts results with a forks
+    // termination timeout (2026-08-02/03 and 2026-11-05). That symptom alone
+    // does NOT prove an upstream IPC race, or that every assertion passed.
+    // The November investigation found that the timeout tests sent REAL
+    // SIGKILL to fixture PIDs 4243/4245. A colliding runner PID could therefore
+    // be killed by the test itself. All kill/wait tests now mock process.kill
+    // and assert the requested signals, restoring the primitive afterwards.
     //
-    // 60s: same reasoning as testTimeout above — teardown is wall-clock work
-    // (exit handlers under CPU contention) and 10s is the stopwatch, not the
-    // work. This does NOT mask a truly wedged worker: that still fails, and
-    // the hanging-process reporter below prints WHAT kept it alive, which is
-    // the diagnosis 0.11.49's two red runs never gave us.
+    // Keep the existing diagnostic allowance; increasing it does not repair
+    // a killed worker. In installed Vitest 4.1.7 this timeout reports a slow
+    // stop; ForksPoolWorker.stop owns its SIGTERM/SIGKILL sequence separately.
     teardownTimeout: 60_000,
-    // 'hanging-process' is SILENT unless a worker cannot exit — then it dumps
-    // the open handles (timers, fds, children) that hold it. Costs nothing on
-    // green runs; turns the next occurrence of the teardown kill into a named
-    // culprit instead of a third unexplained red.
+    // Open-handle diagnostics help with surviving hung processes, but a
+    // process already killed by a signal may leave no handle report.
     reporters: ['default', 'hanging-process'],
     // The guard that keeps a 60s ceiling from hiding a genuine hang: the
     // default reporter prints any test slower than this in yellow. Vitest's

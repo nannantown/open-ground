@@ -6,7 +6,7 @@
 // (setup-home.ts), so the markRateLimited disk mirror lands in a throwaway
 // tmp dir.
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { tmpdir } from 'os'
 import {
   classifyProbeOutput,
@@ -19,7 +19,7 @@ import {
   type TierProbeExec,
   type TierProbeOutput,
 } from './swarmTierProbe'
-import { isTierCooling, markCoolingUntil, __resetQuotaForTest } from './swarmQuota'
+import { isTierCooling, markCoolingUntil, flushQuotaPersist, __resetQuotaForTest } from './swarmQuota'
 
 // The CLI's per-model exhaustion notice, verbatim off the 2026-07-13 live probe
 // (same wording as the 2026-07-09 worker sighting pinned in the orchestrator
@@ -61,6 +61,13 @@ const flushDetached = () => new Promise((r) => setTimeout(r, 0))
 beforeEach(() => {
   __resetTierProbeForTest()
   __resetQuotaForTest()
+})
+
+// A wall verdict schedules its disk mirror without awaiting it. Drain the
+// preserved chain before setup-home's later sandbox deletion, including when
+// an assertion failed; a detached FS warning must not outlive the test worker.
+afterAll(async () => {
+  expect(await flushQuotaPersist()).toEqual({ persisted: true, error: null })
 })
 
 // ── classifyProbeOutput (pure) — quota refusals ONLY, transients are unknown ─
