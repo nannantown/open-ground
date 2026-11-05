@@ -748,6 +748,44 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     ptyFns: ['isTerminalProcessAlive', 'killTerminal', 'listLiveDesksIn', 'listOwnerDeskTerminals'],
     sdkCalls: ['listSdkSessions', 'pushSdkInput', 'terminateSdkSession', 'listAllLiveSupplyDesks', 'listLiveSupplyDesks', 'pushSupplyInput'],
   },
+  'server/routes/conversation.ts': {
+    tier: 'both-pools',
+    why: 'Owner review must wait for both unreaped SDK actors and live native PTYs to release the original conversation before recording an inspected unknown effect. The shared occupancy predicate never stops or replays an actor.',
+    ptyFns: [], sdkCalls: ['isAgentConversationOccupied'],
+  },
+  'src/lib/server/runtimeActionReceipts.ts': {
+    tier: 'both-pools',
+    why: 'Tool audit receipts bind the exact original SDK or PTY handle. A replacement actor with the same conversation cannot make an old executing receipt safe, and native interrupts taint only their original actor.',
+    ptyFns: [], sdkCalls: ['agentConversationHandles', 'isAgentConversationOccupied', 'isRecordedRuntimeHandleOccupied'],
+  },
+  'src/lib/server/runtimeRecovery.ts': {
+    tier: 'both-pools',
+    why: 'Recovery exposes unknown effects only after their original handle has stopped. It distinguishes a replacement actor from the original handle and prevents either a live SDK or PTY conversation from being manually reviewed while still writing.',
+    ptyFns: [], sdkCalls: ['isAgentConversationOccupied', 'isRecordedRuntimeHandleOccupied'],
+  },
+  'src/lib/server/chatgptResponses.ts': {
+    tier: 'both-pools',
+    why: 'An explicit owner review of a private ChatGPT tool result must not race either runtime still owning that conversation. The shared predicate includes closed but unreaped SDK pumps as well as native PTY processes.',
+    ptyFns: [], sdkCalls: ['isAgentConversationOccupied'],
+  },
+  'src/lib/server/presidentInbox.ts': {
+    tier: 'runtime-dispatched',
+    why: 'Owns durable owner input delivery. A supply handle selects guarded PTY delivery or SDK consumed/settled callbacks; a queued receipt is never mistaken for a completed SDK turn.',
+    ptyFns: [],
+    sdkCalls: ['listLiveSupplyDesks', 'pushSdkInput'],
+  },
+  'src/lib/server/swarmRuntimeTransition.ts': {
+    tier: 'both-pools',
+    why: 'The runtime lifecycle seam checkpoints and retires only recorded actors, proving SDK settlement/reaping and native PTY transcript/process release independently before a replacement can use the same worktree.',
+    ptyFns: ['getTerminal', 'getTerminalScreen', 'isTerminalProcessAlive', 'killTerminal', 'listOwnerDeskTerminals', 'waitForTerminalGone'],
+    sdkCalls: ['drainSdkSession', 'getSdkSession', 'listSdkSessions', 'terminateSdkSession', 'pushSdkInput', 'interruptSdkSession', 'currentSdkTurnId', 'listLiveSupplyDesks', 'resumeSdkInputAdmission', 'sdkInputAdmissionPaused'],
+  },
+  'src/lib/server/swarmNativeRecovery.ts': {
+    tier: 'both-pools',
+    why: 'A native history review must not authorize a fresh conversation while either an unreaped SDK actor or a live PTY still owns its conversation. It asks the shared conversation occupancy predicate before reading or fsyncing the fingerprint-bound owner marker; no actor is stopped or replayed.',
+    ptyFns: [],
+    sdkCalls: ['isAgentConversationOccupied'],
+  },
   'src/lib/server/swarmTranscriptProof.ts': {
     tier: 'both-pools',
     why: 'The ChatGPT resume branch verifies that neither pool occupies the target worktree before loading account-bound local conversation history. A false free result would resume an existing conversation beside an unreaped SDK pump; the occupancy question therefore goes through liveDeskOccupies.',
@@ -1205,6 +1243,10 @@ const statusLivenessIn = (rel: string, codeWithStrings: string, sdkAware: boolea
 
 /** Per-file declarations for the status-literal comparisons above. */
 const STATUS_SITES: Record<string, Decl & { count: number }> = {
+  'src/lib/server/swarmRuntimeTransition.ts': {
+    tier: 'runtime-dispatched', count: 1,
+    why: 'Reports an immediate target launch failure. Existing actor occupancy and retirement are determined by reaped/process proof; this status comparison never licenses a replacement beside an unwinding actor.',
+  },
   'src/components/canvas/modules/SwarmSupplyPane.tsx': {
     tier: 'display-only', count: 1,
     why: 'The server-derived beacon exited state only chooses whether the SDK tile draws Restart. It never decides worktree occupancy or reaping, and sending remains subject to the live SDK pool accepting input.',

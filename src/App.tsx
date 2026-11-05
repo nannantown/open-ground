@@ -17,6 +17,7 @@ import { CollabSharedDialog } from '@/components/canvas/CollabSharedDialog'
 import { useCollab } from '@/lib/collab/RealtimeContext'
 import { applyTheme, themeFromSettings } from '@/lib/theme'
 import { useExperiments } from '@/lib/modules/useExperiments'
+import { ConversationDraftOwnerContext } from '@/lib/useConversationDraft'
 import { useJoinDeepLink } from '@/lib/useJoinDeepLink'
 import { Onboarding } from '@/components/Onboarding'
 import { BulkActionBar } from '@/components/canvas/BulkActionBar'
@@ -1309,6 +1310,7 @@ export default function App() {
   const frameLabel = singleSelected ? frameLabelFor(singleSelected.id, canvas) : null
 
   return (
+    <ConversationDraftOwnerContext.Provider value={experiments.loaded && experiments.eligible ? authUser?.id ?? null : null}>
     <main className="h-screen w-screen overflow-hidden bg-bg relative">
       {/* display:contents — no box of its own; only marks "the Ground" for
           PlacementGhost's press test (the panel's canvases sit outside it). */}
@@ -1623,5 +1625,6 @@ export default function App() {
         />
       )}
     </main>
+    </ConversationDraftOwnerContext.Provider>
   )
 }

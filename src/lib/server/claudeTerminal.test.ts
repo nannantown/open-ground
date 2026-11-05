@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
 // Stub the PTY layer so sendInterrupt's byte contract can be asserted without
 // spawning a real terminal (createTerminal/writeInput hit node-pty).
 vi.mock('./terminal', () => ({
@@ -476,8 +477,9 @@ describe('buildLaunchCommand (per-shell PTY command framing)', () => {
 describe('launchClaude (routes the prompt through a temp file + buildLaunchCommand)', () => {
   afterEach(() => vi.useRealTimers())
 
-  it('writes ONE launch command that reads the prompt from a file, never inline', () => {
-    vi.mocked(createTerminal).mockReturnValue({
+  it('passes ONE native shell command as terminal spawn argv, with the prompt in a file and no stdin injection', () => {
+    const create = vi.mocked(createTerminal)
+    create.mockClear().mockReturnValue({
       id: 'tid',
       cwd: '/p',
       shell: '/bin/zsh',
@@ -496,15 +498,19 @@ describe('launchClaude (routes the prompt through a temp file + buildLaunchComma
       initialPrompt: 'SECRET-PROMPT-TEXT',
       appContext: false,
     })
-    vi.runOnlyPendingTimers()
-    expect(wi).toHaveBeenCalledTimes(1)
-    const [id, cmd] = wi.mock.calls[0]
-    expect(id).toBe('tid')
+    expect(create).toHaveBeenCalledOnce()
+    expect(wi).not.toHaveBeenCalled()
+    const launch = create.mock.calls[0][0]
+    expect(launch).toMatchObject({ cwd: '/p', agentSessionId: 'SID', tag: 'claude' })
+    const cmd = launch.command!
     // POSIX host: env-prefixed, reads the prompt via $(cat <tmpfile>), tears down.
     expect(cmd).toContain('OPENGROUND_OWNED=1 ')
     expect(cmd).toMatch(/\$\(cat '[^']+'\)/)
+    const promptFile = cmd.match(/\$\(cat '([^']+)'\)/)![1]
+    expect(readFileSync(promptFile, 'utf8')).toBe('SECRET-PROMPT-TEXT')
     expect((cmd as string).endsWith(' ; exit\n')).toBe(true)
     // The literal prompt text NEVER appears inline on the PTY command line.
     expect(cmd).not.toContain('SECRET-PROMPT-TEXT')
+    vi.runOnlyPendingTimers()
   })
 })

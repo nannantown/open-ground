@@ -64,6 +64,7 @@ import type {
 } from '@/lib/types'
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SdkWorkerPane, blipVerdict, type SdkSessionProbe } from './SdkWorkerPane'
+import { useConversationDraft } from '@/lib/useConversationDraft'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 import { SwarmWorkerSeat, workerSeatLook } from './SwarmWorkerSeat'
@@ -286,6 +287,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
 
   // Seats unmount when collapsed or when reconcile clears an exited desk.
   // Keep unsent words above those branches, scoped by project and in memory.
+  const presidentDraft = useConversationDraft(project.id)
   const [presidentDrafts, setPresidentDrafts] = useState<Record<string, string>>({})
   const [presidentSending, setPresidentSending] = useState<Record<string, boolean>>({})
   const changePresidentDraft = useCallback((value: SetStateAction<string>) => {
@@ -1564,7 +1566,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
             // The live president's desk — the owner's one conversation.
           <SwarmSupplyPane
             projectPath={project.path}
-            draftState={{ value: presidentDrafts[project.id] ?? '', onChange: changePresidentDraft,
+            draftState={{ value: presidentDraft.enabled ? presidentDraft.text : presidentDrafts[project.id] ?? '', onChange: presidentDraft.setText ?? changePresidentDraft, durable: presidentDraft.enabled ? presidentDraft : undefined,
               pending: presidentSending[project.id] ?? false, onPendingChange: changePresidentSending }}
             terminalId={supply.terminalId}
             runtime={supply.runtime}

@@ -30,6 +30,8 @@ import { collabRoutes } from './routes/collab'
 import { researchRoutes } from './routes/research'
 import { phoneLinkRoutes } from './routes/phoneLink'
 import { chatgptRoutes } from './routes/chatgpt'
+import { conversationRoutes } from './routes/conversation'
+import { assistantRuntimeRoutes } from './routes/assistant'
 import { originIsLocal, hostIsLocal } from './loopback'
 
 // ── CSRF / cross-origin guard helpers ──────────────────────────────────────
@@ -120,6 +122,8 @@ export const createApp = () => {
     .route('/', researchRoutes)  // M — research channels: checker + local-only cookie store
     .route('/', phoneLinkRoutes) // N — iPhone ⇄ president desk via the CF relay (docs/PHONE_LINK.md)
     .route('/', chatgptRoutes) // Owner ChatGPT subscription connection/preferences
+    .route('/', conversationRoutes)
+    .route('/', assistantRuntimeRoutes)
 
   // Any /api/* not matched above is a genuine API 404 — it must NOT fall
   // through to the SPA static handler below (which would return index.html

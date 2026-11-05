@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.11.196",
+  "version": "0.11.197",
   "private": true,
   "main": "electron/main.js",
   "scripts": {

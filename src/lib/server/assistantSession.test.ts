@@ -4,10 +4,16 @@
 // is replaced at its one import seam (sdkSession's importer); everything else
 // is the production code.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { access } from 'node:fs/promises'
 
+const subscription = vi.hoisted(() => ({ preflight: vi.fn() }))
 vi.mock('./swarmWorkerSdk', async (orig) => ({ ...(await orig<typeof import('./swarmWorkerSdk')>()), resolveUserClaudeBin: () => '/usr/local/bin/claude' }))
+// Every native SDK fixture stays offline. The real launch seam is exercised
+// below; pure auth/settings validators still reject unproven paid routes.
+vi.mock('./subscriptionOnly', async (orig) => ({ ...(await orig<typeof import('./subscriptionOnly')>()), assertClaudeSubscriptionLaunch: subscription.preflight }))
 
 import { __setSdkImporterForTests } from './sdkSession'
+import { assertClaudeSubscriptionStatus, assertSubscriptionSettings, subscriptionOnlyEnvironment } from './subscriptionOnly'
 import { setSettings } from './store'
 import { __resetQuotaForTest, isTierCooling } from './swarmQuota'
 import { ASSISTANT_TOOL_NAMES, assistantToolGate, closeAssistantSession, liveAssistantModel, type AssistantToolSet } from './assistantSession'
@@ -48,9 +54,78 @@ const result = (text: string): Msg => ({ type: 'result', subtype: 'success', is_
 const noTools = {} as AssistantToolSet
 const ask = (line: string, key = 'k', tools = noTools) => liveAssistantModel.ask({ key, system: async () => 'SYSTEM', line, tools })
 
-beforeEach(() => closeAssistantSession())
+beforeEach(() => {
+  closeAssistantSession()
+  subscription.preflight.mockReset().mockImplementation(async (_cwd: string, source: NodeJS.ProcessEnv) => subscriptionOnlyEnvironment(source))
+})
+afterEach(() => vi.unstubAllEnvs())
 
 describe('what the claude behind the assistant may touch', () => {
+  it('uses subscription proof for the exact resolved executable/cwd and passes only its verified child overlay', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'synthetic-key')
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://synthetic.invalid')
+    vi.stubEnv('OPENAI_API_KEY', 'synthetic-key')
+    vi.stubEnv('CLAUDE_CODE_USE_BEDROCK', '1')
+    vi.stubEnv('OPENGROUND_CLAUDE_BIN', '/must-not-select/claude')
+    let verified: NodeJS.ProcessEnv | undefined
+    subscription.preflight.mockImplementation(async (_cwd: string, source: NodeJS.ProcessEnv) => {
+      assertClaudeSubscriptionStatus({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' })
+      verified = { ...subscriptionOnlyEnvironment(source), CLAUDE_CONFIG_DIR: '/synthetic/verified-config' }
+      return verified
+    })
+    const sdk = fakeSdk(async () => [result('subscription only')])
+    expect(await ask('status')).toBe('subscription only')
+    const options = sdk.queries[0].options
+    expect(subscription.preflight).toHaveBeenCalledExactlyOnceWith(options.cwd, expect.objectContaining({
+      ANTHROPIC_API_KEY: 'synthetic-key', OPENGROUND_CLAUDE_BIN: options.pathToClaudeCodeExecutable,
+    }))
+    expect(options.env).toBe(verified)
+    const child = { ...process.env, ...(options.env as NodeJS.ProcessEnv) }
+    for (const key of ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'OPENAI_API_KEY', 'CLAUDE_CODE_USE_BEDROCK']) expect(child[key]).toBeUndefined()
+    expect(child.CLAUDE_CONFIG_DIR).toBe('/synthetic/verified-config')
+  })
+  it.each([
+    ['unproven login', {}, { loggedIn: true }],
+    ['API-key login', {}, { loggedIn: true, authMethod: 'api_key', apiProvider: 'firstParty' }],
+    ['cloud provider', {}, { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'bedrock' }],
+    ['API credential helper', { apiKeyHelper: 'must-not-run' }, { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }],
+  ])('starts no SDK query or fallback for %s', async (_label, settings, status) => {
+    subscription.preflight.mockImplementation(async () => {
+      assertSubscriptionSettings(settings)
+      assertClaudeSubscriptionStatus(status)
+      return {}
+    })
+    const sdk = fakeSdk(async () => [result('must not be requested')])
+    await expect(ask('private')).rejects.toThrow(/subscription|credential helper/i)
+    expect(sdk.queries).toEqual([])
+    const cwd = subscription.preflight.mock.calls[0][0] as string
+    await expect(access(cwd)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  it('rechecks the admitted lease after subscription preflight before starting a native query', async () => {
+    const sdk = fakeSdk(async () => [result('must not be requested')])
+    let allowed = true
+    subscription.preflight.mockImplementation(async () => { allowed = false; return {} })
+    await expect(liveAssistantModel.ask({ key: 'preflight-owner-change', system: async () => 'SYSTEM', line: 'private', tools: noTools,
+      authorize: async () => { if (!allowed) throw new Error('synthetic owner revoked during preflight') } })).rejects.toThrow('owner revoked during preflight')
+    expect(subscription.preflight).toHaveBeenCalledOnce()
+    expect(sdk.queries).toEqual([])
+  })
+  it('rechecks the admitted lease after asynchronous system preparation before starting a native query', async () => {
+    const sdk = fakeSdk(async () => [result('must not be requested')])
+    let allowed = true
+    await expect(liveAssistantModel.ask({ key: 'late-owner-change', system: async () => { allowed = false; return 'SYSTEM' }, line: 'private', tools: noTools,
+      authorize: async () => { if (!allowed) throw new Error('synthetic owner revoked') } })).rejects.toThrow('owner revoked')
+    expect(sdk.queries).toEqual([])
+  })
+  it('does not push another input into a live actor after its lease is revoked', async () => {
+    const inputs: string[] = []
+    const sdk = fakeSdk(async line => { inputs.push(line); return [result('ok')] })
+    await ask('first')
+    await expect(liveAssistantModel.ask({ key: 'k', system: async () => 'SYSTEM', line: 'must stay out', tools: noTools,
+      authorize: async () => { throw new Error('synthetic lease revoked') } })).rejects.toThrow('lease revoked')
+    expect(sdk.queries).toHaveLength(1)
+    expect(inputs).toEqual(['first'])
+  })
   it("none of Claude Code's own tools, settings or MCP; only its own tools, no bypass, no transcript, the fast model", async () => {
     const sdk = fakeSdk(async () => [result('うん')])
     await ask('やあ')

@@ -350,6 +350,9 @@ export const createTerminal = (opts: {
   cols?: number
   rows?: number
   shell?: string
+  /** Server-built launch program, passed as shell argv rather than typed
+   * through canonical-mode stdin. Raw terminal REST clients cannot set this. */
+  command?: string
   tag?: 'shell' | 'claude'
   agentSessionId?: string
   // Headless utility session (no user-visible pane) — excluded from the Ground
@@ -370,7 +373,9 @@ export const createTerminal = (opts: {
   // -l so PATH (nvm, ~/.local/bin etc.) is set up the same way the user's
   // login shell would set it — matters because OPEN GROUND may have been
   // launched from Finder where the shell otherwise wouldn't run the login profile.
-  const args = process.platform === 'win32' ? [] : ['-l']
+  const args = opts.command === undefined
+    ? process.platform === 'win32' ? [] : ['-l']
+    : process.platform === 'win32' ? ['-NoLogo', '-Command', opts.command] : ['-l', '-i', '-c', opts.command]
   const proc = pty.spawn(shell, args, {
     cwd: opts.cwd,
     cols,

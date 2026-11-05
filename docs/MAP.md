@@ -47,6 +47,24 @@
   ChatGPT controls require the separate real-owner `experiments.eligible`.
   Browser regression: `e2e/swarm-chatgpt-transcript.spec.ts` feeds real transport
   events into president/manager seats at desktop and narrow widths.
+- Owner runtime switching/recovery: `docs/RUNTIME_TRANSITION_RECOVERY_PLAN.md`;
+  `runtimeTransitionStore.ts` / `runtimeTransitions.ts` separate requested and
+  effective profiles and checkpoint before retirement. `swarmRuntimeTransition.ts`
+  freezes dispatch/integration and preserves actor/worktree/budget intent;
+  `swarmNativeTranscript.ts` / `swarmNativeRecovery.ts` inspect native history
+  without editing or replaying unfinished commands. `runtimeLease.ts` pins both
+  accounts; `subscriptionOnly.ts` verifies Claude subscription auth and excludes
+  API-key/alternate-provider credentials at child launch.
+  `assistantRuntimeStore.ts` / `assistantRuntimeTransition.ts` preserve accepted
+  turns, proposals, reset epochs and action receipts. `conversationReceipts.ts`
+  archives immutable terminal receipts; `conversationDrafts.ts` uses revision CAS
+  and accepted-draft indices. `presidentInbox.ts` owns one ordered delivery lane;
+  `runtimeActionReceipts.ts` / `runtimeRecovery.ts` expose unconfirmed effects.
+  Routes: `assistant.ts`, `conversation.ts`, `chatgpt.ts`; sealed phone controls:
+  `conversationControl.ts`. New controls require a fresh v2 capability handshake.
+  UI: `useConversationDraft.ts`, `assistantOutbox.ts`,
+  `ConversationDraftStatus.tsx`, `ConversationRecoverySetting.tsx` and existing
+  president/assistant composers. Browser: `e2e/conversation-recovery.spec.ts`.
 - Songs/NENE development handoff (2026-09-22): `docs/SONGS-HANDOFF-2026-09-22.md`.
   Two local repository branches, delivered UI/recording changes, verification,
   preserved owner data and remaining hardware/packaged-app acceptance checks.

@@ -2,7 +2,8 @@ import { getSettings } from './store'
 import { hasChatGptAccess } from './chatgptAccess'
 import { listChatGptModels } from './chatgptAuth'
 import { chatGptCoolingUntil, ChatGptQuotaError } from './chatgptQuota'
-import type { ClaudeEffort, SwarmAllowedModels } from '../types'
+import type { ClaudeEffort, SwarmAllowedModels, RuntimeProfile } from '../types'
+import { getRuntimeTransition } from './runtimeTransitionStore'
 import { spawnBlock } from './swarmAllowedModels'
 import { chatGptShellPreflight } from './chatgptTools'
 import { claudeRunPreflight } from './claudePreflight'
@@ -25,15 +26,20 @@ export const selectedRuntime = async (use: RuntimeUse): Promise<'claude' | 'chat
   return 'chatgpt'
 }
 
-export const chatGptLaunchConfig = async (use: RuntimeUse): Promise<{ model: string; effort?: ClaudeEffort }> => {
+export const chatGptLaunchConfig = async (use: RuntimeUse, explicitProfile?: RuntimeProfile): Promise<{ model: string; effort?: ClaudeEffort }> => {
+  if (explicitProfile) {
+    const transition = getRuntimeTransition(use)
+    if (!transition || transition.phase !== 'launching' || explicitProfile.provider !== 'chatgpt' || JSON.stringify(transition.desired) !== JSON.stringify(explicitProfile)) throw new Error('The requested handoff is no longer current.')
+  }
   if (await selectedRuntime(use) !== 'chatgpt') throw new Error('ChatGPT is not selected.')
   const until = chatGptCoolingUntil()
   if (until) throw new ChatGptQuotaError(until)
   if (use === 'swarm') await chatGptShellPreflight()
   const [settings, models] = await Promise.all([getSettings(), listChatGptModels()])
-  const model = settings.chatgptModel ? models.find((m) => m.id === settings.chatgptModel) : models[0]
+  const pickedModel = explicitProfile?.model ?? settings.chatgptModel
+  const model = pickedModel ? models.find((m) => m.id === pickedModel) : models[0]
   if (!model) throw new Error('Connect ChatGPT and choose a model available to this account.')
-  const effort = settings.chatgptEffort
+  const effort = (explicitProfile?.effort ?? settings.chatgptEffort) as ClaudeEffort | undefined
   if (effort && model.supportedEfforts?.length && !model.supportedEfforts.includes(effort)) {
     throw new Error('The selected ChatGPT model does not support this reasoning setting.')
   }

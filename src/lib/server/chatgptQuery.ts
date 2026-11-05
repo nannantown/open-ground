@@ -1,11 +1,11 @@
-import { appendFile, mkdir, readFile } from 'fs/promises'
+import { mkdir, open, readFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { resolveHookSourceRoot } from './hooksInstall'
-import { ChatGptConversation, chatGptConversationFile, type ChatGptConversationOptions } from './chatgptResponses'
+import { ChatGptConversation, chatGptConversationFile, ChatGptUncertainActionError, saveChatGptPublicConversation, type ChatGptConversationOptions } from './chatgptResponses'
 import { createChatGptHostTools, type ChatGptToolGuard } from './chatgptTools'
 import type { SdkEvent } from './sdkEvents'
 import { ChatGptQuotaError } from './chatgptQuota'
-import { selectedRuntime } from './chatgptRuntime'
+import { admitChatGptRuntime } from './runtimeLease'
 import { openGroundHome } from './paths'
 import { getChatGptAccountKey } from './chatgptAuth'
 import { createChatGptReviewTool } from './chatgptReview'
@@ -20,10 +20,14 @@ export const chatGptTranscriptFile = (id: string): string => {
 const appendSupplyTranscript = async (id: string, type: 'user' | 'assistant', text: string): Promise<void> => {
   const file = chatGptTranscriptFile(id)
   await mkdir(dirname(file), { recursive: true, mode: 0o700 })
-  await appendFile(file, JSON.stringify({ type, timestamp: new Date().toISOString(), message: { role: type, content: [{ type: 'text', text }] } }) + '\n', { mode: 0o600 })
+  const handle = await open(file, 'a', 0o600)
+  try {
+    await handle.writeFile(JSON.stringify({ type, timestamp: new Date().toISOString(), message: { role: type, content: [{ type: 'text', text }] } }) + '\n')
+    await handle.sync()
+  } finally { await handle.close() }
 }
 interface ChatGptQueryHandle extends AsyncIterable<SdkEvent> { interrupt: () => Promise<void> }
-type ChatGptQueryFn = (params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => ChatGptQueryHandle
+type ChatGptQueryFn = (params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown>; onTurnSettled?: () => Promise<void>; onTurnInterrupted?: (safeToContinue: boolean) => Promise<void>; onTurnRefused?: () => Promise<void>; onPublicText?: (text: string) => void; publicConversation?: () => { lines: { kind: 'input' | 'text'; text: string }[]; overflow: boolean } }) => ChatGptQueryHandle
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 const knownEvents = new Set(['status', 'text', 'input', 'thinking', 'tool_use', 'tool_result', 'turn_end', 'rate_limit', 'api_error', 'quota_refusal', 'compact'])
 /** The adapter emits these events itself; provider wire events never enter the pool. */
@@ -83,12 +87,14 @@ export interface ChatGptQueryDefaults extends Pick<ChatGptConversationOptions, '
   roleInstructions?: (role: RuntimeRole) => Promise<string>
 }
 
-export const createChatGptQuery = (defaults: ChatGptQueryDefaults = {}): ChatGptQueryFn => ({ prompt, options }): ChatGptQueryHandle => {
+export const createChatGptQuery = (defaults: ChatGptQueryDefaults = {}): ChatGptQueryFn => ({ prompt, options, onTurnSettled, onTurnInterrupted, onTurnRefused, onPublicText, publicConversation }): ChatGptQueryHandle => {
   if (typeof options.cwd !== 'string' || typeof options.model !== 'string') throw new Error('ChatGPT runtime requires cwd and model')
   const role = options.runtimeRole
   if (role !== 'worker' && role !== 'manager' && role !== 'supply') throw new Error('ChatGPT runtime requires an explicit role')
   const guard = hookFrom(options)
-  const authorize = defaults.authorize ?? (async () => { if (await selectedRuntime('swarm') !== 'chatgpt') throw new Error('ChatGPT is no longer selected for this agent team') })
+  let admitted: Promise<() => Promise<void>> | undefined
+  const expectedOwnerKey = typeof options.runtimeOwnerKey === 'string' ? options.runtimeOwnerKey : undefined
+  const authorize = defaults.authorize ?? (async () => { await (await (admitted ??= admitChatGptRuntime('swarm', expectedOwnerKey)))() })
   // One immutable account identity for this parent and every independent child.
   // Capturing only inside a newly created child would permit an account switch
   // between the parent's check and that child's first check.
@@ -105,6 +111,11 @@ export const createChatGptQuery = (defaults: ChatGptQueryDefaults = {}): ChatGpt
   const id = typeof options.resume === 'string' ? options.resume : typeof options.sessionId === 'string' ? options.sessionId : undefined
   const system = typeof options.systemPrompt === 'string' ? options.systemPrompt : object(options.systemPrompt) && typeof options.systemPrompt.append === 'string' ? options.systemPrompt.append : ''
   const queue = new EventQueue()
+  const persistPublic = async () => {
+    if (!conversation || !publicConversation || options.persist === false) return
+    const capture = publicConversation()
+    await saveChatGptPublicConversation(conversation.id, capture.lines, capture.overflow, { accountKey, storeDir: defaults.storeDir })
+  }
   let conversation: ChatGptConversation | null = null
   let consumed = false
   let stopped = false
@@ -127,13 +138,28 @@ export const createChatGptQuery = (defaults: ChatGptQueryDefaults = {}): ChatGpt
             const text = inputText(message)
             if (role === 'supply' && options.persist !== false) await appendSupplyTranscript(conversation.id, 'user', text)
             try {
-              const answer = await conversation.run(text, { onEvent: (event) => queue.push(event) })
+              const answer = await conversation.run(text, { onEvent: (event) => { if (event.kind === 'text') onPublicText?.(event.text); queue.push(event) } })
               if (role === 'supply' && options.persist !== false) await appendSupplyTranscript(conversation.id, 'assistant', answer.text)
+              await persistPublic()
+              await onTurnSettled?.()
             } catch (error) {
-              if (error instanceof Error && error.name === 'AbortError') continue
+              if (error instanceof Error && error.name === 'AbortError') {
+                const safe = await conversation.settleInterruptedTurn()
+                if (safe) await persistPublic()
+                await onTurnInterrupted?.(safe)
+                if (!safe) throw new ChatGptUncertainActionError()
+                continue
+              }
               // A genuine usage wall remains visible/parked until the engine
               // stops this session; no automatic retry burns another request.
-              if (error instanceof ChatGptQuotaError) continue
+              if (error instanceof ChatGptQuotaError) {
+                const safe = await conversation.settleInterruptedTurn('quota')
+                if (!safe) { await onTurnInterrupted?.(false); throw new ChatGptUncertainActionError() }
+                await persistPublic()
+                await onTurnRefused?.()
+                if (!onTurnRefused) break
+                continue
+              }
               throw error
             }
           }

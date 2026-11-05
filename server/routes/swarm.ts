@@ -54,6 +54,11 @@ import {
   ProjectDataConflictError,
 } from '@/lib/server/projectData'
 import { swarmRunPreflight } from '@/lib/server/chatgptRuntime'
+import { acceptPresidentInput } from '@/lib/server/presidentInbox'
+import { readConversationReceipt, ReceiptConflict } from '@/lib/server/conversationReceipts'
+import { projectUUIDFromPath } from '@/lib/server/projectDataPath'
+import { hasChatGptAccess } from '@/lib/server/chatgptAccess'
+import { runtimeRequestOwnerKey } from '@/lib/server/runtimeOwner'
 import { swarmEnvPreflight } from '@/lib/server/swarmEnvPreflight'
 import {
   spawnSwarmWorker,
@@ -571,12 +576,31 @@ export const swarmRoutes = new Hono()
   // SDK presidents retain their separately authorized SDK input route.
   .post('/api/swarm/supply/input', async (c) => {
     if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
-    const body = await c.req.json().catch(() => null) as { path?: unknown; terminalId?: unknown; text?: unknown } | null
+    let expectedOwnerKey: string | undefined
+    try { if (c.req.header('X-OpenGround-Owner') !== undefined) expectedOwnerKey = await runtimeRequestOwnerKey(c.req.header('X-OpenGround-Owner')) }
+    catch { return c.json({ error: 'owner-changed' }, 403) }
+    const body = await c.req.json().catch(() => null) as { path?: unknown; terminalId?: unknown; text?: unknown; clientId?: unknown; draftClientId?: unknown; draftRevision?: unknown } | null
     const path = typeof body?.path === 'string' ? body.path : ''
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     const id = typeof body?.terminalId === 'string' ? body.terminalId : ''
     if (!id) return c.json({ error: 'terminalId is required' }, 400)
+    if (typeof body?.clientId === 'string' && await hasChatGptAccess()) {
+      try {
+        const raw = typeof body.text === 'string' ? body.text : ''
+        if (!ownerSayLine(raw) || ownerSayTooLong(raw)) return c.json({ error: 'invalid text' }, 400)
+        const previous = await readConversationReceipt(await projectUUIDFromPath(path), body.clientId, expectedOwnerKey)
+        if (!previous) {
+          const desk = listLiveSupplyDesks(path).find((candidate) => !candidate.stopping)
+          if (!desk || desk.runtime !== 'pty' || desk.handleId !== id) return c.json({ error: 'president is no longer accepting input; refresh the desk' }, 409)
+        }
+        const accepted = await acceptPresidentInput(path, raw, { id: body.clientId, expectedOwnerKey,
+          ...(typeof body.draftClientId === 'string' ? { draftClientId: body.draftClientId } : {}),
+          ...(typeof body.draftRevision === 'number' ? { draftRevision: body.draftRevision } : {}),
+        })
+        return c.json(accepted, ['uncertain', 'cancelled', 'rejected'].includes(accepted.receipt.state) ? 409 : 202)
+      } catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Input could not be saved.' }, error instanceof ReceiptConflict ? 409 : 503) }
+    }
     // The queue addresses the project's newest president. A stale composer
     // must never silently submit its line to a different desk or role.
     const desk = listLiveSupplyDesks(path).find((candidate) => !candidate.stopping)

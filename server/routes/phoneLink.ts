@@ -2,6 +2,10 @@
 // desks (src/lib/server/phoneLink.ts, docs/PHONE_LINK.md). Owner-only: the
 // president is an owner seat, and the pairing code is a key.
 import { Hono, type MiddlewareHandler } from 'hono'
+import { createHash } from 'node:crypto'
+import { runtimeRequestOwnerKey } from '@/lib/server/runtimeOwner'
+import { hasChatGptAccess } from '@/lib/server/chatgptAccess'
+import { resetAssistantRuntime } from '@/lib/server/assistantRuntimeTransition'
 import { stream as honoStream, streamSSE } from 'hono/streaming'
 import { pushKeySaved, hasPhoneLinkAccess, pairPhone, pairingCode, phoneLinkStatus, readPhoneLinkConfig, unpairPhone } from '@/lib/server/phoneLink'
 import { savePushKey } from '@/lib/server/phonePush'
@@ -9,7 +13,6 @@ import {
   ASSISTANT_SAY_MAX,
   AssistantFailure,
   askAssistant,
-  assistantBusy,
   dropAssistantProposal,
   hushAssistantReading,
   plainAssistantError,
@@ -17,6 +20,7 @@ import {
   readAssistantStyle,
   saveAssistantStyle,
   warmAssistant,
+  withAssistantAccessScope,
 } from '@/lib/server/phoneAssistant'
 import { readFile } from 'fs/promises'
 import {
@@ -53,7 +57,8 @@ const ownerOnly: MiddlewareHandler = async (c, next) => {
   if ((origin !== undefined && !originIsLocal(origin)) || (host !== undefined && !hostIsLocal(host))) {
     return c.json({ error: 'forbidden' }, 403)
   }
-  return (await hasPhoneLinkAccess()) ? next() : c.json({ error: 'forbidden' }, 403)
+  if (!await hasPhoneLinkAccess()) return c.json({ error: 'forbidden' }, 403)
+  return c.req.path.includes('/assistant') ? withAssistantAccessScope(() => next()) : next()
 }
 
 const reply = (r: object) => ('error' in r ? Response.json(r, { status: 409 }) : Response.json(r))
@@ -114,7 +119,11 @@ export const phoneLinkRoutes = new Hono()
   })
   // A delete also ends the assistant's live session at once (it holds the deleted
   // talk) and removes what was proposed — the proposals were made from that talk.
-  .delete('/api/phone-link/assistant/log', async (c) => (await clearAssistantLog('assistant'), closeAssistantSession(), clearProposals(), c.json({ ok: true })))
+  .delete('/api/phone-link/assistant/log', async (c) => {
+    if (await hasChatGptAccess()) return c.json(await resetAssistantRuntime({ kind: 'delete-history' }))
+    await clearAssistantLog('assistant'); closeAssistantSession(); clearProposals()
+    return c.json({ ok: true })
+  })
   .delete('/api/phone-link/assistant/log/:id', async (c) =>
     (await deleteAssistantEntry(c.req.param('id'), 'assistant')) ? (closeAssistantSession(), clearProposals(), c.json({ ok: true })) : c.json({ error: 'not found' }, 404),
   )
@@ -131,7 +140,11 @@ export const phoneLinkRoutes = new Hono()
     if (!bytes || !ext) return c.json({ error: 'not found' }, 404)
     return c.body(bytes, 200, { 'content-type': ASSISTANT_PHOTO_TYPES[ext], 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' })
   })
-  .delete('/api/phone-link/assistant/memory', async (c) => (await clearAssistantMemory(), closeAssistantSession(), c.json({ ok: true })))
+  .delete('/api/phone-link/assistant/memory', async (c) => {
+    if (await hasChatGptAccess()) return c.json(await resetAssistantRuntime({ kind: 'delete-memory' }))
+    await clearAssistantMemory(); closeAssistantSession()
+    return c.json({ ok: true })
+  })
   // How many days the log is kept, how long the memo may be.
   .post('/api/phone-link/assistant/config', async (c) => {
     const patch = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
@@ -193,7 +206,14 @@ export const phoneLinkRoutes = new Hono()
   // Talk to the assistant from the screen: the same assistant, the same log.
   // A photo rides along as base64 (`photo`); its bytes decide its format.
   .post('/api/phone-link/assistant/say', async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { text?: unknown; photo?: unknown; stream?: unknown; clientId?: unknown }
+    const expectedOwnerKey = await hasChatGptAccess() ? await runtimeRequestOwnerKey(c.req.header('X-OpenGround-Owner')) : undefined
+    const body = (await c.req.json().catch(() => ({}))) as { text?: unknown; photo?: unknown; stream?: unknown; clientId?: unknown; draftClientId?: unknown; draftRevision?: unknown; conversationId?: unknown; epoch?: unknown }
+    const ownership = { ...(expectedOwnerKey ? { expectedOwnerKey } : {}),
+      ...(typeof body.draftClientId === 'string' ? { draftClientId: body.draftClientId } : {}),
+      ...(typeof body.draftRevision === 'number' ? { draftRevision: body.draftRevision } : {}),
+      ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+      ...(typeof body.epoch === 'number' ? { epoch: body.epoch } : {}),
+    }
     const line = typeof body.text === 'string' ? body.text.trim() : ''
     // The window's own id for the line: kept in the log, so the window knows its
     // line there (CHAT_SPEC §5b startup check).
@@ -211,7 +231,6 @@ export const phoneLinkRoutes = new Hono()
     if (!line && !bytes) return c.json({ error: 'empty' }, 400)
     if (line.length > ASSISTANT_SAY_MAX) return c.json({ error: 'too-long', max: ASSISTANT_SAY_MAX }, 400)
     if (isLockdownEnabledSync()) return c.json({ error: 'work-mode' }, 409)
-    if (assistantBusy()) return c.json({ error: 'busy' }, 429)
     const failed = async (e: unknown) => {
       const f: AssistantFailure = plainAssistantError(e, await getPromptLang().catch(() => 'en' as const))
       return { error: f.reason, detail: f.message, status: f.reason === 'busy' ? 429 : 502 } as const
@@ -238,8 +257,11 @@ export const phoneLinkRoutes = new Hono()
         const send = (o: unknown) => void (said = said.then(() => put(o)))
         const a = await askAssistant(line, {
           via: 'screen',
+          ...ownership,
+          ...(bytes ? { photoDigest: createHash('sha256').update(bytes).digest('hex') } : {}),
           ...(photo ? { photo } : {}),
           ...(clientId ? { clientId } : {}),
+          onAccepted: (receipt) => send({ accepted: true, receipt }),
           onStart: () => send({ state: 'replying' }),
           onInterim: (t) => send({ interim: t }),
           onSay: (t) => send({ say: t }),
@@ -250,7 +272,7 @@ export const phoneLinkRoutes = new Hono()
       })
     }
     try {
-      return c.json(await askAssistant(line, { via: 'screen', ...(photo ? { photo } : {}), ...(clientId ? { clientId } : {}) }))
+      return c.json(await askAssistant(line, { via: 'screen', ...ownership, ...(bytes ? { photoDigest: createHash('sha256').update(bytes).digest('hex') } : {}), ...(photo ? { photo } : {}), ...(clientId ? { clientId } : {}) }))
     } catch (e) {
       const f = await failed(e)
       return c.json({ error: f.error, detail: f.detail }, f.status)

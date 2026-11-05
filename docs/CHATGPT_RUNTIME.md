@@ -55,18 +55,23 @@ Primary specifications, checked 2026-11-05:
 The owner independently selects the assistant and automatic-work provider.
 One ChatGPT model/effort pair is shared by both selections, including memo
 maintenance and automatic-work roles. Independent reviews retain the parent's
-launch configuration. Existing automatic seats keep their launch settings;
-new assistant turns and newly launched seats read the latest selection.
+launch configuration. A requested change drains affected actors at a confirmed
+safe boundary, checkpoints approved shared state, retires the original handles
+and launches replacements before committing the effective profile. Saving an
+unused ChatGPT model preference does not retire active Claude actors.
 Claude's model/effort settings remain intact. Dedicated preference writes prevent
 an older full Settings snapshot from undoing a newer provider choice.
 The UI waits for the server's assistant capability before loading history. The
 legacy local unlock still permits the Claude assistant, while ChatGPT controls
 and status requests require the separate signed-in owner capability.
 
-Changing provider does not kill ongoing work. Stop and restart an existing
-commander or president to use the new selection. Their Claude and ChatGPT
-conversation pointers are stored separately. Worker re-entry retains the worktree
-and starts a separate conversation when its selected provider changes.
+Changing provider preserves the accepted turn and holds newly accepted messages
+in a durable inbox while dispatch and integration drain. The UI shows requested
+and effective profiles separately, with retry/cancel when recovery is needed.
+Claude and ChatGPT conversation pointers remain separate. Worker re-entry retains
+the worktree, Board identity and budget; public conversation words and confirmed
+receipts cross providers, while raw reasoning and tool output do not.
+See `RUNTIME_TRANSITION_RECOVERY_PLAN.md` for the lifecycle contract.
 
 ChatGPT conversations have `chatgpt-` UUID identities and separate, account-bound
 local history. Claude's quota and transcript files are never treated as ChatGPT
@@ -110,8 +115,10 @@ it cannot delegate again, write files or use the network through host tools.
 - Automatic host tools currently require macOS. No unprotected Windows fallback.
 - Conversation size and tool-round limits fail visibly and preserve history.
   Native `/compact` is not emulated by sending it as ordinary user text.
-- Provider changes, logout, work mode and account changes are checked again before
-  new requests and host actions. Accounts never inherit each other's context.
+- New admission follows the effective profile. An accepted turn keeps its
+  immutable launch profile during a requested switch. Logout, work mode and
+  account changes are checked again before requests and host actions.
+  Accounts never inherit each other's context.
 - A private app-factory preview and its signed Electron runtime are separate
   checks from the normal packaged startup, updater and general release.
 
@@ -137,3 +144,20 @@ The same automatic-work acceptance also passed in 141 seconds under the signed
 Electron runtime with its packaged Node 20 environment. This exercised dispatch,
 worker checks, independent review, local integration and Board completion rather
 than relying only on a model-catalog or connection-status response.
+
+## Switching and recovery verification — 2026-11-06
+
+The recovery implementation uses offline model transports and temporary projects
+for fault, reset, account-replacement, duplicate-message and phase-restart tests.
+No real inference is needed to run those tests. Started effects without a durable
+result are held for explicit owner inspection; reset or retry never promises
+rollback. Terminal receipts move to private bounded prefix archives so old IDs
+remain idempotent without filling the active inbox. Draft revision indices are
+committed with acceptance and survive receipt archival.
+
+Desktop browser tests cover both providers, themes, narrow/desktop layouts,
+IME, draft/photo reload, lost acknowledgements and recovery controls. iPhone
+controls require a fresh sealed-v2 capability handshake and bind stop to the
+conversation, epoch and turn observed when tapped. Older clients keep their
+existing protocol; new guarantees are not claimed for legacy plaintext control.
+Physical-device audio/network behavior requires its own real-device verification.

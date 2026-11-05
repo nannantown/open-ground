@@ -18,13 +18,15 @@
 // the safe direction). A proposal not acted on expires after 10 minutes.
 import { createHash, randomUUID } from 'crypto'
 import type { ProjectTask } from '../types'
-import { newId } from '@/lib/ids'
 import { mutateProjectData } from './projectData'
 import { pick, type PromptLang } from './promptLang'
 import { isLockdownEnabledSync } from './lockdown'
 import { relayToCommander } from './commanderRelay'
 import { presidentWordsFit, relayToPresident, type PresidentReply } from './presidentRelay'
 import { getSettings } from './store'
+import { assistantRuntimeDirectory, assistantScopeOwnerKey, mutateAssistantRuntime, readAssistantRuntime } from './assistantRuntimeStore'
+import { runtimeOwnerKey } from './runtimeOwner'
+import { runtimeAdmissionBlocked } from './runtimeTransitionStore'
 
 /** An open proposal waits this long for its button. */
 export const PROPOSAL_MS = 10 * 60_000
@@ -85,6 +87,7 @@ export interface ShownProposal {
   via: 'phone' | 'screen'
 }
 interface Held extends ShownProposal {
+  originTurnId?: string
   path: string
   /** The phone say id of the owner line it came from (message states' `about`). Not shown. */
   about?: string
@@ -101,8 +104,18 @@ interface Held extends ShownProposal {
 export const proposalHash = (p: Pick<ShownProposal, 'kind' | 'projectId' | 'project' | 'title' | 'body'>): string =>
   createHash('sha256').update([p.kind, p.projectId, p.project, p.title, p.body].join('\n'), 'utf8').digest('hex')
 
-const g = globalThis as typeof globalThis & { __openground_assistant_proposals?: { list: Held[]; listeners: Set<() => void> } }
-const store = () => (g.__openground_assistant_proposals ??= { list: [], listeners: new Set() })
+type ProposalCache = { home: string; list: Held[]; listeners: Set<() => void> }
+const g = globalThis as typeof globalThis & { __openground_assistant_proposals?: Map<string, ProposalCache> }
+const store = () => {
+  const home = assistantRuntimeDirectory()
+  if (!(g.__openground_assistant_proposals instanceof Map)) g.__openground_assistant_proposals = new Map()
+  if (!g.__openground_assistant_proposals.has(home)) {
+    const saved = readAssistantRuntime().proposals
+    const list = saved.filter(p => typeof p.id === 'string' && typeof p.body === 'string' && typeof p.path === 'string') as unknown as Held[]
+    g.__openground_assistant_proposals.set(home, { home, list, listeners: new Set() })
+  }
+  return g.__openground_assistant_proposals.get(home)!
+}
 
 /** The talk was deleted: what it proposed goes too (not even listed faded). */
 export const clearProposals = (): void => {
@@ -112,8 +125,9 @@ export const clearProposals = (): void => {
 }
 
 /** Tests: forget every proposal. */
-export const __resetProposals = (): void => {
-  g.__openground_assistant_proposals = undefined
+export const __resetProposals = (keepDisk = false): void => {
+  g.__openground_assistant_proposals?.delete(assistantRuntimeDirectory())
+  if (!keepDisk) mutateAssistantRuntime(state => { state.proposals = []; state.actions = [] })
 }
 
 /** Told whenever the list changes (the phone link sends it on). Returns the unsubscribe. */
@@ -122,6 +136,7 @@ export const onProposalsChanged = (fn: () => void): (() => void) => {
   return () => void store().listeners.delete(fn)
 }
 const changed = () => {
+  mutateAssistantRuntime(state => { state.proposals = structuredClone(store().list) })
   store().listeners.forEach((fn) => {
     try {
       fn()
@@ -147,7 +162,7 @@ const sweep = (now: number): boolean => {
   return moved
 }
 
-const shown = ({ path: _path, pressing: _pressing, cancel: _cancel, about: _about, ...p }: Held): ShownProposal => ({ ...p })
+const shown = ({ path: _path, pressing: _pressing, cancel: _cancel, about: _about, originTurnId: _origin, ...p }: Held): ShownProposal => ({ ...p })
 
 /** What the screens show: oldest first. `via: 'phone'` = only those made from the iPhone. */
 export const listProposals = (o: { now?: number; via?: 'phone' } = {}): ShownProposal[] => {
@@ -205,6 +220,8 @@ const projectLabel = (project: KnownProject, all: KnownProject[]): string => {
 const add = (p: Omit<Held, 'id' | 'at' | 'expiresAt' | 'state'>, now: number): ShownProposal | string => {
   sweep(now)
   const s = store()
+  const existing = p.originTurnId ? s.list.find(x => x.originTurnId === p.originTurnId && proposalHash(x) === proposalHash(p)) : undefined
+  if (existing) return shown(existing)
   if (s.list.filter((x) => x.state === 'open').length >= OPEN_MAX) return FULL
   if (p.title.length + p.body.length > PROPOSAL_CHARS || frameLines(p.project) + (p.title ? frameLines(p.title) : 0) + frameLines(p.body) > FRAME_LINES) return TOO_LONG
   const held: Held = { ...p, id: randomUUID(), at: now, expiresAt: now + PROPOSAL_MS, state: 'open' }
@@ -220,6 +237,8 @@ const add = (p: Omit<Held, 'id' | 'at' | 'expiresAt' | 'state'>, now: number): S
 }
 
 export interface ProposeContext {
+  originTurnId?: string
+  isCurrent?: () => boolean
   lang: PromptLang
   now: number
   via: 'phone' | 'screen'
@@ -241,7 +260,8 @@ export const proposeCard = async (c: CardInput, ctx: ProposeContext): Promise<Sh
   const title = flat(c.title)
   const goal = flat(c.goal)
   if (!title || !goal || !items.length) return 'Not proposed: title, goal and at least one done condition are all required. Ask the owner for what is missing.'
-  return add({ kind: 'card', projectId: project.id, project: projectLabel(project, all), path: project.path, title, body: cardBody(goal, items, ctx.lang), via: ctx.via }, ctx.now)
+  if (ctx.isCurrent && !ctx.isCurrent()) return 'This assistant turn is no longer active.'
+  return add({ kind: 'card', projectId: project.id, project: projectLabel(project, all), path: project.path, title, body: cardBody(goal, items, ctx.lang), via: ctx.via, originTurnId: ctx.originTurnId }, ctx.now)
 }
 
 /** The title of a president frame: who gets the message. */
@@ -260,7 +280,8 @@ export const proposePresident = async (projectId: string, message: string, ctx: 
   const words = flat(message)
   if (!words) return 'Nothing to say: give the message.'
   if (!presidentWordsFit(words)) return TOO_LONG
-  return add({ kind: 'president', projectId: project.id, project: projectLabel(project, all), path: project.path, title: presidentTitle(ctx.lang), body: words, via: ctx.via, ...(ctx.about ? { about: ctx.about } : {}) }, ctx.now)
+  if (ctx.isCurrent && !ctx.isCurrent()) return 'This assistant turn is no longer active.'
+  return add({ kind: 'president', projectId: project.id, project: projectLabel(project, all), path: project.path, title: presidentTitle(ctx.lang), body: words, via: ctx.via, originTurnId: ctx.originTurnId, ...(ctx.about ? { about: ctx.about } : {}) }, ctx.now)
 }
 
 /** One message for a project's commander → its proposal. One line (a multi-line say wedges a desk). */
@@ -273,7 +294,8 @@ export const proposeMessage = async (projectId: string, message: string, ctx: Pr
   if (!visible(project.name) || !visible(project.path)) return UNSEEN_REFUSED
   const words = flat(message)
   if (!words) return 'Nothing to say: give the message.'
-  return add({ kind: 'commander', projectId: project.id, project: projectLabel(project, all), path: project.path, title: '', body: commanderLine(words, ctx.lang), via: ctx.via }, ctx.now)
+  if (ctx.isCurrent && !ctx.isCurrent()) return 'This assistant turn is no longer active.'
+  return add({ kind: 'commander', projectId: project.id, project: projectLabel(project, all), path: project.path, title: '', body: commanderLine(words, ctx.lang), via: ctx.via, originTurnId: ctx.originTurnId }, ctx.now)
 }
 
 /** 「やめて」: every open proposal is dropped (the safe direction — no button needed). */
@@ -292,7 +314,7 @@ export const withdrawProposals = (now = Date.now()): number => {
 
 // ── the button (the ONLY way one is carried out) ───────────────────────────
 
-export type ButtonRefusal = 'not-found' | 'closed' | 'expired' | 'mismatch' | 'work-mode'
+export type ButtonRefusal = 'not-found' | 'closed' | 'expired' | 'mismatch' | 'work-mode' | 'transition'
 export interface Carried {
   proposal: ShownProposal
   card?: { projectId: string; taskId: string; title: string }
@@ -305,7 +327,7 @@ export interface Carried {
 
 /** The owner pressed 「出す」/「送る」 on the frame that showed `hash`. Carried
  *  out at most once; anything that cannot be checked does nothing. */
-export const approveProposal = async (
+const executeProposal = async (
   id: unknown,
   hash: unknown,
   o: {
@@ -318,7 +340,13 @@ export const approveProposal = async (
     onPresident?: { landed?: (p: ShownProposal, about?: string) => void; reply: (p: ShownProposal, r: PresidentReply, about?: string) => void }
   },
 ): Promise<Carried | { error: ButtonRefusal }> => {
+  const expectedOwner = assistantScopeOwnerKey()
+  if (expectedOwner) await runtimeOwnerKey(expectedOwner)
   if (isLockdownEnabledSync()) return { error: 'work-mode' }
+  if (runtimeAdmissionBlocked('assistant') || readAssistantRuntime().paused) return { error: 'transition' }
+  const previous = typeof id === 'string' ? readAssistantRuntime().actions.find(a => a.proposalId === id) : undefined
+  if (previous && previous.hash !== hash) return { error: 'mismatch' }
+  if (previous?.state === 'completed' || previous?.state === 'started' || previous?.state === 'uncertain') return { error: 'closed' }
   const now = o.now ?? Date.now()
   if (sweep(now)) changed()
   const p = typeof id === 'string' ? store().list.find((x) => x.id === id) : undefined
@@ -326,6 +354,13 @@ export const approveProposal = async (
   if (p.state === 'expired') return { error: 'expired' }
   if (p.state !== 'open') return { error: 'closed' }
   if (typeof hash !== 'string' || hash !== proposalHash(p)) return { error: 'mismatch' }
+  const runtime = readAssistantRuntime()
+  const actionId = previous?.id ?? randomUUID()
+  mutateAssistantRuntime(state => {
+    const action = state.actions.find(a => a.id === actionId)
+    if (action) action.state = 'approved'
+    else state.actions.push({ id: actionId, proposalId: p.id, hash, conversationId: runtime.conversationId, epoch: runtime.epoch, state: 'approved', at: now, proposal: structuredClone(p) })
+  })
   // Closed before anything awaits: a second press (the Mac and the iPhone at once) finds it closed.
   p.state = 'done'
   p.closedAt = now
@@ -333,24 +368,34 @@ export const approveProposal = async (
   changed()
   // Not delivered / failed: open again to be pressed — unless it was dropped meanwhile.
   const reopen = () => {
+    mutateAssistantRuntime(state => { const action = state.actions.find(a => a.id === actionId); if (action) action.state = 'cancelled' })
     p.state = p.cancel ? 'dropped' : 'open'
     if (p.state === 'open') delete p.closedAt
     changed()
+  }
+  const completed = (value: Carried): Carried => {
+    mutateAssistantRuntime(state => { const action = state.actions.find(a => a.id === actionId); if (action) { action.state = 'completed'; action.receipt = value as unknown as Record<string, unknown> } })
+    return value
   }
   try {
     // Where the project is NOW (it may have been relocated since; removed = nothing to do).
     const path = ((await getSettings()).projects ?? []).find((x) => x.id === p.projectId)?.path
     if (!path) {
+      mutateAssistantRuntime(state => { const action = state.actions.find(a => a.id === actionId); if (action) action.state = 'cancelled' })
       p.state = 'dropped'
       changed()
       return { error: 'not-found' }
     }
     p.path = path
+    if (expectedOwner) await runtimeOwnerKey(expectedOwner)
+    const stillCurrent = readAssistantRuntime()
+    if (stillCurrent.epoch !== runtime.epoch || stillCurrent.generation !== runtime.generation) { reopen(); return { error: 'closed' } }
+    mutateAssistantRuntime(state => { const action = state.actions.find(a => a.id === actionId); if (action) action.state = 'started' })
     if (p.kind === 'card') {
-      const task: ProjectTask = { id: newId(), title: p.title, notes: p.body, done: false, createdAt: new Date(now).toISOString(), boardColumn: 'todo' }
+      const task: ProjectTask = { id: `assistant-${actionId}`, title: p.title, notes: p.body, done: false, createdAt: new Date(now).toISOString(), boardColumn: 'todo' }
       // One write, with the notes in it. Never folded into another card of the same title.
-      await mutateProjectData(p.path, (d) => void d.tasks.push(task))
-      return { proposal: shown(p), card: { projectId: p.projectId, taskId: task.id, title: task.title } }
+      await mutateProjectData(p.path, (d) => { const found = d.tasks.find(t => t.id === task.id); if (found && (found.title !== task.title || found.notes !== task.notes)) throw new Error('Assistant approved card receipt mismatch'); if (!found) d.tasks.push(task) })
+      return completed({ proposal: shown(p), card: { projectId: p.projectId, taskId: task.id, title: task.title } })
     }
     if (p.kind === 'president') {
       const passed = shown(p)
@@ -360,20 +405,33 @@ export const approveProposal = async (
       })
       // Could not open the window: it stays open, to be pressed again.
       if (!r.ok) reopen()
-      return { proposal: shown(p), president: r.ok ? { woke: r.woke, waiting: r.waiting } : { error: r.error }, ...(p.about ? { about: p.about } : {}) }
+      const result: Carried = { proposal: shown(p), president: r.ok ? { woke: r.woke, waiting: r.waiting } : { error: r.error }, ...(p.about ? { about: p.about } : {}) }
+      return r.ok ? completed(result) : result
     }
     const r = await (o.relay ?? relayToCommander)(p.path, p.body)
     const told = r.ok ? { delivered: r.delivered, woke: r.woke } : { delivered: false, woke: false, error: String(r.body.error ?? 'unreachable') }
     // Not delivered: it stays open, to be pressed again.
     if (!told.delivered) reopen()
-    return { proposal: shown(p), told }
+    return told.delivered ? completed({ proposal: shown(p), told }) : { proposal: shown(p), told }
   } catch (e) {
-    reopen()
+    if (readAssistantRuntime().actions.find(a => a.id === actionId)?.state === 'approved') { reopen(); throw e }
+    // The effect may have happened before its acknowledgement was lost. Keep
+    // its receipt held; reopening here could run the same approved action twice.
+    mutateAssistantRuntime(state => { const action = state.actions.find(a => a.id === actionId); if (action) { action.state = 'uncertain'; action.error = 'effect-result-unconfirmed' } })
     throw e
   } finally {
     p.pressing = false
   }
 }
+
+const approvals = new Set<Promise<Carried | { error: ButtonRefusal }>>()
+export const approveProposal = (...args: Parameters<typeof executeProposal>): ReturnType<typeof executeProposal> => {
+  const run = executeProposal(...args)
+  approvals.add(run)
+  void run.finally(() => approvals.delete(run)).catch(() => {})
+  return run
+}
+export const assistantApprovalsSettled = async (): Promise<void> => { await Promise.allSettled(Array.from(approvals)) }
 
 /** The owner pressed 「やめる」. */
 export const dropProposal = (id: unknown, now = Date.now()): ShownProposal | { error: ButtonRefusal } => {

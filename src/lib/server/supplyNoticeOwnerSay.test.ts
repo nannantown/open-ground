@@ -12,6 +12,7 @@ import {
   SUPPLY_OWNER_SAY_MAX,
   SUPPLY_PASTE_MEASURED_UNFOLDED,
   resetSupplyNoticeState,
+  cancelSupplyOwnerSay,
   SUPPLY_NOTICE_PREFIX,
   SUPPLY_REPLY_PREFIX,
 } from './supplyNotice'
@@ -58,6 +59,36 @@ const harness = (initial: string) => {
 beforeEach(() => resetSupplyNoticeState())
 
 describe('the OWNER lane (phone link)', () => {
+  it('persists admission only when an idle desk is ready, before any bytes are written', async () => {
+    const h = harness(BUSY)
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const beforeSend = vi.fn(async () => { expect(h.writes).toEqual([]); await gate })
+    await queueSupplyOwnerSay(PROJECT, 'durable owner line', undefined, h.deps, { beforeSend })
+    expect(beforeSend).not.toHaveBeenCalled()
+    h.setScreen(IDLE)
+    const delivered = flushSupplyNotices(h.deps)
+    await vi.waitFor(() => expect(beforeSend).toHaveBeenCalledOnce())
+    expect(h.writes).toEqual([])
+    release(); await delivered
+    expect(h.writes).toEqual(['durable owner line'])
+  })
+  it('never writes when the durable claim fails or its queued callback was cancelled while claiming', async () => {
+    const h = harness(IDLE)
+    const beforeSend = vi.fn(async () => { throw new Error('durable journal unavailable') })
+    await queueSupplyOwnerSay(PROJECT, 'held line', undefined, h.deps, { beforeSend })
+    expect(h.writes).toEqual([])
+    resetSupplyNoticeState()
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const claim = vi.fn(() => gate), onDone = vi.fn()
+    const delivery = queueSupplyOwnerSay(PROJECT, 'cancelled line', onDone, h.deps, { beforeSend: claim })
+    await vi.waitFor(() => expect(claim).toHaveBeenCalledOnce())
+    expect(cancelSupplyOwnerSay(PROJECT, onDone)).toBe(true)
+    release(); await delivery
+    expect(h.writes).toEqual([])
+    expect(onDone).not.toHaveBeenCalled()
+  })
   it('delivers SDK owner/reply input directly and retains refused input without reading a PTY', async () => {
     const received: string[] = [], done: boolean[] = []
     let accepts = false

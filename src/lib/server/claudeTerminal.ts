@@ -11,6 +11,7 @@ import { ensureClaudeFolderTrusted } from './claudeTrust'
 import { resolvedClaudeBin } from './claudeConnection'
 import { buildSandboxProfile, wrapWithSandboxExec } from './sandbox'
 import { CLAUDE_EFFORTS, type ClaudeEffort, type ProjectLaunchPrefs } from '../types'
+import { METERED_CLAUDE_ENV_KEYS } from './subscriptionOnly'
 
 // Launches `claude` interactively inside a PTY hosted by OPEN GROUND.
 // The user types in xterm.js; OPEN GROUND observes the session JSONL
@@ -468,20 +469,24 @@ export const buildLaunchCommand = (
   // embedded arg (shellQuoteArg). OPENGROUND_OWNED is always emitted LAST so a
   // caller-supplied key can never shadow it.
   env: Record<string, string> = {},
+  unsetEnv: readonly string[] = [],
 ): string => {
-  const pairs = Object.entries(env).filter(([k]) => ENV_KEY_RE.test(k))
+  const removed = unsetEnv.filter((key) => ENV_KEY_RE.test(key))
+  const pairs = Object.entries(env).filter(([k]) => ENV_KEY_RE.test(k) && !removed.includes(k))
   if (platform === 'win32') {
     // PowerShell has no inline per-command env syntax: each var is its own
     // `$env:K='v';` statement. It leaks into the rest of this short-lived
     // session — fine: the next statement is the claude run, then `; exit` tears
     // the wrapping shell down.
     const sets = pairs.map(([k, v]) => `$env:${k}=${shellQuoteArg(v, platform)};`).join(' ')
-    return `${sets ? sets + ' ' : ''}$env:OPENGROUND_OWNED='1'; & ${argv.join(' ')} ; exit\n`
+    const clear = removed.map((key) => `Remove-Item Env:${key} -ErrorAction SilentlyContinue;`).join(' ')
+    return `${clear ? clear + ' ' : ''}${sets ? sets + ' ' : ''}$env:OPENGROUND_OWNED='1'; & ${argv.join(' ')} ; exit\n`
   }
   // POSIX: inline `K='v'` assignments scoped to the single command (not
   // exported), in front of the always-present OPENGROUND_OWNED=1.
   const prefix = pairs.map(([k, v]) => `${k}=${shellQuoteArg(v, platform)}`).join(' ')
-  return `${prefix ? prefix + ' ' : ''}OPENGROUND_OWNED=1 ${argv.join(' ')} ; exit\n`
+  const clean = removed.length ? `env ${removed.map((key) => `-u ${key}`).join(' ')} ` : ''
+  return `${prefix ? prefix + ' ' : ''}OPENGROUND_OWNED=1 ${clean}${argv.join(' ')} ; exit\n`
 }
 
 // Assemble + write the Seatbelt profile for a sandboxed launch and return the
@@ -549,23 +554,6 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   // claudeTrust.ts). Without it, claude 2.1.167's blocking trust prompt wedges
   // the hidden PTY — the run hangs with an empty log. Best-effort; never throws.
   ensureClaudeFolderTrusted(opts.cwd)
-
-  const info = createTerminal({
-    cwd: opts.cwd,
-    cols: opts.cols ?? 120,
-    rows: opts.rows ?? 32,
-    tag: 'claude',
-    agentSessionId: opts.agentSessionId,
-    // Hidden utility sessions (auto-title / auto-description) stay off the Ground
-    // beacon — carried onto the pool entry so listActiveTerminals can filter them.
-    ...(opts.hidden ? { hidden: true } : {}),
-    // …and an OWNER DESK is carried on so the model-limit watch can find it,
-    // with the name it should use for this desk when it does.
-    ...(opts.ownerDesk ? { ownerDesk: true } : {}),
-    ...(opts.ownerDesk && opts.deskLabel ? { deskLabel: opts.deskLabel } : {}),
-    // The Board card this pane runs — the task-boundary clear's only handle on it.
-    ...(opts.taskId ? { taskId: opts.taskId } : {}),
-  })
 
   // Route the positional prompt through a temp file (see buildClaudeArgv §2):
   // a long prompt written inline to the PTY exceeds canonical-mode line length
@@ -641,7 +629,20 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
         }
       : {}),
   }
-  writeInput(info.id, buildLaunchCommand(launchArgs, process.platform, launchEnv))
+  // The login shell may source keys after the server's environment was checked.
+  // Remove paid-provider variables at the command's process boundary as well.
+  const command = buildLaunchCommand(launchArgs, process.platform, launchEnv, METERED_CLAUDE_ENV_KEYS)
+  // Shell argv has an OS argument-size limit, independent of the PTY's tiny
+  // canonical input line. The Claude process still receives a real PTY for its
+  // unmodified interactive REPL and native Remote Control.
+  const info = createTerminal({
+    cwd: opts.cwd, cols: opts.cols ?? 120, rows: opts.rows ?? 32, command,
+    tag: 'claude', agentSessionId: opts.agentSessionId,
+    ...(opts.hidden ? { hidden: true } : {}),
+    ...(opts.ownerDesk ? { ownerDesk: true } : {}),
+    ...(opts.ownerDesk && opts.deskLabel ? { deskLabel: opts.deskLabel } : {}),
+    ...(opts.taskId ? { taskId: opts.taskId } : {}),
+  })
 
   return {
     terminalId: info.id,

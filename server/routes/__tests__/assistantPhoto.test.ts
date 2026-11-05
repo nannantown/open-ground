@@ -22,6 +22,7 @@ import {
 } from '@/lib/server/assistantMemory'
 import { __resetAssistantMemory, type AssistantDeps } from '@/lib/server/phoneAssistant'
 import type { AssistantAsk, AssistantModel } from '@/lib/server/assistantSession'
+import { assistantRuntimeDirectory, withLocalClaudeAssistantScope } from '@/lib/server/assistantRuntimeStore'
 
 const real = vi.hoisted(() => ({ ask: null as null | ((t: string, d: AssistantDeps) => Promise<unknown>) }))
 const seen = vi.hoisted(() => ({ calls: [] as { text: string; photo?: string }[] }))
@@ -43,13 +44,15 @@ vi.mock('@/lib/server/phoneAssistant', async (orig) => {
 const app = new Hono().route('/', phoneLinkRoutes)
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13])
-const photos = () => readdir(join(openGroundHome(), 'assistant', 'photos')).catch(() => [] as string[])
+const photos = () => withLocalClaudeAssistantScope(() => readdir(join(assistantRuntimeDirectory(), 'photos')).catch(() => [] as string[]))
+const localLog = () => withLocalClaudeAssistantScope(readAssistantLog)
 const say = (body: object) => app.request('/api/phone-link/assistant/say', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
 
 beforeEach(async () => {
   __resetAssistantMemory()
   setLockdownCache(false)
   await clearAssistantLog()
+  await withLocalClaudeAssistantScope(clearAssistantLog)
   seen.calls = []
 })
 
@@ -85,7 +88,7 @@ describe('the say route with a photo', () => {
     expect(r.status).toBe(200)
     const [name] = await photos()
     expect(seen.calls).toEqual([{ text: '', photo: name }])
-    const owner = (await readAssistantLog()).find((e) => e.who === 'owner')!
+    const owner = (await localLog()).find((e) => e.who === 'owner')!
     expect(owner).toMatchObject({ text: '', photo: name, via: 'screen' })
     const got = await app.request(`/api/phone-link/assistant/photo/${name}`)
     expect(got.headers.get('content-type')).toBe('image/png')
@@ -134,7 +137,7 @@ describe('message states: the window names its line', () => {
   it('the window\'s clientId is kept on its line in the log (the startup check finds it there); a bad one is not', async () => {
     await say({ text: 'ひとつ', clientId: 'w-1' })
     await say({ text: 'ふたつ', clientId: 'x'.repeat(101) })
-    const owner = (await readAssistantLog()).filter((e) => e.who === 'owner')
+    const owner = (await localLog()).filter((e) => e.who === 'owner')
     expect(owner.find((e) => e.text === 'ひとつ')?.clientId).toBe('w-1')
     expect(owner.find((e) => e.text === 'ふたつ')?.clientId).toBeUndefined()
   })
@@ -143,19 +146,19 @@ describe('message states: the window names its line', () => {
 describe('a photo leaves with its line', () => {
   it('deleting the line, clearing the talk, or its day expiring deletes the file', async () => {
     await say({ text: 'a', photo: PNG.toString('base64') })
-    const owner = (await readAssistantLog()).find((e) => e.who === 'owner')!
+    const owner = (await localLog()).find((e) => e.who === 'owner')!
     expect(await photos()).toHaveLength(1)
-    await deleteAssistantEntry(owner.id, 'assistant')
+    await withLocalClaudeAssistantScope(() => deleteAssistantEntry(owner.id, 'assistant'))
     expect(await photos()).toEqual([])
 
     await say({ text: 'b', photo: PNG.toString('base64') })
-    await clearAssistantLog('assistant')
+    await withLocalClaudeAssistantScope(() => clearAssistantLog('assistant'))
     expect(await photos()).toEqual([])
 
     const old = Date.now() - 40 * 86_400_000
-    const kept = await saveAssistantPhoto(PNG, 'png', old)
-    const fresh = await saveAssistantPhoto(PNG, 'png')
-    await pruneAssistantLog(30)
+    const kept = await withLocalClaudeAssistantScope(() => saveAssistantPhoto(PNG, 'png', old))
+    const fresh = await withLocalClaudeAssistantScope(() => saveAssistantPhoto(PNG, 'png'))
+    await withLocalClaudeAssistantScope(() => pruneAssistantLog(30))
     expect(await photos()).toEqual([fresh])
     expect(kept).not.toBe(fresh)
   })

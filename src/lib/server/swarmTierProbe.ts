@@ -53,6 +53,7 @@
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { tmpdir } from 'os'
+import { assertClaudeSubscriptionLaunch } from './subscriptionOnly'
 import { resolvedClaudeBin, claudeConnection } from './claudeConnection'
 import { normalizeScreen, matchesQuotaExhaustion } from './swarmRateLimitText'
 import {
@@ -244,9 +245,11 @@ const realExec: TierProbeExec = async (bin, args, opts) => {
   if (process.env.VITEST)
     throw new Error('swarmTierProbe.realExec under vitest — inject TierProbeDeps.exec')
   try {
+    const env = await assertClaudeSubscriptionLaunch(opts.cwd, { ...process.env, OPENGROUND_CLAUDE_BIN: bin })
     const { stdout, stderr } = await execFile(bin, args, {
       timeout: opts.timeoutMs,
       cwd: opts.cwd,
+      env,
       shell: isWindows,
       windowsHide: true,
     })

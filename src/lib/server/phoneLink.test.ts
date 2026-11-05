@@ -29,15 +29,16 @@ vi.mock('./swarmSupplyRuntime', async (orig) => ({
   listLiveSupplyDesks: (cwd: string) => h.desk ? [{ runtime: h.sdkDesk ? 'sdk' : 'pty', handleId: 'd1', cwd, agentSessionId: null, lastOutputAt: null, startedAt: 1, stopping: h.stopping }] : [],
 }))
 
-import { AssistantFailure, askAssistant, __resetAssistantMemory } from './phoneAssistant'
-import { __resetProposals, openProposals, proposalHash, proposeMessage } from './assistantProposals'
+import { AssistantFailure, askAssistant as localAsk, __resetAssistantMemory as localReset } from './phoneAssistant'
+import { __resetProposals as localResetProposals, openProposals as localOpenProposals, proposalHash, proposeMessage as localProposeMessage } from './assistantProposals'
+import { withLocalClaudeAssistantScope } from './assistantRuntimeStore'
 // A message any path sends to a commander lands here (never a real desk).
 const relayed = vi.hoisted(() => [] as string[])
 vi.mock('./commanderRelay', () => ({ relayToCommander: async (_path: string, text: string) => (relayed.push(text), { ok: true, delivered: true, runtime: 'sdk', woke: false }) }))
 import { __testConnect, flushAssistantOutbox, flushPush, PUSH_GAP_MS, PUSH_RETRY_MAX, SAY_HOLD_MAX_MS, handlePhoneFrame, handleRelayFrame, phoneEventsFromLine, pumpTranscript, sendAppLine, sendPresidentTalk, sendRelayState, pairingCode, pairPhone, readPhoneLinkConfig, relayUrlAllowed, startPhoneLink, stopPhoneLink, unpairPhone, tick, __testLinkState } from './phoneLink'
 import { alreadyStored, asCursor, type Cursor, type PushTarget } from '../../../worker/src/phoneRelayAuth'
 import { setLockdownCache } from './lockdown'
-import { saveAssistantConfig } from './assistantMemory'
+import { saveAssistantConfig as localSaveConfig, appendAssistantEntries as localAppend, clearAssistantLog as localClearLog } from './assistantMemory'
 import { openGroundHome } from './paths'
 import { phoneLinkRoutes } from '../../../server/routes/phoneLink'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
@@ -47,6 +48,17 @@ import type { AddressInfo } from 'node:net'
 import { WebSocketServer } from 'ws'
 import { JWT_MIN_AGE_MS, savePushKey, type PushKey } from './phonePush'
 import { flushSupplyNotices, resetSupplyNoticeState, SUPPLY_OWNER_SAY_MAX, SUPPLY_NOTICE_PREFIX, supplyNoticeLine, supplyReplyLine, assistantRelayLine } from './supplyNotice'
+
+// This fixture is deliberately signed out with only the legacy local unlock.
+// Seed and inspect its own namespace; an owner journal must never be a fallback.
+const askAssistant: typeof localAsk = (...args) => withLocalClaudeAssistantScope(() => localAsk(...args))
+const __resetAssistantMemory = () => withLocalClaudeAssistantScope(localReset)
+const __resetProposals = () => withLocalClaudeAssistantScope(localResetProposals)
+const openProposals: typeof localOpenProposals = (...args) => withLocalClaudeAssistantScope(() => localOpenProposals(...args))
+const proposeMessage: typeof localProposeMessage = (...args) => withLocalClaudeAssistantScope(() => localProposeMessage(...args))
+const saveAssistantConfig: typeof localSaveConfig = (...args) => withLocalClaudeAssistantScope(() => localSaveConfig(...args))
+const appendAssistantEntries: typeof localAppend = (...args) => withLocalClaudeAssistantScope(() => localAppend(...args))
+const clearAssistantLog: typeof localClearLog = (...args) => withLocalClaudeAssistantScope(() => localClearLog(...args))
 
 const PROJECT = '/repo/alpha'
 const CFG = { v: 1 as const, relayUrl: 'https://relay.test', macKey: 'm'.repeat(43), phoneKey: 'p'.repeat(43), projectId: 'p1' }
@@ -361,7 +373,6 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
   })
 
   it("the phone's history frames keep their shape: which model wrote an answer stays in the Mac's log", async () => {
-    const { appendAssistantEntries, clearAssistantLog } = await import('./assistantMemory')
     await clearAssistantLog()
     await appendAssistantEntries([{ at: Date.now(), who: 'assistant', text: '先にクレカだね。', via: 'phone', model: 'claude-opus-x' }])
     const { sent, sock } = fakeSocket()
@@ -489,34 +500,37 @@ describe('the assistant — a talk partner of its own, heard on the phone only',
   it("a failure is told in the Mac's language, and still told when the settings cannot be read", async () => {
     const { sent, sock } = fakeSocket()
     const st = __testLinkState(CFG2, sock)
-    const timedOut = async () => {
+    const timedOut = vi.fn(async () => {
       throw new Error('canvas AI session timed out')
-    }
+    })
     h.language = 'ja'
     await handlePhoneFrame(st, { type: 'say', id: 'j1', text: '全体どう?', projectId: 'assistant' }, { assistant: timedOut })
     h.settingsThrow = true
     await handlePhoneFrame(st, { type: 'say', id: 'j2', text: '全体どう?', projectId: 'assistant' }, { assistant: timedOut })
     expect(sent.filter((f) => f.state === 'rejected').map((f) => [f.id, f.detail])).toEqual([
       ['j1', 'アシスタントが時間内に答えられませんでした。'],
-      ['j2', 'The assistant did not answer in time.'],
+      ['j2', 'The assistant could not answer.'],
     ])
+    expect(timedOut).toHaveBeenCalledOnce() // unreadable provider settings cannot authorize a model call
   })
 
   it('a full assistant gets just busy: nothing queued, nothing echoed, not asked', async () => {
     __resetAssistantMemory()
-    const never: Parameters<typeof askAssistant>[1] = { run: () => new Promise(() => {}), digest: async () => ({ text: '', projects: [] }) }
-    void askAssistant('1', never).catch(() => {})
-    void askAssistant('2', never).catch(() => {})
+    let release!: (text: string) => void
+    const gate = new Promise<string>(resolve => { release = resolve })
+    const never: Parameters<typeof askAssistant>[1] = { model: { warm: async () => {}, ask: async () => gate }, digest: async () => ({ text: '', projects: [] }) }
+    const pending = [askAssistant('1', never), askAssistant('2', never)]
     const { sent, sock } = fakeSocket()
     const st = __testLinkState(CFG2, sock)
     const asked: string[] = []
-    await handlePhoneFrame(st, { type: 'say', id: 'f3', text: '3', projectId: 'assistant' }, {
-      assistant: async (t) => (asked.push(t), { reply: 'x' }),
-    })
-    __resetAssistantMemory()
-    expect(asked).toEqual([])
-    expect(sent).toHaveLength(1)
-    expect(sent[0]).toMatchObject({ type: 'ack', id: 'f3', state: 'rejected', reason: 'busy' })
+    try {
+      await handlePhoneFrame(st, { type: 'say', id: 'f3', text: '3', projectId: 'assistant' }, {
+        assistant: async (t) => (asked.push(t), { reply: 'x' }),
+      })
+      expect(asked).toEqual([])
+      expect(sent).toHaveLength(1)
+      expect(sent[0]).toMatchObject({ type: 'ack', id: 'f3', state: 'rejected', reason: 'busy' })
+    } finally { release('synthetic fixture completed'); await Promise.allSettled(pending); __resetAssistantMemory(); await clearAssistantLog() }
   })
 
   it('a busy assistant and an internal failure reach the phone as a reason and plain words only', async () => {

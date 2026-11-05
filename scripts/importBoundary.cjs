@@ -19,6 +19,8 @@ const SEAMS = [
   'src/lib/server/workerRuntime.ts', //   pty⇔sdk dispatcher — workerKey / runtimeOf
   'src/lib/server/swarmSupplyRuntime.ts', // single supply handle/delivery seam across PTY and SDK
   'src/lib/server/swarmSupply.ts', // owns supply launch on either provider; singleton checks use the seam
+  'src/lib/server/swarmRuntimeTransition.ts', // lifecycle seam: drains settled SDK turns and proves/retire recorded PTYs, retaining worktree identity
+  'src/lib/server/presidentInbox.ts', // durable input seam: SDK consumed/settled receipts and guarded PTY delivery share one owner inbox
   'src/lib/server/liveDesks.ts', //       "who is alive / where", both pools, once
   'server/routes/terminal.ts', //         the PTY pool's own REST surface
   'server/routes/sdkSession.ts', //       the SDK pool's own REST surface

@@ -23,7 +23,7 @@ beforeEach(() => {
       posted.push(patch)
       if (rejectSave) return json({ error: 'refused' }, 400)
       Object.assign(status.preferences, Object.fromEntries(Object.entries(patch).map(([key, value]) => [key, value ?? undefined])))
-      return json({ preferences: status.preferences })
+      return json({ preferences: status.preferences, runtime: status.runtime })
     }
     if (path.endsWith('/login')) { status.connection.state = 'connecting'; return json({ authorizationUrl, loginId: 'login-1' }) }
     if (path.endsWith('/cancel')) { status.connection.state = 'signed-out'; return json({ ok: true }) }
@@ -91,4 +91,20 @@ describe('owner ChatGPT controls', () => {
     expect((window as unknown as { openground: { openExternal: ReturnType<typeof vi.fn> } }).openground.openExternal).not.toHaveBeenCalled()
     expect(screen.queryByRole('link')).toBeNull()
   })
+})
+
+
+it('shows the requested provider separately from the effective actor and sends revision-bound recovery', async () => {
+  const profile = { provider: 'claude' as const }
+  status.runtime = {
+    assistant: { scope: 'assistant', revision: 7, phase: 'attention', effective: profile, desired: { provider: 'chatgpt', model: 'catalog-model' }, updatedAt: '2026-11-05T00:00:00Z', error: 'authentication-required' },
+    swarm: { scope: 'swarm', revision: 1, phase: 'stable', effective: profile, desired: profile, updatedAt: '2026-11-05T00:00:00Z' },
+  }
+  render(<ChatGptSetting enabled lockdown={false} />)
+  const group = await screen.findByRole('group', { name: 'settings.chatgpt.assistant' })
+  expect(within(group).getByRole('button', { name: 'ChatGPT' })).toHaveAttribute('aria-pressed', 'true')
+  expect(within(group).getByRole('button', { name: 'ChatGPT' })).toBeDisabled()
+  expect(screen.getByText(/catalog-model/).textContent).toContain('Claude')
+  fireEvent.click(screen.getByRole('button', { name: 'settings.runtime.retry' }))
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/chatgpt/transition', expect.objectContaining({ body: JSON.stringify({ action: 'retry', scope: 'assistant', revision: 7 }) })))
 })

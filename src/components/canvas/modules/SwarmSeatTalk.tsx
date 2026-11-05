@@ -18,6 +18,8 @@
 
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { ChevronDown } from 'lucide-react'
+import type { ConversationSend } from '@/lib/useConversationDraft'
+import { ConversationDraftStatus } from '@/components/assistant/ConversationDraftStatus'
 import { useT } from '@/i18n/I18nContext'
 import { groupSdkFrames } from '@/lib/sdkTranscript'
 import { EventRow, ToolCard, postFailureMessage, type Frame } from './SdkWorkerPane'
@@ -140,7 +142,7 @@ export const SwarmSeatFeed = ({
 }
 
 /** What a send did, in words the seat can show as-is. */
-export type SeatSayResult = { ok: true; note: string } | { ok: false; error: string }
+export type SeatSayResult = { ok: true; note: string; receipt?: { id?: string; state?: string } } | { ok: false; error: string; refused?: boolean }
 
 /** A parent can retain a draft while its conversation surface is unmounted. */
 export interface SeatDraftState {
@@ -148,14 +150,15 @@ export interface SeatDraftState {
   onChange: Dispatch<SetStateAction<string>>
   pending: boolean
   onPendingChange: Dispatch<SetStateAction<boolean>>
+  durable?: ReturnType<typeof import('@/lib/useConversationDraft').useConversationDraft>
 }
 
 type T = (k: string, p?: Record<string, string | number>) => string
 
-const postJson = async (url: string, body: unknown) => {
+const postJson = async (url: string, body: unknown, ownerId?: string) => {
   const r = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(ownerId ? { 'X-OpenGround-Owner': ownerId } : {}) },
     body: JSON.stringify(body),
   })
   return { r, b: (await r.json().catch(() => null)) as Record<string, unknown> | null }
@@ -167,31 +170,39 @@ export const sayToWorker = async (
   sdkSessionId: string,
   text: string,
   t: T,
+  send?: ConversationSend,
 ): Promise<SeatSayResult> => {
   const { r, b } = await postJson(
     `/api/sdk-session/${encodeURIComponent(sdkSessionId)}/input?path=${encodeURIComponent(projectPath)}`,
-    { text },
+    { text, ...(send ? { clientId: send.clientId, draftClientId: send.draftClientId, draftRevision: send.draftRevision } : {}) },
+    send?.ownerId,
   )
+  const receipt = b?.receipt as { id?: string; state?: string } | undefined
+  if (send && r.ok && (receipt?.id !== send.clientId || typeof receipt.state !== 'string')) return { ok: false, error: t('settings.draft.pending') }
+  if (send && receipt?.id === send.clientId && receipt.state === 'uncertain') return { ok: true, note: t('settings.assistant.uncertain'), receipt }
   return r.ok
-    ? { ok: true, note: t('projectPanel.swarm.say.delivered') }
-    : { ok: false, error: t('projectPanel.swarm.say.failed', { error: postFailureMessage(r.status, b) }) }
+    ? { ok: true, note: t(send && b?.queued === true && b.delivered !== true ? 'projectPanel.swarm.say.queued' : 'projectPanel.swarm.say.delivered'), ...(receipt ? { receipt } : {}) }
+    : { ok: false, refused: r.status >= 400 && r.status < 500, error: t('projectPanel.swarm.say.failed', { error: postFailureMessage(r.status, b) }) }
 }
 
 /** The Claude president's guarded owner lane. Queueing is acceptance, even
  *  while its native input box is occupied; the server owns safe delivery. */
-export const sayToPresidentPty = async (projectPath: string, terminalId: string, text: string, t: T): Promise<SeatSayResult> => {
-  const { r, b } = await postJson('/api/swarm/supply/input', { path: projectPath, terminalId, text })
+export const sayToPresidentPty = async (projectPath: string, terminalId: string, text: string, t: T, send?: ConversationSend): Promise<SeatSayResult> => {
+  const { r, b } = await postJson('/api/swarm/supply/input', { path: projectPath, terminalId, text, ...(send ? { clientId: send.clientId, draftClientId: send.draftClientId, draftRevision: send.draftRevision } : {}) }, send?.ownerId)
+  const receipt = b?.receipt as { id?: string; state?: string } | undefined
+  if (send && r.ok && (receipt?.id !== send.clientId || typeof receipt.state !== 'string')) return { ok: false, error: t('settings.draft.pending') }
+  if (send && receipt?.id === send.clientId && receipt.state === 'uncertain') return { ok: true, note: t('settings.assistant.uncertain'), receipt }
   if (!r.ok || b?.queued !== true) {
-    return { ok: false, error: t('projectPanel.swarm.say.failed', { error: postFailureMessage(r.status, b) }) }
+    return { ok: false, refused: r.status >= 400 && r.status < 500, error: t('projectPanel.swarm.say.failed', { error: postFailureMessage(r.status, b) }) }
   }
-  return { ok: true, note: t(b.delivered === true ? 'projectPanel.swarm.say.delivered' : 'projectPanel.swarm.say.queued') }
+  return { ok: true, note: t(b.delivered === true ? 'projectPanel.swarm.say.delivered' : 'projectPanel.swarm.say.queued'), ...(receipt ? { receipt } : {}) }
 }
 
 /** The manager: POST /api/swarm/manager/say — the president's relay path, so
  *  an absent manager is woken exactly as a relayed sentence wakes it. */
 export const sayToManager = async (projectPath: string, text: string, t: T): Promise<SeatSayResult> => {
   const { r, b } = await postJson('/api/swarm/manager/say', { path: projectPath, text })
-  if (!r.ok) return { ok: false, error: t('projectPanel.swarm.say.failed', { error: postFailureMessage(r.status, b) }) }
+  if (!r.ok) return { ok: false, refused: r.status >= 400 && r.status < 500, error: t('projectPanel.swarm.say.failed', { error: postFailureMessage(r.status, b) }) }
   // held (a PTY desk mid-turn) ≠ refused (the desk closed under us): say
   // which, and keep the words either way.
   if (b?.delivered !== true) {
@@ -215,7 +226,7 @@ export const SwarmSeatSay = ({
   draftState,
 }: {
   placeholder: string
-  onSend: (text: string) => Promise<SeatSayResult>
+  onSend: (text: string, send?: ConversationSend) => Promise<SeatSayResult>
   /** The president's ordinary conversation; other seats stay folded. */
   alwaysOpen?: boolean
   disabled?: boolean
@@ -242,7 +253,12 @@ export const SwarmSeatSay = ({
     if (alwaysOpen) boxRef.current?.focus()
     setSending(true)
     setOutcome(null)
-    const r = await onSend(text).catch(
+    let attempt: ConversationSend | undefined
+    const pendingSend = draftState?.durable?.prepareSend ? (async () => {
+      attempt = await draftState.durable!.prepareSend!()
+      return onSend(attempt.text.trim(), attempt)
+    })() : onSend(text)
+    const r = await pendingSend.catch(
       (e: unknown): SeatSayResult => ({ ok: false, error: e instanceof Error ? e.message : String(e) }),
     )
     setSending(false)
@@ -252,9 +268,10 @@ export const SwarmSeatSay = ({
     if (r.ok) {
       // A collapsed/remounted composer may already contain a newer draft when
       // this request finishes. Its acknowledgement clears only its own words.
-      setDraft(current => current === sentDraft ? '' : current)
+      if (attempt) await draftState?.durable?.accepted?.(attempt, r.receipt)
+      else setDraft(current => current === sentDraft ? '' : current)
       if (!alwaysOpen) setOpen(false)
-    }
+    } else if (attempt && r.refused) draftState?.durable?.refused?.(attempt)
   }
 
   const note = outcome ? (
@@ -317,10 +334,11 @@ export const SwarmSeatSay = ({
           disabled={disabled || sending || !draft.trim()}
           aria-busy={sending}
         >
-          {t('projectPanel.swarm.say.send')}
+          {t(draftState?.durable?.attempt ? 'settings.draft.retryMessage' : 'projectPanel.swarm.say.send')}
         </button>
       </div>
       {note}
+      <ConversationDraftStatus draft={draftState?.durable} />
     </div>
   )
 }

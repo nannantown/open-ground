@@ -80,9 +80,7 @@ describe('provider-specific long-lived desk slots', () => {
     await recordSwarmSession(project, 'manager', GPT_MANAGER); await saveChatGptTranscript(GPT_MANAGER)
     const savedHistory = await readFile(chatGptConversationFile(GPT_MANAGER), 'utf8')
     mock.account = 'a-different-synthetic-account'
-    const next = await resolveSwarmSession(project, 'manager', { ...idle, provider: 'chatgpt' })
-    expect(next).toMatchObject({ resume: false, reason: 'missing' })
-    expect(next.agentSessionId).not.toBe(GPT_MANAGER)
+    await expect(resolveSwarmSession(project, 'manager', { ...idle, provider: 'chatgpt' })).rejects.toThrow(/uncertain|invalid history/)
     expect(await readFile(chatGptConversationFile(GPT_MANAGER), 'utf8')).toBe(savedHistory)
     expect((await readSwarmSessions(project)).chatgpt?.manager?.sessionId).toBe(GPT_MANAGER)
     expect(await resolveSwarmSession(project, 'manager', idle)).toMatchObject({ resume: true, agentSessionId: CLAUDE_MANAGER })

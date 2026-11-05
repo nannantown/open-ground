@@ -14,12 +14,12 @@
 // lives on in the memo, which the assistant rewrites (phoneAssistant.ts) when
 // old lines leave its view or the owner says "remember" / "forget". Nothing
 // here is ever logged to the console or kept on the relay.
-import { appendFile, mkdir, readFile, readdir, rm, unlink, writeFile } from 'fs/promises'
+import { appendFile, mkdir, open, readFile, readdir, rm, unlink } from 'fs/promises'
 import { join } from 'path'
 import { newId } from '@/lib/ids'
 import type { PhoneCallRecord } from '@/lib/types'
 import { atomicWriteJson, atomicWriteText } from './atomicWrite'
-import { openGroundHome } from './paths'
+import { assistantRuntimeDirectory, mutateAssistantRuntime, readAssistantRuntime } from './assistantRuntimeStore'
 
 export const ASSISTANT_LOG_DAYS = { default: 30, min: 1, max: 365 }
 export const ASSISTANT_MEMORY_CHARS = { default: 4000, min: 500, max: 8000 }
@@ -44,6 +44,8 @@ export interface AssistantEntry extends Partial<PhoneCallRecord> {
   via: 'phone' | 'screen'
   /** Stable phone say id, for reconciling an optimistic owner line by identity. */
   clientId?: string
+  /** Durable conversation/turn ownership, independent of a provider session. */
+  conversationId?: string
   /** The card the owner's button put on a Board (the app's line about it). */
   card?: { projectId: string; taskId: string; title: string }
   /** A photo the owner sent with this line: its file name under photos/. */
@@ -65,7 +67,7 @@ export interface AssistantConfig {
   voiceChoice: AssistantVoice
 }
 
-const dir = () => join(openGroundHome(), 'assistant')
+const dir = assistantRuntimeDirectory
 const logDir = () => join(dir(), 'log')
 const memoFile = () => join(dir(), 'memory.md')
 const stateFile = () => join(dir(), 'state.json')
@@ -86,8 +88,15 @@ const locked = <T>(fn: () => Promise<T>): Promise<T> => {
 /** Bumped by every delete: a turn that started before it must not write back
  *  a memo built from what the owner has just erased. */
 const g = globalThis as typeof globalThis & { __openground_assistant_epoch?: number }
-export const assistantEpoch = (): number => g.__openground_assistant_epoch ?? 0
-const bump = () => void (g.__openground_assistant_epoch = assistantEpoch() + 1)
+export const assistantEpoch = (): number => readAssistantRuntime().generation
+const bump = () => {
+  const generation = mutateAssistantRuntime(state => {
+    state.generation++
+    for (const turn of state.turns) if (turn.state === 'running') { turn.state = 'interrupted'; turn.error = 'conversation-data-changed' }
+    return state.generation
+  })
+  g.__openground_assistant_epoch = generation
+}
 
 // ── config ─────────────────────────────────────────────────────────────────
 
@@ -188,8 +197,20 @@ export const sniffPhoto = (b: Uint8Array): AssistantPhotoExt | null => {
 export const saveAssistantPhoto = async (bytes: Uint8Array, ext: AssistantPhotoExt, at = Date.now()): Promise<string> => {
   await ensureDir(photoDir())
   const name = `${dayOf(at)}-${newId()}.${ext}`
-  await writeFile(join(photoDir(), name), bytes, { mode: MODE, flag: 'wx' })
-  return name
+  const path = join(photoDir(), name)
+  let created = false
+  try {
+    const photo = await open(path, 'wx', MODE)
+    created = true
+    try { await photo.writeFile(bytes); await photo.sync() } finally { await photo.close() }
+    // Receipt acceptance can release the client's original bytes. Persist the
+    // directory entry as well before returning an acceptable photo reference.
+    if (process.platform !== 'win32') {
+      const directory = await open(photoDir(), 'r')
+      try { await directory.sync() } finally { await directory.close() }
+    }
+    return name
+  } catch (error) { if (created) await rm(path, { force: true }).catch(() => {}); throw error }
 }
 
 /** A kept photo's path, or null for any name this module did not make. */
@@ -227,6 +248,24 @@ export const appendAssistantEntries = (entries: Omit<AssistantEntry, 'id'>[]): P
     const out = entries.map((e) => ({ id: newId(), ...e }))
     for (const e of out) await appendFile(join(logDir(), `${dayOf(e.at)}.jsonl`), JSON.stringify(e) + '\n', { mode: MODE })
     return out
+  })
+
+/** Project a committed turn once. Replaying a journal after a crash cannot
+ * duplicate its owner/answer pair, even if only the first row was appended. */
+export const appendAssistantReceiptEntries = (turnId: string, entries: Omit<AssistantEntry, 'id'>[], current: () => boolean = () => true): Promise<void> =>
+  locked(async () => {
+    await ensureDir(logDir())
+    for (let index = 0; index < entries.length; index++) {
+      if (!current()) return
+      const entry = { ...entries[index], id: `turn:${turnId}:${index}` }
+      const path = join(logDir(), `${dayOf(entry.at)}.jsonl`)
+      const previous = parseLines(await readFile(path, 'utf8').catch(() => '')).find(e => e.id === entry.id)
+      if (previous) {
+        if (JSON.stringify(previous) !== JSON.stringify(entry)) throw new Error('Assistant history receipt conflict')
+        continue
+      }
+      if (current()) await appendFile(path, JSON.stringify(entry) + '\n', { mode: MODE })
+    }
   })
 
 /** Call receipts use the phone's stable id. Retrying one never appends twice,

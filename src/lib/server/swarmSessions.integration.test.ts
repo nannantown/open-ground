@@ -10,7 +10,7 @@ import { parseArgs } from 'util'
 import { addProjectEntry, __resetMigrationCacheForTests } from './registry'
 import { claudeConnection } from './claudeConnection'
 import { claudeDirName } from './claudeProjectDir'
-import { isClaudeSessionLive, killTerminal } from './terminal'
+import { isClaudeSessionLive, killTerminal, getTerminalScreen, getTerminal } from './terminal'
 import {
   spawnSwarmManager,
   MANAGER_INJECTION,
@@ -56,7 +56,7 @@ const STUB = (capdir: string) => `#!/bin/sh
 set -u
 case "\${1:-}" in
   --version|-v) echo "stub-claude 0.0.0"; exit 0 ;;
-  auth) [ "\${2:-}" = "status" ] && { echo '{"loggedIn":true}'; exit 0; } ;;
+  auth) [ "\${2:-}" = "status" ] && { echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'; exit 0; } ;;
 esac
 n=0
 while ! mkdir "${capdir}/claim.$n" 2>/dev/null; do n=$((n+1)); done
@@ -137,15 +137,18 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     }
   }
 
-  const nthLaunch = (n: number) =>
+  const nthLaunch = (n: number, fixturePtyId?: string) =>
     until(`launch #${n}`, async () => {
+      const pty = fixturePtyId ? getTerminal(fixturePtyId) : null
+      if (pty?.finishedAt && pty.exitCode !== 0) throw new Error(`Fixture PTY exited (${pty.exitCode}): ${getTerminalScreen(fixturePtyId!)}`)
       const failed = listSdkSessions().find((session) => session.status === 'failed')
       if (failed) throw new Error(`SDK fixture failed: ${failed.exitReason}`)
       const l = await launches()
       return l.length >= n ? l[n - 1] : null
     }).catch(async (error) => {
       const trace = await readFile(join(capdir, 'protocol.jsonl'), 'utf8').catch(() => '(no CLI trace)')
-      throw new Error(`${String(error)}; sessions=${JSON.stringify(listSdkSessions())}; trace=${trace}`)
+      const screens = fixturePtyId ? [{ id: fixturePtyId, info: getTerminal(fixturePtyId), screen: getTerminalScreen(fixturePtyId)?.slice(-2500) }] : []
+      throw new Error(`${String(error)}; sessions=${JSON.stringify(listSdkSessions())}; trace=${trace}; fixtureScreens=${JSON.stringify(screens)}`)
     })
 
   // The app restart. In production the whole process dies: every PTY goes with it and
@@ -290,8 +293,9 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
 
   it('SUPPLY: boot → restart → resumes the same desk, told to re-read the Board before filing', async () => {
     const cold = await spawnSwarmSupply({ projectPath: proj })
+    expect(getTerminal(cold.terminalId), JSON.stringify(cold)).not.toBeNull()
     expect(cold.resumed).toBe(false)
-    const first = await nthLaunch(1)
+    const first = await nthLaunch(1, cold.terminalId)
     expect(first.flag).toBe('--session-id')
     expect(first.prompt).toBe(SUPPLY_INJECTION + languageDirective('en'))
 

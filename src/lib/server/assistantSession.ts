@@ -36,6 +36,7 @@ import { z } from 'zod'
 import type * as Sdk from '@anthropic-ai/claude-agent-sdk'
 import { importSdkModule } from './sdkSession'
 import { resolveUserClaudeBin, sdkSessionEnv } from './swarmWorkerSdk'
+import { assertClaudeSubscriptionLaunch } from './subscriptionOnly'
 import type { ToolResult } from './assistantTools'
 import type { CardInput } from './assistantProposals'
 import type { ClaudeEffort } from '../types'
@@ -45,6 +46,7 @@ import { resolveAvailableTier } from './swarmLaunch'
 import { MODEL_TIER_LADDER, isModelTier, markRateLimited, type ModelTier } from './swarmQuota'
 import { matchesQuotaRefusal } from './sdkEvents'
 import { selectedRuntime } from './chatgptRuntime'
+import { isLocalClaudeAssistantScope } from './assistantRuntimeStore'
 import { chatGptAssistantModel, closeChatGptAssistant } from './chatgptAssistant'
 
 /** Every line starts here: fast enough to sound like talk; its tools do the looking up. */
@@ -78,6 +80,9 @@ export interface AssistantToolSet {
 type ToolName = keyof AssistantToolSet
 
 export interface AssistantAsk {
+  /** Recheck the admitted owner/epoch immediately before native launch/input. */
+  authorize?: () => Promise<void>
+  runtimeOwnerKey?: string
   /** Changes when what the session was started with is no longer true (style,
    *  name, language, a delete): the next line then starts a fresh session. */
   key: string
@@ -97,7 +102,7 @@ export interface AssistantAsk {
 export interface AssistantModel {
   ask(o: AssistantAsk): Promise<string>
   /** Start (or keep) a session so the next line skips the start-up. */
-  warm(o: Pick<AssistantAsk, 'key' | 'system'>): Promise<void>
+  warm(o: Pick<AssistantAsk, 'key' | 'system' | 'authorize' | 'runtimeOwnerKey'>): Promise<void>
 }
 
 export const ASSISTANT_TOOL_SHAPES = {
@@ -151,11 +156,11 @@ export const assistantToolGate = async (input: unknown) => {
 }
 
 /** The SDK options a session starts with (exported for the launch guard test). */
-export const assistantSessionOptions = (o: { cwd: string; claudeBin: string; system: string; server: unknown; model?: string; effort?: ClaudeEffort }): Record<string, unknown> => ({
+export const assistantSessionOptions = (o: { cwd: string; claudeBin: string; env: NodeJS.ProcessEnv; system: string; server: unknown; model?: string; effort?: ClaudeEffort }): Record<string, unknown> => ({
   cwd: o.cwd,
   model: o.model ?? ASSISTANT_MODEL,
   pathToClaudeCodeExecutable: o.claudeBin,
-  env: sdkSessionEnv(),
+  env: o.env,
   systemPrompt: o.system,
   tools: [],
   mcpServers: { og: o.server },
@@ -216,6 +221,7 @@ interface Live {
   turns: number
   tokens: number
   tools: AssistantToolSet | null
+  authorize?: () => Promise<void>
   idle?: ReturnType<typeof setTimeout>
   dead: boolean
   /** The SDK's own usage-limit refusal wording (USAGE_LIMIT_ERROR_PREFIXES). */
@@ -282,7 +288,7 @@ const deepen = async (live: Live) => {
   }
 }
 
-const start = async (key: string, system: string): Promise<Live> => {
+const start = async (key: string, system: string, authorize?: () => Promise<void>): Promise<Live> => {
   const { base, effort } = await assistantModels()
   const sdk = (await importSdkModule()) as typeof Sdk & { USAGE_LIMIT_ERROR_PREFIXES?: string[] }
   const claudeBin = resolveUserClaudeBin()
@@ -290,7 +296,6 @@ const start = async (key: string, system: string): Promise<Live> => {
   const dir = await mkdtemp(join(tmpdir(), 'openground-assistant-'))
   const box = inbox()
   const live = { key, box, dir, turns: 0, tokens: 0, tools: null, dead: false, model: base, deep: base, effort, refusals: sdk.USAGE_LIMIT_ERROR_PREFIXES ?? [] } as unknown as Live
-  g.__openground_assistant_gen = assistantSessionGen() + 1
   const server = sdk.createSdkMcpServer({
     name: 'og',
     version: '1',
@@ -299,14 +304,25 @@ const start = async (key: string, system: string): Promise<Live> => {
         // Tools act only inside a turn, for that turn's context.
         const t = live.tools
         if (!t) return toCall({ text: 'Not now.' })
+        await live.authorize?.()
         // think_deeper: its wait-line goes out first, then the switch.
-        const r = (t[n] as (a: unknown) => Promise<ToolResult>)(args)
+        const r = await (t[n] as (a: unknown) => Promise<ToolResult>)(args)
+        await live.authorize?.()
         if (n === 'think_deeper') await deepen(live)
-        return toCall(await r)
+        return toCall(r)
       }),
     ),
   })
-  const q = sdk.query({ prompt: box as AsyncIterable<Sdk.SDKUserMessage>, options: assistantSessionOptions({ cwd: dir, claudeBin, system, server, model: base, effort }) as Sdk.Options })
+  let q: ReturnType<typeof sdk.query>
+  try {
+    // This assistant owns its query rather than using the SDK pool wrapper.
+    // Verify its exact executable/cwd and retain the returned child overlay so
+    // an ambient API credential cannot become a paid fallback at this boundary.
+    const env = await assertClaudeSubscriptionLaunch(dir, { ...sdkSessionEnv(), OPENGROUND_CLAUDE_BIN: claudeBin })
+    await authorize?.()
+    q = sdk.query({ prompt: box as AsyncIterable<Sdk.SDKUserMessage>, options: assistantSessionOptions({ cwd: dir, claudeBin, env, system, server, model: base, effort }) as Sdk.Options })
+  } catch (error) { box.end(); await rm(dir, { recursive: true, force: true }); throw error }
+  g.__openground_assistant_gen = assistantSessionGen() + 1
   live.q = q
   live.it = q[Symbol.asyncIterator]()
   g.__openground_assistant_live = live
@@ -363,12 +379,12 @@ const readTurn = async (live: Live, heard: () => void, stream?: AssistantAsk['on
 const usable = (live: Live | null | undefined, key: string): live is Live =>
   !!live && !live.dead && live.key === key && live.turns < MAX_TURNS && live.tokens < MAX_TOKENS
 
-const current = async (o: Pick<AssistantAsk, 'key' | 'system'>): Promise<Live> => {
+const current = async (o: Pick<AssistantAsk, 'key' | 'system' | 'authorize'>): Promise<Live> => {
   const live = g.__openground_assistant_live
   // A changed effort needs a new session (it is set at start).
   if (usable(live, o.key) && live.effort === (await assistantModels()).effort) return live
   if (live) close(live)
-  return start(o.key, await o.system())
+  return start(o.key, await o.system(), o.authorize)
 }
 
 /** One line on `live`: the final text, or a throw (the session is closed then). */
@@ -388,8 +404,11 @@ const turnOn = async (live: Live, o: AssistantAsk, heard: () => void): Promise<s
         }
         // Timed out (and closed) meanwhile: the line never goes in.
         if (live.dead) throw new Error('the assistant session ended')
+        await o.authorize?.()
+        if (live.dead) throw new Error('the assistant session ended')
         live.deep = m.deep
         live.tools = o.tools
+        live.authorize = o.authorize
         live.box.push({ type: 'user', message: { role: 'user', content: o.line }, parent_tool_use_id: null, session_id: '' })
         return readTurn(live, heard, o.onStream)
       })(),
@@ -415,6 +434,7 @@ const turnOn = async (live: Live, o: AssistantAsk, heard: () => void): Promise<s
   } finally {
     clearTimeout(timer)
     live.tools = null
+    live.authorize = undefined
     if (!live.dead) armIdle(live)
   }
 }
@@ -448,7 +468,9 @@ let closedOnPurpose = 0
  * work-mode change. Each provider keeps its own context and spending boundary. */
 export const liveAssistantModel: AssistantModel = {
   warm: async (o) => {
-    if (await selectedRuntime('assistant') === 'chatgpt') {
+    const provider = await selectedRuntime('assistant')
+    if (isLocalClaudeAssistantScope() && provider !== 'claude') throw new Error('Owner sign-in is required for ChatGPT.')
+    if (provider === 'chatgpt') {
       const live = g.__openground_assistant_live
       if (live) close(live)
       return chatGptAssistantModel.warm(o)
@@ -457,7 +479,9 @@ export const liveAssistantModel: AssistantModel = {
     return claudeAssistantModel.warm(o)
   },
   ask: async (o) => {
-    if (await selectedRuntime('assistant') === 'chatgpt') {
+    const provider = await selectedRuntime('assistant')
+    if (isLocalClaudeAssistantScope() && provider !== 'claude') throw new Error('Owner sign-in is required for ChatGPT.')
+    if (provider === 'chatgpt') {
       const live = g.__openground_assistant_live
       if (live) close(live)
       return chatGptAssistantModel.ask(o)

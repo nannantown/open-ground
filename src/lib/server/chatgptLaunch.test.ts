@@ -14,6 +14,7 @@ vi.mock('./chatgptAuth', async (original) => ({ ...(await original<typeof import
 // Launch acceptance exercises a signed-in owner; a local Swarm unlock alone
 // deliberately does not grant the ChatGPT provider in release builds.
 vi.mock('./roles', () => ({ getCustomTabRole: async () => 'owner' }))
+vi.mock('./authStore', async original => ({ ...(await original<typeof import('./authStore')>()), readSession: async () => ({ user: { id: 'synthetic-owner' } }) }))
 vi.mock('./chatgptTools', async (original) => ({ ...(await original<typeof import('./chatgptTools')>()), chatGptShellPreflight: async () => ({ executable: '/usr/bin/sandbox-exec', profile: 'synthetic preflight' }) }))
 vi.mock('./swarmLaunch', async (original) => ({ ...(await original<typeof import('./swarmLaunch')>()), resolveSwarmModelEffortProbed: mock.tier }))
 vi.mock('./hooksInstall', async (original) => ({ ...(await original<typeof import('./hooksInstall')>()), ensureGuardWiring: mock.wiring }))

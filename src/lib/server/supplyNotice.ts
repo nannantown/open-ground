@@ -76,6 +76,7 @@ import { logToEngine } from './engineLogSink'
 import { isGenerating, readInputBoxText } from '@/lib/claudeScreen'
 import { detectMenu } from '@/lib/claudeMenu'
 import { listAllLiveSupplyDesks, pushSupplyInput } from './swarmSupplyRuntime'
+import { runtimeAdmissionBlocked } from './runtimeTransitionStore'
 import {
   getTerminalScreen,
   terminalForeignInput,
@@ -583,6 +584,8 @@ interface OwnerSay {
   line: string
   /** `heard` = the Enter was confirmed (false = the box was found emptied). */
   onDone?: (heard: boolean) => void
+  beforeSend?: () => Promise<void>
+  prepared?: boolean
 }
 const ownerSays: Map<string, OwnerSay[]> =
   globalThis.__openground_supply_owner ?? (globalThis.__openground_supply_owner = new Map())
@@ -640,6 +643,16 @@ const claim = (k: string): (() => void) => {
   inFlight.set(k, token)
   return () => {
     if (inFlight.get(k) === token) inFlight.delete(k)
+  }
+}
+
+/** A handoff freezes new passes first, then awaits any paste already claimed. */
+export const drainSupplyNoticeDeliveries = async (signal?: AbortSignal, timeoutMs = 120_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs
+  while (inFlight.size) {
+    if (signal?.aborted) throw new Error('The president delivery drain was cancelled.')
+    if (Date.now() >= deadline) throw new Error('A previously accepted president delivery is still settling.')
+    await new Promise<void>((resolve) => setTimeout(resolve, 20))
   }
 }
 
@@ -1008,6 +1021,7 @@ export const peekSupplyReplies = (): ReadonlyMap<string, readonly string[]> =>
  * failed pass must not kill the loop that calls it.
  */
 export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}): Promise<string[]> => {
+  if (runtimeAdmissionBlocked('swarm')) return []
   const deps = { ...defaultDeps, ...partial }
   const delivered: string[] = []
   ensureLoaded()
@@ -1204,11 +1218,13 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         }
       }
       if (desk.runtime === 'sdk') {
-        if (deps.sendDirect?.(desk.id, line)) {
-          held.delete(desk.id)
-          commit(true)
-          delivered.push(key)
-        }
+        if (runtimeAdmissionBlocked('swarm')) continue
+        const release = claim(desk.id)
+        try {
+          if (own?.beforeSend && !own.prepared) { await own.beforeSend(); own.prepared = true }
+          if (own && !ownerSays.get(key)?.includes(own)) continue
+          if (deps.sendDirect?.(desk.id, line)) { held.delete(desk.id); commit(true); delivered.push(key) }
+        } finally { release() }
         continue
       }
       // Paste, THEN Enter as a separate write, then confirm the box emptied
@@ -1222,6 +1238,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         return ok
       }
       const appWide = importantKey === APP_WIDE
+      if (runtimeAdmissionBlocked('swarm')) continue
       const releaseDesk = claim(desk.id)
       const releaseAppWide = appWide ? claim(APP_WIDE) : () => {}
       try {
@@ -1237,6 +1254,8 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         // Same tick as the paste write inside injectAnswerIntoWorker (its first
         // await comes after it), so this is the seq the line was pasted at.
         const seq = deps.foreignInput(desk.id)?.seq
+        if (own?.beforeSend && !own.prepared) { await own.beforeSend(); own.prepared = true }
+        if (own && !ownerSays.get(key)?.includes(own)) continue
         const ok = await injectAnswerIntoWorker(desk.id, line, opts)
         if (gen !== generation.n) continue // state was reset meanwhile
         if (ok) {
@@ -1493,12 +1512,13 @@ export const queueSupplyOwnerSay = async (
   text: string,
   onDone?: (heard: boolean) => void,
   deps: Partial<SupplyNoticeDeps> = {},
+  metadata: { beforeSend?: () => Promise<void> } = {},
 ): Promise<number> => {
   const line = ownerSayLine(text)
   if (!projectPath || !line || line.length > SUPPLY_OWNER_SAY_MAX) return 0
   const key = deskKey(projectPath)
   const q = ownerSays.get(key) ?? []
-  q.push({ line, ...(onDone ? { onDone } : {}) })
+  q.push({ line, ...(onDone ? { onDone } : {}), ...(metadata.beforeSend ? { beforeSend: metadata.beforeSend } : {}) })
   ownerSays.set(key, q)
   await flushSupplyNotices(deps).catch(() => [])
   return ownerSays.get(key)?.length ?? 0

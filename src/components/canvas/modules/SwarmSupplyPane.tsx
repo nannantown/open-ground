@@ -143,9 +143,9 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkS
       <SwarmSeatSay alwaysOpen draftState={draftState}
         disabled={busy || (status !== 'waiting' && status !== 'working') || !(runtime === 'sdk' ? sdkSessionId : terminalId)}
         placeholder={t('projectPanel.swarm.say.presidentPlaceholder')}
-        onSend={(text) => runtime === 'sdk' && sdkSessionId
-          ? sayToWorker(projectPath, sdkSessionId, text, t)
-          : sayToPresidentPty(projectPath, terminalId, text, t)} />
+        onSend={(text, send) => runtime === 'sdk' && sdkSessionId
+          ? sayToWorker(projectPath, sdkSessionId, text, t, send)
+          : sayToPresidentPty(projectPath, terminalId, text, t, send)} />
     </div>
   )
 }

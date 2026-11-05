@@ -28,6 +28,7 @@ import { mkdtemp, readFile, realpath, rm, unlink } from 'fs/promises'
 import { tmpdir } from 'os'
 import { basename, dirname, join } from 'path'
 import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
 import type { ProjectTask } from '../types'
 import { buildDonePromptLine, containsDoneMarker, runFileTask, type FileTaskOpts } from './canvasAi'
 import { openGroundHome } from './paths'
@@ -42,6 +43,7 @@ import { isLockdownEnabledSync } from './lockdown'
 import { sessionJsonlPath } from './transcript'
 import {
   appendAssistantEntries,
+  appendAssistantReceiptEntries,
   assistantEntriesFor,
   assistantEpoch,
   assistantPhotoPath,
@@ -61,6 +63,15 @@ import type { PresidentReply, relayToPresident } from './presidentRelay'
 import { ASSISTANT_RELAY_PREFIX } from './supplyNotice'
 import { liveAssistantModel, type AssistantModel, type AssistantToolSet } from './assistantSession'
 import { selectedRuntime } from './chatgptRuntime'
+import { getChatGptAccountKey } from './chatgptAuth'
+import { runtimeAdmissionBlocked, getRuntimeTransition, runtimeEffectiveProfile } from './runtimeTransitionStore'
+import { runtimeOwnerKey } from './runtimeOwner'
+import { hasAssistantAccess } from './assistantAccess'
+import { hasChatGptAccess } from './chatgptAccess'
+import { clearAcceptedConversationDraft } from './conversationDrafts'
+import { acceptAssistantTurn, assistantTurnCurrent, claimAssistantTurn, mutateAssistantRuntime, readAssistantRuntime,
+  settleAssistantTurn, publicAssistantTurnReceipt, AssistantRuntimeConflict, assistantRuntimeDirectory, isLocalClaudeAssistantScope,
+  withLocalClaudeAssistantScope, withOwnerAssistantScope, assistantScopeOwnerKey, type AssistantTurnReceipt } from './assistantRuntimeStore'
 import { runChatGptAssistantFold } from './chatgptAssistantFold'
 import { listForAssistant, readForAssistant, searchForAssistant } from './assistantTools'
 import { ownerLinks, readLinkForAssistant, webSearchForAssistant } from './assistantLinks'
@@ -232,7 +243,26 @@ const g = globalThis as typeof globalThis & {
     talkListeners?: Set<(e: PresidentTalk) => void>
   }
 }
-const mem = () => (g.__openground_assistant ??= { chain: Promise.resolve(), pending: 0, folds: Promise.resolve(), notes: [] })
+const scopedMemory = new Map<string, NonNullable<typeof g.__openground_assistant>>()
+const mem = () => {
+  const key = assistantRuntimeDirectory()
+  if (!scopedMemory.has(key)) scopedMemory.set(key, { chain: Promise.resolve(), pending: 0, folds: Promise.resolve(), notes: [] })
+  return scopedMemory.get(key)!
+}
+/** Legacy local unlock remains Claude-only and uses a separate local data scope. */
+export const withAssistantAccessScope = async <T>(run: () => T): Promise<Awaited<T>> => {
+  if (await hasChatGptAccess()) {
+    const ownerKey = await runtimeOwnerKey()
+    const state = readAssistantRuntime()
+    if (state.ownerKey && state.ownerKey !== ownerKey) throw new AssistantRuntimeConflict('owner-changed')
+    if (!state.ownerKey) mutateAssistantRuntime(s => { s.ownerKey = ownerKey })
+    return await withOwnerAssistantScope(ownerKey, run)
+  }
+  const transition = getRuntimeTransition('assistant')
+  if (!await hasAssistantAccess() || (await getSettings()).assistantProvider === 'chatgpt' || transition?.effective.provider === 'chatgpt' || transition?.desired.provider === 'chatgpt')
+    throw new AssistantRuntimeConflict('owner-required')
+  return await withLocalClaudeAssistantScope(run)
+}
 /** A fold-only run that did not save (claude failed, or its memo was left out /
  *  thrown away) is not repeated on the same lines before this: the hourly tick
  *  must not spend the owner's plan on one stuck fold (~2 tries a day). */
@@ -265,6 +295,12 @@ const echoed = (s: string): string => s.replace(new RegExp('[\\p{Cf}\\p{Default_
 /** Tests: forget the queue (the log and memo are on disk — assistantMemory.ts). */
 export const __resetAssistantMemory = (): void => {
   g.__openground_assistant = undefined
+  scopedMemory.delete(assistantRuntimeDirectory())
+  inboxExecutions.delete(assistantRuntimeDirectory())
+  mutateAssistantRuntime(state => {
+    state.generation++
+    for (const turn of state.turns) if (turn.state === 'queued' || turn.state === 'running') { turn.state = 'cancelled'; turn.error = 'test-reset' }
+  })
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -364,6 +400,16 @@ export interface AssistantAnswer {
 }
 
 export interface AssistantDeps {
+  /** Durable request ownership; never included in the model's prompt. */
+  expectedOwnerKey?: string
+  conversationId?: string
+  epoch?: number
+  draftClientId?: string
+  draftRevision?: number
+  runtimeReceipt?: AssistantTurnReceipt
+  journalEntries?: (entries: Omit<AssistantEntry, 'id'>[]) => void
+  /** Fired only after the durable receipt exists, before a queued turn starts. */
+  onAccepted?: (receipt: ReturnType<typeof publicAssistantTurnReceipt>) => void
   /** The conversation's model (tests). Default: the live SDK session. */
   model?: AssistantModel
   /** One FOLD run (memo upkeep): prompt + handoff file → the file's content (tests). */
@@ -376,6 +422,8 @@ export interface AssistantDeps {
   clientId?: string
   /** A photo sent with the line: its kept file name (saveAssistantPhoto). */
   photo?: string
+  /** Content identity, independent of a fresh photo filename on a retry. */
+  photoDigest?: string
   /** A short "let me look" said before a look-up — sent out ahead of the answer. */
   onInterim?: (text: string) => void
   /** The part read aloud, a sentence at a time as it is written (only on a line
@@ -496,7 +544,9 @@ export const ASSISTANT_LAUNCH = {
 export const ASSISTANT_KICKOFF = "Answer the owner's latest line exactly as your system prompt says.\n" + buildDonePromptLine()
 
 const defaultRun = async (prompt: string, file: string, cwd: string): Promise<string> => {
-  if (await selectedRuntime('assistant') === 'chatgpt') return runChatGptAssistantFold(prompt, file)
+  const provider = await selectedRuntime('assistant')
+  if (isLocalClaudeAssistantScope() && provider !== 'claude') throw new AssistantRuntimeConflict('owner-required')
+  if (provider === 'chatgpt') return runChatGptAssistantFold(prompt, file)
   return runFileTask({
     cwd,
     prompt: ASSISTANT_KICKOFF,
@@ -529,13 +579,15 @@ const clockOf = (deps: AssistantDeps) => deps.now ?? (() => new Date())
 
 /** What one run reads and which old lines it folds into the memo. */
 const plan = async (now: Date) => {
-  const [{ style }, config, memory, log, folded] = await Promise.all([
+  const [{ style }, config, memory, allLog, folded] = await Promise.all([
     readAssistantStyle(),
     readAssistantConfig(),
     readAssistantMemory(),
     readAssistantLog(now.getTime()),
     readFolded(),
   ])
+  const runtime = readAssistantRuntime()
+  const log = allLog.filter(e => e.conversationId ? e.conversationId === runtime.conversationId : runtime.epoch === 0)
   // Only the talk not yet in the memo is read verbatim; past FOLD_AT lines the
   // older part is folded into the memo (compaction, fixed memo size) by a fold run.
   const pending = unfolded(log.filter((e) => e.kind !== 'call'), folded)
@@ -624,7 +676,7 @@ const keepMemo = async (a: Answer, p: Plan, epoch: number): Promise<boolean> => 
 /** What a session was started with. Any change (the memo included — a fold run
  *  or a "remember" saved a new one) starts a fresh session, so the session never
  *  rewrites the memo from a copy older than the one on disk. */
-const sessionKey = (p: Plan, lang: PromptLang, epoch: number): string => JSON.stringify([p.style, p.config.name, p.config.memoryChars, lang, epoch, p.memory])
+const sessionKey = (p: Plan, lang: PromptLang, epoch: number): string => JSON.stringify([assistantRuntimeDirectory(), p.style, p.config.name, p.config.memoryChars, lang, epoch, p.memory])
 
 /** What the app says when a look-up starts, like a person would — varied, in the Mac's language. */
 const WAIT_LINES = { en: ['One moment.', 'Let me check.', 'Let me look.'], ja: ['ちょっと待ってね。', '見てみるね。', '調べてみるね。'] }
@@ -712,6 +764,13 @@ const waitingNote = (now: number): string[] => {
 }
 
 const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer> => {
+  const ownerKey = deps.runtimeReceipt?.ownerKey ?? deps.expectedOwnerKey ?? assistantScopeOwnerKey()
+  const authorize = async () => {
+    if (deps.runtimeReceipt) await assertReceiptIdentity(deps.runtimeReceipt)
+    else if (ownerKey) await runtimeOwnerKey(ownerKey)
+    if (isLockdownEnabledSync()) throw workModeOn(lang)
+    if (isLocalClaudeAssistantScope() && (!await hasAssistantAccess() || await selectedRuntime('assistant') !== 'claude')) throw new AssistantRuntimeConflict('owner-required')
+  }
   const clock = clockOf(deps)
   const now = clock()
   const via = deps.via ?? 'phone'
@@ -732,17 +791,22 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
     // The owner deleted the talk while this line ran: it is not written back.
     if (assistantEpoch() !== epoch) return
     const answer = { at: Math.max(ownerAt, clock().getTime()), who: 'assistant' as const, text: reply, via, ...(answeredBy ? { model: answeredBy } : {}) }
-    await appendAssistantEntries(deps.app ? [{ ...answer, ...deps.app.entry }] : [{ at: ownerAt, who: 'owner', text, via, ...ownerMeta }, answer])
+    const entries = deps.app ? [{ ...answer, ...deps.app.entry }] : [{ at: ownerAt, who: 'owner' as const, text, via, ...ownerMeta }, answer]
+    if (deps.journalEntries) deps.journalEntries(entries)
+    else await appendAssistantEntries(entries)
   }
   try {
     const p = await plan(now)
+    await authorize()
     // Work mode may have come on while this line waited its turn.
     if (isLockdownEnabledSync()) throw workModeOn(lang)
     const digest = deps.digest ?? assistantDigest
     let snapshot: Promise<{ text: string; projects: Known[] }> | null = null
     const projects = async () => (await (snapshot ??= digest())).projects
     const made: ShownProposal[] = []
-    const ctx = { lang, now: now.getTime(), via, projects, digest: async () => (await digest()).text, ...(deps.clientId && !deps.app ? { about: deps.clientId } : {}) }
+    const ctx = { lang, now: now.getTime(), via, projects, digest: async () => (await digest()).text,
+      ...(deps.runtimeReceipt ? { originTurnId: deps.runtimeReceipt.id, isCurrent: () => assistantTurnCurrent(deps.runtimeReceipt!) } : {}),
+      ...(deps.clientId && !deps.app ? { about: deps.clientId } : {}) }
     const photo = deps.photo ? assistantPhotoPath(deps.photo) : null
     let looked = false
     // Read aloud as it is written (the window's call): sentence by sentence while
@@ -767,30 +831,42 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
     const taken = m.notes.splice(0)
     // Notes from before a delete go with the deleted talk.
     const notes = m.notesEpoch === assistantEpoch() ? taken : []
+    const guardTools = (tools: AssistantToolSet): AssistantToolSet => Object.fromEntries(Object.entries(tools).map(([name, fn]) => [name, async (...args: unknown[]) => {
+      if (deps.runtimeReceipt) await assertReceiptIdentity(deps.runtimeReceipt)
+      const value = await (fn as (...input: unknown[]) => Promise<unknown>)(...args)
+      if (deps.runtimeReceipt) await assertReceiptIdentity(deps.runtimeReceipt)
+      return value
+    }])) as unknown as AssistantToolSet
     const said = await (deps.model ?? liveAssistantModel).ask({
+      authorize,
+      ...(ownerKey ? { runtimeOwnerKey: ownerKey } : {}),
       // What the session was started with; any change starts a fresh one.
-      key: sessionKey(p, lang, epoch),
+      key: JSON.stringify([sessionKey(p, lang, epoch), deps.runtimeReceipt?.conversationId]),
       system: async () => {
         const d = await (snapshot ??= digest())
+        await authorize()
         return buildSessionPrompt({ style: p.style, digest: d.text, projects: d.projects, history: [...p.fold, ...p.recent], memory: p.memory, memoryChars: p.config.memoryChars, name: p.config.name, lang, now })
       },
       line:
-        [...notes, ...waitingNote(now.getTime()), deps.app ? deps.app.note : `[${stamp(now.getTime())}] ${text || '(no words, only a photo)'}`].join('\n') +
+        [...notes, ...waitingNote(now.getTime()), ...readAssistantRuntime().actions.slice(-6).filter(a => a.state === 'completed' || a.state === 'uncertain').map(a =>
+          `(App action receipt DATA: ${JSON.stringify({ id: a.id, state: a.state, proposal: a.proposal ? { kind: a.proposal.kind, project: a.proposal.project, title: a.proposal.title, body: a.proposal.body } : undefined, receipt: a.receipt })}. A completed action must not be repeated; an uncertain result needs owner inspection.)`),
+          deps.app ? deps.app.note : `[${stamp(now.getTime())}] ${text || '(no words, only a photo)'}`].join('\n') +
         (photo ? `\n(The owner sent a photo with this line: ${photo} — read_file it to see it.)` : ''),
       // The first look-up of the line says a wait-line, the moment it starts.
-      tools: (deps.app ? retellOnly : (x: AssistantToolSet) => x)(
+      tools: guardTools((deps.app ? retellOnly : (x: AssistantToolSet) => x)(
         turnTools(ctx, made, (set = WAIT_LINES) => {
           if (looked) return
           looked = true
           const lines = pick(lang, set)
           deps.onInterim?.(lines[waitLine++ % lines.length])
         }, deps.app ? new Set() : ownerLinks([...p.fold, ...p.recent].filter((e) => e.who === 'owner').map((e) => e.text).concat(text))),
-      ),
+      )),
       onStream,
       onModel: (m) => (answeredBy = m),
     })
     // Work mode came on while it was thinking: nothing goes out.
     if (isLockdownEnabledSync()) throw workModeOn(lang)
+    if (deps.runtimeReceipt && !assistantTurnCurrent(deps.runtimeReceipt)) throw new AssistantRuntimeConflict('turn-retired')
     // What is read aloud after a proposal is the app's line, never the model's:
     // the frames on the screen say what would happen.
     const told = made.length ? proposedLine(made.map((x) => x.kind), lang) : ''
@@ -810,7 +886,11 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
   } catch (e) {
     // A line that got no answer is still part of the talk (the phone showed it):
     // logged, so the next answer can see it. Never under work mode.
-    if (!logged && !deps.app && !isLockdownEnabledSync() && assistantEpoch() === epoch) await appendAssistantEntries([{ at: now.getTime(), who: 'owner', text, via, ...ownerMeta }]).catch(() => {})
+    if (!logged && !deps.app && !isLockdownEnabledSync() && assistantEpoch() === epoch) {
+      const entries = [{ at: now.getTime(), who: 'owner' as const, text, via, ...ownerMeta }]
+      if (deps.journalEntries) deps.journalEntries(entries)
+      else await appendAssistantEntries(entries).catch(() => {})
+    }
     throw e
   }
 }
@@ -997,7 +1077,7 @@ export const dropAssistantProposal = (id: unknown): ShownProposal | { error: But
 }
 
 /** One line being answered and one waiting: a further one would be refused. */
-export const assistantBusy = (): boolean => mem().pending >= QUEUE_MAX
+export const assistantBusy = (): boolean => isLocalClaudeAssistantScope() ? mem().pending >= QUEUE_MAX : readAssistantRuntime().turns.filter(t => t.state === 'queued' || t.state === 'running').length >= QUEUE_MAX
 
 const queued = <T>(fn: () => Promise<T>): Promise<T> => {
   const m = mem()
@@ -1008,25 +1088,154 @@ const queued = <T>(fn: () => Promise<T>): Promise<T> => {
 
 /** One owner line → the assistant's answer. Turns run one at a time; with one
  *  running and one waiting, a further line is refused as `busy`. */
-export const askAssistant = (text: string, deps: AssistantDeps = {}): Promise<AssistantAnswer> => {
-  const m = mem()
-  if (assistantBusy()) return Promise.reject(failure('busy', 'busy', 'en'))
-  m.pending++
-  return queued(() => turn(text, deps)).finally(() => void m.pending--)
+type InboxExecution = { home: string; running?: Promise<void>; deps: Map<string, AssistantDeps>; waiters: Map<string, { resolve: (a: AssistantAnswer) => void; reject: (error: unknown) => void }[]> }
+const inboxExecutions = new Map<string, InboxExecution>()
+/** Fresh-process recovery fixture: lose executors/callbacks, retain disk work. */
+export const __forgetAssistantExecutionForTest = (): void => { inboxExecutions.delete(assistantRuntimeDirectory()) }
+const execution = (): InboxExecution => {
+  const home = assistantRuntimeDirectory()
+  if (!inboxExecutions.has(home)) inboxExecutions.set(home, { home, deps: new Map(), waiters: new Map() })
+  return inboxExecutions.get(home)!
+}
+const answerOf = (r: AssistantTurnReceipt): AssistantAnswer => ({ reply: r.result!.reply, speak: r.result!.speak,
+  ...(r.result!.said ? { said: true } : {}), ...(r.result!.proposals ? { proposals: r.result!.proposals as unknown as ShownProposal[] } : {}) })
+const inputAccountKey = async (deps: AssistantDeps): Promise<string | undefined> => {
+  if (deps.model || deps.run || await selectedRuntime('assistant') !== 'chatgpt') return undefined
+  try { return await getChatGptAccountKey() }
+  catch (error) {
+    // During a failed/unfinished handoff, owner-authored inbox text can be
+    // saved before the target account is connected. Admission still verifies
+    // the live account before any model or host tool is allowed to run.
+    if (runtimeAdmissionBlocked('assistant')) return undefined
+    throw error
+  }
+}
+const inputOwnerKey = async (deps: AssistantDeps): Promise<string | undefined> => {
+  const expected = deps.expectedOwnerKey ?? assistantScopeOwnerKey()
+  return expected ? runtimeOwnerKey(expected) : deps.model || deps.run ? undefined : runtimeOwnerKey()
+}
+const assertReceiptIdentity = async (receipt: AssistantTurnReceipt): Promise<void> => {
+  if (!assistantTurnCurrent(receipt)) throw new AssistantRuntimeConflict('turn-retired')
+  if (receipt.ownerKey && await runtimeOwnerKey() !== receipt.ownerKey) throw new AssistantRuntimeConflict('owner-changed')
+  if (receipt.accountKey && await getChatGptAccountKey() !== receipt.accountKey) throw new AssistantRuntimeConflict('account-changed')
+}
+export const acceptAssistantInput = async (text: string, deps: AssistantDeps & { clientId: string }): Promise<AssistantTurnReceipt> => {
+  const receipt = acceptAssistantTurn({ id: deps.clientId, text, via: deps.via, photo: deps.photo, photoDigest: deps.photoDigest,
+    conversationId: deps.conversationId, epoch: deps.epoch, draftClientId: deps.draftClientId, draftRevision: deps.draftRevision, accountKey: await inputAccountKey(deps), ownerKey: await inputOwnerKey(deps) })
+  execution().deps.set(receipt.id, deps)
+  try { deps.onAccepted?.(publicAssistantTurnReceipt(receipt)) } catch { /* a closed client does not revoke acceptance */ }
+  if (deps.draftClientId && deps.draftRevision !== undefined) void clearAcceptedConversationDraft('assistant', deps.draftClientId, deps.draftRevision, receipt.ownerKey).catch(() => {})
+  void resumeQueuedAssistantTurns().catch(() => {})
+  return receipt
+}
+export const waitForAssistantRuntimeIdle = async (): Promise<void> => { await execution().running }
+export const notifyAssistantRuntimeReset = (): void => {
+  const live = execution()
+  const state = readAssistantRuntime()
+  for (const [id, waiters] of Array.from(live.waiters)) {
+    const turn = state.turns.find(t => t.id === id)
+    if (!turn || turn.state === 'cancelled' || turn.state === 'interrupted') {
+      for (const waiter of waiters) waiter.reject(new AssistantRuntimeConflict(turn?.error ?? 'conversation-reset'))
+      live.waiters.delete(id); live.deps.delete(id)
+    }
+  }
+}
+export const resumeQueuedAssistantTurns = (recoveryDeps: AssistantDeps = {}): Promise<void> => {
+  const live = execution()
+  if (live.running) return live.running
+  const drain = async () => {
+    for (;;) {
+      if (runtimeAdmissionBlocked('assistant') || readAssistantRuntime().paused) return
+      const next = readAssistantRuntime().turns.find(t => t.state === 'queued')
+      if (!next) return
+      const deps = live.deps.get(next.id) ?? recoveryDeps
+      let receipt: AssistantTurnReceipt | null = null
+      let entries: Omit<AssistantEntry, 'id'>[] = []
+      try {
+        await queued(async () => {
+          if (runtimeAdmissionBlocked('assistant') || readAssistantRuntime().paused) return
+          if (next.ownerKey) await runtimeOwnerKey(next.ownerKey)
+          const provider = deps.model || deps.run ? undefined : await selectedRuntime('assistant')
+          receipt = claimAssistantTurn(next.id, provider ? runtimeEffectiveProfile('assistant') ?? { provider } : undefined, provider === 'chatgpt' ? await getChatGptAccountKey() : undefined)
+          if (!receipt) return
+          await assertReceiptIdentity(receipt)
+          const result = await turn(next.text, { ...deps, clientId: next.id, via: next.via, photo: next.photo,
+            runtimeReceipt: receipt, journalEntries: value => { entries = value.map(e => ({ ...e, conversationId: receipt!.conversationId })) } })
+          await assertReceiptIdentity(receipt)
+          if (!settleAssistantTurn(receipt, { ...result, proposals: result.proposals as unknown as Record<string, unknown>[] | undefined, entries: entries as unknown as Record<string, unknown>[] })) throw new AssistantRuntimeConflict('turn-retired')
+          await appendAssistantReceiptEntries(next.id, entries, () => readAssistantRuntime().epoch === receipt!.epoch)
+          for (const waiter of live.waiters.get(next.id) ?? []) waiter.resolve(result)
+        })
+        if (!receipt) return
+      } catch (error) {
+        if (receipt) {
+          const reason = error instanceof AssistantRuntimeConflict ? error.reason : 'assistant-turn-failed'
+          const committed = settleAssistantTurn(receipt, undefined, reason)
+          if (committed && entries.length) await appendAssistantReceiptEntries(next.id, entries, () => readAssistantRuntime().epoch === receipt!.epoch)
+        } else mutateAssistantRuntime(state => { const t = state.turns.find(t => t.id === next.id); if (t?.state === 'queued') { t.state = 'uncertain'; t.error = 'runtime-authorization-unconfirmed' } })
+        for (const waiter of live.waiters.get(next.id) ?? []) waiter.reject(error)
+      } finally {
+        if (receipt || readAssistantRuntime().turns.find(t => t.id === next.id)?.state !== 'queued') {
+          live.deps.delete(next.id); live.waiters.delete(next.id)
+        }
+      }
+    }
+  }
+  const running = drain().finally(() => {
+    if (live.running !== running) return
+    live.running = undefined
+    const state = readAssistantRuntime()
+    if (!state.paused && !runtimeAdmissionBlocked('assistant') && !state.turns.some(t => t.state === 'running') && state.turns.some(t => t.state === 'queued'))
+      queueMicrotask(() => { void resumeQueuedAssistantTurns(recoveryDeps).catch(() => {}) })
+  })
+  live.running = running
+  return running
+}
+export const askAssistant = async (text: string, deps: AssistantDeps = {}): Promise<AssistantAnswer> => {
+  if (isLocalClaudeAssistantScope()) {
+    const m = mem()
+    if (m.pending >= QUEUE_MAX) throw failure('busy', 'busy', 'en')
+    m.pending++
+    try { return await queued(() => turn(text, deps)) } finally { m.pending-- }
+  }
+  const clientId = deps.clientId ?? randomUUID()
+  try {
+    const receipt = acceptAssistantTurn({ id: clientId, text, via: deps.via, photo: deps.photo, photoDigest: deps.photoDigest, conversationId: deps.conversationId, epoch: deps.epoch,
+      draftClientId: deps.draftClientId, draftRevision: deps.draftRevision, accountKey: await inputAccountKey(deps), ownerKey: await inputOwnerKey(deps) })
+    try { deps.onAccepted?.(publicAssistantTurnReceipt(receipt)) } catch { /* receipt remains queryable */ }
+    if (receipt.state === 'completed' && receipt.result) return Promise.resolve(answerOf(receipt))
+    if (receipt.state !== 'queued' && receipt.state !== 'running') return Promise.reject(new AssistantRuntimeConflict(receipt.error ?? receipt.state))
+    const live = execution()
+    live.deps.set(clientId, deps)
+    const result = new Promise<AssistantAnswer>((resolve, reject) => { live.waiters.set(clientId, [...(live.waiters.get(clientId) ?? []), { resolve, reject }]) })
+    if (deps.draftClientId && deps.draftRevision !== undefined) void clearAcceptedConversationDraft('assistant', deps.draftClientId, deps.draftRevision, receipt.ownerKey).catch(() => {})
+    void resumeQueuedAssistantTurns().catch(() => {})
+    return result
+  } catch (error) { return Promise.reject(error instanceof AssistantRuntimeConflict && error.reason === 'busy' ? failure('busy', 'busy', 'en') : error) }
 }
 
 /** Start the live session ahead of the first line (the owner opened the window),
  *  so that line skips the start-up. In the turns' queue, never counted as a line. */
-export const warmAssistant = (deps: Pick<AssistantDeps, 'model' | 'digest'> = {}): Promise<void> =>
+export const warmAssistant = (deps: Pick<AssistantDeps, 'model' | 'digest' | 'expectedOwnerKey'> = {}): Promise<void> =>
   queued(async () => {
+    if (runtimeAdmissionBlocked('assistant') || readAssistantRuntime().paused) return
     if (isLockdownEnabledSync()) return
     const p = await plan(new Date())
     const lang = await getPromptLang()
     const digest = deps.digest ?? assistantDigest
+    const ownerKey = deps.expectedOwnerKey ?? assistantScopeOwnerKey()
+    const authorize = async () => {
+      if (ownerKey) await runtimeOwnerKey(ownerKey)
+      if (isLockdownEnabledSync()) throw workModeOn(lang)
+      if (isLocalClaudeAssistantScope() && (!await hasAssistantAccess() || await selectedRuntime('assistant') !== 'claude')) throw new AssistantRuntimeConflict('owner-required')
+    }
     await (deps.model ?? liveAssistantModel).warm({
+      authorize,
+      ...(ownerKey ? { runtimeOwnerKey: ownerKey } : {}),
       key: sessionKey(p, lang, assistantEpoch()),
       system: async () => {
         const d = await digest()
+        await authorize()
         return buildSessionPrompt({ style: p.style, digest: d.text, projects: d.projects, history: [...p.fold, ...p.recent], memory: p.memory, memoryChars: p.config.memoryChars, name: p.config.name, lang, now: new Date() })
       },
     })
@@ -1044,6 +1253,7 @@ export const assistantFoldsSettled = (): Promise<unknown> => mem().folds
 export const foldIdleAssistantTalk = (deps: AssistantDeps = {}): Promise<boolean> => {
   const m = mem()
   const run = m.folds.catch(() => {}).then(async () => {
+    if (runtimeAdmissionBlocked('assistant') || readAssistantRuntime().paused) return false
     if (isLockdownEnabledSync()) return false
     const now = clockOf(deps)()
     const epoch = assistantEpoch()

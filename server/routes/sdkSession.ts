@@ -31,6 +31,10 @@ import {
 } from '@/lib/server/sdkSession'
 import { projectUUIDFromPath } from '@/lib/server/projectDataPath'
 import { requireProjectPath } from '../middleware/projectPath'
+import { acceptPresidentInput } from '@/lib/server/presidentInbox'
+import { readConversationReceipt, ReceiptConflict } from '@/lib/server/conversationReceipts'
+import { hasChatGptAccess } from '@/lib/server/chatgptAccess'
+import { runtimeRequestOwnerKey } from '@/lib/server/runtimeOwner'
 
 const HEARTBEAT_MS = 25_000
 
@@ -261,12 +265,37 @@ export const sdkSessionRoutes = new Hono()
   // turn ends (measured), which is what lets the engine inject a rework
   // instruction without the PTY path's paste-then-re-read-the-screen dance.
   .post('/api/sdk-session/:id/input', async (c) => {
+    let expectedOwnerKey: string | undefined
+    try { if (c.req.header('X-OpenGround-Owner') !== undefined) expectedOwnerKey = await runtimeRequestOwnerKey(c.req.header('X-OpenGround-Owner')) }
+    catch { return c.json({ error: 'owner-changed' }, 403) }
     const id = c.req.param('id')
-    const gate = await requireSession(c, id)
-    if (gate instanceof Response) return gate
-    const body = (await c.req.json().catch(() => ({}))) as { text?: unknown }
+    const body = (await c.req.json().catch(() => ({}))) as { text?: unknown; clientId?: unknown; draftClientId?: unknown; draftRevision?: unknown }
     const text = typeof body.text === 'string' ? body.text : ''
     if (!text.trim()) return c.json({ error: 'text is required' }, 400)
+    const path = await requireProjectPath(c)
+    if (path instanceof Response) return path
+    const owner = await hasChatGptAccess()
+    if (typeof body.clientId === 'string' && owner) {
+      try {
+        // Receipt lookup precedes old handle lookup: a switch/restart may have
+        // retired that handle after durably accepting the original request.
+        const scope = await projectUUIDFromPath(path)
+        const previous = await readConversationReceipt(scope, body.clientId, expectedOwnerKey)
+        if (!previous) {
+          const session = await requireSession(c, id)
+          if (session instanceof Response) return session
+          if (session.role !== 'supply') return c.json({ error: 'durable president input requires a president seat' }, 409)
+        }
+        const accepted = await acceptPresidentInput(path, text, { id: body.clientId, expectedOwnerKey,
+          ...(typeof body.draftClientId === 'string' ? { draftClientId: body.draftClientId } : {}),
+          ...(typeof body.draftRevision === 'number' ? { draftRevision: body.draftRevision } : {}),
+        })
+        return c.json(accepted, ['uncertain', 'cancelled', 'rejected'].includes(accepted.receipt.state) ? 409 : 202)
+      } catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Input could not be saved.' }, error instanceof ReceiptConflict ? 409 : 503) }
+    }
+    const gate = await requireSession(c, id)
+    if (gate instanceof Response) return gate
+    if (gate.provider === 'chatgpt' && !owner) return c.json({ error: 'forbidden' }, 403)
     const queued = pushSdkInput(id, text)
     if (!queued) return c.json({ error: 'session is no longer accepting input' }, 409)
     return c.json({ ok: true, queued: true })

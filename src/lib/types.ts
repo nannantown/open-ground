@@ -66,6 +66,25 @@ export interface ChatGptStatus {
   connection: ChatGptConnection
   lockdown: boolean
   preferences: Pick<Settings, 'assistantProvider' | 'swarmProvider' | 'chatgptModel' | 'chatgptEffort'>
+  runtime?: Record<RuntimeScope, RuntimeTransitionStatus>
+}
+
+export type RuntimeScope = 'assistant' | 'swarm'
+export interface RuntimeProfile {
+  provider: AiProvider
+  model?: string
+  effort?: string
+}
+export type RuntimeTransitionPhase = 'stable' | 'draining' | 'checkpointed' | 'retiring' | 'launching' | 'attention'
+/** Public lifecycle state. Provider credentials and account identifiers never leave the server. */
+export interface RuntimeTransitionStatus {
+  scope: RuntimeScope
+  revision: number
+  phase: RuntimeTransitionPhase
+  effective: RuntimeProfile
+  desired: RuntimeProfile
+  updatedAt: string
+  error?: string
 }
 
 export interface Settings {

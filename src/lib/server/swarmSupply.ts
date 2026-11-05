@@ -30,6 +30,10 @@ import { type SpawnSwarmSupplyResponse } from '../types'
 import { listLiveSupplyDesks, stopSupplyDesk, SUPPLY_DESK_LABEL } from './swarmSupplyRuntime'
 import { spawnSdkSession, terminateSdkSession } from './sdkSession'
 import { selectedRuntime, chatGptLaunchConfig } from './chatgptRuntime'
+import { assertSwarmRuntimeAdmission, trackSwarmRuntimeLaunch, type SwarmRuntimeHandoff } from './swarmRuntimeAdmission'
+import { validateNativePresidentRecoveryAdmission, type NativeRecoveryAdmission } from './swarmNativeRecovery'
+import { assertClaudeSubscriptionLaunch } from './subscriptionOnly'
+import { runtimeOwnerKey } from './runtimeOwner'
 import { chatGptDeskOptions } from './chatgptLaunch'
 import { createChatGptQuery, distillChatGptMessage } from './chatgptQuery'
 export { SUPPLY_DESK_LABEL } from './swarmSupplyRuntime'
@@ -73,6 +77,11 @@ export interface SpawnSwarmSupplyOpts {
    *  session id. The escape hatch for a desk whose restored context has gone bad
    *  — off by default, so the normal button always resumes. */
   fresh?: boolean
+  runtimeHandoff?: SwarmRuntimeHandoff
+  /** Internal owner recovery capability; never accepted from a client body. */
+  nativeRecovery?: NativeRecoveryAdmission
+  recoveryInstructions?: string
+  beforeLaunch?: () => Promise<void>
 }
 
 /** Build the LaunchClaudeOpts for a supply session — pure + exported so the
@@ -110,6 +119,7 @@ export const supplyLaunchOpts = (
     rows?: number
     resume?: boolean
     remoteName?: string
+    handoffInstructions?: string
     // Settings.language, resolved by the caller. REQUIRED — not optional, no
     // default `{}` on `opts` any more — so a caller that forgets to thread it
     // through fails `tsc` instead of silently spawning a supply desk whose
@@ -145,7 +155,7 @@ export const supplyLaunchOpts = (
   rows: opts.rows,
   ...(opts.resume ? { resume: true } : {}),
   initialPrompt:
-    (opts.resume ? SUPPLY_RESUME_INJECTION : SUPPLY_INJECTION) + languageDirective(opts.lang),
+    (opts.resume ? SUPPLY_RESUME_INJECTION : SUPPLY_INJECTION) + languageDirective(opts.lang) + (opts.handoffInstructions ? `\n\n${opts.handoffInstructions}` : ''),
 })
 
 /** Launch ONE interactive claude PTY in the project's primary checkout running
@@ -232,9 +242,13 @@ const adoptLiveSupplyDesk = async (
   }
 }
 
-export const spawnSwarmSupply = async (
+export const spawnSwarmSupply = (opts: SpawnSwarmSupplyOpts): Promise<SpawnSwarmSupplyResponse> =>
+  trackSwarmRuntimeLaunch(opts.runtimeHandoff, () => spawnSwarmSupplyInternal(opts))
+
+const spawnSwarmSupplyInternal = async (
   opts: SpawnSwarmSupplyOpts,
 ): Promise<SpawnSwarmSupplyResponse> => {
+  assertSwarmRuntimeAdmission(opts.runtimeHandoff)
   // ── ONE SUPPLY DESK PER PROJECT: the check-then-act is a CRITICAL SECTION ──
   //
   // This guard did not exist until 2026-08-15. Until then the ONLY thing between
@@ -297,14 +311,21 @@ const launchNewSupplyDesk = async (
   opts: SpawnSwarmSupplyOpts,
 ): Promise<SpawnSwarmSupplyResponse> => {
   if (await selectedRuntime('swarm') === 'chatgpt') {
-    const config = await chatGptLaunchConfig('swarm')
-    const session = opts.fresh ? { agentSessionId: `chatgpt-${randomUUID()}`, resume: false }
+    assertSwarmRuntimeAdmission(opts.runtimeHandoff)
+    const config = await chatGptLaunchConfig('swarm', opts.runtimeHandoff?.profile)
+    const session = opts.fresh ? { agentSessionId: `chatgpt-${opts.runtimeHandoff?.operationId ?? randomUUID()}`, resume: false }
       : await resolveSwarmSession(opts.projectPath, 'supply', { provider: 'chatgpt' })
+    const handoffTranscript = opts.runtimeHandoff?.publicTranscript ?? (session.resume
+      ? await (await import('./chatgptResponses')).chatGptPublicConversation(session.agentSessionId) : undefined)
     const lang = await getPromptLang()
+    await opts.beforeLaunch?.()
     const desk = spawnSdkSession({ cwd: opts.projectPath, role: 'supply', provider: 'chatgpt',
+      startPaused: !!opts.runtimeHandoff,
+      handoffTranscript,
       agentSessionId: session.agentSessionId,
-      options: chatGptDeskOptions({ cwd: opts.projectPath, role: 'supply', ...session, ...config }),
-      initialPrompt: (session.resume ? SUPPLY_RESUME_INJECTION : SUPPLY_INJECTION) + languageDirective(lang),
+      options: { ...chatGptDeskOptions({ cwd: opts.projectPath, role: 'supply', ...session, ...config }),
+        ...(opts.runtimeHandoff?.runtimeOwnerKey ? { runtimeOwnerKey: opts.runtimeHandoff.runtimeOwnerKey } : {}) },
+      initialPrompt: (session.resume ? SUPPLY_RESUME_INJECTION : SUPPLY_INJECTION) + languageDirective(lang) + (opts.runtimeHandoff ? `\n\n${opts.runtimeHandoff.instructions}` : '') + (opts.recoveryInstructions ? `\n\n${opts.recoveryInstructions}` : ''),
       queryFn: createChatGptQuery(), distillMessage: distillChatGptMessage,
     })
     if (desk.status === 'failed') { terminateSdkSession(desk.id); throw new Error('ChatGPT president could not start.') }
@@ -315,7 +336,7 @@ const launchNewSupplyDesk = async (
   // `fresh` skips the lookup entirely (and overwrites the record below) — the
   // owner's way out of a restored context that has gone bad.
   const session = opts.fresh
-    ? { agentSessionId: randomUUID(), resume: false }
+    ? { agentSessionId: opts.runtimeHandoff?.operationId ?? randomUUID(), resume: false }
     : await resolveSwarmSession(opts.projectPath, 'supply')
   // Token budget (card 68d8e00f): the execution MODE picks the desk's tier —
   // economy runs the supply officer on sonnet; optimize on opus since 2026-09-18
@@ -343,13 +364,19 @@ const launchNewSupplyDesk = async (
   const remoteName = await resolveSwarmRemoteName('supply', opts.projectPath)
   // Settings.language ⇒ the supply officer's user-facing replies follow it.
   const lang = await getPromptLang()
+  assertSwarmRuntimeAdmission(opts.runtimeHandoff)
+  const subscriptionEnv = await assertClaudeSubscriptionLaunch(opts.projectPath)
+  if (opts.runtimeHandoff?.runtimeOwnerKey) await runtimeOwnerKey(opts.runtimeHandoff.runtimeOwnerKey)
+  await opts.beforeLaunch?.()
+  if (opts.nativeRecovery) await validateNativePresidentRecoveryAdmission(opts.projectPath, opts.nativeRecovery)
+  assertSwarmRuntimeAdmission(opts.runtimeHandoff)
+  const launchOptions = supplyLaunchOpts(
+    opts.projectPath, session.agentSessionId,
+    { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName, lang, handoffInstructions: opts.runtimeHandoff?.instructions ?? opts.recoveryInstructions }, me,
+  )
+  launchOptions.env = { ...launchOptions.env, CLAUDE_CONFIG_DIR: subscriptionEnv.CLAUDE_CONFIG_DIR! }
   const ref = launchClaude(
-    supplyLaunchOpts(
-      opts.projectPath,
-      session.agentSessionId,
-      { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName, lang },
-      me,
-    ),
+    launchOptions,
   )
   // Persist for the NEXT boot. Best-effort by design: a failed write only costs the
   // desk its memory on the following launch (it starts fresh — the old behaviour),

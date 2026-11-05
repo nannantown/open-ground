@@ -35,16 +35,32 @@ import { startBlogPublishLoop } from '@/lib/server/blogPublish'
 import { startOwnerDeskLimitLoop } from '@/lib/server/ownerDeskLimit'
 import { startSupplyContextCapLoop } from '@/lib/server/supplyContextCap'
 import { isPhoneLinkPrimary, startPhoneLink } from '@/lib/server/phoneLink'
-import { foldIdleAssistantTalk } from '@/lib/server/phoneAssistant'
+import { foldIdleAssistantTalk, withAssistantAccessScope } from '@/lib/server/phoneAssistant'
 import { pruneAssistantLog } from '@/lib/server/assistantMemory'
 import { startWorkerReapLoop } from '@/lib/server/swarmWorkerReaper'
 import { installHooks } from '@/lib/server/hooksInstall'
 import { installOgManageSkill } from '@/lib/server/ogManageSkill'
 import { installSwarmTooling } from '@/lib/server/swarmToolingInstall'
 import { installCompactInstructions } from '@/lib/server/compactInstructionsInstall'
+import { runtimeTransitions } from '@/lib/server/runtimeTransitions'
+import { runtimeAdmissionBlocked } from '@/lib/server/runtimeTransitionStore'
+import { flushPresidentInbox } from '@/lib/server/presidentInbox'
+import { resumeQueuedAssistantTurns } from '@/lib/server/phoneAssistant'
+import { assertSavedSwarmRuntimeSafe, flushSwarmHandoffInputs } from '@/lib/server/swarmRuntimeTransition'
+import { assertNoUncertainRuntimeActions } from '@/lib/server/runtimeActionReceipts'
+import { awaitPresidentInputSettlement } from '@/lib/server/presidentInbox'
+import { registerRuntimeRecoveryResume, notifyRuntimeRecoveryChanged } from '@/lib/server/runtimeRecoveryBoot'
+import { resumeAssistantRuntime } from '@/lib/server/assistantRuntimeTransition'
+import { runtimeEffectiveProfile } from '@/lib/server/runtimeTransitionStore'
 
 const PORT = Number(process.env.PORT) || 47776
 const HOSTNAME = '127.0.0.1'
+// Recovery is read/validated before any automatic work or durable inbox drain.
+// A corrupt journal holds work instead of silently resetting to fresh actors.
+const runtimeRecoveryReady = runtimeTransitions().initialize().then(() => true).catch((error) => {
+  console.error('[openground:hono] runtime recovery requires attention', error)
+  return false
+})
 
 // G1 crash resilience — process-level last-resort handlers.
 //
@@ -345,7 +361,19 @@ void (async () => {
 // must never make worse. Fire-and-forget after boot; resumeEngines() is
 // fail-quiet-to-OFF per project and never throws.
 if (typeof process.send === 'function') {
-  void resumeEngines().catch((e) => console.error('[openground:hono] engine resume failed', e))
+  let resumed = false
+  registerRuntimeRecoveryResume(async () => {
+    if (resumed) return
+    const ready = await runtimeRecoveryReady
+    if (!ready || runtimeAdmissionBlocked('swarm')) return
+    await assertSavedSwarmRuntimeSafe()
+    await assertNoUncertainRuntimeActions()
+    await awaitPresidentInputSettlement()
+    await resumeEngines()
+    resumed = true
+    if (bootAutoDrainEnabled()) startAutoDrainLoop()
+  })
+  void notifyRuntimeRecoveryChanged().catch((e) => console.error('[openground:hono] engine resume held for recovery', e))
 }
 
 // AUTO-DRAIN background loop (card cf545637) — the UI-INDEPENDENT server-side tick that
@@ -371,9 +399,8 @@ if (typeof process.send === 'function') {
 // deliberately not the same gate. Neither is a security boundary on its own — see
 // swarmGate.ts's "feature-VISIBILITY flag, not a security boundary" — this comment
 // is about accidental auto-run, not about bypassing the owner gate.)
-if (bootAutoDrainEnabled()) {
-  startAutoDrainLoop()
-}
+// Auto-drain starts with the recovered engine policy above, behind the same
+// journal/unknown-action barrier. Dev servers never resume real user work.
 
 // TERMINAL-POOL sweep background loop — the UI-INDEPENDENT safety net that reaps
 // dead PTY pool entries the happy-path 30s onExit timer can't: a reload-orphaned
@@ -430,19 +457,36 @@ startSupplyContextCapLoop()
 // an iPhone, dial OUT to its Cloudflare relay room so the phone can talk to the
 // president desks from anywhere. Unpaired = nothing happens. Primary (:47776)
 // only — see isPhoneLinkPrimary.
-void startPhoneLink().catch(() => {})
+void runtimeRecoveryReady.then((ready) => ready ? startPhoneLink() : undefined).catch(() => {})
+void runtimeRecoveryReady.then(async (ready) => {
+  if (!ready || typeof process.send !== 'function' || runtimeAdmissionBlocked('assistant')) return
+  const profile = runtimeEffectiveProfile('assistant')
+  if (profile) await resumeAssistantRuntime(profile, null)
+  await resumeQueuedAssistantTurns()
+}).catch((error) => console.error('[openground:hono] assistant recovery requires attention', error))
+const durableInboxTimer = setInterval(() => {
+  void runtimeRecoveryReady.then(async (ready) => {
+    if (!ready) return
+    await flushPresidentInbox()
+    await flushSwarmHandoffInputs()
+  }).catch(() => {})
+}, 2_000)
+durableInboxTimer.unref()
 // The assistant's talk log is kept N days (assistantMemory.ts, owner decision
 // 2026-10-03): at boot and every hour, talk old enough is first folded into the
 // memo (a claude run only when there is any; primary instance only, so two
 // instances never fold the same lines), then days past the kept ones are deleted
 // (reads and saves delete them too).
 const keepAssistantMemory = async (): Promise<void> => {
+  if (!await runtimeRecoveryReady || runtimeAdmissionBlocked('assistant')) return
   // Settings first: work mode reads "off" until they are loaded once.
   await getSettings()
   // ONE run per tick (up to 16,000 characters, oldest first): an owner line never
   // waits behind more than one, and a stuck fold is retried twice a day at most.
-  if (isPhoneLinkPrimary()) await foldIdleAssistantTalk().catch(() => false)
-  await pruneAssistantLog()
+  await withAssistantAccessScope(async () => {
+    if (isPhoneLinkPrimary()) await foldIdleAssistantTalk().catch(() => false)
+    await pruneAssistantLog()
+  })
 }
 void keepAssistantMemory().catch(() => {})
 setInterval(() => void keepAssistantMemory().catch(() => {}), 3_600_000).unref()

@@ -7,7 +7,7 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { pathToFileURL } from 'url'
 import { getEventListeners } from 'events'
-import { ChatGptConversation, chatGptConversationExists, chatGptConversationFile, readChatGptSse, type ChatGptTool } from './chatgptResponses'
+import { ChatGptConversation, chatGptConversationExists, chatGptConversationFile, chatGptPublicConversation, saveChatGptPublicConversation, readChatGptSse, type ChatGptTool } from './chatgptResponses'
 import { ChatGptQuotaError, chatGptCoolingUntil, clearChatGptCooling } from './chatgptQuota'
 import { coolingSnapshot } from './swarmQuota'
 import type { SdkEvent } from './sdkEvents'
@@ -25,6 +25,28 @@ const message = (text: string) => ({ type: 'message', role: 'assistant', content
 const tool: ChatGptTool = { name: 'look', description: 'Test read', parameters: { type: 'object', properties: {}, additionalProperties: false }, invoke: async () => ({ value: 'a fact' }) }
 
 describe('ChatGPT stateless function harness', () => {
+  it('recovers public words across process-local capture loss without transferring tool output or reasoning', async () => {
+    const storeDir = await temp(), id = `chatgpt-${randomUUID()}`
+    const options = { storeDir, accountKey: async () => 'account-a' }
+    await writeFile(chatGptConversationFile(id, storeDir), JSON.stringify({ version: 1, accountKey: 'account-a', input: [
+      { role: 'user', content: 'Owner request' },
+      { type: 'reasoning', encrypted_content: 'private-reasoning' },
+      { type: 'function_call', namespace: 'openground', name: 'look', call_id: 'call-a', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call-a', output: 'private-file-bytes' },
+      message('Public answer'),
+    ] }))
+    expect(await chatGptPublicConversation(id, options)).toEqual([{ kind: 'input', text: 'Owner request' }, { kind: 'text', text: 'Public answer' }])
+    const capture = [{ kind: 'input' as const, text: 'Approved handoff seed' }, { kind: 'text' as const, text: 'Latest answer' }]
+    await saveChatGptPublicConversation(id, capture, false, options)
+    capture[1].text = 'changed in process after save'
+    expect(await chatGptPublicConversation(id, options)).toEqual([{ kind: 'input', text: 'Approved handoff seed' }, { kind: 'text', text: 'Latest answer' }])
+    await expect(chatGptPublicConversation(id, { ...options, accountKey: async () => 'account-b' })).rejects.toThrow(/account changed/)
+    const nativeBefore = await readFile(chatGptConversationFile(id, storeDir), 'utf8')
+    await saveChatGptPublicConversation(id, [], true, options)
+    await expect(chatGptPublicConversation(id, options)).rejects.toThrow(/inspection/)
+    expect(await readFile(chatGptConversationFile(id, storeDir), 'utf8')).toBe(nativeBefore)
+  })
+
   it('normalizes Japanese deltas to complete SDK prose blocks while keeping live onText deltas', async () => {
     const input = '切り替えは\nこのまま進めます。\n\n次の段落です。' + '確認を続けます。'.repeat(12)
     const events: SdkEvent[] = []
@@ -244,8 +266,13 @@ describe('ChatGPT stateless function harness', () => {
     expect(childEvents.some((event) => event.kind === 'quota_refusal')).toBe(true)
     expect(parentEvents.some((event) => event.kind === 'quota_refusal')).toBe(true)
     expect(parentEvents.some((event) => event.kind === 'tool_result')).toBe(false)
-    await expect(parent.run('Do not retry the unfinished delegation')).rejects.toThrow(/closed/)
+    await expect(parent.run('Do not retry the unfinished delegation')).rejects.toThrow(/settlement/)
     expect(fetcher).toHaveBeenCalledTimes(2)
+    // The read-only refusal has a confirmed outcome. Only an explicit control
+    // settlement releases a later owner turn; no unfinished tool is replayed.
+    expect(await parent.settleInterruptedTurn('quota')).toBe(true)
+    await parent.run('A new owner request after settling the refusal')
+    expect(fetcher).toHaveBeenCalledTimes(3)
   })
 
   it('still lets an ordinary host tool error return a receipt and recover in the next response', async () => {

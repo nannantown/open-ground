@@ -35,12 +35,25 @@ const RELAY_MODULE = '../../../worker/src/phoneRelay'
 type Room = { webSocketMessage(ws: unknown, msg: string): Promise<void> }
 import { __testConnect, outerFrame, handleRelayFrame, LEGACY_V1_UNTIL, pairingCode, pumpTranscript, readPhoneLinkConfig, SEALED_MAX_AGE_MS, startPhoneLink, stopPhoneLink, tick, __testLinkState, type PhoneLinkConfig } from './phoneLink'
 import { e2eKeyOf, open, seal } from './phoneLinkSeal'
-import { __resetProposals, listProposals, proposeMessage } from './assistantProposals'
+import { __resetProposals as localResetProposals, listProposals as localListProposals, proposeMessage as localProposeMessage } from './assistantProposals'
+import { withLocalClaudeAssistantScope, assistantRuntimeDirectory } from './assistantRuntimeStore'
 import { openGroundHome } from './paths'
 import { setLockdownCache } from './lockdown'
 import { flushSupplyNotices, resetSupplyNoticeState } from './supplyNotice'
 import { dropAllPhotos, pendingPhotos } from './phonePhoto'
-import { appendAssistantEntries, assistantPhotoPath, readAssistantLog, clearAssistantLog, clearAssistantMemory, writeAssistantMemory } from './assistantMemory'
+import { appendAssistantEntries as localAppend, assistantPhotoPath as localPhotoPath, readAssistantLog as localReadLog,
+  clearAssistantLog as localClearLog, clearAssistantMemory as localClearMemory, writeAssistantMemory as localWriteMemory } from './assistantMemory'
+
+// The sealed legacy fixture has a local unlock and no signed-in owner.
+const __resetProposals = () => withLocalClaudeAssistantScope(localResetProposals)
+const listProposals: typeof localListProposals = (...args) => withLocalClaudeAssistantScope(() => localListProposals(...args))
+const proposeMessage: typeof localProposeMessage = (...args) => withLocalClaudeAssistantScope(() => localProposeMessage(...args))
+const appendAssistantEntries: typeof localAppend = (...args) => withLocalClaudeAssistantScope(() => localAppend(...args))
+const assistantPhotoPath: typeof localPhotoPath = (...args) => withLocalClaudeAssistantScope(() => localPhotoPath(...args))
+const readAssistantLog: typeof localReadLog = (...args) => withLocalClaudeAssistantScope(() => localReadLog(...args))
+const clearAssistantLog: typeof localClearLog = (...args) => withLocalClaudeAssistantScope(() => localClearLog(...args))
+const clearAssistantMemory = () => withLocalClaudeAssistantScope(localClearMemory)
+const writeAssistantMemory: typeof localWriteMemory = (...args) => withLocalClaudeAssistantScope(() => localWriteMemory(...args))
 
 const PROJECT = '/repo/alpha'
 const E2E = randomBytes(32).toString('base64url')
@@ -672,8 +685,9 @@ describe('sealed call records', () => {
   it('a disk failure is rejected; fixing it permits same-id retry without a false delivered', async () => {
     const { wire, sock } = macSocket()
     const st = __testLinkState(CFG, sock)
-    const log = join(openGroundHome(), 'assistant', 'log')
-    mkdirSync(join(openGroundHome(), 'assistant'), { recursive: true })
+    const directory = withLocalClaudeAssistantScope(assistantRuntimeDirectory)
+    const log = join(directory, 'log')
+    mkdirSync(directory, { recursive: true })
     writeFileSync(log, 'not a directory')
     const n = note('disk-fail')
     await handleRelayFrame(st, phoneSays(n))

@@ -13,6 +13,10 @@ vi.mock('@/lib/server/phoneLink', async (orig) => ({
   ...(await orig<object>()),
   hasPhoneLinkAccess: async () => true,
 }))
+// These routes exercise the existing locally unlocked Claude assistant. The
+// newer owner-only runtime uses a separate authorization and memory scope.
+vi.mock('@/lib/server/swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => true }))
+vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => null }))
 vi.mock('@/lib/server/assistantListen', () => ({
   listenBinary: () => '/fake/og-listen',
   voiceCommand: (cmd: unknown) => (h.cmds.push(cmd), h.inCall),

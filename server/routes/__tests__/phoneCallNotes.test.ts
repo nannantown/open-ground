@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { phoneLinkRoutes } from '../phoneLink'
 import { appendAssistantCall, clearAssistantLog, readAssistantLog } from '@/lib/server/assistantMemory'
 import { openGroundHome } from '@/lib/server/paths'
+import { withLocalClaudeAssistantScope } from '@/lib/server/assistantRuntimeStore'
 
 vi.mock('@/lib/server/swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => true }))
 vi.mock('@/lib/server/roles', () => ({ getCustomTabRole: async () => null }))
@@ -15,11 +16,12 @@ beforeEach(async () => {
   project = await realpath(await mkdtemp(join(tmpdir(), 'og-call-project-')))
   await writeFile(join(openGroundHome(), 'settings.json'), JSON.stringify({ projectsMigratedAt: new Date().toISOString(), projects: [{ id: 'p1', path: project, addedAt: new Date().toISOString() }] }))
   await clearAssistantLog()
+  await withLocalClaudeAssistantScope(clearAssistantLog)
 })
 afterEach(async () => { await rm(project, { recursive: true, force: true }) })
 
 it('the Mac reader shows only its registered president notes; assistant reader excludes those notes', async () => {
-  await appendAssistantCall('a', { at: Date.now(), kind: 'call', seconds: 102, projectId: 'assistant', who: 'owner', text: 'Call 1:42', via: 'phone' })
+  await withLocalClaudeAssistantScope(() => appendAssistantCall('a', { at: Date.now(), kind: 'call', seconds: 102, projectId: 'assistant', who: 'owner', text: 'Call 1:42', via: 'phone' }))
   await appendAssistantCall('p', { at: Date.now(), kind: 'call', seconds: 25, projectId: 'p1', who: 'owner', text: 'Call 0:25', via: 'phone' })
   const r = await app.request(`/api/phone-link/call-notes?path=${encodeURIComponent(project)}`)
   expect((await r.json()).entries).toEqual([expect.objectContaining({ id: 'call:p', seconds: 25, projectId: 'p1' })])
@@ -35,7 +37,7 @@ it('the Mac reader shows only its registered president notes; assistant reader e
 
 
 it('clearing assistant conversation or deleting by a president id preserves unrelated project call records', async () => {
-  await appendAssistantCall('a', { at: Date.now(), kind: 'call', seconds: 102, projectId: 'assistant', who: 'owner', text: 'Call 1:42', via: 'phone' })
+  await withLocalClaudeAssistantScope(() => appendAssistantCall('a', { at: Date.now(), kind: 'call', seconds: 102, projectId: 'assistant', who: 'owner', text: 'Call 1:42', via: 'phone' }))
   await appendAssistantCall('p', { at: Date.now(), kind: 'call', seconds: 25, projectId: 'p1', who: 'owner', text: 'Call 0:25', via: 'phone' })
   const deleteOther = await app.request('/api/phone-link/assistant/log/call:p', { method: 'DELETE' })
   expect(deleteOther.status).toBe(404)
@@ -47,7 +49,7 @@ it('clearing assistant conversation or deleting by a president id preserves unre
 })
 
 it('DELETE call-notes clears only that president\'s notes, behind the same path and loopback gates', async () => {
-  await appendAssistantCall('a', { at: Date.now(), kind: 'call', seconds: 102, projectId: 'assistant', who: 'owner', text: 'Call 1:42', via: 'phone' })
+  await withLocalClaudeAssistantScope(() => appendAssistantCall('a', { at: Date.now(), kind: 'call', seconds: 102, projectId: 'assistant', who: 'owner', text: 'Call 1:42', via: 'phone' }))
   await appendAssistantCall('p', { at: Date.now(), kind: 'call', seconds: 25, projectId: 'p1', who: 'owner', text: 'Call 0:25', via: 'phone' })
   await appendAssistantCall('q', { at: Date.now(), kind: 'call', seconds: 9, projectId: 'p2', who: 'owner', text: 'Call 0:09', via: 'phone' })
   const url = `/api/phone-link/call-notes?path=${encodeURIComponent(project)}`
@@ -57,5 +59,6 @@ it('DELETE call-notes clears only that president\'s notes, behind the same path 
   expect((await app.request(url, { method: 'DELETE' })).status).toBe(200)
   expect((await (await app.request(url)).json()).entries).toEqual([])
   const all = (await readAssistantLog()).map((e) => e.id).sort()
-  expect(all).toEqual(['call:a', 'call:q'])
+  expect(all).toEqual(['call:q'])
+  expect((await withLocalClaudeAssistantScope(readAssistantLog)).map(e => e.id)).toEqual(['call:a'])
 })

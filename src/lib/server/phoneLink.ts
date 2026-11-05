@@ -45,6 +45,13 @@ import { langOf, pick } from './promptLang'
 import { e2eKeyOf, open as openSealed, seal, sealTag } from './phoneLinkSeal'
 import { appendAssistantCall, assistantEntriesFor, readAssistantConfig, readAssistantLog, readAssistantMemory, saveAssistantPhoto, sniffPhoto, type AssistantConfig } from './assistantMemory'
 import { awaitPhoto, dropAllPhotos, dropPhoto, PHOTO_PARTS_MAX, takePhotoPart } from './phonePhoto'
+import { conversationCapabilities, handleConversationControl } from './conversationControl'
+import { hasChatGptAccess } from './chatgptAccess'
+import { acceptPresidentInput, flushPresidentInbox } from './presidentInbox'
+import { onConversationReceipt, publicConversationReceipt } from './conversationReceipts'
+import { runtimeOwnerKey } from './runtimeOwner'
+import { runtimeAdmissionBlocked } from './runtimeTransitionStore'
+import { withAssistantAccessScope } from './phoneAssistant'
 
 /** The relay the owner deployed (worker/wrangler.phone.jsonc). Override with
  *  OPENGROUND_PHONE_RELAY_URL at pairing time (tests, a self-hosted relay). */
@@ -63,6 +70,8 @@ export interface PhoneLinkConfig {
   /** v2: ids of phone frames accepted within SEALED_MAX_AGE_MS (id → its ts), so
    *  a frame replayed by the relay is refused even across an app restart. */
   seenIds?: Record<string, number>
+  /** Immutable app-owner binding; never included in the pairing code. */
+  ownerKey?: string
   /** The project (registry UUID) whose president the phone hears. */
   projectId?: string
   /** Where reading of the current transcript began (`f` = project:file). A
@@ -105,7 +114,7 @@ export const LEGACY_V1_UNTIL = Date.parse('2026-11-30T00:00:00Z')
  *  refused (a say is answered `stale`): the relay cannot hold a say and use it later. */
 export const SEALED_MAX_AGE_MS = 5 * 60_000
 /** Content frames sealed on a v2 pairing (control frames stay plain). */
-const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history', 'call-note', 'assistant-proposals', 'assistant-proposal', 'photo-part'])
+const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history', 'call-note', 'assistant-proposals', 'assistant-proposal', 'photo-part', 'conversation-control'])
 
 const EVENT_TEXT_MAX = 8000
 const TAIL_TICK_MS = 1000
@@ -424,7 +433,7 @@ const sendProjects = async (st: LinkState, force = false): Promise<void> => {
   // come whatever is selected — docs/PHONE_LINK.md "The assistant").
   // Its name and colour are the owner's (Settings of the floating assistant —
   // docs/ASSISTANT_DESIGN.md); unnamed, it is just "Assistant".
-  const look = await readAssistantConfig()
+  const look = await withAssistantAccessScope(() => readAssistantConfig())
   const assistant = {
     id: ASSISTANT_ID,
     name: look.name || pick(langOf(await getSettings()), { en: 'Assistant', ja: 'アシスタント' }),
@@ -751,7 +760,8 @@ const assistantHistory = async (st: LinkState, f: Record<string, unknown>, id: s
     bytes += size
     from--
   }
-  const page = { projectId, entries: all.slice(from), more: from > 0, ...head }
+  const capabilities = f.control === true ? await conversationCapabilities() : undefined
+  const page = { projectId, entries: all.slice(from), more: from > 0, ...head, ...(capabilities ? { capabilities } : {}) }
   send(st, { type: 'assistant-history', ...(id !== undefined ? { id } : {}), ...page })
 }
 
@@ -775,7 +785,7 @@ export const flushAssistantOutbox = (st: LinkState, deps: PhoneLinkDeps = {}): v
 
 /** A say to the assistant (phoneAssistant.ts): answered on the Mac and sent to
  *  the phone only — never typed into a desk, never shown on a screen. */
-const assistantSay = async (st: LinkState, id: string | undefined, text: string, deps: PhoneLinkDeps, photoParts?: unknown): Promise<void> => {
+const assistantSay = async (st: LinkState, id: string | undefined, text: string, deps: PhoneLinkDeps, photoParts?: unknown, metadata: Record<string, unknown> = {}): Promise<void> => {
   const ack = (state: 'queued' | 'delivered' | 'rejected', extra: Record<string, unknown> = {}) =>
     sendAssistant(st, { type: 'ack', ...(id !== undefined ? { id } : {}), state, ...extra }, deps)
   const line = text.trim()
@@ -794,19 +804,21 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
   // Work mode: nothing would go out, so nothing is asked either.
   if (isLockdownEnabledSync()) return withPhoto && id !== undefined ? dropPhoto(id) : undefined
   // Full (one answering, one waiting): just `busy`, nothing queued or echoed.
-  if (assistantBusy()) return refuse('busy')
+  if (deps.assistant && assistantBusy()) return refuse('busy')
   let photo: string | undefined
+  let photoDigest: string | undefined
   if (withPhoto) {
     const got = await awaitPhoto(id!, photoParts as number, deps.photoWaitMs)
     // The wait can be long: what was checked before it is checked again.
     if (st.retired || isLockdownEnabledSync()) return
-    if (assistantBusy()) return void ack('rejected', { reason: 'busy' })
+    if (deps.assistant && assistantBusy()) return void ack('rejected', { reason: 'busy' })
     if ('error' in got) return void ack('rejected', { reason: got.error })
     // Its bytes decide what it is (never what the phone says), as from the screen.
     const ext = sniffPhoto(got.bytes)
     if (!ext) return void ack('rejected', { reason: 'photo-bad' })
     try {
       photo = await saveAssistantPhoto(got.bytes, ext)
+      photoDigest = createHash('sha256').update(got.bytes).digest('hex')
     } catch {
       return void ack('rejected', { reason: 'mac-error' })
     }
@@ -814,8 +826,13 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
   // The owner has just spoken: no push until the answer is out (see flushPush).
   const hold = { at: Date.now() }
   st.says.add(hold)
-  ack('queued', { projectId: ASSISTANT_ID })
-  sendAssistant(st, assistantTalk(st, 'owner', { text: line, ...(photo ? { photo } : {}), at: Date.now() }, id), deps)
+  let completedReplay = false
+  const accepted = (receipt?: { state: string }) => {
+    completedReplay = receipt?.state === 'completed'
+    ack(completedReplay ? 'delivered' : 'queued', { projectId: ASSISTANT_ID, ...(receipt ? { receipt } : {}) })
+    if (!completedReplay) sendAssistant(st, assistantTalk(st, 'owner', { text: line, ...(photo ? { photo } : {}), at: Date.now() }, id), deps)
+  }
+  if (deps.assistant) accepted()
   // One final ack, whatever happens after the answer came back. The phone hears
   // plain words only (plainAssistantError), never an internal message.
   // Settings unreadable: English, but the final ack still goes.
@@ -825,7 +842,12 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
     void (!st.assistantOutbox.length && send(st, { type: 'ack', ...(id !== undefined ? { id } : {}), state, projectId: ASSISTANT_ID }))
   // Its turn began (it may have waited behind one other line).
   const onStart = () => live('replying')
-  const a = await (deps.assistant ? deps.assistant(line, photo, onStart) : askAssistant(line, { clientId: id, ...(photo ? { photo } : {}), onStart })).catch(async (e: unknown) =>
+  const a = await (deps.assistant ? deps.assistant(line, photo, onStart) : askAssistant(line, { clientId: id, via: 'phone', ...(photo ? { photo } : {}), ...(photoDigest ? { photoDigest } : {}),
+    ...(typeof metadata.originId === 'string' ? { draftClientId: metadata.originId } : {}),
+    ...(typeof metadata.draftRevision === 'number' ? { draftRevision: metadata.draftRevision } : {}),
+    ...(typeof metadata.conversationId === 'string' ? { conversationId: metadata.conversationId } : {}),
+    ...(typeof metadata.epoch === 'number' ? { epoch: metadata.epoch } : {}),
+    onAccepted: accepted, onStart })).catch(async (e: unknown) =>
     plainAssistantError(e, await getSettings().then(langOf, () => 'en' as const)),
   )
   if (a instanceof AssistantFailure) {
@@ -833,6 +855,7 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
     if (st.says.delete(hold)) void flushPush(st, deps).catch(() => {})
     return
   }
+  if (completedReplay) { st.says.delete(hold); return }
   ack('delivered', { projectId: ASSISTANT_ID, heard: true })
   // `speak`: the part to read aloud (one or two sentences); `text` is all of it.
   const sent = sendAssistant(st, assistantTalk(st, 'assistant', { text: a.reply, ...(a.speak ? { speak: a.speak } : {}), at: Date.now() }), deps)
@@ -900,12 +923,15 @@ const proposalButton = async (st: LinkState, f: Record<string, unknown>, id: str
 }
 
 /** One frame relayed from the phone. Exported for tests. */
-export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>, deps: PhoneLinkDeps = {}): Promise<void> => {
+const handlePhoneFrameInScope = async (st: LinkState, f: Record<string, unknown>, deps: PhoneLinkDeps = {}): Promise<void> => {
   const id = typeof f.id === 'string' ? f.id.slice(0, 100) : undefined
   const ack = (state: 'queued' | 'delivered' | 'replying' | 'replied' | 'rejected', extra: Record<string, unknown> = {}) =>
     send(st, { type: 'ack', ...(id !== undefined ? { id } : {}), state, ...extra })
   // The president is an owner seat: no owner access, nothing is answered.
   if (!(await hasPhoneLinkAccess())) return void ack('rejected', { reason: 'forbidden' })
+  if (st.cfg.ownerKey) {
+    try { await runtimeOwnerKey(st.cfg.ownerKey) } catch { return void ack('rejected', { reason: 'owner-changed' }) }
+  }
   if (f.type === 'projects') return sendProjects(st, true)
   if (f.type === 'push-token') {
     const target = asPushTarget(f)
@@ -929,6 +955,10 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
     return selectProject(st, p.id)
   }
   if (f.type === 'assistant-history') return assistantHistory(st, f, id, deps)
+  if (f.type === 'conversation-control') {
+    if (st.cfg.v !== 2) return void ack('rejected', { reason: 'pair-again' })
+    return void send(st, await handleConversationControl(f))
+  }
   if (f.type === 'assistant-proposal') return proposalButton(st, f, id, deps)
   if (f.type === 'call-note') {
     if (isLockdownEnabledSync() || st.cfg.v !== 2 || st.retired) return
@@ -961,7 +991,7 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
   }
   if (f.type !== 'say') return
   const text = typeof f.text === 'string' ? f.text : ''
-  if (f.projectId === ASSISTANT_ID) return assistantSay(st, id, text, deps, f.photoParts)
+  if (f.projectId === ASSISTANT_ID) return assistantSay(st, id, text, deps, f.photoParts, f)
   // Photos go to the assistant only (the president's desk takes one typed line).
   if (f.photoParts !== undefined) {
     if (id !== undefined) dropPhoto(id)
@@ -973,6 +1003,23 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
   const { all, chosen } = await selectedProject(st)
   const p = typeof f.projectId === 'string' ? all.find((x) => x.id === f.projectId) : chosen
   if (!p) return void ack('rejected', { reason: 'no-project' })
+  if (p.id !== chosen?.id) await selectProject(st, p.id)
+  if (id && !deps.supply && !deps.wakeDesk && await hasChatGptAccess()) {
+    try {
+      const accepted = await acceptPresidentInput(p.path, text, {
+        id,
+        ...(typeof f.originId === 'string' ? { draftClientId: f.originId } : {}),
+        ...(typeof f.draftRevision === 'number' ? { draftRevision: f.draftRevision } : {}),
+        ...(typeof f.conversationId === 'string' ? { conversationId: f.conversationId } : {}),
+        ...(typeof f.epoch === 'number' ? { epoch: f.epoch } : {}),
+      })
+      ack(accepted.receipt.state === 'delivered' ? 'delivered' : ['uncertain', 'cancelled', 'rejected'].includes(accepted.receipt.state) ? 'rejected' : 'queued', { projectId: p.id, ...accepted })
+      if (!st.sayIds.some((entry) => entry.id === id)) st.sayIds = [...st.sayIds, { projectId: p.id, text: sayKey(ownerSayLine(text)), id, at: Date.parse(accepted.receipt.acceptedAt) }].slice(-SAY_IDS_MAX)
+      if (!p.desk && !runtimeAdmissionBlocked('swarm') && accepted.receipt.state === 'queued') await wakePresidentDesk(p.path)
+      await flushPresidentInbox()
+    } catch { ack('rejected', { projectId: p.id, reason: 'mac-error' }) }
+    return
+  }
   // Saying to another project selects it — otherwise its answer is never heard.
   if (p.id !== chosen?.id) await selectProject(st, p.id)
   // No push until this say's final ack went out (see flushPush).
@@ -1013,6 +1060,15 @@ export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>
   })
 }
 
+export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>, deps: PhoneLinkDeps = {}): Promise<void> => {
+  const assistantFrame = f.projectId === ASSISTANT_ID || f.type === 'assistant-proposal' || f.type === 'photo-part' || f.type === 'assistant-history' && (f.projectId === undefined || f.projectId === ASSISTANT_ID)
+  try { await (assistantFrame ? withAssistantAccessScope(() => handlePhoneFrameInScope(st, f, deps)) : handlePhoneFrameInScope(st, f, deps)) }
+  catch (error) {
+    const failure = plainAssistantError(error, 'en')
+    sendAssistant(st, { type: 'ack', ...(typeof f.id === 'string' ? { id: f.id.slice(0, 100) } : {}), state: 'rejected', reason: failure.reason, detail: failure.message }, deps)
+  }
+}
+
 /** One frame from the relay: its own `resume` (the relay never forwards a phone
  *  frame of that type), else a phone frame. Exported for tests. */
 export const handleRelayFrame = async (st: LinkState, f: Record<string, unknown>, deps: PhoneLinkDeps = {}): Promise<void> => {
@@ -1037,7 +1093,7 @@ let lastDropWarn = 0
  *  Logs never carry the content. */
 const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
   const inner = openSealed(key, 'p2m', f.box)
-  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history' || inner.type === 'call-note' || inner.type === 'assistant-proposal' || inner.type === 'photo-part')) {
+  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history' || inner.type === 'call-note' || inner.type === 'assistant-proposal' || inner.type === 'photo-part' || inner.type === 'conversation-control')) {
     // The relay can send these at will: one line a minute, never the frame.
     if (Date.now() - lastDropWarn > 60_000) {
       console.warn(
@@ -1067,7 +1123,8 @@ const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, un
   // replaces itself, and its say (whose id IS written down) is what acts.
   if (inner.type === 'photo-part') return st.retired ? null : inner
   const seen = Object.fromEntries(Object.entries(st.cfg.seenIds ?? {}).filter(([, t]) => typeof t === 'number' && now - t <= SEALED_MAX_AGE_MS))
-  if (id in seen && inner.type !== 'call-note') return null // a second time: the first one was answered
+  const durableReplay = (inner.type === 'say' || inner.type === 'conversation-control') && await hasChatGptAccess()
+  if (id in seen && inner.type !== 'call-note' && !durableReplay) return null
   st.cfg = { ...st.cfg, seenIds: { ...seen, [id]: ts } }
   // On disk before it acts: a restart right after must still know this id —
   // when it cannot be saved, the frame is not acted on (fail closed).
@@ -1293,6 +1350,12 @@ export const startPhoneLink = async (): Promise<boolean> => {
   if (!isPhoneLinkPrimary()) return false
   const cfg = await readPhoneLinkConfig()
   if (!cfg || (cfg.v === 1 && Date.now() >= LEGACY_V1_UNTIL)) return false
+  if (await hasChatGptAccess()) {
+    try {
+      const owner = await runtimeOwnerKey(cfg.ownerKey)
+      if (!cfg.ownerKey) { cfg.ownerKey = owner; await writeConfig(cfg) }
+    } catch { return false }
+  } else if (cfg.ownerKey) return false
   // A config from before the work-mode mark: from now on (docs/PHONE_LINK.md "A president's talk").
   if (cfg.quiet === undefined) {
     cfg.quiet = Date.now()
@@ -1304,7 +1367,13 @@ export const startPhoneLink = async (): Promise<boolean> => {
   const st = newLinkState(cfg, null)
   st.stopped = false
   globalThis.__openground_phone_link = st
-  const unwatch = [onProposalsChanged(() => sendProposals(st)), onAssistantAppLine((e) => sendAppLine(st, e)), onRelayState((e) => sendRelayState(st, e)), onPresidentTalk((e) => void sendPresidentTalk(st, e).catch(() => {}))]
+  const unwatch = [onProposalsChanged(() => sendProposals(st)), onAssistantAppLine((e) => sendAppLine(st, e)), onRelayState((e) => sendRelayState(st, e)), onPresidentTalk((e) => void sendPresidentTalk(st, e).catch(() => {})), onConversationReceipt((receipt) => {
+    void runtimeOwnerKey().then((owner) => {
+      if (owner !== receipt.owner || st.cfg.ownerKey && owner !== st.cfg.ownerKey || st.retired || receipt.scope.startsWith('control-')) return
+      const heard = receipt.state === 'executing' && (receipt.result as { heard?: unknown } | undefined)?.heard === true
+      send(st, { type: 'ack', id: receipt.id, projectId: receipt.scope, state: receipt.state === 'delivered' || heard ? 'delivered' : ['uncertain', 'rejected', 'cancelled'].includes(receipt.state) ? 'rejected' : 'queued', receipt: publicConversationReceipt(receipt) })
+    }).catch(() => {})
+  })]
   st.unwatchProposals = () => unwatch.forEach((u) => u())
   connect(st)
   st.loop = setInterval(() => void tick(st), TAIL_TICK_MS)
@@ -1386,6 +1455,7 @@ export const pairPhone = async (): Promise<{ code: string } | { error: PhoneLink
     macKey: key(),
     phoneKey: key(),
     e2eKey: key(),
+    ...(await hasChatGptAccess() ? { ownerKey: await runtimeOwnerKey() } : {}),
     ...(old?.projectId ? { projectId: old.projectId } : {}),
     quiet: Date.now(), // a president's talk from before this pairing is never handed over
   }

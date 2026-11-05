@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { runtimeOf, workerKey, workerRuntimeKind, type WorkerHandle } from './workerRuntime'
 
 // THE RULE, MADE ENFORCEABLE.
@@ -101,6 +101,8 @@ import {
   listActiveSdkCwds,
   listSdkSessionsIn,
   isSdkSessionLive,
+  drainSdkSession,
+  resumeSdkInputAdmission,
   __resetSdkSessionsForTests,
   __setQuotaPrefixesForTests,
   type SdkQueryFn,
@@ -304,28 +306,28 @@ describe('the engine can SEE an SDK worker’s quota stop', () => {
 // cleaner / gate / beacon / singleton seams.)
 
 describe('the quota notice DECAYS (a recovered worker is not reclaimed forever)', () => {
-  /** Refuse, then — on the next turn — do real work. */
-  const refuseThenResume = (control: { next?: () => void }): SdkQueryFn =>
-    (() => ({
+  /** Refuse, then do work only after the host explicitly admits a NEW turn. */
+  const refuseThenResume: SdkQueryFn = ({ prompt }) =>
+    ({
       async *[Symbol.asyncIterator]() {
-        yield { type: 'assistant', message: { content: [{ type: 'text', text: REFUSAL }] } }
-        yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
-        await new Promise<void>((r) => {
-          control.next = r
-        })
-        yield { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'ls' } }] } }
-        yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
-        await new Promise(() => {})
+        let turn = 0
+        for await (const _input of prompt) {
+          if (turn++ === 0) yield { type: 'assistant', message: { content: [{ type: 'text', text: REFUSAL }] } }
+          else yield { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'ls' } }] } }
+          yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
+        }
       },
-    })) as SdkQueryFn
+    })
 
   it('reports the refusal while it is current…', async () => {
-    const control: { next?: () => void } = {}
-    const s = spawnSdkSession({ cwd: '/wt/d', role: 'worker', options: {}, initialPrompt: 'go', queryFn: refuseThenResume(control) })
-    await new Promise((r) => setTimeout(r, 20))
+    const s = spawnSdkSession({ cwd: '/wt/d', role: 'worker', options: {}, initialPrompt: 'go', queryFn: refuseThenResume })
+    await vi.waitFor(() => expect(getSdkSession(s.id)?.status).toBe('quota-parked'))
+    await drainSdkSession(s.id)
     expect(lastQuotaRefusalText(s.id)).toBe(REFUSAL)
-    control.next?.()
-    await new Promise((r) => setTimeout(r, 20))
+    expect(pushSdkInput(s.id, 'automatic retry must remain paused')).toBe(false)
+    resumeSdkInputAdmission(s.id)
+    expect(pushSdkInput(s.id, 'explicitly continue after recovery')).toBe(true)
+    await vi.waitFor(() => expect(lastQuotaRefusalText(s.id)).toBeNull())
     // …and STOPS once the worker has actually done work again. Before this, the
     // scan walked the whole ring buffer and returned that sentence forever, so
     // the engine reclaimed a healthy worker on every later pass.

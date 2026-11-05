@@ -252,7 +252,7 @@ export class OgPhoneRelay extends DurableObject<Env> {
     if (role === 'phone') {
       if (
         !f ||
-        (f.type !== 'say' && f.type !== 'select' && f.type !== 'projects' && f.type !== 'push-token' && f.type !== 'assistant-history' && f.type !== 'call-note' && f.type !== 'assistant-proposal' && f.type !== 'photo-part')
+        (f.type !== 'say' && f.type !== 'select' && f.type !== 'projects' && f.type !== 'push-token' && f.type !== 'assistant-history' && f.type !== 'call-note' && f.type !== 'assistant-proposal' && f.type !== 'photo-part' && f.type !== 'conversation-control')
       ) {
         this.send(ws, { type: 'error', code: 'bad-frame' })
         return

@@ -6,7 +6,8 @@ import {
   type AssistantModel,
 } from './assistantSession'
 import { ChatGptConversation, type ChatGptTool } from './chatgptResponses'
-import { chatGptLaunchConfig, selectedRuntime } from './chatgptRuntime'
+import { chatGptLaunchConfig } from './chatgptRuntime'
+import { admitChatGptRuntime } from './runtimeLease'
 import type { ToolResult } from './assistantTools'
 import { getChatGptAccountKey } from './chatgptAuth'
 
@@ -30,13 +31,17 @@ export const closeChatGptAssistant = (): void => {
   talk.conversation.close()
 }
 
-const current = async (o: Pick<AssistantAsk, 'key' | 'system'>): Promise<Talk> => {
+const current = async (o: Pick<AssistantAsk, 'key' | 'system' | 'authorize' | 'runtimeOwnerKey'>): Promise<Talk> => {
+  await o.authorize?.()
   const config = await chatGptLaunchConfig('assistant')
-  const key = JSON.stringify([o.key, config, await getChatGptAccountKey()])
+  const key = JSON.stringify([o.key, config, await getChatGptAccountKey(), o.runtimeOwnerKey])
+  await o.authorize?.()
   const existing = g.__openground_chatgpt_assistant
   if (existing?.key === key && existing.turns < 40) return existing
   closeChatGptAssistant()
   const talk: Talk = { key, turns: 0, current: null, conversation: null! }
+  const lease = await admitChatGptRuntime('assistant', o.runtimeOwnerKey)
+  const authorize = async () => { await lease(); await (talk.current?.authorize ?? o.authorize)?.() }
   const tools: ChatGptTool[] = Object.entries(ASSISTANT_TOOL_SHAPES).filter(([name]) => name !== 'think_deeper').map(([name, shape]) => {
     const schema = z.object(shape)
     return {
@@ -44,7 +49,8 @@ const current = async (o: Pick<AssistantAsk, 'key' | 'system'>): Promise<Talk> =
       description: ASSISTANT_TOOL_DESCRIPTIONS[name as keyof typeof ASSISTANT_TOOL_DESCRIPTIONS],
       parameters: z.toJSONSchema(schema),
       invoke: async (input, signal) => {
-        if (signal.aborted || !talk.current || await selectedRuntime('assistant') !== 'chatgpt') throw new Error('Assistant turn is no longer active.')
+        if (signal.aborted || !talk.current) throw new Error('Assistant turn is no longer active.')
+        await authorize()
         const args = schema.parse(input)
         const tool = talk.current.tools[name as keyof AssistantAsk['tools']]
         const result = await (tool as (a: unknown) => Promise<ToolResult>)(args)
@@ -58,9 +64,7 @@ const current = async (o: Pick<AssistantAsk, 'key' | 'system'>): Promise<Talk> =
     instructions: await o.system(),
     tools,
     persist: false,
-    authorize: async () => {
-      if (await selectedRuntime('assistant') !== 'chatgpt') throw new Error('ChatGPT is no longer selected for the assistant.')
-    },
+    authorize,
   })
   g.__openground_chatgpt_assistant = talk
   return talk
@@ -85,6 +89,7 @@ export const chatGptAssistantModel: AssistantModel = {
     const timer = setTimeout(() => talk.controller?.abort(), 120_000)
     let text = ''
     try {
+      await o.authorize?.()
       const answer = await talk.conversation.run(o.line, {
         signal: talk.controller.signal,
         onText: (delta) => { text += delta; o.onStream?.({ text }) },

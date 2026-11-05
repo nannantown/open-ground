@@ -117,6 +117,7 @@ function installFetch(opts: MockOpts = {}) {
     if (url.includes('/api/ground/lamps')) return reply(200, { lamps: opts.lamps ?? [] })
     if (url.includes('/api/auth/session')) return reply(503, {}) // signed-out (default build)
     if (url.includes('/api/collab/config')) return reply(200, { enabled: false })
+    if (url.includes('/api/assistant/runtime')) return reply(200, { conversationId: 'synthetic-assistant', epoch: 0, pending: [], uncertainActions: [], actions: [] })
     // Everything else (feedback/config, notifications,
     // auth/config, usage, …) reads optionally — an empty object collapses to
     // the default (disabled) build, which is what we render here.

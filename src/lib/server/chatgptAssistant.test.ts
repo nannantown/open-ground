@@ -5,6 +5,8 @@ const auth = vi.hoisted(() => ({
   account: 'synthetic-account-a', provider: 'chatgpt', denied: false,
   config: { model: 'synthetic-catalog-model', effort: 'high' },
 }))
+vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => !auth.denied }))
+vi.mock('./authStore', async original => ({ ...(await original<typeof import('./authStore')>()), readSession: async () => ({ user: { id: 'synthetic-owner' } }) }))
 vi.mock('./chatgptAuth', () => ({
   getChatGptAccountKey: async () => auth.account,
   getChatGptAccessToken: async () => 'synthetic-unit-test-token',
@@ -68,16 +70,30 @@ describe('the ChatGPT assistant wrapper with the real stateless transport', () =
     expect(requests.every((body) => body.store === false)).toBe(true)
   })
 
-  it('does not invoke a proposed action after the owner/provider gate closes', async () => {
+  it('does not invoke a proposed action after owner authorization is revoked', async () => {
     const turnTools = tools()
     const fetcher = vi.fn(async () => {
-      auth.provider = 'claude'
+      auth.denied = true
       return response([call('withdraw', {})])
     })
     vi.stubGlobal('fetch', fetcher)
-    await expect(chatGptAssistantModel.ask(ask({ tools: turnTools }))).rejects.toThrow('no longer selected')
+    await expect(chatGptAssistantModel.ask(ask({ tools: turnTools }))).rejects.toThrow('Owner sign-in is required')
     expect(turnTools.withdraw).not.toHaveBeenCalled()
     expect(fetcher).toHaveBeenCalledOnce()
+  })
+
+  it('finishes an admitted turn under its original plan profile when only the requested provider changes', async () => {
+    const turnTools = tools(), requests: Record<string, unknown>[] = []
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(requestBody(init))
+      if (requests.length === 1) { auth.provider = 'claude'; return response([call('status', {})]) }
+      return response([message('The accepted ChatGPT turn finished.')])
+    })
+    vi.stubGlobal('fetch', fetcher)
+    expect(await chatGptAssistantModel.ask(ask({ tools: turnTools }))).toBe('The accepted ChatGPT turn finished.')
+    expect(turnTools.status).toHaveBeenCalledOnce()
+    expect(requests).toHaveLength(2)
+    expect(requests.every(request => request.model === auth.config.model)).toBe(true)
   })
 
   it('rechecks authorization before the inference following a tool, without falling back to Claude', async () => {
@@ -85,7 +101,7 @@ describe('the ChatGPT assistant wrapper with the real stateless transport', () =
     vi.mocked(turnTools.status).mockImplementation(async () => { auth.denied = true; return { text: 'Current Board state' } })
     const fetcher = vi.fn(async () => response([call('status', {})]))
     vi.stubGlobal('fetch', fetcher)
-    await expect(chatGptAssistantModel.ask(ask({ tools: turnTools }))).rejects.toThrow('owner access ended')
+    await expect(chatGptAssistantModel.ask(ask({ tools: turnTools }))).rejects.toThrow('Owner sign-in is required')
     expect(fetcher).toHaveBeenCalledOnce()
     expect(turnTools.status).toHaveBeenCalledOnce()
   })

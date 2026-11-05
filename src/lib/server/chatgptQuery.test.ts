@@ -1,13 +1,31 @@
 import { describe, expect, it, vi } from 'vitest'
-import { readFile, rm } from 'fs/promises'
+import { readFile, rm, mkdtemp } from 'fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { randomUUID } from 'crypto'
 import { createChatGptQuery, distillChatGptMessage, chatGptTranscriptFile } from './chatgptQuery'
-import { chatGptConversationFile } from './chatgptResponses'
+import { chatGptConversationFile, chatGptPublicConversation } from './chatgptResponses'
 
 const envelope = (text: string) => ({ message: { content: [{ type: 'text', text }] } })
 const response = () => new Response(`data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', model: 'test-model', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] }], usage: { input_tokens: 1, output_tokens: 1 } } })}\n\n`)
 
 describe('ChatGPT pool adapter', () => {
+  it('persists captured public text before reporting settlement even when the event consumer has not drained it', async () => {
+    const storeDir = await mkdtemp(join(tmpdir(), 'og-query-public-')), id = `chatgpt-${randomUUID()}`
+    const lines: { kind: 'input' | 'text'; text: string }[] = [{ kind: 'input', text: 'owner words' }]
+    const options = { storeDir, accountKey: async () => 'test-account' }
+    const settled = vi.fn(async () => {
+      expect(await chatGptPublicConversation(id, options)).toEqual([...lines])
+      expect(lines.at(-1)).toEqual({ kind: 'text', text: 'done' })
+    })
+    try {
+      const query = createChatGptQuery({ ...options, fetch: (async () => response()) as typeof fetch, accessToken: async () => 'fixture-only', roleInstructions: async () => 'role protocol', authorize: async () => {} })
+      const handle = query({ prompt: { async *[Symbol.asyncIterator]() { yield envelope('owner words') } }, options: { cwd: '/tmp', model: 'test-model', runtimeRole: 'manager', sessionId: id }, onPublicText: text => lines.push({ kind: 'text', text }), publicConversation: () => ({ lines, overflow: false }), onTurnSettled: settled })
+      for await (const _event of handle) { /* real adapter settlement owns persistence */ }
+      expect(settled).toHaveBeenCalledOnce()
+    } finally { await rm(storeDir, { recursive: true, force: true }) }
+  })
+
   it('requires the worker veto before constructing a query', () => {
     expect(() => createChatGptQuery()({ prompt: { async *[Symbol.asyncIterator]() {} }, options: { cwd: '/tmp', model: 'test-model', runtimeRole: 'worker' } })).toThrow(/guard/)
   })

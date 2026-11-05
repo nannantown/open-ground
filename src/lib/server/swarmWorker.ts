@@ -27,6 +27,7 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { selectedRuntime, chatGptLaunchConfig } from './chatgptRuntime'
+import { assertSwarmRuntimeAdmission, trackSwarmRuntimeLaunch, type SwarmRuntimeHandoff } from './swarmRuntimeAdmission'
 import { chatGptWorkerOptions } from './chatgptLaunch'
 import { createChatGptQuery, distillChatGptMessage } from './chatgptQuery'
 import { verifySdkGuard } from './sdkGuardHook'
@@ -37,6 +38,7 @@ import { projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
 import { isUnderCentralDir } from './worktreeCleanup'
 import { stopAllDesksInDirAndWait, liveDeskOccupies } from './liveDesks'
+import { assertSwarmNativeConversationSettled } from './swarmNativeTranscript'
 import { stopProcessesInDir } from './worktreeProcesses'
 import { removeClaudeFolderTrust } from './claudeTrust'
 import { shutdownWorkerSimulators } from './swarmSimulators'
@@ -810,6 +812,7 @@ export interface SpawnSwarmWorkerOpts {
    *  transcript is loadable (swarmTranscriptProof); this module still runs the same
    *  preflight + guard-wiring gates, so resume opens no new bypass. */
   resumeSessionId?: string
+  runtimeHandoff?: SwarmRuntimeHandoff
   /** LEARNING LOOP (card fdf714ef): the reason this SAME card was previously
    *  差し戻し / rolled back (RED verify / review must-fix). Appended to the /order
    *  so a RE-DISPATCHED card's fresh worker doesn't repeat the failure. Omitted on
@@ -914,9 +917,13 @@ const notifyGuardUnwired = async (
  *  failed SDK launch is a failed dispatch (typed SdkWorkerUnavailableError the
  *  engine's backoff keys on) — never a PTY degrade. Subscription-only still
  *  holds: the session drives the USER'S installed claude CLI. */
-export const spawnSwarmWorker = async (
+export const spawnSwarmWorker = (opts: SpawnSwarmWorkerOpts): Promise<SpawnSwarmWorkerResponse> =>
+  trackSwarmRuntimeLaunch(opts.runtimeHandoff, () => spawnSwarmWorkerInternal(opts))
+
+const spawnSwarmWorkerInternal = async (
   opts: SpawnSwarmWorkerOpts,
 ): Promise<SpawnSwarmWorkerResponse> => {
+  assertSwarmRuntimeAdmission(opts.runtimeHandoff)
   // Token budget (card 68d8e00f): the mode (+ this card's DIFFICULTY TIER, in
   // optimize) picks the worker's model/effort. economy ⇒ sonnet/low, max ⇒ top
   // tier/max, optimize ⇒ TIER_MODEL_EFFORT[resolveCardTier(card)] (touch sonnet/low
@@ -941,7 +948,7 @@ export const spawnSwarmWorker = async (
   // A provider change starts a separate conversation in the preserved worktree.
   const resumeSessionId = opts.resumeSessionId && opts.resumeSessionId.startsWith('chatgpt-') === chatgpt
     ? opts.resumeSessionId : undefined
-  const me = chatgpt ? await chatGptLaunchConfig('swarm') : await resolveSwarmModelEffortProbed(
+  const me = chatgpt ? await chatGptLaunchConfig('swarm', opts.runtimeHandoff?.profile) : await resolveSwarmModelEffortProbed(
     await getExecutionMode(),
     'worker',
     { title: opts.title, notes: opts.notes, tier: opts.tier },
@@ -1035,7 +1042,14 @@ export const spawnSwarmWorker = async (
   // the same conversation; else mint a fresh one (unchanged). resumeSessionId only
   // arrives on the restart path (always paired with opts.worktree above), and only
   // after resumeEngines PROVED the transcript is loadable.
-  const agentSessionId = resumeSessionId ?? (chatgpt ? `chatgpt-${randomUUID()}` : randomUUID())
+  const newConversationId = opts.runtimeHandoff?.operationId ?? randomUUID()
+  const agentSessionId = resumeSessionId ?? (chatgpt ? `chatgpt-${newConversationId}` : newConversationId)
+  if (!chatgpt && resumeSessionId) {
+    try { await assertSwarmNativeConversationSettled(worktree, resumeSessionId) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  }
+  const handoffTranscript = opts.runtimeHandoff?.publicTranscript ?? (chatgpt && resumeSessionId
+    ? await (await import('./chatgptResponses')).chatGptPublicConversation(agentSessionId) : undefined)
   // Owner-only sandbox gate, resolved SERVER-side (owner role && the toggle) —
   // never from the dispatch request. When open, the worker's already-bypass run
   // is wrapped in a Seatbelt sandbox confined to its worktree; the repo's shared
@@ -1103,6 +1117,7 @@ export const spawnSwarmWorker = async (
   }
 
   const trials = await getWorkerTrials()
+  assertSwarmRuntimeAdmission(opts.runtimeHandoff)
   let session: ReturnType<typeof spawnSdkSession>
   try {
     const built = chatgpt ? {
@@ -1135,11 +1150,13 @@ export const spawnSwarmWorker = async (
     })
     for (const w of built.warnings) console.warn(`[swarm] ${w}`)
     session = spawnSdkSession({
+      startPaused: !!opts.runtimeHandoff,
+      handoffTranscript,
       cwd: worktree,
       role: 'worker',
       agentSessionId,
-      options: built.options,
-      initialPrompt: built.initialPrompt,
+      options: { ...built.options, ...(opts.runtimeHandoff?.runtimeOwnerKey ? { runtimeOwnerKey: opts.runtimeHandoff.runtimeOwnerKey } : {}) },
+      initialPrompt: built.initialPrompt + (opts.runtimeHandoff ? `\n\n${opts.runtimeHandoff.instructions}` : ''),
       // Carried down from before the preflight — the type demands it, which is
       // what stops the next spawn site from forgetting to preload.
       ...(chatgpt

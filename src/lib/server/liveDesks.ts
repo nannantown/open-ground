@@ -65,6 +65,20 @@ import type {
 export const listAllLiveDeskCwds = (): string[] =>
   Array.from(new Set([...listActiveTerminalCwds(), ...listActiveSdkCwds()]))
 
+/** A closed SDK handle still occupies its history until its pump is reaped.
+ * Recovery writes must never race an old actor's final receipt/history save. */
+export const isAgentConversationOccupied = (agentSessionId: string): boolean => !!agentSessionId && (
+  listOwnerDeskTerminals().some((terminal) => terminal.agentSessionId === agentSessionId) ||
+  listSdkSessions().some((session) => session.agentSessionId === agentSessionId && !session.reaped)
+)
+export const agentConversationHandles = (agentSessionId: string): { runtime: 'sdk' | 'pty'; handleId: string }[] => [
+  ...listOwnerDeskTerminals().filter((terminal) => terminal.agentSessionId === agentSessionId).map((terminal) => ({ runtime: 'pty' as const, handleId: terminal.id })),
+  ...listSdkSessions().filter((session) => session.agentSessionId === agentSessionId && !session.reaped).map((session) => ({ runtime: 'sdk' as const, handleId: session.id })),
+]
+export const isRecordedRuntimeHandleOccupied = (runtime: 'sdk' | 'pty', handleId: string): boolean => runtime === 'sdk'
+  ? listSdkSessions().some((session) => session.id === handleId && !session.reaped)
+  : listOwnerDeskTerminals().some((terminal) => terminal.id === handleId)
+
 /** {@link listAllLiveDeskCwds}, canonicalized — the form every path comparison
  *  must use. Symlinks are the reason: `~/.openground` is routinely a symlinked
  *  home, and a symlink-only difference makes an occupied directory read as free.

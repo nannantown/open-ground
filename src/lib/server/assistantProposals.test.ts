@@ -10,6 +10,8 @@ import { join } from 'path'
 import { registerTestProject } from '../../test/registerProject'
 import { readProjectData } from './projectData'
 import { setLockdownCache } from './lockdown'
+import { readAssistantRuntime, recoverAssistantRuntime, mutateAssistantRuntime, withOwnerAssistantScope } from './assistantRuntimeStore'
+import * as runtimeOwner from './runtimeOwner'
 import {
   FRAME_LINES,
   OPEN_MAX,
@@ -37,6 +39,75 @@ beforeEach(async () => {
 })
 const card = async (over: Partial<{ title: string; goal: string; done: string[] }> = {}) =>
   proposeCard({ projectId: (await ctx.projects())[0].id, title: '送料を500円に', goal: '送料が500円', done: ['テスト緑'], ...over }, ctx)
+
+describe('proposal and approval recovery', () => {
+  it('requires owner reauthorization immediately before an effect, leaving an unstarted action safe to confirm again', async () => {
+    const proposal = await card()
+    if (typeof proposal === 'string') throw new Error(proposal)
+    let calls = 0
+    const owner = vi.spyOn(runtimeOwner, 'runtimeOwnerKey').mockImplementation(async expected => {
+      if (++calls > 1 || expected !== 'owner-a') throw new Error('owner changed')
+      return 'owner-a'
+    })
+    try {
+      await expect(withOwnerAssistantScope('owner-a', () => approveProposal(proposal.id, proposalHash(proposal), { lang: 'ja' }))).rejects.toThrow('owner changed')
+    } finally { owner.mockRestore() }
+    expect((await readProjectData(proj)).tasks).toEqual([])
+    expect(readAssistantRuntime().actions[0].state).toBe('cancelled')
+    expect(listProposals()[0].state).toBe('open')
+  })
+  it('restores a proposal approved before a crash but never started without guessing that its effect happened', async () => {
+    const proposal = await card()
+    if (typeof proposal === 'string') throw new Error(proposal)
+    mutateAssistantRuntime(state => {
+      state.proposals[0].state = 'done'; state.proposals[0].pressing = true
+      state.actions.push({ id: 'unstarted', proposalId: proposal.id, hash: proposalHash(proposal), conversationId: state.conversationId,
+        epoch: state.epoch, state: 'approved', at: Date.now(), proposal: structuredClone(state.proposals[0]) })
+    })
+    recoverAssistantRuntime(); __resetProposals(true)
+    expect(readAssistantRuntime().actions[0].state).toBe('cancelled')
+    expect(listProposals()[0].state).toBe('open')
+    await approveProposal(proposal.id, proposalHash(proposal), { lang: 'ja' })
+    expect((await readProjectData(proj)).tasks).toHaveLength(1)
+  })
+  it('restores an open frame and a completed card receipt without executing it again', async () => {
+    const proposal = await card()
+    if (typeof proposal === 'string') throw new Error(proposal)
+    __resetProposals(true)
+    expect(listProposals({ now: ctx.now }).map(p => p.id)).toContain(proposal.id)
+    const carried = await approveProposal(proposal.id, proposalHash(proposal), { lang: 'ja', now: ctx.now })
+    expect(carried).toHaveProperty('card')
+    __resetProposals(true)
+    recoverAssistantRuntime()
+    expect(await approveProposal(proposal.id, proposalHash(proposal), { lang: 'ja', now: ctx.now })).toEqual({ error: 'closed' })
+    expect((await readProjectData(proj)).tasks).toHaveLength(1)
+    const receipt = readAssistantRuntime().actions.find(a => a.proposalId === proposal.id)!
+    expect(receipt.state).toBe('completed')
+    expect(receipt.receipt).toHaveProperty('card.taskId', (await readProjectData(proj)).tasks[0].id)
+  })
+  it('holds an effect whose acknowledgement was lost instead of reopening or resending it after restart', async () => {
+    const proposal = await proposeMessage((await ctx.projects())[0].id, 'test first', ctx)
+    if (typeof proposal === 'string') throw new Error(proposal)
+    const relay = vi.fn(async () => { throw new Error('synthetic acknowledgement lost after handoff') })
+    await expect(approveProposal(proposal.id, proposalHash(proposal), { lang: 'ja', relay })).rejects.toThrow('acknowledgement lost')
+    __resetProposals(true)
+    recoverAssistantRuntime()
+    expect(readAssistantRuntime().actions.find(a => a.proposalId === proposal.id)?.state).toBe('uncertain')
+    expect(await approveProposal(proposal.id, proposalHash(proposal), { lang: 'ja', relay })).toEqual({ error: 'closed' })
+    expect(relay).toHaveBeenCalledOnce()
+  })
+  it('cannot create a late proposal after its turn was retired during project lookup', async () => {
+    let release!: () => void
+    let current = true
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const projectId = (await ctx.projects())[0].id
+    const pending = proposeMessage(projectId, 'old turn', { ...ctx, isCurrent: () => current,
+      projects: async () => { await gate; return ctx.projects() } })
+    current = false; release()
+    expect(await pending).toContain('no longer active')
+    expect(listProposals()).toEqual([])
+  })
+})
 
 describe('characters no one can see are never proposed', () => {
   // zero-width space / joiner, word joiner, BOM, direction overrides and isolates,

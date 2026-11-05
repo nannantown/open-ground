@@ -25,6 +25,10 @@ const mocks = vi.hoisted(() => ({
   // Only the binary preflight is faked; the launch plan and SDK pool are real.
   sdkManagerPreflight: vi.fn(),
 }))
+// These singleton races exercise the legacy/local Claude admission. Keep role
+// resolution deterministic before advancing the lock's fake clock; an actual
+// auth-store fs read could schedule its timer only after the clock has advanced.
+vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => false }))
 
 // Pass-through EXCEPT launchClaude: the real module also exports pure helpers
 // (buildAppContextPrompt) that the SDK launch plan legitimately uses. Replacing

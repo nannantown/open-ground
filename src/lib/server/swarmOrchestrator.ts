@@ -61,6 +61,7 @@
 // and the path is a registered project.
 
 import { runtimeSpawnBlock, selectedRuntime, swarmRunPreflight } from './chatgptRuntime'
+import { runtimeAdmissionBlocked } from './runtimeTransitionStore'
 import { hasCompletionConditions, isDispatchableCard } from '@/lib/dispatchGate'
 import { observeBoardProgress } from './supplyProgress'
 import { kickCommanderQuestionSweep } from './commanderQuestions'
@@ -7739,7 +7740,7 @@ export const runDispatchPass = async (
   deps: OrchestratorDeps & Pick<AnomalyDeps, 'notify'>,
   now: number = Date.now(),
 ): Promise<void> => {
-  if (!engine.running) return
+  if (!engine.running || runtimeAdmissionBlocked('swarm')) return
 
   // 1. Read the full board — the monitor needs each worker's current column, and
   //    dispatch/reconcile need the todo queue. One read feeds all three.
@@ -7962,7 +7963,7 @@ export const runDispatchPass = async (
 
   try {
     for (const card of picks) {
-      if (!engine.running) return // a stop mid-pass halts promptly (finally releases)
+      if (!engine.running || runtimeAdmissionBlocked('swarm')) return // also freeze a pending handoff
       // RE-CHECK THE QUOTA PARK GATE PER CARD (2026-07-29).
       //
       // `spawnBlock` is evaluated ONCE, at the top of the pass — but the state it
@@ -9136,7 +9137,7 @@ export const kickIntegratePass = (
   engine: ProjectEngine,
   deps: IntegrationDeps,
 ): void => {
-  if (engine.integrateInFlight) return
+  if (runtimeAdmissionBlocked('swarm') || engine.integrateInFlight) return
   engine.integrateInFlight = true
   void runIntegratePass(engine, deps)
     .catch((e) => logLine(engine, 'warn', `integrate pass errored — ${errMsg(e)}`))
@@ -9745,7 +9746,7 @@ export const runEnginePass = async (
   engine: ProjectEngine,
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps,
 ): Promise<void> => {
-  if (engine.passInFlight) return
+  if (runtimeAdmissionBlocked('swarm') || engine.passInFlight) return
   engine.passInFlight = true
   try {
     // The dispatch pass (monitor → promote → recover → fill) shares the board + worker
@@ -9810,6 +9811,72 @@ export const runEnginePass = async (
   } finally {
     engine.passInFlight = false
   }
+}
+
+export interface SwarmTransitionEngine {
+  path: string
+  capturedAt?: number
+  workers: { worker: OrchestratorWorker; budget: RosterEntry; card?: ProjectTask }[]
+}
+
+/** Wait for BOTH engine lanes; this preserves ON/OFF intent and every worktree. */
+export const drainSwarmEngines = async (timeoutMs = 120_000, deps: Pick<OrchestratorDeps, 'fetchTasks'> = defaultDeps()): Promise<SwarmTransitionEngine[]> => {
+  const deadline = Date.now() + timeoutMs
+  const engines = Array.from(store.engines.values())
+  for (const engine of engines) {
+    while (engine.passInFlight || engine.integrateInFlight) {
+      if (Date.now() >= deadline) throw new Error('Agent integration is still running; switching is waiting for it to settle.')
+      await new Promise<void>((resolve) => setTimeout(resolve, 20))
+    }
+    await runExclusive(engine, async () => {})
+  }
+  const snapshots: SwarmTransitionEngine[] = []
+  for (const engine of engines) {
+    const tasks = engine.workers.length ? await deps.fetchTasks(engine.path) : []
+    const capturedAt = Date.now()
+    snapshots.push({ path: engine.path, capturedAt, workers: engine.workers.map((worker) => ({
+      worker: structuredClone(worker), budget: rosterEntryOf(engine, worker, capturedAt),
+      card: tasks.find((task) => task.id === worker.taskId),
+    })) })
+  }
+  return snapshots
+}
+
+export const swarmTransitionCurrentAssignment = async (path: string, worker: OrchestratorWorker): Promise<ProjectTask | null> => {
+  const deps = defaultDeps()
+  const card = (await deps.fetchTasks(path)).find((task) => task.id === worker.taskId)
+  if (!card || columnOf(card) !== 'doing') return null
+  const heartbeat = await deps.readHeartbeat(path, worker.branch)
+  return !readySinceSendBack(card, heartbeat) || !!heartbeat && heartbeatPredatesReentry(heartbeat, worker.reenteredAt) ? card : null
+}
+export const swarmTransitionWorkStillNeeded = async (path: string, worker: OrchestratorWorker): Promise<boolean> =>
+  !!await swarmTransitionCurrentAssignment(path, worker)
+
+/** Replace only the recorded worker; retain its accumulated work/rework budget. */
+export const replaceSwarmTransitionWorker = async (
+  path: string,
+  original: SwarmTransitionEngine['workers'][number],
+  spawn: SpawnSwarmWorkerResponse,
+): Promise<void> => {
+  const engine = getOrCreateEngine(path)
+  await runExclusive(engine, async () => {
+    const next: OrchestratorWorker = { ...original.worker, terminalId: spawn.terminalId,
+      runtime: spawn.runtime, sdkSessionId: spawn.sdkSessionId, sessionId: spawn.agentSessionId,
+      model: spawn.model, effort: spawn.effort, stage: 'starting',
+      startedAt: new Date(Date.now() - original.budget.workedMs).toISOString(),
+      reenteredAt: new Date().toISOString(),
+    }
+    delete next.reworkAt
+    delete next.readyAt
+    const index = engine.workers.findIndex((worker) => worker.worktree === original.worker.worktree)
+    if (index >= 0) engine.workers[index] = next
+    else engine.workers.push(next)
+    engine.integrationWaitMs?.delete(workerKey(original.worker))
+    engine.integrationWaitSince?.delete(workerKey(original.worker))
+    engine.rosterSig = undefined
+    engine.resumeGraceUntil = Date.now() + BOOT_RESUME_GRACE_MS
+    await syncRoster(engine, Date.now())
+  })
 }
 
 // ── Scheduling (the setTimeout chain) ────────────────────────────────────────

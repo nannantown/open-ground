@@ -4,6 +4,7 @@
 
 import { randomUUID } from 'crypto'
 import { selectedRuntime, chatGptLaunchConfig } from './chatgptRuntime'
+import { assertSwarmRuntimeAdmission, trackSwarmRuntimeLaunch, type SwarmRuntimeHandoff } from './swarmRuntimeAdmission'
 import { chatGptDeskOptions } from './chatgptLaunch'
 import { createChatGptQuery, distillChatGptMessage } from './chatgptQuery'
 import { resolve } from 'path'
@@ -215,6 +216,7 @@ export interface SpawnSwarmManagerOpts {
    *  session id. The escape hatch for a restored context that has gone bad — off
    *  by default, so the normal button always resumes. */
   fresh?: boolean
+  runtimeHandoff?: SwarmRuntimeHandoff
 }
 
 /** ONE DESK PER PROJECT, decided on the POOL (2026-07-19 incident): if a labelled
@@ -300,9 +302,13 @@ const adoptLiveDesk = async (projectPath: string): Promise<SpawnSwarmManagerResp
 export { DESK_SPAWN_LOCK_WAIT_MS }
 
 /** Start an SDK manager, or adopt an existing desk without interrupting it. */
-export const spawnSwarmManager = async (
+export const spawnSwarmManager = (opts: SpawnSwarmManagerOpts): Promise<SpawnSwarmManagerResponse> =>
+  trackSwarmRuntimeLaunch(opts.runtimeHandoff, () => spawnSwarmManagerInternal(opts))
+
+const spawnSwarmManagerInternal = async (
   opts: SpawnSwarmManagerOpts,
 ): Promise<SpawnSwarmManagerResponse> => {
+  assertSwarmRuntimeAdmission(opts.runtimeHandoff)
   // ── ONE SPAWN AT A TIME, per project: the check-then-act is a CRITICAL SECTION ──
   //
   // {@link adoptLiveDesk} decides existence on the pool, which cannot desynchronise
@@ -381,7 +387,7 @@ const launchNewDesk = async (
   // below): the owner's way out of a restored context that has gone bad.
   const chatgpt = await selectedRuntime('swarm') === 'chatgpt'
   const resolved = opts.fresh
-    ? { agentSessionId: chatgpt ? `chatgpt-${randomUUID()}` : randomUUID(), resume: false }
+    ? { agentSessionId: chatgpt ? `chatgpt-${opts.runtimeHandoff?.operationId ?? randomUUID()}` : opts.runtimeHandoff?.operationId ?? randomUUID(), resume: false }
     : await resolveSwarmSession(opts.projectPath, 'manager', chatgpt ? { provider: 'chatgpt' } : {})
   // DESK CONTEXT CAP (owner decision 2026-09-18 — deskContextCap.ts): a resumable
   // conversation already over the cap is NOT resumed; a fresh one opens instead,
@@ -440,7 +446,7 @@ const launchNewDesk = async (
   // seated on a fable whose tier-local wall /usage could not show. One collapsed
   // headless probe (swarmTierProbe) now confirms the tier before the desk spawns;
   // wall ⇒ it cools (disk-mirrored) and the walk seats the commander one rung down.
-  const me = chatgpt ? await chatGptLaunchConfig('swarm') : await resolveSwarmModelEffortProbed(
+  const me = chatgpt ? await chatGptLaunchConfig('swarm', opts.runtimeHandoff?.profile) : await resolveSwarmModelEffortProbed(
     await getExecutionMode(),
     'manager',
     undefined,
@@ -463,6 +469,8 @@ const launchSdkDesk = async (
   lang: PromptLang,
   chatgpt = false,
 ): Promise<SpawnSwarmManagerResponse> => {
+  const handoffTranscript = opts.runtimeHandoff?.publicTranscript ?? (chatgpt && session.resume
+    ? await (await import('./chatgptResponses')).chatGptPublicConversation(session.agentSessionId) : undefined)
   const pre = chatgpt ? null : sdkManagerPreflight()
   if (pre && (!pre.ok || !pre.claudeBin)) {
     throw new SdkManagerUnavailableError(
@@ -490,13 +498,16 @@ const launchSdkDesk = async (
   // into a throw, so nothing is caught here.
   const sdkReady = chatgpt ? null : await preloadSdk()
   let sdkSession: SdkSessionInfo
+  assertSwarmRuntimeAdmission(opts.runtimeHandoff)
   try {
     sdkSession = spawnSdkSession({
+      startPaused: !!opts.runtimeHandoff,
+      handoffTranscript,
       cwd: opts.projectPath,
       role: 'manager',
       agentSessionId: session.agentSessionId,
-      options: plan.options,
-      initialPrompt: plan.initialPrompt,
+      options: { ...plan.options, ...(opts.runtimeHandoff?.runtimeOwnerKey ? { runtimeOwnerKey: opts.runtimeHandoff.runtimeOwnerKey } : {}) },
+      initialPrompt: plan.initialPrompt + (opts.runtimeHandoff ? `\n\n${opts.runtimeHandoff.instructions}` : ''),
       ...(chatgpt
         ? { provider: 'chatgpt' as const, queryFn: createChatGptQuery(), distillMessage: distillChatGptMessage }
         : { sdk: sdkReady! }),

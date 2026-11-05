@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   spawnSdkSession,
   getSdkSession,
@@ -192,8 +192,10 @@ describe('pushSdkInput', () => {
     // …and it did not count as output: neither the clock nor the counter.
     expect(getSdkSession(silent.id)!.lastEventAt).toBe(stamp)
     const snap = getSdkSession(silent.id)!
-    expect(snap.inputs).toBe(2)
-    expect(snap.seq).toBe(2)
+    // A silent provider has not settled the first turn. The nudge stays in
+    // the host queue instead of being prefetched into an unknown operation.
+    expect(snap.inputs).toBe(1)
+    expect(snap.seq).toBe(1)
   })
 
   it('readSdkFrames serves only what is newer than `after`, newest `limit`, and null for unknown ids', async () => {
@@ -280,7 +282,7 @@ describe('interrupt / terminate', () => {
     })
     await settle()
     await interruptSdkSession(info.id)
-    await new Promise((r) => setTimeout(r, 40))
+    await vi.waitFor(() => expect(getSdkSession(info.id)?.reaped).toBe(true))
     const s = getSdkSession(info.id)!
     expect(s.exitReason).toBe('interrupted')
     expect(s.status).toBe('exited') // not 'failed'

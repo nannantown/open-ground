@@ -22,6 +22,7 @@
 
 import { randomUUID } from 'crypto'
 import { resolve as pathResolve, sep } from 'path'
+import { currentRuntimeOwnerKey } from './runtimeOwner'
 import {
   distillSdkMessage,
   isWorkEvidence,
@@ -42,6 +43,13 @@ export interface SdkQueryHandle extends AsyncIterable<unknown> {
 export interface SdkQueryParams {
   prompt: AsyncIterable<unknown>
   options: Record<string, unknown>
+  /** Custom providers call only AFTER history, receipts and transcripts are durable. */
+  onTurnSettled?: () => Promise<void>
+  onTurnInterrupted?: (safeToContinue: boolean) => Promise<void>
+  onTurnRefused?: () => Promise<void>
+  /** Custom providers capture public text before queuing their UI events. */
+  onPublicText?: (text: string) => void
+  publicConversation?: () => { lines: { kind: 'input' | 'text'; text: string }[]; overflow: boolean }
 }
 
 export type SdkQueryFn = (params: SdkQueryParams) => SdkQueryHandle
@@ -56,6 +64,10 @@ export type SdkQueryFn = (params: SdkQueryParams) => SdkQueryHandle
 export type SdkSessionRole = 'worker' | 'manager' | 'supply'
 
 interface SpawnSdkSessionCore {
+  /** Shared public context is seeded without re-recording the role/handoff prompt. */
+  handoffTranscript?: readonly { kind: 'input' | 'text'; text: string }[]
+  /** Handoff actors cannot consume their first prompt until their handle is durable. */
+  startPaused?: boolean
   /** Provider event decoding belongs to the backend; the pool owns lifecycle. */
   provider?: 'chatgpt'
   distillMessage?: (message: unknown) => SdkEvent[]
@@ -169,7 +181,21 @@ export interface SdkStreamFrame {
 
 type Listener = (frame: SdkStreamFrame) => void
 
+export interface SdkInputReceipt {
+  operationId?: string
+  onConsumed?: () => Promise<void>
+  onSettled?: () => Promise<void>
+  onInterrupted?: (safeToContinue: boolean) => Promise<void>
+  onRefused?: () => Promise<void>
+}
+interface PendingSdkInput extends SdkInputReceipt { text: string; initial?: boolean; submitted?: boolean; cancelBeforeSubmit?: boolean; turnId?: string }
+
 interface Entry {
+  publicTranscript?: { kind: 'input' | 'text'; text: string }[]
+  publicTranscriptBytes?: number
+  publicTranscriptOverflow?: boolean
+  activeRefused?: boolean
+  runtimeOwnerKey?: string
   provider?: 'chatgpt'
   distillMessage?: (message: unknown) => SdkEvent[]
   id: string
@@ -192,9 +218,16 @@ interface Entry {
   truncated: boolean
   listeners: Set<Listener>
   /** Pending turns waiting to be yielded into the SDK. */
-  queue: string[]
+  queue: PendingSdkInput[]
+  activeInput?: PendingSdkInput
   /** Parked resolver of the input generator, when it is waiting. */
-  wake: ((text: string | null) => void) | null
+  wake: (() => void) | null
+  /** Do not let a provider prefetch a second input before the first settles. */
+  outstanding?: boolean
+  settledInputs?: number
+  lastSettledAt?: number
+  inputPaused?: boolean
+  gateWake?: (() => void) | null
   closed: boolean
   /** When the pump finished (ms epoch) — the retention clock. Unset while live. */
   closedAt?: number
@@ -485,12 +518,36 @@ const quotaPrefixes = async (): Promise<readonly string[]> => {
  *  intercept — re-measured on review 2026-08-02 — so interception is no longer
  *  the argument; the paragraph above is. A green that depends on winning a race
  *  with a crash is still worse than a red.) */
-let defaultQueryFn: SdkQueryFn = (params) => sdkNow().query(params)
+const subscriptionQuery: SdkQueryFn = (params) => {
+  const sdk = sdkNow() // keep the synchronous preload proof / failure contract
+  let inner: SdkQueryHandle | null = null
+  let stopped = false
+  return {
+    interrupt: async () => { stopped = true; await inner?.interrupt?.() },
+    async *[Symbol.asyncIterator]() {
+      const { assertClaudeSubscriptionLaunch } = await import('./subscriptionOnly')
+      const { guardClaudeRuntimeTools, assertNoUncertainRuntimeActions } = await import('./runtimeActionReceipts')
+      const { runtimeOwnerKey: expectedOwner, ...vendorOptions } = params.options
+      if (typeof params.options.cwd !== 'string') throw new Error('A subscription launch requires an explicit working directory.')
+      const id = typeof params.options.resume === 'string' ? params.options.resume : params.options.sessionId
+      if (typeof id !== 'string') throw new Error('A subscription launch requires its recorded conversation identity.')
+      const source = { ...((params.options.env as NodeJS.ProcessEnv | undefined) ?? process.env) }
+      if (typeof params.options.pathToClaudeCodeExecutable === 'string') source.OPENGROUND_CLAUDE_BIN = params.options.pathToClaudeCodeExecutable
+      const env = await assertClaudeSubscriptionLaunch(params.options.cwd, source)
+      await assertNoUncertainRuntimeActions(params.options.cwd, false)
+      const hooks = await guardClaudeRuntimeTools(params.options.cwd, id, params.options.hooks as Parameters<typeof guardClaudeRuntimeTools>[2], typeof expectedOwner === 'string' ? expectedOwner : undefined)
+      if (stopped) return
+      inner = sdk.query({ prompt: params.prompt, options: { ...vendorOptions, env, hooks } })
+      yield* inner
+    },
+  }
+}
+let defaultQueryFn: SdkQueryFn = subscriptionQuery
 
 /** Test seam: replace the real `query` for tests that must drive the POOL (and
  *  everything built on it) without a subscription. `null` restores production. */
 export const __setDefaultQueryFnForTests = (fn: SdkQueryFn | null): void => {
-  defaultQueryFn = fn ?? ((params) => sdkNow().query(params))
+  defaultQueryFn = fn ?? subscriptionQuery
 }
 
 /** Test seam: pin the prefix list without loading the SDK. */
@@ -498,7 +555,18 @@ export const __setQuotaPrefixesForTests = (p: readonly string[] | null): void =>
   cachedPrefixes = p
 }
 
+const capturePublicLine = (e: Entry, line: { kind: 'input' | 'text'; text: string }): void => {
+  if (e.publicTranscriptOverflow) return
+  const size = Buffer.byteLength(JSON.stringify(line)) + 1
+  const total = (e.publicTranscriptBytes ?? 0) + size
+  if (total > 256 * 1024) { e.publicTranscriptOverflow = true; return }
+  const transcript = e.publicTranscript ??= []
+  transcript.push(line)
+  e.publicTranscriptBytes = total
+}
+
 const emit = (e: Entry, ev: SdkEvent): void => {
+  if (ev.kind === 'text' && !ev.fromSubagent && e.provider !== 'chatgpt') capturePublicLine(e, { kind: 'text', text: ev.text })
   e.seq += 1
   const frame: SdkStreamFrame = { seq: e.seq, ev }
   e.buffer.push(frame)
@@ -557,14 +625,56 @@ const announceStatus = (e: Entry, status: SdkSessionStatus, detail?: string): vo
  *  few lines of it; the full text is the CLI's, not the ring buffer's. */
 const INPUT_EVENT_MAX = 2000
 
+const settleInput = async (e: Entry): Promise<void> => {
+  await e.activeInput?.onSettled?.()
+  e.activeInput = undefined
+  e.outstanding = false
+  e.settledInputs = e.inputs
+  e.lastSettledAt = Date.now()
+  const wake = e.gateWake
+  e.gateWake = null
+  wake?.()
+}
+
+const refuseInput = async (e: Entry): Promise<void> => {
+  await e.activeInput?.onRefused?.()
+  // A usage refusal is a confirmed non-fulfilment, never delivery/cancellation.
+  // Do not admit the next queued turn into the same exhausted connection.
+  e.inputPaused = true
+  e.activeInput = undefined
+  await settleInput(e)
+}
+
 const makeInputIterable =(e: Entry): AsyncIterable<unknown> => ({
   async *[Symbol.asyncIterator]() {
     for (;;) {
-      let text: string | null
-      if (e.queue.length) text = e.queue.shift()!
+      while (!e.closed && (e.outstanding || e.inputPaused)) {
+        await new Promise<void>((resolve) => { e.gateWake = resolve })
+      }
+      if (e.closed) return
+      let input: PendingSdkInput
+      if (e.queue.length) input = e.queue.shift()!
       else if (e.closed) return
-      else text = await new Promise<string | null>((res) => (e.wake = res))
-      if (text === null) return
+      else {
+        await new Promise<void>((resolve) => { e.wake = resolve })
+        continue // re-check pause/closed before consuming a newly queued input
+      }
+      e.outstanding = true
+      e.activeInput = input
+      input.turnId ??= input.operationId ?? `sdk-turn-${randomUUID()}`
+      e.activeRefused = false
+      await input.onConsumed?.()
+      if (e.runtimeOwnerKey) await (await import('./runtimeOwner')).runtimeOwnerKey(e.runtimeOwnerKey)
+      if (e.closed) return
+      if (input.cancelBeforeSubmit) {
+        await input.onInterrupted?.(true)
+        e.activeInput = undefined
+        await settleInput(e)
+        if (!e.closed) setStatus(e, 'waiting')
+        continue
+      }
+      const text = input.text
+      if (!input.initial) capturePublicLine(e, { kind: 'input', text })
       // Record the turn as RECEIVED — the seat's transcript shows what the desk
       // was told (sdkEvents 'input'). lastEventAt is restored: it means "the
       // desk produced something" to the stall readers (workerRuntime
@@ -577,6 +687,7 @@ const makeInputIterable =(e: Entry): AsyncIterable<unknown> => ({
       })
       e.lastEventAt = at
       e.inputs += 1
+      input.submitted = true
       yield {
         type: 'user',
         message: { role: 'user', content: [{ type: 'text', text }] },
@@ -630,6 +741,26 @@ const pump = async (e: Entry): Promise<void> => {
       }
       for (const ev of distill(msg)) {
         emit(e, ev)
+        if (ev.kind === 'quota_refusal') e.activeRefused = true
+        // Native SDK results are turn boundaries. Custom providers have a
+        // stronger, explicit durability callback and must never use this hint.
+        if (ev.kind === 'turn_end' && e.provider !== 'chatgpt') {
+          if (ev.reason === 'aborted_streaming') {
+            let safe = true
+            try {
+              const actions = await import('./runtimeActionReceipts')
+              if (e.agentSessionId) await actions.interruptRuntimeActions(e.agentSessionId, e.runtimeOwnerKey)
+              await actions.assertNoUncertainRuntimeActions(e.cwd, false)
+            } catch { safe = false }
+            await e.activeInput?.onInterrupted?.(safe)
+            if (safe) { e.activeInput = undefined; await settleInput(e) }
+            else { e.exitReason = 'error: An interrupted native action has an unconfirmed result.'; terminateSdkSession(e.id) }
+          } else if (e.activeRefused) {
+            const actions = await import('./runtimeActionReceipts')
+            await actions.assertNoUncertainRuntimeActions(e.cwd)
+            await refuseInput(e)
+          } else await settleInput(e)
+        }
         sawAbort = ev.kind === 'turn_end' && ev.reason === 'aborted_streaming'
         const next = statusAfter(ev)
         // Promote out of 'waiting' as well as 'starting'. A turn injected while
@@ -746,7 +877,7 @@ const pump = async (e: Entry): Promise<void> => {
     if (e.wake) {
       const w = e.wake
       e.wake = null
-      w(null)
+      w()
     }
     // ⚠ REAPED IS SET **ABOVE** THIS LINE, AND THE ORDER IS PART OF THE
     // CONTRACT. This frame IS the announcement of the reap, and `emit` hands it
@@ -775,11 +906,16 @@ const pump = async (e: Entry): Promise<void> => {
 }
 
 export const spawnSdkSession = (opts: SpawnSdkSessionOpts): SdkSessionInfo => {
+  const admittedOwner = currentRuntimeOwnerKey()
+  if (admittedOwner && opts.options.runtimeOwnerKey !== undefined && opts.options.runtimeOwnerKey !== admittedOwner)
+    throw new Error('The SDK launch belongs to a different admitted owner.')
+  if (admittedOwner) opts = { ...opts, options: { ...opts.options, runtimeOwnerKey: admittedOwner } }
   // The pool grows here and only here — the natural edge to bound it at.
   sweepClosedSessions()
   const id = opts.id ?? randomUUID()
   const now = Date.now()
   const e: Entry = {
+    ...(typeof opts.options.runtimeOwnerKey === 'string' ? { runtimeOwnerKey: opts.options.runtimeOwnerKey } : {}),
     ...(opts.provider ? { provider: opts.provider } : {}),
     ...(opts.distillMessage ? { distillMessage: opts.distillMessage } : {}),
     id,
@@ -796,17 +932,34 @@ export const spawnSdkSession = (opts: SpawnSdkSessionOpts): SdkSessionInfo => {
     listeners: new Set(),
     queue: [],
     wake: null,
+    outstanding: false,
+    settledInputs: 0,
+    lastSettledAt: now,
+    inputPaused: opts.startPaused === true,
+    gateWake: null,
     closed: false,
     handle: null,
   }
   pool.sessions.set(id, e)
+  for (const line of opts.handoffTranscript ?? []) capturePublicLine(e, { ...line })
 
-  if (opts.initialPrompt) e.queue.push(opts.initialPrompt)
+  if (opts.initialPrompt) e.queue.push({ text: opts.initialPrompt, initial: true })
 
   const queryFn: SdkQueryFn = opts.queryFn ?? defaultQueryFn
 
   try {
-    e.handle = queryFn({ prompt: makeInputIterable(e), options: opts.options })
+    e.handle = queryFn({ prompt: makeInputIterable(e), options: opts.options,
+      onPublicText: (text) => capturePublicLine(e, { kind: 'text', text }),
+      publicConversation: () => ({ lines: structuredClone(e.publicTranscript ?? []), overflow: e.publicTranscriptOverflow === true }),
+      onTurnSettled: () => settleInput(e), onTurnRefused: () => refuseInput(e),
+      onTurnInterrupted: async (safeToContinue) => {
+        await e.activeInput?.onInterrupted?.(safeToContinue)
+        if (safeToContinue) {
+          e.activeInput = undefined
+          await settleInput(e)
+        }
+      },
+    })
   } catch (err) {
     e.closed = true
     // ⚠ THIS ENTRY MUST LOOK FINISHED IN EVERY SENSE. `pump` never runs here, so
@@ -1083,18 +1236,77 @@ export const listSdkSessionsIn = (cwd: string, role: SdkSessionRole): SdkSession
  *  migration plan appendix B-3). That is what lets the engine inject a rework
  *  instruction without the bracketed-paste + screen-re-read dance the PTY path
  *  needs to confirm the text ever landed. */
-export const pushSdkInput = (id: string, text: string): boolean => {
+export const pushSdkInput = (id: string, text: string, receipt: SdkInputReceipt = {}): boolean => {
   const e = pool.sessions.get(id)
-  if (!e || e.closed) return false
+  if (!e || e.closed || e.inputPaused) return false
+  if (receipt.operationId) {
+    const existing = [e.activeInput, ...e.queue].find((item) => item?.operationId === receipt.operationId)
+    if (existing) return existing.text === text
+  }
+  const input = { text, ...receipt }
+  e.queue.push(input)
   if (e.status === 'waiting' || e.status === 'quota-parked') setStatus(e, 'working')
   if (e.wake) {
     const w = e.wake
     e.wake = null
-    w(text)
-  } else {
-    e.queue.push(text)
+    w()
   }
   return true
+}
+
+export interface SdkRuntimeCheckpoint {
+  id: string
+  cwd: string
+  role?: SdkSessionRole
+  provider: 'claude' | 'chatgpt'
+  agentSessionId?: string
+  settledInputs: number
+  settledAt: number
+  pendingInputs: { text: string; operationId?: string }[]
+  /** Public owner/assistant prose only; no thinking or tool arguments/results. */
+  transcript: { kind: 'input' | 'text'; text: string }[]
+}
+
+export const currentSdkInputOperationId = (id: string): string | null => pool.sessions.get(id)?.activeInput?.operationId ?? null
+/** Server-observed turn identity, including a host role kickoff with no receipt. */
+export const currentSdkTurnId = (id: string): string | null => {
+  const input = pool.sessions.get(id)?.activeInput
+  return input?.operationId ?? input?.turnId ?? null
+}
+export const sdkInputAdmissionPaused = (id: string): boolean => pool.sessions.get(id)?.inputPaused === true
+export const resumeSdkInputAdmission = (id: string): void => {
+  const e = pool.sessions.get(id)
+  if (!e || e.closed) return
+  e.inputPaused = false
+  const wake = e.gateWake
+  e.gateWake = null
+  wake?.()
+}
+
+/** Freeze admission before awaiting the current durable turn. Never interrupts
+ * an action or drains a queued input into the retiring provider. */
+export const drainSdkSession = async (id: string, timeoutMs = 120_000, signal?: AbortSignal): Promise<SdkRuntimeCheckpoint> => {
+  const e = pool.sessions.get(id)
+  if (!e) throw new Error('The recorded SDK actor is missing; inspect recovery before replaying its work.')
+  if (signal?.aborted) throw new Error('The runtime drain was cancelled.')
+  e.inputPaused = true
+  const deadline = Date.now() + timeoutMs
+  while (e.outstanding || e.settledInputs === undefined) {
+    if (signal?.aborted) throw new Error('The runtime drain was cancelled.')
+    if (e.reaped) throw new Error('The SDK actor ended with an unsettled turn; its effects require inspection.')
+    if (Date.now() >= deadline) throw new Error('The SDK actor has not reached a durable turn boundary yet.')
+    await new Promise<void>((resolve) => setTimeout(resolve, 20))
+  }
+  if (e.publicTranscriptOverflow) throw new Error('The public conversation needs an approved summary before handoff; its full context was not silently truncated.')
+  const transcript = e.publicTranscript ?? []
+  if (Buffer.byteLength(JSON.stringify({ transcript, pendingInputs: e.queue })) > 256 * 1024) {
+    throw new Error('The actor handoff exceeds its bounded checkpoint; inspect and reduce it before switching.')
+  }
+  return { id, cwd: e.cwd, ...(e.role ? { role: e.role } : {}),
+    provider: e.provider === 'chatgpt' ? 'chatgpt' : 'claude',
+    ...(e.agentSessionId ? { agentSessionId: e.agentSessionId } : {}),
+    settledInputs: e.settledInputs, settledAt: e.lastSettledAt ?? Date.now(), pendingInputs: e.queue.filter((input) => !input.initial)
+      .map(({ text, operationId }) => ({ text, ...(operationId ? { operationId } : {}) })), transcript }
 }
 
 /** Stop the CURRENT turn but keep the session usable (the graceful stop the PTY
@@ -1124,6 +1336,10 @@ export const pushSdkInput = (id: string, text: string): boolean => {
 export const interruptSdkSession = async (id: string): Promise<boolean> => {
   const e = pool.sessions.get(id)
   if (!e || e.closed || !e.handle?.interrupt) return false
+  if (e.activeInput && !e.activeInput.submitted) {
+    e.activeInput.cancelBeforeSubmit = true
+    return true
+  }
   try {
     await e.handle.interrupt()
     return true
@@ -1141,10 +1357,13 @@ export const terminateSdkSession = (id: string): boolean => {
   if (!e) return false
   if (!e.closed) {
     e.closed = true
+    const gate = e.gateWake
+    e.gateWake = null
+    gate?.()
     if (e.wake) {
       const w = e.wake
       e.wake = null
-      w(null)
+      w()
     }
     void e.handle?.interrupt?.().catch(() => {})
     e.exitReason ??= 'terminated'

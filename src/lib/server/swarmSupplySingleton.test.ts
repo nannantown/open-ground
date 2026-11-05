@@ -28,6 +28,10 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { resolve } from 'path'
+vi.mock('./subscriptionOnly', () => ({ assertClaudeSubscriptionLaunch: async () => ({ CLAUDE_CONFIG_DIR: '/synthetic/claude-config' }) }))
+// Owner capabilities are covered by admission tests. These lock fixtures must
+// not schedule real auth-store IO after their fake clock has advanced.
+vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => false }))
 
 // Same reason as swarmManager.spawn.test.ts: this file deliberately holds a
 // critical section open while other calls queue behind it, and pure-I/O steps
@@ -45,7 +49,9 @@ const mocks = vi.hoisted(() => ({
   resolveSwarmRemoteName: vi.fn(async () => 'supply'),
   selectedRuntime: vi.fn(async (): Promise<'claude' | 'chatgpt'> => 'claude'),
   spawnSdkSession: vi.fn(),
+  publicConversation: vi.fn(async () => [{ kind: 'input' as const, text: 'previous confirmed owner words' }]),
 }))
+vi.mock('./chatgptResponses', async (importOriginal) => ({ ...(await importOriginal<typeof import('./chatgptResponses')>()), chatGptPublicConversation: mocks.publicConversation }))
 vi.mock('./chatgptRuntime', () => ({ selectedRuntime: mocks.selectedRuntime,
   swarmRunPreflight: async () => ({ ok: true }),
   chatGptLaunchConfig: async () => ({ model: 'account-model', effort: 'high' }),
@@ -158,6 +164,7 @@ describe('spawnSwarmSupply — one supply desk per project', () => {
     expect(result).toMatchObject({ runtime: 'sdk', terminalId: '', sdkSessionId: 'sdk-president', resumed: true })
     expect(mocks.resolveSwarmSession).toHaveBeenCalledWith(PROJ, 'supply', { provider: 'chatgpt' })
     expect(mocks.spawnSdkSession).toHaveBeenCalledWith(expect.objectContaining({ role: 'supply', provider: 'chatgpt',
+      handoffTranscript: [{ kind: 'input', text: 'previous confirmed owner words' }],
       options: expect.objectContaining({ runtimeRole: 'supply', model: 'account-model', effort: 'high' }),
     }))
     expect(mocks.resolveSwarmModelEffortProbed).not.toHaveBeenCalled()

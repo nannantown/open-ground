@@ -152,6 +152,8 @@ try {
   // The assistant's records: fetched from the Mac, sealed, never kept here.
   phone.ws.send(JSON.stringify({ type: 'assistant-history', box: 'CCCC' }))
   check('assistant-history reaches the Mac', await until(() => mac2.frames.some((f) => f.type === 'assistant-history' && f.box === 'CCCC')))
+  phone.ws.send(JSON.stringify({ type: 'conversation-control', id: 'control-a', box: 'FFFF' }))
+  check('sealed conversation controls reach the Mac unchanged', await until(() => mac2.frames.some((f) => f.type === 'conversation-control' && f.id === 'control-a' && f.box === 'FFFF')))
   mac2.ws.send(JSON.stringify({ type: 'assistant-history', box: 'AAAA' }))
   mac2.ws.send(JSON.stringify({ type: 'assistant', box: 'BBBB' }))
   check(
@@ -170,7 +172,7 @@ try {
   const replay = await open('phone', room, phoneKey, '?after=0')
   await until(() => replay.frames.some((f) => f.type === 'event' && f.seq === 3))
   await new Promise((r) => setTimeout(r, 300))
-  check('...and are never kept for catch-up', !replay.frames.some((f) => f.type === 'assistant' || f.type === 'assistant-history' || f.type === 'assistant-proposals'))
+  check('...and are never kept for catch-up', !replay.frames.some((f) => f.type === 'assistant' || f.type === 'assistant-history' || f.type === 'assistant-proposals' || f.type === 'conversation-control'))
   replay.ws.close()
 
   // Waking the phone (Push to Talk): the Mac says it can push, then the phone
@@ -247,13 +249,43 @@ try {
     await shut(idleMac)
     const idleSince = Date.now()
 
-    // In use: its Mac stays connected, and nobody dials in again until past the
-    // idle limit (a new connection would itself count as use).
-    const use = pair()
-    const useMac = await short('mac', use.r, use.m, '', { appKey: true })
-    const useSince = Date.now()
-    useMac.ws.send(JSON.stringify({ type: 'projects', projects: [] }))
-    useMac.ws.send(JSON.stringify({ type: 'event', kind: 'president', text: 'first' }))
+    // Run this deadline independently of expiry/rate/cap checks. Those can take
+    // longer than roomIdleS; running them between two absolute sleeps collapsed
+    // BOTH waits to zero and raced a not-yet-stored event against phone hello.
+    const inUseTest = (async () => {
+      const use = pair()
+      const useMac = await short('mac', use.r, use.m, '', { appKey: true })
+      const witness = await short('phone', use.r, use.p)
+      let inUse, catchup
+      try {
+        useMac.ws.send(JSON.stringify({ type: 'projects', projects: [] }))
+        useMac.ws.send(JSON.stringify({ type: 'event', kind: 'president', text: 'first' }))
+        check('the in-use fixture observes its stored first line and projects before starting the idle clock', await until(() =>
+          witness.frames.some((f) => f.type === 'event' && f.seq === 1 && f.text === 'first') &&
+          witness.frames.some((f) => f.type === 'projects')))
+        // No phone remains during the entire idle window: a witness left open
+        // here would itself keep the room alive and fail to test the Mac alone.
+        await shut(witness)
+        const useSince = Date.now()
+        await sleep(Math.max(0, useSince + (IDLE_S + 1) * 1000 - Date.now()))
+        inUse = await short('phone', use.r, use.p)
+        check('the Mac alone preserves the stored head and project list past the idle limit',
+          (await until(() => inUse.frames[0]?.type === 'hello')) &&
+            inUse.frames[0].head === 1 && inUse.frames[0].projects !== null && inUse.frames[0].mac === true)
+        useMac.ws.send(JSON.stringify({ type: 'event', kind: 'president', text: 'recent' }))
+        // Events are broadcast after storage.put: this is a persistence receipt,
+        // not a timed guess that WebSocket.send() finished processing remotely.
+        check('the latest in-use line is stored before reconnecting for catch-up', await until(() => inUse.frames.some((f) => f.type === 'event' && f.text === 'recent' && f.seq === 2)))
+        catchup = await short('phone', use.r, use.p, '?after=0')
+        check(
+          'a room still in use is kept past the idle limit (its latest line, seq and project list stay)',
+          (await until(() => catchup.frames.some((f) => f.type === 'event' && f.text === 'recent' && f.seq === 2))) &&
+            catchup.frames[0]?.type === 'hello' && catchup.frames[0].head === 2 && catchup.frames[0].projects !== null,
+        )
+      } finally { await shut(...[witness, inUse, catchup, useMac].filter(Boolean)) }
+    })()
+    // Observe rejection immediately while the independent checks continue.
+    const inUseResult = inUseTest.then(() => null, (error) => error)
 
     // Expiry: an event is gone after eventTtlS, heard or not.
     const ex = pair()
@@ -309,18 +341,8 @@ try {
     }
     check('connections over the per-room rate are refused (429)', refused)
 
-    // The connected room survived its idle limit; the abandoned one did not.
-    // A line said just before the in-use room's idle limit is still there just after it.
-    await sleep(Math.max(0, useSince + (IDLE_S - 1) * 1000 - Date.now()))
-    useMac.ws.send(JSON.stringify({ type: 'event', kind: 'president', text: 'recent' }))
-    await sleep(Math.max(0, useSince + (IDLE_S + 1) * 1000 - Date.now()))
-    const inUse = await short('phone', use.r, use.p, '?after=0')
-    check(
-      'a room still in use is kept past the idle limit (its latest line, seq and project list stay)',
-      (await until(() => inUse.frames.some((f) => f.type === 'event' && f.text === 'recent' && f.seq === 2))) &&
-        inUse.frames[0]?.type === 'hello' && inUse.frames[0].head === 2 && inUse.frames[0].projects !== null,
-    )
-    await shut(inUse, useMac)
+    const inUseError = await inUseResult
+    if (inUseError) throw inUseError
     await sleep(Math.max(0, idleSince + (IDLE_S + 3) * 1000 - Date.now()))
     const back = await short('phone', idle.r, idle.p, '?after=0')
     await until(() => back.frames.length > 0)

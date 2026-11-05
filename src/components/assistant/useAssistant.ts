@@ -2,7 +2,11 @@
 // one log on this Mac (src/lib/server/assistantMemory.ts, the same log the
 // iPhone reads). The state lives in the always-mounted floating character, so
 // closing the talk window never drops a line still being answered.
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { bindAssistantOutbox, forgetAssistantOutbox, outboxPhoto, persistAssistantOutbox, readAssistantOutbox, type AssistantOutboxItem } from '@/lib/assistantOutbox'
+import { ConversationDraftOwnerContext, type ConversationSend } from '@/lib/useConversationDraft'
+import { useCallback, useContext, useEffect, useRef, useState } from 'react'
+
+export type AssistantSendIdentity = Pick<ConversationSend, 'clientId'> & Partial<Pick<ConversationSend, 'draftClientId' | 'draftRevision'>> & { conversationId?: string; epoch?: number }
 
 export type AssistantLook = 'verm' | 'moss' | 'ochre' | 'ink'
 /** Who reads a call aloud (assistantMemory.ts ASSISTANT_VOICES): VOICEVOX made on this Mac, or the system voice. */
@@ -52,6 +56,9 @@ export interface FailedLine {
   at: number
   kind: 'notSent' | 'noReply'
   entryId?: string
+  clientId?: string
+  durable?: boolean
+  photoMissing?: boolean
 }
 /** §5b: at most this many failed lines, each for at most a day. */
 export const FAILED_MAX = 5
@@ -69,15 +76,15 @@ export const failedLines = (lines: AssistantLine[], held: FailedLine[], now: num
   const talk = lines.filter((l) => l.kind !== 'call' && !l.app && !l.president)
   const logged = talk.flatMap((l, i): FailedLine[] =>
     l.who === 'owner' && talk[i + 1]?.who !== 'assistant'
-      ? [{ key: l.id, entryId: l.id, text: l.text, ...(l.photo ? { photo: photoUrl(l.photo) } : {}), at: l.at, kind: 'noReply' }]
+      ? [{ key: l.id, entryId: l.id, clientId: l.clientId, text: l.text, ...(l.photo ? { photo: photoUrl(l.photo) } : {}), at: l.at, kind: 'noReply' }]
       : [],
   )
   // A held line the log has after all (a late answer, a read that failed) is the log's.
   const inLog = new Set(talk.map((l) => l.clientId).filter(Boolean))
-  return [...logged, ...held.filter((f) => !inLog.has(f.key))]
-    .filter((f) => now - f.at < FAILED_FOR_MS)
-    .sort((a, b) => a.at - b.at)
-    .slice(-FAILED_MAX)
+  const candidates = [...logged, ...held.filter((f) => !inLog.has(f.key))]
+  const durable = candidates.filter(f => f.durable)
+  const ordinary = candidates.filter(f => !f.durable && now - f.at < FAILED_FOR_MS).sort((a, b) => a.at - b.at).slice(-FAILED_MAX)
+  return [...durable, ...ordinary].sort((a, b) => a.at - b.at)
 }
 
 /** A failed line's photo as a data URL again, to send it once more. */
@@ -158,7 +165,7 @@ export interface AssistantState {
    *  onReply gets the answer's words and the part of them to read aloud, once
    *  the answer is in the log; onInterim each "let me look" the moment it is said.
    *  photo = a data URL sent with the line (the line may then be empty). */
-  say: (text: string, onReply?: (reply: string, speak: string, said: boolean) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream) => Promise<boolean>
+  say: (text: string, onReply?: (reply: string, speak: string, said: boolean) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream, send?: AssistantSendIdentity, onAccepted?: () => void) => Promise<boolean>
   /** The owner stopped the reading of the last answer: what of it they heard ('' = none). */
   hush: (heard: string) => Promise<void>
   saveLook: (patch: { name?: string; look?: AssistantLook; voiceChoice?: AssistantVoice }) => Promise<boolean>
@@ -184,7 +191,7 @@ export interface AnswerStream {
 }
 
 /** The answer of a streamed say: `{interim}` / `{say}` / `{hush}` lines as they come, then the answer (or `{error}`). */
-const readAnswer = async (r: Response, onInterim: (t: string) => void, stream?: AnswerStream, onReplying?: () => void): Promise<Record<string, unknown>> => {
+const readAnswer = async (r: Response, onInterim: (t: string) => void, stream?: AnswerStream, onReplying?: () => void, onAccepted?: (receiptId: string) => void): Promise<Record<string, unknown>> => {
   if (!r.body) return ((await r.json().catch(() => ({}))) ?? {}) as Record<string, unknown>
   const reader = r.body.getReader()
   const dec = new TextDecoder()
@@ -193,7 +200,12 @@ const readAnswer = async (r: Response, onInterim: (t: string) => void, stream?: 
   const take = (l: string) => {
     if (!l.trim()) return
     const o = JSON.parse(l) as Record<string, unknown>
-    if (typeof o.interim === 'string') onInterim(o.interim)
+    if (o.accepted === true) {
+      const receipt = o.receipt as { id?: unknown } | undefined
+      if (typeof receipt?.id !== 'string') throw new Error('invalid-acceptance')
+      onAccepted?.(receipt.id)
+    }
+    else if (typeof o.interim === 'string') onInterim(o.interim)
     else if (typeof o.say === 'string') stream?.say?.(o.say)
     else if (o.hush === true) stream?.hush?.()
     else if (o.state === 'replying') onReplying?.()
@@ -213,12 +225,37 @@ const readAnswer = async (r: Response, onInterim: (t: string) => void, stream?: 
 }
 
 export const useAssistant = (open: boolean, words: AssistantWords): AssistantState => {
+  const draftOwner = useContext(ConversationDraftOwnerContext)
+  const ownerNow = useRef(draftOwner); ownerNow.current = draftOwner
+  const turnGeneration = useRef(0)
+  const turnAbort = useRef<AbortController | null>(null)
   const [data, setData] = useState<LogResponse | null>(null)
   const [pending, setPending] = useState<string | null>(null)
   const [pendingPhoto, setPendingPhoto] = useState<string | null>(null)
   const [pendingState, setPendingState] = useState<LineState>('sending')
   /** The window's failed lines that never reached the log (memory only, §5b). */
   const [held, setHeld] = useState<FailedLine[]>([])
+  useEffect(() => {
+    if (!draftOwner) return
+    let stopped = false
+    setHeld([])
+    void (async () => {
+      try {
+        for (const item of readAssistantOutbox(draftOwner)) {
+          const receipt = await fetch(`/api/conversation/receipt?scope=assistant&clientId=${encodeURIComponent(item.clientId)}`, { cache: 'no-store', headers: { 'X-OpenGround-Owner': draftOwner } }).catch(() => null)
+          if (stopped) return
+          if (receipt?.ok) {
+            const saved = await receipt.json().catch(() => null) as { id?: string; state?: string } | null
+            if (saved?.id === item.clientId && typeof saved.state === 'string') { await forgetAssistantOutbox(draftOwner, item.clientId); continue }
+          }
+          const photo = await outboxPhoto(item).catch(() => undefined)
+          if (stopped) return
+          setHeld(rows => rows.some(row => row.key === item.clientId) ? rows : [...rows, { key: item.clientId, text: item.text, at: item.at, kind: 'notSent', durable: true, photoMissing: !!item.photoKey && !photo, ...(photo ? { photo } : {}) }])
+        }
+      } catch { setError(words.failed) }
+    })()
+    return () => { stopped = true }
+  }, [draftOwner, words.failed])
   const [quiet, setQuiet] = useState(false)
   const entriesRef = useRef<AssistantLine[]>([])
   const [interim, setInterim] = useState('')
@@ -232,10 +269,20 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
   // utterances heard back to back) must not both pass a stale `pending`.
   const saying = useRef(false)
 
+  const invalidateTurns = useCallback(() => {
+    turnGeneration.current++; turnAbort.current?.abort(); saying.current = false
+  }, [])
+  useEffect(() => {
+    invalidateTurns()
+    readSeq.current++; setData(null)
+    setPending(null); setPendingPhoto(null); setHeld([]); setInterim('')
+    return invalidateTurns
+  }, [draftOwner, invalidateTurns])
+
   /** 'failed' = no answer worth keeping (network, 5xx, bad body) — worth asking again. */
   const load = useCallback(async (): Promise<'ok' | 'refused' | 'failed' | 'stale'> => {
     const n = ++readSeq.current
-    const r = await fetch(`${API}/log`).catch(() => null)
+    const r = await fetch(`${API}/log`, draftOwner ? { headers: { 'X-OpenGround-Owner': draftOwner } } : undefined).catch(() => null)
     if (n !== readSeq.current) return 'stale'
     // Refused (signed out, not the owner): the talk leaves the screen.
     if (r?.status === 401 || r?.status === 403) {
@@ -257,7 +304,13 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
       proposals: Array.isArray(d.proposals) ? d.proposals : [],
     })
     return 'ok'
-  }, [])
+  }, [draftOwner])
+
+  useEffect(() => {
+    const changed = () => void load()
+    window.addEventListener('openground:assistant-reset', changed)
+    return () => window.removeEventListener('openground:assistant-reset', changed)
+  }, [load])
 
   // The first read: a server still starting (or a blip) must not hide the
   // assistant for good — ask again, backing off, until it answers or refuses.
@@ -285,17 +338,31 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
   }, [open, load])
 
   const say = useCallback(
-    async (text: string, onReply?: (reply: string, speak: string, said: boolean) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream) => {
+    async (text: string, onReply?: (reply: string, speak: string, said: boolean) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream, send?: AssistantSendIdentity, onAccepted?: () => void) => {
       const line = text.trim()
       if ((!line && !photo) || saying.current) return false
       saying.current = true
-      const clientId = crypto.randomUUID()
+      const generation = ++turnGeneration.current
+      const isCurrent = () => generation === turnGeneration.current && ownerNow.current === draftOwner
+      const clientId = send?.clientId ?? crypto.randomUUID()
+      let accepted = false
+      const accept = (receiptId?: string) => {
+        if (receiptId !== undefined && receiptId !== clientId) throw new Error('invalid-acceptance')
+        if (!isCurrent() || accepted) return
+        accepted = true
+        setHeld(rows => rows.filter(row => row.key !== clientId))
+        lost = 'noReply'
+        setPendingState('delivered')
+        if (draftOwner) void forgetAssistantOutbox(draftOwner, clientId).catch(() => { if (isCurrent()) setError(words.failed) })
+        onAccepted?.()
+      }
       const at = Date.now()
       /** Where it got to when it did not get through ('' = it did). */
       let lost: '' | 'notSent' | 'noReply' = ''
       /** The server's reason, when there was one. */
       let why = ''
       const stop = new AbortController()
+      turnAbort.current = stop
       let clock: ReturnType<typeof setTimeout> | undefined
       setPending(line)
       setPendingPhoto(photo ?? null)
@@ -308,12 +375,24 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
       let said = false
       try {
         lost = 'notSent'
+        let delivery: AssistantOutboxItem | undefined
+        if (draftOwner) {
+          delivery = await persistAssistantOutbox(draftOwner, { clientId, text: line, at, ...(send?.conversationId ? { conversationId: send.conversationId, epoch: send.epoch } : {}) }, photo)
+          if (!delivery.sent) {
+            const response = await fetch('/api/assistant/runtime', { cache: 'no-store', headers: { 'X-OpenGround-Owner': draftOwner }, signal: stop.signal })
+            if (!response.ok) throw new Error('conversation-unavailable')
+            const context = await response.json() as { conversationId: string; epoch: number }
+            delivery = await bindAssistantOutbox(draftOwner, clientId, context)
+          }
+        }
+        if (generation !== turnGeneration.current || ownerNow.current !== draftOwner) return false
         const r = await fetch(`${API}/say`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ text: line, stream: true, clientId, ...(photo ? { photo: photo.slice(photo.indexOf(',') + 1) } : {}) }),
+          headers: { 'content-type': 'application/json', ...(draftOwner ? { 'X-OpenGround-Owner': draftOwner } : {}) },
+          body: JSON.stringify({ text: line, stream: true, clientId, ...(delivery?.conversationId ? { conversationId: delivery.conversationId, epoch: delivery.epoch } : {}), ...(send ? { draftClientId: send.draftClientId, draftRevision: send.draftRevision, ...(!delivery?.conversationId && send.conversationId ? { conversationId: send.conversationId, epoch: send.epoch } : {}) } : {}), ...(photo ? { photo: photo.slice(photo.indexOf(',') + 1) } : {}) }),
           signal: stop.signal,
         })
+        if (generation !== turnGeneration.current) return false
         if (!r.ok) {
           const j = (await r.json().catch(() => ({}))) as { error?: string; detail?: string }
           const reason: Record<string, string> = {
@@ -325,28 +404,33 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
           }
           why = j.error ?? ''
           setError(j.detail || reason[j.error ?? ''] || words.failed)
+          if (draftOwner && r.status >= 400 && r.status < 500 && r.status !== 409) await forgetAssistantOutbox(draftOwner, clientId)
           if (GIVE_BACK.has(j.error ?? '')) {
             lost = ''
             return false
           }
           return true
         }
-        // The server took it (the stream is open): delivered, until its turn begins.
-        lost = 'noReply'
-        setPendingState('delivered')
+        // Opening HTTP200 precedes durable admission. Only the accepted frame
+        // (or final reply) changes sending into delivered.
         const a = await readAnswer(
           r,
           (t) => {
+            if (!isCurrent()) return
             setInterim(t)
             onInterim?.(t)
           },
-          stream,
+          stream ? { say: piece => { if (isCurrent()) stream.say?.(piece) }, hush: () => { if (isCurrent()) stream.hush?.() } } : undefined,
           () => {
+            if (!isCurrent()) return
             setPendingState('replying')
             // The answer's clock runs from its turn, not from a wait in the queue.
             clock ??= setTimeout(() => stop.abort(), ANSWER_WAIT_MS)
           },
+          accept,
         )
+        if (generation !== turnGeneration.current) return false
+        if (typeof a.reply === 'string') accept()
         if (typeof a.error === 'string') {
           why = a.error
           setError((typeof a.detail === 'string' && a.detail) || (a.error === 'busy' ? words.busy : words.failed))
@@ -360,26 +444,31 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
         if (!openRef.current) setUnread(true)
         return true
       } catch {
-        setError(words.failed)
+        stop.abort()
+        if (generation === turnGeneration.current) setError(words.failed)
         return true
       } finally {
         clearTimeout(clock)
+        if (generation === turnGeneration.current) {
         // The log first, then drop the pending line: the line never blinks out.
         await load()
+        if (isCurrent()) {
         // A kept failed line says it itself; only "wait" / "work mode" add something worth reading.
         if (lost) setQuiet(why !== 'busy' && why !== 'work-mode')
         // Not through and not in the log (refused, lost, work mode): held here as a
         // failed line — one the log has is shown from the log (failedLines).
         if (lost && !entriesRef.current.some((e) => e.clientId === clientId))
-          setHeld((h) => [...h, { key: clientId, text: line, ...(photo ? { photo } : {}), at, kind: lost as 'notSent' | 'noReply' }].slice(-FAILED_MAX))
+          setHeld((h) => [...h, { key: clientId, text: line, ...(photo ? { photo } : {}), at, kind: lost as 'notSent' | 'noReply', durable: !!draftOwner }])
         setPending(null)
         setPendingPhoto(null)
         setInterim('')
         saying.current = false
         if (reply) onReply?.(reply, speak, said)
+        }
+        }
       }
     },
-    [load, words],
+    [load, words, draftOwner],
   )
 
   const [pressing, setPressing] = useState(false)
@@ -411,8 +500,11 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
 
   const forget = useCallback(
     async (f: FailedLine) => {
-      setHeld((h) => h.filter((x) => x.key !== f.key))
       setError('')
+      if (!f.entryId && draftOwner) {
+        try { await forgetAssistantOutbox(draftOwner, f.key) } catch { setError(words.failed); return false }
+      }
+      setHeld((h) => h.filter((x) => x.key !== f.key))
       if (!f.entryId) return true
       // Only that line: never the whole-talk delete (it would end a turn running now).
       const r = await fetch(`${API}/failed/${encodeURIComponent(f.entryId)}`, { method: 'DELETE' }).catch(() => null)
@@ -421,7 +513,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
       await load()
       return !!r?.ok
     },
-    [load, words],
+    [load, words, draftOwner],
   )
 
   const hush = useCallback(async (heard: string) => {

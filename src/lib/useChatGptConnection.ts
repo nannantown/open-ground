@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { ChatGptStatus } from './types'
+import type { ChatGptStatus, RuntimeScope } from './types'
 
 const CHANGED = 'openground:chatgpt-change'
 export const refreshChatGptConnection = () => window.dispatchEvent(new Event(CHANGED))
@@ -40,20 +40,31 @@ export const useChatGptConnection = (enabled: boolean) => {
     return () => controller.abort()
   }, [enabled, nonce])
   useEffect(() => {
-    if (!enabled || status?.connection.state !== 'connecting') return
+    if (!enabled || (status?.connection.state !== 'connecting' && !Object.values(status?.runtime ?? {}).some(runtime => runtime.phase !== 'stable'))) return
     const timer = window.setInterval(refresh, 2_000)
     return () => window.clearInterval(timer)
-  }, [enabled, status?.connection.state, refresh])
+  }, [enabled, status?.connection.state, status?.runtime, refresh])
   return { status, eligible, error, loading, refresh }
 }
 
 export type ChatGptPreferencePatch = { [K in keyof ChatGptStatus['preferences']]?: ChatGptStatus['preferences'][K] | null }
-export const saveChatGptPreferences = async (patch: ChatGptPreferencePatch): Promise<ChatGptStatus['preferences']> => {
+export interface ChatGptPreferenceResult { preferences: ChatGptStatus['preferences']; runtime?: ChatGptStatus['runtime'] }
+export const requestChatGptPreferences = async (patch: ChatGptPreferencePatch): Promise<ChatGptPreferenceResult> => {
   const response = await fetch('/api/chatgpt/preferences', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
   })
   if (!response.ok) throw new Error('preferences not saved')
-  const body = await response.json() as { preferences: ChatGptStatus['preferences'] }
+  const body = await response.json() as ChatGptPreferenceResult
   refreshChatGptConnection()
-  return body.preferences
+  return body
+}
+export const saveChatGptPreferences = async (patch: ChatGptPreferencePatch): Promise<ChatGptStatus['preferences']> => {
+  return (await requestChatGptPreferences(patch)).preferences
+}
+export const actOnRuntimeTransition = async (action: 'retry' | 'cancel', scope: RuntimeScope, revision: number): Promise<void> => {
+  const response = await fetch('/api/chatgpt/transition', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, scope, revision }),
+  })
+  if (!response.ok) throw new Error('transition not changed')
+  refreshChatGptConnection()
 }

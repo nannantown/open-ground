@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   spawnSdkSession,
   getSdkSession,
@@ -100,7 +100,7 @@ describe('interruptSdkSession — the promise on the button', () => {
     expect(getSdkSession(info.id)!.status).toBe('working')
 
     expect(await interruptSdkSession(info.id)).toBe(true)
-    await settle()
+    await vi.waitFor(() => expect(getSdkSession(info.id)!.status).toBe('waiting'))
 
     // The tooltip says "the session stays open" in both languages. This is that
     // sentence, as an assertion: still live, back to waiting, and it takes work.
@@ -126,7 +126,7 @@ describe('interruptSdkSession — the promise on the button', () => {
     await settle()
 
     await interruptSdkSession(info.id)
-    await settle()
+    await vi.waitFor(() => expect(getSdkSession(info.id)!.status).toBe('waiting'))
     expect(getSdkSession(info.id)!.status).toBe('waiting')
 
     // …hours later, in engine terms: a new turn, then the transport dies.
@@ -172,7 +172,7 @@ describe('interruptSdkSession — the promise on the button', () => {
     })
     await settle()
     await interruptSdkSession(info.id)
-    await settle()
+    await vi.waitFor(() => expect(getSdkSession(info.id)!.reaped).toBe(true))
 
     const s = getSdkSession(info.id)!
     expect(s.exitReason).toBe('interrupted')
@@ -196,7 +196,7 @@ describe('terminateSdkSession — the exit reason survives the normal-return pat
 
     // Idle it first — this is the shape that returns rather than throws.
     await interruptSdkSession(info.id)
-    await settle()
+    await vi.waitFor(() => expect(getSdkSession(info.id)!.status).toBe('waiting'))
     expect(getSdkSession(info.id)!.status).toBe('waiting')
 
     expect(terminateSdkSession(info.id)).toBe(true)

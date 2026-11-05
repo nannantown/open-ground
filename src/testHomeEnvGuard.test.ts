@@ -1308,6 +1308,10 @@ describe('repo guard — the repo-root listing fence', () => {
 type ClaudeAnchorTier = 'fenced' | 'read-only' | 'writes-elsewhere'
 
 const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = {
+  'src/lib/server/swarmTierProbeSubscription.test.ts': {
+    tier: 'writes-elsewhere',
+    why: 'Creates the fake CLI config under an og-tier-subscription-* mkdtemp child home; the child receives that isolated HOME and CLAUDE_CONFIG_DIR plus a separate og-data directory. It launches only the fixture executable and never writes the real Claude home.',
+  },
   // ── fenced ──
   'src/lib/server/claudeTrust.ts': {
     tier: 'fenced',
@@ -1362,6 +1366,10 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
   'src/lib/server/projectSkills.ts': {
     tier: 'read-only',
     why: "lists the user's own ~/.claude/skills (home injectable for tests); scan + stat only",
+  },
+  'src/lib/server/subscriptionOnly.ts': {
+    tier: 'read-only',
+    why: 'Reads subscription settings from the Claude config home and project ancestors, then executes only the CLI auth status preflight. It neither modifies that home nor invokes credential helpers or a model while inspecting it.',
   },
   'src/lib/server/claudeConnection.ts': {
     tier: 'read-only',

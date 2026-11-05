@@ -7,11 +7,15 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent, type ReactNode } from 'react'
 import { useT } from '@/i18n/I18nContext'
 import { ArrowUp, ImagePlus, Mic, MessagesSquare, Phone, SlidersHorizontal, X } from 'lucide-react'
+import { useAssistantRuntime, type AssistantReset } from './useAssistantRuntime'
+import { Btn } from '@/components/ui/Btn'
+import { ConversationDraftStatus } from './ConversationDraftStatus'
+import { useConversationDraft, type ConversationSend } from '@/lib/useConversationDraft'
 import { AssistantPickRows, modelLabel, useAssistantPick } from './AssistantPick'
 import { AssistantCall, type CallPhase } from './AssistantCall'
 import { AssistantMark, LOOK_COLOR } from './AssistantMark'
 import { ASSISTANT_DEFAULT_POS, ASSISTANT_SIZE, ASSISTANT_WINDOW_ATTR, publishAssistantSpot } from './assistantWindow'
-import { PHOTO_MAX_BYTES, PHOTO_TYPES, photoData, photoUrl, useAssistant, type AssistantLine, type AssistantLook, type AssistantVoice, type FailedLine } from './useAssistant'
+import { PHOTO_MAX_BYTES, PHOTO_TYPES, photoData, photoUrl, useAssistant, type AssistantLine, type AssistantLook, type AssistantVoice, type FailedLine, type AssistantSendIdentity } from './useAssistant'
 import { ProposalFrames } from './ProposalFrames'
 import { useCallVoice, useListen, useOtherSpeech } from './useVoice'
 
@@ -98,7 +102,7 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
   /** The exchange made in this opening of the window — all the folded window shows. */
   const [turn, setTurn] = useState<{ said: string; reply: string; photo?: string } | null>(null)
   /** The photo picked for the next line (a data URL), and why one was refused. */
-  const [photo, setPhoto] = useState<string | null>(null)
+  const [localPhoto, setLocalPhoto] = useState<string | null>(null)
   const [photoError, setPhotoError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
   const resending = useRef(false)
@@ -121,7 +125,15 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
     if (showPanel) void loadPick()
   }, [showPanel, loadPick])
   const [draftName, setDraftName] = useState('')
-  const [text, setText] = useState('')
+  const runtimeControl = useAssistantRuntime(chatgptEligible && a.ready)
+  const [armedReset, setArmedReset] = useState<AssistantReset | null>(null)
+  const durableDraft = useConversationDraft('assistant')
+  const photo = durableDraft.enabled ? durableDraft.photo : localPhoto
+  const setPhoto = durableDraft.setPhoto ?? setLocalPhoto
+  const [localText, setLocalText] = useState('')
+  const text = durableDraft.enabled ? durableDraft.text : localText
+  const setText = durableDraft.setText ?? setLocalText
+  const [preparing, setPreparing] = useState(false)
   // Chat mode's mic only types (owner 2026-10-06): on → what is said goes into
   // the input; off by a second press or by sending. Never sends, never speaks.
   const [dictating, setDictating] = useState(false)
@@ -210,7 +222,7 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
   // A line without look-ups is read a sentence at a time as it is written
   // (`{say}` pieces, then the answer is marked `said`); the stop key cuts the
   // reading, and the server is told what of the answer was heard.
-  const sendLine = async (line: string, spoken: boolean, pic?: string) => {
+  const sendLine = async (line: string, spoken: boolean, pic?: string, send?: AssistantSendIdentity) => {
     setTurn(null)
     const cur = { stopped: false, heard: '', done: false, answered: false }
     if (spoken) {
@@ -240,6 +252,8 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
           if (aloud()) speech.cancel()
         },
       },
+      send,
+      send && 'editRevision' in send ? () => { void durableDraft.accepted?.(send as ConversationSend) } : undefined,
     )
     cur.done = true
     // Told first, so the note rides on the very next line (the held one, if any).
@@ -254,6 +268,7 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
       setText((cur) => cur || line)
       if (pic) setPhoto((cur) => cur || pic)
     }
+    return said
   }
   const pickPhoto = (file: File | undefined) => {
     if (!file) return
@@ -493,15 +508,20 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     const line = shown.trim()
-    if ((!line && !photo) || a.pending !== null) return
+    if ((!line && !photo) || a.pending !== null || preparing) return
     setDictating(false) // sending ends typing by voice
     setAbsorbed('')
     // A mouse send leaves focus on the send button, which disables — keep it in the window.
     inputRef.current?.focus()
-    setText('')
-    setPhoto(null)
-    setPhotoError('')
-    await sendLine(line, false, photo ?? undefined)
+    setPreparing(true)
+    try {
+      const send = await durableDraft.prepareSend?.()
+      if (!durableDraft.enabled) setText('')
+      setPhotoError('')
+      const sendPhoto = send ? await durableDraft.photoForSend?.(send) : photo ?? undefined
+      const said = await sendLine(send?.text.trim() ?? line, false, sendPhoto, send)
+      if (!durableDraft.enabled && said) setPhoto(null)
+    } catch { /* Saving must succeed before admitting a new message. */ } finally { setPreparing(false) }
   }
   const toggleExpanded = () => {
     localStorage.setItem(EXPANDED_KEY, expanded ? '0' : '1')
@@ -532,7 +552,7 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
   /** 再送: the same words (and photo) again as a new line; the failed one goes. */
   const resend = async (f: FailedLine) => {
     // A double click passes the pending check twice (pending is set after the awaits).
-    if (a.pending !== null || resending.current) return
+    if (a.pending !== null || resending.current || f.photoMissing) return
     resending.current = true
     try {
       const pic = f.photo ? await photoData(f.photo) : undefined
@@ -543,8 +563,13 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
       }
       // The old line must be gone first: resent while it stays (409 — answered meanwhile —
       // or the Mac unreachable), the same words would be in the talk twice.
-      if (!(await a.forget(f))) return
-      await sendLine(f.text, false, pic)
+      if (chatgptEligible && (f.clientId || !f.entryId)) {
+        const identity = await runtimeControl.retryIdentity(f.clientId ?? f.key)
+        if (identity) await sendLine(f.text, false, pic, identity)
+      } else {
+        if (!(await a.forget(f))) return
+        await sendLine(f.text, false, pic)
+      }
     } finally {
       resending.current = false
     }
@@ -571,7 +596,8 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
   const failedNote = (f: FailedLine) => (
     <span data-testid="assistant-failed" data-key={f.key} className="flex items-center gap-1">
       <span className="text-meta leading-snug text-accent">{t(f.kind === 'notSent' ? 'misc.assistant.notSent' : 'misc.assistant.noReply')}</span>
-      <button type="button" className={textKey} disabled={a.pending !== null || (!!f.photo && photosGone.has(f.photo))} onClick={() => void resend(f)}>{t('misc.assistant.resend')}</button>
+      <button type="button" className={textKey} disabled={a.pending !== null || f.photoMissing || (!!f.photo && photosGone.has(f.photo))} onClick={() => void resend(f)}>{t(chatgptEligible ? 'settings.assistant.retryInstruction' : 'misc.assistant.resend')}</button>
+      {f.photoMissing && <span role="status">{t('settings.draft.photoMissing')}</span>}
       <button type="button" className={textKey} onClick={() => void a.forget(f)}>{t('misc.assistant.delete')}</button>
     </span>
   )
@@ -740,6 +766,25 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
               <span className="text-ui text-ink-muted">VOICEVOX Nemo / VOICEVOX:冥鳴ひまり</span>
             </div>
           )}
+          <ConversationDraftStatus draft={durableDraft} excludeReceiptIds={new Set(runtimeControl.runtime?.pending.map(turn => turn.id) ?? [])} />
+          {runtimeControl.runtime && <div className="flex flex-wrap items-center gap-1.5 text-meta text-ink-muted">
+            <div className="max-h-24 w-full overflow-y-auto">
+              {runtimeControl.runtime.pending.map(turn => <details key={turn.id} className="rounded border border-line px-1.5 py-1">
+                <summary className="cursor-pointer rounded text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-line active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">{t(turn.state === 'running' ? 'settings.assistant.running' : turn.state === 'queued' ? 'settings.assistant.queued' : turn.state === 'uncertain' ? 'settings.assistant.uncertain' : 'settings.assistant.interrupted')}</summary>
+                <p className="whitespace-pre-wrap break-words">{turn.text}</p><p className="break-all text-micro text-ink-faint">{turn.id}</p>
+              </details>)}
+              {runtimeControl.runtime.uncertainActions.length > 0 && <details className="rounded border border-line px-1.5 py-1">
+                <summary className="cursor-pointer rounded text-meta text-ink-muted transition-colors hover:bg-plane hover:text-ink active:bg-line active:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">{t('settings.assistant.uncertain')}</summary>
+                {runtimeControl.runtime.uncertainActions.map(action => <p key={action.id} className="break-all text-micro">{action.id}</p>)}
+              </details>}
+            </div>
+            {(['stop-turn', 'new-conversation', ...(editing ? ['delete-memory', 'delete-history'] : [])] as AssistantReset[]).map(kind => <Btn key={kind} size="xs" disabled={runtimeControl.busy || (kind === 'stop-turn' && !runtimeControl.runtime?.pending.some(turn => turn.state === 'running'))} onClick={() => {
+              if (kind !== 'stop-turn' && armedReset !== kind) { setArmedReset(kind); return }
+              setArmedReset(null); void runtimeControl.reset(kind)
+            }}>{t(armedReset === kind ? 'settings.assistant.confirm' : `settings.assistant.${kind}`)}</Btn>)}
+            {runtimeControl.needsReview && <span role="status">{t('settings.assistant.reviewRequired')}</span>}
+            {runtimeControl.error && <span role="status">{t('settings.assistant.failed')}</span>}
+          </div>}
           {picking && <AssistantPickRows pick={pick} save={savePick} focusRing={focusRing} busy={pickBusy} failed={pickFailed} />}
           {photo && (
             <div className="relative self-start" data-testid="assistant-photo-preview">

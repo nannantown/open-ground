@@ -47,12 +47,13 @@ beforeEach(() => {
       return json({ ok: true, proposals })
     }
     if (url.endsWith('/say')) {
-      const text = JSON.parse(String(init?.body)).text as string
+      const { text, clientId } = JSON.parse(String(init?.body)) as { text: string; clientId: string }
       // As the server streams it: its turn begins at once (replying), the answer when released.
       const line = (o: unknown) => new TextEncoder().encode(JSON.stringify(o) + '\n')
       return new Response(
         new ReadableStream<Uint8Array>({
           start: async (c) => {
+            c.enqueue(line({ accepted: true, receipt: { id: clientId } }))
             c.enqueue(line({ state: 'replying' }))
             await new Promise<void>((resolve) => (answer = { resolve }))
             log = [...log, { id: `o${log.length}`, at: 2, who: 'owner', text }, { id: `r${log.length}`, at: 3, who: 'assistant', text: `答え:${text}` }]
@@ -232,6 +233,8 @@ describe('FloatingAssistant', () => {
               new ReadableStream<Uint8Array>({
                 start: (c) => {
                   ctl = c
+                  const { clientId } = JSON.parse(String(init?.body)) as { clientId: string }
+                  c.enqueue(new TextEncoder().encode(JSON.stringify({ accepted: true, receipt: { id: clientId } }) + '\n'))
                   // As a real fetch: an abort errors the body being read.
                   init?.signal?.addEventListener('abort', () => c.error(new DOMException('aborted', 'AbortError')))
                 },
@@ -260,7 +263,11 @@ describe('FloatingAssistant', () => {
     let ctl!: ReadableStreamDefaultController<Uint8Array>
     const base = vi.mocked(fetch).getMockImplementation()!
     vi.mocked(fetch).mockImplementation(async (url, init) =>
-      String(url).endsWith('/say') ? new Response(new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c) })) : base(url as never, init),
+      String(url).endsWith('/say') ? new Response(new ReadableStream<Uint8Array>({ start: (c) => {
+        ctl = c
+        const { clientId } = JSON.parse(String(init?.body)) as { clientId: string }
+        c.enqueue(new TextEncoder().encode(JSON.stringify({ accepted: true, receipt: { id: clientId } }) + '\n'))
+      } })) : base(url as never, init),
     )
     render(<FloatingAssistant disabled={false} />)
     fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))

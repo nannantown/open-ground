@@ -1795,22 +1795,14 @@ describe('defaultEscalate — say a continue-instruction via the runtime seam', 
     // the turn", not "some function returned true".
     const received: string[] = []
     const consumingQuery = (opts: { prompt: AsyncIterable<unknown> }) => {
-      // Drain the prompt side in the background; emit no events of our own
-      // (next() below settles only when the session is torn down).
-      const drained = (async () => {
-        for await (const turn of opts.prompt) {
-          received.push(
-            (turn as { message: { content: { text: string }[] } }).message.content[0].text,
-          )
-        }
-      })()
       return {
-        [Symbol.asyncIterator]: () => ({
-          next: async (): Promise<IteratorResult<unknown>> => {
-            await drained
-            return { value: undefined, done: true }
-          },
-        }),
+        async *[Symbol.asyncIterator]() {
+          for await (const turn of opts.prompt) {
+            received.push((turn as { message: { content: { text: string }[] } }).message.content[0].text)
+            // The real SDK confirms each turn before consuming the next input.
+            yield { type: 'result', subtype: 'success', is_error: false, terminal_reason: 'completed' }
+          }
+        },
       }
     }
     const s = spawnSdkSession({
@@ -1819,7 +1811,7 @@ describe('defaultEscalate — say a continue-instruction via the runtime seam', 
       initialPrompt: 'go',
       queryFn: consumingQuery as never,
     })
-    await new Promise((r) => setTimeout(r, 10))
+    await vi.waitFor(() => expect(received).toHaveLength(1))
 
     const ok = await defaultEscalate(
       { runtime: 'sdk', sdkSessionId: s.id, terminalId: '' },
@@ -1827,7 +1819,7 @@ describe('defaultEscalate — say a continue-instruction via the runtime seam', 
     )
     expect(ok).toBe(true)
     // Wait for the pushed turn to come out of the prompt iterable.
-    for (let i = 0; i < 100 && received.length < 2; i++) await new Promise((r) => setTimeout(r, 5))
+    await vi.waitFor(() => expect(received).toHaveLength(2))
     expect(received).toHaveLength(2) // the initial prompt + exactly one escalation turn
     const line = received[1]
     expect(line).toContain('line one line two のゴールを続行') // title present, newline → space

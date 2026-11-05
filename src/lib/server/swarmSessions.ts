@@ -43,7 +43,8 @@ import { projectDataFile } from './projectDataPath'
 import { isTranscriptLoadable } from './swarmTranscriptProof'
 import { isSdkSessionLive, listSdkSessions } from './sdkSession'
 import { isClaudeSessionLive } from './terminal'
-import { chatGptConversationExists } from './chatgptResponses'
+import { chatGptConversationRecovery } from './chatgptResponses'
+import { assertSwarmNativeConversationSettled } from './swarmNativeTranscript'
 
 /** The per-project central file holding the desks' session ids. */
 export const SWARM_SESSIONS_FILE = 'swarm-sessions.json'
@@ -448,9 +449,12 @@ export const resolveSwarmSession = async (
   // days-long integration conversation, which is the failure this whole
   // predicate was rewritten to stop. Bounded risk beats permanent loss.
   await (deps.awaitRelease ?? defaultAwaitRelease)(rec.sessionId)
-  const resumable = deps.provider === 'chatgpt'
-    ? await chatGptConversationExists(rec.sessionId)
-    : await isSessionResumable(projectPath, rec.sessionId)
+  const recovery = deps.provider === 'chatgpt' ? await chatGptConversationRecovery(rec.sessionId) : null
+  if (recovery === 'uncertain' || recovery === 'invalid') {
+    throw new Error('The saved ChatGPT conversation has uncertain actions or invalid history. Inspect recovery before starting another actor.')
+  }
+  const resumable = recovery !== null ? recovery === 'resumable' : await isSessionResumable(projectPath, rec.sessionId)
   if (!resumable) return fresh('missing')
+  if (deps.provider !== 'chatgpt') await assertSwarmNativeConversationSettled(projectPath, rec.sessionId)
   return { agentSessionId: rec.sessionId, resume: true }
 }

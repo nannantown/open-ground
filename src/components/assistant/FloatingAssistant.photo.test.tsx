@@ -106,6 +106,12 @@ describe('a photo in the assistant input', () => {
     expect(sent[0].photo).toBe(Buffer.from(PNG).toString('base64'))
     await waitFor(() => expect(preview()).not.toBeNull())
     expect((text as HTMLInputElement).value).toBe('これ何?')
+    sayStatus = 200
+    fireEvent.click(send())
+    expect(await screen.findByText('見たよ')).toBeTruthy()
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toMatchObject({ text: 'これ何?', photo: sent[0].photo })
+    expect(preview()).toBeNull()
   })
 
   it('a copied screenshot pasted into the input is previewed and sent; a text paste is left to the input', async () => {

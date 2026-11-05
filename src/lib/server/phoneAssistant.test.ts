@@ -571,8 +571,9 @@ describe('the assistant only PROPOSES a card or a message; only the frame\'s but
     const a = askAssistant('消される前の一言', { model: m.model })
     await vi.waitFor(() => expect(m.lines).toHaveLength(1))
     await clearAssistantLog()
+    const retired = expect(a).rejects.toMatchObject({ reason: 'turn-retired' })
     go()
-    await a
+    await retired
     expect(await readAssistantLog()).toEqual([])
   })
 
