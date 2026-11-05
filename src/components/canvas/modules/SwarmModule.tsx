@@ -1549,9 +1549,11 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
           <SwarmSupplyPane
             projectPath={project.path}
             terminalId={supply.terminalId}
-            status={statusOfPty(supply.terminalId)}
+            runtime={supply.runtime}
+            sdkSessionId={supply.sdkSessionId}
+            status={statusOfPty(supply.runtime === 'sdk' ? supply.sdkSessionId ?? '' : supply.terminalId)}
             busy={supplyBusy}
-            onExit={() => supply && handleExit(supply.terminalId)}
+            onExit={() => supply && handleExit(supply.runtime === 'sdk' ? supply.sdkSessionId ?? '' : supply.terminalId)}
             onStop={() => void stopSupply()}
             onRestart={() => void restartSupply()}
           />

@@ -17,7 +17,7 @@ import type {
   WordPressSettings,
   WorkerTrialFlags,
 } from '../types'
-import { CLAUDE_EFFORTS, DEFAULT_DESK_CONTEXT_CAP_TOKENS, SWARM_MODEL_TIERS } from '../types'
+import { CHATGPT_EFFORTS, CLAUDE_EFFORTS, DEFAULT_DESK_CONTEXT_CAP_TOKENS, SWARM_MODEL_TIERS } from '../types'
 
 const DEFAULT_SETTINGS: Settings = {
   projects: [],
@@ -387,11 +387,13 @@ export const normalizeWordPressSettings = (raw: unknown): WordPressSettings | nu
 // never widen the validateProjectPath allowlist or rewrite migration sentinels.
 // A non-object body (string / array / null) writes nothing. Returns the keys
 // actually applied (for tests / observability).
-export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]> => {
+const CHATGPT_PREFERENCE_KEYS = ['assistantProvider', 'swarmProvider', 'chatgptModel', 'chatgptEffort'] as const
+
+const setPreferences = async (body: unknown, chatgptOnly: boolean): Promise<(keyof Settings)[]> => {
   const safe: Partial<Settings> = {}
   if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
     const src = body as Record<string, unknown>
-    for (const key of USER_SETTINGS_KEYS) {
+    for (const key of chatgptOnly ? CHATGPT_PREFERENCE_KEYS : USER_SETTINGS_KEYS) {
       if (Object.prototype.hasOwnProperty.call(src, key)) {
         ;(safe as Record<string, unknown>)[key] = src[key]
       }
@@ -424,6 +426,34 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   if (safe.swarmAllowedModels && !Object.prototype.hasOwnProperty.call(safe, 'assistantModel')) {
     const picked = (await getSettings()).assistantModel
     if (picked && !safe.swarmAllowedModels[picked]) safe.assistantModel = undefined
+  }
+  const chatgptKeys = CHATGPT_PREFERENCE_KEYS
+  if (chatgptKeys.some((key) => Object.prototype.hasOwnProperty.call(safe, key))) {
+    // Lazy import keeps the owner resolver's own settings read out of module
+    // initialization. Only an explicit runtime-preference write pays for it.
+    const { hasChatGptAccess } = await import('./chatgptAccess')
+    if (!(await hasChatGptAccess())) {
+      for (const key of chatgptKeys) delete safe[key]
+    } else {
+      const lockdown = safe.lockdownMode === undefined ? (await getSettings()).lockdownMode === true : safe.lockdownMode === true
+      for (const key of ['assistantProvider', 'swarmProvider'] as const) {
+        if (!Object.prototype.hasOwnProperty.call(safe, key)) continue
+        const v = safe[key] as unknown
+        if (v === null || v === '') safe[key] = undefined
+        else if (v !== 'claude' && v !== 'chatgpt') delete safe[key]
+        else if (v === 'chatgpt' && lockdown) delete safe[key]
+      }
+      if (Object.prototype.hasOwnProperty.call(safe, 'chatgptModel')) {
+        const v = safe.chatgptModel as unknown
+        if (v === null || v === '') safe.chatgptModel = undefined
+        else if (typeof v !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(v)) delete safe.chatgptModel
+      }
+      if (Object.prototype.hasOwnProperty.call(safe, 'chatgptEffort')) {
+        const v = safe.chatgptEffort as unknown
+        if (v === null || v === '') safe.chatgptEffort = undefined
+        else if (!(CHATGPT_EFFORTS as readonly unknown[]).includes(v)) delete safe.chatgptEffort
+      }
+    }
   }
   // Store the lockdown switch as a REAL boolean: only a literal `true` turns it
   // on (a forged truthy string must not), everything else persists `false`.
@@ -494,6 +524,12 @@ export const setUserSettings = async (body: unknown): Promise<(keyof Settings)[]
   await setSettings(safe)
   return Object.keys(safe) as (keyof Settings)[]
 }
+
+// Runtime choices have their own endpoint. Old full-settings snapshots from
+// other panels/windows must never overwrite a newer provider/model selection.
+export const setUserSettings = (body: unknown): Promise<(keyof Settings)[]> => setPreferences(body, false)
+export const setChatGptPreferences = (body: unknown): Promise<(keyof Settings)[]> => setPreferences(body, true)
+
 
 // ─── Swarm model hard mask (Settings.swarmAllowedModels) ─────────────────────
 // The persisted "使用可能モデル" switches every claude spawn path consults before

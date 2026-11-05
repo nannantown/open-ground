@@ -23,6 +23,10 @@ vi.mock('./store', async (orig) => ({ ...(await orig<typeof import('./store')>()
 vi.mock('./swarmSessions', () => ({ readSwarmSessions: async (p: string) => ({ supply: { cwd: p, sessionId: 's1' } }) }))
 vi.mock('./transcript', () => ({ sessionJsonlPath: (cwd: string) => h.files[cwd] ?? h.file }))
 vi.mock('./terminal', async (orig) => ({ ...(await orig<typeof import('./terminal')>()), listLiveDesksIn: () => [{ id: 'd1' }] }))
+vi.mock('./swarmSupplyRuntime', async (orig) => ({
+  ...(await orig<typeof import('./swarmSupplyRuntime')>()),
+  listLiveSupplyDesks: (cwd: string) => [{ runtime: 'pty', handleId: 'd1', cwd, agentSessionId: null, lastOutputAt: null, startedAt: 1, stopping: false }],
+}))
 ;(globalThis as Record<string, unknown>).WebSocketRequestResponsePair = class {}
 
 // The relay compiles under worker/tsconfig.json (Workers types), not the app's:

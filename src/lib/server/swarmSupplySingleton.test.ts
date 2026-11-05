@@ -43,6 +43,16 @@ const mocks = vi.hoisted(() => ({
   recordSwarmSession: vi.fn(async () => {}),
   resolveSwarmModelEffortProbed: vi.fn(),
   resolveSwarmRemoteName: vi.fn(async () => 'supply'),
+  selectedRuntime: vi.fn(async (): Promise<'claude' | 'chatgpt'> => 'claude'),
+  spawnSdkSession: vi.fn(),
+}))
+vi.mock('./chatgptRuntime', () => ({ selectedRuntime: mocks.selectedRuntime,
+  swarmRunPreflight: async () => ({ ok: true }),
+  chatGptLaunchConfig: async () => ({ model: 'account-model', effort: 'high' }),
+}))
+vi.mock('./sdkSession', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./sdkSession')>()),
+  spawnSdkSession: mocks.spawnSdkSession,
 }))
 
 // Pass-through EXCEPT launchClaude: the real module also exports pure helpers
@@ -111,6 +121,7 @@ beforeEach(() => {
   pool = []
   launchN = 0
   deadIds = new Set()
+  mocks.selectedRuntime.mockResolvedValue('claude')
 
   mocks.listLiveDesksIn.mockImplementation((cwd: string, label: string) =>
     pool.filter((d) => d.deskLabel === label && resolve(d.cwd) === resolve(cwd)),
@@ -139,6 +150,28 @@ afterEach(() => {
 })
 
 describe('spawnSwarmSupply — one supply desk per project', () => {
+  it('starts a selected ChatGPT president with its own session and no Claude tier probe or PTY', async () => {
+    mocks.selectedRuntime.mockResolvedValue('chatgpt')
+    mocks.resolveSwarmSession.mockResolvedValue({ agentSessionId: 'chatgpt-00000000-0000-4000-8000-000000000001', resume: true })
+    mocks.spawnSdkSession.mockReturnValue({ id: 'sdk-president', status: 'starting' })
+    const result = await spawnSwarmSupply({ projectPath: PROJ })
+    expect(result).toMatchObject({ runtime: 'sdk', terminalId: '', sdkSessionId: 'sdk-president', resumed: true })
+    expect(mocks.resolveSwarmSession).toHaveBeenCalledWith(PROJ, 'supply', { provider: 'chatgpt' })
+    expect(mocks.spawnSdkSession).toHaveBeenCalledWith(expect.objectContaining({ role: 'supply', provider: 'chatgpt',
+      options: expect.objectContaining({ runtimeRole: 'supply', model: 'account-model', effort: 'high' }),
+    }))
+    expect(mocks.resolveSwarmModelEffortProbed).not.toHaveBeenCalled()
+    expect(mocks.launchClaude).not.toHaveBeenCalled()
+  })
+
+  it('preserves an active Claude president and visibly refuses a mismatched provider reuse', async () => {
+    await spawnSwarmSupply({ projectPath: PROJ })
+    mocks.selectedRuntime.mockResolvedValue('chatgpt')
+    await expect(spawnSwarmSupply({ projectPath: PROJ })).rejects.toThrow('現在の社長窓口を停止')
+    expect(mocks.killTerminal).not.toHaveBeenCalled()
+    expect(mocks.spawnSdkSession).not.toHaveBeenCalled()
+    expect(pool).toHaveLength(1)
+  })
   it('TWO CONCURRENT spawns produce ONE desk, and both callers get THAT desk', async () => {
     // Hold the critical section open at its slowest step, so the second caller
     // lands inside the window the guard exists for.

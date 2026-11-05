@@ -15,11 +15,14 @@ import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
 import type { WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
+import { SwarmSeatFeed, SwarmSeatSay, sayToWorker } from './SwarmSeatTalk'
 
 interface Props {
   projectPath: string
   /** PTY id the supply route assigned when it launched `claude` in the cwd. */
   terminalId: string
+  runtime?: 'pty' | 'sdk'
+  sdkSessionId?: string
   /** Display status, derived by SwarmModule from the active-terminal poll +
    *  this pane's exit signal — the SAME vocabulary the worker tiles use. */
   status: WorkerStatus
@@ -42,7 +45,7 @@ export const callStamp = (at: number, lang: string, now = Date.now()): string =>
 }
 export const callDuration = (seconds: number): string => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 
-export const SwarmSupplyPane = ({ projectPath, terminalId, status, busy, onExit, onStop, onRestart }: Props) => {
+export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkSessionId, status, busy, onExit, onStop, onRestart }: Props) => {
   const { t, lang } = useT()
   // `text` is the line as saved (in the language of that moment); shown only
   // for an old record without `seconds`.
@@ -80,7 +83,7 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, status, busy, onExit,
   }[status]
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#1a1a1a]">
+    <div className={`flex h-full min-h-0 flex-col ${runtime === 'sdk' ? 'bg-bg' : 'bg-[#1a1a1a]'}`}>
       {/* The seat's nameplate (role tint · otter · status) + stop. */}
       <SwarmSeatHeader
         role="supply"
@@ -94,7 +97,7 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, status, busy, onExit,
           onClick={onStop}
           disabled={busy}
           title={t('projectPanel.swarm.supply.stop')}
-          className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:text-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+          className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:bg-bg-hover hover:text-accent active:bg-accent active:text-bg-card disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
         >
           <Power size={10} strokeWidth={2.25} />
           {busy ? t('projectPanel.swarm.supply.stopping') : t('projectPanel.swarm.supply.stop')}
@@ -126,14 +129,21 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, status, busy, onExit,
 
       {/* The PTY itself — reused verbatim. onExit bubbles the close up so the
           module flips the session to 'exited' (our header shows it). */}
-      <div className="min-h-0 flex-1">
+      {runtime === 'sdk' && sdkSessionId ? <>
+        <SwarmSeatFeed sdkSessionId={sdkSessionId} projectPath={projectPath} onExit={onExit} />
+        {status === 'exited' ? <button type="button" onClick={onRestart} disabled={busy}
+          className="m-2 rounded border border-line bg-bg-card px-2 py-1 text-ui text-ink transition-colors hover:bg-bg-hover active:bg-accent active:text-bg-card disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+          {t('projectPanel.swarm.restart')}
+        </button> : <SwarmSeatSay placeholder={t('projectPanel.swarm.say.managerPlaceholder')}
+          onSend={(text) => sayToWorker(projectPath, sdkSessionId, text, t)} />}
+      </> : <div className="min-h-0 flex-1">
         <ClaudeTerminalPane
           terminalId={terminalId}
           chrome={false}
           onExit={() => onExit()}
           onRestart={onRestart}
         />
-      </div>
+      </div>}
     </div>
   )
 }

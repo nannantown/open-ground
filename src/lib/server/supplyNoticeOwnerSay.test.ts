@@ -2,7 +2,7 @@
 // words typed in from elsewhere. What matters is what ARRIVED at the desk — the
 // writes array — never "the function returned" (docs/VERIFICATION.md §2).
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   flushSupplyNotices,
   queueSupplyOwnerSay,
@@ -58,6 +58,22 @@ const harness = (initial: string) => {
 beforeEach(() => resetSupplyNoticeState())
 
 describe('the OWNER lane (phone link)', () => {
+  it('delivers SDK owner/reply input directly and retains refused input without reading a PTY', async () => {
+    const received: string[] = [], done: boolean[] = []
+    let accepts = false
+    const screen = vi.fn(() => { throw new Error('An SDK desk has no terminal screen') })
+    const deps = { desks: () => [{ id: 'sdk-president', cwd: PROJECT, runtime: 'sdk' as const }], screen,
+      sendDirect: (_id: string, text: string) => { if (!accepts) return false; received.push(text); return true } }
+    expect(await queueSupplyOwnerSay(PROJECT, 'ChatGPT 社長へ', (heard) => done.push(heard), deps)).toBe(1)
+    expect(done).toEqual([])
+    accepts = true
+    await flushSupplyNotices(deps)
+    expect(received).toEqual(['ChatGPT 社長へ'])
+    expect(done).toEqual([true])
+    await queueSupplyReply(PROJECT, '司令官の報告', deps)
+    expect(received[1]).toContain('司令官の報告')
+    expect(screen).not.toHaveBeenCalled()
+  })
   it('types the owner words with NO prefix, submits them, and reports the landing', async () => {
     const h = harness(IDLE)
     const done: boolean[] = []

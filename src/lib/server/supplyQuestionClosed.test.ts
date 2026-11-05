@@ -2,7 +2,7 @@
 // line that still asks it is withdrawn (owner report 2026-09-24 — a president
 // retold two already-answered questions as 「まだ判断待ち」 because it only ever
 // heard the OPEN side). Drives the real answerEscalation / dismissEscalation
-// against a temp store; only the PTY pool is faked (two live president desks,
+// against a temp store; only the runtime pools are faked (two live president desks,
 // both busy so nothing is typed and the queues can be read back).
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, rm, realpath } from 'fs/promises'
@@ -13,9 +13,9 @@ import { openEscalation, answerEscalation, dismissEscalation } from './swarmEsca
 import { noticeToSupply, peekSupplyImportant, resetSupplyNoticeState } from './supplyNotice'
 import { buildInfoAppNotification } from './swarmNotifications'
 
-const { desks } = vi.hoisted(() => ({ desks: [] as { id: string; cwd: string }[] }))
+const { desks, sdkDesks } = vi.hoisted(() => ({ desks: [] as { id: string; cwd: string }[], sdkDesks: [] as { id: string; cwd: string; role: 'supply'; startedAt: number; seq: number }[] }))
 vi.mock('./terminal', () => ({
-  listOwnerDeskTerminals: () => desks.map((d) => ({ ...d, deskLabel: '社長' })),
+  listOwnerDeskTerminals: () => desks.map((d) => ({ ...d, deskLabel: '補給官', startedAtMs: 1 })),
   isTerminalProcessAlive: () => true,
   getTerminalScreen: () =>
     ['⏺ working', '─'.repeat(40), '❯ ', '─'.repeat(40), '  ⏵⏵ bypass permissions on · esc to interrupt'].join('\n'),
@@ -23,7 +23,7 @@ vi.mock('./terminal', () => ({
   writeDeliveryInput: () => false,
   terminalForeignInput: () => ({ seq: 0, at: 0 }),
 }))
-vi.mock('./swarmSupply', () => ({ SUPPLY_DESK_LABEL: '社長' }))
+vi.mock('./sdkSession', () => ({ listSdkSessions: () => sdkDesks, pushSdkInput: () => false }))
 
 let home: string
 let alpha: string
@@ -38,6 +38,7 @@ beforeEach(async () => {
   await mkdir(alpha, { recursive: true })
   await mkdir(beta, { recursive: true })
   desks.length = 0
+  sdkDesks.length = 0
   desks.push({ id: 'desk-alpha', cwd: alpha }, { id: 'desk-beta', cwd: beta })
   resetSupplyNoticeState()
 })
@@ -100,6 +101,15 @@ describe('a closed question reaches its own project desk only', () => {
     const e = await open()
     await answerEscalation(e.id, 'B: 待つ', undefined, { fromDesk: alpha })
     expect(lines(alpha)).toEqual([])
+    expect(lines(beta)).toEqual([])
+  })
+
+  it('retains a closed-question notice for its own SDK desk when the pool is not accepting input', async () => {
+    desks.length = 0
+    sdkDesks.push({ id: 'sdk-alpha', cwd: alpha, role: 'supply', startedAt: 1, seq: 0 })
+    const e = await open()
+    await answerEscalation(e.id, 'B: 待つ')
+    expect(lines(alpha).some((line) => line.includes('公開してよいですか') && line.includes('「B: 待つ」と答え済み'))).toBe(true)
     expect(lines(beta)).toEqual([])
   })
 })

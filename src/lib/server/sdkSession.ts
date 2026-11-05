@@ -56,6 +56,9 @@ export type SdkQueryFn = (params: SdkQueryParams) => SdkQueryHandle
 export type SdkSessionRole = 'worker' | 'manager' | 'supply'
 
 interface SpawnSdkSessionCore {
+  /** Provider event decoding belongs to the backend; the pool owns lifecycle. */
+  provider?: 'chatgpt'
+  distillMessage?: (message: unknown) => SdkEvent[]
   /** Working directory the session runs in (a worker's worktree). */
   cwd: string
   /** What this session IS, for pool queries (see {@link SdkSessionRole}). */
@@ -122,6 +125,7 @@ export type SpawnSdkSessionOpts = SpawnSdkSessionCore &
   )
 
 export interface SdkSessionInfo {
+  provider?: 'chatgpt'
   id: string
   cwd: string
   role?: SdkSessionRole
@@ -166,6 +170,8 @@ export interface SdkStreamFrame {
 type Listener = (frame: SdkStreamFrame) => void
 
 interface Entry {
+  provider?: 'chatgpt'
+  distillMessage?: (message: unknown) => SdkEvent[]
   id: string
   cwd: string
   role?: SdkSessionRole
@@ -586,7 +592,8 @@ const pump = async (e: Entry): Promise<void> => {
   // Awaited, not synchronous: the vocabulary comes out of the ESM SDK, which a
   // CJS bundle can only reach through `import()`. Free in practice — the spawn
   // that started this pump already awaited the same one-shot load.
-  const prefixes = await quotaPrefixes()
+  const prefixes = e.distillMessage ? [] : await quotaPrefixes()
+  const distill = e.distillMessage ?? ((message: unknown) => distillSdkMessage(message, prefixes))
   // Was the LAST event we saw an aborted turn boundary? Deliberately a
   // most-recent-event flag and NOT a "has this session ever been aborted" one.
   //
@@ -615,13 +622,13 @@ const pump = async (e: Entry): Promise<void> => {
         // this side of the branch. Emitting it and dropping `sawAbort` on the
         // floor made the catch below read a normal terminate as a crash and land
         // every cleanly-stopped SDK worker on 'failed'.
-        for (const ev of distillSdkMessage(msg, prefixes)) {
+        for (const ev of distill(msg)) {
           emit(e, ev)
           sawAbort = ev.kind === 'turn_end' && ev.reason === 'aborted_streaming'
         }
         continue
       }
-      for (const ev of distillSdkMessage(msg, prefixes)) {
+      for (const ev of distill(msg)) {
         emit(e, ev)
         sawAbort = ev.kind === 'turn_end' && ev.reason === 'aborted_streaming'
         const next = statusAfter(ev)
@@ -773,6 +780,8 @@ export const spawnSdkSession = (opts: SpawnSdkSessionOpts): SdkSessionInfo => {
   const id = opts.id ?? randomUUID()
   const now = Date.now()
   const e: Entry = {
+    ...(opts.provider ? { provider: opts.provider } : {}),
+    ...(opts.distillMessage ? { distillMessage: opts.distillMessage } : {}),
     id,
     cwd: opts.cwd,
     ...(opts.role ? { role: opts.role } : {}),
@@ -838,6 +847,7 @@ export const spawnSdkSession = (opts: SpawnSdkSessionOpts): SdkSessionInfo => {
 }
 
 const snapshot = (e: Entry): SdkSessionInfo => ({
+  ...(e.provider ? { provider: e.provider } : {}),
   id: e.id,
   cwd: e.cwd,
   ...(e.role ? { role: e.role } : {}),

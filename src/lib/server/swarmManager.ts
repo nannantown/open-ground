@@ -3,11 +3,14 @@
 // Existing legacy PTY desks remain addressable until stopped; never seat a twin.
 
 import { randomUUID } from 'crypto'
+import { selectedRuntime, chatGptLaunchConfig } from './chatgptRuntime'
+import { chatGptDeskOptions } from './chatgptLaunch'
+import { createChatGptQuery, distillChatGptMessage } from './chatgptQuery'
 import { resolve } from 'path'
 import { resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { resolveSwarmSession, recordSwarmSession, forgetSwarmSessionIf } from './swarmSessions'
-import { getPromptLang, type PromptLang } from './promptLang'
+import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
 import { markRateLimited, isModelTier } from './swarmQuota'
 import { installOgManageSkill } from './ogManageSkill'
 import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
@@ -260,6 +263,10 @@ const adoptLiveDesk = async (projectPath: string): Promise<SpawnSwarmManagerResp
   const aliveDesks = listManagerDesks(projectPath).filter((d) => !d.stopping)
   const existing = aliveDesks[0]
   if (!existing) return null
+  const provider = await selectedRuntime('swarm')
+  if ((existing.agentSessionId?.startsWith('chatgpt-') ? 'chatgpt' : 'claude') !== provider) {
+    throw new SdkManagerUnavailableError(['Stop the current commander, then start it again to use the selected AI provider. Its conversation is preserved.'])
+  }
   if (aliveDesks.length > 1)
     console.warn(
       `[swarmManager] ${aliveDesks.length} live commander desks in ${projectPath} — ` +
@@ -372,15 +379,16 @@ const launchNewDesk = async (
   // open in a live PTY, project moved) and it opens a fresh one instead — the desk
   // always launches. `fresh` skips the lookup outright (and overwrites the record
   // below): the owner's way out of a restored context that has gone bad.
+  const chatgpt = await selectedRuntime('swarm') === 'chatgpt'
   const resolved = opts.fresh
-    ? { agentSessionId: randomUUID(), resume: false }
-    : await resolveSwarmSession(opts.projectPath, 'manager')
+    ? { agentSessionId: chatgpt ? `chatgpt-${randomUUID()}` : randomUUID(), resume: false }
+    : await resolveSwarmSession(opts.projectPath, 'manager', chatgpt ? { provider: 'chatgpt' } : {})
   // DESK CONTEXT CAP (owner decision 2026-09-18 — deskContextCap.ts): a resumable
   // conversation already over the cap is NOT resumed; a fresh one opens instead,
   // still handed MANAGER_RESUME_INJECTION (`recycled`) so the new desk re-reads
   // the world before it speaks. The commander is stateless by design, so this
   // loses nothing and stops every later turn re-reading a huge context.
-  const capped = await recycleDeskSessionIfOverCap(resolved)
+  const capped = chatgpt ? { session: resolved, recycledFromTokens: null } : await recycleDeskSessionIfOverCap(resolved)
   const session = { ...capped.session, recycled: capped.recycledFromTokens !== null }
   const noteRecycled = (): void => {
     if (capped.recycledFromTokens !== null)
@@ -410,17 +418,19 @@ const launchNewDesk = async (
   // The repo-side pins (ogManageSkill.test.ts) hold 定数 ↔ repo SKILL.md; they do
   // NOT hold repo ↔ running desk. This log is the only seam where that gap is
   // observable, so the asymmetry is findable instead of inferred after the fact.
-  const skill = await installOgManageSkill().catch((e) => ({
-    outcome: 'error' as const,
-    path: '(unresolved)',
-    error: String(e),
-  }))
-  if (skill.outcome === 'error' || skill.outcome === 'kept-user') {
-    console.warn(
-      `[swarmManager] og-manage skill NOT refreshed (${skill.outcome}) at ${skill.path}` +
-        `${skill.error ? `: ${skill.error}` : ''} — ` +
-        '司令官は旧 SKILL.md で統合する(専門レビュアー条項・fail-CLOSED 条項を欠く可能性)',
-    )
+  if (!chatgpt) {
+    const skill = await installOgManageSkill().catch((e) => ({
+      outcome: 'error' as const,
+      path: '(unresolved)',
+      error: String(e),
+    }))
+    if (skill.outcome === 'error' || skill.outcome === 'kept-user') {
+      console.warn(
+        `[swarmManager] og-manage skill NOT refreshed (${skill.outcome}) at ${skill.path}` +
+          `${skill.error ? `: ${skill.error}` : ''} — ` +
+          '司令官は旧 SKILL.md で統合する(専門レビュアー条項・fail-CLOSED 条項を欠く可能性)',
+      )
+    }
   }
   // Token budget (card 68d8e00f): economy runs the commander on sonnet; optimize keeps
   // it on the top tier (its integration / safety-review judgment is quality-critical).
@@ -430,7 +440,7 @@ const launchNewDesk = async (
   // seated on a fable whose tier-local wall /usage could not show. One collapsed
   // headless probe (swarmTierProbe) now confirms the tier before the desk spawns;
   // wall ⇒ it cools (disk-mirrored) and the walk seats the commander one rung down.
-  const me = await resolveSwarmModelEffortProbed(
+  const me = chatgpt ? await chatGptLaunchConfig('swarm') : await resolveSwarmModelEffortProbed(
     await getExecutionMode(),
     'manager',
     undefined,
@@ -439,7 +449,7 @@ const launchNewDesk = async (
   )
   if (!me) throw new NoAllowedModelTierError()
   const lang = await getPromptLang()
-  const sdkDesk = await launchSdkDesk(opts, session, me, lang)
+  const sdkDesk = await launchSdkDesk(opts, session, me, lang, chatgpt)
   noteRecycled()
   return { ...sdkDesk, ...recycledField }
 }
@@ -451,20 +461,25 @@ const launchSdkDesk = async (
   session: { agentSessionId: string; resume: boolean; recycled?: boolean },
   me: { model: string; effort?: ClaudeEffort },
   lang: PromptLang,
+  chatgpt = false,
 ): Promise<SpawnSwarmManagerResponse> => {
-  const pre = sdkManagerPreflight()
-  if (!pre.ok || !pre.claudeBin) {
+  const pre = chatgpt ? null : sdkManagerPreflight()
+  if (pre && (!pre.ok || !pre.claudeBin)) {
     throw new SdkManagerUnavailableError(
       pre.problems.length ? pre.problems : ['no claude binary resolved for the SDK commander'],
     )
   }
-  const plan = sdkManagerLaunchPlan({
+  const plan = chatgpt ? {
+    options: chatGptDeskOptions({ cwd: opts.projectPath, role: 'manager', agentSessionId: session.agentSessionId, resume: session.resume, ...me }),
+    initialPrompt: (session.resume || session.recycled ? MANAGER_RESUME_INJECTION : MANAGER_INJECTION) + languageDirective(lang),
+    warnings: [],
+  } : sdkManagerLaunchPlan({
     projectPath: opts.projectPath,
     agentSessionId: session.agentSessionId,
     resume: session.resume,
     recycled: session.recycled,
     me,
-    claudeBin: pre.claudeBin,
+    claudeBin: pre!.claudeBin!,
     lang,
   })
   for (const w of plan.warnings) console.warn(`[swarmManager] ${w}`)
@@ -473,7 +488,7 @@ const launchSdkDesk = async (
   // sdkSession.preloadSdk. A load failure is reported by the spawn as a failed
   // session, which the `status === 'failed'` check further down already turns
   // into a throw, so nothing is caught here.
-  const sdkReady = await preloadSdk()
+  const sdkReady = chatgpt ? null : await preloadSdk()
   let sdkSession: SdkSessionInfo
   try {
     sdkSession = spawnSdkSession({
@@ -482,7 +497,9 @@ const launchSdkDesk = async (
       agentSessionId: session.agentSessionId,
       options: plan.options,
       initialPrompt: plan.initialPrompt,
-      sdk: sdkReady,
+      ...(chatgpt
+        ? { provider: 'chatgpt' as const, queryFn: createChatGptQuery(), distillMessage: distillChatGptMessage }
+        : { sdk: sdkReady! }),
     })
   } catch (e) {
     throw new SdkManagerUnavailableError([

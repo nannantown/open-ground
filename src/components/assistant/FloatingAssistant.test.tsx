@@ -434,9 +434,33 @@ describe('FloatingAssistant', () => {
     const efforts = within(screen.getByRole('group', { name: 'misc.assistant.effort' }))
     expect(efforts.getByRole('button', { name: 'high' }).getAttribute('aria-pressed')).toBe('true')
     fireEvent.click(models.getByRole('button', { name: 'Haiku' }))
+    await waitFor(() => expect(efforts.getByRole('button', { name: 'misc.assistant.auto' })).not.toBeDisabled())
     fireEvent.click(efforts.getByRole('button', { name: 'misc.assistant.auto' }))
     await waitFor(() => expect(posted).toEqual([{ assistantModel: 'haiku' }, { assistantEffort: null }]))
     expect(models.getByRole('button', { name: 'Haiku' }).getAttribute('aria-pressed')).toBe('true')
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === '/api/chatgpt/status')).toEqual([])
+  })
+
+  it('the ChatGPT picker uses its connected catalog and preserves the Claude pick', async () => {
+    const posted: unknown[] = []
+    const base = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url) === '/api/settings') return json({ assistantProvider: 'chatgpt', assistantModel: 'opus', assistantEffort: 'high' })
+      if (String(url) === '/api/chatgpt/status') return json({ connection: { state: 'connected', models: [{ id: 'authorized-catalog-model', name: 'Catalog model', supportedEfforts: ['high'] }] }, lockdown: false, preferences: { assistantProvider: 'chatgpt' } })
+      if (String(url) === '/api/chatgpt/preferences') {
+        const patch = JSON.parse(String(init?.body)); posted.push(patch)
+        return json({ preferences: { assistantProvider: 'chatgpt', ...patch } })
+      }
+      return base(url, init)
+    })
+    render(<FloatingAssistant disabled={false} chatgptEligible />)
+    fireEvent.click(await screen.findByRole('button', { name: 'ノノ' }))
+    fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.pick' }))
+    await screen.findByRole('option', { name: 'Catalog model' })
+    fireEvent.change(screen.getByRole('combobox', { name: 'misc.assistant.model' }), { target: { value: 'authorized-catalog-model' } })
+    await waitFor(() => expect(posted).toEqual([{ chatgptModel: 'authorized-catalog-model' }]))
+    expect(screen.queryByRole('button', { name: 'Opus' })).toBeNull()
+    expect(screen.getByRole('group', { name: 'misc.assistant.effort' })).not.toHaveTextContent('max')
   })
 
   it('the call voice: Nemo first, a pick saved, the credits shown; a Mac that cannot make VOICEVOX shows no choice', async () => {

@@ -60,6 +60,7 @@
 // /api/swarm/*. By the time a call reaches this module the caller is the owner
 // and the path is a registered project.
 
+import { runtimeSpawnBlock, selectedRuntime, swarmRunPreflight } from './chatgptRuntime'
 import { hasCompletionConditions, isDispatchableCard } from '@/lib/dispatchGate'
 import { observeBoardProgress } from './supplyProgress'
 import { kickCommanderQuestionSweep } from './commanderQuestions'
@@ -83,8 +84,6 @@ import {
   getTerminalScreen,
   killTerminal,
   waitForTerminalGone,
-  listLiveDesksIn,
-  isTerminalProcessAlive,
   type OwnerDeskTerminal,
   writeInput,
 } from './terminal'
@@ -98,7 +97,6 @@ import {
   getSdkSession,
   listSdkSessionsIn,
 } from './sdkSession'
-import { claudeRunPreflight } from './claudePreflight'
 // card 2 (docs/ENGINE_PERSISTENCE_PLAN.md) — engine intent write-through +
 // boot-time crash-loop breaker. See resumeEngines() below.
 import {
@@ -170,7 +168,7 @@ import {
 // actuators (dispatch + reviewer panel) consult, so a tier the owner retired can
 // never be launched on by either. Unlike a cool it has no reset, so a swarm parked
 // on 'none-allowed' escalates to a human instead of waiting for a clock.
-import { spawnBlock, type SpawnBlock } from './swarmAllowedModels'
+import { type SpawnBlock } from './swarmAllowedModels'
 // A5 usage sensor, SYNC cache peek only (never awaited, never refreshed here) —
 // the second-priority reset-time source markRateLimited resolves against when
 // the worker's own screen wording didn't carry one.
@@ -240,7 +238,8 @@ import {
   sayToManagerDesk,
 } from './swarmManagerRuntime'
 import type { ManagerDeskHandle, ManagerRuntimeKind } from './swarmManagerRuntime'
-import { SUPPLY_DESK_LABEL, spawnSwarmSupply } from './swarmSupply'
+import { spawnSwarmSupply } from './swarmSupply'
+import { listLiveSupplyDesks } from './swarmSupplyRuntime'
 import { isGitRepoRoot, isUnderGitRepo } from './gitRepoGuard'
 import { readSwarmSessions } from './swarmSessions'
 import { sessionJsonlPath, sessionSubagentsDir } from './transcript'
@@ -3385,8 +3384,8 @@ export interface OrchestratorDeps {
    *  CLI is missing / logged out. {@link maybeAutoStartDrain} consults it so it never flips
    *  `running` true into a spawn it knows will fail (which would make the chain — and the
    *  unattended background sweep — retry forever). OPTIONAL: absent ⇒ no preflight (the
-   *  dispatch unit tests omit it; the manual ON path has its OWN claudeRunPreflight that
-   *  throws a 503). Default (defaultDeps): claudeRunPreflight. */
+   *  dispatch unit tests omit it; the manual ON path has its OWN swarmRunPreflight that
+   *  throws a 503). Default (defaultDeps): swarmRunPreflight. */
   preflight?: () => Promise<{ ok: boolean }>
 }
 
@@ -5034,7 +5033,7 @@ const defaultSpawnWorker = async (opts: {
   worktree?: string
   resumeSessionId?: string
 }): Promise<SpawnSwarmWorkerResponse> => {
-  const pre = await claudeRunPreflight()
+  const pre = await swarmRunPreflight()
   if (!pre.ok) throw new Error(pre.body.error || 'claude not ready')
   return spawnSwarmWorker(opts)
 }
@@ -5678,7 +5677,7 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   // Auto-start preflight (card cf545637): the same claude readiness gate the manual ON
   // path uses, so the unattended background sweep never flips an engine `running` into a
   // spawn it knows will fail (no retry storm when claude is missing / logged out).
-  preflight: claudeRunPreflight,
+  preflight: swarmRunPreflight,
   // Escalation safety valve: persist an in-app notification + raise an OS toast.
   // Fire-and-forget with an internal catch so a notification fault never disturbs
   // a pass (it runs at the very end of runEnginePass anyway).
@@ -7836,7 +7835,7 @@ export const runDispatchPass = async (
   // (!engine.running) return`), so park never fires while the engine is off.
   // Logged (and escalated) only on the ENTER edge, keyed by `spawnBlockSig` — not
   // every 3s tick — so the journal stays legible.
-  const block = spawnBlock(now, await getAllowedModelTiers())
+  const block = await runtimeSpawnBlock(now, await getAllowedModelTiers())
   if (block) {
     const sig = block.kind === 'none-allowed' ? 'none-allowed' : `cooling:${block.until}`
     // `parkUntil` stays the COOLING deadline (what the dashboard reads): a
@@ -7942,7 +7941,7 @@ export const runDispatchPass = async (
   // see the /usage veto on the top tier — 04-quota-models.md §5.5.1), so each card
   // is checked before any git work; spawnSwarmWorker's TierCoolingError is the
   // backstop for the same state (and for the manual / restart doors).
-  const execMode = picks.length ? await getExecutionMode() : undefined
+  const execMode = picks.length && await selectedRuntime('swarm') === 'claude' ? await getExecutionMode() : undefined
   // This state is a park the spawnBlock gate cannot see, so mirror its earliest
   // deadline into `parkUntil` (what the dashboard / president read as "paused
   // until") — recomputed every pass, assigned once in `finally`.
@@ -7978,7 +7977,7 @@ export const runDispatchPass = async (
       // picks are simply left in `todo` for the next tick, which is what park means.
       // The pass's own `now`, not Date.now() — this module is clock-injected
       // throughout, and marks written during the pass are stamped relative to it.
-      const midBlock = spawnBlock(now, await getAllowedModelTiers())
+      const midBlock = await runtimeSpawnBlock(now, await getAllowedModelTiers())
       if (midBlock) {
         logLine(
           engine,
@@ -9072,7 +9071,7 @@ export const runIntegratePass = async (
     // died for a NON-quota reason (a real boot-crash bug) leaves at least one allowed
     // tier un-cooled, so `spawnBlock` reads `null` and this stays latched, exactly as
     // before.
-    const transientWall = rs.lastWakeSpawned === false || spawnBlock(now, await getAllowedModelTiers()) != null
+    const transientWall = rs.lastWakeSpawned === false || await runtimeSpawnBlock(now, await getAllowedModelTiers()) != null
     if (!(transientWall && rs.lastWakeAt > 0 && now - rs.lastWakeAt >= MANAGER_UNREVIVABLE_RETRY_MS))
       return
     rs.attempts = 0
@@ -9844,8 +9843,8 @@ const scheduleNext = (
  *  idle engine; throws ClaudeNotReadyError-shaped errors the route maps to 503.
  *  Kicks one pass immediately, then schedules the chain. */
 export class ClaudeNotReadyError extends Error {
-  body: { error: string; claudeMissing?: true; claudeLoggedOut?: true }
-  constructor(body: { error: string; claudeMissing?: true; claudeLoggedOut?: true }) {
+  body: { error: string; claudeMissing?: true; claudeLoggedOut?: true; chatgptUnavailable?: true }
+  constructor(body: { error: string; claudeMissing?: true; claudeLoggedOut?: true; chatgptUnavailable?: true }) {
     super(body.error)
     this.name = 'ClaudeNotReadyError'
     this.body = body
@@ -9858,7 +9857,7 @@ export const startOrchestrator = async (
 ): Promise<SwarmOrchestratorState> => {
   // Preflight up front (parity with POST /api/swarm/worker): refuse to start an
   // engine that can't spawn anything, with the same machine-readable 503 body.
-  const pre = await claudeRunPreflight()
+  const pre = await swarmRunPreflight()
   if (!pre.ok) throw new ClaudeNotReadyError(pre.body)
 
   const key = await canonicalize(projectPath)
@@ -10093,7 +10092,7 @@ export const stopOrchestrator = async (
  *  first batch INLINE so the queue starts moving within this call, then arms the normal
  *  tick chain — so the full lifecycle (monitor → promote → integrate) runs and the
  *  auto-dispatched worker is never orphaned. PREFLIGHTS `claude` (deps.preflight — injected,
- *  default claudeRunPreflight) right before engaging: a missing / logged-out CLI returns
+ *  default swarmRunPreflight) right before engaging: a missing / logged-out CLI returns
  *  false WITHOUT flipping running, so the unattended background sweep can't spin a
  *  spawn-fail retry storm across EVERY project (design note 4). A final re-check after the
  *  preflight await preserves the twin-dispatch guard. Returns whether it auto-started. Never
@@ -10555,11 +10554,11 @@ export const getOrchestratorState = async (
   // — and the pane, being told a live handle, re-adopts the desk the owner just
   // stopped. Same shape as the commander's stop-does-not-stick, one pool over.
   const supplyLive =
-    listLiveDesksIn(key, SUPPLY_DESK_LABEL).find((d) => isTerminalProcessAlive(d.id)) ?? null
+    listLiveSupplyDesks(key).find((d) => !d.stopping) ?? null
   const supplyDesk = supplyLive
     ? {
-        runtime: 'pty' as const,
-        handleId: supplyLive.id,
+        runtime: supplyLive.runtime,
+        handleId: supplyLive.handleId,
         agentSessionId: supplyLive.agentSessionId ?? null,
       }
     : null
@@ -10705,7 +10704,7 @@ export const resumeStartedAtMs = (entry: RosterEntry, now: number): number => {
  *  For each candidate: PROVE the transcript is loadable (`prove` — missing / empty /
  *  orphan-fresh mtime ⇒ skip, the card falls to the EXISTING crash reclaim), then
  *  respawn via `deps.spawnWorker` with the RESTART worktree + resumeSessionId (which
- *  routes through the SAME claudeRunPreflight + ensureGuardWiring gates — no new
+ *  routes through the SAME swarmRunPreflight + ensureGuardWiring gates — no new
  *  bypass). On success push an OrchestratorWorker anchored by {@link resumeStartedAtMs}
  *  — at ACCUMULATED WORK, so the runaway clock keeps counting across the restart
  *  instead of resetting to zero (plan §3 — a resumed worker is never handed a fresh
@@ -10891,7 +10890,7 @@ const adoptResumeCandidates = async (
  *      {@link isSwarmManualStopPersisted} must be false — the owner's explicit
  *      pause is SUPREMACY over any auto-resume, exactly like every other
  *      manualStop consumer in this file.
- *   3. `claudeRunPreflight()` must pass — a project that can't spawn right now
+ *   3. `swarmRunPreflight()` must pass — a project that can't spawn right now
  *      (claude missing/logged out) just doesn't resume THIS boot; it is not a
  *      fatal condition (the owner can always press ON by hand once fixed).
  * Before any of the above can dispatch, this function also AWAITS the quota
@@ -11031,7 +11030,7 @@ export const resumeEngines = async (
       // ready, spawn fault) must never block the engine resume below.
       if (intent.supplyDesired) {
         try {
-          const pre = await claudeRunPreflight()
+          const pre = await swarmRunPreflight()
           if (pre.ok) await (opts?.spawnSupply ?? spawnSwarmSupply)({ projectPath })
         } catch {
           /* resume is best-effort; the owner can relaunch from the tab */
@@ -11072,7 +11071,7 @@ export const resumeEngines = async (
       // engine-resume branches, once per project per boot.
       if (intent.managerDesired) {
         try {
-          const pre = await claudeRunPreflight()
+          const pre = await swarmRunPreflight()
           if (pre.ok) {
             await (opts?.spawnManager ?? spawnSwarmManager)({ projectPath })
           } else {
@@ -11080,7 +11079,7 @@ export const resumeEngines = async (
               event: 'engine-resume-suppressed',
               projectPath,
               detail:
-                'claude をすぐに使えなかったため、司令官の卓を復帰できませんでした' +
+                '選択中のAIをすぐに使えなかったため、司令官の卓を復帰できませんでした' +
                 `(${pre.body?.error ?? '理由不明'})。worker が動いていても、完了分を統合する司令官がいない状態です — 画面下のエージェントチームのバーから司令官を立て直してください。`,
             }).catch(() => {})
           }
@@ -11096,7 +11095,7 @@ export const resumeEngines = async (
       }
       if (!intent.desiredRunning) continue
       if (await isSwarmManualStopPersisted(key)) continue // supremacy — never override an explicit pause
-      const pre = await claudeRunPreflight()
+      const pre = await swarmRunPreflight()
       if (!pre.ok) {
         // ⚠ NOT SILENT (2026-08-04, adversarial review). This branch used to
         // `continue` with no notification, no journal line, and no retry — and

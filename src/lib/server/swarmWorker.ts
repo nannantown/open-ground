@@ -25,6 +25,11 @@ import { promisify } from 'util'
 import { lstat, mkdir, rm, stat, symlink, unlink } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
+import { homedir } from 'os'
+import { selectedRuntime, chatGptLaunchConfig } from './chatgptRuntime'
+import { chatGptWorkerOptions } from './chatgptLaunch'
+import { createChatGptQuery, distillChatGptMessage } from './chatgptQuery'
+import { verifySdkGuard } from './sdkGuardHook'
 import { centralWorktreesDir, openGroundHome } from './paths'
 import { swarmRepoKey } from './swarmJanitor'
 import { isGitRepoRoot } from './gitRepoGuard'
@@ -37,6 +42,7 @@ import { removeClaudeFolderTrust } from './claudeTrust'
 import { shutdownWorkerSimulators } from './swarmSimulators'
 import { claudeDirName } from './claudeProjectDir'
 import { isExperimentEnabled } from './experiments'
+import { resolveCardTier } from '../cardTier'
 import { resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { coolingSnapshot, isModelTier, isTierCooling } from './swarmQuota'
@@ -931,7 +937,11 @@ export const spawnSwarmWorker = async (
   // the only pre-launch signal that sees a tier-local wall /usage cannot express
   // (swarmTierProbe). Wall ⇒ the tier cools (disk-mirrored) and the ladder walk
   // drops a rung, so a dry fable seats this worker on opus instead of burning it.
-  const me = await resolveSwarmModelEffortProbed(
+  const chatgpt = await selectedRuntime('swarm') === 'chatgpt'
+  // A provider change starts a separate conversation in the preserved worktree.
+  const resumeSessionId = opts.resumeSessionId && opts.resumeSessionId.startsWith('chatgpt-') === chatgpt
+    ? opts.resumeSessionId : undefined
+  const me = chatgpt ? await chatGptLaunchConfig('swarm') : await resolveSwarmModelEffortProbed(
     await getExecutionMode(),
     'worker',
     { title: opts.title, notes: opts.notes, tier: opts.tier },
@@ -963,13 +973,17 @@ export const spawnSwarmWorker = async (
   // idempotent installHooks(); when it STILL doesn't verify, the spawn is
   // refused and the refusal is surfaced to the UI (bell + OS toast, throttled).
   // Covers every worker path — engine dispatch, POST /api/swarm/worker, RESTART.
-  const wiring = await ensureGuardWiring()
-  if (!wiring.ok) {
-    await notifyGuardUnwired(opts.projectPath, wiring.problems)
-    throw new GuardWiringError(wiring.problems)
+  if (!chatgpt) {
+    const wiring = await ensureGuardWiring()
+    if (!wiring.ok) {
+      await notifyGuardUnwired(opts.projectPath, wiring.problems)
+      throw new GuardWiringError(wiring.problems)
+    }
   }
   // RESTART (opts.worktree) relaunches IN the existing worktree — same swarm/*
   // branch + work preserved; a fresh dispatch creates a new isolated worktree.
+  const sandbox = await isExperimentEnabled('sandbox')
+  if (chatgpt && sandbox) throw new SdkWorkerUnavailableError(['The OS sandbox experiment is not supported by the ChatGPT host runtime.'])
   const { worktree, branch } = opts.worktree
     ? await resolveExistingSwarmWorktree(opts.projectPath, opts.worktree)
     : await createSwarmWorktree(opts.projectPath, { hint: opts.hint })
@@ -1014,14 +1028,14 @@ export const spawnSwarmWorker = async (
   //     file is its own sign.
   // Best-effort: a failed delete never fails the spawn (the engine's in-memory
   // `reenteredAt` guard still fences its own workers).
-  if (opts.worktree && !opts.resumeSessionId) {
+  if (opts.worktree && !resumeSessionId) {
     await clearBranchHeartbeat(opts.projectPath, branch).catch(() => {})
   }
   // RESUME (card 4): reuse the PERSISTED session id so `--resume <id>` reattaches
   // the same conversation; else mint a fresh one (unchanged). resumeSessionId only
   // arrives on the restart path (always paired with opts.worktree above), and only
   // after resumeEngines PROVED the transcript is loadable.
-  const agentSessionId = opts.resumeSessionId ?? randomUUID()
+  const agentSessionId = resumeSessionId ?? (chatgpt ? `chatgpt-${randomUUID()}` : randomUUID())
   // Owner-only sandbox gate, resolved SERVER-side (owner role && the toggle) —
   // never from the dispatch request. When open, the worker's already-bypass run
   // is wrapped in a Seatbelt sandbox confined to its worktree; the repo's shared
@@ -1030,7 +1044,6 @@ export const spawnSwarmWorker = async (
   // (launchClaude no-ops it elsewhere); the worker's symlinked node_modules is left
   // fully READ-only — NO carve-out (a writable node_modules would let a sandboxed
   // worker poison code, e.g. `.vite/deps`, the owner later runs UN-sandboxed).
-  const sandbox = await isExperimentEnabled('sandbox')
   // Settings.language ⇒ the worker's user-facing replies (chat, blocker
   // questions, PR/commit text) follow it — resolved once here and threaded
   // into the SDK launch plan below (languageDirective).
@@ -1069,15 +1082,17 @@ export const spawnSwarmWorker = async (
   //
   // The preload stays AHEAD of the preflight for the old reason: nothing may
   // await between the guard-proof and the spawn. Never rejects.
-  const sdkReady = await preloadSdk()
+  const sdkReady = chatgpt ? null : await preloadSdk()
 
   // Everything that must be true before an SDK worker may start (the USER'S own
   // claude, new enough; the A3/L4 veto provably armed — sdkWorkerPreflight).
   // Fail-CLOSED: with no PTY to degrade to, a failed preflight is a failed
   // dispatch — roll back what THIS call created and throw the typed error the
   // engine's spawn-failure backoff keys on.
-  const pre = sdkWorkerPreflight({ writeRoots: [worktree] })
-  if (!pre.ok || !pre.claudeBin) {
+  const pre = chatgpt
+    ? { ...verifySdkGuard({ writeRoots: [worktree], home: homedir() }), claudeBin: null }
+    : sdkWorkerPreflight({ writeRoots: [worktree] })
+  if (!pre.ok || (!chatgpt && !pre.claudeBin)) {
     if (freshlyCreated) {
       await removeSwarmWorktree(opts.projectPath, worktree, { force: true }).catch(() => {})
       await git(opts.projectPath, ['branch', '-D', branch])
@@ -1087,31 +1102,38 @@ export const spawnSwarmWorker = async (
     )
   }
 
-  const built = sdkWorkerLaunchPlan({
-    worktree,
-    agentSessionId,
-    title: opts.title,
-    notes: opts.notes,
-    priorFailure: opts.priorFailure,
-    // The stored tier; the plan resolves the effective one for the directive.
-    tier: opts.tier,
-    // Off-by-default trial flags (docs/trending/TRIALS.md §Trial 4). Read here,
-    // at the one spawn site, so a trial is turned on and off from Settings
-    // without a release — and so all-off produces byte-identical order text.
-    trials: await getWorkerTrials(),
-    resume: !!opts.resumeSessionId,
-    me,
-    claudeBin: pre.claudeBin,
-    env: { ...process.env, ...researchEnv },
-    // The sandbox experiment is not supported on the SDK runtime; passing the
-    // flag through makes the plan SAY so (a warning) instead of silently
-    // dropping the containment the owner asked for.
-    sandbox,
-    lang,
-  })
-  for (const w of built.warnings) console.warn(`[swarm] ${w}`)
+  const trials = await getWorkerTrials()
   let session: ReturnType<typeof spawnSdkSession>
   try {
+    const built = chatgpt ? {
+      options: chatGptWorkerOptions({ cwd: worktree, agentSessionId, resume: !!resumeSessionId, ...me, env: { ...process.env, ...researchEnv } }),
+      initialPrompt: resumeSessionId
+        ? WORKER_RESUME_INJECTION + languageDirective(lang)
+        : buildOrderInjection(opts.title, opts.notes, opts.priorFailure, lang, resolveCardTier({ title: opts.title, notes: opts.notes, tier: opts.tier }), trials),
+      warnings: [],
+    } : sdkWorkerLaunchPlan({
+      worktree,
+      agentSessionId,
+      title: opts.title,
+      notes: opts.notes,
+      priorFailure: opts.priorFailure,
+      // The stored tier; the plan resolves the effective one for the directive.
+      tier: opts.tier,
+      // Off-by-default trial flags (docs/trending/TRIALS.md §Trial 4). Read here,
+      // at the one spawn site, so a trial is turned on and off from Settings
+      // without a release — and so all-off produces byte-identical order text.
+      trials,
+      resume: !!resumeSessionId,
+      me,
+      claudeBin: pre.claudeBin!,
+      env: { ...process.env, ...researchEnv },
+      // The sandbox experiment is not supported on the SDK runtime; passing the
+      // flag through makes the plan SAY so (a warning) instead of silently
+      // dropping the containment the owner asked for.
+      sandbox,
+      lang,
+    })
+    for (const w of built.warnings) console.warn(`[swarm] ${w}`)
     session = spawnSdkSession({
       cwd: worktree,
       role: 'worker',
@@ -1120,7 +1142,9 @@ export const spawnSwarmWorker = async (
       initialPrompt: built.initialPrompt,
       // Carried down from before the preflight — the type demands it, which is
       // what stops the next spawn site from forgetting to preload.
-      sdk: sdkReady,
+      ...(chatgpt
+        ? { provider: 'chatgpt' as const, queryFn: createChatGptQuery(), distillMessage: distillChatGptMessage }
+        : { sdk: sdkReady! }),
     })
   } catch (e) {
     if (freshlyCreated) {

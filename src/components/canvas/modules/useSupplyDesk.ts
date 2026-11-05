@@ -39,6 +39,8 @@ import type { SpawnSwarmSupplyResponse } from '@/lib/types'
  *  checkout — so this is just the PTY id + minted session id + start time. */
 export interface SupplyDeskRecord {
   terminalId: string
+  runtime?: 'pty' | 'sdk'
+  sdkSessionId?: string
   agentSessionId: string
   startedAt: string
 }
@@ -56,8 +58,10 @@ export const loadSupplyRecord = (projectId: string): SupplyDeskRecord | null => 
     if (!o || typeof o !== 'object') return null
     const r = o as Record<string, unknown>
     if (typeof r.terminalId !== 'string') return null
+    if (r.runtime === 'sdk' && (typeof r.sdkSessionId !== 'string' || !r.sdkSessionId || r.terminalId)) return null
     return {
       terminalId: String(r.terminalId),
+      ...(r.runtime === 'sdk' ? { runtime: 'sdk' as const, sdkSessionId: r.sdkSessionId as string } : {}),
       agentSessionId: typeof r.agentSessionId === 'string' ? r.agentSessionId : '',
       startedAt: typeof r.startedAt === 'string' ? r.startedAt : '',
     }
@@ -139,7 +143,13 @@ const postSupply = async (
       envIssuesErrorMessage(t, body?.envIssues) ?? body?.error ?? `HTTP ${res.status}`,
     )
   }
-  return (await res.json()) as SpawnSwarmSupplyResponse
+  const spawned = (await res.json()) as SpawnSwarmSupplyResponse
+  if (spawned.runtime === 'sdk'
+    ? typeof spawned.sdkSessionId !== 'string' || !spawned.sdkSessionId || spawned.terminalId !== ''
+    : typeof spawned.terminalId !== 'string' || !spawned.terminalId) {
+    throw new Error('The president session did not return a usable address.')
+  }
+  return spawned
 }
 
 export const useSupplyDesk = ({
@@ -201,21 +211,22 @@ export const useSupplyDesk = ({
       supply
         ? {
             terminalId: supply.terminalId,
-            runtime: 'pty', // the supply desk is PTY-only by design
+            runtime: supply.runtime ?? 'pty',
+            sdkSessionId: supply.sdkSessionId,
             agentSessionId: supply.agentSessionId,
             startedAt: supply.startedAt,
           }
         : null,
       supplyDesk,
-      { busy, storedDead: !!supply && exitedIds.has(supply.terminalId) },
+      { busy, storedDead: !!supply && exitedIds.has(supply.runtime === 'sdk' ? supply.sdkSessionId ?? '' : supply.terminalId) },
     )
     if (
       v.kind === 'adopt' &&
-      v.record.runtime === 'pty' &&
-      v.record.terminalId !== stoppedHandleRef.current
+      (v.record.runtime === 'sdk' ? v.record.sdkSessionId : v.record.terminalId) !== stoppedHandleRef.current
     ) {
       const rec: SupplyDeskRecord = {
         terminalId: v.record.terminalId,
+        ...(v.record.runtime === 'sdk' ? { runtime: 'sdk' as const, sdkSessionId: v.record.sdkSessionId } : {}),
         agentSessionId: v.record.agentSessionId,
         startedAt: v.record.startedAt,
       }
@@ -247,6 +258,7 @@ export const useSupplyDesk = ({
       // the outcome they asked for either way.
       const next: SupplyDeskRecord = {
         terminalId: spawn.terminalId,
+        ...(spawn.runtime === 'sdk' ? { runtime: 'sdk' as const, sdkSessionId: spawn.sdkSessionId } : {}),
         agentSessionId: spawn.agentSessionId,
         startedAt: new Date().toISOString(),
       }
@@ -269,7 +281,7 @@ export const useSupplyDesk = ({
   // caller's exited/seen bookkeeping is cleared so a relaunch starts clean.
   const stop = useCallback(async () => {
     if (!enabled || !supply || busy) return
-    const term = supply.terminalId
+    const term = supply.runtime === 'sdk' ? supply.sdkSessionId ?? '' : supply.terminalId
     // Remember it BEFORE the round-trip: the reconcile can fire on a poll that
     // lands while the kill is still in flight.
     stoppedHandleRef.current = term
@@ -286,7 +298,9 @@ export const useSupplyDesk = ({
       }).catch(() => {})
       // Belt-and-braces: the raw terminal delete for the stored id (the route
       // kills by desk label; a desk the pool lost the label for still dies here).
-      await api.api.terminal[':id'].$delete({ param: { id: term } }).catch(() => {})
+      if (supply.runtime === 'sdk') {
+        await fetch(`/api/sdk-session/${encodeURIComponent(term)}?path=${encodeURIComponent(projectPath)}`, { method: 'DELETE' }).catch(() => {})
+      } else await api.api.terminal[':id'].$delete({ param: { id: term } }).catch(() => {})
     } finally {
       setSupply(null)
       saveSupplyRecord(projectId, null)
@@ -303,7 +317,7 @@ export const useSupplyDesk = ({
   // so the overlay remains and the user can retry.
   const restart = useCallback(async () => {
     if (!enabled || busy) return
-    const old = supply?.terminalId
+    const old = supply?.runtime === 'sdk' ? supply.sdkSessionId : supply?.terminalId
     stoppedHandleRef.current = null
     setBusy(true)
     setError(null)
@@ -311,10 +325,13 @@ export const useSupplyDesk = ({
       // Best-effort kill the old PTY first. The overlay normally shows only on a
       // dead PTY, but a transient mount-probe failure could surface it for a live
       // one — killing first guarantees we never orphan a still-running session.
-      if (old) await api.api.terminal[':id'].$delete({ param: { id: old } }).catch(() => {})
+      if (old && supply?.runtime === 'sdk') {
+        await fetch(`/api/sdk-session/${encodeURIComponent(old)}?path=${encodeURIComponent(projectPath)}`, { method: 'DELETE' }).catch(() => {})
+      } else if (old) await api.api.terminal[':id'].$delete({ param: { id: old } }).catch(() => {})
       const spawn = await postSupply(projectPath, t)
       const next: SupplyDeskRecord = {
         terminalId: spawn.terminalId,
+        ...(spawn.runtime === 'sdk' ? { runtime: 'sdk' as const, sdkSessionId: spawn.sdkSessionId } : {}),
         agentSessionId: spawn.agentSessionId,
         startedAt: new Date().toISOString(),
       }

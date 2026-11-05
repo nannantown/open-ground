@@ -1,55 +1,16 @@
-// swarmSupply — the in-app, tmux-free replacement for the shell swarm's
-// `swarm-supply.sh`. It is the "supply officer (補給官)" primitive of the OPEN
-// GROUND swarm port (docs / auto-memory project_inapp_swarm_port): the user's
-// CONVERSATION DESK. Given a registered project it launches ONE interactive
-// `claude` PTY in the project's PRIMARY checkout running the `/supply` skill.
-//
-// TWO duties, and the second one is why this desk must STAY a PTY:
-//   1. INTAKE — listen to the user's vague requests, sharpen each into an
-//      OBSERVABLE task, file it into the Board `todo` column (Board HTTP API).
-//   2. STATUS (2026-07-31) — answer 「今どうなってる?」 by READING the swarm:
-//      GET /api/swarm/workers + /api/swarm/orchestrator + /api/project +
-//      the escalation inbox, reported in plain, non-programmer Japanese. Read
-//      only: it never dispatches, merges, moves a column past `todo`, or
-//      switches the engine — those stay the commander's.
-//
-// WHY DUTY 2 LIVES HERE. This desk is the OWNER'S PHONE WINDOW: it is launched
-// with Remote Control ON under an identifiable name (「タスク窓口 <project>」), so
-// it is the one desk reachable from claude.ai / a phone. The COMMANDER can now
-// run on the Agent SDK runtime, which has no terminal and therefore no Remote
-// Control — so if this desk could only take orders, the owner would keep phone
-// ORDERING and lose phone MONITORING. Duty 2 closes that, and is the stated
-// precondition for moving the commander off the PTY at all
-// (docs/SDK_CLIENT_INVESTIGATION.md §13-A, SDK_WORKER_MIGRATION_PLAN.md §14).
-//
-// Unlike a WORKER (swarmWorker.ts) the supply officer gets NO worktree: it
-// operates on the primary checkout — it only READS the repo + writes the
-// recoverable Board, never editing code or pushing. So there is nothing to tear
-// down on stop; stopping it is a plain PTY kill (the terminal DELETE route).
-//
-// This mirrors `swarm-supply.sh` exactly:
-//   exec env SWARM_MANAGER=1 claude --model opus --effort max \
-//        --dangerously-skip-permissions --remote-control supply "/supply"
-//   - SWARM_MANAGER=1 — TAGS the session as the supply officer (for tooling / the
-//     /supply skill). Under WORKER-ONLY guard scoping (2026-07) this is NOT a guard
-//     opt-in: like the commander, the supply desk is a TRUSTED session (it only
-//     READS the repo + writes the recoverable Board), so the PreToolUse veto —
-//     which polices only the confined worker — does not apply to it.
-//   - bypass (--dangerously-skip-permissions) — the desk writes Board cards
-//     unattended-style so the conversation isn't interrupted by a tool-approval
-//     prompt on every `swarm-board.sh add`; its safety net is the human, not the veto.
-//   - opus / max — the supply officer is a PM translating intent into precise,
-//     observable tasks; it runs at full capability (mirrors the shell launcher).
-//   - /supply as claude's POSITIONAL prompt — claude runs the skill on startup,
-//     then stays interactive for the conversation. (A TUI-injected slash command
-//     would not submit — the same delivery fix swarmWorker documents for /order.)
-// Subscription-only: launchClaude drives the user's `claude` CLI, never
-// `claude -p` / the SDK.
+// The project president: one conversation desk in the primary checkout.
+// It sharpens owner requests into Board cards and reads company status.
+// Claude retains its existing interactive PTY and Remote Control. Selecting
+// ChatGPT launches an explicit supply-role session in the structured SDK pool,
+// using the owner's separately authorized ChatGPT plan and host-owned tools.
+// Spawn locking, adoption and stop cover both pools, so a provider switch never
+// starts two presidents. Conversations have separate provider-specific slots.
+// OPEN GROUND's phone/assistant relay addresses either desk through the same
+// durable delivery queue and append-only owner/president transcript.
 
 import { randomUUID } from 'crypto'
 import { resolve } from 'path'
 import { launchClaude, type LaunchClaudeOpts } from './claudeTerminal'
-import { killTerminal, listLiveDesksIn, isTerminalProcessAlive } from './terminal'
 import {
   acquireDeskSpawnLock,
   deskSpawnLockKey,
@@ -66,6 +27,12 @@ import { getExecutionMode, getAllowedModelTiers } from './store'
 import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
 import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmSupplyResponse } from '../types'
+import { listLiveSupplyDesks, stopSupplyDesk, SUPPLY_DESK_LABEL } from './swarmSupplyRuntime'
+import { spawnSdkSession, terminateSdkSession } from './sdkSession'
+import { selectedRuntime, chatGptLaunchConfig } from './chatgptRuntime'
+import { chatGptDeskOptions } from './chatgptLaunch'
+import { createChatGptQuery, distillChatGptMessage } from './chatgptQuery'
+export { SUPPLY_DESK_LABEL } from './swarmSupplyRuntime'
 
 /** The skill the supply session runs, handed to claude as its positional prompt
  *  (claude submits it on startup; a TUI-injected slash command would not). */
@@ -197,7 +164,6 @@ export const supplyLaunchOpts = (
  *  read keys on (the supply twin of MANAGER_DESK_LABEL). Exported (2026-08-03)
  *  because getOrchestratorState now surfaces the live desk to the UI, and a
  *  second literal there would drift from this one. */
-export const SUPPLY_DESK_LABEL = '補給官'
 
 /** Stop every live supply desk in the project. Lives HERE — the module that
  *  owns the desk and its PTY-by-design status — so the route layer never has
@@ -205,9 +171,9 @@ export const SUPPLY_DESK_LABEL = '補給官'
  *  to stop that reach; this module is on its exemption list WITH the reason).
  *  Returns the ids it asked to die (kill is fire-and-forget by pool contract). */
 export const stopSwarmSupplyDesks = (projectPath: string): string[] => {
-  const desks = listLiveDesksIn(projectPath, SUPPLY_DESK_LABEL)
-  for (const d of desks) killTerminal(d.id)
-  return desks.map((d) => d.id)
+  const desks = listLiveSupplyDesks(projectPath)
+  for (const d of desks) stopSupplyDesk(d)
+  return desks.map((d) => d.handleId)
 }
 
 /** Every supply desk in `projectPath` that is REALLY there, newest first.
@@ -226,8 +192,7 @@ export const stopSwarmSupplyDesks = (projectPath: string): string[] => {
  *  (Supply has no `stopping` flag to filter on — that notion belongs to the SDK
  *  pool, and this desk is PTY-only by design, so one pool read is the whole
  *  answer. The process table is what stands in for it.) */
-const listAliveSupplyDesks = (projectPath: string) =>
-  listLiveDesksIn(projectPath, SUPPLY_DESK_LABEL).filter((d) => isTerminalProcessAlive(d.id))
+const listAliveSupplyDesks = (projectPath: string) => listLiveSupplyDesks(projectPath)
 
 /** A live supply desk to hand back INSTEAD of launching, or null.
  *
@@ -239,8 +204,12 @@ const adoptLiveSupplyDesk = async (
   projectPath: string,
 ): Promise<SpawnSwarmSupplyResponse | null> => {
   const alive = listAliveSupplyDesks(projectPath)
-  const existing = alive[0]
+  const existing = alive.find((d) => !d.stopping)
   if (!existing) return null
+  const chatgpt = await selectedRuntime('swarm') === 'chatgpt'
+  if (!!existing.agentSessionId?.startsWith('chatgpt-') !== chatgpt) {
+    throw new Error('現在の社長窓口を停止してから、選んだ接続先でもう一度開始してください。会話の記録は残ります。')
+  }
   if (alive.length > 1)
     console.warn(
       `[swarmSupply] ${alive.length} live supply desks in ${projectPath} — ` +
@@ -254,7 +223,8 @@ const adoptLiveSupplyDesk = async (
     await recordSwarmSession(projectPath, 'supply', existing.agentSessionId).catch(() => {})
   }
   return {
-    terminalId: existing.id,
+    terminalId: existing.runtime === 'pty' ? existing.handleId : '',
+    ...(existing.runtime === 'sdk' ? { runtime: 'sdk' as const, sdkSessionId: existing.handleId } : {}),
     agentSessionId: existing.agentSessionId ?? '',
     // Nothing was RESUMED — no `claude --resume` ran. The desk was already up.
     resumed: false,
@@ -312,6 +282,7 @@ export const spawnSwarmSupply = async (
   try {
     const adopted = await adoptLiveSupplyDesk(opts.projectPath)
     if (adopted) return adopted
+    if (listLiveSupplyDesks(opts.projectPath).length) throw new Error('The president is still stopping. Try again when it has closed.')
     return await launchNewSupplyDesk(opts)
   } finally {
     release()
@@ -325,6 +296,22 @@ export const spawnSwarmSupply = async (
 const launchNewSupplyDesk = async (
   opts: SpawnSwarmSupplyOpts,
 ): Promise<SpawnSwarmSupplyResponse> => {
+  if (await selectedRuntime('swarm') === 'chatgpt') {
+    const config = await chatGptLaunchConfig('swarm')
+    const session = opts.fresh ? { agentSessionId: `chatgpt-${randomUUID()}`, resume: false }
+      : await resolveSwarmSession(opts.projectPath, 'supply', { provider: 'chatgpt' })
+    const lang = await getPromptLang()
+    const desk = spawnSdkSession({ cwd: opts.projectPath, role: 'supply', provider: 'chatgpt',
+      agentSessionId: session.agentSessionId,
+      options: chatGptDeskOptions({ cwd: opts.projectPath, role: 'supply', ...session, ...config }),
+      initialPrompt: (session.resume ? SUPPLY_RESUME_INJECTION : SUPPLY_INJECTION) + languageDirective(lang),
+      queryFn: createChatGptQuery(), distillMessage: distillChatGptMessage,
+    })
+    if (desk.status === 'failed') { terminateSdkSession(desk.id); throw new Error('ChatGPT president could not start.') }
+    await recordSwarmSession(opts.projectPath, 'supply', session.agentSessionId).catch(() => {})
+    return { terminalId: '', runtime: 'sdk', sdkSessionId: desk.id,
+      agentSessionId: session.agentSessionId, resumed: session.resume }
+  }
   // `fresh` skips the lookup entirely (and overwrites the record below) — the
   // owner's way out of a restored context that has gone bad.
   const session = opts.fresh

@@ -67,6 +67,15 @@ describe('makeSdkGuardHook — fail-closed on every failure mode', () => {
 })
 
 describe('makeSdkGuardHook — verdict pass-through', () => {
+  it('keeps host OAuth credentials write-protected even if their parent was allowed', async () => {
+    __resetGuardCacheForTests()
+    const directory = `${HOME}/.openground/secrets`
+    const hook = makeSdkGuardHook({ home: HOME, writeRoots: [directory] })
+    const output = await hook({ tool_name: 'Write', tool_input: { file_path: `${directory}/chatgpt.json`, content: '{}' }, cwd: WT })
+    expect(decisionOf(output)).toBe('deny')
+    expect(output.hookSpecificOutput.permissionDecisionReason).toContain('substrate')
+  })
+
   it('allows what the engine allows', async () => {
     const hook = makeSdkGuardHook({ ...base, evaluateFn: () => ({ decision: 'allow' }) })
     expect(decisionOf(await hook(bash('git status')))).toBe('allow')

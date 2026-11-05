@@ -115,6 +115,7 @@ describe('swarm local owner unlock — env OPENGROUND_LOCAL_OWNER=1', () => {
     // owner's personal corpus, most of all — is a leak this must catch.
     expect(body).toEqual({
       eligible: false,
+      assistantEligible: true,
       flags: { swarm: true, sandbox: false },
       // Public availability follows the host OS; the LOCAL unlock must never
       // report itself as the user's opt-in.
@@ -146,6 +147,20 @@ describe('swarm local owner unlock — hand-edited settings.json swarmLocalOwner
     const body = (await (await app.request('/api/experiments')).json()) as ExperimentsResponse
     expect(body.flags.swarm).toBe(true)
     expect(body.eligible).toBe(false)
+    expect(body.assistantEligible).toBe(true)
+  })
+})
+
+describe('assistant capability metadata stays separate from public Swarm opt-in', () => {
+  it('answers anonymously with a false boolean and never promotes a public opt-in', async () => {
+    for (const swarmOptIn of [false, true]) {
+      await setSettings({ swarmOptIn })
+      const response = await app.request('/api/experiments')
+      expect(response.status).toBe(200)
+      const body = await response.json() as ExperimentsResponse
+      expect(body.assistantEligible).toBe(false)
+      expect(body.eligible).toBe(false)
+    }
   })
 })
 

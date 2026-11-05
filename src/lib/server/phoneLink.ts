@@ -21,10 +21,7 @@ import WebSocket from 'ws'
 import { atomicWriteJson } from './atomicWrite'
 import { openGroundHome } from './paths'
 import { getSettings } from './store'
-import { readSwarmSessions } from './swarmSessions'
-import { sessionJsonlPath } from './transcript'
-import { listLiveDesksIn } from './terminal'
-import { SUPPLY_DESK_LABEL } from './swarmSupply'
+import { listLiveSupplyDesks, supplyTranscriptFile } from './swarmSupplyRuntime'
 import { promptAuthor } from './groundMarks'
 import {
   queueSupplyOwnerSay,
@@ -41,8 +38,7 @@ import { wakePresidentDesk } from './presidentRelay'
 import { isLockdownEnabledSync } from './lockdown'
 import { alreadyStored, asCursor, asPushTarget, type Cursor, type PushTarget } from '../../../worker/src/phoneRelayAuth'
 import { providerTokenExpired, renewStaleProviderToken, pushKeyFingerprint, pushRefusedForGood, pushTokenGone, pushTransient, refusalIsTheApp, readPushKey, sendPushToTalk, type PushKey, type PushResult } from './phonePush'
-import { isSwarmLocalOwnerUnlocked } from './swarmGate'
-import { getCustomTabRole } from './roles'
+import { hasAssistantAccess } from './assistantAccess'
 import { ASSISTANT_ID, ASSISTANT_SAY_MAX, AssistantFailure, askAssistant, assistantBusy, dropAssistantProposal, onAssistantAppLine, onPresidentTalk, onRelayState, plainAssistantError, pressProposal, warmAssistant, type AppLine, type AssistantAnswer, type PresidentTalk, type RelayState } from './phoneAssistant'
 import { listProposals, onProposalsChanged } from './assistantProposals'
 import { langOf, pick } from './promptLang'
@@ -141,8 +137,7 @@ const pushRefusal = (cfg: PhoneLinkConfig, key: PushKey): string | null => {
 /** The app owner only (owner decision 2026-10-01: 「まずはオーナー自分専用」) —
  *  NOT the public Agent Team opt-in, which opens the rest of the swarm. The relay
  *  is the owner's; per-user rooms for App Store users come with their own gate. */
-export const hasPhoneLinkAccess = async (): Promise<boolean> =>
-  (await isSwarmLocalOwnerUnlocked()) || (await getCustomTabRole()) === 'owner'
+export const hasPhoneLinkAccess = hasAssistantAccess
 
 const configFile = (): string => join(openGroundHome(), 'phone-link.json')
 const key = (): string => randomBytes(32).toString('base64url')
@@ -251,7 +246,7 @@ const listProjects = async (): Promise<(PhoneProject & { path: string })[]> => {
     id: p.id,
     path: p.path,
     name: p.displayName || basename(p.path),
-    desk: listLiveDesksIn(p.path, SUPPLY_DESK_LABEL).length > 0,
+    desk: listLiveSupplyDesks(p.path).some((desk) => !desk.stopping),
   }))
 }
 
@@ -651,9 +646,8 @@ const TALK_BYTES = 24_000
 const presidentTalk = async (st: LinkState, p: { id: string; path: string }): Promise<Record<string, unknown>[]> => {
   endQuiet(st) // work mode is off here (assistantHistory returns under it)
   const key = e2eKeyOf(st.cfg.e2eKey)
-  const sess = (await readSwarmSessions(p.path)).supply
-  if (!key || !sess) return []
-  const file = sessionJsonlPath(sess.cwd, sess.sessionId)
+  const file = await supplyTranscriptFile(p.path)
+  if (!key || !file) return []
   let buf: Buffer
   let base: number
   try {
@@ -1104,9 +1098,8 @@ const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, un
 export const pumpTranscript = async (st: LinkState, deps: PhoneLinkDeps = {}): Promise<number> => {
   const { chosen } = await selectedProject(st)
   if (!chosen) return 0
-  const sess = (await readSwarmSessions(chosen.path)).supply
-  if (!sess) return 0
-  const file = sessionJsonlPath(sess.cwd, sess.sessionId)
+  const file = await supplyTranscriptFile(chosen.path)
+  if (!file) return 0
   let size: number
   try {
     size = (await stat(file)).size

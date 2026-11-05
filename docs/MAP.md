@@ -24,6 +24,26 @@
   `assistantMemory.test.ts`. No record is injected into Claude's own transcript.
 
 ## 0. 契約と骨格 — 全変更の起点
+- Owner ChatGPT plan runtime: `docs/CHATGPT_RUNTIME.md`; `chatgptAuth.ts`
+  (independent subscription OAuth, no API-key fallback), `chatgptAccess.ts`
+  (signed-in owner role only; local unlock and general opt-in do not qualify), `chatgptResponses.ts`
+  (account-bound streaming/tool loop), `chatgptTools.ts` (guarded host tools and
+  mandatory credential sandbox and server-exit group reaper; regression
+  `chatgptShutdown.test.ts`), `chatgptQuery.ts` (role skills and pool adapter),
+  `chatgptReview.ts` (independent read-only review, fixed Git and parent abort),
+  `chatgptRuntime.ts` / `chatgptQuota.ts` (provider and quota boundaries),
+  `chatgptAssistant.ts` (existing assistant proposal/read tools),
+  `chatgptAssistantFold.ts` (provider-matched memo maintenance without filesystem
+  authority). Manual routes, engine boot/resume and commander wake all use
+  `chatgptRuntime.swarmRunPreflight` to check the selected provider. Owner connection
+  API: `server/routes/chatgpt.ts`; UI: `ChatGptSetting.tsx`, `useChatGptConnection.ts`,
+  `AssistantPick.tsx`. Provider settings use the dedicated preference setter;
+  generic Settings autosaves cannot overwrite them. `swarmSupplyRuntime.ts`
+  unifies president delivery/presence across PTY and SDK; phone delivery reads
+  ChatGPT's own append-only transcript. Claude remains the default provider.
+  `assistantAccess.ts` shares the legacy owner/local assistant permission between
+  phone routes and the `experiments.assistantEligible` client capability;
+  ChatGPT controls require the separate real-owner `experiments.eligible`.
 - Songs/NENE development handoff (2026-09-22): `docs/SONGS-HANDOFF-2026-09-22.md`.
   Two local repository branches, delivered UI/recording changes, verification,
   preserved owner data and remaining hardware/packaged-app acceptance checks.

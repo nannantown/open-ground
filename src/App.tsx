@@ -1612,12 +1612,14 @@ export default function App() {
         }}
       />
       {/* The owner's assistant floats over every screen (docs/ASSISTANT_DESIGN.md).
-          Not in the public-view preview. Re-mounted when the signed-in user or work
-          mode changes, so it asks the owner-only routes again (they decide). */}
-      {!publicPreview && (
+          Wait for the server's assistant permission before its closed-window
+          history read. The provider picker separately requires the real owner
+          role; public Swarm opt-in opens neither permission. */}
+      {experiments.loaded && experiments.assistantEligible && !publicPreview && (
         <FloatingAssistant
           key={`${authUser?.id ?? ''}:${settings?.lockdownMode === true}`}
           disabled={settings?.lockdownMode === true}
+          chatgptEligible={experiments.eligible}
         />
       )}
     </main>

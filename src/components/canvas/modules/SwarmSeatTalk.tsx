@@ -42,14 +42,18 @@ export const mergeTail = (prev: Frame[], incoming: readonly Frame[]): Frame[] =>
 export const SwarmSeatFeed = ({
   sdkSessionId,
   projectPath,
+  onExit,
 }: {
   sdkSessionId: string
   projectPath: string
+  onExit?: () => void
 }) => {
   const { t } = useT()
   const [frames, setFrames] = useState<Frame[]>([])
   const feedRef = useRef<HTMLDivElement>(null)
   const [drifted, setDrifted] = useState(false)
+  const exitRef = useRef(onExit)
+  exitRef.current = onExit
 
   useEffect(() => {
     let alive = true
@@ -83,6 +87,7 @@ export const SwarmSeatFeed = ({
           // Server reloading — ask again next tick.
         }
       }
+      if (alive && done) exitRef.current?.()
       if (alive && !done) timer = setTimeout(() => void tick(), FEED_POLL_MS)
     }
     // A small random start so N seats mounted together do not poll in

@@ -500,7 +500,9 @@ describe('wiring — spawnSwarmWorker hands the card tier to the SDK launch plan
     // because spawnSwarmWorker needs a real SDK + claude to run end to end.
     const { readFileSync } = await import('fs')
     const src = readFileSync(new URL('./swarmWorker.ts', import.meta.url), 'utf8')
-    const call = src.slice(src.indexOf('const built = sdkWorkerLaunchPlan({'))
+    const callStart = src.indexOf('sdkWorkerLaunchPlan({')
+    expect(callStart).toBeGreaterThanOrEqual(0)
+    const call = src.slice(callStart)
     const body = call.slice(0, call.indexOf('})'))
     expect(body).toContain('tier: opts.tier')
   })

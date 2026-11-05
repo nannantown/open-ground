@@ -1417,6 +1417,10 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'writes-elsewhere',
     why: 'fabricates transcripts under a temp $HOME (claudeHome) to test resume-ability',
   },
+  'src/lib/server/chatgptSessions.test.ts': {
+    tier: 'writes-elsewhere',
+    why: 'seeds Claude transcripts only under the mkdtemp scratch/user-home fixture; HOME points there while comparing provider-specific session slots',
+  },
   'src/lib/server/swarmSessions.integration.test.ts': {
     tier: 'writes-elsewhere',
     why: 'same, via a shell fixture that writes $HOME/.claude/projects with $HOME pinned to a temp dir',

@@ -467,7 +467,7 @@ const poolFns = (): string[] =>
 //      `target.terminalId`, which is the literal regression that file's own
 //      comment quotes as the reason it was written.
 //
-// So the SDK side is now a call set too, derived from the two modules that
+// So the SDK side is now a call set too, derived from the pool/address modules that
 // DEFINE it rather than remembered here — same rule, same reason as POOL_API.
 // It is stricter than `ptyFns` in one way on purpose: membership requires a
 // CALL (`fn(`), not a mention. A deleted arm usually leaves its import behind
@@ -475,8 +475,11 @@ const poolFns = (): string[] =>
 
 /** Where the both-pools seam is defined. Its exports ARE "asking both pools". */
 const LIVEDESKS_MODULE = 'src/lib/server/liveDesks.ts'
+/** Supply has a provider-aware address too; callers must not disappear from
+ * the inventory merely because they delegate pool selection to this seam. */
+const SUPPLY_RUNTIME_MODULE = 'src/lib/server/swarmSupplyRuntime.ts'
 
-/** Exports of sdkSession.ts + liveDesks.ts that REACH a desk (vs. pure helpers
+/** Exports of sdkSession.ts + the both-pool address seams that REACH a desk (vs. pure helpers
  *  and types). Derived from the files, filtered by this table — the same shape
  *  POOL_API has, for the same reason. */
 const SDK_API_SKIP = new Set([
@@ -499,7 +502,8 @@ const SDK_API_SKIP = new Set([
 const sdkFnsAll = (): string[] => {
   const a = poolExportsOf(fileNamed(SDK_MODULE).code)
   const b = poolExportsOf(fileNamed(LIVEDESKS_MODULE).code)
-  return Array.from(new Set([...a, ...b]))
+  const c = poolExportsOf(fileNamed(SUPPLY_RUNTIME_MODULE).code)
+  return Array.from(new Set([...a, ...b, ...c]))
     .filter((e) => !SDK_API_SKIP.has(e))
     .sort()
 }
@@ -584,7 +588,7 @@ const SDK_LIVENESS_SYMBOLS = [
   'reaped',
 ]
 
-/** The SDK-side functions `f` CALLS. sdkSession.ts and liveDesks.ts DEFINE this
+/** The SDK-side functions `f` CALLS. sdkSession.ts and the address seams DEFINE this
  *  surface, so they are not counted as callers of it. */
 const sdkCallsOf = (f: SweptFile, sdkApi: readonly string[]): string[] =>
   // Only sdkSession.ts is excluded: it IS the pool. liveDesks.ts *defines* the
@@ -738,6 +742,18 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     ],
     sdkHandleFloor: 2,
   },
+  [SUPPLY_RUNTIME_MODULE]: {
+    tier: 'both-pools',
+    why: 'The supply address seam lists PTY presidents with a confirmed live process and SDK presidents while their pump is not reaped. It retains stopping SDK occupancy for the singleton guard, marks those desks unadoptable, and dispatches stop/input/transcript lookup by the selected runtime.',
+    ptyFns: ['isTerminalProcessAlive', 'killTerminal', 'listLiveDesksIn', 'listOwnerDeskTerminals'],
+    sdkCalls: ['listSdkSessions', 'pushSdkInput', 'terminateSdkSession', 'listAllLiveSupplyDesks', 'listLiveSupplyDesks', 'pushSupplyInput'],
+  },
+  'src/lib/server/swarmTranscriptProof.ts': {
+    tier: 'both-pools',
+    why: 'The ChatGPT resume branch verifies that neither pool occupies the target worktree before loading account-bound local conversation history. A false free result would resume an existing conversation beside an unreaped SDK pump; the occupancy question therefore goes through liveDeskOccupies.',
+    ptyFns: [],
+    sdkCalls: ['liveDeskOccupies'],
+  },
   'src/lib/server/swarmSessions.ts': {
     tier: 'both-pools',
     why: 'isAgentSessionLiveAnywhere asks both pools whether a claude conversation is still open; answering "free" for a desk that is still talking would hand its transcript to a new --resume.',
@@ -763,16 +779,7 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       'claudeSessionActivity',
       'getTerminal',
       'getTerminalScreen',
-      // 0804: the published supplyDesk handle re-confirms the pool entry against
-      // the PROCESS TABLE before offering it for adoption — `finishedAt` lands on
-      // an async onExit, so for a moment after a kill the pool still lists the
-      // desk and the pane re-adopts the one the owner just stopped. PTY-correct
-      // by construction: the supply desk is a PTY desk (swarmSupply spawns it
-      // through launchClaude), and listManagerDesks does the same re-confirmation
-      // for the commander's PTY arm.
-      'isTerminalProcessAlive',
       'killTerminal',
-      'listLiveDesksIn',
       'waitForTerminalGone',
       'writeInput',
     ],
@@ -798,6 +805,7 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       // live shape the sweep may reclaim, and telling it apart from a working
       // one needs the pool's own session list (status), not just occupancy.
       'listSdkSessionsIn',
+      'listLiveSupplyDesks',
       'terminateSdkSession',
       'waitForSdkSessionGone',
     ],
@@ -832,27 +840,30 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     sdkHandleFloor: 1,
   },
   'src/lib/server/swarmSupply.ts': {
-    tier: 'pty-only-by-design',
-    why: 'The supply desk is deliberately kept on the PTY runtime (docs/commander/00-INDEX.md: it is the outside phone line that must survive the commander moving to SDK, where the remote control disappears). 0803: it also OWNS stopping its desks (stopSwarmSupplyDesks — kill by desk label), so the route layer never reaches the PTY pool directly.',
-    ptyFns: ['killTerminal', 'listLiveDesksIn', 'isTerminalProcessAlive'],
+    tier: 'runtime-dispatched',
+    why: 'Selects the president provider: Claude preserves its PTY launch and ChatGPT launches an SDK session. Adoption and stopping go through the both-pool supply address seam, so an unreaped stopping desk prevents a duplicate and a provider mismatch requires the owner to stop before switching.',
+    ptyFns: [],
+    sdkCalls: ['listLiveSupplyDesks', 'spawnSdkSession', 'stopSupplyDesk', 'terminateSdkSession'],
   },
 
   'src/lib/server/supplyContextCap.ts': {
     tier: 'pty-only-by-design',
-    why: 'Compacts the SUPPLY desk early (desk context cap, 2026-09-18), and the supply desk is deliberately PTY-only (swarmSupply.ts above): it lists owner PTY desks by the supply label, reads the rendered screen for the three live-desk write refusals (noticeDeliverable), and types the compaction into that same pane. The SDK equivalent (pushSdkInput) was measured to work but has no supply desk to address.',
+    why: 'Compacts the Claude PTY supply path by reading its rendered context percentage and typing its native compaction command after screen/foreign-input checks. Those operations only mean anything for a Claude terminal. ChatGPT supply uses the SDK transport history bound and has no Claude context meter or slash-compaction command, so this watcher intentionally addresses only the PTY arm.',
     ptyFns: ['listOwnerDeskTerminals', 'isTerminalProcessAlive', 'getTerminalScreen', 'writeInput'],
   },
 
   'src/lib/server/supplyNotice.ts': {
-    tier: 'pty-only-by-design',
-    why: "The engine's notice channel INTO the supply desk (owner decision 2026-09-22): the four events the owner must judge or know about are typed into that project's pane instead of only ringing the bell. Same pool reads as supplyContextCap.ts directly above — own PTY desks by the supply label, the rendered screen for the three write refusals (noticeDeliverable), one writeDeliveryInput (not counted as foreign input) judged against terminalForeignInput. The supply desk is PTY-only by design (swarmSupply.ts above), so there is no SDK desk to address and no worker here to dispatch on.",
-    ptyFns: ['listOwnerDeskTerminals', 'isTerminalProcessAlive', 'getTerminalScreen', 'terminalForeignInput', 'writeDeliveryInput'],
+    tier: 'both-pools',
+    why: 'Lists adoptable presidents from both pools. PTY delivery retains screen and foreign-input checks; SDK delivery calls the guarded queue through sendDirect and commits a queued notice only when that input is accepted. Project scoping and durable held notices apply to either runtime.',
+    ptyFns: ['getTerminalScreen', 'terminalForeignInput', 'writeDeliveryInput'],
+    sdkCalls: ['listAllLiveSupplyDesks'],
   },
 
   'src/lib/server/phoneLink.ts': {
-    tier: 'pty-only-by-design',
-    why: "The iPhone link (2026-10-01) only asks whether a project's SUPPLY desk is up (listLiveDesksIn by the supply label) to tell the phone and to start one before typing; the typing itself goes through supplyNotice.ts above. The supply desk is PTY-only by design (swarmSupply.ts above), so there is no SDK desk to ask about and no worker here.",
-    ptyFns: ['listLiveDesksIn'],
+    tier: 'both-pools',
+    why: 'The phone project list asks the supply address seam for an adoptable president in either pool, and phone history/tailing selects that provider conversation through supplyTranscriptFile. Input delivery remains the existing supplyNotice owner-say lane, which also dispatches across both pools.',
+    ptyFns: [],
+    sdkCalls: ['listLiveSupplyDesks', 'supplyTranscriptFile'],
   },
 
   // ── one-off utility PTYs: each spawns its own claude, reads it, kills it ──
@@ -946,8 +957,8 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     ptyFns: [],
   },
   'src/components/canvas/modules/useSupplyDesk.ts': {
-    tier: 'pty-only-by-design',
-    why: "The ONE supply desk's state + launch/stop/restart, used by the Swarm bottom bar (the Board's front-desk seat was deleted 2026-09-24; one surface, one desk, one stored record). The supply desk is deliberately PTY-only — it is the outside phone line that must survive the commander moving to SDK, where remote control disappears — so terminalId IS its whole address here. It reaches no worker at all.",
+    tier: 'runtime-dispatched',
+    why: 'Persists and reconciles the one president address with runtime plus exactly one PTY or SDK handle. Launch validation, stopped-handle suppression and stop/restart route selection branch on that runtime; SDK presidents therefore never collapse onto their empty terminalId.',
     ptyFns: [],
   },
   'src/components/canvas/modules/SdkWorkerPane.tsx': {
@@ -976,8 +987,8 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     ptyFns: [],
   },
   'src/components/canvas/modules/SwarmSupplyPane.tsx': {
-    tier: 'pty-only-by-design',
-    why: 'The supply desk tile, and the supply desk is deliberately PTY-only (see swarmSupply.ts).',
+    tier: 'runtime-dispatched',
+    why: 'The president tile renders the existing terminal for a PTY address and the SDK event feed/composer for an SDK address. Input and stop/restart callbacks keep their own runtime handle; a beacon status only chooses the visible controls.',
     ptyFns: [],
   },
 
@@ -1194,6 +1205,18 @@ const statusLivenessIn = (rel: string, codeWithStrings: string, sdkAware: boolea
 
 /** Per-file declarations for the status-literal comparisons above. */
 const STATUS_SITES: Record<string, Decl & { count: number }> = {
+  'src/components/canvas/modules/SwarmSupplyPane.tsx': {
+    tier: 'display-only', count: 1,
+    why: 'The server-derived beacon exited state only chooses whether the SDK tile draws Restart. It never decides worktree occupancy or reaping, and sending remains subject to the live SDK pool accepting input.',
+  },
+  'src/lib/server/swarmSupply.ts': {
+    tier: 'runtime-dispatched', count: 1,
+    why: 'Reads the immediate spawnSdkSession failed result to report that launch failed and terminate that just-created handle. It does not classify a seated desk as gone; singleton occupancy always comes from unreaped sessions through listLiveSupplyDesks.',
+  },
+  [SUPPLY_RUNTIME_MODULE]: {
+    tier: 'runtime-dispatched', count: 2,
+    why: 'The SDK list is filtered only by reaped. These failed/exited literals mark an already-listed, still-occupied desk as stopping so a pane cannot adopt it while the pump unwinds. They never remove occupancy or authorize a second desk; the focused runtime test pins that distinction.',
+  },
   'src/components/canvas/modules/SwarmModule.tsx': {
     tier: 'display-only',
     count: 1,
@@ -1677,14 +1700,14 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
     why: 'The node-pty pool indexing ITS OWN sessions map. The id is the handle it minted; an SDK session is not in this map and never will be.',
   },
   'src/components/canvas/modules/useSupplyDesk.ts::map-keyed': {
-    tier: 'pty-only-by-design',
+    tier: 'runtime-dispatched',
     count: 1,
-    why: "The desk-reconcile's storedDead probe — does the caller's exitedIds hold the STORED supply desk's id. Same reason as the dock above: the supply desk is PTY-only, so terminalId IS its whole address. (This is the supply half of what SwarmModule.tsx::map-keyed used to declare; it moved here with the hook, and SwarmModule's count dropped by one to match.)",
+    why: 'The storedDead probe keys the caller exit set by sdkSessionId for an SDK record or terminalId for a PTY record. The runtime branch chooses the actual address before lookup, so SDK records never share the empty PTY handle.',
   },
   'src/components/canvas/modules/useSupplyDesk.ts::compared': {
-    tier: 'pty-only-by-design',
-    count: 2,
-    why: "Two PTY-scoped identity tests on the supply desk, which has no SDK form: the persisted record's shape check on rehydrate (`typeof r.terminalId !== 'string'` ⇒ reject), and the just-stopped guard that refuses to re-adopt the one handle the owner just asked to die (without it, 停止 loses to the next poll).",
+    tier: 'runtime-dispatched',
+    count: 3,
+    why: 'Three response/record shape checks require terminalId to be a string, empty for an SDK launch or nonempty for a PTY launch. Their adjacent SDK checks require the separate sdkSessionId, preserving exactly one usable handle; actual reconciliation keys on the runtime-selected handle.',
   },
   'src/components/canvas/modules/SwarmModule.tsx::map-keyed': {
     tier: 'pty-only-by-design',
@@ -1711,7 +1734,7 @@ const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
   'src/components/canvas/modules/useSwarmEngine.ts::compared': {
     tier: 'runtime-dispatched',
     count: 1,
-    why: "The runtime/handle sibling test on the roster row. The FILTER beside it no longer compares at all — `typeof '' === \'string\'` admitted a row addressable in neither pool, so it asks `Boolean(handle)` instead — which is why this count went 2 → 1.",
+    why: "The runtime/handle sibling test on the roster row. The FILTER beside it no longer compares at all — `typeof '' === 'string'` admitted a row addressable in neither pool, so it asks `Boolean(handle)` instead — which is why this count went 2 → 1.",
   },
   'src/lib/server/swarmEscalations.ts::compared': {
     tier: 'runtime-dispatched',

@@ -12,7 +12,7 @@ const H = 800
 
 const setup = async (page: Page, o: { swarm: boolean; projectId?: string; tab?: 'board' | 'canvas' }) => {
   await page.route('**/api/experiments', (r) =>
-    r.fulfill({ json: { eligible: true, flags: { swarm: o.swarm, sandbox: false }, swarmOptIn: { available: true, enabled: o.swarm } } }),
+    r.fulfill({ json: { eligible: true, assistantEligible: true, flags: { swarm: o.swarm, sandbox: false }, swarmOptIn: { available: true, enabled: o.swarm } } }),
   )
   await page.route('**/api/phone-link/assistant/log', (r) =>
     r.fulfill({ json: { entries: [], name: 'ノノ', look: 'verm', logDays: 30, memoryChars: 4000, voice: true, proposals: [] } }),

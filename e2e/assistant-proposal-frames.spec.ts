@@ -22,6 +22,13 @@ const talk = (px: number) =>
 /** `after`: the proposals the log holds once a line was said (a card made by that line). */
 const open = async (page: Page, o: { entries: unknown[]; proposals: unknown[]; after?: unknown[]; call?: boolean; folded?: boolean; height?: number }) => {
   let said = false
+  await page.route('**/api/experiments', (r) => r.fulfill({ json: {
+    eligible: true, assistantEligible: true, flags: { swarm: false, sandbox: false },
+    swarmOptIn: { available: true, enabled: false },
+  } }))
+  await page.route('**/api/chatgpt/status', (r) => r.fulfill({ json: {
+    connection: { state: 'signed-out', models: [] }, lockdown: false, preferences: {},
+  } }))
   await page.addInitScript((folded) => {
     localStorage.setItem('openground:onboarded', '1')
     localStorage.setItem('og.assistant.expanded', folded ? '0' : '1')

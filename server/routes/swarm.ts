@@ -40,11 +40,10 @@
 // NOT the only guard). The unlock never comes from the request itself (see
 // swarmGate.ts for why that is safe: this gate is a feature-visibility flag,
 // not a security boundary — POST /api/terminal is already ungated locally).
-// Then every path-accepting route runs validateProjectPath (the registry
-// allowlist) BEFORE any work, and the spawn routes also run the shared claude
-// preflight so a missing/signed-out CLI fails fast (503) instead of orphaning
-// a PTY (+worktree). Subscription-only: every spawn is an interactive `claude`
-// PTY (launchClaude), never `claude -p`/SDK.
+// Every path-accepting route validates the registered project before work.
+// Launches preflight the selected subscription provider before creating a
+// worktree or seating a desk. Claude retains its CLI checks; ChatGPT verifies
+// the owner's plan connection, model selection and host-tool boundary.
 
 import { Hono } from 'hono'
 import { hasSwarmOwnerAccess } from '@/lib/server/swarmGate'
@@ -54,7 +53,7 @@ import {
   validateProjectPath,
   ProjectDataConflictError,
 } from '@/lib/server/projectData'
-import { claudeRunPreflight } from '@/lib/server/claudePreflight'
+import { swarmRunPreflight } from '@/lib/server/chatgptRuntime'
 import { swarmEnvPreflight } from '@/lib/server/swarmEnvPreflight'
 import {
   spawnSwarmWorker,
@@ -344,10 +343,8 @@ export const swarmRoutes = new Hono()
       return c.json({ error: 'goal too large' }, 400)
     }
 
-    // Preflight BEFORE creating the worktree: a missing/signed-out claude is a
-    // doomed spawn (it would open its own OAuth browser), and we don't want to
-    // orphan a worktree for it. Same machine-readable 503 as the terminal route.
-    const pre = await claudeRunPreflight()
+    // Check the selected provider before creating a worktree or claiming a card.
+    const pre = await swarmRunPreflight()
     if (!pre.ok) return c.json(pre.body, 503)
 
     // Env preflight (git/shell): a worker spawn creates a git worktree
@@ -504,9 +501,8 @@ export const swarmRoutes = new Hono()
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
 
-    // Preflight BEFORE spawning: a missing/signed-out claude would open its own
-    // OAuth browser and orphan a PTY. Same machine-readable 503 as /worker.
-    const pre = await claudeRunPreflight()
+    // Refuse an unavailable selected provider before seating the president.
+    const pre = await swarmRunPreflight()
     if (!pre.ok) return c.json(pre.body, 503)
 
     // Env preflight (git/shell): supply runs a PTY through a shell in the
@@ -637,8 +633,8 @@ export const swarmRoutes = new Hono()
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
 
-    // Refuse an unavailable or signed-out CLI before spawning, as /supply does.
-    const pre = await claudeRunPreflight()
+    // Refuse an unavailable selected provider before seating the commander.
+    const pre = await swarmRunPreflight()
     if (!pre.ok) return c.json(pre.body, 503)
 
     // Env preflight (git/shell): the /og-manage CONVERSATION this launches runs

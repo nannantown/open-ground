@@ -591,6 +591,9 @@ function isAllowedOauthUrl(url) {
   }
   if (parsed.protocol !== 'https:') return false
   const host = parsed.hostname.toLowerCase()
+  if (host === 'auth.openai.com') {
+    return parsed.pathname === '/api/accounts/authorize' && parsed.port === '' && !parsed.username && !parsed.password
+  }
   const allowedSuffixes = [
     '.supabase.co', // the project's auth origin (authorize / callback)
     'accounts.google.com',

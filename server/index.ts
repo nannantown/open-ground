@@ -24,6 +24,7 @@ import { getSettings } from '@/lib/server/store'
 import { registerIncomingNotifications, createSwarmInfoNotification } from '@/lib/server/swarmNotifications'
 import { startStuckProcessWatchLoop } from '@/lib/server/stuckProcessWatch'
 import { installGateGroupReaper } from '@/lib/server/gateProcess'
+import { installChatGptHostReaper } from '@/lib/server/chatgptTools'
 import { checkHomeIntegrity } from '@/lib/server/homeIntegrity'
 import { startAutoDrainLoop, bootAutoDrainEnabled, resumeEngines } from '@/lib/server/swarmOrchestrator'
 import { ensureCoolingTableLoaded } from '@/lib/server/swarmQuota'
@@ -219,6 +220,9 @@ if (process.env.OPENGROUND_STUCK_WATCH !== '0') {
 // entry): importing gateProcess inside a vitest worker must not change that
 // worker's signal handling. Idempotent, no-op on Windows.
 installGateGroupReaper()
+// ChatGPT's credential-sandboxed host tools use separate process groups too.
+// Reap them on normal quit, updater teardown, and caught server termination.
+installChatGptHostReaper()
 
 // HOOK INSTALL — idempotently wire OPEN GROUND's Claude Code hooks into the
 // user's ~/.claude/settings.json at boot. This is the ONLY automatic caller

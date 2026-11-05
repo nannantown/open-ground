@@ -911,6 +911,8 @@ function makePathPolicy(env, payloadCwd) {
   // session could disable the veto itself.
   const substratePrefixes = [
     path.join(home, '.openground', 'guard'),
+    path.join(home, '.openground', 'secrets'), // OAuth credentials are host-owned
+
     path.join(home, '.claude', 'hooks'),
   ]
   const substrateLiterals = [

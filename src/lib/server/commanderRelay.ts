@@ -8,7 +8,7 @@
 // must preflight before a model launch, and both must report HELD honestly rather
 // than claim a delivery that did not happen.
 
-import { claudeRunPreflight } from './claudePreflight'
+import { swarmRunPreflight } from './chatgptRuntime'
 import { swarmEnvPreflight } from './swarmEnvPreflight'
 import { spawnSwarmManager } from './swarmManager'
 import { listManagerDesks, sayToManagerDesk } from './swarmManagerRuntime'
@@ -30,7 +30,7 @@ export type CommanderRelayResult =
     }
 
 export interface CommanderRelayDeps {
-  preflight: typeof claudeRunPreflight
+  preflight: typeof swarmRunPreflight
   envPreflight: typeof swarmEnvPreflight
   spawn: typeof spawnSwarmManager
   desks: typeof listManagerDesks
@@ -38,7 +38,7 @@ export interface CommanderRelayDeps {
 }
 
 const defaultDeps: CommanderRelayDeps = {
-  preflight: claudeRunPreflight,
+  preflight: swarmRunPreflight,
   envPreflight: swarmEnvPreflight,
   spawn: spawnSwarmManager,
   desks: listManagerDesks,

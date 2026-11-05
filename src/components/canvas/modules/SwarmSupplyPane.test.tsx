@@ -9,8 +9,22 @@ vi.mock('@/i18n/I18nContext', () => ({
 }))
 vi.mock('@/components/canvas/ClaudeTerminalPane', () => ({ ClaudeTerminalPane: () => <div>real terminal surface</div> }))
 vi.mock('./SwarmSeatHeader', () => ({ SwarmSeatHeader: () => <div>president</div> }))
+vi.mock('./SwarmSeatTalk', () => ({
+  SwarmSeatFeed: ({ sdkSessionId }: { sdkSessionId: string }) => <div>structured president {sdkSessionId}</div>,
+  SwarmSeatSay: () => <div>president composer</div>,
+  sayToWorker: vi.fn(),
+}))
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); h.lang = 'en' })
 const pane = () => <SwarmSupplyPane projectPath="/p one" terminalId="t1" status="waiting" busy={false} onExit={() => {}} onStop={() => {}} onRestart={() => {}} />
+
+it('attaches an SDK president to its own transcript/composer and preserves the PTY surface for Claude', () => {
+  vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ entries: [] }))))
+  const view = render(<SwarmSupplyPane projectPath="/p one" terminalId="" runtime="sdk" sdkSessionId="sdk-president"
+    status="waiting" busy={false} onExit={() => {}} onStop={() => {}} onRestart={() => {}} />)
+  expect(view.getByText('structured president sdk-president')).toBeInTheDocument()
+  expect(view.getByText('president composer')).toBeInTheDocument()
+  expect(view.queryByText('real terminal surface')).toBeNull()
+})
 
 it('shows durable project call notes next to the real terminal using its registered path', async () => {
   const urls: string[] = []

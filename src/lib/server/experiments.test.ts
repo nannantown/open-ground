@@ -27,9 +27,19 @@ const res = (
   eligible: boolean,
   flags: ExperimentFlags,
   swarmOptIn: OptIn = OFF,
-): ExperimentsResponse => ({ eligible, flags, swarmOptIn })
+  assistantEligible = eligible,
+): ExperimentsResponse => ({ eligible, assistantEligible, flags, swarmOptIn })
 
 describe('computeExperiments', () => {
+  it.each([
+    { role: 'owner', local: false, optIn: false, allowed: true },
+    { role: 'none', local: true, optIn: false, allowed: true },
+    { role: 'tester', local: false, optIn: true, allowed: false },
+    { role: 'none', local: false, optIn: false, allowed: false },
+  ] as const)('reports the existing assistant capability for $role/local=$local/public=$optIn', ({ role, local, optIn, allowed }) => {
+    expect(computeExperiments(role, {}, { swarmLocalOwner: local, swarmOptInEnabled: optIn })).toMatchObject({ assistantEligible: allowed })
+  })
+
   it('owner + all toggles on → eligible, all flags open', () => {
     expect(
       computeExperiments('owner', {
@@ -78,14 +88,14 @@ describe('computeExperiments', () => {
 describe('computeExperiments — swarm local owner unlock', () => {
   it('signed out + unlock → swarm opens; eligible and every other flag stay closed', () => {
     expect(computeExperiments('none', {}, { swarmLocalOwner: true })).toEqual(
-      res(false, open({ swarm: true })),
+      res(false, open({ swarm: true }), OFF, true),
     )
   })
 
   it('the unlock does NOT leak to sandbox — even with a forged sandbox toggle', () => {
     expect(
       computeExperiments('none', { experiments: { sandbox: true } }, { swarmLocalOwner: true }),
-    ).toEqual(res(false, open({ swarm: true })))
+    ).toEqual(res(false, open({ swarm: true }), OFF, true))
   })
 
   it('unlock false/absent changes nothing (the locked default)', () => {

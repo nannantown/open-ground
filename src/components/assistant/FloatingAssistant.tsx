@@ -77,7 +77,7 @@ export const panelPlacement = (p: Pos, w: number, h: number) => {
   }
 }
 
-export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
+export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disabled: boolean; chatgptEligible?: boolean }) => {
   const { t, lang } = useT()
   const [open, setOpen] = useState(false)
   const showPanel = open && !disabled
@@ -115,7 +115,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
   const [view, setView] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }))
   const [editing, setEditing] = useState(false)
   const [picking, setPicking] = useState(false)
-  const { pick, load: loadPick, save: savePick } = useAssistantPick()
+  const { pick, load: loadPick, save: savePick, busy: pickBusy, failed: pickFailed } = useAssistantPick(chatgptEligible)
   // Read each time the window opens: the usable models may have changed in Settings.
   useEffect(() => {
     if (showPanel) void loadPick()
@@ -740,7 +740,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
               <span className="text-ui text-ink-muted">VOICEVOX Nemo / VOICEVOX:冥鳴ひまり</span>
             </div>
           )}
-          {picking && <AssistantPickRows pick={pick} save={savePick} focusRing={focusRing} />}
+          {picking && <AssistantPickRows pick={pick} save={savePick} focusRing={focusRing} busy={pickBusy} failed={pickFailed} />}
           {photo && (
             <div className="relative self-start" data-testid="assistant-photo-preview">
               <img src={photo} alt={t('misc.assistant.photo')} className="size-16 rounded-[10px] border border-line object-cover" />
@@ -821,7 +821,7 @@ export const FloatingAssistant = ({ disabled }: { disabled: boolean }) => {
                 onClick={() => setPicking((v) => !v)}
                 aria-pressed={picking}
                 aria-label={t('misc.assistant.pick')}
-                title={`${t('misc.assistant.model')}: ${modelLabel(pick.model) ?? t('misc.assistant.auto')} · ${t('misc.assistant.effort')}: ${pick.effort ?? t('misc.assistant.auto')}`}
+                title={`${t('misc.assistant.model')}: ${pick.provider === 'chatgpt' ? `ChatGPT · ${pick.chatgptModel ?? t('misc.assistant.auto')}` : modelLabel(pick.model) ?? t('misc.assistant.auto')} · ${t('misc.assistant.effort')}: ${(pick.provider === 'chatgpt' ? pick.chatgptEffort : pick.effort) ?? t('misc.assistant.auto')}`}
                 className={`${iconButton} text-ink-subtle hover:bg-plane hover:text-ink active:bg-line aria-pressed:bg-accent-soft aria-pressed:text-accent ${focusRing}`}
               >
                 <SlidersHorizontal size={16} strokeWidth={2.25} />

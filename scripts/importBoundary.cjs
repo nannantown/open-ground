@@ -17,6 +17,8 @@ const SEAMS = [
   'src/lib/server/terminal.ts', //        the node-pty pool itself
   'src/lib/server/sdkSession.ts', //      the Agent SDK pool itself
   'src/lib/server/workerRuntime.ts', //   pty⇔sdk dispatcher — workerKey / runtimeOf
+  'src/lib/server/swarmSupplyRuntime.ts', // single supply handle/delivery seam across PTY and SDK
+  'src/lib/server/swarmSupply.ts', // owns supply launch on either provider; singleton checks use the seam
   'src/lib/server/liveDesks.ts', //       "who is alive / where", both pools, once
   'server/routes/terminal.ts', //         the PTY pool's own REST surface
   'server/routes/sdkSession.ts', //       the SDK pool's own REST surface
@@ -43,9 +45,6 @@ const PTY_BY_DESIGN = [
   'src/lib/server/researchKnowledge.ts', //   one-off PTY per digest/ask, marker-scraped
   //                                          (subscribes to and kills ONLY the
   //                                          terminal it just launched)
-  'src/lib/server/swarmSupply.ts', //        the supply desk is PTY-ONLY BY DESIGN
-  //                                          (Remote Control lives on the PTY runtime;
-  //                                          stopSwarmSupplyDesks kills by desk label)
   'src/lib/server/supplyNotice.ts', //       types the engine's notices into the SUPPLY
   //                                          desk (PTY-only, below): lists owner PTY
   //                                          desks by the supply label, reads a screen,

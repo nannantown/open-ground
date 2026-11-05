@@ -18,6 +18,7 @@
 import { getCustomTabRole } from './roles'
 import { isSwarmLocalOwnerUnlocked, isSwarmOptInAvailable, isSwarmOptInEnabled } from './swarmGate'
 import { getSettings } from './store'
+import { canUseAssistant } from './assistantAccess'
 import type {
   CustomTabRole,
   ExperimentId,
@@ -46,6 +47,7 @@ export const computeExperiments = (
   const eligible = role === 'owner'
   return {
     eligible,
+    assistantEligible: canUseAssistant(role, opts?.swarmLocalOwner === true),
     flags: {
       swarm:
         (eligible && settings.experiments?.swarm === true) ||

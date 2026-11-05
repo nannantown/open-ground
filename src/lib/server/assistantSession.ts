@@ -44,6 +44,8 @@ import { getAllowedModelTiers, getSettings } from './store'
 import { resolveAvailableTier } from './swarmLaunch'
 import { MODEL_TIER_LADDER, isModelTier, markRateLimited, type ModelTier } from './swarmQuota'
 import { matchesQuotaRefusal } from './sdkEvents'
+import { selectedRuntime } from './chatgptRuntime'
+import { chatGptAssistantModel, closeChatGptAssistant } from './chatgptAssistant'
 
 /** Every line starts here: fast enough to sound like talk; its tools do the looking up. */
 export const ASSISTANT_MODEL = 'sonnet'
@@ -98,7 +100,7 @@ export interface AssistantModel {
   warm(o: Pick<AssistantAsk, 'key' | 'system'>): Promise<void>
 }
 
-const SHAPES = {
+export const ASSISTANT_TOOL_SHAPES = {
   read_file: { path: z.string(), offset: z.number().optional(), limit: z.number().optional() },
   list_dir: { path: z.string() },
   search: { path: z.string(), pattern: z.string(), glob: z.string().optional() },
@@ -112,7 +114,7 @@ const SHAPES = {
   think_deeper: {},
 } satisfies Record<ToolName, z.ZodRawShape>
 
-const DESCRIPTIONS: Record<ToolName, string> = {
+export const ASSISTANT_TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   read_file: 'Read a file (absolute path) in a registered project or OPEN GROUND data. Text comes with line numbers, at most 400 lines from `offset`; images come as the image. A directory is listed.',
   list_dir: 'List a directory (absolute path) in a registered project or OPEN GROUND data.',
   search: 'Find lines holding `pattern` (words taken literally, case-insensitive; "a|b" = either) in the files under a directory or in one file (absolute path). `glob` limits file names, e.g. "*.ts". node_modules, .git and build output are skipped. Code is mostly in English: when a word in the owner\'s language finds nothing, search its English words too (for 送料, try "shipping|fee").',
@@ -131,6 +133,8 @@ const DESCRIPTIONS: Record<ToolName, string> = {
 }
 
 /** The full MCP names of the tools above — the only ones the gate lets through. */
+const SHAPES = ASSISTANT_TOOL_SHAPES
+const DESCRIPTIONS = ASSISTANT_TOOL_DESCRIPTIONS
 export const ASSISTANT_TOOL_NAMES = (Object.keys(SHAPES) as ToolName[]).map((n) => `mcp__og__${n}`)
 
 const decide = (permissionDecision: 'allow' | 'deny', reason?: string) => ({
@@ -418,7 +422,7 @@ const turnOn = async (live: Live, o: AssistantAsk, heard: () => void): Promise<s
 class DeepRefused extends Error {}
 
 /** The real model: one live SDK session. Callers serialize (phoneAssistant's queue). */
-export const liveAssistantModel: AssistantModel = {
+const claudeAssistantModel: AssistantModel = {
   warm: async (o) => void (await current(o)),
   ask: async (o) => {
     const reused = usable(g.__openground_assistant_live, o.key)
@@ -439,9 +443,33 @@ export const liveAssistantModel: AssistantModel = {
 }
 
 let closedOnPurpose = 0
+
+/** The owner's choice is checked at every turn, including after logout or a
+ * work-mode change. Each provider keeps its own context and spending boundary. */
+export const liveAssistantModel: AssistantModel = {
+  warm: async (o) => {
+    if (await selectedRuntime('assistant') === 'chatgpt') {
+      const live = g.__openground_assistant_live
+      if (live) close(live)
+      return chatGptAssistantModel.warm(o)
+    }
+    closeChatGptAssistant()
+    return claudeAssistantModel.warm(o)
+  },
+  ask: async (o) => {
+    if (await selectedRuntime('assistant') === 'chatgpt') {
+      const live = g.__openground_assistant_live
+      if (live) close(live)
+      return chatGptAssistantModel.ask(o)
+    }
+    closeChatGptAssistant()
+    return claudeAssistantModel.ask(o)
+  },
+}
 /** Deletes / tests / shutdown: end the live session. */
 export const closeAssistantSession = (): void => {
   closedOnPurpose++
+  closeChatGptAssistant()
   const live = g.__openground_assistant_live
   if (live) close(live)
 }

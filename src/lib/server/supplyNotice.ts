@@ -75,10 +75,8 @@ import { noticeDeliverable, noticeHoldReason, type NoticeHoldReason } from './de
 import { logToEngine } from './engineLogSink'
 import { isGenerating, readInputBoxText } from '@/lib/claudeScreen'
 import { detectMenu } from '@/lib/claudeMenu'
-import { SUPPLY_DESK_LABEL } from './swarmSupply'
+import { listAllLiveSupplyDesks, pushSupplyInput } from './swarmSupplyRuntime'
 import {
-  listOwnerDeskTerminals,
-  isTerminalProcessAlive,
   getTerminalScreen,
   terminalForeignInput,
   writeDeliveryInput,
@@ -295,7 +293,9 @@ const noticeProject = (n: AppNotification): string | null =>
 
 export interface SupplyNoticeDeps {
   /** Live supply desks, as {terminalId, cwd}. */
-  desks: () => { id: string; cwd: string }[]
+  desks: () => { id: string; cwd: string; runtime?: 'pty' | 'sdk' }[]
+  /** SDK input has an explicit acknowledgement; no terminal screen or paste. */
+  sendDirect?: (id: string, text: string) => boolean
   screen: (terminalId: string) => string | null
   /** Type the line into the desk; true iff the keystrokes were written. The
    *  default does NOT count as foreign input (terminal.writeDeliveryInput). */
@@ -327,20 +327,9 @@ export interface SupplyNoticeDeps {
 }
 
 const defaultDeps: SupplyNoticeDeps = {
-  desks: () =>
-    listOwnerDeskTerminals()
-      .filter((d) => d.deskLabel === SUPPLY_DESK_LABEL && isTerminalProcessAlive(d.id))
-      // NEWEST FIRST, and that ordering is load-bearing. `listOwnerDeskTerminals`
-      // returns pool INSERTION order (oldest first), and a project can legitimately
-      // hold two live supply desks — `adoptLiveSupplyDesk` hands the client
-      // `alive[0]` of a newest-first list and deliberately does NOT kill the
-      // extras («余分な卓は Terminal タブから閉じてください»). Sorted the other way,
-      // the notice is typed into the ORPHAN the owner is not looking at, the slot
-      // is cleared, and the news is gone — the exact silence this channel exists
-      // to end. Same order as listLiveDesksIn, so every reader agrees which desk
-      // "the" supply desk is.
-      .sort((a, b) => b.startedAtMs - a.startedAtMs)
-      .map((d) => ({ id: d.id, cwd: d.cwd })),
+  desks: () => listAllLiveSupplyDesks().filter((desk) => !desk.stopping)
+    .map((desk) => ({ id: desk.handleId, cwd: desk.cwd, runtime: desk.runtime })),
+  sendDirect: pushSupplyInput,
   screen: getTerminalScreen,
   write: writeDeliveryInput,
   foreignInput: terminalForeignInput,
@@ -1041,7 +1030,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
   // owner — who talks only to the president — never reads: a commander reply
   // that met a desk misread as half-typed (supplyNoticeGhost.test.ts) was lost
   // that way. Like an important notice, a late one is told with its age.
-  let desks: { id: string; cwd: string }[] = []
+  let desks: ReturnType<SupplyNoticeDeps['desks']> = []
   try {
     desks = deps.desks()
   } catch {
@@ -1061,7 +1050,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       if (served.has(key)) continue
       served.add(key)
       if (inFlight.has(desk.id)) continue // an earlier pass is still typing here
-      const screen = deps.screen(desk.id)
+      const screen = desk.runtime === 'sdk' ? null : deps.screen(desk.id)
       const left = unsent.get(desk.id)
       if (left) {
         // Our own line from an earlier pass. Only its Enter is ever re-sent —
@@ -1168,7 +1157,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         held.delete(desk.id)
         continue
       }
-      const hold = noticeHoldReason(screen)
+      const hold = desk.runtime === 'sdk' ? null : noticeHoldReason(screen)
       if (hold) {
         noteHold(deps, key, desk.id, hold, now) // busy / half-typed / menu — next pass
         continue
@@ -1213,6 +1202,14 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
           digest.items.splice(0, nItems)
           if (digest.items.length === 0) progress.delete(key)
         }
+      }
+      if (desk.runtime === 'sdk') {
+        if (deps.sendDirect?.(desk.id, line)) {
+          held.delete(desk.id)
+          commit(true)
+          delivered.push(key)
+        }
+        continue
       }
       // Paste, THEN Enter as a separate write, then confirm the box emptied
       // (the shared helper). One `${line}\r` write is read by Claude Code as a
@@ -1609,7 +1606,7 @@ export const questionClosedText = (c: ClosedQuestion): string => {
 export const noticeQuestionClosed = (c: ClosedQuestion, partial: Partial<SupplyNoticeDeps> = {}): void => {
   forgetSupplyQuestion(c.id)
   const deps = { ...defaultDeps, ...partial }
-  let desks: { id: string; cwd: string }[]
+  let desks: ReturnType<SupplyNoticeDeps['desks']>
   try {
     desks = deps.desks()
   } catch {
@@ -1643,7 +1640,7 @@ export const catchUpSupplyDesks = async (partial: Partial<SupplyNoticeDeps> = {}
   // Held notices first — a slow or failing store read must not delay what is
   // already queued.
   await flushSupplyNotices(partial)
-  let desks: { id: string; cwd: string }[] = []
+  let desks: ReturnType<SupplyNoticeDeps['desks']> = []
   try {
     desks = deps.desks()
   } catch {

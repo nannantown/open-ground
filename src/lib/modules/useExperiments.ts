@@ -22,6 +22,8 @@ const NO_OPT_IN = { available: false, enabled: false }
 export interface ExperimentsState {
   /** The user may toggle experiments at all (owner). Gates the settings toggle. */
   eligible: boolean
+  /** Legacy phone/screen assistant access; distinct from ChatGPT owner access. */
+  assistantEligible: boolean
   /** Resolved per-experiment open state, including Swarm's public/local unlock. */
   flags: ExperimentFlags
   /** The public swarm opt-in: `available` (this machine — macOS) gates the
@@ -36,6 +38,7 @@ export function useExperiments(sessionId?: string): ExperimentsState {
   const [resolvedSession, setResolvedSession] = useState<string | undefined>(sessionId)
   const requestSeq = useRef(0)
   const [eligible, setEligible] = useState(false)
+  const [assistantEligible, setAssistantEligible] = useState(false)
   const [flags, setFlags] = useState<ExperimentFlags>(NO_FLAGS)
   const [swarmOptIn, setSwarmOptIn] = useState(NO_OPT_IN)
   const [loaded, setLoaded] = useState(false)
@@ -67,6 +70,7 @@ export function useExperiments(sessionId?: string): ExperimentsState {
       if (!aliveRef.current || seq !== requestSeq.current) return
       setResolvedSession(sessionId)
       setEligible(!!body.eligible)
+      setAssistantEligible(body.assistantEligible === true)
       // Take only known flag keys, coerced to booleans — never trust the wire to
       // be exactly NO_FLAGS' shape.
       const next: ExperimentFlags = {
@@ -111,6 +115,7 @@ export function useExperiments(sessionId?: string): ExperimentsState {
   const currentSession = resolvedSession === sessionId
   return {
     eligible: currentSession && eligible,
+    assistantEligible: currentSession && assistantEligible,
     flags: currentSession ? flags : NO_FLAGS,
     swarmOptIn: currentSession ? swarmOptIn : NO_OPT_IN,
     loaded: currentSession && loaded,

@@ -43,6 +43,7 @@ import { projectDataFile } from './projectDataPath'
 import { isTranscriptLoadable } from './swarmTranscriptProof'
 import { isSdkSessionLive, listSdkSessions } from './sdkSession'
 import { isClaudeSessionLive } from './terminal'
+import { chatGptConversationExists } from './chatgptResponses'
 
 /** The per-project central file holding the desks' session ids. */
 export const SWARM_SESSIONS_FILE = 'swarm-sessions.json'
@@ -64,7 +65,9 @@ export interface SwarmRoleSession {
   updatedAt: string
 }
 
-export type SwarmSessionsFile = Partial<Record<SwarmSessionRole, SwarmRoleSession>>
+export type SwarmSessionsFile = Partial<Record<SwarmSessionRole, SwarmRoleSession>> & {
+  chatgpt?: Partial<Record<SwarmSessionRole, SwarmRoleSession>>
+}
 
 /** Why a persisted id was NOT resumed. Diagnostics only (logged + asserted in
  *  tests) — every value means the same thing to the caller: mint a fresh session.
@@ -113,6 +116,15 @@ export const parseSwarmSessions = (parsed: unknown): SwarmSessionsFile => {
   for (const role of SWARM_SESSION_ROLES) {
     const rec = asRoleSession(src[role])
     if (rec) out[role] = rec
+  }
+  const chatgpt = src.chatgpt
+  if (chatgpt && typeof chatgpt === 'object' && !Array.isArray(chatgpt)) {
+    for (const role of SWARM_SESSION_ROLES) {
+      const rec = asRoleSession((chatgpt as Record<string, unknown>)[role])
+      if (rec?.sessionId.startsWith('chatgpt-')) {
+        ;(out.chatgpt ??= {})[role] = rec
+      }
+    }
   }
   return out
 }
@@ -170,10 +182,10 @@ export const recordSwarmSession = async (
   await recordDeskSession(role, sessionId, projectPath, { now })
   return serialise(file, async () => {
     const current = await readSwarmSessions(projectPath)
-    const next: SwarmSessionsFile = {
-      ...current,
-      [role]: { sessionId, cwd: projectPath, updatedAt: now.toISOString() },
-    }
+    const rec = { sessionId, cwd: projectPath, updatedAt: now.toISOString() }
+    const next: SwarmSessionsFile = sessionId.startsWith('chatgpt-')
+      ? { ...current, chatgpt: { ...current.chatgpt, [role]: rec } }
+      : { ...current, [role]: rec }
     await mkdir(dirname(file), { recursive: true })
     await atomicWriteJson(file, next)
   })
@@ -219,9 +231,13 @@ export const forgetSwarmSessionIf = async (
     const file = await projectDataFile(projectPath, SWARM_SESSIONS_FILE)
     return await serialise(file, async () => {
       const current = await readSwarmSessions(projectPath)
-      if (current[role]?.sessionId !== sessionId) return false // superseded — leave it alone
+      const chatgpt = sessionId.startsWith('chatgpt-')
+      if ((chatgpt ? current.chatgpt?.[role] : current[role])?.sessionId !== sessionId) return false
       const next = { ...current }
-      delete next[role]
+      if (chatgpt) {
+        next.chatgpt = { ...current.chatgpt }
+        delete next.chatgpt[role]
+      } else delete next[role]
       await atomicWriteJson(file, next)
       return true
     })
@@ -382,6 +398,7 @@ export const resolveSwarmSession = async (
   projectPath: string,
   role: SwarmSessionRole,
   deps: {
+    provider?: 'claude' | 'chatgpt'
     isLive?: (agentSessionId: string) => boolean
     /** Wait for a stopping-but-not-yet-finished holder of this conversation to
      *  finish (see the call site). Injected for tests; default
@@ -391,13 +408,14 @@ export const resolveSwarmSession = async (
 ): Promise<ResolvedSwarmSession> => {
   const isLive = deps.isLive ?? isAgentSessionLiveAnywhere
   const fresh = (reason: FreshSessionReason): ResolvedSwarmSession => ({
-    agentSessionId: randomUUID(),
+    agentSessionId: deps.provider === 'chatgpt' ? `chatgpt-${randomUUID()}` : randomUUID(),
     resume: false,
     reason,
   })
   let rec: SwarmRoleSession | undefined
   try {
-    rec = (await readSwarmSessions(projectPath))[role]
+    const stored = await readSwarmSessions(projectPath)
+    rec = deps.provider === 'chatgpt' ? stored.chatgpt?.[role] : stored[role]
   } catch (e) {
     // Unregistered path / unreadable home. A real bug — but the desk still opens.
     // eslint-disable-next-line no-console
@@ -430,6 +448,9 @@ export const resolveSwarmSession = async (
   // days-long integration conversation, which is the failure this whole
   // predicate was rewritten to stop. Bounded risk beats permanent loss.
   await (deps.awaitRelease ?? defaultAwaitRelease)(rec.sessionId)
-  if (!(await isSessionResumable(projectPath, rec.sessionId))) return fresh('missing')
+  const resumable = deps.provider === 'chatgpt'
+    ? await chatGptConversationExists(rec.sessionId)
+    : await isSessionResumable(projectPath, rec.sessionId)
+  if (!resumable) return fresh('missing')
   return { agentSessionId: rec.sessionId, resume: true }
 }

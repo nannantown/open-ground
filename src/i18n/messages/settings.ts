@@ -4,6 +4,15 @@
 export const settings = {
   en: {
     'settings.eyebrow': 'Preferences',
+    'settings.chatgpt.connect': 'Connect ChatGPT',
+    'settings.chatgpt.connecting': 'Connecting…',
+    'settings.chatgpt.disconnect': 'Disconnect',
+    'settings.chatgpt.cancel': 'Cancel',
+    'settings.chatgpt.openBrowser': 'Open sign-in',
+    'settings.chatgpt.failed': 'Could not complete this. Try again.',
+    'settings.chatgpt.workMode': 'ChatGPT is unavailable in work mode.',
+    'settings.chatgpt.assistant': 'Assistant',
+    'settings.chatgpt.automation': 'Automatic work',
     // Feedback entry
     // Language
     'settings.language.heading': 'Language',
@@ -205,6 +214,15 @@ export const settings = {
   } as Record<string, string>,
   ja: {
     'settings.eyebrow': '環境設定',
+    'settings.chatgpt.connect': 'ChatGPT を接続',
+    'settings.chatgpt.connecting': '接続中…',
+    'settings.chatgpt.disconnect': '接続を解除',
+    'settings.chatgpt.cancel': 'やめる',
+    'settings.chatgpt.openBrowser': 'サインインを開く',
+    'settings.chatgpt.failed': '完了できませんでした。もう一度お試しください。',
+    'settings.chatgpt.workMode': '業務モード中は ChatGPT を使えません。',
+    'settings.chatgpt.assistant': 'アシスタント',
+    'settings.chatgpt.automation': '自動作業',
     'settings.language.heading': '言語',
     'settings.language.hint': 'システム言語から自動判定します。ここで手動変更できます。',
     'settings.displayName.heading': '表示名',

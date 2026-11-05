@@ -32,6 +32,9 @@
 
 import { open, readdir, stat } from 'fs/promises'
 import { existsSync } from 'fs'
+import { chatGptConversationExists, chatGptConversationFile } from './chatgptResponses'
+import { readCwdTable, pidsWithCwdUnder } from './worktreeProcesses'
+import { liveDeskOccupies } from './liveDesks'
 import { dirname } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
@@ -113,6 +116,16 @@ export const proveTranscriptLoadable = async (
     isSessionHeld?: (sessionId: string) => Promise<boolean | null>
   } = {},
 ): Promise<TranscriptProof> => {
+  if (sessionId.startsWith('chatgpt-')) {
+    try {
+      if (await liveDeskOccupies(cwd)) return { loadable: false, reason: 'live' }
+      if (opts.orphanWindowMs !== undefined && pidsWithCwdUnder(await readCwdTable(), cwd).length) return { loadable: false, reason: 'live' }
+      if (!(await chatGptConversationExists(sessionId))) return { loadable: false, reason: 'missing' }
+      return { loadable: true, reason: 'ok', mtimeMs: (await stat(chatGptConversationFile(sessionId))).mtimeMs }
+    } catch {
+      return { loadable: false, reason: 'missing' }
+    }
+  }
   const path = sessionJsonlPath(cwd, sessionId)
   let fh: Awaited<ReturnType<typeof open>> | undefined
   try {

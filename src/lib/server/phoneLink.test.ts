@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, appendFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const h = vi.hoisted(() => ({ owner: true, desk: false, file: '', files: {} as Record<string, string>, projects: [] as { id: string; path: string }[], language: undefined as string | undefined, settingsThrow: false }))
+const h = vi.hoisted(() => ({ owner: true, desk: false, sdkDesk: false, stopping: false, file: '', files: {} as Record<string, string>, projects: [] as { id: string; path: string }[], language: undefined as string | undefined, settingsThrow: false }))
 vi.mock('./swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => h.owner }))
 vi.mock('./roles', () => ({ getCustomTabRole: async () => null }))
 vi.mock('./store', async (orig) => ({
@@ -23,6 +23,10 @@ vi.mock('./transcript', () => ({ sessionJsonlPath: (cwd: string) => h.files[cwd]
 vi.mock('./terminal', async (orig) => ({
   ...(await orig<typeof import('./terminal')>()),
   listLiveDesksIn: () => (h.desk ? [{ id: 'd1' }] : []),
+}))
+vi.mock('./swarmSupplyRuntime', async (orig) => ({
+  ...(await orig<typeof import('./swarmSupplyRuntime')>()),
+  listLiveSupplyDesks: (cwd: string) => h.desk ? [{ runtime: h.sdkDesk ? 'sdk' : 'pty', handleId: 'd1', cwd, agentSessionId: null, lastOutputAt: null, startedAt: 1, stopping: h.stopping }] : [],
 }))
 
 import { AssistantFailure, askAssistant, __resetAssistantMemory } from './phoneAssistant'
@@ -82,6 +86,8 @@ beforeEach(() => {
   resetSupplyNoticeState()
   h.owner = true
   h.desk = false
+  h.sdkDesk = false
+  h.stopping = false
   h.projects = [{ id: 'p1', path: PROJECT }]
   h.files = {}
   h.language = undefined
@@ -233,6 +239,18 @@ describe('handlePhoneFrame — the phone speaks', () => {
     await handlePhoneFrame(st, { type: 'say', id: 'k', text: '起きて' }, { supply: desk.deps, wakeDesk: async (p) => (woke.push(p), null) })
     expect(woke).toEqual([PROJECT])
     expect(desk.writes).toEqual(['起きて'])
+  })
+
+  it('reports an SDK president as present and a stopping SDK pump as unavailable to the phone', async () => {
+    const { sent, sock } = fakeSocket()
+    const st = __testLinkState(CFG, sock)
+    h.desk = true
+    h.sdkDesk = true
+    await handlePhoneFrame(st, { type: 'projects' })
+    expect(sent.at(-1)).toMatchObject({ projects: expect.arrayContaining([expect.objectContaining({ id: 'p1', desk: true })]) })
+    h.stopping = true
+    await handlePhoneFrame(st, { type: 'projects' })
+    expect(sent.at(-1)).toMatchObject({ projects: expect.arrayContaining([expect.objectContaining({ id: 'p1', desk: false })]) })
   })
 
   it('without owner access nothing is typed and the phone is told no', async () => {

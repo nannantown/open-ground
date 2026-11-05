@@ -34,6 +34,7 @@ import { useT } from '@/i18n/I18nContext'
 import type { Lang } from '@/i18n/messages'
 import { SwarmAllowedModelsSetting } from '@/components/canvas/SwarmAllowedModelsSetting'
 import { PhoneLinkSetting } from '@/components/canvas/PhoneLinkSetting'
+import { ChatGptSetting } from '@/components/canvas/ChatGptSetting'
 
 interface Props {
   open: boolean
@@ -694,6 +695,8 @@ export const SettingsPanel = ({
                   </div>
                   <p className="mt-2 text-meta text-ink-subtle leading-relaxed">{t('settings.connection.hint')}</p>
                 </Section>
+
+                <ChatGptSetting enabled={open && showAdvanced} lockdown={lockdown} />
 
                 {/* Work mode (lockdown) — every user (not owner-gated): the
                     one-toggle kill switch for non-Anthropic egress on a

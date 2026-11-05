@@ -69,6 +69,7 @@ const urlOf = (input: unknown): string =>
       : ((input as Request)?.url ?? '')
 
 interface MockOpts {
+  settings?: Record<string, unknown>
   projects?: ProjectMeta[]
   projectData?: ProjectData
   feedbackEnabled?: boolean
@@ -78,7 +79,7 @@ interface MockOpts {
   settingsPostError?: string
   /** GET /api/experiments — the owner-only gate, resolved SERVER-side. Omitted ⇒
    *  the shipped/non-owner answer (nothing eligible, every flag closed). */
-  experiments?: { eligible: boolean; flags: Record<string, boolean> }
+  experiments?: { eligible: boolean; assistantEligible?: boolean; flags: Record<string, boolean> }
   /** GET /api/ground/lamps — what each card's lamp is decided from. Omitted ⇒
    *  no rows, i.e. every card dark, which is the resting state. */
   lamps?: GroundLampRow[]
@@ -88,6 +89,7 @@ const methodOf = (input: unknown, init?: RequestInit): string =>
   init?.method ?? (input instanceof Request ? input.method : 'GET')
 
 function installFetch(opts: MockOpts = {}) {
+  const settings = { ...SETTINGS, ...opts.settings }
   const projects = opts.projects ?? []
   const jobs = Array.from({ length: opts.aiActiveJobs ?? 0 }, (_, i) => ({ id: `job-${i}` }))
   const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
@@ -96,16 +98,17 @@ function installFetch(opts: MockOpts = {}) {
       const status = opts.settingsPostStatus ?? 200
       return reply(status, status >= 300 ? { error: opts.settingsPostError ?? 'save failed' } : { ok: true })
     }
-    if (url.includes('/api/settings')) return reply(200, { ...SETTINGS, suggestedDisplayName: null })
+    if (url.includes('/api/settings')) return reply(200, { ...settings, suggestedDisplayName: null })
     if (url.includes('/api/projects'))
-      return reply(200, { settings: SETTINGS, projects, canvas: EMPTY_CANVAS })
+      return reply(200, { settings, projects, canvas: EMPTY_CANVAS })
     if (url.includes('/api/project?') && opts.projectData) return reply(200, opts.projectData)
     if (url.includes('/api/feedback/config')) return reply(200, { enabled: !!opts.feedbackEnabled })
     if (url.includes('/api/experiments'))
       return reply(
         200,
-        opts.experiments ?? {
+        opts.experiments ? { ...opts.experiments, assistantEligible: opts.experiments.assistantEligible ?? opts.experiments.eligible } : {
           eligible: false,
+          assistantEligible: false,
           flags: { swarm: false, sandbox: false, persona: false },
         },
       )
@@ -146,6 +149,49 @@ afterEach(() => {
 })
 
 describe('App — whole-render integration', () => {
+  it('assistant owner gate waits for the real role before reading the closed talk or provider status', async () => {
+    const fetchMock = installFetch()
+    const original = fetchMock.getMockImplementation()!
+    let resolveRole!: (response: Response) => void
+    const role = new Promise<Response>((resolve) => { resolveRole = resolve })
+    fetchMock.mockImplementation((input, init) => urlOf(input).includes('/api/experiments') ? role : original(input, init))
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp() })
+    const calls = (path: string) => fetchMock.mock.calls.filter(([input]) => urlOf(input).includes(path))
+    expect(calls('/api/phone-link/assistant/log')).toHaveLength(0)
+    expect(calls('/api/chatgpt/status')).toHaveLength(0)
+    expect(screen.queryByRole('button', { name: 'Assistant' })).toBeNull()
+    await act(async () => { resolveRole(await reply(200, { eligible: true, assistantEligible: true, flags: { swarm: false, sandbox: false } })) })
+    const assistant = await screen.findByRole('button', { name: 'Assistant' })
+    expect(calls('/api/phone-link/assistant/log')).toHaveLength(1)
+    expect(calls('/api/chatgpt/status')).toHaveLength(0)
+    fireEvent.click(assistant)
+    await waitFor(() => expect(calls('/api/chatgpt/status')).toHaveLength(1))
+  })
+
+  it('assistant owner gate never probes private routes for a non-owner with public Swarm enabled', async () => {
+    const fetchMock = installFetch({ settings: { swarmOptIn: true }, experiments: { eligible: false, assistantEligible: false, flags: { swarm: true, sandbox: false } } })
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp() })
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    await screen.findByRole('dialog', { name: 'Settings' })
+    expect(fetchMock.mock.calls.filter(([input]) => /\/api\/(phone-link\/assistant\/log|chatgpt\/status)/.test(urlOf(input)))).toEqual([])
+    expect(screen.queryByRole('button', { name: 'Assistant' })).toBeNull()
+  })
+
+  it('keeps the locally authorized Claude assistant without reading the owner ChatGPT account', async () => {
+    const fetchMock = installFetch({ settings: { swarmLocalOwner: true, assistantProvider: 'claude', assistantModel: 'haiku' }, experiments: { eligible: false, assistantEligible: true, flags: { swarm: true, sandbox: false } } })
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp() })
+    const assistant = await screen.findByRole('button', { name: 'Assistant' })
+    expect(fetchMock.mock.calls.filter(([input]) => urlOf(input).includes('/api/phone-link/assistant/log'))).toHaveLength(1)
+    fireEvent.click(assistant)
+    fireEvent.click(screen.getByRole('button', { name: 'Model and effort' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Haiku' })).toHaveAttribute('aria-pressed', 'true'))
+    expect(fetchMock.mock.calls.filter(([input]) => urlOf(input).includes('/api/chatgpt/status'))).toEqual([])
+    expect(screen.queryByRole('button', { name: 'ChatGPT' })).toBeNull()
+  })
+
   it('keeps the generated language pair visible on Ground after a project refresh', async () => {
     vi.useFakeTimers()
     try {

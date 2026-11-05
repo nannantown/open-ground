@@ -47,6 +47,27 @@ export interface ProjectEntry {
   collabProjectId?: string
 }
 
+/** Runtime choice. Claude settings and ChatGPT settings remain independent. */
+export type AiProvider = 'claude' | 'chatgpt'
+export const CHATGPT_EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const
+export type ChatGptEffort = (typeof CHATGPT_EFFORTS)[number]
+export interface ChatGptModel {
+  id: string
+  name: string
+  supportedEfforts?: string[]
+}
+export interface ChatGptConnection {
+  state: 'signed-out' | 'connecting' | 'connected' | 'error'
+  email?: string
+  models: ChatGptModel[]
+  error?: string
+}
+export interface ChatGptStatus {
+  connection: ChatGptConnection
+  lockdown: boolean
+  preferences: Pick<Settings, 'assistantProvider' | 'swarmProvider' | 'chatgptModel' | 'chatgptEffort'>
+}
+
 export interface Settings {
   /** The project registry — see {@link ProjectEntry}. Optional for back-compat
    *  parse of pre-registry settings.json; populated (possibly empty) once
@@ -135,6 +156,12 @@ export interface Settings {
   assistantModel?: SwarmModelTier
   /** The assistant's effort (absent = auto: thinking off on the fast model). */
   assistantEffort?: ClaudeEffort
+  /** Owner-only runtimes; absent keeps the existing Claude execution path. */
+  assistantProvider?: AiProvider
+  swarmProvider?: AiProvider
+  /** ChatGPT model catalog IDs and effort are independent of Claude's tiers. */
+  chatgptModel?: string
+  chatgptEffort?: ChatGptEffort
   /* NOTE (2026-08-13): `swarmWorkerRuntime` — the worker runtime dial + its
    * `sdkMaxWorkers` slot cap — was DELETED from this type. Workers are
    * SDK-only: the PTY worker runtime is gone, so there is nothing for a dial
@@ -272,13 +299,14 @@ export type ExperimentId = 'swarm' | 'sandbox'
  *  the user is the owner AND has turned that experiment on. */
 export type ExperimentFlags = Record<ExperimentId, boolean>
 
-/** GET /api/experiments. `eligible` = this user may toggle experiments at all
- *  (owner). `flags` = the RESOLVED per-experiment gate (owner && the settings
- *  toggle). A non-owner / signed-out user always gets `eligible: false` and
- *  all-false flags, so every experimental surface stays invisible regardless of
- *  any settings they forge. */
+/** GET /api/experiments. `eligible` mirrors the actual owner role. `flags`
+ * contain each resolved experiment gate, including Swarm's independent public
+ * opt-in and local unlock. Assistant access is reported separately. */
 export interface ExperimentsResponse {
   eligible: boolean
+  /** Existing assistant/phone-link permission: actual owner or explicit local
+   * unlock. Public Swarm opt-in grants neither this nor ChatGPT access. */
+  assistantEligible: boolean
   flags: ExperimentFlags
   /** The PUBLIC swarm opt-in (all users, not just the owner — Settings.swarmOptIn).
    *  `available` = this machine can opt in at all (macOS only; the guard is
@@ -1180,6 +1208,8 @@ export interface SelfUpdateFireResult {
 export interface SpawnSwarmSupplyResponse {
   terminalId: string
   agentSessionId: string
+  runtime?: 'pty' | 'sdk'
+  sdkSessionId?: string
   /** true ⇒ this is the project's PREVIOUS supply conversation, resumed
    *  (`claude --resume`): its session id was persisted centrally and claude still
    *  had the transcript, so the desk kept its memory across the app restart. false
@@ -1769,7 +1799,7 @@ export interface SwarmOrchestratorState {
    *  「オフライン待ち」 on it. Additive + optional (old server ⇒ absent ⇒ false). */
   managerOfflineHold?: boolean
   /** Same, for the supply desk (PTY-only by design — Remote Control lives there). */
-  supplyDesk?: { runtime: 'pty'; handleId: string; agentSessionId: string | null } | null
+  supplyDesk?: { runtime: 'pty' | 'sdk'; handleId: string; agentSessionId: string | null } | null
   /** True while the owner has EXPLICITLY paused the engine (Autonomy OFF) and
    *  not turned it back ON — the machine-readable "stopped by hand" signal a
    *  commander / another session reads to tell a DELIBERATE stop from a

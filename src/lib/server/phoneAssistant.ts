@@ -60,6 +60,8 @@ import type { relayToCommander } from './commanderRelay'
 import type { PresidentReply, relayToPresident } from './presidentRelay'
 import { ASSISTANT_RELAY_PREFIX } from './supplyNotice'
 import { liveAssistantModel, type AssistantModel, type AssistantToolSet } from './assistantSession'
+import { selectedRuntime } from './chatgptRuntime'
+import { runChatGptAssistantFold } from './chatgptAssistantFold'
 import { listForAssistant, readForAssistant, searchForAssistant } from './assistantTools'
 import { ownerLinks, readLinkForAssistant, webSearchForAssistant } from './assistantLinks'
 import {
@@ -140,6 +142,7 @@ export class AssistantFailure extends Error {
 const FAILURE_TEXT = {
   late: { en: 'The assistant did not answer in time.', ja: 'アシスタントが時間内に答えられませんでした。' },
   claude: { en: 'Claude is not ready on the Mac.', ja: 'Mac の Claude が使えない状態です。' },
+  chatgpt: { en: 'The ChatGPT connection or plan usage is unavailable.', ja: 'ChatGPT の接続または契約の利用枠を確認してください。' },
   generic: { en: 'The assistant could not answer.', ja: 'アシスタントが答えられませんでした。' },
   unusable: { en: 'The assistant gave no usable answer.', ja: 'アシスタントの答えを読み取れませんでした。' },
   workMode: { en: 'Work mode is on.', ja: '作業モードがオンです。' },
@@ -153,7 +156,7 @@ export const plainAssistantError = (e: unknown, lang: PromptLang = 'en'): Assist
   const msg = String((e as Error)?.message ?? e)
   return failure(
     'assistant-failed',
-    /no progress|timed out|ended without/.test(msg) ? 'late' : /claude|sign|log ?in|auth/i.test(msg) ? 'claude' : 'generic',
+    /no progress|timed out|ended without/.test(msg) ? 'late' : /chatgpt|openai|codex/i.test(msg) ? 'chatgpt' : /claude|sign|log ?in|auth/i.test(msg) ? 'claude' : 'generic',
     lang,
   )
 }
@@ -492,8 +495,9 @@ export const ASSISTANT_LAUNCH = {
  *  log or the memo (or their expiry) leaves no copy behind. */
 export const ASSISTANT_KICKOFF = "Answer the owner's latest line exactly as your system prompt says.\n" + buildDonePromptLine()
 
-const defaultRun = (prompt: string, file: string, cwd: string): Promise<string> =>
-  runFileTask({
+const defaultRun = async (prompt: string, file: string, cwd: string): Promise<string> => {
+  if (await selectedRuntime('assistant') === 'chatgpt') return runChatGptAssistantFold(prompt, file)
+  return runFileTask({
     cwd,
     prompt: ASSISTANT_KICKOFF,
     file,
@@ -503,6 +507,7 @@ const defaultRun = (prompt: string, file: string, cwd: string): Promise<string> 
     noProgressMs: 60_000,
     timeoutMs: 180_000,
   })
+}
 
 const chars = (ts: Turn[]) => ts.reduce((n, t) => n + t.text.length, 0)
 /** The oldest lines of `ts` that fit in `maxChars` characters (at least one). */

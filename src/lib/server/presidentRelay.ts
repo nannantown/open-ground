@@ -25,9 +25,9 @@ import { ASSISTANT_RELAY_PREFIX, assistantRelayLine, cancelSupplyOwnerSay, owner
 import { canonicalize } from './canonicalize'
 import { listAllActiveDesks, listDeskIdsByRole } from './liveDesks'
 import { SUPPLY_DESK_LABEL } from './swarmSupply'
-import { readSwarmSessions } from './swarmSessions'
-import { sessionJsonlPath } from './transcript'
+import { supplyTranscriptFile } from './swarmSupplyRuntime'
 import { isTaskNotification } from './groundMarks'
+import { selectedRuntime } from './chatgptRuntime'
 
 /** How long the assistant waits for the line to land and the president to answer. */
 export const PRESIDENT_REPLY_WAIT_MS = 10 * 60_000
@@ -77,7 +77,7 @@ export const wakePresidentDesk = async (path: string): Promise<string | null> =>
   const { swarmEnvPreflight } = await import('./swarmEnvPreflight')
   const { spawnSwarmSupply } = await import('./swarmSupply')
   const { patchEngineIntent } = await import('./swarmEnginePersistence')
-  if (!(await claudeRunPreflight()).ok) return 'claude-unavailable'
+  if (await selectedRuntime('swarm') === 'claude' && !(await claudeRunPreflight()).ok) return 'claude-unavailable'
   if (!(await swarmEnvPreflight(path, { force: true, requireGit: false, requireGitRepo: false })).ok) return 'env-unavailable'
   await spawnSwarmSupply({ projectPath: path })
   await patchEngineIntent(path, { supplyDesired: true }).catch(() => {})
@@ -94,10 +94,7 @@ const defaults: PresidentRelayDeps = {
   wake: wakePresidentDesk,
   say: queueSupplyOwnerSay,
   cancel: cancelSupplyOwnerSay,
-  transcript: async (path) => {
-    const s = (await readSwarmSessions(path)).supply
-    return s ? sessionJsonlPath(s.cwd, s.sessionId) : null
-  },
+  transcript: supplyTranscriptFile,
   working: async (path) => {
     const { presidentWorkingCwds } = await import('./groundLamps')
     // The same match as the lamps (groundLamps `under`): canonical, or a folder inside it.
