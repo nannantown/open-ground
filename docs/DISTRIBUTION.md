@@ -182,6 +182,19 @@ curl -s -X POST http://127.0.0.1:47776/api/update/check-now \
   -H 'content-type: application/json' -d '{"apply":"asap"}'
 ```
 
+### Rebuilding a tag after a runner is retired
+
+The macOS build uses `macos-15`. GitHub retired its macOS 14 runners on
+2026-11-02; an old tag's workflow can therefore be refused before any build
+step starts. See the [official runner image notice](https://github.com/actions/runner-images#available-images).
+
+Dispatch the maintained `release.yml` on `main` with `source_ref=vX.Y.Z` to
+rebuild that exact tag. All three jobs check out the supplied source ref; the
+publisher verifies the tag SHA against the checked-out source before publishing.
+This preserves the tested application tree and existing tag instead of moving
+a release tag to a different commit. Use `publish=false` to verify a repaired
+installer before publishing it through the existing `publish-draft` workflow.
+
 ### Required GitHub repo Secrets (macOS signing only)
 
 Set these in the repo's **Settings → Secrets and variables → Actions**. They

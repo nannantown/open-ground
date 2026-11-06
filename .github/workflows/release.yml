@@ -2,7 +2,7 @@
 #
 # Triggered by pushing a tag like `v1.2.3` (or run manually via workflow_dispatch).
 # Two platforms build in parallel and publish to the SAME GitHub Release:
-#   - macOS (macos-14, arm64): .dmg, code-signed + notarized
+#   - macOS (macos-15, arm64): .dmg, code-signed + notarized
 #   - Windows (windows-2022): .exe (NSIS), UNSIGNED (no Windows code-signing cert)
 # A third job (`publish`) then flips the draft release public in the SAME run
 # once both legs succeeded and every expected asset is present — no second
@@ -32,6 +32,11 @@ on:
       - "v*.*.*"
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: "Exact source tag/commit to rebuild with the current workflow (empty = this ref)"
+        required: false
+        type: string
+        default: ""
       publish:
         description: "Publish when both builds succeed (false = stop at the untagged draft)"
         type: boolean
@@ -68,12 +73,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
 
       - name: Create the draft release (idempotent)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
+          if [ -n "$SOURCE_REF" ] && ! [[ "$SOURCE_REF" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+|[a-f0-9]{40})$ ]]; then
+            echo "::error::source_ref must be a release tag or full commit SHA"
+            exit 1
+          fi
           VERSION=$(node -p "require('./package.json').version")
           TAG="v$VERSION"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -88,7 +100,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             platform: mac
           # Pinned: `windows-latest` now redirects to the VS2026 image, which
           # node-gyp/node-pty's native rebuild can't find/use ("Could not find
@@ -100,6 +112,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -215,15 +229,24 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
 
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET: ${{ github.sha }}
         run: |
           set -euo pipefail
+          RELEASE_SOURCE_SHA=$(git rev-parse HEAD)
           VERSION=$(node -p "require('./package.json').version")
           TAG="v$VERSION"
+          # An existing tag must identify the source actually checked out by
+          # every job, even when the maintained workflow lives on another ref.
+          TAG_SHA=$(git ls-remote --sort=refname origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | tail -1 | cut -f1)
+          if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$RELEASE_SOURCE_SHA" ]; then
+            echo "::error::release tag $TAG does not match the built source"
+            exit 1
+          fi
           NOTES_FILE="docs/release-notes/v$VERSION.md"
           # No committed notes ⇒ stay a draft. The in-app update banner and the
           # landing footer surface the release body, so publishing with an empty
@@ -259,6 +282,6 @@ jobs:
           if [ "$already" = "false" ]; then
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$NOTES_FILE"
           else
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest --target "$TARGET" --notes-file "$NOTES_FILE"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest --target "$RELEASE_SOURCE_SHA" --notes-file "$NOTES_FILE"
           fi
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName,url
