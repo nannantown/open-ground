@@ -82,6 +82,12 @@
   `automationRelays.test.ts`, `groundAutomation.test.ts`, `FrameView.test.tsx`,
   `App.render.test.tsx`, `e2e/automation-frame.spec.ts`.
 - Owner runtime switching/recovery: `docs/RUNTIME_TRANSITION_RECOVERY_PLAN.md`;
+  President continuity/cancellation: `docs/PRESIDENT_COMMAND_RECOVERY.md`;
+  `conversationReceipts.cancelPresidentInputs` commits explicit owner cancellations
+  with the existing claim mutex; `conversationCancellation.test.ts` and the route
+  counterpart cover races, retained evidence, fsync and idempotent replay.
+  `liveDesks.updateRestartSafety` supplies `activeOwnerTurns` to the Electron
+  update policy; `liveDesksUpdateOwnerTurns.test.ts` exercises the actual probe.
   `runtimeTransitionStore.ts` / `runtimeTransitions.ts` separate requested and
   effective profiles and checkpoint before retirement. `swarmRuntimeTransition.ts`
   freezes dispatch/integration and preserves actor/worktree/budget intent;

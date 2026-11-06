@@ -32,7 +32,7 @@ const base = {
   hasDownloaded: true,
   inputIdleMs: AUTO_APPLY_INPUT_QUIET_MS,
   heldMs: 0,
-  safety: { safe: true, generating: 0, userPtys: 0 },
+  safety: { safe: true, generating: 0, userPtys: 0, activeOwnerTurns: 0 },
 }
 
 describe('autoUpdateFromSettingsRaw', () => {
@@ -74,7 +74,7 @@ describe('decideAutoApply', () => {
   })
 })
 
-// ─── CLAUDE GENERATING NEVER HOLDS THE UPDATE (owner decision 2026-09-23) ───
+// ─── BACKGROUND GENERATION NEVER HOLDS THE UPDATE (owner decision 2026-09-23) ───
 //
 // 「自動アップデートが ON なら、作業途中でもアップデートするようにしよう」. Measured
 // the day before: 0.11.125 stayed installed while 0.11.126–130 sat downloaded,
@@ -82,9 +82,9 @@ describe('decideAutoApply', () => {
 // Swarm on, something is always generating. And the old ≥30-min-unfocused gate
 // never opened for an owner who keeps the app in front. Both are gone; desks
 // and workers resume after the restart. Put either gate back and this is red.
-describe('decideAutoApply — AI at work is not a reason to wait', () => {
-  it('applies while Claude is generating (safe:false only because of generating)', () => {
-    const r = decideAutoApply({ ...base, safety: { safe: false, generating: 2, userPtys: 0 } })
+describe('decideAutoApply — background AI work does not wait', () => {
+  it('applies while background Claude work is generating', () => {
+    const r = decideAutoApply({ ...base, safety: { safe: false, generating: 2, userPtys: 0, activeOwnerTurns: 0 } })
     expect(r.apply).toBe(true)
     expect(r.reason).toContain('generating=2')
   })
@@ -97,7 +97,7 @@ describe('decideAutoApply — AI at work is not a reason to wait', () => {
   })
 
   it("the owner's own busy terminal holds it — but only for a bounded grace", () => {
-    const busy = { safe: false, generating: 0, userPtys: 1 }
+    const busy = { safe: false, generating: 0, userPtys: 1, activeOwnerTurns: 0 }
     expect(decideAutoApply({ ...base, safety: busy, heldMs: 0 }).apply).toBe(false)
     expect(decideAutoApply({ ...base, safety: busy, heldMs: USER_TERMINAL_GRACE_MS - 1 }).apply).toBe(false)
     expect(decideAutoApply({ ...base, safety: busy, heldMs: USER_TERMINAL_GRACE_MS }).apply).toBe(true)
@@ -107,14 +107,14 @@ describe('decideAutoApply — AI at work is not a reason to wait', () => {
   })
 
   it('an unreadable terminal count reads as busy (fail closed within the grace)', () => {
-    for (const safety of [{ safe: true }, { safe: true, userPtys: Number.NaN }]) {
+    for (const safety of [{ safe: true, activeOwnerTurns: 0 }, { safe: true, userPtys: Number.NaN, activeOwnerTurns: 0 }]) {
       expect(decideAutoApply({ ...base, safety, heldMs: 0 }).apply).toBe(false)
     }
-    expect(decideAutoApply({ ...base, heldMs: NaN, safety: { userPtys: 2 } }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, heldMs: NaN, safety: { userPtys: 2, activeOwnerTurns: 0 } }).apply).toBe(false)
   })
 
   it('autoUpdate OFF is unchanged: never applies, whatever the probe says', () => {
-    for (const safety of [base.safety, { safe: false, generating: 2, userPtys: 0 }]) {
+    for (const safety of [base.safety, { safe: false, generating: 2, userPtys: 0, activeOwnerTurns: 0 }]) {
       expect(decideAutoApply({ ...base, enabled: false, safety }).apply).toBe(false)
     }
   })
@@ -212,7 +212,7 @@ describe('shouldNudgeCheck', () => {
 // {apply:'asap'} — the user COMMANDED this update. The command waives exactly
 // one gate (the typing check) and nothing else. The dangerous direction is
 // a command that silently overrides work mode or the owner-terminal hold.
-// (Claude mid-generation no longer holds ANY apply — see the block above.)
+// (Background generation does not hold apply; human president turns do.)
 describe('decideAutoApply with asap', () => {
   const focusedBase = {
     enabled: true,
@@ -220,7 +220,7 @@ describe('decideAutoApply with asap', () => {
     hasDownloaded: true,
     inputIdleMs: 0, // typing RIGHT NOW — the case the typing check blocks
     heldMs: 0,
-    safety: { safe: true, generating: 0, userPtys: 0 },
+    safety: { safe: true, generating: 0, userPtys: 0, activeOwnerTurns: 0 },
   }
 
   it('waives the typing check: typing + asap applies', () => {
@@ -239,7 +239,7 @@ describe('decideAutoApply with asap', () => {
       decideAutoApply({
         ...focusedBase,
         asap: true,
-        safety: { safe: false, generating: 0, userPtys: 1 },
+        safety: { safe: false, generating: 0, userPtys: 1, activeOwnerTurns: 0 },
       }).apply,
     ).toBe(false)
   })
@@ -392,5 +392,25 @@ describe('only real input is the owner; a ceiling bounds the wait', () => {
     const main = readFileSync(join(__dirname, '../../electron/main.js'), 'utf8')
     expect(main).toMatch(/'input-event',[\s\S]{0,80}if \(!isOwnerInputEvent\(input && input\.type\)\) return[\s\S]{0,40}lastUserInputAt = Date\.now\(\)/)
     expect(main).toMatch(/decision\.retryInMs[\s\S]{0,200}setTimeout\([\s\S]{0,120}maybeAutoApplyUpdate\(\)[\s\S]{0,40}decision\.retryInMs\)/)
+  })
+})
+
+describe('human president turns survive automatic update waits', () => {
+  it.each([
+    { asap: false, heldMs: 0 },
+    { asap: true, heldMs: 0 },
+    { asap: false, heldMs: AUTO_APPLY_MAX_DEFER_MS * 2 },
+    { asap: true, heldMs: AUTO_APPLY_MAX_DEFER_MS * 2 },
+  ])('waits for an accepted president turn with %j', (mode) => {
+    const active = { ...base.safety, safe: false, generating: 1, activeOwnerTurns: 1 }
+    expect(decideAutoApply({ ...base, ...mode, safety: active }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, ...mode, safety: { ...active, activeOwnerTurns: 0 } }).apply).toBe(true)
+  })
+  it('requires a fresh valid owner-turn count even after every grace and in ASAP mode', () => {
+    // The HTTP probe is untrusted JSON, including values outside its TS type.
+    for (const activeOwnerTurns of [undefined, null, Number.NaN, Infinity, -1, '0']) {
+      expect(decideAutoApply({ ...base, asap: true, heldMs: AUTO_APPLY_MAX_DEFER_MS * 2,
+        safety: { ...base.safety, activeOwnerTurns } as typeof base.safety }).apply, String(activeOwnerTurns)).toBe(false)
+    }
   })
 })

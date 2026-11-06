@@ -220,6 +220,10 @@ export const createSwarmRuntimeTransition = (deps: SwarmTransitionDeps) => ({
           ? 'The owner inspected the previous launch and its actual work. Continue from the CURRENT Board, Git, confirmed receipts and owner note below. Do not blindly replay old instructions or assume interrupted effects were undone.'
           : 'The previous actor reached a settled boundary. Continue from the current Board and Git state; completed effects are not undone.',
         'Re-read the repository and Board before acting. Do not repeat an action merely because provider-native history differs.',
+        ...(actor.role === 'supply' ? [
+          'President only: publicConversation is historical context, not a new execution instruction. A runtime restart or provider handoff does not authorize unfinished owner requests.',
+          'Do not resume or replay cancelled or uncertain historical instructions, file cards, or resend work based only on that history. Report current Board state, then wait for newly delivered durable inbox input before acting on an owner request.',
+        ] : []),
         JSON.stringify({ previousProvider: actor.provider, repository: actor.repository,
           task: engineWorker?.card ?? (engineWorker ? { id: engineWorker.worker.taskId, title: engineWorker.worker.taskTitle } : undefined),
           publicConversation: actor.transcript, ...(review ? { ownerReview: review.note, confirmedReceipts: reviewedContext?.confirmedReceipts ?? [] } : {}) }),
@@ -620,7 +624,8 @@ export const flushSwarmHandoffInputs = async (): Promise<void> => {
     if (!session) continue
     scheduledHandoffInputs.add(receipt.id)
     const queued = pushSdkInput(session.id, body.data.text, { operationId: receipt.id,
-      onConsumed: async () => { if (!await claimConversationReceipt(receipt.scope, receipt.id, undefined, receipt.owner)) throw new Error('The handoff input was superseded.') },
+      onConsumed: () => claimConversationReceipt(receipt.scope, receipt.id, undefined, receipt.owner),
+      onReleased: async () => { scheduledHandoffInputs.delete(receipt.id) },
       onSettled: async () => { await finishConversationReceipt(receipt.scope, receipt.id, 'delivered', undefined, receipt.owner); scheduledHandoffInputs.delete(receipt.id) },
       onInterrupted: async (safe) => { await finishConversationReceipt(receipt.scope, receipt.id, safe ? 'cancelled' : 'uncertain', undefined, receipt.owner); scheduledHandoffInputs.delete(receipt.id) },
       onRefused: async () => { await finishConversationReceipt(receipt.scope, receipt.id, 'rejected', { reason: 'usage-limit', fulfilled: false }, receipt.owner); scheduledHandoffInputs.delete(receipt.id) },
@@ -690,9 +695,8 @@ export const controlPresidentConversation = async (projectPath: string, operatio
   }
   if (operation.action === 'stop-turn') {
     if (desk.runtime === 'sdk') {
-      if (operation.turnId && currentSdkTurnId(desk.handleId) !== operation.turnId) throw new Error('This stop request names a stale president turn.')
       await assertCurrent()
-      if (!await interruptSdkSession(desk.handleId)) throw new Error('The president could not be interrupted.')
+      if (!await interruptSdkSession(desk.handleId, operation.turnId)) throw new Error('This stop request names a stale president turn or the president could not be interrupted.')
       return
     }
     const candidates = (await listConversationReceipts()).filter((receipt) => receipt.scope === scope

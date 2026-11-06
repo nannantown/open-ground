@@ -11,7 +11,7 @@ import { getSupplyPublicConversation } from '@/lib/server/swarmSupplyRuntime'
 import { getSettings } from '@/lib/server/store'
 import { z } from 'zod'
 import { runtimeRecoveryIssues } from '@/lib/server/runtimeRecovery'
-import { acceptConversationReceipt, claimConversationReceipt, readConversationReceipt, reviewConversationReceipt, settleRecoveryReviewReceipt } from '@/lib/server/conversationReceipts'
+import { acceptConversationReceipt, cancelPresidentInputs, PresidentCancellationConflict, claimConversationReceipt, readConversationReceipt, reviewConversationReceipt, settleRecoveryReviewReceipt } from '@/lib/server/conversationReceipts'
 import { reviewChatGptUncertainAction } from '@/lib/server/chatgptResponses'
 import { isAgentConversationOccupied } from '@/lib/server/liveDesks'
 import { hostIsLocal, originIsLocal } from '../loopback'
@@ -21,6 +21,10 @@ import { notifyRuntimeRecoveryChanged } from '@/lib/server/runtimeRecoveryBoot'
 const reviewSchema = z.object({ operationId: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/), id: z.string().min(1).max(256), scope: z.string().min(1).max(128), kind: z.enum(['input', 'tool', 'conversation', 'launch']), conversationId: z.string().max(128).optional(), callId: z.string().max(128).optional(), note: z.string().trim().min(1).max(1000) }).strict()
 
 const presidentStopSchema = z.object({ path: z.string().min(1).max(4096), operationId: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/), conversationId: z.string().min(1).max(128), epoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), turnId: z.string().min(1).max(128) }).strict()
+const presidentCancelSchema = presidentStopSchema.omit({ turnId: true }).extend({
+  messageIds: z.array(z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/)).min(1).max(128).refine(ids => new Set(ids).size === ids.length),
+  note: z.string().trim().min(1).max(1000),
+}).strict()
 
 export const conversationRoutes = new Hono<{ Variables: { conversationOwner: string } }>()
   .use('/api/conversation/*', async (c, next) => {
@@ -40,7 +44,7 @@ export const conversationRoutes = new Hono<{ Variables: { conversationOwner: str
       const projectId = await projectUUIDFromPath(path)
       await runtimeOwnerKey(owner)
       const result = await withRuntimeOwner(owner, () => handleConversationControl({ type: 'conversation-control', id: randomUUID(), action: 'status', scope: 'swarm', projectId }))
-      return c.json(result, result.state === 'rejected' ? 409 : 200)
+      return c.json(result.state === 'rejected' ? result : { ...result, capabilities: { ...(result.capabilities as Record<string, unknown> | undefined), cancelPresidentInputs: 1 } }, result.state === 'rejected' ? 409 : 200)
     } catch { return c.json({ error: 'The project or owner is no longer available.' }, 403) }
   })
   .get('/api/conversation/president/history', async (c) => {
@@ -66,6 +70,26 @@ export const conversationRoutes = new Hono<{ Variables: { conversationOwner: str
       const result = await withRuntimeOwner(owner, () => handleConversationControl({ type: 'conversation-control', id: body.operationId, action: 'stop-turn', scope: 'swarm', projectId, conversationId: body.conversationId, epoch: body.epoch, turnId: body.turnId }))
       return c.json(result, result.state === 'rejected' ? 409 : result.state === 'queued' ? 202 : 200)
     } catch { return c.json({ error: 'The project or owner is no longer available.' }, 403) }
+  })
+  .post('/api/conversation/president/cancel-inputs', async (c) => {
+    const parsed = presidentCancelSchema.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) return c.json({ error: 'Invalid cancellation request.', code: 'invalid-cancellation' }, 400)
+    const owner = c.get('conversationOwner'), body = parsed.data
+    let projectId: string, projectPath: string
+    try {
+      projectId = await projectUUIDFromPath(body.path)
+      const project = (await getSettings()).projects?.find(project => project.id === projectId)
+      await runtimeOwnerKey(owner)
+      if (!project) throw new Error('Project unavailable')
+      projectPath = project.path
+    } catch { return c.json({ error: 'The project or owner is no longer available.', code: 'owner-or-project-changed' }, 403) }
+    try {
+      const result = await cancelPresidentInputs({ ...body, scope: projectId, path: projectPath, expectedOwnerKey: owner })
+      await runtimeOwnerKey(owner)
+      return c.json(result)
+    } catch (error) {
+      return c.json({ error: 'The instructions changed or cancellation could not be saved.', code: error instanceof PresidentCancellationConflict ? error.code : 'cancellation-not-saved' }, 409)
+    }
   })
   .get('/api/conversation/recovery', async (c) => c.json({ issues: await runtimeRecoveryIssues(c.get('conversationOwner')) }))
   .post('/api/conversation/recovery/review', async (c) => {

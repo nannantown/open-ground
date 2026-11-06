@@ -70,8 +70,8 @@ const persist = async (path: string, value: unknown): Promise<void> => {
     try { await directory.sync() } finally { await directory.close() }
   }
 }
-type Change<T> = (receipts: Record<string, ConversationReceipt>, contexts: Record<string, ConversationContext>, acceptedDrafts: Record<string, number>, archived?: ConversationReceipt) => { result: T; write: boolean }
-const transaction = <T>(change: Change<T>, lookupKey?: string): Promise<T> => {
+type Change<T> = (receipts: Record<string, ConversationReceipt>, contexts: Record<string, ConversationContext>, acceptedDrafts: Record<string, number>, archived?: ConversationReceipt, archivedBatch?: Record<string, ConversationReceipt>) => { result: T; write: boolean }
+const transaction = <T>(change: Change<T>, lookupKey?: string, options?: { lookupKeys?: string[]; authorize?: () => Promise<unknown> }): Promise<T> => {
   const home = openGroundHome()
   const path = join(home, 'runtime', 'receipts.json')
   const result = writer.then(async () => {
@@ -150,7 +150,16 @@ const transaction = <T>(change: Change<T>, lookupKey?: string): Promise<T> => {
     }
     const archived = lookupKey ? (await readArchive(lookupKey.slice(0, 3)))[lookupKey] : undefined
     if (lookupKey && archived && receipts[lookupKey] && canonical(archived) !== canonical(receipts[lookupKey])) throw new ReceiptConflict()
-    const next = change(receipts, contexts, acceptedDrafts, archived)
+    const archivedBatch: Record<string, ConversationReceipt> = {}
+    for (const key of options?.lookupKeys ?? []) {
+      const value = (await readArchive(key.slice(0, 3)))[key]
+      if (value && receipts[key] && canonical(value) !== canonical(receipts[key])) throw new ReceiptConflict()
+      if (value) archivedBatch[key] = value
+    }
+    // A batch decision runs after all I/O under the same writer as claims.
+    // No await separates its final owner/actor checks from its state changes.
+    await options?.authorize?.()
+    const next = change(receipts, contexts, acceptedDrafts, archived, archivedBatch)
     if (next.write || recovered) {
       // Fail closed at capacity. An unresolved operation is never evicted to
       // make a retry look new and executable again.
@@ -259,6 +268,74 @@ export const markConversationReceiptHeard = async (scope: string, id: string, ex
 export const publicConversationReceipt = (receipt: ConversationReceipt) => {
   const { owner: _owner, hash: _hash, body: _body, attemptBoot: _boot, execution: _execution, acceptedRuntime: _runtime, ...shown } = receipt
   return shown
+}
+
+export class PresidentCancellationConflict extends Error {
+  constructor(public readonly code: 'input-occupied' | 'input-executing' | 'input-unavailable' | 'stale-conversation' | 'operation-conflict') {
+    super('The selected president instructions cannot be cancelled in their current state.')
+    this.name = 'PresidentCancellationConflict'
+  }
+}
+export interface CancelPresidentInputsOptions extends ConversationContext {
+  scope: string
+  path: string
+  operationId: string
+  messageIds: string[]
+  note: string
+  expectedOwnerKey: string
+}
+/** Revoke future intent, never assert that an unknown effect was rolled back.
+ * The operation receipt and every selected cancellation share one fsync write.
+ * A competing execution claim therefore wins or loses the whole batch. */
+export const cancelPresidentInputs = async (options: CancelPresidentInputsOptions) => {
+  const { scope, path, operationId, conversationId, epoch, expectedOwnerKey } = options
+  const note = options.note.trim(), messageIds = [...options.messageIds].sort()
+  if (!validId.test(scope) || !validId.test(operationId) || !path || path.length > 4096 || !conversationId || conversationId.length > 128
+    || !Number.isSafeInteger(epoch) || epoch < 0 || !note || note.length > 1000 || !messageIds.length || messageIds.length > 128
+    || new Set(messageIds).size !== messageIds.length || messageIds.some(id => !validId.test(id))) throw new Error('Invalid president cancellation.')
+  const owner = await runtimeOwnerKey(expectedOwnerKey)
+  const { isAgentConversationOccupied, isRecordedRuntimeHandleOccupied } = await import('./liveDesks')
+  const controlScope = 'control-president-cancel', operationKey = keyFor(owner, controlScope, operationId)
+  const inputKeys = messageIds.map(id => keyFor(owner, scope, id))
+  const body = { kind: 'president-cancel-inputs', scope, path, conversationId, epoch, messageIds, note }
+  const hash = createHash('sha256').update(canonical(body)).digest('hex')
+  const result = await transaction((receipts, contexts, _accepted, _archived, batch = {}) => {
+    const previous = receipts[operationKey] ?? batch[operationKey]
+    const targets = inputKeys.map(key => receipts[key] ?? batch[key])
+    if (previous) {
+      if (previous.hash !== hash || previous.state !== 'delivered') throw new PresidentCancellationConflict('operation-conflict')
+      if (targets.some(receipt => !receipt || receipt.state !== 'cancelled'
+        || (receipt.result as { operationId?: unknown } | null)?.operationId !== operationId)) throw new PresidentCancellationConflict('operation-conflict')
+      return { result: { ok: true as const, conversationId, epoch, receipts: targets.map(publicConversationReceipt) }, write: false }
+    }
+    const context = contexts[keyFor(owner, scope, 'context')]
+    if (!context || context.conversationId !== conversationId || context.epoch !== epoch) throw new PresidentCancellationConflict('stale-conversation')
+    for (const receipt of targets) {
+      const input = receipt?.body as { kind?: unknown; path?: unknown } | null
+      if (!receipt || receipt.owner !== owner || receipt.scope !== scope || receipt.conversationId !== conversationId || receipt.epoch !== epoch
+        || input?.kind !== 'president-input' || input.path !== path) throw new PresidentCancellationConflict('input-unavailable')
+      if (receipt.state === 'executing') throw new PresidentCancellationConflict('input-executing')
+      if (receipt.state !== 'queued' && receipt.state !== 'uncertain') throw new PresidentCancellationConflict('input-unavailable')
+      if (receipt.execution && (isRecordedRuntimeHandleOccupied(receipt.execution.runtime, receipt.execution.handleId)
+        || isAgentConversationOccupied(receipt.execution.sessionId))) throw new PresidentCancellationConflict('input-occupied')
+    }
+    const now = new Date().toISOString()
+    for (const receipt of targets) {
+      const previousState = receipt.state, previousResult = receipt.result
+      receipt.state = 'cancelled'; receipt.updatedAt = now
+      receipt.result = { cancelledByOwner: true, previousState, ...(previousResult !== undefined ? { previousResult } : {}),
+        operationId, automaticReplay: false, effectsRolledBack: false, note }
+    }
+    receipts[operationKey] = { id: operationId, scope: controlScope, owner, hash, body, conversationId, epoch,
+      state: 'delivered', acceptedAt: now, updatedAt: now, result: { cancelledMessageIds: messageIds, effectsRolledBack: false } }
+    return { result: { ok: true as const, conversationId, epoch, receipts: targets.map(publicConversationReceipt) }, write: true }
+  }, undefined, { lookupKeys: [operationKey, ...inputKeys], authorize: () => runtimeOwnerKey(owner) })
+  // Native delivery observers may drop their reservations only AFTER durability.
+  for (const receipt of result.receipts) {
+    const saved = await readConversationReceipt(scope, receipt.id, owner)
+    if (saved) publish(saved)
+  }
+  return result
 }
 /** Owner inspection records a known boundary; it never invokes the old body. */
 export const reviewConversationReceipt = async (scope: string, id: string, note: string, operationId: string, expectedOwnerKey?: string): Promise<ConversationReceipt> => {

@@ -332,6 +332,8 @@ describe('interrupt / terminate', () => {
     })
     expect(removeSdkSession(info.id)).toBe(false) // still running
     terminateSdkSession(info.id)
+    expect(removeSdkSession(info.id)).toBe(false) // transport and receipts still unwinding
+    await vi.waitFor(() => expect(getSdkSession(info.id)?.reaped).toBe(true))
     expect(removeSdkSession(info.id)).toBe(true)
     expect(getSdkSession(info.id)).toBeNull()
   })

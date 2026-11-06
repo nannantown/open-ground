@@ -290,6 +290,7 @@ export const SwarmSeatSay = ({
   draftState,
   appearance = 'compact',
   turnControl,
+  presidentPath,
 }: {
   placeholder: string
   onSend: (text: string, send?: ConversationSend) => Promise<SeatSayResult>
@@ -299,6 +300,7 @@ export const SwarmSeatSay = ({
   draftState?: SeatDraftState
   appearance?: 'compact' | 'chat'
   turnControl?: { running: boolean; canStop: boolean; stopping: boolean; pending?: boolean; onStop: () => void; error?: string | null }
+  presidentPath?: string
 }) => {
   const { t } = useT()
   const [open, setOpen] = useState(false)
@@ -420,7 +422,7 @@ export const SwarmSeatSay = ({
       </div>
       {note}
       {chat && turnControl?.error && <p role="status" className="mx-auto mt-2 max-w-[760px] text-meta text-error">{turnControl.error}</p>}
-      <ConversationDraftStatus draft={draftState?.durable} />
+      <ConversationDraftStatus draft={draftState?.durable} presidentPath={presidentPath} />
     </div>
   )
 }

@@ -14,8 +14,10 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
       { kind: 'text', text: `確認 ${index + 1}：まず現在の実装と検査結果を読みます。\n\n**変更の理由**が伝わるように、会話の段落と作業の区切りを保ちます。\n\n- 入力した文章を残す\n- 返答を読みやすく表示する` },
     ]).flat()
     let revision = 1, turn: string | undefined
+    let deskOpen = true
     let draft = { revision: 0, text: '', updatedAt: '2026-11-06T00:00:00Z' }
-    const sends: Record<string, unknown>[] = [], stops: Record<string, unknown>[] = []
+    const sends: Record<string, unknown>[] = [], stops: Record<string, unknown>[] = [], cancellations: Record<string, unknown>[] = []
+    const receipts = new Map<string, { id: string; state: string }>()
     let releaseSend: (() => void) | undefined
     await page.setViewportSize({ width, height: 900 })
     await page.route('**/api/auth/session', route => route.fulfill({ json: { user: { id: owner, email: 'owner@example.test' } } }))
@@ -34,21 +36,27 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
     await page.route('**/api/swarm/workers?*', route => route.fulfill({ json: { workers: [] } }))
     await page.route('**/api/swarm/preflight?*', route => route.fulfill({ json: { issues: [] } }))
     await page.route('**/api/swarm/escalations?*', route => route.fulfill({ json: { escalations: [] } }))
-    await page.route('**/api/terminal/active', route => route.fulfill({ json: { cwds: [], claude: [{ id, cwd: project.path, status: 'working', desk: true }] } }))
+    await page.route('**/api/terminal/active', route => route.fulfill({ json: { cwds: [], claude: deskOpen ? [{ id, cwd: project.path, status: 'working', desk: true }] : [] } }))
     await page.route('**/api/phone-link/call-notes?*', route => route.fulfill({ json: { entries: [] } }))
     await page.route('**/api/chatgpt/status', route => route.fulfill({ json: { connection: { state: 'signed-out', models: [] }, preferences: { swarmProvider: provider } } }))
-    await page.route(`**/api/sdk-session/${id}?*`, route => route.fulfill({ json: { status: 'working' } }))
+    await page.route(`**/api/sdk-session/${id}?*`, route => route.fulfill(deskOpen ? { json: { status: 'working' } } : { status: 404, json: { error: 'closed-fixture' } }))
+    await page.route('**/api/swarm/supply/stop', route => {
+      expect(route.request().postDataJSON()).toEqual({ path: project.path })
+      deskOpen = false; turn = undefined
+      for (const receipt of receipts.values()) if (receipt.state === 'executing') receipt.state = 'uncertain'
+      return route.fulfill({ json: { ok: true, stopped: 1 } })
+    })
     await page.route(`**/api/sdk-session/${id}/tail?*`, route => route.fulfill({ json: { frames: [
       { seq: 70, ev: { kind: 'input', text: 'INTERNAL KICKOFF MUST NOT BE A CHAT BUBBLE' } },
       { seq: 71, ev: { kind: 'text', text: words[1].text } },
       { seq: 72, ev: { kind: 'tool_use', name: 'Bash', detail: 'npm test -- --run' } },
       { seq: 73, ev: { kind: 'tool_result', ok: true, head: '24 tests passed' } },
-    ], reaped: false } }))
+    ], reaped: !deskOpen } }))
     await page.route('**/api/conversation/president/history?*', route => {
       expect(route.request().headers()['x-openground-owner']).toBe(owner)
       return route.fulfill({ json: { lines: words, revision: String(revision), overflow: false, seq: 73 } })
     })
-    await page.route('**/api/conversation/president/status?*', route => route.fulfill({ json: { state: 'delivered', conversationId: 'fixture-conversation', epoch: 3, activeTurnId: turn, capabilities: { conversationControl: 1 } } }))
+    await page.route('**/api/conversation/president/status?*', route => route.fulfill({ json: { state: 'delivered', conversationId: 'fixture-conversation', epoch: 3, activeTurnId: turn, capabilities: { conversationControl: 1, cancelPresidentInputs: 1 } } }))
     await page.route('**/api/conversation/draft?*', async route => {
       expect(route.request().headers()['x-openground-owner']).toBe(owner)
       if (route.request().method() === 'PUT') {
@@ -58,11 +66,33 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
       }
       await route.fulfill({ json: draft })
     })
-    await page.route('**/api/conversation/receipt?*', route => route.fulfill({ status: 404, json: { error: 'not-found' } }))
+    await page.route('**/api/conversation/receipt?*', route => {
+      expect(route.request().headers()['x-openground-owner']).toBe(owner)
+      const receipt = receipts.get(new URL(route.request().url()).searchParams.get('clientId') ?? '')
+      return route.fulfill(receipt ? { json: receipt } : { status: 404, json: { error: 'not-found' } })
+    })
+    await page.route('**/api/conversation/president/cancel-inputs', route => {
+      expect(route.request().headers()['x-openground-owner']).toBe(owner)
+      const body = route.request().postDataJSON(); cancellations.push(body)
+      expect(body).toMatchObject({ path: project.path, conversationId: 'fixture-conversation', epoch: 3 })
+      expect(body.operationId).toBeTruthy(); expect(body.note).toBeTruthy()
+      expect(body.messageIds).toHaveLength(1)
+      const receipt = receipts.get(body.messageIds[0])
+      expect(receipt).toBeTruthy()
+      expect(['queued', 'uncertain']).toContain(receipt!.state)
+      receipt!.state = 'cancelled'
+      return route.fulfill({ json: { ok: true, receipts: [receipt], conversationId: 'fixture-conversation', epoch: 3 } })
+    })
     await page.route(`**/api/sdk-session/${id}/input?*`, async route => {
       expect(route.request().headers()['x-openground-owner']).toBe(owner)
       const body = route.request().postDataJSON(); sends.push(body)
       if (sends.length === 1) return route.fulfill({ status: 409, json: { error: 'fixture refusal' } })
+      if (sends.length > 2) {
+        const receipt = { id: body.clientId, state: sends.length === 3 ? 'queued' : 'executing' }
+        receipts.set(receipt.id, receipt)
+        draft = { ...draft, revision: draft.revision + 1, text: '' }
+        return route.fulfill({ status: 202, json: { queued: true, delivered: false, receipt } })
+      }
       await new Promise<void>(resolve => { releaseSend = resolve; releaseHeldSend = resolve })
       words.push({ kind: 'input', text: body.text }, { kind: 'text', text: '依頼を受け付けました。作業を進めます。' })
       revision++; turn = 'fixture-turn-a'; draft = { ...draft, revision: draft.revision + 1, text: '' }
@@ -139,5 +169,45 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
     const ownerBubble = await seat.locator('[data-chat-role="owner"]').last().boundingBox()
     expect(ownerBubble!.x).toBeGreaterThan(panel!.x)
     await page.screenshot({ path: info.outputPath(`chat-${provider}-${width}-${theme}.png`), animations: 'disabled' })
+
+    // Acceptance is not execution: cancel only the queued immutable input ID,
+    // keeping an independently edited draft and the open desk intact.
+    const queuedText = 'まだ始まっていないため、この指示は取り消します。'
+    await box.fill(queuedText); await box.press('Enter'); await expect(box).toHaveValue('')
+    const queuedId = sends[2].clientId as string
+    const queued = page.locator('details').filter({ has: page.getByText(queuedText, { exact: true }) })
+    await expect(queued.locator('summary')).toHaveText('受信済み・待機中')
+    await queued.locator('summary').click()
+    await box.fill('この下書きは取消操作とは別に残します。')
+    await page.screenshot({ path: info.outputPath(`queued-cancel-${provider}-${width}-${theme}.png`), animations: 'disabled' })
+    await queued.getByRole('button', { name: '指示を取り消す', exact: true }).click()
+    await expect(queued).toHaveCount(0)
+    await expect(box).toHaveValue('この下書きは取消操作とは別に残します。')
+    expect(cancellations[0].messageIds).toEqual([queuedId]); expect(receipts.get(queuedId)?.state).toBe('cancelled')
+    expect(sends).toHaveLength(3); expect(deskOpen).toBe(true)
+
+    // A consumed instruction becomes uncertain after its actor closes. Its
+    // recovery controls remain available outside the now-unmounted seat.
+    const uncertainText = '別の手段で完了した作業なので、これ以上続けないでください。'
+    await box.fill(uncertainText); await box.press('Enter'); await expect(box).toHaveValue('')
+    const uncertainId = sends[3].clientId as string
+    const uncertain = page.locator('details').filter({ has: page.getByText(uncertainText, { exact: true }) })
+    await expect(uncertain.locator('summary')).toHaveText('回答中')
+    await expect(uncertain.getByRole('button', { name: '指示を取り消す', exact: true })).toHaveCount(0)
+    await seat.getByRole('button', { name: '社長を終了', exact: true }).click()
+    await expect(box).toHaveCount(0)
+    await expect(page.getByText('前の指示の確認が必要なため、後の指示も待機しています。不要な指示は取り消せます。', { exact: true })).toBeVisible()
+    await uncertain.locator('summary').click()
+    await expect(uncertain.getByText(uncertainText, { exact: true })).toBeVisible()
+    const cancelClosed = uncertain.getByRole('button', { name: '指示を取り消す', exact: true })
+    await expect(cancelClosed).toBeEnabled()
+    const cancelBounds = await cancelClosed.boundingBox()
+    expect(cancelBounds!.x).toBeGreaterThanOrEqual(0); expect(cancelBounds!.x + cancelBounds!.width).toBeLessThanOrEqual(width)
+    await page.screenshot({ path: info.outputPath(`closed-uncertain-${provider}-${width}-${theme}.png`), animations: 'disabled' })
+    await cancelClosed.click()
+    await expect(uncertain).toHaveCount(0)
+    await expect(page.getByText('前の指示の確認が必要なため、後の指示も待機しています。不要な指示は取り消せます。', { exact: true })).toHaveCount(0)
+    expect(cancellations[1].messageIds).toEqual([uncertainId]); expect(cancellations[1].operationId).not.toBe(cancellations[0].operationId)
+    expect(receipts.get(uncertainId)?.state).toBe('cancelled'); expect(sends).toHaveLength(4); expect(deskOpen).toBe(false)
   })
 }

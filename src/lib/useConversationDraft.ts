@@ -14,6 +14,7 @@ export interface ConversationSend {
   text: string
 }
 export interface ConversationReceiptView { id: string; state: string; text: string }
+interface PresidentCancellation { path: string; operationId: string; conversationId: string; epoch: number; messageIds: string[]; note: string }
 const unresolved = (state: string) => !['delivered', 'completed', 'replied', 'rejected', 'cancelled'].includes(state)
 interface Snapshot {
   receipts: ConversationReceiptView[]
@@ -222,9 +223,39 @@ class DraftController {
       const response = await fetch(`/api/conversation/receipt?scope=${encodeURIComponent(this.scope)}&clientId=${encodeURIComponent(previous.id)}`, { cache: 'no-store', signal: this.abort.signal, headers: { 'X-OpenGround-Owner': this.owner } })
       if (!response.ok) continue
       const next = await response.json() as { id?: string; state?: string }
-      if (next.id === previous.id && typeof next.state === 'string') this.update({ receipts: this.state.receipts.map(r => r.id === previous.id ? { ...r, state: next.state! } : r) })
+      if (next.id === previous.id && typeof next.state === 'string') this.update({ receipts: this.state.receipts.map(r => r.id === previous.id && unresolved(r.state) ? { ...r, state: next.state! } : r) })
     }
     this.persist()
+  }
+  cancelReceipt = async (projectPath: string, id: string, note: string): Promise<void> => {
+    if (this.scope === 'assistant' || !validId(id) || !this.state.receipts.some(r => r.id === id)) throw new Error('cancellation-unavailable')
+    const key = `${this.key}:cancel:${id}`
+    const headers = { 'Content-Type': 'application/json', 'X-OpenGround-Owner': this.owner }
+    const saved = localStorage.getItem(key)
+    let operation: PresidentCancellation
+    if (saved) {
+      const value = JSON.parse(saved) as PresidentCancellation
+      if (value.path !== projectPath || !validId(value.operationId) || value.operationId.length > 100 || !validId(value.conversationId)
+        || !Number.isSafeInteger(value.epoch) || value.epoch < 0 || !Array.isArray(value.messageIds) || value.messageIds.length !== 1 || value.messageIds[0] !== id
+        || typeof value.note !== 'string' || !value.note.trim() || value.note.length > 1000) throw new Error('cancellation-unavailable')
+      operation = value
+    } else {
+      const statusResponse = await fetch(`/api/conversation/president/status?path=${encodeURIComponent(projectPath)}`, { cache: 'no-store', headers })
+      if (!statusResponse.ok) throw new Error('cancellation-unavailable')
+      const status = await statusResponse.json() as { state?: string; conversationId?: string; epoch?: number; capabilities?: { cancelPresidentInputs?: number } }
+      if (status.state !== 'delivered' || status.capabilities?.cancelPresidentInputs !== 1 || !validId(status.conversationId)
+        || !Number.isSafeInteger(status.epoch) || status.epoch! < 0 || !note.trim() || note.length > 1000) throw new Error('cancellation-unavailable')
+      operation = { path: projectPath, operationId: crypto.randomUUID(), conversationId: status.conversationId, epoch: status.epoch!, messageIds: [id], note }
+      // A lost acknowledgement must retry the same cancellation, never a new command.
+      localStorage.setItem(key, JSON.stringify(operation))
+    }
+    const response = await fetch('/api/conversation/president/cancel-inputs', { method: 'POST', headers, body: JSON.stringify(operation) })
+    if (!response.ok) throw new Error('cancellation-unconfirmed')
+    const result = await response.json() as { ok?: boolean; receipts?: { id?: string; state?: string }[] }
+    if (!result.ok || result.receipts?.length !== 1 || result.receipts[0].id !== id || result.receipts[0].state !== 'cancelled') throw new Error('cancellation-unconfirmed')
+    this.update({ receipts: this.state.receipts.map(r => r.id === id ? { ...r, state: 'cancelled' } : r) })
+    this.persist()
+    localStorage.removeItem(key)
   }
   resolveConflict = async (keepLocal: boolean): Promise<void> => {
     const next = await this.read()
@@ -256,7 +287,7 @@ export const useConversationDraft = (scope: string) => {
     const timer = setInterval(() => void controller.recoverReceipts().catch(() => {}), 2000)
     return () => clearInterval(timer)
   }, [controller, state.receipts])
-  return { enabled: !!controller, ...state, setText: controller?.setText, setPhoto: controller?.setPhoto, photoForSend: controller?.photoForSend, prepareSend: controller?.prepareSend, accepted: controller?.accepted, refused: controller?.refused, flush: controller?.flush, recover: controller?.recover, resolveConflict: controller?.resolveConflict }
+  return { enabled: !!controller, ...state, setText: controller?.setText, setPhoto: controller?.setPhoto, photoForSend: controller?.photoForSend, prepareSend: controller?.prepareSend, accepted: controller?.accepted, refused: controller?.refused, flush: controller?.flush, recover: controller?.recover, cancelReceipt: controller?.cancelReceipt, resolveConflict: controller?.resolveConflict }
 }
 
 /** Only resets client test fixtures; production never discards a draft here. */

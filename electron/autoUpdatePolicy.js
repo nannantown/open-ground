@@ -13,14 +13,17 @@
 //      nothing WITHOUT resume machinery is busy (a terminal the owner opened,
 //      a hidden one-off claude run — the probe's `userPtys`) — or that has
 //      already held this update for USER_TERMINAL_GRACE_MS.
-// AI work in progress is NOT a reason to wait (owner decision 2026-09-23:
+// Background AI work is NOT a reason to wait (owner decision 2026-09-23:
 // 「自動アップデートが ON なら、作業途中でもアップデートするようにしよう」).
 // Measured the day before: 0.11.125 stayed installed while 0.11.126–130 sat
 // downloaded, because the probe answered {safe:false, generating:2} all day —
 // with Swarm on, SOMETHING is always generating, so "wait for a quiet moment"
 // meant "never". Desks and swarm workers resume after a restart by design
 // (liveDesks.ts, swarm recovery), so an interrupted generation is a pause, not
-// a loss. The old "window unfocused ≥30 min" gate went with it: the owner keeps
+// a loss. Human president turns are different: a restart makes an executing
+// durable input uncertain and holds later instructions. Always wait for the
+// server's required activeOwnerTurns count to reach zero, including ASAP and
+// past the ceiling. The old "window unfocused ≥30 min" gate went with it: the owner keeps
 // the app in front all day, so that gate also meant "never".
 // The decision itself is pure; main.js supplies the inputs and performs the
 // teardown-then-quitAndInstall side effect (electron/autoUpdate.js ordering).
@@ -133,7 +136,7 @@ function autoUpdateFromSettingsRaw(raw) {
  *   inputIdleMs: number,          // ms since the last key/mouse input in the window
  *   heldMs: number,               // ms since the first waiting update finished downloading
  *   asap?: boolean,               // live user command (bell {apply:'asap'}) — waives ONLY the typing check
- *   safety: { safe?: boolean, generating?: number, userPtys?: number } | null, // server probe; null = unreachable
+ *   safety: { safe?: boolean, generating?: number, userPtys?: number, activeOwnerTurns?: number } | null, // server probe; null = unreachable
  * }} input
  * @returns {{ apply: boolean, reason: string, retryInMs?: number }}
  *   retryInMs — look again this soon instead of at the next poll
@@ -169,10 +172,15 @@ function decideAutoApply(input) {
   // A dead server means mid-boot or mid-teardown — wrong moments to restart on
   // top of. Fail closed; the next tick asks again.
   if (!input.safety) return { apply: false, reason: 'safety probe unreachable (fail closed)' }
-  // ⚠ `safety.safe` and `safety.generating` are deliberately NOT read: both
-  // count Claude generating, and that must never hold the update (see the
-  // header). Only the owner's own terminals do, for a bounded grace. A missing
-  // or non-numeric count cannot be told apart from "busy", so it holds too.
+  // Required on every new server response, including a public/local legacy
+  // session with no owner ledger. An old or malformed probe cannot establish
+  // that interrupting an accepted human instruction is safe. No time ceiling
+  // or ASAP command waives this gate.
+  const activeOwnerTurns = input.safety.activeOwnerTurns
+  if (activeOwnerTurns !== 0)
+    return { apply: false, reason: `president turn active or unknown (activeOwnerTurns=${activeOwnerTurns ?? '?'})` }
+  // `safe` and `generating` also count background workers/managers, whose
+  // recovery remains unchanged. Only user PTYs receive a bounded grace.
   const userPtys = input.safety.userPtys
   const userBusy = !(typeof userPtys === 'number' && userPtys === 0)
   if (userBusy && !(input.heldMs >= USER_TERMINAL_GRACE_MS))
@@ -181,7 +189,7 @@ function decideAutoApply(input) {
       reason: `owner terminal busy (userPtys=${userPtys ?? '?'}, held ${Math.round(input.heldMs / 60000)}min)`,
     }
   const why = input.asap ? 'commanded (asap)' : overdue ? 'ceiling reached, not typing' : 'owner idle'
-  const note = `generating=${input.safety.generating ?? '?'} userPtys=${userPtys ?? '?'}`
+  const note = `generating=${input.safety.generating ?? '?'} userPtys=${userPtys ?? '?'} activeOwnerTurns=${activeOwnerTurns}`
   return { apply: true, reason: `${why}; ${note}` }
 }
 

@@ -144,7 +144,7 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkS
         />
       </div>}
       {/* One composer across runtime/handle changes, so an unsent draft stays. */}
-      <SwarmSeatSay alwaysOpen draftState={draftState} appearance={runtime === 'sdk' ? 'chat' : 'compact'}
+      <SwarmSeatSay alwaysOpen draftState={draftState} presidentPath={projectPath} appearance={runtime === 'sdk' ? 'chat' : 'compact'}
         turnControl={runtime === 'sdk' && control.available ? {
           running: !!control.status?.activeTurnId || control.pending, canStop: control.canStop, stopping: control.busy, pending: control.pending,
           onStop: () => { void control.stop() },

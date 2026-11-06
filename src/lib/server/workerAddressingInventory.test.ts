@@ -677,7 +677,7 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     tier: 'both-pools',
     why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, canonicalLiveDeskCwds/isDirOccupied/liveDeskOccupies (the occupancy question a spawn must ask), listAllActiveDesks, stopAllDesksInDirAndWait, (0925) listDeskIdsByRole — the desk ids of one role from both pools (PTY deskLabel + SDK role) for the Ground president lamp, and (0803) updateRestartSafety/computeRestartSafety — the "may the app restart itself to apply an update?" verdict for the Electron shell (GET /api/update/restart-safety).',
     ptyFns: ['killTerminalsByCwdAndWait', 'listActiveTerminalCwds', 'listActiveTerminals', 'listOwnerDeskTerminals', 'listPtySafetyViews'],
-    sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'terminateSdkSessionsInDir'],
+    sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'currentSdkTurnId', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'terminateSdkSessionsInDir'],
   },
   'src/lib/server/groundLamps.ts': {
     tier: 'both-pools',
@@ -761,6 +761,11 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   'src/lib/server/runtimeRecovery.ts': {
     tier: 'both-pools',
     why: 'Recovery exposes unknown effects only after their original handle has stopped. It distinguishes a replacement actor from the original handle and prevents either a live SDK or PTY conversation from being manually reviewed while still writing.',
+    ptyFns: [], sdkCalls: ['isAgentConversationOccupied', 'isRecordedRuntimeHandleOccupied'],
+  },
+  'src/lib/server/conversationReceipts.ts': {
+    tier: 'both-pools',
+    why: 'Owner abandonment may cancel an unconfirmed president input only after its original recorded handle and conversation are unoccupied in both pools. This shared predicate includes closed but unreaped SDK actors; the receipt transaction neither stops nor replays an actor.',
     ptyFns: [], sdkCalls: ['isAgentConversationOccupied', 'isRecordedRuntimeHandleOccupied'],
   },
   'src/lib/server/chatgptResponses.ts': {

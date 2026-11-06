@@ -183,7 +183,10 @@ type Listener = (frame: SdkStreamFrame) => void
 
 export interface SdkInputReceipt {
   operationId?: string
-  onConsumed?: () => Promise<void>
+  /** False refuses just this input before any provider bytes are yielded. */
+  onConsumed?: () => Promise<void | boolean>
+  /** Release an unconsumed queue reservation; never claims execution. */
+  onReleased?: () => Promise<void>
   onSettled?: () => Promise<void>
   onInterrupted?: (safeToContinue: boolean) => Promise<void>
   onRefused?: () => Promise<void>
@@ -231,8 +234,8 @@ interface Entry {
   closed: boolean
   /** When the pump finished (ms epoch) — the retention clock. Unset while live. */
   closedAt?: number
-  /** Set ONLY by the pump's `finally`, i.e. once the SDK's async iterator has
-   *  actually returned and the transport is done.
+  /** Set only after the SDK iterator returns AND its input receipts settle.
+   *  A finished transport with unsaved receipts still holds this lease.
    *
    *  ⚠ THE DISTINCTION THAT MATTERS. `closed` and `status:'exited'` are set
    *  SYNCHRONOUSLY by {@link terminateSdkSession} — they mean "we asked it to
@@ -242,6 +245,9 @@ interface Entry {
    *  working directory until it is really gone has to wait on THIS flag; waiting
    *  on `isSdkSessionAlive` returns true on the first poll and gates nothing. */
   reaped?: boolean
+  /** The transport ended; durable input callbacks still gate retirement. */
+  retirementReady?: boolean
+  retirementPending?: Promise<void>
   /** Turn boundaries seen since this session parked on a quota refusal. The
    *  first belongs to the refusing turn itself; the second means a whole new
    *  turn completed, i.e. the worker moved on. Reset whenever the park clears. */
@@ -645,6 +651,35 @@ const refuseInput = async (e: Entry): Promise<void> => {
   await settleInput(e)
 }
 
+/** Only receipt bookkeeping is retried after transport exit. Provider input is
+ * never replayed, and the actor lease stays held until its final state is saved. */
+const finishRetirement = (e: Entry): Promise<void> => {
+  if (e.reaped || !e.retirementReady) return Promise.resolve()
+  if (e.retirementPending) return e.retirementPending
+  const work = Promise.resolve().then(async () => {
+    try {
+      if (e.activeInput) {
+        await e.activeInput.onInterrupted?.(false)
+        e.activeInput = undefined
+      }
+      while (e.queue.length) {
+        await e.queue[0].onReleased?.()
+        e.queue.shift()
+      }
+      e.outstanding = false
+      e.closedAt = Date.now()
+      // Announce retirement only AFTER the durable callbacks have completed.
+      e.reaped = true
+      announceStatus(e, e.exitReason?.startsWith('error:') ? 'failed' : 'exited', e.exitReason)
+    } catch {
+      // A normal pool read retries this same settlement, not the original turn.
+      setStatus(e, 'failed', 'The SDK transport ended, but its input receipt could not be saved. Retirement is held until that receipt is confirmed.')
+    } finally { e.retirementPending = undefined }
+  })
+  e.retirementPending = work
+  return work
+}
+
 const makeInputIterable =(e: Entry): AsyncIterable<unknown> => ({
   async *[Symbol.asyncIterator]() {
     for (;;) {
@@ -663,7 +698,13 @@ const makeInputIterable =(e: Entry): AsyncIterable<unknown> => ({
       e.activeInput = input
       input.turnId ??= input.operationId ?? `sdk-turn-${randomUUID()}`
       e.activeRefused = false
-      await input.onConsumed?.()
+      if (await input.onConsumed?.() === false) {
+        await input.onReleased?.()
+        e.activeInput = undefined
+        await settleInput(e)
+        if (!e.closed) setStatus(e, 'waiting')
+        continue
+      }
       if (e.runtimeOwnerKey) await (await import('./runtimeOwner')).runtimeOwnerKey(e.runtimeOwnerKey)
       if (e.closed) return
       if (input.cancelBeforeSubmit) {
@@ -870,38 +911,16 @@ const pump = async (e: Entry): Promise<void> => {
         : `error: ${String((err as Error)?.message ?? err).slice(0, 200)}`
   } finally {
     e.closed = true
-    e.closedAt = Date.now()
-    // The iterator has RETURNED — the only in-process evidence that the claude
-    // behind this session is actually done, as opposed to merely asked to stop.
-    e.reaped = true
+    e.retirementReady = true
+    const gate = e.gateWake
+    e.gateWake = null
+    gate?.()
     if (e.wake) {
       const w = e.wake
       e.wake = null
       w()
     }
-    // ⚠ REAPED IS SET **ABOVE** THIS LINE, AND THE ORDER IS PART OF THE
-    // CONTRACT. This frame IS the announcement of the reap, and `emit` hands it
-    // to every listener SYNCHRONOUSLY — so a listener that answers "is it really
-    // gone?" out of the pool on receipt must find the flag already true. Emit
-    // first and such a listener is told the session is still live and then never
-    // hears about it again: it waits out routes/sdkSession.ts's 25 s heartbeat,
-    // which is the lag this announcement exists to remove.
-    //
-    // (Measured 2026-08-01: the SSE route as written survives the inversion by
-    // luck — it re-reads the pool from the write promise's `.then`, a microtask
-    // later. That is not a reason to invert it; it is a reason the guard in
-    // server/routes/__tests__/sdkSessionStreamEnd.test.ts pins the ORDER
-    // directly, from a listener, instead of trusting an end-to-end test to
-    // notice.)
-    //
-    // `announceStatus`, NOT `setStatus`: after a terminate the status is already
-    // 'exited' and the dedupe would swallow the one frame that proves the claude
-    // actually let go. See {@link announceStatus}.
-    announceStatus(
-      e,
-      e.exitReason && e.exitReason.startsWith('error:') ? 'failed' : 'exited',
-      e.exitReason,
-    )
+    await finishRetirement(e)
   }
 }
 
@@ -999,7 +1018,9 @@ export const spawnSdkSession = (opts: SpawnSdkSessionOpts): SdkSessionInfo => {
   return snapshot(e)
 }
 
-const snapshot = (e: Entry): SdkSessionInfo => ({
+const snapshot = (e: Entry): SdkSessionInfo => {
+  if (e.retirementReady && !e.reaped) void finishRetirement(e)
+  return {
   ...(e.provider ? { provider: e.provider } : {}),
   id: e.id,
   cwd: e.cwd,
@@ -1023,7 +1044,8 @@ const snapshot = (e: Entry): SdkSessionInfo => ({
   ...(e.closed ? { closed: true } : {}),
   seq: e.seq,
   ...(e.inputs ? { inputs: e.inputs } : {}),
-})
+  }
+}
 
 /** The newest frames after `after`, at most `limit` of them — the POLLED twin
  *  of the SSE replay, for the Agent Team bar's seats, which must not hold a
@@ -1035,6 +1057,7 @@ export const readSdkFrames = (
 ): { frames: SdkStreamFrame[]; seq: number; status: SdkSessionStatus; reaped: boolean } | null => {
   const e = pool.sessions.get(id)
   if (!e) return null
+  if (e.retirementReady && !e.reaped) void finishRetirement(e)
   const newer: SdkStreamFrame[] = []
   for (let i = e.buffer.length - 1; i >= 0 && newer.length < limit && e.buffer[i].seq > after; i--) {
     newer.unshift(e.buffer[i])
@@ -1346,9 +1369,11 @@ export const drainSdkSession = async (id: string, timeoutMs = 120_000, signal?: 
  *  Deliberately does NOT set `closed`: this is not a stop, and closing here would
  *  reap a session that is still perfectly able to take the next instruction. If
  *  the CLI dies anyway, the pump's catch records 'interrupted', not 'failed'. */
-export const interruptSdkSession = async (id: string): Promise<boolean> => {
+export const interruptSdkSession = async (id: string, expectedTurnId?: string): Promise<boolean> => {
   const e = pool.sessions.get(id)
   if (!e || e.closed || !e.handle?.interrupt) return false
+  // No await may separate this identity check from the interrupt invocation.
+  if (expectedTurnId !== undefined && currentSdkTurnId(id) !== expectedTurnId) return false
   if (e.activeInput && !e.activeInput.submitted) {
     e.activeInput.cancelBeforeSubmit = true
     return true
@@ -1389,7 +1414,7 @@ export const terminateSdkSession = (id: string): boolean => {
  *  terminate first. */
 export const removeSdkSession = (id: string): boolean => {
   const e = pool.sessions.get(id)
-  if (!e || !e.closed) return false
+  if (!e || !e.reaped) return false
   pool.sessions.delete(id)
   return true
 }

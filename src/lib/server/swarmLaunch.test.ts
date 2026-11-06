@@ -40,7 +40,7 @@ import {
   type SwarmAllowedModels,
   type SwarmModelTier,
 } from '../types'
-import { MODEL_TIER_LADDER, markCoolingUntil, isTierCooling, __resetQuotaForTest } from './swarmQuota'
+import { MODEL_TIER_LADDER, markCoolingUntil, isTierCooling, __resetQuotaForTest, flushQuotaPersist } from './swarmQuota'
 import { __resetAllowedModelsForTest } from './swarmAllowedModels'
 
 // The quota cooling table and the allowed-models mirror are process-wide
@@ -51,6 +51,11 @@ import { __resetAllowedModelsForTest } from './swarmAllowedModels'
 beforeEach(() => {
   __resetQuotaForTest()
   __resetAllowedModelsForTest()
+})
+afterEach(async () => {
+  // Sync cooling setters enqueue real I/O; finish it before the file's HOME
+  // sandbox and console RPC are torn down.
+  expect((await flushQuotaPersist()).persisted).toBe(true)
 })
 
 // The ONE place supply / worker / (future) commander source their model+effort,
@@ -203,6 +208,9 @@ describe('resolveSwarmRemoteName (spawn 時解決 — HOME 隔離統合)', () =>
   })
 
   afterEach(async () => {
+    // This nested cleanup runs before the outer hook. Drain while its original
+    // HOME still exists, before restoring the environment or removing it.
+    expect((await flushQuotaPersist()).persisted).toBe(true)
     // Restore, never delete: an unset OPENGROUND_HOME sends later resolution at the
     // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
     if (savedOgHome !== undefined) process.env.OPENGROUND_HOME = savedOgHome

@@ -7,7 +7,7 @@ import { registerTestProject } from '../../test/registerProject'
 import { openGroundHome } from './paths'
 import { projectUUIDFromPath } from './projectDataPath'
 import * as receipts from './conversationReceipts'
-import { spawnSdkSession, terminateSdkSession, getSdkSession, sdkInputAdmissionPaused } from './sdkSession'
+import { spawnSdkSession, terminateSdkSession, getSdkSession, sdkInputAdmissionPaused, pushSdkInput, currentSdkTurnId, type SdkQueryParams } from './sdkSession'
 import { controlPresidentConversation, reviewNativeConversationRecovery } from './swarmRuntimeTransition'
 import { recordSwarmSession } from './swarmSessions'
 import { patchEngineIntent } from './swarmEnginePersistence'
@@ -32,11 +32,13 @@ const fixture = async () => {
   let stop = () => {}
   const stopped = new Promise<void>(resolve => { stop = resolve })
   const interrupt = vi.fn(async () => { stop() })
-  const session = spawnSdkSession({ cwd: path, role: 'supply', options: {}, queryFn: () => ({
-    async *[Symbol.asyncIterator]() { await stopped; yield* [] }, interrupt,
-  }) })
+  let params!: SdkQueryParams
+  const session = spawnSdkSession({ cwd: path, role: 'supply', options: {}, queryFn: (input) => {
+    params = input
+    return { async *[Symbol.asyncIterator]() { await stopped; yield* [] }, interrupt }
+  } })
   ids.push(session.id)
-  return { path, scope, context, session, interrupt }
+  return { path, scope, context, session, interrupt, input: params.prompt[Symbol.asyncIterator](), settled: () => params.onTurnSettled!() }
 }
 const nativeFixture = async () => {
   const f = await fixture()
@@ -56,6 +58,32 @@ const nativeFixture = async () => {
   return { ...f, file, old, review }
 }
 describe('president controls bind the current durable conversation', () => {
+  it('interrupts the exact observed current SDK turn while preserving its conversation epoch', async () => {
+    const f = await fixture()
+    pushSdkInput(f.session.id, 'current instruction', { operationId: 'observed-current-turn' }); await f.input.next()
+    await controlPresidentConversation(f.path, { action: 'stop-turn', turnId: 'observed-current-turn', ...f.context, expectedOwnerKey: 'synthetic-owner' })
+    expect(f.interrupt).toHaveBeenCalledOnce()
+    expect(await receipts.readConversationContext(f.scope)).toEqual(f.context)
+    await vi.waitFor(() => expect(getSdkSession(f.session.id)?.reaped).toBe(true))
+  })
+  it('does not interrupt a successor turn that starts while an exact stop rechecks its owner and epoch', async () => {
+    const f = await fixture()
+    pushSdkInput(f.session.id, 'first request', { operationId: 'observed-turn-a' }); await f.input.next()
+    let reads = 0
+    vi.spyOn(receipts, 'readConversationContext').mockImplementation(async () => {
+      if (++reads === 2) {
+        await f.settled()
+        pushSdkInput(f.session.id, 'successor request', { operationId: 'successor-turn-b' }); await f.input.next()
+      }
+      return f.context
+    })
+    try {
+      await expect(controlPresidentConversation(f.path, { action: 'stop-turn', turnId: 'observed-turn-a', ...f.context, expectedOwnerKey: 'synthetic-owner' })).rejects.toThrow('stale president turn')
+      expect(f.interrupt).not.toHaveBeenCalled()
+      expect(currentSdkTurnId(f.session.id)).toBe('successor-turn-b')
+      expect(getSdkSession(f.session.id)?.closed).not.toBe(true)
+    } finally { await f.settled() }
+  })
   it('rejects an old conversation/epoch without interrupting or resetting the current desk', async () => {
     const f = await fixture()
     await receipts.rotateConversationContext(f.scope, f.context)

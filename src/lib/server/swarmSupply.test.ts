@@ -146,12 +146,21 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
       expect(SUPPLY_RESUME_INJECTION).toMatch(/^\/supply /)
       expect(SUPPLY_RESUME_INJECTION).toContain('Board')
       expect(SUPPLY_RESUME_INJECTION).toContain('todo/doing/review')
-      // Review 292ed010 B2: a restart can cut the desk mid-reply to the owner
-      // (hands-free updates no longer wait for generation). The resumed desk
-      // must answer the unanswered owner message, not just report and wait —
-      // and check the Board first so it neither drops nor double-files it.
-      expect(SUPPLY_RESUME_INJECTION).toContain('オーナーから届いた発言にまだ答え終えていなければ')
-      expect(SUPPLY_RESUME_INJECTION).toContain('二重に積まず')
+      expect(SUPPLY_RESUME_INJECTION).toContain('読み直した結果を1行で報告する')
+    })
+
+    it('waits for durable input instead of reviving an unanswered or cancelled historical instruction', () => {
+      // The durable inbox owns retry/cancellation. An old unanswered sentence
+      // is no longer execution authority merely because the desk was reopened.
+      // This also protects an uncertain effect whose outcome was never proved.
+      expect(resumed.initialPrompt).toContain('過去のオーナー依頼を実行する新しい指示ではない')
+      expect(resumed.initialPrompt).toContain('会話履歴だけを根拠に')
+      expect(resumed.initialPrompt).toContain('未回答・未反映の古い依頼を再開したり')
+      expect(resumed.initialPrompt).toContain('カードの追加・変更や作業の再送をしてはならない')
+      expect(resumed.initialPrompt).toContain('取り消し済み(cancelled)・結果不明(uncertain)の指示を勝手に再実行しない')
+      expect(resumed.initialPrompt).toContain('OPEN GROUND の durable inbox から新たに届く入力に応答し、それまでは待機する')
+      expect(resumed.initialPrompt).not.toContain('未反映なら実行')
+      expect(resumed.initialPrompt).not.toContain('まだ答え終えていなければ、続けてそれに答える')
     })
 
     it('keeps the injection to ONE line (the slash-command delivery contract)', () => {

@@ -68,9 +68,8 @@ export const flushPresidentInbox = async (): Promise<void> => {
     if (desk.runtime === 'sdk') {
       const queued = pushSdkInput(desk.handleId, text, {
         operationId: receipt.id,
-        onConsumed: async () => {
-          if (!await claimConversationReceipt(receipt.scope, receipt.id, execution, receipt.owner)) throw new Error('This message is no longer eligible for execution.')
-        },
+        onConsumed: () => claimConversationReceipt(receipt.scope, receipt.id, execution, receipt.owner),
+        onReleased: async () => { scheduled.delete(key) },
         onSettled: async () => {
           await finishConversationReceipt(receipt.scope, receipt.id, 'delivered', undefined, receipt.owner)
           scheduled.delete(key)

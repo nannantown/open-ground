@@ -1,5 +1,12 @@
 # 00 — INDEX: 司令塔文書の入口(読む順・メンタルモデル・十戒・表示の信頼度)
 
+**President continuity (2026-11-06):** see
+[PRESIDENT_COMMAND_RECOVERY.md](../PRESIDENT_COMMAND_RECOVERY.md). Active owner
+instructions now hold automatic app updates; background worker generation does
+not. Explicit cancellation revokes selected saved inputs without claiming their
+effects completed or were rolled back. SDK transport retirement settles consumed
+inputs and releases unconsumed reservations before another actor can take them.
+
 ## Current Contract (2026-09-19)
 
 Persona/proxy answers and self-supply are removed. Engine integration remains commander-owned; its dormant panel and mutating implementation are now deleted.

@@ -34,6 +34,10 @@ export const settings = {
     'settings.draft.failed': 'Your draft is retained. Saving could not be confirmed.',
     'settings.draft.pending': 'Delivery could not be confirmed. Retry uses the same message ID.',
     'settings.draft.saving': 'Saving…',
+    'settings.draft.cancelInput': 'Cancel instruction',
+    'settings.draft.cancelNote': 'The owner cancelled this instruction. Do not replay it.',
+    'settings.draft.cancelFailed': 'Cancellation could not be confirmed. If the president is still open, close it and retry this cancellation.',
+    'settings.draft.blocked': 'A previous instruction needs review. Later instructions are waiting; you can cancel any that are no longer needed.',
     'settings.assistant.running': 'Answering',
     'settings.assistant.retryInstruction': 'Send this instruction again',
     'settings.assistant.reviewRequired': 'Review the interrupted work in Settings before another attempt.',
@@ -155,7 +159,7 @@ export const settings = {
     // than OFF. And it promised to wait "while a terminal pane is open", which
     // is why it waited forever: an empty shell counted as work.
     'settings.autoUpdate.hint':
-      'New versions install themselves and the app reopens on its own — nothing asks you first, and you are still told an update is waiting so you can take it now. It does not wait for Claude: the commander and Agent Team workers on autopilot pick up where they left off after the restart, and if the president was cut off mid-reply it answers your last message again once it is back. It only waits while you are using the app (3 minutes without keys or mouse is enough), and while a terminal you opened yourself has something running in it — until 30 minutes after the update arrived, because those terminals come back empty. It never retries by itself a version that failed to install. Quitting the app also applies a waiting update.',
+      'New versions install themselves and the app reopens on its own — nothing asks you first, and you are still told an update is waiting so you can take it now. It waits for a president instruction already in progress to finish. Background commander and Agent Team work can pause for the restart and resume afterward. It also waits while you are using the app (3 minutes without keys or mouse is enough), and while a terminal you opened yourself has something running in it — until 30 minutes after the update arrived, because those terminals come back empty. It never retries by itself a version that failed to install. Quitting the app also applies a waiting update.',
     // Work mode (lockdown) — the non-Anthropic egress kill switch
     'settings.lockdown.heading': 'Work mode',
     'settings.lockdown.label': 'Block non-Anthropic connections',
@@ -281,6 +285,10 @@ export const settings = {
     'settings.draft.failed': '下書きは残っています。保存を確認できませんでした。',
     'settings.draft.pending': '受け付けを確認できませんでした。同じメッセージとして再送します。',
     'settings.draft.saving': '保存中…',
+    'settings.draft.cancelInput': '指示を取り消す',
+    'settings.draft.cancelNote': 'オーナーがこの指示を取り消しました。再実行しないでください。',
+    'settings.draft.cancelFailed': '取消状態を確認できませんでした。社長が開いている場合は、終了してから同じ取消をもう一度お試しください。',
+    'settings.draft.blocked': '前の指示の確認が必要なため、後の指示も待機しています。不要な指示は取り消せます。',
     'settings.assistant.running': '回答中',
     'settings.assistant.retryInstruction': 'この指示をもう一度送る',
     'settings.assistant.reviewRequired': '次の試行の前に、設定で中断した作業結果を確認してください。',
@@ -381,7 +389,7 @@ export const settings = {
     'settings.autoUpdate.heading': '自動アップデート',
     'settings.autoUpdate.label': '新しい版を自動で適用する',
     'settings.autoUpdate.hint':
-      '新しい版へ自動で入れ替え、アプリも自動で開き直します。確認は求めませんが、更新が待っていることはお知らせするので、今すぐ入れることもできます。Claude の作業中でも待ちません —— 司令官と自動運転中のエージェントチームのワーカーは開き直したあと続きから動き、社長は返事の途中で切れた場合、戻ってからあなたの直前の発言に答え直します。待つのは、あなたがアプリを操作している最中(3分間キーもマウスも触らなければ十分)と、あなた自身が開いたターミナルで何かが動いているときだけです(ターミナルは開き直すと空に戻るため。ただし更新が届いてから最長30分まで)。一度インストールに失敗した版を、勝手に何度も入れ直すことはしません。アプリを閉じたときにも適用されます。',
+      '新しい版へ自動で入れ替え、アプリも自動で開き直します。確認は求めませんが、更新が待っていることはお知らせするので、今すぐ入れることもできます。社長が受け取って実行中の命令は、完了するまで待ちます。バックグラウンドの司令官やエージェントチームの作業は、更新後に再開します。このほか、あなたがアプリを操作している最中(3分間キーもマウスも触らなければ十分)と、あなた自身が開いたターミナルで何かが動いているときも待ちます(ターミナルは開き直すと空に戻るため。ただし更新が届いてから最長30分まで)。一度インストールに失敗した版を、勝手に何度も入れ直すことはしません。アプリを閉じたときにも適用されます。',
     'settings.lockdown.heading': '業務モード',
     'settings.lockdown.label': 'Anthropic 以外の外部通信を遮断',
     'settings.lockdown.hint':

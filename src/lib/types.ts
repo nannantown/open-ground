@@ -2497,14 +2497,18 @@ export interface GroundLampsResponse {
  *    hands-free policy does NOT wait for it (desks/workers resume).
  *  - `userPtys`: busy work with no resume machinery — visible non-desk,
  *    non-engine PTY panes not abandoned (user terminals, incl. plain shells),
- *    plus hidden one-off claude runs mid-generation. The one count the
- *    hands-free policy still waits for (bounded grace).
- *  Resting desks (補給官/司令官) and swarm workers do NOT block: they resume by
- *  design (conversation --resume + roster recovery). */
+ *    plus hidden one-off claude runs mid-generation. The terminal count the
+ *    hands-free policy waits for with a bounded grace.
+ *  - `activeOwnerTurns`: executing durable president inputs or live president
+ *    turns (SDK or PTY), deduplicated by handle. Required even for legacy users
+ *    without a receipt ledger. Auto-apply always waits for zero; queued and
+ *    already uncertain inputs do not contribute. Background managers/workers
+ *    remain resumable and do not contribute to this count. */
 export interface UpdateRestartSafetyResponse {
   safe: boolean
   generating: number
   userPtys: number
+  activeOwnerTurns: number
 }
 
 // ---- Auth (optional Google/GitHub login via Supabase Auth) ----------------

@@ -49,7 +49,7 @@ const abandoned = () =>
 
 describe('computeRestartSafety', () => {
   it('empty pools ⇒ safe', () => {
-    expect(computeRestartSafety([], [], NOW)).toEqual({ safe: true, generating: 0, userPtys: 0 })
+    expect(computeRestartSafety([], [], NOW)).toEqual({ safe: true, generating: 0, userPtys: 0, activeOwnerTurns: 0 })
   })
 
   it('a resting desk PTY (補給官 at the prompt) does NOT block — it resumes by design', () => {
@@ -99,7 +99,7 @@ describe('computeRestartSafety', () => {
     // {"safe":false,"generating":0,"userPtys":2}, both panes empty login shells
     // open for 1h23m. This is the case the whole change exists for.
     const r = computeRestartSafety([abandoned(), abandoned()], [], NOW)
-    expect(r).toEqual({ safe: true, generating: 0, userPtys: 0 })
+    expect(r).toEqual({ safe: true, generating: 0, userPtys: 0, activeOwnerTurns: 0 })
   })
 
   it('a shell with a BACKGROUND job blocks — the hole the foreground check alone left', () => {
@@ -160,7 +160,7 @@ describe('computeRestartSafety', () => {
       ['working', 'waiting'],
     )
     // pty#1: generating AND a user pane (both true — it is a user claude mid-turn)
-    expect(r).toEqual({ safe: false, generating: 2, userPtys: 2 })
+    expect(r).toEqual({ safe: false, generating: 2, userPtys: 2, activeOwnerTurns: 0 })
   })
 })
 

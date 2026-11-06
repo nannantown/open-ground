@@ -39,12 +39,15 @@ import {
   listSdkSessions,
   terminateSdkSessionsInDir,
   isSdkSessionReaped,
+  currentSdkTurnId,
 } from './sdkSession'
 import type { SdkSessionStatus } from './sdkEvents'
 import { canonicalize } from './canonicalize'
 import { projectsDataRootDir } from './paths'
 import { sep } from 'path'
 import { execFile } from 'node:child_process'
+import { hasChatGptAccess } from './chatgptAccess'
+import { listConversationReceipts } from './conversationReceipts'
 import type {
   ActiveTerminalsResponse,
   ClaudeBeaconStatus,
@@ -283,7 +286,8 @@ export const stopAllDesksInDirAndWait = async (
 //            claude or plain shell — is user state with no resume machinery).
 //   ⚠ 2026-09-23: `safe` is now only the MANUAL answer. The hands-free policy
 //   (electron/autoUpdatePolicy.js) ignores `safe`/`generating` — desks and
-//   workers resume — and waits only on `userPtys`, for at most 30 min.
+//   workers resume — but an accepted president turn must finish first.
+//   `activeOwnerTurns` is never waived by ASAP, a typing ceiling or PTY grace.
 //   ALLOWS:  resting desks (補給官/司令官 — conversation resume by design),
 //            swarm workers at rest in the central worktrees area (roster
 //            recovery + conversation resume, and their edits live on disk),
@@ -393,6 +397,7 @@ export const computeRestartSafety = (
   }[],
   sdkStatuses: readonly SdkSessionStatus[],
   now: number = Date.now(),
+  activeOwnerTurns: number = 0,
 ): UpdateRestartSafetyResponse => {
   const generating =
     ptys.filter((p) => p.claudeWorking).length +
@@ -463,7 +468,7 @@ export const computeRestartSafety = (
   const userPtys = ptys.filter(
     (p) => !p.desk && !p.engine && (p.hidden ? p.claudeWorking : !abandoned(p)),
   ).length
-  return { safe: generating === 0 && userPtys === 0, generating, userPtys }
+  return { safe: generating === 0 && userPtys === 0 && activeOwnerTurns === 0, generating, userPtys, activeOwnerTurns }
 }
 
 /** The live answer, from BOTH pools. Engine-owned cwds are recognised by
@@ -471,6 +476,11 @@ export const computeRestartSafety = (
  *  — user projects never live there; the sep-terminated compare mirrors
  *  isDirOccupied so `…/projects-evil` can't match). */
 export const updateRestartSafety = async (): Promise<UpdateRestartSafetyResponse> => {
+  // The ledger covers the send/observation and durable-settlement gaps where
+  // a president can look idle despite an accepted turn still executing. Only
+  // the signed-in owner's records are readable; legacy/local users still get
+  // the live-pool protection below without acquiring an auth requirement.
+  // An unreadable owner ledger rejects the probe, so Electron defers.
   const centralRoot = await canonicalize(projectsDataRootDir())
   const ptys = await Promise.all(
     listPtySafetyViews().map(async (v) => ({
@@ -491,10 +501,28 @@ export const updateRestartSafety = async (): Promise<UpdateRestartSafetyResponse
       engine: (await canonicalize(v.cwd)).startsWith(centralRoot + sep),
     })),
   )
-  const sdkStatuses = listSdkSessions()
-    .filter((s) => isSdkSessionLive(s))
-    .map((s) => s.status)
-  return computeRestartSafety(ptys, sdkStatuses)
+  const receipts = await hasChatGptAccess() ? await listConversationReceipts() : []
+  // Read both pools after the asynchronous probe work. A supply input remains
+  // active until its durable completion callback, even if its UI status has
+  // already changed to waiting. Queued inputs and held uncertain receipts are
+  // not an executing turn, and must not pin every subsequent update forever.
+  const sdk = listSdkSessions().filter((s) => isSdkSessionLive(s))
+  const activeOwnerTurns = new Set<string>()
+  for (const receipt of receipts) {
+    if (receipt.state !== 'executing' || !receipt.body || typeof receipt.body !== 'object' ||
+        (receipt.body as { kind?: unknown }).kind !== 'president-input') continue
+    activeOwnerTurns.add(receipt.execution
+      ? `${receipt.execution.runtime}:${receipt.execution.handleId}`
+      : `receipt:${receipt.scope}:${receipt.id}`)
+  }
+  const supplyPtys = new Set(listOwnerDeskTerminals().filter((desk) => desk.deskLabel === '補給官').map((desk) => desk.id))
+  for (const pane of listActiveTerminals().claude) {
+    if (supplyPtys.has(pane.id) && pane.status === 'working') activeOwnerTurns.add(`pty:${pane.id}`)
+  }
+  for (const session of sdk) {
+    if (session.role === 'supply' && currentSdkTurnId(session.id)) activeOwnerTurns.add(`sdk:${session.id}`)
+  }
+  return computeRestartSafety(ptys, sdk.map((s) => s.status), Date.now(), activeOwnerTurns.size)
 }
 
 /** Is this SDK session a swarm ROLE DESK (commander / supply) rather than work?

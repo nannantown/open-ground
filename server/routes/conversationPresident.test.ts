@@ -38,9 +38,13 @@ describe('desktop president exact-turn controls', () => {
   it('reads the registered project status with the admitted owner pinned', async () => {
     const response = await status()
     expect(response.status).toBe(200)
-    expect(await response.json()).toMatchObject({ state: 'delivered', conversationId: 'conversation-a', epoch: 4, activeTurnId: 'observed-turn' })
+    expect(await response.json()).toMatchObject({ state: 'delivered', conversationId: 'conversation-a', epoch: 4, activeTurnId: 'observed-turn', capabilities: { cancelPresidentInputs: 1 } })
     expect(h.project).toHaveBeenCalledExactlyOnceWith('/fixture/project')
     expect(h.control).toHaveBeenCalledExactlyOnceWith({ type: 'conversation-control', id: expect.any(String), action: 'status', scope: 'swarm', projectId: 'registered-project' })
+  })
+  it('advertises desktop cancellation without replacing the existing status capabilities', async () => {
+    h.control.mockResolvedValue({ state: 'delivered', capabilities: { conversationControl: 1, durableSay: 1 } })
+    expect(await (await status()).json()).toMatchObject({ capabilities: { conversationControl: 1, durableSay: 1, cancelPresidentInputs: 1 } })
   })
   it('returns only the bounded public projection for the canonical project and admitted owner', async () => {
     const response = await conversationRoutes.request('/api/conversation/president/history?path=%2Ffixture%2Fproject&sessionId=sdk-fixture', { headers: { 'X-OpenGround-Owner': 'owner-a' } })

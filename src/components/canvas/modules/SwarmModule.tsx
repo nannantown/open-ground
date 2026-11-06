@@ -62,6 +62,7 @@ import type {
 import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SdkWorkerPane, blipVerdict, type SdkSessionProbe } from './SdkWorkerPane'
 import { useConversationDraft } from '@/lib/useConversationDraft'
+import { ConversationDraftStatus } from '@/components/assistant/ConversationDraftStatus'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 import { SwarmWorkerSeat, workerSeatLook } from './SwarmWorkerSeat'
@@ -1358,6 +1359,9 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
           {t(engine.automation.allowed ? 'projectPanel.swarm.automationFrameInside' : 'projectPanel.swarm.automationFrameOutside')}
         </p>
       )}
+      {!collapsed && !supply && presidentDraft.receipts.some(receipt => ['queued', 'uncertain'].includes(receipt.state)) && <div className="shrink-0 border-b border-line-soft px-3 py-2">
+        <ConversationDraftStatus draft={presidentDraft} presidentPath={project.path} />
+      </div>}
       {/* Env preflight (git/shell) — ONE banner listing every unmet prerequisite
           (GET /api/swarm/preflight, the same gate the worker/supply/manager spawn
           routes enforce), so a missing git / non-repo project / missing shell is

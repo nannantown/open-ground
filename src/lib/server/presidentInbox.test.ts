@@ -63,14 +63,16 @@ afterEach(async () => {
 })
 const rig = () => {
   let params!: SdkQueryParams
+  let failure: Error | undefined
   const stopped = deferred<void>()
   const session = spawnSdkSession({ cwd, role: 'supply', provider: 'chatgpt', agentSessionId: `chatgpt-${randomUUID()}`,
     options: { runtimeOwnerKey: 'owner-a' }, distillMessage: () => [], queryFn: input => {
       params = input
-      return { async *[Symbol.asyncIterator]() { await stopped.promise; yield* [] }, interrupt: async () => { stopped.resolve() } }
+      return { async *[Symbol.asyncIterator]() { await stopped.promise; if (failure) throw failure; yield* [] }, interrupt: async () => { stopped.resolve() } }
     } })
   sessions.push(session.id)
-  return { session, input: params.prompt[Symbol.asyncIterator](), settled: () => params.onTurnSettled!(), interrupted: (safe: boolean) => params.onTurnInterrupted!(safe) }
+  return { session, input: params.prompt[Symbol.asyncIterator](), settled: () => params.onTurnSettled!(), interrupted: (safe: boolean) => params.onTurnInterrupted!(safe),
+    end: (error?: Error) => { failure = error; stopped.resolve() } }
 }
 const native = () => { h.native = { runtime: 'pty', handleId: 'native-handle', cwd, agentSessionId: 'native-conversation', lastOutputAt: null, startedAt: 1, stopping: false } }
 const flush = async () => { h.blocked = false; await flushPresidentInbox() }
@@ -130,14 +132,71 @@ describe('durable president inbox through the SDK pool', () => {
     expect(getSdkSession(replacement.session.id)?.inputs).toBe(1)
     expect((await receipt('handoff-input'))?.state).toBe('delivered')
   })
+  it('releases an unconsumed reservation when its actor ends naturally, without a provider transition', async () => {
+    const old = rig()
+    await acceptPresidentInput(cwd, 'still waiting for the president', { id: 'natural-retirement-input' }); await flush()
+    old.end()
+    await vi.waitFor(() => expect(getSdkSession(old.session.id)?.reaped).toBe(true))
+    expect((await receipt('natural-retirement-input'))?.state).toBe('queued')
+    const replacement = rig(); await flush(); await flush()
+    const pending = await drainSdkSession(replacement.session.id)
+    expect(pending.pendingInputs).toEqual([{ text: 'still waiting for the president', operationId: 'natural-retirement-input' }])
+    // A drain pauses consumption; resume it only for the explicit fixture read.
+    const { resumeSdkInputAdmission } = await import('./sdkSession')
+    resumeSdkInputAdmission(replacement.session.id)
+    expect((await replacement.input.next()).value).toMatchObject({ message: { content: [{ text: 'still waiting for the president' }] } })
+    await replacement.settled()
+    expect(getSdkSession(replacement.session.id)?.inputs).toBe(1)
+    expect((await receipt('natural-retirement-input'))?.state).toBe('delivered')
+  })
+  it('persists a consumed fatal turn as uncertain before its original actor is reaped and never replays it', async () => {
+    const old = rig()
+    await acceptPresidentInput(cwd, 'possibly changed external work', { id: 'fatal-consumed-input' }); await flush(); await old.input.next()
+    old.end(new Error('synthetic provider transport failed'))
+    await vi.waitFor(() => expect(getSdkSession(old.session.id)?.reaped).toBe(true))
+    expect((await receipt('fatal-consumed-input'))?.state).toBe('uncertain')
+    const replacement = rig(); await flush()
+    expect((await drainSdkSession(replacement.session.id)).pendingInputs).toEqual([])
+    expect(getSdkSession(old.session.id)?.inputs).toBe(1)
+  })
+  it('holds retirement when fatal-turn settlement cannot be fsynced and retries only the receipt after disk recovery', async () => {
+    const old = rig()
+    await acceptPresidentInput(cwd, 'effect must not be replayed', { id: 'fatal-settlement-disk' }); await flush(); await old.input.next()
+    const write = atomic.atomicWriteJson
+    let diskFailed = true
+    vi.spyOn(atomic, 'atomicWriteJson').mockImplementation(async (path, value, options) => {
+      const saved = value as { receipts?: Record<string, { id: string; state: string }> }
+      if (diskFailed && Object.values(saved.receipts ?? {}).some(item => item.id === 'fatal-settlement-disk' && item.state === 'uncertain')) throw new Error('synthetic receipt fsync unavailable')
+      return write(path, value, options)
+    })
+    try {
+      old.end(new Error('synthetic fatal stream'))
+      await vi.waitFor(() => expect(getSdkSession(old.session.id)?.status).toBe('failed'))
+      expect(getSdkSession(old.session.id)?.reaped).not.toBe(true)
+      expect(getSdkSession(old.session.id)?.closed).toBe(true)
+      expect((await receipt('fatal-settlement-disk'))?.state).toBe('executing')
+      expect(getSdkSession(old.session.id)?.inputs).toBe(1)
+      diskFailed = false
+      await vi.waitFor(() => expect(getSdkSession(old.session.id)?.reaped).toBe(true))
+      expect((await receipt('fatal-settlement-disk'))?.state).toBe('uncertain')
+      expect(getSdkSession(old.session.id)?.inputs).toBe(1)
+    } finally { diskFailed = false }
+  })
   it('cancels an old epoch before the queued SDK input can reach its actor', async () => {
     const f = rig()
     const first = await acceptPresidentInput(cwd, 'old epoch', { id: 'sdk-old-epoch' }); await flush()
     await cancelQueuedPresidentInputs(cwd)
-    await expect(f.input.next()).rejects.toThrow('no longer eligible')
-    expect(getSdkSession(f.session.id)?.inputs ?? 0).toBe(0)
     expect((await receipt('sdk-old-epoch'))?.state).toBe('cancelled')
     await expect(acceptPresidentInput(cwd, 'stale epoch', { id: 'new-with-stale-epoch', conversationId: first.receipt.conversationId, epoch: first.receipt.epoch })).rejects.toThrow('different content')
+    const nextInput = f.input.next()
+    await vi.waitFor(() => expect(getSdkSession(f.session.id)?.status).toBe('waiting'))
+    expect(getSdkSession(f.session.id)?.inputs ?? 0).toBe(0)
+    await acceptPresidentInput(cwd, 'innocent next instruction', { id: 'after-cancelled-epoch' }); await flush()
+    expect((await nextInput).value).toMatchObject({ message: { content: [{ text: 'innocent next instruction' }] } })
+    expect(getSdkSession(f.session.id)?.inputs).toBe(1)
+    expect(getSdkSession(f.session.id)?.closed).not.toBe(true)
+    await f.settled()
+    expect((await receipt('after-cancelled-epoch'))?.state).toBe('delivered')
   })
   it('holds an interrupted SDK effect with unknown outcome and does not automatically resend it', async () => {
     const f = rig()

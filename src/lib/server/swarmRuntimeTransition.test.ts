@@ -19,6 +19,36 @@ const rig = () => {
   return { log, deps, transition: createSwarmRuntimeTransition(deps), latest: () => saved! }
 }
 describe('swarm provider handoff participant', () => {
+  it.each(['claude', 'chatgpt'] as const)('gives the %s president historical context without reviving old commands, leaving durable IDs with the inbox', async provider => {
+    const f = rig(), checkpoint = await f.transition.drain()
+    f.deps.enqueue = vi.fn(async () => {})
+    await f.transition.retire(checkpoint)
+    await f.transition.resume({ provider }, f.latest())
+    const handoff = vi.mocked(f.deps.start).mock.calls[0][1]
+    expect(handoff.publicTranscript).toEqual([{ kind: 'input', text: 'The owner goal' }])
+    expect(handoff.instructions).toContain('publicConversation is historical context, not a new execution instruction')
+    expect(handoff.instructions).toContain('A runtime restart or provider handoff does not authorize unfinished owner requests')
+    expect(handoff.instructions).toContain('Do not resume or replay cancelled or uncertain historical instructions')
+    expect(handoff.instructions).toContain('wait for newly delivered durable inbox input')
+    expect(f.deps.enqueue).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ role: 'supply' }), 'new-president', 'legacy queued', 0,
+      { provider }, undefined, undefined)
+    expect(f.deps.send).not.toHaveBeenCalled()
+    // A receipt-owned instruction is neither moved to a new handoff ID nor
+    // inferred from transcript prose. Its original inbox remains authoritative.
+    expect(f.latest().actors[0].pendingInputs).toContainEqual({ text: 'ledger queued', operationId: 'root-owned' })
+  })
+  it.each(['manager', 'worker'] as const)('retains normal %s work continuation and pending delivery without the president-only waiting rule', async role => {
+    const f = rig(), checkpoint = await f.transition.drain()
+    checkpoint.actors[0].role = role
+    if (role === 'worker') checkpoint.engines = [{ path: '/synthetic/project', workers: [{ worker: { worktree: '/synthetic/project', taskId: 'current-card' }, budget: {} }] } as SwarmRuntimeCheckpoint['engines'][number]]
+    await f.transition.retire(checkpoint)
+    await f.transition.resume({ provider: 'chatgpt' }, f.latest())
+    const handoff = vi.mocked(f.deps.start).mock.calls[0][1]
+    expect(handoff.instructions).toContain('Continue from the current Board and Git state')
+    expect(handoff.instructions).not.toContain('publicConversation is historical context')
+    expect(handoff.instructions).not.toContain('wait for newly delivered durable inbox input')
+    expect(f.deps.send).toHaveBeenCalledExactlyOnceWith('new-president', 'legacy queued')
+  })
   it('checkpoints settled work before retirement, transfers public context, and leaves ID-bound input with its durable owner', async () => {
     const f = rig(), checkpoint = await f.transition.drain()
     expect(f.log).toEqual(['engine-settled', 'actor-settled', 'git-checkpoint', 'engine-settled'])
@@ -106,6 +136,7 @@ describe('swarm provider handoff participant', () => {
     expect(handoff.instructions).toContain('Do not blindly replay old instructions')
     expect(handoff.instructions).toContain('latest-reviewed-head')
     expect(handoff.instructions).toContain('known-action')
+    expect(handoff.instructions).toContain('wait for newly delivered durable inbox input')
     expect(f.latest().actors[0].launch?.reviewed).toEqual({ operationId: id, note: 'Owner inspected Git and the resulting files.' })
     await expect(f.transition.resume(profile, f.latest())).rejects.toThrow('without a provable live replacement')
     expect(f.deps.start).toHaveBeenCalledTimes(2)
