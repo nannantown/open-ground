@@ -813,8 +813,9 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   'src/lib/server/swarmOrchestrator.ts': {
     tier: 'runtime-dispatched',
     why: 'The engine. Every worker-reaching path branches on the id it was given (sdkId ? endSdk : endTerminal) or goes through workerKey; the raw pool calls that remain are the pty arms.',
+    // Manager discovery now delegates the PTY activity read to
+    // managerDeskForSession, shared with the SDK/provider-aware target resolver.
     ptyFns: [
-      'claudeSessionActivity',
       'getTerminal',
       'getTerminalScreen',
       'killTerminal',

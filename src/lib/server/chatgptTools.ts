@@ -23,6 +23,18 @@ export interface ChatGptHostToolOptions {
 }
 const MAX_FILE_BYTES = 1024 * 1024
 const MAX_OUTPUT_BYTES = 128 * 1024
+const PROCESS_STOP_GRACE_MS = 250
+const OUTPUT_CLOSE_GRACE_MS = 250
+/** A tool may have acted, but its process/output lifecycle was not confirmed.
+ * The Responses adapter must leave its call unresolved for owner recovery,
+ * rather than returning an ordinary failed-tool receipt or retrying it. */
+export class ChatGptHostOutcomeUncertainError extends Error {
+  readonly code = 'host_outcome_uncertain'
+  constructor(readonly cause?: Error) {
+    super('ChatGPT host command process-group termination and output closure could not both be confirmed. Its effects are unconfirmed; inspect the actual work before continuing and do not automatically repeat the command.')
+    this.name = 'ChatGptHostOutcomeUncertainError'
+  }
+}
 const stopped = () => new DOMException('ChatGPT host tool stopped', 'AbortError')
 const checkAbort = (signal: AbortSignal): void => { if (signal.aborted) throw stopped() }
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -156,49 +168,89 @@ const runProtectedProcess = async (options: HostProcessOptions): Promise<{ stdou
     let stderr = ''
     let bytes = 0
     let failure: Error | null = null
+    let inspectionFailure: Error | undefined
     let killTimer: ReturnType<typeof setTimeout> | undefined
+    let closeTimer: ReturnType<typeof setTimeout> | undefined
+    let groupPollTimer: ReturnType<typeof setTimeout> | undefined
+    let stopping = false
     let closed = false
-    let killed = false
+    let groupGone = false
     let resultCode: number | null = null
     let settled = false
     let remainingProcessesStopped = false
-    const finish = () => {
-      if (settled || !closed || !killed) return
-      settled = true
-      if (child.pid) liveHostGroups.delete(child.pid)
+    const clearWaits = () => {
       clearTimeout(timer)
       clearTimeout(killTimer)
+      clearTimeout(closeTimer)
+      clearTimeout(groupPollTimer)
       options.signal.removeEventListener('abort', onAbort)
+    }
+    const finish = () => {
+      if (settled || !closed || !groupGone) return
+      settled = true
+      if (child.pid) liveHostGroups.delete(child.pid)
+      clearWaits()
       if (failure) reject(failure)
       else resolveResult({ stdout, stderr, exitCode: resultCode, ...(remainingProcessesStopped ? { remainingProcessesStopped: true } : {}) })
     }
     const groupSignal = (signal: NodeJS.Signals) => {
-      if (!child.pid) return
+      if (!child.pid || groupGone) return
       try { process.kill(-child.pid, signal) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') failure ??= error as Error }
     }
     const groupAlive = (): boolean => {
+      // Once this group is gone, never signal/probe a subsequently reused ID.
+      if (groupGone) return false
       if (!child.pid) return false
       try { process.kill(-child.pid, 0); return true } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false
-        failure ??= error as Error
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') { groupGone = true; return false }
+        // A probe can briefly return EPERM while macOS is reaping a group.
+        // This is not proof of command failure or of group disappearance.
+        inspectionFailure = error as Error
         return true
       }
     }
+    const waitForCompletion = () => {
+      if (closeTimer !== undefined) return
+      const inspect = () => {
+        if (settled) return
+        if (!groupAlive() && closed) { finish(); return }
+        groupPollTimer = setTimeout(inspect, 10)
+      }
+      closeTimer = setTimeout(() => {
+        if (settled) return
+        if (!groupAlive() && closed) { finish(); return }
+        settled = true
+        clearWaits()
+        // A detached descendant can hold inherited pipes after the original
+        // process group is gone. Destroying our pipe readers releases the
+        // local wait; it does NOT prove that descendant or its effects ended.
+        if (child.pid && groupGone) liveHostGroups.delete(child.pid)
+        child.stdin?.destroy()
+        child.stdout?.destroy()
+        child.stderr?.destroy()
+        reject(new ChatGptHostOutcomeUncertainError(failure ?? inspectionFailure))
+      }, OUTPUT_CLOSE_GRACE_MS)
+      inspect()
+    }
     const finishGroup = () => {
+      if (stopping) return
+      stopping = true
       groupSignal('SIGTERM')
       killTimer = setTimeout(() => {
         if (groupAlive()) groupSignal('SIGKILL')
-        killed = true
-        finish()
-      }, 250)
+        // Sending SIGKILL is not evidence that every child has exited yet.
+        // Confirm group disappearance independently of the parent's close.
+        waitForCompletion()
+      }, PROCESS_STOP_GRACE_MS)
     }
     const terminate = (error: Error) => {
-      if (failure) return
-      failure = error
+      if (settled) return
+      failure ??= error
       finishGroup()
     }
     const onAbort = () => terminate(stopped())
     const append = (chunk: string, which: 'stdout' | 'stderr') => {
+      if (settled) return
       bytes += Buffer.byteLength(chunk)
       if (bytes > (options.maxOutputBytes ?? MAX_OUTPUT_BYTES)) { terminate(new Error('ChatGPT host output exceeded its limit; narrow the operation')); return }
       if (which === 'stdout') stdout += chunk
@@ -208,15 +260,33 @@ const runProtectedProcess = async (options: HostProcessOptions): Promise<{ stdou
     child.stderr!.setEncoding('utf8')
     child.stdout!.on('data', (chunk: string) => append(chunk, 'stdout'))
     child.stderr!.on('data', (chunk: string) => append(chunk, 'stderr'))
-    child.once('error', (error) => { failure ??= error; closed = true; killed = true; finish() })
+    child.once('error', (error) => {
+      failure ??= error
+      if (!child.pid) { closed = true; groupGone = true; finish() }
+      else terminate(error)
+    })
+    child.once('exit', (code) => {
+      resultCode = code
+      if (settled || stopping) return
+      // Node's `close` waits for every inherited stdout/stderr descriptor,
+      // including descriptors held by a detached child outside this group.
+      // Begin foreground cleanup on process exit, not on eventual pipe close.
+      if (groupAlive()) { remainingProcessesStopped = true; finishGroup() }
+      else waitForCompletion()
+    })
     child.once('close', (code) => {
       resultCode = code
       closed = true
+      if (settled) {
+        if (child.pid && !groupAlive()) liveHostGroups.delete(child.pid)
+        return
+      }
       // A script may leave children behind even though its shell exited zero.
       // Every tool invocation is foreground-only: settle only after its group
       // has been stopped, including on the successful-parent path.
-      if (!failure && groupAlive()) { remainingProcessesStopped = true; finishGroup() }
-      else if (!failure) killed = true
+      if (!stopping) {
+        if (groupAlive()) { remainingProcessesStopped = true; finishGroup() }
+      } else groupAlive() // Observe a completed SIGTERM before escalating it.
       finish()
     })
     options.signal.addEventListener('abort', onAbort, { once: true })

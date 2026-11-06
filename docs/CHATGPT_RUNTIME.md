@@ -103,7 +103,13 @@ no shell requirement. This is separate from the optional worktree-sandbox experi
 
 Commands have bounded output and deadlines. Interrupts, normal completion and
 server shutdown during app quit or update reap remaining process-group members.
-There is no persistent shell input channel.
+Process exit and stdout/stderr closure are checked separately: a detached child
+can keep a pipe open after the original group is gone. Cleanup uses bounded
+SIGTERM/SIGKILL and drain waits. If both group disappearance and output closure
+cannot be confirmed, the tool returns a typed uncertain outcome, leaves its
+saved call unresolved and holds recovery for inspection instead of reporting
+success, retrying the command or waiting forever. There is no persistent shell
+input channel.
 The existing worktree occupancy and cleanup gates remain authoritative.
 Independent review uses a fresh context on the same account, model and reasoning
 setting. Its only tools are bounded project reads and fixed read-only Git
@@ -113,8 +119,13 @@ it cannot delegate again, write files or use the network through host tools.
 ## Limits
 
 - Automatic host tools currently require macOS. No unprotected Windows fallback.
-- Conversation size and tool-round limits fail visibly and preserve history.
-  Native `/compact` is not emulated by sending it as ordinary user text.
+- Persistent worker, commander and president turns checkpoint after each batch
+  of 32 response/tool exchanges, then continue the same accepted turn using
+  durable results. A checkpoint neither replays tools nor settles the owner input.
+  Authorization, account identity, interruption and quota checks still apply.
+  Short-lived independent reviewers retain their hard round limit.
+- Conversation size limits still fail visibly and preserve history. Native
+  `/compact` is not emulated by sending it as ordinary user text.
 - New admission follows the effective profile. An accepted turn keeps its
   immutable launch profile during a requested switch. Logout, work mode and
   account changes are checked again before requests and host actions.
@@ -161,3 +172,31 @@ controls require a fresh sealed-v2 capability handshake and bind stop to the
 conversation, epoch and turn observed when tapped. Older clients keep their
 existing protocol; new guarantees are not claimed for legacy plaintext control.
 Physical-device audio/network behavior requires its own real-device verification.
+
+## Long work and commander delivery verification — 2026-11-06
+
+The stopping investigation found a worker history ending at exactly 32 exchanges
+and commander nudges reading the Claude session slot while ChatGPT was selected.
+Commander presence, delivery, ready notifications and recycling now resolve one
+unique live handle for the effective provider and project. A stale saved slot may
+resolve to one live orphan; ambiguous or stopping candidates are held, and a
+profile or handle change during an await revokes delivery. Input echoes do not
+become proof of useful work.
+
+Offline regression tests exercise 35 and 65 tool exchanges with persistent
+history, one accepted input, one final settlement, exact-once tool execution and
+cumulative usage. Fault tests cover interrupt, owner/account replacement, failed
+checkpoint persistence, plan limits and unresolved process outcomes. Process
+lifecycle tests include a real disposable detached pipe holder under the same
+credential sandbox; manager delivery tests use the real provider session store
+and pool boundary. No paid inference or API-key fallback is used by these tests.
+
+The same actual query adapter and protected shell tools passed an offline
+65-action acceptance under the installed signed Electron 31.7.7 / Node 20.18.0:
+66 synthetic response streams, 65 real foreground scratch commands in order,
+checkpoints at 32/64, and one final input settlement. The production CJS server
+bundle also booted and served its SPA from an isolated temporary home in that
+runtime. A separate real process acceptance confirmed normal exit, confirmed
+deadline failure and bounded uncertain outcome for an escaped pipe holder,
+including cleanup of only the fixture's own child. No installed bundle or live
+project was modified for these checks.

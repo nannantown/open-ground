@@ -7527,6 +7527,7 @@ describe('defaultNotifyManagerReady — the non-destructive gate', () => {
    *  registry entry, no home, no PTY pool — the gate is what is under test. */
   const noticeDeps = (screen: string | null, writes: { id: string; data: string }[]) => ({
     sessions: async () => ({ manager: { sessionId: 'sess-1', cwd: '/repo', updatedAt: 'x' } }),
+    terminal: () => ({ cwd: '/repo', agentSessionId: 'sess-1', deskLabel: '司令官' }),
     activity: () => ({ live: true, lastOutputAt: 1, terminalId: 'tty-1' }),
     getScreen: () => screen,
     write: (id: string, data: string) => {

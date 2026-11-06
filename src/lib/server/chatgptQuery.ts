@@ -138,7 +138,13 @@ export const createChatGptQuery = (defaults: ChatGptQueryDefaults = {}): ChatGpt
             const text = inputText(message)
             if (role === 'supply' && options.persist !== false) await appendSupplyTranscript(conversation.id, 'user', text)
             try {
-              const answer = await conversation.run(text, { onEvent: (event) => { if (event.kind === 'text') onPublicText?.(event.text); queue.push(event) } })
+              const answer = await conversation.run(text, {
+                onEvent: (event) => { if (event.kind === 'text') onPublicText?.(event.text); queue.push(event) },
+                // A role can span many bounded batches. The public transcript
+                // is durable here, but the accepted owner turn remains open
+                // until the model actually finishes it below.
+                onCheckpoint: persistPublic,
+              })
               if (role === 'supply' && options.persist !== false) await appendSupplyTranscript(conversation.id, 'assistant', answer.text)
               await persistPublic()
               await onTurnSettled?.()

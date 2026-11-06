@@ -28,9 +28,13 @@
   (independent subscription OAuth, no API-key fallback), `chatgptAccess.ts`
   (signed-in owner role only; local unlock and general opt-in do not qualify), `chatgptResponses.ts`
   (account-bound streaming/tool loop; onText deltas are separate from complete
-  SDK text blocks, so the seat's 80-frame tail retains prose), `chatgptTools.ts` (guarded host tools and
-  mandatory credential sandbox and server-exit group reaper; regression
-  `chatgptShutdown.test.ts`), `chatgptQuery.ts` (role skills and pool adapter),
+  SDK text blocks, so the seat's 80-frame tail retains prose; persistent roles
+  checkpoint confirmed tools every 32 exchanges without settling/replaying their
+  accepted turn), `chatgptTools.ts` (guarded host tools, mandatory credential
+  sandbox, bounded process/output cleanup and server-exit group reaper;
+  regressions `chatgptShutdown.test.ts`, `chatgptToolsLifecycle.test.ts`),
+  `chatgptQuery.ts` (role skills and pool adapter; continuation and safe-stop
+  regressions `chatgptContinuation.test.ts`, `chatgptCheckpointSafety.test.ts`),
   `chatgptReview.ts` (independent read-only review, fixed Git and parent abort),
   `chatgptRuntime.ts` / `chatgptQuota.ts` (provider and quota boundaries),
   `chatgptAssistant.ts` (existing assistant proposal/read tools),
@@ -41,7 +45,10 @@
   `AssistantPick.tsx`. Provider settings use the dedicated preference setter;
   generic Settings autosaves cannot overwrite them. `swarmSupplyRuntime.ts`
   unifies president delivery/presence across PTY and SDK; phone delivery reads
-  ChatGPT's own append-only transcript. Claude remains the default provider.
+  ChatGPT's own append-only transcript. `swarmOrchestrator.ts` resolves one live
+  commander handle from the effective provider for presence, nudges, ready
+  notifications and recycling; ambiguity and profile/handle changes hold delivery
+  (`swarmManagerDelivery.test.ts`). Claude remains the default provider.
   `assistantAccess.ts` shares the legacy owner/local assistant permission between
   phone routes and the `experiments.assistantEligible` client capability;
   ChatGPT controls require the separate real-owner `experiments.eligible`.

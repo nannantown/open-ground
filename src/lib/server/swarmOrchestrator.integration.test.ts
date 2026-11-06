@@ -895,6 +895,7 @@ describe('runIntegratePass — RESURRECTION reflex, REAL manager heartbeat (受�
       // what this test drives (present-and-beating → died → resurrected).
       managerPresence: async (p, now) =>
         defaultManagerPresence(p, now, {
+          terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
           activity: () => ({
             live: deskLive,
             lastOutputAt: deskPaintAt,
@@ -964,12 +965,14 @@ describe('runIntegratePass — RESURRECTION reflex, REAL manager heartbeat (受�
     deskPaintAt = null
     expect(
       await defaultManagerPresence(proj, now, {
+        terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
         activity: () => ({ live: true, lastOutputAt: null, terminalId: 'pty-manager' }),
       }),
     ).toBe('idle')
     // …and one paint is enough to make it unambiguously 'active' again.
     expect(
       await defaultManagerPresence(proj, now, {
+        terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
         activity: () => ({ live: true, lastOutputAt: now - 30_000, terminalId: 'pty-manager' }),
       }),
     ).toBe('active')
@@ -999,6 +1002,7 @@ describe('defaultManagerPresence — the echo discount (echoUntil) is honoured',
     //     budget empty (§7-10) and the resurrection guard fire (§7-12).
     expect(
       await defaultManagerPresence(proj, now, {
+        terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
         activity: () => ({ live: true, lastOutputAt: wroteAt, terminalId: 'pty-manager' }),
         echoUntil,
       }),
@@ -1008,6 +1012,7 @@ describe('defaultManagerPresence — the echo discount (echoUntil) is honoured',
     //     the discount would gag a desk that genuinely answered.
     expect(
       await defaultManagerPresence(proj, now, {
+        terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
         activity: () => ({ live: true, lastOutputAt: echoUntil + 1, terminalId: 'pty-manager' }),
         echoUntil,
       }),
@@ -1016,6 +1021,7 @@ describe('defaultManagerPresence — the echo discount (echoUntil) is honoured',
     // (c) With nothing of ours to discount, that same early paint counts as it always did.
     expect(
       await defaultManagerPresence(proj, now, {
+        terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
         activity: () => ({ live: true, lastOutputAt: wroteAt, terminalId: 'pty-manager' }),
         echoUntil: 0,
       }),
@@ -1069,6 +1075,7 @@ describe('defaultManagerDeliveryAt — sub-agent transcripts count as work (the 
     await touch(sessionJsonlPath(proj, SID), t - 40 * 60_000)
     await touch(join(sessionSubagentsDir(proj, SID), 'agent-abc123.jsonl'), t - 60_000)
     const at = await defaultManagerDeliveryAt(proj, {
+      terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
       activity: () => ({ live: true, lastOutputAt: t, terminalId: 'pty-manager' }),
     })
     expect(at).not.toBeNull()
@@ -1088,12 +1095,14 @@ describe('defaultManagerDeliveryAt — sub-agent transcripts count as work (the 
     // Nothing written anywhere ⇒ no evidence ⇒ null (the fail-open: never "stalled").
     expect(
       await defaultManagerDeliveryAt(proj, {
+        terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
         activity: () => ({ live: true, lastOutputAt: t, terminalId: 'pty-manager' }),
       }),
     ).toBeNull()
     // A beat alone still answers — the channel is not dropped, only joined by the others.
     await writeManagerHeartbeat(proj, { phase: 'merge' }, t)
     const at = await defaultManagerDeliveryAt(proj, {
+      terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
       activity: () => ({ live: true, lastOutputAt: t, terminalId: 'pty-manager' }),
     })
     expect(Math.abs(at! - t)).toBeLessThan(1500)
@@ -1110,6 +1119,7 @@ describe('defaultManagerDeliveryAt — sub-agent transcripts count as work (the 
     await touch(sessionJsonlPath(proj, SID), spokeAt)
     await touch(join(sessionSubagentsDir(proj, SID), 'agent-abc123.jsonl'), spokeAt)
     const at = await defaultManagerDeliveryAt(proj, {
+      terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
       activity: () => ({ live: true, lastOutputAt: Date.parse('2026-07-22T11:11:00Z'), terminalId: 'p' }),
     })
     expect(Math.abs(at! - spokeAt)).toBeLessThan(1500)
@@ -1397,18 +1407,21 @@ describe('defaultManagerPresence — a never-written heartbeat is not evidence o
     const now = 1_700_000_000_000
     expect(
       await defaultManagerPresence(proj, now, {
+        terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
         activity: () => ({ live: true, lastOutputAt: null, terminalId: 'pty-manager' }),
       }),
     ).toBe('idle')
     // A desk with no beat but REAL recent paint is still unambiguously working.
     expect(
       await defaultManagerPresence(proj, now, {
+        terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
         activity: () => ({ live: true, lastOutputAt: now - 30_000, terminalId: 'pty-manager' }),
       }),
     ).toBe('active')
     // …and with no PTY at all it is still 'absent' (the spawn path is unchanged).
     expect(
       await defaultManagerPresence(proj, now, {
+        terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
         activity: () => ({ live: false, lastOutputAt: null, terminalId: null }),
       }),
     ).toBe('absent')
@@ -1437,6 +1450,7 @@ describe('defaultNudgeManager — the live-desk poke clears pending input first'
       sleep: async (ms) => {
         waits.push(ms)
       },
+      terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
       activity: () => ({ live: true, lastOutputAt: null, terminalId: 'pty-manager' }),
     })
     expect(ok).toBe(true)
@@ -1460,6 +1474,7 @@ describe('defaultNudgeManager — the live-desk poke clears pending input first'
       sleep: async () => {
         slept = true
       },
+      terminal: () => ({ cwd: proj, agentSessionId: 'manager-session-uuid', deskLabel: '司令官' }),
       activity: () => ({ live: true, lastOutputAt: null, terminalId: 'pty-manager' }),
     })
     expect(ok).toBe(false)

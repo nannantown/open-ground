@@ -61,7 +61,7 @@
 // and the path is a registered project.
 
 import { runtimeSpawnBlock, selectedRuntime, swarmRunPreflight } from './chatgptRuntime'
-import { runtimeAdmissionBlocked } from './runtimeTransitionStore'
+import { getRuntimeTransition, runtimeAdmissionBlocked } from './runtimeTransitionStore'
 import { hasCompletionConditions, isDispatchableCard } from '@/lib/dispatchGate'
 import { observeBoardProgress } from './supplyProgress'
 import { kickCommanderQuestionSweep } from './commanderQuestions'
@@ -79,7 +79,6 @@ import { atomicWriteJson } from './atomicWrite'
 import { noticeDeliverable } from './deskDeliverable'
 import { openGroundHome } from './paths'
 import {
-  claudeSessionActivity,
   type ClaudeSessionActivity,
   getTerminal,
   getTerminalScreen,
@@ -239,6 +238,7 @@ import {
   sayToManagerDesk,
 } from './swarmManagerRuntime'
 import type { ManagerDeskHandle, ManagerRuntimeKind } from './swarmManagerRuntime'
+import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
 import { spawnSwarmSupply } from './swarmSupply'
 import { listLiveSupplyDesks } from './swarmSupplyRuntime'
 import { isGitRepoRoot, isUnderGitRepo } from './gitRepoGuard'
@@ -4170,61 +4170,94 @@ export const sessionBackgroundTaskAt = async (cwd: string, sessionId: string): P
   return newest
 }
 
-/** WHICH desk is the engine talking about, and when did it last paint? The resolution
- *  {@link defaultManagerPresence} and {@link defaultManagerDeliveryAt} must agree on —
- *  extracted so the two probes can never judge DIFFERENT desks (the orphan fallback below
- *  is subtle enough that a second hand-rolled copy would drift).
- *
- *  null ⇒ there is no desk anywhere (presence's `'absent'`). Otherwise the desk's own
- *  cwd + session id + newest paint — the ORPHAN's when the store's record is stale, since
- *  its session id and this project's path are what name ITS transcript, and judging the
- *  desk that exists by the activity of one that does not is precisely the 2026-07-19 bug.
- *  Throws only what its callers already catch (a torn session store). */
-const resolveManagerDesk = async (
-  projectPath: string,
-  deps: {
-    activity?: (agentSessionId: string) => ClaudeSessionActivity
-    liveDesks?: (cwd: string, deskLabel: string) => OwnerDeskTerminal[]
-    managerDesks?: typeof listManagerDesks
-  },
-): Promise<{ cwd: string; sessionId: string; paintedAt: number } | null> => {
-  const rec = (await readSwarmSessions(projectPath)).manager
-  const pty = rec
-    ? (deps.activity ?? claudeSessionActivity)(rec.sessionId)
-    : { live: false, lastOutputAt: null, terminalId: null }
-  // The record's desk is gone (or there is no record). BEFORE concluding there is
-  // no desk, ASK THE POOL (2026-07-19: eleven desks, none of them dead).
-  //
-  // 'absent' drives the only spawn, so reading it wrongly is what builds a twin —
-  // and this probe used to read it from ONE slot in a store that every spawn
-  // overwrites and whose write failure is swallowed (swarmManager). A desk whose
-  // id has been overwritten keeps running while presence, asking only about the id
-  // on file, calls it absent forever: engine spawns a replacement, that one's id
-  // takes the slot, and the previous desk joins the pile. The desks were never
-  // dead — they were UNNAMED. This is the hole 03 §2.3 recorded on 2026-07-19
-  // (「登録されていない卓は presence から見えない」), closed here at its source.
-  //
-  // The pool cannot desynchronise from itself, so a labelled commander desk found
-  // there is proof a desk EXISTS — which is exactly and only what 'absent' claims
-  // the absence of. Reconciling the store is spawnSwarmManager's job (it holds the
-  // write path); presence stays a pure read and simply stops lying.
-  //
-  // BOTH POOLS since stage 3. An SDK commander is in no PTY pool at all, so a
-  // PTY-only sweep here would call a perfectly healthy desk 'absent' and ask for
-  // a replacement EVERY PASS — the eleven-desk incident reproduced exactly, this
-  // time by construction rather than by a store desync. `listManagerDesks` is the
-  // one place that knows where commander desks can live.
-  const orphan = pty.live
-    ? null
-    : ((deps.managerDesks ?? listManagerDesks)(projectPath, {
-        ...(deps.liveDesks ? { ptyDesks: deps.liveDesks } : {}),
-      })[0] ?? null)
-  if (!pty.live && !orphan) return null // no desk anywhere — the ONLY spawn trigger
-  return {
-    cwd: orphan ? projectPath : rec!.cwd,
-    sessionId: orphan ? (orphan.agentSessionId ?? '') : rec!.sessionId,
-    paintedAt: (orphan ? orphan.lastOutputAt : pty.lastOutputAt) ?? 0,
+type ManagerTerminalEvidence = Pick<NonNullable<ReturnType<typeof getTerminal>>, 'cwd' | 'agentSessionId' | 'deskLabel'>
+interface ManagerResolutionDeps {
+  activity?: (agentSessionId: string) => ClaudeSessionActivity
+  terminal?: (id: string) => ManagerTerminalEvidence | undefined
+  liveDesks?: (cwd: string, deskLabel: string) => OwnerDeskTerminal[]
+  managerDesks?: typeof listManagerDesks
+  sessions?: typeof readSwarmSessions
+  desk?: typeof managerDeskForSession
+}
+interface ManagerTarget {
+  desk: ManagerDeskHandle | null
+  occupied: boolean
+  admission: string
+}
+const managerAdmissionKey = (state: NonNullable<ReturnType<typeof getRuntimeTransition>>): string =>
+  JSON.stringify([state.revision, state.phase, state.effective])
+const managerAdmission = async () => {
+  const state = getRuntimeTransition('swarm')
+  if (state) return { provider: state.effective.provider, key: managerAdmissionKey(state) }
+  // Before the recovery journal exists, preserve the legacy Claude path and
+  // still honour a selected ChatGPT provider without reading the Claude slot.
+  const provider = await selectedRuntime('swarm')
+  return { provider, key: provider }
+}
+
+/** One target for presence, notices, nudges and recycling. A saved id is a
+ * hint; the live pool supplies occupancy. Never select an arbitrary first
+ * desk when more than one admitted conversation exists. */
+const resolveManagerTarget = async (projectPath: string, deps: ManagerResolutionDeps = {}): Promise<ManagerTarget> => {
+  const admission = await managerAdmission()
+  const stored = await (deps.sessions ?? readSwarmSessions)(projectPath)
+  const rec = admission.provider === 'chatgpt' ? stored.chatgpt?.manager : stored.manager
+  const poolDeps = { ...(deps.activity ? { activity: deps.activity } : {}), ...(deps.liveDesks ? { ptyDesks: deps.liveDesks } : {}) }
+  const candidates = (deps.managerDesks ?? listManagerDesks)(projectPath, poolDeps)
+  let named = rec && resolve(rec.cwd) === resolve(projectPath)
+    ? (deps.desk ?? managerDeskForSession)(rec.sessionId, projectPath, poolDeps) : null
+  if (named?.runtime === 'pty') {
+    // managerDeskForSession's legacy activity lookup supplies the requested
+    // cwd, so it cannot prove the actual terminal belongs to this project.
+    const member = candidates.some(candidate => candidate.runtime === 'pty' && candidate.handleId === named!.handleId &&
+      candidate.agentSessionId === rec?.sessionId && resolve(candidate.cwd) === resolve(projectPath))
+    const actual = member ? undefined : (deps.terminal ?? getTerminal)(named.handleId)
+    if (!member && (!actual || resolve(actual.cwd) !== resolve(projectPath) || actual.agentSessionId !== rec?.sessionId || actual.deskLabel !== MANAGER_DESK_LABEL)) named = null
   }
+  const desks = new Map<string, ManagerDeskHandle>()
+  let conflicting = false
+  for (const candidate of [...candidates, ...(named ? [named] : [])]) {
+    if (resolve(candidate.cwd) !== resolve(projectPath)) continue
+    const key = `${candidate.runtime}:${candidate.handleId}`
+    const previous = desks.get(key)
+    if (previous?.agentSessionId && candidate.agentSessionId && previous.agentSessionId !== candidate.agentSessionId) conflicting = true
+    desks.set(key, candidate.agentSessionId || !previous ? candidate : previous)
+  }
+  const live = Array.from(desks.values())
+  const admitted = live.filter(desk => desk.agentSessionId &&
+    (desk.agentSessionId.startsWith('chatgpt-') ? 'chatgpt' : 'claude') === admission.provider)
+  const eligible = admitted.filter(desk => {
+    if (desk.stopping || !desk.agentSessionId) return false
+    const provider = desk.agentSessionId.startsWith('chatgpt-') ? 'chatgpt' : 'claude'
+    const sdk = desk.runtime === 'sdk' ? getSdkSession(desk.handleId) : null
+    if (sdk && ((sdk.provider ?? 'claude') !== provider || sdk.agentSessionId !== desk.agentSessionId)) return false
+    return provider === admission.provider
+  })
+  const desk = !conflicting && !live.some(item => !item.agentSessionId) && admitted.length === 1 && eligible.length === 1 ? eligible[0] : null
+  return { desk, occupied: live.length > 0, admission: admission.key }
+}
+
+const managerTargetAdmitted = (target: ManagerTarget): boolean => {
+  const state = getRuntimeTransition('swarm')
+  return !runtimeAdmissionBlocked('swarm') && (!state || managerAdmissionKey(state) === target.admission)
+}
+
+/** Recheck the original handle and committed profile after awaits. A provider
+ * handoff may revoke admission, but must never redirect an existing message. */
+const managerTargetCurrent = async (projectPath: string, target: ManagerTarget, deps: ManagerResolutionDeps): Promise<boolean> => {
+  if (!managerTargetAdmitted(target) || !target.desk) return false
+  const current = await resolveManagerTarget(projectPath, deps)
+  return managerTargetAdmitted(target) && current.admission === target.admission &&
+    current.desk?.runtime === target.desk.runtime && current.desk.handleId === target.desk.handleId &&
+    current.desk.agentSessionId === target.desk.agentSessionId
+}
+
+const resolveManagerDesk = async (projectPath: string, deps: ManagerResolutionDeps): Promise<{
+  cwd: string; sessionId: string; paintedAt: number; unresolved?: boolean
+} | null> => {
+  const target = await resolveManagerTarget(projectPath, deps)
+  if (!target.desk) return target.occupied ? { cwd: projectPath, sessionId: '', paintedAt: 0, unresolved: true } : null
+  return { cwd: target.desk.cwd, sessionId: target.desk.agentSessionId!, paintedAt: target.desk.lastOutputAt ?? 0 }
 }
 
 /** WHEN did the commander last demonstrably DO something — the DELIVERY clock the stall
@@ -4255,12 +4288,14 @@ export const defaultManagerDeliveryAt = async (
   projectPath: string,
   deps: {
     activity?: (agentSessionId: string) => ClaudeSessionActivity
+    terminal?: (id: string) => ManagerTerminalEvidence | undefined
     liveDesks?: (cwd: string, deskLabel: string) => OwnerDeskTerminal[]
   } = {},
 ): Promise<number | null> => {
   try {
     const beatAt = await readManagerHeartbeatAt(projectPath)
     const desk = await resolveManagerDesk(projectPath, deps)
+    if (desk?.unresolved) return null
     const sid = desk?.sessionId ?? ''
     const [parentAt, subAt] = sid
       ? await Promise.all([
@@ -4323,6 +4358,7 @@ export const defaultManagerPresence = async (
   // genuinely answers the nudge still reads 'active' and still refunds its budget.
   deps: {
     activity?: (agentSessionId: string) => ClaudeSessionActivity
+    terminal?: (id: string) => ManagerTerminalEvidence | undefined
     echoUntil?: number
     /** The POOL's live-commander-desk lookup (injected for tests) — the fallback
      *  authority when the session store does not name a desk that exists. */
@@ -4334,6 +4370,7 @@ export const defaultManagerPresence = async (
     // the delivery probe so the two can never judge different desks. See resolveManagerDesk.
     const desk = await resolveManagerDesk(projectPath, deps)
     if (!desk) return 'absent' // no desk anywhere — the ONLY spawn trigger
+    if (desk.unresolved) return 'idle' // occupied, but unsafe to address or spawn beside
     // A desk EXISTS. Is anything moving? Any ONE positive signal is enough — these are
     // alternative evidence of the same fact, never requirements to be ANDed (the AND is
     // precisely what broke). The heartbeat keeps its own documented rule, including the
@@ -4418,6 +4455,7 @@ export const defaultNudgeManager = async (
     write?: typeof writeInput
     sleep?: (ms: number) => Promise<void>
     activity?: (agentSessionId: string) => ClaudeSessionActivity
+    terminal?: (id: string) => ManagerTerminalEvidence | undefined
     desk?: typeof managerDeskForSession
     say?: typeof sayToManagerDesk
   },
@@ -4425,12 +4463,10 @@ export const defaultNudgeManager = async (
   const write = deps?.write ?? writeInput
   const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   try {
-    const rec = (await readSwarmSessions(projectPath)).manager
-    if (!rec) return false
-    const desk = (deps?.desk ?? managerDeskForSession)(rec.sessionId, projectPath, {
-      ...(deps?.activity ? { activity: deps.activity } : {}),
-    })
-    if (!desk) return false
+    if (runtimeAdmissionBlocked('swarm')) return false
+    const target = await resolveManagerTarget(projectPath, deps)
+    const desk = target.desk
+    if (!desk || !await managerTargetCurrent(projectPath, target, deps ?? {}) || !managerTargetAdmitted(target)) return false
     // An SDK desk has NO screen to clear and no draft to protect, so the ESC
     // (and the pause that lets it land) is skipped entirely rather than sent
     // into a stream that has no notion of it. The push is queued by the CLI even
@@ -4441,6 +4477,7 @@ export const defaultNudgeManager = async (
     }
     if (!write(desk.handleId, '\x1b')) return false
     await sleep(STALL_ESCALATE_DELAY_MS)
+    if (!await managerTargetCurrent(projectPath, target, deps ?? {}) || !managerTargetAdmitted(target)) return false
     return write(desk.handleId, `${MANAGER_STALL_NUDGE_TEXT}\r`)
   } catch {
     return false
@@ -4535,6 +4572,7 @@ export const defaultNotifyManagerReady = async (
   deps?: {
     write?: typeof writeInput
     activity?: (agentSessionId: string) => ClaudeSessionActivity
+    terminal?: (id: string) => ManagerTerminalEvidence | undefined
     getScreen?: (terminalId: string) => string | null
     sessions?: typeof readSwarmSessions
     desk?: typeof managerDeskForSession
@@ -4543,16 +4581,10 @@ export const defaultNotifyManagerReady = async (
 ): Promise<boolean> => {
   const getScreen = deps?.getScreen ?? getTerminalScreen
   try {
-    // The RECORD's desk, deliberately — the same lookup defaultNudgeManager uses, so the
-    // two writers can never type into different desks. (An orphan desk the pool knows but
-    // the store does not is visible to `presence` and not to either writer; closing that
-    // is a change to the nudge path too, and belongs with it rather than here.)
-    const rec = (await (deps?.sessions ?? readSwarmSessions)(projectPath)).manager
-    if (!rec) return false
-    const desk = (deps?.desk ?? managerDeskForSession)(rec.sessionId, projectPath, {
-      ...(deps?.activity ? { activity: deps.activity } : {}),
-    })
-    if (!desk) return false
+    if (runtimeAdmissionBlocked('swarm')) return false
+    const target = await resolveManagerTarget(projectPath, deps)
+    const desk = target.desk
+    if (!desk || !await managerTargetCurrent(projectPath, target, deps ?? {}) || !managerTargetAdmitted(target)) return false
     // `noticeDeliverable` is handed to the seam rather than applied here, so the
     // PTY arm keeps its two refusals byte-for-byte while the SDK arm — which has
     // no screen and no draft that a notice could clobber — simply does not
@@ -4620,9 +4652,7 @@ const defaultWakeManager = async (
  *  resolution `defaultNudgeManager` uses, so "who do we recycle" can never disagree
  *  with "who did we just fail to poke". Null ⇒ no desk we can name. Never throws. */
 const resolveManagerDeskHandle = async (projectPath: string): Promise<ManagerDeskHandle | null> => {
-  const rec = (await readSwarmSessions(projectPath)).manager
-  const named = rec ? managerDeskForSession(rec.sessionId, projectPath) : null
-  return named ?? listManagerDesks(projectPath)[0] ?? null
+  return (await resolveManagerTarget(projectPath)).desk
 }
 
 /** {@link IntegrationDeps.managerDeskRuntime} — which runtime carries the desk.
@@ -4652,8 +4682,10 @@ const defaultManagerDeskRuntime = async (projectPath: string): Promise<ManagerRu
  *  unwind), so the absent-arm's next pass sees the desk go and seats a fresh one through
  *  the ordinary wake path — no second spawn road. */
 const defaultRecycleManagerDesk = async (projectPath: string): Promise<boolean> => {
-  const desk = await resolveManagerDeskHandle(projectPath)
-  if (!desk || desk.runtime !== 'sdk') return false
+  if (runtimeAdmissionBlocked('swarm')) return false
+  const target = await resolveManagerTarget(projectPath)
+  const desk = target.desk
+  if (!desk || desk.runtime !== 'sdk' || !await managerTargetCurrent(projectPath, target, {}) || !managerTargetAdmitted(target)) return false
   return terminateSdkSession(desk.handleId)
 }
 

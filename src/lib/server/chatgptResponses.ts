@@ -8,6 +8,7 @@ import { getChatGptAccessToken, getChatGptAccountKey } from './chatgptAuth'
 import { ChatGptQuotaError, markChatGptRateLimited } from './chatgptQuota'
 import type { SdkEvent, SdkTurnUsage } from './sdkEvents'
 import { atomicWriteJson } from './atomicWrite'
+import { ChatGptHostOutcomeUncertainError } from './chatgptTools'
 
 export interface ChatGptTool {
   name: string
@@ -41,6 +42,10 @@ export interface ChatGptRunOptions {
   signal?: AbortSignal
   onText?: (delta: string) => void
   onEvent?: (event: SdkEvent) => void
+  /** A persistent actor may continue the SAME accepted turn after a bounded
+   * batch of confirmed tools. No turn_end/input settlement happens here.
+   * Without this host callback, short-lived reviewers retain their hard cap. */
+  onCheckpoint?: () => Promise<void>
 }
 export interface ChatGptRunResult { text: string; model: string; usage: SdkTurnUsage }
 export class ChatGptResponseError extends Error {
@@ -286,6 +291,7 @@ export class ChatGptConversation {
   constructor(private readonly options: ChatGptConversationOptions) {
     this.id = options.id ?? `chatgpt-${randomUUID()}`
     if (!validId(this.id)) throw new Error('Invalid ChatGPT conversation id')
+    if (options.maxToolRounds !== undefined && (!Number.isSafeInteger(options.maxToolRounds) || options.maxToolRounds < 1)) throw new Error('Invalid ChatGPT tool round budget')
     this.tools = new Map(options.tools.map((tool) => [tool.name, tool]))
     if (this.tools.size !== options.tools.length || options.tools.some((tool) => !/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(tool.name))) throw new Error('Invalid or duplicate ChatGPT tool name')
   }
@@ -348,8 +354,23 @@ export class ChatGptConversation {
       this.checkSize(next)
       this.history = next
       await this.save()
-      for (let round = 0; round < (this.options.maxToolRounds ?? 32); round++) {
+      const batchLimit = this.options.maxToolRounds ?? 32
+      for (let round = 0; ; round++) {
         if (active.signal.aborted) throw abortError()
+        if (round === batchLimit) {
+          if (!run.onCheckpoint) throw new ChatGptResponseError('ChatGPT reached the tool-turn limit. Its history has been preserved.')
+          // All calls in the previous response have durable results. Yield to
+          // the owning actor without ending its input, replaying a call, or
+          // inventing a new user "Continue" message. Authorization/account
+          // checks below still gate the very next request, including after a
+          // provider switch or an owner interrupt at this checkpoint.
+          if (unresolvedTool(this.history)) throw new ChatGptUncertainActionError()
+          await this.save()
+          await run.onCheckpoint()
+          await new Promise<void>((resolve) => setImmediate(resolve))
+          if (active.signal.aborted) throw abortError()
+          round = 0
+        }
         await this.options.authorize?.()
         await this.verifyAccount()
         const token = await (this.options.accessToken ?? getChatGptAccessToken)()
@@ -474,6 +495,10 @@ export class ChatGptConversation {
           await this.verifyAccount()
           try { result = await this.tools.get(call.name)!.invoke(args, active.signal) } catch (error) {
             if (active.signal.aborted) throw abortError()
+            // A bounded process cleanup can finish without proof of its
+            // external effects. Keep the saved call unfinished; an ordinary
+            // tool-error receipt would authorize continuation/replay.
+            if (error instanceof ChatGptHostOutcomeUncertainError) throw error
             // A child Agent shares this plan. A usage wall stops the whole
             // turn, rather than buying a parent continuation to discuss it.
             if (error instanceof ChatGptQuotaError) {
@@ -495,7 +520,6 @@ export class ChatGptConversation {
           run.onEvent?.({ kind: 'tool_result', ok, head: typeof content === 'string' ? content.slice(0, 160) : '[image content]' })
         }
       }
-      throw new ChatGptResponseError('ChatGPT reached the tool-turn limit. Its history has been preserved.')
     } catch (error) {
       if (unresolvedTool(this.history)) this.closed = true
       if (error instanceof ChatGptQuotaError) { this.settlementRequired = true; run.onEvent?.({ kind: 'quota_refusal', raw: error.message }) }
