@@ -30,6 +30,7 @@ import { GROUND_SEEN_EVENT, groundLamp, type GroundLamp } from '@/lib/groundLamp
 import { setClientLockdown } from '@/lib/lockdownClient'
 import { FloatingAssistant } from '@/components/assistant/FloatingAssistant'
 import { autoLayout, findFreeSpot, frameLabelFor } from '@/lib/layout'
+import { automationFrame, createAutomationFrame } from '@/lib/automationFrame'
 import { GHOST_H, GHOST_W, PlacementGhost } from '@/components/canvas/PlacementGhost'
 import { useCanvasHistory } from '@/lib/useCanvasHistory'
 import { newId } from '@/lib/ids'
@@ -68,6 +69,9 @@ const FEEDBACK_SEEN_KEY = 'openground:feedbackSeenAt'
 // a light tour). Persisted in localStorage so it never reappears after the
 // user has made a choice.
 const ONBOARDED_KEY = 'openground:onboarded'
+type CanvasEditorIdentity = { ownerId: string | undefined; generation: number }
+const sameCanvasEditor = (a: CanvasEditorIdentity, b: CanvasEditorIdentity) =>
+  a.ownerId === b.ownerId && a.generation === b.generation
 const feedbackSeenKey = (sourceId: string | null) =>
   sourceId ? `${FEEDBACK_SEEN_KEY}:${sourceId}` : FEEDBACK_SEEN_KEY
 
@@ -284,6 +288,18 @@ export default function App() {
   // flush it before fetching, and must not clobber the local canvas with the
   // (older) server snapshot while it stays set.
   const pendingCanvasSave = useRef<CanvasState | null>(null)
+  const pendingCanvasIdentity = useRef<CanvasEditorIdentity | null>(null)
+  const canvasSaveInFlight = useRef<Promise<void> | null>(null)
+  const canvasIdentity = useRef<CanvasEditorIdentity>({ ownerId: authUser?.id, generation: 0 })
+  if (canvasIdentity.current.ownerId !== authUser?.id) canvasIdentity.current = { ownerId: authUser?.id, generation: canvasIdentity.current.generation + 1 }
+  const editingIdentity = canvasIdentity.current
+  const [canvasSaveState, setCanvasSaveState] = useState<'idle' | 'saving' | 'error' | 'conflict' | 'pending' | 'owner-changed'>('idle')
+  useEffect(() => {
+    if (pendingCanvasIdentity.current && !sameCanvasEditor(pendingCanvasIdentity.current, editingIdentity)) {
+      if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null }
+      setCanvasSaveState('owner-changed')
+    }
+  }, [editingIdentity])
 
   // Persist the pending canvas edit NOW, cancelling the debounce timer. On
   // success the marker clears only if no newer edit arrived while the POST was
@@ -295,14 +311,39 @@ export default function App() {
       clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
+    while (canvasSaveInFlight.current) await canvasSaveInFlight.current
     const pending = pendingCanvasSave.current
     if (!pending) return
-    try {
-      const res = await api.api.canvas.$post({ json: pending })
-      if (res.ok && pendingCanvasSave.current === pending) pendingCanvasSave.current = null
-    } catch {
-      // Kept pending — retried on the next flush (next edit's timer or load()).
+    const identity = pendingCanvasIdentity.current
+    if (!identity || !sameCanvasEditor(identity, canvasIdentity.current)) { setCanvasSaveState('owner-changed'); return }
+    const stillAuthored = () => sameCanvasEditor(identity, canvasIdentity.current)
+    const holdOldEditor = () => { if (pendingCanvasIdentity.current === identity) setCanvasSaveState('owner-changed') }
+    const save = async () => {
+      setCanvasSaveState('saving')
+      try {
+        const res = await api.api.canvas.$post({ json: pending }, { headers: identity.ownerId ? { 'X-OpenGround-Owner': identity.ownerId } : {} })
+        if (!stillAuthored()) { holdOldEditor(); return }
+        if (!res.ok) { setCanvasSaveState(res.status === 409 ? 'conflict' : 'error'); return }
+        const result = await res.json() as { canvas?: CanvasState; reconciliation?: string }
+        if (!stillAuthored()) { holdOldEditor(); return }
+        const savedRevision = result.canvas?.automation?.revision
+        // Later local drags retain their geometry and inherit only the revision
+        // just committed by this serialized request, never the old snapshot.
+        if (savedRevision !== undefined) {
+          const rebase = (state: CanvasState): CanvasState => state.automation &&
+            state.automation.revision === pending.automation?.revision
+            ? { ...state, automation: { ...state.automation, revision: savedRevision } } : state
+          if (pendingCanvasSave.current && pendingCanvasSave.current !== pending) pendingCanvasSave.current = rebase(pendingCanvasSave.current)
+          setCanvas((state) => state && stillAuthored() ? rebase(state) : state)
+        }
+        if (pendingCanvasSave.current === pending) pendingCanvasSave.current = result.reconciliation === 'pending' ? result.canvas ?? pending : null
+        if (!pendingCanvasSave.current) pendingCanvasIdentity.current = null
+        setCanvasSaveState(result.reconciliation === 'pending' ? 'pending' : 'idle')
+      } catch { if (stillAuthored()) setCanvasSaveState('error'); else holdOldEditor() }
     }
+    const task = save()
+    canvasSaveInFlight.current = task
+    try { await task } finally { if (canvasSaveInFlight.current === task) canvasSaveInFlight.current = null }
   }, [])
 
   const load = useCallback(async (): Promise<ProjectsResponse | null> => {
@@ -826,22 +867,30 @@ export default function App() {
 
   const scheduleSave = useCallback(
     (c: CanvasState) => {
+      if (!sameCanvasEditor(editingIdentity, canvasIdentity.current)) return
       pendingCanvasSave.current = c
       if (saveTimer.current) clearTimeout(saveTimer.current)
+      const priorAuthor = pendingCanvasIdentity.current
+      // Editing an old unsaved snapshot does not transfer its author to the
+      // current account. Sign back in and explicitly retry, or load the saved canvas.
+      const author = priorAuthor && !sameCanvasEditor(priorAuthor, editingIdentity) ? priorAuthor : editingIdentity
+      pendingCanvasIdentity.current = author
+      if (!sameCanvasEditor(author, canvasIdentity.current)) { saveTimer.current = null; setCanvasSaveState('owner-changed'); return }
       saveTimer.current = setTimeout(() => {
         saveTimer.current = null
         void flushCanvasSave()
       }, 400)
     },
-    [flushCanvasSave],
+    [flushCanvasSave, editingIdentity],
   )
 
   const onCanvasChange = useCallback(
     (c: CanvasState) => {
+      if (!sameCanvasEditor(editingIdentity, canvasIdentity.current)) return
       setCanvas(c)
       scheduleSave(c)
     },
-    [scheduleSave],
+    [scheduleSave, editingIdentity],
   )
 
   // Mutate the canvas from the freshest state — safe under rapid-fire updates
@@ -849,13 +898,13 @@ export default function App() {
   const mutateCanvas = useCallback(
     (fn: (c: CanvasState) => CanvasState) => {
       setCanvas((c) => {
-        if (!c) return c
+        if (!c || !sameCanvasEditor(editingIdentity, canvasIdentity.current)) return c
         const next = fn(c)
         if (next !== c) scheduleSave(next)
         return next
       })
     },
-    [scheduleSave],
+    [scheduleSave, editingIdentity],
   )
 
   const { undo, redo } = useCanvasHistory(canvas, onCanvasChange)
@@ -882,7 +931,10 @@ export default function App() {
     if (!canvas) return
     const clones = canvas.elements
       .filter((el) => selectedIds.includes(el.id))
-      .map((el) => ({ ...el, id: newId(), x: el.x + 28, y: el.y + 28 }))
+      .map((el) => {
+        const { groundRole: _role, ...ordinary } = el
+        return { ...ordinary, id: newId(), x: el.x + 28, y: el.y + 28 }
+      })
     if (!clones.length) return
     onCanvasChange({ ...canvas, elements: [...canvas.elements, ...clones] })
     setSelectedIds(clones.map((cl) => cl.id))
@@ -1375,6 +1427,19 @@ export default function App() {
         </div>
       )}
       <Toolbar
+        onAutomationFrame={ownerFeatures && authUser?.id ? () => {
+          const next = createAutomationFrame(canvas, newId(), t('toolbar.automationFrame'))
+          const frame = automationFrame(next)
+          if (!frame) return
+          const zoom = Math.min(1, Math.max(0.2, Math.min((window.innerWidth - 100) / (frame.width ?? 680), (window.innerHeight - 180) / (frame.height ?? 440))))
+          onCanvasChange({ ...next, viewport: {
+            x: window.innerWidth / 2 - (frame.x + (frame.width ?? 680) / 2) * zoom,
+            y: window.innerHeight / 2 - (frame.y + (frame.height ?? 440) / 2) * zoom, zoom,
+          } })
+          setSelectedIds([frame.id])
+        } : undefined}
+        automationFrameActive={!!automationFrame(canvas)}
+        automationFrameBusy={canvasSaveState === 'saving' || canvasSaveState === 'conflict' || canvasSaveState === 'owner-changed'}
         onSearch={() => setJumpOpen(true)}
         onNewProject={() => setNewProjectOpen(true)}
         onImport={importProject}
@@ -1400,6 +1465,35 @@ export default function App() {
         projectCount={visibleProjects.length}
         usage={<UsageHud />}
       />
+      {canvasSaveState !== 'idle' && (
+        <div role={canvasSaveState === 'error' || canvasSaveState === 'conflict' || canvasSaveState === 'owner-changed' ? 'alert' : 'status'} className="absolute bottom-5 right-5 z-30 flex max-w-[min(480px,calc(100vw-96px))] items-center gap-3 rounded-[3px] border border-line bg-bg-card px-3 py-2 text-meta text-ink-muted shadow-card">
+          <span>{t(canvasSaveState === 'saving' ? 'toolbar.canvasSaving' : canvasSaveState === 'owner-changed' ? 'toolbar.canvasOwnerChanged' : canvasSaveState === 'conflict' ? 'toolbar.canvasConflict' : canvasSaveState === 'pending' ? 'toolbar.canvasReconcilePending' : 'toolbar.canvasSaveError')}</span>
+          {(canvasSaveState === 'error' || canvasSaveState === 'pending' || canvasSaveState === 'owner-changed') && <button type="button" disabled={canvasSaveState === 'owner-changed' && pendingCanvasIdentity.current?.ownerId !== editingIdentity.ownerId} onClick={() => {
+            if (canvasSaveState === 'owner-changed') {
+              if (pendingCanvasIdentity.current?.ownerId !== canvasIdentity.current.ownerId) return
+              pendingCanvasIdentity.current = canvasIdentity.current
+            }
+            void flushCanvasSave()
+          }} className="shrink-0 rounded-sm px-2 py-1 text-ink transition-colors enabled:hover:bg-plane enabled:active:bg-line-soft enabled:active:text-accent-deeper disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">{t('toolbar.canvasRetry')}</button>}
+          {(canvasSaveState === 'conflict' || canvasSaveState === 'owner-changed') && <button type="button" onClick={() => { void (async () => {
+            const reloadingIdentity = canvasIdentity.current
+            const pendingAtReload = pendingCanvasSave.current
+            if (canvasSaveInFlight.current) await canvasSaveInFlight.current
+            if (pendingCanvasSave.current !== pendingAtReload || !sameCanvasEditor(reloadingIdentity, canvasIdentity.current)) return
+            if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null }
+            try {
+              const response = await api.api.canvas.$get()
+              if (!response.ok) return
+              const saved = await response.json() as CanvasState
+              if (pendingCanvasSave.current !== pendingAtReload || !sameCanvasEditor(reloadingIdentity, canvasIdentity.current)) return
+              pendingCanvasSave.current = null
+              pendingCanvasIdentity.current = null
+              setCanvas(saved)
+              setCanvasSaveState('idle')
+            } catch { /* The unsaved layout remains visible until a successful reload. */ }
+          })() }} className="shrink-0 rounded-sm px-2 py-1 text-ink transition-colors hover:bg-plane active:bg-line-soft active:text-accent-deeper focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">{t('toolbar.canvasReload')}</button>}
+        </div>
+      )}
       <ProjectPanel
         // One panel for both modes: `shared` (a folder-less collab project shared
         // WITH the user) flips ProjectPanel into the member body; otherwise the

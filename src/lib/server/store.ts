@@ -127,7 +127,7 @@ const readJsonWithHealth = async <T>(
 const readJson = async <T>(path: string, fallback: T): Promise<T> =>
   (await readJsonWithHealth(path, fallback)).value
 
-const writeJson = async (path: string, data: unknown) => {
+const writeJson = async (path: string, data: unknown, opts?: { mode?: number; fsync?: boolean }) => {
   await ensureOpenGroundHome()
   // GENERATIONAL BACKUP (2026-07-18 incident): copy the CURRENT content aside
   // before it is replaced, so the previous generation of settings.json /
@@ -139,7 +139,7 @@ const writeJson = async (path: string, data: unknown) => {
   // (its own invariant) — a failed backup logs and the save proceeds — so this
   // cannot turn a backup problem into a save problem.
   await snapshotBeforeWrite(path)
-  await atomicWriteJson(path, data)
+  await atomicWriteJson(path, data, opts)
 }
 
 /** `getSettings` plus WHY the values are what they are — see ConfigReadHealth.
@@ -677,7 +677,31 @@ export const isLockdownEnabled = async (): Promise<boolean> =>
   (await getSettings()).lockdownMode === true
 
 export const getCanvas = () => readJson<CanvasState>(canvasFile(), DEFAULT_CANVAS)
-export const setCanvas = (c: CanvasState) => writeJson(canvasFile(), c)
+/** Safety readers must distinguish an empty first install from damaged policy. */
+export const getCanvasWithHealth = () => readJsonWithHealth<CanvasState>(canvasFile(), DEFAULT_CANVAS)
+let canvasWrites: Promise<unknown> = Promise.resolve()
+/** Every Ground producer shares this read/modify/write lock. Reconciliation
+ * runs AFTER this promise resolves, never while the canvas lock is held. */
+export const mutateCanvas = (mutate: (current: CanvasState) => CanvasState | Promise<CanvasState>): Promise<CanvasState> => {
+  const task = canvasWrites.catch(() => {}).then(async () => {
+    const current = await getCanvasWithHealth()
+    if (current.health === 'unreadable') throw Object.assign(new Error('Ground canvas is unreadable.'), { status: 503 })
+    const next = await mutate(current.value)
+    if (next !== current.value) await writeJson(canvasFile(), next, { mode: 0o600, fsync: true })
+    return next
+  })
+  canvasWrites = task
+  return task
+}
+/** Full replacement is for trusted initialization/tests; production editors
+ * use mutateCanvas to avoid replacing newly saved execution authority. */
+export const setCanvas = async (c: CanvasState): Promise<void> => { await mutateCanvas(() => c) }
+
+export const removeCanvasProjectPosition = (projectId: string): Promise<CanvasState> => mutateCanvas((current) => {
+  if (!Object.prototype.hasOwnProperty.call(current.positions, projectId)) return current
+  const { [projectId]: _drop, ...positions } = current.positions
+  return { ...current, positions, ...(current.automation ? { automation: { ...current.automation, revision: current.automation.revision + 1 } } : {}) }
+})
 
 // ─── In-app notification read-state (Ground お知らせ bell) ─────────────────────
 // A tiny home-cache file (~/.openground/notifications.json) holding the ids the

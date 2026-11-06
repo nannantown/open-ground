@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import type { ReactNode } from 'react'
 import { SwarmSupplyPane, callStamp } from './SwarmSupplyPane'
 // t: the real substitution shape, keyed by the current language.
 const h = vi.hoisted(() => ({ lang: 'en' }))
@@ -8,7 +9,7 @@ vi.mock('@/i18n/I18nContext', () => ({
   useT: () => ({ lang: h.lang, t: (k: string, v?: Record<string, string>) => (k === 'projectPanel.swarm.supply.call' ? `${h.lang === 'ja' ? '通話' : 'Call'} ${v?.duration}` : k) }),
 }))
 vi.mock('@/components/canvas/ClaudeTerminalPane', () => ({ ClaudeTerminalPane: () => <div>real terminal surface</div> }))
-vi.mock('./SwarmSeatHeader', () => ({ SwarmSeatHeader: () => <div>president</div> }))
+vi.mock('./SwarmSeatHeader', () => ({ SwarmSeatHeader: ({ children }: { children: ReactNode }) => <div>president{children}</div> }))
 vi.mock('./SwarmSeatTalk', async (importOriginal) => ({
   ...await importOriginal<typeof import('./SwarmSeatTalk')>(),
   SwarmSeatFeed: ({ sdkSessionId }: { sdkSessionId: string }) => <div>structured president {sdkSessionId}</div>,
@@ -23,6 +24,17 @@ it('attaches an SDK president to its own transcript and always-visible composer,
   expect(view.getByText('structured president sdk-president')).toBeInTheDocument()
   expect(view.getByRole('textbox', { name: 'projectPanel.swarm.say.presidentPlaceholder' })).toBeInTheDocument()
   expect(view.queryByText('real terminal surface')).toBeNull()
+})
+
+it('names the header action as ending the president rather than stopping only a response', () => {
+  vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ entries: [] }))))
+  const stop = vi.fn()
+  const view = render(<SwarmSupplyPane projectPath="/fixture" terminalId="" runtime="sdk" sdkSessionId="sdk-president"
+    status="waiting" busy={false} onExit={() => {}} onStop={stop} onRestart={() => {}} />)
+  const end = view.getByRole('button', { name: 'projectPanel.swarm.supply.stopHint' })
+  expect(end).toHaveAttribute('title', 'projectPanel.swarm.supply.stopHint')
+  fireEvent.click(end)
+  expect(stop).toHaveBeenCalledOnce()
 })
 
 it('keeps an unsent president draft across exit and SDK restart, refusing input until the new desk is ready', async () => {

@@ -2,6 +2,16 @@
 // toggle labels). Add keys as 'toolbar.*'. English is the source of truth.
 export const toolbar = {
   en: {
+    'toolbar.automationFrame': 'Automatic operation',
+    'toolbar.automationFrameCreate': 'Create the Automatic operation frame. Projects inside run automatically; projects outside stop taking new automatic work.',
+    'toolbar.automationFrameFocus': 'Show the Automatic operation frame',
+    'toolbar.canvasSaving': 'Saving layout… Automatic operation changes apply after saving.',
+    'toolbar.canvasSaveError': 'The layout could not be saved. Automatic operation uses the last saved layout.',
+    'toolbar.canvasConflict': 'The saved automation layout changed. Load it before editing again; unsaved layout changes will be replaced.',
+    'toolbar.canvasOwnerChanged': 'This unsaved layout belongs to another account session. Sign back in to its original account and retry, or load the saved layout.',
+    'toolbar.canvasRetry': 'Retry save',
+    'toolbar.canvasReload': 'Load saved layout',
+    'toolbar.canvasReconcilePending': 'Layout saved. Automatic operation is waiting to apply the change.',
     'toolbar.add': 'Add project',
     // Concise visible label for the pill button; `toolbar.add` stays the tooltip.
     'toolbar.addLabel': 'Add',
@@ -38,6 +48,16 @@ export const toolbar = {
     'toolbar.searchLampReview': 'Delivered — take a look',
   } as Record<string, string>,
   ja: {
+    'toolbar.automationFrame': '自動運用',
+    'toolbar.automationFrameCreate': '自動運用フレームを作成。中のプロジェクトは自動運用ON、外は新しい自動作業を停止します。',
+    'toolbar.automationFrameFocus': '自動運用フレームを表示',
+    'toolbar.canvasSaving': '配置を保存中… 自動運用は保存後に反映します。',
+    'toolbar.canvasSaveError': '配置を保存できませんでした。自動運用は保存済みの配置を使います。',
+    'toolbar.canvasConflict': '保存済みの自動運用の配置が変更されました。読み込み直すと未保存の配置を置き換えます。',
+    'toolbar.canvasOwnerChanged': '別のアカウントで編集した未保存の配置です。元のアカウントで再試行するか、保存済みの配置を読み込んでください。',
+    'toolbar.canvasRetry': '保存を再試行',
+    'toolbar.canvasReload': '保存済みの配置を読み込む',
+    'toolbar.canvasReconcilePending': '配置を保存しました。自動運用の反映を待っています。',
     'toolbar.add': 'プロジェクトを追加',
     'toolbar.addLabel': '追加',
     'toolbar.newProject': '新規プロジェクト',

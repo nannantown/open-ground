@@ -132,7 +132,7 @@ const postSupply = async (
   projectPath: string,
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): Promise<SpawnSwarmSupplyResponse> => {
-  const res = await fetch('/api/swarm/supply', {
+  const res = await fetch('/api/swarm/supply/open', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ path: projectPath }),

@@ -36,6 +36,7 @@ import { swarmRepoKey } from './swarmJanitor'
 import { isGitRepoRoot } from './gitRepoGuard'
 import { projectUUIDFromPath } from './projectDataPath'
 import { canonicalize } from './canonicalize'
+import { assertAutomaticOperationAllowed, AutomationPolicyError } from './automationPolicy'
 import { isUnderCentralDir } from './worktreeCleanup'
 import { stopAllDesksInDirAndWait, liveDeskOccupies } from './liveDesks'
 import { assertSwarmNativeConversationSettled } from './swarmNativeTranscript'
@@ -924,6 +925,7 @@ const spawnSwarmWorkerInternal = async (
   opts: SpawnSwarmWorkerOpts,
 ): Promise<SpawnSwarmWorkerResponse> => {
   assertSwarmRuntimeAdmission(opts.runtimeHandoff)
+  if (!opts.runtimeHandoff) await assertAutomaticOperationAllowed(opts.projectPath)
   // Token budget (card 68d8e00f): the mode (+ this card's DIFFICULTY TIER, in
   // optimize) picks the worker's model/effort. economy ⇒ sonnet/low, max ⇒ top
   // tier/max, optimize ⇒ TIER_MODEL_EFFORT[resolveCardTier(card)] (touch sonnet/low
@@ -991,6 +993,7 @@ const spawnSwarmWorkerInternal = async (
   // branch + work preserved; a fresh dispatch creates a new isolated worktree.
   const sandbox = await isExperimentEnabled('sandbox')
   if (chatgpt && sandbox) throw new SdkWorkerUnavailableError(['The OS sandbox experiment is not supported by the ChatGPT host runtime.'])
+  if (!opts.runtimeHandoff) await assertAutomaticOperationAllowed(opts.projectPath)
   const { worktree, branch } = opts.worktree
     ? await resolveExistingSwarmWorktree(opts.projectPath, opts.worktree)
     : await createSwarmWorktree(opts.projectPath, { hint: opts.hint })
@@ -1117,9 +1120,10 @@ const spawnSwarmWorkerInternal = async (
   }
 
   const trials = await getWorkerTrials()
-  assertSwarmRuntimeAdmission(opts.runtimeHandoff)
   let session: ReturnType<typeof spawnSdkSession>
   try {
+    assertSwarmRuntimeAdmission(opts.runtimeHandoff)
+    if (!opts.runtimeHandoff) await assertAutomaticOperationAllowed(opts.projectPath)
     const built = chatgpt ? {
       options: chatGptWorkerOptions({ cwd: worktree, agentSessionId, resume: !!resumeSessionId, ...me, env: { ...process.env, ...researchEnv } }),
       initialPrompt: resumeSessionId
@@ -1177,7 +1181,7 @@ const spawnSwarmWorkerInternal = async (
     // persistent SDK-module blow-up churned a worktree rollback every 3s tick
     // with no hold and no bell, the exact shape the ladder exists to stop.
     // (swarmManager.launchSdkDesk wraps the same throw for the same reason.)
-    if (e instanceof SdkWorkerUnavailableError) throw e
+    if (e instanceof SdkWorkerUnavailableError || e instanceof AutomationPolicyError) throw e
     throw new SdkWorkerUnavailableError([
       `SDK spawn failed (${String((e as Error)?.message ?? e).slice(0, 200)})`,
     ])

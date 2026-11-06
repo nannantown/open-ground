@@ -746,12 +746,12 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     tier: 'both-pools',
     why: 'The supply address seam lists PTY presidents with a confirmed live process and SDK presidents while their pump is not reaped. It retains stopping SDK occupancy for the singleton guard, marks those desks unadoptable, and dispatches stop/input/transcript lookup by the selected runtime.',
     ptyFns: ['isTerminalProcessAlive', 'killTerminal', 'listLiveDesksIn', 'listOwnerDeskTerminals'],
-    sdkCalls: ['listSdkSessions', 'pushSdkInput', 'terminateSdkSession', 'listAllLiveSupplyDesks', 'listLiveSupplyDesks', 'pushSupplyInput'],
+    sdkCalls: ['listSdkSessions', 'pushSdkInput', 'terminateSdkSession', 'listAllLiveSupplyDesks', 'listLiveSupplyDesks', 'pushSupplyInput', 'getSdkPublicConversation'],
   },
   'server/routes/conversation.ts': {
     tier: 'both-pools',
-    why: 'Owner review must wait for both unreaped SDK actors and live native PTYs to release the original conversation before recording an inspected unknown effect. The shared occupancy predicate never stops or replays an actor.',
-    ptyFns: [], sdkCalls: ['isAgentConversationOccupied'],
+    why: 'Owner review must wait for both unreaped SDK actors and live native PTYs to release the original conversation before recording an inspected unknown effect. The shared occupancy predicate never stops or replays an actor. Desktop history additionally reaches the unique current SDK president through the owner-bound supply projection seam.',
+    ptyFns: [], sdkCalls: ['isAgentConversationOccupied', 'getSupplyPublicConversation'],
   },
   'src/lib/server/runtimeActionReceipts.ts': {
     tier: 'both-pools',

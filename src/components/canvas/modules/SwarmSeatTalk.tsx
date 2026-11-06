@@ -16,17 +16,20 @@
 // the route: the seat passes `onSend` (manager → /api/swarm/manager/say,
 // worker → /api/sdk-session/:id/input) and shows the honest answer.
 
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
-import { ChevronDown } from 'lucide-react'
-import type { ConversationSend } from '@/lib/useConversationDraft'
+import { useContext, useEffect, useLayoutEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
+import { ChevronDown, ChevronUp, Loader2, Square } from 'lucide-react'
+import { ConversationDraftOwnerContext, type ConversationSend } from '@/lib/useConversationDraft'
 import { ConversationDraftStatus } from '@/components/assistant/ConversationDraftStatus'
 import { useT } from '@/i18n/I18nContext'
 import { groupSdkFrames } from '@/lib/sdkTranscript'
 import { EventRow, ToolCard, postFailureMessage, type Frame } from './SdkWorkerPane'
+import { PresidentChatTranscript, type PresidentPublicLine } from './PresidentChatTranscript'
 
 /** How often a seat asks for new lines, and how many it keeps. */
 export const FEED_POLL_MS = 2500
 export const FEED_FRAMES = 80
+const CONVERSATION_FRAME_CAP = 4096
+const CONVERSATION_POLL_LIMIT = 200
 const FEED_START_JITTER_MS = 500
 
 type TailBody = { frames?: Frame[]; reaped?: boolean }
@@ -34,25 +37,44 @@ type TailBody = { frames?: Frame[]; reaped?: boolean }
 /** Merge a tail answer into what the seat holds: append, newest FEED_FRAMES.
  *  Pure so the ceiling and the de-dup (a frame at or below the last seq we
  *  hold is never appended twice) are testable without a timer. */
-export const mergeTail = (prev: Frame[], incoming: readonly Frame[]): Frame[] => {
+export const mergeTail = (prev: Frame[], incoming: readonly Frame[], cap = FEED_FRAMES): Frame[] => {
   const last = prev.length ? prev[prev.length - 1].seq : 0
   const fresh = incoming.filter((f) => f.seq > last)
   if (!fresh.length) return prev
   const next = [...prev, ...fresh]
-  return next.length > FEED_FRAMES ? next.slice(next.length - FEED_FRAMES) : next
+  return next.length > cap ? next.slice(next.length - cap) : next
 }
 
 export const SwarmSeatFeed = ({
   sdkSessionId,
   projectPath,
   onExit,
+  conversation = false,
+  conversationKey,
 }: {
   sdkSessionId: string
   projectPath: string
   onExit?: () => void
+  conversation?: boolean
+  /** Confirmed controller conversation/epoch, unchanged by a profile handoff. */
+  conversationKey?: string
 }) => {
   const { t } = useT()
+  const owner = useContext(ConversationDraftOwnerContext)
+  const historyScope = `${owner ?? ''}\n${projectPath}`
+  const boundary = useRef({ scope: historyScope, key: conversationKey, generation: 0 })
+  if (boundary.current.scope !== historyScope) boundary.current = { scope: historyScope, key: conversationKey, generation: boundary.current.generation + 1 }
+  else if (conversationKey !== undefined && boundary.current.key !== conversationKey) {
+    // Learning the first context is not a reset. A subsequent confirmed epoch
+    // change revokes old words and every in-flight read before another paint.
+    boundary.current = { scope: historyScope, key: conversationKey, generation: boundary.current.generation + (boundary.current.key === undefined ? 0 : 1) }
+  }
+  const generation = boundary.current.generation
   const [frames, setFrames] = useState<Frame[]>([])
+  const sourceKey = `${historyScope}\n${sdkSessionId}\n${generation}`
+  const [frameSource, setFrameSource] = useState(sourceKey)
+  const [history, setHistory] = useState<{ owner: string; path: string; session: string; generation: number; lines: PresidentPublicLine[]; overflow: boolean; revision: string } | null>(null)
+  const [historyDenied, setHistoryDenied] = useState(false)
   const feedRef = useRef<HTMLDivElement>(null)
   const [drifted, setDrifted] = useState(false)
   const exitRef = useRef(onExit)
@@ -60,9 +82,12 @@ export const SwarmSeatFeed = ({
 
   useEffect(() => {
     let alive = true
+    const current = () => alive && boundary.current.scope === historyScope && boundary.current.generation === generation
     let timer: ReturnType<typeof setTimeout> | undefined
     let after = 0
     setFrames([])
+    setFrameSource(sourceKey)
+    setHistoryDenied(false)
     setDrifted(false)
     const tick = async () => {
       let done = false
@@ -70,28 +95,49 @@ export const SwarmSeatFeed = ({
       if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
         try {
           const r = await fetch(
-            `/api/sdk-session/${encodeURIComponent(sdkSessionId)}/tail?path=${encodeURIComponent(projectPath)}&after=${after}&limit=${FEED_FRAMES}`,
+            `/api/sdk-session/${encodeURIComponent(sdkSessionId)}/tail?path=${encodeURIComponent(projectPath)}&after=${after}&limit=${conversation ? CONVERSATION_POLL_LIMIT : FEED_FRAMES}`,
           )
-          if (!alive) return
+          if (!current()) return
           if (r.ok) {
             const b = (await r.json().catch(() => null)) as TailBody | null
-            if (!alive) return
+            if (!current()) return
             const got = Array.isArray(b?.frames) ? b!.frames! : []
             if (got.length) {
               after = got[got.length - 1].seq
-              setFrames((prev) => mergeTail(prev, got))
+              setFrames((prev) => mergeTail(prev, got, conversation ? CONVERSATION_FRAME_CAP : FEED_FRAMES))
             }
             // Reaped: nothing more can arrive — keep what we have, stop asking.
             done = b?.reaped === true
           } else if (r.status === 404 || r.status === 403) {
             done = true
           }
+          if (conversation && owner) {
+            try {
+              // Read after the tail: if it says reaped, this final snapshot
+              // also contains the public words captured before that reap.
+              const response = await fetch(`/api/conversation/president/history?path=${encodeURIComponent(projectPath)}&sessionId=${encodeURIComponent(sdkSessionId)}`, {
+                cache: 'no-store', headers: { 'X-OpenGround-Owner': owner },
+              })
+              if (!current()) return
+              if (response.status === 403) { setHistoryDenied(true); setHistory(null) }
+              else if (response.ok) {
+                const data = await response.json() as { lines?: PresidentPublicLine[]; overflow?: boolean; revision?: string }
+                if (!current()) return
+                if (Array.isArray(data.lines) && data.lines.every(line => (line.kind === 'input' || line.kind === 'text') && typeof line.text === 'string') && typeof data.revision === 'string') {
+                  setHistoryDenied(false)
+                  setHistory(previous => previous?.owner === owner && previous.path === projectPath && previous.session === sdkSessionId && previous.generation === generation && previous.revision === data.revision ? previous : { owner, path: projectPath, session: sdkSessionId, generation, lines: data.lines!, overflow: data.overflow === true, revision: data.revision! })
+                }
+              }
+              // A retired pool entry or a temporary disconnect never erases
+              // the last authorized public snapshot already on screen.
+            } catch { /* Keep the last authorized words while disconnected. */ }
+          }
         } catch {
           // Server reloading — ask again next tick.
         }
       }
-      if (alive && done) exitRef.current?.()
-      if (alive && !done) timer = setTimeout(() => void tick(), FEED_POLL_MS)
+      if (current() && done) exitRef.current?.()
+      if (current() && !done) timer = setTimeout(() => void tick(), FEED_POLL_MS)
     }
     // A small random start so N seats mounted together do not poll in
     // lockstep (a burst of N requests on the one spare connection).
@@ -101,7 +147,7 @@ export const SwarmSeatFeed = ({
       alive = false
       if (timer) clearTimeout(timer)
     }
-  }, [sdkSessionId, projectPath])
+  }, [sdkSessionId, projectPath, conversation, owner, sourceKey, historyScope, generation])
 
   // Follow the newest line unless the reader scrolled up (SdkWorkerPane's rule:
   // judged from the reader's own scroll, never from post-growth distance).
@@ -109,20 +155,38 @@ export const SwarmSeatFeed = ({
     const el = feedRef.current
     if (el) setDrifted(el.scrollHeight - el.scrollTop - el.clientHeight >= 40)
   }
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = feedRef.current
     if (el && !drifted) el.scrollTop = el.scrollHeight
-  }, [frames, drifted])
+  }, [frames, drifted, history])
+  const hasFrames = frames.length > 0
+  useEffect(() => {
+    const el = feedRef.current
+    if (!conversation || !el || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => { if (!drifted) el.scrollTop = el.scrollHeight })
+    observer.observe(el)
+    if (el.firstElementChild) observer.observe(el.firstElementChild)
+    return () => observer.disconnect()
+  }, [conversation, drifted, hasFrames])
 
   // "thought (N)" rows are furniture in a narrow seat; the full log keeps them.
-  const items = groupSdkFrames(frames.filter((x) => x.ev.kind !== 'thinking'))
+  const publicHistory = history && history.owner === owner && history.path === projectPath && history.generation === generation && !historyDenied ? history : null
+  // An owner-bound history read authorizes this surface. A fast tail must not
+  // briefly turn its bootstrap prompt into an owner message while it waits.
+  const authorized = !conversation || !owner || publicHistory?.session === sdkSessionId
+  const visibleFrames = frameSource === sourceKey && !historyDenied && authorized ? frames : []
+  const items = groupSdkFrames(visibleFrames.filter((x) => x.ev.kind !== 'thinking'))
+  const publicLines = publicHistory && !publicHistory.overflow ? publicHistory.lines : conversation && owner && !publicHistory ? [] : undefined
+  const partial = conversation && (publicHistory?.overflow || (!publicHistory && visibleFrames.length > 0 && visibleFrames[0].seq > 1))
   return (
     <div className="relative min-h-0 flex-1" data-seat-feed>
-      <div ref={feedRef} onScroll={onScroll} className="h-full overflow-y-auto px-3 py-2 text-meta">
-        {items.length === 0 ? (
+      <div ref={feedRef} onScroll={onScroll} data-president-scroll={conversation || undefined}
+        className={conversation ? 'h-full overflow-y-auto overscroll-contain px-4 pb-4 pt-6 sm:px-6' : 'h-full overflow-y-auto px-3 py-2 text-meta'}>
+        {partial && <p role="status" className="mx-auto mb-4 max-w-[760px] text-meta text-ink-subtle">{t('projectPanel.swarm.chat.recent')}</p>}
+        {items.length === 0 && !publicLines?.length ? (
           <p className="text-ink-faint">{t('projectPanel.swarm.feed.empty')}</p>
         ) : (
-          items.map((it) =>
+          conversation ? <PresidentChatTranscript items={items} publicLines={publicLines} /> : items.map((it) =>
             it.kind === 'tool' ? <ToolCard key={it.seq} item={it} /> : <EventRow key={it.seq} ev={it.ev} t={t} />,
           )
         )}
@@ -131,7 +195,7 @@ export const SwarmSeatFeed = ({
         <button
           type="button"
           onClick={() => setDrifted(false)}
-          className="absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded-full border border-line bg-bg-card px-2 py-0.5 text-micro text-ink-muted shadow-sm transition-colors duration-150 hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+          className={conversation ? 'absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-line bg-bg-card px-3 py-1.5 text-meta text-ink-muted shadow-sm transition-colors duration-150 hover:border-line-strong hover:bg-plane hover:text-ink active:bg-ink active:text-bg disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1' : 'absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded-full border border-line bg-bg-card px-2 py-0.5 text-micro text-ink-muted shadow-sm transition-colors duration-150 hover:border-accent hover:text-accent active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1'}
         >
           <ChevronDown size={11} strokeWidth={2} className="mr-0.5 inline-block align-[-1px]" />
           {t('projectPanel.swarm.sdk.jumpLatest')}
@@ -201,7 +265,7 @@ export const sayToPresidentPty = async (projectPath: string, terminalId: string,
 /** The manager: POST /api/swarm/manager/say — the president's relay path, so
  *  an absent manager is woken exactly as a relayed sentence wakes it. */
 export const sayToManager = async (projectPath: string, text: string, t: T): Promise<SeatSayResult> => {
-  const { r, b } = await postJson('/api/swarm/manager/say', { path: projectPath, text })
+  const { r, b } = await postJson('/api/swarm/manager/input', { path: projectPath, text })
   if (!r.ok) return { ok: false, refused: r.status >= 400 && r.status < 500, error: t('projectPanel.swarm.say.failed', { error: postFailureMessage(r.status, b) }) }
   // held (a PTY desk mid-turn) ≠ refused (the desk closed under us): say
   // which, and keep the words either way.
@@ -224,6 +288,8 @@ export const SwarmSeatSay = ({
   alwaysOpen = false,
   disabled = false,
   draftState,
+  appearance = 'compact',
+  turnControl,
 }: {
   placeholder: string
   onSend: (text: string, send?: ConversationSend) => Promise<SeatSayResult>
@@ -231,6 +297,8 @@ export const SwarmSeatSay = ({
   alwaysOpen?: boolean
   disabled?: boolean
   draftState?: SeatDraftState
+  appearance?: 'compact' | 'chat'
+  turnControl?: { running: boolean; canStop: boolean; stopping: boolean; pending?: boolean; onStop: () => void; error?: string | null }
 }) => {
   const { t } = useT()
   const [open, setOpen] = useState(false)
@@ -243,6 +311,15 @@ export const SwarmSeatSay = ({
   const [outcome, setOutcome] = useState<SeatSayResult | null>(null)
   const boxRef = useRef<HTMLTextAreaElement>(null)
   const composingRef = useRef(false)
+  const chat = appearance === 'chat'
+  const showStop = chat && turnControl?.running && !draft.trim()
+  const stopLabel = turnControl?.pending && !turnControl.stopping ? 'projectPanel.swarm.chat.confirmStop' : 'projectPanel.swarm.chat.stop'
+  useLayoutEffect(() => {
+    const box = boxRef.current
+    if (!chat || !box) return
+    box.style.height = 'auto'
+    box.style.height = `${Math.max(64, Math.min(box.scrollHeight, 200))}px`
+  }, [chat, draft])
 
   const send = async () => {
     const sentDraft = draft
@@ -250,7 +327,7 @@ export const SwarmSeatSay = ({
     if (!text || sending || disabled || composingRef.current) return
     // Focus follows this explicit send action, never mounting the president.
     // A read-only pending box keeps keyboard focus for the next sentence.
-    if (alwaysOpen) boxRef.current?.focus()
+    if (alwaysOpen) boxRef.current?.focus({ preventScroll: true })
     setSending(true)
     setOutcome(null)
     let attempt: ConversationSend | undefined
@@ -275,7 +352,7 @@ export const SwarmSeatSay = ({
   }
 
   const note = outcome ? (
-    <p role="status" className={`text-micro ${outcome.ok ? 'text-ink-faint' : 'text-error'}`}>
+    <p role="status" className={`${chat ? 'mx-auto mt-2 w-full max-w-[760px]' : ''} text-micro ${outcome.ok ? 'text-ink-faint' : 'text-error'}`}>
       {outcome.ok ? outcome.note : outcome.error}
     </p>
   ) : null
@@ -291,7 +368,8 @@ export const SwarmSeatSay = ({
     )
   }
   return (
-    <div className="flex shrink-0 flex-col gap-1 border-t border-line-soft bg-bg-card px-2 py-1.5">
+    <div className={chat ? 'shrink-0 px-4 pb-4 pt-2 sm:px-6' : 'flex shrink-0 flex-col gap-1 border-t border-line-soft bg-bg-card px-2 py-1.5'} data-president-composer={chat || undefined}>
+      <div className={chat ? 'mx-auto flex w-full min-w-0 max-w-[760px] flex-col gap-2 rounded-[24px] border border-line-soft bg-bg-elevated px-4 pb-3 pt-3 shadow-sm transition-colors duration-150 focus-within:border-line-strong' : 'contents'}>
       <textarea
         ref={boxRef}
         autoFocus={!alwaysOpen}
@@ -320,7 +398,7 @@ export const SwarmSeatSay = ({
             void send()
           }
         }}
-        className="w-full resize-none rounded-[3px] border border-line bg-bg-inset px-1.5 py-1 text-meta text-ink placeholder:text-ink-faint transition-colors duration-150 hover:border-line-strong focus:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:opacity-40"
+        className={chat ? 'max-h-[200px] w-full resize-none rounded-xl border-0 bg-transparent py-1 text-ui leading-relaxed text-ink placeholder:text-ink-faint transition-colors duration-150 hover:bg-plane/30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-40' : 'w-full resize-none rounded-[3px] border border-line bg-bg-inset px-1.5 py-1 text-meta text-ink placeholder:text-ink-faint transition-colors duration-150 hover:border-line-strong focus:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:opacity-40'}
       />
       <div className="flex items-center gap-1.5">
         <span className="min-w-0 flex-1 truncate text-micro text-ink-faint">{alwaysOpen ? null : t('projectPanel.swarm.say.keyHint')}</span>
@@ -329,15 +407,19 @@ export const SwarmSeatSay = ({
         </button>}
         <button
           type="button"
-          className={SMALL_BTN}
-          onClick={() => void send()}
-          disabled={disabled || sending || !draft.trim()}
-          aria-busy={sending}
+          className={chat ? 'flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-bg transition-colors duration-150 enabled:hover:bg-ink-muted enabled:hover:text-bg enabled:active:bg-accent enabled:active:text-bg-card disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2' : SMALL_BTN}
+          onClick={() => showStop ? turnControl?.onStop() : void send()}
+          disabled={showStop ? disabled || !turnControl?.canStop || turnControl?.stopping : disabled || sending || !draft.trim()}
+          aria-busy={showStop ? turnControl?.stopping : sending}
+          aria-label={chat ? t(showStop ? stopLabel : draftState?.durable?.attempt ? 'settings.draft.retryMessage' : 'projectPanel.swarm.say.send') : undefined}
+          title={chat ? t(showStop ? stopLabel : 'projectPanel.swarm.say.send') : undefined}
         >
-          {t(draftState?.durable?.attempt ? 'settings.draft.retryMessage' : 'projectPanel.swarm.say.send')}
+          {chat ? (sending || turnControl?.stopping ? <Loader2 size={17} className="animate-spin" aria-hidden /> : showStop ? <Square size={13} fill="currentColor" strokeWidth={0} aria-hidden /> : <ChevronUp size={22} strokeWidth={2.25} aria-hidden />) : t(draftState?.durable?.attempt ? 'settings.draft.retryMessage' : 'projectPanel.swarm.say.send')}
         </button>
       </div>
+      </div>
       {note}
+      {chat && turnControl?.error && <p role="status" className="mx-auto mt-2 max-w-[760px] text-meta text-error">{turnControl.error}</p>}
       <ConversationDraftStatus draft={draftState?.durable} />
     </div>
   )

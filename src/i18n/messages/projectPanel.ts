@@ -2,6 +2,10 @@
 // English is the source of truth; keep `en` and `ja` key sets identical.
 export const projectPanel = {
   en: {
+    'projectPanel.swarm.automationFrameInside': 'Inside the Automatic operation frame. New automatic work starts when the existing safety checks permit it.',
+    'projectPanel.swarm.automationFrameOutside': 'Outside the Automatic operation frame. New automatic work is off; accepted work and manual conversations are preserved.',
+    'projectPanel.swarm.automationFrameControl': 'Move this project into or out of the Automatic operation frame on the Ground to control automatic work.',
+    'projectPanel.swarm.automationFrameTalk': 'Talk to the president',
     // Header
     'projectPanel.backToGround': 'Back to Ground',
     'projectPanel.renameProjectMenu': 'Rename',
@@ -199,12 +203,13 @@ export const projectPanel = {
     'projectPanel.swarm.supply.launchFailed': "Couldn't start the president: {error}",
     'projectPanel.swarm.supply.hint':
       'The president hears your requests, files them as work, and tells you about progress, questions and finished work. The commander and workers stay behind the scenes.',
-    'projectPanel.swarm.supply.stop': 'Stop',
+    'projectPanel.swarm.supply.stop': 'End',
+    'projectPanel.swarm.supply.stopHint': 'End president session',
     'projectPanel.swarm.supply.calls': 'Call records',
     'projectPanel.swarm.supply.call': 'Call {duration}',
     'projectPanel.swarm.supply.clearCalls': 'Clear call records',
     'projectPanel.swarm.supply.clearCallsConfirm': 'Click again to clear',
-    'projectPanel.swarm.supply.stopping': 'Stopping…',
+    'projectPanel.swarm.supply.stopping': 'Ending…',
     // Manager (マネージャー) seat — since 2026-09-23 a nameplate only (running /
     // stopped / not there + a quiet start/stop); the owner talks only to the
     // president. `overseer*` label the Monitoring switch on the top bar.
@@ -233,6 +238,22 @@ export const projectPanel = {
     // A seat's live conversation (SwarmSeatFeed) and its quiet one-line send
     // box (SwarmSeatSay) — the owner rarely needs either, so both stay small.
     'projectPanel.swarm.feed.empty': 'Nothing said yet.',
+    'projectPanel.swarm.chat.reply': 'President reply',
+    'projectPanel.swarm.chat.activity': 'Recent activity',
+    'projectPanel.swarm.chat.commandDone': 'Ran a command',
+    'projectPanel.swarm.chat.commandRunning': 'Running a command',
+    'projectPanel.swarm.chat.readDone': 'Read a file',
+    'projectPanel.swarm.chat.readRunning': 'Reading a file',
+    'projectPanel.swarm.chat.reviewDone': 'Completed an independent review',
+    'projectPanel.swarm.chat.reviewRunning': 'Reviewing independently',
+    'projectPanel.swarm.chat.toolDone': 'Used {name}',
+    'projectPanel.swarm.chat.toolRunning': 'Using {name}',
+    'projectPanel.swarm.chat.toolFailed': '{name} did not complete',
+    'projectPanel.swarm.chat.stop': 'Stop response',
+    'projectPanel.swarm.chat.confirmStop': 'Check stop result',
+    'projectPanel.swarm.chat.stopFailed': 'Could not confirm the stop. Check the current response before trying again.',
+    'projectPanel.swarm.chat.stopQueued': 'Stop requested. Waiting for confirmation.',
+    'projectPanel.swarm.chat.recent': 'Earlier activity is outside this recent view.',
     'projectPanel.swarm.feed.input': 'Told',
     'projectPanel.swarm.feed.more': 'Show all',
     'projectPanel.swarm.feed.less': 'Show less',
@@ -550,6 +571,10 @@ export const projectPanel = {
     // Running roster — live claude lanes for the project.
   } as Record<string, string>,
   ja: {
+    'projectPanel.swarm.automationFrameInside': '自動運用フレーム内です。既存の安全確認が通ると、新しい自動作業を開始します。',
+    'projectPanel.swarm.automationFrameOutside': '自動運用フレーム外です。新しい自動作業はOFF。受理済みの作業と手動の会話は保持します。',
+    'projectPanel.swarm.automationFrameControl': '自動運用の切り替えは、Groundの自動運用フレームへプロジェクトを出し入れしてください。',
+    'projectPanel.swarm.automationFrameTalk': '社長と話す',
     // Header
     'projectPanel.backToGround': 'Ground に戻る',
     'projectPanel.renameProjectMenu': '名前を変更',
@@ -728,12 +753,13 @@ export const projectPanel = {
     'projectPanel.swarm.supply.launchFailed': '社長を呼べませんでした: {error}',
     'projectPanel.swarm.supply.hint':
       '社長があなたの要望を聞いて仕事にし、進み具合・質問・完成品をあなたに伝えます。司令官やワーカーは裏で動きます。',
-    'projectPanel.swarm.supply.stop': '停止',
+    'projectPanel.swarm.supply.stop': '終了',
+    'projectPanel.swarm.supply.stopHint': '社長を終了',
     'projectPanel.swarm.supply.calls': '通話の記録',
     'projectPanel.swarm.supply.call': '通話 {duration}',
     'projectPanel.swarm.supply.clearCalls': '通話の記録を消す',
     'projectPanel.swarm.supply.clearCallsConfirm': 'もう一度押すと消えます',
-    'projectPanel.swarm.supply.stopping': '停止中…',
+    'projectPanel.swarm.supply.stopping': '終了中…',
     // マネージャーの席 — 2026-09-23 から名札だけ(動いている/止まっている/いない＋
     // 控えめな起動・停止)。オーナーが話すのは社長だけ。overseer* は上部バーの監視スイッチ。
     'projectPanel.swarm.manager.tab': 'マネージャー',
@@ -759,6 +785,22 @@ export const projectPanel = {
     'projectPanel.swarm.manager.conversationHint':
       'マネージャーは社長が受けた仕事をワーカーに割り振り、仕上がりを統合します。動いている間は、ここに直近のやりとりが出ます。',
     'projectPanel.swarm.feed.empty': 'まだやりとりはありません。',
+    'projectPanel.swarm.chat.reply': '社長の返答',
+    'projectPanel.swarm.chat.activity': '直近の作業',
+    'projectPanel.swarm.chat.commandDone': 'コマンドを実行しました',
+    'projectPanel.swarm.chat.commandRunning': 'コマンドを実行中',
+    'projectPanel.swarm.chat.readDone': 'ファイルを読み込みました',
+    'projectPanel.swarm.chat.readRunning': 'ファイルを読み込み中',
+    'projectPanel.swarm.chat.reviewDone': '独立した見直しを終えました',
+    'projectPanel.swarm.chat.reviewRunning': '独立した見直しを進めています',
+    'projectPanel.swarm.chat.toolDone': '{name}を使用しました',
+    'projectPanel.swarm.chat.toolRunning': '{name}を使用中',
+    'projectPanel.swarm.chat.toolFailed': '{name}が完了しませんでした',
+    'projectPanel.swarm.chat.stop': '返答を止める',
+    'projectPanel.swarm.chat.confirmStop': '停止結果を確認する',
+    'projectPanel.swarm.chat.stopFailed': '停止を確認できませんでした。現在の返答を確認してから、もう一度お試しください。',
+    'projectPanel.swarm.chat.stopQueued': '停止を依頼しました。確認を待っています。',
+    'projectPanel.swarm.chat.recent': '以前の作業履歴は、この直近の表示には含まれません。',
     'projectPanel.swarm.feed.input': '受け取った指示',
     'projectPanel.swarm.feed.more': '続きを見る',
     'projectPanel.swarm.feed.less': '畳む',

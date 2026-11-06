@@ -35,6 +35,8 @@ interface SwitchProps {
   available: boolean
   /** A power round-trip is in flight (disables the switch during the engine call). */
   busy: boolean
+  /** Another persisted control owns this switch; explain the disabled state. */
+  controlledHint?: string
   /** Flip the master switch — SwarmModule composes start/stop + the launches. */
   onToggle: (next: boolean) => void
 }
@@ -46,7 +48,7 @@ interface SwitchProps {
  *  + aria-checked gives screen readers "<team>, on/off"; as a native button it
  *  already takes Space / Enter. Hover / focus-visible / disabled per
  *  ui-interactive-states. */
-export const SwarmPowerSwitch = ({ running, available, busy, onToggle }: SwitchProps) => {
+export const SwarmPowerSwitch = ({ running, available, busy, controlledHint, onToggle }: SwitchProps) => {
   const { t } = useT()
   return (
     <button
@@ -54,8 +56,8 @@ export const SwarmPowerSwitch = ({ running, available, busy, onToggle }: SwitchP
       role="switch"
       aria-checked={running}
       aria-label={t('projectPanel.swarm.power.label')}
-      title={t(available ? 'projectPanel.swarm.power.hint' : 'projectPanel.swarm.power.offline')}
-      disabled={busy || !available}
+      title={controlledHint ?? t(available ? 'projectPanel.swarm.power.hint' : 'projectPanel.swarm.power.offline')}
+      disabled={busy || !available || !!controlledHint}
       onClick={() => onToggle(!running)}
       className={[
         'group inline-flex h-6 shrink-0 items-center rounded-full px-0.5',

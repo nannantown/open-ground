@@ -47,6 +47,7 @@
 
 import { Hono } from 'hono'
 import { hasSwarmOwnerAccess } from '@/lib/server/swarmGate'
+import { AutomationPolicyError } from '@/lib/server/automationPolicy'
 import {
   readProjectData,
   mutateProjectData,
@@ -397,6 +398,7 @@ export const swarmRoutes = new Hono()
       try {
         outcome = await claimCardForDispatch(path, taskId)
       } catch (e: any) {
+      if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
         // A refused/failed claim means we do NOT own the card — never spawn on it.
         // A CAS refusal is someone else writing the board (409); anything else is
         // the store failing under us (500).
@@ -461,6 +463,7 @@ export const swarmRoutes = new Hono()
       // The claim outlived the spawn it was for — hand the card back to `todo`
       // so it is re-dispatchable instead of stranded in `doing` worker-less.
       if (claimed) await releaseCardClaim(path, taskId).catch(() => {})
+      if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
       // "A desk is already working here" is a CONFLICT, not a breakage: the
       // caller asked for a restart that would have made two claudes share one
       // worktree, and the right answer is the same 409 the card-claim gates use.
@@ -492,7 +495,9 @@ export const swarmRoutes = new Hono()
   // guard opt-in: the WORKER-ONLY PreToolUse veto never polices this trusted desk.
   // RESUMES the project's previous supply conversation by default (the response's
   // `resumed` says which happened); `fresh:true` opts out. See swarmSessions.ts.
-  .post('/api/swarm/supply', async (c) => {
+  // Canonical role launches are automatic; /open is the explicit GUI desk.
+  // The request body cannot promote an automatic launch to an owner action.
+  .on('POST', ['/api/swarm/supply', '/api/swarm/supply/open'], async (c) => {
     // OWNER-ONLY gate (see /api/swarm/worker): the supply session is an
     // owner-only control-plane spawn. Non-owner / signed-out → 403, before any
     // body parse / path validation.
@@ -534,7 +539,8 @@ export const swarmRoutes = new Hono()
       // out of a restored context that has gone bad); anything but a literal true is
       // a resume, so a junk body can never silently discard the desk's memory.
       const fresh = body?.fresh === true
-      const res = await spawnSwarmSupply({ projectPath: path, cols, rows, fresh })
+      const res = await spawnSwarmSupply({ projectPath: path, cols, rows, fresh,
+        cause: c.req.path === '/api/swarm/supply/open' ? 'owner' : 'automatic' })
       // The owner wants this desk UP — remember it across restarts (engine.json),
       // so an app update brings the supply officer back instead of a dead pane
       // (0803 owner request). AWAITED but swallow-on-fail: a failed mirror write
@@ -545,6 +551,7 @@ export const swarmRoutes = new Hono()
       await patchEngineIntent(path, { supplyDesired: true }).catch(() => {})
       return c.json(res)
     } catch (e: any) {
+      if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
       return c.json({ error: `failed to spawn supply: ${e?.message ?? e}` }, 500)
     }
   })
@@ -668,7 +675,8 @@ export const swarmRoutes = new Hono()
   })
   // Managers launch through the SDK with /og-manage in the primary checkout.
   // Supply keeps its interactive PTY. Both preserve conversation IDs on restart.
-  .post('/api/swarm/manager', async (c) => {
+  // Canonical role launches are automatic; /open is the explicit GUI desk.
+  .on('POST', ['/api/swarm/manager', '/api/swarm/manager/open'], async (c) => {
     // Shared Swarm access gate, including the public opt-in, before body parsing.
     if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
@@ -706,7 +714,8 @@ export const swarmRoutes = new Hono()
       // re-read the Board first — its conversation survived the restart, the
       // engine's in-memory roster did not. `fresh:true` forces a new conversation.
       const fresh = body?.fresh === true
-      const res = await spawnSwarmManager({ projectPath: path, fresh })
+      const res = await spawnSwarmManager({ projectPath: path, fresh,
+        cause: c.req.path === '/api/swarm/manager/open' ? 'owner' : 'automatic' })
       // The owner wants this desk UP — remember it across restarts (engine.json),
       // the exact twin of the supply spawn's write above. WITHOUT this the
       // commander was the ONE desk with nothing to come back for: an update
@@ -719,6 +728,7 @@ export const swarmRoutes = new Hono()
       await patchEngineIntent(path, { managerDesired: true }).catch(() => {})
       return c.json(res)
     } catch (e: any) {
+      if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
       return c.json({ error: `failed to spawn manager: ${e?.message ?? e}` }, 500)
     }
   })
@@ -747,41 +757,14 @@ export const swarmRoutes = new Hono()
     await patchEngineIntent(path, { managerDesired: false }).catch(() => {})
     return c.json({ ok: true, stopped })
   })
-  // --- POST /api/swarm/manager/say — relay ONE message to the commander -------
-  // Body: { path, text }. The RUNTIME-AGNOSTIC way to speak to the commander
-  // desk, and the reason it exists is the phone.
-  //
-  // The owner reaches OPEN GROUND from outside through the SUPPLY desk, which
-  // stays on a PTY precisely because Remote Control only works there. Supply can
-  // read everything (「状況」) and file cards, but relaying an instruction —
-  // 「swarm/X をマージして」 — used to mean knowing the commander's terminal id and
-  // POSTing raw keystrokes to /api/terminal/:id/input, which is wrong twice: it
-  // does not exist for an SDK commander, and even on a PTY it is the same
-  // half-typed-input hazard the engine's notice path had to grow two refusals
-  // for. One endpoint, one seam (swarmManagerRuntime.sayToManagerDesk), and the
-  // caller never learns which runtime answered.
-  //
-  // Owner-gated + path-validated like every /api/swarm/* write.
-  //
-  // WAKES AN ABSENT COMMANDER (owner decision 2026-09-22 — 「いいよ。おこして。」).
-  // This route used to report "there is no commander desk" (404) and stop, on the
-  // grounds that waking a desk costs a model launch and belongs to the engine's
-  // reflex or the owner's button. That reasoning was right about the cost and
-  // wrong about who decides: the commander is woken by the engine only when
-  // there are cards ready to integrate, so for most of the day it is simply not
-  // there — and a relayed sentence IS the owner's button, just pressed from a
-  // phone. With the reply leg in place the owner can now ask the commander
-  // questions, and 「司令官がいません」 would be the answer to almost all of them.
-  //
-  // `wake:false` opts OUT, for a caller whose sentence is not worth a launch.
-  // The default is ON because this route has exactly one purpose — carrying the
-  // owner's own words — and they have decided those are worth it.
-  //
-  // Waking does NOT set `managerDesired`: that flag means "the owner wants a
-  // commander desk standing", which the explicit button says. A question is a
-  // transient act, so the woken desk lives until it is stopped or the app
-  // restarts, and the next question wakes it again.
-  .post('/api/swarm/manager/say', async (c) => {
+  // Canonical /manager/say is the automatic role-to-role delegation lane used
+  // by /supply. Frame membership therefore applies even when its payload quotes
+  // an owner. Explicit GUI conversation uses /manager/input. Both retain the
+  // existing owner/path gates; a route name is semantic intent, not proof that
+  // an untrusted caller is human. Neither accepts a client-supplied cause.
+  // wake:false avoids opening an absent desk; a transient wake does not change
+  // managerDesired (only the explicit /manager/open button does).
+  .on('POST', ['/api/swarm/manager/say', '/api/swarm/manager/input'], async (c) => {
     if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
     try {
@@ -797,7 +780,8 @@ export const swarmRoutes = new Hono()
     if (text.length > MAX_MANAGER_SAY) return c.json({ error: 'text too large' }, 400)
     // The wake/preflight/closed-desk/held logic lives in commanderRelay.ts so the
     // commander question lane (commanderQuestions.ts) takes the SAME path.
-    const res = await relayToCommander(path, text, { wake: body?.wake !== false })
+    const res = await relayToCommander(path, text, { wake: body?.wake !== false,
+      cause: c.req.path === '/api/swarm/manager/input' ? 'owner' : 'automatic' })
     if (!res.ok) return c.json(res.body, res.status)
     // held ≠ failed: a PTY desk mid-generation (or with a half-typed draft) is
     // asked again later rather than clobbered, and the caller is TOLD which it
@@ -860,6 +844,7 @@ export const swarmRoutes = new Hono()
       const res = await removeSwarmWorktree(path, worktree, { force })
       return c.json(res)
     } catch (e: any) {
+      if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
       return c.json({ error: `failed to remove worktree: ${e?.message ?? e}` }, 500)
     }
   })
@@ -994,6 +979,7 @@ export const swarmRoutes = new Hono()
     try {
       return c.json(await startOrchestrator(path))
     } catch (e: any) {
+      if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
       // Same machine-readable 503 the worker route returns when claude is
       // missing / signed out, so the client shows one sign-in affordance.
       if (e instanceof ClaudeNotReadyError) return c.json(e.body, 503)
@@ -1015,7 +1001,10 @@ export const swarmRoutes = new Hono()
     const path = typeof body?.path === 'string' ? body.path : ''
     if (!path) return c.json({ error: 'path is required' }, 400)
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
-    return c.json(await stopOrchestrator(path))
+    try { return c.json(await stopOrchestrator(path)) } catch (error) {
+      if (error instanceof AutomationPolicyError) return c.json({ error: error.message, code: error.code, automationBlocked: true }, 409)
+      throw error
+    }
   })
   // --- POST /api/swarm/orchestrator/worker/stop — STOP one engine worker -------
   // Body: { path, terminalId }. The owner halts a SINGLE autonomous worker: the
@@ -1233,6 +1222,7 @@ export const swarmRoutes = new Hono()
       })
       return c.json<EscalationOpenResponse>(res)
     } catch (e: any) {
+      if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
       return c.json({ error: `failed to open escalation: ${e?.message ?? e}` }, 500)
     }
   })
@@ -1261,6 +1251,7 @@ export const swarmRoutes = new Hono()
       const res = await answerEscalation(id, answer, undefined, { by, ...fromDeskOf(body) })
       return c.json<EscalationAnswerResponse>(res)
     } catch (e: any) {
+      if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
       if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
       if (e instanceof EscalationStateError) return c.json({ error: e.message }, 409)
       return c.json({ error: `failed to answer escalation: ${e?.message ?? e}` }, 500)
@@ -1288,6 +1279,7 @@ export const swarmRoutes = new Hono()
     try {
       return c.json(await raiseEscalationToOwner(id, { plainQuestion }))
     } catch (e: any) {
+      if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
       if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
       return c.json({ error: `failed to raise escalation: ${e?.message ?? e}` }, 500)
     }
@@ -1308,6 +1300,7 @@ export const swarmRoutes = new Hono()
     try {
       return c.json<EscalationDismissResponse>({ escalation: await dismissEscalation(id, fromDeskOf(body)) })
     } catch (e: any) {
+      if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
       if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
       return c.json({ error: `failed to dismiss escalation: ${e?.message ?? e}` }, 500)
     }

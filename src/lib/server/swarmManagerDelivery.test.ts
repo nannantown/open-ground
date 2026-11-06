@@ -8,10 +8,13 @@ import { initializeRuntimeTransitions, updateRuntimeJournal } from './runtimeTra
 import { getSdkSession, spawnSdkSession, terminateSdkSession } from './sdkSession'
 import type { SdkEvent } from './sdkEvents'
 import { defaultManagerPresence, defaultNotifyManagerReady, defaultNudgeManager } from './swarmOrchestrator'
+const automation = vi.hoisted(() => ({ allowed: true }))
+vi.mock('./automationPolicy', async (original) => ({ ...await original<typeof import('./automationPolicy')>(), automaticOperationAllowed: async () => automation.allowed }))
 
 let project: string
 const handles: string[] = []
 beforeEach(async () => {
+  automation.allowed = true
   const home = join(process.env.OPENGROUND_HOME!, `manager-delivery-${randomUUID()}`)
   project = join(home, 'project')
   await mkdir(project, { recursive: true })
@@ -147,6 +150,20 @@ describe('manager control uses the admitted provider and the actual live handle'
           journal.scopes.swarm.revision++
         })
       },
+    })).toBe(false)
+    expect(writes).toEqual(['\x1b'])
+  })
+
+  it('does not submit PTY text after frame membership is revoked during the ESC pause', async () => {
+    await select('claude')
+    const id = randomUUID()
+    await recordSwarmSession(project, 'manager', id)
+    const writes: string[] = []
+    expect(await defaultNudgeManager(project, {
+      activity: () => ({ live: true, lastOutputAt: null, terminalId: 'synthetic-pty' }),
+      terminal: () => ({ cwd: project, agentSessionId: id, deskLabel: '司令官' }),
+      write: (_id, text) => { writes.push(text); return true },
+      sleep: async () => { automation.allowed = false },
     })).toBe(false)
     expect(writes).toEqual(['\x1b'])
   })

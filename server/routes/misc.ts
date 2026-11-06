@@ -21,7 +21,7 @@ import {
   setSettings,
   setUserSettings,
   getCanvas,
-  setCanvas,
+  removeCanvasProjectPosition,
   getNotificationState,
   markNotificationsRead,
   isLockdownEnabled,
@@ -381,11 +381,7 @@ export const miscRoutes = new Hono()
     if (!raw) return c.json({ error: 'path required' }, 400)
     const removed = await removeProjectEntry(raw)
     if (!removed) return c.json({ error: 'not registered' }, 404)
-    const canvas = await getCanvas()
-    if (canvas.positions[removed.id]) {
-      const { [removed.id]: _drop, ...rest } = canvas.positions
-      await setCanvas({ ...canvas, positions: rest })
-    }
+    await removeCanvasProjectPosition(removed.id)
     return c.json({ ok: true })
   })
   // --- GET / POST /api/settings ---------------------------------------------

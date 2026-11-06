@@ -28,6 +28,7 @@ import {
 import { resolveTextStyle } from '@/lib/canvasTextStyle'
 import { siblingId, firstChildId, parentId as navParentId } from '@/lib/canvasSelectionNav'
 import { cloneSubset } from '@/lib/canvasClone'
+import { GROUND_PROJECT_CARD_WIDTH, GROUND_PROJECT_CARD_HEIGHT, automationFrameMembership } from '@/lib/automationFrame'
 import { initialDrawnFrameFill } from '@/lib/canvasFillStyle'
 import { makeBackdropResolver } from '@/lib/canvasContrast'
 import { useThemeName } from '@/lib/theme'
@@ -205,8 +206,8 @@ const MOCK_DEFAULT_H = 320
 const COMMENT_W = 28
 const COMMENT_H = 28
 // Approximate card / text footprints, used only for marquee hit-testing.
-const CARD_W = 256
-const CARD_H = 140
+const CARD_W = GROUND_PROJECT_CARD_WIDTH
+const CARD_H = GROUND_PROJECT_CARD_HEIGHT
 const TEXT_W = 300
 const TEXT_H = 44
 // Drag snapping: an element's edges/centers snap to other elements' within this
@@ -3265,13 +3266,15 @@ export const InfiniteCanvas = ({
           .map((f) => ({ ...f, area: f.b.w * f.b.h }))
       : null
     const thisArea = fb.w * fb.h
+    const automaticMembers = c.automation?.enabled && c.automation.frameId === frame.id
+      ? automationFrameMembership(c, projects.map((project) => project.id)).projectIds : null
     const ids: string[] = []
     for (const proj of projects) {
       const pos = c.positions[proj.id]
       if (!pos) continue
       const cx = pos.x + CARD_W / 2
       const cy = pos.y + CARD_H / 2
-      if (!(cx >= fb.x && cx <= fb.x + fb.w && cy >= fb.y && cy <= fb.y + fb.h))
+      if (automaticMembers ? !automaticMembers.has(proj.id) : !(cx >= fb.x && cx <= fb.x + fb.w && cy >= fb.y && cy <= fb.y + fb.h))
         continue
       // Skip when a smaller (nested) frame also holds this card's centre — it is
       // that nested frame's card, not ours.
@@ -3914,6 +3917,7 @@ export const InfiniteCanvas = ({
             ) : (
               <FrameView
                 frame={frame}
+                automation={canvas.automation?.enabled === true && canvas.automation.frameId === frame.id && frame.groundRole === 'automation'}
                 selected={selectedSet.has(frame.id)}
                 hovered={hoverFrameId === frame.id}
                 editing={editingId === frame.id}

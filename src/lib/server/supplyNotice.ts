@@ -77,6 +77,7 @@ import { isGenerating, readInputBoxText } from '@/lib/claudeScreen'
 import { detectMenu } from '@/lib/claudeMenu'
 import { listAllLiveSupplyDesks, pushSupplyInput } from './swarmSupplyRuntime'
 import { runtimeAdmissionBlocked } from './runtimeTransitionStore'
+import { automaticOperationAllowed } from './automationPolicy'
 import {
   getTerminalScreen,
   terminalForeignInput,
@@ -1145,6 +1146,9 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       const own = ownerSays.get(key)?.[0] ?? null
       const queue = replies.get(key)
       const reply = own ? null : (queue?.[0] ?? null)
+      // Owner words and replies finish an already accepted conversation.
+      // Unsolicited news/progress must not start a new outside-frame turn.
+      if (!own && !reply && !await automaticOperationAllowed(desk.cwd)) continue
       // App-wide fatals first: they are rare and concern the whole app.
       const appWideFree = !inFlight.has(APP_WIDE) && !Array.from(unsent.values()).some((u) => u.appWide && !u.rang)
       // A landing notice inside its grace (SUPPLY_LANDING_GRACE_MS) is skipped,
@@ -1256,6 +1260,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         const seq = deps.foreignInput(desk.id)?.seq
         if (own?.beforeSend && !own.prepared) { await own.beforeSend(); own.prepared = true }
         if (own && !ownerSays.get(key)?.includes(own)) continue
+        if (!own && !reply && !await automaticOperationAllowed(desk.cwd)) continue
         const ok = await injectAnswerIntoWorker(desk.id, line, opts)
         if (gen !== generation.n) continue // state was reset meanwhile
         if (ok) {

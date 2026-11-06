@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useCanvasHistory } from './useCanvasHistory'
 import type { CanvasState } from './types'
+import { createAutomationFrame, isAutomationAllowed } from './automationFrame'
 
 // undo/redo for the canvas document (card positions + free elements). The hook
 // debounces edits into steps, but undo()/redo() flush any pending edit first,
@@ -59,5 +60,72 @@ describe('useCanvasHistory', () => {
     act(() => result.current.undo())
     // Nothing to undo — the viewport change is intentionally not a history step.
     expect(apply).not.toHaveBeenCalled()
+  })
+})
+
+describe('useCanvasHistory — automation identity and server revision', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('restores the designated ID together with its frame through create/delete/recreate and undo/redo', () => {
+    const apply = vi.fn<(c: CanvasState) => void>()
+    const legacy: CanvasState = { positions: {}, elements: [], viewport: { x: 0, y: 0, zoom: 1 } }
+    const first = createAutomationFrame(legacy, 'frame-1', '自動運用')
+    first.automation!.revision = 1
+    const removed: CanvasState = { ...first, elements: [], automation: { ...first.automation!, revision: 2 } }
+    const second = createAutomationFrame(removed, 'frame-2', '自動運用')
+    second.automation!.revision = 3
+    const { result, rerender } = renderHook(({ canvas }) => useCanvasHistory(canvas, apply), { initialProps: { canvas: legacy } })
+    const settle = (canvas: CanvasState) => { rerender({ canvas }); act(() => { vi.advanceTimersByTime(450) }) }
+    for (const canvas of [first, removed, second]) settle(canvas)
+    act(() => result.current.undo())
+    expect(apply.mock.lastCall![0].automation).toEqual({ version: 1, enabled: true, frameId: 'frame-1', revision: 3 })
+    rerender({ canvas: apply.mock.lastCall![0] })
+    act(() => result.current.undo())
+    const restored = apply.mock.lastCall![0]
+    expect(restored.elements.find(element => element.groundRole === 'automation')?.id).toBe('frame-1')
+    expect(restored.automation?.frameId).toBe('frame-1')
+    expect(restored.automation?.revision).toBe(3)
+    // A subsequent server ACK must not replace the redo step or rewind its CAS.
+    rerender({ canvas: { ...restored, automation: { ...restored.automation!, revision: 9 } } })
+    act(() => result.current.redo())
+    expect(apply.mock.lastCall![0].elements).toHaveLength(0)
+    expect(apply.mock.lastCall![0].automation).toMatchObject({ frameId: 'frame-1', revision: 9 })
+    rerender({ canvas: apply.mock.lastCall![0] })
+    act(() => result.current.redo())
+    expect(apply.mock.lastCall![0].elements.find(element => element.groundRole === 'automation')?.id).toBe('frame-2')
+    expect(apply.mock.lastCall![0].automation).toMatchObject({ frameId: 'frame-2', revision: 9 })
+  })
+
+  it('undoing the first opt-in leaves an explicit empty allowlist and can redo the creation', () => {
+    const apply = vi.fn<(c: CanvasState) => void>()
+    const legacy: CanvasState = { positions: { project: { x: 0, y: 0 } }, elements: [], viewport: { x: 0, y: 0, zoom: 1 } }
+    const created = createAutomationFrame(legacy, 'frame-1', '自動運用')
+    created.automation!.revision = 4
+    const { result, rerender } = renderHook(({ canvas }) => useCanvasHistory(canvas, apply), { initialProps: { canvas: legacy } })
+    rerender({ canvas: created })
+    act(() => result.current.undo())
+    const undone = apply.mock.lastCall![0]
+    expect(undone.automation).toEqual({ version: 1, revision: 4, enabled: true, frameId: null })
+    expect(undone.elements).toHaveLength(0)
+    expect(isAutomationAllowed(undone, 'project')).toBe(false)
+    rerender({ canvas: undone })
+    act(() => result.current.redo())
+    expect(apply.mock.lastCall![0].automation).toMatchObject({ frameId: 'frame-1', revision: 4 })
+    expect(apply.mock.lastCall![0].elements[0].groundRole).toBe('automation')
+  })
+
+  it('ignores revision-only acknowledgements but records a real configuration change', () => {
+    const apply = vi.fn<(c: CanvasState) => void>()
+    const base = createAutomationFrame({ positions: {}, elements: [], viewport: { x: 0, y: 0, zoom: 1 } }, 'frame-1', '自動運用')
+    base.automation!.revision = 5
+    const { result, rerender } = renderHook(({ canvas }) => useCanvasHistory(canvas, apply), { initialProps: { canvas: base } })
+    const acknowledged: CanvasState = { ...base, automation: { ...base.automation!, revision: 11 } }
+    rerender({ canvas: acknowledged })
+    act(() => { vi.advanceTimersByTime(450); result.current.undo() })
+    expect(apply).not.toHaveBeenCalled()
+    rerender({ canvas: { ...acknowledged, automation: { ...acknowledged.automation!, enabled: false, revision: 12 } } })
+    act(() => result.current.undo())
+    expect(apply.mock.lastCall![0].automation).toEqual({ version: 1, revision: 12, enabled: true, frameId: 'frame-1' })
   })
 })

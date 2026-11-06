@@ -33,8 +33,7 @@ import { stopAllDesksInDirAndWait } from '@/lib/server/liveDesks'
 import {
   getSettings,
   setSettings,
-  getCanvas,
-  setCanvas,
+  removeCanvasProjectPosition,
 } from '@/lib/server/store'
 import { EditorNotFoundError, openInEditor, openWithApp } from '@/lib/server/editorCli'
 import { detectInstalledEditors, resolveAllowedEditorBundle } from '@/lib/server/editorDetect'
@@ -817,11 +816,7 @@ export const projectRoutes = new Hono()
   // An orphaned central dir is the safe side of that trade.
   const removed = await removeProjectEntry(target)
   if (removed) {
-    const canvas = await getCanvas()
-    if (canvas.positions[removed.id]) {
-      const { [removed.id]: _drop, ...rest } = canvas.positions
-      await setCanvas({ ...canvas, positions: rest })
-    }
+    await removeCanvasProjectPosition(removed.id)
     await rm(projectCentralDir(removed.id), { recursive: true, force: true }).catch(() => {})
   }
   return c.json({ ok: true })

@@ -35,6 +35,7 @@ import type { OrchestratorDeps, ProjectEngine } from '@/lib/server/swarmOrchestr
 import { initOverseerRuntime } from '@/lib/server/swarmOverseer'
 import { readProjectData, mutateProjectData } from '@/lib/server/projectData'
 import type { ProjectTask, SpawnSwarmWorkerResponse } from '@/lib/types'
+import { AutomationPolicyError } from '@/lib/server/automationPolicy'
 
 /** The fake spawn body, swapped per test. Hoisted so the vi.mock factory (which
  *  runs before the module body) can close over it. `onBoardRead` fires after every
@@ -218,6 +219,19 @@ describe('POST /api/swarm/worker — the card is claimed BEFORE the worker spawn
     const after = await cardNow('c1')
     expect(after?.boardColumn).toBe('todo') // re-dispatchable, not stranded
     expect(after?.branch).toBeUndefined()
+  })
+
+  it('releases the claim after a late automation-policy revocation instead of leaving a worker-less doing card', async () => {
+    await seedCard({ id: 'c1' })
+    hooks.spawn = async () => {
+      expect((await cardNow('c1'))?.boardColumn).toBe('doing')
+      throw new AutomationPolicyError()
+    }
+    const res = await app.request('/api/swarm/worker', json({ path: proj, taskId: 'c1' }))
+    expect(res.status).toBe(409)
+    expect(await res.json()).toMatchObject({ code: 'automation-frame-off', automationBlocked: true })
+    expect((await cardNow('c1'))?.boardColumn).toBe('todo')
+    expect((await cardNow('c1'))?.branch).toBeUndefined()
   })
 
   it('a manual start of a DRAFT card runs it and clears the draft mark (gate ⑧ exemption)', async () => {

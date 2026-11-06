@@ -29,6 +29,9 @@ const mocks = vi.hoisted(() => ({
 // resolution deterministic before advancing the lock's fake clock; an actual
 // auth-store fs read could schedule its timer only after the clock has advanced.
 vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => false }))
+// The lock deadline uses fake timers; membership IO is covered separately by
+// automation launch tests and must not defer registration of that deadline.
+vi.mock('./automationPolicy', async (original) => ({ ...await original<typeof import('./automationPolicy')>(), assertAutomaticOperationAllowed: async () => {} }))
 
 // Pass-through EXCEPT launchClaude: the real module also exports pure helpers
 // (buildAppContextPrompt) that the SDK launch plan legitimately uses. Replacing

@@ -72,14 +72,14 @@ export interface PresidentRelayDeps {
 /** Same steps as POST /api/swarm/supply: preflights, spawn (resuming the
  *  stored conversation), remember the intent. Returns an error string or null.
  *  Shared with the phone link (a say to a project whose desk is closed). */
-export const wakePresidentDesk = async (path: string): Promise<string | null> => {
+export const wakePresidentDesk = async (path: string, cause: 'owner' | 'automatic' = 'automatic'): Promise<string | null> => {
   const { claudeRunPreflight } = await import('./claudePreflight')
   const { swarmEnvPreflight } = await import('./swarmEnvPreflight')
   const { spawnSwarmSupply } = await import('./swarmSupply')
   const { patchEngineIntent } = await import('./swarmEnginePersistence')
   if (await selectedRuntime('swarm') === 'claude' && !(await claudeRunPreflight()).ok) return 'claude-unavailable'
   if (!(await swarmEnvPreflight(path, { force: true, requireGit: false, requireGitRepo: false })).ok) return 'env-unavailable'
-  await spawnSwarmSupply({ projectPath: path })
+  await spawnSwarmSupply({ projectPath: path, cause })
   await patchEngineIntent(path, { supplyDesired: true }).catch(() => {})
   return null
 }
@@ -91,7 +91,7 @@ const defaults: PresidentRelayDeps = {
     const want = resolve(path)
     return listAllActiveDesks().claude.some((d) => ids.has(d.id) && resolve(d.cwd) === want)
   },
-  wake: wakePresidentDesk,
+  wake: (path) => wakePresidentDesk(path, 'owner'),
   say: queueSupplyOwnerSay,
   cancel: cancelSupplyOwnerSay,
   transcript: supplyTranscriptFile,

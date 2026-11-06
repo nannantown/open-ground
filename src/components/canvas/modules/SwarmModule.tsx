@@ -851,7 +851,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
     setManagerBusy(true)
     setError(null)
     try {
-      const res = await fetch('/api/swarm/manager', {
+      const res = await fetch('/api/swarm/manager/open', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ path: project.path }),
@@ -970,7 +970,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
       // leaving an SDK desk alive here would make the respawn ADOPT it and the
       // owner's Restart would silently do nothing.
       if (manager) await stopCommanderDesk(manager, project.path)
-      const res = await fetch('/api/swarm/manager', {
+      const res = await fetch('/api/swarm/manager/open', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ path: project.path }),
@@ -1107,6 +1107,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
   // (No separate auto-integrate switch exists anymore — retired 2026-07-16.)
   const powerSwarm = useCallback(
     (next: boolean) => {
+      if (engine.automation?.enabled) return
       const plan = planSwarmPower(next, {
         running: engine.running,
         hasSupply: !!supply,
@@ -1116,7 +1117,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
       if (plan.launchSupply) void launchSupply()
       if (plan.launchManager) void launchManager()
     },
-    [engine.running, supply, manager, toggleAutonomy, launchSupply, launchManager],
+    [engine.running, engine.automation?.enabled, supply, manager, toggleAutonomy, launchSupply, launchManager],
   )
 
   // ── The SINGLE worker source both tabs render ────────────────────────────
@@ -1336,6 +1337,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
           running={engine.running}
           available={engineAvailable}
           busy={engineBusy}
+          controlledHint={engine.automation?.enabled ? t('projectPanel.swarm.automationFrameControl') : undefined}
           onToggle={(next) => {
             // First run from the FOLDED strip: open the bar onto the
             // onboarding (what Start does, before it does it) instead of
@@ -1348,6 +1350,11 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
           }}
         />
       </div>
+      {!collapsed && engine.automation?.enabled && (
+        <p role="status" className="shrink-0 border-b border-line-soft bg-bg px-3 py-2 text-meta leading-relaxed text-ink-muted">
+          {t(engine.automation.allowed ? 'projectPanel.swarm.automationFrameInside' : 'projectPanel.swarm.automationFrameOutside')}
+        </p>
+      )}
       {/* Env preflight (git/shell) — ONE banner listing every unmet prerequisite
           (GET /api/swarm/preflight, the same gate the worker/supply/manager spawn
           routes enforce), so a missing git / non-repo project / missing shell is
@@ -1457,7 +1464,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
           (crash-loop breaker / preflight) or this is a build where resume doesn't run.
           Offer a one-click resume (never auto-resumed). Dismiss clears the persisted
           marker (toggleAutonomy false → forgetSwarmAutonomy). */}
-      {engine.autonomyRemembered && !engine.running && (
+      {engine.autonomyRemembered && !engine.running && !engine.automation?.enabled && (
         <div className="flex shrink-0 items-center gap-3 border-b border-line-soft bg-bg px-3 py-2">
           <span className="min-w-0 flex-1 text-meta leading-relaxed text-ink-muted">
             {t('projectPanel.swarm.autonomyReminder')}
@@ -1489,7 +1496,17 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
           work-flow, and what Start does, shown BEFORE pressing it. Its Start fires
           the SAME powerSwarm composition as the bar above. Otherwise → the normal
           row of seats. */}
-      {swarmIdle && (!onboardingSeen || showOnboarding) ? (
+      {swarmIdle && engine.automation?.enabled ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center p-4">
+          <div className="max-w-[360px] text-center">
+            <p className="mb-4 text-ui text-ink-subtle">{t('projectPanel.swarm.automationFrameControl')}</p>
+            <button type="button" onClick={() => { void launchSupply() }} disabled={engineBusy}
+              className="inline-flex items-center rounded-[3px] bg-accent px-4 py-1.5 text-ui font-medium text-bg-card transition-colors enabled:hover:bg-accent-hover enabled:active:bg-accent-deeper disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2">
+              {t('projectPanel.swarm.automationFrameTalk')}
+            </button>
+          </div>
+        </div>
+      ) : swarmIdle && (!onboardingSeen || showOnboarding) ? (
         <SwarmOnboarding
           onStart={() => {
             markOnboardingSeen()

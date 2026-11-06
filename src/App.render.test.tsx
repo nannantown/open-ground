@@ -18,9 +18,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react'
 import App from './App'
 import { I18nProvider } from '@/i18n/I18nContext'
-import { AuthProvider } from '@/lib/auth/AuthContext'
+import { AuthProvider, useAuth } from '@/lib/auth/AuthContext'
 import { RealtimeProvider } from '@/lib/collab/RealtimeContext'
-import type { GroundLampRow, ProjectMeta, ProjectData } from '@/lib/types'
+import type { CanvasState, GroundLampRow, ProjectMeta, ProjectData } from '@/lib/types'
 import { projectPanel } from '@/i18n/messages/projectPanel'
 
 /** The Ground card marks are icons; their names are the hover text (en). */
@@ -69,6 +69,8 @@ const urlOf = (input: unknown): string =>
       : ((input as Request)?.url ?? '')
 
 interface MockOpts {
+  canvasPost?: (body: CanvasState) => Promise<Response>
+  authUserId?: string
   settings?: Record<string, unknown>
   projects?: ProjectMeta[]
   projectData?: ProjectData
@@ -94,6 +96,11 @@ function installFetch(opts: MockOpts = {}) {
   const jobs = Array.from({ length: opts.aiActiveJobs ?? 0 }, (_, i) => ({ id: `job-${i}` }))
   const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
     const url = urlOf(input)
+    if (new URL(url, 'http://fixture').pathname === '/api/canvas' && methodOf(input, init) === 'POST') {
+      const body = JSON.parse(String(init?.body)) as CanvasState
+      return opts.canvasPost?.(body) ?? reply(200, { ok: true, canvas: body })
+    }
+    if (new URL(url, 'http://fixture').pathname === '/api/canvas') return reply(200, EMPTY_CANVAS)
     if (url.includes('/api/settings') && methodOf(input, init) === 'POST') {
       const status = opts.settingsPostStatus ?? 200
       return reply(status, status >= 300 ? { error: opts.settingsPostError ?? 'save failed' } : { ok: true })
@@ -115,7 +122,7 @@ function installFetch(opts: MockOpts = {}) {
     if (url.includes('/api/canvas/ai/active')) return reply(200, { jobs })
     if (url.includes('/api/terminal/active')) return reply(200, { cwds: [], claude: [] })
     if (url.includes('/api/ground/lamps')) return reply(200, { lamps: opts.lamps ?? [] })
-    if (url.includes('/api/auth/session')) return reply(503, {}) // signed-out (default build)
+    if (url.includes('/api/auth/session')) return opts.authUserId ? reply(200, { user: { id: opts.authUserId } }) : reply(503, {})
     if (url.includes('/api/collab/config')) return reply(200, { enabled: false })
     if (url.includes('/api/assistant/runtime')) return reply(200, { conversationId: 'synthetic-assistant', epoch: 0, pending: [], uncertainActions: [], actions: [] })
     // Everything else (feedback/config, notifications,
@@ -127,11 +134,16 @@ function installFetch(opts: MockOpts = {}) {
   return fetchMock
 }
 
-const renderApp = () =>
+const AuthTestControls = () => {
+  const auth = useAuth()
+  return <aside><button type="button" onClick={() => { void auth.refresh() }}>Refresh synthetic identity</button><output data-testid="synthetic-identity">{auth.user?.id ?? 'signed-out'}</output></aside>
+}
+const renderApp = (authControls = false) =>
   render(
     <I18nProvider>
       <AuthProvider>
         <RealtimeProvider>
+          {authControls && <AuthTestControls />}
           <App />
         </RealtimeProvider>
       </AuthProvider>
@@ -150,6 +162,152 @@ afterEach(() => {
 })
 
 describe('App — whole-render integration', () => {
+  it('creates and saves one owner-designated automation frame and rebases later saves onto the committed revision', async () => {
+    const writes: CanvasState[] = []
+    installFetch({ authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async (body) => {
+      writes.push(structuredClone(body))
+      return reply(200, { ok: true, canvas: { ...body, automation: { ...body.automation, revision: 1 } }, reconciliation: 'complete' })
+    } })
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp() })
+    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0].automation).toMatchObject({ version: 1, revision: 0, enabled: true })
+    const designated = writes[0].elements.filter((element) => element.groundRole === 'automation')
+    expect(designated).toHaveLength(1)
+    expect(writes[0].automation?.frameId).toBe(designated[0].id)
+    expect(designated[0].x).toBeGreaterThan(writes[0].positions.id.x + 256)
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Automatic operation' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Automatic operation' }))
+    await waitFor(() => expect(writes).toHaveLength(2))
+    expect(writes[1].automation?.revision).toBe(1)
+    expect(writes[1].elements.filter((element) => element.groundRole === 'automation')).toHaveLength(1)
+  })
+
+  it('retains a visible unsaved frame on a conflicting save and exposes the saved-layout recovery action', async () => {
+    installFetch({ authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async () => reply(409, { error: 'conflict' }) })
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp() })
+    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    const recover = await screen.findByRole('button', { name: 'Load saved layout' })
+    expect(recover).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toContain('unsaved layout changes will be replaced')
+    expect((screen.getByRole('button', { name: 'Automatic operation' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('does not authorize owner A’s pending layout as owner B after a debounce, and permits an explicit retry after A signs back in', async () => {
+    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } } }
+    const calls = installFetch(options)
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp(true) })
+    await waitFor(() => expect(screen.getByTestId('synthetic-identity').textContent).toBe('owner-a'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    options.authUserId = 'owner-b'
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh synthetic identity' }))
+    await waitFor(() => expect(screen.getByTestId('synthetic-identity').textContent).toBe('owner-b'))
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)) })
+    const saves = () => calls.mock.calls.filter(([input, init]) => new URL(urlOf(input), 'http://fixture').pathname === '/api/canvas' && methodOf(input, init) === 'POST')
+    expect(saves()).toHaveLength(0)
+    expect(screen.getByRole('alert').textContent).toContain('another account')
+    options.authUserId = 'owner-a'
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh synthetic identity' }))
+    await waitFor(() => expect(screen.getByTestId('synthetic-identity').textContent).toBe('owner-a'))
+    expect(saves()).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry save' }))
+    await waitFor(() => expect(saves()).toHaveLength(1))
+    expect(new Headers(saves()[0][1]?.headers).get('X-OpenGround-Owner')).toBe('owner-a')
+  })
+
+  it('does not clear or rebase A’s pending layout when its accepted ACK arrives after an account switch', async () => {
+    let acknowledge!: (value: Response) => void
+    let sent!: CanvasState
+    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } },
+      canvasPost: async (body) => { sent = body; return new Promise((resolve) => { acknowledge = resolve }) } }
+    const calls = installFetch(options)
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp(true) })
+    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    await waitFor(() => expect(sent?.automation).toBeTruthy())
+    options.authUserId = 'owner-b'
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh synthetic identity' }))
+    await waitFor(() => expect(screen.getByTestId('synthetic-identity').textContent).toBe('owner-b'))
+    await act(async () => { acknowledge(await reply(200, { ok: true, canvas: { ...sent, automation: { ...sent.automation, revision: 777 } } })) })
+    expect(screen.getByRole('alert').textContent).toContain('another account')
+    expect(document.querySelector(`[data-element-id="${sent.automation!.frameId}"]`)).toBeTruthy()
+    fireEvent(window, new Event('focus'))
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)) })
+    expect(document.querySelector(`[data-element-id="${sent.automation!.frameId}"]`)).toBeTruthy()
+    expect(calls.mock.calls.filter(([input, init]) => new URL(urlOf(input), 'http://fixture').pathname === '/api/canvas' && methodOf(input, init) === 'POST')).toHaveLength(1)
+  })
+
+  it('does not submit an anonymous pending canvas edit as a newly signed-in owner', async () => {
+    const options: MockOpts = { projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } } }
+    const calls = installFetch(options)
+    localStorage.setItem('openground:onboarded', '1')
+    let view!: ReturnType<typeof renderApp>
+    await act(async () => { view = renderApp(true) })
+    const viewport = view.container.querySelector('main > div.contents > div')!
+    expect(viewport).toBeTruthy()
+    fireEvent.wheel(viewport, { deltaX: 10, deltaY: 20 })
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)) })
+    options.authUserId = 'owner-a'
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh synthetic identity' }))
+    await waitFor(() => expect(screen.getByTestId('synthetic-identity').textContent).toBe('owner-a'))
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)) })
+    expect(calls.mock.calls.filter(([input, init]) => new URL(urlOf(input), 'http://fixture').pathname === '/api/canvas' && methodOf(input, init) === 'POST')).toHaveLength(0)
+    expect(screen.getByRole('alert').textContent).toContain('another account')
+  })
+
+  it('rechecks the editing identity after a flush waits behind an older in-flight save', async () => {
+    let acknowledge!: (value: Response) => void
+    let first!: CanvasState
+    const posted: CanvasState[] = []
+    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async (body) => {
+      posted.push(body)
+      if (posted.length === 1) { first = body; return new Promise((resolve) => { acknowledge = resolve }) }
+      return reply(200, { ok: true, canvas: body })
+    } }
+    installFetch(options)
+    localStorage.setItem('openground:onboarded', '1')
+    let view!: ReturnType<typeof renderApp>
+    await act(async () => { view = renderApp(true) })
+    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    await waitFor(() => expect(posted).toHaveLength(1))
+    fireEvent.wheel(view.container.querySelector('main > div.contents > div')!, { deltaX: 20, deltaY: 30 })
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)) })
+    fireEvent(window, new Event('focus'))
+    options.authUserId = 'owner-b'
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh synthetic identity' }))
+    await waitFor(() => expect(screen.getByTestId('synthetic-identity').textContent).toBe('owner-b'))
+    await act(async () => { acknowledge(await reply(200, { ok: true, canvas: { ...first, automation: { ...first.automation, revision: 1 } } })) })
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)) })
+    expect(posted).toHaveLength(1)
+    expect(screen.getByRole('alert').textContent).toContain('another account')
+  })
+
+  it('does not transfer an explicit reload to a newer drag made while the reload waits for an old ACK', async () => {
+    let acknowledge!: (value: Response) => void
+    let sent!: CanvasState
+    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } },
+      canvasPost: async (body) => { sent = body; return new Promise((resolve) => { acknowledge = resolve }) } }
+    const calls = installFetch(options)
+    localStorage.setItem('openground:onboarded', '1')
+    let view!: ReturnType<typeof renderApp>
+    await act(async () => { view = renderApp(true) })
+    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    await waitFor(() => expect(sent?.automation).toBeTruthy())
+    options.authUserId = 'owner-b'
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh synthetic identity' }))
+    await waitFor(() => expect(screen.getByTestId('synthetic-identity').textContent).toBe('owner-b'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Load saved layout' }))
+    fireEvent.wheel(view.container.querySelector('main > div.contents > div')!, { deltaX: 20, deltaY: 30 })
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)) })
+    await act(async () => { acknowledge(await reply(200, { ok: true, canvas: sent })) })
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)) })
+    expect(calls.mock.calls.filter(([input, init]) => new URL(urlOf(input), 'http://fixture').pathname === '/api/canvas' && methodOf(input, init) === 'GET')).toHaveLength(0)
+    expect(document.querySelector(`[data-element-id="${sent.automation!.frameId}"]`)).toBeTruthy()
+  })
+
   it('assistant owner gate waits for the real role before reading the closed talk or provider status', async () => {
     const fetchMock = installFetch()
     const original = fetchMock.getMockImplementation()!

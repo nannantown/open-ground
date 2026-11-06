@@ -32,7 +32,10 @@ vi.setConfig({ testTimeout: 60_000 })
 const hooks = vi.hoisted(() => ({
   envResult: { ok: true, issues: [] } as SwarmEnvPreflightResult,
   envCalls: [] as Array<{ path: string; opts?: SwarmEnvPreflightOptions }>,
+  relay: vi.fn(async (_path: string, _text: string, _opts?: { cause?: string }) => ({ ok: true, delivered: true, runtime: 'sdk', woke: false })),
 }))
+
+vi.mock('@/lib/server/commanderRelay', () => ({ relayToCommander: hooks.relay }))
 
 vi.mock('@/lib/server/claudePreflight', () => ({
   claudeRunPreflight: async () => ({ ok: true }),
@@ -77,6 +80,7 @@ vi.mock('@/lib/server/swarmManager', async (importOriginal) => {
 import { spawnSwarmWorker } from '@/lib/server/swarmWorker'
 import { spawnSwarmSupply } from '@/lib/server/swarmSupply'
 import { spawnSwarmManager } from '@/lib/server/swarmManager'
+import { AutomationPolicyError } from '@/lib/server/automationPolicy'
 
 const OWNER = 'owner@example.com'
 process.env.OPENGROUND_OWNER_EMAILS = OWNER
@@ -125,6 +129,7 @@ beforeEach(async () => {
   await register(proj)
   hooks.envResult = { ok: true, issues: [] }
   hooks.envCalls = []
+  hooks.relay.mockClear()
   vi.mocked(spawnSwarmWorker).mockClear()
   vi.mocked(spawnSwarmSupply).mockClear()
   vi.mocked(spawnSwarmManager).mockClear()
@@ -224,5 +229,41 @@ describe('requireGit/requireGitRepo — only /worker requires a git repo; only /
     const call = hooks.envCalls.at(-1)
     expect(call?.opts?.requireGitRepo).toBe(false)
     expect(call?.opts?.requireGit).not.toBe(false)
+  })
+})
+
+describe('automatic role protocol and explicit GUI conversation are distinct routes', () => {
+  it.each(['manager', 'supply'] as const)('%s ignores an owner cause in the canonical body; only /open carries the server-owned manual cause', async role => {
+    const spawn = role === 'manager' ? vi.mocked(spawnSwarmManager) : vi.mocked(spawnSwarmSupply)
+    spawn.mockImplementationOnce(async opts => {
+      expect(opts.cause).toBe('automatic')
+      throw new AutomationPolicyError()
+    })
+    const blocked = await app.request(`/api/swarm/${role}`, json({ path: proj, cause: 'owner' }))
+    expect(blocked.status).toBe(409)
+    expect(await blocked.json()).toMatchObject({ automationBlocked: true })
+    const opened = await app.request(`/api/swarm/${role}/open`, json({ path: proj, cause: 'automatic' }))
+    expect(opened.status).toBe(200)
+    expect(spawn).toHaveBeenLastCalledWith(expect.objectContaining({ projectPath: proj, cause: 'owner' }))
+  })
+
+  it('keeps canonical commander delegation automatic while explicit GUI input uses the owner conversation lane', async () => {
+    const automatic = await app.request('/api/swarm/manager/say', json({ path: proj, text: 'a delegated instruction', cause: 'owner' }))
+    expect(automatic.status).toBe(200)
+    expect(hooks.relay).toHaveBeenLastCalledWith(proj, 'a delegated instruction', { wake: true, cause: 'automatic' })
+    const manual = await app.request('/api/swarm/manager/input', json({ path: proj, text: 'an explicit owner question', cause: 'automatic' }))
+    expect(manual.status).toBe(200)
+    expect(hooks.relay).toHaveBeenLastCalledWith(proj, 'an explicit owner question', { wake: true, cause: 'owner' })
+  })
+
+  it.each(['/api/swarm/manager/open', '/api/swarm/manager/input', '/api/swarm/supply/open'])('requires the existing owner capability and registered project for %s', async route => {
+    const unregistered = await app.request(route, json({ path: '/not-a-registered-project', text: 'hello' }))
+    expect(unregistered.status).toBe(403)
+    await clearSession()
+    const signedOut = await app.request(route, json({ path: proj, text: 'hello' }))
+    expect(signedOut.status).toBe(403)
+    expect(hooks.relay).not.toHaveBeenCalled()
+    expect(spawnSwarmManager).not.toHaveBeenCalled()
+    expect(spawnSwarmSupply).not.toHaveBeenCalled()
   })
 })

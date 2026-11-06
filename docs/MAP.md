@@ -54,6 +54,29 @@
   ChatGPT controls require the separate real-owner `experiments.eligible`.
   Browser regression: `e2e/swarm-chatgpt-transcript.spec.ts` feeds real transport
   events into president/manager seats at desktop and narrow widths.
+- President SDK conversation UI: `PresidentChatTranscript.tsx` renders public
+  owner bubbles/assistant prose and compact activity; `SwarmSeatTalk.tsx` keeps
+  its composer visible with durable draft/IME behavior. `usePresidentControl.ts`
+  binds Stop to an observed owner/project/conversation epoch/turn and retries a
+  lost acknowledgement with the same operation ID. HTTP status/stop/history:
+  `server/routes/conversation.ts`; read-only bounded history goes through
+  `swarmSupplyRuntime.getSupplyPublicConversation` to the unique current SDK
+  president's owner-bound public projection in `sdkSession.ts`. Tools/reasoning
+  are excluded, and a reset invalidates previous-context responses. Regressions:
+  `conversationPresident.test.ts`, `sdkPublicConversation.test.ts`,
+  `SwarmPresidentChat.test.tsx`, `usePresidentControl.test.tsx`,
+  `e2e/president-chat.spec.ts`.
+- Ground automatic-operation frame: `docs/AUTOMATION_FRAME.md`;
+  `automationFrame.ts` shares dedicated-role geometry and fail-closed membership.
+  `groundCanvas.ts` validates owner consent and revision CAS; `store.mutateCanvas`
+  serializes every producer with fresh reads and durable writes. `automationPolicy.ts`
+  reads persisted authority and reconciles on save/normal background startup.
+  Orchestrator/role/relay gates pause new outside dispatch, integration and automatic
+  wake while preserving accepted worker monitoring and explicit owner conversations.
+  Canonical role HTTP remains automatic; GUI open/input routes select manual intent.
+  Regressions: `automationFrame.test.ts`, `groundCanvas*.test.ts`,
+  `automationPolicy.test.ts`, `automationEngine.test.ts`, `automationLaunch.test.ts`,
+  `automationRelays.test.ts`, `groundAutomation.test.ts`, `e2e/automation-frame.spec.ts`.
 - Owner runtime switching/recovery: `docs/RUNTIME_TRANSITION_RECOVERY_PLAN.md`;
   `runtimeTransitionStore.ts` / `runtimeTransitions.ts` separate requested and
   effective profiles and checkpoint before retirement. `swarmRuntimeTransition.ts`

@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef } from 'react'
-import { LayoutGrid, Minimize } from 'lucide-react'
+import { LayoutGrid, Minimize, Zap } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
 import {
@@ -18,6 +18,7 @@ import { shadowsCss } from '@/lib/canvasShadow'
 
 interface Props {
   frame: CanvasElement
+  automation?: boolean
   selected: boolean
   /** The idle pointer is over this frame (the deepest one under it). */
   hovered?: boolean
@@ -76,6 +77,7 @@ export function groundFrameStroke(stroke: string | undefined, hovered: boolean):
 // the body is click-through so cards on top stay reachable.
 export const FrameView = memo(({
   frame,
+  automation = false,
   selected,
   hovered = false,
   editing,
@@ -173,6 +175,7 @@ export const FrameView = memo(({
           />
         ) : (
           <>
+            {automation && <span title={t('canvasEl.frame.automationHint')} className="inline-flex shrink-0 items-center gap-1 rounded-sm bg-accent-soft px-1.5 py-0.5 text-meta font-medium text-accent-deeper"><Zap size={12} aria-hidden />{t('canvasEl.frame.automation')}</span>}
             <span className="flex-1 select-none truncate font-display text-read leading-none text-ink">
               {frame.text || <span className="text-ink-faint">Frame</span>}
             </span>

@@ -684,7 +684,7 @@ export const controlPresidentConversation = async (projectPath: string, operatio
     if (admission) await validateNativePresidentRecoveryAdmission(projectPath, admission)
     context = await cancelQueuedPresidentInputs(projectPath)
     await assertCurrent()
-    await spawnSwarmSupply({ projectPath, fresh: true, ...(admission ? { nativeRecovery: admission, recoveryInstructions } : {}),
+    await spawnSwarmSupply({ projectPath, fresh: true, cause: 'owner', ...(admission ? { nativeRecovery: admission, recoveryInstructions } : {}),
       beforeLaunch: async () => { await assertCurrent(); if (admission) await validateNativePresidentRecoveryAdmission(projectPath, admission) } })
     return
   }
@@ -728,7 +728,7 @@ export const controlPresidentConversation = async (projectPath: string, operatio
     await assertCurrent()
     context = await cancelQueuedPresidentInputs(projectPath)
     await assertCurrent()
-    await spawnSwarmSupply({ projectPath, fresh: true, beforeLaunch: assertCurrent })
+    await spawnSwarmSupply({ projectPath, fresh: true, cause: 'owner', beforeLaunch: assertCurrent })
   } finally {
     if (!retired && desk.runtime === 'sdk' && !paused) resumeSdkInputAdmission(desk.handleId)
   }

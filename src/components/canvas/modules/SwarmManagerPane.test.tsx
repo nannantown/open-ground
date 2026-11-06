@@ -124,7 +124,7 @@ describe("the manager's seat", () => {
     expect(reqs.filter((r) => r.url.includes('manager/say'))).toHaveLength(0)
     fireEvent.keyDown(box, { key: 'Enter', metaKey: true })
     await findByText('projectPanel.swarm.say.woke')
-    const say = reqs.filter((r) => r.url === '/api/swarm/manager/say')
+    const say = reqs.filter((r) => r.url === '/api/swarm/manager/input')
     expect(say).toHaveLength(1)
     expect(JSON.parse(say[0].body!)).toEqual({ path: '/p', text: '状況を教えて' })
     // Delivered ⇒ folded again.

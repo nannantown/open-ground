@@ -61,6 +61,7 @@
 // and the path is a registered project.
 
 import { runtimeSpawnBlock, selectedRuntime, swarmRunPreflight } from './chatgptRuntime'
+import { automaticOperationAllowed, assertAutomaticOperationAllowed, readProjectAutomationPolicy, AutomationPolicyError, type AutomationReconciliation } from './automationPolicy'
 import { getRuntimeTransition, runtimeAdmissionBlocked } from './runtimeTransitionStore'
 import { hasCompletionConditions, isDispatchableCard } from '@/lib/dispatchGate'
 import { observeBoardProgress } from './supplyProgress'
@@ -1871,6 +1872,10 @@ export interface ProjectEngine {
   path: string
   /** True while the autonomous drain chain is scheduled. */
   running: boolean
+  /** The loop may continue monitoring accepted workers while new automatic
+   * operations are OFF outside the dedicated Ground frame. */
+  automationBlocked?: boolean
+  automation?: { enabled: boolean; allowed: boolean }
   /** Owner EXPLICITLY paused the engine via the OFF toggle (stopOrchestrator). While
    *  set, {@link maybeAutoStartDrain} will NOT auto-start the drain — so a manual OFF
    *  genuinely halts new dispatch (条件2) even though a DEFAULT-off engine auto-drains
@@ -2899,7 +2904,7 @@ registerEngineLogSink(async (projectPath, level, message) => {
 // disk fault only loses the NEXT boot's resume, never disturbs this process.
 const persistEngineIntent = async (engine: ProjectEngine, projectPath: string): Promise<void> => {
   const ok = await writeEngineIntent(projectPath, {
-    desiredRunning: engine.running,
+    desiredRunning: engine.running && !engine.automationBlocked,
     overseer: engine.overseer.enabled,
   })
   if (!ok) logLine(engine, 'warn', 'engine intent persist failed (disk) — in-memory state unaffected')
@@ -3112,7 +3117,8 @@ const stateOf = (
   const live = engine.workers.filter((w) => isAlive(w))
   const counters = engine.metrics ?? emptyMetricsCounters()
   return {
-    running: engine.running,
+    running: engine.running && !engine.automationBlocked,
+    ...(engine.automation ? { automation: engine.automation } : {}),
     // The OR of the in-memory flag and the persisted record, so "stopped by hand"
     // reads true across a restart (fresh engine ⇒ flag false, record still true).
     manualStop: engine.manualStop === true || manualStopPersisted,
@@ -4246,7 +4252,9 @@ const managerTargetAdmitted = (target: ManagerTarget): boolean => {
  * handoff may revoke admission, but must never redirect an existing message. */
 const managerTargetCurrent = async (projectPath: string, target: ManagerTarget, deps: ManagerResolutionDeps): Promise<boolean> => {
   if (!managerTargetAdmitted(target) || !target.desk) return false
+  if (!await automaticOperationAllowed(projectPath) || !managerTargetAdmitted(target)) return false
   const current = await resolveManagerTarget(projectPath, deps)
+  if (!await automaticOperationAllowed(projectPath)) return false
   return managerTargetAdmitted(target) && current.admission === target.admission &&
     current.desk?.runtime === target.desk.runtime && current.desk.handleId === target.desk.handleId &&
     current.desk.agentSessionId === target.desk.agentSessionId
@@ -4463,6 +4471,7 @@ export const defaultNudgeManager = async (
   const write = deps?.write ?? writeInput
   const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   try {
+    if (!await automaticOperationAllowed(projectPath)) return false
     if (runtimeAdmissionBlocked('swarm')) return false
     const target = await resolveManagerTarget(projectPath, deps)
     const desk = target.desk
@@ -4581,6 +4590,7 @@ export const defaultNotifyManagerReady = async (
 ): Promise<boolean> => {
   const getScreen = deps?.getScreen ?? getTerminalScreen
   try {
+    if (!await automaticOperationAllowed(projectPath)) return false
     if (runtimeAdmissionBlocked('swarm')) return false
     const target = await resolveManagerTarget(projectPath, deps)
     const desk = target.desk
@@ -4627,6 +4637,7 @@ const defaultWakeManager = async (
   cards: readonly { branch: string; title: string }[],
 ): Promise<boolean> => {
   try {
+    if (!await automaticOperationAllowed(projectPath)) return false
     await spawnSwarmManager({ projectPath })
   } catch {
     return false // no usable tier / claude missing / spawn fault — retry next pass
@@ -4682,6 +4693,7 @@ const defaultManagerDeskRuntime = async (projectPath: string): Promise<ManagerRu
  *  unwind), so the absent-arm's next pass sees the desk go and seats a fresh one through
  *  the ordinary wake path — no second spawn road. */
 const defaultRecycleManagerDesk = async (projectPath: string): Promise<boolean> => {
+  if (!await automaticOperationAllowed(projectPath)) return false
   if (runtimeAdmissionBlocked('swarm')) return false
   const target = await resolveManagerTarget(projectPath)
   const desk = target.desk
@@ -7048,6 +7060,12 @@ const monitorWorkers = async (
       }
     }
 
+    // Frame OFF does not manufacture a new "Continue" turn or reclaim a
+    // merely quiet accepted task. Quota/ceiling/death monitoring above remains.
+    if (stall.action !== 'none' && !await automaticOperationAllowed(engine.path)) {
+      next.push(withHeartbeat({ ...w, stage }, heartbeat))
+      continue
+    }
     // Reached here ⇒ NOT silent, OR silent without a question ⇒ no wait arm
     // applies. Drop any stale question-state (the worker recovered, or was
     // never in one) and take the ordinary STALL path: a silent worker is NUDGED
@@ -7752,6 +7770,15 @@ const collectUnownedDoing = async (
   for (const id of Array.from(holds.keys())) if (!present.has(id)) holds.delete(id)
 }
 
+const refreshEngineAutomationPolicy = async (engine: ProjectEngine) => {
+  const policy = await readProjectAutomationPolicy(engine.path)
+  engine.automation = { enabled: policy.enabled, allowed: policy.allowed }
+  if (policy.enabled) engine.automationBlocked = !await automaticOperationAllowed(engine.path)
+  // Disabling the policy does not reactivate a previously paused engine.
+  // An explicit owner ON clears that pause through startOrchestrator.
+  return policy
+}
+
 /** ONE pass. Idempotent-ish and side-effect-bounded:
  *   1. read the board (full card list),
  *   2. MONITOR (Card②): advance each dispatched worker's stage and, when one is
@@ -7773,6 +7800,7 @@ export const runDispatchPass = async (
   now: number = Date.now(),
 ): Promise<void> => {
   if (!engine.running || runtimeAdmissionBlocked('swarm')) return
+  await refreshEngineAutomationPolicy(engine)
 
   // 1. Read the full board — the monitor needs each worker's current column, and
   //    dispatch/reconcile need the todo queue. One read feeds all three.
@@ -7808,6 +7836,7 @@ export const runDispatchPass = async (
   //    workers (freeing their slots).
   await monitorWorkers(engine, deps, byId, now)
   if (!engine.running) return // a stop during the (awaiting) monitor halts promptly
+  if (!(await refreshEngineAutomationPolicy(engine)).allowed || engine.automationBlocked) return
 
   // 2b. Collect the cards NO worker owns but whose branch already holds delivered
   //     work — the restart-orphan case monitorWorkers structurally cannot see
@@ -7995,7 +8024,7 @@ export const runDispatchPass = async (
 
   try {
     for (const card of picks) {
-      if (!engine.running || runtimeAdmissionBlocked('swarm')) return // also freeze a pending handoff
+      if (!engine.running || runtimeAdmissionBlocked('swarm') || !await automaticOperationAllowed(engine.path)) return // recheck after every awaited preparation
       // RE-CHECK THE QUOTA PARK GATE PER CARD (2026-07-29).
       //
       // `spawnBlock` is evaluated ONCE, at the top of the pass — but the state it
@@ -8099,8 +8128,10 @@ export const runDispatchPass = async (
       // park it in blocked for a human. Only a branch with 0 commits ahead, or one
       // git positively reports gone, still dispatches fresh, as before.
       const priorBranch = typeof fresh.branch === 'string' ? fresh.branch.trim() : ''
+      if (!await automaticOperationAllowed(engine.path)) return
       if (!reuse && priorBranch) {
         const ahead = await cardBranchHoldsWork(engine.path, priorBranch, deps.countCommitsAhead, deps.branchExists)
+        if (!await automaticOperationAllowed(engine.path)) return
         if (ahead !== false) {
           const fails = (engine.reentryFailures ??= new Map())
           const tries = (fails.get(card.id) ?? 0) + 1
@@ -8139,8 +8170,6 @@ export const runDispatchPass = async (
           continue
         }
       }
-      engine.reentryFailures?.delete(card.id)
-
       let spawn: SpawnSwarmWorkerResponse
       try {
         spawn = await deps.spawnWorker({
@@ -8158,6 +8187,11 @@ export const runDispatchPass = async (
           ...(reuse ? { worktree: reuse.worktree } : {}),
         })
       } catch (e) {
+        if (e instanceof AutomationPolicyError) {
+          await refreshEngineAutomationPolicy(engine)
+          logLine(engine, 'info', 'automatic admission changed during worker preparation; the pick remains queued without spending a retry', 'routine')
+          return // finally releases every reserved pick
+        }
         // QUOTA DEFER (2026-10-21): the only tier this card could launch on is
         // cooling. Not a failure — the card simply waits in todo and the first pass
         // after the reset launches it. Said once per wall, not every 3s.
@@ -8176,6 +8210,7 @@ export const runDispatchPass = async (
         }
         continue
       }
+      engine.reentryFailures?.delete(card.id)
       if (priorFailure) engine.reworkReasons.delete(card.id) // consumed — injected into this /order
       engine.coolingDefers?.delete(card.id)
       if (reuse && spawn.branch === reuse.branch) {
@@ -8458,7 +8493,7 @@ export const runIntegratePass = async (
   // machine (stale window / boot grace). Production passes the wall clock.
   now: number = Date.now(),
 ): Promise<void> => {
-  if (!engine.running) return
+  if (!engine.running || !await automaticOperationAllowed(engine.path)) return
   // Throttle: skip ticks until INTEGRATE_TICK_MS has passed (the loop still
   // ticks every TICK_MS for dispatch). lastIntegrateAt starts at 0 so the first
   // pass after start runs immediately.
@@ -9795,7 +9830,7 @@ export const runEnginePass = async (
     // the vitest run finished (the measured 21-minute quota-detection lag's third
     // leg). kickIntegratePass owns the re-entrancy guard (integrateInFlight) and
     // the .catch; its write sections take the engine critical section themselves.
-    if (engine.running) kickIntegratePass(engine, deps)
+    if (engine.running && !engine.automationBlocked) kickIntegratePass(engine, deps)
     if (engine.running) {
       let tasks: ProjectTask[] | null = null
       try {
@@ -9825,7 +9860,7 @@ export const runEnginePass = async (
         /* belt-and-suspenders: never let escalation break a pass */
       }
 
-      await runOverseerPass(
+      if (!engine.automationBlocked) await runOverseerPass(
         engine,
         tasks,
         (level, message) => logLine(engine, level, message, 'routine'),
@@ -9835,7 +9870,7 @@ export const runEnginePass = async (
       // owner. Throttled + off-tick inside (waking a commander must not hold
       // the pass); a no-op when nothing sits in the commander lane.
       try {
-        kickCommanderQuestionSweep(engine.path)
+        if (!engine.automationBlocked) kickCommanderQuestionSweep(engine.path)
       } catch {
         /* never let the question lane break a pass */
       }
@@ -9953,14 +9988,21 @@ export class ClaudeNotReadyError extends Error {
 export const startOrchestrator = async (
   projectPath: string,
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
+  cause: 'owner' | 'frame' = 'owner',
 ): Promise<SwarmOrchestratorState> => {
+  await assertAutomaticOperationAllowed(projectPath)
+  if ((await readProjectAutomationPolicy(projectPath)).enabled) cause = 'frame'
+  if (cause === 'frame' && automationBootBlocked) throw new Error('Automatic operation is held by the boot crash-loop or storage safeguard. Review the reported startup problem before restarting the app.')
   // Preflight up front (parity with POST /api/swarm/worker): refuse to start an
   // engine that can't spawn anything, with the same machine-readable 503 body.
   const pre = await swarmRunPreflight()
   if (!pre.ok) throw new ClaudeNotReadyError(pre.body)
+  await assertAutomaticOperationAllowed(projectPath)
 
   const key = await canonicalize(projectPath)
   const engine = getOrCreateEngine(key)
+  engine.automationBlocked = false
+  await refreshEngineAutomationPolicy(engine)
   // Owner re-engaged autonomy — clear any prior explicit-pause so the engine runs now
   // AND so a later natural idle can auto-restart it again (maybeAutoStartDrain). The
   // INVERSE of stopOrchestrator's manualStop=true; the two toggles are the consent.
@@ -9988,6 +10030,7 @@ export const startOrchestrator = async (
   //   · reading it ONCE keeps the write below a single `writeEngineIntent`, so this
   //     path costs no more disk than it did before card 2b.
   const priorIntent = await readEngineIntent(projectPath)
+  await assertAutomaticOperationAllowed(projectPath)
   if (!engine.running) {
     engine.running = true
     // Boot-resume grace no longer applies to a stopped→ON start. Cleared ONLY here:
@@ -10000,7 +10043,7 @@ export const startOrchestrator = async (
     // sitting out the remainder of a rung (up to 15m) armed before the owner
     // fixed the cause. Wrong at most once — a still-broken machine re-arms on
     // that first attempt. (Adversarial review 2026-08-13.)
-    engine.sdkSpawnHold = undefined
+    if (cause === 'owner') engine.sdkSpawnHold = undefined
     // Reset the integration throttle so the first pass after a (re)start refreshes
     // the readiness display immediately — without this, a stop→start within
     // INTEGRATE_TICK_MS would leave the "統合可" snapshot stale for up to 15s.
@@ -10044,7 +10087,7 @@ export const startOrchestrator = async (
     // line deleted is worth nothing, so none was left behind — the reasoning
     // above is the record. Reproducing it needs the pass to see work waiting AND
     // the desk absent, which is an integration-level fixture.
-    engine.managerResume = undefined
+    if (cause === 'owner') engine.managerResume = undefined
     // New start epoch — supersedes any stale chain still settling from a prior
     // start (whose `.finally` will see the bumped generation and not re-arm).
     const gen = (engine.generation += 1)
@@ -10100,6 +10143,8 @@ export const stopOrchestrator = async (
   projectPath: string,
   deps: OrchestratorDeps = defaultDeps(),
 ): Promise<SwarmOrchestratorState> => {
+  if ((await readProjectAutomationPolicy(projectPath)).enabled)
+    throw new AutomationPolicyError('Move the project outside the automatic-operation frame to pause new work. Accepted workers remain monitored.', 'automation-frame-controlled')
   const key = await canonicalize(projectPath)
   // Clear the persisted reminder FIRST — an explicit OFF (or a "dismiss" of the
   // restart reminder) must forget the owner's intent even when store.engines has
@@ -10202,9 +10247,10 @@ export const maybeAutoStartDrain = async (
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps,
   now: number = Date.now(),
 ): Promise<boolean> => {
+  if (!await automaticOperationAllowed(engine.path)) return false
   // No auto-start when: already draining / mid-pass (the running loop owns refills — don't
   // double-drive), OR the owner explicitly paused (manualStop — OFF must stick, 条件2).
-  if (engine.running || engine.passInFlight || engine.manualStop) return false
+  if (engine.running || engine.passInFlight || engine.manualStop || !await automaticOperationAllowed(engine.path)) return false
   // The PERSISTED half of the owner's pause (Settings.swarmManualStop): the in-memory
   // flag dies with the process, so without this check a restart would let the opt-in
   // AUTODRAIN sweep re-ignite an engine the owner deliberately stopped by hand. An
@@ -10244,6 +10290,7 @@ export const maybeAutoStartDrain = async (
   // FINAL re-check AFTER the preflight await, then COMMIT synchronously (no await between
   // this re-check and engine.running=true) — a concurrent caller that engaged the engine
   // during our preflight await is caught here, preserving the twin-dispatch guard.
+  if (!await automaticOperationAllowed(engine.path)) return false
   if (engine.running || engine.passInFlight || engine.manualStop) return false
 
   // Conditions met — engage the engine. These three mutations ARE the manual ON toggle's
@@ -10667,10 +10714,12 @@ export const getOrchestratorState = async (
     deskLive: managerDeskFull !== null,
     beatFresh: manager?.fresh === true,
   })
+  const automation = await readProjectAutomationPolicy(projectPath)
   const engine = store.engines.get(key)
   if (!engine) {
     return {
       ...emptyState(),
+      automation: { enabled: automation.enabled, allowed: automation.allowed },
       autonomyRemembered: remembered,
       manualStop: stopped,
       manualStopPersisted: stopped,
@@ -10693,6 +10742,8 @@ export const getOrchestratorState = async (
   }
   return {
     ...stateOf(engine, deps.isAlive, tasks, remembered, stopped, overseerIntent),
+    automation: { enabled: automation.enabled, allowed: automation.allowed },
+    running: engine.running && !engine.automationBlocked && (!automation.enabled || automation.allowed),
     manager,
     managerDesk,
     managerPresence,
@@ -10718,6 +10769,7 @@ export const drainTickOrchestrator = async (
 ): Promise<SwarmOrchestratorState> => {
   const key = await canonicalize(projectPath)
   const engine = getOrCreateEngine(key)
+  await refreshEngineAutomationPolicy(engine)
   // DEFAULT OFF (card eadb25e6 — release blocker): the drain-tick NO LONGER auto-starts a
   // stopped engine. Merely MOUNTING the Swarm pane — including a pane RESTORED on app launch
   // (App.tsx view-restore) — must NOT spin up workers. The engine store is in-memory, so a
@@ -10730,6 +10782,49 @@ export const drainTickOrchestrator = async (
   // Same pure read as getOrchestratorState: surface the persisted "stopped by hand"
   // record so the Swarm hook's poll agrees with the GET (this tick answers the same UI).
   return stateOf(engine, deps.isAlive, [], false, await isSwarmManualStopPersisted(key))
+}
+
+/** Project policy controls new admission, not the lifetime of accepted actors.
+ * An outside engine keeps its existing monitor chain and worktree ownership. */
+export const reconcileAutomationOrchestrators = async (
+  deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
+): Promise<AutomationReconciliation> => {
+  const result: AutomationReconciliation = { started: [], paused: [], failures: [] }
+  const projects = (await getSettings()).projects ?? []
+  for (const project of projects) {
+    try {
+      const key = await canonicalize(project.path)
+      const previous = store.engines.get(key)
+      const policy = await readProjectAutomationPolicy(project.path)
+      if (!policy.enabled) continue // an unconfigured Ground retains legacy intent
+      if (!policy.allowed) {
+        if (previous) {
+          const changed = !previous.automationBlocked
+          await refreshEngineAutomationPolicy(previous)
+          if (changed) {
+            logLine(previous, 'info', 'automatic admission OFF outside the Ground frame; accepted workers remain monitored')
+            await persistEngineIntent(previous, project.path)
+          }
+        }
+        result.paused.push(project.path)
+        continue
+      }
+      if (!await automaticOperationAllowed(project.path)) throw new Error('The current owner account cannot start automatic operation.')
+      if (runtimeAdmissionBlocked('swarm')) throw new Error('The AI connection transition must settle before automatic operation can start.')
+      if (automationBootBlocked) throw new Error('Automatic operation is held by the boot crash-loop or storage safeguard.')
+      if (previous?.running) {
+        const changed = previous.automationBlocked
+        await refreshEngineAutomationPolicy(previous)
+        if (changed) await persistEngineIntent(previous, project.path)
+      } else {
+        await startOrchestrator(project.path, deps, 'frame')
+        result.started.push(project.path)
+      }
+    } catch (error) {
+      result.failures.push({ path: project.path, reason: errMsg(error).slice(0, 300) })
+    }
+  }
+  return result
 }
 
 // ── Auto-drain background loop (card cf545637 — UI-INDEPENDENT server-side tick) ──
@@ -10868,7 +10963,7 @@ const adoptResumeCandidates = async (
     // sleep up to one orphan window — precisely on an update restart — and the
     // re-read in resumeEngines ran BEFORE it. An OFF pressed meanwhile must not be
     // answered with a worker nobody monitors (scheduleNext honours `running`).
-    if (!engine.running || (await isSwarmManualStopPersisted(engine.path))) {
+    if (!engine.running || !await automaticOperationAllowed(engine.path) || (await isSwarmManualStopPersisted(engine.path))) {
       logLine(engine, 'info', 'boot resume adopt stopped — owner switched autonomy off')
       return
     }
@@ -11018,6 +11113,7 @@ const adoptResumeCandidates = async (
  * must NEVER throw and NEVER block/crash server boot; a project simply doesn't
  * resume if anything about it can't be read cleanly.
  */
+let automationBootBlocked = false
 export const resumeEngines = async (
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
   opts?: {
@@ -11076,6 +11172,7 @@ export const resumeEngines = async (
       }).then((p) => p.loadable))
   const { items, persisted } = await recordEngineBoot(appVersion, now)
   if (!persisted) {
+    automationBootBlocked = true
     // FAIL-CLOSED (see recordEngineBoot's comment): the breaker's own memory
     // couldn't reach disk, so this boot is treated as tripped — resuming
     // unattended workers while the ONE safety valve against a resume-and-crash
@@ -11088,6 +11185,7 @@ export const resumeEngines = async (
     return { resumed: [], suppressed: true }
   }
   if (isCrashLoopTripped(items, appVersion, now)) {
+    automationBootBlocked = true
     const recent = items.filter((r) => r.appVersion === appVersion && now - r.at <= 10 * 60 * 1000)
     await createSwarmFatalNotification({
       event: 'engine-resume-suppressed',
@@ -11095,6 +11193,7 @@ export const resumeEngines = async (
     }).catch(() => {})
     return { resumed: [], suppressed: true }
   }
+  automationBootBlocked = false
 
   // Wait for the quota cooling table to hydrate from disk BEFORE any dispatch
   // can fire (memoized — server/index.ts already kicked this off at boot, so
@@ -11118,6 +11217,8 @@ export const resumeEngines = async (
   for (const projectPath of paths) {
     try {
       const key = await canonicalize(projectPath)
+      const automation = await readProjectAutomationPolicy(projectPath)
+      if (!automation.allowed || automation.enabled && !await automaticOperationAllowed(projectPath)) continue
       const intent = await readEngineIntent(projectPath)
       // SUPPLY DESK RESUME (2026-08-03, owner request: 「補給官も毎回再起動から
       // はじまるのでめんどくさい」). Independent of the ENGINE's desiredRunning —
@@ -11130,7 +11231,7 @@ export const resumeEngines = async (
       if (intent.supplyDesired) {
         try {
           const pre = await swarmRunPreflight()
-          if (pre.ok) await (opts?.spawnSupply ?? spawnSwarmSupply)({ projectPath })
+          if (pre.ok && await automaticOperationAllowed(projectPath)) await (opts?.spawnSupply ?? spawnSwarmSupply)({ projectPath })
         } catch {
           /* resume is best-effort; the owner can relaunch from the tab */
         }
@@ -11172,7 +11273,7 @@ export const resumeEngines = async (
         try {
           const pre = await swarmRunPreflight()
           if (pre.ok) {
-            await (opts?.spawnManager ?? spawnSwarmManager)({ projectPath })
+            if (await automaticOperationAllowed(projectPath)) await (opts?.spawnManager ?? spawnSwarmManager)({ projectPath })
           } else {
             await createSwarmFatalNotification({
               event: 'engine-resume-suppressed',
@@ -11192,8 +11293,8 @@ export const resumeEngines = async (
           }).catch(() => {})
         }
       }
-      if (!intent.desiredRunning) continue
-      if (await isSwarmManualStopPersisted(key)) continue // supremacy — never override an explicit pause
+      if (!intent.desiredRunning && !automation.enabled) continue
+      if (!automation.enabled && await isSwarmManualStopPersisted(key)) continue
       const pre = await swarmRunPreflight()
       if (!pre.ok) {
         // ⚠ NOT SILENT (2026-08-04, adversarial review). This branch used to
@@ -11217,6 +11318,9 @@ export const resumeEngines = async (
         continue
       }
       const engine = getOrCreateEngine(key)
+      await refreshEngineAutomationPolicy(engine)
+      if (engine.automationBlocked) continue
+      if (automation.enabled) await forgetSwarmManualStop(key)
       if (engine.running) continue // already running (defensive — fresh boot never hits this)
       engine.manualStop = false
       // SEED THE REVIEW DWELL CLOCK (2026-08-14) — the whole point of persisting it.
@@ -11275,7 +11379,7 @@ export const resumeEngines = async (
       // DOES honour `running`, so the chain never starts — the freshly spawned
       // workers run with NOBODY monitoring them (no stall detection, no runaway
       // clock, no reclaim). Checking again here costs one file read.
-      if (await isSwarmManualStopPersisted(key)) {
+      if (!await automaticOperationAllowed(projectPath) || !automation.enabled && await isSwarmManualStopPersisted(key)) {
         engine.running = false
         engine.resumeGraceUntil = undefined // no resume ⇒ nothing to wait for
         engine.generation += 1 // any in-flight scheduleNext from this boot is void
@@ -11401,8 +11505,10 @@ export const setOverseer = async (
   enabled: boolean,
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
 ): Promise<SwarmOrchestratorState> => {
+  if (enabled) await assertAutomaticOperationAllowed(projectPath)
   const key = await canonicalize(projectPath)
   const engine = getOrCreateEngine(key)
+  await refreshEngineAutomationPolicy(engine)
   // ARMING requires a RUNNING engine (§5:243 "autonomy ON 中の engine にのみ有効").
   // Refusing here — not merely dimming the UI — is what STRUCTURALLY closes the D1/K1
   // gap: without it an owner could arm a fresh STOPPED engine, and a later auto-drain
@@ -11488,6 +11594,7 @@ export const dismissOverseerReminder = async (
 /** Drop all engine state — for hermetic route/engine tests (mirrors
  *  __resetMigrationCacheForTests). Cancels any pending timers first. */
 export const __resetOrchestratorForTests = (): void => {
+  automationBootBlocked = false
   store.engines.forEach((e) => {
     if (e.timer) clearTimeout(e.timer)
     // STOP the engine before dropping it from the map — otherwise a fire-and-forget

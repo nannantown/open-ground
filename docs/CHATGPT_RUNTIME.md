@@ -200,3 +200,27 @@ runtime. A separate real process acceptance confirmed normal exit, confirmed
 deadline failure and bounded uncertain outcome for an escaped pipe holder,
 including cleanup of only the fixture's own child. No installed bundle or live
 project was modified for these checks.
+
+## President chat and Ground admission — 2026-11-06
+
+SDK president conversations use owner bubbles, unboxed assistant prose, bounded
+public history and a persistent composer. Activity is a separate disclosure.
+The desktop Stop control shares the phone controller's durable exact-turn
+contract; ending the whole desk is a separate action. A lost acknowledgement
+reuses its operation ID, and a confirmed conversation reset fences old history
+responses. Public history excludes tools/reasoning and refuses retired,
+ambiguous, wrong-project or wrong-owner handles; its existing 256 KiB capture
+boundary remains visible rather than claiming an unlimited archive.
+
+The optional Ground automatic-operation frame controls new automatic admission
+from persisted geometry. Existing installs retain manual intent until explicitly
+enabled. Inside membership remains subject to owner, account, work-mode, quota,
+verification and crash-loop safeguards. Outside projects keep accepted worker
+monitoring and manual president/phone conversation; new dispatch, integration and
+automatic wake pause. Dedicated IDs survive renaming, cloned frames carry no
+execution authority, and deletion/damaged policy never silently restores legacy
+automation. See `AUTOMATION_FRAME.md` for persistence, UI and recovery rules.
+
+The owner's shared ChatGPT preference is `gpt-6.1-sol` / `xhigh`, confirmed on
+both effective runtime scopes after the normal-app update. The implementation
+still has no API-key or metered billing fallback.

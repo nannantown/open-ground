@@ -134,7 +134,7 @@ const harness = () => {
       const url = typeof input === 'string' ? input : ((input as Request)?.url ?? '')
       const method = (init?.method ?? 'GET').toUpperCase()
       reqs.push({ url, method, body: typeof init?.body === 'string' ? init.body : '' })
-      if (url === '/api/swarm/manager' && method === 'POST')
+      if (url === '/api/swarm/manager/open' && method === 'POST')
         return json({ terminalId: 'term-1', runtime: 'pty', agentSessionId: 'a1', resumed: false })
       if (url.startsWith('/api/swarm/workers')) return json({ workers: [] })
       if (url.startsWith('/api/swarm/orchestrator')) return json(engineState())
@@ -166,7 +166,7 @@ describe('closing the commander desk', () => {
     await userEvent.click(await screen.findByText('projectPanel.swarm.manager.tab'))
     await userEvent.click(await screen.findByRole('button', { name: 'projectPanel.swarm.manager.launch' }))
     await waitFor(() =>
-      expect(reqs.some((r) => r.url === '/api/swarm/manager' && r.method === 'POST')).toBe(true),
+      expect(reqs.some((r) => r.url === '/api/swarm/manager/open' && r.method === 'POST')).toBe(true),
     )
 
     await userEvent.click(await screen.findByText('projectPanel.swarm.manager.stop'))

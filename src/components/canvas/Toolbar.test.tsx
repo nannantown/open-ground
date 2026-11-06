@@ -24,6 +24,22 @@ const base = {
 // toolbar entry is gated on collab being enabled (the parent passes onOpenShared
 // only then), so the default (collab-off) build shows nothing.
 describe('Toolbar — member "Shared with me" entry (card 6067c41e)', () => {
+  it('exposes the owner opt-in with selected, disabled, and keyboard focus states', () => {
+    const onAutomationFrame = vi.fn()
+    const view = render(<Toolbar {...base} onAutomationFrame={onAutomationFrame} automationFrameActive />)
+    const control = screen.getByRole('button', { name: 'toolbar.automationFrame' }) as HTMLButtonElement
+    expect(control.getAttribute('aria-pressed')).toBe('true')
+    expect(control.className).toContain('bg-accent-soft')
+    expect(control.className).toContain('text-accent-deeper')
+    expect(control.className).toContain('focus-visible:outline')
+    fireEvent.click(control)
+    expect(onAutomationFrame).toHaveBeenCalledTimes(1)
+    view.rerender(<Toolbar {...base} onAutomationFrame={onAutomationFrame} automationFrameBusy />)
+    expect(control.disabled).toBe(true)
+    fireEvent.click(control)
+    expect(onAutomationFrame).toHaveBeenCalledTimes(1)
+  })
+
   it('hides the join entry when collab is off (onOpenShared omitted)', () => {
     render(<Toolbar {...base} />)
     expect(screen.queryByTitle('toolbar.sharedWithMe')).toBeNull()

@@ -106,6 +106,26 @@ afterEach(() => {
 const POWER = 'projectPanel.swarm.power.label'
 
 describe('the header row opens and folds the bar (owner 2026-09-24)', () => {
+  it('shows frame authority and disables manual power inside or outside without disabling manual president conversation', async () => {
+    for (const allowed of [true, false]) {
+      const { posted } = harness(engineState({ running: false, autonomyRemembered: true, automation: { enabled: true, allowed } }))
+      const view = render(<SwarmModule project={project} />)
+      await screen.findByText(allowed ? 'projectPanel.swarm.automationFrameInside' : 'projectPanel.swarm.automationFrameOutside')
+      const power = screen.getByRole('switch', { name: POWER }) as HTMLButtonElement
+      expect(power.disabled).toBe(true)
+      fireEvent.click(power)
+      expect(posted.map((item) => item.url).filter((url) => url.includes('/orchestrator/start') || url.includes('/orchestrator/stop'))).toHaveLength(0)
+      expect(screen.queryByText('projectPanel.swarm.autonomyReminder.resume')).toBeNull()
+      const talk = screen.getByRole('button', { name: 'projectPanel.swarm.automationFrameTalk' }) as HTMLButtonElement
+      expect(talk.disabled).toBe(false)
+      const supplyBefore = posted.filter((item) => item.url === '/api/swarm/supply/open').length
+      fireEvent.click(talk)
+      await waitFor(() => expect(posted.filter((item) => item.url === '/api/swarm/supply/open')).toHaveLength(supplyBefore + 1))
+      expect(posted.some((item) => item.url.includes('/orchestrator/start'))).toBe(false)
+      view.unmount()
+    }
+  })
+
   it('a click on the EMPTY part of the row toggles once', async () => {
     harness(engineState())
     const onToggle = vi.fn()

@@ -3,7 +3,7 @@ import { homedir } from 'os'
 import { basename, join, relative, resolve, sep } from 'path'
 import { createHash, randomUUID } from 'crypto'
 import type { CanvasState, ProjectEntry, Settings } from '../types'
-import { getCanvas, getSettings, setCanvas, setSettings } from './store'
+import { getSettings, mutateCanvas, setSettings } from './store'
 import { openGroundHome } from './paths'
 import { canonicalize } from './canonicalize'
 
@@ -78,20 +78,20 @@ const migrateOnce = async (): Promise<void> => {
   }
 
   // Keep only positions whose key is a live project id; identity-map otherwise.
-  const canvas = await getCanvas()
-  const positions: CanvasState['positions'] = {}
-  let changed = false
-  for (const [id, pos] of Object.entries(canvas.positions)) {
-    if (liveIds.has(id)) positions[id] = pos
-    else changed = true // an orphan key we're dropping
-  }
-
   // Commit the (orphan-pruned) canvas BEFORE the sentinel, so the sentinel
   // (written via setSettings) is the LAST durable write. Because the ids are
   // deterministic, a crash + retry re-derives the identical mapping, so this is
   // fully idempotent. Only write canvas when we actually changed it, to avoid a
   // needless write (and to never clobber positions on a no-op retry).
-  if (changed) await setCanvas({ ...canvas, positions })
+  await mutateCanvas((canvas) => {
+    const positions: CanvasState['positions'] = {}
+    let changed = false
+    for (const [id, pos] of Object.entries(canvas.positions)) {
+      if (liveIds.has(id)) positions[id] = pos
+      else changed = true
+    }
+    return changed ? { ...canvas, positions, ...(canvas.automation ? { automation: { ...canvas.automation, revision: canvas.automation.revision + 1 } } : {}) } : canvas
+  })
 
   await setSettings({
     projects,

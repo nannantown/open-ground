@@ -102,6 +102,7 @@ import {
   peekSupplyNotices,
 } from './supplyNotice'
 import { startSupplyContextCapLoop, stopSupplyContextCapLoop } from './supplyContextCap'
+import { readProjectAutomationPolicy } from './automationPolicy'
 
 let home: string
 const prevHome = process.env.OPENGROUND_HOME
@@ -186,27 +187,33 @@ describe('the engine actually reaches the supply desk', () => {
 // from the interval callback → this test fails, writes stays [].
 describe('a held notice is re-offered by the existing supply loop', () => {
   it('delivers on the loop\'s next tick, with no timer of its own', async () => {
-    vi.useFakeTimers()
-    try {
-      // Refused: this desk is mid-turn. (The screen the POOL reports is IDLE, so
-      // the refusal has to come from the deps handed in here.)
-      queueSupplyNotice(PROJECT, '\u5224\u65ad\u304c\u307b\u3057\u3044', {
-        desks: () => [{ id: DESK, cwd: PROJECT }],
-        screen: () => BUSY_SCREEN,
-        write: () => true,
-      })
-      expect(writes).toEqual([])
-      expect(peekSupplyNotices().get(PROJECT)).toBeTruthy()
+    // This fresh isolated home uses the real healthy legacy policy. Finish its
+    // first refusal before the tick: queueSupplyNotice is an async operation,
+    // and advancing a virtual clock cannot complete its real filesystem reads.
+    await expect(readProjectAutomationPolicy(PROJECT)).resolves.toMatchObject({ enabled: false, allowed: true, healthy: true })
+    await queueSupplyNotice(PROJECT, '\u5224\u65ad\u304c\u307b\u3057\u3044', {
+      desks: () => [{ id: DESK, cwd: PROJECT }],
+      screen: () => BUSY_SCREEN,
+      write: () => true,
+    })
+    expect(writes).toEqual([])
+    expect(peekSupplyNotices().get(PROJECT)).toBeTruthy()
 
+    // The retry still uses production dependencies and real policy reads.
+    // Let its paste/Enter clock progress while those I/O promises settle.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
       startSupplyContextCapLoop(1_000)
       await vi.advanceTimersByTimeAsync(1_000)
-      stopSupplyContextCapLoop()
+      const drained = stopSupplyContextCapLoop()
       await vi.advanceTimersByTimeAsync(3_000) // paste → Enter → landing check
+      await drained
 
       expect(writes).toHaveLength(1)
       expect(writes[0]![1]).toContain('\u5224\u65ad\u304c\u307b\u3057\u3044')
       expect(peekSupplyNotices().size).toBe(0)
     } finally {
+      await stopSupplyContextCapLoop()
       vi.useRealTimers()
     }
   })

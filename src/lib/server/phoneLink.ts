@@ -1015,7 +1015,7 @@ const handlePhoneFrameInScope = async (st: LinkState, f: Record<string, unknown>
       })
       ack(accepted.receipt.state === 'delivered' ? 'delivered' : ['uncertain', 'cancelled', 'rejected'].includes(accepted.receipt.state) ? 'rejected' : 'queued', { projectId: p.id, ...accepted })
       if (!st.sayIds.some((entry) => entry.id === id)) st.sayIds = [...st.sayIds, { projectId: p.id, text: sayKey(ownerSayLine(text)), id, at: Date.parse(accepted.receipt.acceptedAt) }].slice(-SAY_IDS_MAX)
-      if (!p.desk && !runtimeAdmissionBlocked('swarm') && accepted.receipt.state === 'queued') await wakePresidentDesk(p.path)
+      if (!p.desk && !runtimeAdmissionBlocked('swarm') && accepted.receipt.state === 'queued') await wakePresidentDesk(p.path, 'owner')
       await flushPresidentInbox()
     } catch { ack('rejected', { projectId: p.id, reason: 'mac-error' }) }
     return
@@ -1030,7 +1030,7 @@ const handlePhoneFrameInScope = async (st: LinkState, f: Record<string, unknown>
   }
   let starting = false
   if (!p.desk) {
-    const err = await (deps.wakeDesk ?? wakePresidentDesk)(p.path).catch((e) => String(e?.message ?? e))
+    const err = await (deps.wakeDesk ?? ((path) => wakePresidentDesk(path, 'owner')))(p.path).catch((e) => String(e?.message ?? e))
     if (err) {
       ack('rejected', { reason: 'desk-failed', detail: err.slice(0, 200) })
       return release()

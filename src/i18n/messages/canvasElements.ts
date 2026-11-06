@@ -2,6 +2,8 @@
 // EditableText/InfiniteCanvas). Add keys as 'canvasEl.*'. English is source of truth.
 export const canvasElements = {
   en: {
+    'canvasEl.frame.automation': 'Automatic',
+    'canvasEl.frame.automationHint': 'Projects inside run automatically. Outside projects stop taking new automatic work; accepted work is preserved.',
     // Screen/Mock iframe interactivity affordances
     'canvasEl.iframe.clickToInteract': 'Click to interact',
     'canvasEl.iframe.interactive': 'Interactive',
@@ -49,6 +51,8 @@ export const canvasElements = {
     // EditableText
   } as Record<string, string>,
   ja: {
+    'canvasEl.frame.automation': '自動運用',
+    'canvasEl.frame.automationHint': '中は自動運用ON。外は新しい自動作業を停止し、受理済みの作業は保持します。',
     'canvasEl.iframe.clickToInteract': 'クリックで操作',
     'canvasEl.iframe.interactive': '操作モード',
     // Screen/Mock tweak (inspect-and-instruct) flow

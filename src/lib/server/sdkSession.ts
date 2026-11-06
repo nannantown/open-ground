@@ -1047,6 +1047,19 @@ export const getSdkSession = (id: string): SdkSessionInfo | null => {
   return e ? snapshot(e) : null
 }
 
+/** Read-only UI projection. Unlike the frame ring, this includes the bounded
+ * public handoff seed and survives a renderer reload. No tools or reasoning
+ * enter it, and an actor with no admitted owner cannot leak into a new login. */
+export const getSdkPublicConversation = (id: string, expected: { ownerKey: string; cwd: string; role: SdkSessionRole }): {
+  lines: { kind: 'input' | 'text'; text: string }[]; overflow: boolean; seq: number; revision: string
+} | null => {
+  const entry = pool.sessions.get(id)
+  if (!entry || entry.runtimeOwnerKey !== expected.ownerKey || entry.role !== expected.role
+    || pathResolve(entry.cwd) !== pathResolve(expected.cwd)) return null
+  const lines = entry.publicTranscript ?? [], overflow = entry.publicTranscriptOverflow === true
+  return { lines: lines.map(({ kind, text }) => ({ kind, text })), overflow, seq: entry.seq, revision: `${lines.length}:${overflow ? 1 : 0}` }
+}
+
 export const listSdkSessions = (): SdkSessionInfo[] => {
   // forEach for the same ES5-target reason as emit().
   const out: SdkSessionInfo[] = []

@@ -13,6 +13,7 @@ import { swarmEnvPreflight } from './swarmEnvPreflight'
 import { spawnSwarmManager } from './swarmManager'
 import { listManagerDesks, sayToManagerDesk } from './swarmManagerRuntime'
 import { noticeDeliverable } from './deskDeliverable'
+import { automaticOperationAllowed } from './automationPolicy'
 
 export type CommanderRelayResult =
   | {
@@ -48,10 +49,12 @@ const defaultDeps: CommanderRelayDeps = {
 export const relayToCommander = async (
   path: string,
   text: string,
-  opts: { wake?: boolean } = {},
+  opts: { wake?: boolean; cause?: 'owner' | 'automatic' } = {},
   partial: Partial<CommanderRelayDeps> = {},
 ): Promise<CommanderRelayResult> => {
   const deps = { ...defaultDeps, ...partial }
+  const allowed = () => opts.cause === 'owner' ? Promise.resolve(true) : automaticOperationAllowed(path)
+  if (!await allowed()) return { ok: false, status: 503, body: { error: 'automatic operation is OFF outside its Ground frame', delivered: false, woke: false, automationBlocked: true } }
   // A desk asked to stop is CLOSED — it refuses every push — so speaking to it
   // is not "held, try later", it is nobody home.
   const liveDesk = () => deps.desks(path).find((d) => !d.stopping) ?? null
@@ -74,7 +77,8 @@ export const relayToCommander = async (
       }
     }
     try {
-      await deps.spawn({ projectPath: path })
+      if (!await allowed()) return { ok: false, status: 503, body: { error: 'automatic operation changed during preflight', delivered: false, woke: false, automationBlocked: true } }
+      await deps.spawn({ projectPath: path, cause: opts.cause ?? 'automatic' })
       desk = liveDesk()
       woke = desk !== null
     } catch (e: any) {
@@ -86,6 +90,7 @@ export const relayToCommander = async (
     }
   }
   if (!desk) return { ok: false, status: 404, body: { error: 'no commander desk is running in this project' } }
+  if (!await allowed()) return { ok: false, status: 503, body: { error: 'automatic operation is OFF outside its Ground frame', delivered: false, woke, automationBlocked: true } }
   const res = deps.say(desk, text, { deliverable: noticeDeliverable })
   return {
     ok: true,

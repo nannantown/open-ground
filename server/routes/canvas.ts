@@ -22,7 +22,9 @@ import { randomUUID } from 'crypto'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
 
-import { getCanvas, setCanvas } from '@/lib/server/store'
+import { getCanvas } from '@/lib/server/store'
+import { GroundCanvasError, saveGroundCanvas } from '@/lib/server/groundCanvas'
+import { reconcileAutomationPolicy } from '@/lib/server/automationPolicy'
 import { validateProjectPath } from '@/lib/server/projectData'
 import {
   deleteCanvasAsset,
@@ -89,9 +91,16 @@ export const canvasRoutes = new Hono()
     return c.json(await getCanvas())
   })
   .post('/api/canvas', async (c) => {
-    const body = await c.req.json()
-    await setCanvas(body)
-    return c.json({ ok: true })
+    try {
+      const canvas = await saveGroundCanvas(await c.req.json(), c.req.header('X-OpenGround-Owner'))
+      // Geometry is durable before it can admit any new automatic work.
+      const reconciliation = await reconcileAutomationPolicy().then((result) => result?.failures?.length ? 'pending' as const : 'complete' as const, () => 'pending' as const)
+      return c.json({ ok: true, canvas, reconciliation })
+    } catch (error) {
+      if (error instanceof GroundCanvasError) return c.json({ error: error.message }, error.status)
+      if (error instanceof SyntaxError) return c.json({ error: 'Invalid Ground JSON.' }, 400)
+      return c.json({ error: 'Ground canvas could not be saved.' }, 503)
+    }
   })
   // =========================================================================
   // /api/canvas/asset — per-canvas image assets (POST upload / GET / DELETE)

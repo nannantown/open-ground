@@ -3,7 +3,12 @@ import { hasChatGptAccess } from '@/lib/server/chatgptAccess'
 import { readConversationDraft, saveConversationDraft, DraftConflict } from '@/lib/server/conversationDrafts'
 import { presidentInputReceipt } from '@/lib/server/presidentInbox'
 import { getAssistantTurnReceipt } from '@/lib/server/assistantRuntimeStore'
-import { runtimeOwnerKey, runtimeRequestOwnerKey } from '@/lib/server/runtimeOwner'
+import { runtimeOwnerKey, runtimeRequestOwnerKey, withRuntimeOwner } from '@/lib/server/runtimeOwner'
+import { randomUUID } from 'node:crypto'
+import { projectUUIDFromPath } from '@/lib/server/projectDataPath'
+import { handleConversationControl } from '@/lib/server/conversationControl'
+import { getSupplyPublicConversation } from '@/lib/server/swarmSupplyRuntime'
+import { getSettings } from '@/lib/server/store'
 import { z } from 'zod'
 import { runtimeRecoveryIssues } from '@/lib/server/runtimeRecovery'
 import { acceptConversationReceipt, claimConversationReceipt, readConversationReceipt, reviewConversationReceipt, settleRecoveryReviewReceipt } from '@/lib/server/conversationReceipts'
@@ -15,6 +20,8 @@ import { notifyRuntimeRecoveryChanged } from '@/lib/server/runtimeRecoveryBoot'
 
 const reviewSchema = z.object({ operationId: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/), id: z.string().min(1).max(256), scope: z.string().min(1).max(128), kind: z.enum(['input', 'tool', 'conversation', 'launch']), conversationId: z.string().max(128).optional(), callId: z.string().max(128).optional(), note: z.string().trim().min(1).max(1000) }).strict()
 
+const presidentStopSchema = z.object({ path: z.string().min(1).max(4096), operationId: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/), conversationId: z.string().min(1).max(128), epoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), turnId: z.string().min(1).max(128) }).strict()
+
 export const conversationRoutes = new Hono<{ Variables: { conversationOwner: string } }>()
   .use('/api/conversation/*', async (c, next) => {
     const origin = c.req.header('origin'), host = c.req.header('host')
@@ -22,6 +29,43 @@ export const conversationRoutes = new Hono<{ Variables: { conversationOwner: str
     if (!await hasChatGptAccess()) return c.json({ error: 'forbidden' }, 403)
     try { c.set('conversationOwner', await runtimeRequestOwnerKey(c.req.header('X-OpenGround-Owner'))) } catch { return c.json({ error: 'owner-changed' }, 403) }
     return next()
+  })
+  // Desktop shares the phone controller's durable, exact-conversation/turn
+  // contract. The renderer never asks the server to pick whichever turn is new.
+  .get('/api/conversation/president/status', async (c) => {
+    const path = c.req.query('path') ?? ''
+    if (!path || path.length > 4096) return c.json({ error: 'Invalid project.' }, 400)
+    const owner = c.get('conversationOwner')
+    try {
+      const projectId = await projectUUIDFromPath(path)
+      await runtimeOwnerKey(owner)
+      const result = await withRuntimeOwner(owner, () => handleConversationControl({ type: 'conversation-control', id: randomUUID(), action: 'status', scope: 'swarm', projectId }))
+      return c.json(result, result.state === 'rejected' ? 409 : 200)
+    } catch { return c.json({ error: 'The project or owner is no longer available.' }, 403) }
+  })
+  .get('/api/conversation/president/history', async (c) => {
+    const path = c.req.query('path') ?? '', id = c.req.query('sessionId') ?? ''
+    if (!path || path.length > 4096 || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) return c.json({ error: 'Invalid conversation.' }, 400)
+    const owner = c.get('conversationOwner')
+    try {
+      const projectId = await projectUUIDFromPath(path)
+      const project = (await getSettings()).projects?.find(project => project.id === projectId)
+      await runtimeOwnerKey(owner)
+      if (!project) return c.json({ error: 'Conversation is unavailable.' }, 404)
+      const history = getSupplyPublicConversation(project.path, id, owner)
+      return history ? c.json(history) : c.json({ error: 'Conversation is unavailable.' }, 404)
+    } catch { return c.json({ error: 'The project or owner is no longer available.' }, 403) }
+  })
+  .post('/api/conversation/president/stop', async (c) => {
+    const parsed = presidentStopSchema.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) return c.json({ error: 'Invalid stop request.' }, 400)
+    const owner = c.get('conversationOwner'), body = parsed.data
+    try {
+      const projectId = await projectUUIDFromPath(body.path)
+      await runtimeOwnerKey(owner)
+      const result = await withRuntimeOwner(owner, () => handleConversationControl({ type: 'conversation-control', id: body.operationId, action: 'stop-turn', scope: 'swarm', projectId, conversationId: body.conversationId, epoch: body.epoch, turnId: body.turnId }))
+      return c.json(result, result.state === 'rejected' ? 409 : result.state === 'queued' ? 202 : 200)
+    } catch { return c.json({ error: 'The project or owner is no longer available.' }, 403) }
   })
   .get('/api/conversation/recovery', async (c) => c.json({ issues: await runtimeRecoveryIssues(c.get('conversationOwner')) }))
   .post('/api/conversation/recovery/review', async (c) => {

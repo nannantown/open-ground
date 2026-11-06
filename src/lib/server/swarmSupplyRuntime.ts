@@ -2,7 +2,7 @@
 // SDK sessions until their pump is reaped; adoption excludes them.
 import { listOwnerDeskTerminals, listLiveDesksIn, isTerminalProcessAlive, killTerminal } from './terminal'
 import { resolve } from 'node:path'
-import { listSdkSessions, pushSdkInput, terminateSdkSession, type SdkSessionInfo } from './sdkSession'
+import { listSdkSessions, pushSdkInput, terminateSdkSession, getSdkPublicConversation, type SdkSessionInfo } from './sdkSession'
 
 export const SUPPLY_DESK_LABEL = '補給官'
 export interface SupplyDeskHandle {
@@ -65,4 +65,12 @@ export const supplyTranscriptFile = async (projectPath: string): Promise<string 
     return (await import('./chatgptQuery')).chatGptTranscriptFile(session.sessionId)
   }
   return (await import('./transcript')).sessionJsonlPath(session.cwd, session.sessionId)
+}
+
+/** Owner-bound public words for a specific SDK president handle. Runtime pool
+ * access stays here; route code cannot redirect a worker or another project. */
+export const getSupplyPublicConversation = (projectPath: string, handleId: string, ownerKey: string) => {
+  const current = listLiveSupplyDesks(projectPath).filter(desk => !desk.stopping)
+  if (current.length !== 1 || current[0].runtime !== 'sdk' || current[0].handleId !== handleId) return null
+  return getSdkPublicConversation(handleId, { ownerKey, cwd: projectPath, role: 'supply' })
 }

@@ -88,7 +88,15 @@ for (const width of [1280, 390]) for (const role of ['manager', 'supply'] as con
     })
     expect(new Set(positions.map(position => position.y)).size).toBe(1)
     expect(positions.every((position, i) => i === 0 || position.x > positions[i - 1].x)).toBe(true)
-    await expect(feed.getByRole('button', { name: /Read/ })).toBeVisible()
+    // The president names public activities in the UI language; the manager
+    // keeps its tool-card label. This legacy tail fixture has no owner login
+    // (the canonical owner history/group is covered by president-chat.spec).
+    const read = feed.getByRole('button', { name: role === 'supply' ? 'ファイルを読み込みました' : /Read/ })
+    await expect(read).toBeVisible()
+    await expect(read).toHaveAttribute('aria-expanded', 'false')
+    await read.click()
+    await expect(read).toHaveAttribute('aria-expanded', 'true')
+    await expect(feed.getByText('確認用の結果です。', { exact: false })).toBeVisible()
     await feed.evaluate(element => { element.firstElementChild!.scrollTop = 0 })
     await page.screenshot({ path: info.outputPath(`chatgpt-${role}-${width}.png`), fullPage: true, animations: 'disabled' })
   })

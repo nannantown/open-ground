@@ -5,6 +5,7 @@
 import { randomUUID } from 'crypto'
 import { selectedRuntime, chatGptLaunchConfig } from './chatgptRuntime'
 import { assertSwarmRuntimeAdmission, trackSwarmRuntimeLaunch, type SwarmRuntimeHandoff } from './swarmRuntimeAdmission'
+import { assertAutomaticOperationAllowed } from './automationPolicy'
 import { chatGptDeskOptions } from './chatgptLaunch'
 import { createChatGptQuery, distillChatGptMessage } from './chatgptQuery'
 import { resolve } from 'path'
@@ -212,6 +213,8 @@ export interface SpawnSwarmManagerOpts {
   /** The registered project to command — the manager session's cwd (its primary
    *  checkout). The route validates this with validateProjectPath first. */
   projectPath: string
+  /** Set by a manual owner route, never accepted from its request body. */
+  cause?: 'owner' | 'automatic'
   /** Force a BRAND-NEW conversation, ignoring (and overwriting) the persisted
    *  session id. The escape hatch for a restored context that has gone bad — off
    *  by default, so the normal button always resumes. */
@@ -309,6 +312,7 @@ const spawnSwarmManagerInternal = async (
   opts: SpawnSwarmManagerOpts,
 ): Promise<SpawnSwarmManagerResponse> => {
   assertSwarmRuntimeAdmission(opts.runtimeHandoff)
+  if (!opts.runtimeHandoff && opts.cause !== 'owner') await assertAutomaticOperationAllowed(opts.projectPath)
   // ── ONE SPAWN AT A TIME, per project: the check-then-act is a CRITICAL SECTION ──
   //
   // {@link adoptLiveDesk} decides existence on the pool, which cannot desynchronise
@@ -499,6 +503,7 @@ const launchSdkDesk = async (
   const sdkReady = chatgpt ? null : await preloadSdk()
   let sdkSession: SdkSessionInfo
   assertSwarmRuntimeAdmission(opts.runtimeHandoff)
+  if (!opts.runtimeHandoff && opts.cause !== 'owner') await assertAutomaticOperationAllowed(opts.projectPath)
   try {
     sdkSession = spawnSdkSession({
       startPaused: !!opts.runtimeHandoff,

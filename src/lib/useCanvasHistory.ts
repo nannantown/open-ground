@@ -4,6 +4,7 @@ import type { CanvasState } from './types'
 interface Snapshot {
   positions: CanvasState['positions']
   elements: CanvasState['elements']
+  automation?: Omit<NonNullable<CanvasState['automation']>, 'revision'>
 }
 
 const HISTORY_LIMIT = 80
@@ -12,13 +13,16 @@ const COMMIT_DELAY = 450
 const snap = (c: CanvasState): Snapshot => ({
   positions: c.positions,
   elements: c.elements,
+  ...(c.automation ? { automation: { version: c.automation.version, enabled: c.automation.enabled, frameId: c.automation.frameId } } : {}),
 })
 
-// Reference equality is enough: every real edit replaces the positions or the
-// elements object, while a pan/zoom keeps both. So pan/zoom never produces a
-// history step — undoing a scroll would just be annoying.
+// Position/element references identify drawing edits. Policy configuration
+// travels with its frame; server revision acknowledgements are not user edits.
 const same = (a: Snapshot, b: Snapshot) =>
-  a.positions === b.positions && a.elements === b.elements
+  a.positions === b.positions && a.elements === b.elements &&
+  a.automation?.version === b.automation?.version &&
+  a.automation?.enabled === b.automation?.enabled &&
+  a.automation?.frameId === b.automation?.frameId
 
 // Undo/redo for the canvas document — card positions and free-form elements;
 // the viewport is deliberately excluded. A burst of edits (a drag, a resize)
@@ -61,8 +65,14 @@ export function useCanvasHistory(
       const c = canvasRef.current
       if (!c) return
       const next: CanvasState = { ...c, positions: s.positions, elements: s.elements }
+      // Undo owns configuration, never the server's current CAS revision.
+      // Returning to a pre-opt-in snapshot pauses all automatic admission;
+      // it must not silently restore legacy operation after deleting the frame.
+      if (s.automation) next.automation = { ...s.automation, revision: c.automation?.revision ?? 0 }
+      else if (c.automation) next.automation = { version: 1, enabled: true, frameId: null, revision: c.automation.revision }
+      else delete next.automation
       canvasRef.current = next // keep fresh for back-to-back undo/redo
-      committed.current = s
+      committed.current = snap(next)
       applyCanvas(next)
     },
     [applyCanvas],

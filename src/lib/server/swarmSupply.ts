@@ -31,6 +31,7 @@ import { listLiveSupplyDesks, stopSupplyDesk, SUPPLY_DESK_LABEL } from './swarmS
 import { spawnSdkSession, terminateSdkSession } from './sdkSession'
 import { selectedRuntime, chatGptLaunchConfig } from './chatgptRuntime'
 import { assertSwarmRuntimeAdmission, trackSwarmRuntimeLaunch, type SwarmRuntimeHandoff } from './swarmRuntimeAdmission'
+import { assertAutomaticOperationAllowed } from './automationPolicy'
 import { validateNativePresidentRecoveryAdmission, type NativeRecoveryAdmission } from './swarmNativeRecovery'
 import { assertClaudeSubscriptionLaunch } from './subscriptionOnly'
 import { runtimeOwnerKey } from './runtimeOwner'
@@ -71,6 +72,8 @@ export interface SpawnSwarmSupplyOpts {
   /** The registered project to feed — the supply PTY's cwd (its primary
    *  checkout). The route validates this with validateProjectPath first. */
   projectPath: string
+  /** Server-selected intent: explicit conversation or automatic delegation. */
+  cause?: 'owner' | 'automatic'
   cols?: number
   rows?: number
   /** Force a BRAND-NEW conversation, ignoring (and overwriting) the persisted
@@ -249,6 +252,7 @@ const spawnSwarmSupplyInternal = async (
   opts: SpawnSwarmSupplyOpts,
 ): Promise<SpawnSwarmSupplyResponse> => {
   assertSwarmRuntimeAdmission(opts.runtimeHandoff)
+  if (!opts.runtimeHandoff && opts.cause !== 'owner') await assertAutomaticOperationAllowed(opts.projectPath)
   // ── ONE SUPPLY DESK PER PROJECT: the check-then-act is a CRITICAL SECTION ──
   //
   // This guard did not exist until 2026-08-15. Until then the ONLY thing between
@@ -319,6 +323,7 @@ const launchNewSupplyDesk = async (
       ? await (await import('./chatgptResponses')).chatGptPublicConversation(session.agentSessionId) : undefined)
     const lang = await getPromptLang()
     await opts.beforeLaunch?.()
+    if (!opts.runtimeHandoff && opts.cause !== 'owner') await assertAutomaticOperationAllowed(opts.projectPath)
     const desk = spawnSdkSession({ cwd: opts.projectPath, role: 'supply', provider: 'chatgpt',
       startPaused: !!opts.runtimeHandoff,
       handoffTranscript,
@@ -367,9 +372,11 @@ const launchNewSupplyDesk = async (
   assertSwarmRuntimeAdmission(opts.runtimeHandoff)
   const subscriptionEnv = await assertClaudeSubscriptionLaunch(opts.projectPath)
   if (opts.runtimeHandoff?.runtimeOwnerKey) await runtimeOwnerKey(opts.runtimeHandoff.runtimeOwnerKey)
+  if (!opts.runtimeHandoff && opts.cause !== 'owner') await assertAutomaticOperationAllowed(opts.projectPath)
   await opts.beforeLaunch?.()
   if (opts.nativeRecovery) await validateNativePresidentRecoveryAdmission(opts.projectPath, opts.nativeRecovery)
   assertSwarmRuntimeAdmission(opts.runtimeHandoff)
+  if (!opts.runtimeHandoff && opts.cause !== 'owner') await assertAutomaticOperationAllowed(opts.projectPath)
   const launchOptions = supplyLaunchOpts(
     opts.projectPath, session.agentSessionId,
     { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName, lang, handoffInstructions: opts.runtimeHandoff?.instructions ?? opts.recoveryInstructions }, me,

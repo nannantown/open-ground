@@ -1245,7 +1245,7 @@ const relayTell = (wake: boolean) => async (projectPath: string, text: string): 
     // Lazy: commanderRelay → swarmManager reaches back into modules that import
     // this one; a static import would be a cycle.
     const { relayToCommander } = await import('./commanderRelay')
-    const r = await relayToCommander(projectPath, text, { wake })
+    const r = await relayToCommander(projectPath, text, { wake, cause: 'owner' })
     return r.ok && r.delivered
   } catch {
     return false

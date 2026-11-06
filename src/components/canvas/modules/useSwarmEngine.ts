@@ -246,6 +246,7 @@ export interface EngineConsumption {
 }
 
 export interface SwarmEngineState {
+  automation?: { enabled: boolean; allowed: boolean }
   /** Autonomy — the drain+dispatch loop is scheduled (Card① start/stop). */
   running: boolean
   /** The owner EXPLICITLY paused the engine (Autonomy OFF) and hasn't turned it
@@ -618,6 +619,10 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
         : null
 
   return {
+    ...(o.automation && typeof o.automation === 'object' &&
+      typeof (o.automation as Record<string, unknown>).enabled === 'boolean' &&
+      typeof (o.automation as Record<string, unknown>).allowed === 'boolean'
+      ? { automation: o.automation as { enabled: boolean; allowed: boolean } } : {}),
     ...(managerPresence !== undefined ? { managerPresence } : {}),
     managerOfflineHold: o.managerOfflineHold === true,
     running: o.running === true,

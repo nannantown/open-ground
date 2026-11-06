@@ -30,7 +30,7 @@ export function cloneSubset(
   if (!sources.length) return null
   const idMap = new Map(sources.map((el) => [el.id, mkId()]))
   const clones = sources.map((el) => {
-    const { chatId: _chatId, resolved: _resolved, ...rest } = el
+    const { chatId: _chatId, resolved: _resolved, groundRole: _groundRole, ...rest } = el
     const next: CanvasElement = { ...rest, id: idMap.get(el.id)! }
     if (el.parentId && idMap.has(el.parentId)) next.parentId = idMap.get(el.parentId)!
     if (el.anchorId) {

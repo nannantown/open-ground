@@ -32,6 +32,9 @@ vi.mock('./subscriptionOnly', () => ({ assertClaudeSubscriptionLaunch: async () 
 // Owner capabilities are covered by admission tests. These lock fixtures must
 // not schedule real auth-store IO after their fake clock has advanced.
 vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => false }))
+// These fixtures advance a lock deadline, not policy IO. Admission itself is
+// exercised by automationPolicy/automationEngine/automationRelays regressions.
+vi.mock('./automationPolicy', async (original) => ({ ...await original<typeof import('./automationPolicy')>(), assertAutomaticOperationAllowed: async () => {} }))
 
 // Same reason as swarmManager.spawn.test.ts: this file deliberately holds a
 // critical section open while other calls queue behind it, and pure-I/O steps

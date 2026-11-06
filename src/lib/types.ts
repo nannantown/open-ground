@@ -671,6 +671,8 @@ export interface CanvasShadow {
 // current element type. A future phase may refactor this into a proper union.
 export interface CanvasElement {
   id: string
+  /** Ground-only singleton role; copied frames never inherit execution authority. */
+  groundRole?: 'automation'
   type: 'text' | 'sticky' | 'frame' | 'mock' | 'comment' | 'image' | 'screen' | 'shape' | 'group'
   x: number
   y: number
@@ -930,6 +932,9 @@ export type Tool =
   | 'ellipse'
 
 export interface CanvasState {
+  /** Explicit opt-in. A missing/deleted designated frame keeps the policy enabled
+   *  with an empty allowlist; only an explicit disable returns to manual control. */
+  automation?: { version: 1; revision: number; enabled: boolean; frameId: string | null }
   positions: Record<string, CanvasPosition>
   viewport: {
     x: number
@@ -1782,6 +1787,8 @@ export interface SwarmManagerHeartbeat {
 export type SwarmManagerPresence = 'missing' | 'quiet' | 'working'
 
 export interface SwarmOrchestratorState {
+  /** The Ground frame controls automatic admission; manual conversations stay available. */
+  automation?: { enabled: boolean; allowed: boolean }
   /** True while the autonomous drain+dispatch loop is scheduled. OFF ⇒ the
    *  engine never dispatches (manual POST /api/swarm/worker is untouched) AND
    *  never integrates — the global stop. */

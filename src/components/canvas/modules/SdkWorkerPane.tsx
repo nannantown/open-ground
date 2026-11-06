@@ -822,7 +822,7 @@ const InlineMd = ({ text }: { text: string }) => {
 // 13.5px/1.75 with a real heading scale and paragraph rhythm — this is the
 // PRIMARY reading surface of the desk. Sub-agent prose stays a size down and
 // muted (a side conversation, not the report).
-const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) => (
+export const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) => (
   <div
     className={
       subagent

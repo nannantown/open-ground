@@ -8,6 +8,7 @@ import { Power, Trash2 } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
 import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
+import { usePresidentControl } from '@/lib/usePresidentControl'
 import type { WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 import { SwarmSeatFeed, SwarmSeatSay, sayToWorker, sayToPresidentPty, type SeatDraftState } from './SwarmSeatTalk'
@@ -43,6 +44,7 @@ export const callDuration = (seconds: number): string => `${Math.floor(seconds /
 
 export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkSessionId, status, busy, onExit, onStop, onRestart, draftState }: Props) => {
   const { t, lang } = useT()
+  const control = usePresidentControl(projectPath, runtime === 'sdk' && !!sdkSessionId)
   // `text` is the line as saved (in the language of that moment); shown only
   // for an old record without `seconds`.
   const [calls, setCalls] = useState<{ id: string; at: number; text: string; seconds?: number }[]>([])
@@ -92,7 +94,8 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkS
           type="button"
           onClick={onStop}
           disabled={busy}
-          title={t('projectPanel.swarm.supply.stop')}
+          title={t('projectPanel.swarm.supply.stopHint')}
+          aria-label={t('projectPanel.swarm.supply.stopHint')}
           className="flex shrink-0 items-center gap-1 rounded-[3px] border border-line px-1.5 py-0.5 text-micro text-ink-muted transition-colors hover:border-accent hover:bg-bg-hover hover:text-accent active:bg-accent active:text-bg-card disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
         >
           <Power size={10} strokeWidth={2.25} />
@@ -125,7 +128,8 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkS
 
       {/* Closing either surface reports the same desk lifecycle to the parent. */}
       {runtime === 'sdk' && sdkSessionId ? <>
-        <SwarmSeatFeed sdkSessionId={sdkSessionId} projectPath={projectPath} onExit={onExit} />
+        <SwarmSeatFeed sdkSessionId={sdkSessionId} projectPath={projectPath} onExit={onExit} conversation
+          conversationKey={control.status ? JSON.stringify([control.status.conversationId, control.status.epoch]) : undefined} />
         {status === 'exited' ? <button type="button" onClick={onRestart} disabled={busy}
           className="m-2 rounded border border-line bg-bg-card px-2 py-1 text-ui text-ink transition-colors hover:bg-bg-hover active:bg-accent active:text-bg-card disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
           {t('projectPanel.swarm.restart')}
@@ -140,7 +144,12 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkS
         />
       </div>}
       {/* One composer across runtime/handle changes, so an unsent draft stays. */}
-      <SwarmSeatSay alwaysOpen draftState={draftState}
+      <SwarmSeatSay alwaysOpen draftState={draftState} appearance={runtime === 'sdk' ? 'chat' : 'compact'}
+        turnControl={runtime === 'sdk' && control.available ? {
+          running: !!control.status?.activeTurnId || control.pending, canStop: control.canStop, stopping: control.busy, pending: control.pending,
+          onStop: () => { void control.stop() },
+          error: control.error ? t('projectPanel.swarm.chat.stopFailed') : control.queued ? t('projectPanel.swarm.chat.stopQueued') : null,
+        } : undefined}
         disabled={busy || (status !== 'waiting' && status !== 'working') || !(runtime === 'sdk' ? sdkSessionId : terminalId)}
         placeholder={t('projectPanel.swarm.say.presidentPlaceholder')}
         onSend={(text, send) => runtime === 'sdk' && sdkSessionId

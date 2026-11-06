@@ -27,6 +27,7 @@ import { installGateGroupReaper } from '@/lib/server/gateProcess'
 import { installChatGptHostReaper } from '@/lib/server/chatgptTools'
 import { checkHomeIntegrity } from '@/lib/server/homeIntegrity'
 import { startAutoDrainLoop, bootAutoDrainEnabled, resumeEngines } from '@/lib/server/swarmOrchestrator'
+import { startAutomationPolicyLoop } from '@/lib/server/automationPolicy'
 import { ensureCoolingTableLoaded } from '@/lib/server/swarmQuota'
 import { warmTierProbeAtBoot } from '@/lib/server/swarmTierProbe'
 import { startTerminalSweepLoop } from '@/lib/server/terminal'
@@ -371,6 +372,7 @@ if (typeof process.send === 'function') {
     await awaitPresidentInputSettlement()
     await resumeEngines()
     resumed = true
+    startAutomationPolicyLoop()
     if (bootAutoDrainEnabled()) startAutoDrainLoop()
   })
   void notifyRuntimeRecoveryChanged().catch((e) => console.error('[openground:hono] engine resume held for recovery', e))
