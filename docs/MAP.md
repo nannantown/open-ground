@@ -66,8 +66,11 @@
   `conversationPresident.test.ts`, `sdkPublicConversation.test.ts`,
   `SwarmPresidentChat.test.tsx`, `usePresidentControl.test.tsx`,
   `e2e/president-chat.spec.ts`.
-- Ground automatic-operation frame: `docs/AUTOMATION_FRAME.md`;
-  `automationFrame.ts` shares dedicated-role geometry and fail-closed membership.
+- Ground automatic-operation frames: `docs/AUTOMATION_FRAME.md`;
+  `automationFrame.ts` shares V2 ON-frame IDs, V1 compatibility, per-frame controls
+  and fail-closed union membership. Normal Ground frames expose owner-only switches
+  in `FrameView.tsx`; `App.tsx` routes them through the existing save queue.
+  The Ground toolbar and owner project panes have no automatic-operation switches.
   `groundCanvas.ts` validates owner consent and revision CAS; `store.mutateCanvas`
   serializes every producer with fresh reads and durable writes. `automationPolicy.ts`
   reads persisted authority and reconciles on save/normal background startup.
@@ -76,7 +79,8 @@
   Canonical role HTTP remains automatic; GUI open/input routes select manual intent.
   Regressions: `automationFrame.test.ts`, `groundCanvas*.test.ts`,
   `automationPolicy.test.ts`, `automationEngine.test.ts`, `automationLaunch.test.ts`,
-  `automationRelays.test.ts`, `groundAutomation.test.ts`, `e2e/automation-frame.spec.ts`.
+  `automationRelays.test.ts`, `groundAutomation.test.ts`, `FrameView.test.tsx`,
+  `App.render.test.tsx`, `e2e/automation-frame.spec.ts`.
 - Owner runtime switching/recovery: `docs/RUNTIME_TRANSITION_RECOVERY_PLAN.md`;
   `runtimeTransitionStore.ts` / `runtimeTransitions.ts` separate requested and
   effective profiles and checkpoint before retirement. `swarmRuntimeTransition.ts`
@@ -167,8 +171,9 @@
 - **プロジェクト検索**(2026-09-26): 入口 = `Toolbar` の虫めがねアイコンのみ(文字なし・tooltip に「プロジェクトを探す ⌘K」)+ ⌘K → `ProjectJumpPalette`。
   一致判定・移動先・最近開いた順は pure の `src/lib/groundJump.ts`(テスト `groundJump.test.ts`)、
   カメラ移動と光らせは `App.tsx` の `flyToCard`(着地後は静かな選択=Enter/クリックで開く)。
-- **Ground frames** (2026-09-26): header actions are icon-only (`FrameView.tsx`: LayoutGrid = tidy,
-  Shrink = fit, tooltip only). Geometry is pure in `src/lib/groundFrameLayout.ts` (`tidyLayout` /
+- **Ground frames** (2026-09-26): layout actions are icon-only (`FrameView.tsx`: LayoutGrid = tidy,
+  Minimize = fit, tooltip only); owner automatic operation uses a labelled per-frame switch.
+  Ground frame names use the body font. Geometry is pure in `src/lib/groundFrameLayout.ts` (`tidyLayout` /
   `fitFrameRect`, test `groundFrameLayout.test.ts`); `InfiniteCanvas.tsx` `frameContentBoxes`
   collects a frame's DIRECT contents as boxes — its own cards (geometric, directOnly) plus child
   elements (persisted `parentId`), a child frame carrying its descendants + the cards inside it.

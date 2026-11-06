@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef } from 'react'
-import type { CanvasState } from './types'
+import type { CanvasAutomationV1, CanvasAutomationV2, CanvasState } from './types'
+
+type AutomationSnapshot = Omit<CanvasAutomationV1, 'revision'> | Omit<CanvasAutomationV2, 'revision'>
 
 interface Snapshot {
   positions: CanvasState['positions']
   elements: CanvasState['elements']
-  automation?: Omit<NonNullable<CanvasState['automation']>, 'revision'>
+  automation?: AutomationSnapshot
 }
 
 const HISTORY_LIMIT = 80
@@ -13,7 +15,9 @@ const COMMIT_DELAY = 450
 const snap = (c: CanvasState): Snapshot => ({
   positions: c.positions,
   elements: c.elements,
-  ...(c.automation ? { automation: { version: c.automation.version, enabled: c.automation.enabled, frameId: c.automation.frameId } } : {}),
+  ...(c.automation ? { automation: c.automation.version === 2
+    ? { version: 2, enabled: true, frameIds: Array.isArray(c.automation.frameIds) ? [...c.automation.frameIds] : [] }
+    : { version: 1, enabled: c.automation.enabled, frameId: c.automation.frameId } } : {}),
 })
 
 // Position/element references identify drawing edits. Policy configuration
@@ -22,7 +26,9 @@ const same = (a: Snapshot, b: Snapshot) =>
   a.positions === b.positions && a.elements === b.elements &&
   a.automation?.version === b.automation?.version &&
   a.automation?.enabled === b.automation?.enabled &&
-  a.automation?.frameId === b.automation?.frameId
+  a.automation?.frameId === b.automation?.frameId &&
+  JSON.stringify(a.automation?.frameIds ? [...a.automation.frameIds].sort() : undefined) ===
+    JSON.stringify(b.automation?.frameIds ? [...b.automation.frameIds].sort() : undefined)
 
 // Undo/redo for the canvas document — card positions and free-form elements;
 // the viewport is deliberately excluded. A burst of edits (a drag, a resize)
@@ -68,7 +74,16 @@ export function useCanvasHistory(
       // Undo owns configuration, never the server's current CAS revision.
       // Returning to a pre-opt-in snapshot pauses all automatic admission;
       // it must not silently restore legacy operation after deleting the frame.
-      if (s.automation) next.automation = { ...s.automation, revision: c.automation?.revision ?? 0 }
+      if (c.automation?.version === 2 || s.automation?.version === 2) {
+        const frameIds = s.automation?.version === 2 ? [...s.automation.frameIds] :
+          s.automation?.enabled && s.automation.frameId ? [s.automation.frameId] : []
+        next.automation = { version: 2, enabled: true, frameIds, revision: c.automation?.revision ?? 0 }
+        next.elements = s.elements.map((element) => {
+          if (element.groundRole === undefined) return element
+          const { groundRole: _role, ...ordinary } = element
+          return ordinary
+        })
+      } else if (s.automation) next.automation = { ...s.automation, revision: c.automation?.revision ?? 0 }
       else if (c.automation) next.automation = { version: 1, enabled: true, frameId: null, revision: c.automation.revision }
       else delete next.automation
       canvasRef.current = next // keep fresh for back-to-back undo/redo

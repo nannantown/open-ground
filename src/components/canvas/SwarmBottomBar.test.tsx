@@ -23,13 +23,16 @@ vi.mock('@/components/canvas/modules/SwarmModule', () => ({
     collapsed,
     onToggleCollapsed,
     barHandle,
+    ownerFeatures = false,
   }: {
     collapsed: boolean
     onToggleCollapsed: () => void
     barHandle: SwarmBarHandle
+    ownerFeatures?: boolean
   }) => (
     <div
       data-testid="hdr"
+      data-owner-features={String(ownerFeatures)}
       {...barHandle}
       onClick={(e) => {
         if ((e.target as Element).closest('[role="switch"]')) return
@@ -72,6 +75,12 @@ afterEach(() => {
 })
 
 describe('SwarmBottomBar', () => {
+  it('passes the resolved owner feature gate to the project automation surface', () => {
+    const view = render(<SwarmBottomBar project={project('owner')} ownerFeatures />)
+    expect(hdr().getAttribute('data-owner-features')).toBe('true')
+    view.rerender(<SwarmBottomBar project={project('public')} />)
+    expect(hdr().getAttribute('data-owner-features')).toBe('false')
+  })
   it('starts folded — one strip, no height, no separate drag strip', () => {
     render(<SwarmBottomBar project={project('p1')} />)
     expect(screen.getByText('folded')).toBeTruthy()

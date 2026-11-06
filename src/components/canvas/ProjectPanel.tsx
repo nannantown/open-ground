@@ -2582,7 +2582,7 @@ const OwnedProjectBody = ({
           its open/closed state and live seats survive the switch. Keyed by
           project so another project never inherits this one's seats. Gated
           here by the same predicate the Board's swarm vocabulary uses. */}
-      {isSwarmVisible(moduleGate) && <SwarmBottomBar key={project.id} project={project} />}
+      {isSwarmVisible(moduleGate) && <SwarmBottomBar key={project.id} project={project} ownerFeatures={ownerFeatures} />}
       </div>
       </div>
 

@@ -1,5 +1,7 @@
-// SwarmPowerBar — the SINGLE master on/off switch for the whole Swarm bar,
-// an INLINE piece that SwarmModule places on its one-line header (the old full-width bar + the separate mode row + the
+// SwarmPowerBar — the legacy public opt-in master on/off switch. Owner and
+// frame-controlled surfaces hide it in SwarmModule and use Ground frames.
+// It remains an inline part of the public bar's one-line header (the old
+// full-width bar + the separate mode row + the
 // separate tab row were three stacked strips that squeezed the terminal area —
 // now everything lives on the tab row itself).
 //
@@ -22,9 +24,9 @@
 // (No separate auto-integrate switch exists — retired 2026-07-16. The engine
 // never pushes; waking the commander for ready work rides the engine ON state.)
 //
-// SECURITY: rendered only inside SwarmModule, itself behind the owner+toggle
-// gate; the /api/swarm/* routes the composition calls are owner-only too. No
-// extra gating here — the trace-zero guarantee is structural (see SwarmModule).
+// SECURITY: ProjectPanel's resolved Swarm gate controls visibility; server
+// routes recheck access. Owner/frame-controlled modes never mount this legacy
+// control (SwarmModule); an unconfigured public opt-in retains it.
 
 import { useT } from '@/i18n/I18nContext'
 
@@ -35,8 +37,6 @@ interface SwitchProps {
   available: boolean
   /** A power round-trip is in flight (disables the switch during the engine call). */
   busy: boolean
-  /** Another persisted control owns this switch; explain the disabled state. */
-  controlledHint?: string
   /** Flip the master switch — SwarmModule composes start/stop + the launches. */
   onToggle: (next: boolean) => void
 }
@@ -48,7 +48,7 @@ interface SwitchProps {
  *  + aria-checked gives screen readers "<team>, on/off"; as a native button it
  *  already takes Space / Enter. Hover / focus-visible / disabled per
  *  ui-interactive-states. */
-export const SwarmPowerSwitch = ({ running, available, busy, controlledHint, onToggle }: SwitchProps) => {
+export const SwarmPowerSwitch = ({ running, available, busy, onToggle }: SwitchProps) => {
   const { t } = useT()
   return (
     <button
@@ -56,8 +56,8 @@ export const SwarmPowerSwitch = ({ running, available, busy, controlledHint, onT
       role="switch"
       aria-checked={running}
       aria-label={t('projectPanel.swarm.power.label')}
-      title={controlledHint ?? t(available ? 'projectPanel.swarm.power.hint' : 'projectPanel.swarm.power.offline')}
-      disabled={busy || !available || !!controlledHint}
+      title={t(available ? 'projectPanel.swarm.power.hint' : 'projectPanel.swarm.power.offline')}
+      disabled={busy || !available}
       onClick={() => onToggle(!running)}
       className={[
         'group inline-flex h-6 shrink-0 items-center rounded-full px-0.5',

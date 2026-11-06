@@ -68,7 +68,10 @@ const urlOf = (input: unknown): string =>
       ? input.href
       : ((input as Request)?.url ?? '')
 
+const frameScene = (): CanvasState => ({ positions: { id: { x: 0, y: 0 } }, viewport: { x: 0, y: 0, zoom: 1 }, elements: [{ id: 'ordinary-frame', type: 'frame', text: 'Work', x: 400, y: 60, width: 680, height: 440 }] })
+
 interface MockOpts {
+  canvas?: CanvasState
   canvasPost?: (body: CanvasState) => Promise<Response>
   authUserId?: string
   settings?: Record<string, unknown>
@@ -100,14 +103,14 @@ function installFetch(opts: MockOpts = {}) {
       const body = JSON.parse(String(init?.body)) as CanvasState
       return opts.canvasPost?.(body) ?? reply(200, { ok: true, canvas: body })
     }
-    if (new URL(url, 'http://fixture').pathname === '/api/canvas') return reply(200, EMPTY_CANVAS)
+    if (new URL(url, 'http://fixture').pathname === '/api/canvas') return reply(200, opts.canvas ?? EMPTY_CANVAS)
     if (url.includes('/api/settings') && methodOf(input, init) === 'POST') {
       const status = opts.settingsPostStatus ?? 200
       return reply(status, status >= 300 ? { error: opts.settingsPostError ?? 'save failed' } : { ok: true })
     }
     if (url.includes('/api/settings')) return reply(200, { ...settings, suggestedDisplayName: null })
     if (url.includes('/api/projects'))
-      return reply(200, { settings, projects, canvas: EMPTY_CANVAS })
+      return reply(200, { settings, projects, canvas: opts.canvas ?? EMPTY_CANVAS })
     if (url.includes('/api/project?') && opts.projectData) return reply(200, opts.projectData)
     if (url.includes('/api/feedback/config')) return reply(200, { enabled: !!opts.feedbackEnabled })
     if (url.includes('/api/experiments'))
@@ -162,46 +165,91 @@ afterEach(() => {
 })
 
 describe('App — whole-render integration', () => {
-  it('creates and saves one owner-designated automation frame and rebases later saves onto the committed revision', async () => {
+  it('shows ordinary frame names without offering automatic operation to a non-owner', async () => {
+    installFetch({ authUserId: 'regular-user', projects: [projectMeta()], canvas: frameScene(), experiments: { eligible: false, flags: { swarm: true } } })
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp() })
+    expect(await screen.findByText('Work')).toHaveClass('font-body')
+    expect(screen.queryByRole('switch', { name: 'Automatic operation' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Automatic operation' })).not.toBeInTheDocument()
+  })
+
+  it('toggles an existing normal frame, preserving its geometry and rebasing the next toggle onto the saved revision', async () => {
     const writes: CanvasState[] = []
-    installFetch({ authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async (body) => {
+    installFetch({ authUserId: 'owner-a', projects: [projectMeta()], canvas: frameScene(), experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async (body) => {
       writes.push(structuredClone(body))
       return reply(200, { ok: true, canvas: { ...body, automation: { ...body.automation, revision: 1 } }, reconciliation: 'complete' })
     } })
     localStorage.setItem('openground:onboarded', '1')
     await act(async () => { renderApp() })
-    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    fireEvent.click(await screen.findByRole('switch', { name: 'Automatic operation' }))
     await waitFor(() => expect(writes).toHaveLength(1))
-    expect(writes[0].automation).toMatchObject({ version: 1, revision: 0, enabled: true })
-    const designated = writes[0].elements.filter((element) => element.groundRole === 'automation')
-    expect(designated).toHaveLength(1)
-    expect(writes[0].automation?.frameId).toBe(designated[0].id)
-    expect(designated[0].x).toBeGreaterThan(writes[0].positions.id.x + 256)
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Automatic operation' }) as HTMLButtonElement).disabled).toBe(false))
-    fireEvent.click(screen.getByRole('button', { name: 'Automatic operation' }))
+    expect(writes[0].automation).toEqual({ version: 2, revision: 0, enabled: true, frameIds: ['ordinary-frame'] })
+    expect(writes[0].elements).toEqual(frameScene().elements)
+    expect(writes[0].positions).toEqual(frameScene().positions)
+    await waitFor(() => expect((screen.getByRole('switch', { name: 'Automatic operation' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('switch', { name: 'Automatic operation' }))
     await waitFor(() => expect(writes).toHaveLength(2))
-    expect(writes[1].automation?.revision).toBe(1)
-    expect(writes[1].elements.filter((element) => element.groundRole === 'automation')).toHaveLength(1)
+    expect(writes[1].automation).toEqual({ version: 2, revision: 1, enabled: true, frameIds: [] })
+    expect(writes[1].elements).toEqual(frameScene().elements)
+    expect(screen.queryByRole('button', { name: 'Automatic operation' })).not.toBeInTheDocument()
+
+  })
+
+  it('keeps both normal-frame toggles made in one React batch in the saved policy', async () => {
+    const writes: CanvasState[] = []
+    const scene = frameScene()
+    scene.elements.push({ ...scene.elements[0], id: 'second-frame', text: 'Second', x: 1100 })
+    installFetch({ authUserId: 'owner-a', projects: [projectMeta()], canvas: scene, experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async body => {
+      writes.push(body); return reply(200, { ok: true, canvas: body })
+    } })
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp() })
+    const controls = await screen.findAllByRole('switch', { name: 'Automatic operation' })
+    act(() => { controls[0].click(); controls[1].click() })
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0].automation).toMatchObject({ version: 2, frameIds: ['ordinary-frame', 'second-frame'] })
+    expect(controls[0]).toHaveAttribute('aria-checked', 'true')
+    expect(controls[1]).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('undoes a frame toggle with Ctrl+Z while its header switch retains keyboard focus', async () => {
+    const writes: CanvasState[] = []
+    installFetch({ authUserId: 'owner-a', projects: [projectMeta()], canvas: frameScene(), experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async body => {
+      writes.push(body); return reply(200, { ok: true, canvas: body })
+    } })
+    localStorage.setItem('openground:onboarded', '1')
+    await act(async () => { renderApp() })
+    const control = await screen.findByRole('switch', { name: 'Automatic operation' })
+    fireEvent.click(control)
+    expect(control).toHaveAttribute('aria-checked', 'true')
+    control.focus()
+    fireEvent.keyDown(control, { key: 'z', ctrlKey: true })
+    fireEvent.keyUp(control, { key: 'z', ctrlKey: true })
+    expect(control).toHaveAttribute('aria-checked', 'false')
+    expect(control).toHaveFocus()
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0].automation).toMatchObject({ version: 2, enabled: true, frameIds: [] })
   })
 
   it('retains a visible unsaved frame on a conflicting save and exposes the saved-layout recovery action', async () => {
-    installFetch({ authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async () => reply(409, { error: 'conflict' }) })
+    installFetch({ authUserId: 'owner-a', projects: [projectMeta()], canvas: frameScene(), experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async () => reply(409, { error: 'conflict' }) })
     localStorage.setItem('openground:onboarded', '1')
     await act(async () => { renderApp() })
-    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    fireEvent.click(await screen.findByRole('switch', { name: 'Automatic operation' }))
     const recover = await screen.findByRole('button', { name: 'Load saved layout' })
     expect(recover).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('unsaved layout changes will be replaced')
-    expect((screen.getByRole('button', { name: 'Automatic operation' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('switch', { name: 'Automatic operation' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('does not authorize owner A’s pending layout as owner B after a debounce, and permits an explicit retry after A signs back in', async () => {
-    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } } }
+    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], canvas: frameScene(), experiments: { eligible: true, flags: { swarm: true } } }
     const calls = installFetch(options)
     localStorage.setItem('openground:onboarded', '1')
     await act(async () => { renderApp(true) })
     await waitFor(() => expect(screen.getByTestId('synthetic-identity').textContent).toBe('owner-a'))
-    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    fireEvent.click(await screen.findByRole('switch', { name: 'Automatic operation' }))
     options.authUserId = 'owner-b'
     fireEvent.click(screen.getByRole('button', { name: 'Refresh synthetic identity' }))
     await waitFor(() => expect(screen.getByTestId('synthetic-identity').textContent).toBe('owner-b'))
@@ -221,27 +269,27 @@ describe('App — whole-render integration', () => {
   it('does not clear or rebase A’s pending layout when its accepted ACK arrives after an account switch', async () => {
     let acknowledge!: (value: Response) => void
     let sent!: CanvasState
-    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } },
+    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], canvas: frameScene(), experiments: { eligible: true, flags: { swarm: true } },
       canvasPost: async (body) => { sent = body; return new Promise((resolve) => { acknowledge = resolve }) } }
     const calls = installFetch(options)
     localStorage.setItem('openground:onboarded', '1')
     await act(async () => { renderApp(true) })
-    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    fireEvent.click(await screen.findByRole('switch', { name: 'Automatic operation' }))
     await waitFor(() => expect(sent?.automation).toBeTruthy())
     options.authUserId = 'owner-b'
     fireEvent.click(screen.getByRole('button', { name: 'Refresh synthetic identity' }))
     await waitFor(() => expect(screen.getByTestId('synthetic-identity').textContent).toBe('owner-b'))
     await act(async () => { acknowledge(await reply(200, { ok: true, canvas: { ...sent, automation: { ...sent.automation, revision: 777 } } })) })
     expect(screen.getByRole('alert').textContent).toContain('another account')
-    expect(document.querySelector(`[data-element-id="${sent.automation!.frameId}"]`)).toBeTruthy()
+    expect(document.querySelector(`[data-element-id="${sent.elements[0].id}"]`)).toBeTruthy()
     fireEvent(window, new Event('focus'))
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)) })
-    expect(document.querySelector(`[data-element-id="${sent.automation!.frameId}"]`)).toBeTruthy()
+    expect(document.querySelector(`[data-element-id="${sent.elements[0].id}"]`)).toBeTruthy()
     expect(calls.mock.calls.filter(([input, init]) => new URL(urlOf(input), 'http://fixture').pathname === '/api/canvas' && methodOf(input, init) === 'POST')).toHaveLength(1)
   })
 
   it('does not submit an anonymous pending canvas edit as a newly signed-in owner', async () => {
-    const options: MockOpts = { projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } } }
+    const options: MockOpts = { projects: [projectMeta()], canvas: frameScene(), experiments: { eligible: true, flags: { swarm: true } } }
     const calls = installFetch(options)
     localStorage.setItem('openground:onboarded', '1')
     let view!: ReturnType<typeof renderApp>
@@ -262,7 +310,7 @@ describe('App — whole-render integration', () => {
     let acknowledge!: (value: Response) => void
     let first!: CanvasState
     const posted: CanvasState[] = []
-    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async (body) => {
+    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], canvas: frameScene(), experiments: { eligible: true, flags: { swarm: true } }, canvasPost: async (body) => {
       posted.push(body)
       if (posted.length === 1) { first = body; return new Promise((resolve) => { acknowledge = resolve }) }
       return reply(200, { ok: true, canvas: body })
@@ -271,7 +319,7 @@ describe('App — whole-render integration', () => {
     localStorage.setItem('openground:onboarded', '1')
     let view!: ReturnType<typeof renderApp>
     await act(async () => { view = renderApp(true) })
-    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    fireEvent.click(await screen.findByRole('switch', { name: 'Automatic operation' }))
     await waitFor(() => expect(posted).toHaveLength(1))
     fireEvent.wheel(view.container.querySelector('main > div.contents > div')!, { deltaX: 20, deltaY: 30 })
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)) })
@@ -288,13 +336,13 @@ describe('App — whole-render integration', () => {
   it('does not transfer an explicit reload to a newer drag made while the reload waits for an old ACK', async () => {
     let acknowledge!: (value: Response) => void
     let sent!: CanvasState
-    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], experiments: { eligible: true, flags: { swarm: true } },
+    const options: MockOpts = { authUserId: 'owner-a', projects: [projectMeta()], canvas: frameScene(), experiments: { eligible: true, flags: { swarm: true } },
       canvasPost: async (body) => { sent = body; return new Promise((resolve) => { acknowledge = resolve }) } }
     const calls = installFetch(options)
     localStorage.setItem('openground:onboarded', '1')
     let view!: ReturnType<typeof renderApp>
     await act(async () => { view = renderApp(true) })
-    fireEvent.click(await screen.findByRole('button', { name: 'Automatic operation' }))
+    fireEvent.click(await screen.findByRole('switch', { name: 'Automatic operation' }))
     await waitFor(() => expect(sent?.automation).toBeTruthy())
     options.authUserId = 'owner-b'
     fireEvent.click(screen.getByRole('button', { name: 'Refresh synthetic identity' }))
@@ -305,7 +353,7 @@ describe('App — whole-render integration', () => {
     await act(async () => { acknowledge(await reply(200, { ok: true, canvas: sent })) })
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)) })
     expect(calls.mock.calls.filter(([input, init]) => new URL(urlOf(input), 'http://fixture').pathname === '/api/canvas' && methodOf(input, init) === 'GET')).toHaveLength(0)
-    expect(document.querySelector(`[data-element-id="${sent.automation!.frameId}"]`)).toBeTruthy()
+    expect(document.querySelector(`[data-element-id="${sent.elements[0].id}"]`)).toBeTruthy()
   })
 
   it('assistant owner gate waits for the real role before reading the closed talk or provider status', async () => {

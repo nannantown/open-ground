@@ -2,9 +2,6 @@
 // toggle labels). Add keys as 'toolbar.*'. English is the source of truth.
 export const toolbar = {
   en: {
-    'toolbar.automationFrame': 'Automatic operation',
-    'toolbar.automationFrameCreate': 'Create the Automatic operation frame. Projects inside run automatically; projects outside stop taking new automatic work.',
-    'toolbar.automationFrameFocus': 'Show the Automatic operation frame',
     'toolbar.canvasSaving': 'Saving layout… Automatic operation changes apply after saving.',
     'toolbar.canvasSaveError': 'The layout could not be saved. Automatic operation uses the last saved layout.',
     'toolbar.canvasConflict': 'The saved automation layout changed. Load it before editing again; unsaved layout changes will be replaced.',
@@ -48,9 +45,6 @@ export const toolbar = {
     'toolbar.searchLampReview': 'Delivered — take a look',
   } as Record<string, string>,
   ja: {
-    'toolbar.automationFrame': '自動運用',
-    'toolbar.automationFrameCreate': '自動運用フレームを作成。中のプロジェクトは自動運用ON、外は新しい自動作業を停止します。',
-    'toolbar.automationFrameFocus': '自動運用フレームを表示',
     'toolbar.canvasSaving': '配置を保存中… 自動運用は保存後に反映します。',
     'toolbar.canvasSaveError': '配置を保存できませんでした。自動運用は保存済みの配置を使います。',
     'toolbar.canvasConflict': '保存済みの自動運用の配置が変更されました。読み込み直すと未保存の配置を置き換えます。',

@@ -197,8 +197,9 @@ describe("the manager's seat (③, conversation since 2026-09-24)", () => {
   it('shows RUNNING, stop, a folded send link and its polled conversation — no stream', async () => {
     storeManager()
     const h = harness({ active: () => [{ id: MANAGER_SDK_ID, status: 'working' }] })
-    render(<SwarmModule project={project} />)
+    render(<SwarmModule project={project} ownerFeatures />)
     expect(await screen.findByText('projectPanel.swarm.manager.stateRunning')).toBeTruthy()
+    expect(screen.queryByRole('switch', { name: 'projectPanel.swarm.power.label' })).toBeNull()
     // The seat as SwarmModule mounts it (2026-09-24): stop + the FOLDED
     // send-a-word link, the desk's conversation polled from its tail — and
     // still NO stream: a stream per seat is the six-connection freeze.

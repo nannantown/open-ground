@@ -13,7 +13,6 @@ import {
   Moon,
   Sun,
   Search,
-  Zap,
 } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
 import { applyTheme, currentTheme, persistTheme, useThemeName, type ThemeName } from '@/lib/theme'
@@ -25,10 +24,6 @@ import { NotificationBell } from '@/components/canvas/NotificationBell'
 import type { AppNotification } from '@/lib/types'
 
 interface Props {
-  /** Owner-only explicit opt-in; an existing frame is focused instead of duplicated. */
-  onAutomationFrame?: () => void
-  automationFrameActive?: boolean
-  automationFrameBusy?: boolean
   /** Opens the project search (the ⌘K palette). Shown only when there are projects. */
   onSearch?: () => void
   onNewProject: () => void
@@ -79,9 +74,6 @@ interface Props {
 // lives in Settings now (auto-detected from the OS otherwise), and refresh is ⌘R
 // / auto-on-focus — so neither needs a permanent button here.
 export const Toolbar = ({
-  onAutomationFrame,
-  automationFrameActive,
-  automationFrameBusy,
   onSearch,
   onNewProject,
   onImport,
@@ -140,13 +132,6 @@ export const Toolbar = ({
       </div>
 
       <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-3">
-        {onAutomationFrame && (
-          <div className="rounded-[3px] border border-line bg-bg-card/95 p-1 shadow-card backdrop-blur">
-            <IconButton onClick={onAutomationFrame} active={automationFrameActive} disabled={automationFrameBusy}
-              title={t(automationFrameActive ? 'toolbar.automationFrameFocus' : 'toolbar.automationFrameCreate')}
-              label={t('toolbar.automationFrame')}><Zap size={14} strokeWidth={1.75} /></IconButton>
-          </div>
-        )}
         {/* The gauge is the widest single item in the bar (~200px). It is ambient
             information, not a control, so it is the first thing to go. */}
         {usage && <div className="hidden xl:flex items-center">{usage}</div>}

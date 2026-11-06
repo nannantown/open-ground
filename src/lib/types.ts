@@ -671,7 +671,7 @@ export interface CanvasShadow {
 // current element type. A future phase may refactor this into a proper union.
 export interface CanvasElement {
   id: string
-  /** Ground-only singleton role; copied frames never inherit execution authority. */
+  /** Legacy V1 designation. V2 keeps ON frame IDs in CanvasState.automation. */
   groundRole?: 'automation'
   type: 'text' | 'sticky' | 'frame' | 'mock' | 'comment' | 'image' | 'screen' | 'shape' | 'group'
   x: number
@@ -931,10 +931,27 @@ export type Tool =
   | 'rect'
   | 'ellipse'
 
+/** Read compatibility for the original dedicated automation frame. */
+export interface CanvasAutomationV1 {
+  version: 1
+  revision: number
+  enabled: boolean
+  frameId: string | null
+  frameIds?: never
+}
+/** Normal frame IDs whose automation switch is ON. An empty list stays OFF;
+ *  it never restores the pre-opt-in legacy admission policy. */
+export interface CanvasAutomationV2 {
+  version: 2
+  revision: number
+  enabled: true
+  frameIds: string[]
+  frameId?: never
+}
+export type CanvasAutomationPolicy = CanvasAutomationV1 | CanvasAutomationV2
+
 export interface CanvasState {
-  /** Explicit opt-in. A missing/deleted designated frame keeps the policy enabled
-   *  with an empty allowlist; only an explicit disable returns to manual control. */
-  automation?: { version: 1; revision: number; enabled: boolean; frameId: string | null }
+  automation?: CanvasAutomationPolicy
   positions: Record<string, CanvasPosition>
   viewport: {
     x: number

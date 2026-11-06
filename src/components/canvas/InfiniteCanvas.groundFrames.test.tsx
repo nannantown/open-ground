@@ -9,6 +9,7 @@
 // heights fall back to CARD_H (140) and client coords are world coords.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import type { CanvasElement, CanvasState, ProjectMeta } from '@/lib/types'
 
 vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (k: string) => k }) }))
@@ -73,22 +74,27 @@ const scene = (over: { outer?: Partial<CanvasElement> } = {}): CanvasState => ({
   ],
 })
 
-const renderScene = (canvas: CanvasState) => {
+const renderScene = (canvas: CanvasState, control?: { onToggle: (id: string, on: boolean) => void; busy?: boolean; disabled?: boolean; selectedIds?: string[] }) => {
   const onCanvasChange = vi.fn()
+  const onSelect = vi.fn()
+  const onEditingIdChange = vi.fn()
   const projects = Object.keys(canvas.positions).map(project)
   const view = (cv: CanvasState) => (
     <InfiniteCanvas
       projects={projects}
       canvas={cv}
       onCanvasChange={onCanvasChange}
-      selectedIds={[]}
-      onSelect={vi.fn()}
+      selectedIds={control?.selectedIds ?? []}
+      onSelect={onSelect}
       onSelectIds={vi.fn()}
       editingId={null}
-      onEditingIdChange={vi.fn()}
+      onEditingIdChange={onEditingIdChange}
       tool="select"
       onToolChange={vi.fn()}
       frameVariant="ground"
+      onToggleFrameAutomation={control?.onToggle}
+      frameAutomationBusy={control?.busy}
+      frameAutomationDisabled={control?.disabled}
     />
   )
   const utils = render(view(canvas))
@@ -103,7 +109,7 @@ const renderScene = (canvas: CanvasState) => {
     ) as HTMLButtonElement
   }
   const lastState = () => onCanvasChange.mock.calls.at(-1)?.[0] as CanvasState | undefined
-  return { ...utils, action, lastState, onCanvasChange, rerenderWith }
+  return { ...utils, action, lastState, onCanvasChange, onSelect, onEditingIdChange, rerenderWith }
 }
 
 type Rect = { x: number; y: number; w: number; h: number }
@@ -329,4 +335,72 @@ describe('Ground frame stroke', () => {
     expect(groundFrameStroke('#336699', false)).toBe('#336699')
     expect(groundFrameStroke('#336699', true)).toBe('#336699')
   })
+})
+
+it('drags only this frame’s card when two separate frames are configured ON', () => {
+  const before: CanvasState = { viewport: { x: 0, y: 0, zoom: 1 },
+    positions: { first: { x: 20, y: 80 }, second: { x: 820, y: 80 } },
+    automation: { version: 2, revision: 1, enabled: true, frameIds: ['First', 'Second'] },
+    elements: [frame('First', 0, 0, 400, 320), frame('Second', 800, 0, 400, 320)] }
+  const { container, getByText, lastState } = renderScene(before)
+  const header = getByText('First').parentElement!
+  const viewport = container.firstElementChild!
+  fireEvent.pointerDown(header, { button: 0, clientX: 20, clientY: 16, pointerId: 1 })
+  fireEvent.pointerMove(viewport, { buttons: 1, clientX: 120, clientY: 66, pointerId: 1 })
+  fireEvent.pointerUp(viewport, { button: 0, clientX: 120, clientY: 66, pointerId: 1 })
+  const after = lastState()!
+  expect(after.positions.first).not.toEqual(before.positions.first)
+  expect(after.positions.second).toEqual(before.positions.second)
+  expect(after.elements.find(element => element.id === 'Second')).toEqual(before.elements[1])
+})
+
+it('wires the owner action to its own frame ID and forbids locked or saving mutations', async () => {
+  const before: CanvasState = { viewport: { x: 0, y: 0, zoom: 1 }, positions: {},
+    automation: { version: 2, revision: 1, enabled: true, frameIds: ['First'] },
+    elements: [frame('First', 0, 0, 400, 320), frame('Second', 800, 0, 400, 320)] }
+  const control = { onToggle: vi.fn(), busy: false }
+  const { container, rerenderWith } = renderScene(before, control)
+  const first = container.querySelector('[data-element-id="First"] [role="switch"]') as HTMLButtonElement
+  const second = container.querySelector('[data-element-id="Second"] [role="switch"]') as HTMLButtonElement
+  expect(first).toHaveAttribute('aria-checked', 'true')
+  expect(second).toHaveAttribute('aria-checked', 'false')
+  fireEvent.click(second)
+  expect(control.onToggle).toHaveBeenCalledExactlyOnceWith('Second', true)
+  second.focus()
+  await userEvent.keyboard(' ')
+  expect(control.onToggle).toHaveBeenCalledTimes(2)
+  rerenderWith({ ...before, elements: before.elements.map(element => element.id === 'First' ? { ...element, locked: true } : element) })
+  expect(first).toBeDisabled()
+  fireEvent.click(first)
+  expect(control.onToggle).toHaveBeenCalledTimes(2)
+  control.busy = true
+  rerenderWith(before)
+  expect(first).toBeDisabled()
+  expect(second).toBeDisabled()
+  expect(first).toHaveAttribute('aria-busy', 'true')
+})
+
+it.each(['Enter', 'Tab'])('keeps native %s on a selected frame’s switch out of canvas selection navigation', async key => {
+  const before: CanvasState = { viewport: { x: 0, y: 0, zoom: 1 }, positions: {},
+    automation: { version: 2, revision: 1, enabled: true, frameIds: ['First'] },
+    elements: [frame('First', 0, 0, 400, 320), frame('Second', 800, 0, 400, 320)] }
+  const toggle = vi.fn()
+  const { container, onSelect, onEditingIdChange } = renderScene(before, { onToggle: toggle, selectedIds: ['First'] })
+  const first = container.querySelector('[data-element-id="First"] [role="switch"]') as HTMLButtonElement
+  const second = container.querySelector('[data-element-id="Second"] [role="switch"]') as HTMLButtonElement
+  first.focus()
+  await userEvent.keyboard(`{${key}}`)
+  if (key === 'Enter') expect(toggle).toHaveBeenCalledExactlyOnceWith('First', false)
+  else { expect(second).toHaveFocus(); expect(toggle).not.toHaveBeenCalled() }
+  expect(onEditingIdChange).not.toHaveBeenCalled()
+  expect(onSelect).not.toHaveBeenCalled()
+})
+
+it.each(['Enter', 'Tab'])('retains canvas %s selection navigation away from native controls', key => {
+  const before: CanvasState = { viewport: { x: 0, y: 0, zoom: 1 }, positions: {},
+    elements: [frame('First', 0, 0, 400, 320), frame('Second', 800, 0, 400, 320)] }
+  const { onSelect, onEditingIdChange } = renderScene(before, { onToggle: vi.fn(), selectedIds: ['First'] })
+  fireEvent.keyDown(window, { key })
+  if (key === 'Enter') expect(onEditingIdChange).toHaveBeenCalledExactlyOnceWith('First')
+  else expect(onSelect).toHaveBeenCalledExactlyOnceWith('Second')
 })

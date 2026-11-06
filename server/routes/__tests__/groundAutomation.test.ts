@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { canvasFile, ensureOpenGroundHome } from '@/lib/server/paths'
-import { createAutomationFrame } from '@/lib/automationFrame'
+import { createAutomationFrame, isAutomationAllowed, setFrameAutomation } from '@/lib/automationFrame'
 import type { CanvasState } from '@/lib/types'
 
 const access = vi.hoisted(() => ({ owner: false, changed: false, reconciled: vi.fn() }))
@@ -25,6 +25,39 @@ beforeEach(async () => {
 })
 
 describe('POST Ground canvas — execution consent is durable and authorized', () => {
+  it('durably saves ordinary frame switches before reconciliation, rejects stale/downgrade input, and keeps the last OFF explicit', async () => {
+    const ordinary = initial()
+    ordinary.elements = [
+      { id: 'first', type: 'frame', text: 'First', x: 0, y: 0, width: 500, height: 400 },
+      { id: 'second', type: 'frame', text: 'Second', x: 800, y: 0, width: 500, height: 400 },
+    ]
+    const toggled = setFrameAutomation(ordinary, 'first', true)
+    expect((await post(toggled)).status).toBe(403)
+    expect(access.reconciled).not.toHaveBeenCalled()
+    access.owner = true
+    access.reconciled.mockImplementation(async () => {
+      const saved = await store.getCanvas()
+      expect(saved.automation?.version).toBe(2)
+      expect(saved.automation!.revision).toBeGreaterThan(0)
+    })
+    expect((await post(toggled)).status).toBe(200)
+    const first = await store.getCanvas()
+    expect(first.automation).toEqual({ version: 2, revision: 1, enabled: true, frameIds: ['first'] })
+    expect(isAutomationAllowed(first, 'project')).toBe(true)
+    expect((await post(setFrameAutomation(first, 'second', true))).status).toBe(200)
+    expect((await post(setFrameAutomation(first, 'first', false))).status).toBe(409)
+    const both = await store.getCanvas()
+    expect(both.automation).toMatchObject({ version: 2, frameIds: ['first', 'second'], revision: 2 })
+    const off = setFrameAutomation(setFrameAutomation(both, 'first', false), 'second', false)
+    expect((await post(off)).status).toBe(200)
+    expect(isAutomationAllowed(await store.getCanvas(), 'project')).toBe(false)
+    const downgrade = { ...off, automation: { version: 1, enabled: false, revision: 3, frameId: null } }
+    expect((await post(downgrade)).status).toBe(409)
+    expect((await post(ordinary)).status).toBe(409)
+    expect(access.reconciled).toHaveBeenCalledTimes(3)
+    expect((await store.getCanvas()).automation).toEqual({ version: 2, revision: 3, enabled: true, frameIds: [] })
+  })
+
   it('does not grant a decorative frame named 自動運用 any execution authority', async () => {
     const canvas = initial()
     canvas.elements.push({ id: 'ordinary', type: 'frame', text: '自動運用', x: 0, y: 0, width: 500, height: 500 })

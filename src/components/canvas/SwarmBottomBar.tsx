@@ -83,7 +83,7 @@ export const isSwarmBarChord = (e: globalThis.KeyboardEvent, isMac: boolean): bo
   !e.altKey &&
   (isMac ? e.metaKey && !e.ctrlKey && !e.shiftKey : e.ctrlKey && e.shiftKey && !e.metaKey)
 
-export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
+export const SwarmBottomBar = ({ project, ownerFeatures = false }: { project: ProjectMeta; ownerFeatures?: boolean }) => {
   const [open, setOpen] = useState(() => loadSwarmBarOpen(project.id))
   const [height, setHeight] = useState(() => loadSwarmBarHeight(project.id))
   const rootRef = useRef<HTMLDivElement>(null)
@@ -218,6 +218,7 @@ export const SwarmBottomBar = ({ project }: { project: ProjectMeta }) => {
       <StreamOwnerContext.Provider value="swarmBar">
       <SwarmModule
         project={project}
+        ownerFeatures={ownerFeatures}
         collapsed={!open}
         barHandle={{
           onPointerDown,

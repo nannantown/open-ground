@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useCanvasHistory } from './useCanvasHistory'
 import type { CanvasState } from './types'
-import { createAutomationFrame, isAutomationAllowed } from './automationFrame'
+import { createAutomationFrame, isAutomationAllowed, setFrameAutomation } from './automationFrame'
 
 // undo/redo for the canvas document (card positions + free elements). The hook
 // debounces edits into steps, but undo()/redo() flush any pending edit first,
@@ -67,6 +67,46 @@ describe('useCanvasHistory — automation identity and server revision', () => {
   beforeEach(() => { vi.useFakeTimers() })
   afterEach(() => { vi.useRealTimers() })
 
+  it('does not crash or invent a history edit when a malformed persisted V2 list is loaded', () => {
+    const apply = vi.fn<(c: CanvasState) => void>()
+    const damaged = { positions: {}, elements: [], viewport: { x: 0, y: 0, zoom: 1 },
+      automation: { version: 2, revision: 4, enabled: true, frameIds: null } } as unknown as CanvasState
+    const { result } = renderHook(() => useCanvasHistory(damaged, apply))
+    act(() => result.current.undo())
+    expect(apply).not.toHaveBeenCalled()
+  })
+
+  it('undoes the first normal-frame toggle to V2 all-OFF and redoes it using the latest ACK revision', () => {
+    const apply = vi.fn<(c: CanvasState) => void>()
+    const ordinary: CanvasState = { positions: {}, elements: [{ id: 'normal', type: 'frame', text: 'Normal', x: 0, y: 0 }], viewport: { x: 0, y: 0, zoom: 1 } }
+    const on = setFrameAutomation(ordinary, 'normal', true); on.automation!.revision = 3
+    const { result, rerender } = renderHook(({ canvas }) => useCanvasHistory(canvas, apply), { initialProps: { canvas: ordinary } })
+    rerender({ canvas: on })
+    act(() => result.current.undo())
+    const off = apply.mock.lastCall![0]
+    expect(off.automation).toEqual({ version: 2, revision: 3, enabled: true, frameIds: [] })
+    rerender({ canvas: { ...off, automation: { ...off.automation!, revision: 4 } } })
+    act(() => result.current.redo())
+    expect(apply.mock.lastCall![0].automation).toEqual({ version: 2, revision: 4, enabled: true, frameIds: ['normal'] })
+  })
+
+  it('normalizes an older V1 history step into current V2 without rewinding its server revision', () => {
+    const apply = vi.fn<(c: CanvasState) => void>()
+    const original = createAutomationFrame({ positions: {}, elements: [], viewport: { x: 0, y: 0, zoom: 1 } }, 'first', 'First')
+    original.automation!.revision = 2
+    const multi = { ...original, automation: { version: 2, revision: 7, enabled: true, frameIds: ['first', 'second'] },
+      elements: original.elements.map(({ groundRole: _role, ...element }) => element) } as unknown as CanvasState
+    const { result, rerender } = renderHook(({ canvas }) => useCanvasHistory(canvas, apply), { initialProps: { canvas: original } })
+    rerender({ canvas: multi })
+    act(() => result.current.undo())
+    const undone = apply.mock.lastCall![0]
+    expect(undone.automation).toEqual({ version: 2, revision: 7, enabled: true, frameIds: ['first'] })
+    expect(undone.elements.every(element => !element.groundRole)).toBe(true)
+    rerender({ canvas: { ...undone, automation: { ...undone.automation!, revision: 8 } } })
+    act(() => result.current.redo())
+    expect(apply.mock.lastCall![0].automation).toEqual({ version: 2, revision: 8, enabled: true, frameIds: ['first', 'second'] })
+  })
+
   it('restores the designated ID together with its frame through create/delete/recreate and undo/redo', () => {
     const apply = vi.fn<(c: CanvasState) => void>()
     const legacy: CanvasState = { positions: {}, elements: [], viewport: { x: 0, y: 0, zoom: 1 } }
@@ -124,7 +164,7 @@ describe('useCanvasHistory — automation identity and server revision', () => {
     rerender({ canvas: acknowledged })
     act(() => { vi.advanceTimersByTime(450); result.current.undo() })
     expect(apply).not.toHaveBeenCalled()
-    rerender({ canvas: { ...acknowledged, automation: { ...acknowledged.automation!, enabled: false, revision: 12 } } })
+    rerender({ canvas: { ...acknowledged, automation: { version: 1, frameId: 'frame-1', enabled: false, revision: 12 } } })
     act(() => result.current.undo())
     expect(apply.mock.lastCall![0].automation).toEqual({ version: 1, revision: 12, enabled: true, frameId: 'frame-1' })
   })

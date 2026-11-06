@@ -13,13 +13,10 @@
 // no seat, so a folded bar opens no EventSource (the 6-connection cap — see
 // the seats-row comment further down / SwarmWorkerSeat).
 //
-// SECURITY: this component is mounted ONLY from SwarmBottomBar, which
-// ProjectPanel renders behind `isSwarmVisible(moduleGate)` — itself the
-// server-resolved experiment gate (gateFromFlags / computeExperiments). A non-owner or a
-// flag-off user never mounts it, so every side effect here (the localStorage
-// worker registry, the polls, the spawns) is reached ONLY when the gate is open.
-// There is therefore nothing extra to gate INSIDE this file — the trace-zero
-// guarantee is structural (Task A), and this file just consumes it.
+// SECURITY: ProjectPanel mounts SwarmBottomBar behind its resolved
+// `isSwarmVisible(moduleGate)` gate (owner features or public/local opt-in).
+// ownerFeatures separately chooses frame-only automatic-operation controls;
+// an open public Swarm flag never grants the owner's frame controls.
 //
 // SCOPE: this surface LAUNCHES the role PTYs (supply / commander / worker
 // restart) and RENDERS state. It owns the master power SWITCH (start/stop +
@@ -274,6 +271,8 @@ const FOLDED_ENGINE_POLL_MS = 15_000
 
 interface SwarmModuleProps {
   project: ProjectMeta
+  /** Resolved app-owner UI gate, distinct from the public Swarm opt-in. */
+  ownerFeatures?: boolean
   /** Folded into the bottom bar's single strip: header row only, no seats. */
   collapsed?: boolean
   /** Present ⇒ the header row carries the bar's open/close toggle. */
@@ -282,7 +281,7 @@ interface SwarmModuleProps {
   barHandle?: SwarmBarHandle
 }
 
-export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, barHandle }: SwarmModuleProps) => {
+export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false, onToggleCollapsed, barHandle }: SwarmModuleProps) => {
   const { t } = useT()
 
   // Seats unmount when collapsed or when reconcile clears an exited desk.
@@ -432,6 +431,10 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
     envIssues,
     refreshEnvPreflight,
   } = useSwarmEngine(project.path, collapsed ? FOLDED_ENGINE_POLL_MS : undefined)
+  // Owners control automatic work on Ground frames, including before their
+  // first opt-in. Configured policy also removes legacy controls in a public
+  // preview or after sign-out. Unconfigured public opt-in keeps its old UI.
+  const frameOnlyAutomation = ownerFeatures || engine.automation?.enabled === true
 
   // ── Onboarding: FIRST RUN ONLY (2026-08-03 text-diet) ──────────────────────
   // The full explainer used to return on EVERY fully-idle visit — a returning
@@ -1093,7 +1096,8 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
     [busyWorktrees, project.path, forgetPty, t],
   )
 
-  // ── The SINGLE master power switch (条件: 単一の開始/停止スイッチ) ────────────
+  // Legacy public opt-in power composition. Owner/frame-controlled modes use
+  // Ground frame controls and cannot invoke this from their project surface.
   // ON: start the autonomous engine (which drains todo → dispatches workers) AND
   // launch the commander + supply conversations together. OFF: stop the engine's
   // NEW dispatch only — running workers finish (the server engine leaves them
@@ -1107,7 +1111,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
   // (No separate auto-integrate switch exists anymore — retired 2026-07-16.)
   const powerSwarm = useCallback(
     (next: boolean) => {
-      if (engine.automation?.enabled) return
+      if (frameOnlyAutomation) return
       const plan = planSwarmPower(next, {
         running: engine.running,
         hasSupply: !!supply,
@@ -1117,7 +1121,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
       if (plan.launchSupply) void launchSupply()
       if (plan.launchManager) void launchManager()
     },
-    [engine.running, engine.automation?.enabled, supply, manager, toggleAutonomy, launchSupply, launchManager],
+    [engine.running, frameOnlyAutomation, supply, manager, toggleAutonomy, launchSupply, launchManager],
   )
 
   // ── The SINGLE worker source both tabs render ────────────────────────────
@@ -1231,7 +1235,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
   const foldedNotice =
     showEnvBanner ||
     engine.consumption.overLimit ||
-    (engine.autonomyRemembered && !engine.running)
+    (!frameOnlyAutomation && engine.autonomyRemembered && !engine.running)
 
   return (
     // Right-pane-centric layout (条件4): the old left "to-do rail + dispatch"
@@ -1333,11 +1337,10 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
           </span>
         ) : null}
         <div className="min-w-0 flex-1" aria-hidden />
-        <SwarmPowerSwitch
+        {!frameOnlyAutomation && <SwarmPowerSwitch
           running={engine.running}
           available={engineAvailable}
           busy={engineBusy}
-          controlledHint={engine.automation?.enabled ? t('projectPanel.swarm.automationFrameControl') : undefined}
           onToggle={(next) => {
             // First run from the FOLDED strip: open the bar onto the
             // onboarding (what Start does, before it does it) instead of
@@ -1348,7 +1351,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
             }
             powerSwarm(next)
           }}
-        />
+        />}
       </div>
       {!collapsed && engine.automation?.enabled && (
         <p role="status" className="shrink-0 border-b border-line-soft bg-bg px-3 py-2 text-meta leading-relaxed text-ink-muted">
@@ -1464,7 +1467,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
           (crash-loop breaker / preflight) or this is a build where resume doesn't run.
           Offer a one-click resume (never auto-resumed). Dismiss clears the persisted
           marker (toggleAutonomy false → forgetSwarmAutonomy). */}
-      {engine.autonomyRemembered && !engine.running && !engine.automation?.enabled && (
+      {engine.autonomyRemembered && !engine.running && !frameOnlyAutomation && (
         <div className="flex shrink-0 items-center gap-3 border-b border-line-soft bg-bg px-3 py-2">
           <span className="min-w-0 flex-1 text-meta leading-relaxed text-ink-muted">
             {t('projectPanel.swarm.autonomyReminder')}
@@ -1496,7 +1499,7 @@ export const SwarmModule = ({ project, collapsed = false, onToggleCollapsed, bar
           work-flow, and what Start does, shown BEFORE pressing it. Its Start fires
           the SAME powerSwarm composition as the bar above. Otherwise → the normal
           row of seats. */}
-      {swarmIdle && engine.automation?.enabled ? (
+      {swarmIdle && frameOnlyAutomation ? (
         <div className="flex min-h-0 flex-1 items-center justify-center p-4">
           <div className="max-w-[360px] text-center">
             <p className="mb-4 text-ui text-ink-subtle">{t('projectPanel.swarm.automationFrameControl')}</p>

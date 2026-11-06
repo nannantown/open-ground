@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CanvasState } from './types'
-import { automationFrameMembership, createAutomationFrame, isAutomationAllowed } from './automationFrame'
+import { automationFrameMembership, createAutomationFrame, configuredFrameIds, isAutomationAllowed, isFrameAutomationOn, setFrameAutomation } from './automationFrame'
 import { cloneSubset } from './canvasClone'
 
 const canvas = (): CanvasState => ({
@@ -8,6 +8,100 @@ const canvas = (): CanvasState => ({
   viewport: { x: 0, y: 0, zoom: 1 },
   automation: { version: 1, revision: 0, enabled: true, frameId: 'auto' },
   elements: [{ id: 'auto', type: 'frame', groundRole: 'automation', text: '自動運用', x: 0, y: 0, width: 600, height: 400 }],
+})
+
+const multiFrame = (): CanvasState => ({
+  positions: { first: { x: 20, y: 20 }, second: { x: 820, y: 20 }, outside: { x: 1600, y: 20 } },
+  viewport: { x: 0, y: 0, zoom: 1 },
+  automation: { version: 2, revision: 4, enabled: true, frameIds: ['first-frame', 'second-frame'] },
+  elements: [
+    { id: 'first-frame', type: 'frame', text: 'First', x: 0, y: 0, width: 500, height: 400 },
+    { id: 'second-frame', type: 'frame', text: 'Second', x: 800, y: 0, width: 500, height: 400 },
+  ],
+} as unknown as CanvasState)
+
+describe('normal frames share an explicit ON allowlist', () => {
+  it('migrates the first explicit toggle without losing the previous dedicated ON frame or writing during reads', () => {
+    const legacy = canvas()
+    legacy.elements.push({ id: 'ordinary', type: 'frame', text: 'Ordinary', x: 800, y: 0, width: 500, height: 400 })
+    const before = JSON.stringify(legacy)
+    expect(configuredFrameIds(legacy)).toEqual(['auto'])
+    expect(isFrameAutomationOn(legacy, 'ordinary')).toBe(false)
+    expect(JSON.stringify(legacy)).toBe(before)
+    const migrated = setFrameAutomation(legacy, 'ordinary', true)
+    expect(migrated.automation).toEqual({ version: 2, revision: 0, enabled: true, frameIds: ['auto', 'ordinary'] })
+    expect(migrated.elements.every(element => !element.groundRole)).toBe(true)
+    expect(isAutomationAllowed(migrated, 'inside')).toBe(true)
+    expect(isAutomationAllowed(migrated, 'outside')).toBe(true)
+    expect(JSON.stringify(legacy)).toBe(before)
+    const one = setFrameAutomation(migrated, 'auto', false)
+    expect(configuredFrameIds(one)).toEqual(['ordinary'])
+    expect(isAutomationAllowed(one, 'inside')).toBe(false)
+  })
+
+  it('keeps ordinary and cloned frames OFF and uses the configured ID list rather than a copied element flag', () => {
+    const state = multiFrame()
+    const copy = cloneSubset(state.elements, new Set(['first-frame']), () => 'clone')!
+    const cloned = { ...state, elements: [...state.elements, ...copy.clones] }
+    expect(isFrameAutomationOn(cloned, 'clone')).toBe(false)
+    expect(configuredFrameIds(cloned)).toEqual(['first-frame', 'second-frame'])
+    const enabled = setFrameAutomation(cloned, 'clone', true)
+    expect(isFrameAutomationOn(enabled, 'clone')).toBe(true)
+    const off = setFrameAutomation(setFrameAutomation(setFrameAutomation(enabled, 'clone', false), 'first-frame', false), 'second-frame', false)
+    expect(off.automation).toEqual({ version: 2, revision: 4, enabled: true, frameIds: [] })
+    expect(isAutomationAllowed(off, 'first')).toBe(false)
+  })
+
+  it('migrates an explicitly disabled legacy setting only when a switch is used', () => {
+    const state = multiFrame(); delete state.automation
+    state.automation = { version: 1, revision: 7, enabled: false, frameId: null }
+    expect(isAutomationAllowed(state, 'outside')).toBe(true)
+    const optedIn = setFrameAutomation(state, 'first-frame', false)
+    expect(optedIn.automation).toEqual({ version: 2, revision: 7, enabled: true, frameIds: [] })
+    expect(isAutomationAllowed(optedIn, 'outside')).toBe(false)
+  })
+
+  it('admits the union of visible ON frames while keeping outside projects OFF', () => {
+    const state = multiFrame()
+    const membership = automationFrameMembership(state, ['first', 'second', 'outside'])
+    expect(Array.from(membership.projectIds)).toEqual(['first', 'second'])
+    expect(membership.frameId).toBeNull()
+    expect(isAutomationAllowed(state, 'outside')).toBe(false)
+  })
+
+  it('does not let a hidden or deleted ON frame revoke another valid ON frame', () => {
+    const state = multiFrame()
+    state.elements[0].hidden = true
+    expect(Array.from(automationFrameMembership(state, ['first', 'second']).projectIds)).toEqual(['second'])
+    expect(automationFrameMembership(state, []).frameId).toBe('second-frame')
+    state.elements = state.elements.slice(1)
+    expect(isAutomationAllowed(state, 'second')).toBe(true)
+    expect(isAutomationAllowed(state, 'first')).toBe(false)
+  })
+
+  it('keeps an explicit empty list OFF and rejects malformed V2 authority', () => {
+    for (const policy of [
+      { version: 2, revision: 4, enabled: true, frameIds: [] },
+      { version: 2, revision: 4, enabled: true, frameIds: ['first-frame', 'first-frame'] },
+      { version: 2, revision: 4, enabled: false, frameIds: ['first-frame'] },
+      { version: 2, revision: 4, enabled: true, frameIds: 'first-frame' },
+      { version: 2, revision: 4, enabled: true, frameIds: ['first-frame'], frameId: 'first-frame' },
+    ]) {
+      const state = multiFrame(); state.automation = policy as CanvasState['automation']
+      expect(automationFrameMembership(state, ['first']).enabled).toBe(true)
+      expect(isAutomationAllowed(state, 'first')).toBe(false)
+    }
+  })
+
+  it('unions overlapping/nested ON frames without duplicate project admission and ignores invalid frame geometry independently', () => {
+    const state = multiFrame()
+    state.elements[1] = { ...state.elements[1], x: 10, y: 10 }
+    expect(Array.from(automationFrameMembership(state, ['first', 'first']).projectIds)).toEqual(['first'])
+    state.elements[0].rotation = Number.NaN
+    expect(isAutomationAllowed(state, 'first')).toBe(true)
+    expect(automationFrameMembership(state, []).frameId).toBe('second-frame')
+    expect(setFrameAutomation(state, 'not-a-frame', true)).toBe(state)
+  })
 })
 
 describe('the dedicated Ground automation frame', () => {

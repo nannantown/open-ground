@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef } from 'react'
-import { LayoutGrid, Minimize, Zap } from 'lucide-react'
+import { LayoutGrid, Minimize } from 'lucide-react'
 import type { CanvasElement } from '@/lib/types'
 import { useT } from '@/i18n/I18nContext'
 import {
@@ -19,6 +19,9 @@ import { shadowsCss } from '@/lib/canvasShadow'
 interface Props {
   frame: CanvasElement
   automation?: boolean
+  onToggleAutomation?: (on: boolean) => void
+  automationDisabled?: boolean
+  automationBusy?: boolean
   selected: boolean
   /** The idle pointer is over this frame (the deepest one under it). */
   hovered?: boolean
@@ -78,6 +81,9 @@ export function groundFrameStroke(stroke: string | undefined, hovered: boolean):
 export const FrameView = memo(({
   frame,
   automation = false,
+  onToggleAutomation,
+  automationDisabled = false,
+  automationBusy = false,
   selected,
   hovered = false,
   editing,
@@ -146,7 +152,7 @@ export const FrameView = memo(({
           borderTopRightRadius: Math.max(0, radius - 1),
         }}
         className={[
-          'pointer-events-auto flex h-9 items-center gap-2 border-b px-3',
+          'pointer-events-auto flex h-9 items-center gap-1 border-b px-2 font-body',
           selected ? 'border-accent bg-accent-soft' : 'border-line bg-bg-elevated',
           editing ? 'cursor-text' : 'cursor-grab active:cursor-grabbing',
         ].join(' ')}
@@ -171,12 +177,11 @@ export const FrameView = memo(({
             }}
             onPointerDown={(e) => e.stopPropagation()}
             placeholder="Frame name"
-            className="w-full bg-transparent font-display text-read leading-none text-ink focus:outline-none"
+            className="min-w-0 flex-1 bg-transparent font-body text-read leading-none text-ink focus:outline-none"
           />
         ) : (
           <>
-            {automation && <span title={t('canvasEl.frame.automationHint')} className="inline-flex shrink-0 items-center gap-1 rounded-sm bg-accent-soft px-1.5 py-0.5 text-meta font-medium text-accent-deeper"><Zap size={12} aria-hidden />{t('canvasEl.frame.automation')}</span>}
-            <span className="flex-1 select-none truncate font-display text-read leading-none text-ink">
+            <span title={frame.text} className="min-w-0 flex-1 select-none truncate font-body text-read leading-none text-ink">
               {frame.text || <span className="text-ink-faint">Frame</span>}
             </span>
             {([
@@ -204,6 +209,20 @@ export const FrameView = memo(({
             )}
           </>
         )}
+        {onToggleAutomation && <button type="button" role="switch" aria-checked={automation}
+          aria-label={t('canvasEl.frame.automationLabel')}
+          title={t(automation ? 'canvasEl.frame.automationOff' : 'canvasEl.frame.automationOn')}
+          aria-busy={automationBusy} disabled={automationDisabled || automationBusy}
+          onPointerDown={e => e.stopPropagation()}
+          onKeyDown={e => { if (e.key === ' ' || e.key === 'Enter') e.stopPropagation() }}
+          onKeyUp={e => { if (e.key === ' ' || e.key === 'Enter') e.stopPropagation() }}
+          onClick={e => { e.stopPropagation(); onToggleAutomation(!automation) }}
+          className={`group ml-1 inline-flex h-6 shrink-0 items-center gap-1 rounded-[3px] px-0.5 font-body text-meta transition-colors duration-150 enabled:hover:bg-plane enabled:hover:text-ink enabled:active:bg-line-soft enabled:active:text-accent-deeper disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 ${automation ? 'text-accent-deeper' : 'text-ink-muted'}`}>
+          <span>{t('canvasEl.frame.automation')}</span>
+          <span aria-hidden className={`relative h-4 w-7 shrink-0 rounded-full border transition-colors duration-150 ${automation ? 'border-accent bg-accent group-enabled:group-hover:bg-accent/80 group-enabled:group-active:bg-accent/65' : 'border-ink-faint bg-bg-inset group-enabled:group-hover:bg-plane group-enabled:group-active:bg-line-soft'}`}>
+            <span className={`absolute top-[2px] h-[10px] w-[10px] rounded-full transition-[left,background-color] duration-150 ${automation ? 'left-[14px] bg-bg-card' : 'left-[2px] bg-ink-muted'}`} />
+          </span>
+        </button>}
       </div>
     </div>
   )

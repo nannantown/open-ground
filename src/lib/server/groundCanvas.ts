@@ -1,5 +1,5 @@
 import type { CanvasState } from '../types'
-import { automationFrame, automationFrameMembership } from '../automationFrame'
+import { automationFrames, automationFrameMembership, configuredFrameIds, isCanvasAutomationPolicy } from '../automationFrame'
 import { mutateCanvas } from './store'
 import { runtimeRequestOwnerKey, runtimeOwnerKey } from './runtimeOwner'
 
@@ -35,21 +35,25 @@ function validate(value: unknown): asserts value is CanvasState {
   }
   if (value.automation !== undefined) {
     const policy = value.automation
-    if (!object(policy) || policy.version !== 1 || typeof policy.enabled !== 'boolean' ||
-        !Number.isSafeInteger(policy.revision) || Number(policy.revision) < 0 ||
-        !(policy.frameId === null || typeof policy.frameId === 'string')) {
+    if (!isCanvasAutomationPolicy(policy)) {
       throw new GroundCanvasError(400, 'Invalid automation policy.')
     }
     const frames = value.elements.filter((element) => element.groundRole === 'automation')
-    if (frames.length > 1 || (frames.length === 1 && frames[0].id !== policy.frameId)) {
+    if (policy.version === 2 && frames.length > 0) {
+      throw new GroundCanvasError(400, 'Normal-frame automation cannot include a legacy role marker.')
+    }
+    if (policy.version === 1 && (frames.length > 1 || frames.length === 1 && frames[0].id !== policy.frameId)) {
       throw new GroundCanvasError(400, 'Automation requires one designated frame.')
     }
-    const designated = value.elements.find((element) => element.id === policy.frameId)
-    if (designated && (designated.groundRole !== 'automation' || designated.type !== 'frame' ||
+    const frameIds = policy.version === 2 ? policy.frameIds : policy.frameId ? [policy.frameId] : []
+    for (const id of frameIds) {
+      const designated = value.elements.find((element) => element.id === id)
+      if (designated && (policy.version === 1 && designated.groundRole !== 'automation' || designated.type !== 'frame' ||
         designated.rotation !== undefined && !finite(designated.rotation) ||
         !finite(designated.width ?? 400) || !finite(designated.height ?? 280) ||
         (designated.width ?? 400) <= 0 || (designated.height ?? 280) <= 0)) {
-      throw new GroundCanvasError(400, 'Invalid designated automation frame.')
+        throw new GroundCanvasError(400, 'Invalid designated automation frame.')
+      }
     }
   } else if (value.elements.some((element) => element.groundRole !== undefined)) {
     throw new GroundCanvasError(400, 'An automation frame requires its policy.')
@@ -62,10 +66,13 @@ const authority = (canvas: CanvasState): string => {
   const policy = canvas.automation
   if (!policy) return 'legacy'
   const { revision: _revision, ...configuration } = policy
-  const roles = canvas.elements.filter((element) => element.groundRole === 'automation')
+  if (configuration.version === 2) configuration.frameIds = [...configuration.frameIds].sort()
+  const ids = new Set(configuredFrameIds(canvas))
+  const frames = canvas.elements.filter((element) => ids.has(element.id))
     .map(({ id, type, x, y, width, height, rotation, hidden, opacity, groundRole }) => ({ id, type, x, y, width, height, rotation, hidden, opacity, groundRole }))
+    .sort((a, b) => a.id.localeCompare(b.id))
   const members = Array.from(automationFrameMembership(canvas, Object.keys(canvas.positions)).projectIds).sort()
-  return JSON.stringify({ configuration, roles, members, visibleFrameId: automationFrame(canvas)?.id ?? null })
+  return JSON.stringify({ configuration, frames, members, visibleFrameIds: automationFrames(canvas).map((frame) => frame.id).sort() })
 }
 
 /** Serialize read/CAS/owner recheck/durable write. An omitted policy in an old
@@ -76,8 +83,8 @@ export function saveGroundCanvas(body: unknown, claimedOwnerId?: string): Promis
     catch { throw new GroundCanvasError(503, 'Ground canvas is invalid; restore it before saving.') }
     validate(body)
     const next: CanvasState = structuredClone(body)
-    if (current.automation && !next.automation) {
-      // Missing metadata is a stale client, not an explicit disable operation.
+    if (current.automation && !next.automation || current.automation?.version === 2 && next.automation?.version !== 2) {
+      // Omitted authority or a V2 downgrade is a stale client, never opt-out.
       throw new GroundCanvasError(409, 'Ground automation changed. Reload before saving.')
     }
     const changed = authority(current) !== authority(next)

@@ -8,7 +8,7 @@
 //     president in words instead — skills/supply/SKILL.md), and so is the
 //     overseer restore banner that re-armed monitoring from the screen.
 // Each test names the mutation that turns it red.
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react'
 import type { ProjectMeta, SwarmOrchestratorState } from '@/lib/types'
 import { messages } from '@/i18n/messages'
@@ -102,18 +102,17 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
+beforeEach(() => { localStorage.clear() })
 
 const POWER = 'projectPanel.swarm.power.label'
 
 describe('the header row opens and folds the bar (owner 2026-09-24)', () => {
-  it('shows frame authority and disables manual power inside or outside without disabling manual president conversation', async () => {
+  it('shows frame authority and hides project power inside or outside without disabling manual president conversation', async () => {
     for (const allowed of [true, false]) {
       const { posted } = harness(engineState({ running: false, autonomyRemembered: true, automation: { enabled: true, allowed } }))
       const view = render(<SwarmModule project={project} />)
       await screen.findByText(allowed ? 'projectPanel.swarm.automationFrameInside' : 'projectPanel.swarm.automationFrameOutside')
-      const power = screen.getByRole('switch', { name: POWER }) as HTMLButtonElement
-      expect(power.disabled).toBe(true)
-      fireEvent.click(power)
+      expect(screen.queryByRole('switch', { name: POWER })).toBeNull()
       expect(posted.map((item) => item.url).filter((url) => url.includes('/orchestrator/start') || url.includes('/orchestrator/stop'))).toHaveLength(0)
       expect(screen.queryByText('projectPanel.swarm.autonomyReminder.resume')).toBeNull()
       const talk = screen.getByRole('button', { name: 'projectPanel.swarm.automationFrameTalk' }) as HTMLButtonElement
@@ -124,6 +123,52 @@ describe('the header row opens and folds the bar (owner 2026-09-24)', () => {
       expect(posted.some((item) => item.url.includes('/orchestrator/start'))).toBe(false)
       view.unmount()
     }
+  })
+
+  it('hides every owner project automation action before the first frame while preserving manual president launch', async () => {
+    for (const collapsed of [true, false]) {
+      for (const seen of [false, true]) {
+        if (seen) localStorage.setItem('og-swarm-onboarding-seen-v1', '1')
+        else localStorage.removeItem('og-swarm-onboarding-seen-v1')
+        const { posted } = harness(engineState({ running: false, autonomyRemembered: true }))
+        const view = render(<SwarmModule project={project} ownerFeatures collapsed={collapsed} onToggleCollapsed={() => {}} />)
+        await screen.findByTestId('swarm-bar-toggle')
+        expect(screen.queryByRole('switch', { name: POWER })).toBeNull()
+        expect(screen.queryByRole('button', { name: 'projectPanel.swarm.power.start' })).toBeNull()
+        expect(screen.queryByRole('button', { name: 'projectPanel.swarm.autonomyReminder.resume' })).toBeNull()
+        expect(screen.queryByRole('button', { name: 'projectPanel.swarm.autonomyReminder.dismiss' })).toBeNull()
+        if (!collapsed) {
+          const talk = await screen.findByRole('button', { name: 'projectPanel.swarm.automationFrameTalk' })
+          fireEvent.click(talk)
+          await waitFor(() => expect(posted.some(item => item.url === '/api/swarm/supply/open')).toBe(true))
+        }
+        expect(posted.some(item => /\/orchestrator\/(start|stop)$/.test(item.url))).toBe(false)
+        view.unmount()
+      }
+    }
+  })
+
+  it('retains the unconfigured public opt-in start and resume controls', async () => {
+    localStorage.setItem('og-swarm-onboarding-seen-v1', '1')
+    const { posted } = harness(engineState({ running: false, autonomyRemembered: true, automation: { enabled: false, allowed: true } }))
+    render(<SwarmModule project={project} ownerFeatures={false} />)
+    const power = await screen.findByRole('switch', { name: POWER })
+    await waitFor(() => expect((power as HTMLButtonElement).disabled).toBe(false))
+    expect(screen.getByRole('button', { name: 'projectPanel.swarm.power.start' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'projectPanel.swarm.autonomyReminder.resume' })).toBeTruthy()
+    fireEvent.click(power)
+    await waitFor(() => expect(posted.some(item => item.url === '/api/swarm/orchestrator/start')).toBe(true))
+  })
+
+  it('keeps a running owner engine visible without exposing project auto-power, while manual president start still works', async () => {
+    const { posted } = harness(engineState({ running: true }))
+    render(<SwarmModule project={project} ownerFeatures />)
+    const manual = await screen.findByRole('button', { name: 'projectPanel.swarm.supply.launch' })
+    expect(screen.queryByRole('switch', { name: POWER })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'projectPanel.swarm.power.start' })).toBeNull()
+    fireEvent.click(manual)
+    await waitFor(() => expect(posted.some(item => item.url === '/api/swarm/supply/open')).toBe(true))
+    expect(posted.some(item => /\/orchestrator\/(start|stop)$/.test(item.url))).toBe(false)
   })
 
   it('a click on the EMPTY part of the row toggles once', async () => {

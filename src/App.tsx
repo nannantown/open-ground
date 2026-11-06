@@ -30,7 +30,7 @@ import { GROUND_SEEN_EVENT, groundLamp, type GroundLamp } from '@/lib/groundLamp
 import { setClientLockdown } from '@/lib/lockdownClient'
 import { FloatingAssistant } from '@/components/assistant/FloatingAssistant'
 import { autoLayout, findFreeSpot, frameLabelFor } from '@/lib/layout'
-import { automationFrame, createAutomationFrame } from '@/lib/automationFrame'
+import { setFrameAutomation } from '@/lib/automationFrame'
 import { GHOST_H, GHOST_W, PlacementGhost } from '@/components/canvas/PlacementGhost'
 import { useCanvasHistory } from '@/lib/useCanvasHistory'
 import { newId } from '@/lib/ids'
@@ -1378,6 +1378,9 @@ export default function App() {
         onOpenShared={openSharedCard}
         canvas={canvas}
         onCanvasChange={onCanvasChange}
+        onToggleFrameAutomation={ownerFeatures && authUser?.id ? (id, on) => mutateCanvas(current => setFrameAutomation(current, id, on)) : undefined}
+        frameAutomationBusy={canvasSaveState === 'saving'}
+        frameAutomationDisabled={canvasSaveState === 'conflict' || canvasSaveState === 'owner-changed'}
         selectedIds={selectedIds}
         onSelect={handleSelect}
         onSelectIds={setSelectedIds}
@@ -1427,19 +1430,6 @@ export default function App() {
         </div>
       )}
       <Toolbar
-        onAutomationFrame={ownerFeatures && authUser?.id ? () => {
-          const next = createAutomationFrame(canvas, newId(), t('toolbar.automationFrame'))
-          const frame = automationFrame(next)
-          if (!frame) return
-          const zoom = Math.min(1, Math.max(0.2, Math.min((window.innerWidth - 100) / (frame.width ?? 680), (window.innerHeight - 180) / (frame.height ?? 440))))
-          onCanvasChange({ ...next, viewport: {
-            x: window.innerWidth / 2 - (frame.x + (frame.width ?? 680) / 2) * zoom,
-            y: window.innerHeight / 2 - (frame.y + (frame.height ?? 440) / 2) * zoom, zoom,
-          } })
-          setSelectedIds([frame.id])
-        } : undefined}
-        automationFrameActive={!!automationFrame(canvas)}
-        automationFrameBusy={canvasSaveState === 'saving' || canvasSaveState === 'conflict' || canvasSaveState === 'owner-changed'}
         onSearch={() => setJumpOpen(true)}
         onNewProject={() => setNewProjectOpen(true)}
         onImport={importProject}

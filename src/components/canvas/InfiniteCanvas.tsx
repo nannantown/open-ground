@@ -28,7 +28,7 @@ import {
 import { resolveTextStyle } from '@/lib/canvasTextStyle'
 import { siblingId, firstChildId, parentId as navParentId } from '@/lib/canvasSelectionNav'
 import { cloneSubset } from '@/lib/canvasClone'
-import { GROUND_PROJECT_CARD_WIDTH, GROUND_PROJECT_CARD_HEIGHT, automationFrameMembership } from '@/lib/automationFrame'
+import { GROUND_PROJECT_CARD_WIDTH, GROUND_PROJECT_CARD_HEIGHT, isFrameAutomationOn } from '@/lib/automationFrame'
 import { initialDrawnFrameFill } from '@/lib/canvasFillStyle'
 import { makeBackdropResolver } from '@/lib/canvasContrast'
 import { useThemeName } from '@/lib/theme'
@@ -164,6 +164,10 @@ interface Props {
    *  is the Figma-style design frame (project Canvas): the rect is pure
    *  content and the name floats outside, above the top-left corner. */
   frameVariant?: 'ground' | 'design'
+  /** Ground owner control; omitted on design canvases and non-owner surfaces. */
+  onToggleFrameAutomation?: (frameId: string, on: boolean) => void
+  frameAutomationDisabled?: boolean
+  frameAutomationBusy?: boolean
   /** True while this canvas sits INERT beneath another surface (the Ground
    *  under an open project panel). Every window-level keyboard handler in
    *  here goes quiet — otherwise a V/F/Delete typed into the panel's canvas
@@ -436,6 +440,7 @@ interface FrameLeafCb {
   onEditDone: () => void
   onTidy: () => void
   onFit: () => void
+  onToggleAutomation: (on: boolean) => void
 }
 
 // Free-form canvas: project cards, text/sticky annotations and grouping
@@ -467,6 +472,9 @@ export const InfiniteCanvas = ({
   canvasId,
   onImagePaste,
   frameVariant = 'ground',
+  onToggleFrameAutomation,
+  frameAutomationDisabled = false,
+  frameAutomationBusy = false,
   suspendKeys = false,
   flash,
 }: Props) => {
@@ -487,6 +495,8 @@ export const InfiniteCanvas = ({
   suspendKeysRef.current = suspendKeys
   const canvasRef = useRef(canvas)
   canvasRef.current = canvas
+  const automationControls = useRef({ onToggleFrameAutomation, disabled: frameAutomationDisabled || frameAutomationBusy })
+  automationControls.current = { onToggleFrameAutomation, disabled: frameAutomationDisabled || frameAutomationBusy }
   // Wheel events from a trackpad pinch fire faster than React can commit, so a
   // handler that only reads canvasRef would see the same stale viewport across
   // a burst of events and effectively produce one zoom step per frame. We
@@ -1224,6 +1234,10 @@ export const InfiniteCanvas = ({
       // leaf). Single-selection only — navigation has no meaning for a multi.
       // (Sits BEFORE the Shift handling below so ⇧Tab / ⇧Enter reach it.)
       if (e.key === 'Enter' || e.key === 'Tab') {
+        // This listener runs in capture, before a header button can consume
+        // the key. Leave native activation/focus alone; other Ground shortcuts
+        // (including undo and tool selection) still follow their own paths.
+        if (e.target instanceof Element && e.target.closest('button, a[href], select, [role="button"], [role="switch"]')) return
         const cur = selectedRef.current
         if (cur.length !== 1) return
         const els = canvasRef.current.elements
@@ -3262,19 +3276,17 @@ export const InfiniteCanvas = ({
     const otherFrames = opts?.directOnly
       ? c.elements
           .filter((e) => e.type === 'frame' && e.id !== frame.id)
-          .map((e) => ({ id: e.id, b: groundBox(e), area: 0 }))
+          .map((e) => ({ id: e.id, b: groundBox(e), rotation: e.rotation ?? 0, area: 0 }))
           .map((f) => ({ ...f, area: f.b.w * f.b.h }))
       : null
     const thisArea = fb.w * fb.h
-    const automaticMembers = c.automation?.enabled && c.automation.frameId === frame.id
-      ? automationFrameMembership(c, projects.map((project) => project.id)).projectIds : null
     const ids: string[] = []
     for (const proj of projects) {
       const pos = c.positions[proj.id]
       if (!pos) continue
       const cx = pos.x + CARD_W / 2
       const cy = pos.y + CARD_H / 2
-      if (automaticMembers ? !automaticMembers.has(proj.id) : !(cx >= fb.x && cx <= fb.x + fb.w && cy >= fb.y && cy <= fb.y + fb.h))
+      if (!pointInRotatedBox(fb, frame.rotation ?? 0, { x: cx, y: cy }))
         continue
       // Skip when a smaller (nested) frame also holds this card's centre — it is
       // that nested frame's card, not ours.
@@ -3282,10 +3294,7 @@ export const InfiniteCanvas = ({
         otherFrames?.some(
           (f) =>
             f.area < thisArea &&
-            cx >= f.b.x &&
-            cx <= f.b.x + f.b.w &&
-            cy >= f.b.y &&
-            cy <= f.b.y + f.b.h,
+            pointInRotatedBox(f.b, f.rotation, { x: cx, y: cy }),
         )
       )
         continue
@@ -3783,6 +3792,12 @@ export const InfiniteCanvas = ({
           const fr = canvasRef.current.elements.find((x) => x.id === id)
           if (fr) fitFrameRef.current(fr)
         },
+        onToggleAutomation: (on) => {
+          const c = canvasRef.current
+          const frame = c.elements.find(element => element.id === id)
+          if (!frame || frame.locked || groupCascadeSets(c.elements).lockedViaGroup.has(id) || automationControls.current.disabled) return
+          automationControls.current.onToggleFrameAutomation?.(id, on)
+        },
       }
       frameCbCache.current.set(id, cb)
     }
@@ -3917,7 +3932,10 @@ export const InfiniteCanvas = ({
             ) : (
               <FrameView
                 frame={frame}
-                automation={canvas.automation?.enabled === true && canvas.automation.frameId === frame.id && frame.groundRole === 'automation'}
+                automation={isFrameAutomationOn(canvas, frame.id)}
+                onToggleAutomation={onToggleFrameAutomation ? fcb.onToggleAutomation : undefined}
+                automationDisabled={frameAutomationDisabled || frame.locked || lockedViaGroup.has(frame.id)}
+                automationBusy={frameAutomationBusy}
                 selected={selectedSet.has(frame.id)}
                 hovered={hoverFrameId === frame.id}
                 editing={editingId === frame.id}

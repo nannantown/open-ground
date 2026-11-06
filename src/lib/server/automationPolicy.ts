@@ -26,17 +26,28 @@ export const readProjectAutomationPolicy = async (projectPath: string): Promise<
     if (!value || !Array.isArray(value.elements) || !value.positions || typeof value.positions !== 'object' || Array.isArray(value.positions)) return closed
     if (!automationFrameMembership(value, []).enabled) return { enabled: false, allowed: true, healthy: true, frameId: null }
     const projects = (await getSettings()).projects ?? []
-    const membership = automationFrameMembership(value, projects.map((project) => project.id))
     const path = await canonicalize(projectPath)
     const matches = []
     for (const project of projects) if (await canonicalize(project.path) === path) matches.push(project)
+    // Identity resolution can yield to a saved OFF toggle. Read authority last,
+    // with no settings/path awaits between this snapshot and its decision.
+    const latest = await getCanvasWithHealth()
+    if (latest.health === 'unreadable' || !latest.value || !Array.isArray(latest.value.elements) ||
+        !latest.value.positions || typeof latest.value.positions !== 'object' || Array.isArray(latest.value.positions)) return closed
+    const membership = automationFrameMembership(latest.value, projects.map((project) => project.id))
+    if (!membership.enabled) return { enabled: false, allowed: true, healthy: true, frameId: null }
     return { enabled: true, allowed: matches.length === 1 && membership.projectIds.has(matches[0].id), healthy: true, frameId: membership.frameId }
   } catch { return closed }
 }
 
 export const automaticOperationAllowed = async (projectPath: string): Promise<boolean> => {
   const policy = await readProjectAutomationPolicy(projectPath)
-  return policy.allowed && (!policy.enabled || await hasChatGptAccess())
+  if (!policy.allowed) return false
+  if (!policy.enabled) return true // legacy grants never acquire an owner requirement
+  if (!await hasChatGptAccess()) return false
+  // Auth IO may also yield to a durable move/toggle OFF. Never return its older
+  // allowed snapshot to a launch leaf after the capability check settles.
+  return (await readProjectAutomationPolicy(projectPath)).allowed
 }
 
 export const assertAutomaticOperationAllowed = async (projectPath: string): Promise<void> => {
@@ -68,7 +79,7 @@ export const startAutomationPolicyLoop = (intervalMs = 15_000): void => {
     loopInFlight = true
     try {
       const { value, health } = await getCanvasWithHealth()
-      if (health === 'unreadable' || value.automation?.enabled) await reconcileAutomationPolicy()
+      if (health === 'unreadable' || automationFrameMembership(value, []).enabled) await reconcileAutomationPolicy()
     } catch { /* persisted policy remains authoritative; the next tick retries */ }
     finally { loopInFlight = false }
   }

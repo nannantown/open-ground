@@ -1,6 +1,6 @@
 {
   "name": "openground",
-  "version": "0.11.199",
+  "version": "0.11.200",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -140,7 +140,7 @@
           ]
         }
       ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "artifactName": "OPEN-GROUND-${version}-${arch}.${ext}",
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.icns",
       "hardenedRuntime": true,

@@ -24,12 +24,79 @@ vi.mock('./runtimeOwner', () => ({
   runtimeOwnerKey: async (key?: string) => { mock.verifyOwner(key); if (mock.changedOwner) throw new Error('changed'); return 'owner-a' },
 }))
 import { saveGroundCanvas } from './groundCanvas'
-import { createAutomationFrame } from '../automationFrame'
+import { createAutomationFrame, setFrameAutomation } from '../automationFrame'
 
 const empty = (): CanvasState => ({ positions: { project: { x: 0, y: 0 } }, viewport: { x: 0, y: 0, zoom: 1 }, elements: [] })
 beforeEach(() => {
   mock.canvas = empty(); mock.health = 'ok'; mock.owner = true; mock.changedOwner = false
   vi.clearAllMocks()
+})
+
+const ordinaryFrames = (): CanvasState => ({ ...empty(), elements: [
+  { id: 'first', type: 'frame', text: 'First', x: 0, y: 0, width: 500, height: 400 },
+  { id: 'second', type: 'frame', text: 'Second', x: 800, y: 0, width: 500, height: 400 },
+] })
+const v2 = (canvas: CanvasState, frameIds: string[]): CanvasState => ({ ...canvas,
+  automation: { version: 2, revision: canvas.automation?.revision ?? 0, enabled: true, frameIds },
+} as unknown as CanvasState)
+
+describe('normal frame ON/OFF consent', () => {
+  it('persists multiple ordinary ON frames with owner consent and a server revision', async () => {
+    mock.canvas = ordinaryFrames()
+    const saved = await saveGroundCanvas(v2(mock.canvas, ['first', 'second']))
+    expect(saved.automation).toEqual({ version: 2, enabled: true, frameIds: ['first', 'second'], revision: 1 })
+    expect(saved.elements.every(element => !element.groundRole)).toBe(true)
+    mock.owner = false
+    await expect(saveGroundCanvas(v2(saved, ['first']))).rejects.toMatchObject({ status: 403 })
+    expect(mock.canvas.automation).toEqual(saved.automation)
+  })
+
+  it('keeps V2 authority through all-OFF and rejects omission, downgrade and stale toggle', async () => {
+    mock.canvas = ordinaryFrames()
+    const on = await saveGroundCanvas(v2(mock.canvas, ['first']))
+    const off = await saveGroundCanvas(v2(on, []))
+    expect(off.automation).toEqual({ version: 2, enabled: true, frameIds: [], revision: 2 })
+    await expect(saveGroundCanvas(on)).rejects.toMatchObject({ status: 409 })
+    await expect(saveGroundCanvas(ordinaryFrames())).rejects.toMatchObject({ status: 409 })
+    await expect(saveGroundCanvas({ ...off, automation: { version: 1, enabled: false, frameId: null, revision: 2 } })).rejects.toMatchObject({ status: 409 })
+  })
+
+  it('protects an ON frame area even when it currently contains no project', async () => {
+    mock.canvas = ordinaryFrames(); mock.canvas.positions = {}
+    const on = await saveGroundCanvas(v2(mock.canvas, ['first', 'second']))
+    mock.owner = false
+    const resized = structuredClone(on); resized.elements[1].width = 700
+    await expect(saveGroundCanvas(resized)).rejects.toMatchObject({ status: 403 })
+  })
+
+  it('binds every visible ON frame to owner and CAS even when hidden ancestors change no current project membership', async () => {
+    mock.canvas = ordinaryFrames(); mock.canvas.positions = {}
+    mock.canvas.elements.push({ id: 'third', type: 'frame', text: 'Third', x: 1600, y: 0, width: 500, height: 400 },
+      { id: 'parent', type: 'group', text: '', x: 0, y: 0, hidden: true })
+    mock.canvas.elements[0].parentId = 'parent'
+    const on = await saveGroundCanvas(v2(mock.canvas, ['first', 'second', 'third']))
+    const unhidden = structuredClone(on); unhidden.elements.find(element => element.id === 'parent')!.hidden = false
+    mock.owner = false
+    await expect(saveGroundCanvas(unhidden)).rejects.toMatchObject({ status: 403 })
+    mock.owner = true
+    expect((await saveGroundCanvas(unhidden)).automation?.revision).toBe(2)
+    await expect(saveGroundCanvas(on)).rejects.toMatchObject({ status: 409 })
+  })
+
+  it('migrates V1 only with fresh owner consent and refuses malformed ON ID lists', async () => {
+    const old = await saveGroundCanvas(createAutomationFrame(empty(), 'auto', 'Legacy'))
+    const migration = setFrameAutomation(old, 'auto', false)
+    mock.owner = false
+    await expect(saveGroundCanvas(migration)).rejects.toMatchObject({ status: 403 })
+    mock.owner = true
+    const saved = await saveGroundCanvas(migration)
+    expect(saved.automation).toEqual({ version: 2, enabled: true, frameIds: [], revision: 2 })
+    for (const frameIds of [['auto', 'auto'], [null], 'auto']) {
+      await expect(saveGroundCanvas({ ...saved, automation: { version: 2, revision: 2, enabled: true, frameIds } })).rejects.toMatchObject({ status: 400 })
+    }
+    mock.canvas = { ...saved, automation: { version: 2, revision: 2, enabled: true, frameIds: null } } as unknown as CanvasState
+    await expect(saveGroundCanvas(ordinaryFrames())).rejects.toMatchObject({ status: 503 })
+  })
 })
 
 describe('durable Ground automation authority', () => {
