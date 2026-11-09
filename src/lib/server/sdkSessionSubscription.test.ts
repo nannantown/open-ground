@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-const f = vi.hoisted(() => ({ auth: vi.fn(), hooks: vi.fn(), actions: vi.fn() }))
+const f = vi.hoisted(() => ({ auth: vi.fn(), hooks: vi.fn(), actions: vi.fn(), observe: vi.fn() }))
 vi.mock('./subscriptionOnly', () => ({ assertClaudeSubscriptionLaunch: f.auth }))
-vi.mock('./runtimeActionReceipts', () => ({ guardClaudeRuntimeTools: f.hooks, assertNoUncertainRuntimeActions: f.actions }))
+vi.mock('./runtimeActionReceipts', () => ({ createClaudeRuntimeToolAudit: async (...args: unknown[]) => ({ hooks: await f.hooks(...args), observeSdkMessage: f.observe }), assertNoUncertainRuntimeActions: f.actions }))
 import { __setDefaultQueryFnForTests, __setSdkImporterForTests, getSdkSession, preloadSdk, spawnSdkSession, terminateSdkSession, type SdkQueryParams } from './sdkSession'
 import { withRuntimeOwner } from './runtimeOwner'
 import * as runtimeOwner from './runtimeOwner'
@@ -12,6 +12,7 @@ beforeEach(() => {
   f.auth.mockReset().mockResolvedValue({ PATH: '/synthetic/bin', CLAUDE_CONFIG_DIR: '/synthetic/claude', ANTHROPIC_API_KEY: undefined })
   f.hooks.mockReset().mockResolvedValue({ PreToolUse: [] })
   f.actions.mockReset().mockResolvedValue(undefined)
+  f.observe.mockReset().mockResolvedValue(undefined)
   __setDefaultQueryFnForTests(null)
 })
 afterEach(async () => {
@@ -52,6 +53,23 @@ describe('real SDK launch admission (offline SDK fixture)', () => {
     expect(getSdkSession(session.id)?.status).toBe('failed')
     expect(loaded.query).not.toHaveBeenCalled()
     expect(f.hooks).not.toHaveBeenCalled()
+  })
+  it('awaits raw-result durability and never yields or continues after observer failure', async () => {
+    let continued = false
+    const query = vi.fn(() => ({ async *[Symbol.asyncIterator]() {
+      yield { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'synthetic-call', is_error: true, content: 'synthetic veto result' }] } }
+      continued = true
+      yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
+    } }))
+    __setSdkImporterForTests(async () => ({ query, USAGE_LIMIT_ERROR_PREFIXES: [] }))
+    const sdk = await preloadSdk()
+    f.observe.mockRejectedValue(new Error('synthetic durable result failure'))
+    const session = spawnSdkSession({ cwd: '/synthetic/project', role: 'worker', sdk, options: { cwd: '/synthetic/project', sessionId: 'synthetic-conversation' } })
+    ids.push(session.id)
+    await vi.waitFor(() => expect(getSdkSession(session.id)?.reaped).toBe(true))
+    expect(getSdkSession(session.id)?.status).toBe('failed')
+    expect(continued).toBe(false)
+    expect(f.observe).toHaveBeenCalledOnce()
   })
   it('does not downgrade an owner launch to a legacy launch after logout during asynchronous preflight', async () => {
     const loaded = await sdk()

@@ -1,46 +1,81 @@
 import { createHash } from 'node:crypto'
 import type { HookCallbackMatcher, HookEvent } from '@anthropic-ai/claude-agent-sdk'
-import { acceptConversationReceipt, claimConversationReceipt, finishConversationReceipt, listConversationReceipts } from './conversationReceipts'
+import { acceptConversationReceipt, claimConversationReceipt, finishConversationReceipt, listConversationReceipts, readConversationReceipt } from './conversationReceipts'
 import { projectUUIDFromPath } from './projectDataPath'
 import { hasChatGptAccess } from './chatgptAccess'
 import { runtimeOwnerKey } from './runtimeOwner'
 
 type Hooks = Partial<Record<HookEvent, HookCallbackMatcher[]>>
 const idFor = (sessionId: string, toolId: string) => `tool-${createHash('sha256').update(JSON.stringify([sessionId, toolId])).digest('hex')}`
+const inputHash = (input: unknown) => createHash('sha256').update(JSON.stringify(input ?? null)).digest('hex')
+const object = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+export interface ClaudeRuntimeToolAudit { hooks: Hooks; observeSdkMessage(message: unknown): Promise<void> }
 /** Audit hooks never grant permission: every existing guard remains authoritative.
  * Started-without-post receipts are conservative recovery holds, even when a
  * native permission denial may have prevented the effect. */
-export const guardClaudeRuntimeTools = async (cwd: string, sessionId: string, raw: unknown = {}, expectedOwnerKey?: string): Promise<Hooks> => {
+export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: string, raw: unknown = {}, expectedOwnerKey?: string): Promise<ClaudeRuntimeToolAudit> => {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid runtime tool guards.')
   const hooks = raw as Hooks
   if (Object.values(hooks).some((matchers) => !Array.isArray(matchers) || matchers.some((matcher) => !matcher || !Array.isArray(matcher.hooks) || matcher.hooks.some((hook) => typeof hook !== 'function')))) throw new Error('Invalid runtime tool guards.')
   if (!await hasChatGptAccess()) {
     if (expectedOwnerKey) throw new Error('The owner account changed.')
-    return hooks
+    return { hooks, observeSdkMessage: async () => {} }
   }
   const scope = await projectUUIDFromPath(cwd).catch(() => null)
-  if (!scope) return hooks // assistant has its own read-only/proposal journal
+  if (!scope) return { hooks, observeSdkMessage: async () => {} } // assistant has its own read-only/proposal journal
   const owner = await runtimeOwnerKey(expectedOwnerKey)
   const { agentConversationHandles } = await import('./liveDesks')
   const handles = agentConversationHandles(sessionId)
   if (handles.length !== 1) throw new Error('A unique recorded actor is required before a tool can execute.')
   const execution = { ...handles[0], sessionId }
   const recordingFaults = new Set<string>()
+  const claimed = new Map<string, { id: string; tool: string; inputHash: string; claimed: boolean; ambiguous: boolean }>()
+  const observed = new Map<string, { tool: string; inputHash: string }>()
+  const denied = new Map<string, { tool: string; inputHash: string }>()
+  const forget = (callId: string) => { claimed.delete(callId); observed.delete(callId); denied.delete(callId) }
   const result = { ...hooks }
-  result.PreToolUse = [...(hooks.PreToolUse ?? []), { hooks: [async (input, toolId) => {
+  const existingPre = (hooks.PreToolUse ?? []).map(matcher => ({ ...matcher, hooks: matcher.hooks.map(hook => async (...args: Parameters<typeof hook>) => {
+    const output = await hook(...args), [input, toolId] = args, decision = object(object(output)?.hookSpecificOutput)
+    // Observe the real guard's unchanged decision. Command stdout alone can
+    // never prove a veto, even if it prints the same native error prefix.
     try {
-    if (recordingFaults.size) throw new Error('A tool result could not be recorded.')
+      if (input.hook_event_name === 'PreToolUse' && decision?.hookEventName === 'PreToolUse' && decision.permissionDecision === 'deny'
+        && typeof decision.permissionDecisionReason === 'string' && decision.permissionDecisionReason.startsWith('openground-guard BLOCKED: ')) {
+        const callId = toolId ?? input.tool_use_id
+        if (callId && (denied.size < 256 || denied.has(callId))) denied.set(callId, { tool: input.tool_name, inputHash: inputHash(input.tool_input) })
+        else recordingFaults.add('guard-observation-capacity')
+      }
+    } catch { recordingFaults.add('guard-observation-unavailable') }
+    return output
+  }) }))
+  result.PreToolUse = [...existingPre, { hooks: [async (input, toolId) => {
+    try {
     if (input.hook_event_name !== 'PreToolUse') throw new Error('Invalid tool receipt hook.')
-    if (await runtimeOwnerKey() !== owner) throw new Error('The owner account changed.')
-    await assertNoUncertainRuntimeActions(cwd, false)
     const callId = toolId ?? input.tool_use_id
     if (!callId) throw new Error('A tool call without an ID cannot execute.')
+    // Reserve before any await: a denied duplicate must never provide outcome
+    // evidence for an earlier, possibly executing use of the same tool ID.
+    const previous = claimed.get(callId)
+    if (previous) {
+      previous.ambiguous = true
+      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'This tool call already has a receipt or an uncertain result. Inspect it before proceeding.' } }
+    }
+    if (claimed.size >= 256) throw new Error('Too many unconfirmed tool calls.')
     const id = idFor(sessionId, callId)
+    const candidate = { id, tool: input.tool_name, inputHash: inputHash(input.tool_input), claimed: false, ambiguous: false }
+    claimed.set(callId, candidate)
+    if (recordingFaults.size) throw new Error('A tool result could not be recorded.')
+    if (await runtimeOwnerKey() !== owner) throw new Error('The owner account changed.')
+    await assertNoUncertainRuntimeActions(cwd, false)
     await acceptConversationReceipt(scope, id, { kind: 'runtime-tool', provider: 'claude', sessionId, toolId: callId, tool: input.tool_name,
       // Hash arguments, rather than copying file contents or credentials into a
       // second store. The native transcript supplies private inspection detail.
-      inputHash: createHash('sha256').update(JSON.stringify(input.tool_input ?? null)).digest('hex') }, undefined, owner)
-    if (!await claimConversationReceipt(scope, id, execution, owner)) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'This tool call already has a receipt or an uncertain result. Inspect it before proceeding.' } }
+      inputHash: inputHash(input.tool_input) }, undefined, owner)
+    if (!await claimConversationReceipt(scope, id, execution, owner)) {
+      candidate.ambiguous = true
+      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'This tool call already has a receipt or an uncertain result. Inspect it before proceeding.' } }
+    }
+    candidate.claimed = true
     await runtimeOwnerKey(owner)
     return {}
     } catch {
@@ -51,8 +86,8 @@ export const guardClaudeRuntimeTools = async (cwd: string, sessionId: string, ra
   }] }]
   result.PostToolUse = [...(hooks.PostToolUse ?? []), { hooks: [async (input, toolId) => {
     if (input.hook_event_name !== 'PostToolUse') throw new Error('Invalid tool receipt hook.')
-    const id = idFor(sessionId, toolId ?? input.tool_use_id)
-    try { await finishConversationReceipt(scope, id, 'delivered', { confirmed: true }, owner); recordingFaults.delete(id) }
+    const callId = toolId ?? input.tool_use_id, id = idFor(sessionId, callId)
+    try { await finishConversationReceipt(scope, id, 'delivered', { confirmed: true }, owner); recordingFaults.delete(id); forget(callId) }
     catch (error) { recordingFaults.add(id); throw error }
     return {}
   }] }]
@@ -60,13 +95,65 @@ export const guardClaudeRuntimeTools = async (cwd: string, sessionId: string, ra
     if (input.hook_event_name !== 'PostToolUseFailure') throw new Error('Invalid tool receipt hook.')
     // A returned failure is a confirmed result (possibly with partial effects).
     // An interrupted effect still needs inspection; it is never called undone.
-    const id = idFor(sessionId, toolId ?? input.tool_use_id)
-    try { await finishConversationReceipt(scope, id, input.is_interrupt ? 'uncertain' : 'delivered', { failed: true, interrupted: input.is_interrupt === true }, owner); recordingFaults.delete(id) }
+    const callId = toolId ?? input.tool_use_id, id = idFor(sessionId, callId)
+    try { await finishConversationReceipt(scope, id, input.is_interrupt ? 'uncertain' : 'delivered', { failed: true, interrupted: input.is_interrupt === true }, owner); recordingFaults.delete(id); forget(callId) }
     catch (error) { recordingFaults.add(id); throw error }
     return {}
   }] }]
-  return result
+  return { hooks: result, observeSdkMessage: async message => {
+    const item = object(message), content = object(item?.message)?.content
+    if (!item || !Array.isArray(content) || item.session_id !== undefined && item.session_id !== sessionId) return
+    if (item.type === 'assistant') {
+      for (const rawBlock of content) {
+        const block = object(rawBlock)
+        if (block?.type !== 'tool_use' || typeof block.id !== 'string' || typeof block.name !== 'string' || !('input' in block)) continue
+        if (observed.size >= 256 && !observed.has(block.id)) throw new Error('Too many unconfirmed tool observations.')
+        const value = { tool: block.name, inputHash: inputHash(block.input) }, previous = observed.get(block.id)
+        if (previous && (previous.tool !== value.tool || previous.inputHash !== value.inputHash)) throw new Error('The observed tool identity changed.')
+        observed.set(block.id, value)
+      }
+      return
+    }
+    if (item.type !== 'user') return
+    for (const rawBlock of content) {
+      const block = object(rawBlock)
+      if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue
+      const callId = block.tool_use_id, candidate = claimed.get(callId), use = observed.get(callId), denial = denied.get(callId)
+      // PostToolUseFailure does not run when PreToolUse vetoes a call. Only
+      // this explicit OG veto result proves nonexecution; ordinary errors,
+      // interruptions and background acknowledgements remain unconfirmed.
+      const veto = candidate?.claimed && !candidate.ambiguous && denial && denial.tool === candidate.tool && denial.inputHash === candidate.inputHash
+        && block.is_error === true && block.is_interrupt !== true && item.is_interrupt !== true && object(item.message)?.is_interrupt !== true
+        && typeof block.content === 'string' && block.content.startsWith(`PreToolUse:${candidate.tool} hook error: openground-guard BLOCKED: `)
+        && (item.tool_use_result === undefined || typeof item.tool_use_result === 'string')
+      if (!veto) { if (!candidate?.ambiguous) forget(callId); continue }
+      try {
+        await runtimeOwnerKey(owner)
+        const receipt = await readConversationReceipt(scope, candidate.id, owner)
+        if (claimed.get(callId) !== candidate || !candidate.claimed || candidate.ambiguous) continue
+        if (!receipt || receipt.state !== 'executing') { forget(callId); continue }
+        const body = object(receipt.body), actor = receipt.execution
+        if (receipt.owner !== owner || receipt.scope !== scope || body?.kind !== 'runtime-tool' || body.provider !== 'claude'
+          || body.sessionId !== sessionId || body.toolId !== callId || body.tool !== candidate.tool || body.inputHash !== candidate.inputHash
+          || use && (use.tool !== candidate.tool || use.inputHash !== candidate.inputHash)
+          || actor?.runtime !== 'sdk' || actor.sessionId !== sessionId || actor.handleId !== execution.handleId || execution.runtime !== 'sdk')
+          throw new Error('The denied tool result does not match its recorded execution.')
+        await runtimeOwnerKey(owner)
+        const current = agentConversationHandles(sessionId)
+        if (current.length !== 1 || current[0].runtime !== execution.runtime || current[0].handleId !== execution.handleId)
+          throw new Error('The denied tool result belongs to a different actor.')
+        if (claimed.get(callId) !== candidate || !candidate.claimed || candidate.ambiguous) continue
+        await finishConversationReceipt(scope, candidate.id, 'rejected', { confirmed: true, failed: true, denied: true,
+          source: 'sdk-guard-veto', automaticReplay: false, effectsRolledBack: false }, owner)
+        recordingFaults.delete(candidate.id)
+        forget(callId)
+      } catch (error) { recordingFaults.add(candidate.id); throw error }
+    }
+  } }
 }
+/** Compatibility for callers that need only the permission hooks. */
+export const guardClaudeRuntimeTools = async (cwd: string, sessionId: string, raw: unknown = {}, expectedOwnerKey?: string): Promise<Hooks> =>
+  (await createClaudeRuntimeToolAudit(cwd, sessionId, raw, expectedOwnerKey)).hooks
 export const assertNoUncertainRuntimeActions = async (cwd?: string, includeExecuting = true): Promise<void> => {
   if (!await hasChatGptAccess()) return
   const scope = cwd ? await projectUUIDFromPath(cwd) : undefined

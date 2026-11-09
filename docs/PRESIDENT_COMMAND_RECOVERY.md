@@ -41,6 +41,13 @@ boundary applies to both SDK and PTY presidents.
 - Cancellation retains the original body, error, execution and prior result.
   Late callbacks cannot revive it. Tool receipts are independent and are never
   implicitly reviewed or erased by cancelling an owner instruction.
+- Claude Code can omit post hooks when a pre-tool guard refuses a command.
+  An actual OPEN GROUND guard denial and its matching terminal SDK result are
+  matched to this invocation's claimed owner/session/tool receipt and saved as
+  rejected before yielding the result. This grants no permission or retry.
+  Generic errors, background execution, interruption, ambiguous duplicate calls
+  and unmatched historical receipts still require inspection; absence of a post
+  hook proves nothing.
 - The shared SDK/PTY resume prompt checks the live Board and waits for newly
   delivered input. President handoff also treats its old public conversation as
   context only. Neither prompt grants permission to resume an old owner command

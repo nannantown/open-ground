@@ -532,7 +532,7 @@ const subscriptionQuery: SdkQueryFn = (params) => {
     interrupt: async () => { stopped = true; await inner?.interrupt?.() },
     async *[Symbol.asyncIterator]() {
       const { assertClaudeSubscriptionLaunch } = await import('./subscriptionOnly')
-      const { guardClaudeRuntimeTools, assertNoUncertainRuntimeActions } = await import('./runtimeActionReceipts')
+      const { createClaudeRuntimeToolAudit, assertNoUncertainRuntimeActions } = await import('./runtimeActionReceipts')
       const { runtimeOwnerKey: expectedOwner, ...vendorOptions } = params.options
       if (typeof params.options.cwd !== 'string') throw new Error('A subscription launch requires an explicit working directory.')
       const id = typeof params.options.resume === 'string' ? params.options.resume : params.options.sessionId
@@ -541,10 +541,13 @@ const subscriptionQuery: SdkQueryFn = (params) => {
       if (typeof params.options.pathToClaudeCodeExecutable === 'string') source.OPENGROUND_CLAUDE_BIN = params.options.pathToClaudeCodeExecutable
       const env = await assertClaudeSubscriptionLaunch(params.options.cwd, source)
       await assertNoUncertainRuntimeActions(params.options.cwd, false)
-      const hooks = await guardClaudeRuntimeTools(params.options.cwd, id, params.options.hooks as Parameters<typeof guardClaudeRuntimeTools>[2], typeof expectedOwner === 'string' ? expectedOwner : undefined)
+      const audit = await createClaudeRuntimeToolAudit(params.options.cwd, id, params.options.hooks, typeof expectedOwner === 'string' ? expectedOwner : undefined)
       if (stopped) return
-      inner = sdk.query({ prompt: params.prompt, options: { ...vendorOptions, env, hooks } })
-      yield* inner
+      inner = sdk.query({ prompt: params.prompt, options: { ...vendorOptions, env, hooks: audit.hooks } })
+      for await (const message of inner) {
+        await audit.observeSdkMessage(message)
+        yield message
+      }
     },
   }
 }
