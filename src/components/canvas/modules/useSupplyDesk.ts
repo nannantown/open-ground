@@ -31,6 +31,7 @@ import { useT } from '@/i18n/I18nContext'
 import { reconcileDesk, type LiveDeskHandle } from '@/lib/deskReconcile'
 import { envIssuesErrorMessage } from './useSwarmEngine'
 import type { SpawnSwarmSupplyResponse } from '@/lib/types'
+import { usePresidentControl } from '@/lib/usePresidentControl'
 
 /** The supply session as the client remembers it. Like a worker, the PTY
  *  (terminalId) lives SERVER-side and survives this tab unmounting; the metadata
@@ -111,6 +112,7 @@ export interface UseSupplyDeskArgs {
 }
 
 export interface SupplyDeskApi {
+  control: ReturnType<typeof usePresidentControl>
   /** The desk this client is attached to, or null (⇒ render a launch CTA). */
   supply: SupplyDeskRecord | null
   /** A launch/stop/restart round-trip is in flight. */
@@ -161,6 +163,8 @@ export const useSupplyDesk = ({
   enabled,
 }: UseSupplyDeskArgs): SupplyDeskApi => {
   const { t } = useT()
+  const control = usePresidentControl(projectPath, enabled)
+  const { checkAdmission } = control
   const [supply, setSupply] = useState<SupplyDeskRecord | null>(() => loadSupplyRecord(projectId))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -250,6 +254,7 @@ export const useSupplyDesk = ({
     setBusy(true)
     setError(null)
     try {
+      if (!await checkAdmission()) return
       const spawn = await postSupply(projectPath, t)
       // `spawn.reused` (server ≥ 2026-08-15) means the desk was ALREADY up and
       // nothing was launched — we still store the record, because the point is
@@ -273,7 +278,7 @@ export const useSupplyDesk = ({
     } finally {
       setBusy(false)
     }
-  }, [enabled, supply, busy, projectPath, projectId, t])
+  }, [enabled, supply, busy, projectPath, projectId, t, checkAdmission])
 
   // Stop the supply session: kill the PTY. There is NO worktree to tear down
   // (supply runs in the primary checkout), so unlike a worker terminate this is
@@ -322,6 +327,9 @@ export const useSupplyDesk = ({
     setBusy(true)
     setError(null)
     try {
+      // Re-read admission BEFORE deleting the stored handle. A provider switch
+      // owns retirement/replacement and must not race a manual restart.
+      if (!await checkAdmission()) return
       // Best-effort kill the old PTY first. The overlay normally shows only on a
       // dead PTY, but a transient mount-probe failure could surface it for a live
       // one — killing first guarantees we never orphan a still-running session.
@@ -347,9 +355,9 @@ export const useSupplyDesk = ({
     } finally {
       setBusy(false)
     }
-  }, [enabled, supply, busy, projectPath, projectId, forgetPty, t])
+  }, [enabled, supply, busy, projectPath, projectId, forgetPty, t, checkAdmission])
 
   const clearError = useCallback(() => setError(null), [])
 
-  return { supply, busy, error, clearError, launch, stop, restart }
+  return { supply, busy, error, clearError, launch, stop, restart, control }
 }

@@ -32,7 +32,7 @@ export const RuntimeTransitionRows = ({ runtime, busy, onAction }: { runtime?: R
     </span>
     {runtime.phase === 'attention' && runtime.error && <span className="text-accent">{runtime.error}</span>}
     {runtime.phase === 'attention' && <Btn size="xs" disabled={busy} onClick={() => onAction('retry')}>{t('settings.runtime.retry')}</Btn>}
-    {pending && <Btn size="xs" disabled={busy} onClick={() => onAction('cancel')}>{t('settings.runtime.cancel')}</Btn>}
+    {runtime.phase === 'attention' && <Btn size="xs" disabled={busy} onClick={() => onAction('cancel')}>{t('settings.runtime.cancel')}</Btn>}
   </div>
 }
 

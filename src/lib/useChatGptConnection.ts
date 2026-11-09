@@ -40,10 +40,10 @@ export const useChatGptConnection = (enabled: boolean) => {
     return () => controller.abort()
   }, [enabled, nonce])
   useEffect(() => {
-    if (!enabled || (status?.connection.state !== 'connecting' && !Object.values(status?.runtime ?? {}).some(runtime => runtime.phase !== 'stable'))) return
+    if (!enabled || (!error && status?.connection.state !== 'connecting' && !Object.values(status?.runtime ?? {}).some(runtime => runtime.phase !== 'stable'))) return
     const timer = window.setInterval(refresh, 2_000)
     return () => window.clearInterval(timer)
-  }, [enabled, status?.connection.state, status?.runtime, refresh])
+  }, [enabled, status?.connection.state, status?.runtime, error, refresh])
   return { status, eligible, error, loading, refresh }
 }
 
@@ -61,9 +61,9 @@ export const requestChatGptPreferences = async (patch: ChatGptPreferencePatch): 
 export const saveChatGptPreferences = async (patch: ChatGptPreferencePatch): Promise<ChatGptStatus['preferences']> => {
   return (await requestChatGptPreferences(patch)).preferences
 }
-export const actOnRuntimeTransition = async (action: 'retry' | 'cancel', scope: RuntimeScope, revision: number): Promise<void> => {
+export const actOnRuntimeTransition = async (action: 'retry' | 'cancel', scope: RuntimeScope, revision: number, request?: { owner: string; signal: AbortSignal }): Promise<void> => {
   const response = await fetch('/api/chatgpt/transition', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, scope, revision }),
+    method: 'POST', signal: request?.signal, headers: { 'Content-Type': 'application/json', ...(request ? { 'X-OpenGround-Owner': request.owner } : {}) }, body: JSON.stringify({ action, scope, revision }),
   })
   if (!response.ok) throw new Error('transition not changed')
   refreshChatGptConnection()

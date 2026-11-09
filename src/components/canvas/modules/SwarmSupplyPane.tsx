@@ -32,6 +32,7 @@ interface Props {
   onRestart: () => void
   /** Owned by the project module so closing this surface keeps unsent words. */
   draftState?: SeatDraftState
+  control?: ReturnType<typeof usePresidentControl>
 }
 
 /** "14:05" today, "10/5 14:05" (month/day in `lang`) on any other day. */
@@ -42,9 +43,10 @@ export const callStamp = (at: number, lang: string, now = Date.now()): string =>
 }
 export const callDuration = (seconds: number): string => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 
-export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkSessionId, status, busy, onExit, onStop, onRestart, draftState }: Props) => {
+export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkSessionId, status, busy, onExit, onStop, onRestart, draftState, control: sharedControl }: Props) => {
   const { t, lang } = useT()
-  const control = usePresidentControl(projectPath, runtime === 'sdk' && !!sdkSessionId)
+  const ownControl = usePresidentControl(projectPath, !sharedControl && runtime === 'sdk' && !!sdkSessionId)
+  const control = sharedControl ?? ownControl
   // `text` is the line as saved (in the language of that moment); shown only
   // for an old record without `seconds`.
   const [calls, setCalls] = useState<{ id: string; at: number; text: string; seconds?: number }[]>([])
@@ -130,7 +132,7 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkS
       {runtime === 'sdk' && sdkSessionId ? <>
         <SwarmSeatFeed sdkSessionId={sdkSessionId} projectPath={projectPath} onExit={onExit} conversation
           conversationKey={control.status ? JSON.stringify([control.status.conversationId, control.status.epoch]) : undefined} />
-        {status === 'exited' ? <button type="button" onClick={onRestart} disabled={busy}
+        {status === 'exited' ? <button type="button" onClick={onRestart} disabled={busy || control.admissionBlocked}
           className="m-2 rounded border border-line bg-bg-card px-2 py-1 text-ui text-ink transition-colors hover:bg-bg-hover active:bg-accent active:text-bg-card disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
           {t('projectPanel.swarm.restart')}
         </button> : null}

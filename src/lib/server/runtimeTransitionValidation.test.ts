@@ -5,6 +5,8 @@ import { listChatGptModels } from './chatgptAuth'
 import { claudeRunPreflight } from './claudePreflight'
 import { chatGptShellPreflight } from './chatgptTools'
 import { validateRuntimePreferences } from './runtimeTransitionValidation'
+import { assertClaudeSubscriptionLaunch } from './subscriptionOnly'
+import { tmpdir } from 'node:os'
 import type { Settings } from '../types'
 
 vi.mock('./store', () => ({ getSettings: vi.fn() }))
@@ -12,6 +14,7 @@ vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: vi.fn() }))
 vi.mock('./chatgptAuth', () => ({ listChatGptModels: vi.fn() }))
 vi.mock('./claudePreflight', () => ({ claudeRunPreflight: vi.fn() }))
 vi.mock('./chatgptTools', () => ({ chatGptShellPreflight: vi.fn() }))
+vi.mock('./subscriptionOnly', () => ({ assertClaudeSubscriptionLaunch: vi.fn() }))
 
 const settings = (patch: Partial<Settings> = {}): Settings => ({ projectsRoot: null, archiveDirName: '_archive', excludePatterns: [], assistantProvider: 'claude', swarmProvider: 'claude', ...patch })
 beforeEach(() => {
@@ -20,6 +23,7 @@ beforeEach(() => {
   vi.mocked(hasChatGptAccess).mockResolvedValue(true)
   vi.mocked(claudeRunPreflight).mockResolvedValue({ ok: true })
   vi.mocked(listChatGptModels).mockRejectedValue(new Error('ChatGPT account is offline.'))
+  vi.mocked(assertClaudeSubscriptionLaunch).mockResolvedValue({})
 })
 
 describe('runtime preference validation respects the affected execution scope', () => {
@@ -28,6 +32,7 @@ describe('runtime preference validation respects the affected execution scope', 
     const patch = scope === 'assistant' ? { assistantProvider: 'claude' } as const : { swarmProvider: 'claude' } as const
     await expect(validateRuntimePreferences(patch)).resolves.toBeUndefined()
     expect(claudeRunPreflight).toHaveBeenCalledTimes(1)
+    expect(assertClaudeSubscriptionLaunch).toHaveBeenCalledWith(tmpdir())
     expect(listChatGptModels).not.toHaveBeenCalled()
     expect(chatGptShellPreflight).not.toHaveBeenCalled()
   })
@@ -37,6 +42,7 @@ describe('runtime preference validation respects the affected execution scope', 
     expect(listChatGptModels).not.toHaveBeenCalled()
     expect(chatGptShellPreflight).not.toHaveBeenCalled()
     expect(claudeRunPreflight).not.toHaveBeenCalled()
+    expect(assertClaudeSubscriptionLaunch).not.toHaveBeenCalled()
   })
   it('still requires the ChatGPT catalog when a shared model changes an active ChatGPT scope', async () => {
     vi.mocked(getSettings).mockResolvedValue(settings({ assistantProvider: 'chatgpt' }))
@@ -56,5 +62,15 @@ describe('runtime preference validation respects the affected execution scope', 
     expect(getSettings).not.toHaveBeenCalled()
     expect(claudeRunPreflight).not.toHaveBeenCalled()
     expect(listChatGptModels).not.toHaveBeenCalled()
+  })
+  it('checks shared subscription auth once before switching, without probing every registered project', async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings({ swarmProvider: 'chatgpt', projects: Array.from({ length: 54 }, (_, i) => ({ id: `project-${i}`, path: `/inactive-${i}`, addedAt: '2026-11-09T00:00:00.000Z' })) }))
+    vi.mocked(assertClaudeSubscriptionLaunch).mockRejectedValue(new Error('Sign in to a Claude subscription.'))
+    await expect(validateRuntimePreferences({ swarmProvider: 'claude' })).rejects.toThrow('Sign in to a Claude subscription.')
+    expect(assertClaudeSubscriptionLaunch).toHaveBeenCalledExactlyOnceWith(tmpdir())
+  })
+  it('probes assistant auth in the parent of its new temporary session, without reading unrelated project auth', async () => {
+    await validateRuntimePreferences({ assistantProvider: 'claude' })
+    expect(assertClaudeSubscriptionLaunch).toHaveBeenCalledExactlyOnceWith(tmpdir())
   })
 })

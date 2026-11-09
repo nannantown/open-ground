@@ -6,6 +6,8 @@ import { claudeRunPreflight } from './claudePreflight'
 import { chatGptShellPreflight } from './chatgptTools'
 import { CHATGPT_EFFORTS } from '../types'
 import type { RuntimePreferencePatch } from './runtimeTransitions'
+import { tmpdir } from 'node:os'
+import { assertClaudeSubscriptionLaunch } from './subscriptionOnly'
 
 const patchSchema = z.object({
   assistantProvider: z.enum(['claude', 'chatgpt']).nullable().optional(),
@@ -34,5 +36,13 @@ export const validateRuntimePreferences = async (raw: RuntimePreferencePatch): P
   if (patch.assistantProvider === 'claude' || patch.swarmProvider === 'claude' || patch.assistantProvider === null || patch.swarmProvider === null) {
     const result = await claudeRunPreflight()
     if (!result.ok) throw new Error(result.body.error)
+    // Cached CLI availability is not proof of the subscription-only launch
+    // environment. Validate before the coordinator accepts/drains a switch.
+    // Assistant sessions use a new empty child of tmpdir; its inherited settings
+    // are identical here without creating a directory or starting a model.
+    // One shared auth proof, not one command per registered project. The exact
+    // cwd/environment guards at every actor launch still validate local settings
+    // and fail closed if auth changes after this early check.
+    await assertClaudeSubscriptionLaunch(tmpdir())
   }
 }

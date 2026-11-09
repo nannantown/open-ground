@@ -1371,6 +1371,10 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
     tier: 'read-only',
     why: 'Reads subscription settings from the Claude config home and project ancestors, then executes only the CLI auth status preflight. It neither modifies that home nor invokes credential helpers or a model while inspecting it.',
   },
+  'src/lib/server/subscriptionOnly.test.ts': {
+    tier: 'read-only',
+    why: 'Mocks filesystem reads and auth subprocesses; the home path is only the expected default settings read. No home mutation or credential access occurs.',
+  },
   'src/lib/server/claudeConnection.ts': {
     tier: 'read-only',
     why: 'probes the well-known install target ~/.claude/local/claude to locate the binary',

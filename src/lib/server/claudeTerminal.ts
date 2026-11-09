@@ -631,7 +631,13 @@ export const launchClaude = (opts: LaunchClaudeOpts): ClaudeTerminalRef => {
   }
   // The login shell may source keys after the server's environment was checked.
   // Remove paid-provider variables at the command's process boundary as well.
-  const command = buildLaunchCommand(launchArgs, process.platform, launchEnv, METERED_CLAUDE_ENV_KEYS)
+  // Keep the verified auth namespace too: a profile must not redirect the CLI
+  // to a different config/helper after preflight. Absence remains absence.
+  const configDir = opts.env?.CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_CONFIG_DIR
+  if (typeof configDir === 'string') launchEnv.CLAUDE_CONFIG_DIR = configDir
+  else delete launchEnv.CLAUDE_CONFIG_DIR
+  const unsetEnv = typeof configDir === 'string' ? METERED_CLAUDE_ENV_KEYS : [...METERED_CLAUDE_ENV_KEYS, 'CLAUDE_CONFIG_DIR']
+  const command = buildLaunchCommand(launchArgs, process.platform, launchEnv, unsetEnv)
   // Shell argv has an OS argument-size limit, independent of the PTY's tiny
   // canonical input line. The Claude process still receives a real PTY for its
   // unmodified interactive REPL and native Remote Control.

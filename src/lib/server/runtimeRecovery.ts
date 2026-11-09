@@ -20,6 +20,7 @@ export interface RuntimeRecoveryIssue {
   projectName?: string
   projectPath?: string
   state: 'uncertain'
+  inspectionError?: 'native-history-unavailable'
 }
 /** Metadata only. Arguments, file contents, credentials and raw reasoning stay private. */
 export const runtimeRecoveryIssues = async (expectedOwnerKey?: string): Promise<RuntimeRecoveryIssue[]> => {

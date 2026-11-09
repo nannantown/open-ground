@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { appendFile, mkdir, mkdtemp, readFile, readdir, realpath, stat, unlink, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, readdir, realpath, stat, truncate, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { openGroundHome } from './paths'
@@ -170,5 +170,58 @@ describe('owner-reviewed native recovery markers', () => {
     await f.recovery.review(f.options)
     expect((await f.recovery.state(f.source, 'owner-a')).review).toBeDefined()
     expect(await readFile(f.file)).toEqual(bytes)
+  })
+})
+
+
+describe('native recovery inspection failures are per conversation', () => {
+  it.each(['oversized', 'malformed-storage', 'sensitive-io'] as const)('keeps %s source unavailable beside a healthy issue without allowing review', async mode => {
+    const healthy = await fixture(), failed = await fixture()
+    healthy.deps.sources = async () => [failed.source, healthy.source]
+    if (mode === 'oversized') await truncate(failed.file, 32 * 1024 * 1024 + 1)
+    else if (mode === 'malformed-storage') { await unlink(failed.file); await mkdir(failed.file) }
+    else {
+      const inspect = healthy.deps.inspect
+      healthy.deps.inspect = async (...args) => {
+        if (args[1] === failed.source.sessionId) throw Object.assign(new Error('PRIVATE fixture contents at /sensitive/credential-location'), { code: 'EACCES' })
+        return inspect(...args)
+      }
+    }
+    const unavailable = { id: failed.options.id, scope: failed.source.projectId, kind: 'conversation', conversationId: failed.source.sessionId, state: 'uncertain', inspectionError: 'native-history-unavailable' }
+    const issues = await healthy.recovery.list()
+    expect(issues).toEqual([unavailable, { id: healthy.options.id, scope: healthy.source.projectId, kind: 'conversation', conversationId: healthy.source.sessionId, tool: 'Bash', state: 'uncertain' }])
+    expect(JSON.stringify(issues)).not.toMatch(/PRIVATE|sensitive|credential-location|Old request|never executed|EACCES/)
+    await expect(healthy.recovery.review(failed.options)).rejects.toThrow()
+    await expect(healthy.recovery.state(failed.source, 'owner-a')).rejects.toThrow()
+    const hash = createHash('sha256').update(JSON.stringify(['owner-a', failed.source.projectId, failed.source.role, failed.source.sessionId])).digest('hex')
+    await expect(stat(join(openGroundHome(), 'runtime', 'native-conversation-reviews', `${hash}.json`))).rejects.toMatchObject({ code: 'ENOENT' })
+    healthy.deps.held = async (sessionId?: string) => sessionId === failed.source.sessionId
+    expect(await healthy.recovery.list()).toHaveLength(1)
+  })
+  it('retains an explicitly requested stopped source when its history becomes uninspectable', async () => {
+    const f = await stoppedPresident()
+    await expect(nativePresidentRecoveryAdmission(f.path, currentOwner.key)).rejects.toThrow('Review the previous native')
+    await truncate(f.file, 32 * 1024 * 1024 + 1)
+    expect(await listNativeConversationRecoveryIssues()).toContainEqual({ id: f.issue.id, scope: f.projectId, kind: 'conversation', conversationId: f.sessionId, state: 'uncertain', inspectionError: 'native-history-unavailable' })
+    await expect(reviewNativeConversationRecovery(f.review)).rejects.toThrow('inspection limit')
+    expect(await stat(f.pending)).toBeDefined()
+  })
+  it('does not hide source validation or saved review identity failures as unavailable history', async () => {
+    const f = await fixture()
+    const sources = f.deps.sources
+    f.deps.sources = async () => { throw new Error('Invalid native recovery request identity.') }
+    await expect(f.recovery.list()).rejects.toThrow('request identity')
+    f.deps.sources = sources
+    await f.recovery.review(f.options)
+    const hash = createHash('sha256').update(JSON.stringify(['owner-a', f.source.projectId, f.source.role, f.source.sessionId])).digest('hex')
+    const file = join(openGroundHome(), 'runtime', 'native-conversation-reviews', `${hash}.json`)
+    const saved = JSON.parse(await readFile(file, 'utf8')); saved.review.ownerKey = 'another-owner'
+    await writeFile(file, JSON.stringify(saved))
+    await expect(f.recovery.list()).rejects.toThrow('another conversation')
+  })
+  it('rechecks the owner after a failed inspection before returning metadata', async () => {
+    const f = await fixture()
+    f.deps.inspect = async () => { f.owner('replacement-owner'); throw new Error('private inspection failure') }
+    await expect(f.recovery.list()).rejects.toThrow('owner changed')
   })
 })

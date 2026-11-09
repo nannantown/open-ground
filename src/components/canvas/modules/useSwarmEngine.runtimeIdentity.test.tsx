@@ -26,6 +26,13 @@
 import { describe, it, expect } from 'vitest'
 import { engineWorkerKey, sanitizeEngineState, sanitizeSwarmWorkers } from './useSwarmEngine'
 
+it.each(['sdk', 'pty'] as const)('retains a live %s president handle for replacement adoption', runtime => {
+  const desk = { runtime, handleId: `${runtime}-president-replacement`, agentSessionId: 'saved-president-conversation' }
+  expect(sanitizeEngineState({ supplyDesk: desk }).supplyDesk).toEqual(desk)
+  expect(sanitizeEngineState({ supplyDesk: null }).supplyDesk).toBeNull()
+  expect(sanitizeEngineState({}).supplyDesk).toBeUndefined()
+})
+
 describe('sanitizeEngineState — an SDK worker is addressed by its SESSION', () => {
   /** The row an engine that has stopped emitting a meaningless terminalId
    *  sends: runtime + the handle, and nothing from the PTY pool. */

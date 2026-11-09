@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { subscriptionOnlyEnvironment } from './subscriptionOnly'
 // Stub the PTY layer so sendInterrupt's byte contract can be asserted without
 // spawning a real terminal (createTerminal/writeInput hit node-pty).
 vi.mock('./terminal', () => ({
@@ -512,5 +516,58 @@ describe('launchClaude (routes the prompt through a temp file + buildLaunchComma
     // The literal prompt text NEVER appears inline on the PTY command line.
     expect(cmd).not.toContain('SECRET-PROMPT-TEXT')
     vi.runOnlyPendingTimers()
+  })
+})
+
+describe('native launch preserves the verified auth namespace after shell profiles', () => {
+  afterEach(() => vi.unstubAllEnvs())
+  const capture = (env?: Record<string, string>) => {
+    const create = vi.mocked(createTerminal)
+    create.mockClear().mockReturnValue({ id: 'namespace-fixture', cwd: '/fixture/project' } as never)
+    launchClaude({ cwd: '/fixture/project', agentSessionId: 'NAMESPACE-FIXTURE', appContext: false, ...(env ? { env } : {}) })
+    return create.mock.calls[0][0].command!
+  }
+  it.skipIf(process.platform === 'win32').each([
+    { server: undefined, explicit: undefined },
+    { server: '/synthetic/server-config', explicit: undefined },
+    { server: '/synthetic/server-config', explicit: "/synthetic/owner's explicit config" },
+  ])('matches direct auth-status namespace despite a later profile override: %j', ({ server, explicit }) => {
+    const fixture = mkdtempSync(join(tmpdir(), 'og-native-auth-boundary-'))
+    try {
+      const binary = join(fixture, 'fake-claude')
+      writeFileSync(binary, `#!${process.execPath}\nconsole.log(JSON.stringify({ config: process.env.CLAUDE_CONFIG_DIR ?? null, paidKeyPresent: !!process.env.ANTHROPIC_API_KEY }))\n`, { mode: 0o700 })
+      vi.stubEnv('OPENGROUND_CLAUDE_BIN', binary)
+      vi.stubEnv('CLAUDE_CONFIG_DIR', server)
+      const env = explicit === undefined ? undefined : { CLAUDE_CONFIG_DIR: explicit }
+      // Both invocations are this local no-model fixture. The first observes
+      // the sanitized preflight environment; the second executes the actual
+      // captured launch command after simulating a login profile's late export.
+      const expected = JSON.parse(execFileSync(binary, ['auth', 'status'], { encoding: 'utf8', env: subscriptionOnlyEnvironment({ ...process.env, ...env }) }))
+      const command = capture(env)
+      const profile = "export CLAUDE_CONFIG_DIR='/synthetic/profile-other-auth'; export ANTHROPIC_API_KEY='synthetic-profile-key';\n"
+      const actual = JSON.parse(execFileSync('/bin/sh', ['-c', profile + command], { encoding: 'utf8' }))
+      expect(actual).toEqual(expected)
+      expect(actual.paidKeyPresent).toBe(false)
+      expect(actual.config).toBe(explicit ?? server ?? null)
+    } finally { rmSync(fixture, { recursive: true, force: true }) }
+  })
+  it.each([
+    { server: undefined, explicit: undefined },
+    { server: 'C:\\synthetic\\server-config', explicit: undefined },
+    { server: 'C:\\synthetic\\server-config', explicit: "C:\\synthetic\\owner's config" },
+  ])('pins the same namespace at the actual PowerShell launch boundary: %j', ({ server, explicit }) => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    try {
+      Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+      vi.stubEnv('OPENGROUND_CLAUDE_BIN', 'C:\\synthetic\\fake-claude.exe')
+      vi.stubEnv('CLAUDE_CONFIG_DIR', server)
+      const command = capture(explicit === undefined ? undefined : { CLAUDE_CONFIG_DIR: explicit })
+      const config = explicit ?? server
+      if (config === undefined) expect(command).toContain('Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue;')
+      else {
+        expect(command).toContain(`$env:CLAUDE_CONFIG_DIR=${shellQuoteArg(config, 'win32')};`)
+        expect(command).not.toContain('Remove-Item Env:CLAUDE_CONFIG_DIR')
+      }
+    } finally { Object.defineProperty(process, 'platform', platform) }
   })
 })

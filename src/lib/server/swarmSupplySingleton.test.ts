@@ -28,7 +28,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { resolve } from 'path'
-vi.mock('./subscriptionOnly', () => ({ assertClaudeSubscriptionLaunch: async () => ({ CLAUDE_CONFIG_DIR: '/synthetic/claude-config' }) }))
+const subscription = vi.hoisted(() => ({ env: { CLAUDE_CONFIG_DIR: '/synthetic/claude-config' } as NodeJS.ProcessEnv }))
+vi.mock('./subscriptionOnly', () => ({ assertClaudeSubscriptionLaunch: async () => subscription.env }))
 // Owner capabilities are covered by admission tests. These lock fixtures must
 // not schedule real auth-store IO after their fake clock has advanced.
 vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => false }))
@@ -126,6 +127,7 @@ let launchN = 0
 let deadIds = new Set<string>()
 
 beforeEach(() => {
+  subscription.env = { CLAUDE_CONFIG_DIR: '/synthetic/claude-config' }
   vi.clearAllMocks()
   pool = []
   launchN = 0
@@ -159,6 +161,13 @@ afterEach(() => {
 })
 
 describe('spawnSwarmSupply — one supply desk per project', () => {
+  it.each([undefined, '/synthetic/explicit-config'])('keeps the verified native auth namespace unchanged: %s', async config => {
+    subscription.env = config === undefined ? {} : { CLAUDE_CONFIG_DIR: config }
+    await spawnSwarmSupply({ projectPath: PROJ })
+    const options = mocks.launchClaude.mock.calls[0][0]
+    if (config === undefined) expect(options.env).not.toHaveProperty('CLAUDE_CONFIG_DIR')
+    else expect(options.env.CLAUDE_CONFIG_DIR).toBe(config)
+  })
   it('starts a selected ChatGPT president with its own session and no Claude tier probe or PTY', async () => {
     mocks.selectedRuntime.mockResolvedValue('chatgpt')
     mocks.resolveSwarmSession.mockResolvedValue({ agentSessionId: 'chatgpt-00000000-0000-4000-8000-000000000001', resume: true })

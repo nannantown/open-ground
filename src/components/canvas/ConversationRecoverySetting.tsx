@@ -3,7 +3,7 @@ import { Btn } from '@/components/ui/Btn'
 import { useT } from '@/i18n/I18nContext'
 import { ConversationDraftOwnerContext } from '@/lib/useConversationDraft'
 import { refreshChatGptConnection } from '@/lib/useChatGptConnection'
-interface Issue { id: string; scope: string; kind: 'input' | 'tool' | 'conversation' | 'launch'; tool?: string; conversationId?: string; callId?: string; projectName?: string; projectPath?: string; state: 'uncertain' }
+interface Issue { id: string; scope: string; kind: 'input' | 'tool' | 'conversation' | 'launch'; tool?: string; conversationId?: string; callId?: string; projectName?: string; projectPath?: string; state: 'uncertain'; inspectionError?: 'native-history-unavailable' }
 interface Review { id: string; scope: string; kind: Issue['kind']; conversationId?: string; callId?: string; note: string; operationId: string }
 const key = (issue: Issue) => JSON.stringify([issue.id, issue.scope, issue.kind, issue.conversationId, issue.callId])
 
@@ -43,7 +43,7 @@ export const ConversationRecoverySetting = () => {
     return () => clearInterval(timer)
   }, [load, owner, storageKey])
   const review = async (issue: Issue) => {
-    if (!owner || busy) return
+    if (!owner || busy || issue.inspectionError) return
     const id = key(issue)
     const note = notes[id]?.trim()
     if (!note) return
@@ -67,12 +67,13 @@ export const ConversationRecoverySetting = () => {
     {issues.map(issue => <div key={key(issue)} className="flex flex-col gap-1.5 rounded border border-line px-2 py-2">
       {issue.projectPath && <p className="break-all text-meta text-ink">{issue.projectName} · {issue.projectPath}</p>}
       <p className="break-all text-meta text-ink-muted">{issue.tool ?? issue.kind} · {issue.id}</p>
+      {issue.inspectionError && <p role="status" className="text-meta text-accent">{t('settings.recovery.historyUnavailable')}</p>}
       <label className="flex flex-col gap-1 text-meta text-ink-muted">
         <span>{t('settings.recovery.note')}</span>
         <textarea rows={2} maxLength={1000} value={notes[key(issue)] ?? ''} readOnly={!!attempts[key(issue)] || busy === key(issue)} onChange={event => setNotes(current => ({ ...current, [key(issue)]: event.target.value }))}
           className="min-w-0 resize-y rounded border border-line bg-bg px-2 py-1 text-ui text-ink transition-colors hover:border-line-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40" />
       </label>
-      <Btn size="xs" disabled={!!busy || !notes[key(issue)]?.trim()} onClick={() => void review(issue)}>{t(attempts[key(issue)] ? 'settings.recovery.retry' : 'settings.recovery.review')}</Btn>
+      <Btn size="xs" disabled={!!busy || !!issue.inspectionError || !notes[key(issue)]?.trim()} onClick={() => void review(issue)}>{t(attempts[key(issue)] ? 'settings.recovery.retry' : 'settings.recovery.review')}</Btn>
     </div>)}
     {failed && <p role="status" className="text-meta text-accent">{t('settings.recovery.failed')}</p>}
     <div><Btn size="xs" disabled={!!busy} onClick={() => void load().then(() => setFailed(false), () => setFailed(true))}>{t('settings.connection.recheck')}</Btn></div>

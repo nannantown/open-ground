@@ -104,3 +104,11 @@ describe('runtime recovery uses the original actor handle and admitted owner', (
     expect(mock.connection).not.toHaveBeenCalled()
   })
 })
+
+
+it('keeps launch and healthy conversation issues beside an unavailable native history', async () => {
+  const unavailable = { id: 'native-unavailable', scope: 'project-one', kind: 'conversation', conversationId: 'unavailable', state: 'uncertain', inspectionError: 'native-history-unavailable' }
+  const healthy = { id: 'native-healthy', scope: 'project-two', kind: 'conversation', conversationId: 'healthy', tool: 'Bash', state: 'uncertain' }
+  mock.launches.mockResolvedValue([{ id: 'launch-one' }]); mock.native.mockResolvedValue([unavailable, healthy])
+  expect(await runtimeRecoveryIssues('owner-a')).toEqual([{ id: 'launch-one', scope: 'swarm', kind: 'launch', state: 'uncertain' }, unavailable, healthy])
+})

@@ -43,3 +43,23 @@ it('does not inspect or review another owner when no actual owner is confirmed',
   render(<ConversationRecoverySetting />)
   expect(fetch).not.toHaveBeenCalled()
 })
+it('keeps an unreadable native history visible without authorizing review, while healthy launch recovery remains usable', async () => {
+  const posts: Record<string, unknown>[] = []
+  vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => {
+    if (init?.method === 'POST') { posts.push(JSON.parse(String(init.body))); return Response.json({ ok: true }) }
+    return Response.json({ issues: [
+      { id: 'native-unreadable', scope: 'project-a', kind: 'conversation', conversationId: 'unreadable', state: 'uncertain', inspectionError: 'native-history-unavailable' },
+      { id: 'launch-inspectable', scope: 'swarm', kind: 'launch', state: 'uncertain' },
+    ] })
+  }))
+  render(ownerView())
+  await screen.findByText('settings.recovery.historyUnavailable')
+  const notes = screen.getAllByRole('textbox', { name: 'settings.recovery.note' })
+  notes.forEach(note => fireEvent.change(note, { target: { value: 'Checked the actual Board and Git results.' } }))
+  const reviews = screen.getAllByRole('button', { name: 'settings.recovery.review' })
+  expect(reviews[0]).toBeDisabled(); expect(reviews[1]).toBeEnabled()
+  fireEvent.click(reviews[0]); expect(posts).toEqual([])
+  fireEvent.click(reviews[1])
+  await waitFor(() => expect(posts).toHaveLength(1))
+  expect(posts[0].id).toBe('launch-inspectable')
+})

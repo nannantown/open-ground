@@ -11,6 +11,14 @@ boundary applies to both SDK and PTY presidents.
 
 ## Current behavior
 
+- Provider changes preserve the ordinary Claude CLI login namespace. A missing
+  explicit configuration directory is never replaced with a default environment
+  override. Target subscription validation runs before retiring the old team;
+  exact launch checks still prevent paid credential fallback after a later change.
+- The president exposes transition progress and revision-bound recovery in its
+  own pane. Launch and restart wait for stable admission, before a restart can
+  delete an old handle. Native and SDK replacement handles both survive polling.
+
 - The restart-safety probe includes required `activeOwnerTurns`, combining live
   supply activity and executing owner input receipts. Automatic updates wait for
   those turns even with ASAP or the normal deferral ceiling. Background managers

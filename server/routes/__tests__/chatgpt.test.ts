@@ -11,6 +11,7 @@ vi.mock('@/lib/server/chatgptAccess', () => ({ hasChatGptAccess: async () => moc
 vi.mock('@/lib/server/chatgptAuth', () => ({ getChatGptConnection: mock.get, listChatGptModels: async () => (await mock.get()).models, beginChatGptLogin: mock.begin, cancelChatGptLogin: mock.cancel, disconnectChatGpt: mock.disconnect }))
 vi.mock('@/lib/server/authStore', async original => ({ ...(await original<typeof import('@/lib/server/authStore')>()), readSession: async () => ({ user: { id: 'synthetic-owner' } }) }))
 vi.mock('@/lib/server/claudePreflight', () => ({ claudeRunPreflight: async () => ({ ok: true }) }))
+vi.mock('@/lib/server/subscriptionOnly', () => ({ assertClaudeSubscriptionLaunch: async () => ({}) }))
 vi.mock('@/lib/server/runtimeTransitions', async original => ({ ...(await original<typeof import('@/lib/server/runtimeTransitions')>()), runtimeTransitions: () => mock.coordinator! }))
 import { chatgptRoutes } from '../chatgpt'
 import { getSettings, setSettings, setChatGptPreferences } from '@/lib/server/store'

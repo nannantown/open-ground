@@ -95,6 +95,11 @@
   without editing or replaying unfinished commands. `runtimeLease.ts` pins both
   accounts; `subscriptionOnly.ts` verifies Claude subscription auth and excludes
   API-key/alternate-provider credentials at child launch.
+  The default Claude configuration directory remains unspecified in the child
+  environment, preserving ordinary CLI sign-in; explicit custom directories are
+  retained. `runtimeTransitionValidation.ts` verifies the target subscription
+  before retiring the current team. Native history inspection failures remain
+  individual recovery issues rather than hiding the whole recovery list.
   `assistantRuntimeStore.ts` / `assistantRuntimeTransition.ts` preserve accepted
   turns, proposals, reset epochs and action receipts. `conversationReceipts.ts`
   archives immutable terminal receipts; `conversationDrafts.ts` uses revision CAS
@@ -105,6 +110,9 @@
   UI: `useConversationDraft.ts`, `assistantOutbox.ts`,
   `ConversationDraftStatus.tsx`, `ConversationRecoverySetting.tsx` and existing
   president/assistant composers. Browser: `e2e/conversation-recovery.spec.ts`.
+  President connection recovery reuses `usePresidentControl.ts` status polling;
+  `useSupplyDesk.ts` checks admission before launch or deleting a previous seat.
+  `useSwarmEngine.ts` retains both native and SDK replacement desk handles.
 - Songs/NENE development handoff (2026-09-22): `docs/SONGS-HANDOFF-2026-09-22.md`.
   Two local repository branches, delivered UI/recording changes, verification,
   preserved owner data and remaining hardware/packaged-app acceptance checks.

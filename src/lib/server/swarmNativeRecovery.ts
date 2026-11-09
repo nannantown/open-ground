@@ -68,6 +68,16 @@ const read = async (owner: string, target: NativeRecoverySource): Promise<Native
     return review
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
 }
+export interface NativeConversationRecoveryIssue {
+  id: string
+  scope: string
+  kind: 'conversation'
+  conversationId: string
+  tool?: string
+  state: 'uncertain'
+  /** A bounded inspection failed; never a raw filesystem/provider error. */
+  inspectionError?: 'native-history-unavailable'
+}
 export interface NativeRecoveryDeps {
   sources(): Promise<NativeRecoverySource[]>
   inspect(cwd: string, sessionId: string): ReturnType<typeof inspectSwarmNativeConversation>
@@ -76,12 +86,14 @@ export interface NativeRecoveryDeps {
   reviewed?(source: NativeRecoverySource, owner: string): Promise<void>
 }
 export const createNativeConversationRecovery = (deps: NativeRecoveryDeps) => {
-  const state = async (source: NativeRecoverySource, owner: string) => {
-    if (await deps.held(source.sessionId)) throw new Error('The native conversation is still running. Stop it before reviewing its work.')
-    const proof = await deps.inspect(source.cwd, source.sessionId)
+  const inspectedState = async (source: NativeRecoverySource, owner: string, proof: Awaited<ReturnType<NativeRecoveryDeps['inspect']>>) => {
     if (source.requestedFingerprint && source.requestedFingerprint !== proof.fingerprint) throw new Error('The requested native conversation changed. Inspect it again before reviewing.')
     const review = await read(owner, source)
     return { proof, review: review?.fingerprint === proof.fingerprint ? review : undefined }
+  }
+  const state = async (source: NativeRecoverySource, owner: string) => {
+    if (await deps.held(source.sessionId)) throw new Error('The native conversation is still running. Stop it before reviewing its work.')
+    return inspectedState(source, owner, await deps.inspect(source.cwd, source.sessionId))
   }
   const review = async (options: { id: string; projectId: string; sessionId: string; note: string; operationId: string; expectedOwnerKey: string }): Promise<void> => {
     const owner = await deps.owner(options.expectedOwnerKey)
@@ -112,14 +124,33 @@ export const createNativeConversationRecovery = (deps: NativeRecoveryDeps) => {
     await write
   }
   return { review, state, list: async () => {
-    const owner = await deps.owner(), issues: { id: string; scope: string; kind: 'conversation'; conversationId: string; tool?: string; state: 'uncertain' }[] = []
+    const owner = await deps.owner(), issues: NativeConversationRecoveryIssue[] = []
     for (const source of await deps.sources()) {
+      await deps.owner(owner)
       if (await deps.held(source.sessionId)) continue
-      try {
-        const current = await state(source, owner)
-        if (current.proof.unfinishedTools.length && !current.review) issues.push({ id: `native-${source.sessionId}`, scope: source.projectId, kind: 'conversation', conversationId: source.sessionId, tool: current.proof.unfinishedTools[0].name, state: 'uncertain' })
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      let proof: Awaited<ReturnType<NativeRecoveryDeps['inspect']>>
+      try { proof = await deps.inspect(source.cwd, source.sessionId) }
+      catch (error) {
+        await deps.owner(owner)
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        const held = await deps.held(source.sessionId)
+        await deps.owner(owner)
+        if (held) continue
+        // Isolate only the transcript inspection. An oversized, unreadable or
+        // changing file cannot hide other launch/effect recovery. Its review
+        // and admission still use state(), so unavailable proof grants nothing.
+        issues.push({ id: `native-${source.sessionId}`, scope: source.projectId, kind: 'conversation', conversationId: source.sessionId, state: 'uncertain', inspectionError: 'native-history-unavailable' })
+        continue
+      }
+      const held = await deps.held(source.sessionId)
+      await deps.owner(owner)
+      if (held) continue
+      // Requested source fingerprints and saved marker identities are security
+      // checks, not inspection failures; keep them outside the isolated catch.
+      const current = await inspectedState(source, owner, proof)
+      if (current.proof.unfinishedTools.length && !current.review) issues.push({ id: `native-${source.sessionId}`, scope: source.projectId, kind: 'conversation', conversationId: source.sessionId, tool: current.proof.unfinishedTools[0].name, state: 'uncertain' })
     }
+    await deps.owner(owner)
     return issues
   } }
 }
@@ -145,7 +176,13 @@ const sources = async (): Promise<NativeRecoverySource[]> => {
     if (!current || !sameSource(current, request)) continue
     try {
       if ((await inspectSwarmNativeConversation(current.cwd, current.sessionId)).fingerprint === request.fingerprint) result.push({ ...current, requestedFingerprint: request.fingerprint })
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      // The request's schema, identity and current source were already checked.
+      // Retain its exact fingerprint for list() to report unavailable proof;
+      // state()/review() must still inspect successfully before any admission.
+      result.push({ ...current, requestedFingerprint: request.fingerprint })
+    }
   }
   return result
 }

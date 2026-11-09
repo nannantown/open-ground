@@ -63,6 +63,7 @@ import { SwarmWorkerPane, type WorkerStatus } from './SwarmWorkerPane'
 import { SdkWorkerPane, blipVerdict, type SdkSessionProbe } from './SdkWorkerPane'
 import { useConversationDraft } from '@/lib/useConversationDraft'
 import { ConversationDraftStatus } from '@/components/assistant/ConversationDraftStatus'
+import { RuntimeTransitionRows } from '@/components/canvas/ChatGptSetting'
 import { SwarmSupplyPane } from './SwarmSupplyPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 import { SwarmWorkerSeat, workerSeatLook } from './SwarmWorkerSeat'
@@ -953,6 +954,7 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
     launch: launchSupply,
     stop: stopSupply,
     restart: restartSupply,
+    control: presidentControl,
   } = useSupplyDesk({
     projectId: project.id,
     projectPath: project.path,
@@ -1362,6 +1364,11 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
       {!collapsed && !supply && presidentDraft.receipts.some(receipt => ['queued', 'uncertain'].includes(receipt.state)) && <div className="shrink-0 border-b border-line-soft px-3 py-2">
         <ConversationDraftStatus draft={presidentDraft} presidentPath={project.path} />
       </div>}
+      {!collapsed && presidentControl.status?.runtime && presidentControl.status.runtime.phase !== 'stable' && <div className="shrink-0 border-b border-line-soft px-3 py-2">
+        <RuntimeTransitionRows runtime={presidentControl.status.runtime} busy={!presidentControl.available || presidentControl.transitionBusy}
+          onAction={action => { void presidentControl.transition(action) }} />
+        {presidentControl.transitionError && <p role="alert" className="mt-1 text-meta text-error">{t('settings.runtime.failed')}</p>}
+      </div>}
       {/* Env preflight (git/shell) — ONE banner listing every unmet prerequisite
           (GET /api/swarm/preflight, the same gate the worker/supply/manager spawn
           routes enforce), so a missing git / non-repo project / missing shell is
@@ -1589,6 +1596,7 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
           ) : supply ? (
             // The live president's desk — the owner's one conversation.
           <SwarmSupplyPane
+            control={presidentControl}
             projectPath={project.path}
             draftState={{ value: presidentDraft.enabled ? presidentDraft.text : presidentDrafts[project.id] ?? '', onChange: presidentDraft.setText ?? changePresidentDraft, durable: presidentDraft.enabled ? presidentDraft : undefined,
               pending: presidentSending[project.id] ?? false, onPendingChange: changePresidentSending }}
@@ -1612,7 +1620,7 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
                   <button
                     type="button"
                     onClick={() => void launchSupply()}
-                    disabled={supplyBusy}
+                    disabled={supplyBusy || presidentControl.admissionBlocked}
                     className="inline-flex items-center gap-1.5 rounded-[3px] border border-line bg-bg-card px-3 py-1.5 text-ui text-ink-muted transition-colors hover:border-accent hover:text-ink active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
                   >
                     <Power size={13} strokeWidth={2} />

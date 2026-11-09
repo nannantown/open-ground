@@ -378,7 +378,8 @@ const launchNewSupplyDesk = async (
     opts.projectPath, session.agentSessionId,
     { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName, lang, handoffInstructions: opts.runtimeHandoff?.instructions ?? opts.recoveryInstructions }, me,
   )
-  launchOptions.env = { ...launchOptions.env, CLAUDE_CONFIG_DIR: subscriptionEnv.CLAUDE_CONFIG_DIR! }
+  if (typeof subscriptionEnv.CLAUDE_CONFIG_DIR === 'string')
+    launchOptions.env = { ...launchOptions.env, CLAUDE_CONFIG_DIR: subscriptionEnv.CLAUDE_CONFIG_DIR }
   const ref = launchClaude(
     launchOptions,
   )

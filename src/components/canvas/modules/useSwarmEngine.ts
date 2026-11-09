@@ -314,8 +314,8 @@ export interface SwarmEngineState {
    *  reconcile (deskReconcile.ts) adopts so an engine-woken desk attaches
    *  within one poll instead of the pane pinning to a dead pre-restart id. */
   managerDesk?: { runtime: 'pty' | 'sdk'; handleId: string; agentSessionId: string | null } | null
-  /** Same for the supply desk (PTY-only by design). */
-  supplyDesk?: { runtime: 'pty'; handleId: string; agentSessionId: string | null } | null
+  /** Same both-pool identity for the president desk. */
+  supplyDesk?: { runtime: 'pty' | 'sdk'; handleId: string; agentSessionId: string | null } | null
 }
 
 export const EMPTY_KPIS: EngineKpis = {
@@ -610,13 +610,7 @@ export const sanitizeEngineState = (raw: unknown): SwarmEngineState => {
     o.managerPresence === 'missing' || o.managerPresence === 'quiet' || o.managerPresence === 'working'
       ? o.managerPresence
       : undefined
-  const supplyDeskRaw = parseDesk(o.supplyDesk)
-  const supplyDesk =
-    supplyDeskRaw && supplyDeskRaw.runtime === 'pty'
-      ? { runtime: 'pty' as const, handleId: supplyDeskRaw.handleId, agentSessionId: supplyDeskRaw.agentSessionId }
-      : supplyDeskRaw === undefined
-        ? undefined
-        : null
+  const supplyDesk = parseDesk(o.supplyDesk)
 
   return {
     ...(o.automation && typeof o.automation === 'object' &&

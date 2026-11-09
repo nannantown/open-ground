@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { ChatGptSetting } from './ChatGptSetting'
+import { ChatGptSetting, RuntimeTransitionRows } from './ChatGptSetting'
 import type { ChatGptStatus } from '@/lib/types'
 vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (key: string) => key }) }))
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -102,9 +102,17 @@ it('shows the requested provider separately from the effective actor and sends r
   }
   render(<ChatGptSetting enabled lockdown={false} />)
   const group = await screen.findByRole('group', { name: 'settings.chatgpt.assistant' })
-  expect(within(group).getByRole('button', { name: 'ChatGPT' })).toHaveAttribute('aria-pressed', 'true')
-  expect(within(group).getByRole('button', { name: 'ChatGPT' })).toBeDisabled()
-  expect(screen.getByText(/catalog-model/).textContent).toContain('Claude')
+  await waitFor(() => {
+    expect(within(group).getByRole('button', { name: 'ChatGPT' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(group).getByRole('button', { name: 'ChatGPT' })).toBeDisabled()
+    expect(screen.getByText(/catalog-model/).textContent).toContain('Claude')
+  })
   fireEvent.click(screen.getByRole('button', { name: 'settings.runtime.retry' }))
   await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/chatgpt/transition', expect.objectContaining({ body: JSON.stringify({ action: 'retry', scope: 'assistant', revision: 7 }) })))
+})
+
+it.each(['draining', 'checkpointed', 'retiring', 'launching'] as const)('does not offer an unsupported Cancel during %s', phase => {
+  render(<RuntimeTransitionRows runtime={{ scope: 'swarm', revision: 3, phase, effective: { provider: 'chatgpt' }, desired: { provider: 'claude' }, updatedAt: '2026-11-09T00:00:00Z' }} busy={false} onAction={vi.fn()} />)
+  expect(screen.queryByRole('button', { name: 'settings.runtime.cancel' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'settings.runtime.retry' })).toBeNull()
 })

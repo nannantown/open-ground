@@ -17,13 +17,19 @@ export const subscriptionOnlyEnvironment = (source: NodeJS.ProcessEnv): NodeJS.P
   return result
 }
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+const SIGN_IN_REQUIRED = 'Sign in to a Claude subscription. API-key and alternative-provider execution are disabled.'
+const AUTH_UNVERIFIED = 'Claude subscription authentication could not be verified. Check the Claude CLI and sign in again before switching.'
+const parseStatus = (stdout: unknown): unknown => {
+  if (typeof stdout !== 'string' || Buffer.byteLength(stdout) > 64 * 1024) throw new Error(AUTH_UNVERIFIED)
+  try { return JSON.parse(stdout) } catch { throw new Error(AUTH_UNVERIFIED) }
+}
 export const assertSubscriptionSettings = (value: unknown): void => {
   if (!object(value)) throw new Error('Claude settings could not be verified for subscription-only use.')
   if (value.apiKeyHelper !== undefined || value.awsAuthRefresh !== undefined || value.awsCredentialExport !== undefined) throw new Error('Claude has an API credential helper configured. Subscription-only execution is paused.')
   if (object(value.env) && Object.entries(value.env).some(([key, v]) => metered.test(key) && v !== undefined && v !== null && v !== '')) throw new Error('Claude settings select an API credential or alternative provider. Subscription-only execution is paused.')
 }
 export const assertClaudeSubscriptionStatus = (value: unknown): void => {
-  if (!object(value) || value.loggedIn !== true || value.authMethod !== 'claude.ai' || value.apiProvider !== 'firstParty' || value.apiKeySource) throw new Error('Sign in to a Claude subscription. API-key and alternative-provider execution are disabled.')
+  if (!object(value) || value.loggedIn !== true || value.authMethod !== 'claude.ai' || value.apiProvider !== 'firstParty' || value.apiKeySource) throw new Error(SIGN_IN_REQUIRED)
 }
 const verifySettingsFiles = async (cwd: string, env: NodeJS.ProcessEnv): Promise<void> => {
   const config = env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
@@ -48,10 +54,23 @@ const verifySettingsFiles = async (cwd: string, env: NodeJS.ProcessEnv): Promise
  * never logs credentials, starts a model, purchases credits or edits settings. */
 export const assertClaudeSubscriptionLaunch = async (cwd: string, source: NodeJS.ProcessEnv = process.env): Promise<NodeJS.ProcessEnv> => {
   const env = subscriptionOnlyEnvironment(source)
-  env.CLAUDE_CONFIG_DIR = source.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
   await verifySettingsFiles(cwd, env)
   const binary = source.OPENGROUND_CLAUDE_BIN || resolvedClaudeBin() || absoluteClaudeOnPath() || 'claude'
-  const { stdout } = await execFile(binary, ['auth', 'status'], { cwd, env, timeout: 6000, maxBuffer: 64 * 1024, shell: process.platform === 'win32' })
-  assertClaudeSubscriptionStatus(JSON.parse(stdout))
+  let stdout: string
+  try {
+    const result = await execFile(binary, ['auth', 'status'], { cwd, env, timeout: 6000, maxBuffer: 64 * 1024, shell: process.platform === 'win32' })
+    stdout = result.stdout
+  } catch (error) {
+    // The official CLI uses exit 1 for a normal signed-out status. Only that
+    // exact negative proof is classified; never accept positive auth from a
+    // failed, killed or timed-out command. Raw command/stdout/stderr stay private.
+    if (object(error) && error.code === 1 && error.killed !== true && !error.signal) {
+      const status = parseStatus(error.stdout)
+      if (object(status) && status.loggedIn === false && status.authMethod === 'none' && status.apiProvider === 'firstParty' && !status.apiKeySource)
+        throw new Error(SIGN_IN_REQUIRED)
+    }
+    throw new Error(AUTH_UNVERIFIED)
+  }
+  assertClaudeSubscriptionStatus(parseStatus(stdout))
   return env
 }

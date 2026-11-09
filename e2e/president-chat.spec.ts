@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createAndImportProject } from './fixtures/helpers'
+import type { RuntimeTransitionStatus } from '../src/lib/types'
 
 // Both provider names use the same SDK surface. All account, conversation,
 // draft and execution responses below are fixtures; no model is started.
@@ -15,8 +16,15 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
     ]).flat()
     let revision = 1, turn: string | undefined
     let deskOpen = true
+    let runtimePhase: RuntimeTransitionStatus['phase'] = 'stable', runtimeRevision = 3
+    let runtimeProvider = provider, desiredProvider = provider === 'chatgpt' ? 'claude' : 'chatgpt'
+    const transitionError = 'Sign in to a Claude subscription before retrying the switch.'
+    const runtime = () => ({ scope: 'swarm', revision: runtimeRevision, phase: runtimePhase, effective: { provider: runtimeProvider },
+      desired: { provider: runtimePhase === 'stable' ? runtimeProvider : desiredProvider }, updatedAt: new Date(runtimeRevision * 1000).toISOString(),
+      ...(runtimePhase === 'attention' ? { error: transitionError } : {}) })
     let draft = { revision: 0, text: '', updatedAt: '2026-11-06T00:00:00Z' }
     const sends: Record<string, unknown>[] = [], stops: Record<string, unknown>[] = [], cancellations: Record<string, unknown>[] = []
+    const transitions: Record<string, unknown>[] = [], opens: unknown[] = [], deletes: string[] = []
     const receipts = new Map<string, { id: string; state: string }>()
     let releaseSend: (() => void) | undefined
     await page.setViewportSize({ width, height: 900 })
@@ -39,7 +47,14 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
     await page.route('**/api/terminal/active', route => route.fulfill({ json: { cwds: [], claude: deskOpen ? [{ id, cwd: project.path, status: 'working', desk: true }] : [] } }))
     await page.route('**/api/phone-link/call-notes?*', route => route.fulfill({ json: { entries: [] } }))
     await page.route('**/api/chatgpt/status', route => route.fulfill({ json: { connection: { state: 'signed-out', models: [] }, preferences: { swarmProvider: provider } } }))
-    await page.route(`**/api/sdk-session/${id}?*`, route => route.fulfill(deskOpen ? { json: { status: 'working' } } : { status: 404, json: { error: 'closed-fixture' } }))
+    await page.route(`**/api/sdk-session/${id}?*`, route => {
+      if (route.request().method() === 'DELETE') deletes.push(route.request().url())
+      return route.fulfill(deskOpen ? { json: { status: 'working' } } : { status: 404, json: { error: 'closed-fixture' } })
+    })
+    await page.route('**/api/swarm/supply/open', route => {
+      opens.push(route.request().postDataJSON())
+      return route.fulfill({ status: 409, json: { error: 'No president launch belongs in this fixture.' } })
+    })
     await page.route('**/api/swarm/supply/stop', route => {
       expect(route.request().postDataJSON()).toEqual({ path: project.path })
       deskOpen = false; turn = undefined
@@ -56,7 +71,20 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
       expect(route.request().headers()['x-openground-owner']).toBe(owner)
       return route.fulfill({ json: { lines: words, revision: String(revision), overflow: false, seq: 73 } })
     })
-    await page.route('**/api/conversation/president/status?*', route => route.fulfill({ json: { state: 'delivered', conversationId: 'fixture-conversation', epoch: 3, activeTurnId: turn, capabilities: { conversationControl: 1, cancelPresidentInputs: 1 } } }))
+    await page.route('**/api/conversation/president/status?*', route => {
+      expect(route.request().headers()['x-openground-owner']).toBe(owner)
+      return route.fulfill({ json: { state: 'delivered', conversationId: 'fixture-conversation', epoch: 3, activeTurnId: turn, runtime: runtime(), capabilities: { conversationControl: 1, cancelPresidentInputs: 1 } } })
+    })
+    await page.route('**/api/chatgpt/transition', route => {
+      expect(route.request().headers()['x-openground-owner']).toBe(owner)
+      const body = route.request().postDataJSON(); transitions.push(body)
+      expect(runtimePhase).toBe('attention')
+      expect(body).toMatchObject({ scope: 'swarm', revision: runtimeRevision })
+      expect(['retry', 'cancel']).toContain(body.action)
+      if (body.action === 'retry') runtimeProvider = desiredProvider
+      runtimePhase = 'stable'; runtimeRevision++
+      return route.fulfill({ status: 202, json: { runtime: { swarm: runtime() } } })
+    })
     await page.route('**/api/conversation/draft?*', async route => {
       expect(route.request().headers()['x-openground-owner']).toBe(owner)
       if (route.request().method() === 'PUT') {
@@ -209,5 +237,46 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
     await expect(page.getByText('前の指示の確認が必要なため、後の指示も待機しています。不要な指示は取り消せます。', { exact: true })).toHaveCount(0)
     expect(cancellations[1].messageIds).toEqual([uncertainId]); expect(cancellations[1].operationId).not.toBe(cancellations[0].operationId)
     expect(receipts.get(uncertainId)?.state).toBe('cancelled'); expect(sends).toHaveLength(4); expect(deskOpen).toBe(false)
+
+    // The closed president is also the recovery surface. A pending switch must
+    // not become an unrelated supply/open or an old-handle DELETE request.
+    const deletedBeforeSwitch = deletes.length
+    const launch = seat.getByRole('button', { name: '社長を呼ぶ', exact: true })
+    runtimePhase = 'draining'; runtimeRevision++
+    await page.evaluate(() => window.dispatchEvent(new Event('openground:chatgpt-change')))
+    await expect(page.locator('[data-runtime-phase="draining"]')).toContainText('現在の作業の完了待ち')
+    await expect(launch).toBeDisabled()
+    await expect(page.getByRole('button', { name: '切り替えをやめる', exact: true })).toHaveCount(0)
+    await launch.dispatchEvent('click')
+    expect(opens).toEqual([]); expect(deletes).toHaveLength(deletedBeforeSwitch)
+    runtimePhase = 'attention'
+    await page.evaluate(() => window.dispatchEvent(new Event('openground:chatgpt-change')))
+    const attention = page.locator('[data-runtime-phase="attention"]')
+    await expect(attention).toContainText('ChatGPT'); await expect(attention).toContainText('Claude')
+    await expect(attention).toContainText(transitionError)
+    await expect(attention.getByRole('button', { name: '再試行', exact: true })).toBeEnabled()
+    await expect(attention.getByRole('button', { name: '切り替えをやめる', exact: true })).toBeEnabled()
+    await expect(launch).toBeDisabled()
+    const recoveryBounds = await attention.boundingBox()
+    expect(recoveryBounds!.x).toBeGreaterThanOrEqual(0); expect(recoveryBounds!.x + recoveryBounds!.width).toBeLessThanOrEqual(width)
+    await page.screenshot({ path: info.outputPath(`switch-attention-${provider}-${width}-${theme}.png`), animations: 'disabled' })
+    const retryRevision = runtimeRevision
+    await attention.getByRole('button', { name: '再試行', exact: true }).click()
+    await expect(attention).toHaveCount(0); await expect(launch).toBeEnabled()
+    expect(transitions[0]).toEqual({ action: 'retry', scope: 'swarm', revision: retryRevision })
+    expect(opens).toEqual([]); expect(deletes).toHaveLength(deletedBeforeSwitch)
+
+    // Cancel uses the next observed revision, preserving the current effective
+    // provider rather than issuing another launch or replaying owner input.
+    runtimePhase = 'attention'; runtimeRevision++; desiredProvider = runtimeProvider === 'claude' ? 'chatgpt' : 'claude'
+    await page.evaluate(() => window.dispatchEvent(new Event('openground:chatgpt-change')))
+    await expect(attention).toBeVisible(); await expect(launch).toBeDisabled()
+    const cancelRevision = runtimeRevision
+    await attention.getByRole('button', { name: '切り替えをやめる', exact: true }).click()
+    await expect(attention).toHaveCount(0); await expect(launch).toBeEnabled()
+    expect(transitions[1]).toEqual({ action: 'cancel', scope: 'swarm', revision: cancelRevision })
+    expect(opens).toEqual([]); expect(deletes).toHaveLength(deletedBeforeSwitch)
+    expect(sends).toHaveLength(4); expect(deskOpen).toBe(false)
+    await page.screenshot({ path: info.outputPath(`switch-recovered-${provider}-${width}-${theme}.png`), animations: 'disabled' })
   })
 }
