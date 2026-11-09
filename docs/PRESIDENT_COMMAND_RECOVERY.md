@@ -48,6 +48,11 @@ boundary applies to both SDK and PTY presidents.
   Generic errors, background execution, interruption, ambiguous duplicate calls
   and unmatched historical receipts still require inspection; absence of a post
   hook proves nothing.
+- JSON tool inputs are compared by value across SDK messages and permission
+  hooks: object key order is ignored, while changed values and array order
+  remain distinct. The original persisted input hash format is unchanged.
+  A manager's known recovery hold is checked before selecting or recording a
+  replacement conversation, so a refused launch cannot overwrite its pointer.
 - The shared SDK/PTY resume prompt checks the live Board and waits for newly
   delivered input. President handoff also treats its old public conversation as
   context only. Neither prompt grants permission to resume an old owner command

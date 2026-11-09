@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { createHash } from 'node:crypto'
 import type { HookCallback, HookInput } from '@anthropic-ai/claude-agent-sdk'
 import { createClaudeRuntimeToolAudit, guardClaudeRuntimeTools, assertNoUncertainRuntimeActions } from './runtimeActionReceipts'
 import { acceptConversationReceipt, claimConversationReceipt, listConversationReceipts } from './conversationReceipts'
@@ -47,14 +48,22 @@ beforeEach(async () => { h.owner = 'owner-a'; h.access = true; h.occupied = fals
 afterEach(() => vi.restoreAllMocks())
 
 describe('durable Claude tool audit hooks', () => {
-  it('records an explicit guard-veto result before the real SDK pool can expose it or continue the turn', async () => {
+  it.each([
+    { order: 'root', observed: { command: 'synthetic, never executed', description: 'fixture', timeout: 1234, run_in_background: false },
+      guarded: { command: 'synthetic, never executed', timeout: 1234, description: 'fixture', run_in_background: false } },
+    { order: 'nested', observed: { command: 'synthetic, never executed', options: { targets: [{ left: 'a', right: 'b' }], enabled: true } },
+      guarded: { command: 'synthetic, never executed', options: { enabled: true, targets: [{ right: 'b', left: 'a' }] } } },
+    { order: 'distinct Unicode', observed: { command: 'synthetic, never executed', options: { '\u00e9': 'composed', 'e\u0301': 'decomposed' } },
+      guarded: { command: 'synthetic, never executed', options: { 'e\u0301': 'decomposed', '\u00e9': 'composed' } } },
+  ])('records a real guard-veto with reordered $order keys before the SDK pool exposes it, keeping the persisted plain hash', async ({ observed, guarded }) => {
     let stateAfterYield: string | undefined
     const query = vi.fn(({ prompt, options }: SdkQueryParams) => ({
       async *[Symbol.asyncIterator]() {
         for await (const _input of prompt) {
-          yield { type: 'assistant', session_id: 'session-a', message: { content: [{ type: 'tool_use', id: 'guard-veto', name: 'Bash', input: { command: 'synthetic, never executed' } }] } }
+          yield { type: 'assistant', session_id: 'session-a', message: { content: [{ type: 'tool_use', id: 'guard-veto', name: 'Bash', input: observed }] } }
           const hooks = options.hooks as Awaited<ReturnType<typeof guardClaudeRuntimeTools>>
-          await Promise.all(hooks.PreToolUse!.flatMap(matcher => matcher.hooks.map(hook => invoke(hook, 'PreToolUse', 'guard-veto'))))
+          const value = { ...input('PreToolUse', 'guard-veto'), tool_input: guarded } as HookInput
+          await Promise.all(hooks.PreToolUse!.flatMap(matcher => matcher.hooks.map(hook => hook(value, 'guard-veto', { signal: new AbortController().signal }))))
           yield { type: 'user', session_id: 'session-a', message: { content: [{ type: 'tool_result', tool_use_id: 'guard-veto', is_error: true,
             content: 'PreToolUse:Bash hook error: openground-guard BLOCKED: synthetic forbidden operation' }] } }
           // This runs only once the query wrapper has released the raw result.
@@ -74,11 +83,63 @@ describe('durable Claude tool audit hooks', () => {
       sessionId = session.id; h.liveHandle = session.id
       await vi.waitFor(() => expect(getSdkSession(session.id)?.status).toBe('waiting'))
       expect(stateAfterYield).toBe('rejected')
-      expect((await listConversationReceipts())[0]).toMatchObject({ state: 'rejected' })
+      expect((await listConversationReceipts())[0]).toMatchObject({ state: 'rejected', body: {
+        inputHash: createHash('sha256').update(JSON.stringify(guarded)).digest('hex'),
+      } })
     } finally {
       if (sessionId) { terminateSdkSession(sessionId); await vi.waitFor(() => expect(getSdkSession(sessionId!)?.reaped).toBe(true)) }
       __setSdkImporterForTests(null)
     }
+  })
+  it('matches a real guard and its claimed input by JSON value while retaining the claim’s original persisted hash', async () => {
+    h.occupied = true
+    const audit = await createClaudeRuntimeToolAudit('/synthetic/project', 'session-a', { PreToolUse: [{ hooks: [async () => ({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'openground-guard BLOCKED: synthetic forbidden operation' },
+    })] }] }, 'owner-a')
+    const guarded = { description: 'fixture', command: 'synthetic, never executed' }
+    const claimed = { command: 'synthetic, never executed', description: 'fixture' }
+    await audit.observeSdkMessage({ type: 'assistant', session_id: 'session-a', message: { content: [{ type: 'tool_use', id: 'call-a', name: 'Bash', input: guarded }] } })
+    const pre = (tool_input: unknown): HookInput => ({ ...input('PreToolUse'), tool_input } as HookInput)
+    await audit.hooks.PreToolUse![0].hooks[0](pre(guarded), 'call-a', { signal: new AbortController().signal })
+    await last(audit.hooks, 'PreToolUse')(pre(claimed), 'call-a', { signal: new AbortController().signal })
+    const saved = (await listConversationReceipts())[0]
+    await audit.observeSdkMessage(vetoResult())
+    expect((await listConversationReceipts())[0]).toMatchObject({ state: 'rejected', hash: saved.hash, body: saved.body })
+    expect(saved.body).toMatchObject({ inputHash: createHash('sha256').update(JSON.stringify(claimed)).digest('hex') })
+  })
+  it.each([
+    { difference: 'nested value', observed: { command: 'synthetic, never executed', options: { target: 'a' } }, guarded: { command: 'synthetic, never executed', options: { target: 'b' } } },
+    { difference: 'array order', observed: { command: 'synthetic, never executed', targets: ['a', 'b'] }, guarded: { command: 'synthetic, never executed', targets: ['b', 'a'] } },
+    { difference: 'Unicode key bytes', observed: { command: 'synthetic, never executed', options: { '\u00e9': 'fixture' } }, guarded: { command: 'synthetic, never executed', options: { 'e\u0301': 'fixture' } } },
+  ])('does not equate an actual $difference change', async ({ observed, guarded }) => {
+    h.occupied = true
+    const audit = await createClaudeRuntimeToolAudit('/synthetic/project', 'session-a', { PreToolUse: [{ hooks: [async () => ({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'openground-guard BLOCKED: synthetic forbidden operation' },
+    })] }] }, 'owner-a')
+    await audit.observeSdkMessage({ type: 'assistant', session_id: 'session-a', message: { content: [{ type: 'tool_use', id: 'call-a', name: 'Bash', input: observed }] } })
+    const value = { ...input('PreToolUse'), tool_input: guarded } as HookInput
+    await Promise.all(audit.hooks.PreToolUse!.flatMap(matcher => matcher.hooks.map(hook => hook(value, 'call-a', { signal: new AbortController().signal }))))
+    await expect(audit.observeSdkMessage(vetoResult())).rejects.toThrow('does not match')
+    expect((await listConversationReceipts())[0]).toMatchObject({ state: 'executing' })
+  })
+  it('rejects cyclic assistant input before any outcome can be accepted', async () => {
+    const audit = await createClaudeRuntimeToolAudit('/synthetic/project', 'session-a', {}, 'owner-a')
+    const value: Record<string, unknown> = { command: 'synthetic, never executed' }
+    value.self = value
+    await expect(audit.observeSdkMessage({ type: 'assistant', session_id: 'session-a', message: { content: [{ type: 'tool_use', id: 'call-a', name: 'Bash', input: value }] } })).rejects.toThrow()
+    expect(await listConversationReceipts()).toEqual([])
+  })
+  it('fails closed on cyclic real guard input without creating a receipt or authorizing a later call', async () => {
+    const audit = await createClaudeRuntimeToolAudit('/synthetic/project', 'session-a', { PreToolUse: [{ hooks: [async () => ({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'openground-guard BLOCKED: synthetic forbidden operation' },
+    })] }] }, 'owner-a')
+    const value: Record<string, unknown> = { command: 'synthetic, never executed' }
+    value.self = value
+    const pre = { ...input('PreToolUse'), tool_input: value } as HookInput
+    const outcomes = await Promise.all(audit.hooks.PreToolUse!.flatMap(matcher => matcher.hooks.map(hook => hook(pre, 'call-a', { signal: new AbortController().signal }))))
+    expect(outcomes.map(decision)).toEqual(['deny', 'deny'])
+    expect(decision(await invoke(last(audit.hooks, 'PreToolUse'), 'PreToolUse', 'next-call'))).toBe('deny')
+    expect(await listConversationReceipts()).toEqual([])
   })
   it('does not accept command stdout spoofing a veto without the real guard denying that exact call', async () => {
     const audit = await claimedVeto({})

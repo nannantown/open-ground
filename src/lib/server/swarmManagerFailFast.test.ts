@@ -3,8 +3,12 @@
 // Failures remain visible and must never open a terminal fallback.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { rm } from 'node:fs/promises'
+import { join } from 'node:path'
 
 const mocks = vi.hoisted(() => ({
+  ownerAccess: false,
+  liveWorker: false,
   launchClaude: vi.fn(),
   listLiveDesksIn: vi.fn(() => [] as unknown[]),
   onTerminalExit: vi.fn((_id: string, _onExit: () => void) => () => {}),
@@ -19,8 +23,28 @@ const mocks = vi.hoisted(() => ({
   sdkManagerPreflight: vi.fn(),
   sdkManagerLaunchPlan: vi.fn(() => ({ options: {}, initialPrompt: '/og-manage', warnings: [] })),
   spawnSdkSession: vi.fn(),
+  preloadSdk: vi.fn(async () => null),
+  recycleDeskSessionIfOverCap: vi.fn(async (session: { agentSessionId: string; resume: boolean }) => ({ session, recycledFromTokens: null })),
 }))
 
+vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => mocks.ownerAccess }))
+vi.mock('./runtimeOwner', async original => ({
+  ...(await original<typeof import('./runtimeOwner')>()),
+  runtimeOwnerKey: async () => 'fixture-owner',
+}))
+vi.mock('./projectDataPath', async original => ({
+  ...(await original<typeof import('./projectDataPath')>()),
+  projectUUIDFromPath: async () => 'fixture-project',
+}))
+vi.mock('./liveDesks', async original => ({
+  ...(await original<typeof import('./liveDesks')>()),
+  isAgentConversationOccupied: () => mocks.liveWorker,
+  isRecordedRuntimeHandleOccupied: (_runtime: string, handleId: string) => mocks.liveWorker && handleId === 'parallel-worker-handle',
+}))
+vi.mock('./deskContextCap', async original => ({
+  ...(await original<typeof import('./deskContextCap')>()),
+  recycleDeskSessionIfOverCap: mocks.recycleDeskSessionIfOverCap,
+}))
 vi.mock('./claudeTerminal', () => ({ launchClaude: mocks.launchClaude }))
 vi.mock('./terminal', () => ({
   listLiveDesksIn: mocks.listLiveDesksIn,
@@ -49,16 +73,22 @@ vi.mock('./swarmManagerSdk', async (importOriginal) => ({
 vi.mock('./sdkSession', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./sdkSession')>()),
   spawnSdkSession: mocks.spawnSdkSession,
+  preloadSdk: mocks.preloadSdk,
 }))
 
 import { spawnSwarmManager } from './swarmManager'
 import { SdkManagerUnavailableError } from './swarmManagerSdk'
 import { setSettings } from './store'
+import { openGroundHome } from './paths'
+import { acceptConversationReceipt, claimConversationReceipt, finishConversationReceipt, readConversationReceipt } from './conversationReceipts'
 
 const PROJ = '/repo/alpha'
 
 beforeEach(async () => {
   vi.clearAllMocks()
+  mocks.ownerAccess = false
+  mocks.liveWorker = false
+  await rm(join(openGroundHome(), 'runtime'), { recursive: true, force: true })
   mocks.listLiveDesksIn.mockReturnValue([])
   mocks.onTerminalExit.mockImplementation(() => () => {})
   mocks.isTerminalProcessAlive.mockReturnValue(true)
@@ -68,6 +98,7 @@ beforeEach(async () => {
   mocks.resolveSwarmRemoteName.mockResolvedValue('manager')
   mocks.installOgManageSkill.mockResolvedValue({ outcome: 'installed', path: '/tmp/skill' })
   mocks.recordSwarmSession.mockResolvedValue(undefined)
+  mocks.recycleDeskSessionIfOverCap.mockImplementation(async session => ({ session, recycledFromTokens: null }))
   mocks.sdkManagerLaunchPlan.mockReturnValue({ options: {}, initialPrompt: '/og-manage', warnings: [] })
   mocks.launchClaude.mockImplementation(() => {
     throw new Error(
@@ -77,6 +108,65 @@ beforeEach(async () => {
 })
 
 describe('commander SDK fail-fast — an SDK dial never seats a PTY desk', () => {
+  const savedAction = async (state: 'uncertain' | 'executing' | 'rejected') => {
+    await acceptConversationReceipt('fixture-project', 'existing-tool', {
+      kind: 'runtime-tool', provider: 'claude', sessionId: 'parallel-worker-session',
+      toolId: 'fixture-call', tool: 'Bash', inputHash: 'fixture-input-hash',
+    }, undefined, 'fixture-owner')
+    await claimConversationReceipt('fixture-project', 'existing-tool', {
+      sessionId: 'parallel-worker-session', handleId: 'parallel-worker-handle', runtime: 'sdk',
+    }, 'fixture-owner')
+    if (state !== 'executing') await finishConversationReceipt('fixture-project', 'existing-tool', state, { fixture: true }, 'fixture-owner')
+  }
+
+  it.each([false, true])('an existing unconfirmed action blocks before conversation resolution or replacement (fresh=%s)', async fresh => {
+    mocks.ownerAccess = true
+    await savedAction('uncertain')
+    mocks.resolveSwarmSession.mockResolvedValue({ agentSessionId: 'previous-manager', resume: true })
+    mocks.sdkManagerPreflight.mockReturnValue({
+      ok: true, problems: [], claudeBin: '/synthetic/claude', cliVersion: '2.1.220',
+    })
+    mocks.spawnSdkSession.mockReturnValue({ id: 'must-not-open', status: 'working' })
+
+    await expect(spawnSwarmManager({ projectPath: PROJ, fresh })).rejects.toThrow('unconfirmed result')
+
+    expect(mocks.resolveSwarmSession).not.toHaveBeenCalled()
+    expect(mocks.recycleDeskSessionIfOverCap).not.toHaveBeenCalled()
+    expect(mocks.installOgManageSkill).not.toHaveBeenCalled()
+    expect(mocks.sdkManagerPreflight).not.toHaveBeenCalled()
+    expect(mocks.preloadSdk).not.toHaveBeenCalled()
+    expect(mocks.spawnSdkSession).not.toHaveBeenCalled()
+    expect(mocks.recordSwarmSession).not.toHaveBeenCalled()
+    expect(mocks.forgetSwarmSessionIf).not.toHaveBeenCalled()
+    expect(await readConversationReceipt('fixture-project', 'existing-tool', 'fixture-owner')).toMatchObject({ state: 'uncertain' })
+  })
+
+  it.each(['executing', 'rejected'] as const)('a %s action with a known live or terminal result does not block the manager', async state => {
+    mocks.ownerAccess = true
+    mocks.liveWorker = true
+    await savedAction(state)
+    mocks.sdkManagerPreflight.mockReturnValue({
+      ok: true, problems: [], claudeBin: '/synthetic/claude', cliVersion: '2.1.220',
+    })
+    mocks.spawnSdkSession.mockReturnValue({ id: 'sdk-live', status: 'working' })
+
+    const result = await spawnSwarmManager({ projectPath: PROJ })
+
+    expect(result.sdkSessionId).toBe('sdk-live')
+    expect(mocks.recordSwarmSession).toHaveBeenCalledWith(PROJ, 'manager', 'sid-1')
+    expect(await readConversationReceipt('fixture-project', 'existing-tool', 'fixture-owner')).toMatchObject({ state })
+  })
+
+  it('keeps legacy non-owner launch access when the owner-only action guard is inapplicable', async () => {
+    await savedAction('uncertain')
+    mocks.sdkManagerPreflight.mockReturnValue({
+      ok: true, problems: [], claudeBin: '/synthetic/claude', cliVersion: '2.1.220',
+    })
+    mocks.spawnSdkSession.mockReturnValue({ id: 'sdk-legacy', status: 'working' })
+
+    await expect(spawnSwarmManager({ projectPath: PROJ })).resolves.toMatchObject({ sdkSessionId: 'sdk-legacy' })
+  })
+
   it('a failed preflight THROWS the typed error naming the cause — no desk, no PTY', async () => {
     mocks.sdkManagerPreflight.mockReturnValue({
       ok: false,

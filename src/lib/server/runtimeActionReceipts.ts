@@ -7,7 +7,23 @@ import { runtimeOwnerKey } from './runtimeOwner'
 
 type Hooks = Partial<Record<HookEvent, HookCallbackMatcher[]>>
 const idFor = (sessionId: string, toolId: string) => `tool-${createHash('sha256').update(JSON.stringify([sessionId, toolId])).digest('hex')}`
+// Persisted receipt hashes retain their original format. Only comparisons
+// across SDK message/hook JSON ignore object key order; arrays retain order.
 const inputHash = (input: unknown) => createHash('sha256').update(JSON.stringify(input ?? null)).digest('hex')
+const inputValueHash = (input: unknown): string => {
+  const ancestors = new Set<object>()
+  const canonical = (value: unknown): string => {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value)
+    if (typeof value !== 'object' || ancestors.has(value)
+      || !Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) throw new Error('Invalid JSON tool input.')
+    ancestors.add(value)
+    try {
+      return Array.isArray(value) ? `[${Array.from(value, canonical).join(',')}]`
+        : `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(',')}}`
+    } finally { ancestors.delete(value) }
+  }
+  return createHash('sha256').update(canonical(input ?? null)).digest('hex')
+}
 const object = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 export interface ClaudeRuntimeToolAudit { hooks: Hooks; observeSdkMessage(message: unknown): Promise<void> }
 /** Audit hooks never grant permission: every existing guard remains authoritative.
@@ -29,9 +45,9 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
   if (handles.length !== 1) throw new Error('A unique recorded actor is required before a tool can execute.')
   const execution = { ...handles[0], sessionId }
   const recordingFaults = new Set<string>()
-  const claimed = new Map<string, { id: string; tool: string; inputHash: string; claimed: boolean; ambiguous: boolean }>()
-  const observed = new Map<string, { tool: string; inputHash: string }>()
-  const denied = new Map<string, { tool: string; inputHash: string }>()
+  const claimed = new Map<string, { id: string; tool: string; inputHash: string; inputValueHash: string; claimed: boolean; ambiguous: boolean }>()
+  const observed = new Map<string, { tool: string; inputValueHash: string }>()
+  const denied = new Map<string, { tool: string; inputValueHash: string }>()
   const forget = (callId: string) => { claimed.delete(callId); observed.delete(callId); denied.delete(callId) }
   const result = { ...hooks }
   const existingPre = (hooks.PreToolUse ?? []).map(matcher => ({ ...matcher, hooks: matcher.hooks.map(hook => async (...args: Parameters<typeof hook>) => {
@@ -42,7 +58,7 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
       if (input.hook_event_name === 'PreToolUse' && decision?.hookEventName === 'PreToolUse' && decision.permissionDecision === 'deny'
         && typeof decision.permissionDecisionReason === 'string' && decision.permissionDecisionReason.startsWith('openground-guard BLOCKED: ')) {
         const callId = toolId ?? input.tool_use_id
-        if (callId && (denied.size < 256 || denied.has(callId))) denied.set(callId, { tool: input.tool_name, inputHash: inputHash(input.tool_input) })
+        if (callId && (denied.size < 256 || denied.has(callId))) denied.set(callId, { tool: input.tool_name, inputValueHash: inputValueHash(input.tool_input) })
         else recordingFaults.add('guard-observation-capacity')
       }
     } catch { recordingFaults.add('guard-observation-unavailable') }
@@ -62,7 +78,7 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
     }
     if (claimed.size >= 256) throw new Error('Too many unconfirmed tool calls.')
     const id = idFor(sessionId, callId)
-    const candidate = { id, tool: input.tool_name, inputHash: inputHash(input.tool_input), claimed: false, ambiguous: false }
+    const candidate = { id, tool: input.tool_name, inputHash: inputHash(input.tool_input), inputValueHash: inputValueHash(input.tool_input), claimed: false, ambiguous: false }
     claimed.set(callId, candidate)
     if (recordingFaults.size) throw new Error('A tool result could not be recorded.')
     if (await runtimeOwnerKey() !== owner) throw new Error('The owner account changed.')
@@ -108,8 +124,8 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
         const block = object(rawBlock)
         if (block?.type !== 'tool_use' || typeof block.id !== 'string' || typeof block.name !== 'string' || !('input' in block)) continue
         if (observed.size >= 256 && !observed.has(block.id)) throw new Error('Too many unconfirmed tool observations.')
-        const value = { tool: block.name, inputHash: inputHash(block.input) }, previous = observed.get(block.id)
-        if (previous && (previous.tool !== value.tool || previous.inputHash !== value.inputHash)) throw new Error('The observed tool identity changed.')
+        const value = { tool: block.name, inputValueHash: inputValueHash(block.input) }, previous = observed.get(block.id)
+        if (previous && (previous.tool !== value.tool || previous.inputValueHash !== value.inputValueHash)) throw new Error('The observed tool identity changed.')
         observed.set(block.id, value)
       }
       return
@@ -122,7 +138,7 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
       // PostToolUseFailure does not run when PreToolUse vetoes a call. Only
       // this explicit OG veto result proves nonexecution; ordinary errors,
       // interruptions and background acknowledgements remain unconfirmed.
-      const veto = candidate?.claimed && !candidate.ambiguous && denial && denial.tool === candidate.tool && denial.inputHash === candidate.inputHash
+      const veto = candidate?.claimed && !candidate.ambiguous && denial && denial.tool === candidate.tool && denial.inputValueHash === candidate.inputValueHash
         && block.is_error === true && block.is_interrupt !== true && item.is_interrupt !== true && object(item.message)?.is_interrupt !== true
         && typeof block.content === 'string' && block.content.startsWith(`PreToolUse:${candidate.tool} hook error: openground-guard BLOCKED: `)
         && (item.tool_use_result === undefined || typeof item.tool_use_result === 'string')
@@ -135,7 +151,7 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
         const body = object(receipt.body), actor = receipt.execution
         if (receipt.owner !== owner || receipt.scope !== scope || body?.kind !== 'runtime-tool' || body.provider !== 'claude'
           || body.sessionId !== sessionId || body.toolId !== callId || body.tool !== candidate.tool || body.inputHash !== candidate.inputHash
-          || use && (use.tool !== candidate.tool || use.inputHash !== candidate.inputHash)
+          || use && (use.tool !== candidate.tool || use.inputValueHash !== candidate.inputValueHash)
           || actor?.runtime !== 'sdk' || actor.sessionId !== sessionId || actor.handleId !== execution.handleId || execution.runtime !== 'sdk')
           throw new Error('The denied tool result does not match its recorded execution.')
         await runtimeOwnerKey(owner)

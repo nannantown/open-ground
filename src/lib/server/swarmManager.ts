@@ -38,6 +38,7 @@ import { watchSdkDeskForLimit } from './sdkDeskLimit'
 import { getExecutionMode, getAllowedModelTiers } from './store'
 import { recycleDeskSessionIfOverCap, deskRecycledLogLine } from './deskContextCap'
 import { logToEngine } from './engineLogSink'
+import { assertNoUncertainRuntimeActions } from './runtimeActionReceipts'
 import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmManagerResponse } from '../types'
 
@@ -382,6 +383,10 @@ const spawnSwarmManagerInternal = async (
 const launchNewDesk = async (
   opts: SpawnSwarmManagerOpts,
 ): Promise<SpawnSwarmManagerResponse> => {
+  // Surface saved unknown effects before resolving/recycling a conversation or
+  // recording a new pointer. Healthy parallel workers keep their accepted turns;
+  // the SDK's query-time guard still checks changes after this launch boundary.
+  await assertNoUncertainRuntimeActions(opts.projectPath, false)
   // RESUME the project's previous commander conversation whenever claude can still
   // load it (swarmSessions.ts) — the commander is a days-long integration desk, not
   // a disposable worker, and an OPEN GROUND restart (i.e. every release) used to
