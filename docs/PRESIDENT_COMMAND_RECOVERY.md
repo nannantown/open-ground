@@ -45,6 +45,11 @@ boundary applies to both SDK and PTY presidents.
   An actual OPEN GROUND guard denial and its matching terminal SDK result are
   matched to this invocation's claimed owner/session/tool receipt and saved as
   rejected before yielding the result. This grants no permission or retry.
+  A native Bash pre-tool-hook error from an external guard is instead recorded
+  as a confirmed failure: its exact native error/string-output pair must match
+  this query's observed tool use, claimed input, owner and actor. The result is
+  saved before being exposed to the query. It does not claim success, no side
+  effects or rollback. Shell stdout with the same wording is not evidence.
   Generic errors, background execution, interruption, ambiguous duplicate calls
   and unmatched historical receipts still require inspection; absence of a post
   hook proves nothing.

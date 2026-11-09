@@ -10,6 +10,7 @@ import { createClaudeRuntimeToolAudit, guardClaudeRuntimeTools, assertNoUncertai
 import { acceptConversationReceipt, claimConversationReceipt, listConversationReceipts } from './conversationReceipts'
 import * as receipts from './conversationReceipts'
 import * as atomic from './atomicWrite'
+import * as ownerIdentity from './runtimeOwner'
 import { openGroundHome } from './paths'
 import { __setSdkImporterForTests, getSdkSession, preloadSdk, spawnSdkSession, terminateSdkSession, type SdkQueryParams } from './sdkSession'
 
@@ -35,17 +36,149 @@ const last = (hooks: Awaited<ReturnType<typeof guardClaudeRuntimeTools>>, name: 
 const vetoResult = (callId = 'call-a') => ({ type: 'user', session_id: 'session-a',
   tool_use_result: 'Error: openground-guard BLOCKED: synthetic forbidden operation', message: { content: [{ type: 'tool_result', tool_use_id: callId, is_error: true,
     content: 'PreToolUse:Bash hook error: openground-guard BLOCKED: synthetic forbidden operation' }] } })
-const claimedVeto = async (raw?: Parameters<typeof createClaudeRuntimeToolAudit>[2]) => {
+const nativePreFailure = (callId = 'call-a') => {
+  const content = 'PreToolUse:Bash hook error: [bash /synthetic/swarm-guard.sh]: swarm-guard BLOCKED: synthetic constraint\n'
+  return { type: 'user', session_id: 'session-a', parent_tool_use_id: null, isSynthetic: false, tool_use_result: `Error: ${content}`,
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: callId, is_error: true, content }] } }
+}
+const claimedVeto = async (raw?: Parameters<typeof createClaudeRuntimeToolAudit>[2], opts: {
+  observe?: boolean; observations?: number; claimedInput?: unknown; observedInput?: unknown
+} = {}) => {
   h.occupied = true
   const audit = await createClaudeRuntimeToolAudit('/synthetic/project', 'session-a', raw ?? { PreToolUse: [{ hooks: [async () => ({
     hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'openground-guard BLOCKED: synthetic forbidden operation' },
   })] }] }, 'owner-a')
-  await audit.observeSdkMessage({ type: 'assistant', session_id: 'session-a', message: { content: [{ type: 'tool_use', id: 'call-a', name: 'Bash', input: { command: 'synthetic, never executed' } }] } })
-  await Promise.all(audit.hooks.PreToolUse!.flatMap(matcher => matcher.hooks.map(hook => invoke(hook, 'PreToolUse'))))
+  const tool_input = opts.claimedInput ?? { command: 'synthetic, never executed' }
+  if (opts.observe !== false) await audit.observeSdkMessage({ type: 'assistant', session_id: 'session-a', message: {
+    content: Array.from({ length: opts.observations ?? 1 }, () => ({ type: 'tool_use', id: 'call-a', name: 'Bash', input: opts.observedInput ?? tool_input })),
+  } })
+  const value = { ...input('PreToolUse'), tool_input } as HookInput
+  await Promise.all(audit.hooks.PreToolUse!.flatMap(matcher => matcher.hooks.map(hook => hook(value, 'call-a', { signal: new AbortController().signal }))))
   return audit
 }
 beforeEach(async () => { h.owner = 'owner-a'; h.access = true; h.occupied = false; h.liveHandle = 'fixture-handle'; await rm(join(openGroundHome(), 'runtime'), { recursive: true, force: true }) })
 afterEach(() => vi.restoreAllMocks())
+
+describe('strict native Bash PreToolUse failures', () => {
+  it.each(['none', 'pass', 'deny'])('settles a returned native failure with %s local hooks without claiming no effects', async hook => {
+    const raw = hook === 'none' ? {} : { PreToolUse: [{ hooks: [async () => hook === 'deny'
+      ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'synthetic external policy' } } : {}] }] }
+    const audit = await claimedVeto(raw)
+    await audit.observeSdkMessage(nativePreFailure())
+    const receipt = (await listConversationReceipts())[0]
+    expect(receipt.state).toBe('delivered')
+    expect(receipt.result).toEqual({ confirmed: true, failed: true, source: 'sdk-native-pretool-failure', automaticReplay: false, effectsRolledBack: false })
+  })
+  it.each(['not-error', 'synthetic', 'foreign-session', 'missing-session', 'foreign-parent', 'foreign-id', 'missing-structured', 'wrong-string-pair', 'stdout-object', 'background-object', 'detached-object', 'interrupt-block', 'interrupt-top', 'interrupt-message', 'duplicate-results', 'wrong-role', 'ordinary-error', 'empty-reason'])('holds %s rather than accepting a forged or incomplete native terminal result', async kind => {
+    const audit = await claimedVeto({}), result = nativePreFailure()
+    const block = result.message.content[0]
+    if (kind === 'not-error') block.is_error = false
+    if (kind === 'synthetic') result.isSynthetic = true
+    if (kind === 'foreign-session') result.session_id = 'other-session'
+    if (kind === 'missing-session') delete (result as Partial<typeof result>).session_id
+    if (kind === 'foreign-parent') Object.assign(result, { parent_tool_use_id: 'other-parent' })
+    if (kind === 'foreign-id') block.tool_use_id = 'other-call'
+    if (kind === 'missing-structured') delete (result as Partial<typeof result>).tool_use_result
+    if (kind === 'wrong-string-pair') result.tool_use_result += 'changed'
+    if (kind === 'stdout-object') Object.assign(result, { tool_use_result: { stdout: block.content, stderr: '', interrupted: false } })
+    if (kind === 'background-object') Object.assign(result, { tool_use_result: { backgroundTaskId: 'ongoing', interrupted: false } })
+    if (kind === 'detached-object') Object.assign(result, { tool_use_result: { detachedToolCall: true } })
+    if (kind === 'interrupt-block') Object.assign(block, { is_interrupt: true })
+    if (kind === 'interrupt-top') Object.assign(result, { is_interrupt: true })
+    if (kind === 'interrupt-message') Object.assign(result.message, { is_interrupt: true })
+    if (kind === 'duplicate-results') result.message.content.push({ ...block })
+    if (kind === 'wrong-role') result.message.role = 'assistant'
+    if (kind === 'ordinary-error') { block.content = 'Exit code 1\nPreToolUse:Bash hook error: printed to stdout'; result.tool_use_result = `Error: ${block.content}` }
+    if (kind === 'empty-reason') { block.content = 'PreToolUse:Bash hook error:   \n'; result.tool_use_result = `Error: ${block.content}` }
+    await audit.observeSdkMessage(result)
+    expect((await listConversationReceipts())[0]).toMatchObject({ state: 'executing' })
+  })
+  it.each(['unobserved', 'duplicate-same-frame', 'duplicate-later-frame', 'background-request', 'changed-input', 'duplicate-claim'])('retains a %s claim instead of borrowing another invocation’s evidence', async kind => {
+    const audit = await claimedVeto({}, { ...(kind === 'unobserved' ? { observe: false } : {}),
+      ...(kind === 'duplicate-same-frame' ? { observations: 2 } : {}),
+      ...(kind === 'background-request' ? { claimedInput: { command: 'synthetic, never executed', run_in_background: true } } : {}),
+      ...(kind === 'changed-input' ? { observedInput: { command: 'different synthetic input' } } : {}),
+    })
+    if (kind === 'duplicate-later-frame') await audit.observeSdkMessage({ type: 'assistant', session_id: 'session-a', message: {
+      content: [{ type: 'tool_use', id: 'call-a', name: 'Bash', input: { command: 'synthetic, never executed' } }],
+    } })
+    if (kind === 'duplicate-claim') await invoke(last(audit.hooks, 'PreToolUse'), 'PreToolUse')
+    await audit.observeSdkMessage(nativePreFailure())
+    expect((await listConversationReceipts())[0]).toMatchObject({ state: 'executing' })
+  })
+  it('does not settle a prior query’s receipt or an unclaimed ID', async () => {
+    await claimedVeto({})
+    const next = await createClaudeRuntimeToolAudit('/synthetic/project', 'session-a', {}, 'owner-a')
+    await next.observeSdkMessage(nativePreFailure())
+    await next.observeSdkMessage(nativePreFailure('unclaimed'))
+    expect((await listConversationReceipts())[0]).toMatchObject({ state: 'executing' })
+  })
+  it.each(['owner', 'handle'])('refuses a late native result after its %s changed', async kind => {
+    const audit = await claimedVeto({})
+    if (kind === 'owner') h.owner = 'owner-b'
+    else h.liveHandle = 'replacement-handle'
+    await expect(audit.observeSdkMessage(nativePreFailure())).rejects.toThrow()
+    h.owner = 'owner-a'
+    expect((await listConversationReceipts())[0]).toMatchObject({ state: 'executing' })
+  })
+  it('propagates a native-failure fsync error and refuses a later tool', async () => {
+    const audit = await claimedVeto({})
+    vi.spyOn(atomic, 'atomicWriteJson').mockRejectedValueOnce(new Error('synthetic native result fsync failure'))
+    await expect(audit.observeSdkMessage(nativePreFailure())).rejects.toThrow('native result fsync failure')
+    expect((await listConversationReceipts())[0]).toMatchObject({ state: 'executing' })
+    expect(decision(await invoke(last(audit.hooks, 'PreToolUse'), 'PreToolUse', 'next-call'))).toBe('deny')
+  })
+  it.each(['receipt-read', 'owner-check'])('keeps repeated observations ambiguous during the awaited %s', async stage => {
+    const audit = await claimedVeto({})
+    let release = () => {}, entered = () => {}
+    const waiting = new Promise<void>(resolve => { release = resolve }), reached = new Promise<void>(resolve => { entered = resolve })
+    const read = receipts.readConversationReceipt, owner = ownerIdentity.runtimeOwnerKey
+    vi.spyOn(receipts, 'readConversationReceipt').mockImplementationOnce(async (...args) => {
+      const receipt = await read(...args)
+      if (stage === 'receipt-read') { entered(); await waiting }
+      else vi.spyOn(ownerIdentity, 'runtimeOwnerKey').mockImplementationOnce(async (...expected) => { entered(); await waiting; return owner(...expected) })
+      return receipt
+    })
+    const observing = audit.observeSdkMessage(nativePreFailure())
+    try {
+      await reached
+      await audit.observeSdkMessage({ type: 'assistant', session_id: 'session-a', message: {
+        content: [{ type: 'tool_use', id: 'call-a', name: 'Bash', input: { command: 'synthetic, never executed' } }],
+      } })
+    } finally { release() }
+    await observing
+    expect((await listConversationReceipts())[0]).toMatchObject({ state: 'executing' })
+  })
+  it.each([false, true])('requires native result durability before the actual SDK pool continues (fsync failure: %s)', async fail => {
+    let afterYield: string | undefined
+    const query = vi.fn(({ prompt, options }: SdkQueryParams) => ({ async *[Symbol.asyncIterator]() {
+      for await (const _input of prompt) {
+        yield { type: 'assistant', session_id: 'session-a', message: { content: [{ type: 'tool_use', id: 'call-a', name: 'Bash', input: { command: 'synthetic, never executed' } }] } }
+        const hooks = options.hooks as Awaited<ReturnType<typeof guardClaudeRuntimeTools>>
+        await invoke(last(hooks, 'PreToolUse'), 'PreToolUse')
+        if (fail) vi.spyOn(atomic, 'atomicWriteJson').mockRejectedValueOnce(new Error('synthetic native result fsync failure'))
+        yield nativePreFailure()
+        afterYield = (await listConversationReceipts())[0]?.state
+        yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
+      }
+    }, interrupt: async () => {} }))
+    let sessionId: string | undefined
+    try {
+      h.occupied = true
+      __setSdkImporterForTests(async () => ({ query, USAGE_LIMIT_ERROR_PREFIXES: [] }))
+      const sdk = await preloadSdk()
+      const session = spawnSdkSession({ cwd: '/synthetic/project', role: 'manager', sdk, agentSessionId: 'session-a', initialPrompt: 'synthetic',
+        options: { cwd: '/synthetic/project', sessionId: 'session-a', runtimeOwnerKey: 'owner-a' } })
+      sessionId = session.id; h.liveHandle = session.id
+      await vi.waitFor(() => expect(getSdkSession(session.id)?.status).toBe(fail ? 'failed' : 'waiting'))
+      expect(afterYield).toBe(fail ? undefined : 'delivered')
+      expect((await listConversationReceipts())[0]?.state).toBe(fail ? 'executing' : 'delivered')
+    } finally {
+      if (sessionId) { terminateSdkSession(sessionId); await vi.waitFor(() => expect(getSdkSession(sessionId!)?.reaped).toBe(true)) }
+      __setSdkImporterForTests(null)
+    }
+  })
+})
 
 describe('durable Claude tool audit hooks', () => {
   it.each([

@@ -45,8 +45,8 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
   if (handles.length !== 1) throw new Error('A unique recorded actor is required before a tool can execute.')
   const execution = { ...handles[0], sessionId }
   const recordingFaults = new Set<string>()
-  const claimed = new Map<string, { id: string; tool: string; inputHash: string; inputValueHash: string; claimed: boolean; ambiguous: boolean }>()
-  const observed = new Map<string, { tool: string; inputValueHash: string }>()
+  const claimed = new Map<string, { id: string; tool: string; inputHash: string; inputValueHash: string; claimed: boolean; ambiguous: boolean; backgroundRequested: boolean }>()
+  const observed = new Map<string, { tool: string; inputValueHash: string; currentSession: boolean; ambiguous: boolean }>()
   const denied = new Map<string, { tool: string; inputValueHash: string }>()
   const forget = (callId: string) => { claimed.delete(callId); observed.delete(callId); denied.delete(callId) }
   const result = { ...hooks }
@@ -78,7 +78,8 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
     }
     if (claimed.size >= 256) throw new Error('Too many unconfirmed tool calls.')
     const id = idFor(sessionId, callId)
-    const candidate = { id, tool: input.tool_name, inputHash: inputHash(input.tool_input), inputValueHash: inputValueHash(input.tool_input), claimed: false, ambiguous: false }
+    const candidate = { id, tool: input.tool_name, inputHash: inputHash(input.tool_input), inputValueHash: inputValueHash(input.tool_input), claimed: false, ambiguous: false,
+      backgroundRequested: object(input.tool_input)?.run_in_background === true }
     claimed.set(callId, candidate)
     if (recordingFaults.size) throw new Error('A tool result could not be recorded.')
     if (await runtimeOwnerKey() !== owner) throw new Error('The owner account changed.')
@@ -124,29 +125,38 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
         const block = object(rawBlock)
         if (block?.type !== 'tool_use' || typeof block.id !== 'string' || typeof block.name !== 'string' || !('input' in block)) continue
         if (observed.size >= 256 && !observed.has(block.id)) throw new Error('Too many unconfirmed tool observations.')
-        const value = { tool: block.name, inputValueHash: inputValueHash(block.input) }, previous = observed.get(block.id)
+        const value = { tool: block.name, inputValueHash: inputValueHash(block.input), currentSession: item.session_id === sessionId, ambiguous: false }, previous = observed.get(block.id)
         if (previous && (previous.tool !== value.tool || previous.inputValueHash !== value.inputValueHash)) throw new Error('The observed tool identity changed.')
-        observed.set(block.id, value)
+        if (previous) previous.ambiguous = true
+        else observed.set(block.id, value)
       }
       return
     }
     if (item.type !== 'user') return
+    const singleResult = content.filter(rawBlock => object(rawBlock)?.type === 'tool_result').length === 1
     for (const rawBlock of content) {
       const block = object(rawBlock)
       if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue
       const callId = block.tool_use_id, candidate = claimed.get(callId), use = observed.get(callId), denial = denied.get(callId)
       // PostToolUseFailure does not run when PreToolUse vetoes a call. Only
-      // this explicit OG veto result proves nonexecution; ordinary errors,
-      // interruptions and background acknowledgements remain unconfirmed.
+      // this explicit OG veto result proves nonexecution. A strict native Bash
+      // pre-hook failure proves a returned failure, never that effects were undone.
       const veto = candidate?.claimed && !candidate.ambiguous && denial && denial.tool === candidate.tool && denial.inputValueHash === candidate.inputValueHash
         && block.is_error === true && block.is_interrupt !== true && item.is_interrupt !== true && object(item.message)?.is_interrupt !== true
         && typeof block.content === 'string' && block.content.startsWith(`PreToolUse:${candidate.tool} hook error: openground-guard BLOCKED: `)
         && (item.tool_use_result === undefined || typeof item.tool_use_result === 'string')
-      if (!veto) { if (!candidate?.ambiguous) forget(callId); continue }
+      const nativeFailure = candidate?.claimed && !candidate.ambiguous && !candidate.backgroundRequested && candidate.tool === 'Bash'
+        && use?.currentSession && !use.ambiguous && use.tool === candidate.tool && use.inputValueHash === candidate.inputValueHash
+        && singleResult && item.session_id === sessionId && item.parent_tool_use_id === null && item.isSynthetic !== true && object(item.message)?.role === 'user'
+        && block.is_error === true && block.is_interrupt !== true && item.is_interrupt !== true && object(item.message)?.is_interrupt !== true
+        && typeof block.content === 'string' && block.content.startsWith('PreToolUse:Bash hook error: ') && block.content.slice('PreToolUse:Bash hook error: '.length).trim().length > 0
+        && typeof item.tool_use_result === 'string' && item.tool_use_result === `Error: ${block.content}`
+      if (!veto && !nativeFailure) { if (!candidate?.ambiguous) forget(callId); continue }
       try {
         await runtimeOwnerKey(owner)
         const receipt = await readConversationReceipt(scope, candidate.id, owner)
-        if (claimed.get(callId) !== candidate || !candidate.claimed || candidate.ambiguous) continue
+        if (claimed.get(callId) !== candidate || !candidate.claimed || candidate.ambiguous
+          || !veto && (observed.get(callId) !== use || use?.ambiguous !== false)) continue
         if (!receipt || receipt.state !== 'executing') { forget(callId); continue }
         const body = object(receipt.body), actor = receipt.execution
         if (receipt.owner !== owner || receipt.scope !== scope || body?.kind !== 'runtime-tool' || body.provider !== 'claude'
@@ -158,9 +168,11 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
         const current = agentConversationHandles(sessionId)
         if (current.length !== 1 || current[0].runtime !== execution.runtime || current[0].handleId !== execution.handleId)
           throw new Error('The denied tool result belongs to a different actor.')
-        if (claimed.get(callId) !== candidate || !candidate.claimed || candidate.ambiguous) continue
-        await finishConversationReceipt(scope, candidate.id, 'rejected', { confirmed: true, failed: true, denied: true,
-          source: 'sdk-guard-veto', automaticReplay: false, effectsRolledBack: false }, owner)
+        if (claimed.get(callId) !== candidate || !candidate.claimed || candidate.ambiguous
+          || !veto && (observed.get(callId) !== use || use?.ambiguous !== false)) continue
+        await finishConversationReceipt(scope, candidate.id, veto ? 'rejected' : 'delivered', veto
+          ? { confirmed: true, failed: true, denied: true, source: 'sdk-guard-veto', automaticReplay: false, effectsRolledBack: false }
+          : { confirmed: true, failed: true, source: 'sdk-native-pretool-failure', automaticReplay: false, effectsRolledBack: false }, owner)
         recordingFaults.delete(candidate.id)
         forget(callId)
       } catch (error) { recordingFaults.add(candidate.id); throw error }
