@@ -402,6 +402,14 @@ const defaults: SwarmTransitionDeps = {
   send: pushSdkInput,
   ready: async (actor, id) => {
     if (getSdkSession(id)) resumeSdkInputAdmission(id)
+    const currentNative = () => {
+      if (!isTerminalProcessAlive(id)) throw new Error('The target native president exited before accepting the handoff.')
+      const current = getTerminal(id)
+      if (!current || current.id !== id || current.cwd !== actor.cwd || current.agentSessionId !== actor.launch?.operationId
+        || current.deskLabel !== (actor.role === 'supply' ? SUPPLY_DESK_LABEL : MANAGER_DESK_LABEL))
+        throw new Error('The target native president changed before confirming its handoff.')
+      return current
+    }
     const deadline = Date.now() + 120_000
     for (;;) {
       const session = getSdkSession(id)
@@ -409,11 +417,17 @@ const defaults: SwarmTransitionDeps = {
         if (session.closed || session.reaped || session.status === 'failed' || session.status === 'quota-parked') throw new Error('The target AI could not begin its handoff. Its recorded state was retained.')
         if (session.status === 'working' || session.status === 'waiting') return
       } else {
-        if (!isTerminalProcessAlive(id)) throw new Error('The target native president exited before accepting the handoff.')
-        const current = getTerminal(id)
-        if (current && noticeHoldReason(getTerminalScreen(id)) === null) {
-          const transcript = await nativeTranscript({ ...actor, id, runtime: 'pty', agentSessionId: current.agentSessionId })
-          if (transcript.some((line) => line.kind === 'text')) return
+        const current = currentNative()
+        if (noticeHoldReason(getTerminalScreen(id)) === null) {
+          let transcript: SwarmTransitionActor['transcript'] | undefined
+          try { transcript = await nativeTranscript({ ...actor, id, runtime: 'pty', agentSessionId: current.agentSessionId }) }
+          catch (error) {
+            // A fresh CLI can paint its prompt before creating its JSONL. Only
+            // absence is startup waiting; unreadable or unfinished history holds.
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          }
+          currentNative()
+          if (transcript?.some((line) => line.kind === 'text') && noticeHoldReason(getTerminalScreen(id)) === null) return
         }
       }
       if (Date.now() >= deadline) throw new Error('The target AI has not confirmed startup yet; retry recovery without launching a duplicate.')
