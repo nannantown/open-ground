@@ -1,29 +1,31 @@
 # President conversation and iPhone compatibility
 
-Decision: 2026-11-05. The owner's requirement is an ordinary, always-visible
-conversation input for the president, with no metered inference API.
+Decision updated: 2026-11-09. The president uses one input surface for its
+runtime, with no metered inference API.
 
 ## Input and execution are separate
 
-`SwarmSupplyPane` owns one persistent `SwarmSeatSay` below either conversation
-surface. ChatGPT presidents keep their structured SDK-style transport. Claude
-presidents keep the user's unmodified Claude Code CLI in a PTY. The Claude
-terminal remains available for direct input and native Remote Control.
+`SwarmSupplyPane` shows `SwarmSeatSay` only for SDK conversation surfaces.
+Claude PTY presidents use the terminal's native input without a second
+composer below it. Native Remote Control remains available. This is selected
+by the actual runtime, rather than by the provider name.
 
-The input stays open after sending and does not take focus when mounted. Enter
+The SDK input stays open after sending and does not take focus when mounted. Enter
 sends, Shift+Enter inserts a newline, and an active IME composition does not
-send. Starting, stopping and exited seats cannot receive a new message; their
-unsent draft is owned by the project's `SwarmModule`, so it survives the pane
-being unmounted by desk reconciliation or bar folding. It is not written to
-disk, and does not imply recovery after quitting the app.
+send. Starting, stopping and exited SDK seats cannot receive a new message.
+The project's `SwarmModule` owns the draft and existing durable draft controller,
+so hiding the composer during a switch to PTY does not discard or send it.
+Returning to SDK restores the draft. Pending instruction status and cancellation
+remain available on the PTY surface without an extra input field.
 
 On narrow windows the president seat fits the space left beside the folded
 seat rail. Its minimum width must not force the input and send control outside
 that space. Wider windows retain the seat resizing and horizontal row layout.
 
-Claude's conversation input uses the same guarded owner lane as the iPhone,
-not raw terminal keystrokes and not the manager-reply `/supply/say` route. Busy
-desks, menus and existing terminal drafts hold the message for later delivery.
+Desktop Claude PTY input goes directly to the native terminal. iPhone messages
+and other application-delivered owner input still use the guarded owner lane,
+not the manager-reply `/supply/say` route. Busy desks, menus and existing terminal
+drafts hold these queued messages for later delivery.
 Acceptance into this queue is distinct from confirmed delivery. The existing
 owner-lane plain-text normalization and length limit apply.
 

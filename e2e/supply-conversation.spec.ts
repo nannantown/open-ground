@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { createAndImportProject } from './fixtures/helpers'
 
-// The provider-independent president UI (Claude PTY / ChatGPT SDK). Every desk/input response is a
+// Native Claude uses its terminal input; the ChatGPT SDK keeps the chat composer. Every desk/input response is a
 // browser fixture: no agent, real subscription, settings write or send is used.
 test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'wait' }) })
 
@@ -11,6 +11,7 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
     const id = 'sdk-fixture-president'
     const runtime = provider === 'claude' ? 'pty' : 'sdk'
     const sent: string[] = []
+    const composerInput: string[] = []
     const nativeInput: string[] = []
     await page.setViewportSize({ width, height: 900 })
     await page.route('**/api/experiments', route => route.fulfill({ json: {
@@ -42,10 +43,8 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
       await route.fulfill(sent.length === 1 ? { status: 409, json: { error: 'fixture refusal' } } : { json: { ok: true, queued: true } })
     })
     await page.route('**/api/swarm/supply/input', async route => {
-      expect(runtime).toBe('pty')
-      expect(route.request().postDataJSON()).toMatchObject({ path: project.path, terminalId: id })
-      sent.push(route.request().postDataJSON().text)
-      await route.fulfill(sent.length === 1 ? { status: 409, json: { error: 'fixture refusal' } } : { json: { queued: true, delivered: false } })
+      composerInput.push(route.request().postDataJSON().text)
+      await route.fulfill({ status: 409, json: { error: 'native terminal uses its own input' } })
     })
     await page.route(`**/api/terminal/${id}`, route => route.fulfill({ json: {
       id, cwd: project.path, cols: 80, rows: 24, tag: 'claude', agentSessionId: 'fixture-claude', createdAt: Date.now(), finishedAt: null,
@@ -73,6 +72,22 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
     const seat = page.locator('[data-seat-key="supply"]')
     const box = seat.getByRole('textbox', { name: '社長に話す' })
     const send = seat.getByRole('button', { name: '送る', exact: true })
+    if (runtime === 'pty') {
+      await connected
+      await expect(seat.locator('.xterm-screen')).toBeVisible()
+      await expect(box).toHaveCount(0)
+      await expect(send).toHaveCount(0)
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+      await expect(toggle).toBeFocused()
+      await seat.locator('.xterm-screen').click()
+      await page.keyboard.type('native')
+      await page.keyboard.press('Enter')
+      await expect.poll(() => nativeInput.join('')).toBe('native\r')
+      expect(sent).toEqual([])
+      expect(composerInput).toEqual([])
+      await page.screenshot({ path: info.outputPath(`${provider}-${theme}-${width}.png`), fullPage: true, animations: 'disabled' })
+      return
+    }
     const measurements: unknown[] = []
     const measure = async (stage: string) => measurements.push(await box.evaluate((el, stage) => {
       const seat = el.closest('[data-seat-key]')!
@@ -98,11 +113,6 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     await expect(toggle).toBeFocused()
     await measure('mounted')
-    if (runtime === 'pty') {
-      await seat.locator('.xterm-screen').click()
-      await page.keyboard.type('native')
-      await expect.poll(() => nativeInput.join('')).toBe('native')
-    }
     await expect(send).toBeDisabled()
     expect(await send.evaluate(el => ({ opacity: getComputedStyle(el).opacity, cursor: getComputedStyle(el).cursor }))).toEqual({ opacity: '0.4', cursor: 'not-allowed' })
     await box.fill('一行目')
@@ -145,7 +155,7 @@ for (const provider of ['claude', 'chatgpt']) for (const width of [1280, 390]) f
     await expect(box).toBeFocused()
     await expect(send).toBeDisabled()
     expect(sent).toEqual(['一行目\n二行目', '一行目\n二行目'])
-    await expect(seat.getByRole('status')).toContainText(runtime === 'pty' ? '社長が空いたら届きます。' : '届けました。')
+    await expect(seat.getByRole('status')).toContainText('届けました。')
     await box.fill('次の相談も続けて話せます。')
     await measure('new-draft-before-collapse')
     await assertComposerFits()

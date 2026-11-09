@@ -1,17 +1,17 @@
-// The owner's president seat: SDK transcript or legacy Claude terminal, with
-// one conversation composer shared across runtime/session changes. The parent
-// owns launch/stop/restart. SDK input uses its session route; Claude PTY input
-// uses the guarded president queue and retains the native terminal controls.
+// The owner's president seat: SDK chat or a native Claude terminal.
+// SDK chat uses its own composer; Claude PTY keeps its native input. The parent
+// owns launch/stop/restart and preserves drafts across runtime/session changes.
 
 import { useEffect, useState } from 'react'
 import { Power, Trash2 } from 'lucide-react'
 import { ClaudeTerminalPane } from '@/components/canvas/ClaudeTerminalPane'
+import { ConversationDraftStatus } from '@/components/assistant/ConversationDraftStatus'
 import { BEACON_SPRITE } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
 import { usePresidentControl } from '@/lib/usePresidentControl'
 import type { WorkerStatus } from './SwarmWorkerPane'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
-import { SwarmSeatFeed, SwarmSeatSay, sayToWorker, sayToPresidentPty, type SeatDraftState } from './SwarmSeatTalk'
+import { SwarmSeatFeed, SwarmSeatSay, sayToWorker, type SeatDraftState } from './SwarmSeatTalk'
 
 interface Props {
   projectPath: string
@@ -145,18 +145,16 @@ export const SwarmSupplyPane = ({ projectPath, terminalId, runtime = 'pty', sdkS
           onRestart={onRestart}
         />
       </div>}
-      {/* One composer across runtime/handle changes, so an unsent draft stays. */}
-      <SwarmSeatSay alwaysOpen draftState={draftState} presidentPath={projectPath} appearance={runtime === 'sdk' ? 'chat' : 'compact'}
-        turnControl={runtime === 'sdk' && control.available ? {
+      {runtime === 'sdk' && sdkSessionId ? <SwarmSeatSay alwaysOpen draftState={draftState} presidentPath={projectPath} appearance="chat"
+        turnControl={control.available ? {
           running: !!control.status?.activeTurnId || control.pending, canStop: control.canStop, stopping: control.busy, pending: control.pending,
           onStop: () => { void control.stop() },
           error: control.error ? t('projectPanel.swarm.chat.stopFailed') : control.queued ? t('projectPanel.swarm.chat.stopQueued') : null,
         } : undefined}
-        disabled={busy || (status !== 'waiting' && status !== 'working') || !(runtime === 'sdk' ? sdkSessionId : terminalId)}
+        disabled={busy || (status !== 'waiting' && status !== 'working')}
         placeholder={t('projectPanel.swarm.say.presidentPlaceholder')}
-        onSend={(text, send) => runtime === 'sdk' && sdkSessionId
-          ? sayToWorker(projectPath, sdkSessionId, text, t, send)
-          : sayToPresidentPty(projectPath, terminalId, text, t, send)} />
+        onSend={(text, send) => sayToWorker(projectPath, sdkSessionId, text, t, send)} />
+        : <ConversationDraftStatus draft={draftState?.durable} presidentPath={projectPath} />}
     </div>
   )
 }

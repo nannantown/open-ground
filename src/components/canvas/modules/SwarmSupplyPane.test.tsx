@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
-import type { ReactNode } from 'react'
+import { cleanup, fireEvent, render, renderHook, waitFor } from '@testing-library/react'
+import { useState, type ReactNode } from 'react'
+import { useConversationDraft } from '@/lib/useConversationDraft'
 import { SwarmSupplyPane, callStamp } from './SwarmSupplyPane'
 // t: the real substitution shape, keyed by the current language.
 const h = vi.hoisted(() => ({ lang: 'en' }))
@@ -68,32 +69,54 @@ it('keeps an unsent president draft across exit and SDK restart, refusing input 
   expect(box).toBeInTheDocument()
 })
 
-it('keeps the same draft across PTY and SDK desks, posting the live PTY address through the president queue', async () => {
+it('hides the extra composer on PTY and restores its parent-owned SDK draft without sending it', async () => {
   const posts: { url: string; body: unknown }[] = []
   vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
     if (init?.method === 'POST') posts.push({ url, body: JSON.parse(init.body as string) })
     return Promise.resolve(new Response(JSON.stringify(init?.method === 'POST' ? { queued: true, delivered: false } : { entries: [] })))
   })
-  const props = { projectPath: '/p one', terminalId: 'pty-old', runtime: 'pty' as const, status: 'waiting' as const,
+  const props = { projectPath: '/p one', status: 'waiting' as const,
     busy: false, onExit: vi.fn(), onStop: vi.fn(), onRestart: vi.fn() }
-  const view = render(<SwarmSupplyPane {...props} />)
+  const Harness = ({ runtime, terminalId = '', sdkSessionId, busy = false }: { runtime: 'pty' | 'sdk'; terminalId?: string; sdkSessionId?: string; busy?: boolean }) => {
+    const [value, onChange] = useState('')
+    const [pending, onPendingChange] = useState(false)
+    return <SwarmSupplyPane {...props} runtime={runtime} terminalId={terminalId} sdkSessionId={sdkSessionId} busy={busy}
+      draftState={{ value, onChange, pending, onPendingChange }} />
+  }
+  const view = render(<Harness runtime="sdk" sdkSessionId="sdk-old" />)
   const box = view.getByRole('textbox')
-  expect(view.getByText('real terminal surface')).toBeInTheDocument()
   fireEvent.change(box, { target: { value: 'どちらの接続でも残す' } })
-  view.rerender(<SwarmSupplyPane {...props} runtime="sdk" terminalId="" sdkSessionId="sdk-swapped" />)
-  expect(box).toBeInTheDocument()
-  expect(box).toHaveValue('どちらの接続でも残す')
-  view.rerender(<SwarmSupplyPane {...props} terminalId="pty-new" busy />)
-  expect(box).toBeDisabled()
-  fireEvent.keyDown(box, { key: 'Enter' })
+  view.rerender(<Harness runtime="pty" terminalId="pty-new" />)
+  expect(view.getByText('real terminal surface')).toBeInTheDocument()
+  expect(view.queryByRole('textbox')).toBeNull()
+  expect(view.queryByRole('button', { name: 'projectPanel.swarm.say.send' })).toBeNull()
   expect(posts).toHaveLength(0)
-  view.rerender(<SwarmSupplyPane {...props} terminalId="pty-new" />)
-  expect(box).toBeInTheDocument()
-  expect(box).toHaveValue('どちらの接続でも残す')
-  fireEvent.keyDown(box, { key: 'Enter' })
-  await view.findByText('projectPanel.swarm.say.queued')
-  expect(posts).toEqual([{ url: '/api/swarm/supply/input', body: { path: '/p one', terminalId: 'pty-new', text: 'どちらの接続でも残す' } }])
-  expect(box).toHaveValue('')
+  view.rerender(<Harness runtime="sdk" sdkSessionId="sdk-new" busy />)
+  const restored = view.getByRole('textbox')
+  expect(restored).toHaveValue('どちらの接続でも残す')
+  expect(restored).toBeDisabled()
+  fireEvent.keyDown(restored, { key: 'Enter' })
+  expect(posts).toHaveLength(0)
+  view.rerender(<Harness runtime="sdk" sdkSessionId="sdk-new" />)
+  fireEvent.keyDown(restored, { key: 'Enter' })
+  await waitFor(() => expect(posts).toEqual([{ url: '/api/sdk-session/sdk-new/input?path=%2Fp%20one', body: { text: 'どちらの接続でも残す' } }]))
+  await waitFor(() => expect(restored).toHaveValue(''))
+})
+
+it('keeps pending instruction cancellation available on PTY without a second input', async () => {
+  vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ entries: [] }))))
+  const base = renderHook(() => useConversationDraft('project-fixture')).result.current
+  const cancelReceipt = vi.fn(async () => {})
+  const durable = { ...base, enabled: true, cancelReceipt, receipts: [{ id: 'queued-input', state: 'queued', text: '確認待ちの指示' }] }
+  const view = render(<SwarmSupplyPane projectPath="/p one" terminalId="pty-new" runtime="pty" status="waiting" busy={false}
+    onExit={vi.fn()} onStop={vi.fn()} onRestart={vi.fn()}
+    draftState={{ value: '', onChange: vi.fn(), pending: false, onPendingChange: vi.fn(), durable }} />)
+  expect(view.getByText('real terminal surface')).toBeInTheDocument()
+  expect(view.queryByRole('textbox')).toBeNull()
+  expect(view.queryByRole('button', { name: 'projectPanel.swarm.say.send' })).toBeNull()
+  fireEvent.click(view.getByText('settings.assistant.queued'))
+  fireEvent.click(view.getByRole('button', { name: 'settings.draft.cancelInput' }))
+  await waitFor(() => expect(cancelReceipt).toHaveBeenCalledExactlyOnceWith('/p one', 'queued-input', 'settings.draft.cancelNote'))
 })
 
 it('shows durable project call notes next to the real terminal using its registered path', async () => {

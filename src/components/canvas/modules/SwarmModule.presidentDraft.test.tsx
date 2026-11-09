@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import type { ProjectMeta } from '@/lib/types'
 
-const h = vi.hoisted(() => ({ desk: { runtime: 'pty', handleId: 'pty-old', agentSessionId: 'conversation-old' } as {
+const h = vi.hoisted(() => ({ desk: { runtime: 'sdk', handleId: 'sdk-old', agentSessionId: 'conversation-old' } as {
   runtime: 'pty' | 'sdk'; handleId: string; agentSessionId: string
 } | null }))
 vi.mock('@/i18n/I18nContext', () => ({ useT: () => ({ t: (key: string) => key, lang: 'en' }) }))
@@ -27,17 +27,17 @@ import { supplyStorageKey } from './useSupplyDesk'
 const project: ProjectMeta = { id: 'president-draft-a', name: 'a', path: '/fixture/a', description: '',
   lastModified: '2026-11-05T00:00:00.000Z', hasGit: true, openTaskCount: 0, totalTaskCount: 0 }
 const placeholder = 'projectPanel.swarm.say.presidentPlaceholder'
-const storeDesk = () => localStorage.setItem(supplyStorageKey(project.id), JSON.stringify({ terminalId: 'pty-old',
+const storeDesk = () => localStorage.setItem(supplyStorageKey(project.id), JSON.stringify({ terminalId: '', runtime: 'sdk', sdkSessionId: 'sdk-old',
   agentSessionId: 'conversation-old', startedAt: '2026-11-05T00:00:00.000Z' }))
 
 beforeEach(() => {
-  h.desk = { runtime: 'pty', handleId: 'pty-old', agentSessionId: 'conversation-old' }
+  h.desk = { runtime: 'sdk', handleId: 'sdk-old', agentSessionId: 'conversation-old' }
   storeDesk()
   vi.stubGlobal('fetch', vi.fn((input: unknown) => {
     const url = String(input)
     // Both projects' already-live desks are in the global status poll before
     // switching projects, so pending is the only possible send blocker.
-    const body = url.includes('/api/terminal/active') ? { claude: ['pty-old', 'sdk-new', 'sdk-project-b'].map(id => ({ id, status: 'waiting' })) }
+    const body = url.includes('/api/terminal/active') ? { claude: ['sdk-old', 'pty-old', 'sdk-new', 'sdk-project-b'].map(id => ({ id, status: 'waiting' })) }
       : url.includes('/tail?') ? { frames: [], reaped: false }
       : { entries: [], escalations: [] }
     return Promise.resolve(new Response(JSON.stringify(body)))
@@ -60,13 +60,30 @@ describe('president draft ownership above the real seat lifecycle', () => {
     const view = render(<SwarmModule project={project} />)
     const box = await view.findByRole('textbox', { name: placeholder })
     fireEvent.change(box, { target: { value: 'keep through exit' } })
+    h.desk = { runtime: 'pty', handleId: 'pty-old', agentSessionId: 'native-conversation' }
+    view.rerender(<SwarmModule project={project} />)
+    const nativeExit = await view.findByRole('button', { name: 'fixture desk exit' })
+    expect(view.queryByRole('textbox', { name: placeholder })).toBeNull()
     h.desk = null
-    fireEvent.click(view.getByRole('button', { name: 'fixture desk exit' }))
+    fireEvent.click(nativeExit)
     await waitFor(() => expect(view.queryByRole('textbox', { name: placeholder })).toBeNull())
     expect(localStorage.getItem(supplyStorageKey(project.id))).toBeNull()
     h.desk = { runtime: 'sdk', handleId: 'sdk-new', agentSessionId: 'conversation-new' }
     view.rerender(<SwarmModule project={project} />)
     expect(await view.findByRole('textbox', { name: placeholder })).toHaveValue('keep through exit')
+  })
+
+  it('keeps the parent draft while the native PTY hides the SDK composer and restores it on SDK adoption', async () => {
+    const view = render(<SwarmModule project={project} />)
+    fireEvent.change(await view.findByRole('textbox', { name: placeholder }), { target: { value: 'continue after native terminal' } })
+    h.desk = { runtime: 'pty', handleId: 'pty-old', agentSessionId: 'native-conversation' }
+    view.rerender(<SwarmModule project={project} />)
+    await view.findByRole('button', { name: 'fixture desk exit' })
+    expect(view.queryByRole('textbox', { name: placeholder })).toBeNull()
+    expect(view.queryByRole('button', { name: 'projectPanel.swarm.say.send' })).toBeNull()
+    h.desk = { runtime: 'sdk', handleId: 'sdk-new', agentSessionId: 'conversation-new' }
+    view.rerender(<SwarmModule project={project} />)
+    expect(await view.findByRole('textbox', { name: placeholder })).toHaveValue('continue after native terminal')
   })
 
   it('never shows one project’s draft in another project', async () => {
@@ -82,10 +99,10 @@ describe('president draft ownership above the real seat lifecycle', () => {
     let finish!: (response: Response) => void
     const sent: string[] = []
     vi.stubGlobal('fetch', vi.fn((input: unknown, init?: RequestInit) => {
-      if (String(input) !== '/api/swarm/supply/input') return fetchFixture(input as RequestInfo, init)
+      if (String(input) !== '/api/sdk-session/sdk-old/input?path=%2Ffixture%2Fa') return fetchFixture(input as RequestInfo, init)
       sent.push(JSON.parse(String(init?.body)).text)
       return sent.length === 1 ? new Promise<Response>(resolve => { finish = resolve })
-        : Promise.resolve(new Response(JSON.stringify({ queued: true, delivered: false })))
+        : Promise.resolve(new Response(JSON.stringify({ ok: true, queued: true })))
     }))
     const view = render(<SwarmModule project={project} />)
     const box = await view.findByRole('textbox', { name: placeholder })
@@ -99,7 +116,7 @@ describe('president draft ownership above the real seat lifecycle', () => {
     expect(view.getByRole('button', { name: 'projectPanel.swarm.say.send' })).toBeDisabled()
     fireEvent.keyDown(remounted, { key: 'Enter' })
     expect(sent).toEqual(['the accepted sentence'])
-    await act(async () => { finish(new Response(JSON.stringify({ queued: true, delivered: false }))) })
+    await act(async () => { finish(new Response(JSON.stringify({ ok: true, queued: true }))) })
     expect(remounted).not.toHaveAttribute('readonly')
     expect(remounted).toHaveValue('')
     fireEvent.change(remounted, { target: { value: 'the next sentence' } })
@@ -110,7 +127,7 @@ describe('president draft ownership above the real seat lifecycle', () => {
   it('does not block another project while the first project’s send is pending', async () => {
     const fetchFixture = globalThis.fetch
     let finish!: (response: Response) => void
-    vi.stubGlobal('fetch', vi.fn((input: unknown, init?: RequestInit) => String(input) === '/api/swarm/supply/input'
+    vi.stubGlobal('fetch', vi.fn((input: unknown, init?: RequestInit) => String(input) === '/api/sdk-session/sdk-old/input?path=%2Ffixture%2Fa'
       ? new Promise<Response>(resolve => { finish = resolve })
       : fetchFixture(input as RequestInfo, init)))
     const view = render(<SwarmModule project={project} />)
@@ -123,7 +140,7 @@ describe('president draft ownership above the real seat lifecycle', () => {
     expect(other).not.toHaveAttribute('readonly')
     fireEvent.change(other, { target: { value: 'project b stays editable' } })
     expect(view.getByRole('button', { name: 'projectPanel.swarm.say.send' })).toBeEnabled()
-    await act(async () => { finish(new Response(JSON.stringify({ queued: true, delivered: false }))) })
+    await act(async () => { finish(new Response(JSON.stringify({ ok: true, queued: true }))) })
     expect(other).toHaveValue('project b stays editable')
   })
 })
