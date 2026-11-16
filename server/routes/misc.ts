@@ -27,6 +27,9 @@ import {
   isLockdownEnabled,
 } from '@/lib/server/store'
 import { resolveExperiments } from '@/lib/server/experiments'
+import { readAgentImage, readKeptAgentImage } from '@/lib/server/agentPhoto'
+import { hostIsLocal } from '../loopback'
+import { ASSISTANT_PHOTO_TYPES } from '@/lib/server/assistantMemory'
 import { scanProjects } from '@/lib/server/scan'
 import {
   acknowledgeIntegrityReport,
@@ -197,6 +200,27 @@ export const miscRoutes = new Hono()
   // and reports that as an ABSENT count rather than a zero, so one bad
   // tasks.json cannot darken every other card on the canvas.
   .get('/api/ground/lamps', async (c) => c.json(await readGroundLamps()))
+  // An image an agent put in its reply (`![…](/path)`, src/lib/agentImage.ts),
+  // as the Mac chat shows it: only what readAgentImage allows (registered
+  // projects / OPEN GROUND data without secrets / the temp folder), only a
+  // JPEG / PNG / GIF / WebP by its own bytes, at most 5 MB.
+  .get('/api/agent-image', async (c) => {
+    // It reads files: a rebound DNS name (a foreign page on a loopback address)
+    // gets nothing, though GETs are otherwise let through (app.ts).
+    const host = c.req.header('host')
+    if (host !== undefined && !hostIsLocal(host)) return c.json({ error: 'invalid host' }, 403)
+    // With project + key: the copy that line got the first time (agentPhoto.ts).
+    const path = c.req.query('path') ?? '', project = c.req.query('project'), key = c.req.query('key')
+    const r = project && key && key.length <= 300 ? await readKeptAgentImage(path, `mac:${key}`, project) : await readAgentImage(path)
+    if ('error' in r) return c.json({ error: 'not found' }, 404)
+    return c.body(new Uint8Array(r.bytes), 200, {
+      'content-type': ASSISTANT_PHOTO_TYPES[r.ext],
+      'cache-control': 'private, no-cache',
+      'x-content-type-options': 'nosniff',
+      // Another site's <img> cannot even learn whether an image is there.
+      'cross-origin-resource-policy': 'same-origin',
+    })
+  })
   // --- POST /api/ground/seen ------------------------------------------------
   // The owner has this project open with the agent-team bar (the president's
   // seat) unfolded — stamp it, which clears the card's question / review marks

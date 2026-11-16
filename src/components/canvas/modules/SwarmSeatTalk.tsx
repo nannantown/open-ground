@@ -186,7 +186,7 @@ export const SwarmSeatFeed = ({
         {items.length === 0 && !publicLines?.length ? (
           <p className="text-ink-faint">{t('projectPanel.swarm.feed.empty')}</p>
         ) : (
-          conversation ? <PresidentChatTranscript items={items} publicLines={publicLines} /> : items.map((it) =>
+          conversation ? <PresidentChatTranscript items={items} publicLines={publicLines} kept={{ project: projectPath, session: sdkSessionId }} /> : items.map((it) =>
             it.kind === 'tool' ? <ToolCard key={it.seq} item={it} /> : <EventRow key={it.seq} ev={it.ev} t={t} />,
           )
         )}

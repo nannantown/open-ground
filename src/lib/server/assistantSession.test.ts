@@ -143,7 +143,7 @@ describe('what the claude behind the assistant may touch', () => {
     expect(o.allowedTools).toEqual(ASSISTANT_TOOL_NAMES)
     expect(Object.keys(o.mcpServers as object)).toEqual(['og'])
     expect(o).not.toHaveProperty('allowDangerouslySkipPermissions')
-    expect(Object.keys(sdk.toolDefs).sort()).toEqual(['list_dir', 'make_card', 'read_file', 'read_link', 'search', 'status', 'tell_commander', 'tell_president', 'think_deeper', 'web_search', 'withdraw'])
+    expect(Object.keys(sdk.toolDefs).sort()).toEqual(['list_dir', 'make_card', 'read_file', 'read_link', 'search', 'send_image', 'status', 'tell_commander', 'tell_president', 'think_deeper', 'web_search', 'withdraw'])
   })
 
   it('the gate lets only its own tools through — anything else, or a malformed call, is denied', async () => {

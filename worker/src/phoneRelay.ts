@@ -22,7 +22,9 @@
 // The assistant's frames (`assistant`, `assistant-history`, `assistant-proposals`
 // and the phone's `assistant-proposal` button press — sealed on v2 like
 // every content frame) are passed on and never kept: its records live on the
-// Mac, the phone fetches them there.
+// Mac, the phone fetches them there. So are agent images: the phone's
+// `photo-get` (counted like any phone frame) and the Mac's sealed `photo` parts
+// that answer it (docs/PHONE_LINK.md "Agent images").
 import { DurableObject } from 'cloudflare:workers'
 import {
   MinuteCounter,
@@ -252,7 +254,7 @@ export class OgPhoneRelay extends DurableObject<Env> {
     if (role === 'phone') {
       if (
         !f ||
-        (f.type !== 'say' && f.type !== 'select' && f.type !== 'projects' && f.type !== 'push-token' && f.type !== 'assistant-history' && f.type !== 'call-note' && f.type !== 'assistant-proposal' && f.type !== 'photo-part' && f.type !== 'conversation-control')
+        (f.type !== 'say' && f.type !== 'select' && f.type !== 'projects' && f.type !== 'push-token' && f.type !== 'assistant-history' && f.type !== 'call-note' && f.type !== 'assistant-proposal' && f.type !== 'photo-part' && f.type !== 'photo-get' && f.type !== 'conversation-control')
       ) {
         this.send(ws, { type: 'error', code: 'bad-frame' })
         return
@@ -298,7 +300,7 @@ export class OgPhoneRelay extends DurableObject<Env> {
     } else if (f.type === 'projects') {
       await this.ctx.storage.put('projects', f)
       this.toPhones(f)
-    } else if (f.type === 'ack' || f.type === 'assistant' || f.type === 'assistant-history' || f.type === 'assistant-proposals') {
+    } else if (f.type === 'ack' || f.type === 'assistant' || f.type === 'assistant-history' || f.type === 'assistant-proposals' || f.type === 'photo') {
       this.toPhones(f)
     } else if (f.type === 'push-ready') {
       await this.ctx.storage.put('push', f.on === true)

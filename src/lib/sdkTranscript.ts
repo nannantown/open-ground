@@ -19,6 +19,7 @@
 //    ever fed to innerHTML).
 
 import type { SdkEvent } from './server/sdkEvents'
+import { AGENT_IMAGES_MAX, imageRefOf } from './agentImage'
 
 export interface SdkFrame {
   seq: number
@@ -76,6 +77,9 @@ export type MarkdownBlock =
   | { kind: 'heading'; level: 1 | 2 | 3; text: string }
   | { kind: 'code'; lang: string; text: string }
   | { kind: 'list'; ordered: boolean; items: string[] }
+  /** A line that is only `![alt](/absolute/path)` — an image the agent sent
+   *  (agentImage.ts; the phone reads the same lines the same way). */
+  | { kind: 'image'; alt: string; path: string }
 
 /** Split worker prose into renderable blocks. Inline styling (bold / `code`)
  *  is left IN the text — the renderer handles it per-line; this only decides
@@ -84,9 +88,18 @@ export type MarkdownBlock =
 export const parseMarkdownBlocks = (text: string): MarkdownBlock[] => {
   const blocks: MarkdownBlock[] = []
   const lines = text.split('\n')
+  let images = 0
+  const imageAt = (l: string) => (images < AGENT_IMAGES_MAX ? imageRefOf(l) : null)
   let i = 0
   while (i < lines.length) {
     const line = lines[i]
+    const image = imageAt(line)
+    if (image) {
+      images++
+      blocks.push({ kind: 'image', ...image })
+      i++
+      continue
+    }
     const fence = /^```(\w*)\s*$/.exec(line)
     if (fence) {
       const body: string[] = []
@@ -131,6 +144,7 @@ export const parseMarkdownBlocks = (text: string): MarkdownBlock[] => {
     while (
       i < lines.length &&
       lines[i].trim() &&
+      !imageAt(lines[i]) &&
       !/^```/.test(lines[i]) &&
       !/^#{1,3}\s/.test(lines[i]) &&
       !/^\s*[-*•]\s/.test(lines[i]) &&

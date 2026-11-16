@@ -16,7 +16,7 @@ const turn = z.object({
   acceptedAt: z.number(), updatedAt: z.number(), state: z.enum(['queued', 'running', 'completed', 'failed', 'interrupted', 'cancelled', 'uncertain']),
   attemptId: id.optional(), profile: profile.optional(), accountKey: z.string().max(256).optional(),
   ownerKey: z.string().max(128).optional(),
-  result: z.object({ reply: z.string().max(30_000), speak: z.string().max(30_000).optional(), said: z.boolean().optional(), proposals: z.array(z.record(z.string(), z.unknown())).max(6).optional(), entries: z.array(z.record(z.string(), z.unknown())).max(2).optional() }).optional(),
+  result: z.object({ reply: z.string().max(30_000), speak: z.string().max(30_000).optional(), said: z.boolean().optional(), proposals: z.array(z.record(z.string(), z.unknown())).max(6).optional(), photos: z.array(z.string().max(240)).max(4).optional(), entries: z.array(z.record(z.string(), z.unknown())).max(2).optional() }).optional(),
   error: z.string().max(500).optional(), draftClientId: id.optional(), draftRevision: z.number().int().nonnegative().optional(),
 })
 const proposal = z.object({ id, kind: z.enum(['card', 'commander', 'president']), projectId: id, project: z.string().max(1000),

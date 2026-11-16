@@ -168,3 +168,36 @@ describe('a photo in the assistant input', () => {
     expect(sent).toEqual([{ text: 'やあ', stream: true, clientId: expect.any(String) }])
   })
 })
+
+describe('an image the assistant sends (docs/CHAT_SPEC.md §9.4)', () => {
+  it('shows under its words, folded and unfolded; a click opens it large and Esc closes it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('/log')) return json({ entries: log, name: 'ノノ', look: 'moss' })
+      if (url.endsWith('/say')) {
+        log = [{ id: 'o', at: 2, who: 'owner', text: 'スクショ送って' }, { id: 'r', at: 3, who: 'assistant', text: 'どうぞ', photo: '2026-11-16-sent.png' }]
+        return json({ reply: 'どうぞ', photos: ['2026-11-16-sent.png'] })
+      }
+      return json({}, 404)
+    }))
+    await open()
+    fireEvent.change(screen.getByRole('textbox', { name: 'misc.assistant.message' }), { target: { value: 'スクショ送って' } })
+    fireEvent.click(send())
+    expect(await screen.findByText('どうぞ')).toBeTruthy()
+    const shown = () => screen.getByTestId('assistant-talk').querySelector('img[src="/api/phone-link/assistant/photo/2026-11-16-sent.png"]')
+    expect(shown()).not.toBeNull()
+    // The other view (folded ⇄ unfolded — the window remembers which) shows it too.
+    fireEvent.click(screen.getByRole('button', { name: /misc\.assistant\.(showTalk|hideTalk)/ }))
+    await waitFor(() => expect(shown()).not.toBeNull())
+    if (screen.queryByRole('button', { name: 'misc.assistant.showTalk' })) {
+      fireEvent.click(screen.getByRole('button', { name: 'misc.assistant.showTalk' }))
+      await waitFor(() => expect(shown()).not.toBeNull())
+    }
+    fireEvent.click(shown()!.closest('button')!)
+    const large = () => document.body.querySelectorAll('img[src="/api/phone-link/assistant/photo/2026-11-16-sent.png"]')
+    expect(large()).toHaveLength(2)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(large()).toHaveLength(1))
+    // The window itself stays open.
+    expect(screen.getByTestId('assistant-talk')).toBeTruthy()
+  })
+})

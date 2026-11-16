@@ -36,7 +36,9 @@ const PresidentToolActivity = ({ item }: { item: ToolItem }) => {
 
 /** The president uses the same structured words for either provider. */
 export interface PresidentPublicLine { kind: 'input' | 'text'; text: string }
-export const PresidentChatTranscript = ({ items, publicLines }: { items: SdkRenderItem[]; publicLines?: PresidentPublicLine[] }) => {
+/** `kept`: the project and this conversation's id — each reply's image lines
+ *  then show the copy they got the first time (docs/CHAT_SPEC.md §9.4). */
+export const PresidentChatTranscript = ({ items, publicLines, kept }: { items: SdkRenderItem[]; publicLines?: PresidentPublicLine[]; kept?: { project: string; session: string } }) => {
   const { t } = useT()
   // Public history owns the words. Tail frames add recent activities only;
   // capture may precede the pool event, so never merge text from both sources.
@@ -55,7 +57,7 @@ export const PresidentChatTranscript = ({ items, publicLines }: { items: SdkRend
     </div>
     if (ev.kind === 'text') return <article key={key} aria-label={t('projectPanel.swarm.chat.reply')} data-chat-role="assistant"
       className="min-w-0 [overflow-wrap:anywhere] [&_pre]:max-w-full">
-      <ProseBlocks text={ev.text} subagent={ev.fromSubagent} />
+      <ProseBlocks text={ev.text} subagent={ev.fromSubagent} kept={kept && { project: kept.project, key: `${kept.session}:${key}` }} />
     </article>
     if (ev.kind === 'turn_end') return <div key={key} className="h-1" aria-hidden />
     if (ev.kind === 'thinking' || ev.kind === 'status') return null

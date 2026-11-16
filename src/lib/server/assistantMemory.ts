@@ -213,6 +213,9 @@ export const saveAssistantPhoto = async (bytes: Uint8Array, ext: AssistantPhotoE
   } catch (error) { if (created) await rm(path, { force: true }).catch(() => {}); throw error }
 }
 
+/** A name shaped like a kept photo's (`<UTC day>-<id>.<ext>`, nothing else). */
+export const isAssistantPhotoName = (name: string): boolean => PHOTO_FILE.test(name)
+
 /** A kept photo's path, or null for any name this module did not make. */
 export const assistantPhotoPath = (name: string): string | null => (PHOTO_FILE.test(name) ? join(photoDir(), name) : null)
 

@@ -169,10 +169,20 @@ try {
   check('assistant-proposal reaches the Mac', await until(() => mac2.frames.some((f) => f.type === 'assistant-proposal' && f.box === 'DDDD')))
   mac2.ws.send(JSON.stringify({ type: 'assistant-proposals', box: 'EEEE' }))
   check('assistant-proposals reach the phone', await until(() => phone.frames.some((f) => f.type === 'assistant-proposals' && f.box === 'EEEE')))
+  // An agent image (docs/PHONE_LINK.md "Agent images"): the phone's photo-get
+  // reaches the Mac; the Mac's sealed `photo` part — as large as the Mac makes
+  // one (24 KB of image, base64'd twice ≈ 44 KB) — reaches the phone unchanged.
+  phone.ws.send(JSON.stringify({ type: 'photo-get', box: 'GGGG' }))
+  check('photo-get reaches the Mac', await until(() => mac2.frames.some((f) => f.type === 'photo-get' && f.box === 'GGGG')))
+  const photoBox = crypto.randomBytes(32_900).toString('base64')
+  const photoPart = JSON.stringify({ type: 'photo', box: photoBox })
+  check('a full-size photo part fits the Mac frame cap', photoPart.length > 43_000 && photoPart.length <= 64 * 1024)
+  mac2.ws.send(photoPart)
+  check('a photo part reaches the phone unchanged', await until(() => phone.frames.some((f) => f.type === 'photo' && f.box === photoBox && !('seq' in f))))
   const replay = await open('phone', room, phoneKey, '?after=0')
   await until(() => replay.frames.some((f) => f.type === 'event' && f.seq === 3))
   await new Promise((r) => setTimeout(r, 300))
-  check('...and are never kept for catch-up', !replay.frames.some((f) => f.type === 'assistant' || f.type === 'assistant-history' || f.type === 'assistant-proposals' || f.type === 'conversation-control'))
+  check('...and are never kept for catch-up', !replay.frames.some((f) => f.type === 'assistant' || f.type === 'assistant-history' || f.type === 'assistant-proposals' || f.type === 'conversation-control' || f.type === 'photo'))
   replay.ws.close()
 
   // Waking the phone (Push to Talk): the Mac says it can push, then the phone

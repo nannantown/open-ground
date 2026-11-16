@@ -56,8 +56,11 @@ import {
   writeIdleTried,
   unfolded,
   writeAssistantMemory,
+  saveAssistantPhoto,
   type AssistantEntry,
 } from './assistantMemory'
+import { readAgentImage } from './agentPhoto'
+import { AGENT_IMAGES_MAX } from '../agentImage'
 import type { relayToCommander } from './commanderRelay'
 import type { PresidentReply, relayToPresident } from './presidentRelay'
 import { ASSISTANT_RELAY_PREFIX } from './supplyNotice'
@@ -397,6 +400,9 @@ export interface AssistantAnswer {
   proposals?: ShownProposal[]
   /** `speak` already went out sentence by sentence (onSay) — not to be read again. */
   said?: true
+  /** Images it sent with the answer (send_image): kept photo names, in order.
+   *  The first rides on the answer's log line, each further one on a line of its own. */
+  photos?: string[]
 }
 
 export interface AssistantDeps {
@@ -493,6 +499,7 @@ export const buildSessionPrompt = (o: {
     '- read_file / list_dir / search: read anything in the registered projects and OPEN GROUND\'s data (read only; secrets are refused). Use absolute paths.',
     '- read_link: when the owner gives a link (a YouTube video, a web page) and asks about it, read it — a video comes as its subtitles — and answer from what it says. When it could not be read (no subtitles, page unreachable, channel not set up on this computer), say so plainly; never guess the content. Only links the owner wrote can be read. Reddit threads, GitHub repos and issues and feeds are read the same way. X cannot be read by you: say so.',
     '- web_search: when the owner asks what is out there, what people say (Reddit), news, or for GitHub projects, search — one short line of words — and answer from what comes back, with where it came from. A channel not set up on this computer: say so plainly.',
+    '- send_image: when the owner asks you to send or show them a picture (「画像を送って」「スクショ見せて」) — a screenshot, a design, a photo in a project — find the file (list_dir / search) and send it: it appears with your answer on their phone and screen. Then say in a few words what it is; never write its path. Nothing found: say so plainly.',
     '- status: every project\'s state right now. Use it when asked how things are going — the snapshot below gets old.',
     '- make_card / tell_commander / tell_president only PROPOSE: the app shows the owner the card or the message in a frame on the screen, and only the owner\'s button there carries it out. Nothing anyone says or types does — a yes to you (「うん」「いいよ」「出して」) does nothing: then say in a few words to press the button on the screen (「画面のボタンで決めてね」). Never say a proposal is done; an "App note" before the owner\'s line tells you what their buttons did.',
     '- make_card: when the owner asks for work in a project and both the project and what is wanted are clear, propose it AT ONCE — fill the goal and the done conditions from their words (no tests mentioned: "tests green" for code changes); never ask them for a goal or details you can write yourself, the frame lets them check it. Only when the project or the request itself is unclear, ask ONE short question back. A short card: title, goal and done conditions, each one line — it must fit in a small frame (about 10 lines of 20 Japanese characters, the project and title included), so keep each line short. Bigger work is for the project\'s president: say so instead.',
@@ -686,7 +693,7 @@ let waitLine = 0
 
 /** The tools of one turn. Reading tools read (assistantTools.ts decides what);
  *  make_card / tell_commander / tell_president only PROPOSE (assistantProposals.ts). */
-const turnTools = (ctx: ProposeContext & { digest: () => Promise<string> }, made: ShownProposal[], look: (lines?: typeof WAIT_LINES) => void, links: ReadonlySet<string>): AssistantToolSet => {
+const turnTools = (ctx: ProposeContext & { digest: () => Promise<string> }, made: ShownProposal[], look: (lines?: typeof WAIT_LINES) => void, links: ReadonlySet<string>, photos: string[] = []): AssistantToolSet => {
   const propose = async (p: Promise<ShownProposal | string>) => {
     const r = await p
     if (typeof r === 'string') return { text: r }
@@ -700,6 +707,14 @@ const turnTools = (ctx: ProposeContext & { digest: () => Promise<string> }, made
     status: async () => (look(), { text: await ctx.digest() }),
     read_link: (a) => (look(), readLinkForAssistant(a.url, links, {}, { feed: a.feed })),
     web_search: (a) => (look(), webSearchForAssistant(a.where, a.query)),
+    // Kept now with the owner's photos; goes out with the answer (phoneLink / the window).
+    send_image: async (a) => {
+      if (photos.length >= AGENT_IMAGES_MAX) return { text: `Already ${AGENT_IMAGES_MAX} images with this answer; no more.` }
+      const r = await readAgentImage(a.path)
+      if ('error' in r) return { text: r.error }
+      photos.push(await saveAssistantPhoto(r.bytes, r.ext))
+      return { text: 'It goes to the owner with your answer (shown under your words). Say in a few words what it is; never write the path.' }
+    },
     make_card: (a) => propose(proposeCard(a, ctx)),
     tell_commander: (a) => propose(proposeMessage(a.projectId, a.message, ctx)),
     tell_president: (a) => propose(proposePresident(a.projectId, a.message, ctx)),
@@ -717,7 +732,7 @@ const turnTools = (ctx: ProposeContext & { digest: () => Promise<string> }, made
  *  from the web (its words are not the owner's). Reading files stays. */
 const retellOnly = (t: AssistantToolSet): AssistantToolSet => {
   const refuse = async () => ({ text: 'Not in this turn: only tell the owner what the president said.' })
-  return { ...t, make_card: refuse, tell_commander: refuse, tell_president: refuse, withdraw: refuse, think_deeper: refuse, read_link: refuse, web_search: refuse }
+  return { ...t, make_card: refuse, tell_commander: refuse, tell_president: refuse, withdraw: refuse, think_deeper: refuse, read_link: refuse, web_search: refuse, send_image: refuse }
 }
 
 /** A note for the model's next line, dropped if the talk is deleted before then. */
@@ -739,7 +754,7 @@ const note = (text: string) => {
  *  started later from the log does not know it was cut — fine at 15 min idle. */
 export const hushAssistantReading = async (heard: unknown): Promise<boolean> => {
   if (typeof heard !== 'string' || heard.length > 200) return false
-  const last = assistantEntriesFor(await readAssistantLog()).findLast((e) => e.who === 'assistant')
+  const last = assistantEntriesFor(await readAssistantLog()).findLast((e) => e.who === 'assistant' && !!e.text)
   if (!last || !spokenPart(last.text).startsWith(heard)) return false
   note(
     heard
@@ -785,15 +800,23 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
   let logged = false
   /** Which model wrote the answer (the session tells), kept in the log next to it. */
   let answeredBy = ''
-  const log = async (reply: string) => {
+  const log = async (reply: string, photos: string[] = []) => {
     const ownerAt = now.getTime()
     logged = true
     // The owner deleted the talk while this line ran: it is not written back.
     if (assistantEpoch() !== epoch) return
-    const answer = { at: Math.max(ownerAt, clock().getTime()), who: 'assistant' as const, text: reply, via, ...(answeredBy ? { model: answeredBy } : {}) }
+    const [photo0, ...more] = photos
+    const answer = { at: Math.max(ownerAt, clock().getTime()), who: 'assistant' as const, text: reply, via, ...(photo0 ? { photo: photo0 } : {}), ...(answeredBy ? { model: answeredBy } : {}) }
+    // Each further image: a line of its own, right after the answer (a ms
+    // later each, so the log's time order keeps them there). Written straight
+    // to the log, never into the turn's receipt: a receipt holds at most the
+    // line and its answer, and an older build that reads more refuses the
+    // whole runtime file (assistantRuntimeStore `entries` max 2).
+    const extra = more.map((photo, i) => ({ at: answer.at + 1 + i, who: 'assistant' as const, text: '', via, photo }))
     const entries = deps.app ? [{ ...answer, ...deps.app.entry }] : [{ at: ownerAt, who: 'owner' as const, text, via, ...ownerMeta }, answer]
     if (deps.journalEntries) deps.journalEntries(entries)
     else await appendAssistantEntries(entries)
+    if (extra.length) await appendAssistantEntries(extra)
   }
   try {
     const p = await plan(now)
@@ -804,6 +827,7 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
     let snapshot: Promise<{ text: string; projects: Known[] }> | null = null
     const projects = async () => (await (snapshot ??= digest())).projects
     const made: ShownProposal[] = []
+    const photos: string[] = []
     const ctx = { lang, now: now.getTime(), via, projects, digest: async () => (await digest()).text,
       ...(deps.runtimeReceipt ? { originTurnId: deps.runtimeReceipt.id, isCurrent: () => assistantTurnCurrent(deps.runtimeReceipt!) } : {}),
       ...(deps.clientId && !deps.app ? { about: deps.clientId } : {}) }
@@ -859,7 +883,7 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
           looked = true
           const lines = pick(lang, set)
           deps.onInterim?.(lines[waitLine++ % lines.length])
-        }, deps.app ? new Set() : ownerLinks([...p.fold, ...p.recent].filter((e) => e.who === 'owner').map((e) => e.text).concat(text))),
+        }, deps.app ? new Set() : ownerLinks([...p.fold, ...p.recent].filter((e) => e.who === 'owner').map((e) => e.text).concat(text)), photos),
       )),
       onStream,
       onModel: (m) => (answeredBy = m),
@@ -871,18 +895,20 @@ const turn = async (text: string, deps: AssistantDeps): Promise<AssistantAnswer>
     // the frames on the screen say what would happen.
     const told = made.length ? proposedLine(made.map((x) => x.kind), lang) : ''
     const words = said.trim() || told
-    if (!words) throw failure('assistant-failed', 'unusable', lang)
+    // Only an image is an answer too (the owner asked for a picture).
+    if (!words && !photos.length) throw failure('assistant-failed', 'unusable', lang)
     const reply = words.length > REPLY_MAX ? words.slice(0, REPLY_MAX - 1) + '…' : words
-    await log(reply)
+    await log(reply, photos)
+    const shown = photos.length ? { photos } : {}
     // Old talk due for the memo is folded in the background — never on this line's clock.
     if (p.mustRewrite && (deps.run || !deps.model)) void foldIdleAssistantTalk({ ...(deps.run ? { run: deps.run } : {}), now: clock }).catch(() => {})
     const speak = told || spokenPart(reply)
     // Streamed pieces stand for `speak`: what they have not said yet goes out now.
     if (sent && !tooled && !told) {
       if (speak.startsWith(sent) && speak.length > sent.length) deps.onSay?.(speak.slice(sent.length))
-      return { reply, speak, said: true }
+      return { reply, speak, said: true, ...shown }
     }
-    return { reply, speak, ...(made.length ? { proposals: made } : {}) }
+    return { reply, speak, ...(made.length ? { proposals: made } : {}), ...shown }
   } catch (e) {
     // A line that got no answer is still part of the talk (the phone showed it):
     // logged, so the next answer can see it. Never under work mode.
@@ -1098,7 +1124,7 @@ const execution = (): InboxExecution => {
   return inboxExecutions.get(home)!
 }
 const answerOf = (r: AssistantTurnReceipt): AssistantAnswer => ({ reply: r.result!.reply, speak: r.result!.speak,
-  ...(r.result!.said ? { said: true } : {}), ...(r.result!.proposals ? { proposals: r.result!.proposals as unknown as ShownProposal[] } : {}) })
+  ...(r.result!.said ? { said: true } : {}), ...(r.result!.proposals ? { proposals: r.result!.proposals as unknown as ShownProposal[] } : {}), ...(r.result!.photos?.length ? { photos: r.result!.photos } : {}) })
 const inputAccountKey = async (deps: AssistantDeps): Promise<string | undefined> => {
   if (deps.model || deps.run || await selectedRuntime('assistant') !== 'chatgpt') return undefined
   try { return await getChatGptAccountKey() }

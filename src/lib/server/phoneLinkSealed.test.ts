@@ -3,12 +3,12 @@
 // the REAL Mac end sends, and asserts what the relay ends up holding and what
 // reaches the desk — never "a function was called".
 import { describe, it, expect, vi, beforeEach, afterAll, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync, statSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHmac, hkdfSync, randomBytes } from 'node:crypto'
 
-const h = vi.hoisted(() => ({ file: '', files: {} as Record<string, string>, projects: [] as { id: string; path: string; displayName?: string }[], offAt: undefined as number | undefined }))
+const h = vi.hoisted(() => ({ file: '', files: {} as Record<string, string>, projects: [] as { id: string; path: string; displayName?: string }[], offAt: undefined as number | undefined, dataDir: '', unlocked: true, role: null as string | null, extra: {} as Record<string, unknown> }))
 vi.mock('cloudflare:workers', () => ({
   DurableObject: class {
     constructor(
@@ -17,9 +17,11 @@ vi.mock('cloudflare:workers', () => ({
     ) {}
   },
 }))
-vi.mock('./swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => true }))
-vi.mock('./roles', () => ({ getCustomTabRole: async () => null }))
-vi.mock('./store', async (orig) => ({ ...(await orig<typeof import('./store')>()), getSettings: async () => ({ projects: h.projects, lockdownOffAt: h.offAt }) }))
+vi.mock('./swarmGate', () => ({ isSwarmLocalOwnerUnlocked: async () => h.unlocked }))
+vi.mock('./roles', () => ({ getCustomTabRole: async () => h.role }))
+vi.mock('./store', async (orig) => ({ ...(await orig<typeof import('./store')>()), getSettings: async () => ({ projects: h.projects, lockdownOffAt: h.offAt, ...h.extra }) }))
+vi.mock('./projectDataPath', async (orig) => ({ ...(await orig<typeof import('./projectDataPath')>()), projectDataDir: async () => h.dataDir, projectUUIDFromPath: async () => 'uuid-p1' }))
+vi.mock('./runtimeOwner', async (orig) => ({ ...(await orig<typeof import('./runtimeOwner')>()), runtimeOwnerKey: async () => 'owner-test' }))
 vi.mock('./swarmSessions', () => ({ readSwarmSessions: async (p: string) => ({ supply: { cwd: p, sessionId: 's1' } }) }))
 vi.mock('./transcript', () => ({ sessionJsonlPath: (cwd: string) => h.files[cwd] ?? h.file }))
 vi.mock('./terminal', async (orig) => ({ ...(await orig<typeof import('./terminal')>()), listLiveDesksIn: () => [{ id: 'd1' }] }))
@@ -33,7 +35,7 @@ vi.mock('./swarmSupplyRuntime', async (orig) => ({
 // loaded by a path tsc does not follow, so only vitest (with the mock above) runs it.
 const RELAY_MODULE = '../../../worker/src/phoneRelay'
 type Room = { webSocketMessage(ws: unknown, msg: string): Promise<void> }
-import { __testConnect, outerFrame, handleRelayFrame, LEGACY_V1_UNTIL, pairingCode, pumpTranscript, readPhoneLinkConfig, SEALED_MAX_AGE_MS, startPhoneLink, stopPhoneLink, tick, __testLinkState, type PhoneLinkConfig } from './phoneLink'
+import { __testConnect, outerFrame, handleRelayFrame, phoneEventsFromLine, withPhoto, LEGACY_V1_UNTIL, pairingCode, pumpTranscript, readPhoneLinkConfig, SEALED_MAX_AGE_MS, startPhoneLink, stopPhoneLink, tick, __testLinkState, type PhoneLinkConfig } from './phoneLink'
 import { e2eKeyOf, open, seal } from './phoneLinkSeal'
 import { __resetProposals as localResetProposals, listProposals as localListProposals, proposeMessage as localProposeMessage } from './assistantProposals'
 import { withLocalClaudeAssistantScope, assistantRuntimeDirectory } from './assistantRuntimeStore'
@@ -71,6 +73,10 @@ beforeEach(() => {
   h.files = {}
   h.offAt = undefined
   h.file = join(dir, `${Math.random()}.jsonl`)
+  h.dataDir = join(dir, `data-${Math.random()}`)
+  h.unlocked = true
+  h.role = null
+  h.extra = {}
   writeFileSync(h.file, '')
 })
 afterEach(() => {
@@ -879,18 +885,110 @@ describe('sealed photos (docs/PHONE_LINK.md "Photos")', () => {
     expect(opened(wire).at(-1)?.inner).toMatchObject({ type: 'ack', id: 'lost', state: 'rejected', reason: 'photo-incomplete' })
   })
 
-  it('what the Mac cannot take is refused, never half-done: not an image, a president, a v1 pairing', async () => {
+  it('a photo to a president is kept as a file and its path typed into the desk, which Reads it', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const a = asked()
+    const photo = jpeg(9000)
+    const toPresident = phonePhoto('pres', photo).map((s) => JSON.parse(s))
+    toPresident[toPresident.length - 1] = phoneSays({ type: 'say', id: 'pres', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 2 })
+    const desk = fakeDesk()
+    for (const f of toPresident) await handleRelayFrame(st, f, { assistant: a.assistant, supply: desk.deps })
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'pres', state: 'replying' })
+    expect(desk.writes).toHaveLength(1)
+    const m = /^見て \[image: (.+\/phone-photos\/[0-9a-f]{64}\.jpg)\]$/.exec(desk.writes[0])
+    expect(m).not.toBeNull()
+    expect(m![1].startsWith(h.dataDir)).toBe(true)
+    expect(readFileSync(m![1]).equals(photo)).toBe(true)
+    expect(statSync(m![1]).mode & 0o777).toBe(0o600)
+    expect(a.got).toEqual([])
+    // The echo of that line in the transcript carries the owner's words only.
+    expect(phoneEventsFromLine(JSON.stringify({ type: 'user', message: { content: desk.writes[0] } }))).toMatchObject([{ kind: 'owner', text: '見て', photoAttached: true }])
+    // A photo alone (no words) is still a line; one that is not an image is refused and never typed.
+    const alone = phonePhoto('alone', jpeg(5000), '').map((s) => JSON.parse(s))
+    alone[alone.length - 1] = phoneSays({ type: 'say', id: 'alone', ts: Date.now(), text: '', projectId: 'p1', photoParts: 1 })
+    for (const f of alone) await handleRelayFrame(st, f, { supply: desk.deps })
+    expect(desk.writes.at(-1)).toMatch(/^\[image: .+\.jpg\]$/)
+    expect(phoneEventsFromLine(JSON.stringify({ type: 'user', message: { content: desk.writes.at(-1) } }))).toMatchObject([{ kind: 'owner', text: '', photoAttached: true }])
+    const bad = phonePhoto('pbad', Buffer.from('not an image at all')).map((s) => JSON.parse(s))
+    bad[bad.length - 1] = phoneSays({ type: 'say', id: 'pbad', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 1 })
+    for (const f of bad) await handleRelayFrame(st, f, { supply: desk.deps })
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'pbad', state: 'rejected', reason: 'photo-bad' })
+    // Too large: a part over 12 KB makes the photo bad, nothing typed.
+    await handleRelayFrame(st, phoneSays({ type: 'photo-part', id: 'pbig-p0', sayId: 'pbig', part: 0, parts: 1, data: jpeg(12 * 1024 + 1).toString('base64'), ts: Date.now() }))
+    await handleRelayFrame(st, phoneSays({ type: 'say', id: 'pbig', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 1 }), { supply: desk.deps })
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'pbig', state: 'rejected', reason: 'photo-bad' })
+    // Missing parts: refused plainly, nothing typed.
+    const [lost0, , lostSay] = phonePhoto('plost', jpeg(9000)).map((s) => JSON.parse(s))
+    await handleRelayFrame(st, lost0)
+    await handleRelayFrame(st, phoneSays({ type: 'say', id: 'plost', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 2 }), { supply: desk.deps, photoWaitMs: 50 })
+    void lostSay
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'plost', state: 'rejected', reason: 'photo-incomplete' })
+    // A part count out of range, and an unknown project.
+    await handleRelayFrame(st, phoneSays({ type: 'say', id: 'pmany', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 65 }), { supply: desk.deps })
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'pmany', state: 'rejected', reason: 'photo-bad' })
+    await handleRelayFrame(st, phoneSays({ type: 'say', id: 'pnone', ts: Date.now(), text: '見て', projectId: 'nope', photoParts: 1 }), { supply: desk.deps })
+    expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'pnone', state: 'rejected', reason: 'no-project' })
+    expect(desk.writes).toHaveLength(2)
+  })
+
+  it('a photo to a president needs no assistant scope: its parts are kept outside it', async () => {
+    // The assistant runs on ChatGPT without the owner's ChatGPT access: the
+    // assistant scope refuses (owner-required), the president is still reachable.
+    h.extra = { assistantProvider: 'chatgpt' }
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const desk = fakeDesk()
+    const frames = phonePhoto('noasst', jpeg(9000)).map((s) => JSON.parse(s))
+    frames[frames.length - 1] = phoneSays({ type: 'say', id: 'noasst', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 2 })
+    for (const f of frames) await handleRelayFrame(st, f, { supply: desk.deps, photoWaitMs: 50 })
+    expect(desk.writes).toHaveLength(1)
+    expect(desk.writes[0]).toMatch(/^見て \[image: .+\.jpg\]$/)
+    expect(opened(wire).some((f) => f.inner?.id === 'noasst' && f.inner?.state === 'rejected')).toBe(false)
+  })
+
+  it('the owner path (durable receipts): a resent photo say is the same receipt, never a conflict, one file', async () => {
+    h.role = 'owner'
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const photo = jpeg(9000)
+    const send = async () => {
+      const frames = phonePhoto('dur', photo).map((s) => JSON.parse(s))
+      frames[frames.length - 1] = phoneSays({ type: 'say', id: 'dur', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 2 })
+      for (const f of frames) await handleRelayFrame(st, f, { photoWaitMs: 50 })
+    }
+    await send()
+    const first = opened(wire).filter((f) => f.inner?.id === 'dur' && f.inner?.type === 'ack')
+    expect(first.at(-1)?.inner?.state).toBe('queued')
+    expect(first.at(-1)?.inner?.receipt?.id).toBe('dur')
+    await send()
+    const acks = opened(wire).filter((f) => f.inner?.id === 'dur' && f.inner?.type === 'ack')
+    expect(acks.map((f) => f.inner?.state)).toEqual(['queued', 'queued'])
+    expect(acks[1].inner?.receipt?.acceptedAt).toBe(acks[0].inner?.receipt?.acceptedAt)
+    expect(readdirSync(join(h.dataDir, 'phone-photos'))).toHaveLength(1)
+    // The resend came with no parts at all (they were taken): still the kept receipt.
+    await handleRelayFrame(st, phoneSays({ type: 'say', id: 'dur', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 2 }), { photoWaitMs: 50 })
+    expect(opened(wire).filter((f) => f.inner?.id === 'dur' && f.inner?.type === 'ack').at(-1)?.inner?.state).toBe('queued')
+  })
+
+  it('work mode drops a president photo at once, never a 30 s wait', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    const desk = fakeDesk()
+    setLockdownCache(true)
+    const t0 = Date.now()
+    await handleRelayFrame(st, phoneSays({ type: 'say', id: 'wm', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 2 }), { supply: desk.deps })
+    expect(Date.now() - t0).toBeLessThan(1000)
+    expect(desk.writes).toEqual([])
+    expect(opened(wire).filter((f) => f.inner?.id === 'wm')).toEqual([])
+  })
+
+  it('what the Mac cannot take is refused, never half-done: not an image, a v1 pairing', async () => {
     const { wire, sock } = macSocket()
     const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
     const a = asked()
     for (const s of phonePhoto('txt', Buffer.from('not an image at all'))) await handleRelayFrame(st, JSON.parse(s), { assistant: a.assistant })
     expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'txt', state: 'rejected', reason: 'photo-bad' })
-    const toPresident = phonePhoto('pres', jpeg(9000)).map((s) => JSON.parse(s))
-    toPresident[toPresident.length - 1] = phoneSays({ type: 'say', id: 'pres', ts: Date.now(), text: '見て', projectId: 'p1', photoParts: 2 })
-    const desk = fakeDesk()
-    for (const f of toPresident) await handleRelayFrame(st, f, { assistant: a.assistant, supply: desk.deps })
-    expect(opened(wire).at(-1)?.inner).toMatchObject({ id: 'pres', state: 'rejected', reason: 'photo-assistant-only' })
-    expect(desk.writes).toEqual([])
     expect(a.got).toEqual([])
     // v1: plain frames, so no photo — its parts are not even kept — and its projects list never offers one.
     const v1 = macSocket()
@@ -902,8 +1000,10 @@ describe('sealed photos (docs/PHONE_LINK.md "Photos")', () => {
     expect(JSON.parse(v1.wire.at(-1)!)).toMatchObject({ id: 'x', state: 'rejected', reason: 'pair-again' })
     await handleRelayFrame(old, { type: 'projects' })
     expect(JSON.parse(v1.wire.at(-1)!).photo).toBeUndefined()
+    expect(JSON.parse(v1.wire.at(-1)!).presidentPhoto).toBeUndefined()
     await handleRelayFrame(st, phoneSays({ type: 'projects', id: 'cap', ts: Date.now() }))
     expect(opened(wire).at(-1)?.inner?.photo).toBe(true)
+    expect(opened(wire).at(-1)?.inner?.presidentPhoto).toBe(true)
     expect(a.got).toEqual([])
   })
 
@@ -978,5 +1078,159 @@ describe('sealed photos (docs/PHONE_LINK.md "Photos")', () => {
     await handleRelayFrame(st, { ...say, type: 'photo-part' }, { assistant: a.assistant })
     expect(wire.length).toBe(n)
     dropAllPhotos()
+  })
+})
+
+describe('agent images to the phone (docs/PHONE_LINK.md "Agent images")', () => {
+  beforeEach(async () => { await clearAssistantLog(); await clearAssistantMemory() })
+  /** A PNG's bytes (what sniffPhoto reads) of `size` bytes. */
+  const png = (size: number) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), randomBytes(size - 8)])
+  const imageFile = (bytes: Buffer, name = `${Math.random()}.png`) => {
+    const p = join(dir, name)
+    writeFileSync(p, bytes)
+    return p
+  }
+  /** The phone asks for `name` through the real relay room; the Mac answers;
+   *  what reaches the phone, opened, plus every Mac frame as it crossed. */
+  const fetchThroughRelay = async (st: ReturnType<typeof __testLinkState>, wire: string[], name: string, deps: Parameters<typeof handleRelayFrame>[2] = {}) => {
+    const room = await relayRoom()
+    // A fresh id each ask, as the phone does (one id is answered once).
+    await room.fromPhone(JSON.stringify(phoneSays({ type: 'photo-get', id: `g${Math.random()}`, ts: Date.now(), name })))
+    expect(room.mac.got).toHaveLength(1)
+    const from = wire.length
+    for (const s of room.mac.got) await handleRelayFrame(st, JSON.parse(s), deps)
+    const sent = wire.slice(from)
+    for (const s of sent) await room.fromMac(s)
+    // Passed on, never kept.
+    expect(Array.from(room.store.keys()).filter((k) => k.startsWith('ev:'))).toEqual([])
+    return { sent, got: opened(room.phone.got).map((f) => f.inner) }
+  }
+  /** The parts put back together the way the phone does: by `part`, whatever the order. */
+  const joined = (parts: Record<string, unknown>[]) =>
+    Buffer.concat([...parts].sort((x, y) => (x.part as number) - (y.part as number)).map((p) => Buffer.from(p.data as string, 'base64')))
+
+  it('a president image line goes as a line of its own carrying a name, never the path; the phone fetches it whole', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState(CFG, sock)
+    const image = png(60_000)
+    const path = imageFile(image)
+    await pumpTranscript(st)
+    appendFileSync(h.file, line({ type: 'assistant', timestamp: '2026-11-16T00:00:00Z', message: { content: [{ type: 'text', text: `できました。\n\n![今の画面](<${path}>)` }] } }))
+    expect(await pumpTranscript(st)).toBe(2)
+    const events = opened(wire).filter((f) => f.type === 'event').map((f) => f.inner)
+    expect(events.map((e) => [e.kind, e.text])).toEqual([['president', 'できました。'], ['president', '']])
+    const name = events[1].photo as string
+    expect(name).toMatch(/^[A-Za-z0-9_-]+-i[0-9a-f]{40}\.png$/) // its project, then its bytes
+    expect(JSON.stringify(events)).not.toContain(dir)
+    expect(wire.join('\n')).not.toContain(dir)
+    const { sent, got } = await fetchThroughRelay(st, wire, name)
+    expect(got.every((f) => f.type === 'photo' && f.name === name && f.parts === 3)).toBe(true)
+    expect(got).toHaveLength(3)
+    expect(joined(got).equals(image)).toBe(true)
+    for (const s of sent) expect(s.length).toBeLessThanOrEqual(64 * 1024)
+  })
+
+  it('an image the president names but the Mac cannot keep (gone, not an image, outside what may be read) is not sent', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState(CFG, sock)
+    const notImage = imageFile(Buffer.from('not an image at all'), 'x.png')
+    await pumpTranscript(st)
+    appendFileSync(h.file, line({ type: 'assistant', message: { content: [{ type: 'text', text: `どうぞ\n![a](${join(dir, 'gone.png')})\n![b](${notImage})\n![c](/etc/hosts)` }] } }))
+    expect(await pumpTranscript(st)).toBe(1)
+    expect(opened(wire).filter((f) => f.type === 'event').map((f) => f.inner.text)).toEqual(['どうぞ'])
+  })
+
+  it('the assistant answer carries its first image; each further image is a line of its own', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState({ ...CFG, assistantDirect: true }, sock)
+    await handleRelayFrame(st, phoneSays({ type: 'say', id: 's1', ts: Date.now(), text: 'スクショ送って', projectId: 'assistant' }), {
+      assistant: async () => ({ reply: 'どうぞ', photos: ['2026-11-16-aaa.png', '2026-11-16-bbb.jpg'] }),
+    })
+    const lines = opened(wire).filter((f) => f.type === 'assistant' && f.inner.kind === 'assistant').map((f) => [f.inner.text, f.inner.photo])
+    expect(lines).toEqual([['どうぞ', '2026-11-16-aaa.png'], ['', '2026-11-16-bbb.jpg']])
+  })
+
+  it('the largest image goes in 64 parts that each fit the relay; one larger is shrunk to fit, or refused when it cannot be', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState(CFG, sock)
+    const name = async (bytes: Buffer) => {
+      await pumpTranscript(st)
+      appendFileSync(h.file, line({ type: 'assistant', message: { content: [{ type: 'text', text: `![x](${imageFile(bytes)})` }] } }))
+      await pumpTranscript(st)
+      return opened(wire).filter((f) => f.type === 'event').at(-1)!.inner.photo as string
+    }
+    const largest = png(64 * 24 * 1024)
+    const full = await fetchThroughRelay(st, wire, await name(largest))
+    expect(full.got).toHaveLength(64)
+    expect(joined(full.got).equals(largest)).toBe(true)
+
+    const over = await name(png(64 * 24 * 1024 + 1))
+    const small = png(30_000)
+    const shrunk = await fetchThroughRelay(st, wire, over, { photoShrink: async () => small })
+    expect(joined(shrunk.got).equals(small)).toBe(true)
+    const refused = await fetchThroughRelay(st, wire, over, { photoShrink: async () => null })
+    expect(refused.got).toEqual([expect.objectContaining({ type: 'photo', name: over, error: 'photo-bad' })])
+    const tooBig = await fetchThroughRelay(st, wire, over, { photoShrink: async () => png(64 * 24 * 1024 + 1) })
+    expect(tooBig.got).toEqual([expect.objectContaining({ error: 'photo-bad' })])
+  })
+
+  it('a name the Mac never made is photo-gone (no path is ever read from it); a v1 pairing gets nothing', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState(CFG, sock)
+    for (const bad of ['../../../etc/hosts', '2026-11-16-x.txt', '2026-11-16-nothere.png']) {
+      const { got } = await fetchThroughRelay(st, wire, bad)
+      expect(got).toEqual([expect.objectContaining({ type: 'photo', error: 'photo-gone' })])
+    }
+    const v1 = macSocket()
+    const st1 = __testLinkState({ ...CFG, v: 1, e2eKey: undefined } as PhoneLinkConfig, v1.sock)
+    await handleRelayFrame(st1, { type: 'photo-get', id: 'g2', ts: Date.now(), name: '2026-11-16-nothere.png' })
+    expect(v1.wire).toEqual([])
+  })
+
+  it('one sealed photo-get played again by the relay, at once or later, is answered once and shrunk once', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState(CFG, sock)
+    await pumpTranscript(st)
+    appendFileSync(h.file, line({ type: 'assistant', message: { content: [{ type: 'text', text: `![x](${imageFile(png(64 * 24 * 1024 + 1))})` }] } }))
+    await pumpTranscript(st)
+    const name = opened(wire).filter((f) => f.type === 'event').at(-1)!.inner.photo as string
+    let shrinks = 0
+    const small = png(60_000)
+    const photoShrink = async () => (shrinks++, await new Promise((r) => setTimeout(r, 20)), small)
+    const ask = JSON.stringify(phoneSays({ type: 'photo-get', id: 'replayed', ts: Date.now(), name }))
+    const from = wire.length
+    await Promise.all(Array.from({ length: 20 }, () => handleRelayFrame(st, JSON.parse(ask), { photoShrink })))
+    for (let i = 0; i < 20; i++) await handleRelayFrame(st, JSON.parse(ask), { photoShrink })
+    const parts = opened(wire.slice(from)).filter((f) => f.type === 'photo')
+    expect(parts).toHaveLength(3) // one answer of 3 parts, not 40
+    expect(joined(parts.map((f) => f.inner)).equals(small)).toBe(true)
+    expect(shrinks).toBe(1)
+    // Different asks for the same big image at once: still one shrink, each answered.
+    const asks = Array.from({ length: 5 }, (_, i) => JSON.parse(JSON.stringify(phoneSays({ type: 'photo-get', id: `fresh${i}`, ts: Date.now(), name }))))
+    const before = wire.length
+    await Promise.all(asks.map((a) => handleRelayFrame(st, a, { photoShrink })))
+    expect(opened(wire.slice(before)).filter((f) => f.type === 'photo')).toHaveLength(15)
+    expect(shrinks).toBe(1)
+  })
+
+  it('a line read again is the image it was the first time: a reused or emptied path changes nothing; v1 gets no image line', async () => {
+    const path = imageFile(png(5000))
+    const ev = { kind: 'president' as const, text: '', image: path }
+    const first = await withPhoto(ev, 'p1:s.jsonl:100:1', PROJECT)
+    expect(first?.photo).toMatch(/\.png$/)
+    writeFileSync(path, png(6000)) // the president took a new shot under the same name
+    expect((await withPhoto(ev, 'p1:s.jsonl:100:1', PROJECT))?.photo).toBe(first?.photo)
+    rmSync(path) // the temp folder was emptied
+    expect((await withPhoto(ev, 'p1:s.jsonl:100:1', PROJECT))?.photo).toBe(first?.photo)
+    expect(await withPhoto(ev, 'p1:s.jsonl:200:0', PROJECT)).toBeNull() // another line naming the gone file
+    expect(await withPhoto({ ...ev, image: imageFile(png(5000)) }, null, PROJECT)).toBeNull()
+    expect(await withPhoto({ kind: 'president', text: 'words' }, null, PROJECT)).toEqual({ kind: 'president', text: 'words' })
+  })
+
+  it('the Mac says it answers photo-get', async () => {
+    const { wire, sock } = macSocket()
+    const st = __testLinkState(CFG, sock)
+    await handleRelayFrame(st, phoneSays({ type: 'projects', id: 'pr1', ts: Date.now() }))
+    expect(opened(wire).find((f) => f.type === 'projects')?.inner).toMatchObject({ photoGet: true })
   })
 })

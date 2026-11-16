@@ -90,8 +90,9 @@ on screen is [C4].
 |---|---|---|---|---|
 | Partner menu **[C3]** | `line.3.horizontal` / `Menu` | メニュー / Menu | opens 「話す相手」 | never (rows disabled during a call) |
 | Call (header **[C2]**) | `phone` / `Phone` | 通話 / Call · 通話に戻る / Back to the call | starts a call, or reopens it | offline and not in a call |
-| Add photo | `plus` / `Plus` | 写真を添付 / Add a photo | menu: 写真を選ぶ / Choose a photo · 画像をペースト / Paste an image | offline. **Hidden** (not disabled) when the partner is a president or the pairing is v1 |
+| Add photo | `plus` / `Plus` | 写真を添付 / Add a photo | menu: 写真を選ぶ / Choose a photo · 画像をペースト / Paste an image | offline. **Hidden** (not disabled) when the pairing is v1, and for a president when the Mac does not send `presidentPhoto` (PHONE_LINK.md "Photos"). The Mac's own president chat has no photo button yet |
 | Remove photo | `xmark` / `X` | 写真を外す / Remove the photo | drops the attached photo | — |
+| Image in the talk | the image itself (no icon) | 大きく見る / View larger | opens it large over everything; a tap on it or around it (Mac: also Esc) closes | not loaded yet (iPhone) |
 | Mic (dictation) | `mic` ⇄ `mic.fill` / `Mic` | 話す / Talk | tap starts listening; tap again puts the words into the field (never sends) | offline, in a call |
 | Send | `arrow.up` / `ArrowUp` | 送信 / Send | sends text and/or photo | empty, offline, waiting for a reply |
 | Call: talk | `mic` ⇄ `arrow.up` / `Mic` ⇄ `ArrowUp` | 話す / Talk · 送信 / Send | first tap opens a turn (and stops the reading); second sends | dialing, muted, ending, earphones just pulled out. Mac: the `ArrowUp` here needs the owner's OK to extend the allow-list to `AssistantCall.tsx` |
@@ -317,6 +318,7 @@ Target words (ja / en). **Bold** in "Today" = differs on that screen today.
 | composer.attach | 写真を添付 | Add a photo | Mac 「**写真を添える**」 |
 | composer.pickPhoto / pastePhoto | 写真を選ぶ / 画像をペースト | Choose a photo / Paste an image | Mac: none |
 | composer.removePhoto | 写真を外す | Remove the photo | Mac 「**写真を取り消す**」 |
+| talk.viewLarger | 大きく見る | View larger | Mac `misc.chatImage.open` (tooltip of an image in the talk) |
 | header.menu **[C3]** | メニュー | Menu | Mac: none |
 | partners.title / search / none / close **[C3]** | 話す相手 / 検索 / 見つかりません / 閉じる | Talk to / Search / No match / Close | Mac: none |
 | partners.inCall **[C3]** | 通話を終えると、相手を切り替えられます | End the call to switch | Mac: none |
@@ -378,9 +380,17 @@ rules but stay in Swift for version 0; they move into the shared file later.
 - Labels printed under the keys: **[C4]**.
 
 ### 9.4 Photos
-- Assistant only, one photo per line, text optional (PHONE_LINK.md "Photos").
+- Assistant and presidents (a president only when the Mac sends `presidentPhoto`, iPhone only for now — the Mac's president chat has no photo button), one photo per line, text optional (PHONE_LINK.md "Photos").
 - Target on both: + opens 写真を選ぶ / 画像をペースト. The Mac also takes ⌘V and a drop onto the window. The iPhone shrinks to a JPEG of at most 384 KB; the Mac keeps its 5 MB limit (§10 A8).
-- In the conversation, the own line shows the photo as a thumbnail (max height 160) above the words. Today the iPhone shows only the word 「写真」 because it keeps no copy, and the Mac never sends an image back (PHONE_LINK.md "Photos"). **(wire)**: the history must carry a small copy.
+- In the conversation, the own line shows the photo as a thumbnail (max height 160) above the words. The iPhone fetches it from the Mac by name (`photo-get`, PHONE_LINK.md "Agent images"); a Mac without `photoGet` still gets the word 「写真」.
+
+**Images an agent sends (2026-11-16, both partners).** The owner asks 「画像を送って」 and the image appears in the thread.
+- Who: the assistant (its `send_image` tool) and a president (a line that is only `![what it is](/path)` in its reply). Up to 4 per reply. The president's 添付 button stays hidden; this is the reply direction only.
+- Where: under the reply's words, left-aligned like a reply, as a thumbnail of max height 160 with radius 10 and a hairline border. It has no bubble and no caption. An image-only reply (no words) is just the image. Each further image is a line of its own, below the first.
+- Tap / click: opens the image large over everything (dark scrim, fit to the screen). A tap on the image or around it closes it; the Mac also closes on Esc. The same applies to the owner's own photo in the talk. Tooltip / accessibility label: 大きく見る / View larger.
+- Not loaded yet (iPhone: still fetching) shows a neutral placeholder of the thumbnail's size. If it cannot be fetched (`photo-gone`, `photo-bad`, offline), it shows the word 「写真」, and a tap tries again. No error text is printed. On the Mac, an image that cannot load shows the browser's place-holder with its words (「写真」, or the president's words for it) at opacity 0.4 with a not-allowed cursor, and does not open large. This is the same in both themes.
+- The Mac shows the president's image in the seat chat (SDK president). A terminal (PTY) president has no chat to show it in: the image line stays text in its terminal, and the phone still gets the image.
+- An image stays the image it was when it first appeared: on both, a line shows the copy the Mac kept the first time. The president later reusing the same file name, or the temp folder being emptied, changes nothing (PHONE_LINK.md "Agent images").
 
 ### 9.5 Proposal frames
 - Shown only with the assistant. A frame holds: the kind label (カード案 / 司令官へ, accent, note size) and the project (muted); the title (name); the body (sub, verbatim); and the buttons, right-aligned: やめる (outline) and 出す / 送信 (filled ink).
@@ -467,7 +477,7 @@ Measured 2026-10-27; screenshots are on the Canvas 「チャットの違い」. 
 | D07 | Talking to presidents | partner sheet, one conversation each | assistant only (president = terminal seat) | C3 |
 | D08 | Name and colour editing | none (shows the Mac's) | Mark button left of the composer | iOS (moves to Settings) |
 | D09 | Dictation | tap / tap, 90 s limit, 「話す」, says 聞き取れませんでした | tap / tap, no limit, 「声で入力」, typing takes over | 新 (§9.2) |
-| D10 | Photos | + → choose / paste; shows only 「写真」 in the talk | button → file; shows the photo | 新 (wire) |
+| D10 | Photos | + → choose / paste; shows only 「写真」 in the talk | button → file; shows the photo | 新 (wire: `photo-get`, 2026-11-16 — both show the photo and an agent's images, tap = large; §9.4) |
 | D11 | Call screen | full screen; 話す · 終了 · 消音; 会話に戻る; ongoing bar; 5-min hang-up | inside the window; スピーカー · 終了 · 消音; closing ends the call | iOS |
 | D12 | 「スピーカー」 | output route, only with earphones | read aloud on / off for the call | iOS (the Mac key goes; per-line stop instead) |
 | D13 | Words printed on controls | names under the call keys; 「タップで入力欄へ」 while listening | tooltip only (owner rule, CLAUDE.md) | C4 |

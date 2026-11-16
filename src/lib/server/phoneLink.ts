@@ -15,11 +15,12 @@
 // Keys live in ~/.openground/phone-link.json (0600). The room is named by the
 // hash of the phone's key, so the relay stores no phone credential at all.
 import { randomBytes, createHash } from 'crypto'
-import { open, readFile, rm, stat } from 'fs/promises'
+import { mkdir, open, readdir, readFile, rm, stat, writeFile } from 'fs/promises'
 import { basename, join } from 'path'
 import WebSocket from 'ws'
 import { atomicWriteJson } from './atomicWrite'
 import { openGroundHome } from './paths'
+import { projectDataDir, projectUUIDFromPath } from './projectDataPath'
 import { getSettings } from './store'
 import { listLiveSupplyDesks, supplyTranscriptFile } from './swarmSupplyRuntime'
 import { promptAuthor } from './groundMarks'
@@ -45,10 +46,12 @@ import { langOf, pick } from './promptLang'
 import { e2eKeyOf, open as openSealed, seal, sealTag } from './phoneLinkSeal'
 import { appendAssistantCall, assistantEntriesFor, readAssistantConfig, readAssistantLog, readAssistantMemory, saveAssistantPhoto, sniffPhoto, type AssistantConfig } from './assistantMemory'
 import { awaitPhoto, dropAllPhotos, dropPhoto, PHOTO_PARTS_MAX, takePhotoPart } from './phonePhoto'
+import { keepAgentImage, photoForPhone, photoFrames, type PhotoShrink } from './agentPhoto'
+import { splitImageRefs } from '../agentImage'
 import { conversationCapabilities, handleConversationControl } from './conversationControl'
 import { hasChatGptAccess } from './chatgptAccess'
 import { acceptPresidentInput, flushPresidentInbox } from './presidentInbox'
-import { onConversationReceipt, publicConversationReceipt } from './conversationReceipts'
+import { onConversationReceipt, publicConversationReceipt, readConversationReceipt } from './conversationReceipts'
 import { runtimeOwnerKey } from './runtimeOwner'
 import { runtimeAdmissionBlocked } from './runtimeTransitionStore'
 import { withAssistantAccessScope } from './phoneAssistant'
@@ -106,6 +109,12 @@ export interface PhoneEvent {
    *  its text keeps the prefix, so a phone that does not know this field still
    *  shows where it came from. */
   via?: 'assistant'
+  /** An owner line that carried a phone photo to a president (its path is cut
+   *  off `text`, which may then be empty). */
+  photoAttached?: true
+  /** Mac-side only: the path of a president's image line (agentImage.ts). Never
+   *  sent — withPhoto turns it into the kept photo's `photo` name. */
+  image?: string
 }
 
 /** A plaintext (v1) pairing stops connecting after this: pair again to get v2. */
@@ -114,8 +123,12 @@ export const LEGACY_V1_UNTIL = Date.parse('2026-11-30T00:00:00Z')
  *  refused (a say is answered `stale`): the relay cannot hold a say and use it later. */
 export const SEALED_MAX_AGE_MS = 5 * 60_000
 /** Content frames sealed on a v2 pairing (control frames stay plain). */
-const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history', 'call-note', 'assistant-proposals', 'assistant-proposal', 'photo-part', 'conversation-control'])
+const SEALED_TYPES = new Set(['say', 'select', 'projects', 'event', 'ack', 'assistant', 'assistant-history', 'call-note', 'assistant-proposals', 'assistant-proposal', 'photo-part', 'photo-get', 'photo', 'conversation-control'])
 
+/** `photo-get` ids remembered at most (fresh ones; the relay cannot mint new ones). */
+const PHOTO_GETS_MAX = 512
+/** `photo-get`s waiting their turn at most (one is answered at a time). */
+const PHOTO_GET_WAIT_MAX = 16
 const EVENT_TEXT_MAX = 8000
 const TAIL_TICK_MS = 1000
 const PROJECTS_EVERY_MS = 15_000
@@ -200,6 +213,30 @@ const texts = (content: unknown): string[] =>
       ? content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text as string)
       : []
 
+/** A phone photo for a president: kept under the project's central data dir
+ *  (never in the repo), 0600, named by its bytes' sha256 — the same photo is
+ *  always the same path, so a resent say is the same line (and the same
+ *  receipt hash). Returns its absolute path. ponytail: photos untouched for 30
+ *  days are swept on the next save — no other cleanup. */
+const PRESIDENT_PHOTO_DAYS = 30
+export const savePresidentPhoto = async (projectPath: string, bytes: Uint8Array, ext: string, now = Date.now()): Promise<string> => {
+  const dir = join(await projectDataDir(projectPath), 'phone-photos')
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  for (const name of await readdir(dir).catch(() => [] as string[])) {
+    const old = await stat(join(dir, name)).then((s) => now - s.mtimeMs > PRESIDENT_PHOTO_DAYS * 86_400_000, () => false)
+    if (old) await rm(join(dir, name), { force: true }).catch(() => {})
+  }
+  const path = join(dir, `${createHash('sha256').update(bytes).digest('hex')}.${ext}`)
+  await writeFile(path, bytes, { mode: 0o600, flag: 'wx' }).catch((e: NodeJS.ErrnoException) => {
+    if (e?.code !== 'EEXIST') throw e
+  })
+  return path
+}
+
+/** The typed line naming a photo: the desk (bypass permissions) Reads the path. */
+export const withPresidentPhoto = (text: string, path: string): string => `${ownerSayLine(text)} [image: ${path}]`.trim()
+const PRESIDENT_PHOTO_TAIL = /\s*\[image: [^\]]*[\\/]phone-photos[\\/][^\]]+\]$/
+
 /** The events one transcript line carries for the owner's ear (oldest first).
  *  Tool calls / results, meta lines, compaction summaries, API errors and
  *  command wrappers carry none. */
@@ -224,10 +261,17 @@ export const phoneEventsFromLine = (line: string): PhoneEvent[] => {
   const at = Number.isFinite(t) ? { at: t } : {}
   if (ev.type === 'assistant') {
     if (ev.isApiErrorMessage) return []
-    return texts(ev.message?.content)
-      .map(clip)
-      .filter(Boolean)
-      .map((text) => ({ kind: 'president' as const, text, ...at }))
+    // An image line becomes a line of its own (no words), right after the words
+    // it stood among — its place (`i`) depends on the text alone, never on
+    // whether the file could be kept, so a resend gives every event the same cur.
+    return texts(ev.message?.content).flatMap((t) => {
+      const { text, paths } = splitImageRefs(t)
+      const words = clip(text)
+      return [
+        ...(words ? [{ kind: 'president' as const, text: words, ...at }] : []),
+        ...paths.map((image) => ({ kind: 'president' as const, text: '', image, ...at })),
+      ]
+    })
   }
   const queued = ev.type === 'attachment' && ev.attachment?.type === 'queued_command'
   if (ev.type !== 'user' && !queued) return []
@@ -235,9 +279,26 @@ export const phoneEventsFromLine = (line: string): PhoneEvent[] => {
   const raw = (queued ? texts(ev.attachment?.prompt) : texts(ev.message?.content)).join('\n').trim()
   if (!raw) return []
   if (raw.startsWith(ASSISTANT_RELAY_PREFIX)) return [{ kind: 'owner', text: clip(ASSISTANT_RELAY_PREFIX + supplyLineBody(raw)), via: 'assistant', ...at }]
-  if (promptAuthor(raw) === 'owner') return [{ kind: 'owner', text: clip(raw), ...at }]
+  if (promptAuthor(raw) === 'owner') {
+    // The photo's file path is for the desk, not the owner's thread.
+    const words = raw.replace(PRESIDENT_PHOTO_TAIL, '')
+    return [{ kind: 'owner', text: clip(words), ...(words !== raw ? { photoAttached: true as const } : {}), ...at }]
+  }
   const kind = raw.startsWith(SUPPLY_NOTICE_PREFIX) ? 'notice' : raw.startsWith(SUPPLY_REPLY_PREFIX) ? 'commander' : null
   return kind ? [{ kind, text: clip(supplyLineBody(raw)), ...at }] : []
+}
+
+/** An event as the phone gets it: a president's image line goes as its kept
+ *  photo's name (agentPhoto.ts), never its path; null = the file could not be
+ *  kept (gone, not an image, not readable) — that line is not sent. `key` = the
+ *  line's transcript position (it keeps the copy it got first); null = a v1
+ *  pairing, which gets no image lines (docs/PHONE_LINK.md "Agent images"). */
+export const withPhoto = async (ev: PhoneEvent, key: string | null, projectPath: string): Promise<(Omit<PhoneEvent, 'image'> & { photo?: string }) | null> => {
+  if (ev.image === undefined) return ev
+  if (key === null) return null
+  const { image, ...rest } = ev
+  const kept = await keepAgentImage(image, `phone:${key}`, projectPath)
+  return 'name' in kept ? { ...rest, photo: kept.name } : null
 }
 
 // ── projects ────────────────────────────────────────────────────────────────
@@ -263,6 +324,11 @@ const listProjects = async (): Promise<(PhoneProject & { path: string })[]> => {
 
 interface LinkState {
   cfg: PhoneLinkConfig
+  /** `photo-get` ids answered within SEALED_MAX_AGE_MS (id → when): a sealed
+   *  request the relay plays again is answered once (docs/PHONE_LINK.md "Agent images"). */
+  photoGets?: Map<string, number>
+  /** `photo-get`s are answered one at a time; this many may wait at most. */
+  photoQueue?: { chain: Promise<void>; waiting: number }
   ws: WebSocket | null
   stopped: boolean
   backoff: number
@@ -336,6 +402,8 @@ export interface PhoneLinkDeps {
   assistant?: (text: string, photo?: string, onStart?: () => void) => Promise<AssistantAnswer>
   /** How long a say waits for its photo's missing parts (tests). */
   photoWaitMs?: number
+  /** Shrinks an image too large for the phone (tests; default macOS sips). */
+  photoShrink?: PhotoShrink
   /** Start the assistant's session ahead of a line — passed only by the live
    *  link (connect), so a test's frame never starts a real claude. */
   warm?: () => Promise<void>
@@ -446,7 +514,9 @@ const sendProjects = async (st: LinkState, force = false): Promise<void> => {
     selected: chosen?.id ?? null,
     // `photo`: this Mac puts a phone's `photo-part`s together (docs/PHONE_LINK.md "Photos").
     // `presidentTalk`: `assistant-history` with `talk: true` returns a president's talk.
-    ...(st.cfg.v === 2 ? { callNote: true, photo: true, presidentTalk: true } : {}),
+    // `presidentPhoto`: a say to a president may carry a photo too.
+    // `photoGet`: a line's `photo` is fetched with `photo-get` (docs/PHONE_LINK.md "Agent images").
+    ...(st.cfg.v === 2 ? { callNote: true, photo: true, presidentTalk: true, presidentPhoto: true, photoGet: true } : {}),
     projects: [assistant, ...all.map(({ id, name, desk }) => ({ id, name, desk }))],
   }
   const body = JSON.stringify(frame)
@@ -694,8 +764,9 @@ const presidentTalk = async (st: LinkState, p: { id: string; path: string }): Pr
     const events = phoneEventsFromLine(buf.subarray(at, nl).toString('utf8'))
     at = nl + 1
     for (let i = 0; i < events.length; i++) {
-      const ev = events[i]
-      if ((ev.at ?? 0) <= quiet) continue
+      if ((events[i].at ?? 0) <= quiet) continue
+      const ev = await withPhoto(events[i], `${fid}:${o}:${i}`, p.path)
+      if (!ev) continue
       const cur = `${fid}:${o}:${i}`
       let id: string | undefined
       if (ev.kind === 'owner') {
@@ -858,7 +929,12 @@ const assistantSay = async (st: LinkState, id: string | undefined, text: string,
   if (completedReplay) { st.says.delete(hold); return }
   ack('delivered', { projectId: ASSISTANT_ID, heard: true })
   // `speak`: the part to read aloud (one or two sentences); `text` is all of it.
-  const sent = sendAssistant(st, assistantTalk(st, 'assistant', { text: a.reply, ...(a.speak ? { speak: a.speak } : {}), at: Date.now() }), deps)
+  // Images it sent (send_image): the first with the words, each further one a
+  // line of its own — as in the log (docs/PHONE_LINK.md "Agent images").
+  const [photo0, ...morePhotos] = a.photos ?? []
+  const at = Date.now()
+  const sent = sendAssistant(st, assistantTalk(st, 'assistant', { text: a.reply, ...(a.speak ? { speak: a.speak } : {}), ...(photo0 ? { photo: photo0 } : {}), at }), deps)
+  for (const p of morePhotos) sendAssistant(st, assistantTalk(st, 'assistant', { text: '', photo: p, at }), deps)
   if (sent) live('replied')
   st.says.delete(hold)
   if (sent) owePush(st, deps)
@@ -984,37 +1060,86 @@ const handlePhoneFrameInScope = async (st: LinkState, f: Record<string, unknown>
     }
     return
   }
+  if (f.type === 'photo-get') {
+    // Sealed only (v2), like everything said. The image goes in `photo` parts
+    // under the request's id; a closed socket loses them (the phone asks again).
+    if (st.cfg.v !== 2 || st.retired || isLockdownEnabledSync() || id === undefined) return
+    const name = typeof f.name === 'string' ? f.name.slice(0, 200) : ''
+    // One at a time; past PHOTO_GET_WAIT_MAX waiting, the ask is dropped (the
+    // phone's 30 s run out and a tap asks again).
+    const q = (st.photoQueue ??= { chain: Promise.resolve(), waiting: 0 })
+    if (q.waiting >= PHOTO_GET_WAIT_MAX) return
+    q.waiting++
+    const run = q.chain.then(async () => {
+      if (st.retired || isLockdownEnabledSync()) return
+      const got = await photoForPhone(name, deps.photoShrink)
+      if (typeof got === 'string') return void send(st, { type: 'photo', id, name, error: got })
+      for (const part of photoFrames(id, name, got)) if (!send(st, part)) return
+    }).finally(() => void q.waiting--)
+    q.chain = run.catch(() => {})
+    return run
+  }
   if (f.type === 'photo-part') {
     // Sealed only (v2): on v1 the parts would cross the relay readable.
     if (st.cfg.v === 2 && !st.retired && !isLockdownEnabledSync()) takePhotoPart(f)
     return
   }
   if (f.type !== 'say') return
-  const text = typeof f.text === 'string' ? f.text : ''
+  let text = typeof f.text === 'string' ? f.text : ''
   if (f.projectId === ASSISTANT_ID) return assistantSay(st, id, text, deps, f.photoParts, f)
-  // Photos go to the assistant only (the president's desk takes one typed line).
-  if (f.photoParts !== undefined) {
-    if (id !== undefined) dropPhoto(id)
-    return void ack('rejected', { reason: 'photo-assistant-only' })
+  // A photo to a president (docs/PHONE_LINK.md "Photos"): kept in the project's
+  // central data dir and named on the typed line, so the desk Reads it.
+  const photoParts = f.photoParts
+  const withPhoto = photoParts !== undefined
+  const refuse = (reason: string, extra: Record<string, unknown> = {}) => {
+    if (withPhoto && id !== undefined) dropPhoto(id)
+    ack('rejected', { reason, ...extra })
   }
+  if (withPhoto && st.cfg.v !== 2) return refuse('pair-again')
+  // Work mode: its parts were never kept (as for the assistant), so no 30 s wait.
+  if (withPhoto && isLockdownEnabledSync()) return void (id !== undefined && dropPhoto(id))
+  if (withPhoto && (id === undefined || !Number.isInteger(photoParts) || (photoParts as number) < 1 || (photoParts as number) > PHOTO_PARTS_MAX)) return refuse('photo-bad')
   // Empty once the mode characters are dropped ('/', '!!'): it would never land.
-  if (!ownerSayLine(text)) return void ack('rejected', { reason: 'empty' })
-  if (ownerSayTooLong(text)) return void ack('rejected', { reason: 'too-long', max: SUPPLY_OWNER_SAY_MAX })
+  if (!ownerSayLine(text) && !withPhoto) return refuse('empty')
+  if (ownerSayTooLong(text)) return refuse('too-long', { max: SUPPLY_OWNER_SAY_MAX })
   const { all, chosen } = await selectedProject(st)
   const p = typeof f.projectId === 'string' ? all.find((x) => x.id === f.projectId) : chosen
-  if (!p) return void ack('rejected', { reason: 'no-project' })
+  if (!p) return refuse('no-project')
+  // The echo is matched by the owner's words (the path is cut off it).
+  const sayWords = ownerSayLine(text)
+  const durable = id !== undefined && !deps.supply && !deps.wakeDesk && await hasChatGptAccess()
+  // A resend of a say already accepted (durable replay): its parts were taken
+  // the first time, so the kept line is answered again, never a new photo.
+  const prior = durable && withPhoto ? await projectUUIDFromPath(p.path).then((scope) => readConversationReceipt(scope, id!), () => undefined) : undefined
+  const priorText = (prior?.body as { text?: unknown } | undefined)?.text
+  if (typeof priorText === 'string') {
+    dropPhoto(id!)
+    text = priorText
+  } else if (withPhoto) {
+    const got = await awaitPhoto(id!, photoParts as number, deps.photoWaitMs)
+    if (st.retired) return
+    if ('error' in got) return void ack('rejected', { reason: got.error })
+    const ext = sniffPhoto(got.bytes)
+    if (!ext) return void ack('rejected', { reason: 'photo-bad' })
+    try {
+      text = withPresidentPhoto(text, await savePresidentPhoto(p.path, got.bytes, ext))
+    } catch {
+      return void ack('rejected', { reason: 'mac-error' })
+    }
+    if (ownerSayTooLong(text)) return void ack('rejected', { reason: 'too-long', max: SUPPLY_OWNER_SAY_MAX })
+  }
   if (p.id !== chosen?.id) await selectProject(st, p.id)
-  if (id && !deps.supply && !deps.wakeDesk && await hasChatGptAccess()) {
+  if (durable) {
     try {
       const accepted = await acceptPresidentInput(p.path, text, {
-        id,
+        id: id!,
         ...(typeof f.originId === 'string' ? { draftClientId: f.originId } : {}),
         ...(typeof f.draftRevision === 'number' ? { draftRevision: f.draftRevision } : {}),
         ...(typeof f.conversationId === 'string' ? { conversationId: f.conversationId } : {}),
         ...(typeof f.epoch === 'number' ? { epoch: f.epoch } : {}),
       })
       ack(accepted.receipt.state === 'delivered' ? 'delivered' : ['uncertain', 'cancelled', 'rejected'].includes(accepted.receipt.state) ? 'rejected' : 'queued', { projectId: p.id, ...accepted })
-      if (!st.sayIds.some((entry) => entry.id === id)) st.sayIds = [...st.sayIds, { projectId: p.id, text: sayKey(ownerSayLine(text)), id, at: Date.parse(accepted.receipt.acceptedAt) }].slice(-SAY_IDS_MAX)
+      if (!st.sayIds.some((entry) => entry.id === id)) st.sayIds = [...st.sayIds, { projectId: p.id, text: sayKey(sayWords), id, at: Date.parse(accepted.receipt.acceptedAt) }].slice(-SAY_IDS_MAX)
       if (!p.desk && !runtimeAdmissionBlocked('swarm') && accepted.receipt.state === 'queued') await wakePresidentDesk(p.path, 'owner')
       await flushPresidentInbox()
     } catch { ack('rejected', { projectId: p.id, reason: 'mac-error' }) }
@@ -1038,7 +1163,7 @@ const handlePhoneFrameInScope = async (st: LinkState, f: Record<string, unknown>
     starting = true
   }
   ack('queued', { projectId: p.id, ...(starting ? { desk: 'starting' } : {}) })
-  const said: LinkState['sayIds'][number] | undefined = id !== undefined ? { projectId: p.id, text: sayKey(ownerSayLine(text)), id, at: Date.now() } : undefined
+  const said: LinkState['sayIds'][number] | undefined = id !== undefined ? { projectId: p.id, text: sayKey(sayWords), id, at: Date.now() } : undefined
   if (said) st.sayIds = [...st.sayIds, said].slice(-SAY_IDS_MAX)
   await queueSupplyOwnerSay(
     p.path,
@@ -1061,7 +1186,8 @@ const handlePhoneFrameInScope = async (st: LinkState, f: Record<string, unknown>
 }
 
 export const handlePhoneFrame = async (st: LinkState, f: Record<string, unknown>, deps: PhoneLinkDeps = {}): Promise<void> => {
-  const assistantFrame = f.projectId === ASSISTANT_ID || f.type === 'assistant-proposal' || f.type === 'photo-part' || f.type === 'assistant-history' && (f.projectId === undefined || f.projectId === ASSISTANT_ID)
+  // A photo part needs no assistant scope: it may be for a president.
+  const assistantFrame = f.projectId === ASSISTANT_ID || f.type === 'assistant-proposal' || f.type === 'assistant-history' && (f.projectId === undefined || f.projectId === ASSISTANT_ID)
   try { await (assistantFrame ? withAssistantAccessScope(() => handlePhoneFrameInScope(st, f, deps)) : handlePhoneFrameInScope(st, f, deps)) }
   catch (error) {
     const failure = plainAssistantError(error, 'en')
@@ -1093,7 +1219,7 @@ let lastDropWarn = 0
  *  Logs never carry the content. */
 const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
   const inner = openSealed(key, 'p2m', f.box)
-  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history' || inner.type === 'call-note' || inner.type === 'assistant-proposal' || inner.type === 'photo-part' || inner.type === 'conversation-control')) {
+  if (!inner || !(inner.type === 'say' || inner.type === 'select' || inner.type === 'projects' || inner.type === 'assistant-history' || inner.type === 'call-note' || inner.type === 'assistant-proposal' || inner.type === 'photo-part' || inner.type === 'photo-get' || inner.type === 'conversation-control')) {
     // The relay can send these at will: one line a minute, never the frame.
     if (Date.now() - lastDropWarn > 60_000) {
       console.warn(
@@ -1122,6 +1248,19 @@ const unsealPhoneFrame = async (st: LinkState, key: Buffer, f: Record<string, un
   // A photo part is not written down: kept by (sayId, part), a second copy only
   // replaces itself, and its say (whose id IS written down) is what acts.
   if (inner.type === 'photo-part') return st.retired ? null : inner
+  // A photo-get only reads, so it is not written down (no disk write per
+  // image) — but each id is answered once while it is fresh: the relay is not
+  // trusted to send a sealed request only once, and every answer is up to 64
+  // big frames and maybe a shrink.
+  if (inner.type === 'photo-get') {
+    if (st.retired) return null
+    const asked = (st.photoGets ??= new Map())
+    asked.forEach((t, k) => now - t > SEALED_MAX_AGE_MS && asked.delete(k))
+    if (asked.has(id)) return null
+    asked.set(id, now)
+    while (asked.size > PHOTO_GETS_MAX) asked.delete(asked.keys().next().value!)
+    return inner
+  }
   const seen = Object.fromEntries(Object.entries(st.cfg.seenIds ?? {}).filter(([, t]) => typeof t === 'number' && now - t <= SEALED_MAX_AGE_MS))
   const durableReplay = (inner.type === 'say' || inner.type === 'conversation-control') && await hasChatGptAccess()
   if (id in seen && inner.type !== 'call-note' && !durableReplay) return null
@@ -1212,7 +1351,8 @@ export const pumpTranscript = async (st: LinkState, deps: PhoneLinkDeps = {}): P
     // '\n' never splits a UTF-8 character.
     const events = phoneEventsFromLine(buf.subarray(at, nl).toString('utf8'))
     for (let i = 0; i < events.length; i++) {
-      const ev = events[i]
+      const ev = await withPhoto(events[i], st.cfg.v === 2 ? `${fid}:${base + at}:${i}` : null, chosen.path)
+      if (!ev) continue
       const sayId = ev.kind === 'owner' ? sayIdFor(st, chosen.id, ev.text, `${fid}:${base + at}:${i}`) : undefined
       if (!send(st, { type: 'event', projectId: chosen.id, ...ev, ...(sayId !== undefined ? { id: sayId } : {}), cur: { f: fid, o: base + at, i } })) return n
       n++

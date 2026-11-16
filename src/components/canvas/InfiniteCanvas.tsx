@@ -1335,6 +1335,9 @@ export const InfiniteCanvas = ({
         // global Esc (which clears the GROUND selection = closes the project
         // panel) only fires once there's nothing left to escape here. (A drag
         // cancel was already handled above, before the modifier dispatch.)
+        // An open overlay (an image opened large in a chat, a dialog) takes
+        // this Esc itself, as on the Board.
+        if (document.querySelector('[data-esc-overlay]')) return
         if (tool !== 'select') {
           e.preventDefault()
           onToolChange('select')

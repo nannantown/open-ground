@@ -306,7 +306,8 @@ frames** — "goes to the selected project" below is v1 only).
   with `bad-frame`. No reply on success. With the Mac offline the relay holds the
   newest one and hands it to the Mac when it is back (no `mac-offline`).
 
-- `photo-part` (v2, to the assistant only) — one piece of a photo sent with a `say`; see "Photos".
+- `photo-part` (v2, to the assistant or a president) — one piece of a photo sent with a `say`; see "Photos".
+- `photo-get` (v2) — fetch the image a line names in its `photo`; answered with `photo` parts. See "Agent images".
 
 Frames over 16,384 characters or of any other `type` are refused (`bad-frame`), never
 forwarded to the Mac.
@@ -429,6 +430,8 @@ let json = try AES.GCM.open(sealed, using: key, authenticating: aad("m2p"))  // 
 | → phone | `{ "type": "ack", "box": "…" }`, `{ "type": "projects", "box": "…" }` (also as `hello.projects`) |
 | phone → | `{ "type": "assistant-history", "box": "…" }` (inner: `id`, `ts` as for every phone frame, optional `before`) |
 | phone → | `{ "type": "photo-part", "id": "<the part's own id>", "box": "…" }` — passed on, never stored, counted apart (see "Photos") |
+| phone → | `{ "type": "photo-get", "box": "…" }` — passed on like any phone frame (see "Agent images") |
+| → phone | `{ "type": "photo", "box": "…" }` — one part of an image the phone asked for: passed on, never stored, no `seq` (see "Agent images") |
 | → phone | `{ "type": "assistant", "box": "…" }`, `{ "type": "assistant-history", "box": "…" }` — passed on, never stored by the relay, no `seq` (see "What the assistant remembers") |
 
 Plain (no words in them, the relay must read them): `hello`, `mac`, `error`,
@@ -454,7 +457,7 @@ looking at, `"assistant"` for the assistant):
 { "type": "projects", "id": "<uuid>", "ts": 1790000000000 }
 ```
 The Mac drops (silently, no reply — it cannot know who sent it):
-a frame that does not open (forged, altered, another key, the wrong direction), one that opens but is not a `say` / `select` / `projects` / `assistant-history` / `call-note`,
+a frame that does not open (forged, altered, another key, the wrong direction), one that opens but is not a `say` / `select` / `projects` / `assistant-history` / `call-note` (or another phone frame listed above, e.g. `photo-part` / `photo-get`),
 plain JSON in place of `box`, a frame without an `id`, and a frame whose `id`
 it has already accepted (kept for 5 min, across a Mac restart: the first one was
 answered). A frame whose `ts` is more than **5 min** from the Mac's clock is
@@ -1148,8 +1151,8 @@ The owner can send the assistant a photo from the phone: one picked from the
 library or pasted from the clipboard, with or without words. The Mac shows it
 in its assistant chat, and the assistant looks at it before answering. This
 replaces the phone repo's proposal `docs/PHOTO.md`, which this section follows
-exactly. Photos go **to the assistant only**, and **only on a sealed (v2)
-pairing**.
+exactly. Photos go to the assistant and, since 2026-11-16, to a president
+(see "A photo to a president" below), and **only on a sealed (v2) pairing**.
 
 **Capability.** The Mac puts `"photo": true` in its **sealed `projects`** frame,
 next to `callNote`. The phone shows its attach button only when it sees this.
@@ -1204,7 +1207,8 @@ After the parts comes the say, on the same socket:
    The turn lets the assistant `Read` its own copy.
 5. The owner echo (`assistant` / `event`, `kind: "owner"`) and the
    `assistant-history` entries carry that `photo` name. The image itself is
-   never sent back.
+   not in the line: the phone fetches it by that name with `photo-get`
+   (see "Agent images").
 6. The Mac holds at most 4 photos in progress. When it is full, it drops the
    oldest unfinished photo ("oldest" = kept first). A complete photo is dropped
    only when all four are complete, since its say normally follows right
@@ -1230,12 +1234,57 @@ After the parts comes the say, on the same socket:
 |---|---|
 | `photo-incomplete` | some parts never came within 30 s → send it again |
 | `photo-bad` | the parts did not make a photo: not an image, over 5 MB, malformed parts, or a part count that disagrees with `photoParts` |
-| `photo-assistant-only` | `photoParts` on a say to a president. Nothing is typed into the desk |
+| `photo-assistant-only` | (older Macs only) `photoParts` on a say to a president. A Mac that sends `presidentPhoto: true` never answers this |
+| `no-project` | (a president) the say's `projectId` is not a registered project |
 | `pair-again` | a v1 pairing. Its plain `photo-part`s are ignored |
 | `busy` / `too-long` / `mac-error` | as for any say to the assistant |
 
 Under work mode, parts and the say are dropped silently, as every assistant
 line is.
+
+### A photo to a president (2026-11-16)
+
+**Capability.** The Mac also puts `"presidentPhoto": true` in its sealed
+`projects`. The phone shows the attach button in a president's thread only when
+it sees this flag (`photo` alone still means the assistant only). v1 never gets it.
+
+**Wire.** The same `photo-part` frames and `say` with `photoParts`; the say's
+`projectId` is the president's project.
+
+**What the Mac does** (`phoneLink.ts`, the president branch of the `say` handler):
+the same part checks, wait and sniff as above, then:
+
+1. It saves the bytes as `~/.openground/projects/<uuid>/phone-photos/<sha256 of the bytes>.<ext>`
+   (0600, dir 0700) — the project's central data dir, never the repo. Named by
+   its bytes, the same photo is always the same file and the same line, so a
+   resent say keeps one file and the same receipt hash. Files untouched for 30
+   days are deleted on the next save, and all of them with the project.
+2. It types ONE desk line: `<the owner's words> [image: <absolute path>]`
+   (`withPresidentPhoto`; words may be empty). The president desk runs with
+   bypass permissions, so it `Read`s the path and sees the image. The line must
+   still fit `SUPPLY_OWNER_SAY_MAX` with the path, else `too-long`.
+3. The owner echo read back from the transcript (`phoneEventsFromLine`) drops
+   the ` [image: …/phone-photos/…]` tail and carries `photoAttached: true`, so
+   the thread shows the owner's words (empty for a photo alone — the phone
+   draws its photo mark from the flag) and the say id is matched by those words as before. The image is never sent
+   back to the phone here (Mac → phone images are a separate feature).
+
+**No assistant scope.** `photo-part` frames are kept outside the assistant's
+access scope (`handlePhoneFrame`), so a president photo works when the assistant
+cannot run (ChatGPT assistant without the owner's ChatGPT access, an owner-key
+change). Only the assistant's `say` enters that scope.
+
+**The owner's durable path** (ChatGPT access → `acceptPresidentInput`): the
+receipt body is the typed line, path included, so its hash is the photo's
+digest plus the words. A resend of an id already accepted (durable replay
+re-admits seen ids) reuses that receipt's line and drops any parts — its parts
+were taken the first time, so it is never waited for nor refused.
+
+**Work mode:** the parts were never kept, so the say is dropped at once, silently
+(as for the assistant), never after the 30 s wait.
+
+Refused before anything is typed: `pair-again` (v1), `photo-bad` (bad part count,
+not an image), `photo-incomplete`, `no-project`, `too-long`, `mac-error` (could not save).
 
 **The relay** (`worker/src/phoneRelay.ts`) passes `photo-part` on to the Mac
 like a `say`. It never keeps one: with the Mac offline, each part gets
@@ -1290,6 +1339,156 @@ real workerd (`worker/test/phoneRelay.local.mjs`): a full-size part passes
 unchanged, and parts are counted apart. Not yet checked: a send from a physical
 iPhone through the deployed relay. That waits for the relay redeploy and the
 phone build with the fixed part ids.
+
+## Agent images (2026-11-16)
+
+Owner request, 2026-11-16: when the owner asks a president or the assistant to
+"send me the picture / screenshot", the image shows in the thread on the phone
+(tap = large) and in the Mac chat. The phone does not get the image inside the
+line. A line carries only the image's **name**, and the phone **fetches** the
+image by that name. The same fetch also serves images in history pages, images
+sent while the phone was away, and the owner's own photos (the owner line's
+`photo`, see "Photos"). v2 only: on v1 nothing is sent and `photo-get` is ignored.
+
+**Capability.** The Mac puts `"photoGet": true` in its sealed `projects` frame.
+A phone that does not see it shows the word 「写真」 for a line with `photo`, as
+before.
+
+**Which lines carry an image.** A line carries `"photo": "<name>"`: one image per
+line, and the line's `text` may be empty. This applies to:
+
+- `assistant` frames, and `event` frames with `projectId: "assistant"`, of kind
+  `assistant` (and `owner`, as before);
+- `event` frames of kind `president`;
+- `assistant-history` `entries`, and its `talk` entries ("A president's talk").
+
+A name is at most 100 characters of `[A-Za-z0-9._-]`. The phone treats it as
+opaque and may cache the image under it.
+
+**How an agent sends one.**
+
+- **The assistant** calls its tool `send_image({ path })`
+  (`phoneAssistant.ts` `turnTools`; read by `agentPhoto.ts` `readAgentImage`). The
+  first image rides on the answer: its log line and its `assistant` frame get
+  `photo`. Each further image is a line of its own, right after it, with `text`
+  `""`. There are at most 4 per answer. A retelling turn (a president's answer
+  passed on) cannot send one.
+- **A president** writes a line that is only `![what it is](/absolute/path.png)`
+  in its reply. `~/…` also works, and so does `<…>` around a path with spaces.
+  At most 4 per reply; a line inside a code fence does not count
+  (`src/lib/agentImage.ts` `splitImageRefs`, shared with the Mac chat). The
+  words go as one `president` event, as before, without the image lines. Each
+  image is then an `event` of its own (`text: ""`, `photo`), at the next
+  position (`cur.i`) of the same transcript line. Its place depends on the text
+  alone, so a resend gets the same `cur`. The Mac keeps a copy before it sends
+  the event. The copy lives in the project's central data dir,
+  `~/.openground/projects/<projectId>/agent-photos/` (0600, beside the phone's
+  photos for that president in `phone-photos/`). It is deleted with the
+  project, and a copy left untouched for 30 days goes on the next keep. It is
+  named by its project and its bytes, `<projectId>-i<first 40 hex of sha256>.<ext>`.
+  A line read again (a resend, a talk page, the Mac chat drawn again) is the
+  image it got the first time. `index.json` in that folder maps the line to
+  that copy: its transcript position for the phone, its place in the chat
+  for the Mac. A reused path (`/tmp/shot.png` taken again) or an emptied temp
+  folder changes neither the phone's image nor the Mac's. An
+  image the Mac cannot keep is not sent: the file is gone, it is not an image,
+  or it is outside what may be read. The path never leaves the Mac. When the
+  assistant passes a president's answer on, an image line counts as an answer,
+  in the words "(sent an image)"; the image itself is not passed on.
+
+**What an agent may send.** The file must be:
+
+- in a registered project, in OPEN GROUND's data (secrets refused, the same rule
+  as the assistant's `read_file`), or in the temp folder (`$TMPDIR`, `/tmp`),
+  which is where a fresh screenshot goes;
+- a JPEG, PNG, GIF or WebP, judged by its bytes (`sniffPhoto`);
+- at most 5 MB.
+
+**Fetching.** Phone → Mac, sealed (`p2m`), with the `id` and `ts` every phone
+frame has:
+
+```json
+outside: { "type": "photo-get", "box": "…" }
+inside:  { "type": "photo-get", "id": "<fresh id>", "ts": 1790000000000, "name": "<photo>" }
+```
+
+A `photo-get` only reads, so its id is not written to disk. The relay is not
+trusted to deliver a sealed request only once, so the Mac keeps each id in
+memory for 5 minutes (`SEALED_MAX_AGE_MS`) and answers it **once**. The same
+sealed request played again, at once or later, gets nothing. The phone sends a
+fresh id each time it asks. The Mac answers one `photo-get` at a time. At most
+16 more wait their turn; past that an ask is dropped, and the phone's 30 s
+runs out and a tap asks again. An image is shrunk at most once while it is
+being asked for: asks that overlap share that one shrink, and later asks reuse
+its result. The Mac answers on the same socket with the image in parts:
+
+```json
+inside:  { "type": "photo", "id": "<the photo-get's id>", "name": "<photo>", "part": 0, "parts": 3, "data": "<base64 of the part's bytes>" }
+```
+
+- Each part holds at most **24 KB** of image (`PHONE_PHOTO_PART`). Sealed and
+  base64'd twice, a full part is about 44 KB on the wire, under the relay's 64 KB
+  Mac frame cap. An image takes at most **64 parts** (1.5 MB, `PHONE_PHOTO_MAX`).
+  The phone puts the parts together by `part` and does not count on their order.
+  If they are not all there within 30 s, it shows the image as not loaded and
+  tries again on a tap.
+- An image over 1.5 MB is shrunk before it goes. It becomes a JPEG of at most
+  2000 px, then 1600, 1280 or 1024, at quality 70, until it fits (macOS `sips`).
+  The kept file stays as it was. The phone checks the format by the bytes:
+  JPEG, PNG, GIF or WebP.
+- Nothing by that name (deleted with its line, past its days, or a name the
+  Mac never made): `{ "type": "photo", "id", "name", "error": "photo-gone" }`.
+  A name is looked up only among the Mac's kept photos, so no path can be read
+  through it.
+- Not an image, or it cannot be brought under 1.5 MB:
+  `{ "type": "photo", "id", "name", "error": "photo-bad" }`.
+- When the socket closes in between, the rest is lost (nothing is kept for
+  later). The phone asks again.
+
+Under work mode, nothing is answered.
+
+**The relay** (`worker/src/phoneRelay.ts`) passes `photo-get` on to the Mac. It
+counts the frame under `phoneFramesPerMin`. It passes the Mac's `photo` on to
+every phone socket without keeping it and without a `seq`, as it does with
+`assistant` frames. **Redeploy the relay before releasing a Mac that says
+`photoGet: true`.** An old relay refuses `photo-get` with `bad-frame` and
+silently drops `photo`, so the phone would wait for nothing. The new relay is
+harmless to older Macs and phones.
+
+**Older phones.** An iPhone build from before this section shows an image-only
+line of a president or the assistant as an empty bubble, and ignores `photo`
+frames it never asked for. Nothing breaks.
+
+**Free-plan budget.** Messages the relay sends on to a phone are free. What
+counts is what comes in. Per image fetched, that is one `photo-get` from the
+phone and up to 64 `photo` parts from the Mac: at most 65 incoming messages.
+That is under the budget of a phone photo (49), times 1.3. Viewing tens of
+images a day stays at a few percent of the daily 100,000.
+
+Verified 2026-11-16, in the real relay room on in-memory storage
+(`phoneLinkSealed.test.ts` "agent images to the phone"):
+
+- a president's image line arrives as its own event with a name and without the
+  path, then crosses the relay and is put back together byte-identical;
+- a 64-part image arrives whole, with every part under 64 KB;
+- a larger image is shrunk, or refused with `photo-bad`;
+- an unknown name or a path-like name is answered `photo-gone`;
+- a v1 pairing gets nothing;
+- one sealed `photo-get` played 40 times (20 at once, 20 after) is answered
+  with one image and shrunk once, and five fresh asks at once share that shrink;
+- a line keeps its first image after its path is reused or deleted (the phone
+  and the Mac chat, `server/routes/__tests__/agentImage.test.ts`).
+
+The Mac chat reads a president's image through `GET /api/agent-image`
+(`server/routes/misc.ts`). The route refuses a non-loopback `Host`, so a
+rebound DNS name gets nothing. It sends `Cross-Origin-Resource-Policy:
+same-origin`, so another site's `<img>` cannot even learn whether an image is
+there.
+
+The relay half also ran on a real workerd (`worker/test/phoneRelay.local.mjs`):
+a full-size `photo` part reaches the phone unchanged, and it is not kept for
+catch-up. Not yet checked: a physical iPhone through the deployed relay. That
+waits for the relay redeploy and the phone build (openground-ios card).
 
 ## What the assistant remembers (2026-10-03)
 

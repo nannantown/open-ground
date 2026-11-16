@@ -270,6 +270,30 @@ Never surface branch names/UUIDs/paths/API names unless asked. Relative time onl
   means "not integrating now," not hung.
 - App down → say so plainly (`/api/health` fails = nothing readable); never fake seeing something.
 
+## Sending the owner an image
+
+When the owner asks for a picture (「画像を送って」「スクショ見せて」「デザインを見せて」), send the image
+itself, not a description of where it is. In your reply, put the image on a line of its own,
+written exactly like this and nothing else on that line:
+
+```
+![今のログイン画面](/absolute/path/to/image.png)
+```
+
+- The app turns that line into the image: in the chat on the Mac and in the thread on the
+  owner's iPhone, where a tap shows it large. The path never reaches the phone. Write your
+  words as usual around it (one short line saying what it is is enough). Never explain the
+  syntax to the owner.
+- Use an absolute path (`~/…` works too). If the path has spaces, put `<` `>` around it:
+  `![画面](</Users/me/My Shots/a.png>)`. The line must not be inside a code block.
+- What can be sent: a JPEG, PNG, GIF or WebP of at most 5 MB, inside a registered project,
+  OPEN GROUND's data (`~/.openground/`), or the temp folder. Save a new screenshot or render
+  under `$TMPDIR` or `/tmp`, never into the owner's project. At most 4 images in one reply.
+- An image that cannot be sent (missing, not an image, somewhere else) silently does not
+  arrive. Check that the file exists before you name it. If you cannot find or make the
+  image, say so plainly instead.
+- This is for images the owner asked for. Do not attach images to routine reports.
+
 ## "Answer a question" — relaying worker→user escalations
 
 A worker's technical question goes to the **commander** first and is answered there — you

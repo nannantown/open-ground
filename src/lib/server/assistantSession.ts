@@ -70,6 +70,8 @@ export interface AssistantToolSet {
   read_link(a: { url: string; feed?: boolean }): Promise<ToolResult>
   /** Look something up on the web, Reddit or GitHub — read only (assistantLinks.ts). */
   web_search(a: { where: SearchWhere; query: string }): Promise<ToolResult>
+  /** Send the owner an image file with the answer (agentPhoto.ts). */
+  send_image(a: { path: string }): Promise<ToolResult>
   make_card(a: CardInput): Promise<ToolResult>
   tell_commander(a: { projectId: string; message: string }): Promise<ToolResult>
   tell_president(a: { projectId: string; message: string }): Promise<ToolResult>
@@ -112,6 +114,7 @@ export const ASSISTANT_TOOL_SHAPES = {
   status: {},
   read_link: { url: z.string(), feed: z.boolean().optional() },
   web_search: { where: z.enum(SEARCH_WHERE), query: z.string() },
+  send_image: { path: z.string() },
   make_card: { projectId: z.string(), title: z.string(), goal: z.string(), done: z.array(z.string()) },
   tell_commander: { projectId: z.string(), message: z.string() },
   tell_president: { projectId: z.string(), message: z.string() },
@@ -128,6 +131,8 @@ export const ASSISTANT_TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     "Read a link the owner wrote in their own words: a YouTube video comes as its subtitles, a Reddit thread with its comments, a GitHub repo (README) or issue, a feed's items (`feed: true` when it is a feed without .rss/.xml in its name), any other page as its text. Read only; long ones are cut. Says so plainly when it can't be read (no subtitles, page unreachable, channel not set up on this computer).",
   web_search:
     'Search, read only: `where` "web" (the web), "reddit" (Reddit threads) or "github" (GitHub repositories); `query` is one short line of words. Use it when the owner asks what is out there, what people say, or for news. Says so plainly when that channel is not set up on this computer.',
+  send_image:
+    'Send the owner an image file (absolute path in a registered project, OPEN GROUND data or the temp folder; JPEG, PNG, GIF or WebP, at most 5 MB). It is shown with your answer on their phone and screen. At most 4 per answer. Use it when they ask you to send or show them a picture, screenshot or design.',
   make_card: "PROPOSE one short work card for a project's Board: shown to the owner in a frame; only their button puts it on the Board. title, goal and done are each one short line; about 10 lines of 20 Japanese characters in all, or it is refused.",
   tell_commander: "PROPOSE one message for a project's commander: shown to the owner in a frame; only their button sends it. One line, plain words.",
   tell_president:

@@ -257,3 +257,16 @@ describe('a background task finishing mid-answer is not someone typing in (rewor
     expect(await reply.done).toEqual({ kind: 'answered', text: '調べます。\n\n半分できています。' })
   })
 })
+
+describe('an answer that is only an image (docs/PHONE_LINK.md "Agent images")', () => {
+  it('still ends the wait as an answer — said as an image, never as its path', async () => {
+    let file = ''
+    const r = await rig({}, async (t) => {
+      if (t === 1_002_000) await appendFile(file, said('![画面](/tmp/og-shot.png)', t))
+    })
+    file = r.file
+    const reply = replyOf()
+    await relayToPresident('/p', 'スクショ送って', reply.on, r.deps)
+    expect(await reply.done).toEqual({ kind: 'answered', text: '(sent an image)' })
+  })
+})

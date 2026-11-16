@@ -165,7 +165,7 @@ export interface AssistantState {
    *  onReply gets the answer's words and the part of them to read aloud, once
    *  the answer is in the log; onInterim each "let me look" the moment it is said.
    *  photo = a data URL sent with the line (the line may then be empty). */
-  say: (text: string, onReply?: (reply: string, speak: string, said: boolean) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream, send?: AssistantSendIdentity, onAccepted?: () => void) => Promise<boolean>
+  say: (text: string, onReply?: (reply: string, speak: string, said: boolean, photos: string[]) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream, send?: AssistantSendIdentity, onAccepted?: () => void) => Promise<boolean>
   /** The owner stopped the reading of the last answer: what of it they heard ('' = none). */
   hush: (heard: string) => Promise<void>
   saveLook: (patch: { name?: string; look?: AssistantLook; voiceChoice?: AssistantVoice }) => Promise<boolean>
@@ -338,7 +338,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
   }, [open, load])
 
   const say = useCallback(
-    async (text: string, onReply?: (reply: string, speak: string, said: boolean) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream, send?: AssistantSendIdentity, onAccepted?: () => void) => {
+    async (text: string, onReply?: (reply: string, speak: string, said: boolean, photos: string[]) => void, photo?: string, onInterim?: (text: string) => void, stream?: AnswerStream, send?: AssistantSendIdentity, onAccepted?: () => void) => {
       const line = text.trim()
       if ((!line && !photo) || saying.current) return false
       saying.current = true
@@ -373,6 +373,8 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
       let reply = ''
       let speak = ''
       let said = false
+      // Images it sent with the answer (send_image): kept names, shown under its words.
+      let photos: string[] = []
       try {
         lost = 'notSent'
         let delivery: AssistantOutboxItem | undefined
@@ -441,6 +443,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
         reply = typeof a.reply === 'string' ? a.reply : ''
         speak = typeof a.speak === 'string' && a.speak ? a.speak : reply
         said = a.said === true
+        photos = Array.isArray(a.photos) ? a.photos.filter((p): p is string => typeof p === 'string') : []
         if (!openRef.current) setUnread(true)
         return true
       } catch {
@@ -463,7 +466,7 @@ export const useAssistant = (open: boolean, words: AssistantWords): AssistantSta
         setPendingPhoto(null)
         setInterim('')
         saying.current = false
-        if (reply) onReply?.(reply, speak, said)
+        if (reply || photos.length) onReply?.(reply, speak, said, photos)
         }
         }
       }

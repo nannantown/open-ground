@@ -175,7 +175,9 @@ export const watchPresidentReply = async (path: string, words: string, from: num
       const blocks = Array.isArray(ev.message?.content) ? (ev.message!.content as Block[]) : typeof ev.message?.content === 'string' ? [{ type: 'text', text: ev.message.content }] : []
       if (!blocks.length) return false
       endedOnText = blocks.at(-1)?.type === 'text'
-      const texts = phoneEventsFromLine(line).filter((e) => e.kind === 'president').map((e) => e.text)
+      // An image line (docs/PHONE_LINK.md "Agent images") is an answer too: said
+      // as such, never as its path, so an answer that is only an image still ends the wait.
+      const texts = phoneEventsFromLine(line).filter((e) => e.kind === 'president').map((e) => (e.image !== undefined ? '(sent an image)' : e.text))
       said.push(...texts)
       return true
     }

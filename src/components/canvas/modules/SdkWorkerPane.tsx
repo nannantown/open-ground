@@ -18,6 +18,8 @@ import { useT } from '@/i18n/I18nContext'
 import { holdStream, useStreamOwner } from '@/lib/streamBudget'
 import type { SpriteState } from '@/lib/swarm/sprites'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
+import { ChatImage } from '@/components/ui/ChatImage'
+import { agentImageUrl } from '@/lib/agentImage'
 import { assistantClearance, useAssistantSpot } from '@/components/assistant/assistantWindow'
 import type { SdkEvent, SdkSessionStatus } from '@/lib/server/sdkEvents'
 import {
@@ -822,7 +824,10 @@ const InlineMd = ({ text }: { text: string }) => {
 // 13.5px/1.75 with a real heading scale and paragraph rhythm — this is the
 // PRIMARY reading surface of the desk. Sub-agent prose stays a size down and
 // muted (a side conversation, not the report).
-export const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boolean }) => (
+/** `kept`: the project and a key naming this reply (its conversation and place
+ *  in it) — its image lines then show the copy each line got the first time
+ *  (agentImageUrl). Without it, whatever is at the path now. */
+export const ProseBlocks = ({ text, subagent, kept }: { text: string; subagent?: boolean; kept?: { project: string; key: string } }) => (
   <div
     className={
       subagent
@@ -868,6 +873,12 @@ export const ProseBlocks = ({ text, subagent }: { text: string; subagent?: boole
                 </li>
               ))}
             </ul>
+          )
+        case 'image':
+          return (
+            <div key={i} className="my-2">
+              <ChatImage src={agentImageUrl(b.path, kept && { project: kept.project, key: `${kept.key}:${i}` })} alt={b.alt} />
+            </div>
           )
         default:
           return (

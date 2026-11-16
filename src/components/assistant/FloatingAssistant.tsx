@@ -17,6 +17,7 @@ import { AssistantMark, LOOK_COLOR } from './AssistantMark'
 import { ASSISTANT_DEFAULT_POS, ASSISTANT_SIZE, ASSISTANT_WINDOW_ATTR, publishAssistantSpot } from './assistantWindow'
 import { PHOTO_MAX_BYTES, PHOTO_TYPES, photoData, photoUrl, useAssistant, type AssistantLine, type AssistantLook, type AssistantVoice, type FailedLine, type AssistantSendIdentity } from './useAssistant'
 import { ProposalFrames } from './ProposalFrames'
+import { ChatImage } from '@/components/ui/ChatImage'
 import { useCallVoice, useListen, useOtherSpeech } from './useVoice'
 
 const POS_KEY = 'og.assistant.pos'
@@ -100,7 +101,7 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
   const a = useAssistant(showPanel, words)
   const [expanded, setExpanded] = useState(() => localStorage.getItem(EXPANDED_KEY) === '1')
   /** The exchange made in this opening of the window — all the folded window shows. */
-  const [turn, setTurn] = useState<{ said: string; reply: string; photo?: string } | null>(null)
+  const [turn, setTurn] = useState<{ said: string; reply: string; photo?: string; photos?: string[] } | null>(null)
   /** The photo picked for the next line (a data URL), and why one was refused. */
   const [localPhoto, setLocalPhoto] = useState<string | null>(null)
   const [photoError, setPhotoError] = useState('')
@@ -234,8 +235,8 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
     const heard = (piece: string) => () => void (cur.heard += piece)
     const said = await a.say(
       line,
-      (reply, speak, streamed) => {
-        setTurn({ said: line, reply, photo: pic })
+      (reply, speak, streamed, photos) => {
+        setTurn({ said: line, reply, photo: pic, photos })
         cur.answered = true
         if (!spoken || !live.current.inCall) return
         if (cur.stopped) setUnspoken('')
@@ -584,7 +585,7 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
   const ownLine = (key: string, said: string, src?: string, note?: ReactNode) => (
     <div key={key} className="flex max-w-[80%] flex-col items-end gap-1 self-end">
       {/* A photo takes its height only once loaded: the talk's room and its scroll follow. */}
-      {src && <img src={src} alt={t('misc.assistant.photo')} onLoad={photoLoaded} onError={() => void checkPhotoGone(src)} className="max-h-40 max-w-full rounded-[10px] border border-line object-contain" />}
+      {src && <ChatImage src={src} alt={t('misc.assistant.photo')} onLoad={photoLoaded} onError={() => void checkPhotoGone(src)} />}
       {said && <p className={`${owned} max-w-full`}>{said}</p>}
       {note}
     </div>
@@ -609,6 +610,12 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
     ...heldRows.map((held) => ({ at: held.at, held })),
   ].sort((x, y) => x.at - y.at)
   const answered = 'max-w-[88%] self-start whitespace-pre-wrap text-ui leading-relaxed'
+  /** An image the assistant sent: under its words, the size of the owner's photo. */
+  const sentImage = (name: string) => (
+    <div key={name} className="max-w-[88%] self-start">
+      <ChatImage src={photoUrl(name)} alt={t('misc.assistant.photo')} onLoad={photoLoaded} />
+    </div>
+  )
   const iconButton = 'grid size-8 shrink-0 place-items-center rounded-full transition-colors duration-150'
   const saveName = () => {
     if (editing && draftName.trim() !== a.name) void a.saveLook({ name: draftName })
@@ -675,7 +682,10 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
                     return l.who === 'owner' ? (
                       ownLine(l.id, l.text, l.photo && photoUrl(l.photo), f && failedNote(f))
                     ) : (
-                      <Fragment key={l.id}>{l.text && <p className={answered}>{l.text}</p>}</Fragment>
+                      <Fragment key={l.id}>
+                        {l.text && <p className={answered}>{l.text}</p>}
+                        {l.photo && sentImage(l.photo)}
+                      </Fragment>
                     )
                   })
                 : (
@@ -686,6 +696,7 @@ export const FloatingAssistant = ({ disabled, chatgptEligible = false }: { disab
                         <>
                           {ownLine('said', turn.said, turn.photo)}
                           {turn.reply && <p className={answered}>{turn.reply}</p>}
+                          {turn.photos?.map(sentImage)}
                         </>
                       )}
                     </>

@@ -944,7 +944,8 @@
   `phoneLink.ts` `assistantSay` saves it like a screen photo (`saveAssistantPhoto`) → `askAssistant(line, {photo})`. Mac says `photo: true` in sealed
   `projects` (v2 only). Relay passes `photo-part`, counts it apart (`photoPartsPerMin`, `phoneRelayAuth.ts`) — **redeploy before release**.
   Tests `phoneLinkSealed.test.ts` "sealed photos" (real relay room) / `worker/test/phoneRelay.local.mjs`; live `scripts/verify-phone-photo-live.mts`.
-  Canon: docs/PHONE_LINK.md "Photos".
+  To a president (2026-11-16): same parts → `savePresidentPhoto` (`~/.openground/projects/<uuid>/phone-photos/`) → desk line `<words> [image: <path>]`;
+  echo drops the tail; flag `presidentPhoto: true`. Canon: docs/PHONE_LINK.md "Photos".
 - Assistant photos (2026-10-06): the floating window's photo button → `POST /api/phone-link/assistant/say` `{text, photo: base64}`
   (JPEG/PNG/GIF/WebP judged by bytes `sniffPhoto`, ≤5 MB, else 415 `photo-type` / 413 `photo-too-large`). Kept as
   `~/.openground/assistant/photos/<UTC day>-<id>.<ext>` (0600), named on the owner's log line (`photo`), served by
@@ -952,6 +953,20 @@
   The turn copies it into its own temp dir and only then adds `Read` (`assistantTools`, still `--restricted`). Later turns see
   only `[sent a photo]`. iPhone gets the name, not the image (empty bubble for a photo-only line — the phone app's follow-up).
   Tests `server/routes/__tests__/assistantPhoto.test.ts` / `FloatingAssistant.photo.test.tsx`; a real claude turn with a photo was checked once by hand (2026-10-06: it read the text and colour back).
+- Agent images (2026-11-16, canon docs/PHONE_LINK.md "Agent images" + docs/CHAT_SPEC.md §9.4): the assistant's tool `send_image`
+  (`phoneAssistant.ts` `turnTools` → `AssistantAnswer.photos`, first on the answer line, the rest as `text:''` lines written straight to
+  the log — a receipt keeps ≤2 `entries`, an older build refuses more) and a president's whole-line `![alt](/path)` (`src/lib/agentImage.ts`
+  — ONE parser for the phone `phoneEventsFromLine` → `withPhoto` and the Mac chat `parseMarkdownBlocks` `image` block). Files are read by
+  `agentPhoto.ts` `readAgentImage` (assistant read roots + temp folder, sniffed, ≤5 MB); president copies `keepAgentImage` in
+  `~/.openground/projects/<id>/agent-photos/` (`<id>-i<sha>.<ext>`, `index.json` = line → first copy; 30 days by mtime; gone with the project).
+  Phone fetches by name: sealed `photo-get` → `photo` parts (24 KB × ≤64, sips-shrunk over 1.5 MB; `photo-gone` / `photo-bad`), flag
+  `photoGet` — relay passes both (**redeploy before release**); each id answered once (`LinkState.photoGets`, 5 min), one at a time
+  (`photoQueue`, 16 waiting), one shrink per image (`shrunk`). Mac chat: `ChatImage.tsx` (thumbnail + click-to-large, also the owner's
+  photo) in `FloatingAssistant.tsx` and `SdkWorkerPane.tsx` `ProseBlocks`; president images via `GET /api/agent-image?path=&project=&key=`
+  (`misc.ts`: the line's kept copy; loopback Host, CORP same-origin), key from `PresidentChatTranscript` (session + reply + image place).
+  Tests `phoneLinkSealed.test.ts` "agent images", `phoneAssistant.test.ts` "send_image", `src/lib/agentImage.test.ts`,
+  `server/routes/__tests__/agentImage.test.ts`, `FloatingAssistant.photo.test.tsx`, `worker/test/phoneRelay.local.mjs`.
+  How agents use it: `skills/supply/SKILL.md` "Sending the owner an image", the assistant prompt's `send_image` line.
 - Message states (2026-10-30, canon docs/CHAT_SPEC.md §5b + PHONE_LINK.md "Message states"): sending / delivered / replying / replied / failed
   for every own line. Wire = two more sealed `ack` states `replying` / `replied` (no relay redeploy; old iPhones drop them): assistant in
   `phoneLink.ts` `assistantSay` (`onStart` from `phoneAssistant.ts` turn start; live only, never kept), president = `replying` after
