@@ -10,7 +10,7 @@ import { runtimeOwnerKey } from './runtimeOwner'
 import { acceptConversationReceipt, claimConversationReceipt, finishConversationReceipt, listConversationReceipts, readConversationReceipt, readConversationContext } from './conversationReceipts'
 import { acceptPresidentInput, cancelQueuedPresidentInputs, cancelUnsubmittedPresidentInput, awaitPresidentInputSettlement } from './presidentInbox'
 import { awaitSwarmRuntimeLaunches, type SwarmRuntimeHandoff } from './swarmRuntimeAdmission'
-import { drainSwarmEngines, replaceSwarmTransitionWorker, swarmTransitionWorkStillNeeded, swarmTransitionCurrentAssignment, type SwarmTransitionEngine } from './swarmOrchestrator'
+import { OWNER_REVIEW_HOLD_HINT, drainSwarmEngines, replaceSwarmTransitionWorker, swarmTransitionWorkStillNeeded, swarmTransitionCurrentAssignment, type SwarmTransitionEngine } from './swarmOrchestrator'
 import { drainSdkSession, getSdkSession, listSdkSessions, terminateSdkSession, pushSdkInput, interruptSdkSession, currentSdkTurnId, sdkInputAdmissionPaused, resumeSdkInputAdmission } from './sdkSession'
 import { getTerminal, getTerminalScreen, isTerminalProcessAlive, killTerminal, listOwnerDeskTerminals, waitForTerminalGone } from './terminal'
 import { noticeHoldReason } from './deskDeliverable'
@@ -587,36 +587,83 @@ export const reviewSwarmLaunchRecovery = async (options: { id: string; note: str
   await reviewer.review(recovery.state.desired, recovery.checkpoint, options.id, options.note)
 }
 
-/** Run before ordinary boot resume. An existing unconfirmed history is not a
- * missing session and must never silently become a fresh task execution. */
-export const assertSavedSwarmRuntimeSafe = async (): Promise<void> => {
-  const { assertNoUncertainRuntimeActions } = await import('./runtimeActionReceipts')
-  await assertNoUncertainRuntimeActions()
-  const settings = await getSettings()
-  const provider = settings.swarmProvider ?? 'claude'
-  for (const project of settings.projects ?? []) {
-    const intent = await readEngineIntent(project.path)
-    if (!intent.desiredRunning && !intent.managerDesired && !intent.supplyDesired) continue
-    const workers = intent.desiredRunning && !await isSwarmManualStopPersisted(project.path) ? await readRoster(project.path) : []
-    const sessions = await readSwarmSessions(project.path)
-    const ids = new Map(workers.filter((worker) => worker.sessionId.startsWith('chatgpt-') === (provider === 'chatgpt')).map((worker) => [worker.sessionId, worker.worktree]))
-    for (const role of ['supply', 'manager'] as const) {
-      if (!(role === 'supply' ? intent.supplyDesired : intent.managerDesired)) continue
-      const record = provider === 'chatgpt' ? sessions.chatgpt?.[role] : sessions[role]
+export type BootResumeActor = 'supply' | 'manager' | 'engine'
+/** Run before ordinary boot resume, ONE ACTOR AT A TIME. An existing unconfirmed
+ * history is not a missing session and must never silently become a fresh task
+ * execution — so the actor that owns it stays down until the owner reviews it.
+ *
+ * Per actor, not per app (2026-11-17). This used to be one global assert in the
+ * boot callback: a single commander's Bash interrupted by an update (sns-hub,
+ * 2026-11-09) threw for EVERY project, so resumeEngines never ran again — no
+ * president, no autopilot, no policy loop, on every later boot, with only a
+ * stderr line nobody reads. The scopes now match the manual launch doors:
+ * commander / engine use the project-scoped check spawnSwarmManager and SDK
+ * launches already apply; the president is held only by its own session or an
+ * unsettled president instruction in its project.
+ *
+ * Returns null when the actor may resume, otherwise the reason (plain text). */
+export const savedSwarmRuntimeHold = async (projectPath: string, actor: BootResumeActor): Promise<string | null> => {
+  try {
+    const { listUncertainRuntimeActions } = await import('./runtimeActionReceipts')
+    const settings = await getSettings()
+    const provider = settings.swarmProvider ?? 'claude'
+    const intent = await readEngineIntent(projectPath)
+    const sessions = await readSwarmSessions(projectPath)
+    const ids = new Map<string, string>()
+    if (actor === 'engine') {
+      const workers = await isSwarmManualStopPersisted(projectPath) ? [] : await readRoster(projectPath)
+      for (const worker of workers) if (worker.sessionId.startsWith('chatgpt-') === (provider === 'chatgpt')) ids.set(worker.sessionId, worker.worktree)
+    } else if (actor === 'supply' ? intent.supplyDesired : intent.managerDesired) {
+      const record = provider === 'chatgpt' ? sessions.chatgpt?.[actor] : sessions[actor]
       if (record) ids.set(record.sessionId, record.cwd)
     }
+    // includeExecuting=false: at boot every pre-restart actor is dead, so its
+    // executing receipt still counts; on a later retry a LIVE actor's in-flight
+    // call is not "unconfirmed from the last shutdown". anyOwner: the owner-role
+    // lookup may not have answered yet right after launch (the old global check
+    // threw on exactly that), and an unsettled president instruction must hold
+    // whether or not it has — the old awaitPresidentInputSettlement did.
+    const receipts = (await listUncertainRuntimeActions(projectPath, false, true)).filter((r) => {
+      if (actor !== 'supply') return true
+      const body = r.body as { kind?: unknown; sessionId?: unknown } | null
+      return body?.kind === 'president-input' || ids.has(String(r.execution?.sessionId ?? body?.sessionId))
+    })
+    // 会話の復旧 lists and clears only the signed-in owner's records (runtimeRecovery.ts),
+    // so the hold follows the same line (2026-11-17 review): another account's
+    // record is not this owner's to clear and holds nothing, and while the owner
+    // is not known yet (lookup offline, signed out) the hold says to sign in and
+    // stays on the retry timer instead of pointing at a screen that shows nothing.
+    if (receipts.length) {
+      const owner = await runtimeOwnerKey().catch(() => null)
+      if (owner === null) return 'オーナーのアカウント確認が取れていないため、前回の終了時に結果を確かめられなかった操作を確認できません(サインインすると設定の「会話の復旧」に表示されます)'
+      if (receipts.some((r) => r.owner === owner)) return `前回の終了時に結果を確かめられなかった操作が残っています(${OWNER_REVIEW_HOLD_HINT})`
+    }
+    const projectId = (settings.projects ?? []).find((project) => resolve(project.path) === resolve(projectPath))?.id
     for (const [id, cwd] of Array.from(ids)) {
       if (id.startsWith('chatgpt-')) {
         const recovery = await chatGptConversationRecovery(id)
-        if (recovery === 'uncertain' || recovery === 'invalid') throw new Error('Saved agent work has unconfirmed actions or invalid history. Inspect it before automatic restart.')
+        if (recovery === 'uncertain' || recovery === 'invalid') return `保存された会話に、結果を確かめられなかった操作か壊れた履歴があります(${OWNER_REVIEW_HOLD_HINT})`
       } else {
         try { await assertSwarmNativeConversationSettled(cwd, id) }
         catch (error) {
-          if (error instanceof NativeUnfinishedToolsError && await nativeConversationRecoveryReviewed(project.id, cwd, id)) continue
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          if (error instanceof NativeUnfinishedToolsError && projectId && await nativeConversationRecoveryReviewed(projectId, cwd, id)) continue
+          if (error instanceof NativeUnfinishedToolsError) return `保存された会話が操作の途中で止まっています(${OWNER_REVIEW_HOLD_HINT})`
+          // A read that failed or raced a write clears on its own — retried on the timer.
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            console.warn('[swarm] boot resume: saved conversation not readable yet', error)
+            return '保存された会話をまだ読み取れません(しばらくして自動でやり直します)'
+          }
         }
       }
     }
+    return null
+  } catch (error) {
+    // Owner-facing notices stay Japanese; the English detail goes to the server log.
+    const message = error instanceof Error ? error.message : String(error)
+    if (/owner account changed/i.test(message)) return 'サインインしているオーナーのアカウントが切り替わったため、確認をやり直しています'
+    if (/sign-in is required/i.test(message)) return 'オーナーのアカウント確認がまだ取れていません'
+    console.warn('[swarm] boot resume: safety check failed', error)
+    return '再開前の安全確認ができませんでした(しばらくして自動でやり直します)'
   }
 }
 

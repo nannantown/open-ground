@@ -203,6 +203,12 @@ export const acceptedConversationDraftRevision = async (scope: string, clientId:
   const key = keyFor(await runtimeOwnerKey(expectedOwnerKey), scope, clientId)
   return transaction((_receipts, _contexts, accepted) => ({ result: accepted[key], write: false }))
 }
+/** Every account's receipts, read-only. Boot resume's safety check uses this so
+ * it does not depend on the owner-role lookup having answered yet: right after a
+ * launch that lookup can still be offline, and the owner-scoped read then throws
+ * ("Owner sign-in is required") — which held every project's resume (2026-11-17). */
+export const listAllConversationReceipts = (): Promise<ConversationReceipt[]> =>
+  transaction((receipts) => ({ result: Object.values(receipts), write: false }))
 export const listConversationReceipts = async (expectedOwnerKey?: string): Promise<ConversationReceipt[]> => {
   const owner = await runtimeOwnerKey(expectedOwnerKey)
   return transaction((receipts) => ({ result: Object.values(receipts).filter((r) => r.owner === owner), write: false }))

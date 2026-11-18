@@ -252,6 +252,15 @@ interface Entry {
    *  first belongs to the refusing turn itself; the second means a whole new
    *  turn completed, i.e. the worker moved on. Reset whenever the park clears. */
   parkTurnEnds?: number
+  /** tool_use ids whose tool_result has not come back yet (2026-11-17). A restart
+   *  inside this window leaves the transcript with an unfinished tool call, which
+   *  the boot resume must hold for the owner's review — so the hands-free update
+   *  waits for this to empty (liveDesks.ts updateRestartSafety). */
+  toolCallsInFlight?: Set<string>
+  /** The same for a custom provider (ChatGPT), whose stream reaches us already
+   *  converted to events without call ids. It runs one call at a time, so a
+   *  per-session count is exact (rework 2026-11-17). */
+  providerToolCalls?: number
   handle: SdkQueryHandle | null
 }
 
@@ -742,6 +751,38 @@ const makeInputIterable =(e: Entry): AsyncIterable<unknown> => ({
   },
 })
 
+/** Keep {@link Entry.toolCallsInFlight} in step with the raw SDK stream: an
+ *  assistant tool_use opens a call, its tool_result closes it, and a turn's
+ *  `result` closes whatever is left (an aborted turn has no results to wait for). */
+const trackToolCalls = (e: Entry, msg: unknown): void => {
+  if (e.distillMessage) return // provider shapes are not Claude's — see trackToolEvent
+  const m = msg as { type?: unknown; message?: { content?: unknown } } | null
+  if (m?.type === 'result') { e.toolCallsInFlight?.clear(); return }
+  const blocks = m?.message?.content
+  if (!Array.isArray(blocks)) return
+  for (const b of blocks as ({ type?: unknown; id?: unknown; tool_use_id?: unknown } | null)[]) {
+    if (m?.type === 'assistant' && b?.type === 'tool_use' && typeof b.id === 'string') (e.toolCallsInFlight ??= new Set()).add(b.id)
+    else if (m?.type === 'user' && b?.type === 'tool_result') e.toolCallsInFlight?.delete(String(b.tool_use_id))
+  }
+}
+
+/** A custom provider's converted events: tool_use opens a call, tool_result
+ *  closes it, a turn's end (completed, aborted or failed) closes whatever is left. */
+const trackToolEvent = (e: Entry, ev: SdkEvent): void => {
+  if (!e.distillMessage) return
+  if (ev.kind === 'tool_use') e.providerToolCalls = (e.providerToolCalls ?? 0) + 1
+  else if (ev.kind === 'tool_result') e.providerToolCalls = Math.max(0, (e.providerToolCalls ?? 0) - 1)
+  else if (ev.kind === 'turn_end') e.providerToolCalls = 0
+}
+
+/** How many tool calls are running right now across every SDK session, native
+ *  and custom-provider alike. */
+export const sdkToolCallsInFlight = (): number => {
+  let n = 0
+  pool.sessions.forEach((e) => { n += (e.toolCallsInFlight?.size ?? 0) + (e.providerToolCalls ?? 0) })
+  return n
+}
+
 /** Drain the SDK's output into the ring buffer until it ends. */
 const pump = async (e: Entry): Promise<void> => {
   // Awaited, not synchronous: the vocabulary comes out of the ESM SDK, which a
@@ -764,6 +805,7 @@ const pump = async (e: Entry): Promise<void> => {
   let sawAbort = false
   try {
     for await (const msg of e.handle!) {
+      trackToolCalls(e, msg)
       // ⚠ TERMINATE IS THE END OF STATUS. Once `closed` is set the session has
       // been ended by us; the iterator may keep yielding for a while, and every
       // status write below would then RESURRECT a terminated session — turn_end
@@ -779,12 +821,14 @@ const pump = async (e: Entry): Promise<void> => {
         // every cleanly-stopped SDK worker on 'failed'.
         for (const ev of distill(msg)) {
           emit(e, ev)
+          trackToolEvent(e, ev)
           sawAbort = ev.kind === 'turn_end' && ev.reason === 'aborted_streaming'
         }
         continue
       }
       for (const ev of distill(msg)) {
         emit(e, ev)
+        trackToolEvent(e, ev)
         if (ev.kind === 'quota_refusal') e.activeRefused = true
         // Native SDK results are turn boundaries. Custom providers have a
         // stronger, explicit durability callback and must never use this hint.
@@ -913,6 +957,8 @@ const pump = async (e: Entry): Promise<void> => {
         ? (e.exitReason ?? 'interrupted')
         : `error: ${String((err as Error)?.message ?? err).slice(0, 200)}`
   } finally {
+    e.toolCallsInFlight?.clear()
+    e.providerToolCalls = 0
     e.closed = true
     e.retirementReady = true
     const gate = e.gateWake

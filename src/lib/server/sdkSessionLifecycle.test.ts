@@ -8,12 +8,14 @@ import {
   isSdkSessionLive,
   attachSdkListener,
   listActiveSdkCwds,
+  sdkToolCallsInFlight,
   __resetSdkSessionsForTests,
   __setQuotaPrefixesForTests,
   type SdkQueryFn,
   type SdkStreamFrame,
 } from './sdkSession'
 import { distillSdkMessage, isWorkEvidence, type SdkEvent } from './sdkEvents'
+import { updateRestartSafety } from './liveDesks'
 
 // HOW A SESSION ENDS, and what the record says about WHY.
 //
@@ -376,5 +378,74 @@ describe('isWorkEvidence — what proves a desk is working RIGHT NOW', () => {
     expect(evs({ type: 'system', subtype: 'session_state_changed', state: 'idle' })).toEqual([])
     expect(evs({ type: 'system', subtype: 'init', session_id: 'abc' })).toEqual([])
     expect(evs({ type: 'stream_event', event: { type: 'content_block_delta' } })).toEqual([])
+  })
+})
+
+// THE TOOL BOUNDARY the hands-free update waits for (2026-11-17): a call is in
+// flight from its tool_use until its tool_result, and a turn's result closes
+// whatever the turn left open.
+describe('sdkToolCallsInFlight — what the update waits for', () => {
+  it('counts a tool call from its tool_use to its tool_result, and a result clears the rest', async () => {
+    const steps: (() => void)[] = []
+    const step = () => new Promise<void>((r) => steps.push(r))
+    const queryFn: SdkQueryFn = ({ prompt }) => ({
+      async *[Symbol.asyncIterator]() {
+        for await (const _msg of prompt) {
+          void _msg
+          yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_a', name: 'Bash', input: { command: 'sleep 9' } }] } }
+          await step()
+          yield { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_a', content: 'ok' }] } }
+          await step()
+          yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_b', name: 'Bash', input: {} }] } }
+          await step()
+          yield resultAborted()
+          await step()
+        }
+      },
+      interrupt: async () => {},
+    })
+    spawnSdkSession({ cwd: '/tmp/w', options: {}, initialPrompt: 'go', queryFn })
+    const next = async () => { await vi.waitFor(() => expect(steps.length).toBeGreaterThan(0)); steps.shift()!(); await settle() }
+    await vi.waitFor(() => expect(sdkToolCallsInFlight()).toBe(1))
+    expect((await updateRestartSafety()).toolCallsInFlight, 'the probe the Electron shell reads').toBe(1)
+    await next()
+    expect(sdkToolCallsInFlight(), 'the result closed it').toBe(0)
+    await next()
+    expect(sdkToolCallsInFlight()).toBe(1)
+    await next()
+    expect(sdkToolCallsInFlight(), 'the turn ended — nothing left to wait for').toBe(0)
+  })
+})
+
+describe('sdkToolCallsInFlight — a ChatGPT actor counts too (rework 2026-11-17)', () => {
+  it('counts a converted tool_use until its tool_result, and a turn end clears it', async () => {
+    const steps: (() => void)[] = []
+    const step = () => new Promise<void>((r) => steps.push(r))
+    const queryFn: SdkQueryFn = ({ prompt }) => ({
+      async *[Symbol.asyncIterator]() {
+        for await (const _msg of prompt) {
+          void _msg
+          yield { kind: 'tool_use', name: 'shell', detail: 'npm test' }
+          await step()
+          yield { kind: 'tool_result', ok: true, head: 'ok' }
+          await step()
+          yield { kind: 'tool_use', name: 'shell', detail: 'git status' }
+          await step()
+          yield { kind: 'turn_end', reason: 'aborted_streaming', isError: false }
+          await step()
+        }
+      },
+      interrupt: async () => {},
+    })
+    spawnSdkSession({ cwd: '/tmp/w', options: {}, initialPrompt: 'go', queryFn, provider: 'chatgpt', distillMessage: (m) => [m as SdkEvent] })
+    const next = async () => { await vi.waitFor(() => expect(steps.length).toBeGreaterThan(0)); steps.shift()!(); await settle() }
+    await vi.waitFor(() => expect(sdkToolCallsInFlight()).toBe(1))
+    expect((await updateRestartSafety()).toolCallsInFlight, 'the probe the update waits on').toBe(1)
+    await next()
+    expect(sdkToolCallsInFlight()).toBe(0)
+    await next()
+    expect(sdkToolCallsInFlight()).toBe(1)
+    await next()
+    expect(sdkToolCallsInFlight(), 'an aborted turn leaves nothing in flight').toBe(0)
   })
 })

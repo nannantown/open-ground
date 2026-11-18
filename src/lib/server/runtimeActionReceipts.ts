@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { HookCallbackMatcher, HookEvent } from '@anthropic-ai/claude-agent-sdk'
-import { acceptConversationReceipt, claimConversationReceipt, finishConversationReceipt, listConversationReceipts, readConversationReceipt } from './conversationReceipts'
+import { acceptConversationReceipt, claimConversationReceipt, finishConversationReceipt, listConversationReceipts, listAllConversationReceipts, readConversationReceipt, type ConversationReceipt } from './conversationReceipts'
 import { projectUUIDFromPath } from './projectDataPath'
 import { hasChatGptAccess } from './chatgptAccess'
 import { runtimeOwnerKey } from './runtimeOwner'
@@ -182,16 +182,22 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
 /** Compatibility for callers that need only the permission hooks. */
 export const guardClaudeRuntimeTools = async (cwd: string, sessionId: string, raw: unknown = {}, expectedOwnerKey?: string): Promise<Hooks> =>
   (await createClaudeRuntimeToolAudit(cwd, sessionId, raw, expectedOwnerKey)).hooks
-export const assertNoUncertainRuntimeActions = async (cwd?: string, includeExecuting = true): Promise<void> => {
-  if (!await hasChatGptAccess()) return
+/** The unconfirmed runtime effects in one project (or everywhere when `cwd` is
+ * omitted). Boot resume reads this per project so one stale receipt holds only
+ * its own project's actors, never every project's (2026-11-17). */
+export const listUncertainRuntimeActions = async (cwd?: string, includeExecuting = true, anyOwner = false): Promise<ConversationReceipt[]> => {
+  if (!anyOwner && !await hasChatGptAccess()) return []
   const scope = cwd ? await projectUUIDFromPath(cwd) : undefined
   const { isAgentConversationOccupied, isRecordedRuntimeHandleOccupied } = await import('./liveDesks')
-  const uncertain = (await listConversationReceipts()).filter((r) => {
+  return (await (anyOwner ? listAllConversationReceipts() : listConversationReceipts())).filter((r) => {
     const body = r.body as { kind?: unknown; sessionId?: unknown } | null
     const relevant = body?.kind === 'runtime-tool' || body?.kind === 'president-input'
     const originalActorLive = r.execution ? isRecordedRuntimeHandleOccupied(r.execution.runtime, r.execution.handleId) : typeof body?.sessionId === 'string' && isAgentConversationOccupied(body.sessionId)
     return (!scope || r.scope === scope) && relevant && (r.state === 'uncertain' || (r.state === 'executing' && (includeExecuting || !originalActorLive)))
   })
+}
+export const assertNoUncertainRuntimeActions = async (cwd?: string, includeExecuting = true): Promise<void> => {
+  const uncertain = await listUncertainRuntimeActions(cwd, includeExecuting)
   if (uncertain.length) throw new Error('A previous tool operation has an unconfirmed result. Inspect the saved project work before resuming automatic work.')
 }
 /** A native abort only taints this actor's unconfirmed effects, never a

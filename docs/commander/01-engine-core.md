@@ -361,6 +361,134 @@ resume そのものが走らないので、司令官の卓も戻らない。実�
 `server/routes/__tests__/swarmManagerDesired.test.ts`(spawn が書かない / stop が消さない /
 owner ゲート欠落)、`SwarmModule.commanderStop.test.tsx`(生ハンドル DELETE への差し戻し / path 欠落)。
 
+### 7.4b2 Boot resume holds per actor and retries until the gate opens (2026-11-17)
+
+**Old knowledge withdrawn: "a resume blocked at boot stays off for the session" and
+"the president's resume is best-effort and silent".**
+
+**Measured incident.** After the 0.11.208 update neither the presidents nor the
+autopilot came back on any project (orchestrator: `running:false`,
+`autonomyRemembered:true`, `autonomyResumed:false`, empty log, no notification).
+`~/.openground/engine-boots.json` — written by `recordEngineBoot` on the first
+line of every `resumeEngines()` — had not changed since the 0.11.207 boot
+(2026-11-09 17:36 JST), i.e. `resumeEngines()` had not run on any boot since.
+`~/.openground/runtime/receipts.json` held three `uncertain` `runtime-tool`
+receipts ("The app restarted after this operation began"), the first from
+2026-11-09 18:06 JST: a commander desk's Bash in one project (sns-hub) cut off by
+a restart. The boot callback in `server/index.ts` ran
+`assertSavedSwarmRuntimeSafe()` / `assertNoUncertainRuntimeActions()` /
+`awaitPresidentInputSettlement()` **globally** before `resumeEngines()`, so that
+one receipt threw on every later boot: no president, commander or autopilot
+anywhere, the automation policy loop never started, and the only trace was a
+`console.error` in a stderr nobody reads.
+
+A second, intermittent stopper on the same line ("it came back on some boots and
+not others"): the receipt reads are owner-scoped (`runtimeOwnerKey`), and right
+after a launch the owner-role lookup can still be offline — then
+`awaitPresidentInputSettlement()` threw "Owner sign-in is required" and held
+the whole boot the same silent way.
+
+**Now:**
+
+- **Per actor, not per app.** `savedSwarmRuntimeHold(projectPath, actor)`
+  (`swarmRuntimeTransition.ts`) replaces the global asserts. Commander and
+  engine are held by that project's unconfirmed receipts (the same scope the
+  manual `spawnSwarmManager` / SDK launch doors already check) and by their own
+  sessions' unfinished history; the president only by its own session or an
+  unsettled president instruction in its project. Unrelated projects and
+  actors resume. The check reads every account's receipts
+  (`listAllConversationReceipts`), so it neither throws nor goes blind while
+  the owner-role lookup has not answered — but it holds only on what 会話の復旧
+  can show and clear (that screen lists the signed-in owner's records only):
+  owner known ⇒ only that owner's receipts hold (another account's record holds
+  nothing); owner not known yet (lookup offline, signed out) ⇒ any receipt
+  holds, as a transient "sign in" hold on the retry timer.
+- **No global assert before `resumeEngines`.** The boot callback lives in
+  `bootResumeHook.ts` (`server/index.ts` only registers it) so
+  `bootResumeHook.test.ts` can run it with the old asserts throwing — putting
+  any of them back ahead of `resumeEngines` turns that test red.
+- **The boot resume owns a held engine's start.** While a project's engine part
+  is pending, the frame reconcile (`reconcileAutomationOrchestrators`) and the
+  opt-in auto-drain sweep leave it alone — starting it there would skip the
+  hold, the roster reconcile and `--resume` adoption. Retries also wait while
+  an AI connection switch is in flight (`runtimeAdmissionBlocked('swarm')`).
+- **Retry, not one shot.** `resumeEngines()` keeps a pending map (president /
+  commander / engine per project). Anything a gate held — preflight, the
+  owner-account check (`automaticOperationAllowed`), saved work awaiting review,
+  a spawn that threw — stays pending and `retryBootResumes()` re-runs the
+  attempt from the automation policy loop (15 s, `automationPolicy.ts`) and
+  after a recovery review (the `runtimeRecoveryBoot` re-notify, not awaited so
+  an AI-switch settle never waits out a pass). A hold only the owner's review
+  clears (its reason carries `OWNER_REVIEW_HOLD_HINT`) is skipped by the 15 s
+  timer — each try ran the claude preflight and re-parsed transcripts up to
+  32 MB — and retried on that re-notify (`retryBootResumes({ownerReview:true})`)
+  or every `BOOT_OWNER_HOLD_RETRY_MS` (5 min), because it can also clear with no
+  review at all (an orphaned claude finishing its call) (re-notify:
+  queued if a pass is running; a re-notify that lands while the first boot pass
+  is still running re-runs the hook afterwards — `runtimeRecoveryBoot.ts`). A
+  read error on a saved transcript is NOT an owner-only hold (it stays on the
+  timer). A project unregistered after boot is dropped (an empty registry read —
+  what an unreadable settings.json returns — drops nothing). Every attempt
+  re-reads `engine.json` (and the desk flags again right before spawning), so a
+  stop the owner made while it was pending (`supplyDesired`/`managerDesired`
+  cleared, manual-stop record) drops it. A project deliberately outside the
+  Ground frame (a healthy canvas read) resumes nothing, as before, and says so
+  once if something had been up; an unreadable canvas or an unanswered account
+  check is transient and stays pending. The crash-loop breaker and the unwritable
+  boot ring still suppress the whole boot with no retry — deliberate.
+- **Never silent.** Each hold writes `boot resume held: <who>: <why>` to that
+  project's engine log when that engine exists (`GET /api/swarm/orchestrator` →
+  `log`; no engine is created just to log — the reconcile could persist it and
+  clear a saved `desiredRunning`) and raises one `engine-resume-suppressed`
+  notification per distinct reason (not per retry) — once the project has been
+  held for `BOOT_HOLD_ANNOUNCE_MS` (15 s, a timestamp on the entry, not a retry
+  count: the policy loop's first tick retries milliseconds after boot; the
+  timestamp restarts when the hold changes and clears when it clears), so a few
+  seconds of an offline owner-role lookup at launch raise neither a fatal toast
+  nor a 戻りました notice. Hold texts are Japanese only (an owner-lookup
+  error, a switched account, an unreadable transcript); English error detail goes
+  to the server log. An owner-review hold
+  (never retried on the timer) is announced at once. A late successful resume
+  raises an `engine-resumed` info notice only if its hold had been announced.
+  The president's resume is no longer silent either.
+- **The update waits for a tool boundary (2026-11-17, `electron/autoUpdatePolicy.js`).**
+  The holds above keep the c5c61209 rule (an interrupted, unconfirmed tool
+  action is never silently replayed), so the way to bring the commander and
+  engine back hands-free after an UPDATE is not to be mid-call when it lands.
+  `GET /api/update/restart-safety` reports `toolCallsInFlight` (SDK
+  tool_use without its tool_result for native Claude actors, and the converted
+  tool_use / tool_result / turn_end events for ChatGPT actors — one call at a
+  time, so a per-session count — both from `sdkSession.ts`'s live stream; PTY
+  desks are not counted, swarm workers and commanders are SDK-only); the
+  hands-free apply waits for 0, looking again every 2 s, for at most
+  `TOOL_BOUNDARY_MAX_WAIT_MS` (15 min) of ACCUMULATED tool-wait time — then
+  installs anyway, as before. `nextToolBoundaryWait` adds, per decision deferred
+  for a tool call, the time since the previous such decision (each step capped at
+  `TOOL_WAIT_STEP_CAP_MS` = 2 × the 2 s look-again); a decision deferred for
+  anything else (owner active/typing, a president turn, the owner's terminal, an
+  unreachable probe) ends the streak and its gap adds nothing — wall-clock since
+  the first tool deferral counted the owner's own working time and then
+  installed mid-tool at the first idle moment. No decision resets the total
+  (with several workers busy any reset let the bound run forever), nor does a
+  newer version; it lives in the main process, so a real install ends it, and
+  `onStuck` (an install that returned without quitting) clears it. An
+  unreachable probe gets the 2 s look-again only in the middle of a tool-wait
+  streak, once; a streak logs when it starts, not every look.
+  Generation alone still does not hold an update (2026-09-23). `main.js`
+  re-asks right before the teardown on every hands-free apply. Residual: a tool
+  call that starts in the ~instant between that last probe and the server
+  teardown is still cut (and held for review) — the window, not the rule, shrank.
+
+Teeth (red measured on fe4e0607, then mutation-checked):
+`swarmOrchestrator.resumeEngines.test.ts` "boot resume retry — a gate not ready
+at boot opens later" and `swarmOrchestrator.bootResumeFrame.test.ts` (the frame
+reconcile does not bypass a held engine; the 2026-11-17 follow-ups: owner gate
+closed→open, announce-after-retry, owner-only backoff, unregistered drop,
+president held by its instruction / transcript, foreign receipts), plus
+`bootResumeHook.test.ts`, `server/__tests__/autoUpdatePolicy.test.ts` (tool
+boundary, bounded) and `sdkSessionLifecycle.test.ts` (`sdkToolCallsInFlight`).
+Each red-measured by a production mutation on the follow-up branch.
+
 ### 7.4c 「誰も動かしていない doing カード」は engine が回収する(2026-08-27 実測の停止)
 
 **旧知識: worker が done になれば司令官が起こされる。条件付きで撤回。**

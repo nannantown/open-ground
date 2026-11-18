@@ -731,6 +731,10 @@
   write-through `~/.openground/projects/<uuid>/engine.json` + crash-loop breaker ring
   `~/.openground/engine-boots.json`) + `swarmOrchestrator.ts` の `resumeEngines()`(server 起動時に
   `server/index.ts` から fire-and-forget で呼ばれる)。設計正典 = `docs/ENGINE_PERSISTENCE_PLAN.md`
+  Boot entry since 2026-11-17: `bootResumeHook.ts` (no global saved-work assert before
+  `resumeEngines`; per-actor holds + retry = docs/commander/01 §7.4b2). The hands-free update
+  waits for an AI tool boundary (`toolCallsInFlight` in `/api/update/restart-safety`,
+  `electron/autoUpdatePolicy.js`) so an update does not create those holds.
 - **worker roster の write-through + boot 照合**(2026-07-23, card 3): `swarmWorkerRoster.ts`
   (roster を心拍の隣 `~/.openground/swarm/<repoキー>/roster.json` へ write-through — sessionId /
   taskId / branch / worktree / tier / spawnAt / workedMs / reworkCount。状態遷移点のみ書く

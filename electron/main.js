@@ -89,6 +89,7 @@ const {
   SAFETY_FETCH_TIMEOUT_MS,
   autoUpdateFromSettingsRaw,
   decideAutoApply,
+  nextToolBoundaryWait,
   decideDownloadedAction,
   shouldNudgeCheck,
   asapWindowActive,
@@ -2088,6 +2089,12 @@ let lastUserInputType = 'launch'
 // typing at the tick (decision.retryInMs) — so the update lands seconds after
 // they stop instead of a whole poll later.
 let autoApplyRetryTimer = null
+// Time spent waiting for an AI tool boundary, accumulated across tool-wait streaks
+// (bounded by TOOL_BOUNDARY_MAX_WAIT_MS), and when the current streak last looked
+// (0 = not in one). Kept by nextToolBoundaryWait; cleared only when an install
+// attempt returned without quitting (onStuck below).
+let toolBoundaryWaitedMs = 0
+let toolBoundaryLastTickAt = 0
 // The version whose install this boot found FAILED (reportFailedInstallOnBoot),
 // '' when the marker did not name one, null when nothing failed. The hands-free
 // loop never retries it (autoUpdatePolicy `failedBefore`).
@@ -2138,6 +2145,8 @@ async function evaluateAutoApply() {
     inputIdleMs: now - lastUserInputAt,
     heldMs: now - downloadedUpdateAt,
     asap: asapWindowActive({ armedAt: asapArmedAt, now }),
+    toolWaitMs: toolBoundaryWaitedMs,
+    toolWaitActive: toolBoundaryLastTickAt > 0,
     safety: downloadedUpdate ? await fetchRestartSafety() : null,
   })
 }
@@ -2146,8 +2155,16 @@ async function evaluateAutoApply() {
  *  dialog path) when every condition holds; otherwise just logs why not. */
 async function maybeAutoApplyUpdate() {
   const decision = await evaluateAutoApply()
+  const wasToolWait = toolBoundaryLastTickAt > 0
+  const wait = nextToolBoundaryWait({
+    waitedMs: toolBoundaryWaitedMs, lastTickAt: toolBoundaryLastTickAt, now: Date.now(), toolWait: decision.toolWait,
+  })
+  toolBoundaryWaitedMs = wait.waitedMs
+  toolBoundaryLastTickAt = wait.lastTickAt
   if (!decision.apply) {
-    ulog.info(`auto-apply deferred: ${decision.reason} [last input: ${lastUserInputType}]`)
+    // A tool wait looks again every 2 s: log when it starts, not every look.
+    if (!(decision.toolWait && wasToolWait))
+      ulog.info(`auto-apply deferred: ${decision.reason} [last input: ${lastUserInputType}]`)
     if (decision.retryInMs && !autoApplyRetryTimer) {
       autoApplyRetryTimer = setTimeout(() => {
         autoApplyRetryTimer = null
@@ -2426,18 +2443,20 @@ async function applyUpdateWhenStaged(version, opts = {}) {
       reportInstallNotReady(version)
       return
     }
-    // The hands-free decision is up to STAGE_WAIT_MS old by now. Ask again
-    // (review 292ed010 A3): an owner who sat down and started typing during the
-    // wait must not be restarted mid-sentence. A person's "Restart now" has no
-    // recheck — they are the one asking.
-    if (opts.recheck) {
-      const again = await opts.recheck()
-      if (!again.apply) {
-        applyInFlight = false
-        ulog.info(`auto-apply called off after staging: ${again.reason}`)
-        armAutoApplyLoop()
-        return
-      }
+  }
+  // The hands-free decision may be up to STAGE_WAIT_MS old by now. Ask again
+  // (review 292ed010 A3): an owner who sat down and started typing during the
+  // wait must not be restarted mid-sentence. A person's "Restart now" has no
+  // recheck — they are the one asking. Asked even when nothing had to stage
+  // (2026-11-17): an AI tool call can start during the ShipIt preflight above,
+  // and this is the last look before the teardown cuts it.
+  if (opts.recheck) {
+    const again = await opts.recheck()
+    if (!again.apply) {
+      applyInFlight = false
+      ulog.info(`auto-apply called off right before the teardown: ${again.reason}`)
+      armAutoApplyLoop()
+      return
     }
   }
   await applyDownloadedUpdate({
@@ -2461,6 +2480,10 @@ async function applyUpdateWhenStaged(version, opts = {}) {
     // so it is the honest place to take the arm back.
     onStuck: () => {
       armedKickstart = null
+      // The install never happened (a real one ends this process, and the count
+      // with it): a later attempt protects running tool calls afresh.
+      toolBoundaryWaitedMs = 0
+      toolBoundaryLastTickAt = 0
       reportInstallStuck(version)
     },
     // "We are quitting to install X, running Y." The next boot reads this and,

@@ -2509,6 +2509,10 @@ export interface UpdateRestartSafetyResponse {
   generating: number
   userPtys: number
   activeOwnerTurns: number
+  /** AI tool calls (a worker's Bash, an edit…) running right now. The hands-free
+   *  update waits (bounded) for 0: a restart mid-call leaves an unconfirmed result
+   *  that holds the commander / engine until the owner reviews it (2026-11-17). */
+  toolCallsInFlight: number
 }
 
 // ---- Auth (optional Google/GitHub login via Supabase Auth) ----------------

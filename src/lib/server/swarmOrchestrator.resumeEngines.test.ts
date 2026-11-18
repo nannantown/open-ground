@@ -5,6 +5,8 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import {
   resumeEngines,
+  retryBootResumes,
+  BOOT_HOLD_ANNOUNCE_MS,
   getOrchestratorState,
   startOrchestrator,
   stopOrchestrator,
@@ -26,6 +28,7 @@ import { rememberSwarmManualStop, forgetSwarmManualStop } from './store'
 import { settingsFile, engineBootsFile } from './paths'
 import type { AppNotification, SwarmInfoNotification, TaskTier } from '../types'
 import { desiredModelEffort } from './swarmLaunch'
+import { startAutomationPolicyLoop, stopAutomationPolicyLoop } from './automationPolicy'
 
 // resumeEngines() is card 2's boot re-hydration entry point
 // (docs/ENGINE_PERSISTENCE_PLAN.md §4). These tests register REAL project
@@ -101,6 +104,11 @@ afterEach(async () => {
 // dir pinned by src/test/setup-home.ts — re-resolve it fresh each read since
 // setup-home re-pins it around every test.
 const swarmNotificationsPath = () => join(process.env.OPENGROUND_HOME ?? '', 'swarm-notifications.json')
+/** One retry after the hold has lasted long enough to be announced (2026-11-17). */
+const retryAfterAnnounceDelay = async () => {
+  const spy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + BOOT_HOLD_ANNOUNCE_MS)
+  try { await retryBootResumes() } finally { spy.mockRestore() }
+}
 const readNotificationsFresh = async (): Promise<AppNotification[]> => {
   try {
     const raw = JSON.parse(await readFile(swarmNotificationsPath(), 'utf8')) as { items: AppNotification[] }
@@ -215,6 +223,9 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
     // and here every OTHER project may still resume normally.
     expect(result.suppressed).toBe(false)
 
+    // Announced once the hold has lasted 15 s (2026-11-17): a blip
+    // that clears within it is not an incident.
+    await retryAfterAnnounceDelay()
     const notifications = await readNotificationsFresh()
     const fatal = notifications.find(
       (n) => n.kind === 'swarm-fatal' && n.swarmFatal?.event === 'engine-resume-suppressed',
@@ -505,6 +516,9 @@ describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
       managerDesired: true,
     })
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
+    // Announced once the hold has lasted 15 s (2026-11-17): a blip
+    // that clears within it is not an incident.
+    await retryAfterAnnounceDelay()
     const fatal = (await readNotificationsFresh()).find(
       (n) => n.kind === 'swarm-fatal' && n.swarmFatal?.event === 'engine-resume-suppressed',
     )
@@ -526,6 +540,9 @@ describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
         throw new Error('claude refused')
       },
     })
+    // Announced once the hold has lasted 15 s (2026-11-17): a blip
+    // that clears within it is not an incident.
+    await retryAfterAnnounceDelay()
     const fatal = (await readNotificationsFresh()).find(
       (n) =>
         n.kind === 'swarm-fatal' &&
@@ -1133,5 +1150,146 @@ describe('resumeEngines — worker conversation resume (card 4)', () => {
     expect(resumeStartedAtMs(e({ spawnAt: 0, workedMs: 60_000 }), now)).toBe(now)
     // a clock that ran backwards cannot mint budget
     expect(resumeStartedAtMs(e({ spawnAt: now + 60_000, workedMs: 60_000 }), now)).toBe(now)
+  })
+})
+
+// 2026-11-17 — "after an update, the president and the autopilot that were up
+// come back by themselves". Measured root cause: one unconfirmed tool receipt
+// (a commander's Bash cut off by the 2026-11-09 update) made the GLOBAL boot
+// safety assert throw on every later boot, so resumeEngines never ran again —
+// and even when it did run, a gate that was not ready at the first instant
+// (preflight, owner-account check, saved work awaiting review) was final for the
+// whole session. These pin the retry: a held actor comes back once its gate
+// opens, driven by the real policy loop; a wish the owner withdrew never does.
+describe('boot resume retry — a gate not ready at boot opens later (2026-11-17)', () => {
+  afterEach(() => stopAutomationPolicyLoop())
+  const settle = () => new Promise((r) => setTimeout(r, 2_500))
+
+  it('(a) president: claude not ready at boot, ready later ⇒ the president comes back without a press', async () => {
+    preflightMock.ok = false
+    await writeEngineIntent(projA, { desiredRunning: false, overseer: false, supplyDesired: true })
+    const spawned: string[] = []
+    await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA],
+      spawnSupply: async ({ projectPath }) => { spawned.push(projectPath) },
+    })
+    expect(spawned).toHaveLength(0)
+    // Announced once the hold has lasted 15 s (2026-11-17): a blip
+    // that clears within it is not an incident.
+    await retryAfterAnnounceDelay()
+    const held = (await readNotificationsFresh()).find(
+      (n) => n.kind === 'swarm-fatal' && n.swarmFatal?.event === 'engine-resume-suppressed' && n.swarmFatal?.projectPath === projA,
+    )
+    expect(held?.swarmFatal?.detail, 'a held president must say why (condition 8)').toContain('社長')
+    preflightMock.ok = true
+    startAutomationPolicyLoop(1_000)
+    await vi.waitFor(() => expect(spawned).toEqual([projA]), { timeout: 8_000 })
+  })
+
+  it('(a) saved work awaiting review holds only that actor; once reviewed it comes back — and another project is not held', async () => {
+    let reviewed = false
+    await writeEngineIntent(projA, { desiredRunning: false, overseer: false, supplyDesired: true })
+    await writeEngineIntent(projB, { desiredRunning: false, overseer: false, supplyDesired: true })
+    const spawned: string[] = []
+    await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA, projB],
+      spawnSupply: async ({ projectPath }) => { spawned.push(projectPath) },
+      runtimeHold: async (projectPath) => (projectPath === projA && !reviewed ? 'unconfirmed result' : null),
+    })
+    expect(spawned).toEqual([projB])
+    reviewed = true
+    startAutomationPolicyLoop(1_000)
+    await vi.waitFor(() => expect(spawned).toEqual([projB, projA]), { timeout: 8_000 })
+  })
+
+  it('(b) supplyDesired:false ⇒ never resumes, however many retries run', async () => {
+    await writeEngineIntent(projA, { desiredRunning: false, overseer: false, supplyDesired: false })
+    const spawned: string[] = []
+    await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA],
+      spawnSupply: async ({ projectPath }) => { spawned.push(projectPath) },
+    })
+    startAutomationPolicyLoop(1_000)
+    await settle()
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('(b) the owner stops the president while it is still held ⇒ it stays closed when the gate opens', async () => {
+    preflightMock.ok = false
+    await writeEngineIntent(projA, { desiredRunning: false, overseer: false, supplyDesired: true })
+    const spawned: string[] = []
+    await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA],
+      spawnSupply: async ({ projectPath }) => { spawned.push(projectPath) },
+    })
+    await writeEngineIntent(projA, { desiredRunning: false, overseer: false, supplyDesired: false })
+    preflightMock.ok = true
+    startAutomationPolicyLoop(1_000)
+    await settle()
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('(7) autopilot: claude not ready at boot, ready later ⇒ the engine runs again without owner action', async () => {
+    preflightMock.ok = false
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+    await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
+    expect((await getOrchestratorState(projA, safeDeps())).running).toBe(false)
+    preflightMock.ok = true
+    startAutomationPolicyLoop(1_000)
+    await vi.waitFor(async () => expect((await getOrchestratorState(projA, safeDeps())).running).toBe(true), { timeout: 8_000 })
+  })
+
+  it('(7) autopilot stopped by hand stays stopped, even after the gate opens', async () => {
+    preflightMock.ok = false
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+    await rememberSwarmManualStop(await canonicalize(projA))
+    await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
+    preflightMock.ok = true
+    startAutomationPolicyLoop(1_000)
+    await settle()
+    expect((await getOrchestratorState(projA, safeDeps())).running).toBe(false)
+  })
+})
+
+// The MEASURED root cause, reproduced: an unconfirmed tool result left in ONE
+// project by a restart (2026-11-09, a commander's Bash) held every project's
+// resume on every later boot. Now it holds only the actors it belongs to — and
+// the check works before the owner-role lookup has answered (no session here,
+// exactly like a launch whose role fetch is still offline).
+describe('boot resume — a stale unconfirmed receipt holds only its own project (2026-11-17)', () => {
+  const receiptsPath = () => join(process.env.OPENGROUND_HOME ?? '', 'runtime', 'receipts.json')
+  afterEach(async () => { await rm(receiptsPath(), { force: true }) })
+
+  it('B\'s commander stays down (and says why); A\'s commander and B\'s president come back', async () => {
+    const owner = 'a'.repeat(64)
+    const id = 'tool-' + 'b'.repeat(64)
+    const { createHash } = await import('crypto')
+    const key = createHash('sha256').update(JSON.stringify([owner, uuidB, id])).digest('hex')
+    const at = '2026-11-09T09:06:14.575Z'
+    await mkdir(join(process.env.OPENGROUND_HOME ?? '', 'runtime'), { recursive: true })
+    await writeFile(receiptsPath(), JSON.stringify({ version: 1, contexts: {}, acceptedDrafts: {}, receipts: { [key]: {
+      id, scope: uuidB, owner, hash: 'c'.repeat(64), state: 'uncertain', acceptedAt: at, updatedAt: at, epoch: 0,
+      error: 'The app restarted after this operation began. Inspect its result before continuing.',
+      body: { kind: 'runtime-tool', provider: 'claude', sessionId: 'commander-session-b', toolId: 'toolu_x', tool: 'Bash', inputHash: 'd'.repeat(64) },
+      execution: { sessionId: 'commander-session-b', handleId: 'h1', runtime: 'sdk' },
+    } } }))
+    await writeEngineIntent(projA, { desiredRunning: false, overseer: false, managerDesired: true })
+    await writeEngineIntent(projB, { desiredRunning: false, overseer: false, managerDesired: true, supplyDesired: true })
+    const managers: string[] = []
+    const supplies: string[] = []
+    await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [projA, projB],
+      spawnManager: async ({ projectPath }) => { managers.push(projectPath) },
+      spawnSupply: async ({ projectPath }) => { supplies.push(projectPath) },
+    })
+    expect(managers, 'one stale receipt in B must not hold A').toEqual([projA])
+    expect(supplies, "B's president is not the actor with the unconfirmed result").toEqual([projB])
+    // No session here: the owner is not known yet, so the hold is the retried
+    // (transient) kind and is announced once it has lasted.
+    await retryAfterAnnounceDelay()
+    const held = (await readNotificationsFresh()).find(
+      (n) => n.kind === 'swarm-fatal' && n.swarmFatal?.event === 'engine-resume-suppressed' && n.swarmFatal?.projectPath === projB,
+    )
+    expect(held?.swarmFatal?.detail).toContain('司令官')
   })
 })

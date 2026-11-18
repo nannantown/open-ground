@@ -40,6 +40,7 @@ import {
   terminateSdkSessionsInDir,
   isSdkSessionReaped,
   currentSdkTurnId,
+  sdkToolCallsInFlight,
 } from './sdkSession'
 import type { SdkSessionStatus } from './sdkEvents'
 import { canonicalize } from './canonicalize'
@@ -398,6 +399,7 @@ export const computeRestartSafety = (
   sdkStatuses: readonly SdkSessionStatus[],
   now: number = Date.now(),
   activeOwnerTurns: number = 0,
+  toolCallsInFlight: number = 0,
 ): UpdateRestartSafetyResponse => {
   const generating =
     ptys.filter((p) => p.claudeWorking).length +
@@ -468,7 +470,7 @@ export const computeRestartSafety = (
   const userPtys = ptys.filter(
     (p) => !p.desk && !p.engine && (p.hidden ? p.claudeWorking : !abandoned(p)),
   ).length
-  return { safe: generating === 0 && userPtys === 0 && activeOwnerTurns === 0, generating, userPtys, activeOwnerTurns }
+  return { safe: generating === 0 && userPtys === 0 && activeOwnerTurns === 0, generating, userPtys, activeOwnerTurns, toolCallsInFlight }
 }
 
 /** The live answer, from BOTH pools. Engine-owned cwds are recognised by
@@ -522,7 +524,10 @@ export const updateRestartSafety = async (): Promise<UpdateRestartSafetyResponse
   for (const session of sdk) {
     if (session.role === 'supply' && currentSdkTurnId(session.id)) activeOwnerTurns.add(`sdk:${session.id}`)
   }
-  return computeRestartSafety(ptys, sdk.map((s) => s.status), Date.now(), activeOwnerTurns.size)
+  // Tool calls in flight (2026-11-17): every SDK-pool actor, native Claude and
+  // ChatGPT alike, counted from its live stream (sdkSession.ts). PTY desks are
+  // not counted — swarm workers and commanders are SDK-only.
+  return computeRestartSafety(ptys, sdk.map((s) => s.status), Date.now(), activeOwnerTurns.size, sdkToolCallsInFlight())
 }
 
 /** Is this SDK session a swarm ROLE DESK (commander / supply) rather than work?

@@ -11,11 +11,15 @@ import {
   AUTO_APPLY_TYPING_RETRY_MS,
   isOwnerInputEvent,
   USER_TERMINAL_GRACE_MS,
+  TOOL_BOUNDARY_MAX_WAIT_MS,
+  TOOL_BOUNDARY_RETRY_MS,
   NUDGE_MIN_GAP_MS,
   ASAP_WINDOW_MS,
   asapWindowActive,
   autoUpdateFromSettingsRaw,
   decideAutoApply,
+  nextToolBoundaryWait,
+  TOOL_WAIT_STEP_CAP_MS,
   decideDownloadedAction,
   shouldNudgeCheck,
 } from '../../electron/autoUpdatePolicy'
@@ -32,7 +36,7 @@ const base = {
   hasDownloaded: true,
   inputIdleMs: AUTO_APPLY_INPUT_QUIET_MS,
   heldMs: 0,
-  safety: { safe: true, generating: 0, userPtys: 0, activeOwnerTurns: 0 },
+  safety: { safe: true, generating: 0, userPtys: 0, activeOwnerTurns: 0, toolCallsInFlight: 0 },
 }
 
 describe('autoUpdateFromSettingsRaw', () => {
@@ -84,7 +88,7 @@ describe('decideAutoApply', () => {
 // and workers resume after the restart. Put either gate back and this is red.
 describe('decideAutoApply — background AI work does not wait', () => {
   it('applies while background Claude work is generating', () => {
-    const r = decideAutoApply({ ...base, safety: { safe: false, generating: 2, userPtys: 0, activeOwnerTurns: 0 } })
+    const r = decideAutoApply({ ...base, safety: { safe: false, generating: 2, userPtys: 0, activeOwnerTurns: 0, toolCallsInFlight: 0 } })
     expect(r.apply).toBe(true)
     expect(r.reason).toContain('generating=2')
   })
@@ -97,7 +101,7 @@ describe('decideAutoApply — background AI work does not wait', () => {
   })
 
   it("the owner's own busy terminal holds it — but only for a bounded grace", () => {
-    const busy = { safe: false, generating: 0, userPtys: 1, activeOwnerTurns: 0 }
+    const busy = { safe: false, generating: 0, userPtys: 1, activeOwnerTurns: 0, toolCallsInFlight: 0 }
     expect(decideAutoApply({ ...base, safety: busy, heldMs: 0 }).apply).toBe(false)
     expect(decideAutoApply({ ...base, safety: busy, heldMs: USER_TERMINAL_GRACE_MS - 1 }).apply).toBe(false)
     expect(decideAutoApply({ ...base, safety: busy, heldMs: USER_TERMINAL_GRACE_MS }).apply).toBe(true)
@@ -107,14 +111,14 @@ describe('decideAutoApply — background AI work does not wait', () => {
   })
 
   it('an unreadable terminal count reads as busy (fail closed within the grace)', () => {
-    for (const safety of [{ safe: true, activeOwnerTurns: 0 }, { safe: true, userPtys: Number.NaN, activeOwnerTurns: 0 }]) {
+    for (const safety of [{ safe: true, activeOwnerTurns: 0, toolCallsInFlight: 0 }, { safe: true, userPtys: Number.NaN, activeOwnerTurns: 0, toolCallsInFlight: 0 }]) {
       expect(decideAutoApply({ ...base, safety, heldMs: 0 }).apply).toBe(false)
     }
-    expect(decideAutoApply({ ...base, heldMs: NaN, safety: { userPtys: 2, activeOwnerTurns: 0 } }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, heldMs: NaN, safety: { userPtys: 2, activeOwnerTurns: 0, toolCallsInFlight: 0 } }).apply).toBe(false)
   })
 
   it('autoUpdate OFF is unchanged: never applies, whatever the probe says', () => {
-    for (const safety of [base.safety, { safe: false, generating: 2, userPtys: 0, activeOwnerTurns: 0 }]) {
+    for (const safety of [base.safety, { safe: false, generating: 2, userPtys: 0, activeOwnerTurns: 0, toolCallsInFlight: 0 }]) {
       expect(decideAutoApply({ ...base, enabled: false, safety }).apply).toBe(false)
     }
   })
@@ -220,7 +224,7 @@ describe('decideAutoApply with asap', () => {
     hasDownloaded: true,
     inputIdleMs: 0, // typing RIGHT NOW — the case the typing check blocks
     heldMs: 0,
-    safety: { safe: true, generating: 0, userPtys: 0, activeOwnerTurns: 0 },
+    safety: { safe: true, generating: 0, userPtys: 0, activeOwnerTurns: 0, toolCallsInFlight: 0 },
   }
 
   it('waives the typing check: typing + asap applies', () => {
@@ -239,7 +243,7 @@ describe('decideAutoApply with asap', () => {
       decideAutoApply({
         ...focusedBase,
         asap: true,
-        safety: { safe: false, generating: 0, userPtys: 1, activeOwnerTurns: 0 },
+        safety: { safe: false, generating: 0, userPtys: 1, activeOwnerTurns: 0, toolCallsInFlight: 0 },
       }).apply,
     ).toBe(false)
   })
@@ -404,7 +408,7 @@ describe('human president turns survive automatic update waits', () => {
   ])('waits for an accepted president turn with %j', (mode) => {
     const active = { ...base.safety, safe: false, generating: 1, activeOwnerTurns: 1 }
     expect(decideAutoApply({ ...base, ...mode, safety: active }).apply).toBe(false)
-    expect(decideAutoApply({ ...base, ...mode, safety: { ...active, activeOwnerTurns: 0 } }).apply).toBe(true)
+    expect(decideAutoApply({ ...base, ...mode, safety: { ...active, activeOwnerTurns: 0, toolCallsInFlight: 0 } }).apply).toBe(true)
   })
   it('requires a fresh valid owner-turn count even after every grace and in ASAP mode', () => {
     // The HTTP probe is untrusted JSON, including values outside its TS type.
@@ -412,5 +416,114 @@ describe('human president turns survive automatic update waits', () => {
       expect(decideAutoApply({ ...base, asap: true, heldMs: AUTO_APPLY_MAX_DEFER_MS * 2,
         safety: { ...base.safety, activeOwnerTurns } as typeof base.safety }).apply, String(activeOwnerTurns)).toBe(false)
     }
+  })
+})
+
+// THE TOOL BOUNDARY (2026-11-17). A restart mid tool call (a worker's Bash)
+// leaves an unconfirmed result, and the boot resume then holds that project's
+// commander and autopilot for the owner's review. So the hands-free update waits
+// for a moment with no AI tool call running — bounded, then installs anyway.
+describe('decideAutoApply — waits for an AI tool boundary, bounded', () => {
+  const busy = { ...base.safety, safe: false, generating: 2, toolCallsInFlight: 1 }
+  it('a tool call in flight defers, and asks again within seconds', () => {
+    const r = decideAutoApply({ ...base, safety: busy })
+    expect(r.apply).toBe(false)
+    expect(r.toolWait).toBe(true)
+    expect(r.retryInMs).toBe(TOOL_BOUNDARY_RETRY_MS)
+    expect(TOOL_BOUNDARY_RETRY_MS).toBeLessThan(10_000)
+  })
+  it('generation alone still does not wait (2026-09-23 stays): no tool running ⇒ apply', () => {
+    expect(decideAutoApply({ ...base, safety: { ...busy, toolCallsInFlight: 0 } }).apply).toBe(true)
+  })
+  it('the wait is bounded — past it the update installs, as before', () => {
+    expect(decideAutoApply({ ...base, safety: busy, toolWaitMs: TOOL_BOUNDARY_MAX_WAIT_MS - 1 }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, safety: busy, toolWaitMs: TOOL_BOUNDARY_MAX_WAIT_MS }).apply).toBe(true)
+    expect(TOOL_BOUNDARY_MAX_WAIT_MS).toBeLessThanOrEqual(30 * 60 * 1000)
+  })
+  it('even a commanded (asap) update waits for the boundary', () => {
+    expect(decideAutoApply({ ...base, asap: true, inputIdleMs: 0, safety: busy }).apply).toBe(false)
+  })
+  it('an older server without the count waits — but only up to the bound', () => {
+    const old = { safe: true, generating: 0, userPtys: 0, activeOwnerTurns: 0 }
+    expect(decideAutoApply({ ...base, safety: old }).apply).toBe(false)
+    expect(decideAutoApply({ ...base, safety: old, toolWaitMs: TOOL_BOUNDARY_MAX_WAIT_MS }).apply).toBe(true)
+  })
+})
+
+// The bound counts only time actually spent waiting on a tool boundary
+// (rework #2): wall-clock since the first tool deferral counted the owner's own
+// working time and then installed mid-tool at the first idle moment.
+describe('nextToolBoundaryWait — the bound accumulates only real tool-wait time', () => {
+  const busy = { ...base.safety, safe: false, generating: 2, toolCallsInFlight: 1 }
+  /** One hands-free tick, the way main.js runs it. */
+  const tick = (st: { waitedMs: number; lastTickAt: number }, now: number, input: Partial<typeof base> & { safety: unknown }) => {
+    const d = decideAutoApply({ ...base, ...input, toolWaitMs: st.waitedMs, toolWaitActive: st.lastTickAt > 0 } as Parameters<typeof decideAutoApply>[0])
+    return { d, st: nextToolBoundaryWait({ ...st, now, toolWait: d.toolWait }) }
+  }
+
+  it('40 minutes of the owner working do not count: the first idle moment with a tool running still waits', () => {
+    let st = { waitedMs: 0, lastTickAt: 0 }
+    let t = 1_000_000
+    ;({ st } = tick(st, t, { safety: busy })) // owner away, a worker mid-Bash
+    t += TOOL_BOUNDARY_RETRY_MS
+    ;({ st } = tick(st, t, { safety: busy }))
+    for (let m = 0; m < 8; m++) { // owner back, working: deferred for "owner active" every 5 min
+      t += AUTO_APPLY_POLL_MS
+      ;({ st } = tick(st, t, { safety: busy, inputIdleMs: 1_000 }))
+    }
+    t += AUTO_APPLY_POLL_MS
+    const { d } = tick(st, t, { safety: busy }) // first idle moment — a worker is mid-Bash
+    expect(d.apply, 'must not install mid-tool on time the owner spent working').toBe(false)
+    expect(d.toolWait).toBe(true)
+  })
+
+  it('15 minutes of continuous tool-busy waiting does apply — the bound still holds', () => {
+    let st = { waitedMs: 0, lastTickAt: 0 }
+    let t = 1_000_000
+    const t0 = t
+    for (let i = 0; i < 2_000; i++) {
+      const r = tick(st, t, { safety: busy })
+      if (r.d.apply) break
+      st = r.st
+      t += TOOL_BOUNDARY_RETRY_MS
+    }
+    expect(t - t0).toBeGreaterThanOrEqual(TOOL_BOUNDARY_MAX_WAIT_MS)
+    expect(t - t0).toBeLessThan(TOOL_BOUNDARY_MAX_WAIT_MS + 3 * TOOL_BOUNDARY_RETRY_MS)
+  })
+
+  it('no decision resets the total; a long gap inside a streak counts only one capped step', () => {
+    let st = nextToolBoundaryWait({ waitedMs: 0, lastTickAt: 0, now: 1_000_000, toolWait: true })
+    st = nextToolBoundaryWait({ ...st, now: 1_002_000, toolWait: true })
+    expect(st.waitedMs).toBe(2_000)
+    st = nextToolBoundaryWait({ ...st, now: 1_062_000, toolWait: true }) // a minute passed
+    expect(st.waitedMs).toBe(2_000 + TOOL_WAIT_STEP_CAP_MS)
+    st = nextToolBoundaryWait({ ...st, now: 1_070_000, toolWait: false }) // typing / 0 tools / unreachable
+    expect(st).toEqual({ waitedMs: 2_000 + TOOL_WAIT_STEP_CAP_MS, lastTickAt: 0 })
+  })
+
+  it('an unreachable probe gets the 2 s look-again only in the middle of a tool wait, once', () => {
+    expect(decideAutoApply({ ...base, safety: null, toolWaitMs: 5_000, toolWaitActive: true }).retryInMs).toBe(TOOL_BOUNDARY_RETRY_MS)
+    expect(decideAutoApply({ ...base, safety: null, toolWaitMs: 5_000, toolWaitActive: false }).retryInMs, 'not forever after one past wait').toBeUndefined()
+    const after = nextToolBoundaryWait({ waitedMs: 5_000, lastTickAt: 9, now: 10, toolWait: false })
+    expect(after.lastTickAt, 'the timeout ends the streak, so a second one falls back to the poll').toBe(0)
+  })
+})
+
+describe('main.js wires the tool-boundary wait (source checks)', () => {
+  const main = readFileSync(join(__dirname, '../../electron/main.js'), 'utf8')
+  it('feeds the policy the accumulated wait and whether a streak is running, and keeps both with the pure helper', () => {
+    expect(main).toContain('toolWaitMs: toolBoundaryWaitedMs,')
+    expect(main).toContain('toolWaitActive: toolBoundaryLastTickAt > 0,')
+    expect(main).toMatch(/nextToolBoundaryWait\(\{\s*waitedMs: toolBoundaryWaitedMs, lastTickAt: toolBoundaryLastTickAt, now: Date\.now\(\), toolWait: decision\.toolWait,/)
+    expect(main).toContain('toolBoundaryWaitedMs = wait.waitedMs')
+    expect(main).toContain('toolBoundaryLastTickAt = wait.lastTickAt')
+  })
+  it('clears the total only when an install attempt returned without quitting — not on a newer version or before the install', () => {
+    expect(main).toMatch(/onStuck: \(\) => \{[\s\S]{0,300}toolBoundaryWaitedMs = 0/)
+    expect(main.match(/(?<!let )toolBoundaryWaitedMs = 0\b/g), 'one reset, in onStuck').toHaveLength(1)
+  })
+  it('re-asks right before every hands-free teardown, not only after staging', () => {
+    const apply = main.slice(main.indexOf('async function applyUpdateWhenStaged'), main.indexOf('await applyDownloadedUpdate('))
+    expect(apply).toMatch(/\n {2}if \(opts\.recheck\) \{/)
   })
 })

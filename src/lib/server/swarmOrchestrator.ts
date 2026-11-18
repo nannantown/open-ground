@@ -10809,6 +10809,9 @@ export const reconcileAutomationOrchestrators = async (
         result.paused.push(project.path)
         continue
       }
+      // A boot resume still pending for this engine owns its start (saved-work hold,
+      // roster reconcile, --resume adoption). Starting it here bypassed all three.
+      if (bootResumePending.get(project.path)?.engine && !previous?.running) throw new Error('再起動後の復帰を待っています。復帰が済むと自動運転が始まります。')
       if (!await automaticOperationAllowed(project.path)) throw new Error('The current owner account cannot start automatic operation.')
       if (runtimeAdmissionBlocked('swarm')) throw new Error('The AI connection transition must settle before automatic operation can start.')
       if (automationBootBlocked) throw new Error('Automatic operation is held by the boot crash-loop or storage safeguard.')
@@ -11114,6 +11117,72 @@ const adoptResumeCandidates = async (
  * resume if anything about it can't be read cleanly.
  */
 let automationBootBlocked = false
+/** What a project still owes its boot resume (true = not yet back). Re-read
+ *  against the persisted wishes on every attempt, so an explicit stop drops it. */
+interface BootResumeEntry {
+  supply: boolean; manager: boolean; engine: boolean
+  /** The current hold, and every reason already announced (one notice per reason). */
+  reason?: string; told?: Set<string>
+  /** Something actually came back on a later attempt — worth saying so. */
+  started?: boolean
+  /** Every current hold is one only the owner's review in 会話の復旧 clears. */
+  ownerOnly?: boolean
+  /** When the CURRENT hold began, and when the project was last tried (ms). */
+  heldSince?: number; triedAt?: number
+}
+/** A hold is announced once it has lasted this long (2026-11-17 rework): a few
+ *  seconds of an offline owner-role lookup at launch is not an incident. Time,
+ *  not a retry count — the policy loop's first tick retries milliseconds after boot. */
+export const BOOT_HOLD_ANNOUNCE_MS = 15_000
+/** A hold only the owner's review clears is still re-tried this often: it can
+ *  also clear by itself (an orphaned claude finishing its call, a new
+ *  conversation) and then nothing would ever re-notify. */
+export const BOOT_OWNER_HOLD_RETRY_MS = 5 * 60_000
+let bootResumeClock: () => number = Date.now
+/** The words every hold that only the owner's review can clear carries
+ *  (swarmRuntimeTransition.ts savedSwarmRuntimeHold). Such a hold is retried when
+ *  runtime recovery re-notifies, never on the policy loop's 15 s timer. */
+export const OWNER_REVIEW_HOLD_HINT = '設定の「会話の復旧」で確認すると再開します'
+const bootResumePending = new Map<string, BootResumeEntry>()
+let bootResumeAttempt: ((projectPath: string) => Promise<string | null>) | undefined
+let bootResumeList: (() => Promise<string[]>) | undefined
+let bootResumeRetrying = false
+let ownerReviewRetryQueued = false
+const defaultRuntimeHold = async (projectPath: string, actor: 'supply' | 'manager' | 'engine'): Promise<string | null> =>
+  (await import('./swarmRuntimeTransition')).savedSwarmRuntimeHold(projectPath, actor)
+/** Re-run the boot resume of every project still pending (2026-11-17). Called by
+ *  the policy loop and after a recovery review; a no-op before the boot resume
+ *  ran, after a suppressed boot, or once nothing is pending. Never throws. */
+export const retryBootResumes = async (opts?: { ownerReview?: boolean }): Promise<void> => {
+  // An AI connection switch in flight refuses every spawn (adoption would fall to
+  // crash reclaim and lose --resume for good); its settle re-notifies the boot hook.
+  if (!bootResumeAttempt || runtimeAdmissionBlocked('swarm')) return
+  if (bootResumeRetrying) {
+    // A review landing mid-pass must not be lost: the running pass skipped the
+    // owner-only holds it would now clear.
+    if (opts?.ownerReview) ownerReviewRetryQueued = true
+    return
+  }
+  bootResumeRetrying = true
+  try {
+    // A project unregistered since boot is nobody's to bring back.
+    const registered = await bootResumeList?.().catch(() => undefined)
+    for (const projectPath of Array.from(bootResumePending.keys())) {
+      // An empty list is what an unreadable settings.json reads as — never a reason to drop.
+      if (registered?.length && !registered.includes(projectPath)) { bootResumePending.delete(projectPath); continue }
+      // Not on the 15 s timer: each try runs the claude preflight and re-parses saved
+      // transcripts (up to 32 MB) for an answer the owner's review usually changes —
+      // so between reviews only a slow retry.
+      const entry = bootResumePending.get(projectPath)
+      if (entry?.ownerOnly && !opts?.ownerReview && bootResumeClock() - (entry.triedAt ?? 0) < BOOT_OWNER_HOLD_RETRY_MS) continue
+      await bootResumeAttempt(projectPath).catch(() => null)
+    }
+  } finally { bootResumeRetrying = false }
+  if (ownerReviewRetryQueued) {
+    ownerReviewRetryQueued = false
+    await retryBootResumes({ ownerReview: true })
+  }
+}
 export const resumeEngines = async (
   deps: OrchestratorDeps & IntegrationDeps & AnomalyDeps = defaultDeps(),
   opts?: {
@@ -11139,6 +11208,11 @@ export const resumeEngines = async (
     /** DI for tests: the COMMANDER-desk boot resume (default spawnSwarmManager).
      *  Same shape and same reason as {@link spawnSupply}. */
     spawnManager?: (o: { projectPath: string }) => Promise<unknown>
+    /** DI for tests: the per-actor saved-work safety check (default
+     *  savedSwarmRuntimeHold). null = may resume, string = held, with why. */
+    runtimeHold?: (projectPath: string, actor: 'supply' | 'manager' | 'engine') => Promise<string | null>
+    /** DI for tests: the boot-resume clock (hold announce delay, owner-hold retry). */
+    clock?: () => number
   },
 ): Promise<{ resumed: string[]; suppressed: boolean }> => {
   const now = opts?.now ?? Date.now()
@@ -11213,13 +11287,41 @@ export const resumeEngines = async (
     return { resumed: [], suppressed: false }
   }
 
-  const resumed: string[] = []
-  for (const projectPath of paths) {
-    try {
+  // BOOT RESUME RETRY (2026-11-17). Each project's resume is ONE re-runnable
+  // attempt per actor (president / commander / engine). A gate that is not ready
+  // at the first instant — the owner-account check, the claude preflight, saved
+  // work awaiting review — leaves that actor PENDING with its reason in the
+  // engine log and the owner's inbox, and retryBootResumes (policy loop, recovery
+  // review) re-runs the attempt until it lands. Before this, a gate closed at
+  // boot was final for the whole session and mostly silent. A wish the owner
+  // withdraws (supply/stop, manager stop, autopilot OFF) drops the pending actor
+  // on the next attempt because every attempt re-reads the persisted intent.
+  const holdOf = opts?.runtimeHold ?? defaultRuntimeHold
+  const attempt = async (projectPath: string, entry: BootResumeEntry, hold: (who: string, why: string) => void): Promise<string | null> => {
       const key = await canonicalize(projectPath)
-      const automation = await readProjectAutomationPolicy(projectPath)
-      if (!automation.allowed || automation.enabled && !await automaticOperationAllowed(projectPath)) continue
       const intent = await readEngineIntent(projectPath)
+      if (!intent.supplyDesired) entry.supply = false
+      if (!intent.managerDesired) entry.manager = false
+      const automation = await readProjectAutomationPolicy(projectPath)
+      if (!automation.allowed && automation.healthy) {
+        // Deliberately outside the Ground frame: nothing comes back automatically
+        // (as before); frame membership changes are the policy reconcile's job. Said
+        // once, only when something had been up, and never retried.
+        if (entry.supply || entry.manager || intent.desiredRunning) {
+          await createSwarmFatalNotification({
+            event: 'engine-resume-suppressed',
+            projectPath,
+            detail: 'このプロジェクトは Ground の自動運転の枠の外なので、再起動前に動いていた社長・司令官・自動運転を自動では戻していません(手動で立ち上げられます)。',
+          }).catch(() => {})
+        }
+        entry.supply = entry.manager = entry.engine = false
+        return null
+      }
+      if (!automation.allowed || automation.enabled && !await automaticOperationAllowed(projectPath)) {
+        // An unreadable canvas or an owner-account check not ready yet — transient.
+        hold('全体', automation.allowed ? 'オーナーのアカウント確認がまだ取れていません' : 'Ground の自動運転の枠をまだ読み取れません')
+        return null
+      }
       // SUPPLY DESK RESUME (2026-08-03, owner request: 「補給官も毎回再起動から
       // はじまるのでめんどくさい」). Independent of the ENGINE's desiredRunning —
       // the supply desk is the owner's phone window and can be up with autonomy
@@ -11228,13 +11330,20 @@ export const resumeEngines = async (
       // and cleared ONLY by the explicit stop route, so a desk the owner closed
       // stays closed. Fail-quiet: a supply that cannot come back (claude not
       // ready, spawn fault) must never block the engine resume below.
-      if (intent.supplyDesired) {
+      //
+      // Not best-effort any more (2026-11-17): a desk that cannot come back yet is
+      // held with its reason and retried, never silently dropped for the session.
+      if (entry.supply) {
         try {
           const pre = await swarmRunPreflight()
-          if (pre.ok && await automaticOperationAllowed(projectPath)) await (opts?.spawnSupply ?? spawnSwarmSupply)({ projectPath })
-        } catch {
-          /* resume is best-effort; the owner can relaunch from the tab */
-        }
+          const why = !pre.ok ? `AI をすぐに使えませんでした(${pre.body?.error ?? '理由不明'})` : await holdOf(projectPath, 'supply')
+          if (why) hold('社長', why)
+          else if (!await automaticOperationAllowed(projectPath)) hold('社長', 'オーナーのアカウント確認がまだ取れていません')
+          // Re-read the wish right before spawning: a stop pressed while the checks
+          // above awaited must not be resurrected.
+          else if (!(await readEngineIntent(projectPath)).supplyDesired) entry.supply = false
+          else { await (opts?.spawnSupply ?? spawnSwarmSupply)({ projectPath }); entry.supply = false; entry.started = true }
+        } catch (e) { hold('社長', `卓を復帰できませんでした(${errMsg(e)})`) }
       }
       // COMMANDER DESK RESUME (2026-08-26) — the twin of the supply block above,
       // and the fix for the orphaned-commander incident.
@@ -11269,32 +11378,21 @@ export const resumeEngines = async (
       // missing, while a commander that fails to relaunch is INVISIBLE and leaves
       // exactly the stall this whole block exists to end. Same event as the three
       // engine-resume branches, once per project per boot.
-      if (intent.managerDesired) {
+      if (entry.manager) {
         try {
           const pre = await swarmRunPreflight()
-          if (pre.ok) {
-            if (await automaticOperationAllowed(projectPath)) await (opts?.spawnManager ?? spawnSwarmManager)({ projectPath })
-          } else {
-            await createSwarmFatalNotification({
-              event: 'engine-resume-suppressed',
-              projectPath,
-              detail:
-                '選択中のAIをすぐに使えなかったため、司令官の卓を復帰できませんでした' +
-                `(${pre.body?.error ?? '理由不明'})。worker が動いていても、完了分を統合する司令官がいない状態です — 画面下のエージェントチームのバーから司令官を立て直してください。`,
-            }).catch(() => {})
-          }
-        } catch (e) {
-          await createSwarmFatalNotification({
-            event: 'engine-resume-suppressed',
-            projectPath,
-            detail:
-              `司令官の卓を復帰できませんでした(${e instanceof Error ? e.message : String(e)})。` +
-              'worker が動いていても、完了分を統合する司令官がいない状態です — 画面下のエージェントチームのバーから司令官を立て直してください。',
-          }).catch(() => {})
-        }
+          const why = !pre.ok ? `選択中のAIをすぐに使えませんでした(${pre.body?.error ?? '理由不明'})` : await holdOf(projectPath, 'manager')
+          if (why) hold('司令官', why)
+          else if (!await automaticOperationAllowed(projectPath)) hold('司令官', 'オーナーのアカウント確認がまだ取れていません')
+          else if (!(await readEngineIntent(projectPath)).managerDesired) entry.manager = false
+          else { await (opts?.spawnManager ?? spawnSwarmManager)({ projectPath }); entry.manager = false; entry.started = true }
+        } catch (e) { hold('司令官', `卓を復帰できませんでした(${errMsg(e)})`) }
       }
-      if (!intent.desiredRunning && !automation.enabled) continue
-      if (!automation.enabled && await isSwarmManualStopPersisted(key)) continue
+      if (!entry.engine) return null
+      if (!intent.desiredRunning && !automation.enabled || !automation.enabled && await isSwarmManualStopPersisted(key) || store.engines.get(key)?.running) {
+        entry.engine = false
+        return null
+      }
       const pre = await swarmRunPreflight()
       if (!pre.ok) {
         // ⚠ NOT SILENT (2026-08-04, adversarial review). This branch used to
@@ -11307,21 +11405,24 @@ export const resumeEngines = async (
         // they believed it was running. The two sibling branches above (disk
         // fault, crash-loop breaker) both raise this same event; this one is
         // the likeliest of the three and was the only mute one.
-        // Once per project per boot — the loop visits each path once.
-        await createSwarmFatalNotification({
-          event: 'engine-resume-suppressed',
-          projectPath,
-          detail:
-            'claude をすぐに使えなかったため、このプロジェクトのエージェントチームの自動再開を見送りました' +
-            `(${pre.body?.error ?? '理由不明'})。画面下のエージェントチームのバーから手動でオンにできます。`,
-        }).catch(() => {})
-        continue
+        // Now a pending hold (2026-11-17): recorded once per reason, retried.
+        hold('自動運転', `claude をすぐに使えませんでした(${pre.body?.error ?? '理由不明'})`)
+        return null
+      }
+      const engineHold = await holdOf(projectPath, 'engine')
+      if (engineHold) {
+        hold('自動運転', engineHold)
+        return null
       }
       const engine = getOrCreateEngine(key)
       await refreshEngineAutomationPolicy(engine)
-      if (engine.automationBlocked) continue
+      if (engine.automationBlocked) {
+        hold('自動運転', 'オーナーのアカウント確認がまだ取れていません')
+        return null
+      }
       if (automation.enabled) await forgetSwarmManualStop(key)
-      if (engine.running) continue // already running (defensive — fresh boot never hits this)
+      entry.engine = false
+      if (engine.running) return null // already running (a retry after the frame reconcile started it)
       engine.manualStop = false
       // SEED THE REVIEW DWELL CLOCK (2026-08-14) — the whole point of persisting it.
       // Without this every restart re-stamped each waiting branch as "arrived just now",
@@ -11379,12 +11480,19 @@ export const resumeEngines = async (
       // DOES honour `running`, so the chain never starts — the freshly spawned
       // workers run with NOBODY monitoring them (no stall detection, no runaway
       // clock, no reclaim). Checking again here costs one file read.
-      if (!await automaticOperationAllowed(projectPath) || !automation.enabled && await isSwarmManualStopPersisted(key)) {
+      const stillAllowed = await automaticOperationAllowed(projectPath)
+      if (!stillAllowed || !automation.enabled && await isSwarmManualStopPersisted(key)) {
         engine.running = false
         engine.resumeGraceUntil = undefined // no resume ⇒ nothing to wait for
         engine.generation += 1 // any in-flight scheduleNext from this boot is void
-        logLine(engine, 'info', 'boot resume aborted — owner stopped autonomy during reconcile')
-        continue
+        if (stillAllowed) {
+          logLine(engine, 'info', 'boot resume aborted — owner stopped autonomy during reconcile')
+          return null
+        }
+        // The gate closed mid-reconcile (account check / frame) — not the owner's stop.
+        entry.engine = true
+        hold('自動運転', 'オーナーのアカウント確認がまだ取れていません')
+        return null
       }
       // card 4 — ADOPT the surviving in-progress workers: `--resume`-respawn each
       // PROVEN one into engine.workers BEFORE runEnginePass is kicked. This ordering
@@ -11393,18 +11501,87 @@ export const resumeEngines = async (
       // roster reconcile just persisted; and the pass's dispatch would twin-spawn a
       // still-live worker's card unless that card is already counted (its worker in
       // engine.workers). Awaited ⇒ this adoption is inside the spawn freeze too.
-      await adoptResumeCandidates(engine, reconciled, deps, prove, now)
+      await adoptResumeCandidates(engine, reconciled, deps, prove, opts?.now ?? Date.now())
       engine.resumeGraceUntil = (opts?.now ?? Date.now()) + BOOT_RESUME_GRACE_MS
       const gen = (engine.generation += 1)
       logLine(engine, 'info', `engine resumed at boot (v${appVersion})`)
       void runEnginePass(engine, deps)
         .catch(() => {})
         .finally(() => scheduleNext(engine, deps, gen))
-      resumed.push(key)
-    } catch {
-      // fail-quiet-to-OFF — this project's engine just doesn't resume; server
-      // boot (and every OTHER project's resume) must never be affected.
+      entry.started = true
+      return key
+  }
+  const resumeOne = async (projectPath: string): Promise<string | null> => {
+    const entry = bootResumePending.get(projectPath)
+    if (!entry) return null
+    const held: string[] = []
+    let key: string | null = null
+    // A throw is never allowed to escape into server boot (or another project's
+    // resume); it becomes this project's recorded hold and the next retry.
+    try { key = await attempt(projectPath, entry, (who, why) => { held.push(`${who}: ${why}`) }) }
+    catch (e) { held.push(`再開処理: ${errMsg(e)}`) }
+    // Log only into an engine that already exists: creating one just to hold a log
+    // line would let the frame reconcile persist it and clear a saved desiredRunning.
+    const engineLog = async (level: OrchestratorLogLine['level'], message: string) => {
+      const engine = store.engines.get(await canonicalize(projectPath).catch(() => projectPath))
+      if (engine) logLine(engine, level, message)
     }
+    if (!entry.supply && !entry.manager && !entry.engine) {
+      bootResumePending.delete(projectPath)
+      if (entry.reason) {
+        await engineLog('info', 'boot resume finished after an earlier hold (resumed or withdrawn)')
+        // Only when the hold had been announced — an unannounced blip stays silent.
+        if (entry.started && entry.told?.size) {
+          await createSwarmInfoNotification({
+            event: 'engine-resumed',
+            detail: '再起動後に待っていた社長・司令官・自動運転が戻りました。',
+          }).catch(() => {})
+        }
+      }
+      return key
+    }
+    const reason = held.join(' / ')
+    const previous = entry.reason
+    const now = bootResumeClock()
+    entry.triedAt = now
+    // The clock belongs to THIS hold: it restarts when the hold changes and stops
+    // when it clears, so a later few-second blip is not announced at once on the
+    // strength of an older, different hold (rework #2).
+    if (!reason) entry.heldSince = undefined
+    else if (reason !== previous || entry.heldSince === undefined) entry.heldSince = now
+    entry.ownerOnly = held.length > 0 && held.every((h) => h.includes(OWNER_REVIEW_HOLD_HINT))
+    if (reason && reason !== previous) {
+      entry.reason = reason
+      await engineLog('warn', `boot resume held: ${reason}`)
+    }
+    // ANNOUNCED ONLY ONCE IT HAS LASTED (2026-11-17 reviews): right after a launch
+    // the owner-role lookup can be offline for a few seconds, which raised a fatal
+    // toast per project and then a 戻りました notice moments later. A hold only the
+    // owner can clear is said at once — waiting would only delay their review.
+    const told = (entry.told ??= new Set())
+    const lasted = now - (entry.heldSince ?? now) >= BOOT_HOLD_ANNOUNCE_MS
+    if (reason && (entry.ownerOnly || lasted) && !told.has(reason)) {
+      told.add(reason)
+      // NOT SILENT (completion condition 8): the commander reads the engine log,
+      // the president relays the owner's inbox. Once per reason, not per retry.
+      await createSwarmFatalNotification({
+        event: 'engine-resume-suppressed',
+        projectPath,
+        detail: `再起動後の復帰を待っています — ${reason}。条件が整いしだい自動で戻します(社長・司令官・自動運転を手動で立ち上げても構いません)。`,
+      }).catch(() => {})
+    }
+    return key
+  }
+
+  bootResumePending.clear()
+  for (const projectPath of paths) bootResumePending.set(projectPath, { supply: true, manager: true, engine: true })
+  bootResumeAttempt = resumeOne
+  bootResumeList = listProjectPaths
+  bootResumeClock = opts?.clock ?? (() => Date.now())
+  const resumed: string[] = []
+  for (const projectPath of paths) {
+    const key = await resumeOne(projectPath)
+    if (key) resumed.push(key)
   }
 
   if (resumed.length) {
@@ -11438,6 +11615,7 @@ export const runAutoDrainScan = async (
   }
   let started = 0
   for (const path of paths) {
+    if (bootResumePending.get(path)?.engine) continue // the boot resume owns this start
     try {
       const engine = getOrCreateEngine(await canonicalize(path))
       if (await maybeAutoStartDrain(engine, deps, now)) started += 1
@@ -11595,6 +11773,12 @@ export const dismissOverseerReminder = async (
  *  __resetMigrationCacheForTests). Cancels any pending timers first. */
 export const __resetOrchestratorForTests = (): void => {
   automationBootBlocked = false
+  bootResumePending.clear()
+  bootResumeAttempt = undefined
+  bootResumeList = undefined
+  bootResumeClock = Date.now
+  bootResumeRetrying = false
+  ownerReviewRetryQueued = false
   store.engines.forEach((e) => {
     if (e.timer) clearTimeout(e.timer)
     // STOP the engine before dropping it from the map — otherwise a fire-and-forget

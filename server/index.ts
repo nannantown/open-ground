@@ -26,8 +26,7 @@ import { startStuckProcessWatchLoop } from '@/lib/server/stuckProcessWatch'
 import { installGateGroupReaper } from '@/lib/server/gateProcess'
 import { installChatGptHostReaper } from '@/lib/server/chatgptTools'
 import { checkHomeIntegrity } from '@/lib/server/homeIntegrity'
-import { startAutoDrainLoop, bootAutoDrainEnabled, resumeEngines } from '@/lib/server/swarmOrchestrator'
-import { startAutomationPolicyLoop } from '@/lib/server/automationPolicy'
+import { bootResumeOnRecoveryChange } from '@/lib/server/bootResumeHook'
 import { ensureCoolingTableLoaded } from '@/lib/server/swarmQuota'
 import { warmTierProbeAtBoot } from '@/lib/server/swarmTierProbe'
 import { startTerminalSweepLoop } from '@/lib/server/terminal'
@@ -47,9 +46,7 @@ import { runtimeTransitions } from '@/lib/server/runtimeTransitions'
 import { runtimeAdmissionBlocked } from '@/lib/server/runtimeTransitionStore'
 import { flushPresidentInbox } from '@/lib/server/presidentInbox'
 import { resumeQueuedAssistantTurns } from '@/lib/server/phoneAssistant'
-import { assertSavedSwarmRuntimeSafe, flushSwarmHandoffInputs } from '@/lib/server/swarmRuntimeTransition'
-import { assertNoUncertainRuntimeActions } from '@/lib/server/runtimeActionReceipts'
-import { awaitPresidentInputSettlement } from '@/lib/server/presidentInbox'
+import { flushSwarmHandoffInputs } from '@/lib/server/swarmRuntimeTransition'
 import { registerRuntimeRecoveryResume, notifyRuntimeRecoveryChanged } from '@/lib/server/runtimeRecoveryBoot'
 import { resumeAssistantRuntime } from '@/lib/server/assistantRuntimeTransition'
 import { runtimeEffectiveProfile } from '@/lib/server/runtimeTransitionStore'
@@ -362,19 +359,9 @@ void (async () => {
 // must never make worse. Fire-and-forget after boot; resumeEngines() is
 // fail-quiet-to-OFF per project and never throws.
 if (typeof process.send === 'function') {
-  let resumed = false
-  registerRuntimeRecoveryResume(async () => {
-    if (resumed) return
-    const ready = await runtimeRecoveryReady
-    if (!ready || runtimeAdmissionBlocked('swarm')) return
-    await assertSavedSwarmRuntimeSafe()
-    await assertNoUncertainRuntimeActions()
-    await awaitPresidentInputSettlement()
-    await resumeEngines()
-    resumed = true
-    startAutomationPolicyLoop()
-    if (bootAutoDrainEnabled()) startAutoDrainLoop()
-  })
+  // The boot resume itself (and why no global safety assert may run before it)
+  // lives in bootResumeHook.ts, where its regression test can run it.
+  registerRuntimeRecoveryResume(() => bootResumeOnRecoveryChange(runtimeRecoveryReady))
   void notifyRuntimeRecoveryChanged().catch((e) => console.error('[openground:hono] engine resume held for recovery', e))
 }
 

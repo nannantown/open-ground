@@ -677,7 +677,7 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     tier: 'both-pools',
     why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, canonicalLiveDeskCwds/isDirOccupied/liveDeskOccupies (the occupancy question a spawn must ask), listAllActiveDesks, stopAllDesksInDirAndWait, (0925) listDeskIdsByRole — the desk ids of one role from both pools (PTY deskLabel + SDK role) for the Ground president lamp, and (0803) updateRestartSafety/computeRestartSafety — the "may the app restart itself to apply an update?" verdict for the Electron shell (GET /api/update/restart-safety).',
     ptyFns: ['killTerminalsByCwdAndWait', 'listActiveTerminalCwds', 'listActiveTerminals', 'listOwnerDeskTerminals', 'listPtySafetyViews'],
-    sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'currentSdkTurnId', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'terminateSdkSessionsInDir'],
+    sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'currentSdkTurnId', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'sdkToolCallsInFlight', 'terminateSdkSessionsInDir'],
   },
   'src/lib/server/groundLamps.ts': {
     tier: 'both-pools',

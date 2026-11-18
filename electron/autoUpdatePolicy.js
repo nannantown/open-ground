@@ -86,6 +86,21 @@ function isOwnerInputEvent(type) {
  *  left running all day must not become "never update" again. */
 const USER_TERMINAL_GRACE_MS = 30 * 60 * 1000
 
+/** THE TOOL BOUNDARY (2026-11-17). An AI tool call cut by the restart (a
+ *  worker's Bash, a commander's git) leaves a result nobody can confirm, and the
+ *  boot resume rightly will not replay it: that project's commander and engine
+ *  stay down until the owner reviews it in 会話の復旧. Generation itself still
+ *  does not hold an update (2026-09-23) — only the seconds a tool is actually
+ *  running do. Bounded, like every other wait here: with several workers busy
+ *  a gap with nothing in flight normally comes within seconds, and a 20-minute
+ *  test run must not become "never update" again. Past the bound the update
+ *  installs anyway, as before. */
+const TOOL_BOUNDARY_MAX_WAIT_MS = 15 * 60 * 1000
+
+/** While waiting for a tool boundary, look again this soon — a boundary between
+ *  two calls is a few seconds wide, a 5-minute poll would almost never hit it. */
+const TOOL_BOUNDARY_RETRY_MS = 2 * 1000
+
 /** Re-evaluate this often while an update sits downloaded. */
 const AUTO_APPLY_POLL_MS = 5 * 60 * 1000
 
@@ -136,10 +151,13 @@ function autoUpdateFromSettingsRaw(raw) {
  *   inputIdleMs: number,          // ms since the last key/mouse input in the window
  *   heldMs: number,               // ms since the first waiting update finished downloading
  *   asap?: boolean,               // live user command (bell {apply:'asap'}) — waives ONLY the typing check
- *   safety: { safe?: boolean, generating?: number, userPtys?: number, activeOwnerTurns?: number } | null, // server probe; null = unreachable
+ *   toolWaitMs?: number,          // ms this update has spent waiting for a tool boundary (accumulated)
+ *   toolWaitActive?: boolean,     // the previous decision was itself a tool wait
+ *   safety: { safe?: boolean, generating?: number, userPtys?: number, activeOwnerTurns?: number, toolCallsInFlight?: number } | null, // server probe; null = unreachable
  * }} input
- * @returns {{ apply: boolean, reason: string, retryInMs?: number }}
+ * @returns {{ apply: boolean, reason: string, retryInMs?: number, toolWait?: boolean }}
  *   retryInMs — look again this soon instead of at the next poll
+ *   toolWait — deferred ONLY for an AI tool call in flight (the caller times the bound)
  */
 function decideAutoApply(input) {
   if (!input.enabled) return { apply: false, reason: 'autoUpdate off' }
@@ -171,7 +189,15 @@ function decideAutoApply(input) {
   }
   // A dead server means mid-boot or mid-teardown — wrong moments to restart on
   // top of. Fail closed; the next tick asks again.
-  if (!input.safety) return { apply: false, reason: 'safety probe unreachable (fail closed)' }
+  // In the middle of a tool wait, a busy server timing out ONE probe must not drop
+  // the look-again cadence to the 5-minute poll. Only then: this decision ends the
+  // streak, so a second timeout falls back to the poll (no 2 s loop forever).
+  if (!input.safety)
+    return {
+      apply: false,
+      reason: 'safety probe unreachable (fail closed)',
+      ...(input.toolWaitActive ? { retryInMs: TOOL_BOUNDARY_RETRY_MS } : {}),
+    }
   // Required on every new server response, including a public/local legacy
   // session with no owner ledger. An old or malformed probe cannot establish
   // that interrupting an accepted human instruction is safe. No time ceiling
@@ -188,9 +214,47 @@ function decideAutoApply(input) {
       apply: false,
       reason: `owner terminal busy (userPtys=${userPtys ?? '?'}, held ${Math.round(input.heldMs / 60000)}min)`,
     }
+  // Absent (an older server) reads as busy, so it waits — but only up to the bound.
+  const toolCalls = input.safety.toolCallsInFlight
+  const toolWaitMs = input.toolWaitMs ?? 0
+  const toolsBusy = !(typeof toolCalls === 'number' && toolCalls === 0)
+  if (toolsBusy && !(toolWaitMs >= TOOL_BOUNDARY_MAX_WAIT_MS))
+    return {
+      apply: false,
+      reason: `AI tool call in flight (toolCallsInFlight=${toolCalls ?? '?'}, waited ${Math.round(toolWaitMs / 1000)}s)`,
+      retryInMs: TOOL_BOUNDARY_RETRY_MS,
+      toolWait: true,
+    }
   const why = input.asap ? 'commanded (asap)' : overdue ? 'ceiling reached, not typing' : 'owner idle'
-  const note = `generating=${input.safety.generating ?? '?'} userPtys=${userPtys ?? '?'} activeOwnerTurns=${activeOwnerTurns}`
+  const note = `generating=${input.safety.generating ?? '?'} userPtys=${userPtys ?? '?'} activeOwnerTurns=${activeOwnerTurns} toolCallsInFlight=${toolCalls ?? '?'}${toolsBusy ? ' (tool-boundary wait expired)' : ''}`
   return { apply: true, reason: `${why}; ${note}` }
+}
+
+/** One look-again step counts at most this much toward the bound — a gap longer
+ *  than that was spent deferred for something else (or unreachable). */
+const TOOL_WAIT_STEP_CAP_MS = 2 * TOOL_BOUNDARY_RETRY_MS
+
+/**
+ * Pure bookkeeping for the tool-boundary bound (2026-11-17, rework #2).
+ * ACCUMULATES only time actually spent waiting on a tool boundary: each decision
+ * deferred for a tool call adds the time since the previous such decision
+ * (capped at {@link TOOL_WAIT_STEP_CAP_MS}); a decision deferred for anything
+ * else — the owner active or typing, a president turn, the owner's terminal, an
+ * unreachable probe — ends the streak, so that gap adds nothing.
+ *
+ * Why not a start timestamp: wall-clock since the first tool deferral counted an
+ * owner's 40 minutes of work as "waited on tools", and the first idle moment then
+ * installed mid-tool — the exact cut this bound exists to avoid. Why never reset
+ * by a decision: with several workers busy, any reset let the bound run forever.
+ * The total only goes back to 0 when an install attempt returned without quitting
+ * (main.js onStuck); a real install ends the process and the count with it.
+ * @param {{ waitedMs: number, lastTickAt: number, now: number, toolWait?: boolean }} input
+ * @returns {{ waitedMs: number, lastTickAt: number }} lastTickAt 0 = not in a wait streak
+ */
+function nextToolBoundaryWait(input) {
+  if (!input.toolWait) return { waitedMs: input.waitedMs, lastTickAt: 0 }
+  const step = input.lastTickAt ? Math.min(Math.max(0, input.now - input.lastTickAt), TOOL_WAIT_STEP_CAP_MS) : 0
+  return { waitedMs: input.waitedMs + step, lastTickAt: input.now }
 }
 
 /**
@@ -267,6 +331,8 @@ module.exports = {
   AUTO_APPLY_TYPING_RETRY_MS,
   isOwnerInputEvent,
   USER_TERMINAL_GRACE_MS,
+  TOOL_BOUNDARY_MAX_WAIT_MS,
+  TOOL_BOUNDARY_RETRY_MS,
   AUTO_APPLY_POLL_MS,
   SAFETY_FETCH_TIMEOUT_MS,
   NUDGE_MIN_GAP_MS,
@@ -275,5 +341,7 @@ module.exports = {
   autoUpdateFromSettingsRaw,
   decideDownloadedAction,
   decideAutoApply,
+  nextToolBoundaryWait,
+  TOOL_WAIT_STEP_CAP_MS,
   shouldNudgeCheck,
 }

@@ -81,7 +81,12 @@ export const startAutomationPolicyLoop = (intervalMs = 15_000): void => {
       const { value, health } = await getCanvasWithHealth()
       if (health === 'unreadable' || automationFrameMembership(value, []).enabled) await reconcileAutomationPolicy()
     } catch { /* persisted policy remains authoritative; the next tick retries */ }
-    finally { loopInFlight = false }
+    // A president / commander / autopilot that was up before the restart but
+    // whose gate was not ready at boot comes back here once it is (2026-11-17).
+    // Not awaited: an adoption can take minutes and must not stall the frame
+    // reconcile; retryBootResumes has its own in-flight guard.
+    void import('./swarmOrchestrator').then((m) => m.retryBootResumes()).catch(() => {})
+    loopInFlight = false
   }
   policyTimer = setInterval(() => { void tick() }, Math.max(1000, intervalMs))
   policyTimer.unref?.()
