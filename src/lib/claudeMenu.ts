@@ -7,7 +7,7 @@
 // Pure + framework-free so both the server detector and the client type share
 // it and it's unit-testable against a captured screen.
 
-import { PROMPT_ROW_RE, RULE_ROW_RE } from './claudeScreen'
+import { PROMPT_ROW_RE, RULE_ROW_RE, SCROLLED_BOX_TOP_RE } from './claudeScreen'
 
 export interface MenuOption {
   n: number
@@ -78,8 +78,11 @@ export const detectMenu = (screenText: string): DetectedMenu | null => {
   }
   if (hits.length < 2) return null
 
+  // A box scrolled past its start shows no `❯` — its `↑ N more` top rule is the box.
   const inputBoxBelow = (row: number): boolean =>
-    rows.some((r, i) => i > row && PROMPT_ROW_RE.test(r) && RULE_ROW_RE.test(rows[i - 1]))
+    rows.some(
+      (r, i) => i > row && (SCROLLED_BOX_TOP_RE.test(r) || (PROMPT_ROW_RE.test(r) && RULE_ROW_RE.test(rows[i - 1]))),
+    )
   // Options 1,2,… reached from hits[k]: back to 1, then forward — skipping
   // numbered rows that do not continue the count. Null unless ≥2 from 1.
   const gather = (k: number): typeof hits | null => {

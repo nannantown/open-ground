@@ -244,6 +244,12 @@ for (const key of [
   'OPENGROUND_COLLAB_WS_URL',
   // The phone-link app key: baked like the two above, read lazily by phoneLink.ts.
   'OPENGROUND_PHONE_RELAY_APP_KEY',
+  // The claude binary the app pins for the sessions it launches (sdkSession /
+  // assistantSession put it in their env), so an in-app worker inherits it and
+  // claudeTerminal.test.ts's Windows framing cases read the Mac's real binary
+  // instead of their mock (2 red on a worker, green under env -u, 2026-11-24).
+  // Every test that needs a value sets it itself.
+  'OPENGROUND_CLAUDE_BIN',
 ]) {
   // Guard the guard: this list must never grow to include a home var. Unsetting
   // OPENGROUND_HOME makes openGroundHome() fall back to the user's REAL

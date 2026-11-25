@@ -862,11 +862,20 @@ export const listPtySafetyViews = (): PtySafetyView[] => {
   return out
 }
 
+/** What a terminal pane sends by itself, never typing: focus in/out (claude
+ *  turns on DECSET 1004, so every click into or out of a pane writes one) and
+ *  the device-attributes reply a pane opened on a desk gives the query in its
+ *  replay (`ESC[?1;2c`). Neither touches the input box. Counted as foreign
+ *  input, one click after a failed Enter kept a long line from ever being
+ *  pressed again (docs/commander/06 §1.15; measured on every live president
+ *  desk 2026-11-24 with scripts/probe-desk-focus-mode.mts). */
+const TERMINAL_REPORT_RE = /^(?:\x1b\[[IO]|\x1b\[[?>][\d;]*c)+$/
+
 export const writeInput = (id: string, data: string): boolean => {
   const s = sessions.get(id)
   if (!s || s.info.finishedAt) return false
   s.pty.write(data)
-  s.foreignInput = { seq: (s.foreignInput?.seq ?? 0) + 1, at: Date.now() }
+  if (!TERMINAL_REPORT_RE.test(data)) s.foreignInput = { seq: (s.foreignInput?.seq ?? 0) + 1, at: Date.now() }
   return true
 }
 

@@ -35,7 +35,7 @@ import { sessionContextTokens } from './claudeUsage'
 import { getDeskContextCapTokens } from './store'
 import { logToEngine } from './engineLogSink'
 import { deskCompactedLogLine } from './deskContextCap'
-import { catchUpSupplyDesks } from './supplyNotice'
+import { catchUpSupplyDesks, supplyDeliveryInFlight } from './supplyNotice'
 import { kickAllCommanderQuestionSweeps } from './commanderQuestions'
 import type { OrchestratorLogLine } from '../types'
 
@@ -153,6 +153,11 @@ export const runSupplyContextCapPass = async (
         state.pending.delete(sid) // lost — fall through and try again
       }
       if (tokens === null || tokens < cap) continue
+      // A notice being typed into this desk right now is not on the screen yet
+      // (a paste is painted some ms after it is written), and `/compact` starts
+      // with a line-kill: sent now it would erase that line unsent. Both ride
+      // the same timer tick, so this is not a rare meeting. Next pass.
+      if (supplyDeliveryInFlight(d.id)) continue
       if (!noticeDeliverable(deps.screen(d.id))) continue // busy / half-typed / menu — next pass
       if (!deps.sendCompact(d.id)) continue
       state.pending.set(sid, { sentAt: deps.now(), fromTokens: tokens })

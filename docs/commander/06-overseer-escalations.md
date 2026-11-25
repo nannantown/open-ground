@@ -1312,7 +1312,8 @@ Now every president line (reply / important / progress) goes through the shared 
 - Enter never took ⇒ the line stays queued and the desk is remembered as holding it (`unsent`).
   The next pass sends **only the Enter** (`submitPastedInput`) — never the text again. If the
   box is already clear (the owner pressed Enter or cleared it), the line is dequeued, not retyped.
-- One delivery per desk at a time (`inFlight`); an app-wide line is not typed into a second desk
+- One delivery per desk at a time (`inFlight` — since 2026-11-23 checked and claimed in one call
+  and held from the policy read to the end of the desk visit, §1.15); an app-wide line is not typed into a second desk
   while one is in flight or unsent.
 - `queueSupplyReply` now resolves after the landing check, so `supply/say`'s `delivered` means
   "submitted", not "typed".
@@ -1655,3 +1656,129 @@ Guards: `swarmLandedLedger.test.ts` (「a done card the owner called off…」, 
 only done card was called off」) + `swarmKpiLanded.test.ts` (「…closed as done + abandoned…」).
 Red measured 2026-10-07 by dropping `&& t.abandoned !== true` from both `isLandedCard`s → 3 red;
 restored → green.
+
+## §1.15 — A president line typed but never sent: two causes (2026-11-23)
+
+Owner reports 2026-11-20 (openground-ec) and 11-23 (OPEN GROUND), 0.11.209: an idle president's
+box held the same engine line twice, unsent, until the owner pressed Enter by hand.
+
+**Records (read 2026-11-23, read-only).** The engine journals hold seven
+「社長の窓口への配達をN分保留中: 打ち込んだ行の Enter が通らない (enter-not-taken)」 lines (sns-hub and
+Music Production 11-09, openground-ec 11-20, OPEN GROUND 11-20 / 11-23 ×2, JobSearch 11-23). Six
+follow two or more notices queued within about a second (several cards dispatched by one engine
+pass, two workers stopped together) — cause 1. JobSearch's follows nothing of the kind — cause 2.
+The president transcripts hold five owner turns that are one engine line twice, exactly (X+X:
+openground-ec 11-20 09:00, OPEN GROUND 11-20 09:02 and 11-23 06:14 / 06:22 / 07:34 UTC) — each
+sent by the owner's own Enter. On 11-23 the live OPEN GROUND president (read with
+`scripts/peek-desk.mts`) held a doubled progress line on a quiet, menu-less frame.
+
+**Cause 1 — two passes typed the same line.** Notices queued close together each start their own
+`flushSupplyNotices` (one engine pass moving several cards makes `supplyProgress.observeBoardProgress`
+call `queueSupplyProgress` once per card, back to back). Each pass asked `inFlight.has(desk)`, then
+awaited `automaticOperationAllowed` (added 2026-11-06 in 5acd2982; it can wait on the owner-role
+lookup, `roles.ts` `fetchRemoteRole`) before `claim(desk)` — so every one went on to paste. The
+re-read of the box right before a paste cannot stop the second one: claude paints a paste some ms
+after it is written. Two copies are not "only our line", so `onlyOurPasteInBox` refused every
+Enter (rightly) and the line sat there. Real claude, throwaway home
+(`scripts/probe-supply-concurrent-passes.mts`): pre-fix `writes: PASTE(86) PASTE(86)`, the box
+holding the line twice, still queued; fixed `PASTE(86) ENTER`, box empty, generating.
+
+**Cause 2 — a line taller than the box (claude 2.1.330).** A box taller than claude shows now
+carries its scroll state IN its rules: `─── ↑ 4 more ───` on top while the view is at the end (the
+box's own `❯` row is then out of view), `─── ↓ 4 more ───` below after Ctrl+A
+(`scripts/probe-scrolled-box-frames.mts`, 58x29). `readInputBoxText` anchored on the last `❯` —
+the turn submitted before — so it read the conversation as the box, and no Enter was pressed; after
+Ctrl+A the `↓` row was not a rule, so the footer was read into the head and the head check failed
+as well. JobSearch's president (58x29) held a 330-character commander reply from 07:53 to 10:09
+UTC. `scripts/probe-supply-delivery.mts` 58 29 300: pre-fix `injectAnswerIntoWorker => false`,
+only the paste written; fixed `=> true`, paste ^A ^E Enter, box empty — and 93x16/473 chars,
+158x28/193, 58x29 three-line all submitted.
+
+**Not the cause:** Claude Code's own 「✔ Update installed · Restart to update」 row, on screen
+both times. Measured 2026-11-23 on the live president desks (SSE replay → headless xterm →
+`readScreen`): it sits on its own row ABOVE the box's top rule, where no reader looks, and every
+idle desk read as box `''` / deliverable. Long-lived desks all show it, hence "both times".
+
+**Fix.**
+- `tryClaim` (supplyNotice.ts) — the check and the claim are ONE call with no await between them,
+  taken right after the visit's policy read and held for the rest of the visit (released in
+  `finally`). A second pass leaves the desk alone. The screen and the lanes are read under the
+  claim, so a desk that went idle during the policy read is seen idle, and a reply queued during it
+  takes the desk in its own pass — the news follows once the desk is free.
+- The policy read is NOT under the claim (review 2026-11-24): it can wait seconds on the owner-role
+  lookup, every pass makes it for every live desk while anything is queued, and a line the policy
+  refuses waits for good — claimed through it, the desk was "in flight" to `supplyContextCap` on
+  every tick and the context cap could be put off for good.
+- `supplyContextCap` skips a desk while `supplyDeliveryInFlight(desk)`: its `/compact` starts with
+  a line-kill and its pass rides the same 60 s tick as a delivery pass — typed over a paste that is
+  not painted yet, it would erase the notice unsent (and the empty box then reads as "the owner
+  sent it").
+- `RULE_ROW_RE` (claudeScreen.ts) accepts the labelled rules; a `↑ N more` top rule below the last
+  `❯` (`SCROLLED_BOX_TOP_RE`) starts the box for `readInputBoxText`, `inputBoxStart` and
+  `detectMenu`'s input-box check. A scrolled box with no text in view reads `null` (unreadable),
+  never `''` (empty — a line would be pasted on top).
+- A paste whose `injectAnswerIntoWorker` throws afterwards is still tracked as unsent, so the next
+  pass sends only the Enter.
+- The unsent record's foreign-input `seq` is read in the same tick as the paste (after the owner
+  line's `beforeSend` and the news policy read, not before them). Read before those awaits, a key
+  that reached the desk during them made every re-press of a scrolled box refuse
+  ("not untouched since the paste") — the line sat there until the bell (2026-11-24).
+- `writeInput` (terminal.ts) no longer counts what a pane sends by itself as foreign input
+  (`TERMINAL_REPORT_RE`: focus in/out `ESC[I` / `ESC[O`, device-attributes replies `ESC[?…c` /
+  `ESC[>…c`); every key still counts, as does a write mixing a report with a key. See cause 3.
+
+**Cause 3 — a pane's own reports counted as the owner's typing (found in review, 2026-11-24).**
+claude 2.1.330 turns focus reporting on (`ESC[?1004h`), so the app's xterm pane writes `ESC[I` /
+`ESC[O` through `/api/terminal/:id/input` on every click into or out of it, and a pane opened on a
+desk answers the device-attributes query in its replay with `ESC[?1;2c`. All of it went through
+`writeInput` and bumped the foreign-input record. A long line (the box shows only its tail) is
+pressed only while that record is untouched since its paste — so after one failed Enter, a single
+click on the president's pane kept the line from ever being pressed again; it sat there until the
+owner pressed Enter. Measured read-only on four live president desks (OPEN GROUND, openground-ec,
+sns-hub, JobSearch) with `scripts/probe-desk-focus-mode.mts`: focus reporting on at the end of
+every replay, and the replay alone answered `ESC[?1;2c`.
+
+**Unchanged.** A box that does hold anything but our one line still gets no Enter and nothing is
+erased; after `SUPPLY_UNSENT_MAX_PASSES` quiet passes the `supply-notice-unsent` bell rings once
+(on record for the OPEN GROUND and openground-ec lines above), later notices stay queued, and they are told once the
+owner sends or clears the box.
+
+**Seen on one desk, not measured as a cause.** On the OPEN GROUND desk (158x28) claude's own
+「✻ Bug report drafted … clear text to review, send, or dismiss」 panel made the frame taller than
+the terminal, and claude dropped the frame's BOTTOM (the box's last rows, its closing rule and the
+footer were not drawn) — 11-23, and still there 11-24 (the panel stays until the owner clears the
+box and reviews or dismisses it). A box cut like that shows only its head; the Enter guard cannot
+vouch for the rest and refuses — the bell is the answer there. Pressing anyway would submit
+whatever the owner appended from the phone (Remote Control input is not in the foreign-input record).
+
+**Re-measured 2026-11-24 (a second session, before integration).** The reds below re-measured by
+hand (pre-fix files written over the fixed ones, then restored). Real claude 2.1.330 on the fixed
+code, throwaway `OPENGROUND_HOME`, test project: `probe-scrolled-box-frames.mts … 58 29 300` drew
+`─── ↑ 3 more ───` (paste / Ctrl+E) and `❯ …` + `─── ↓ 3 more ───` (Ctrl+A), each read as only the
+rows in view; `probe-supply-concurrent-passes.mts` wrote `PASTE(86) ENTER`, box empty, generating.
+The live OPEN GROUND president (still 0.11.209, read with `peek-desk.mts`) held the progress digest
+of two cards dispatched together, typed twice — cause 1 again — with
+`new task? /clear to save … · ✔ Update installed · Restart to update` on its own row above the
+box's top rule. Both probes now set their own throwaway home (never run one against the real home).
+
+Guards: `supplyNoticeConcurrentPasses.test.ts`, and the "claude 2.1.330 scrolled box" block of
+`supplyNoticeScrolledBox.test.ts`. Red measured 2026-11-23 — pre-fix supplyNotice.ts +
+supplyContextCap.ts: `expected [ 'PASTE', 'PASTE' ] to deeply equal [ 'PASTE', 'ENTER' ]` (progress
+line and important bundle alike), the reply left queued, `/compact` typed over the notice, the
+throwing Enter left untracked (`[ 'PASTE', 'ENTER' ]`); origin/main claudeScreen.ts + claudeMenu.ts:
+the long reply stops at `[ 'PASTE' ]`, the reader and menu assertions fail. Red measured 2026-11-24
+for 「a long line whose first Enter failed is re-pressed even if a key arrived while it was being
+prepared」 with the `seq` read moved back above the awaits: `[ 'PASTE', 'HOME', 'END', 'ENTER' ]`
+(no re-press); for 「a line the policy keeps waiting does not hold off the compaction of its desk」
+with the claim taken before the policy read: `expected [] to deeply equal [ 'term-president' ]`;
+for the two foreign-input cases with `writeInput` counting every write: `expected 4 to be +0` and
+the re-press missing; with `tryClaim` not checking, the two-cards / bundle cases went back to
+`[ 'PASTE', 'PASTE' ]`; with `inputBoxStart` cutting nothing for a scrolled box, the box rows showed
+up in `conversationRows`.
+
+**Left as is (review 2026-11-24).** A box that shows our WHOLE line is pressed on the screen's word
+alone, without the foreign-input check: a key written in the few ms before claude paints it would
+go out with our line (older than this change; checking there would turn any later key into a line
+that is never sent). `detectMenu` reads a `─── ↑ N more ───` row under a cursor as "the input box
+is below, this is history" — the same trust the old rule-then-`❯` check already had; no 2.1.330
+screen with a chooser above a scrolled box is known.

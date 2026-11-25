@@ -633,19 +633,30 @@ const seenDesks: Set<string> =
 const toldTo: Map<string, Set<string>> =
   globalThis.__openground_supply_told ?? (globalThis.__openground_supply_told = new Map())
 
-/** Desks a pass is typing into right now (and APP_WIDE while an app-wide line
+/** Desks a pass is working on right now (and APP_WIDE while an app-wide line
  *  is in flight) — a concurrent pass must not type a second line there. */
 const inFlight: Map<string, object> =
   globalThis.__openground_supply_inflight ?? (globalThis.__openground_supply_inflight = new Map())
-/** Mark `k` in flight; the returned release clears only THIS claim (a pass that
- *  outlived a state reset must not free a newer pass's desk). */
-const claim = (k: string): (() => void) => {
+/** Take `k` for this pass — or null when another pass holds it. The check and
+ *  the claim are ONE call on purpose: written as two statements, an `await` got
+ *  between them (2026-11-06) and two passes typed the same line into one box
+ *  (supplyNoticeConcurrentPasses.test.ts). The returned release clears only
+ *  THIS claim (a pass that outlived a state reset must not free a newer pass's
+ *  desk). */
+const tryClaim = (k: string): (() => void) | null => {
+  if (inFlight.has(k)) return null
   const token = {}
   inFlight.set(k, token)
   return () => {
     if (inFlight.get(k) === token) inFlight.delete(k)
   }
 }
+
+/** Is a delivery pass working on this desk right now? For the OTHER engine
+ *  channel that writes into a president desk (supplyContextCap's compaction,
+ *  which starts with a line-kill): the screen cannot answer this — a paste is
+ *  painted some ms after it is written. */
+export const supplyDeliveryInFlight = (deskId: string): boolean => inFlight.has(deskId)
 
 /** A handoff freezes new passes first, then awaits any paste already claimed. */
 export const drainSupplyNoticeDeliveries = async (signal?: AbortSignal, timeoutMs = 120_000): Promise<void> => {
@@ -1058,13 +1069,37 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
   const served = new Set<string>()
   // Project-less fatals (APP_WIDE) go to the first desk that can take them.
   for (const desk of desks) {
+    // This visit's claim on the desk (see below) — released on every way out.
+    let release: (() => void) | null = null
     // PER DESK, not around the loop: one throwing screen()/write() must not
     // abort delivery for every project after it in the list.
     try {
       const key = deskKey(desk.cwd)
       if (served.has(key)) continue
       served.add(key)
-      if (inFlight.has(desk.id)) continue // an earlier pass is still typing here
+      // Owner words and replies finish an already accepted conversation.
+      // Unsolicited news/progress must not start a new outside-frame turn.
+      // Asked BEFORE the desk is claimed: the read can wait seconds on the
+      // owner-role lookup, and a desk claimed through it was "in flight" to the
+      // desk compaction on the same tick, tick after tick, while a refused line
+      // waited (supplyContextCap). Nothing is picked on its strength: the lanes
+      // are read under the claim, below.
+      const newsAllowed =
+        !!ownerSays.get(key)?.length || !!replies.get(key)?.length || (await automaticOperationAllowed(desk.cwd))
+      // ONE CLAIM FOR THE REST OF THE VISIT, checked and taken in one call with
+      // no await in between. Several passes do start in one tick (one engine
+      // pass moving two cards calls queueSupplyProgress twice —
+      // supplyProgress.observeBoardProgress), and a pass that awaited between
+      // "is this desk free?" and its claim let the next one through to type the
+      // same line: the screen cannot stop it (claude paints a paste some ms
+      // after it is written, so the second pass still reads an empty box). That
+      // is how one line was typed twice and then never sent — two copies in the
+      // box are not "only our line", so the Enter guard refused, rightly (owner
+      // reports 2026-11-20 / 11-23).
+      release = tryClaim(desk.id)
+      if (!release) continue // another pass is working on this desk
+      // Read under the claim, after the policy read: a desk that went idle
+      // meanwhile is seen idle.
       const screen = desk.runtime === 'sdk' ? null : deps.screen(desk.id)
       const left = unsent.get(desk.id)
       if (left) {
@@ -1072,67 +1107,61 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         // never the text — and only on a frame where the box shows only that
         // line (onlyOurPasteInBox), no menu is open and the desk is not generating (guardEnter): an
         // Enter must never submit the owner's own typing or confirm a menu.
-        // Claimed BEFORE the first await so a concurrent pass cannot press too.
-        const release = claim(desk.id)
-        try {
-          const { sanitizeForPaste, submitPastedInput } = await import('./swarmEscalations')
-          // Read AFTER the claim and the import. The box read as EMPTY (a
-          // positive reading, on an idle menu-less frame) ⇒ the line left it:
-          // the owner pressed Enter or cleared it — dequeued, never retyped.
-          // No frame / a menu / anything else ⇒ not evidence either way.
-          const fresh = deps.screen(desk.id)
-          // Only a quiet frame is evidence the box is wedged; a busy / menu /
-          // unreadable one is the owner working and is not counted.
-          const quiet =
-            fresh !== null &&
-            !isGenerating(fresh) &&
-            detectMenu(fresh) === null &&
-            readInputBoxText(fresh) !== null
-          const gen = generation.n
-          // An EMPTY box is also what the owner clearing it looks like — so it
-          // dequeues the line but is not proof the owner heard it.
-          const cleared = fresh !== null && noticeDeliverable(fresh)
-          const landed =
-            cleared ||
-            (await submitPastedInput(desk.id, sanitizeForPaste(left.line), {
-              write: deps.write,
-              sleep: deps.sleep,
-              readScreen: deps.screen,
-              guardEnter: true,
-              foreignInput: deps.foreignInput,
-              sinceSeq: left.seq,
-            }))
-          if (gen !== generation.n) continue // state was reset meanwhile
-          if (landed) {
-            unsent.delete(desk.id)
-            held.delete(desk.id)
-            left.commit(!cleared)
-            delivered.push(key)
-            continue
-          }
-          // A quiet frame whose box still holds our line: our Enter did not take
-          // (not the owner's typing — the box is ours).
-          noteHold(deps, key, desk.id, quiet ? 'enter-not-taken' : (noticeHoldReason(fresh) ?? 'no-input-box'), now)
-          if (
-            !left.rang &&
-            ((quiet && ++left.passes >= SUPPLY_UNSENT_MAX_PASSES) || now - left.since > SUPPLY_NOTICE_TTL_MS)
-          ) {
-            // Stuck: ring the bell ONCE — but NEVER dequeue (owner decision
-            // 2026-09-24: 「届けられなかったものは捨てずに再送し、配達済み扱いは
-            // 着地確認後だけ」). It used to commit here, and the president never
-            // heard a line that had only looked stuck (the ghost-text misread,
-            // supplyNoticeGhost.test.ts). A project line keeps its tracking: the
-            // box still holds it, so this desk could take nothing else anyway,
-            // and the box reading empty later still counts as landed. An APP-WIDE
-            // line keeps its tracking too, but a rung one no longer blocks the
-            // shared lane (`appWideFree`): another desk may take the item, and
-            // this desk's later landing then removes nothing (by identity).
-            left.rang = true
-            if (left.kind === 'reply') deps.onReplyExpired(key, left.line)
-            else if (left.kind !== 'owner') deps.onNoticeGivenUp(key, left.line)
-          }
-        } finally {
-          release()
+        const { sanitizeForPaste, submitPastedInput } = await import('./swarmEscalations')
+        // Read AFTER the claim and the import. The box read as EMPTY (a
+        // positive reading, on an idle menu-less frame) ⇒ the line left it:
+        // the owner pressed Enter or cleared it — dequeued, never retyped.
+        // No frame / a menu / anything else ⇒ not evidence either way.
+        const fresh = deps.screen(desk.id)
+        // Only a quiet frame is evidence the box is wedged; a busy / menu /
+        // unreadable one is the owner working and is not counted.
+        const quiet =
+          fresh !== null &&
+          !isGenerating(fresh) &&
+          detectMenu(fresh) === null &&
+          readInputBoxText(fresh) !== null
+        const gen = generation.n
+        // An EMPTY box is also what the owner clearing it looks like — so it
+        // dequeues the line but is not proof the owner heard it.
+        const cleared = fresh !== null && noticeDeliverable(fresh)
+        const landed =
+          cleared ||
+          (await submitPastedInput(desk.id, sanitizeForPaste(left.line), {
+            write: deps.write,
+            sleep: deps.sleep,
+            readScreen: deps.screen,
+            guardEnter: true,
+            foreignInput: deps.foreignInput,
+            sinceSeq: left.seq,
+          }))
+        if (gen !== generation.n) continue // state was reset meanwhile
+        if (landed) {
+          unsent.delete(desk.id)
+          held.delete(desk.id)
+          left.commit(!cleared)
+          delivered.push(key)
+          continue
+        }
+        // A quiet frame whose box still holds our line: our Enter did not take
+        // (not the owner's typing — the box is ours).
+        noteHold(deps, key, desk.id, quiet ? 'enter-not-taken' : (noticeHoldReason(fresh) ?? 'no-input-box'), now)
+        if (
+          !left.rang &&
+          ((quiet && ++left.passes >= SUPPLY_UNSENT_MAX_PASSES) || now - left.since > SUPPLY_NOTICE_TTL_MS)
+        ) {
+          // Stuck: ring the bell ONCE — but NEVER dequeue (owner decision
+          // 2026-09-24: 「届けられなかったものは捨てずに再送し、配達済み扱いは
+          // 着地確認後だけ」). It used to commit here, and the president never
+          // heard a line that had only looked stuck (the ghost-text misread,
+          // supplyNoticeGhost.test.ts). A project line keeps its tracking: the
+          // box still holds it, so this desk could take nothing else anyway,
+          // and the box reading empty later still counts as landed. An APP-WIDE
+          // line keeps its tracking too, but a rung one no longer blocks the
+          // shared lane (`appWideFree`): another desk may take the item, and
+          // this desk's later landing then removes nothing (by identity).
+          left.rang = true
+          if (left.kind === 'reply') deps.onReplyExpired(key, left.line)
+          else if (left.kind !== 'owner') deps.onNoticeGivenUp(key, left.line)
         }
         continue
       }
@@ -1146,9 +1175,7 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       const own = ownerSays.get(key)?.[0] ?? null
       const queue = replies.get(key)
       const reply = own ? null : (queue?.[0] ?? null)
-      // Owner words and replies finish an already accepted conversation.
-      // Unsolicited news/progress must not start a new outside-frame turn.
-      if (!own && !reply && !await automaticOperationAllowed(desk.cwd)) continue
+      if (!own && !reply && !newsAllowed) continue
       // App-wide fatals first: they are rare and concern the whole app.
       const appWideFree = !inFlight.has(APP_WIDE) && !Array.from(unsent.values()).some((u) => u.appWide && !u.rang)
       // A landing notice inside its grace (SUPPLY_LANDING_GRACE_MS) is skipped,
@@ -1223,12 +1250,9 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       }
       if (desk.runtime === 'sdk') {
         if (runtimeAdmissionBlocked('swarm')) continue
-        const release = claim(desk.id)
-        try {
-          if (own?.beforeSend && !own.prepared) { await own.beforeSend(); own.prepared = true }
-          if (own && !ownerSays.get(key)?.includes(own)) continue
-          if (deps.sendDirect?.(desk.id, line)) { held.delete(desk.id); commit(true); delivered.push(key) }
-        } finally { release() }
+        if (own?.beforeSend && !own.prepared) { await own.beforeSend(); own.prepared = true }
+        if (own && !ownerSays.get(key)?.includes(own)) continue
+        if (deps.sendDirect?.(desk.id, line)) { held.delete(desk.id); commit(true); delivered.push(key) }
         continue
       }
       // Paste, THEN Enter as a separate write, then confirm the box emptied
@@ -1243,8 +1267,10 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
       }
       const appWide = importantKey === APP_WIDE
       if (runtimeAdmissionBlocked('swarm')) continue
-      const releaseDesk = claim(desk.id)
-      const releaseAppWide = appWide ? claim(APP_WIDE) : () => {}
+      // Free a few lines up (`appWideFree`), with no await since — so this
+      // cannot fail today; it is asked again so that it never silently can.
+      const releaseAppWide = appWide ? tryClaim(APP_WIDE) : () => {}
+      if (!releaseAppWide) continue
       try {
         const { injectAnswerIntoWorker } = await import('./swarmEscalations')
         const opts = {
@@ -1255,13 +1281,17 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
           foreignInput: deps.foreignInput,
         }
         const gen = generation.n
-        // Same tick as the paste write inside injectAnswerIntoWorker (its first
-        // await comes after it), so this is the seq the line was pasted at.
-        const seq = deps.foreignInput(desk.id)?.seq
         if (own?.beforeSend && !own.prepared) { await own.beforeSend(); own.prepared = true }
         if (own && !ownerSays.get(key)?.includes(own)) continue
         if (!own && !reply && !await automaticOperationAllowed(desk.cwd)) continue
-        const ok = await injectAnswerIntoWorker(desk.id, line, opts)
+        // Same tick as the paste write inside injectAnswerIntoWorker (its first
+        // await comes after it), so this is the seq the line was pasted at. Read
+        // before the awaits above, input arriving during them made the unsent
+        // re-press of a scrolled box refuse for good.
+        const seq = deps.foreignInput(desk.id)?.seq
+        // A throw after the paste must still leave the line tracked as unsent
+        // (below) — untracked, only a screen read would stop a second paste.
+        const ok = await injectAnswerIntoWorker(desk.id, line, opts).catch(() => false)
         if (gen !== generation.n) continue // state was reset meanwhile
         if (ok) {
           held.delete(desk.id)
@@ -1274,11 +1304,12 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
           unsent.set(desk.id, { line, commit, appWide, kind, passes: 0, since: now, seq })
         }
       } finally {
-        releaseDesk()
         releaseAppWide()
       }
     } catch {
       /* best effort — a notice that missed stays queued for the next pass */
+    } finally {
+      release?.()
     }
   }
   return delivered

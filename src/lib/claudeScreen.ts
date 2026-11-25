@@ -69,8 +69,18 @@ export const WORKING_FOOTER_RE = /esc to interrupt/i
  *  makes detection fail closed rather than misfire. */
 export const PROMPT_ROW_RE = /^\s*❯(.*)$/
 
-/** A horizontal rule row (the input box's top/bottom separators). */
-export const RULE_ROW_RE = /^\s*[─━]{6,}\s*$/
+/** A horizontal rule row (the input box's top/bottom separators). A box taller
+ *  than claude shows carries its scroll state IN its rules — measured on real
+ *  claude 2.1.330 (2026-11-23, scripts/probe-scrolled-box-frames.mts):
+ *  `─── ↑ 4 more ───` on top while the view is at the text's end, `─── ↓ 4 more
+ *  ───` below after Ctrl+A. Both are rules: read as text, the bottom one put the
+ *  footer into the box, and no line that overflowed a president's box was ever
+ *  submitted (JobSearch's desk held a commander reply for 2h15m, 2026-11-23). */
+export const RULE_ROW_RE = /^\s*(?:[─━]{6,}|[─━]{3,}\s*[↑↓]\s*\d+\s*more\s*[─━]{3,})\s*$/
+
+/** The top rule of a box scrolled past its START (`─── ↑ 4 more ───`): its own
+ *  `❯` row is out of view, so the last `❯` on screen is a submitted turn. */
+export const SCROLLED_BOX_TOP_RE = /^\s*[─━]{3,}\s*↑\s*\d+\s*more\s*[─━]{3,}\s*$/
 
 /** The empty input box's occasional suggestion placeholder (`❯ Try "…"`).
  *  Carried over VERBATIM from swarmQuestions (including its duplicated `"`), so
@@ -154,18 +164,34 @@ export const lastPromptRow = (rows: readonly string[]): number => {
   return -1
 }
 
+/** Where the input box's text starts on screen: its `❯` row — or, for a box
+ *  scrolled past its start, the row under its `↑ N more` top rule (`scrolled`).
+ *  Anchored on the last `❯` alone, a scrolled box read as the submitted turn
+ *  above it. null: no input box on screen. */
+const boxTextStart = (rows: readonly string[]): { row: number; scrolled: boolean } | null => {
+  const p = lastPromptRow(rows)
+  for (let i = rows.length - 1; i > p; i--) {
+    if (SCROLLED_BOX_TOP_RE.test(rows[i])) return { row: i + 1, scrolled: true }
+  }
+  return p < 0 ? null : { row: p, scrolled: false }
+}
+
 /** The input box's visible text: the last `❯` row's remainder plus its wrapped
- *  continuation rows (until the closing rule / end of frame), joined. */
+ *  continuation rows (until the closing rule / end of frame), joined — for a
+ *  scrolled box, the rows in view. */
 export const readInputBoxText = (screen: string): string | null => {
   const rows = screen.split('\n')
-  const p = lastPromptRow(rows)
-  if (p < 0) return null
-  const parts: string[] = [rows[p].replace(PROMPT_ROW_RE, '$1')]
-  for (let i = p + 1; i < rows.length; i++) {
+  const start = boxTextStart(rows)
+  if (!start) return null
+  const parts = start.scrolled ? [] : [rows[start.row].replace(PROMPT_ROW_RE, '$1')]
+  for (let i = start.scrolled ? start.row : start.row + 1; i < rows.length; i++) {
     if (RULE_ROW_RE.test(rows[i]) || IDLE_FOOTER_RE.test(rows[i])) break
     parts.push(rows[i])
   }
-  return parts.join('\n').trim()
+  const text = parts.join('\n').trim()
+  // A scrolled box holds text by definition: none in view is a frame we cannot
+  // read, never an empty box (which would let a line be pasted on top).
+  return start.scrolled && !text ? null : text
 }
 
 /** Where the INPUT BOX begins — the index of the rule fencing the last `❯` row,
@@ -179,8 +205,10 @@ export const readInputBoxText = (screen: string): string | null => {
  *  conversation — otherwise it displaces whatever claude last said, which is the
  *  difference between noticing a stopped session and going quiet on it. */
 export const inputBoxStart = (rows: readonly string[]): number => {
-  const p = lastPromptRow(rows)
-  if (p < 0) return rows.length
+  const start = boxTextStart(rows)
+  if (!start) return rows.length
+  if (start.scrolled) return start.row - 1 // its `↑ N more` top rule
+  const p = start.row
   // Walk up over the box's own (possibly wrapped) rows to its opening rule.
   let top = p
   while (top > 0 && !RULE_ROW_RE.test(rows[top - 1]) && !isChromeRow(rows[top - 1])) top--
