@@ -13,7 +13,8 @@ import { resolveSwarmModelEffortProbed } from './swarmLaunch'
 import { NoAllowedModelTierError } from './swarmAllowedModels'
 import { resolveSwarmSession, recordSwarmSession, forgetSwarmSessionIf } from './swarmSessions'
 import { getPromptLang, languageDirective, type PromptLang } from './promptLang'
-import { markRateLimited, isModelTier } from './swarmQuota'
+import { markRateLimited, isModelTier, MODEL_TIER_LADDER } from './swarmQuota'
+import { quotaRefusalKindOfText, refusalClosesEveryModel } from './swarmRateLimitText'
 import { installOgManageSkill } from './ogManageSkill'
 import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
 import { listManagerDesks } from './swarmManagerRuntime'
@@ -134,6 +135,8 @@ export const watchSdkDeskForDeathOnArrival = (
     now?: () => number
     forget?: typeof forgetSwarmSessionIf
     mark?: typeof markRateLimited
+    /** Record a death at start that was NOT a quota refusal (its exit reason). */
+    note?: (projectPath: string, reason: string) => void
   } = {},
 ): (() => void) | null => {
   if (!isModelTier(tier)) return null // never cool an arbitrary model string
@@ -178,14 +181,30 @@ export const watchSdkDeskForDeathOnArrival = (
     // status when the pump unwinds (announceStatus, sdkSession.ts).
     if (f.ev.kind !== 'status') return
     if (f.ev.status !== 'exited' && f.ev.status !== 'failed') return
-    if (refusal === null) return // it died of something else — says nothing about the tier
+    if (refusal === null) {
+      // It died of something else: nothing to learn about the tier, but its exit
+      // reason is the only record of WHY the commander did not come up (the pool
+      // forgets it after a linger; the engine saw only an absent desk). Say it.
+      if (nowFn() - bornAt <= DESK_DOA_WINDOW_MS) {
+        learned = true
+        const reason = f.ev.detail ?? 'ended without a reason'
+        if (deps.note) deps.note(projectPath, reason)
+        else void import('./swarmOrchestrator').then((m) => m.noteCommanderDeathAtStart(projectPath, reason)).catch(() => {})
+      }
+      return
+    }
     try {
       if (nowFn() - bornAt > DESK_DOA_WINDOW_MS) return // it lived; this says nothing about the launch
       learned = true
-      const until = mark(tier, { ptyText: refusal, now: nowFn() })
+      // An all-model limit (the 5-hour window, the weekly allowance) closes every
+      // tier at once: cooling only this one sent the next wake one tier down into
+      // the same wall (2026-11-23). Only a per-model limit steps down.
+      const every = refusalClosesEveryModel(quotaRefusalKindOfText(refusal), refusal)
+      let until = 0
+      for (const t of every ? MODEL_TIER_LADDER : [tier]) until = mark(t, { ptyText: refusal, now: nowFn() })
       console.warn(
-        `[swarmManager] SDK 司令官卓が tier '${tier}' の枯渇で起動即死 — ` +
-          `${tier} を ${new Date(until).toISOString()} まで冷却(次の起動は1段下の tier)`,
+        `[swarmManager] SDK 司令官卓が ${every ? '全モデル共通の上限' : `tier '${tier}' の枯渇`}で起動即死 — ` +
+          `${every ? '全 tier' : tier} を ${new Date(until).toISOString()} まで冷却${every ? '' : '(次の起動は1段下の tier)'}`,
       )
       // A resumed session's transcript is real history, not just a refusal —
       // never drop the pointer to it (even after a quota refusal).

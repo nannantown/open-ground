@@ -108,6 +108,7 @@ import {
   type HeartbeatSign,
   type ProjectEngine,
   type WorkerProbe,
+  OWNER_REVIEW_HOLD_HINT,
 } from './swarmOrchestrator'
 import type { ManagerRuntimeKind } from './swarmManagerRuntime'
 import { matchesRateLimit, normalizeScreen } from './swarmRateLimitText'
@@ -3437,9 +3438,13 @@ describe('runDispatchPass — quota sensor wiring (sighting → cooling → park
         worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'fable' }),
       ],
     })
+    // A PER-MODEL limit (it names the model). Until 2026-11-24 this fixture read
+    // "Claude usage limit reached", which is the all-model wording: that now cools
+    // every tier (next test), so the one-tier attribution is pinned on the wording
+    // it belongs to.
     const deps = makeDeps({
       cards: [card('a', { boardColumn: 'doing' })],
-      screens: new Map([['pty-a-1', 'Claude usage limit reached — resets in 30 minutes']]),
+      screens: new Map([['pty-a-1', "You've reached your Fable 5 limit — resets in 30 minutes"]]),
     })
     const t1 = T0 + STALL_SILENCE_MS + 1
     await runDispatchPass(engine, { ...deps, quotaBlocked: () => true }, t1)
@@ -3452,6 +3457,28 @@ describe('runDispatchPass — quota sensor wiring (sighting → cooling → park
     expect(isTierCooling('sonnet', t1 + 1)).toBe(false)
     // The hold log names the attribution so the journal shows WHY dispatch will shift.
     expect(engine.log.some((l) => l.message.includes('tier fable cooling until'))).toBe(true)
+  })
+
+  // 2026-11-23: one 5-hour limit, four cards, sixteen launches — the engine stepped
+  // fable→opus→sonnet→haiku per card and every launch was refused on arrival. A
+  // limit that names no model closes them all, so ONE sighting cools the ladder.
+  it('a sighting worded as an ALL-MODEL limit cools every tier at once (no step-down into the same wall)', async () => {
+    const engine = newEngine({
+      workers: [
+        worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt, model: 'fable' }),
+      ],
+    })
+    const deps = makeDeps({
+      cards: [card('a', { boardColumn: 'doing' })],
+      screens: new Map([['pty-a-1', 'Claude usage limit reached — resets in 30 minutes']]),
+    })
+    const t1 = T0 + STALL_SILENCE_MS + 1
+    await runDispatchPass(engine, { ...deps, quotaBlocked: () => true }, t1)
+    for (const tier of MODEL_TIER_LADDER) {
+      expect(isTierCooling(tier, t1 + 29 * 60_000)).toBe(true)
+      expect(isTierCooling(tier, t1 + 30 * 60_000 + 1)).toBe(false)
+    }
+    expect(engine.log.some((l) => l.message.includes('every tier cooling until'))).toBe(true)
   })
 
   // The 2026-07-09 incident, end to end on the production seam. The assertion
@@ -3589,9 +3616,12 @@ describe('runDispatchPass — quota sensor wiring (sighting → cooling → park
         worker({ terminalId: 'pty-a-1', branch: 'swarm/a', worktree: '/wt/a', taskId: 'a', taskTitle: 'task a', startedAt }),
       ],
     })
+    // A per-model limit on a worker whose model nobody recorded: WHICH tier is a
+    // guess. (The all-model wording this fixture used until 2026-11-24 is no
+    // guess — it cools every tier; see the test above.)
     const deps = makeDeps({
       cards: [card('a', { boardColumn: 'doing' })],
-      screens: new Map([['pty-a-1', 'Claude usage limit reached']]),
+      screens: new Map([['pty-a-1', "You've reached your Fable 5 limit."]]),
     })
     const t1 = T0 + STALL_SILENCE_MS + 1
     await runDispatchPass(engine, { ...deps, quotaBlocked: () => true }, t1)
@@ -4398,16 +4428,21 @@ describe('runDispatchPass — monitor: runaway (execution-time ceiling)', () => 
     expect(engine.workers).toHaveLength(1)
   })
 
-  it('runaway takes PRIORITY over a quota stop (→ blocked, not todo)', async () => {
+  it('a quota stop past the ceiling stays a quota stop (→ todo, not blocked)', async () => {
+    // Reversed 2026-11-27 (card 1123-151658, condition 13). This test used to pin
+    // the opposite — runaway beat the quota arm — and that was the measured
+    // incident: workers whose transcript ended on "You've hit your 5-hour limit"
+    // were parked in blocked and never re-dispatched when the limit lifted. A
+    // worker parked on a usage limit is not burning tokens, so the ceiling has
+    // nothing to protect; the next dispatch gets a fresh budget and the ceiling
+    // keeps its teeth there. The no-quota case stays pinned by the test below.
     const engine = newEngine({ workers: [w1()] })
-    // Alive past the ceiling on WORKING time (統合待ち credit 0), so runaway still
-    // wins the race against the quota-stop arm even with the verdict raised.
     const now = T0 + MAX_EXEC_MS + 1
     const deps = makeDeps({
       cards: [card('a', { boardColumn: 'doing' })],
     })
     await runDispatchPass(engine, { ...deps, quotaBlocked: () => true }, now)
-    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'blocked' }])
+    expect(deps.recovered).toEqual([{ taskId: 'a', column: 'todo' }])
   })
 
   // (The rate-limit HOLD credit tests — 'does NOT count a BANKED hold', 'credits a
@@ -5729,6 +5764,8 @@ const makeIntDeps = (init: {
   wakeFails?: boolean
   /** nudgeManager returns false — the live desk's PTY vanished mid-poke. */
   nudgeFails?: boolean
+  /** nudgeManager reports the SDK desk is paused on the usage limit. */
+  nudgeUsageLimit?: boolean
   /** The OFFLINE HOLD sensor (2026-09-02). A function of nothing so a test can
    *  flip the route between passes (down → up); absent ⇒ online, which keeps
    *  every pre-existing wake/nudge assertion meaning what it always meant. */
@@ -5921,7 +5958,7 @@ const makeIntDeps = (init: {
     // "open another one".
     nudgeManager: async (p) => {
       nudged.push(p)
-      return !init.nudgeFails
+      return init.nudgeUsageLimit ? 'usage-limit' : !init.nudgeFails
     },
     isOnline: async () => (init.online ? init.online() : true),
     // The NOTICE channel (2026-07-27). Records EVERY offer — the retry of an
@@ -6165,6 +6202,39 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     // One-shot per episode: a further pass does NOT re-fire the fatal.
     await passAt(engine, deps, T0 + (MAX_MANAGER_RESUME_ATTEMPTS + 1) * GRACE)
     expect(deps.notifications).toHaveLength(1)
+  })
+
+  // 2026-11-24: for eight hours every failed wake was journalled "no usable model
+  // tier" and the give-up said "check the commander's desk by hand", while the
+  // launch was being refused over an unconfirmed operation. The record and the
+  // notice now carry what the launch itself said, and where the owner clears it.
+  it('the failed wake and the give-up say WHY the commander did not come up, and where to go when only the owner can clear it', async () => {
+    const engine = newEngine()
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresenceFn: () => 'absent', wakeFails: true })
+    const wake = deps.wakeManager
+    // What defaultWakeManager leaves behind when the launch throws.
+    deps.wakeManager = async (p, cards) => {
+      const woke = await wake(p, cards)
+      engine.lastCommanderFailure = 'A previous tool operation has an unconfirmed result. Inspect the saved project work before resuming automatic work.'
+      return woke
+    }
+    for (let i = 0; i <= MAX_MANAGER_RESUME_ATTEMPTS; i++) await passAt(engine, deps, T0 + i * GRACE)
+    const held = engine.log.filter((l) => l.message.includes('起動できず保留'))
+    expect(held).toHaveLength(MAX_MANAGER_RESUME_ATTEMPTS)
+    for (const l of held) {
+      expect(l.message).toContain(OWNER_REVIEW_HOLD_HINT)
+      expect(l.message).not.toContain('tier')
+    }
+    expect(deps.notifications.map((n) => n.event)).toEqual(['manager-unrevivable'])
+    expect(deps.notifications[0].detail).toContain('結果を確かめられなかった操作が残っています')
+    expect(deps.notifications[0].detail).toContain(OWNER_REVIEW_HOLD_HINT)
+  })
+
+  it('a wake that leaves no reason of its own does not quote the previous attempt\'s', async () => {
+    const engine = newEngine({ lastCommanderFailure: 'yesterday\'s reason' })
+    const deps = makeIntDeps({ reviews: [reviewCard('a', 'swarm/a')], managerPresenceFn: () => 'absent', wakeFails: true })
+    await passAt(engine, deps, T0)
+    expect(engine.log.find((l) => l.message.includes('起動できず保留'))?.message).not.toContain('yesterday')
   })
 
   it('RE-ARMS after a backoff when the give-up was a QUOTA WALL (no usable tier) — a transient wall never stalls integration forever (完了条件2, 2026-07-20)', async () => {
@@ -6547,6 +6617,24 @@ describe('runIntegratePass — manager-only integration wake + resurrection (202
     expect(deps.notifications[0].detail).not.toContain('応答なし') // a different fact, said differently
     for (let i = 1; i <= 10; i++) await passAt(engine, deps, at + i * MANAGER_NUDGE_INTERVAL_MS)
     expect(deps.notifications).toHaveLength(1) // still once per episode
+  })
+
+  it('a commander paused on the usage limit is not "unreachable": no 開き直す bell, no recycle', async () => {
+    // It takes input again by itself when the limit lifts. Counted as unaddressable,
+    // the engine rang the wrong cause and recycled the desk — cutting its helper's
+    // running command, then meeting the same limit (review 2026-11-26).
+    const engine = newEngine()
+    const deps = makeIntDeps({
+      reviews: [reviewCard('a', 'swarm/a')],
+      managerPresence: 'idle',
+      deskRuntime: 'sdk',
+      nudgeUsageLimit: true,
+    })
+    const at = await driveToWedged(engine, deps)
+    for (let i = 1; i <= 10; i++) await passAt(engine, deps, at + i * MANAGER_NUDGE_INTERVAL_MS)
+    expect(engine.managerResume?.unaddressable ?? 0).toBe(0)
+    expect(deps.recycled).toEqual([])
+    expect(deps.notifications.filter((n) => n.event === 'manager-unresponsive')).toEqual([])
   })
 
   it('the episode ENDS when the queue drains — a later wedge is belled (and recycled) afresh', async () => {
@@ -8691,6 +8779,26 @@ describe('collectUnownedDoing — 実行中で取り残されたカードは未�
     expect(teardowns).toEqual([{ worktree: '/wt/q', sdkSessionId: 'sdk-q-9', reason: 'rate-limit' }])
     expect(deps.recovered).toEqual([{ taskId: 'q', column: 'todo' }])
     expect(engine.log.some((l) => l.message.includes('上限停止のまま取り残されていた'))).toBe(true)
+  })
+
+  it('a parked unowned desk still running a command is reclaimed when the command ends, not in the middle of it', async () => {
+    // Cut off mid-command, the command has no result, and that unconfirmed
+    // operation holds the whole project (review 2026-11-26).
+    const c = card('q', { boardColumn: 'doing', branch: 'swarm/q', title: 'parked one' })
+    let running = 1
+    const deps = withDesk(
+      { ...makeDeps({ cards: [c] }), sdkWorkerFacts: () => ({ toolCallsInFlight: running }) },
+      { kind: 'parked', worktree: '/wt/q', sdkSessionId: 'sdk-q-9' },
+    )
+    const engine = newEngine({ running: true, workers: [] })
+    await runDispatchPass(engine, deps, NOW)
+    await runDispatchPass(engine, deps, AFTER_GRACE)
+    await runDispatchPass(engine, deps, AFTER_GRACE + 60_000)
+    expect(deps.tornDown).toEqual([])
+    expect(deps.recovered).toEqual([])
+    running = 0
+    await runDispatchPass(engine, deps, AFTER_GRACE + 120_000)
+    expect(deps.recovered).toEqual([{ taskId: 'q', column: 'todo' }])
   })
 
   it('a LIVE desk is never touched — a manual worker in flight looks exactly like this', async () => {

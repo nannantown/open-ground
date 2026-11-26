@@ -14,7 +14,9 @@
 // what" at a glance anyway; the transcript opens on demand, ONE seat at a time
 // (SwarmModule's `openWorktree`), which bounds the screen at 3 streams.
 
+import { useRef } from 'react'
 import { Power, RotateCcw, Trash2, AlertTriangle, ScrollText } from 'lucide-react'
+import { useAssistantClearance } from '@/components/assistant/assistantWindow'
 import { useT } from '@/i18n/I18nContext'
 import type { MessageKey } from '@/i18n/messages'
 import { BEACON_SPRITE } from '@/lib/swarm/sprites'
@@ -90,6 +92,11 @@ export const SwarmWorkerSeat = ({
   const asking = look.sprite === 'asking'
   const statusLabel = t(look.labelKey)
   const job = taskTitle || branch
+  // The seat's last buttons wrap out from under the floating assistant — or,
+  // with the character over the row's left part, the row lifts them above it
+  // (either way the row grows, so it is measured without its room).
+  const actionsRef = useRef<HTMLDivElement>(null)
+  const actionsRoom = useAssistantClearance(actionsRef, { side: 'right', grows: true })
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
@@ -154,7 +161,7 @@ export const SwarmWorkerSeat = ({
       ) : (
         <div className="min-h-0 flex-1" />
       )}
-      <div className="flex shrink-0 flex-wrap items-center gap-2 px-3 py-1.5">
+      <div ref={actionsRef} style={actionsRoom} className="flex shrink-0 flex-wrap items-center gap-2 px-3 py-1.5">
           <button
             type="button"
             onClick={onOpenLog}

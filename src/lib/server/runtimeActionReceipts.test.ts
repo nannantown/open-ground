@@ -12,7 +12,7 @@ import * as receipts from './conversationReceipts'
 import * as atomic from './atomicWrite'
 import * as ownerIdentity from './runtimeOwner'
 import { openGroundHome } from './paths'
-import { __setSdkImporterForTests, getSdkSession, preloadSdk, spawnSdkSession, terminateSdkSession, type SdkQueryParams } from './sdkSession'
+import { __resetSdkSessionsForTests, __setQuotaPrefixesForTests, __setSdkImporterForTests, getSdkSession, preloadSdk, sdkQuotaPause, spawnSdkSession, terminateSdkSession, type SdkQueryParams } from './sdkSession'
 
 const h = vi.hoisted(() => ({ owner: 'owner-a', access: true, occupied: false, liveHandle: 'fixture-handle' }))
 vi.mock('./runtimeOwner', async original => ({ ...(await original<typeof import('./runtimeOwner')>()), runtimeOwnerKey: async (expected?: string) => {
@@ -541,5 +541,53 @@ describe('durable Claude tool audit hooks', () => {
     await expect(assertNoUncertainRuntimeActions('/synthetic/project', false)).resolves.toBeUndefined()
     h.liveHandle = 'replacement-handle'
     await expect(assertNoUncertainRuntimeActions('/synthetic/project', false)).rejects.toThrow('unconfirmed result')
+  })
+})
+
+// A USAGE REFUSAL IS NOT AN ABORT (2026-11-23 22:21 / 11-24 04:38).
+//
+// Measured: three workers on one project, one 5-hour limit. The two that were
+// refused while the third was in the middle of a command ended on the spot —
+// the refused turn asked "is anything in this project unconfirmed?" and counted
+// the third worker's RUNNING command as unconfirmed. The engine read a quota
+// stop as a crash (cards → blocked, never resumed). The same check ended the
+// commander while its own helper's command was running; that command was killed
+// with it, and the unconfirmed operation it left held the project for 8 hours.
+describe('a usage refusal while a command is still running somewhere in the project', () => {
+  const REFUSAL = "You've hit your 5-hour limit · resets 9pm (Asia/Tokyo)"
+  const refusedSession = () => spawnSdkSession({ cwd: '/synthetic/project', role: 'worker', options: {}, initialPrompt: 'synthetic',
+    queryFn: ({ prompt }) => ({ async *[Symbol.asyncIterator]() {
+      for await (const _input of prompt) {
+        yield { type: 'assistant', message: { content: [{ type: 'text', text: REFUSAL }] } }
+        yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
+      }
+    } }) })
+  // Written through the module instance the session's own check will load: an
+  // earlier test in this file restarts the modules (vi.resetModules), and a
+  // receipt claimed by the instance from before that "restart" reads as left
+  // over from a previous boot — unconfirmed by definition, whoever is alive.
+  const running = async () => {
+    const live = await import('./conversationReceipts')
+    await live.acceptConversationReceipt('project-a', 'ongoing', { kind: 'runtime-tool', sessionId: 'another-worker' })
+    await live.claimConversationReceipt('project-a', 'ongoing', { sessionId: 'another-worker', handleId: 'fixture-handle', runtime: 'sdk' })
+  }
+  beforeEach(() => __setQuotaPrefixesForTests(["You've hit your"]))
+  afterEach(() => { __setQuotaPrefixesForTests(null); __resetSdkSessionsForTests() })
+
+  it('parks the refused session — it is not ended, and the running command is left alone', async () => {
+    await running()
+    h.occupied = true // the actor running that command is alive
+    const session = refusedSession()
+    await vi.waitFor(() => expect(sdkQuotaPause(session.id)).not.toBeNull())
+    expect(getSdkSession(session.id)).toMatchObject({ status: 'quota-parked' })
+    expect(getSdkSession(session.id)?.exitReason).toBeUndefined()
+    expect((await (await import('./conversationReceipts')).listConversationReceipts())[0]?.state).toBe('executing')
+  })
+  it('still ends the session when the command really is unconfirmed (its actor is gone)', async () => {
+    await running()
+    h.occupied = false
+    const session = refusedSession()
+    await vi.waitFor(() => expect(getSdkSession(session.id)?.status).toBe('failed'))
+    expect(getSdkSession(session.id)?.exitReason).toContain('unconfirmed result')
   })
 })

@@ -641,7 +641,7 @@ describe('SdkWorkerPane — composer and the floating assistant', () => {
     vi.restoreAllMocks()
   })
 
-  it('pads its right side only while the character covers it', async () => {
+  it('makes room only while the character covers it — off its right end, or lifting the row', async () => {
     const { publishAssistantSpot } = await import('@/components/assistant/assistantWindow')
     // A 1000×800 window; the composer spans its bottom 32px, full width.
     vi.stubGlobal('innerWidth', 1000)
@@ -656,11 +656,19 @@ describe('SdkWorkerPane — composer and the floating assistant', () => {
     // The default corner: character spans x 930–980 → 1000 - 930 + 8.
     act(() => publishAssistantSpot({ right: 20, bottom: 18 }))
     expect(row.style.paddingRight).toBe('78px')
-    // Dragged further in: the room follows it.
+    // Dragged a little further in: the room follows it (1000 - 890 + 8).
+    act(() => publishAssistantSpot({ right: 60, bottom: 18 }))
+    expect(row.style.paddingRight).toBe('118px')
+    // Dragged in over more than a third of the row: the row lifts itself above
+    // the character instead (800 - 740 + 8). This used to expect a 258px right
+    // room — taken however wide, it crushed the input (to 14px at the row's left
+    // end) and slid the send button under the character (review ab3-R1, 2026-11-26).
     act(() => publishAssistantSpot({ right: 200, bottom: 10 }))
-    expect(row.style.paddingRight).toBe('258px')
+    expect(row.style.paddingRight).toBe('')
+    expect(row.style.paddingBottom).toBe('68px')
     // Dragged up, clear of the row: no room.
     act(() => publishAssistantSpot({ right: 20, bottom: 400 }))
     expect(row.style.paddingRight).toBe('')
+    expect(row.style.paddingBottom).toBe('')
   })
 })

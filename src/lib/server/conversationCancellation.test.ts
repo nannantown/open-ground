@@ -28,7 +28,7 @@ describe('owner cancellation only revokes selected president intent', () => {
     await finishConversationReceipt(scope, 'tool', 'uncertain', { error: 'Independent effect still requires inspection.' })
     await claimConversationReceipt(scope, 'two', execution)
     await finishConversationReceipt(scope, 'two', 'uncertain', { error: 'effect may have happened', heard: true })
-    const file = join(openGroundHome(), 'runtime', 'receipts.json'), saved = JSON.parse(await readFile(file, 'utf8'))
+    const file = join(openGroundHome(), 'runtime', 'receipts-v2.json'), saved = JSON.parse(await readFile(file, 'utf8'))
     Object.values(saved.receipts).forEach(value => { const entry = value as { id: string; error?: string }; if (entry.id === 'two') entry.error = 'Original interruption evidence.' })
     await writeFile(file, JSON.stringify(saved))
     const before = await receipt('two')
@@ -62,9 +62,9 @@ describe('owner cancellation only revokes selected president intent', () => {
       }
       const body = await request(['one', 'bad'])
       if (mode === 'old-context') await rotateConversationContext(scope, await readConversationContext(scope))
-      const before = await readFile(join(openGroundHome(), 'runtime', 'receipts.json'), 'utf8')
+      const before = await readFile(join(openGroundHome(), 'runtime', 'receipts-v2.json'), 'utf8')
       await expect(cancelPresidentInputs(body)).rejects.toThrow()
-      expect(await readFile(join(openGroundHome(), 'runtime', 'receipts.json'), 'utf8')).toBe(before)
+      expect(await readFile(join(openGroundHome(), 'runtime', 'receipts-v2.json'), 'utf8')).toBe(before)
     },
   )
   it('serializes cancellation against a real execution claim in both orders', async () => {
@@ -100,7 +100,7 @@ describe('owner cancellation only revokes selected president intent', () => {
   })
   it('replays an archived cancellation and its archived control without accepting old work again', async () => {
     await input('one'); const body = await request(), first = await cancelPresidentInputs(body)
-    const file = join(openGroundHome(), 'runtime', 'receipts.json'), saved = JSON.parse(await readFile(file, 'utf8'))
+    const file = join(openGroundHome(), 'runtime', 'receipts-v2.json'), saved = JSON.parse(await readFile(file, 'utf8'))
     const original = Object.values(saved.receipts)[0] as Record<string, unknown>
     for (let i = 0; Object.keys(saved.receipts).length < 3072; i++) {
       const id = `padding-${i}`, key = createHash('sha256').update(JSON.stringify(['owner-a', scope, id])).digest('hex')
@@ -115,10 +115,10 @@ describe('owner cancellation only revokes selected president intent', () => {
   })
   it('does not acknowledge or partly cancel when the atomic fsync write fails', async () => {
     await input('one'); await input('two'); const body = await request(['one', 'two'])
-    const before = await readFile(join(openGroundHome(), 'runtime', 'receipts.json'), 'utf8')
+    const before = await readFile(join(openGroundHome(), 'runtime', 'receipts-v2.json'), 'utf8')
     vi.spyOn(atomic, 'atomicWriteJson').mockRejectedValueOnce(new Error('synthetic cancel fsync failure'))
     await expect(cancelPresidentInputs(body)).rejects.toThrow('cancel fsync failure')
-    expect(await readFile(join(openGroundHome(), 'runtime', 'receipts.json'), 'utf8')).toBe(before)
+    expect(await readFile(join(openGroundHome(), 'runtime', 'receipts-v2.json'), 'utf8')).toBe(before)
     expect((await receipt('one'))?.state).toBe('queued'); expect((await receipt('two'))?.state).toBe('queued')
     expect((await cancelPresidentInputs(body)).receipts.every(r => r.state === 'cancelled')).toBe(true)
   })

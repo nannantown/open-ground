@@ -576,6 +576,10 @@ describe('repo guard — exactly one OPEN GROUND home resolver', () => {
       // (soundOnDone/soundOnDoneVolume) — same structural reason as the other
       // two (a bare-node Claude hook cannot import paths.ts).
       'scripts/openground-hook.js': 3,
+      // 2026-11-24: a bare-node script like swarm-lock.js, and it builds the
+      // app's own home only to COMPARE, like hooksInstall.ts: dev:alt refuses an
+      // OPENGROUND_HOME that resolves to it and never writes through it.
+      'scripts/dev-alt.mjs': 1,
     }
     // NOT read at all, and pinned at no number — the two files where a hit is
     // meaningless rather than allowed:

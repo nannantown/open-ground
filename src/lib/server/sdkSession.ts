@@ -23,6 +23,7 @@
 import { randomUUID } from 'crypto'
 import { resolve as pathResolve, sep } from 'path'
 import { currentRuntimeOwnerKey } from './runtimeOwner'
+import { resolveCoolingUntil, spentUsageResetsAt } from './swarmQuota'
 import {
   distillSdkMessage,
   isWorkEvidence,
@@ -149,6 +150,9 @@ export interface SdkSessionInfo {
   lastEventAt: number
   /** Why the session ended, once it has. */
   exitReason?: string
+  /** Commands (tool calls) running right now; absent when none. The engine
+   *  reads it so it never cuts a worker off in the middle of one. */
+  toolCallsInFlight?: number
   /** The pump has actually unwound — see {@link Entry.reaped}. EXPOSED because
    *  "is this session still there?" must be answerable the SAME way by every
    *  consumer: `status` is flipped synchronously by terminateSdkSession and is
@@ -230,6 +234,18 @@ interface Entry {
   settledInputs?: number
   lastSettledAt?: number
   inputPaused?: boolean
+  /** Set when {@link inputPaused} came from a usage refusal (refuseInput), not a
+   *  runtime drain: when the limit says it resets, and its words. The pause's
+   *  exit — see {@link pushSdkInput} and {@link resumeSdkQuotaPauses}. Before
+   *  2026-11-23 a refused desk stayed deaf until the app restarted. */
+  quotaPause?: { until: number; text?: string }
+  /** Ends {@link quotaPause} at its stated reset (refuseInput). */
+  quotaResumeTimer?: ReturnType<typeof setTimeout>
+  /** The active turn has called a tool — it has had effects, so a refusal that
+   *  ends it does not put its message back (refuseInput). */
+  activeActed?: boolean
+  /** The newest `quota_refusal` sentence this session saw. */
+  lastRefusalText?: string
   gateWake?: (() => void) | null
   closed: boolean
   /** When the pump finished (ms epoch) — the retention clock. Unset while live. */
@@ -499,7 +515,8 @@ export const importSdkModule = async (): Promise<unknown> => {
 // quota detection silent rather than wrong; a private copy of Anthropic's
 // wording is the thing sdkEvents exists to avoid.
 let cachedPrefixes: readonly string[] | null = null
-const quotaPrefixes = async (): Promise<readonly string[]> => {
+/** Also read by the pre-launch tier probe (swarmTierProbe.classifyProbeOutput). */
+export const quotaPrefixes = async (): Promise<readonly string[]> => {
   if (cachedPrefixes) return cachedPrefixes
   await loadSdkModule()
   // ⚠ DO NOT MEMOISE THE EMPTY LIST WHEN THE LOAD FAILED. `[]` is truthy, so the
@@ -655,11 +672,36 @@ const settleInput = async (e: Entry): Promise<void> => {
 }
 
 const refuseInput = async (e: Entry): Promise<void> => {
-  await e.activeInput?.onRefused?.()
+  const refused = e.activeInput
+  await refused?.onRefused?.()
   // A usage refusal is a confirmed non-fulfilment, never delivery/cancellation.
-  // Do not admit the next queued turn into the same exhausted connection.
+  // Do not admit the next queued turn into the same exhausted connection —
+  // until the limit says it resets. Without that bound the desk stayed deaf
+  // after the limit came back: the commander took no message until a restart
+  // (2026-11-23). The refusal is read as the sentence it is, handed over just
+  // now (a time already past today is tomorrow's), then the spent usage
+  // window's reset, then the flat grace — the cooling resolver's order. Read as
+  // a stale screen, "resets 2:50am" at 22:21 paused for 20 minutes only, and the
+  // turn admitted after that met the same wall (review 2026-11-26).
+  const now = Date.now()
+  const a5 = e.provider === 'chatgpt' ? null : spentUsageResetsAt((await import('./claudeUsageCli')).peekCachedUsage())
+  const until = resolveCoolingUntil({ ptyText: e.lastRefusalText, a5ResetsAt: a5, now, fresh: true })
+  e.quotaPause = { until, ...(e.lastRefusalText ? { text: e.lastRefusalText } : {}) }
   e.inputPaused = true
+  // A message the limit refused before the desk did anything with it was never
+  // worked on, and its sender was told it was delivered: keep it and hand it
+  // over when the limit lifts. One with a receipt of its own (an owner's turn)
+  // has just been settled as refused; one that ran a tool has had effects —
+  // neither is put back (never replay).
+  if (refused && !refused.onRefused && !e.activeActed) e.queue.unshift(refused)
   e.activeInput = undefined
+  // The pause ends by itself at the stated reset, so a kept message does not
+  // wait for some later sender to knock (pushSdkInput) to be handed over.
+  clearTimeout(e.quotaResumeTimer)
+  e.quotaResumeTimer = setTimeout(() => {
+    if (e.quotaPause?.until === until) resumeSdkInputAdmission(e.id)
+  }, Math.min(Math.max(0, until - now) + 1000, 2 ** 31 - 1))
+  e.quotaResumeTimer.unref?.()
   await settleInput(e)
 }
 
@@ -710,6 +752,7 @@ const makeInputIterable =(e: Entry): AsyncIterable<unknown> => ({
       e.activeInput = input
       input.turnId ??= input.operationId ?? `sdk-turn-${randomUUID()}`
       e.activeRefused = false
+      e.activeActed = false
       if (await input.onConsumed?.() === false) {
         await input.onReleased?.()
         e.activeInput = undefined
@@ -822,6 +865,7 @@ const pump = async (e: Entry): Promise<void> => {
         for (const ev of distill(msg)) {
           emit(e, ev)
           trackToolEvent(e, ev)
+          if (ev.kind === 'quota_refusal') e.lastRefusalText = ev.raw
           sawAbort = ev.kind === 'turn_end' && ev.reason === 'aborted_streaming'
         }
         continue
@@ -829,7 +873,11 @@ const pump = async (e: Entry): Promise<void> => {
       for (const ev of distill(msg)) {
         emit(e, ev)
         trackToolEvent(e, ev)
-        if (ev.kind === 'quota_refusal') e.activeRefused = true
+        if (ev.kind === 'tool_use') e.activeActed = true
+        if (ev.kind === 'quota_refusal') {
+          e.activeRefused = true
+          e.lastRefusalText = ev.raw
+        }
         // Native SDK results are turn boundaries. Custom providers have a
         // stronger, explicit durability callback and must never use this hint.
         if (ev.kind === 'turn_end' && e.provider !== 'chatgpt') {
@@ -844,8 +892,21 @@ const pump = async (e: Entry): Promise<void> => {
             if (safe) { e.activeInput = undefined; await settleInput(e) }
             else { e.exitReason = 'error: An interrupted native action has an unconfirmed result.'; terminateSdkSession(e.id) }
           } else if (e.activeRefused) {
+            // A refusal cut nothing off, so ask what the launch guard and the
+            // abort branch above ask (`false`): a command some actor in this
+            // project is still RUNNING — another worker's, or this session's own
+            // background helper's — is not an unconfirmed result. Counting it
+            // (the default) ended the refused session on the spot whenever
+            // anything in the project was mid-command. Measured 2026-11-23
+            // 22:21: three workers, one limit; the two refused while the third
+            // ran a command died here and the engine read a quota stop as a
+            // crash (cards → blocked). 11-24 04:38: the commander died here with
+            // its own helper's command running, that command was killed with
+            // it, and the unconfirmed operation this very check exists to
+            // prevent held the project for eight hours. A result that really is
+            // unconfirmed (its actor gone) still ends the session.
             const actions = await import('./runtimeActionReceipts')
-            await actions.assertNoUncertainRuntimeActions(e.cwd)
+            await actions.assertNoUncertainRuntimeActions(e.cwd, false)
             await refuseInput(e)
           } else await settleInput(e)
         }
@@ -1091,6 +1152,9 @@ const snapshot = (e: Entry): SdkSessionInfo => {
   // refused — a button that exists only to produce an error. Exposed so the tile
   // can ask the question it actually has.
   ...(e.closed ? { closed: true } : {}),
+  ...((e.toolCallsInFlight?.size ?? 0) + (e.providerToolCalls ?? 0) > 0
+    ? { toolCallsInFlight: (e.toolCallsInFlight?.size ?? 0) + (e.providerToolCalls ?? 0) }
+    : {}),
   seq: e.seq,
   ...(e.inputs ? { inputs: e.inputs } : {}),
   }
@@ -1323,6 +1387,10 @@ export const listSdkSessionsIn = (cwd: string, role: SdkSessionRole): SdkSession
  *  needs to confirm the text ever landed. */
 export const pushSdkInput = (id: string, text: string, receipt: SdkInputReceipt = {}): boolean => {
   const e = pool.sessions.get(id)
+  // A usage refusal's pause ends when the limit said it resets — checked here,
+  // where every sender (the commander relay, the engine's nudge, the notice
+  // lanes) arrives, so none of them meets a desk that stays deaf after it.
+  if (e?.inputPaused && e.quotaPause && Date.now() >= e.quotaPause.until) resumeSdkInputAdmission(id)
   if (!e || e.closed || e.inputPaused) return false
   if (receipt.operationId) {
     const existing = [e.activeInput, ...e.queue].find((item) => item?.operationId === receipt.operationId)
@@ -1363,9 +1431,32 @@ export const resumeSdkInputAdmission = (id: string): void => {
   const e = pool.sessions.get(id)
   if (!e || e.closed) return
   e.inputPaused = false
+  e.quotaPause = undefined
+  clearTimeout(e.quotaResumeTimer)
   const wake = e.gateWake
   e.gateWake = null
   wake?.()
+}
+
+/** Why this session takes no input because of a usage refusal: when the limit
+ *  said it resets and its words. Null when it is not paused by one. */
+export const sdkQuotaPause = (id: string): { until: number; text?: string } | null => {
+  const e = pool.sessions.get(id)
+  return e && !e.closed && e.inputPaused && e.quotaPause ? { ...e.quotaPause } : null
+}
+
+/** The owner says the limit came back before its stated reset: every session
+ *  paused by a usage refusal takes input again (a runtime drain's pause is not
+ *  touched). If the limit is in fact still spent, the next turn is refused again
+ *  and the session pauses again — nothing is replayed. Returns how many. */
+export const resumeSdkQuotaPauses = (): number => {
+  let n = 0
+  pool.sessions.forEach((e) => {
+    if (e.closed || !e.inputPaused || !e.quotaPause) return
+    resumeSdkInputAdmission(e.id)
+    n++
+  })
+  return n
 }
 
 /** Freeze admission before awaiting the current durable turn. Never interrupts
@@ -1375,6 +1466,7 @@ export const drainSdkSession = async (id: string, timeoutMs = 120_000, signal?: 
   if (!e) throw new Error('The recorded SDK actor is missing; inspect recovery before replaying its work.')
   if (signal?.aborted) throw new Error('The runtime drain was cancelled.')
   e.inputPaused = true
+  e.quotaPause = undefined // the drain owns this pause now; only its resume ends it
   const deadline = Date.now() + timeoutMs
   while (e.outstanding || e.settledInputs === undefined) {
     if (signal?.aborted) throw new Error('The runtime drain was cancelled.')

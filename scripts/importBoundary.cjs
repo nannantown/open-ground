@@ -70,6 +70,9 @@ const SDK_BY_DESIGN = [
   'src/lib/server/assistantSession.ts', //   the assistant's ONE live session: needs only
   //                                          the SDK loader (importSdkModule, for
   //                                          createSdkMcpServer), never a desk of either pool
+  'src/lib/server/swarmTierProbe.ts', //     needs only the SDK's exported refusal
+  //                                          vocabulary (quotaPrefixes) to read a headless
+  //                                          `claude -p` probe; never a desk of either pool
 ]
 
 /** DEBT. These reach BOTH pools directly today. Every one is a place where the

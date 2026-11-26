@@ -25,6 +25,14 @@ const inputValueHash = (input: unknown): string => {
   return createHash('sha256').update(canonical(input ?? null)).digest('hex')
 }
 const object = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+const ALREADY_RECEIPTED = 'This tool call already has a receipt or an uncertain result. Inspect it before proceeding.'
+const RECORDING_UNAVAILABLE = 'Owner authorization or durable action recording is unavailable. No action was authorized.'
+/** The guard's own refusals, as the CLI hands them back in the tool result
+ *  ("PreToolUse:Bash hook error: <reason>", measured 2026-11-20). Exported so the
+ *  engine can tell a worker whose every tool call is refused from one whose
+ *  commands merely fail (swarmOrchestrator's tool-denial watch). */
+export const isRuntimeActionDenial = (toolResult: string): boolean =>
+  toolResult.includes(ALREADY_RECEIPTED) || toolResult.includes(RECORDING_UNAVAILABLE)
 export interface ClaudeRuntimeToolAudit { hooks: Hooks; observeSdkMessage(message: unknown): Promise<void> }
 /** Audit hooks never grant permission: every existing guard remains authoritative.
  * Started-without-post receipts are conservative recovery holds, even when a
@@ -74,7 +82,7 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
     const previous = claimed.get(callId)
     if (previous) {
       previous.ambiguous = true
-      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'This tool call already has a receipt or an uncertain result. Inspect it before proceeding.' } }
+      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: ALREADY_RECEIPTED } }
     }
     if (claimed.size >= 256) throw new Error('Too many unconfirmed tool calls.')
     const id = idFor(sessionId, callId)
@@ -90,7 +98,7 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
       inputHash: inputHash(input.tool_input) }, undefined, owner)
     if (!await claimConversationReceipt(scope, id, execution, owner)) {
       candidate.ambiguous = true
-      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'This tool call already has a receipt or an uncertain result. Inspect it before proceeding.' } }
+      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: ALREADY_RECEIPTED } }
     }
     candidate.claimed = true
     await runtimeOwnerKey(owner)
@@ -98,7 +106,7 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
     } catch {
       // A native hook exception can be treated as an advisory hook failure.
       // An explicit permission denial makes an unavailable journal fail closed.
-      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'Owner authorization or durable action recording is unavailable. No action was authorized.' } }
+      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: RECORDING_UNAVAILABLE } }
     }
   }] }]
   result.PostToolUse = [...(hooks.PostToolUse ?? []), { hooks: [async (input, toolId) => {

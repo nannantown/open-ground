@@ -16,6 +16,12 @@ npm run dev:alt    # SECOND dev instance (worktree/parallel branch): auto-picks 
                    # first free port pair from Web :5175 / API :47777 upward and
                    # prints the URL. The primary pair 5174/47776 stays untouched.
                    # (OAuth login works only on the primary — fixed redirect URI.)
+                   # Runs on its own throwaway data folder unless OPENGROUND_HOME
+                   # is set, and refuses ~/.openground. Never start a second server
+                   # on ~/.openground (docs/VERIFICATION.md §4.2 — it stopped two
+                   # teams for 3 days). HOME stays yours: outside a swarm worktree
+                   # it still installs that checkout's hooks / guard / skills into
+                   # ~/.openground and ~/.claude, so set HOME=$(mktemp -d) too.
 npm run dev:web    # Vite SPA only (:5174, HMR)
 npm run dev:server # Hono API only (:47776, tsx watch)
 npm run build      # vite build → dist-web/  +  esbuild → server/dist/index.cjs

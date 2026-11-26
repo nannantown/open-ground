@@ -47,6 +47,7 @@ import {
   isSdkSessionLive,
   getSdkSession,
   pushSdkInput,
+  sdkQuotaPause,
   terminateSdkSession,
 } from './sdkSession'
 import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
@@ -198,8 +199,12 @@ export const managerDeskForSession = (
 
 export interface SayResult {
   ok: boolean
-  /** Why a PTY delivery was held back, when it was. SDK deliveries never are. */
-  heldBecause?: 'busy-or-half-typed' | 'no-desk'
+  /** Why a delivery was held back, when it was. 'usage-limit': an SDK desk a
+   *  usage limit refused takes no input until `retryAt` (or until the owner says
+   *  the limit came back — POST /api/swarm/quota/uncool {tier:'all'}). */
+  heldBecause?: 'busy-or-half-typed' | 'no-desk' | 'usage-limit'
+  /** For 'usage-limit': when the limit said it resets (epoch ms). */
+  retryAt?: number
 }
 
 /** Deliver one line to the commander and press Enter.
@@ -228,7 +233,10 @@ export const sayToManagerDesk = (
 ): SayResult => {
   if (!h) return { ok: false, heldBecause: 'no-desk' }
   if (h.runtime === 'sdk') {
-    return { ok: (deps.push ?? pushSdkInput)(h.handleId, text) }
+    if ((deps.push ?? pushSdkInput)(h.handleId, text)) return { ok: true }
+    // Say WHY, so the president can tell the owner instead of a bare false.
+    const pause = sdkQuotaPause(h.handleId)
+    return pause ? { ok: false, heldBecause: 'usage-limit', retryAt: pause.until } : { ok: false }
   }
   const scr = (deps.screen ?? getTerminalScreen)(h.handleId)
   if (deps.deliverable && !deps.deliverable(scr)) {

@@ -497,6 +497,10 @@ const SDK_API_SKIP = new Set([
   // a pool listing. The assistant's
   // own session (assistantSession.ts) needs only this.
   'importSdkModule',
+  // Same kind (2026-11-25): hands back the SDK's exported refusal vocabulary
+  // (USAGE_LIMIT_ERROR_PREFIXES), never a session, a desk or a pool listing. The
+  // pre-launch tier probe (swarmTierProbe.ts) reads a headless `claude -p` with it.
+  'quotaPrefixes',
 ])
 
 const sdkFnsAll = (): string[] => {
@@ -675,9 +679,9 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
   },
   'src/lib/server/liveDesks.ts': {
     tier: 'both-pools',
-    why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, canonicalLiveDeskCwds/isDirOccupied/liveDeskOccupies (the occupancy question a spawn must ask), listAllActiveDesks, stopAllDesksInDirAndWait, (0925) listDeskIdsByRole — the desk ids of one role from both pools (PTY deskLabel + SDK role) for the Ground president lamp, and (0803) updateRestartSafety/computeRestartSafety — the "may the app restart itself to apply an update?" verdict for the Electron shell (GET /api/update/restart-safety).',
+    why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, canonicalLiveDeskCwds/isDirOccupied/liveDeskOccupies (the occupancy question a spawn must ask), listAllActiveDesks, stopAllDesksInDirAndWait, (0925) listDeskIdsByRole — the desk ids of one role from both pools (PTY deskLabel + SDK role) for the Ground president lamp, and (0803) updateRestartSafety/computeRestartSafety — the "may the app restart itself to apply an update?" verdict for the Electron shell (GET /api/update/restart-safety), and (1125) resumeQuotaPausedDesks — the owner\'s "the usage limit is back": every desk a usage refusal left unable to take input takes input again, on either runtime (only SDK desks hold such a pause).',
     ptyFns: ['killTerminalsByCwdAndWait', 'listActiveTerminalCwds', 'listActiveTerminals', 'listOwnerDeskTerminals', 'listPtySafetyViews'],
-    sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'currentSdkTurnId', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'sdkToolCallsInFlight', 'terminateSdkSessionsInDir'],
+    sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'currentSdkTurnId', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'resumeSdkQuotaPauses', 'sdkToolCallsInFlight', 'terminateSdkSessionsInDir'],
   },
   'src/lib/server/groundLamps.ts': {
     tier: 'both-pools',
@@ -738,6 +742,9 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       'isSdkSessionLive',
       'listSdkSessionsIn',
       'pushSdkInput',
+      // 1123: sayToManagerDesk says WHY an SDK commander took no input — a usage
+      // refusal's pause and when it ends — instead of a bare false.
+      'sdkQuotaPause',
       'terminateSdkSession',
     ],
     sdkHandleFloor: 2,
@@ -833,6 +840,9 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       // of only re-arming its own monitoring.
       'deliverAnswerToWorker',
       'getSdkSession',
+      // 1123: defaultDeps.sdkWorkerFacts reads an SDK worker's usage refusal by
+      // its sdkSessionId — the refused-then-gone arm and the all-model cooling.
+      'lastQuotaRefusalText',
       'isSdkSessionReaped',
       // 0827: the 'unowned-doing' anomaly asks BOTH pools whether anything is
       // live in a branch's worktree before it calls the card abandoned — a

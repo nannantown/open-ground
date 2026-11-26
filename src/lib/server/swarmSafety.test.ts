@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
-import { mkdtemp, mkdir, rm, realpath, writeFile, readFile, symlink } from 'fs/promises'
+import { mkdtemp, mkdir, rm, realpath, writeFile, readFile, symlink, chmod } from 'fs/promises'
 import { existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -1124,5 +1124,43 @@ describe('INVARIANT E-FAILCLOSED — unverifiable guard wiring refuses the worke
     expect(err).toBeTruthy()
     expect(err).not.toBeInstanceOf(GuardWiringError)
     expect(String(err.message)).toContain('no registered project owns')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A worktree that cannot be made says WHY (2026-11-23). Measured in AIResearch:
+// a first-time project with no commit yet failed `worktree add … HEAD` every 3 s
+// for hours, and the journal said only "git worktree add failed for <branch>".
+// ═══════════════════════════════════════════════════════════════════════════
+describe('a worker worktree that cannot be made says why', () => {
+  it('a first-time project with no commit names the missing first commit — and works once there is one', async () => {
+    const proj = join(scratch, 'fresh')
+    await mkdir(proj)
+    await git(proj, ['init', '-b', 'main'])
+    await addProjectEntry(proj)
+    await expect(createSwarmWorktree(proj)).rejects.toThrow('このプロジェクトにはまだ git の記録(コミット)がありません')
+    await writeFile(join(proj, 'README.md'), '# first\n')
+    await git(proj, ['add', '-A'])
+    await git(proj, ['commit', '-m', 'init'])
+    const wt = await createSwarmWorktree(proj)
+    expect(existsSync(wt.worktree)).toBe(true)
+  })
+
+  it("a refused `worktree add` carries git's own words", async () => {
+    const proj = join(scratch, 'locked')
+    await mkdir(proj)
+    await git(proj, ['init', '-b', 'main'])
+    await writeFile(join(proj, 'README.md'), '# base\n')
+    await git(proj, ['add', '-A'])
+    await git(proj, ['commit', '-m', 'base'])
+    const entry = await addProjectEntry(proj)
+    const parent = centralWorktreesDir(entry.id)
+    await mkdir(parent, { recursive: true })
+    await chmod(parent, 0o555) // git cannot create the worktree directory
+    try {
+      await expect(createSwarmWorktree(proj)).rejects.toThrow(/git worktree add failed for swarm\/\S+: .*(denied|could not|cannot)/i)
+    } finally {
+      await chmod(parent, 0o755)
+    }
   })
 })

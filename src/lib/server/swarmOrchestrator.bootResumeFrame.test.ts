@@ -24,6 +24,10 @@ import { sessionJsonlPath } from './transcript'
 import type { AppNotification } from '../types'
 import { writeEngineIntent } from './swarmEnginePersistence'
 import { settingsFile, canvasFile, engineBootsFile } from './paths'
+import { settings as settingsMessages } from '../../i18n/messages/settings'
+import { assertNoUncertainRuntimeActions } from './runtimeActionReceipts'
+import { engineJournalPath } from './engineJournal'
+import { AUTOMATION_START_TELL_MS } from './swarmOrchestrator'
 
 // 2026-11-17 adversarial review M1: inside the Ground frame the policy loop's
 // reconcile used to start an engine the boot resume was still HOLDING (saved
@@ -51,7 +55,7 @@ vi.mock('./claudePreflight', async (importOriginal) => ({
 
 const home = () => process.env.OPENGROUND_HOME ?? ''
 const notificationsPath = () => join(home(), 'swarm-notifications.json')
-const receiptsPath = () => join(home(), 'runtime', 'receipts.json')
+const receiptsPath = () => join(home(), 'runtime', 'receipts-v2.json')
 const notices = async (): Promise<AppNotification[]> => {
   try { return (JSON.parse(await readFile(notificationsPath(), 'utf8')) as { items: AppNotification[] }).items } catch { return [] }
 }
@@ -301,6 +305,48 @@ describe('boot resume follow-ups (2026-11-17, 4d9b7d9c reviews)', () => {
     const managers: string[] = []
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj], spawnManager: async ({ projectPath }) => { managers.push(projectPath) } })
     expect(managers).toEqual([])
-    expect((await heldNotice()).at(-1)?.swarmFatal?.detail).toContain('会話の復旧')
+    // The Settings screen's own heading — 「会話の復旧」 was never on that screen.
+    expect((await heldNotice()).at(-1)?.swarmFatal?.detail).toContain(settingsMessages.ja['settings.recovery.title'])
+  })
+})
+
+describe('the engine asks the launch guard its own question (2026-11-23)', () => {
+  it('a saved unconfirmed result holds; a signed-out owner holds; the review releases — exactly when a launch would fail', async () => {
+    const count = defaultDeps().savedWorkHold!
+    gate.owner = OWNER
+    await seedReceipt(OWNER, { kind: 'runtime-tool', provider: 'claude', sessionId: 'gone-worker', tool: 'Bash' })
+    expect(await count(proj)).toBe(1)
+    await expect(assertNoUncertainRuntimeActions(proj, false)).rejects.toThrow(/unconfirmed result/)
+    gate.owner = null
+    await expect(count(proj)).rejects.toThrow(/sign-in/)
+    await expect(assertNoUncertainRuntimeActions(proj, false)).rejects.toThrow(/sign-in/)
+    gate.owner = OWNER
+    await rm(receiptsPath(), { force: true })
+    expect(await count(proj)).toBe(0)
+    await expect(assertNoUncertainRuntimeActions(proj, false)).resolves.toBeUndefined()
+  })
+})
+
+describe('a Ground-frame project whose automatic start keeps failing is told once (2026-11-23)', () => {
+  afterEach(() => { vi.useRealTimers() })
+  it('the reason reaches the engine record and the president after a minute — once — instead of being dropped', async () => {
+    gate.access = false // the owner account cannot be confirmed: the start throws
+    const notify = vi.fn()
+    const deps = { ...safeDeps(), notify }
+    const t0 = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(t0)
+    expect((await reconcileAutomationOrchestrators(deps)).failures).toHaveLength(1)
+    expect(notify).not.toHaveBeenCalled() // a switch that settles in seconds is not news
+    vi.setSystemTime(t0 + AUTOMATION_START_TELL_MS + 1000)
+    await reconcileAutomationOrchestrators(deps)
+    vi.setSystemTime(t0 + 2 * AUTOMATION_START_TELL_MS)
+    await reconcileAutomationOrchestrators(deps)
+    const told = notify.mock.calls.map((c) => c[0]).filter((n) => n.event === 'automation-held')
+    expect(told).toHaveLength(1)
+    expect(told[0].projectPath).toBe(proj)
+    expect(told[0].detail).toContain('作業を自動で始められない状態が続いています')
+    expect(told[0].detail).toContain('オーナーのアカウントが確かめられません')
+    await vi.waitFor(async () => expect(await readFile(await engineJournalPath(proj), 'utf8')).toContain('automatic start keeps failing'))
   })
 })

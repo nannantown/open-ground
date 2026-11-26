@@ -136,7 +136,9 @@ auto-clean). **Never `git stash`** - commit or discard.
 
 Worktrees isolate files, not ports (stale `npm run dev` can evict the
 standard pair, Web 5174/API 47776). Extra instances always `npm run
-dev:alt` (plain `npm run dev` fights over 5174/47776). Stop your own dev
+dev:alt` (plain `npm run dev` fights over 5174/47776); it runs on its own
+throwaway data folder - never start a second server on `~/.openground`
+(docs/VERIFICATION.md §4.2). Stop your own dev
 server on cleanup too (`git worktree remove` leaves it running). Never
 kill another session's dev server -
 distinguish via `ps -eo pid,lstart,command` path

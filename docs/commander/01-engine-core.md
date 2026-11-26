@@ -489,6 +489,255 @@ president held by its instruction / transcript, foreign receipts), plus
 boundary, bounded) and `sdkSessionLifecycle.test.ts` (`sdkToolCallsInFlight`).
 Each red-measured by a production mutation on the follow-up branch.
 
+### 7.4b3 A second OPEN GROUND process no longer marks the live app's work "uncertain" (2026-11-23)
+
+**Old knowledge withdrawn: "an `uncertain` runtime-tool receipt means the app
+restarted".** It could also mean that *another process* opened the journal.
+
+**Measured incident (2026-11-20 → 23).** A worker ran `npm run dev:alt` to look
+at a UI change. `scripts/dev-alt.mjs` passed the environment through, so the
+second server shared `~/.openground`. Within 100 ms of its first journal read
+(the 2 s inbox tick in `server/index.ts` lists receipts in every server process
+once the owner is signed in) two live Bash calls of the real app — one in this
+project, one in another — became `uncertain` ("The app restarted after this
+operation began"). The app had not restarted since 11-18
+(`engine-boots.json`). One such receipt in a project makes
+`assertNoUncertainRuntimeActions` deny every tool (PreToolUse "No action was
+authorized"), ends each SDK launch before `claude` starts (the engine only logs
+"worker lost") and keeps `spawnSwarmManager` from starting the commander: two
+projects stood still for three days. Older marks of the same shape (11-09 ×2,
+11-15) have no identified trigger.
+
+**Cause.** `conversationReceipts.ts` keeps `bootId = randomUUID()` per process
+and, on *every* journal open (reads included), rewrote each `executing` receipt
+whose `attemptBoot` was another boot to `uncertain`. "Another boot" was taken
+to mean "a boot that is gone". Nothing kept a second process from writing the
+journal either (`writer` serialises one process only).
+
+**Now:**
+
+- **One owner per data folder's runtime journal** (`runtimeJournalOwner.ts`,
+  checked first inside `transaction()`, the single choke point). The owner
+  record is `runtime/journal-owner/<generation>.json` = `{bootId, pid, port}`,
+  where `port` is a loopback listener the owner opens before it publishes the
+  record and never closes, so only the end of the process closes it. While the
+  owner lives, any other process gets `RuntimeJournalOwnedElsewhere` (message
+  names the owner's pid and says to check what it is first: if it is the live
+  app, give this copy its own `OPENGROUND_HOME`; if the refused one is the app,
+  stop the pid only once it is confirmed a stray copy and never move the app to
+  another home; never delete `runtime/journal-owner/` — agents read it; logged
+  once per pid) before it reads or writes. Every
+  caller fails closed on it (503 / 409 / 500, deny, hold or a quiet retry —
+  audited 2026-11-23, none proceeds).
+- **Gone takes proof** (one rule on every OS, nothing spawned): `kill(pid, 0)`
+  = ESRCH; or nothing listens on the recorded port (ECONNREFUSED); or what
+  listens there answers something other than the owner's hash (the port went to
+  another program — after a reboot old pids soon belong to other programs, so
+  the pid alone proves nothing). Everything else counts as alive: a stopped,
+  sleeping or busy owner still has its connection accepted by the kernel and
+  simply does not answer (no lease, no timeout to run out), and an owner out of
+  file descriptors hangs up without a word (libuv sheds load that way) —
+  neither is proof. Our own pid counts as gone (an earlier load of the module —
+  tests reload modules; a reused pid otherwise). The first version
+  (2026-11-23) compared OS start times through `ps` / PowerShell; dropped
+  2026-11-24: PowerShell 5.1 cannot read the start time of a process it may not
+  open (a reused pid after a reboot often is one, and "cannot tell" = alive
+  would have refused the app its own journal), and Linux `ps lstart` can differ
+  between two invocations. A probe sends one HTTP-shaped line first, so a
+  program that waits for the client to speak (HTTP servers above all) answers
+  too and gives itself away. A silent holder is probed at most once a minute:
+  each probe stays queued at a stopped owner (a reset does not free the slot —
+  measured on macOS), and Windows refuses connections to a full queue, which
+  would read as gone. The pid check still runs every time.
+- **Takeover is a compare-and-swap**: generation n+1 is published with
+  `link(2)`, which never overwrites (EEXIST = lost the race), and withdrawn
+  again unless every other record in the folder is one this process judged,
+  unchanged — compared by content, not name: a listing can be older than two
+  takeovers, and a name judged gone can hold a fresh live claim once the folder
+  was emptied. Every record is judged, not only the newest: a process that died
+  between publishing and withdrawing leaves one above the live owner's, and the
+  owner publishes itself again above it.
+- **The restart sweep** is reached only by the owner, so a real restart (the
+  previous owner is gone) still marks its unfinished work `uncertain` as
+  before. Since 2026-11-24 each claim also records its process
+  (`attemptHolder` = `{pid, port}`, the same proof of life as an owner record),
+  and the sweep marks a call `uncertain` only once that process is proven gone
+  (same rule as above). Defence in depth: even a second owner (the lock folder
+  deleted from outside while the app works) leaves a live process's calls
+  alone — but it still shuts the live app out until it exits (Limits: never
+  delete `runtime/journal-owner/`). Claims written before carry no holder and
+  keep the old rule.
+  `attemptHolder` is never shown (`publicConversationReceipt`).
+- **Builds from before the lock are shut out** (2026-11-24): the journal lives
+  at `runtime/receipts-v2.json` (`version: 2`, same shape). Pre-fix builds read
+  and replace `runtime/receipts.json` and know no lock, and an old checkout's
+  server (ten such worktrees on the owner's Mac that day) would flip the live
+  app's claims. The first answer — `version: 2` in place, which pre-fix builds
+  refuse to parse — stopped their *reads* but not a *write* already under way:
+  an old build that read version 1 just before the app wrote renamed its stale
+  copy over the app's journal (review round 2, modelled), and the app's
+  in-flight receipt disappeared. So the owner (`retireLegacyJournal`, every
+  transaction, one `stat` once done) moves `receipts.json` in, keeps it as
+  `receipts.json.retired`, and puts a **folder** at the old path: old builds
+  fail closed reading it (`EISDIR`) and cannot rename a file over it. Leaving a
+  plain old file behind was rejected: an old build would then run on a stale
+  copy, and a later real restart's cut-off call would be missing from it — the
+  hold weakened. A file there again — a downgraded app run after its folder was
+  removed by hand, or an old build's write landing between the rename and the
+  folder — is merged, not dropped (commander rework 2026-11-26; until then it
+  was only renamed: its `uncertain` marks and owner inputs vanished and the
+  first `.retired` was overwritten). What it holds that `receipts-v2.json` (its
+  archive included) lacks moves in, so its cut-off calls are held by the sweep;
+  for anything both hold, `receipts-v2.json`'s copy stands; accepted draft
+  revisions keep the higher one. Every copy is kept (`.retired`, `.retired.2`,
+  …), never overwritten.
+- `npm run dev:alt` runs on its **own throwaway `OPENGROUND_HOME`** unless one
+  is given (`scripts/dev-alt.mjs`; the path is printed), and refuses one that
+  is the app's own folder however it is spelled — a symlink, another letter
+  case, `/System/Volumes/Data/…`, or with `HOME` pointed elsewhere (compared by
+  device and inode against `~/.openground` of both `HOME` and the account).
+
+**Limits (by design or not yet covered):**
+
+- First come, first owner. A second process on the real home that touches the
+  journal while the app is down (e.g. during an update restart) keeps the app
+  out until that process exits — refused calls name its pid. `dev:alt` no
+  longer shares the home and refuses it, so this takes a plain server or a
+  script started on the real home.
+- An app version from before this change writes no owner record: a live app is
+  protected once it runs this version itself. Conversely, once this version has
+  opened the journal, an older build (a downgrade, or a self-update rollback to
+  a pre-fix build) finds a folder at `runtime/receipts.json` and holds all
+  runtime work until it is upgraded again (for an owner with ChatGPT access its
+  `assertNoUncertainRuntimeActions` reads the journal and throws). Removing that
+  empty folder by hand lets an old build start over on an empty journal —
+  without the holds recorded since; what it records there moves back in on the
+  next upgrade (above). That includes the installed app itself
+  while it still runs a pre-fix version: a process of this version that opens
+  the real home's journal first (a script, a server pointed at it) leaves the
+  old app holding all runtime work until it is upgraded. So release and
+  install promptly once this lands.
+- Pids and loopback ports belong to one machine: a data folder shared with a
+  container or another host is not covered. After a reboot, a reused pid plus a
+  program on the recorded port that neither speaks nor answers the probe's line
+  still reads as alive until that program lets go of the port (the refusal
+  names that unrelated pid; `lsof` below shows it). No record and no claim is
+  ever written without its port (a failed loopback listen fails that call; the
+  next one tries again): one only a pid speaks for could never be proven gone,
+  and after a restart a reused pid would refuse the real app its own journal
+  for as long as that other program runs (commander rework 2026-11-24; the
+  first design's record without `started` had the same hole). A portless record
+  can only come from a build that never shipped; it counts as alive while its
+  pid lives.
+- **Never delete `runtime/journal-owner/` while any OPEN GROUND process runs.**
+  It does not free the journal, it hands it to whichever process asks next
+  (measured 2026-11-26 with real processes): when that is a second process, it
+  owns the journal and the live app is refused on every call
+  (`RuntimeJournalOwnedElsewhere`: every tool denied, no worker or commander
+  starts, as in the incident) until that process exits. The claim holders above
+  still keep the live app's calls from being marked `uncertain`.
+- The data folder needs hard links (APFS, NTFS, ext4). On exFAT / FAT or an SMB
+  home the journal fails closed with a message that says so.
+- Not yet run on a real Windows machine (a refused loopback connect takes about
+  2 s there; the probe waits up to 5 s).
+- A plain `npm run dev` / `start` / `dev:server` next to the running app exits
+  on EADDRINUSE before its first I/O callback, so it never reaches the journal
+  (audited 2026-11-23).
+- Still unlocked second-process writes, out of this change: `runtime/transitions.json`
+  (boot-time "restarted during a switch" stamp — the live app overwrites it on
+  its next step), `runtime/drafts.json` (composer drafts — no boot logic and
+  no write on read; written only when a second server's UI is typed into), and
+  route-triggered actions in a second server's UI that judge liveness from
+  their own memory (worktree remove / clean, opening a desk). Hence: never
+  point a second server at the real home.
+
+**Diagnose:** `GET /api/conversation/recovery` lists the `uncertain` receipts
+(the journal itself: `~/.openground/runtime/receipts-v2.json`; `receipts.json`
+there is a folder, `receipts.json.retired` (`.2`, … for later ones) the
+pre-lock copies); `ls ~/.openground/runtime/journal-owner/` shows the owner
+generation (`cat` it for the pid and port; `ps -o pid,lstart,command -p <pid>`
+and `lsof -nP -iTCP:<port> -sTCP:LISTEN` show who holds them) — look, never
+delete it while any OPEN GROUND process runs (Limits). A second process on the
+same home answers its receipt routes with the pid message above. When the
+refused one is the app itself (another process asked first while the app was
+down), check what that pid is and stop it only once it is confirmed a stray
+copy; never move the app to another `OPENGROUND_HOME` — it would start empty.
+
+Teeth (each red-measured by a production mutation, 2026-11-23 / 24):
+`runtimeJournalOwner.test.ts` — a real second process leaves a live process's
+executing receipts byte-identical and is refused, and the same receipts turn
+`uncertain` once the first process is gone (red with the owner check removed:
+both live receipts `uncertain`; red with "gone" never proven; red with the
+restart sweep disabled); the refused copy stays refused on every later read and
+write (red with the check on the first call only) and never compacts a full
+journal (red with the check moved below compaction); old builds' path is a
+folder while the app runs — their read gets `EISDIR`, a rename over it is
+refused — and a pre-lock journal moves in once, its cut-off call held, its path
+a folder and a `.retired` copy kept (red with the folder never made, with the
+move skipped, with version 1 no longer readable); a live process's calls stay
+`executing` even for a second owner after the lock folder was deleted, and turn
+`uncertain` once that process is gone (red with the sweep ignoring the holder,
+and with claims carrying no holder); a claim whose check after publishing fails
+is withdrawn (red without the withdrawal); a stopped owner is still the owner; each "cannot tell" judged on its own
+— no port, a hang-up, a reset, EPERM — is alive (red with each counted as gone);
+a silent holder is probed once a minute (red without the limit); an exited
+owner, a pid and a port that went to other programs (a greeting server, an
+HTTP-like one that waits for the probe's line — red with a silent probe), an
+unreadable record are taken over and a `05.json` is left alone (red with
+leading zeros accepted); a claim published after our listing is never
+overwritten; a claim that lands under a newer live owner is withdrawn; a record
+that reappeared under a name judged gone is kept (red with names compared, not
+content); a gone process's stray record above the live owner does not hand the
+journal over; of two simultaneous starters exactly one owns.
+`server/__tests__/devAltHome.test.ts` — `dev:alt` hands its server a fresh
+throwaway home (red with `OPENGROUND_HOME: home` dropped) and refuses
+`~/.openground`, also through a symlink (red with the refusal removed).
+`runtimeActionReceipts.test.ts` "restores a fresh-module started receipt"
+guards the own-pid rule. Commander rework (2026-11-24, re-measured 2026-11-25 on
+the final code, each guard removed alone): a claim that lands under a newer
+live owner from a listing older than two takeovers is withdrawn (red with the
+post-link check disabled: 2 failed); with the first listen failing nothing is
+published and the next call claims with its port (red when a portless claim is
+published — also red before the fix, 7b648224); the refusal tells the reader to
+use its own `OPENGROUND_HOME` and not to stop the pid unchecked (red with the
+old "Stop it" text). Five of these mutations passed the whole suite before
+the 2026-11-24 review round (check on the first call only, check below
+compaction, portless / hang-up / EPERM / socket error counted as gone).
+Re-measured on the final code (2026-11-25, a detached copy of the branch, one
+edit at a time, restored from git): the seven mutations of the folder / move /
+version-1 read / holder check / holder stamp / withdrawal each turn exactly
+their test red. The two layers were measured apart: with the owner check
+removed (the `runtime/` folder still made), the second copy is no longer
+refused (3 failed) but the claim holders keep the live calls `executing`; with
+the holder check removed as well, the incident is back — `expected
+{ 'live-action': 'uncertain', … } to deeply equal { 'live-action':
+'executing', … }` (4 failed).
+Commander rework (2026-11-26, measured on this code, each production edit
+alone, restored after): a populated pre-lock journal (two projects' marks,
+settled history, owner inputs with draft revisions, contexts) moves in whole,
+only its cut-off call `uncertain` (red with the move-in keeping only
+`executing` records and empty contexts / drafts: `expected 1 to be 7` — the
+one-record test above stayed green under it); a pre-lock journal that
+reappears after the move is merged (red before the fix: `expected undefined to
+deeply equal { id: 'mark-downgraded', … }`), each part with teeth — the archive
+not counted as ours, the old copy winning a shared key, contexts not moved in,
+the old draft revision winning, drafts not moved in, the first `.retired`
+overwritten: 1 failed each; the refusal names both remedies and warns off
+deleting the lock folder (red with the 2026-11-25 text).
+
+Measured with real processes in an isolated `OPENGROUND_HOME` / `HOME` /
+`TMPDIR` (2026-11-23 on the start-time rule, 2026-11-24 on the listener rule
+with the journal at `version: 2`, 2026-11-25 with the journal at
+`receipts-v2.json`, and 2026-11-26 on the code of the 2026-11-26 rework, the
+refusal naming both remedies — same outcome each time): process A held
+two executing receipts; a real `server/index.ts` boot B
+on the same home ran 7 s past its first `/api/health` answer (three inbox
+ticks) — journal byte-identical, owner record A's alone, B's recovery route
+answered 500 naming A's pid; A then settled one call (`delivered`), so the live
+app's work went on; after A was killed, B took over (generation 2) and marked
+only A's unsettled receipt `uncertain`. With the owner check removed the same
+run reproduced the incident (2026-11-23).
+
 ### 7.4c 「誰も動かしていない doing カード」は engine が回収する(2026-08-27 実測の停止)
 
 **旧知識: worker が done になれば司令官が起こされる。条件付きで撤回。**
@@ -636,6 +885,77 @@ engine 非所有のとき `GET /api/swarm/workers`(union)を引き、生きた�
 すり替え / parked の reason を crash にすり替え — 各1〜2本が赤)と、
 孤児保留の3本(2026-09-24 — 孤児確認を外す / 'unavailable' を保留扱いにする / 5分の上限を外す / 毎回ログを書く / anomaly 条件を外す — 各1〜2本が赤)と、`BoardModule.drawerWorker.test.tsx` 4本(生存 id 条件を外す=残骸に画面が出る /
 中断分岐を外す=実行ボタンが戻る — 各赤)。
+
+### 7.4e Saved-work hold — no dispatch into a project with an unconfirmed operation (2026-11-23)
+
+**Symptom it ends.** A project in the automation frame where nothing starts: every
+dispatched worker is "worker lost" within seconds (the card lands in `blocked` after
+two tries), the commander cannot be woken, running workers have every tool call
+refused with `Owner authorization or durable action recording is unavailable. No
+action was authorized.`, and nothing says why. Measured 2026-11-09 → 11-23 in five
+projects.
+
+**Cause.** One operation whose result nobody confirmed (an `uncertain` receipt, or an
+`executing` one whose actor is gone) holds the whole project: every SDK launch asserts
+`assertNoUncertainRuntimeActions(cwd, false)` at its first step and every PreToolUse
+hook asks the same (`runtimeActionReceipts.ts`). That safeguard is correct and is not
+weakened — nothing retries, clears or bypasses the operation; only the owner's review
+does. The engine simply did not know.
+
+**What the engine does now** (`refreshSavedWorkHold`, step 3a of `runDispatchPass`,
+predicate + wording in `savedWorkHold.ts`):
+
+- While the project holds such an operation the fill stage dispatches nothing — cards
+  stay in `todo` — and the commander is not woken (the wake reflex's absent arm
+  returns early, so the three strikes are not spent on a launch that must throw).
+  Monitor / promote / reclaim keep running.
+- On the ENTERING edge only: one journal line (`saved-work hold — N operation(s) …`)
+  and one `automation-held` fatal notification, which reaches the president's desk
+  through the existing notice lane. The detail says what is happening and where to
+  press what. Cleared by the first pass that reads zero (`saved-work hold lifted`).
+- The words name the Settings screen by its own labels, read from the i18n table
+  (`OWNER_REVIEW_WHERE` = 設定 ›「詳細設定」›「ChatGPT」›「中断した作業の確認」). The
+  old hint said 「会話の復旧」, a heading that screen does not have.
+- After a restart the boot resume owns the same hold (`savedSwarmRuntimeHold`, §7.4b2).
+
+**The engine no longer makes such operations itself.** Its quota stop used to cut a
+worker off in the middle of a running command (JobSearch, 2026-11-23 16:29: a test run
+started 3 minutes earlier), which left exactly this kind of receipt and stopped the
+project. Every engine stop — the quota stop, the execution ceiling, the stall reclaim —
+now waits while the worker's session reports a tool call in flight
+(`awaitToolBoundary`, reading `sdkWorkerFacts(...).toolCallsInFlight`), up to
+`TOOL_BOUNDARY_WAIT_MS` (15 min); a parked worker costs nothing. A wait belongs to ONE
+stop: a worker the engine no longer wants to stop drops its stamp at the end of that
+pass (`monitorWorkers`' sweep), so a later stop waits from zero. A stop that still cuts
+a command off (the bound elapsing) journals `worker stopped in the middle of N running
+command(s) (<reason>)` and the saved-work notice it causes names that stop as the
+reason.
+
+**A usage refusal is not an abort** (2026-11-24, `sdkSession.ts` pump). A refused turn
+used to end its own session whenever ANY command in the project was still running
+(it asked `assertNoUncertainRuntimeActions(cwd)`, which counts running commands): two
+of three workers died that way on one limit (11-23 22:21), and the commander died with
+its own helper's command running — that command was killed with it and became the
+unconfirmed operation that held the project for eight hours (11-24 04:38). The refused
+turn now asks what the launch guard asks (`…(cwd, false)`): only a result that really
+is unconfirmed (its actor gone) ends the session; otherwise it parks.
+
+**Other silences this closed** (same notice lane, `automation-held`, each told ONCE):
+
+| What kept failing in silence | Now | Constant |
+|---|---|---|
+| A worker whose every tool call the runtime action guard refuses (sat until the 90-minute ceiling) | `watchToolDenials`: journal + notice after N refusals in a row; quiet when the saved-work notice already says so; re-armed by a call that goes through | `TOOL_DENIAL_ALERT` = 3 |
+| A card whose dispatch fails every 3 s (a first-time project with no commit: `worktree add … HEAD` failed ~5,000 times, no reason) | `createSwarmWorktree` says which it is (no commit yet / not a git folder) and keeps git's own first line otherwise; `tellRepeatedDispatchFailure` tells the president after N in a row, still retrying | `DISPATCH_FAILURE_TELL` = 5 |
+| A frame project whose automatic start keeps failing (`reconcileAutomationOrchestrators` returned `failures` that the canvas save reduced to "pending" and the 15 s loop dropped) | `tellAutomationStartFailures`: journal + notice once per project and reason; the boot resume's own hold and the boot safeguard are not told twice | `AUTOMATION_START_TELL_MS` = 60 s |
+| The commander could not be woken, journalled as "no usable model tier" whatever the cause, and "check the desk by hand" | `defaultWakeManager` keeps what the launch said (`lastCommanderFailure`), `noteCommanderDeathAtStart` keeps a desk's exit reason; `commanderFailureWords` turns it into the owner's words — an unconfirmed operation comes with the Settings path, a quota wall is called a usage limit — in the wake line, the retry line and the `manager-unrevivable` notice | — |
+
+**Reading the journal.** `worker lost — … · exit: <reason>` now carries the SDK
+session's own exit reason (before: nothing for SDK workers), and a failed commander
+wake journals `司令官を起動できませんでした — <reason>` instead of blaming model tiers.
+
+Guards: `swarmSavedWorkHold.test.ts`, `runtimeActionReceipts.test.ts` ("a usage refusal
+while a command is still running…"), `swarmOrchestrator.test.ts` ("the failed wake and
+the give-up say WHY…") — each measured red against the pre-fix code.
 
 ### 7.5 passInFlight / pendingDispatch は外から見えない
 

@@ -8,7 +8,9 @@
 // must preflight before a model launch, and both must report HELD honestly rather
 // than claim a delivery that did not happen.
 
-import { swarmRunPreflight } from './chatgptRuntime'
+import { runtimeSpawnBlock, swarmRunPreflight } from './chatgptRuntime'
+import { commanderFailureWords } from './savedWorkHold'
+import { getAllowedModelTiers } from './store'
 import { swarmEnvPreflight } from './swarmEnvPreflight'
 import { spawnSwarmManager } from './swarmManager'
 import { listManagerDesks, sayToManagerDesk } from './swarmManagerRuntime'
@@ -22,6 +24,7 @@ export type CommanderRelayResult =
       runtime: 'pty' | 'sdk'
       woke: boolean
       heldBecause?: string
+      retryAt?: number
     }
   | {
       ok: false
@@ -82,10 +85,16 @@ export const relayToCommander = async (
       desk = liveDesk()
       woke = desk !== null
     } catch (e: any) {
+      // `why`: the same failure in the owner's words, so the president can retell
+      // it instead of an English error — an unconfirmed operation comes with where
+      // to go, a quota wall is called a usage limit (the engine's own wake says
+      // the same: commanderFailureWords).
+      const reason = String(e?.message ?? e)
+      const wall = (await getAllowedModelTiers().then((allowed) => runtimeSpawnBlock(Date.now(), allowed)).catch(() => null))?.kind ?? null
       return {
         ok: false,
         status: 503,
-        body: { error: `failed to wake the commander: ${e?.message ?? e}`, delivered: false, woke: false },
+        body: { error: `failed to wake the commander: ${reason}`, why: commanderFailureWords(reason, wall), delivered: false, woke: false },
       }
     }
   }
@@ -98,5 +107,6 @@ export const relayToCommander = async (
     runtime: desk.runtime,
     woke,
     ...(res.heldBecause ? { heldBecause: res.heldBecause } : {}),
+    ...(res.retryAt ? { retryAt: res.retryAt } : {}),
   }
 }

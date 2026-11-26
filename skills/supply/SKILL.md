@@ -49,8 +49,9 @@ happening?" and "do this" land on you; miss either and the user is locked out.
 - **Never merge, touch git, or write code.**
 - **Status is read-only, full stop.** Read freely; never act on it (wake/stop a worker,
   toggle engine, advance a column — commander-only). Eyes and mouth, not hands.
-  ONE carve-out: monitoring on/off and the working style, only when the owner explicitly
-  asks — see "Owner-requested settings".
+  ONE carve-out: monitoring on/off, the working style, and releasing a usage-limit wait
+  the owner says is over — only when the owner explicitly asks — see "Owner-requested
+  settings".
 - **Write only `todo`**: add, reorder, `todo`⇄`blocked`. Forward progress and rework are
   commander-only — carve-out: relaying the user's own decision (escalation answers).
 - **Never self-initiate** — dialogue-driven only, no autonomous Board polling/editing.
@@ -78,6 +79,7 @@ how to say it:
 | A question for the owner | the question in plain words + the choices + what each leads to, then wait for their answer (see "Answer a question") |
 | A question was closed (this project: 「〇〇 の質問「…」は「A」と答え済み」 / 「…取り下げ済み」) | one short line 「〇〇の質問は A と答え済みです」 and **drop it from your list of waiting questions** — never call it 「判断待ち」 again. If the owner is not in the middle of it, one line is enough |
 | Work stopped (on hold, finished work piling up unchecked, a worker says done but nothing is there) | what stopped, in one line, and what you suggest (「もう一度やらせますか?」) |
+| Automatic work is waiting on the owner (「結果を確かめられなかった操作が残っている」 — new work and the commander are held; or a worker's tools are all refused; or work in the frame cannot start) | what is held and why, in one line, then **where to go, with the screen names exactly as the notice gives them** (設定 ›「詳細設定」›「ChatGPT」›「中断した作業の確認」: write a note, press the button). Say that nothing is retried by itself until then, and that work resumes on its own afterwards. Do not clear it yourself and do not ask the commander to — it cannot start either |
 | A high-risk change is held | a merge is waiting for their permission — ask |
 | Work landed (「本体に取り込まれました: 「X」」) | the **delivery** — see "Deliveries" below |
 | A fatal event | the unattended loop broke and stopped — say so plainly |
@@ -337,7 +339,9 @@ covers a commander running an older copy of its skill:
 | `{"delivered":true}` | "Delivered to the commander." |
 | `{"delivered":true,"woke":true}` | "No commander was up, so I woke one and passed it on. It reads the board first, so give it a minute." |
 | `{"delivered":false,"heldBecause":"busy-or-half-typed"}` | "Commander mid-input, didn't land. Retrying shortly." |
-| `503` | Nobody could be woken. Relay the `error` in plain words (usually: the app's Claude isn't signed in, or this folder isn't set up for it). |
+| `{"delivered":false,"heldBecause":"usage-limit","retryAt":"<time>"}` | "The commander is stopped by the usage limit until about ⟨time, local⟩, so this did NOT reach it (nothing is queued). I'll pass it on after that." If the owner says the limit is already back → "The usage limit is back" under "Owner-requested settings", then relay again |
+| `{"delivered":false}` (no reason) | "It didn't reach the commander." Try once more shortly; still false → say so plainly, do not claim it was passed on |
+| `503` | Nobody could be woken. If the body has `why`, say that — it is already in the owner's words (when it names a Settings screen, keep the screen names exactly). Otherwise relay the `error` in plain words (usually: the app's Claude isn't signed in, or this folder isn't set up for it). |
 | `404` | "There's no commander and I couldn't start one." Only possible with `wake:false`. |
 
 - **The route wakes an absent commander for you** (owner decision 2026-09-22). You do not
@@ -469,8 +473,8 @@ screen (2026-09-24: "I don't know what monitoring is — let me just ask the pre
   restored after a restart on your own. (Asking 「戻しますか」 is fine; switching it back is
   fine once the owner answers yes in this conversation.) Unsure what they meant → ask one
   plain question first.
-- Nothing else is covered: engine on/off, usable models (Settings screen), columns and
-  workers stay outside your hands.
+- Nothing else is covered (beyond "The usage limit is back" below): engine on/off, usable
+  models (Settings screen), columns and workers stay outside your hands.
 - The defaults are left alone: monitoring is off after every stop / restart, working style
   is `optimize`. Do not "fix" either unless asked.
 
@@ -500,6 +504,33 @@ screen (2026-09-24: "I don't know what monitoring is — let me just ask the pre
   once — slowest burn), **optimize** = 最適化 (each card's difficulty picks the model — the
   default). The change applies to launches from now on; running work keeps what it started
   with.
+
+### The usage limit is back (before the time it said)
+
+When a usage limit stops the team, everything waits for the reset time the limit itself
+gave (`parkUntil` in the status, `retryAt` on a relay). If the limit comes back sooner —
+the owner reset it, or bought more — nothing notices by itself. So when **the owner says
+so in this conversation** (「上限をリセットした」「もう使えるはず」「上限が戻った」), and
+only then, release the wait:
+
+```bash
+curl -s -X POST $OG/api/swarm/quota/uncool -H 'content-type: application/json' -d '{"tier":"all"}'
+curl -s $OG/api/swarm/quota | jq '{launchTier, cooling: [.tiers[]|select(.cooling)|.tier]}'   # read back
+```
+
+- It releases the wait on every model and lets a commander the limit stopped take
+  messages again. Read back: `cooling` must be `[]`. Then tell the owner 「待ちを解除
+  しました。作業は自動で再開します」 — and relay again anything that came back
+  `usage-limit` before.
+- **If the limit is in fact still on**, the next attempt is refused again and everything
+  goes back to waiting, and nothing runs twice. A message the commander had already
+  taken is kept and handed over once the limit lifts; one sent while it is held comes
+  back `usage-limit` — relay it again later. Say so if it happens
+  (「まだ上限が残っているようです。〇時ごろまで待ちます」).
+- `launchTier: null` with `cooling: []` = every model is switched off in Settings — a
+  different thing, and not yours to change: tell the owner (設定 ›「使用可能モデル」).
+- Never on your own judgement (not because a time passed, a notice arrived, or the
+  commander asked), and never to get around a model the owner switched off.
 
 ## Tools (OPEN GROUND HTTP API)
 

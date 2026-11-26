@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2, Minus, Plus, Redo2, Sparkles, Undo2, X } from 'lucide-react'
 import { useT } from '@/i18n/I18nContext'
+import { useAssistantClearance } from '@/components/assistant/assistantWindow'
 import { Overlay, DialogHeader } from '@/components/ui/overlay'
 import { InfiniteCanvas, type CanvasZoomApi } from './InfiniteCanvas'
 import { ToolPalette } from './ToolPalette'
@@ -578,6 +579,9 @@ export const CanvasWorkspace = ({
   // through mutateElements (normal undo history) and selected as a block so
   // the user can immediately move/adjust the placement.
   const surfaceRef = useRef<HTMLDivElement>(null)
+  const historyRef = useRef<HTMLDivElement>(null)
+  // (as big as its two buttons and pinned by its corner: the room grows it)
+  const historyRoom = useAssistantClearance(historyRef, { side: 'bottom', grows: true })
   const [genOpen, setGenOpen] = useState(false)
   const [genPrompt, setGenPrompt] = useState('')
   // Owner-picked generation model (2026-08-03), remembered per machine. The
@@ -1419,26 +1423,31 @@ export const CanvasWorkspace = ({
             ),
             inspectorHost,
           )}
-        {/* Undo / redo — keeps the ⌘Z history discoverable for mouse users. */}
-        <div className="absolute bottom-4 right-4 z-20 flex items-center gap-0.5 rounded-[7px] border border-line bg-bg-card/90 p-1 shadow-card backdrop-blur">
-          <button
-            type="button"
-            onClick={undo}
-            disabled={!canUndo}
-            title={t('canvas.undo')}
-            className="flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-plane hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-          >
-            <Undo2 size={14} strokeWidth={2} />
-          </button>
-          <button
-            type="button"
-            onClick={redo}
-            disabled={!canRedo}
-            title={t('canvas.redo')}
-            className="flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-plane hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-          >
-            <Redo2 size={14} strokeWidth={2} />
-          </button>
+        {/* Undo / redo — keeps the ⌘Z history discoverable for mouse users.
+            The anchor steps the pair up while the assistant's character sits
+            on this corner (it floats; the canvas never moves for it) — its
+            padding is not a hit target, so the canvas under it stays live. */}
+        <div ref={historyRef} className="pointer-events-none absolute bottom-4 right-4 z-20" style={historyRoom}>
+          <div className="pointer-events-auto flex items-center gap-0.5 rounded-[7px] border border-line bg-bg-card/90 p-1 shadow-card backdrop-blur">
+            <button
+              type="button"
+              onClick={undo}
+              disabled={!canUndo}
+              title={t('canvas.undo')}
+              className="flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-plane hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+            >
+              <Undo2 size={14} strokeWidth={2} />
+            </button>
+            <button
+              type="button"
+              onClick={redo}
+              disabled={!canRedo}
+              title={t('canvas.redo')}
+              className="flex h-7 w-7 items-center justify-center rounded-[4px] text-ink-muted transition-colors hover:bg-plane hover:text-ink disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+            >
+              <Redo2 size={14} strokeWidth={2} />
+            </button>
+          </div>
         </div>
         {/* "Sign in to Claude" terminal — opened from the signed-out CTA above.
             Portaled to <body> so the canvas's transformed / overflow-hidden

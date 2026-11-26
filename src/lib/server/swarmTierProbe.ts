@@ -55,7 +55,9 @@ import { promisify } from 'util'
 import { tmpdir } from 'os'
 import { assertClaudeSubscriptionLaunch } from './subscriptionOnly'
 import { resolvedClaudeBin, claudeConnection } from './claudeConnection'
-import { normalizeScreen, matchesQuotaExhaustion } from './swarmRateLimitText'
+import { normalizeScreen, matchesQuotaExhaustion, quotaRefusalKindOfText, refusalClosesEveryModel } from './swarmRateLimitText'
+import { matchesQuotaRefusal } from './sdkEvents'
+import { quotaPrefixes } from './sdkSession'
 import {
   isTierCooling,
   markRateLimited,
@@ -143,9 +145,15 @@ export type TierProbeExec = (
  *  flip, 2026-07-13 review). A transient fault therefore classifies 'unknown'
  *  — and a healthy answer that merely MENTIONS such wording (rc=0, "PROBE_OK
  *  (note: too many requests…)") classifies 'ok'. Pure. */
-export const classifyProbeOutput = (out: TierProbeOutput): TierProbeVerdict => {
+export const classifyProbeOutput = (out: TierProbeOutput, refusalPrefixes: readonly string[] = []): TierProbeVerdict => {
   const text = normalizeScreen(`${out.stdout}\n${out.stderr}`)
   if (text && matchesQuotaExhaustion(text)) return 'wall'
+  // The CLI vendor's own refusal vocabulary (the SDK's USAGE_LIMIT_ERROR_PREFIXES),
+  // on a line of its own. The patterns above predate "You've hit your 5-hour
+  // limit", the CLI's words for the all-model stop, and read it as 'unknown' — so
+  // the probe waved launch after launch into that wall (2026-11-23).
+  const lines = `${out.stdout}\n${out.stderr}`.split('\n')
+  if (lines.some((line) => matchesQuotaRefusal(normalizeScreen(line), refusalPrefixes))) return 'wall'
   return out.failed ? 'unknown' : 'ok'
 }
 
@@ -331,14 +339,17 @@ const probeOnce = async (
         cwd: tmpdir(),
       },
     )
-    const verdict = classifyProbeOutput(out)
+    const verdict = classifyProbeOutput(out, await quotaPrefixes())
     if (verdict === 'wall') {
-      const until = markRateLimited(tier, {
-        ptyText: `${out.stdout}\n${out.stderr}`,
-        now: nowFn(),
-      })
+      const said = `${out.stdout}\n${out.stderr}`
+      // An all-model limit (the 5-hour window, the weekly allowance) closes every
+      // tier at once: cooling only the probed one sent the next launch one tier
+      // down into the same wall (refusalClosesEveryModel — two agreeing signs).
+      const every = refusalClosesEveryModel(quotaRefusalKindOfText(said), said)
+      let until = 0
+      for (const t of every ? MODEL_TIER_LADDER : [tier]) until = markRateLimited(t, { ptyText: said, now: nowFn() })
       console.warn(
-        `[openground:swarm-probe] tier '${tier}' refused the pre-launch probe (wall) — cooling until ${new Date(until).toISOString()}`,
+        `[openground:swarm-probe] tier '${tier}' refused the pre-launch probe (wall${every ? ' — an all-model limit, every tier' : ''}) — cooling until ${new Date(until).toISOString()}`,
       )
     } else {
       state.known.set(tier, { verdict, at: nowFn() })

@@ -121,6 +121,7 @@ import {
   MAX_MANUAL_COOLING_MS,
   MODEL_TIER_LADDER,
 } from '@/lib/server/swarmQuota'
+import { resumeQuotaPausedDesks } from '@/lib/server/liveDesks'
 import { highestSpawnableTier } from '@/lib/server/swarmAllowedModels'
 import { getAllowedModelTiers, getSettings } from '@/lib/server/store'
 import {
@@ -794,6 +795,9 @@ export const swarmRoutes = new Hono()
       // Board, so the owner should expect the answer to take longer.
       ...(res.woke ? { woke: true } : {}),
       ...(res.heldBecause ? { heldBecause: res.heldBecause } : {}),
+      // 'usage-limit': the commander a usage limit refused hears again from this
+      // time on (skills/supply/SKILL.md tells the owner so, in plain words).
+      ...(res.retryAt ? { retryAt: new Date(res.retryAt).toISOString() } : {}),
     })
   })
   // --- POST /api/swarm/manager/beat — the commander's heartbeat (card B) ------
@@ -1394,6 +1398,10 @@ export const swarmRoutes = new Hono()
   // Body: { tier }. Undo a cool (manual or sensor-made) so the tier is available
   // on the next launch. Idempotent: releasing an already-available tier is a
   // no-op that still returns the snapshot.
+  // { tier: 'all' } (2026-11-23) is the owner's "the limit came back early" —
+  // the president runs it when the owner says so (skills/supply/SKILL.md): every
+  // tier is released AND every desk a usage refusal left deaf (the commander)
+  // takes input again, instead of both waiting for the stated reset time.
   .post('/api/swarm/quota/uncool', async (c) => {
     if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
     let body: any
@@ -1403,8 +1411,8 @@ export const swarmRoutes = new Hono()
       return c.json({ error: 'invalid body' }, 400)
     }
     const tier = body?.tier
-    if (!isModelTier(tier)) {
-      return c.json({ error: `tier must be one of ${MODEL_TIER_LADDER.join(', ')}` }, 400)
+    if (!isModelTier(tier) && tier !== 'all') {
+      return c.json({ error: `tier must be one of ${MODEL_TIER_LADDER.join(', ')}, or all` }, 400)
     }
     const now = Date.now()
     // Same two beats as /cool — and the uncool needs them just as much: hydrate
@@ -1412,7 +1420,8 @@ export const swarmRoutes = new Hono()
     // marks and the persist would drop them), then flush (else a restart right
     // after would faithfully reload the mark the owner just released).
     await ensureCoolingTableLoaded(now)
-    clearCooling(tier)
+    for (const t of tier === 'all' ? MODEL_TIER_LADDER : [tier]) clearCooling(t)
+    if (tier === 'all') resumeQuotaPausedDesks()
     // A failed save is arguably WORSE here than on /cool: the file still holds the
     // mark, so the next boot would hydrate it and the tier the owner just released
     // would come back cooling. Report that rather than answering 200.

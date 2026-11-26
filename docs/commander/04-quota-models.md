@@ -134,6 +134,9 @@ swarmQuota.ts:364-372。上から順に試し、**過去時刻は無視して次
 - `POST /api/swarm/quota/cool` body `{tier, untilMs}` または `{tier, minutes}`(server/routes/swarm.ts:921-978)。検証: tier は `isModelTier` で梯子照合(930-932、未知 alias は 400 = 推測で冷やさない fail-closed)、`until` は `(now, now + MAX_MANUAL_COOLING_MS]` 必須(948-951)。
 - `MAX_MANUAL_COOLING_MS` = **7日**(swarmQuota.ts:424)。週次 quota より長く、忘れた cool が自己治癒する上限。
 - `POST /api/swarm/quota/uncool` body `{tier}`(983-1017)→ `clearCooling`(swarmQuota.ts:433-437、idempotent)。センサー製・手動製どちらの mark も消せる。誤検知(一過性 5xx を枯渇と誤読)の脱出口。
+- **`{tier:"all"}`(2026-11-23)** — the owner's "the limit came back early". Releases every tier in one call
+  AND lifts every SDK desk a usage refusal left unable to take input (`resumeSdkQuotaPauses`, §3.8). The
+  president runs it only when the owner says so (`skills/supply/SKILL.md` "Owner-requested settings").
 - 3本とも **swarm owner gate**: `hasSwarmOwnerAccess()` を通れなければ 403(904, 926, 988 — owner ログイン **or** サーバローカル解錠。swarmGate.ts、docs/SECURITY.md)。
 - **3本とも永続化を経由する**(§2.1.1): GET/cool/uncool は応答前に `ensureCoolingTableLoaded` を await(908 / 939 / 1000)、cool/uncool はさらに `flushQuotaPersist` を await する(966 / 1005)。
 - **200 は嘘をつかない**: 書込に失敗したら **500**(966-977 / 1005-1016)。`/cool` の 200 = ディスクに載った、`/uncool` の 200 = ディスクから消えた。500 のときは **mark はメモリには効いている**(このプロセスのエンジンは tier を避ける)が**再起動で消える** — 本文がそう言う。`/uncool` の 500 はさらに危険で、**古い mark が file に残っているので再起動すると tier が cooling に戻る**。500 を見たら §10 の書込先チェック(権限 / ディスク残量 / `swarm-quota.json` がディレクトリになっていないか)。
@@ -226,6 +229,94 @@ monitor のセンサーは **worker 画面しか見ない**ので、レビュー
 - integrate は 15秒 throttle(197, 4638)だが、走った pass は **card ごとに verify(tsc/test)+ 敵対レビューパネル(数分)を直列実行**する。コード自身が「a whole-pass hold well past DEFAULT_STALE_MS (10 min)」と自認(5129-5140)。self-supply スキャンを fire-and-forget 化した理由も同じ(「passInFlight is held for this whole body — so awaiting it froze dispatch AND the monitor」5646-5657)。
 - **含意: integrate が重い間、monitor は1回も回らなかった = rate-limit 検知の時計はそもそも読まれない**。→ ケーススタディ原因③。
 - **`0d1f7f0` 後**: integrate は self-supply と同型の fire-and-forget に(`kickIntegratePass` + `integrateInFlight`)。monitor は verify/panel 中も 3 秒 tick で回る。正典 = 03 章 §2.1/§2.4。
+
+### 3.4.1 All-model limits, and the command in flight (2026-11-23)
+
+- **One refusal of an all-model limit cools every tier.** The 5-hour window and the weekly all-model
+  allowance refuse every model, but the arm used to cool only the worker's own tier, so dispatch stepped
+  down fable→opus→sonnet→haiku and every step was refused at once (measured 16:29–16:33: 4 cards × 4
+  tiers = 16 launches). "All-model" needs TWO agreeing signs (`refusalClosesEveryModel`, swarmRateLimitText.ts):
+  the CLI printed no "switch models with /model" remedy (`quotaRefusalKindOfText` / `classifyQuotaRefusal` say
+  `account-wide`) AND the refusal names no model family. The second is not redundant — "You've reached your
+  Opus limit · resets 5pm" and "Fable 5 requires usage credits." carry no remedy line and are one model's
+  limit; cooling the whole ladder on them would park every dispatch until the reset although another model
+  could run. Both signs ⇒ `markRateLimited` on every ladder tier (journal: `every tier cooling until … (an
+  all-model limit …)`) and the spawn park holds dispatch; anything less ⇒ only the worker's tier, as before.
+  Measured wordings (2026-11-24, ~800 real refusals on the owner's machine): every all-model stop reads
+  "You've hit your 5-hour | session | weekly limit · resets …".
+  The SDK refusal text (`sdkWorkerFacts(...).refusal`, from `lastQuotaRefusalText`) is also what the reset
+  time is read from now — the SDK tail the arm used before leaves the refusal sentence out.
+- **The same reading in the two other places that cool a tier (2026-11-25).** The pre-launch probe
+  (`swarmTierProbe.ts`) and the commander's death-on-arrival watch (`swarmManager.watchSdkDeskForDeathOnArrival`)
+  cooled only the tier that met the wall, so they too walked a launch down the ladder. Both now cool every
+  tier on an all-model refusal (same `refusalClosesEveryModel`). The probe also reads the CLI vendor's own
+  refusal list (the SDK's `USAGE_LIMIT_ERROR_PREFIXES`, line by line) besides `QUOTA_EXHAUSTION_PATTERNS`: the
+  private patterns predate "You've hit your 5-hour limit" and classified it `unknown`, so the probe waved
+  every launch into that wall. Guards: `swarmTierProbe.test.ts` ("an ALL-MODEL limit cools every tier on one
+  probe"), `swarmEngineSdkBlindspots.test.ts` ("an ALL-MODEL refusal followed by death cools EVERY tier").
+- **The mark is written on the first sighting**, then the stop waits for the worker's running command
+  (`awaitToolBoundary`, up to `TOOL_BOUNDARY_WAIT_MS` = 15 min — 01 章 §7.4e). A stop mid-command used to
+  leave the command unconfirmed, which holds the whole project.
+- Guards: `swarmSavedWorkHold.test.ts` ("an all-model limit is not walked down tier by tier", "every engine
+  stop waits for a running command").
+
+### 3.4.2 Refused, then gone — still a quota stop (2026-11-24)
+
+**Symptom it ends.** A worker's transcript ends "You've hit your 5-hour limit · resets …", the journal says
+`worker lost — card → blocked` (crash), and the card never resumes when the limit lifts (three cards sat in
+`blocked` overnight, 11-23 17:44 / 22:21; again 11-24 12:48).
+
+**Cause.** The quota arm (§3.4) only looks at a LIVE worker, after `QUOTA_STOP_DEBOUNCE_MS` of silence. A
+session that ends within seconds of its refusal reaches the dead-worker path first, which calls it a crash;
+`recoveryColumn` then parks a branch that has commits in `blocked`, where nothing returns it.
+
+**Now** (`refusedThenGone` in `monitorWorkers`). A dead SDK worker whose last words in the pool are a usage
+refusal (`sdkWorkerFacts(...).refusal` — the same decay rule as the live arm: no tool call and no second turn
+since) and that had not itself declared ready is recovered as `rate-limit`: the wall is cooled
+(`coolQuotaWall`, same reading as §3.4.1), the card goes back to `todo`, the journal says `worker ended on a
+usage refusal — a quota stop, not a crash` and `quota-stopped — requeued — card → todo · exit: <reason>`, and
+the dispatch after the reset re-enters the same branch. It is not promoted on "exited with commits" either.
+A death whose last words were not a refusal is still a crash. Once the pool has forgotten the session (its
+linger, or an app restart) there is nothing to read and the old crash rule applies.
+
+Most of these deaths no longer happen at all: a refused turn used to end its own session whenever any
+command in the project was running — see 01 章 §7.4e "A usage refusal is not an abort".
+
+- Guards: `swarmSavedWorkHold.test.ts` ("a worker refused by the usage limit and gone at once is a quota
+  stop, not a crash").
+
+### 3.8 A desk a usage limit refused hears again (2026-11-23)
+
+**Symptom it ends.** After the commander's SDK desk was refused ("You've hit your 5-hour limit · resets 9pm"),
+every message to it — `POST /api/swarm/manager/say`, the engine's nudges — answered `{"delivered":false}`
+with no reason, long after the limit came back; the wake path kept adopting that deaf desk (`reused:true`).
+Only a restart or stopping the desk recovered it.
+
+**Cause.** `sdkSession.refuseInput` pauses input admission (correct: do not feed the next turn into an
+exhausted connection), and the only code that lifted it was the runtime switch.
+
+**Now.**
+- The refusal records when the limit says it resets (`quotaPause.until`, `resolveCoolingUntil` with
+  `fresh:true`): the refusal's own words read as a sentence handed over just now — a bare time already
+  past today is TOMORROW's ("resets 2:50am" at 22:21), unless it passed under 15 minutes ago (the reset is
+  happening now) — then the spent usage window's reset (A5, Claude desks only), then the flat grace. Read
+  as a stale screen, that night refusal paused for 20 minutes only (review 2026-11-26).
+- The pause ends by itself at that time (a timer), and `pushSdkInput` also lifts a pause whose time has
+  passed — so neither a kept message nor a sender meets a desk that stays deaf.
+- A message sent while the pause holds is not taken: the sender is told so (`manager/say` below). A message
+  the desk had taken and the limit then refused BEFORE the turn called any tool is kept at the head of the
+  queue and handed over when the pause lifts — its sender was told it was delivered, and it was never
+  worked on. A turn that already ran a tool, or an owner's turn with its own receipt (settled as refused),
+  is not put back: nothing is replayed. If the limit is in fact still spent, the next turn is refused again
+  and the desk pauses again.
+- `POST /api/swarm/quota/uncool {tier:"all"}` lifts every quota pause at once (`resumeSdkQuotaPauses`).
+- A runtime drain's pause is not touched by either (`drainSdkSession` clears the quota annotation — the drain
+  owns that pause until its own resume).
+- `manager/say` says why: `{"delivered":false,"heldBecause":"usage-limit","retryAt":"<ISO>"}`.
+- Guards: `sdkQuotaPause.test.ts` (fixed clocks: refused → reset time passes → delivered; a night refusal
+  reads tomorrow; a just-passed time is not a day away; a refused message is kept and delivered after the
+  lift; the pause ends by itself; a turn that ran a tool is not put back; refused → owner lift → delivered;
+  drain untouched; relay reason), `server/routes/__tests__/swarm.test.ts` (uncool all).
 
 ### 3.7 owner-desk arm — **オーナー自身の会話**が止まったら知らせる(2026-07-18)
 
@@ -1051,6 +1142,13 @@ curl -s http://127.0.0.1:47776/api/swarm/quota | jq
   ```
 - mask OFF にしていた → ON へ戻す(7.2-2 の逆)。**uncool は OFF tier を復活させない**(独立2拒否権 §0)。
 - 放置でも cooling は until で自然解除+journal に `quota park lifted`(4466)。none-allowed だけは人間必須。
+- **The limit came back before its stated reset (2026-11-23)** — the owner reset it, or it lifted early: one
+  call releases every tier and every desk the refusal left deaf (§3.8). The president does this when the owner
+  says so; the commander may too when the owner asks it.
+  ```bash
+  curl -s -X POST http://127.0.0.1:47776/api/swarm/quota/uncool \
+    -H 'content-type: application/json' -d '{"tier":"all"}' | jq '[.tiers[]|select(.cooling)]|length'   # 0
+  ```
 
 ### 7.4 誤検知(健全 tier が冷えた)
 

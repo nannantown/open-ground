@@ -90,7 +90,7 @@ describe('durable president inbox through the SDK pool', () => {
     const accepted = await acceptPresidentInput(cwd, 'owner words', { id: 'sdk-one', expectedOwnerKey: 'owner-a' })
     expect(accepted.receipt.state).toBe('queued')
     expect(getSdkSession(f.session.id)?.inputs ?? 0).toBe(0)
-    expect(JSON.parse(await readFile(join(openGroundHome(), 'runtime', 'receipts.json'), 'utf8')).receipts).toBeTruthy()
+    expect(JSON.parse(await readFile(join(openGroundHome(), 'runtime', 'receipts-v2.json'), 'utf8')).receipts).toBeTruthy()
     await flush()
     expect((await receipt('sdk-one'))?.state).toBe('queued')
     expect((await f.input.next()).value).toMatchObject({ message: { content: [{ text: 'owner words' }] } })
@@ -223,7 +223,7 @@ describe('durable president inbox through the SDK pool', () => {
     await acceptPresidentInput(cwd, 'consumed before crash', { id: 'sdk-crash' }); await flush(); await old.input.next()
     terminateSdkSession(old.session.id)
     await vi.waitFor(() => expect(getSdkSession(old.session.id)?.reaped).toBe(true))
-    const file = join(openGroundHome(), 'runtime', 'receipts.json')
+    const file = join(openGroundHome(), 'runtime', 'receipts-v2.json')
     const disk = JSON.parse(await readFile(file, 'utf8')) as { receipts: Record<string, { attemptBoot?: string }> }
     Object.values(disk.receipts).forEach(item => { item.attemptBoot = 'previous-process-boot' })
     await writeFile(file, JSON.stringify(disk))

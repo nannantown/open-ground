@@ -41,6 +41,7 @@ import {
   isSdkSessionReaped,
   currentSdkTurnId,
   sdkToolCallsInFlight,
+  resumeSdkQuotaPauses,
 } from './sdkSession'
 import type { SdkSessionStatus } from './sdkEvents'
 import { canonicalize } from './canonicalize'
@@ -561,6 +562,12 @@ export const listDeskIdsByRole = (ptyLabel: string, sdkRole: string): Set<string
   }
   return ids
 }
+
+/** The owner says the usage limit came back early: every desk a usage refusal
+ *  left unable to take input takes input again, on either runtime. Only SDK
+ *  desks hold such a pause (sdkSession refuseInput); a PTY desk's own CLI waits
+ *  the limit out, so there is nothing to lift there. Returns how many. */
+export const resumeQuotaPausedDesks = (): number => resumeSdkQuotaPauses()
 
 export const listAllActiveDesks = (): ActiveTerminalsResponse => {
   const pty = listActiveTerminals()

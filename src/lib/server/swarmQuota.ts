@@ -72,6 +72,22 @@ export const MODEL_TIER_LADDER: readonly ModelTier[] = SWARM_MODEL_TIERS
  *  agree in production while this module stays standalone for tests. */
 export const DEFAULT_COOLING_GRACE_MS = 20 * 60_000
 
+/** How far past a FRESH refusal's bare reset time must be before it means
+ *  tomorrow ({@link parseResetLabel}); nearer, the reset is happening now. */
+const FRESH_ROLLOVER_MARGIN_MS = 15 * 60_000
+
+type UsageSlot = { pct: number; resetsAt: string } | null | undefined
+
+/** The reset a usage reading (A5) offers as a cooling horizon, or null. Its
+ *  `resetsAt` is a standing display shown even at 3%, so it counts only for a
+ *  SPENT slot; with both spent, the session's sooner reset wins. One rule for
+ *  the engine's cooling and an SDK desk's refusal pause. */
+export const spentUsageResetsAt = (usage: { session?: UsageSlot; weekAll?: UsageSlot } | null): string | null => {
+  if (usage?.session && usage.session.pct >= 100) return usage.session.resetsAt
+  if (usage?.weekAll && usage.weekAll.pct >= 100) return usage.weekAll.resetsAt
+  return null
+}
+
 // ── Cooling table (globalThis singleton — survives tsx watch reloads) ─────────
 //
 // tier → reset epoch ms. A tier is "cooling" while its stored `until` is in the
@@ -289,6 +305,7 @@ const unitToMs = (unit: string): number => {
 export const parseResetLabel = (
   label: string | null | undefined,
   now: number,
+  fresh = false,
 ): number | null => {
   if (!label) return null
   const s = label.trim()
@@ -330,7 +347,17 @@ export const parseResetLabel = (
     // worst case the engine retries early and re-learns the truth from a fresh
     // frame. A genuine future time today ("resets at 3pm" seen at 2pm) is
     // unaffected — that is the case this branch actually exists for.
-    if (d.getTime() <= now) return null
+    //
+    // FRESH text is the exception (2026-11-26): an SDK refusal is a sentence the
+    // CLI handed over just now, not a frame re-read later, so "resets 2:50am" at
+    // 22:21 is tomorrow's 2:50am. Reading it as stale paused the refused desk for
+    // the 20-minute grace instead, and the turn admitted after that met the same
+    // wall. Only a time well past — a boundary race ("resets 9pm" at 9:00:30pm)
+    // is the reset happening now, not one a day away.
+    if (d.getTime() <= now) {
+      if (!fresh || now - d.getTime() < FRESH_ROLLOVER_MARGIN_MS) return null
+      d.setDate(d.getDate() + 1)
+    }
     return d.getTime()
   }
 
@@ -388,6 +415,7 @@ export const parseResetLabel = (
 export const extractPtyResetUntil = (
   text: string | null | undefined,
   now: number,
+  fresh = false,
 ): number | null => {
   if (!text) return null
 
@@ -403,7 +431,7 @@ export const extractPtyResetUntil = (
   // Absolute — "limit (will) reset(s) (at) <time…>" up to sentence/line end.
   const abs = text.match(/\bresets?\s+(?:at\s+)?([^.\n\r]+)/i)
   if (abs) {
-    const until = parseResetLabel(abs[1], now)
+    const until = parseResetLabel(abs[1], now, fresh)
     if (until != null) return until
   }
   return null
@@ -421,10 +449,13 @@ export const resolveCoolingUntil = (opts: {
   a5ResetsAt?: string | null
   graceMs?: number
   now: number
+  /** The text was handed over just now (an SDK refusal), not re-read off a
+   *  screen: a bare time already past today means tomorrow. */
+  fresh?: boolean
 }): number => {
-  const { ptyText, a5ResetsAt, graceMs = DEFAULT_COOLING_GRACE_MS, now } = opts
+  const { ptyText, a5ResetsAt, graceMs = DEFAULT_COOLING_GRACE_MS, now, fresh = false } = opts
 
-  const fromPty = extractPtyResetUntil(ptyText, now)
+  const fromPty = extractPtyResetUntil(ptyText, now, fresh)
   if (fromPty != null && fromPty > now) return fromPty
 
   const fromA5 = parseResetLabel(a5ResetsAt, now)

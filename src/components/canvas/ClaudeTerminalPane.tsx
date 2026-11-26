@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Power, RotateCcw } from 'lucide-react'
+import { useAssistantClearance } from '@/components/assistant/assistantWindow'
 import { api } from '@/lib/api-client'
 import { wireTerminalFileDrop } from '@/lib/terminalFileDrop'
 import {
@@ -72,6 +73,8 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
   // Which side of the window this stream counts against (streamBudget.ts).
   const streamOwnerRef = useRef(useStreamOwner())
   const hostRef = useRef<HTMLDivElement | null>(null)
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const assistantRoom = useAssistantClearance(viewportRef, { inset: 8 })
   const termRef = useRef<any>(null)
   const fitRef = useRef<any>(null)
   const esRef = useRef<EventSource | null>(null)
@@ -533,7 +536,14 @@ export const ClaudeTerminalPane = ({ terminalId, label, onExit, onRestart, chrom
           placed directly on hostRef is silently dropped from FitAddon's row
           math, overshooting the computed row count and clipping the bottom of
           the pane under hostRef's overflow-hidden. */}
-      <div className="relative min-h-0 flex-1 overflow-hidden bg-[#1a1a1a] px-2 py-2">
+      {/* The floating assistant never moves the layout, so the viewport steps
+          its grid out from under the character itself (Claude Code's input box
+          and update notice end in the bottom-right corner). `inset` = px-2. */}
+      <div
+        ref={viewportRef}
+        className="relative min-h-0 flex-1 overflow-hidden bg-[#1a1a1a] px-2 py-2"
+        style={assistantRoom}
+      >
         <div
           ref={hostRef}
           className="h-full w-full overflow-hidden"

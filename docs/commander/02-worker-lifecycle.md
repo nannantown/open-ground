@@ -1128,9 +1128,10 @@ worktree is removed only when ALL hold:
 4. **Re-checked just before removal** — (a) re-reads the card column and idleness, (b) re-reads the
    roster. Earlier removals in the same pass can take seconds.
 
-Runs in the **primary instance only** (port 47776): sessions and the engine live in one process, and
-`npm run dev:alt` shares `~/.openground`, so a second server would read the primary's working workers
-as dead. The merge check does not fetch (a stale trunk ref only makes a branch look unmerged). A
+Runs in the **primary instance only** (port 47776): sessions and the engine live in one process, so a
+second server on the same `~/.openground` would read the primary's working workers as dead.
+(`npm run dev:alt` gets its own throwaway `OPENGROUND_HOME` since 2026-11-23 unless one is given —
+01 章 §7.4b3.) The merge check does not fetch (a stale trunk ref only makes a branch look unmerged). A
 non-force `git worktree remove` also deletes gitignored files in the tree — same as step 7.
 
 When something was removed, `runSwarmJanitor` (no force) then deletes the merged branch with `-d` and the orphaned heartbeat.

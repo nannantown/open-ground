@@ -19,7 +19,7 @@ vi.mock('./runtimeOwner', () => ({ runtimeOwnerKey: async (expected?: string) =>
   return h.owner
 } }))
 const key = (scope: string, id: string, owner = h.owner) => createHash('sha256').update(JSON.stringify([owner, scope, id])).digest('hex')
-const file = () => join(openGroundHome(), 'runtime', 'receipts.json')
+const file = () => join(openGroundHome(), 'runtime', 'receipts-v2.json')
 const archive = (id = 'receipt-0', scope = 'project-a') => join(openGroundHome(), 'runtime', 'receipt-archive', `${key(scope, id).slice(0, 3)}.json`)
 const entry = (index: number, state: ConversationReceipt['state'] = 'queued'): ConversationReceipt => ({
   id: `receipt-${index}`, scope: 'project-a', owner: h.owner, body: { ordinal: index },
@@ -58,7 +58,8 @@ describe('bounded receipt archives retain execution identity', () => {
     h.reads = []
     const old = await readConversationReceipt('project-a', 'receipt-0')
     expect(old).toEqual(seeded[key('project-a', 'receipt-0')])
-    expect(h.reads).toEqual([file(), archive()])
+    // Receipt storage reads exactly one shard; the owner check (runtimeJournalOwner.ts) is not storage.
+    expect(h.reads.filter((path) => !path.includes(join('runtime', 'journal-owner')))).toEqual([file(), archive()])
     expect(await acceptConversationReceipt('project-a', 'receipt-0', { ordinal: 0 })).toEqual(old)
     await expect(acceptConversationReceipt('project-a', 'receipt-0', { ordinal: 99 })).rejects.toBeInstanceOf(ReceiptConflict)
     for (const id of ['receipt-0', 'receipt-1', 'receipt-2']) expect(await claimConversationReceipt('project-a', id)).toBe(false)

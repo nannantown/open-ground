@@ -2825,6 +2825,14 @@ export type SwarmFatalEvent =
   // pane; nothing is lost, only deferred. Fires from swarmOrchestrator.ts
   // (resumeEngines), never per-project (projectPath/taskId/branch absent).
   | 'engine-resume-suppressed'
+  // 'automation-held' (2026-11-23): a project in automatic operation cannot start
+  // or continue work for a reason the owner must hear WHILE THE APP RUNS (the
+  // boot-time twin is 'engine-resume-suppressed'): saved work awaiting their
+  // review (an unconfirmed tool result holds dispatch, the commander's launch and
+  // every running worker's tools), a worker whose tool calls are all refused, or
+  // the Ground frame's automatic start failing. `detail` is the plain-language
+  // reason plus where to go; raised once per hold, never per pass.
+  | 'automation-held'
   // 'data-integrity' is NOT a swarm event: it is the boot-time home-data damage
   // check (src/lib/server/homeIntegrity.ts) reporting that settings.json /
   // canvas.json lost entries, became unreadable, or picked up a test fixture

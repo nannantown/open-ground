@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, open, readFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { atomicWriteJson } from './atomicWrite'
 import { openGroundHome } from './paths'
 import { runtimeOwnerKey } from './runtimeOwner'
+import { assertRuntimeJournalOwner, runtimeJournalHolder, runtimeJournalHolderGone } from './runtimeJournalOwner'
 
 const bootId = randomUUID()
 const receiptSchema = z.object({
@@ -13,6 +14,8 @@ const receiptSchema = z.object({
   state: z.enum(['queued', 'executing', 'delivered', 'rejected', 'uncertain', 'cancelled']),
   acceptedAt: z.string().datetime(), updatedAt: z.string().datetime(),
   attemptBoot: z.string().optional(), result: z.unknown().optional(), error: z.string().max(500).optional(),
+  // The claiming process's proof of life (runtimeJournalOwner.ts runtimeJournalHolder).
+  attemptHolder: z.object({ pid: z.number().int().positive(), port: z.number().int().min(1).max(65535).optional() }).strict().optional(),
   conversationId: z.string().optional(), epoch: z.number().int().nonnegative().optional(),
   execution: z.object({ sessionId: z.string(), handleId: z.string(), runtime: z.enum(['sdk', 'pty']), nativeOffset: z.number().int().nonnegative().optional() }).optional(),
   acceptedRuntime: z.object({ provider: z.enum(['claude', 'chatgpt']), accountKey: z.string().max(256).optional() }).optional(),
@@ -21,7 +24,10 @@ export type ConversationReceipt = z.infer<typeof receiptSchema>
 const contextSchema = z.object({ conversationId: z.string(), epoch: z.number().int().nonnegative() }).strict()
 export type ConversationContext = z.infer<typeof contextSchema>
 const hashKey = z.string().regex(/^[a-f0-9]{64}$/)
-const schema = z.object({ version: z.literal(1), receipts: z.record(hashKey, receiptSchema), contexts: z.record(hashKey, contextSchema).default({}),
+// Version 2 (2026-11-24) changes nothing in the shape; it marks a journal this
+// build wrote (runtime/receipts-v2.json — retireLegacyJournal below). Version 1
+// is still read.
+const schema = z.object({ version: z.union([z.literal(1), z.literal(2)]), receipts: z.record(hashKey, receiptSchema), contexts: z.record(hashKey, contextSchema).default({}),
   acceptedDrafts: z.record(hashKey, z.number().int().nonnegative()).default({}) }).strict()
 const archiveSchema = z.object({ version: z.literal(1), prefix: z.string().regex(/^[a-f0-9]{3}$/), receipts: z.record(hashKey, receiptSchema) }).strict()
 const MAX_RECEIPTS = 4096
@@ -70,11 +76,79 @@ const persist = async (path: string, value: unknown): Promise<void> => {
     try { await directory.sync() } finally { await directory.close() }
   }
 }
+const archivePath = (home: string, prefix: string) => join(home, 'runtime', 'receipt-archive', `${prefix}.json`)
+/** The finals archived under one key prefix; none when the shard does not exist. */
+const readArchiveShard = async (home: string, prefix: string): Promise<Record<string, ConversationReceipt>> => {
+  try {
+    const raw = await readFile(archivePath(home, prefix), 'utf8')
+    if (Buffer.byteLength(raw) > MAX_BYTES) throw new Error('Receipt archive exceeds its limit.')
+    const saved = archiveSchema.parse(JSON.parse(raw))
+    if (saved.prefix !== prefix || Object.keys(saved.receipts).length > MAX_RECEIPTS) throw new Error('Receipt archive exceeds its limit or changed identity.')
+    for (const [key, receipt] of Object.entries(saved.receipts)) if (!terminal(receipt) || !key.startsWith(prefix) || keyFor(receipt.owner, receipt.scope, receipt.id) !== key) throw new Error('Receipt archive is invalid.')
+    return saved.receipts
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw error }
+}
+// Builds from before the owner lock (runtimeJournalOwner.ts) know no lock: they
+// read and replace runtime/receipts.json and flip every claim of another boot.
+// Old checkouts outlive the fix. That file's content moves into this journal;
+// then a folder takes its place, so they fail closed reading it (EISDIR) and can
+// no longer rename a file over it, not even a write already under way.
+// A file can appear there again: a downgraded app run after its folder was
+// removed by hand, or an old build's write landing between our rename and mkdir.
+// What it holds that this journal (its archive included) lacks moves in too, so
+// its marks and owner inputs are not lost and the sweep holds its cut-off calls;
+// for anything both hold, this journal's copy stands. Every copy is kept, as
+// receipts.json.retired, .retired.2, …, never overwritten.
+const retireLegacyJournal = async (home: string, path: string): Promise<void> => {
+  const legacy = join(home, 'runtime', 'receipts.json')
+  const kindOf = (file: string) => stat(file).then((found) => found.isDirectory() ? 'folder' : 'file',
+    (error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return 'none'; throw error })
+  const read = async (file: string) => {
+    const raw = await readFile(file, 'utf8')
+    if (Buffer.byteLength(raw) > MAX_BYTES) throw new Error('Receipt journal exceeds its limit.')
+    return schema.parse(JSON.parse(raw))
+  }
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const kind = await kindOf(legacy)
+    if (kind === 'folder') return
+    if (kind === 'file') {
+      const old = await read(legacy)
+      const ours = await kindOf(path) === 'none' ? undefined : await read(path)
+      if (!ours) await persist(path, { ...old, version: 2 })
+      else {
+        let moved = false
+        const shards = new Map<string, Record<string, ConversationReceipt>>()
+        for (const [key, receipt] of Object.entries(old.receipts)) {
+          const prefix = key.slice(0, 3)
+          if (!shards.has(prefix)) shards.set(prefix, await readArchiveShard(home, prefix))
+          if (ours.receipts[key] || shards.get(prefix)?.[key]) continue
+          ours.receipts[key] = receipt; moved = true
+        }
+        for (const [key, context] of Object.entries(old.contexts)) if (!ours.contexts[key]) { ours.contexts[key] = context; moved = true }
+        for (const [key, revision] of Object.entries(old.acceptedDrafts)) if (revision > (ours.acceptedDrafts[key] ?? -1)) { ours.acceptedDrafts[key] = revision; moved = true }
+        // Past the read limit the journal could not be opened again; the old file stays.
+        if (moved && byteSize(ours) > MAX_BYTES) throw new Error('Receipt storage is full. Existing work was retained.')
+        if (moved) await persist(path, { ...ours, version: 2 })
+      }
+      // Only the owner names copies, one transaction at a time.
+      let retired = `${legacy}.retired`
+      for (let n = 2; await kindOf(retired) !== 'none'; n++) retired = `${legacy}.retired.${n}`
+      await rename(legacy, retired).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error })
+    }
+    try { await mkdir(legacy, { mode: 0o700 }); return } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+  }
+  throw new Error('The receipt journal of earlier builds could not be retired.')
+}
 type Change<T> = (receipts: Record<string, ConversationReceipt>, contexts: Record<string, ConversationContext>, acceptedDrafts: Record<string, number>, archived?: ConversationReceipt, archivedBatch?: Record<string, ConversationReceipt>) => { result: T; write: boolean }
 const transaction = <T>(change: Change<T>, lookupKey?: string, options?: { lookupKeys?: string[]; authorize?: () => Promise<unknown> }): Promise<T> => {
   const home = openGroundHome()
-  const path = join(home, 'runtime', 'receipts.json')
+  const path = join(home, 'runtime', 'receipts-v2.json')
   const result = writer.then(async () => {
+    // Another live process owning this home's journal refuses us before any
+    // read: only the owner may judge which claims a restart cut off.
+    await assertRuntimeJournalOwner(home, bootId)
+    await retireLegacyJournal(home, path)
+    const holder = await runtimeJournalHolder(bootId)
     let receipts: Record<string, ConversationReceipt> = {}
     let contexts: Record<string, ConversationContext> = {}
     let acceptedDrafts: Record<string, number> = {}
@@ -83,10 +157,17 @@ const transaction = <T>(change: Change<T>, lookupKey?: string, options?: { looku
       const raw = await readFile(path, 'utf8')
       if (Buffer.byteLength(raw) > MAX_BYTES) throw new Error('Receipt journal exceeds its limit.')
       const saved = schema.parse(JSON.parse(raw)); receipts = saved.receipts; contexts = saved.contexts; acceptedDrafts = saved.acceptedDrafts
+      // Only owners claim, and we own the journal now, so a claim by another boot
+      // belongs to an owner that is gone (runtimeJournalOwner.ts). Each claim
+      // also names its process: a call is held only once that process is proven
+      // gone, so even a second owner (the lock folder deleted from outside)
+      // never flips a live process's work, though it still shuts the live app
+      // out until it exits (runtimeJournalOwner.ts). Claims from before that
+      // have no name.
       for (const receipt of Object.values(receipts)) {
-        if (receipt.state === 'executing' && receipt.attemptBoot !== bootId) {
-          receipt.state = 'uncertain'; receipt.error = 'The app restarted after this operation began. Inspect its result before continuing.'; recovered = true
-        }
+        if (receipt.state !== 'executing' || receipt.attemptBoot === bootId) continue
+        if (receipt.attemptBoot && receipt.attemptHolder && !await runtimeJournalHolderGone({ bootId: receipt.attemptBoot, ...receipt.attemptHolder })) continue
+        receipt.state = 'uncertain'; receipt.error = 'The app restarted after this operation began. Inspect its result before continuing.'; recovered = true
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     // Upgrade legacy active receipts before any copy can leave this document.
@@ -95,23 +176,14 @@ const transaction = <T>(change: Change<T>, lookupKey?: string, options?: { looku
       recordAcceptedDraft(receipt, acceptedDrafts)
     }
     const archives = new Map<string, Record<string, ConversationReceipt>>()
-    const archivePath = (prefix: string) => join(home, 'runtime', 'receipt-archive', `${prefix}.json`)
     const readArchive = async (prefix: string): Promise<Record<string, ConversationReceipt>> => {
       const cached = archives.get(prefix)
       if (cached) return cached
-      let entries: Record<string, ConversationReceipt> = {}
-      try {
-        const raw = await readFile(archivePath(prefix), 'utf8')
-        if (Buffer.byteLength(raw) > MAX_BYTES) throw new Error('Receipt archive exceeds its limit.')
-        const saved = archiveSchema.parse(JSON.parse(raw))
-        if (saved.prefix !== prefix || Object.keys(saved.receipts).length > MAX_RECEIPTS) throw new Error('Receipt archive exceeds its limit or changed identity.')
-        for (const [key, receipt] of Object.entries(saved.receipts)) if (!terminal(receipt) || !key.startsWith(prefix) || keyFor(receipt.owner, receipt.scope, receipt.id) !== key) throw new Error('Receipt archive is invalid.')
-        entries = saved.receipts
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      const entries = await readArchiveShard(home, prefix)
       archives.set(prefix, entries)
       return entries
     }
-    const document = () => ({ version: 1 as const, receipts, contexts, acceptedDrafts })
+    const document = () => ({ version: 2 as const, receipts, contexts, acceptedDrafts })
     const validateActive = (): void => {
       if (Object.keys(receipts).length > MAX_RECEIPTS || Object.keys(acceptedDrafts).length > 16384 || byteSize(document()) > MAX_BYTES)
         throw new Error('Receipt storage is full. Existing work was retained.')
@@ -136,7 +208,7 @@ const transaction = <T>(change: Change<T>, lookupKey?: string, options?: { looku
           }
           const archive = { version: 1 as const, prefix, receipts: entries }
           if (Object.keys(entries).length > MAX_RECEIPTS || byteSize(archive) > MAX_BYTES) throw new Error('Receipt archive is full. Existing work was retained.')
-          if (dirty) await persist(archivePath(prefix), archive)
+          if (dirty) await persist(archivePath(home, prefix), archive)
           archives.set(prefix, entries)
         }))
         for (const savedShard of saved) if (savedShard.status === 'rejected') throw savedShard.reason
@@ -160,6 +232,8 @@ const transaction = <T>(change: Change<T>, lookupKey?: string, options?: { looku
     // No await separates its final owner/actor checks from its state changes.
     await options?.authorize?.()
     const next = change(receipts, contexts, acceptedDrafts, archived, archivedBatch)
+    // Our claims carry our proof of life (the sweep above).
+    if (next.write) for (const receipt of Object.values(receipts)) if (receipt.state === 'executing' && receipt.attemptBoot === bootId) receipt.attemptHolder ??= holder
     if (next.write || recovered) {
       // Fail closed at capacity. An unresolved operation is never evicted to
       // make a retry look new and executable again.
@@ -272,7 +346,7 @@ export const markConversationReceiptHeard = async (scope: string, id: string, ex
   }, key).then(publish)
 }
 export const publicConversationReceipt = (receipt: ConversationReceipt) => {
-  const { owner: _owner, hash: _hash, body: _body, attemptBoot: _boot, execution: _execution, acceptedRuntime: _runtime, ...shown } = receipt
+  const { owner: _owner, hash: _hash, body: _body, attemptBoot: _boot, attemptHolder: _holder, execution: _execution, acceptedRuntime: _runtime, ...shown } = receipt
   return shown
 }
 

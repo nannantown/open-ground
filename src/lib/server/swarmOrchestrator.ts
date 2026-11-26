@@ -97,7 +97,9 @@ import {
   isSdkSessionReaped,
   getSdkSession,
   listSdkSessionsIn,
+  lastQuotaRefusalText,
 } from './sdkSession'
+import { classifyQuotaRefusal, quotaRefusalKindOfText, refusalClosesEveryModel } from './swarmRateLimitText'
 // card 2 (docs/ENGINE_PERSISTENCE_PLAN.md) — engine intent write-through +
 // boot-time crash-loop breaker. See resumeEngines() below.
 import {
@@ -143,6 +145,7 @@ import {
 } from './store'
 import {
   runtimeOf,
+  sdkToolDenialStreak,
   workerKey,
   workerRuntimeKind,
   type WorkerHandle,
@@ -163,6 +166,7 @@ import {
   coolingSnapshot,
   isModelTier,
   isTierCooling,
+  spentUsageResetsAt,
 } from './swarmQuota'
 // [Allowed] the owner's PERMANENT per-tier ON/OFF switch — the second, independent
 // veto. `spawnBlock` ANDs it with the cooling table and is the ONE gate both
@@ -230,6 +234,8 @@ import type {
   TaskTier,
 } from '../types'
 import { createSwarmFatalNotification, createSwarmInfoNotification } from './swarmNotifications'
+import { OWNER_REVIEW_HOLD_HINT, automationStartNotice, commanderFailureWords, dispatchFailureNotice, ownerUnconfirmedNotice, savedWorkHoldCount, savedWorkHoldNotice, toolDenialNotice } from './savedWorkHold'
+import { isRuntimeActionDenial } from './runtimeActionReceipts'
 // Manager-only integration (2026-07-15): the engine no longer merges — it WAKES the
 // commander when a worker is ready. These are the seams the default wake dep uses.
 import { spawnSwarmManager } from './swarmManager'
@@ -1764,12 +1770,7 @@ export { RATE_LIMIT_PATTERNS, RATE_LIMIT_TAIL_MAX, endsInRateLimit } from './swa
  *  0708). When BOTH slots are spent the session's (sooner) reset wins: a
  *  too-early resume just re-marks on the next sighting, while over-trusting the
  *  weekly reset could park for days. Read-only peek (honors K8). */
-const a5CoolingHint = (): string | null => {
-  const a5 = peekCachedUsage()
-  if (a5?.session && a5.session.pct >= 100) return a5.session.resetsAt
-  if (a5?.weekAll && a5.weekAll.pct >= 100) return a5.weekAll.resetsAt
-  return null
-}
+const a5CoolingHint = (): string | null => spentUsageResetsAt(peekCachedUsage())
 
 /** Classify a worker's recent output into WHY it might not be progressing:
  *    • 'question' — claude asked a FREE-TEXT question and idles awaiting the
@@ -1971,6 +1972,30 @@ export interface ProjectEngine {
    *  rest of the engine's cognition — a restart retries immediately, which is
    *  the right bias (the cause may have been fixed while we were down). */
   sdkSpawnHold?: { until: number; failures: number; reason: string; notifiedAt: number }
+  /** Saved-work hold (2026-11-23): the project has an operation whose result
+   *  nobody confirmed, so every SDK launch would die at its first step and every
+   *  running worker's tool call is denied (savedWorkHold.ts). While set, the fill
+   *  stage dispatches nothing and the commander is not woken; cards stay in todo.
+   *  Journalled and told to the president ONCE, on the entering edge; cleared by
+   *  the first pass that finds the operations reviewed. In-memory: after a
+   *  restart the boot resume owns the same hold (savedSwarmRuntimeHold). */
+  savedWorkHold?: { since: number; count: number; unanswered?: string; told?: boolean }
+  /** What the engine itself cut off mid-command (a forced stop after
+   *  {@link TOOL_BOUNDARY_WAIT_MS}) — said in the saved-work notice it causes. */
+  forcedStopNote?: string
+  /** Per worker (workerKey): when the engine first wanted to stop it but a
+   *  command was still running, and WHICH stop is waiting — see awaitToolBoundary. */
+  toolBoundaryWaits?: Map<string, { since: number; stop: string }>
+  /** Why the commander last failed to come up (its launch threw, or its SDK desk
+   *  ended within seconds) — journalled when it happens and named in the
+   *  'manager-unrevivable' notice, which used to say only "keeps dying". */
+  lastCommanderFailure?: string
+  /** Workers (workerKey) whose run of refused tool calls was already journalled
+   *  and told — see watchToolDenials. */
+  toolDenialTold?: Set<string>
+  /** Per todo card: dispatch failures in a row, and whether the president was
+   *  told — see tellRepeatedDispatchFailure. Cleared by a dispatch that works. */
+  dispatchFailures?: Map<string, { count: number; told: boolean }>
   /** Per todo card: the `tier@until` its dispatch was last deferred on (its only
    *  launchable tier is COOLING — the fill stage's pre-check or spawnSwarmWorker's
    *  TierCoolingError). Logs each card's deferral once per wall instead of on every
@@ -2294,6 +2319,10 @@ export interface ProjectEngine {
    *  (capped — see ORPHAN_UNKNOWN_HOLD_CAP_MS). Drives the once-per-hold
    *  start/release log lines and the 'unowned-doing' anomaly. In-memory only. */
   unownedOrphanHold?: Map<string, { since: number; unknownSince?: number }>
+  /** Per card: when the sweep first found its parked, unowned desk still running
+   *  a command — it is reclaimed once the command ends (bounded by
+   *  TOOL_BOUNDARY_WAIT_MS), never in the middle of it. In-memory only. */
+  unownedCommandWaits?: Map<string, number>
   /** Per-CARD (taskId) 'doing' cards whose worker has declared itself done (a ready
    *  beat newer than the latest 差し戻し) yet the card has not moved on — see
    *  {@link noticeStrandedReady}. `since` = first pass seen so; `notifiedAt` = when
@@ -2364,6 +2393,9 @@ export interface ProjectEngine {
 
 interface OrchestratorStore {
   engines: Map<string, ProjectEngine>
+  /** Per frame project whose automatic start keeps failing: the reason, since
+   *  when, and whether the president was told — see tellAutomationStartFailures. */
+  automationStartFailures?: Map<string, { reason: string; since: number; told: boolean }>
 }
 
 declare global {
@@ -3184,6 +3216,19 @@ export interface OrchestratorDeps {
   }) => Promise<SpawnSwarmWorkerResponse>
   /** Is this worker's PTY still alive? (A freed slot ⇒ refill.) */
   isAlive: (w: WorkerHandle) => boolean
+  /** How many unconfirmed operations hold this project's automatic work
+   *  (savedWorkHold.ts). THROWS when the launch guard's question cannot be
+   *  answered (owner sign-in gone, record unreadable) — every launch would fail
+   *  the same way, so that holds too. Absent ⇒ never held (hermetic tests). */
+  savedWorkHold?: (projectPath: string) => Promise<number>
+  /** What the pool knows about an SDK worker's session beyond "alive": why it
+   *  ended (the only record of a death at start — the pool forgets it after its
+   *  linger), how many commands it is running right now, and the usage refusal
+   *  it is parked on (its own words — the SDK tail leaves them out). Absent ⇒ unknown. */
+  sdkWorkerFacts?: (sdkSessionId: string) => { exitReason?: string; toolCallsInFlight?: number; refusal?: string } | undefined
+  /** How many of an SDK worker's newest tool calls in a row the runtime action
+   *  guard refused (0 once one goes through). Absent ⇒ never watched. */
+  toolDenialStreak?: (sdkSessionId: string) => number
   /** Where this card's work already lives, if anywhere — see
    *  {@link ensureSwarmWorktreeForBranch}. `null` ⇒ dispatch fresh. Optional so
    *  existing dep literals keep compiling; the default resolver is used when
@@ -3519,7 +3564,7 @@ export interface IntegrationDeps {
   /** Poke the LIVE commander desk about waiting work — the `'idle'` response, and the
    *  reason that state never spawns anything (完了条件2+5). Best-effort: false when the
    *  PTY is gone. MUST NOT throw. Default: {@link defaultNudgeManager}. */
-  nudgeManager: (projectPath: string) => Promise<boolean>
+  nudgeManager: (projectPath: string) => Promise<boolean | 'usage-limit'>
   /** Can a desk reach the API right now? The OFFLINE HOLD's sensor
    *  (2026-09-02): false ⇒ the manager reflex types nothing and charges
    *  nothing; the offline→online edge restores the voice and pokes at once.
@@ -4467,7 +4512,7 @@ export const defaultNudgeManager = async (
     desk?: typeof managerDeskForSession
     say?: typeof sayToManagerDesk
   },
-): Promise<boolean> => {
+): Promise<boolean | 'usage-limit'> => {
   const write = deps?.write ?? writeInput
   const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   try {
@@ -4482,7 +4527,10 @@ export const defaultNudgeManager = async (
     // mid-generation, and its acceptance comes back synchronously — the whole
     // reason this path had to be a two-step dance on a PTY.
     if (desk.runtime === 'sdk') {
-      return (deps?.say ?? sayToManagerDesk)(desk, MANAGER_STALL_NUDGE_TEXT).ok
+      const said = (deps?.say ?? sayToManagerDesk)(desk, MANAGER_STALL_NUDGE_TEXT)
+      // Paused on the usage limit is not "unreachable": the desk takes input again
+      // by itself when the limit lifts (review 2026-11-26).
+      return said.ok || (said.heldBecause === 'usage-limit' ? 'usage-limit' : false)
     }
     if (!write(desk.handleId, '\x1b')) return false
     await sleep(STALL_ESCALATE_DELAY_MS)
@@ -4637,9 +4685,19 @@ const defaultWakeManager = async (
   cards: readonly { branch: string; title: string }[],
 ): Promise<boolean> => {
   try {
-    if (!await automaticOperationAllowed(projectPath)) return false
+    // Thrown, not returned, so this refusal reaches the journal and the notice
+    // like every other reason the commander did not come up.
+    if (!await automaticOperationAllowed(projectPath)) throw new Error('オーナーのアカウントが確かめられません(設定でサインインすると起動します)')
     await spawnSwarmManager({ projectPath })
-  } catch {
+  } catch (e) {
+    // The reason used to be dropped here, and the reflex then journalled every
+    // failure as "no usable model tier" — including ones that had nothing to do
+    // with quota (2026-11-23). Say what the launch itself said.
+    const engine = store.engines.get(await canonicalize(projectPath).catch(() => projectPath))
+    if (engine) {
+      engine.lastCommanderFailure = errMsg(e).slice(0, 300)
+      logLine(engine, 'warn', `司令官を起動できませんでした — ${engine.lastCommanderFailure}`, 'integrate')
+    }
     return false // no usable tier / claude missing / spawn fault — retry next pass
   }
   const n = cards.length
@@ -5124,6 +5182,238 @@ const holdSdkSpawn = async (engine: ProjectEngine, reason: string, now: number):
         'claude へのサインインし直し(または CLI の更新)で直ることが多いです。原因が解消すれば自動で再開します — 再操作は不要。',
     }).catch(() => {})
   }
+}
+
+/** How long an engine stop waits for a worker's running command to finish before
+ *  it stops the worker anyway (see {@link awaitToolBoundary}). Longer than one full
+ *  test run (20+ minutes on this repo): fifteen cut that very command off. */
+export const TOOL_BOUNDARY_WAIT_MS = 30 * 60_000
+
+/** How long the launch guard's question must stay unanswerable before the
+ *  president is told (refreshSavedWorkHold) — dispatch holds from the first pass. */
+const UNANSWERED_HOLD_TELL_MS = 60_000
+
+/** The stop labels whose waits other arms must not conclude (awaitToolBoundary). */
+const QUOTA_STOP = 'quota-stopped'
+const BUDGET_STOP = 'over its execution budget'
+
+/** TOOL BOUNDARY (2026-11-23, measured in JobSearch): an engine stop — quota,
+ *  execution ceiling, stall reclaim — used to cut a worker off in the middle of a
+ *  running command (a test run started minutes earlier). The command was left
+ *  with no result, that unconfirmed operation held the whole project
+ *  (savedWorkHold.ts), and every re-dispatch died in seconds. So every such stop
+ *  first waits, bounded, for the worker's running commands to finish: a command
+ *  that never returns must not hold the slot forever, and a stop that still cuts
+ *  one off is recorded by recoverLost and named in the hold's notice.
+ *  True ⇒ keep the worker this pass. */
+const awaitToolBoundary = (
+  engine: ProjectEngine,
+  w: OrchestratorWorker,
+  deps: Pick<OrchestratorDeps, 'sdkWorkerFacts'>,
+  now: number,
+  stop: string,
+): boolean => {
+  const running = w.sdkSessionId ? (deps.sdkWorkerFacts?.(w.sdkSessionId)?.toolCallsInFlight ?? 0) : 0
+  const waits = (engine.toolBoundaryWaits ??= new Map())
+  const key = workerKey(w)
+  const wait = waits.get(key)
+  if (running > 0 && wait === undefined) {
+    waits.set(key, { since: now, stop })
+    logLine(
+      engine,
+      'info',
+      `worker ${stop} with ${running} command(s) still running — waiting for them to finish before stopping it (up to ${Math.round(TOOL_BOUNDARY_WAIT_MS / 60_000)}m): ${w.branch} (${shorten(w.taskTitle)})`,
+    )
+    return true
+  }
+  if (running > 0 && wait !== undefined && now - wait.since < TOOL_BOUNDARY_WAIT_MS) {
+    // A usage stop takes over a wait another stop began: when the command ends,
+    // the worker leaves as a quota stop (its card back to todo), not as the
+    // other stop's (review 2026-11-26).
+    if (stop === QUOTA_STOP) wait.stop = stop
+    return true
+  }
+  waits.delete(key)
+  return false
+}
+
+/** SAVED-WORK HOLD (2026-11-23). True while the project has an operation whose
+ *  result nobody confirmed: every SDK launch into it would die at its first step
+ *  (the measured "worker lost" spin: spawn → dead in seconds → card parked), and
+ *  the commander cannot start either. Journalled and told to the president ONCE,
+ *  on the entering edge — never per pass. Nothing here retries, clears or
+ *  bypasses the operations: only the owner's review does (savedWorkHold.ts). */
+const refreshSavedWorkHold = async (
+  engine: ProjectEngine,
+  deps: OrchestratorDeps & Pick<AnomalyDeps, 'notify'>,
+  now: number,
+): Promise<boolean> => {
+  let count = 0
+  // The predicate asks the launch guard's own question, so when it cannot be
+  // answered (the owner's sign-in is gone, the record cannot be read) every launch
+  // would fail the same way — that holds too, under its own words. Fail-closed,
+  // like the guard it mirrors.
+  let unanswered: string | undefined
+  try { count = (await deps.savedWorkHold?.(engine.path)) ?? 0 } catch (e) { unanswered = errMsg(e).slice(0, 200) }
+  const prev = engine.savedWorkHold
+  if (!count && unanswered === undefined) {
+    // A cut-off that left nothing unconfirmed names no later, unrelated hold.
+    engine.forcedStopNote = undefined
+    if (prev) {
+      engine.savedWorkHold = undefined
+      logLine(engine, 'info', 'saved-work hold lifted — nothing holds a launch any more; dispatch and the commander resume', 'dispatch')
+    }
+    return false
+  }
+  const running = engine.workers.length
+  // Same KIND of hold (unanswered or counted) — an error whose wording varies
+  // pass to pass is one episode, not a new notice each time.
+  if (prev && (prev.unanswered !== undefined) === (unanswered !== undefined)) {
+    prev.count = count
+    if (unanswered !== undefined) {
+      prev.unanswered = unanswered
+      // Told only once the question has stayed unanswerable a while: a single
+      // read error (EMFILE, EBUSY on the record) holds dispatch for a pass but
+      // is not "check your sign-in" (review 2026-11-26).
+      if (!prev.told && now - prev.since >= UNANSWERED_HOLD_TELL_MS) {
+        prev.told = true
+        const notice: SwarmFatalNotification = { event: 'automation-held', projectPath: engine.path, detail: ownerUnconfirmedNotice(running, /sign-in/i.test(unanswered)) }
+        if (deps.notify) deps.notify(notice)
+        else await createSwarmFatalNotification(notice).catch(() => {})
+      }
+    }
+    return true
+  }
+  engine.savedWorkHold = { since: now, count, ...(unanswered !== undefined ? { unanswered } : {}) }
+  const stuck = running ? `; ${running} running worker(s) have every tool call refused` : ''
+  logLine(
+    engine,
+    'warn',
+    unanswered !== undefined
+      ? `saved-work hold — the launch guard cannot confirm the owner or read the operation record (${unanswered}): holding new dispatch and the commander's launch (cards stay in todo)${stuck}`
+      : `saved-work hold — ${count} operation(s) with an unconfirmed result in this project: holding new dispatch and the commander's launch (cards stay in todo)${stuck}. ${OWNER_REVIEW_HOLD_HINT}`,
+    'dispatch',
+  )
+  if (unanswered !== undefined) return true // told once it lasts (above)
+  const cause = engine.forcedStopNote
+  engine.forcedStopNote = undefined
+  const notice: SwarmFatalNotification = {
+    event: 'automation-held',
+    projectPath: engine.path,
+    detail: (cause ? `${cause}。` : '') + savedWorkHoldNotice(running),
+  }
+  if (deps.notify) deps.notify(notice)
+  else await createSwarmFatalNotification(notice).catch(() => {})
+  return true
+}
+
+/** A commander SDK desk ended within seconds of its launch (swarmManager's
+ *  death-on-arrival watch). Its exit reason lived only in the session pool,
+ *  which forgets it after a linger; the engine saw an absent desk and nothing
+ *  else (2026-11-23). Journal it and keep it for the 'manager-unrevivable'
+ *  notice. A project with no engine has no journal to keep it in. */
+export const noteCommanderDeathAtStart = async (projectPath: string, reason: string): Promise<void> => {
+  const engine = store.engines.get(await canonicalize(projectPath).catch(() => projectPath))
+  if (!engine) return
+  engine.lastCommanderFailure = reason.slice(0, 300)
+  logLine(engine, 'warn', `司令官の卓が起動直後に終了しました — ${engine.lastCommanderFailure}`, 'integrate')
+}
+
+/** Dispatch failures in a row for one card before the president hears of it. */
+export const DISPATCH_FAILURE_TELL = 5
+
+/** A card whose dispatch keeps failing (2026-11-23). Measured in AIResearch: a
+ *  worktree that could not be made failed every 3 s for hours (2026-08-14 a
+ *  first-time project with no commit yet; 2026-09-29 four hours, ~4,700 lines)
+ *  and nobody heard. The fast retry stays (a git hiccup heals); after
+ *  {@link DISPATCH_FAILURE_TELL} in a row the president is told once, with the
+ *  failure's own words, until a dispatch of that card works. */
+const tellRepeatedDispatchFailure = (
+  engine: ProjectEngine,
+  cardId: string,
+  title: string,
+  reason: string,
+  deps: Pick<AnomalyDeps, 'notify'>,
+): void => {
+  const streaks = (engine.dispatchFailures ??= new Map())
+  const s = streaks.get(cardId) ?? { count: 0, told: false }
+  s.count++
+  streaks.set(cardId, s)
+  if (s.told || s.count < DISPATCH_FAILURE_TELL) return
+  s.told = true
+  logLine(engine, 'warn', `dispatch keeps failing (${s.count} in a row) — told the president; still retrying: ${shorten(title)} — ${reason}`, 'dispatch')
+  const notice: SwarmFatalNotification = { event: 'automation-held', projectPath: engine.path, detail: dispatchFailureNotice(title, reason) }
+  if (deps.notify) deps.notify(notice)
+  else void createSwarmFatalNotification(notice).catch(() => {})
+}
+
+/** How many refused tool calls in a row make a worker "unable to work". One or
+ *  two can be a single bad call retried; three in a row is the guard refusing
+ *  everything (measured 2026-11-20: every call refused, worker idle for 90m). */
+export const TOOL_DENIAL_ALERT = 3
+
+/** TOOL-DENIAL WATCH (2026-11-23). A worker whose every tool call the runtime
+ *  action guard refuses can do nothing, yet reads as busy (it keeps trying) or
+ *  merely quiet, so it sat until the 90-minute ceiling and nobody heard why.
+ *  After {@link TOOL_DENIAL_ALERT} refusals in a row: one journal line, and one
+ *  notice to the president unless the saved-work hold's notice already says the
+ *  running work is stuck. Once per worker; re-armed by a call that goes through. */
+const watchToolDenials = (
+  engine: ProjectEngine,
+  w: OrchestratorWorker,
+  deps: Pick<OrchestratorDeps, 'toolDenialStreak'> & Pick<AnomalyDeps, 'notify'>,
+): void => {
+  const streak = w.sdkSessionId ? (deps.toolDenialStreak?.(w.sdkSessionId) ?? 0) : 0
+  const told = (engine.toolDenialTold ??= new Set())
+  const key = workerKey(w)
+  if (streak < TOOL_DENIAL_ALERT) {
+    if (streak === 0) told.delete(key)
+    return
+  }
+  if (told.has(key)) return
+  told.add(key)
+  logLine(
+    engine,
+    'warn',
+    `worker's tool calls are all refused (${streak} in a row by the runtime action guard) — it cannot work until the cause clears: ${w.branch} (${shorten(w.taskTitle)}). ${OWNER_REVIEW_HOLD_HINT}`,
+  )
+  if (engine.savedWorkHold) return
+  const notice: SwarmFatalNotification = { event: 'automation-held', projectPath: engine.path, detail: toolDenialNotice(w.taskTitle) }
+  if (deps.notify) deps.notify(notice)
+  else void createSwarmFatalNotification(notice).catch(() => {})
+}
+
+/** QUOTA SENSOR — cool the wall one worker's usage refusal names, and return the
+ *  journal note. Shared by the live quota arm and the refused-then-gone arm in
+ *  monitorWorkers so both read the refusal the same way: an all-model limit
+ *  cools EVERY tier, a per-model one only the worker's own, and a worker with no
+ *  on-ladder model marks nothing (never cool a tier by guess). "All-model" needs
+ *  two agreeing signs (refusalClosesEveryModel) — anything less keeps the old
+ *  one-tier mark, because cooling the whole ladder parks every dispatch. */
+const coolQuotaWall = (w: OrchestratorWorker, refusal: string | undefined, screen: string | null, now: number): string => {
+  const tier = MODEL_TIER_LADDER.find((t) => t === w.model)
+  // A worker off the Claude ladder (a ChatGPT model) met ITS provider's limit:
+  // "ChatGPT usage limit; retry after …" says nothing about Claude's tiers
+  // (docs/CHATGPT_RUNTIME.md — a ChatGPT limit cools only ChatGPT).
+  if (!tier) return ''
+  const accountWide = refusalClosesEveryModel(refusal ? quotaRefusalKindOfText(refusal) : classifyQuotaRefusal(screen), refusal ?? screen)
+  const toCool = accountWide ? MODEL_TIER_LADDER : [tier]
+  let until = 0
+  for (const t of toCool) {
+    until = markRateLimited(t, { ptyText: refusal ?? screen, a5ResetsAt: a5CoolingHint(), graceMs: RATE_LIMIT_GRACE_MS, now })
+  }
+  return accountWide
+    ? ` · every tier cooling until ${new Date(until).toISOString()} (an all-model limit — a lower tier is refused too)`
+    : ` · tier ${tier} cooling until ${new Date(until).toISOString()}`
+}
+
+/** The owner's word for why the engine stopped a worker (the mid-command notice). */
+const STOP_REASON_JA: Partial<Record<WorkerRecoveryReason, string>> = {
+  'rate-limit': '使用量の上限',
+  runaway: '時間切れ',
+  'integration-wait': '時間切れ',
+  stall: '応答が無いため',
+  question: '質問の待ち時間切れ',
 }
 
 // (isWorkerAlive / defaultLastOutputAt / defaultNudge lived here until 2026-07-30.
@@ -5680,6 +5970,14 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   moveToReview: defaultMoveToReview,
   spawnWorker: defaultSpawnWorker,
   isAlive: (w) => runtimeOf(w).isAlive(w),
+  savedWorkHold: savedWorkHoldCount,
+  toolDenialStreak: (id) => sdkToolDenialStreak(id, isRuntimeActionDenial),
+  sdkWorkerFacts: (id) => {
+    const s = getSdkSession(id)
+    if (!s) return undefined
+    const refusal = lastQuotaRefusalText(id)
+    return { exitReason: s.exitReason, toolCallsInFlight: s.toolCallsInFlight, ...(refusal ? { refusal } : {}) }
+  },
   countCommitsAhead: defaultCountCommitsAhead,
   countNestedCommits: defaultCountNestedCommits,
   taskAssetWrittenSince: defaultTaskAssetWrittenSince,
@@ -5771,7 +6069,7 @@ const withHeartbeat = (w: OrchestratorWorker, hb: HeartbeatSign | null): Orchest
  *  is injected (no clock here) so the stall escalation is unit-tested deterministically. */
 const monitorWorkers = async (
   engine: ProjectEngine,
-  deps: OrchestratorDeps,
+  deps: OrchestratorDeps & Pick<AnomalyDeps, 'notify'>,
   byId: Map<string, ProjectTask>,
   now: number,
 ): Promise<void> => {
@@ -5838,6 +6136,10 @@ const monitorWorkers = async (
       wip?: WipCommitResult
       exitInfo?: { code: number | null; signal?: number }
     } = { removed: false }
+    // Read BEFORE the teardown ends the session: why it died (a death at start
+    // has no other record), and whether the engine is cutting a command off.
+    const sdkFacts = w.sdkSessionId ? deps.sdkWorkerFacts?.(w.sdkSessionId) : undefined
+    const cutOff = reason !== 'crash' ? (sdkFacts?.toolCallsInFlight ?? 0) : 0
     try {
       teardown = await deps.recoverWorker({
         projectPath: engine.path,
@@ -5917,7 +6219,27 @@ const monitorWorkers = async (
     const exitNote =
       teardown.exitInfo !== undefined
         ? ` · exitCode=${teardown.exitInfo.code ?? 'null'}${teardown.exitInfo.signal !== undefined ? ` signal=${teardown.exitInfo.signal}` : ''} (${classifyWorkerExit(teardown.exitInfo.code, teardown.exitInfo.signal)})`
-        : ''
+        : // An SDK worker has no exit code; its session's own exitReason is the
+          // cause ("error: A previous tool operation has an unconfirmed result…").
+          // Without it a death at start read as a bare "worker lost" (2026-11-23).
+          // (A worker that ended on a usage refusal arrives here as 'rate-limit'
+          // and is just as dead — its exit reason is kept too.)
+          (reason === 'crash' || !probe.alive) && sdkFacts?.exitReason
+          ? ` · exit: ${sdkFacts.exitReason}`
+          : ''
+    // MID-COMMAND STOP (2026-11-23): the engine stopped this worker while a
+    // command was still running. That command now has no result, and the
+    // unconfirmed operation holds the whole project until the owner reviews it —
+    // so the stop is recorded here and named in the notice the hold raises.
+    if (cutOff > 0) {
+      logLine(
+        engine,
+        'warn',
+        `worker stopped in the middle of ${cutOff} running command(s) (${reason}): ${w.branch} (${shorten(w.taskTitle)}) — ` +
+          `the unfinished command is now an unconfirmed operation and holds this project's automatic work until reviewed. ${OWNER_REVIEW_HOLD_HINT}`,
+      )
+      engine.forcedStopNote = `「${shorten(w.taskTitle)}」の担当を${STOP_REASON_JA[reason] ?? 'エンジンの判断'}で止めたとき、実行中だった操作が途中で切れました`
+    }
     // SALVAGE SURFACED (2026-07-12 全損): the reclaimed worktree held uncommitted
     // work and it was committed to the worker's branch instead of being destroyed.
     // The commander MUST see this — a re-dispatch of the same card branches fresh,
@@ -6086,6 +6408,26 @@ const monitorWorkers = async (
       return (await deps.readHeartbeat(engine.path, w.branch))?.ready === true
     } catch {
       return false
+    }
+  }
+
+  // A tool-boundary wait belongs to ONE stop. A worker the engine no longer wants
+  // to stop (its refusal decayed, it spoke again) must start a later wait from
+  // zero: a stamp left behind made that later stop skip its wait — and its
+  // cooling mark — once fifteen minutes had passed since the old one. So the
+  // waits nobody asked for again in this pass are dropped at its end.
+  const boundaryHeld = new Set<string>()
+  const holdForToolBoundary = (w: OrchestratorWorker, stop: string): boolean => {
+    const held = awaitToolBoundary(engine, w, deps, now, stop)
+    if (held) boundaryHeld.add(workerKey(w))
+    return held
+  }
+  /** The runtime's own verdict: this worker is parked on a usage limit. */
+  const quotaParked = (w: OrchestratorWorker): boolean => {
+    try {
+      return deps.quotaBlocked?.(w) ?? runtimeOf(w).quotaBlocked(w)
+    } catch {
+      return false // pool read failed → keep the text verdict
     }
   }
 
@@ -6343,6 +6685,22 @@ const monitorWorkers = async (
       promote = false
       stage = 'running'
     }
+    // REFUSED, THEN GONE (2026-11-23 17:44 / 22:21). A worker whose session ended
+    // on a usage refusal is a QUOTA STOP that happened to arrive as a death — the
+    // refusal and the end land within seconds of each other, so the alive-only
+    // quota arm below never sees it. It did not finish (no promote on "exited
+    // with commits" unless it had itself declared ready), and it did not crash:
+    // read as a crash it parked the card in 'blocked' (it had commits), where
+    // nothing brings it back when the limit lifts — three cards sat there
+    // overnight. The pool still holds the session's last words for its linger;
+    // they count as a refusal by the same decay rule as the live arm (nothing
+    // worked after it). Handled in the `!alive` branch below.
+    const refusedThenGone =
+      !alive && w.sdkSessionId && heartbeat?.ready !== true ? deps.sdkWorkerFacts?.(w.sdkSessionId)?.refusal : undefined
+    if (promote && refusedThenGone) {
+      promote = false
+      stage = 'running'
+    }
 
     if (promote) {
       let moved = false
@@ -6447,8 +6805,18 @@ const monitorWorkers = async (
       // failure away. (recordKeptMove stamps the intent; pruneStuckMoves drops it
       // the moment the card leaves 'doing'.)
       const pending = engine.stuckMoves.get(w.taskId)
-      const pendingReason: WorkerRecoveryReason =
+      let pendingReason: WorkerRecoveryReason =
         pending?.intent === 'recover-review' ? 'integration-wait' : 'crash'
+      // Refused, then gone (see above): cool the wall and requeue the card like
+      // any other quota stop.
+      if (pendingReason === 'crash' && refusedThenGone) {
+        pendingReason = 'rate-limit'
+        logLine(
+          engine,
+          'warn',
+          `worker ended on a usage refusal — a quota stop, not a crash: cooling and requeueing the card${coolQuotaWall(w, refusedThenGone, refusedThenGone, now)}: ${w.branch} (${shorten(w.taskTitle)})`,
+        )
+      }
       // Restore the SHAPE as well. Passing only the reason left `shape` undefined,
       // which defaults to the 「差し戻し後の再作業」 verb — so a retried
       // 'capped-wait' / 'work' stop invented a re-work in its recovery line.
@@ -6475,6 +6843,7 @@ const monitorWorkers = async (
     // refine the ACTION by reading its screen: a rate-limit WAIT is held (not
     // nudged/reclaimed — that would throw away its committed work), a trust prompt
     // is auto-accepted, and anything else takes the existing nudge→reclaim path.
+    watchToolDenials(engine, w, deps)
     const startedMs = Date.parse(w.startedAt)
 
     // (1) EXECUTION CEILING — working time since dispatch past MAX_EXEC_MS.
@@ -6555,7 +6924,19 @@ const monitorWorkers = async (
     // every banked minute is pre-rework — subtracting it again would forgive the
     // same minutes twice and let a re-work run to 2× its budget.
     const budgetCreditMs = budgetFromMs === startedMs ? creditMs : 0
-    if (isRunaway(budgetFromMs, now, MAX_EXEC_MS, budgetCreditMs)) {
+    // The ceiling does not conclude a stop that is not its own (review
+    // 2026-11-26): a worker parked on a usage limit is the quota arm's — it leaves
+    // as a quota stop, card back to todo — and a wait another stop began (a stall
+    // reclaim waiting out a test run) is concluded by that stop. This arm runs
+    // first in the loop, so judging them here turned both into a runaway, card →
+    // blocked, never re-dispatched when the limit lifted.
+    const waitOwner = engine.toolBoundaryWaits?.get(workerKey(w))?.stop
+    const ceilingsOwn = (waitOwner === undefined || waitOwner === BUDGET_STOP) && !quotaParked(w)
+    if (ceilingsOwn && isRunaway(budgetFromMs, now, MAX_EXEC_MS, budgetCreditMs)) {
+      if (holdForToolBoundary(w, BUDGET_STOP)) {
+        next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
+        continue
+      }
       // A worker that has ALREADY reached ready is NOT a 暴走: it produced
       // integrable, committed work, so the failure mode this ceiling defends
       // against (a task too big, a loop that never lands anything) is disproven.
@@ -6823,11 +7204,7 @@ const monitorWorkers = async (
     // into it — overnight review 2026-08-04). A legacy PTY roster row's arm
     // reports constant false (its runtime is dead; it can only be torn down).
     let output: 'rate-limited' | 'question' | 'normal' = classifyOutput(screen, workerRuntimeKind(w))
-    try {
-      if (deps.quotaBlocked?.(w) ?? runtimeOf(w).quotaBlocked(w)) output = 'rate-limited'
-    } catch {
-      /* pool read failed → keep the text verdict */
-    }
+    if (quotaParked(w)) output = 'rate-limited'
     const stallParams = {
       stallMs: STALL_SILENCE_MS,
       cooldownMs: STALL_NUDGE_COOLDOWN_MS,
@@ -6940,23 +7317,31 @@ const monitorWorkers = async (
     // when the tier warms (parsed reset time / A5 / RATE_LIMIT_GRACE_MS), the
     // card redispatches by itself — no human re-arm.
     if (output === 'rate-limited' && cheapStall.silentMs >= QUOTA_STOP_DEBOUNCE_MS) {
-      engine.nudges.delete(workerKey(w))
       // QUOTA SENSOR (the one production write into swarmQuota's cooling
       // table): attribute this sighting to the tier the worker launched on.
       // Reset time resolves refusal text → A5 cache → RATE_LIMIT_GRACE_MS
       // (resolveCoolingUntil). A worker with no recorded/on-ladder model marks
       // nothing (never cool a tier by guess) — its card still requeues.
-      const tier = MODEL_TIER_LADDER.find((t) => t === w.model)
-      let cooling = ''
-      if (tier) {
-        const until = markRateLimited(tier, {
-          ptyText: screen,
-          a5ResetsAt: a5CoolingHint(),
-          graceMs: RATE_LIMIT_GRACE_MS,
-          now,
-        })
-        cooling = ` · tier ${tier} cooling until ${new Date(until).toISOString()}`
+      // Marked on the FIRST sighting, before any tool-boundary wait, so dispatch
+      // stops launching into the wall at once; never re-marked while waiting (a
+      // re-read of "resets 9pm" after 9pm would mean tomorrow).
+      //
+      // ALL-MODEL LIMIT (2026-11-23): the 5-hour window and the weekly all-model
+      // allowance refuse every tier at once, so stepping down only spent three
+      // more launches per card (measured: 4 cards × 4 tiers = 16 launches, every
+      // one refused at once). The CLI's own remedy line says which kind this is
+      // (it offers /model only when another model still has headroom): an
+      // account-wide refusal cools EVERY tier on this one sighting, and only a
+      // per-model one steps down. Unknown kind ⇒ the old per-tier mark.
+      const refusal = w.sdkSessionId ? deps.sdkWorkerFacts?.(w.sdkSessionId)?.refusal : undefined
+      // Cooled once, on the pass the quota stop takes its wait (its own, or one
+      // another stop began and this one takes over).
+      const cooling = engine.toolBoundaryWaits?.get(workerKey(w))?.stop === QUOTA_STOP ? '' : coolQuotaWall(w, refusal, screen, now)
+      if (holdForToolBoundary(w, QUOTA_STOP)) {
+        next.push(withHeartbeat({ ...w, stage: 'running' }, heartbeat))
+        continue
       }
+      engine.nudges.delete(workerKey(w))
       logLine(
         engine,
         'warn',
@@ -7074,6 +7459,11 @@ const monitorWorkers = async (
     engine.questionRaised?.delete(workerKey(w))
     engine.questionWaits?.delete(workerKey(w))
     if (stall.action === 'reclaim') {
+      // A silent worker running a long command (a full test run) is not hung.
+      if (holdForToolBoundary(w,'silent past the stall limit')) {
+        next.push(withHeartbeat({ ...w, stage }, heartbeat))
+        continue
+      }
       engine.nudges.delete(workerKey(w))
       // A silent worker is reclaimed like a crash: recoveryColumn (via recoverLost)
       // sends a bare hang to 'todo' (one retry) or 'blocked' (budget spent), never
@@ -7174,6 +7564,9 @@ const monitorWorkers = async (
       if (!liveTerminalIds.has(id)) engine.questionWaits.delete(id)
     }
   }
+  engine.toolBoundaryWaits?.forEach((_since, key) => {
+    if (!boundaryHeld.has(key)) engine.toolBoundaryWaits?.delete(key)
+  })
 
   engine.workers = next
 }
@@ -7731,6 +8124,28 @@ const collectUnownedDoing = async (
         )
       }
     }
+    // A parked desk still running a command (a helper's test run) is reclaimed
+    // when the command ends, not in the middle of it: a command cut off has no
+    // result, and that unconfirmed operation holds the whole project — the same
+    // rule as every engine stop (awaitToolBoundary; review 2026-11-26).
+    if (desk.kind === 'parked') {
+      const running = deps.sdkWorkerFacts?.(desk.sdkSessionId)?.toolCallsInFlight ?? 0
+      const waits = (engine.unownedCommandWaits ??= new Map())
+      const since = waits.get(t.id)
+      if (running > 0 && (since === undefined || now - since < TOOL_BOUNDARY_WAIT_MS)) {
+        if (since === undefined) {
+          waits.set(t.id, now)
+          logLine(
+            engine,
+            'info',
+            `上限停止のまま取り残された無所属 worker が命令を実行中 — 終わるまで回収を待ちます(最大${Math.round(TOOL_BOUNDARY_WAIT_MS / 60_000)}分): ${shorten(t.title ?? '')} → ${branch}`,
+            'dispatch',
+          )
+        }
+        continue
+      }
+      waits.delete(t.id)
+    }
     try {
       const td = await deps.recoverWorker({
         projectPath: engine.path,
@@ -7768,6 +8183,9 @@ const collectUnownedDoing = async (
   // starts a fresh grace window.
   for (const id of Array.from(seen.keys())) if (!present.has(id)) seen.delete(id)
   for (const id of Array.from(holds.keys())) if (!present.has(id)) holds.delete(id)
+  engine.unownedCommandWaits?.forEach((_since, id) => {
+    if (!present.has(id)) engine.unownedCommandWaits?.delete(id)
+  })
 }
 
 const refreshEngineAutomationPolicy = async (engine: ProjectEngine) => {
@@ -7831,6 +8249,11 @@ export const runDispatchPass = async (
   //     as one accumulated plain-language digest. Deterministic, no model.
   observeBoardProgress(engine.path, tasks)
 
+  // 1d. SAVED-WORK HOLD (2026-11-23) — read BEFORE monitoring, so a worker whose
+  //     tool calls the same cause refuses is not told twice (watchToolDenials
+  //     stays quiet under the hold's own notice). Acted on at 3a.
+  const savedWorkHeld = await refreshSavedWorkHold(engine, deps, now)
+
   // 2. Monitor existing workers: advance stages, promote the done ones
   //    doing→review, recover crashed AND stalled ones, and prune dead/finished
   //    workers (freeing their slots).
@@ -7877,6 +8300,11 @@ export const runDispatchPass = async (
       /* keep retrying on later passes */
     }
   }
+
+  // 3a. SAVED-WORK HOLD (2026-11-23): an operation with an unconfirmed result
+  // holds every launch in this project — dispatch nothing into it. Cards stay in
+  // todo; monitor / promote / reclaim above are untouched.
+  if (savedWorkHeld) return
 
   // 3b. SPAWN PARK (card 0add9d30 — churn stop; extended with the owner's model
   // mask): when no tier is BOTH enabled and cooled-down, hold ALL new dispatch
@@ -8208,8 +8636,10 @@ export const runDispatchPass = async (
           await holdSdkSpawn(engine, errMsg(e), now)
           break
         }
+        tellRepeatedDispatchFailure(engine, card.id, title, errMsg(e), deps)
         continue
       }
+      engine.dispatchFailures?.delete(card.id)
       engine.reentryFailures?.delete(card.id)
       if (priorFailure) engine.reworkReasons.delete(card.id) // consumed — injected into this /order
       engine.coolingDefers?.delete(card.id)
@@ -9012,7 +9442,17 @@ export const runIntegratePass = async (
       return
     }
     if (lastNudgeAt > 0 && now - lastNudgeAt < MANAGER_NUDGE_INTERVAL_MS) return
-    const poked = await deps.nudgeManager(engine.path)
+    const nudged = await deps.nudgeManager(engine.path)
+    // A commander paused on the usage limit is neither unreachable nor ignoring us:
+    // it takes input again by itself when the limit lifts. Counting it as
+    // unaddressable rang 「宛先が分からない…開き直すと復旧します」 and recycled the
+    // desk — which cut its helper's running command and met the same limit again
+    // (review 2026-11-26). Throttled like any poke; nothing else is charged.
+    if (nudged === 'usage-limit') {
+      rs.lastNudgeAt = now
+      return
+    }
+    const poked = nudged
     // The THROTTLE is charged either way — a failed write must not turn into a
     // hot loop. The BUDGET is charged only when something was actually typed.
     //
@@ -9073,6 +9513,13 @@ export const runIntegratePass = async (
   // presence === 'absent' — no desk at all. THIS is the resurrection path (and the only
   // one that may fire 'manager-unrevivable'). Give a freshly-woken one time to boot and
   // register its session before judging again (else the boot gap double-spawns).
+  //
+  // SAVED-WORK HOLD: the launch would throw (swarmManager.launchNewDesk asks the
+  // same question), so trying only burns the three strikes toward a
+  // 'manager-unrevivable' bell that names the wrong cause. The hold's own notice
+  // already told the president why, and the next pass after the owner's review
+  // wakes the commander normally.
+  if (engine.savedWorkHold) return
   if (rs.lastWakeAt > 0 && now - rs.lastWakeAt < MANAGER_RESUME_GRACE_MS) return
 
   // Grace elapsed and still not responding → the last wake didn't take (or first sighting).
@@ -9081,13 +9528,19 @@ export const runIntegratePass = async (
   // ONCE — burning tokens in a detect→spawn→die loop helps no one. `attempts` resets the
   // moment the desk is seen healthy again (above) or work drains (no card waiting).
   if (rs.attempts >= MAX_MANAGER_RESUME_ATTEMPTS) {
+    // THE REAL REASON (2026-11-24). Both lines below used to say "no usable
+    // model tier" / "check the commander's desk by hand" whatever had happened —
+    // for eight hours while the cause was an unconfirmed operation, and still
+    // after the limit had lifted. commanderFailureWords reads what the launch
+    // itself said, and adds where to go when only the owner's review clears it.
+    const wall = (await runtimeSpawnBlock(now, await getAllowedModelTiers()))?.kind ?? null
+    const why = commanderFailureWords(engine.lastCommanderFailure, wall)
     if (!rs.fatalFired) {
       rs.fatalFired = true
       logLine(
         engine,
         'error',
-        `マネージャーが ${rs.attempts} 回連続で蘇生に失敗 — 統合が止まっています。手動でマネージャー卓を確認してください` +
-          `(エージェントチームのバー › マネージャー)。統合待ち ${swarmCards.length} 件`,
+        `マネージャーが ${rs.attempts} 回連続で蘇生に失敗 — 統合が止まっています。理由: ${why}。統合待ち ${swarmCards.length} 件`,
         'integrate',
       )
       // Best-effort escalation (bell + OS toast) — never awaited, internal-catch so a
@@ -9097,7 +9550,7 @@ export const runIntegratePass = async (
         projectPath: engine.path,
         branch: swarmCards[0]?.branch,
         taskTitle: swarmCards[0]?.title || undefined,
-        detail: `マネージャーが ${rs.attempts} 回連続で落ちています(統合待ち ${swarmCards.length} 件)。手動で確認を`,
+        detail: `司令官(マネージャー)を ${rs.attempts} 回起こそうとしましたが、起動できていません(司令官の確認待ち ${swarmCards.length} 件)。理由: ${why}`,
         logHint: 'エージェントチームのバー › マネージャー / engine log の integrate 行',
       })
     }
@@ -9139,15 +9592,15 @@ export const runIntegratePass = async (
     // died for a NON-quota reason (a real boot-crash bug) leaves at least one allowed
     // tier un-cooled, so `spawnBlock` reads `null` and this stays latched, exactly as
     // before.
-    const transientWall = rs.lastWakeSpawned === false || await runtimeSpawnBlock(now, await getAllowedModelTiers()) != null
+    const transientWall = rs.lastWakeSpawned === false || wall != null
     if (!(transientWall && rs.lastWakeAt > 0 && now - rs.lastWakeAt >= MANAGER_UNREVIVABLE_RETRY_MS))
       return
     rs.attempts = 0
     logLine(
       engine,
       'warn',
-      `マネージャー蘇生を再試行します — 使えるモデル tier が無いまま ${Math.round((now - rs.lastWakeAt) / 60_000)} 分経過` +
-        `(quota 壁が明けていれば回復する・統合待ち ${swarmCards.length} 件)`,
+      `マネージャー蘇生を再試行します — 前回から ${Math.round((now - rs.lastWakeAt) / 60_000)} 分経過。` +
+        `前回起動できなかった理由: ${why}(統合待ち ${swarmCards.length} 件)`,
       'integrate',
     )
     // …fall through to the resuscitate block below.
@@ -9159,10 +9612,16 @@ export const runIntegratePass = async (
   // attempt whether or not the spawn itself succeeded (woke=false ⇒ no usable tier; that
   // is a failed resurrection too, and drives the guard above toward escalation). Record
   // the wake time so the grace throttles the next attempt.
+  // Each wake speaks for itself: a reason left by an earlier attempt must not be
+  // quoted for this one (the wake, or the desk's death at start, writes it anew).
+  engine.lastCommanderFailure = undefined
   const woke = await deps.wakeManager(
     engine.path,
     swarmCards.map((c) => ({ branch: c.branch, title: c.title ?? '' })),
   )
+  const wokeWhyNot = woke
+    ? ''
+    : commanderFailureWords(engine.lastCommanderFailure, (await runtimeSpawnBlock(now, await getAllowedModelTiers()))?.kind ?? null)
   rs.lastWakeAt = now
   rs.attempts += 1
   // Remember whether a desk was actually seated — the transient-vs-permanent bit the
@@ -9191,7 +9650,7 @@ export const runIntegratePass = async (
     (rs.attempts === 1
       ? 'worker ready — マネージャーを起こしました'
       : `マネージャーが応答しないため蘇生しました(${rs.attempts}回目)`) +
-      (woke ? '' : '(使えるモデル tier が無く spawn 保留 — 次 pass で再試行)') +
+      (woke ? '' : `(起動できず保留 — ${wokeWhyNot}。次 pass で再試行)`) +
       `(統合判断はマネージャー・engine は統合しない): ` +
       `${names.slice(0, 5).join(', ')}${names.length > 5 ? ` 他${names.length - 5}件` : ''}`,
     'integrate',
@@ -10812,8 +11271,8 @@ export const reconcileAutomationOrchestrators = async (
       // A boot resume still pending for this engine owns its start (saved-work hold,
       // roster reconcile, --resume adoption). Starting it here bypassed all three.
       if (bootResumePending.get(project.path)?.engine && !previous?.running) throw new Error('再起動後の復帰を待っています。復帰が済むと自動運転が始まります。')
-      if (!await automaticOperationAllowed(project.path)) throw new Error('The current owner account cannot start automatic operation.')
-      if (runtimeAdmissionBlocked('swarm')) throw new Error('The AI connection transition must settle before automatic operation can start.')
+      if (!await automaticOperationAllowed(project.path)) throw new Error('オーナーのアカウントが確かめられません(設定でサインインすると始まります)')
+      if (runtimeAdmissionBlocked('swarm')) throw new Error('AI の接続の切り替えが終わるのを待っています')
       if (automationBootBlocked) throw new Error('Automatic operation is held by the boot crash-loop or storage safeguard.')
       if (previous?.running) {
         const changed = previous.automationBlocked
@@ -10827,7 +11286,44 @@ export const reconcileAutomationOrchestrators = async (
       result.failures.push({ path: project.path, reason: errMsg(error).slice(0, 300) })
     }
   }
+  tellAutomationStartFailures(result.failures, deps.notify, Date.now())
   return result
+}
+
+/** How long a frame project's automatic start must keep failing, for the same
+ *  reason, before the president is told — an AI connection switch settles in
+ *  seconds, and the policy loop retries every 15 s. */
+export const AUTOMATION_START_TELL_MS = 60_000
+
+/** A frame project whose automatic start keeps failing (2026-11-23). The reasons
+ *  used to be reduced to "pending" by the canvas save and dropped by the 15 s
+ *  loop, so a project in the frame simply never started and nobody heard why.
+ *  Once per project and reason: one journal line and one notice to the president.
+ *  The boot resume's own hold and the boot crash-loop safeguard already announce
+ *  themselves ('engine-resume-suppressed') and are not told twice. */
+const tellAutomationStartFailures = (
+  failures: AutomationReconciliation['failures'],
+  notify: ((n: SwarmFatalNotification) => void) | undefined,
+  now: number,
+): void => {
+  const seen = (store.automationStartFailures ??= new Map())
+  const failing = new Set(failures.map((f) => f.path))
+  for (const path of Array.from(seen.keys())) if (!failing.has(path)) seen.delete(path)
+  for (const { path, reason } of failures) {
+    if (automationBootBlocked || bootResumePending.get(path)?.engine) continue
+    const prev = seen.get(path)
+    const entry = prev?.reason === reason ? prev : { reason, since: now, told: false }
+    seen.set(path, entry)
+    if (entry.told || now - entry.since < AUTOMATION_START_TELL_MS) continue
+    entry.told = true
+    const message = `automatic start keeps failing for this Ground-frame project — ${reason}`
+    const engine = store.engines.get(path)
+    if (engine) logLine(engine, 'warn', message, 'dispatch')
+    else void appendEngineJournalLine(path, { at: new Date(now).toISOString(), level: 'warn', message, kind: 'dispatch' }).catch(() => {})
+    const notice: SwarmFatalNotification = { event: 'automation-held', projectPath: path, detail: automationStartNotice(reason) }
+    if (notify) notify(notice)
+    else void createSwarmFatalNotification(notice).catch(() => {})
+  }
 }
 
 // ── Auto-drain background loop (card cf545637 — UI-INDEPENDENT server-side tick) ──
@@ -11141,8 +11637,10 @@ export const BOOT_OWNER_HOLD_RETRY_MS = 5 * 60_000
 let bootResumeClock: () => number = Date.now
 /** The words every hold that only the owner's review can clear carries
  *  (swarmRuntimeTransition.ts savedSwarmRuntimeHold). Such a hold is retried when
- *  runtime recovery re-notifies, never on the policy loop's 15 s timer. */
-export const OWNER_REVIEW_HOLD_HINT = '設定の「会話の復旧」で確認すると再開します'
+ *  runtime recovery re-notifies, never on the policy loop's 15 s timer. Built in
+ *  savedWorkHold.ts from the Settings screen's own labels; re-exported here for
+ *  its existing importers. */
+export { OWNER_REVIEW_HOLD_HINT }
 const bootResumePending = new Map<string, BootResumeEntry>()
 let bootResumeAttempt: ((projectPath: string) => Promise<string | null>) | undefined
 let bootResumeList: (() => Promise<string[]>) | undefined

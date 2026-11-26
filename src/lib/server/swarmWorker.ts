@@ -454,6 +454,17 @@ export const createSwarmWorktree = async (
       existing.add(ref)
     }
   }
+  // A first-time project with no commit yet has nothing to branch a worker from.
+  // `worktree add … HEAD` then failed every 3 s for hours with no reason in the
+  // journal (AIResearch, 2026-08-14 / 09-29, ~5,000 lines) — say which it is,
+  // in words the owner can act on (the president retells the engine's notice).
+  if (!existing.size) {
+    throw new Error(
+      isGitRepoRoot(projectPath)
+        ? 'このプロジェクトにはまだ git の記録(コミット)がありません — 最初のコミットができると作業を始められます'
+        : 'このフォルダは git で管理されていません(フォルダの一番上に .git がありません)',
+    )
+  }
   const base = pickBaseRef(existing)
 
   // Uniqueness: timestamp + a 48-bit random token (two same-second spawns won't
@@ -477,20 +488,23 @@ export const createSwarmWorktree = async (
   // SHARED .git/config, so concurrent `worktree add` (several workers at once)
   // don't contend on the config lock. Clean up on failure (the dir did not
   // pre-exist, so this only removes what we just created).
-  const added = await git(projectPath, [
-    '-c',
-    'branch.autoSetupMerge=false',
-    'worktree',
-    'add',
-    '-b',
-    branch,
-    dir,
-    base,
-  ])
-  if (added === null) {
+  // git's own words are kept: "failed" alone told nobody why (see above).
+  let addFailure: string | null = null
+  try {
+    // gitRepoGuard, as in git(): never spawn git in a non-repo/vanishing cwd.
+    if (!isGitRepoRoot(projectPath)) throw new Error('the project folder is no longer a git repository root')
+    await execFile('git', ['-c', 'branch.autoSetupMerge=false', 'worktree', 'add', '-b', branch, dir, base], {
+      cwd: projectPath,
+      ...GIT_OPTS,
+    })
+  } catch (e) {
+    const stderr = String((e as { stderr?: unknown }).stderr ?? '').trim()
+    addFailure = (stderr || String((e as Error)?.message ?? e)).split('\n')[0].slice(0, 200)
+  }
+  if (addFailure !== null) {
     await git(projectPath, ['worktree', 'remove', '--force', dir])
     await git(projectPath, ['branch', '-D', branch])
-    throw new Error(`createSwarmWorktree: git worktree add failed for ${branch}`)
+    throw new Error(`createSwarmWorktree: git worktree add failed for ${branch}: ${addFailure}`)
   }
 
   await linkWorktreeNodeModules(projectPath, dir)

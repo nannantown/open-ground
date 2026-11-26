@@ -15,6 +15,14 @@ import { swarmQuotaFile } from '@/lib/server/paths'
 import { setSettings } from '@/lib/server/store'
 import { createSwarmFatalNotification } from '@/lib/server/swarmNotifications'
 import type { SwarmOrchestratorState, AppNotificationsResponse, SwarmQuotaResponse } from '@/lib/types'
+import {
+  spawnSdkSession,
+  terminateSdkSession,
+  pushSdkInput,
+  sdkQuotaPause,
+  __setQuotaPrefixesForTests,
+  type SdkQueryFn,
+} from '@/lib/server/sdkSession'
 
 // POST /api/swarm/worker + /worktree/remove against the real Hono app, with
 // OPENGROUND_HOME on a throwaway dir so the registry (the validateProjectPath
@@ -613,6 +621,40 @@ describe('/api/swarm/quota — the model-tier cooling table', () => {
     // sonnet frees up first (10 min), so that is when the swarm can resume.
     expect(body.allCoolingUntil).toBeGreaterThan(body.now)
     expect(body.allCoolingUntil! - body.now).toBeLessThan(11 * 60_000)
+  })
+
+  // 2026-11-23: the owner says the limit came back before its stated reset (21:00).
+  // One call releases every tier AND the commander a refusal left deaf — before,
+  // the table stayed cooled until 21:00 and the commander took no message at all.
+  it("uncool {tier:'all'} releases every tier and the refused commander hears again", async () => {
+    for (const tier of ['fable', 'opus', 'sonnet', 'haiku']) await app.request('/api/swarm/quota/cool', json({ tier, minutes: 300 }))
+    __setQuotaPrefixesForTests(["You've hit your"])
+    const refuseOnce: SdkQueryFn = ({ prompt }) => ({
+      async *[Symbol.asyncIterator]() {
+        let turn = 0
+        for await (const _input of prompt) {
+          if (turn++ === 0) yield { type: 'assistant', message: { content: [{ type: 'text', text: "You've hit your 5-hour limit · resets 9pm (Asia/Tokyo)" }] } }
+          yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
+        }
+      },
+    })
+    // A registered project: the refusal path asks the owner's receipt journal
+    // about this project before pausing (sdkSession.refuseInput).
+    await setSettings({ projects: [{ id: 'quota-desk', path: scratch, addedAt: '2026-11-23T00:00:00.000Z' }] })
+    const desk = spawnSdkSession({ cwd: scratch, role: 'manager', options: {}, initialPrompt: 'start', queryFn: refuseOnce })
+    try {
+      await vi.waitFor(() => expect(sdkQuotaPause(desk.id)).not.toBeNull())
+      expect(pushSdkInput(desk.id, 'still refused')).toBe(false)
+      const res = await app.request('/api/swarm/quota/uncool', json({ tier: 'all' }))
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as SwarmQuotaResponse
+      expect(body.tiers.every((t) => !t.cooling)).toBe(true)
+      expect(body.launchTier).toBe('fable')
+      expect(pushSdkInput(desk.id, 'the limit is back')).toBe(true)
+    } finally {
+      terminateSdkSession(desk.id)
+      __setQuotaPrefixesForTests(null)
+    }
   })
 
   it('uncool releases a tier (and is idempotent)', async () => {

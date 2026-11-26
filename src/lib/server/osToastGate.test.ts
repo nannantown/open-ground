@@ -47,6 +47,7 @@ const FATAL: Record<SwarmFatalEvent, false> = {
   'manager-unresponsive': false,
   'reentry-failed': false,
   'engine-resume-suppressed': false,
+  'automation-held': false,
   'data-integrity': false,
 }
 

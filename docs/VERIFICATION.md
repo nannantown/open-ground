@@ -253,6 +253,53 @@ cd - >/dev/null && rmdir .scratch/og-esm-probe .scratch 2>/dev/null || true
 
 「守られた」と「装置が働いた」は別物。受け入れ検証では必ず区別して記録する。
 
+## 4.2 A second OPEN GROUND process on the real data folder is not a harmless copy (2026-11-20)
+
+Verifying in "the real app" must never mean starting a **second server on
+`~/.openground`**. On 2026-11-20 a worker ran `npm run dev:alt` to look at a UI
+change; that second server shared the live app's data folder and, within
+100 ms of its first read, marked the live app's in-flight tool calls
+`uncertain`. Every tool in two projects was then denied, every new worker
+ended before `claude` started and the commander could not launch — for three
+days (`docs/commander/01-engine-core.md` §7.4b3).
+
+- `npm run dev:alt` now runs on its own throwaway `OPENGROUND_HOME` unless you
+  give one (`scripts/dev-alt.mjs` prints the path), and refuses `~/.openground`
+  itself.
+- `HOME` is still the owner's. Whatever the change touches, a server boot
+  installs its own checkout's hook and guard scripts into the real
+  `~/.openground/hooks` / `~/.openground/guard`, wires them into
+  `~/.claude/settings.json` (`hooksInstall.ts` anchors them at `homedir()`,
+  whatever `OPENGROUND_HOME` is) and installs its `skills/` into `~/.claude`
+  (`installSwarmTooling`). Only a checkout under `~/.openground` (swarm
+  worktrees) is refused as their source (`resolveHookSourceRoot`). From any
+  other checkout (the main one, a `/tmp` or `~/Library/Caches` review
+  worktree), isolate `HOME` too:
+  `OPENGROUND_HOME=$(mktemp -d) HOME=$(mktemp -d) npm run dev:alt`.
+- The same goes for any `tsx` script that imports `src/lib/server`: set
+  `OPENGROUND_HOME` first. Tests already do (`src/test/setup-home.ts`).
+- The structural stop: one live process owns `runtime/receipts-v2.json`
+  (`runtimeJournalOwner.ts`). A second process is refused with
+  `RuntimeJournalOwnedElsewhere`. It names the owner's pid: check what it is
+  first. Usually it is the live app — give your copy its own `OPENGROUND_HOME`.
+  If the refused one is the app itself (another process asked first while it
+  was down), stop that pid only once it is confirmed a stray copy, and never
+  move the app to another `OPENGROUND_HOME` (it would start empty). Each claim
+  names its process, so a call is marked `uncertain` only once that process is
+  gone. A checkout from before the lock knows no lock, but its path
+  (`runtime/receipts.json`) is a folder once the app has run this version, so
+  it fails closed. That protects the journal only. A second server's UI can still act on the live app's other
+  state from its own memory (worktree remove / clean, opening a desk), and
+  whoever touches the journal first while the app is down keeps the app out
+  until it exits. So the rule stands: never point a second server at the real
+  home.
+- Never delete `runtime/journal-owner/` while any OPEN GROUND process runs. It
+  unlocks nothing: the next process to ask owns the journal, and when that is
+  not the live app, the app is refused on every call until that process exits
+  — every tool denied, as in the incident (01 §7.4b3).
+- If agent tools start failing with "No action was authorized", stop and
+  report it as a blocker — it is this incident class, not a reason to retry.
+
 ## 5. 同じ型が2回出たら、レビューをやめて**構造で止める**
 
 9周で約60件のうち**15件以上が同じ1つの型**だった（2つの実装が併存しているのに片方だけを指す）。

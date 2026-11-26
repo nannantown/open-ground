@@ -105,6 +105,18 @@
   archives immutable terminal receipts; `conversationDrafts.ts` uses revision CAS
   and accepted-draft indices. `presidentInbox.ts` owns one ordered delivery lane;
   `runtimeActionReceipts.ts` / `runtimeRecovery.ts` expose unconfirmed effects.
+  `runtimeJournalOwner.ts`: one live process owns `runtime/receipts-v2.json`
+  (`runtime/journal-owner/<n>.json`); any other process is refused
+  (`RuntimeJournalOwnedElsewhere`) instead of marking the live app's in-flight
+  work `uncertain` (2026-11-20 incident, commander/01 §7.4b3). Each claim names
+  its process (`attemptHolder`), and a call is marked `uncertain` only once that
+  process is gone. The pre-lock path `runtime/receipts.json` is moved in (a
+  file there again later is merged, never dropped), kept as
+  `receipts.json.retired` (`.2`, … never overwritten), and becomes a folder, so
+  pre-lock builds fail closed on it. Never delete `runtime/journal-owner/`
+  while any OPEN GROUND process runs (the next asker owns the journal). Tests:
+  `runtimeJournalOwner.test.ts` (real processes); `dev:alt`'s own throwaway
+  home and its refusal of `~/.openground`: `server/__tests__/devAltHome.test.ts`.
   Routes: `assistant.ts`, `conversation.ts`, `chatgpt.ts`; sealed phone controls:
   `conversationControl.ts`. New controls require a fresh v2 capability handshake.
   UI: `useConversationDraft.ts`, `assistantOutbox.ts`,
@@ -740,6 +752,15 @@
   `resumeEngines`; per-actor holds + retry = docs/commander/01 §7.4b2). The hands-free update
   waits for an AI tool boundary (`toolCallsInFlight` in `/api/update/restart-safety`,
   `electron/autoUpdatePolicy.js`) so an update does not create those holds.
+- **Saved-work hold while the app runs** (2026-11-23): `savedWorkHold.ts` (ONE predicate +
+  ONE wording, built from the Settings screen's own labels) + `swarmOrchestrator.ts`
+  `refreshSavedWorkHold` (no dispatch, commander not woken, president told once via the
+  `automation-held` notice) / `awaitToolBoundary` (every engine stop waits for a running
+  command) / `watchToolDenials` / `tellRepeatedDispatchFailure` / `tellAutomationStartFailures`.
+  Tests: `swarmSavedWorkHold.test.ts`, `sdkQuotaPause.test.ts`. Canon: docs/commander/01 §7.4e,
+  04 §3.4.1–3.4.2 / §3.8. Trap: the hold is the launch guard's own question
+  (`listUncertainRuntimeActions(cwd, false)`) — never add a second, looser reader, and never
+  clear a receipt from the engine; only the owner's review in Settings does.
 - **worker roster の write-through + boot 照合**(2026-07-23, card 3): `swarmWorkerRoster.ts`
   (roster を心拍の隣 `~/.openground/swarm/<repoキー>/roster.json` へ write-through — sessionId /
   taskId / branch / worktree / tier / spawnAt / workedMs / reworkCount。状態遷移点のみ書く
@@ -928,6 +949,11 @@
   `assistantSession.test.ts`(起動オプション・門・常駐・一言)/ `phoneAssistant.test.ts`(うんでは何も起きない・ボタンだけ・メモはオーナーの行だけ)/
   `phoneAssistantLaunch.test.ts`(畳み込み run の argv = Write のみ)/ `phoneLink.test.ts`(電話のボタン)/ `FloatingAssistant.test.tsx`(枠・隠れたら押せない)/
   `e2e/assistant-proposal-frames.spec.ts`(実 Chromium・ビルド済みCSSで: 長い会話のチャット中も通話中も枠が切れず押せる=jsdom では flex の配分が見えない)。枠の箱は縮まない・上限は窓の最大高さ−会話以外の部品−会話に残す 88px(実測・ただし枠がそれでしか収まらない短い窓では枠を優先)。閉じた案は最後に閉じた1件(`closedAt`)だけ薄い1行・出した案は緑のチェック(会話の場所を取らない)。写真は読み込み後に測り直し・最下段へ。
+  キャラの下に入った部品は自分で場所を空ける(キャラは浮いていて配置は動かない・2026-11-23): `assistantWindow.ts` `useAssistantClearance` —
+  端末(`TerminalPane` / `ClaudeTerminalPane`)と会話の本文(`SwarmSeatFeed` / `SdkWorkerPane`)は失う割合が小さい側(右=桁 / 下=行)に余白・真ん中に置かれたら(1/3 超)何もしない、
+  入力行・送信カード(`SwarmSeatSay` / `SdkWorkerPane`)とワーカー卓のボタン行(`SwarmWorkerSeat`)は右・キャラが箱の左寄りにいて右が 1/3 を超えるなら箱ごと上へ持ち上げる、アイコン列(`SwarmSeatRail`)は下(1/3 まで・超えたら何もしない)、Canvas の取り消し/やり直しは上へ。
+  測り直し = キャラの移動・窓や部品のサイズ変化・スクロール(卓の列は横に流れる)。算術 = `assistantWindow.clearance.test.ts`・実配置(両テーマ)= `e2e/assistant-terminal-room.spec.ts`。
+  罠: 部品を足すなら「測る箱 = 余白を付ける箱」にする。余白は箱の 1/3 まで(箱より大きい余白は中身が 0 で下止まりして箱そのものを伸ばし、次の測定がさらに大きい余白を返す — 2026-11-26 のレビューでアイコン列が 800→1760px に伸びた)。余白で箱が育つ(中身の高さの箱 = 足元の送信欄・ボタン行・Canvas の取り消し/やり直し)なら `grows` を渡す: 下の余白は箱を持ち上げるだけなので上限なし・余白を外して測る — 余白込みで測るとキャラを動かすたびに箱が付いてくる(2026-11-24 に Canvas で実際に起きた)。スクロールする箱には `grows` を使わない(位置がずれる)。
   実機確認 `npx tsx scripts/verify-assistant-live.mts`(本物の claude・使い捨て HOME)/ 秒数 `node scripts/measure-assistant-latency.mjs [baseUrl] "…"`。
   罠: SDK 0.3.220 は `settingSources` 省略で**全設定を読む**(`[]` 必須)/ 門が throw すると fail-open なので catch で deny。
 - アシスタント → 社長の伝言(2026-10-30): 道具 `tell_president` = 提案(`assistantProposals.ts` `proposePresident`・kind `president`・題 「社長へ」)→ 「送る」で `presidentRelay.ts`
@@ -1114,7 +1140,8 @@
 - 配布: `docs/DISTRIBUTION.md` — 2リポ構成(origin=PMmap 開発・open-ground 公開、tag vX.Y.Z で CI)
 - テスト: `server/__tests__/`(selfUpdate / autoUpdate / forkEnv / startup / electronLockdown …)
 - 罠: `electron/*.js` は純 CommonJS — 触ったら `node --check`。asar:false は node-pty の制約で
-  意図的。ポート 5174/47776 は不可侵 — 2本目の dev は `npm run dev:alt`。
+  意図的。ポート 5174/47776 は不可侵 — 2本目の dev は `npm run dev:alt`(既定で使い捨ての
+  `OPENGROUND_HOME` で動く。本物の `~/.openground` を2本目に見せない — VERIFICATION.md §4.2)。
 - Runtime selection was removed for everyone on 2026-09-21. New managers and
   workers are SDK-only; supply/ordinary terminals remain PTY-based. Retired
   settings POSTs are ignored while legacy data is preserved

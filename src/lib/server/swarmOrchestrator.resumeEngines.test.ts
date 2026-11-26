@@ -1257,7 +1257,7 @@ describe('boot resume retry — a gate not ready at boot opens later (2026-11-17
 // the check works before the owner-role lookup has answered (no session here,
 // exactly like a launch whose role fetch is still offline).
 describe('boot resume — a stale unconfirmed receipt holds only its own project (2026-11-17)', () => {
-  const receiptsPath = () => join(process.env.OPENGROUND_HOME ?? '', 'runtime', 'receipts.json')
+  const receiptsPath = () => join(process.env.OPENGROUND_HOME ?? '', 'runtime', 'receipts-v2.json')
   afterEach(async () => { await rm(receiptsPath(), { force: true }) })
 
   it('B\'s commander stays down (and says why); A\'s commander and B\'s president come back', async () => {

@@ -14,6 +14,7 @@ import { OWNER_REVIEW_HOLD_HINT, drainSwarmEngines, replaceSwarmTransitionWorker
 import { drainSdkSession, getSdkSession, listSdkSessions, terminateSdkSession, pushSdkInput, interruptSdkSession, currentSdkTurnId, sdkInputAdmissionPaused, resumeSdkInputAdmission } from './sdkSession'
 import { getTerminal, getTerminalScreen, isTerminalProcessAlive, killTerminal, listOwnerDeskTerminals, waitForTerminalGone } from './terminal'
 import { noticeHoldReason } from './deskDeliverable'
+import { OWNER_REVIEW_WHERE } from './savedWorkHold'
 import { sendInterrupt } from './claudeTerminal'
 import { classifyQuotaRefusal } from './swarmRateLimitText'
 import { sessionJsonlPath } from './transcript'
@@ -635,7 +636,7 @@ export const savedSwarmRuntimeHold = async (projectPath: string, actor: BootResu
     // stays on the retry timer instead of pointing at a screen that shows nothing.
     if (receipts.length) {
       const owner = await runtimeOwnerKey().catch(() => null)
-      if (owner === null) return 'オーナーのアカウント確認が取れていないため、前回の終了時に結果を確かめられなかった操作を確認できません(サインインすると設定の「会話の復旧」に表示されます)'
+      if (owner === null) return 'オーナーのアカウント確認が取れていないため、前回の終了時に結果を確かめられなかった操作を確認できません(サインインすると' + OWNER_REVIEW_WHERE + 'に表示されます)'
       if (receipts.some((r) => r.owner === owner)) return `前回の終了時に結果を確かめられなかった操作が残っています(${OWNER_REVIEW_HOLD_HINT})`
     }
     const projectId = (settings.projects ?? []).find((project) => resolve(project.path) === resolve(projectPath))?.id

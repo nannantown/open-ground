@@ -34,6 +34,7 @@ import {
   type PointerEvent,
   type ReactNode,
 } from 'react'
+import { useAssistantClearance } from '@/components/assistant/assistantWindow'
 import { SwarmSprite } from '@/components/canvas/SwarmSprite'
 import type { SpriteState } from '@/lib/swarm/sprites'
 import { useT } from '@/i18n/I18nContext'
@@ -316,12 +317,21 @@ export interface RailSeat {
 /** The folded seats, as a column of character icons. Nothing folded ⇒ nothing. */
 export const SwarmSeatRail = ({ seats, onOpen }: { seats: readonly RailSeat[]; onOpen: (key: string) => void }) => {
   const { t } = useT()
+  // The floating assistant's character rests on this column's foot (its spot
+  // until the owner drags it). The column ends its icons above the character,
+  // so one that would land under it is reached by scrolling instead — while
+  // that takes a third of the column at most (higher up, the character sits on
+  // the column itself, and a bigger room would stretch it below the bar).
+  const railRef = useRef<HTMLDivElement>(null)
+  const room = useAssistantClearance(railRef, { side: 'bottom' }, [seats.length === 0])
   if (seats.length === 0) return null
   return (
     <div
+      ref={railRef}
       role="group"
       aria-label={t('projectPanel.swarm.seat.rail')}
       className="flex w-[72px] shrink-0 flex-col gap-1 overflow-y-auto border-l border-line-soft bg-bg p-1"
+      style={room}
       data-seat-rail
     >
       {seats.map((s) => {

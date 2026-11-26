@@ -20,6 +20,7 @@ import { useContext, useEffect, useLayoutEffect, useRef, useState, type Dispatch
 import { ChevronDown, ChevronUp, Loader2, Square } from 'lucide-react'
 import { ConversationDraftOwnerContext, type ConversationSend } from '@/lib/useConversationDraft'
 import { ConversationDraftStatus } from '@/components/assistant/ConversationDraftStatus'
+import { useAssistantClearance } from '@/components/assistant/assistantWindow'
 import { useT } from '@/i18n/I18nContext'
 import { groupSdkFrames } from '@/lib/sdkTranscript'
 import { EventRow, ToolCard, postFailureMessage, type Frame } from './SdkWorkerPane'
@@ -76,6 +77,7 @@ export const SwarmSeatFeed = ({
   const [history, setHistory] = useState<{ owner: string; path: string; session: string; generation: number; lines: PresidentPublicLine[]; overflow: boolean; revision: string } | null>(null)
   const [historyDenied, setHistoryDenied] = useState(false)
   const feedRef = useRef<HTMLDivElement>(null)
+  const feedRoom = useAssistantClearance(feedRef, { inset: conversation ? 16 : 8 })
   const [drifted, setDrifted] = useState(false)
   const exitRef = useRef(onExit)
   exitRef.current = onExit
@@ -158,16 +160,19 @@ export const SwarmSeatFeed = ({
   useLayoutEffect(() => {
     const el = feedRef.current
     if (el && !drifted) el.scrollTop = el.scrollHeight
-  }, [frames, drifted, history])
+    // (the room under the assistant's character is part of the scroll height)
+  }, [frames, drifted, history, feedRoom?.paddingBottom, feedRoom?.paddingRight])
   const hasFrames = frames.length > 0
+  // …and through every change of size: the send box below grows when it opens
+  // or lifts its words above the assistant's character, and this box shrinks.
   useEffect(() => {
     const el = feedRef.current
-    if (!conversation || !el || typeof ResizeObserver === 'undefined') return
+    if (!el || typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(() => { if (!drifted) el.scrollTop = el.scrollHeight })
     observer.observe(el)
     if (el.firstElementChild) observer.observe(el.firstElementChild)
     return () => observer.disconnect()
-  }, [conversation, drifted, hasFrames])
+  }, [drifted, hasFrames])
 
   // "thought (N)" rows are furniture in a narrow seat; the full log keeps them.
   const publicHistory = history && history.owner === owner && history.path === projectPath && history.generation === generation && !historyDenied ? history : null
@@ -180,7 +185,9 @@ export const SwarmSeatFeed = ({
   const partial = conversation && (publicHistory?.overflow || (!publicHistory && visibleFrames.length > 0 && visibleFrames[0].seq > 1))
   return (
     <div className="relative min-h-0 flex-1" data-seat-feed>
-      <div ref={feedRef} onScroll={onScroll} data-president-scroll={conversation || undefined}
+      {/* The floating assistant never moves the layout: the words step out
+          from under its character themselves (`inset` = the smaller padding). */}
+      <div ref={feedRef} onScroll={onScroll} data-president-scroll={conversation || undefined} style={feedRoom}
         className={conversation ? 'h-full overflow-y-auto overscroll-contain px-4 pb-4 pt-6 sm:px-6' : 'h-full overflow-y-auto px-3 py-2 text-meta'}>
         {partial && <p role="status" className="mx-auto mb-4 max-w-[760px] text-meta text-ink-subtle">{t('projectPanel.swarm.chat.recent')}</p>}
         {items.length === 0 && !publicLines?.length ? (
@@ -314,6 +321,16 @@ export const SwarmSeatSay = ({
   const boxRef = useRef<HTMLTextAreaElement>(null)
   const composingRef = useRef(false)
   const chat = appearance === 'chat'
+  // The send button ends this box, in the corner the floating assistant's
+  // character sits on — so the box keeps its right end out from under it while
+  // that costs a third of the box at most. With the character further in (on
+  // its left end) the box lifts its words above the character instead: the
+  // text field keeps its width and the button stays reachable. The chat card
+  // is centred, so it is the card that is measured, not the full-width row.
+  // ponytail: a re-measure (the character moving) can nudge a long draft's
+  // scroll position while the room is on the right; the next keystroke puts it back.
+  const roomRef = useRef<HTMLDivElement>(null)
+  const room = useAssistantClearance(roomRef, { side: 'right', grows: true }, [open, alwaysOpen, chat])
   const showStop = chat && turnControl?.running && !draft.trim()
   const stopLabel = turnControl?.pending && !turnControl.stopping ? 'projectPanel.swarm.chat.confirmStop' : 'projectPanel.swarm.chat.stop'
   useLayoutEffect(() => {
@@ -361,7 +378,7 @@ export const SwarmSeatSay = ({
 
   if (!open && !alwaysOpen) {
     return (
-      <div className="flex shrink-0 items-center gap-2 border-t border-line-soft px-2 py-1">
+      <div ref={roomRef} style={room} data-seat-say className="flex shrink-0 items-center gap-2 border-t border-line-soft px-2 py-1">
         <button type="button" className={LINK_BTN} onClick={() => setOpen(true)} disabled={disabled}>
           {t('projectPanel.swarm.say.open')}
         </button>
@@ -370,8 +387,8 @@ export const SwarmSeatSay = ({
     )
   }
   return (
-    <div className={chat ? 'shrink-0 px-4 pb-4 pt-2 sm:px-6' : 'flex shrink-0 flex-col gap-1 border-t border-line-soft bg-bg-card px-2 py-1.5'} data-president-composer={chat || undefined}>
-      <div className={chat ? 'mx-auto flex w-full min-w-0 max-w-[760px] flex-col gap-2 rounded-[24px] border border-line-soft bg-bg-elevated px-4 pb-3 pt-3 shadow-sm transition-colors duration-150 focus-within:border-line-strong' : 'contents'}>
+    <div ref={chat ? undefined : roomRef} style={chat ? undefined : room} data-seat-say className={chat ? 'shrink-0 px-4 pb-4 pt-2 sm:px-6' : 'flex shrink-0 flex-col gap-1 border-t border-line-soft bg-bg-card px-2 py-1.5'} data-president-composer={chat || undefined}>
+      <div ref={chat ? roomRef : undefined} style={chat ? room : undefined} className={chat ? 'mx-auto flex w-full min-w-0 max-w-[760px] flex-col gap-2 rounded-[24px] border border-line-soft bg-bg-elevated px-4 pb-3 pt-3 shadow-sm transition-colors duration-150 focus-within:border-line-strong' : 'contents'}>
       <textarea
         ref={boxRef}
         autoFocus={!alwaysOpen}

@@ -20,7 +20,7 @@ import type { SpriteState } from '@/lib/swarm/sprites'
 import { SwarmSeatHeader } from './SwarmSeatHeader'
 import { ChatImage } from '@/components/ui/ChatImage'
 import { agentImageUrl } from '@/lib/agentImage'
-import { assistantClearance, useAssistantSpot } from '@/components/assistant/assistantWindow'
+import { useAssistantClearance } from '@/components/assistant/assistantWindow'
 import type { SdkEvent, SdkSessionStatus } from '@/lib/server/sdkEvents'
 import {
   groupSdkFrames,
@@ -219,27 +219,12 @@ export const SdkWorkerPane = ({
   const [truncated, setTruncated] = useState(false)
   const [draft, setDraft] = useState('')
   // The floating assistant sits over the screen and the layout never moves for
-  // it — so the composer pads its own right side whenever the character
-  // actually covers it (wherever the owner dragged it; 0 when it is elsewhere
-  // or not on screen at all).
-  const assistantSpot = useAssistantSpot()
+  // it — so the composer makes its own room whenever the character actually
+  // covers it (wherever the owner dragged it; none when it is elsewhere or not
+  // on screen at all): its right end, or — with the character over its left
+  // part — the whole row lifted above the character.
   const composerRef = useRef<HTMLDivElement>(null)
-  const [assistantRoom, setAssistantRoom] = useState(0)
-  useLayoutEffect(() => {
-    const el = composerRef.current
-    if (!el) return
-    const measure = () =>
-      setAssistantRoom(assistantClearance(el.getBoundingClientRect(), assistantSpot, window.innerWidth, window.innerHeight))
-    measure()
-    window.addEventListener('resize', measure)
-    // The pane's own box: a drawer / seat resize moves the composer.
-    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
-    if (el.parentElement) ro?.observe(el.parentElement)
-    return () => {
-      window.removeEventListener('resize', measure)
-      ro?.disconnect()
-    }
-  }, [assistantSpot, accepting])
+  const assistantRoom = useAssistantClearance(composerRef, { side: 'right', grows: true }, [accepting])
   // ── The open-question banner (2026-08-03, owner-requested) ─────────────────
   // The 0.11.52 acceptance put the owner in front of this exact pane while
   // their worker sat waiting on a question — and the pane said only 「待機中」.
@@ -298,6 +283,9 @@ export const SdkWorkerPane = ({
   // Either OUR own POST or the module's terminate/force-remove is in flight.
   const controlsBusy = posting || busy
   const feedRef = useRef<HTMLDivElement | null>(null)
+  // The transcript's last lines end right above the composer, where the
+  // character reaches (`inset` = py-5, the smaller padding).
+  const feedRoom = useAssistantClearance(feedRef, { inset: 20 })
   // Latest onExit, without making the subscription depend on its identity.
   const onExitRef = useRef(onExit)
   onExitRef.current = onExit
@@ -471,7 +459,9 @@ export const SdkWorkerPane = ({
     const el = feedRef.current
     if (!el || drifted) return
     el.scrollTop = el.scrollHeight
-  }, [frames, drifted])
+    // (the room under the assistant's character is part of the scroll height,
+    // and the composer lifting its row above the character shrinks this box)
+  }, [frames, drifted, feedRoom?.paddingBottom, feedRoom?.paddingRight, assistantRoom?.paddingBottom])
   const jumpToLatest = () => {
     const el = feedRef.current
     if (el) el.scrollTop = el.scrollHeight
@@ -686,6 +676,7 @@ export const SdkWorkerPane = ({
           ref={feedRef}
           onScroll={onFeedScroll}
           className="h-full overflow-y-auto px-6 py-5"
+          style={feedRoom}
         >
           {/* Document measure (owner feedback 2026-08-03「paddingもないし文字も
               小さいし強弱がない」): the transcript is a REPORT, so it gets
@@ -746,7 +737,7 @@ export const SdkWorkerPane = ({
         <div
           ref={composerRef}
           className="flex shrink-0 items-center gap-1.5 border-t border-line-soft bg-bg-card px-2 py-1.5"
-          style={assistantRoom ? { paddingRight: assistantRoom } : undefined}
+          style={assistantRoom}
         >
           <input
             value={draft}

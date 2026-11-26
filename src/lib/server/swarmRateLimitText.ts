@@ -605,8 +605,18 @@ export const classifyQuotaRefusal = (
  *  {@link judgeRefusalBlock} rather than folded into it: that function's nine
  *  rejections are the product of nine rounds of measurement, and classification is
  *  a separate question asked only of text that has already passed all of them. */
-const refusalKind = (text: string): QuotaRefusalKind =>
-  MODEL_SWITCH_REMEDY.test(normalizeScreen(text)) ? 'model-switchable' : 'account-wide'
+const refusalKind = (text: string): QuotaRefusalKind => {
+  const said = normalizeScreen(text)
+  return MODEL_SWITCH_REMEDY.test(said) || OFFERS_ANOTHER_MODEL.test(said) ? 'model-switchable' : 'account-wide'
+}
+
+/** Every way a refusal ALREADY judged to be one offers another model. The CLI
+ *  words it three ways (2.1.220 bundled with the SDK, 2.1.332 installed —
+ *  review 2026-11-26): "switch models with /model", "/model to switch models."
+ *  and "Switch to another model … to continue." Only ever asked of a refusal,
+ *  never of free text — {@link MODEL_SWITCH_REMEDY} stays the narrow form because
+ *  it is also a refusal-DETECTING pattern. */
+const OFFERS_ANOTHER_MODEL = /\/model\b|\bswitch to (?:another|a different) model\b/
 
 /** {@link refusalKind} for a caller that ALREADY knows the text is a refusal.
  *
@@ -624,6 +634,47 @@ const refusalKind = (text: string): QuotaRefusalKind =>
  *  wording from being called stopped. This entry point has none of them, by
  *  design, because a protocol message has no position to be wrong about. */
 export const quotaRefusalKindOfText = (text: string): QuotaRefusalKind => refusalKind(text)
+
+/** The model families a per-model limit names: the swarm's own tiers plus
+ *  `mythos`, which the CLI's refusal vocabulary also knows (2.1.331:
+ *  `/^(?:Fable|Haiku|Mythos|Opus|Sonnet)… requires usage credits\./`). */
+const NAMES_A_MODEL = new RegExp(
+  `\\b(?:${SWARM_MODEL_TIERS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).concat('mythos').join('|')})\\b`,
+)
+
+/** Does this refusal close EVERY model at once — the 5-hour window, the weekly
+ *  all-model allowance — so that stepping down a tier only meets the same wall?
+ *
+ *  Asked before the engine cools the whole ladder on one sighting, which is a far
+ *  wider act than advising the owner: a wrong "yes" parks every dispatch until
+ *  the stated reset (days, for a weekly limit) although another model would have
+ *  run. So the answer is "yes" only when the refusal POSITIVELY names an
+ *  all-model window ({@link ALL_MODEL_WINDOW}), offers no other model
+ *  ({@link refusalKind}) and names no model. A negative rule ("no /model remedy")
+ *  was not enough: the CLI's credit and spend refusals ("You're out of usage
+ *  credits. /model to switch models.", "You've hit your monthly spend limit.
+ *  Switch to another model … to continue.") close only some models and word
+ *  their way out differently (review 2026-11-26). A wrong "no" only keeps the
+ *  old one-tier-at-a-time behaviour, so anything unlisted is one model's limit.
+ *
+ *  `said` is the refusal sentence (SDK), or the whole screen for a PTY worker —
+ *  there a model named or a switch offered anywhere on screen answers "no", the
+ *  same safe side. */
+export const refusalClosesEveryModel = (kind: QuotaRefusalKind | null, said: string | null | undefined): boolean => {
+  if (kind !== 'account-wide') return false
+  const text = normalizeScreen(said ?? '')
+  return ALL_MODEL_WINDOW.test(text) && !OFFERS_ANOTHER_MODEL.test(text) && !NAMES_A_MODEL.test(text)
+}
+
+/** The refusals that close EVERY model, as the CLI words them. Its limit names
+ *  (2.1.332, read 2026-11-26): five_hour "session limit", seven_day "weekly
+ *  limit" — all models; seven_day_opus "Opus limit", seven_day_sonnet "Sonnet
+ *  limit", seven_day_overage_included "Fable 5 limit", overage "usage credit
+ *  limit" — one model, or the credits only some models need. Measured on this
+ *  machine (2026-11-24, ~800 real refusals): every all-model stop read "You've
+ *  hit your 5-hour|session|weekly limit · resets …". Plus the older CLI's
+ *  account limit ("Claude usage limit reached"). A POSITIVE list on purpose. */
+const ALL_MODEL_WINDOW = /\b(?:hit|reached) your (?:5-hour|session|weekly) limit\b|\bclaude(?: ai)? usage limit reached\b/
 
 /** Did `claude` STOP on a spent quota? The boolean face of
  *  {@link classifyQuotaRefusal}, for callers that only gate on the fact of a stop.

@@ -101,6 +101,7 @@ import {
   type AnomalyDeps,
 } from './swarmOrchestrator'
 import { watchSdkDeskForDeathOnArrival, DESK_DOA_WINDOW_MS, spawnSwarmManager } from './swarmManager'
+import { MODEL_TIER_LADDER } from './swarmQuota'
 import type { SdkStreamFrame } from './sdkSession'
 import type { SdkEvent } from './sdkEvents'
 import { writeEngineIntent } from './swarmEnginePersistence'
@@ -218,6 +219,13 @@ describe('② the SDK 司令官卓 learns from its own corpse (tier cooling + st
     expect(a.marks[0].text).toBe(REFUSAL)
   })
 
+  it('an ALL-MODEL refusal followed by death cools EVERY tier, so the next wake does not step down into the same wall (2026-11-23)', () => {
+    const a = armed()
+    a.stream.emit({ kind: 'quota_refusal', raw: "You've hit your 5-hour limit · resets 9pm (Asia/Tokyo)" })
+    died(a)
+    expect(a.marks.map((m) => m.tier)).toEqual([...MODEL_TIER_LADDER])
+  })
+
   it('a death with NO refusal says nothing about the tier', () => {
     // The polarity rule, at the layer that can actually enforce it: "the desk
     // died young" is not evidence, "the desk SAID the tier is spent" is.
@@ -225,6 +233,32 @@ describe('② the SDK 司令官卓 learns from its own corpse (tier cooling + st
     died(a)
     expect(a.marks).toEqual([])
     expect(a.forgets).toEqual([])
+  })
+
+  it('a death with NO refusal still says WHY it died — the only record of a commander that never came up (2026-11-23)', () => {
+    const notes: { path: string; reason: string }[] = []
+    const stream = fakeStream()
+    let t = 1_000_000
+    watchSdkDeskForDeathOnArrival('sdk-sess-1', 'fable', '/proj/a', 'agent-sid-1', false, {
+      attach: stream.attach,
+      now: () => t,
+      mark: () => { throw new Error('a non-quota death must not cool a tier') },
+      forget: async () => true,
+      note: (path, reason) => notes.push({ path, reason }),
+    })
+    stream.emit({ kind: 'status', status: 'failed', detail: 'error: A previous tool operation has an unconfirmed result.' })
+    expect(notes).toEqual([{ path: '/proj/a', reason: 'error: A previous tool operation has an unconfirmed result.' }])
+
+    // A desk that lived past the birth window died of something its launch did not cause.
+    const later = fakeStream()
+    watchSdkDeskForDeathOnArrival('sdk-sess-2', 'fable', '/proj/a', 'agent-sid-2', false, {
+      attach: later.attach,
+      now: () => t,
+      note: (path, reason) => notes.push({ path, reason }),
+    })
+    t += DESK_DOA_WINDOW_MS + 1
+    later.emit({ kind: 'status', status: 'exited', detail: 'terminated' })
+    expect(notes).toHaveLength(1)
   })
 
   it('EVERY refusal wording Anthropic ships cools the tier — not just the two a private regex liked', () => {
@@ -243,9 +277,23 @@ describe('② the SDK 司令官卓 learns from its own corpse (tier cooling + st
       const a = armed()
       a.stream.emit({ kind: 'quota_refusal', raw })
       died(a)
-      expect(a.marks, raw).toHaveLength(1)
-      expect(a.marks[0].text).toBe(raw)
+      // Exactly the desk's own tier: none of these closes every model (credits,
+      // one model, no all-model window named). A looser `toContain` stayed green
+      // with the model-name sign removed from the watch (review 2026-11-26).
+      expect(a.marks.map((m) => m.tier), raw).toEqual(['fable'])
+      expect(a.marks.every((m) => m.text === raw), raw).toBe(true)
     }
+  })
+
+  it.each([
+    "You're out of usage credits. /model to switch models.",
+    "You've hit your monthly spend limit. Switch to another model to continue.",
+    "You've hit your team's pooled group budget. Switch to another model to continue.",
+  ])('a credit / spend refusal that offers another model cools only the desk\'s tier: %s', (raw) => {
+    const a = armed()
+    a.stream.emit({ kind: 'quota_refusal', raw })
+    died(a)
+    expect(a.marks.map((m) => m.tier)).toEqual(['fable'])
   })
 
   it('a FRESH desk that died quoting a refusal also FORGETS its session pointer (else the next launch --resumes a one-line transcript)', () => {

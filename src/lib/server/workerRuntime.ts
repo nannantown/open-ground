@@ -201,6 +201,20 @@ const bufferedSdkEvents = (id: string): SdkEvent[] => {
   return att.replay.map((f) => f.ev)
 }
 
+/** How many of this SDK session's newest tool results in a row `isDenial` calls
+ *  a refusal — 0 as soon as one went through (or failed for its own reasons). */
+export const sdkToolDenialStreak = (id: string, isDenial: (toolResult: string) => boolean): number => {
+  const events = bufferedSdkEvents(id)
+  let n = 0
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]
+    if (ev.kind !== 'tool_result') continue
+    if (ev.ok || !isDenial(ev.head)) break
+    n++
+  }
+  return n
+}
+
 /** One event as the line the engine reads. null ⇒ contributes nothing.
  *
  *  ⚠ MARKERS, NOT TUI GLYPHS. The CLI's own `⏺` / `⎿` are deliberately NOT used:

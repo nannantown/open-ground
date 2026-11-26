@@ -19,7 +19,7 @@ import {
   type TierProbeExec,
   type TierProbeOutput,
 } from './swarmTierProbe'
-import { isTierCooling, markCoolingUntil, flushQuotaPersist, __resetQuotaForTest } from './swarmQuota'
+import { isTierCooling, markCoolingUntil, flushQuotaPersist, __resetQuotaForTest, MODEL_TIER_LADDER } from './swarmQuota'
 
 // The CLI's per-model exhaustion notice, verbatim off the 2026-07-13 live probe
 // (same wording as the 2026-07-09 worker sighting pinned in the orchestrator
@@ -167,6 +167,26 @@ describe('ensureTierProbed', () => {
     await ensureTierProbed('fable', { exec, bin: '/fake/claude', now: () => NOW })
     expect(isTierCooling('fable', NOW + 44 * 60_000)).toBe(true)
     expect(isTierCooling('fable', NOW + 46 * 60_000)).toBe(false)
+  })
+
+  it('an ALL-MODEL limit cools every tier on one probe, so the next launch does not step down into the same wall (2026-11-23)', async () => {
+    // Measured 2026-11-23 16:29–16:33: the 5-hour window refuses every model,
+    // but each wall cooled only the tier that met it, so launches walked down
+    // fable → opus → sonnet → haiku and were refused at every step.
+    const { exec } = makeExec(() => out({ stdout: "You've hit your 5-hour limit · resets 9pm (Asia/Tokyo)", failed: true }))
+    expect(await ensureTierProbed('fable', { exec, bin: '/fake/claude', now: () => NOW })).toBe('wall')
+    for (const t of MODEL_TIER_LADDER) expect(isTierCooling(t, NOW), t).toBe(true)
+  })
+
+  it.each([
+    FABLE_LIMIT_NOTICE,
+    'Fable 5 requires usage credits. Add funds to continue.',
+    "You're out of usage credits. /model to switch models.",
+    "You've hit your monthly spend limit. Switch to another model to continue.",
+  ])('a per-model limit still cools only its own tier (the one case where stepping down helps): %s', async (said) => {
+    const { exec } = makeExec(() => out({ stdout: said, failed: true }))
+    expect(await ensureTierProbed('fable', { exec, bin: '/fake/claude', now: () => NOW })).toBe('wall')
+    expect(MODEL_TIER_LADDER.filter((t) => isTierCooling(t, NOW))).toEqual(['fable'])
   })
 
   it('a TRANSIENT fault never cools the tier (fail-open end to end)', async () => {

@@ -205,6 +205,7 @@ const EVENT_LABEL: Record<SwarmFatalEvent, string> = {
   // The title stays cause-agnostic on purpose; `detail` (built per-call at the
   // fire site) is what actually says which one happened.
   'engine-resume-suppressed': 'Agent Team — auto-resume paused',
+  'automation-held': 'Agent Team — automatic work is waiting',
   // Plain Japanese on purpose: unlike every other entry here (read by the
   // operator), this one is read by the OWNER, who is not a programmer, and it is
   // about their own data going missing. See homeIntegrity.ts.

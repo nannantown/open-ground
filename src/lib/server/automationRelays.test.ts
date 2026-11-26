@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { relayToCommander, type CommanderRelayDeps } from './commanderRelay'
+import { OWNER_REVIEW_HOLD_HINT } from './savedWorkHold'
 import { queueSupplyNotice, queueSupplyOwnerSay, queueSupplyReply, resetSupplyNoticeState, type SupplyNoticeDeps } from './supplyNotice'
 
 const policy = vi.hoisted(() => ({ allowed: false }))
@@ -38,6 +39,17 @@ describe('automatic relay admission is distinct from explicit owner conversation
     expect(await relayToCommander('/fixture/project', 'owner instruction', { cause: 'owner' }, f.deps)).toMatchObject({ ok: true, delivered: true, woke: true })
     expect(f.spawn).toHaveBeenCalledWith({ projectPath: '/fixture/project', cause: 'owner' })
     expect(f.say).toHaveBeenCalledOnce()
+  })
+
+  // 2026-11-23: the president asked the commander on the owner's behalf, the wake
+  // threw over an unconfirmed operation, and all it got back was an English
+  // "failed to wake" — nothing it could tell the owner to do.
+  it('a wake that fails says why in the owner\'s words, with where to go when only their review clears it', async () => {
+    const f = commander()
+    f.deps.spawn = vi.fn(async () => { throw new Error('A previous tool operation has an unconfirmed result. Inspect the saved project work before resuming automatic work.') })
+    const res = await relayToCommander('/fixture/project', 'owner instruction', { cause: 'owner' }, f.deps)
+    expect(res).toMatchObject({ ok: false, status: 503, body: { delivered: false, woke: false } })
+    expect((res as { body: { why?: string } }).body.why).toContain(OWNER_REVIEW_HOLD_HINT)
   })
 
   it('does not wake a commander after membership changes during preflight', async () => {

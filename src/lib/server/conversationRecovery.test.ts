@@ -24,7 +24,7 @@ describe('durable conversation receipts and drafts', () => {
   it('holds a started operation from an earlier process instead of re-executing it', async () => {
     await acceptConversationReceipt('project-a', 'message-a', { text: 'effect' })
     await claimConversationReceipt('project-a', 'message-a')
-    const file = join(process.env.OPENGROUND_HOME!, 'runtime', 'receipts.json')
+    const file = join(process.env.OPENGROUND_HOME!, 'runtime', 'receipts-v2.json')
     const saved = JSON.parse(await readFile(file, 'utf8'))
     Object.values(saved.receipts).forEach((receipt) => { (receipt as { attemptBoot: string }).attemptBoot = 'previous-process' })
     await writeFile(file, JSON.stringify(saved))
@@ -67,7 +67,7 @@ describe('durable conversation receipts and drafts', () => {
   })
   it('does not reset a corrupt receipt file or expose its old accepted draft as unsent', async () => {
     await saveConversationDraft('project-a', 'device-a', 0, 'held line')
-    const file = join(process.env.OPENGROUND_HOME!, 'runtime', 'receipts.json')
+    const file = join(process.env.OPENGROUND_HOME!, 'runtime', 'receipts-v2.json')
     await writeFile(file, '{corrupt')
     await expect(readConversationDraft('project-a', 'device-a')).rejects.toThrow()
     expect(await readFile(file, 'utf8')).toBe('{corrupt')
