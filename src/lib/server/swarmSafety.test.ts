@@ -8,6 +8,7 @@ import { join } from 'path'
 import { installHooks, verifyGuardWiring, ensureGuardWiring } from './hooksInstall'
 import {
   createSwarmWorktree,
+  gitFailureLine,
   removeSwarmWorktree,
   spawnSwarmWorker,
   GuardWiringError,
@@ -1162,5 +1163,14 @@ describe('a worker worktree that cannot be made says why', () => {
     } finally {
       await chmod(parent, 0o755)
     }
+  })
+  // The CI runner's git prints progress before the reason, and the first line alone
+  // ("Preparing worktree (new branch …)") was all the owner was told (public CI,
+  // 0.11.211). The real stderr shape from that run:
+  it('keeps the line that says why, not git\'s progress line before it', () => {
+    expect(gitFailureLine("Preparing worktree (new branch 'swarm/x')\nfatal: could not create leading directories of '/w/x': Permission denied"))
+      .toBe("fatal: could not create leading directories of '/w/x': Permission denied")
+    expect(gitFailureLine('fatal: invalid reference: main')).toBe('fatal: invalid reference: main')
+    expect(gitFailureLine('Preparing worktree\nsomething went wrong\n')).toBe('something went wrong')
   })
 })

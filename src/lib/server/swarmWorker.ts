@@ -430,6 +430,14 @@ export interface SwarmWorktree {
   uuid: string
 }
 
+/** The line of git's output that says why it failed. git can print progress first
+ *  ("Preparing worktree (new branch …)" on the CI runner's git) and the reason on a
+ *  later `fatal:` / `error:` line; the first line alone carried no reason. */
+export const gitFailureLine = (output: string): string => {
+  const lines = output.split('\n').map((l) => l.trim()).filter(Boolean)
+  return (lines.find((l) => /^(fatal|error):/i.test(l)) ?? lines[lines.length - 1] ?? '').slice(0, 200)
+}
+
 /** Create an isolated `swarm/*` worktree for `projectPath` under its central
  *  worktrees dir, node_modules symlinked from the main checkout. Throws if the
  *  path isn't a registered project (projectUUIDFromPath) or `git worktree add`
@@ -499,7 +507,7 @@ export const createSwarmWorktree = async (
     })
   } catch (e) {
     const stderr = String((e as { stderr?: unknown }).stderr ?? '').trim()
-    addFailure = (stderr || String((e as Error)?.message ?? e)).split('\n')[0].slice(0, 200)
+    addFailure = gitFailureLine(stderr || String((e as Error)?.message ?? e))
   }
   if (addFailure !== null) {
     await git(projectPath, ['worktree', 'remove', '--force', dir])
