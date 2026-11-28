@@ -1353,19 +1353,19 @@ const CLAUDE_ANCHORS: Record<string, { tier: ClaudeAnchorTier; why: string }> = 
   },
   'src/lib/server/transcript.ts': {
     tier: 'read-only',
-    why: "reads claude's session JSONLs under ~/.claude/projects for generateDescription's marker poll",
+    why: "the ONE resolver of claude's transcript folder (claudeConfigDir / claudeProjectsRoot: CLAUDE_CONFIG_DIR, else ~/.claude). claudeUsage, claudeUsageCli and swarmTokenAudit read through it since 2026-11-28 (pinned by claudeProjectsRoot.test.ts); this file itself only reads the JSONLs",
   },
-  'src/lib/server/claudeUsage.ts': {
+  'src/lib/server/claudeProjectsRoot.test.ts': {
     tier: 'read-only',
-    why: 'tallies token usage from the same JSONLs (UsageHud)',
+    why: "names the REAL ~/.claude (from os.userInfo, not $HOME) only to assert the test-time transcript folder is never under it; reads source files, writes nothing",
   },
-  'src/lib/server/claudeUsageCli.ts': {
-    tier: 'read-only',
-    why: 'the /usage CLI-scrape counterpart — same JSONLs, same read-only tally',
+  'src/test/setup-home.ts': {
+    tier: 'writes-elsewhere',
+    why: 'points CLAUDE_CONFIG_DIR at <test home>/.claude so every transcript path a test derives lands in the throwaway test home, never the real ~/.claude/projects',
   },
-  'src/lib/server/swarmTokenAudit.ts': {
-    tier: 'read-only',
-    why: 'walks worker-worktree session dirs under ~/.claude/projects to attribute swarm token spend',
+  'src/lib/server/supplyNotice.ts': {
+    tier: 'writes-elsewhere',
+    why: "its resume note TELLS the president to re-read ~/.claude/skills/supply/SKILL.md (text only, never opened here); the file's own writes are the OG-home notice journal",
   },
   'src/lib/server/projectSkills.ts': {
     tier: 'read-only',

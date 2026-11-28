@@ -284,6 +284,34 @@ twin を作らないことを実 PTY で固定)。
 > 会話や入力欄に同じ文言が現れても busy に化けない。日本語が false になるのは正しい —— だから
 > こそ①だけでは足りず、**②の入力欄チェックが要る**(日本語を打ちかけの卓は「生成中でない」)。
 
+> **★2026-11-28 — desks that cost nothing while waiting (docs/AUTONOMY-SPEC.md R-D3, unit U4).**
+> Measured over 7 days: every app start revived each `managerDesired` commander (and each
+> `supplyDesired` president) with an auto-sent resume prompt — one full turn over the whole
+> conversation per desk per start, with nothing waiting — and a commander that stayed up was
+> never measured against the context cap (237k average context per commander call).
+> - **No commander at boot.** `resumeEngines` no longer spawns the commander (the 2026-08-26
+>   boot revival is reversed). `managerDesired` stays recorded (only `/manager/stop` clears it).
+>   The commander is started by its first need, each on its own lane: a review-ready card →
+>   the absent arm below, on the first integrate pass after boot (`lastIntegrateAt = 0`); a
+>   worker's question or an answer owed to the commander → the `commanderQuestions` sweep
+>   (engine pass + the 60 s supply loop) through `relayToCommander({wake:true})`; the
+>   president's relay → `POST /api/swarm/manager/say`. The 2026-08-26 incident (finished work
+>   nobody integrated) is the first lane. Guards: `swarmOrchestrator.idleDesks.test.ts`,
+>   `commanderWakeOnNeed.test.ts`, `managerSayWake.routes.test.ts`.
+> - **Cap at wake.** Right before the notice (C) and right before a poke, `closedOverCap()` asks
+>   `managerDeskOverCap` (default `swarmManager.idleManagerDeskOverCap`). An SDK desk whose turn
+>   has ended (status `waiting`, no tool call in flight, not paused on a limit, no background
+>   task) with a fill at or over the commander cap (`MANAGER_CONTEXT_CAP` = 120,000;
+>   `Settings.deskContextCapTokens` overrides both desks when set) is closed through
+>   `recycleManagerDesk(path, {idleOnly:true})` — the `manager-unresponsive` teardown, which
+>   re-checks idleness after its last await. The absent arm reopens it, and `launchNewDesk`
+>   finds the conversation over the same cap and opens a fresh one (`MANAGER_RESUME_INJECTION`).
+>   A busy or PTY desk is never closed; one conversation is closed at most once
+>   (`managerResume.capRecycledSession`); `lastNudgeAt = now` keeps the unwinding desk from
+>   being poked. Log: `司令官の卓を閉じた(待機中・文脈 N が上限超え)…`.
+> - **Not covered:** a relay (`manager/say`, the question sweep) reaching a LIVE over-cap desk
+>   does not close it; that desk is woken into its context as before.
+
 今の B相は:
 
 ```
@@ -301,7 +329,9 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
                                    未送の managerNotice もここで破棄 — 古い報せを後から届けない)
 ★2026-07-27 通知チャネル(蘇生反射より前・presence を読む前・どのゲートの外側)
   reviewSeenAt に初めて載ったブランチがある? ─Yes→ engine.managerNotice に積む(1枠・新しい方が勝つ)
-  managerNotice が在る? ─Yes→ notifyManagerReady を毎 pass 提示
+  managerNotice が在る? ─Yes→ ★2026-11-28 先に cap at wake: 待機中の SDK 卓が上限超えなら
+                              閉じて return(通知は積んだまま・absent 腕が新しい会話で開き直す)
+                              ─それ以外→ notifyManagerReady を毎 pass 提示
       卓の画面が noticeDeliverable?(生成中でない かつ 入力欄が空 —— null は空でない)
         ├ Yes → 1行+CR を書く(**ESC も Ctrl-U も送らない**)・managerNotice=null・
         │        rs.lastNoticeAt=now(下の echoUntil に入る)・info ログ
@@ -357,6 +387,7 @@ review に swarm ブランチある? ─No→ 反射を丸ごと disarm(rs 全�
   │                                  **1度だけ**閉じて absent 経路に立て直させる(PTY 卓は閉じない)→ return
   │                                  (§7-10。滞留 40 分未満・予算が残っている間は従来どおり鳴らさない)
   │     直前 nudge から interval(10分)未満? ─Yes→ return
+  │     ★2026-11-28 cap at wake: 待機中の SDK 卓が上限超え? ─Yes→ 閉じて return(声はかけない)
   │     ─No→ nudgeManager(生きている卓の PTY へ1行+CR)・nudges+1・lastNudgeAt=now・info ログ
   │           ※1バイトも書けなかった場合は nudges を**増やさず** unaddressable+1(2026-08-04)。
   │             3回連続で書けず、かつ滞留 40 分以上なら同じ `manager-unresponsive` の鐘(理由文は「声をかけられません」側)
@@ -987,12 +1018,57 @@ spawn は `absent` 限定**なので、反射が君の卓を潰すことも二�
 ### 起こされたら(`manager-woke` 通知が来たら)
 
 `manager-woke` 情報通知(または起動直後の `/og-manage` の「状況」)で review に統合待ちが
-来たと分かる。やることは1つ: **review の各カードの diff を読み、重量級レビューして、問題なければ
-下の手順で land する**。エンジンは verify も敵対レビューもしていない —— **検証もレビューも君が負う**
+来たと分かる。やることは1つ: **review の各カードの diff を読み、カードの型に応じた深さでレビューして
+(下の「Review depth follows the card」)、問題なければ下の手順で land する**。エンジンは verify も敵対レビューもしていない —— **検証もレビューも君が負う**
 (必要なら時間無制限の subagent レビュアーを立てる。これが「深い判断が要る統合は必ず manager の
 目を通す」の実装)。**高リスクパス(release/CI/署名/依存/secrets 系 = `HIGH_RISK_PATHS` / og-manage
 §「マージ」手順 0)に触れるブランチは、他が緑でも特に慎重に** —— fail-closed の安全網は今や君の
 手順の中にしかない(エンジン側の force-hold は撤去済み)。
+
+### Review depth follows the card (2026-11-28 — AUTONOMY-SPEC R-D5, owner decision §7-3 A)
+
+The worker has followed the card's difficulty since 2026-09-22 (`TIER_DIRECTIVE`, 04 §5.9); the
+commander's review did not — every card got the full reviewer panel, and commander sub-agents were
+12.5% of billed tokens at ~211k context per call (AUTONOMY-SPEC §1.2). og-manage 「マージ」 step 4 now
+settles the depth first, one `【難易度: <tier>】` line per tier, worded like the worker's directive:
+
+| card | commander's review |
+|---|---|
+| `touch` / `standard` | no reviewer sub-agent; the commander reads the whole diff itself (a diff it cannot read whole ⇒ one reviewer) |
+| `design` | exactly one independent adversarial reviewer |
+| `ultra` | the full panel as before (one reviewer for a light diff, several with a majority vote for a heavy/dangerous one) |
+| safety floor tripped, `executionMode: max`, card unreadable / cardless, or unsure | the full panel |
+
+- **Where the tier comes from.** `GET /api/swarm/card-tier?path=&id=` (owner-only, read-only;
+  `server/routes/swarm.ts`) returns `{ tier, effectiveTier, floored }`: the stored tier (null when
+  none), `resolveCardTier` on the stored card — the function the worker's model/effort is resolved
+  through — and `tripsSafetyFloor` on its title + notes. Step 4 calls it with
+  `curl -sfG … --data-urlencode "path=$PWD" --data-urlencode "id=…"` and prints
+  `<effectiveTier> <floored>`; a failed call prints nothing, which reads as unknown ⇒ full panel.
+  It is its own route, not fields on the `GET /api/project` task rows, because `PUT /api/project`
+  writes those rows back and a computed field would be persisted.
+- **Why not a copied regex (history, review D-M1 2026-11-28).** Step 4 first copied `HEAVY_SIGNALS`
+  into a jq `test()`. jq's Oniguruma counts Japanese letters as word characters, so `\bguard\b` does
+  not match in 「guardを直す」 (nor `sandboxの修正` / `authが落ちる` / `migrationを追加` /
+  `deleteボタン`), while the worker's JS regex (no `u` flag) does: those cards ran at the `design`
+  floor and the commander gave them no reviewer. The earlier note here that jq and JS agree (33
+  probes) was wrong — the probes had no keyword next to Japanese text. The same step also read
+  `GET /api/project?path=$PWD` unencoded, which curl refuses for a path with a space (exit 3), so in
+  the OPEN GROUND checkout it printed nothing and every card got the full panel.
+- **Deliberately stricter than the worker side.** A floored card's worker runs at `design` (one
+  adversarial review); the commander gives it the full panel. `max` mode keeps today's weight for every
+  card (the owner's §7-3 B wording), so the light review exists only in `optimize` / `economy`.
+- **Unchanged:** step 0's high-risk force-hold, step 3's gates (tsc / lint / the full suite or its
+  pass record), fail-CLOSED, the specialist primary-source rule below (a diff in one of those domains
+  gets one specialist reviewer even on a touch/standard card), and who integrates.
+- **Pin:** `ogManageSkill.test.ts` — inside step 4 and before the reviewer paragraph, a `【難易度: <tier>`
+  line for every `TASK_TIERS` entry (a new tier goes red); floor / unknown / `max` ⇒ full panel; the
+  encoded `card-tier` call is there and no copied pattern (`--arg re` / `HEAVY_SIGNALS`) or unencoded
+  `api/project?path=$PWD` is; the route is served by `server/routes/swarm.ts`; the never-lightened list.
+  Same caveat as the specialist pin: it proves the words and their place, not that the commander obeys
+  them. The route itself: `server/routes/__tests__/swarmCardTier.routes.test.ts` (the five Japanese
+  titles above floor to `design`, owner gate, unknown card, a path with a space encoded as curl does);
+  red measured with the route answering the stored tier instead of `resolveCardTier`.
 
 ### 専門レビュアー — 判断の前に一次資料を取り込む(2026-07-19・オーナー指示)
 

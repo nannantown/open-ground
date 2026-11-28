@@ -361,10 +361,23 @@ export const UsageHud = ({ compact = false }: { compact?: boolean }) => {
                             in between. With a number, the measurement is note-it,
                             run cards, note-it-again — inside the app, which is the
                             whole point of the app. `compactTokens` keeps the row
-                            one line. */}
-                        <span className="shrink-0 text-meta tabular-nums text-ink">
-                          {compactTokens(r.tokens)}
-                          <span className="text-ink-faint"> · {share}%</span>
+                            one line.
+                            A column, so the row's baseline stays the billed
+                            figure's and the label keeps its width: on one line a
+                            third figure cut the role labels short. */}
+                        <span className="flex shrink-0 flex-col items-end text-meta tabular-nums text-ink">
+                          <span>
+                            {compactTokens(r.tokens)}
+                            <span className="text-ink-faint"> · {share}%</span>
+                          </span>
+                          {/* Cache reads, beside the bill and never in it or the
+                              share (R-D4, docs/AUTONOMY-SPEC.md): 29x the billed
+                              figure in the week measured 2026-11-28, and what
+                              grows with a long context. Faint, explained only by
+                              its hover text — no label on screen. */}
+                          <span className="text-micro text-ink-faint" title={t('misc.usage.breakdown.cacheRead')}>
+                            {compactTokens(r.cacheRead)}
+                          </span>
                         </span>
                       </li>
                     )

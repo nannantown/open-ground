@@ -28,7 +28,7 @@ import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
 import { readRoster } from './swarmWorkerRoster'
 import { readEngineIntent } from './swarmEnginePersistence'
 import { readSwarmSessions } from './swarmSessions'
-import { chatGptConversationRecovery, chatGptPublicConversation } from './chatgptResponses'
+import { chatGptConversationRecovery, chatGptHistoryAccount, chatGptPublicConversation } from './chatgptResponses'
 import { chatGptConversationFile } from './chatgptResponses'
 import { nativePresidentRecoveryAdmission, validateNativePresidentRecoveryAdmission, nativeConversationRecoveryReviewed } from './swarmNativeRecovery'
 export { listNativeConversationRecoveryIssues, reviewNativeConversationRecovery } from './swarmNativeRecovery'
@@ -591,29 +591,37 @@ export const reviewSwarmLaunchRecovery = async (options: { id: string; note: str
 export type BootResumeActor = 'supply' | 'manager' | 'engine'
 /** Run before ordinary boot resume, ONE ACTOR AT A TIME. An existing unconfirmed
  * history is not a missing session and must never silently become a fresh task
- * execution — so the actor that owns it stays down until the owner reviews it.
+ * execution of the SAME conversation.
  *
- * Per actor, not per app (2026-11-17). This used to be one global assert in the
- * boot callback: a single commander's Bash interrupted by an update (sns-hub,
- * 2026-11-09) threw for EVERY project, so resumeEngines never ran again — no
- * president, no autopilot, no policy loop, on every later boot, with only a
- * stderr line nobody reads. The scopes now match the manual launch doors:
- * commander / engine use the project-scoped check spawnSwarmManager and SDK
- * launches already apply; the president is held only by its own session or an
- * unsettled president instruction in its project.
+ * Per actor, not per app (2026-11-17), and since 2026-11-28 per CONVERSATION
+ * (AUTONOMY-SPEC R-B3, owner decision §7-1 = A): an unconfirmed result holds only
+ * the conversation that issued it. So:
+ *   • president — its OWN held conversation waits here (the owner's history lives
+ *     in it): the seat shows the question in the inbox and stays down until the
+ *     owner answers. Nothing else holds it.
+ *   • commander — never held by its own saved conversation: the launch opens a
+ *     FRESH conversation told what stopped (swarmManager.launchNewDesk).
+ *   • engine — never held by a worker's: the engine parks that worker's card and
+ *     never resumes it (refreshSavedWorkHold, adoptResumeCandidates).
+ * A receipt that names no conversation still holds every actor (unattributable).
+ * Every held operation found here gets its ONE question in the owner's inbox
+ * (R-B4), also for a user without the owner role (R-B5: the native review marker
+ * is then keyed by the local user), so no hold waits on a door that user lacks.
  *
  * Returns null when the actor may resume, otherwise the reason (plain text). */
 export const savedSwarmRuntimeHold = async (projectPath: string, actor: BootResumeActor): Promise<string | null> => {
   try {
-    const { listUncertainRuntimeActions } = await import('./runtimeActionReceipts')
+    const { listUncertainRuntimeActions, receiptSession } = await import('./runtimeActionReceipts')
+    const { chatGptHoldHint, askAboutHeldOperation, nativeHeldOperation, savedWorkHolds } = await import('./savedWorkHold')
     const settings = await getSettings()
     const provider = settings.swarmProvider ?? 'claude'
     const intent = await readEngineIntent(projectPath)
     const sessions = await readSwarmSessions(projectPath)
     const ids = new Map<string, string>()
+    const cards = new Map<string, string>()
     if (actor === 'engine') {
       const workers = await isSwarmManualStopPersisted(projectPath) ? [] : await readRoster(projectPath)
-      for (const worker of workers) if (worker.sessionId.startsWith('chatgpt-') === (provider === 'chatgpt')) ids.set(worker.sessionId, worker.worktree)
+      for (const worker of workers) if (worker.sessionId.startsWith('chatgpt-') === (provider === 'chatgpt')) { ids.set(worker.sessionId, worker.worktree); cards.set(worker.sessionId, worker.taskId) }
     } else if (actor === 'supply' ? intent.supplyDesired : intent.managerDesired) {
       const record = provider === 'chatgpt' ? sessions.chatgpt?.[actor] : sessions[actor]
       if (record) ids.set(record.sessionId, record.cwd)
@@ -625,10 +633,15 @@ export const savedSwarmRuntimeHold = async (projectPath: string, actor: BootResu
     // threw on exactly that), and an unsettled president instruction must hold
     // whether or not it has — the old awaitPresidentInputSettlement did.
     const receipts = (await listUncertainRuntimeActions(projectPath, false, true)).filter((r) => {
-      if (actor !== 'supply') return true
-      const body = r.body as { kind?: unknown; sessionId?: unknown } | null
-      return body?.kind === 'president-input' || ids.has(String(r.execution?.sessionId ?? body?.sessionId))
+      const holder = receiptSession(r)
+      if (holder === undefined) return true // names no conversation: holds every actor
+      const body = r.body as { kind?: unknown } | null
+      return actor === 'supply' && (body?.kind === 'president-input' || ids.has(holder))
     })
+    // ONE question per held operation in this project (deduped by the inbox), so
+    // the owner hears of every one even while the engine is off. Best-effort:
+    // the engine's own pass asks again.
+    await savedWorkHolds(projectPath).then((ops) => Promise.all(ops.map((op) => askAboutHeldOperation(projectPath, op)))).catch(() => {})
     // 会話の復旧 lists and clears only the signed-in owner's records (runtimeRecovery.ts),
     // so the hold follows the same line (2026-11-17 review): another account's
     // record is not this owner's to clear and holds nothing, and while the owner
@@ -643,12 +656,31 @@ export const savedSwarmRuntimeHold = async (projectPath: string, actor: BootResu
     for (const [id, cwd] of Array.from(ids)) {
       if (id.startsWith('chatgpt-')) {
         const recovery = await chatGptConversationRecovery(id)
-        if (recovery === 'uncertain' || recovery === 'invalid') return `保存された会話に、結果を確かめられなかった操作か壊れた履歴があります(${OWNER_REVIEW_HOLD_HINT})`
+        // No inbox question exists for it (not a receipt): Settings' ChatGPT recovery panel is its door (review R2 S-4)
+        // — only while that panel can list it; otherwise the words name what does clear it (R3-ui S1, R4 S2).
+        if (recovery === 'uncertain' || recovery === 'invalid') {
+          // The panel's own conditions, read only when they can change the words and cheapest
+          // first: runtimeOwnerKey already requires the owner role; the connection read may
+          // ask ChatGPT (cached 60 s), so it runs last (review R5 NIT 1-2).
+          const account = await chatGptHistoryAccount(id)
+          const panelShows = account === 'this' && recovery === 'uncertain' && !settings.lockdownMode
+            && await runtimeOwnerKey().then(Boolean, () => false)
+            && await import('./chatgptAuth').then(async (m) => (await m.getChatGptConnection()).state === 'connected').catch(() => false)
+          const hint = chatGptHoldHint(account, recovery, panelShows)
+          return `保存された ChatGPT の会話は、このままでは再開できません(${hint})`
+        }
       } else {
         try { await assertSwarmNativeConversationSettled(cwd, id) }
         catch (error) {
-          if (error instanceof NativeUnfinishedToolsError && projectId && await nativeConversationRecoveryReviewed(projectId, cwd, id)) continue
-          if (error instanceof NativeUnfinishedToolsError) return `保存された会話が操作の途中で止まっています(${OWNER_REVIEW_HOLD_HINT})`
+          if (error instanceof NativeUnfinishedToolsError) {
+            if (projectId && await nativeConversationRecoveryReviewed(projectId, cwd, id)) continue
+            const seat = actor === 'engine' ? { role: 'worker' as const, ...(cards.get(id) ? { taskId: cards.get(id) } : {}) } : { role: actor }
+            await askAboutHeldOperation(projectPath, nativeHeldOperation(id, error.tools[0], seat)).catch(() => {})
+            // Only the president's own conversation waits for the answer; the
+            // commander opens fresh, and the engine parks that worker's card.
+            if (actor === 'supply') return `保存された会話が操作の途中で止まっています(${OWNER_REVIEW_HOLD_HINT})`
+            continue
+          }
           // A read that failed or raced a write clears on its own — retried on the timer.
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
             console.warn('[swarm] boot resume: saved conversation not readable yet', error)

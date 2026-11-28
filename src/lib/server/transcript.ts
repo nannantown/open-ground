@@ -26,7 +26,12 @@ import { claudeDirName } from './claudeProjectDir'
 //     depends on exactly that.
 // ---------------------------------------------------------------------------
 
-export const claudeProjectsRoot = () => join(homedir(), '.claude', 'projects')
+/** Claude Code's config directory: CLAUDE_CONFIG_DIR when set (the CLI honours
+ *  it — every session it starts then writes there), else ~/.claude. Resolved per
+ *  call so the test setup's override wins. Every reader of transcripts goes
+ *  through {@link claudeProjectsRoot}; no other module builds this path. */
+export const claudeConfigDir = (): string => process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+export const claudeProjectsRoot = () => join(claudeConfigDir(), 'projects')
 const sessionDir = (cwd: string): string =>
   join(claudeProjectsRoot(), claudeDirName(cwd))
 /** Where claude keeps THIS session's transcript — the one place that knowledge

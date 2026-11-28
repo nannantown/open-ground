@@ -180,4 +180,35 @@ describe('supplyLaunchOpts (supply launch contract)', () => {
       expect(resumed.model).toBe(ME.model)
     })
   })
+
+  // ── QUIET boot revival (docs/AUTONOMY-SPEC.md R-D3a, 2026-11-28) ─────────────
+  // The boot used to auto-send SUPPLY_RESUME_INJECTION: one full turn over the
+  // president's whole context per start, with nothing waiting. A quiet revival
+  // sends nothing; the resume note rides the first line delivered instead
+  // (supplyNotice.ts — supplyResumeNote.test.ts).
+  describe('quiet (boot revival)', () => {
+    it('a quiet RESUME launches with no positional prompt at all — claude bills nothing until spoken to', () => {
+      const quiet = supplyLaunchOpts('/repo', 'sid-old', { resume: true, quiet: true, lang: 'en' }, ME)
+      expect(quiet.initialPrompt).toBeUndefined()
+      expect(quiet.resume).toBe(true)
+      const argv = buildClaudeArgv(quiet, null, null, null, 'darwin')
+      expect(argv[argv.indexOf('--resume') + 1]).toBe('sid-old')
+      expect(argv.some((a) => a.includes('/supply'))).toBe(false)
+    })
+
+    it('a quiet launch with NOTHING to resume still takes the role (/supply) — a bare claude would answer as nobody', () => {
+      const fresh = supplyLaunchOpts('/repo', 'sid-new', { quiet: true, lang: 'en' }, ME)
+      expect(fresh.initialPrompt).toBe(SUPPLY_INJECTION + languageDirective('en'))
+    })
+
+    it('handoff instructions are never swallowed by quiet', () => {
+      const h = supplyLaunchOpts('/repo', 'sid-old', { resume: true, quiet: true, lang: 'en', handoffInstructions: 'X' }, ME)
+      expect(h.initialPrompt).toContain('X')
+    })
+
+    it('the owner-initiated resume is unchanged (no quiet ⇒ the resume prompt is sent)', () => {
+      const owner = supplyLaunchOpts('/repo', 'sid-old', { resume: true, lang: 'en' }, ME)
+      expect(owner.initialPrompt).toBe(SUPPLY_RESUME_INJECTION + languageDirective('en'))
+    })
+  })
 })

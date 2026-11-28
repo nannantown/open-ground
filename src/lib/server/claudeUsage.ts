@@ -1,8 +1,8 @@
 import type { Stats } from 'fs'
 import { open, readdir, stat } from 'fs/promises'
-import { homedir } from 'os'
-import { basename, join, sep } from 'path'
+import { basename, join, relative, sep } from 'path'
 import type { ClaudeUsage, UsageBreakdown, UsageBreakdownRow, UsageSourceKind } from '../types'
+import { claudeProjectsRoot } from './transcript'
 
 /** Claude Code's max context window, in tokens. The auto-compact denominator for
  *  the per-session gauge: `% used = contextTokens ÷ this`. Pinned at 200k by the
@@ -17,7 +17,7 @@ const WINDOW_MS = WINDOW_HOURS * 60 * 60 * 1000
 // long-running sessions whose last write is fresh but oldest line is old.
 const FILE_MTIME_SLACK_MS = 60 * 60 * 1000
 
-const claudeProjectsDir = () => join(homedir(), '.claude', 'projects')
+const claudeProjectsDir = () => claudeProjectsRoot()
 
 /** The ONE de-duplication rule, shared by every consumer of this walk.
  *
@@ -489,16 +489,20 @@ export const sessionContextTokens = async (
 // which is the question the owner actually acted on (measured: half a weekly
 // Fable budget gone with no heavy card in flight — the always-on desks). This
 // walks the SAME jsonl files over a longer window and groups the billed tokens
-// by model × source.
+// (and, beside them, the cache reads) by model × source.
 //
-// SOURCES are what the file path can PROVE, and no more:
-//   • 'swarm-worker' — the session ran in a swarm worktree (isSwarmWorktreeSessionDir).
-//   • 'project'      — its cwd is one of the owner's registered projects. That is
-//                      the commander/supply desks AND the owner's own `claude`
-//                      in that repo: both sit in the repo root, and nothing in
-//                      the transcript separates them. The UI says so rather than
-//                      guessing.
-//   • 'other'        — every other cwd (other repos, one-off sessions).
+// SOURCES are what the path and the desk ledger can PROVE, and no more:
+//   • 'swarm-worker'      — the session ran in a swarm worktree (isSwarmWorktreeDirName).
+//   • 'manager'/'supply'  — the desk ledger names its session id.
+//   • 'project'           — its cwd is one of the owner's registered projects and
+//                           the ledger does not name it: the owner's own `claude`,
+//                           or a desk from before the ledger. The UI says so.
+//   • 'other'             — every other cwd (other repos, one-off sessions).
+// A sub-agent's transcript (`<dir>/<sessionId>/subagents/agent-*.jsonl`) takes
+// the source of the session that started it — `<dir>` and `<sessionId>` are
+// the first two path segments under the projects dir for both. Naming it from
+// its own parent folder (`subagents`) put 39% of a week in 'other' (measured
+// 2026-11-28, docs/AUTONOMY-SPEC.md §1.2).
 
 // The wire types live in src/lib/types.ts (the shared client/server contract).
 
@@ -537,7 +541,7 @@ export const collectUsageBreakdown = async (opts: {
   }
 
   const seen = new Set<string>()
-  const sums = new Map<string, number>() // `${model}\u0000${source}` → tokens
+  const sums = new Map<string, { tokens: number; cacheRead: number }>() // key: `${model}\u0000${source}`
   for (const file of files) {
     let st
     try {
@@ -548,12 +552,14 @@ export const collectUsageBreakdown = async (opts: {
     if (st.mtimeMs < fileCutoffMs) continue
     const scan = await scanFile(file, st)
     if (!scan) continue
-    const dirName = basename(join(file, '..'))
+    // `<dir>/<sessionId>.jsonl` or `<dir>/<sessionId>/subagents/…jsonl`: the
+    // same two segments name a session and every sub-agent it started.
+    const [dirName, second = dirName] = relative(root, file).split(sep)
     // Desk first, by session id: a commander/supply transcript sits in the
     // project's dir, exactly where the owner's own sessions sit. Only the
     // ledger can tell them apart; a session it does not name is 'project'
     // (the owner's, or a desk from before the ledger — the UI label says so).
-    const sessionId = basename(file, '.jsonl')
+    const sessionId = basename(second, '.jsonl')
     const desk = opts.deskSessions?.get(sessionId)
     const source: UsageSourceKind = isSwarmWorktreeDirName(dirName)
       ? 'swarm-worker'
@@ -567,16 +573,19 @@ export const collectUsageBreakdown = async (opts: {
       if (!countOnce(seen, e)) return
       if (!e.model) return
       const billed = e.input + e.output + e.cacheWrite
-      if (billed <= 0) return
+      if (billed <= 0 && e.cacheRead <= 0) return
       const key = `${e.model}\u0000${source}`
-      sums.set(key, (sums.get(key) ?? 0) + billed)
+      const sum = sums.get(key) ?? { tokens: 0, cacheRead: 0 }
+      sum.tokens += billed
+      sum.cacheRead += e.cacheRead
+      sums.set(key, sum)
     })
   }
 
   const rows: UsageBreakdownRow[] = Array.from(sums.entries())
-    .map(([key, tokens]) => {
+    .map(([key, { tokens, cacheRead }]) => {
       const [model, source] = key.split('\u0000')
-      return { model, source: source as UsageSourceKind, tokens }
+      return { model, source: source as UsageSourceKind, tokens, cacheRead }
     })
     .sort((a, b) => b.tokens - a.tokens)
   return {

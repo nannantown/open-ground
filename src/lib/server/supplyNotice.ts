@@ -543,6 +543,41 @@ declare global {
   var __openground_supply_reported: Map<string, { id: string; at: number }[]> | undefined
   // eslint-disable-next-line no-var
   var __openground_supply_held: Map<string, { since: number; logged: boolean }> | undefined
+  // eslint-disable-next-line no-var
+  var __openground_supply_resume_owed: Set<string> | undefined
+}
+
+/** What a president revived QUIET at boot (swarmSupply `quiet`, docs/AUTONOMY-SPEC.md
+ *  R-D3a) is told with the first line it is handed — the obligations the old
+ *  auto-sent SUPPLY_RESUME_INJECTION carried, without spending a turn on a desk
+ *  nobody speaks to. APPENDED, never prepended: the line's leading prefix is the
+ *  frozen protocol groundMarks.promptAuthor reads to tell the owner's own words from
+ *  app lines. One line, and short enough to fit most lines within
+ *  {@link SUPPLY_PASTE_MEASURED_UNFOLDED}. */
+export const SUPPLY_RESUME_NOTE =
+  '【再開の案内】アプリ再起動で前回の会話を復元してから最初の入力。記憶は古い — 応じる前に Board(todo/doing/review)を API で読み直し、手順は ~/.claude/skills/supply/SKILL.md を読み直す。会話履歴だけを根拠に古い依頼・取り消し済み・結果不明の指示を再実行しない。'
+
+/** PTY president desks (terminal ids) still owed {@link SUPPLY_RESUME_NOTE}. */
+const resumeNoteOwed: Set<string> =
+  globalThis.__openground_supply_resume_owed ?? (globalThis.__openground_supply_resume_owed = new Set())
+
+/** swarmSupply: this desk was launched with nothing sent. */
+export const owePresidentResumeNote = (terminalId: string): void => {
+  if (terminalId) resumeNoteOwed.add(terminalId)
+}
+
+/** Has this desk not been handed its first line since a quiet launch? Only the
+ *  app's delivery clears it, so the context cap reads it together with the desk's
+ *  own transcript (supplyContextCap quietSinceLaunch): the owner may speak to the
+ *  desk in its seat or through Remote Control, which never comes through here. */
+export const presidentResumeNoteOwed = (terminalId: string): boolean => resumeNoteOwed.has(terminalId)
+
+/** `line` with the owed note appended, or `line` itself when nothing is owed or the
+ *  two would not fit one paste (the note then rides the next line). */
+const withResumeNote = (deskId: string, line: string): string => {
+  if (!resumeNoteOwed.has(deskId)) return line
+  const noted = `${line} ${SUPPLY_RESUME_NOTE}`
+  return noted.length <= SUPPLY_PASTE_MEASURED_UNFOLDED ? noted : line
 }
 
 interface UnsentLine {
@@ -999,6 +1034,7 @@ export const resetSupplyNoticeState = (opts: { keepDisk?: boolean } = {}): void 
   inFlight.clear()
   unsent.clear()
   held.clear()
+  resumeNoteOwed.clear()
   generation.n++
 }
 
@@ -1289,19 +1325,26 @@ export const flushSupplyNotices = async (partial: Partial<SupplyNoticeDeps> = {}
         // before the awaits above, input arriving during them made the unsent
         // re-press of a scrolled box refuse for good.
         const seq = deps.foreignInput(desk.id)?.seq
+        // The first line after a quiet boot revival carries the resume note; it is
+        // owed until a line carrying it is HEARD (an emptied box is not hearing).
+        const typedLine = withResumeNote(desk.id, line)
+        const commitTyped = (heard: boolean): void => {
+          if (heard && typedLine !== line) resumeNoteOwed.delete(desk.id)
+          commit(heard)
+        }
         // A throw after the paste must still leave the line tracked as unsent
         // (below) — untracked, only a screen read would stop a second paste.
-        const ok = await injectAnswerIntoWorker(desk.id, line, opts).catch(() => false)
+        const ok = await injectAnswerIntoWorker(desk.id, typedLine, opts).catch(() => false)
         if (gen !== generation.n) continue // state was reset meanwhile
         if (ok) {
           held.delete(desk.id)
-          commit(true)
+          commitTyped(true)
           delivered.push(key)
         } else if (typed) {
           // The text is in the box but the Enter did not take: the next pass
           // re-sends ONLY the Enter (never the text — no double line).
           const kind = own ? 'owner' : reply ? 'reply' : bundle ? 'important' : 'progress'
-          unsent.set(desk.id, { line, commit, appWide, kind, passes: 0, since: now, seq })
+          unsent.set(desk.id, { line: typedLine, commit: commitTyped, appWide, kind, passes: 0, since: now, seq })
         }
       } finally {
         releaseAppWide()

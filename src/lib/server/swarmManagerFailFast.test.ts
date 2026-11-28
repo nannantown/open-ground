@@ -108,36 +108,45 @@ beforeEach(async () => {
 })
 
 describe('commander SDK fail-fast — an SDK dial never seats a PTY desk', () => {
-  const savedAction = async (state: 'uncertain' | 'executing' | 'rejected') => {
+  const savedAction = async (state: 'uncertain' | 'executing' | 'rejected', sessionId = 'parallel-worker-session') => {
     await acceptConversationReceipt('fixture-project', 'existing-tool', {
-      kind: 'runtime-tool', provider: 'claude', sessionId: 'parallel-worker-session',
+      kind: 'runtime-tool', provider: 'claude', sessionId,
       toolId: 'fixture-call', tool: 'Bash', inputHash: 'fixture-input-hash',
     }, undefined, 'fixture-owner')
     await claimConversationReceipt('fixture-project', 'existing-tool', {
-      sessionId: 'parallel-worker-session', handleId: 'parallel-worker-handle', runtime: 'sdk',
+      sessionId, handleId: 'parallel-worker-handle', runtime: 'sdk',
     }, 'fixture-owner')
     if (state !== 'executing') await finishConversationReceipt('fixture-project', 'existing-tool', state, { fixture: true }, 'fixture-owner')
   }
 
-  it.each([false, true])('an existing unconfirmed action blocks before conversation resolution or replacement (fresh=%s)', async fresh => {
+  // R-B3 (AUTONOMY-SPEC, owner decision 2026-11-28). This used to pin "an
+  // existing unconfirmed action blocks before conversation resolution or
+  // replacement": a parallel worker's cut-off call kept the commander down. Only
+  // the conversation that issued a call can run it again, so another
+  // conversation's unconfirmed action no longer blocks the commander, and the
+  // commander's OWN held conversation is replaced by a fresh one. Neither path
+  // ever rewrites the receipt.
+  it('another conversation\'s unconfirmed action does not block the commander, and the receipt is left as it is', async () => {
     mocks.ownerAccess = true
     await savedAction('uncertain')
     mocks.resolveSwarmSession.mockResolvedValue({ agentSessionId: 'previous-manager', resume: true })
-    mocks.sdkManagerPreflight.mockReturnValue({
-      ok: true, problems: [], claudeBin: '/synthetic/claude', cliVersion: '2.1.220',
-    })
-    mocks.spawnSdkSession.mockReturnValue({ id: 'must-not-open', status: 'working' })
+    mocks.sdkManagerPreflight.mockReturnValue({ ok: true, problems: [], claudeBin: '/synthetic/claude', cliVersion: '2.1.220' })
+    mocks.spawnSdkSession.mockReturnValue({ id: 'sdk-resumed', status: 'working' })
+    await expect(spawnSwarmManager({ projectPath: PROJ })).resolves.toMatchObject({ sdkSessionId: 'sdk-resumed' })
+    expect(mocks.spawnSdkSession.mock.calls[0][0]).toMatchObject({ agentSessionId: 'previous-manager' })
+    expect(await readConversationReceipt('fixture-project', 'existing-tool', 'fixture-owner')).toMatchObject({ state: 'uncertain' })
+  })
 
-    await expect(spawnSwarmManager({ projectPath: PROJ, fresh })).rejects.toThrow('unconfirmed result')
-
-    expect(mocks.resolveSwarmSession).not.toHaveBeenCalled()
-    expect(mocks.recycleDeskSessionIfOverCap).not.toHaveBeenCalled()
-    expect(mocks.installOgManageSkill).not.toHaveBeenCalled()
-    expect(mocks.sdkManagerPreflight).not.toHaveBeenCalled()
-    expect(mocks.preloadSdk).not.toHaveBeenCalled()
-    expect(mocks.spawnSdkSession).not.toHaveBeenCalled()
-    expect(mocks.recordSwarmSession).not.toHaveBeenCalled()
-    expect(mocks.forgetSwarmSessionIf).not.toHaveBeenCalled()
+  it('the commander\'s OWN held conversation is never resumed: a fresh one opens, told what stopped, and the receipt is untouched', async () => {
+    mocks.ownerAccess = true
+    await savedAction('uncertain', 'previous-manager')
+    mocks.resolveSwarmSession.mockResolvedValue({ agentSessionId: 'previous-manager', resume: true })
+    mocks.sdkManagerPreflight.mockReturnValue({ ok: true, problems: [], claudeBin: '/synthetic/claude', cliVersion: '2.1.220' })
+    mocks.spawnSdkSession.mockReturnValue({ id: 'sdk-fresh', status: 'working' })
+    await spawnSwarmManager({ projectPath: PROJ })
+    const launched = mocks.spawnSdkSession.mock.calls[0][0] as { agentSessionId: string; initialPrompt: string }
+    expect(launched.agentSessionId).not.toBe('previous-manager')
+    expect(launched.initialPrompt).toContain('NEW conversation')
     expect(await readConversationReceipt('fixture-project', 'existing-tool', 'fixture-owner')).toMatchObject({ state: 'uncertain' })
   })
 

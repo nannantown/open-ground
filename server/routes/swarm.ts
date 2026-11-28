@@ -18,6 +18,7 @@
 //                                   plain PTY kill.
 // POST /api/swarm/worktree/remove — tear a worker worktree down (kill/complete).
 // GET  /api/swarm/orchestrator    — the COMMANDER engine's state for a project.
+// GET  /api/swarm/standing        — where the project stands and why (R-E1).
 // GET  /api/swarm/workers         — the SERVER-TRUTH worker list (live PTYs +
 //                                   engine roster + heartbeat files unified) —
 //                                   see src/lib/server/swarmWorkerRegistry.ts.
@@ -87,6 +88,7 @@ import {
   isCardDispatchInFlight,
   resolveOrchestratorReview,
   getOrchestratorState,
+  readProjectStanding,
   drainTickOrchestrator,
   setOverseer,
   dismissOverseerReminder,
@@ -131,7 +133,7 @@ import {
 } from '@/lib/server/swarmLandedLedger'
 import { basename } from 'path'
 import { asTaskTier, type SwarmAllowedModels } from '@/lib/types'
-import { applySafetyFloor } from '@/lib/cardTier'
+import { applySafetyFloor, resolveCardTier, tripsSafetyFloor } from '@/lib/cardTier'
 import type {
   AppNotificationsResponse,
   EscalationsResponse,
@@ -387,6 +389,13 @@ export const swarmRoutes = new Hono()
     // in-flight spawn. The board column is the shared mutual-exclusion token.
     let claimed = false
     if (taskId) {
+      // (a0) The card waits for the owner's answer about an operation whose result
+      //      nobody confirmed (AUTONOMY-SPEC R-B3): no new conversation may take
+      //      it — through this door either — before that answer. Fail-closed: an
+      //      inbox that cannot be read refuses too.
+      const waiting = await (await import('@/lib/server/swarmEscalations')).listOpenOwnerQuestionsStrict(path)
+        .then((open) => open.some((e) => e.receiptKey.startsWith('hold:') && e.taskId === taskId), () => true)
+      if (waiting) return c.json({ error: 'this task waits for the owner\'s answer about an operation whose result is unknown' }, 409)
       // (a) The engine got there first — it is mid-spawn for this card, or its
       //     worker is already live (a lagging todo→doing move can hide that from
       //     the board). Refuse rather than mint a rival branch.
@@ -875,6 +884,41 @@ export const swarmRoutes = new Hono()
     if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
     return c.json(await getOrchestratorState(path))
   })
+  // --- GET /api/swarm/standing — where the project stands (AUTONOMY-SPEC R-E1) --
+  // Query: ?path= . Returns ProjectStanding { state, needs, progressedAt?,
+  // reasons[] }: the one answer to "is it held and why", in the owner's language.
+  // A thin adapter over standingOf (swarmStanding.ts); the president retells
+  // reasons[].plain word for word. PURE READ-ONLY, owner-only + validated.
+  .get('/api/swarm/standing', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    const path = c.req.query('path') ?? ''
+    if (!path) return c.json({ error: 'path is required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    return c.json(await readProjectStanding(path))
+  })
+  // --- GET /api/swarm/card-tier — the tier a card's worker runs at (R-D5) ----
+  // Query: ?path=&id= . Returns { tier, effectiveTier, floored }: the stored tier
+  // (null when none or junk), resolveCardTier on the stored card (the function
+  // the worker's model/effort is resolved through), and whether its title/notes
+  // trip the safety floor. og-manage 「マージ」 step 4 settles the review depth
+  // from this; a copied regex in jq disagreed with JS next to Japanese text.
+  // Its own route, not fields on GET /api/project: PUT /api/project writes task
+  // rows back, so a computed field there would be persisted. PURE READ-ONLY,
+  // owner-only + validated.
+  .get('/api/swarm/card-tier', async (c) => {
+    if (!(await hasSwarmOwnerAccess())) return c.json({ error: 'forbidden' }, 403)
+    const path = c.req.query('path') ?? ''
+    const id = c.req.query('id') ?? ''
+    if (!path || !id) return c.json({ error: 'path and id are required' }, 400)
+    if (!(await validateProjectPath(path))) return c.json({ error: 'path not allowed' }, 403)
+    const card = (await readProjectData(path)).tasks.find((t) => t.id === id)
+    if (!card) return c.json({ error: 'task not found' }, 404)
+    return c.json({
+      tier: asTaskTier(card.tier) ?? null,
+      effectiveTier: resolveCardTier(card),
+      floored: tripsSafetyFloor(`${card.title ?? ''}\n${card.notes ?? ''}`),
+    })
+  })
   // --- GET /api/swarm/workers — the SERVER-TRUTH worker list -----------------
   // Query: ?path= . Returns SwarmWorkersResponse { workers: SwarmWorkerRecord[] }.
   // Unifies live PTYs, the engine's own roster, and heartbeat files so a worker
@@ -1257,7 +1301,7 @@ export const swarmRoutes = new Hono()
     } catch (e: any) {
       if (e instanceof AutomationPolicyError) return c.json({ error: e.message, code: e.code, automationBlocked: true }, 409)
       if (e instanceof EscalationNotFoundError) return c.json({ error: 'escalation not found' }, 404)
-      if (e instanceof EscalationStateError) return c.json({ error: e.message }, 409)
+      if (e instanceof EscalationStateError) return c.json({ error: e.message, ...(e.code ? { code: e.code } : {}), ...(e.reason ? { reason: e.reason } : {}) }, 409)
       return c.json({ error: `failed to answer escalation: ${e?.message ?? e}` }, 500)
     }
   })

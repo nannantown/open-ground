@@ -20,9 +20,15 @@
 //   before starts folded. Opening on entry cannot freeze the window: the seats
 //   only get what the page's streams leave (streamBudget.ts, pinned in
 //   SwarmModule.streamBudget.test.tsx).
+// - Waiting (owner decision 2026-11-28, AUTONOMY-SPEC §7-4 = A): when the
+//   project's standing (GET /api/swarm/standing) is 'waiting' — work held for a
+//   reason that lifts by itself — a muted clock sits beside the switch. No label,
+//   no state colour; the reason and the resume time are its hover text only.
 
 import { useEffect, useRef, useState, type HTMLAttributes, type KeyboardEvent, type PointerEvent } from 'react'
-import type { ProjectMeta } from '@/lib/types'
+import { Clock } from 'lucide-react'
+import type { ProjectMeta, ProjectStanding } from '@/lib/types'
+import { useT } from '@/i18n/I18nContext'
 import { useGroundLook } from '@/lib/useGroundLook'
 import { SwarmModule } from '@/components/canvas/modules/SwarmModule'
 import { StreamOwnerContext } from '@/lib/streamBudget'
@@ -83,7 +89,42 @@ export const isSwarmBarChord = (e: globalThis.KeyboardEvent, isMac: boolean): bo
   !e.altKey &&
   (isMac ? e.metaKey && !e.ctrlKey && !e.shiftKey : e.ctrlKey && e.shiftKey && !e.metaKey)
 
+/** How often the bar re-reads the project's standing. */
+export const STANDING_POLL_MS = 10_000
+
+/** The project's standing, polled while the page is visible. Null until read;
+ *  a failed read keeps the last one (a flash of nothing reads as "not held"). */
+const useStanding = (path: string): ProjectStanding | null => {
+  const [standing, setStanding] = useState<ProjectStanding | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setStanding(null)
+    const read = async () => {
+      if (document.hidden) return
+      try {
+        const res = await fetch(`/api/swarm/standing?path=${encodeURIComponent(path)}`, { cache: 'no-store' })
+        if (!res.ok) return
+        const next = (await res.json()) as ProjectStanding
+        if (!cancelled) setStanding((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next))
+      } catch {
+        /* server restarting / offline — keep the last reading */
+      }
+    }
+    void read()
+    const id = window.setInterval(() => void read(), STANDING_POLL_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [path])
+  return standing
+}
+
 export const SwarmBottomBar = ({ project, ownerFeatures = false }: { project: ProjectMeta; ownerFeatures?: boolean }) => {
+  const { t } = useT()
+  const standing = useStanding(project.path)
+  const waitingHint =
+    standing?.state === 'waiting' ? standing.reasons.map((r) => r.plain).join(' ') || t('projectPanel.groundMarkWaiting') : null
   const [open, setOpen] = useState(() => loadSwarmBarOpen(project.id))
   const [height, setHeight] = useState(() => loadSwarmBarHeight(project.id))
   const rootRef = useRef<HTMLDivElement>(null)
@@ -220,6 +261,19 @@ export const SwarmBottomBar = ({ project, ownerFeatures = false }: { project: Pr
         project={project}
         ownerFeatures={ownerFeatures}
         collapsed={!open}
+        headerMark={
+          waitingHint ? (
+            <span
+              role="img"
+              data-testid="swarm-bar-waiting"
+              title={waitingHint}
+              aria-label={waitingHint}
+              className="inline-flex shrink-0 items-center text-ink-faint"
+            >
+              <Clock size={14} strokeWidth={2} aria-hidden />
+            </span>
+          ) : undefined
+        }
         barHandle={{
           onPointerDown,
           onPointerMove,

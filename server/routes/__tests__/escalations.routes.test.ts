@@ -5,6 +5,8 @@ import { join } from 'path'
 import { app } from '../../app'
 import { writeSession, clearSession } from '@/lib/server/authStore'
 import { __resetMigrationCacheForTests, addImportedProjectEntry } from '@/lib/server/registry'
+import { openEscalation, dismissEscalation } from '@/lib/server/swarmEscalations'
+import { holdAnswerReason } from '@/lib/server/savedWorkHold'
 import type {
   EscalationOpenResponse,
   EscalationAnswerResponse,
@@ -136,6 +138,14 @@ describe('escalations routes — the owner journey', () => {
       answer: 'too late',
     })
     expect(lateAnswer.status).toBe(409)
+
+    // Review R2 S-3: a held-operation question the engine withdrew answers with
+    // the plain owner sentence and its mark — never the technical line above.
+    const { escalation: held } = await openEscalation({ projectPath: project, question: 'q', context: 'c', whyEscalated: 'insufficient-info', receiptKey: 'hold:tool-r' }, { notify: async (n) => n })
+    await dismissEscalation(held.id)
+    const heldRes = await post('/api/swarm/escalations/answer', { id: held.id, answer: 'A' })
+    expect(heldRes.status).toBe(409)
+    expect(await heldRes.json()).toEqual({ error: holdAnswerReason('closed', 'en'), code: 'hold', reason: 'closed' })
   })
 
   it('plainQuestion rides open → list (the owner-facing 平易文); oversize is 400', async () => {

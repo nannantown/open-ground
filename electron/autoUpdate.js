@@ -299,7 +299,128 @@ function applyDownloadedUpdate(deps) {
   })
 }
 
+/** Child shutdown grace before we escalate to SIGKILL: the server's own
+ *  SHUTDOWN_TOOL_GRACE_MS (20 s, src/lib/server/sdkSession.ts — on SIGTERM it
+ *  refuses new tool calls and waits that long for the running ones) plus 5 s to
+ *  exit. Was 5 s, which landed the hard kill inside that wait (AUTONOMY-SPEC
+ *  R-B2). Plain JS cannot import the TS constant; autoUpdate.test.ts pins the sum. */
+const CHILD_SIGTERM_GRACE_MS = 25_000
+
+/** Graceful teardown for ANY forked child: SIGTERM, wait up to `graceMs`, then
+ *  SIGKILL. Resolves once the child is gone (or we've force-killed it). Shared by
+ *  the live-engine shutdown (quit, "Restart now", engine switch) and the
+ *  self-update canary teardown. Lives here, not in main.js, so its timing is
+ *  unit-testable without Electron (server/__tests__/autoUpdate.test.ts). */
+function terminateChild(child, graceMs = CHILD_SIGTERM_GRACE_MS) {
+  return new Promise((resolve) => {
+    if (!child || child.killed || child.exitCode !== null) {
+      resolve()
+      return
+    }
+
+    let settled = false
+    let killTimer
+    const done = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(killTimer)
+      resolve()
+    }
+
+    child.once('exit', done)
+
+    try {
+      child.kill('SIGTERM')
+    } catch {
+      done()
+      return
+    }
+
+    killTimer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* already gone */
+      }
+      done()
+    }, graceMs)
+  })
+}
+
+/** main.js's `before-quit` and relaunch decisions, extracted so they can be
+ *  tested without Electron. Injected: `hasChildren` (hasLiveForkedChildren over
+ *  the live refs), `hideWindows`, `teardown` (reap every forked child),
+ *  `quit` (app.quit) and `relaunch` (app.relaunch).
+ *
+ *  WHY THE TEARDOWN IS TRACKED, NOT INFERRED (2026-11-28). A quit can now wait up
+ *  to ~25 s for the server's running tool calls (terminateChild). Asking
+ *  hasChildren() on every before-quit was wrong for that long: SIGTERM sets
+ *  `serverChild.killed` at once, so a second ⌘Q / dock Quit read "nothing live"
+ *  and quit Electron mid-wait, leaving the server to finish alone (and a quick
+ *  relaunch to find the port taken). So: idle + live children ⇒ hide every
+ *  window (the app looks closed now) and start ONE teardown; running ⇒ hold any
+ *  further quit; done ⇒ let the teardown's own quit through. idle + nothing live
+ *  ⇒ quit as before.
+ *
+ *  A teardown started OUTSIDE the gate is held for too: "Restart now"
+ *  (applyDownloadedUpdate) tears the server down itself, then quitAndInstall
+ *  quits. main.js passes that teardown through `track`, so a ⌘Q during the
+ *  server's wait is held, and the install's own quit — raised after the tracked
+ *  teardown settled — goes through (review C-S1). */
+function createQuitGate(deps) {
+  let teardown = 'idle' // 'idle' | 'running' | 'done'
+  let tracked = 0
+  let relaunchRequested = false
+  return {
+    /** `app.on('before-quit')`. */
+    beforeQuit(event) {
+      if (teardown === 'done') return
+      if (teardown === 'running' || tracked > 0) {
+        event.preventDefault()
+        return
+      }
+      if (!deps.hasChildren()) return
+      event.preventDefault()
+      teardown = 'running'
+      try {
+        deps.hideWindows()
+      } catch {
+        /* cosmetic — the teardown is the point */
+      }
+      new Promise((resolve) => resolve(deps.teardown()))
+        .catch(() => {})
+        .then(() => {
+          teardown = 'done'
+          deps.quit()
+        })
+    },
+    /** Hold every quit while `promise` (a teardown the gate did not start) is
+     *  pending. Returns a promise that settles like `promise`, after the hold is
+     *  released — so a caller chaining its own quit on it is never held. */
+    track(promise) {
+      tracked++
+      return Promise.resolve(promise).finally(() => {
+        tracked--
+      })
+    },
+    /** A second launch or a dock reopen. While quitting, no window may be
+     *  surfaced (it is hidden and dying): ask for ONE relaunch after this process
+     *  exits instead, and return true so the caller does nothing else. */
+    relaunchIfQuitting() {
+      if (teardown === 'idle') return false
+      if (!relaunchRequested) {
+        relaunchRequested = true
+        deps.relaunch()
+      }
+      return true
+    },
+  }
+}
+
 module.exports = {
+  CHILD_SIGTERM_GRACE_MS,
+  terminateChild,
+  createQuitGate,
   INSTALL_WATCHDOG_MS,
   STAGE_WAIT_MS,
   eagerSquirrelHandoff,

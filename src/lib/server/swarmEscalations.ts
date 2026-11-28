@@ -114,9 +114,13 @@ export class EscalationNotFoundError extends Error {
 }
 
 /** An operation that contradicts the record's lifecycle (e.g. answering a
- *  DISMISSED question) — refused loudly rather than silently "succeeding". */
+ *  DISMISSED question) — refused loudly rather than silently "succeeding".
+ *  `code: 'hold'` marks a refusal written for the owner, in their language (a
+ *  held operation's question): the screens show it as it is, and any other
+ *  message stays technical (review R2 S-3). `reason` (savedWorkHold.HoldRefusal)
+ *  says which refusal it is, so a seat branches on it, never on the sentence. */
 export class EscalationStateError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly code?: 'hold', readonly reason?: string) {
     super(message)
     this.name = 'EscalationStateError'
   }
@@ -1210,6 +1214,9 @@ export interface AnswerEscalationDeps {
    *  none stands; true only when the desk accepted it (default: the same relay
    *  as `manager/say` — without waking on the answer request, waking on retry). */
   tellCommander?: (projectPath: string, text: string) => Promise<boolean>
+  /** DI for tests: apply the owner's answer to a held operation's question
+   *  (receiptKey `hold:<id>` — default savedWorkHold.answerHeldOperation). */
+  answerHeld?: (record: Escalation, answer: string) => Promise<unknown>
   now?: () => Date
 }
 
@@ -1353,7 +1360,9 @@ const deliverAnswer = async (
       // option every time (measured 2026-08-04: 「B: このまま保留」 resolved as
       // resume, and the card moved anyway). The line stays what the worker
       // reads; the choice is read from the answer alone.
-      { workerAddressed, answer, byOwner: record.answeredBy !== 'commander' },
+      // A held operation's card moves ONLY through answerHeldOperation (phase 0),
+      // on an explicit A/B: the generic unpark must not read 「続けて」 as resume.
+      { workerAddressed, answer: record.receiptKey.startsWith('hold:') ? '' : answer, byOwner: record.answeredBy !== 'commander' },
     )
     queued = true
   }
@@ -1394,6 +1403,30 @@ export const answerEscalation = async (
   const text = (answer ?? '').trim().slice(0, MAX_ESCALATION_ANSWER)
   if (!text) throw new Error('answer is required')
 
+  // PHASE 0 — A HELD OPERATION'S QUESTION (AUTONOMY-SPEC R-B3/R-B4): the owner's
+  // choice is APPLIED before the answer is recorded (the same review the Settings
+  // panel writes, then the card or desk moves on — savedWorkHold.answerHeldOperation).
+  // Outside the chain: it reaches the receipt journal and the orchestrator (L2).
+  // A refusal — no A or B in it, the held conversation still running, a review
+  // that did not take — throws the plain reason (409, the president relays it) and
+  // leaves the question OPEN. Until 2026-11-28 the answer was recorded first and a
+  // failed apply only logged: the question closed, the hold stood, and the engine
+  // asked the same question again with no reason given (reviews A-M2, D-M2).
+  let heldApplied = false
+  if (by === 'owner') {
+    const pending = (await readTolerant()).find((e) => e.id === id)
+    if (pending?.status === 'open' && pending.receiptKey.startsWith('hold:')) {
+      const held = await import('./savedWorkHold')
+      try {
+        await (deps?.answerHeld ?? held.answerHeldOperation)(pending, text)
+      } catch (e) {
+        const refused = e instanceof Error && e.name === 'HoldAnswerRefused' ? e as InstanceType<typeof held.HoldAnswerRefused> : undefined
+        throw new EscalationStateError(refused ? refused.message : held.holdAnswerReason('failed', await held.holdLang()), 'hold', refused?.reason ?? 'failed')
+      }
+      heldApplied = true
+    }
+  }
+
   // PHASE 1 — under the chain (L1): validate + persist. File
   // read-modify-write ONLY; nothing here may reach the orchestrator (L2).
   // Returns either a finished answer, or the record that still needs delivering.
@@ -1406,6 +1439,15 @@ export const answerEscalation = async (
     const record = known.find((e) => e.id === id)
     if (!record) throw new EscalationNotFoundError(id)
     if (record.status === 'dismissed') {
+      // Our own review lifted the hold and an engine pass withdrew the question in
+      // the gap: the answer took — nothing left to record.
+      if (heldApplied) return { done: true, escalation: record, delivery: 'skipped' as const }
+      // A held operation's question the engine withdrew (its result turned up):
+      // nothing is wrong, and the owner is told so in their words (review R2 S-3).
+      if (by === 'owner' && record.receiptKey.startsWith('hold:')) {
+        const held = await import('./savedWorkHold')
+        throw new EscalationStateError(held.holdAnswerReason('closed', await held.holdLang()), 'hold', 'closed')
+      }
       throw new EscalationStateError('escalation was dismissed — reopen it by raising it again')
     }
     if (record.status === 'injected') {

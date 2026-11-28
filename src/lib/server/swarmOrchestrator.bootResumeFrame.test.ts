@@ -24,10 +24,11 @@ import { sessionJsonlPath } from './transcript'
 import type { AppNotification } from '../types'
 import { writeEngineIntent } from './swarmEnginePersistence'
 import { settingsFile, canvasFile, engineBootsFile } from './paths'
-import { settings as settingsMessages } from '../../i18n/messages/settings'
 import { assertNoUncertainRuntimeActions } from './runtimeActionReceipts'
+import { listEscalations } from './swarmEscalations'
 import { engineJournalPath } from './engineJournal'
 import { AUTOMATION_START_TELL_MS } from './swarmOrchestrator'
+import { CHATGPT_REVIEW_HOLD_HINT } from './savedWorkHold'
 
 // 2026-11-17 adversarial review M1: inside the Ground frame the policy loop's
 // reconcile used to start an engine the boot resume was still HOLDING (saved
@@ -87,7 +88,8 @@ beforeEach(async () => {
   await rm(receiptsPath(), { force: true })
   proj = await mkdtemp(join(tmpdir(), 'og-bootframe-'))
   id = randomUUID()
-  await writeFile(settingsFile(), JSON.stringify({ projects: [{ id, path: proj, addedAt: '2026-01-01T00:00:00.000Z' }] }))
+  // The owner's machine runs Japanese (Settings.language; unset ⇒ English).
+  await writeFile(settingsFile(), JSON.stringify({ language: 'ja', projects: [{ id, path: proj, addedAt: '2026-01-01T00:00:00.000Z' }] }))
   await writeFile(canvasFile(), JSON.stringify({
     positions: { [id]: { x: 10, y: 10 } }, viewport: { x: 0, y: 0, zoom: 1 },
     automation: { version: 1, enabled: true, frameId: 'auto', revision: 1 },
@@ -177,6 +179,25 @@ describe('boot resume follow-ups (2026-11-17, 4d9b7d9c reviews)', () => {
     reviewed = true
     await retryBootResumes({ ownerReview: true })
     expect((await getOrchestratorState(proj, safeDeps())).running).toBe(true)
+  })
+
+  // Review R2 S-4: a held ChatGPT desk conversation names the Settings door (it
+  // raises no question in the bar) — and is still a hold only the owner clears:
+  // off the 15 s timer, announced at once, without "launch it by hand".
+  it('a ChatGPT conversation held for the owner\'s review in Settings is an owner-only hold too', async () => {
+    let checks = 0
+    await writeEngineIntent(proj, { desiredRunning: true, overseer: false })
+    await resumeEngines(safeDeps(), {
+      listProjectPaths: async () => [proj],
+      clock: () => 1_000_000,
+      runtimeHold: async () => { checks++; return `saved ChatGPT conversation (${CHATGPT_REVIEW_HOLD_HINT})` },
+    })
+    const afterBoot = checks
+    const told = await heldNotice()
+    expect(told, 'said at once').toHaveLength(1)
+    expect(told[0].swarmFatal?.detail).not.toContain('手動で立ち上げても構いません')
+    await retryBootResumes()
+    expect(checks, 'the 15 s policy-loop retry skips it').toBe(afterBoot)
   })
 
   it('a later few-second blip is not announced at once on the strength of an older, different hold', async () => {
@@ -289,41 +310,73 @@ describe('boot resume follow-ups (2026-11-17, 4d9b7d9c reviews)', () => {
     await rm(file, { force: true })
   })
 
-  it("another account's unconfirmed result does not hold this owner's commander (会話の復旧 could never show it)", async () => {
+  // These two pinned the owner scoping on the COMMANDER's boot resume until
+  // 2026-11-28, when the commander stopped being revived at boot (R-D3a — it is
+  // started by its first need instead). The same scoping guards the engine's
+  // project-wide hold, so they now pin it there.
+  it("another account's unconfirmed result does not hold this owner's autopilot (会話の復旧 could never show it)", async () => {
     gate.owner = OWNER
-    await writeEngineIntent(proj, { desiredRunning: false, overseer: false, managerDesired: true })
+    await writeEngineIntent(proj, { desiredRunning: true, overseer: false })
     await seedReceipt('f'.repeat(64), { kind: 'runtime-tool', provider: 'claude', sessionId: 'old-commander', tool: 'Bash' })
-    const managers: string[] = []
-    await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj], spawnManager: async ({ projectPath }) => { managers.push(projectPath) } })
-    expect(managers).toEqual([proj])
+    await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
+    expect((await getOrchestratorState(proj, safeDeps())).running).toBe(true)
   })
 
-  it("this owner's own unconfirmed result still holds the commander", async () => {
+  // R-B3 (AUTONOMY-SPEC, owner decision 2026-11-28 §7-1 = A) together with R-D3a.
+  // These used to pin "this owner's own unconfirmed result still holds the
+  // commander" and, after the commander stopped being revived at boot, "...still
+  // holds the autopilot": one cut-off call kept the project down until the owner
+  // found the Settings screen. Only the conversation that issued a call can run it
+  // again, so nothing else waits for it: the autopilot resumes, the commander is
+  // not revived at boot (it opens a FRESH conversation on its first need —
+  // swarmManager.launchNewDesk), and the owner gets ONE question in the inbox at
+  // boot, even when no desk and no autopilot comes back.
+  const holdQuestions = async () =>
+    (await listEscalations({ projectPath: proj, status: 'open' })).filter((e) => e.receiptKey.startsWith('hold:r-'))
+
+  it("this owner's unconfirmed result on the commander's conversation does not hold the autopilot", async () => {
     gate.owner = OWNER
-    await writeEngineIntent(proj, { desiredRunning: false, overseer: false, managerDesired: true })
+    await writeEngineIntent(proj, { desiredRunning: true, overseer: false, managerDesired: true })
+    await recordSwarmSession(proj, 'manager', 'old-commander')
     await seedReceipt(OWNER, { kind: 'runtime-tool', provider: 'claude', sessionId: 'old-commander', tool: 'Bash' })
-    const managers: string[] = []
-    await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj], spawnManager: async ({ projectPath }) => { managers.push(projectPath) } })
-    expect(managers).toEqual([])
-    // The Settings screen's own heading — 「会話の復旧」 was never on that screen.
-    expect((await heldNotice()).at(-1)?.swarmFatal?.detail).toContain(settingsMessages.ja['settings.recovery.title'])
+    await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
+    expect((await getOrchestratorState(proj, safeDeps())).running).toBe(true)
+    expect(await holdQuestions()).toHaveLength(1)
+  })
+
+  it('with nothing coming back at boot (no frame, autopilot off), the commander\'s held operation is still asked about once', async () => {
+    gate.owner = OWNER
+    // No automation frame at all: the engine path returns before it asks, and no
+    // president is wished for — only the commander's saved conversation is left.
+    await writeFile(canvasFile(), JSON.stringify({ positions: { [id]: { x: 10, y: 10 } }, viewport: { x: 0, y: 0, zoom: 1 } }))
+    await writeEngineIntent(proj, { desiredRunning: false, overseer: false, managerDesired: true })
+    await recordSwarmSession(proj, 'manager', 'old-commander')
+    await seedReceipt(OWNER, { kind: 'runtime-tool', provider: 'claude', sessionId: 'old-commander', tool: 'Bash' })
+    await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
+    const open = await holdQuestions()
+    expect(open).toHaveLength(1)
+    expect(open[0].plainQuestion).toContain('マネージャー')
+    await resumeEngines(safeDeps(), { listProjectPaths: async () => [proj] })
+    expect(await holdQuestions()).toHaveLength(1)
   })
 })
 
 describe('the engine asks the launch guard its own question (2026-11-23)', () => {
-  it('a saved unconfirmed result holds; a signed-out owner holds; the review releases — exactly when a launch would fail', async () => {
-    const count = defaultDeps().savedWorkHold!
+  it('a saved unconfirmed result holds its own conversation only; a signed-out owner holds; the review releases — exactly when a launch would fail', async () => {
+    const holds = defaultDeps().savedWorkHold!
     gate.owner = OWNER
     await seedReceipt(OWNER, { kind: 'runtime-tool', provider: 'claude', sessionId: 'gone-worker', tool: 'Bash' })
-    expect(await count(proj)).toBe(1)
-    await expect(assertNoUncertainRuntimeActions(proj, false)).rejects.toThrow(/unconfirmed result/)
+    expect((await holds(proj)).map((op) => op.sessionId)).toEqual(['gone-worker'])
+    await expect(assertNoUncertainRuntimeActions(proj, false, 'gone-worker')).rejects.toThrow(/unconfirmed result/)
+    // R-B3: another conversation in the same project launches.
+    await expect(assertNoUncertainRuntimeActions(proj, false, 'another-worker')).resolves.toBeUndefined()
     gate.owner = null
-    await expect(count(proj)).rejects.toThrow(/sign-in/)
-    await expect(assertNoUncertainRuntimeActions(proj, false)).rejects.toThrow(/sign-in/)
+    await expect(holds(proj)).rejects.toThrow(/sign-in/)
+    await expect(assertNoUncertainRuntimeActions(proj, false, 'another-worker')).rejects.toThrow(/sign-in/)
     gate.owner = OWNER
     await rm(receiptsPath(), { force: true })
-    expect(await count(proj)).toBe(0)
-    await expect(assertNoUncertainRuntimeActions(proj, false)).resolves.toBeUndefined()
+    expect(await holds(proj)).toEqual([])
+    await expect(assertNoUncertainRuntimeActions(proj, false, 'gone-worker')).resolves.toBeUndefined()
   })
 })
 

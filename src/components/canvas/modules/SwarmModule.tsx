@@ -91,6 +91,7 @@ import type { SwarmEnvIssueId } from './useSwarmEngine'
 import { workerBeaconStatus } from '@/lib/workerBeacon'
 import { SwarmErrorBanner } from '@/components/canvas/modules/SwarmErrorBanner'
 import { STREAM_BUDGET, useStreamCount } from '@/lib/streamBudget'
+import { HoldQuestionDialog, type HoldQuestion } from '@/components/canvas/modules/HoldQuestionDialog'
 
 // Seats (社長 / manager / each worker) lay out as ONE horizontally-scrolling
 // row. Each seat grows to fill the area when there are few but never shrinks
@@ -281,9 +282,12 @@ interface SwarmModuleProps {
   onToggleCollapsed?: () => void
   /** The bottom bar's drag handlers, spread on the header row (SwarmBottomBar). */
   barHandle?: SwarmBarHandle
+  /** A mark drawn just before the on/off switch — the bar's standing clock
+   *  (SwarmBottomBar, AUTONOMY-SPEC R-E2). */
+  headerMark?: ReactNode
 }
 
-export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false, onToggleCollapsed, barHandle }: SwarmModuleProps) => {
+export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false, onToggleCollapsed, barHandle, headerMark }: SwarmModuleProps) => {
   const { t } = useT()
 
   // Seats unmount when collapsed or when reconcile clears an exited desk.
@@ -357,6 +361,18 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
   // one-glance count. null = not read yet (or a failed read): the strip then
   // says NOTHING, never "0" (an unread inbox must not look like a clear one).
   const [ownerQuestionCount, setOwnerQuestionCount] = useState<number | null>(null)
+  // The open questions about operations whose result nobody confirmed (`hold:`),
+  // off the SAME poll: the owner answers them right here (HoldQuestionDialog) —
+  // the president cannot answer for its own held conversation (review D-M3).
+  const [holdQuestions, setHoldQuestions] = useState<HoldQuestion[]>([])
+  const [holdDialogOpen, setHoldDialogOpen] = useState(false)
+  // Open only by a click: once nothing is left to answer (the owner answered the
+  // last one, or the engine withdrew it) the dialog is closed, so a later poll's
+  // question — or the answered one, handed back by a poll in flight — never
+  // opens it by itself (review R2 S-1).
+  useEffect(() => {
+    if (!holdQuestions.length) setHoldDialogOpen(false)
+  }, [holdQuestions.length])
   // Long-lived streams the PAGE (the open tab's body) holds right now — the
   // bar may only use what they leave of STREAM_BUDGET (streamBudget.ts).
   const pageStreams = useStreamCount('page')
@@ -376,7 +392,10 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
         if (!r.ok || stopped) return
         const d = (await r.json()) as {
           escalations?: {
+            id?: string
             status?: string
+            receiptKey?: string
+            taskId?: string
             sdkSessionId?: string
             question?: string
             plainQuestion?: string
@@ -384,6 +403,9 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
           }[]
         }
         const next = new Map<string, string>()
+        const holds = (d.escalations ?? [])
+          .filter((e) => e.status === 'open' && e.id && e.receiptKey?.startsWith('hold:') && (e.plainQuestion || e.question))
+          .map((e): HoldQuestion => ({ id: e.id!, text: (e.plainQuestion || e.question)!, twoWay: !!e.taskId }))
         const openCount = (d.escalations ?? []).filter((e) => e.status === 'open').length
         const open = (d.escalations ?? [])
           .filter((e) => e.status === 'open' && e.sdkSessionId && (e.plainQuestion || e.question))
@@ -395,6 +417,7 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
         if (!stopped) {
           setQuestionBySdk(next)
           setOwnerQuestionCount(openCount)
+          setHoldQuestions(holds)
         }
       } catch {
         /* keep the last known state — a fetch hiccup must not flap the banner */
@@ -1280,7 +1303,9 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
           onToggleCollapsed
             ? // With the bar's drag handle the row is grabbed (row-resize); a
               // press without moving still opens / folds.
-              `${barHandle ? 'cursor-row-resize touch-none select-none' : 'cursor-pointer'} pl-1.5 transition-colors duration-150 hover:bg-plane active:bg-line-soft has-[[role=switch]:hover]:bg-bg has-[[role=switch]:active]:bg-bg`
+              // A control inside the row lights itself, not the row (the switch, the
+              // question chip — review R2 S-6).
+              `${barHandle ? 'cursor-row-resize touch-none select-none' : 'cursor-pointer'} pl-1.5 transition-colors duration-150 hover:bg-plane active:bg-line-soft has-[[role=switch]:hover]:bg-bg has-[[role=switch]:active]:bg-bg has-[[data-bar-chip]:hover]:bg-bg has-[[data-bar-chip]:active]:bg-bg`
             : 'pl-3',
           collapsed ? '' : 'border-b border-line',
         ].join(' ')}
@@ -1322,7 +1347,27 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
         )}
         {/* Questions waiting on the owner — said only when there ARE some and
             the inbox was actually read (ownerQuestionCount's contract). */}
-        {ownerQuestionCount ? (
+        {ownerQuestionCount && holdQuestions.length ? (
+          // A held operation waits on the owner's answer: the count opens it.
+          <button
+            type="button"
+            data-bar-chip
+            onClick={() => setHoldDialogOpen(true)}
+            title={t('projectPanel.swarm.bar.answerHint')}
+            className={[
+              'inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full bg-plane px-2 py-0.5 text-meta text-ink',
+              // The app's small-button states (the seat's start button): accent edge
+              // and text on hover, a soft accent fill pressed. A ring, not a border —
+              // the chip keeps the plain chip's size. Pressed, the text turns ink: accent
+              // on the soft fill is 4.41:1 in the light palette, under AA (R3-ui N3).
+              'ring-1 ring-inset ring-transparent transition duration-150 hover:text-accent hover:ring-accent active:bg-accent/10 active:text-ink',
+              'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+            ].join(' ')}
+          >
+            <Hand size={12} strokeWidth={2} className="shrink-0 text-status-ask" aria-hidden />
+            {t('projectPanel.swarm.bar.questions', { count: ownerQuestionCount })}
+          </button>
+        ) : ownerQuestionCount ? (
           <span
             title={t('projectPanel.swarm.bar.questionsHint')}
             className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-plane px-2 py-0.5 text-meta text-ink"
@@ -1340,6 +1385,7 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
           </span>
         ) : null}
         <div className="min-w-0 flex-1" aria-hidden />
+        {headerMark}
         {!frameOnlyAutomation && <SwarmPowerSwitch
           running={engine.running}
           available={engineAvailable}
@@ -1356,6 +1402,18 @@ export const SwarmModule = ({ project, ownerFeatures = false, collapsed = false,
           }}
         />}
       </div>
+      {/* Outside the row: a click in the dialog must not open / fold the bar. */}
+      {holdDialogOpen && holdQuestions.length > 0 && (
+        <HoldQuestionDialog
+          questions={holdQuestions}
+          otherCount={Math.max(0, (ownerQuestionCount ?? 0) - holdQuestions.length)}
+          onAnswered={(id) => {
+            setHoldQuestions((qs) => qs.filter((q) => q.id !== id))
+            setOwnerQuestionCount((n) => (n ? n - 1 : n))
+          }}
+          onClose={() => setHoldDialogOpen(false)}
+        />
+      )}
       {!collapsed && engine.automation?.enabled && (
         <p role="status" className="shrink-0 border-b border-line-soft bg-bg px-3 py-2 text-meta leading-relaxed text-ink-muted">
           {t(engine.automation.allowed ? 'projectPanel.swarm.automationFrameInside' : 'projectPanel.swarm.automationFrameOutside')}

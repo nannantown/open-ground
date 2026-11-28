@@ -36,6 +36,7 @@ import { initOverseerRuntime } from '@/lib/server/swarmOverseer'
 import { readProjectData, mutateProjectData } from '@/lib/server/projectData'
 import type { ProjectTask, SpawnSwarmWorkerResponse } from '@/lib/types'
 import { AutomationPolicyError } from '@/lib/server/automationPolicy'
+import { openEscalation } from '@/lib/server/swarmEscalations'
 
 /** The fake spawn body, swapped per test. Hoisted so the vi.mock factory (which
  *  runs before the module body) can close over it. `onBoardRead` fires after every
@@ -505,5 +506,22 @@ describe('runDispatchPass — the engine cannot twin a card the manual route tak
     const after = await cardNow('c1')
     expect(after?.boardColumn).toBe('todo') // claim handed back, not stranded in doing
     expect(after?.branch).toBeUndefined()
+  })
+})
+
+// R-B3 (AUTONOMY-SPEC): a card parked for the owner's answer about an operation
+// whose result is unknown must not be taken by a new conversation through this
+// door either (the commander dispatches through it) before that answer.
+describe('POST /api/swarm/worker — a card waiting for the owner\'s answer about an unknown result', () => {
+  it('is refused (409) and nothing spawns; another card still dispatches', async () => {
+    await seedCard({ id: 'held', boardColumn: 'blocked' })
+    await seedCard({ id: 'free' })
+    await openEscalation({ projectPath: proj, question: 'q', plainQuestion: 'q', context: 'c', whyEscalated: 'insufficient-info', receiptKey: 'hold:tool-x', taskId: 'held' }, { notify: async () => undefined })
+    const refused = await app.request('/api/swarm/worker', json({ path: proj, taskId: 'held' }))
+    expect(refused.status).toBe(409)
+    expect(spawnCalls).toHaveLength(0)
+    const ok = await app.request('/api/swarm/worker', json({ path: proj, taskId: 'free' }))
+    expect(ok.status).toBe(200)
+    expect(spawnCalls).toHaveLength(1)
   })
 })

@@ -17,7 +17,8 @@
 //              (dist-web/) as static files AND answers /api on the fixed port,
 //              so the whole app is one origin. We wait for /api/health to echo
 //              our bootId, then loadURL(BASE_URL). The child dies with us
-//              (before-quit → SIGTERM → 5s → SIGKILL).
+//              (before-quit → SIGTERM → it waits ≤20s for running tool calls
+//              → exits; SIGKILL only at 25s — electron/autoUpdate.js terminateChild).
 //
 // Single source of truth for "is the server ours": GET /api/health must return
 // 200 with { app: 'openground', bootId: <our bootId> }. In dev the running
@@ -51,6 +52,8 @@ const {
   waitForInstallStaged,
   hasLiveForkedChildren,
   applyDownloadedUpdate,
+  terminateChild,
+  createQuitGate,
 } = require('./autoUpdate')
 // The updater's MEMORY (2026-09-13): every updater line to ~/.openground/updater.log,
 // and a pending-install marker the next boot checks. See electron/updaterLog.js.
@@ -138,9 +141,6 @@ const MODE =
 const HEALTH_POLL_INTERVAL_MS = 250
 const HEALTH_TIMEOUT_MS = 120_000
 const HEALTH_REQUEST_TIMEOUT_MS = 2_000
-
-// Child shutdown grace before we escalate to SIGKILL.
-const CHILD_SIGTERM_GRACE_MS = 5_000
 
 // A bootId for THIS launch. The bundled Hono server echoes it back through
 // /api/health (via OPENGROUND_BOOT_ID) so we can prove the listener on :47776
@@ -406,6 +406,55 @@ function deliverDeepLink(url) {
 }
 
 // ---------------------------------------------------------------------------
+// Quit. Tear down EVERY forked child before the process exits. The live engine is
+// the common case, but a self-update cycle can also have a canary (its own port)
+// and an `npm run build` / regression child in flight — those would orphan if we
+// quit mid-cycle (R4). isQuitting is set FIRST so the cycle's health waits bail and
+// the rollback skips recovery. Async-safe via event.preventDefault() until the
+// children are gone (or the grace elapses). The decision is createQuitGate's
+// (electron/autoUpdate.js, unit-tested); the reaping is the teardown below.
+// ---------------------------------------------------------------------------
+const quitGate = createQuitGate({
+  // Shared with the "Restart now" auto-update path (electron/autoUpdate.js): the
+  // SAME predicate decides both "reap before quitting" here and "is teardown done
+  // so quitAndInstall won't be intercepted" there. Keeping one definition means
+  // the auto-update regression test (autoUpdate.test.ts) exercises this exact gate.
+  hasChildren: () =>
+    hasLiveForkedChildren({
+      serverChild,
+      activeCanaryHandle,
+      activeBuildChild,
+      activeE2eChild,
+    }),
+  // The teardown can wait ~25 s for running tool calls: the app must look closed
+  // NOW, or the owner presses ⌘Q again or force-quits. The dock icon goes too
+  // (macOS), so nothing on screen says it is still running.
+  hideWindows: () => {
+    for (const w of BrowserWindow.getAllWindows()) w.hide()
+    if (app.dock) app.dock.hide()
+  },
+  teardown: () => {
+    isQuitting = true
+    // The build/vitest child shares npm's group and has no graceful protocol — SIGKILL
+    // its WHOLE group outright (killing only the parent orphans the fork pool → 100%+
+    // core saturation; detached spawn + group-kill reaps every worker, task 402d34a0
+    // MUST-FIX1).
+    killProcessTree(activeBuildChild)
+    // The e2e (playwright) child spawns its webServer in a SEPARATE group, so route it
+    // through gracefulGroupKill (discover that group → SIGINT → SIGKILL escalation) and
+    // WAIT for it before quitting — a plain group SIGKILL would orphan the webServer on
+    // port 47876 (review-B M1).
+    return Promise.all([
+      gracefulGroupKill(activeE2eChild),
+      shutdownServerChild(),
+      activeCanaryHandle ? stopCanaryEngine(activeCanaryHandle) : Promise.resolve(),
+    ])
+  },
+  quit: () => app.quit(),
+  relaunch: () => app.relaunch(),
+})
+
+// ---------------------------------------------------------------------------
 // Single instance — app.requestSingleInstanceLock(). A second `open` of the
 // app gets denied the lock and quits immediately; the first instance gets a
 // 'second-instance' event and raises its window. This is the Electron-native
@@ -439,6 +488,9 @@ if (!gotLock) {
   })
 
   app.on('second-instance', (_event, argv) => {
+    // Opened again while quitting: never surface the hidden, dying window —
+    // the gate asks for one relaunch after this process exits.
+    if (quitGate.relaunchIfQuitting()) return
     // Win/Linux deliver a warm deep link as an argv to the second launch.
     const url = deepLinkFromArgv(argv)
     if (url) deliverDeepLink(url)
@@ -467,6 +519,9 @@ if (!gotLock) {
   })
 
   app.on('activate', () => {
+    // macOS delivers "open the app again" to a running app as activate (a dock
+    // click / Finder open), not second-instance — same rule while quitting.
+    if (quitGate.relaunchIfQuitting()) return
     if (mainWindow === null) {
       createWindow()
       // The server is still up (we never tore it down on window close), so
@@ -489,43 +544,9 @@ if (!gotLock) {
     }
   })
 
-  // Tear down EVERY forked child before the process exits. The live engine is the
-  // common case, but a self-update cycle can also have a canary (its own port) and
-  // an `npm run build` / regression child in flight — those would orphan if we quit
-  // mid-cycle (R4). isQuitting is set FIRST so the cycle's health waits bail and the
-  // rollback skips recovery. Async-safe via event.preventDefault() until the
-  // children are gone (or the grace elapses).
-  app.on('before-quit', (event) => {
-    // Shared with the "Restart now" auto-update path (electron/autoUpdate.js): the
-    // SAME predicate decides both "reap before quitting" here and "is teardown done
-    // so quitAndInstall won't be intercepted" there. Keeping one definition means
-    // the auto-update regression test (autoUpdate.test.ts) exercises this exact gate.
-    const hasChildren = hasLiveForkedChildren({
-      serverChild,
-      activeCanaryHandle,
-      activeBuildChild,
-      activeE2eChild,
-    })
-    if (!hasChildren) return
-    event.preventDefault()
-    isQuitting = true
-    // The build/vitest child shares npm's group and has no graceful protocol — SIGKILL
-    // its WHOLE group outright (killing only the parent orphans the fork pool → 100%+
-    // core saturation; detached spawn + group-kill reaps every worker, task 402d34a0
-    // MUST-FIX1).
-    killProcessTree(activeBuildChild)
-    // The e2e (playwright) child spawns its webServer in a SEPARATE group, so route it
-    // through gracefulGroupKill (discover that group → SIGINT → SIGKILL escalation) and
-    // WAIT for it before quitting — a plain group SIGKILL would orphan the webServer on
-    // port 47876 (review-B M1).
-    Promise.all([
-      gracefulGroupKill(activeE2eChild),
-      shutdownServerChild(),
-      activeCanaryHandle ? stopCanaryEngine(activeCanaryHandle) : Promise.resolve(),
-    ]).finally(() => {
-      app.quit()
-    })
-  })
+  // Tear down EVERY forked child before the process exits — the decision lives in
+  // quitGate (electron/autoUpdate.js createQuitGate), the reaping in its teardown.
+  app.on('before-quit', (event) => quitGate.beforeQuit(event))
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +736,8 @@ function createWindow() {
 }
 
 function focusExistingWindow() {
+  // Every other way back to the window (a deep link, a notification) while quitting.
+  if (quitGate.relaunchIfQuitting()) return
   if (!mainWindow) return
   if (mainWindow.isMinimized()) mainWindow.restore()
   mainWindow.show()
@@ -995,45 +1018,6 @@ async function attemptCrashRespawn() {
     )
     app.exit(1)
   }
-}
-
-// Graceful teardown for ANY forked child: SIGTERM, wait up to `graceMs`, then
-// SIGKILL. Resolves once the child is gone (or we've force-killed it). Shared by
-// the live-engine shutdown and the self-update canary teardown.
-function terminateChild(child, graceMs = CHILD_SIGTERM_GRACE_MS) {
-  return new Promise((resolve) => {
-    if (!child || child.killed || child.exitCode !== null) {
-      resolve()
-      return
-    }
-
-    let settled = false
-    let killTimer
-    const done = () => {
-      if (settled) return
-      settled = true
-      clearTimeout(killTimer)
-      resolve()
-    }
-
-    child.once('exit', done)
-
-    try {
-      child.kill('SIGTERM')
-    } catch {
-      done()
-      return
-    }
-
-    killTimer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL')
-      } catch {
-        /* already gone */
-      }
-      done()
-    }, graceMs)
-  })
 }
 
 // Stop the LIVE engine (serverChild). Used at quit AND as the switch's "stop old".
@@ -2463,7 +2447,10 @@ async function applyUpdateWhenStaged(version, opts = {}) {
     setQuitting: (v) => {
       isQuitting = v
     },
-    shutdownServerChild,
+    // Through the quit gate: the server may wait ~20 s for a running tool call,
+    // and a ⌘Q in that window must be held, not quit Electron with the server
+    // still bound to :47776 (review C-S1).
+    shutdownServerChild: () => quitGate.track(shutdownServerChild()),
     // Fall back to a plain quit if the handle is somehow gone: by this point the
     // server child has already been torn down, so doing NOTHING would leave the
     // user staring at a live window backed by a dead server.

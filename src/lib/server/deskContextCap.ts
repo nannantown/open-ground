@@ -14,7 +14,11 @@
 //     API and git. Dropping the conversation loses nothing, and costs nothing —
 //     a summary would have to read the whole context to write it. So at SPAWN,
 //     a persisted conversation over the cap is not resumed; a fresh one opens
-//     with the same re-read instruction. (This module — the decision.)
+//     with the same re-read instruction. (This module — the decision.) And since
+//     2026-11-28 (R-D3b) also at a WAKE: an idle SDK commander over its cap
+//     (MANAGER_CONTEXT_CAP, lower than the supply desk's) is closed instead of
+//     woken, and the spawn above reopens it fresh (swarmManager.idleManagerDeskOverCap,
+//     swarmOrchestrator runIntegratePass).
 //   • SUPPLY OFFICER — COMPACT. Its conversation with the owner continues, so
 //     cutting the thread would be felt. It is sent one compaction command once idle
 //     (supplyContextCap.ts).
@@ -27,7 +31,23 @@
 
 import { randomUUID } from 'crypto'
 import { sessionContextTokens } from './claudeUsage'
-import { getDeskContextCapTokens } from './store'
+import { getSettings } from './store'
+
+/** The COMMANDER's cap when the owner set none (docs/AUTONOMY-SPEC.md R-D3b,
+ *  2026-11-28). Measured over 7 days: 237k average context per commander call
+ *  against the shared 300k default — the commander re-reads the world through the
+ *  API and git anyway, so a smaller conversation loses nothing. The supply desk
+ *  keeps DEFAULT_DESK_CONTEXT_CAP_TOKENS (its thread is the owner's conversation). */
+export const MANAGER_CONTEXT_CAP = 120_000
+
+/** The commander's cap: Settings.deskContextCapTokens when the owner set it (it
+ *  overrides both desks; 0 = off), else {@link MANAGER_CONTEXT_CAP}. Same
+ *  validation as store.getDeskContextCapTokens, whose absent-default is the
+ *  supply desk's. */
+export const managerContextCapTokens = async (): Promise<number> => {
+  const v = (await getSettings()).deskContextCapTokens
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : MANAGER_CONTEXT_CAP
+}
 
 export interface DeskSessionChoice {
   agentSessionId: string
@@ -47,9 +67,10 @@ export interface DeskContextCapDeps {
   newId?: () => string
 }
 
-/** Decide whether a desk that is about to RESUME `session` should open a fresh
- *  conversation instead. Only a resume can be recycled (a fresh session has no
- *  context to cap). Never throws. */
+/** Decide whether a COMMANDER desk that is about to RESUME `session` should open
+ *  a fresh conversation instead (its only caller is swarmManager.launchNewDesk, so
+ *  the default cap is the commander's). Only a resume can be recycled (a fresh
+ *  session has no context to cap). Never throws. */
 export const recycleDeskSessionIfOverCap = async (
   session: DeskSessionChoice,
   deps: DeskContextCapDeps = {},
@@ -59,7 +80,7 @@ export const recycleDeskSessionIfOverCap = async (
   let cap: number
   let tokens: number | null
   try {
-    cap = await (deps.cap ?? getDeskContextCapTokens)()
+    cap = await (deps.cap ?? managerContextCapTokens)()
     if (!(cap > 0)) return keep // 0 = off
     tokens = await (deps.contextTokens ?? sessionContextTokens)(session.agentSessionId)
   } catch {
@@ -76,6 +97,11 @@ export const recycleDeskSessionIfOverCap = async (
  *  `consumption:` lines). */
 export const deskRecycledLogLine = (deskLabel: string, fromTokens: number): string =>
   `${deskLabel}の卓を作り直した(文脈 ${fromTokens.toLocaleString('en-US')} から 0 へ)— 文脈上限を超えたため前回の会話を再開せず新しい会話で起動`
+
+/** The engine-log line for a commander desk closed at a wake (R-D3b): it was idle
+ *  and over the cap, so the engine closed it instead of waking it into that context. */
+export const deskClosedOverCapLogLine = (deskLabel: string, fromTokens: number): string =>
+  `${deskLabel}の卓を閉じた(待機中・文脈 ${fromTokens.toLocaleString('en-US')} が上限超え)— 次のパスで新しい会話の卓を起動します`
 
 /** The engine-log line for a compacted desk. */
 export const deskCompactedLogLine = (deskLabel: string, fromTokens: number, toTokens: number | null): string =>

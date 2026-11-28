@@ -684,6 +684,45 @@ describe('the desks’ skills match the code-matched strings they depend on', ()
     expect(read('supply', 'SKILL.md')).toContain(ASSISTANT_RELAY_PREFIX)
   })
 
+  it('skills/supply/SKILL.md answers "held, and why" from the standing route, word for word (AUTONOMY-SPEC R-E1)', async () => {
+    // The Ground card, the bar and the president must say the SAME sentence:
+    // the president reads it off GET /api/swarm/standing and never rewords it.
+    const text = read('supply', 'SKILL.md')
+    expect(text).toContain('$OG/api/swarm/standing')
+    expect(text).toContain('`reasons[].plain` **word for word**')
+    // The old private reading of the usage-limit park is gone — one source only.
+    expect(text).not.toContain('`parkUntil` future')
+  })
+
+  // Review 2026-11-28 D-S2: the president did not know the budget gate existed.
+  // A budget hold is not the usage limit — uncool does not lift it — and the
+  // owner changes the budget through the same owner-requested recipe, read back.
+  const section = (text: string, heading: string) => {
+    const start = text.indexOf(heading)
+    expect(start, heading).toBeGreaterThan(-1)
+    const next = text.indexOf('\n## ', start + heading.length)
+    const sub = text.indexOf('\n### ', start + heading.length)
+    const ends = [next, sub].filter((i) => i > -1)
+    return text.slice(start, ends.length ? Math.min(...ends) : undefined)
+  }
+  it('skills/supply/SKILL.md names the budget holds and says they are not the usage limit', async () => {
+    const text = read('supply', 'SKILL.md')
+    for (const kind of ['window-headroom', 'weekly-reserve', 'usage-unknown']) expect(text).toContain(`\`${kind}\``)
+    expect(text).toContain('`quota/uncool` does not lift')
+  })
+  it('skills/supply/SKILL.md changes swarmBudget only through the owner-requested recipe, read back', async () => {
+    const owner = section(read('supply', 'SKILL.md'), '## Owner-requested settings')
+    expect(owner).toContain(`-d '{"swarmBudget":`)
+    expect(owner).toContain('jq .swarmBudget')
+  })
+  it('skills/supply/SKILL.md reads ⑤ after uncool and never claims a resume while the budget holds', async () => {
+    const back = section(read('supply', 'SKILL.md'), '### The usage limit is back')
+    expect(back).toContain('$OG/api/swarm/standing')
+    expect(back).toContain('`weekly-reserve`')
+    // The unconditional "released, work resumes" line is gone.
+    expect(back).not.toMatch(/Then tell the owner 「待ちを解除\s*しました。作業は自動で再開します」/)
+  })
+
   it('skills/og-manage/SKILL.md names the route it is obliged to answer on', async () => {
     const text = read('og-manage', 'SKILL.md')
     expect(text).toContain('/api/swarm/supply/say')

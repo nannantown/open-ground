@@ -56,6 +56,7 @@ describe('swarmSessions (desk session persistence + resume)', () => {
   let proj: string
   let savedOgHome: string | undefined
   let savedHome: string | undefined
+  let savedClaudeConfig: string | undefined
 
   // Claude files a session at ~/.claude/projects/<hyphenated-cwd>/<id>.jsonl. The
   // probe reads exactly that path, so the test writes exactly that path.
@@ -80,6 +81,9 @@ describe('swarmSessions (desk session persistence + resume)', () => {
   beforeEach(async () => {
     home = await realpath(await mkdtemp(join(tmpdir(), 'og-sess-home-')))
     claudeHome = await realpath(await mkdtemp(join(tmpdir(), 'og-sess-claude-')))
+    // claudeProjectsRoot() prefers CLAUDE_CONFIG_DIR (set by the test setup) over HOME.
+    savedClaudeConfig = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = join(claudeHome, '.claude')
     scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-sess-scratch-')))
     savedOgHome = process.env.OPENGROUND_HOME
     savedHome = process.env.HOME
@@ -98,6 +102,7 @@ describe('swarmSessions (desk session persistence + resume)', () => {
     // Restore, never delete: an unset HOME sends later resolution at the
     // REAL home dir (the 2026-07-18 data loss). See src/lib/server/testHomeGuard.ts.
     if (savedHome !== undefined) process.env.HOME = savedHome
+    if (savedClaudeConfig !== undefined) process.env.CLAUDE_CONFIG_DIR = savedClaudeConfig
     __resetMigrationCacheForTests()
     await rm(home, { recursive: true, force: true })
     await rm(claudeHome, { recursive: true, force: true })

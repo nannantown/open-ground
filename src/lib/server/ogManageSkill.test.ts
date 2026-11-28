@@ -8,6 +8,7 @@ import {
   SPECIALIST_NO_SOURCE_MARKER,
   SPECIALIST_REVIEW_MANAGER_CLAUSES,
 } from './swarmSpecialistReview'
+import { TASK_TIERS } from '../types'
 
 // The installer's ownership contract, exercised against a throwaway tmpdir —
 // never the real ~/.claude (source AND target are injected via the test-only
@@ -138,13 +139,18 @@ describe('shipped skill source (skills/og-manage/SKILL.md)', () => {
   // read 手順4 during an integration"; a clause parked in an appendix is not
   // wired in at all. So slice 手順4 out and assert against the SLICE.
   //
-  // Both anchors are verified unique in the shipped file (1 occurrence each);
-  // if either stops matching, the slice throws rather than silently degrading to
-  // an empty string that would make every toContain below fail confusingly.
-  const STEP4_START = '4. **独立レビュー(敵対・必須)**'
+  // The start is "the first top-level `4. **` after the 「マージ」 heading" — not
+  // the step's title words, which changed in 2026-11-28 (review depth by tier) and
+  // would otherwise make every step-4 pin throw instead of failing on its claim.
+  // If either anchor stops matching, the slice throws rather than silently
+  // degrading to an empty string that would make every toContain below fail
+  // confusingly.
+  const MERGE_HEAD = '### "マージ" / merge'
+  const STEP4_START = '\n4. **'
   const STEP4_END = '5. `git -C <wt> merge-base --is-ancestor origin/main HEAD`'
   const mergeStep4 = (text: string): string => {
-    const start = text.indexOf(STEP4_START)
+    const head = text.indexOf(MERGE_HEAD)
+    const start = head < 0 ? -1 : text.indexOf(STEP4_START, head)
     const end = text.indexOf(STEP4_END, start + 1)
     if (start < 0 || end <= start) {
       throw new Error(
@@ -180,6 +186,70 @@ describe('shipped skill source (skills/og-manage/SKILL.md)', () => {
     expect(step4).toContain('**fail-CLOSED**: レビュアーがエラー/空 verdict なら1回だけ再試行→ダメなら止めて報告')
     expect(step4).toContain('「レビューできなかった」を「クリーン」と同一視しない')
     expect(step4).toContain(SPECIALIST_NO_SOURCE_MARKER)
+  })
+
+  // REVIEW DEPTH FOLLOWS THE CARD (AUTONOMY-SPEC R-D5; owner decision §7-3 A,
+  // 2026-11-28). The worker's half is TIER_DIRECTIVE (swarmWorker.ts), keyed by
+  // the card's EFFECTIVE tier; this is the commander's half, so it is written in
+  // the same 【難易度: <tier> shape and keyed by the same tier list. Iterating
+  // TASK_TIERS makes a new tier a red test here, not a tier the commander's
+  // review silently has no rule for.
+  const tierLine = (step4: string, tier: string): string => {
+    const at = step4.indexOf(`【難易度: ${tier}`)
+    if (at < 0) return ''
+    const nl = step4.indexOf('\n', at)
+    return step4.slice(at, nl < 0 ? undefined : nl)
+  }
+
+  it('手順4 sets the reviewer count by the card tier, one 【難易度: <tier> line per tier', async () => {
+    const step4 = mergeStep4(await readFile(shippedPath, 'utf8'))
+    for (const t of TASK_TIERS) expect(tierLine(step4, t), `no 【難易度: ${t} line in 手順4`).not.toBe('')
+    expect(tierLine(step4, 'touch')).toContain('No reviewer sub-agent')
+    expect(tierLine(step4, 'standard')).toContain('No reviewer sub-agent')
+    expect(tierLine(step4, 'design')).toContain('Exactly ONE independent adversarial reviewer')
+    expect(tierLine(step4, 'ultra')).toContain('The full panel')
+    // The depth is settled BEFORE the paragraph that starts reviewers — the same
+    // position argument as the specialist pin above.
+    const reviewerAt = step4.indexOf('Agent ツールでレビュアーを起動')
+    for (const t of TASK_TIERS) expect(step4.indexOf(`【難易度: ${t}`)).toBeLessThan(reviewerAt)
+  })
+
+  it('the safety floor and every unknown keep the full panel; the tier is the worker’s own, read from the app', async () => {
+    const step4 = mergeStep4(await readFile(shippedPath, 'utf8'))
+    expect(step4).toContain('**Safety floor ⇒ the full panel, whatever the tier**')
+    expect(step4).toContain('an unknown never lightens a review')
+    expect(step4).toContain('`executionMode` is `max`')
+    // The tier and the floor come from GET /api/swarm/card-tier — resolveCardTier,
+    // the worker's own function. A copied HEAVY_SIGNALS in jq disagreed with JS
+    // next to Japanese text (Oniguruma counts kana as word characters, so
+    // `\bguard\b` missed 「guardを直す」; review D-M1, 2026-11-28): no copy may
+    // come back. The path is URL-encoded (`-G --data-urlencode`): the OPEN GROUND
+    // checkout has a space, and curl refuses an unencoded one (exit 3), which
+    // printed nothing and silently gave every card the full panel. `-f` makes a
+    // failed call print nothing, which the fail-closed clause reads as unknown.
+    expect(step4).toContain('curl -sfG "$OG/api/swarm/card-tier" --data-urlencode "path=$PWD" --data-urlencode "id=<full card id>"')
+    expect(step4).toContain('"\\(.effectiveTier) \\(.floored)"')
+    expect(step4).toContain('`<floored>` is `true`')
+    expect(step4).toContain('the command prints nothing')
+    expect(step4).not.toContain('--arg re')
+    expect(step4).not.toContain('HEAVY_SIGNALS')
+    expect(step4).not.toMatch(/api\/project\?path=\$PWD/)
+    // …and the route the skill names is served by the app.
+    const routes = await readFile(join(process.cwd(), 'server', 'routes', 'swarm.ts'), 'utf8')
+    expect(routes).toContain(".get('/api/swarm/card-tier'")
+  })
+
+  it('the tier never lightens the force-hold, the gates, fail-CLOSED, the specialist rule or who integrates', async () => {
+    const text = await readFile(shippedPath, 'utf8')
+    const step4 = mergeStep4(text)
+    expect(step4).toContain('**The tier never lightens**')
+    expect(step4).toContain("step 0's high-risk force-hold")
+    expect(step4).toContain("step 3's gates (tsc / lint / the full suite or its pass record)")
+    expect(step4).toContain('gets one specialist reviewer even on a touch/standard card')
+    expect(step4).toContain('who integrates (you)')
+    // …and the gates it points at are still in the merge procedure.
+    expect(text).toContain('3. **Re-verify (mandatory)**')
+    expect(text).toContain('npx tsx scripts/full-suite-passed.mts <wt>')
   })
 
   it('drives the app HTTP API for every commander action', async () => {

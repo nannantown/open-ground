@@ -363,3 +363,45 @@ describe('groundLamp — opening the project is the read receipt (2026-09-26)', 
     expect(groundLamp({ ...idle, presidentAskedAt: T + 1, seenAt: T, openedAt: T + 5 })).toBe('question')
   })
 })
+
+// WAITING (owner decision 2026-11-28, AUTONOMY-SPEC §7-4 = A): a muted clock when
+// the project's standing says work is held for a reason that lifts by itself.
+// needs-owner outranks running outranks waiting (R-E2).
+describe('groundLamp — the standing: needs-owner > running > waiting', () => {
+  const held = { started: 0, inFlight: 1, liveWork: false }
+  const T = 1_000_000
+
+  it('waiting draws the clock over in-flight cards that nothing can move', () => {
+    // Before: a todo card under a running autopilot lit 'working' for the whole
+    // of a four-hour usage limit while nothing moved.
+    expect(groundLamp({ ...held })).toBe('working')
+    expect(groundLamp({ ...held, standing: 'waiting' })).toBe('waiting')
+  })
+
+  it('needs-owner is the hand, even with no open question in the inbox', () => {
+    // An unconfirmed operation awaiting review, every model switched off.
+    expect(groundLamp({ ...held, standing: 'needs-owner' })).toBe('question')
+    expect(groundLamp({ ...held, standing: 'needs-owner', commanderWorking: true })).toBe('question')
+  })
+
+  it('running outranks waiting — live evidence beats the clock', () => {
+    expect(groundLamp({ ...held, standing: 'waiting', commanderWorking: true })).toBe('working')
+    expect(groundLamp({ ...held, started: 1, liveWork: true, standing: 'waiting' })).toBe('working')
+    expect(groundLamp({ ...held, standing: 'running' })).toBe('working')
+    expect(groundLamp({ ...held, standing: 'waiting', presidentWorking: true })).toBe('working')
+  })
+
+  it('an open question outranks the clock', () => {
+    expect(groundLamp({ ...held, standing: 'waiting', openQuestions: 1 })).toBe('question')
+    expect(groundLamp({ ...held, standing: 'waiting', presidentAskedAt: T + 1, seenAt: T })).toBe('question')
+  })
+
+  it('waiting outranks "delivered, take a look", like running does', () => {
+    expect(groundLamp({ ...held, standing: 'waiting', deliveredAt: T + 1, seenAt: T })).toBe('waiting')
+  })
+
+  it('idle and off add nothing: the old rules decide', () => {
+    expect(groundLamp({ ...held, standing: 'idle' })).toBe('working')
+    expect(groundLamp({ started: 0, inFlight: 0, liveWork: false, standing: 'off' })).toBeNull()
+  })
+})

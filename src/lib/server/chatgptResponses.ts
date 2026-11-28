@@ -131,6 +131,14 @@ export const chatGptConversationRecovery = async (id: string): Promise<'missing'
     return error instanceof ChatGptUncertainActionError ? 'uncertain' : 'invalid'
   }
 }
+/** Whose saved history this is — for a hold's words only (review R3-ui S1), never a
+ *  resume decision: chatGptConversationRecovery stays the one gate. Local reads only. */
+export const chatGptHistoryAccount = async (id: string, options: { accountKey?: () => Promise<string>; storeDir?: string } = {}): Promise<'this' | 'other' | 'signed-out' | 'unreadable'> => {
+  let accountKey: string
+  try { accountKey = (await readHistory(chatGptConversationFile(id, options.storeDir), MAX_HISTORY_BYTES, true)).accountKey } catch { return 'unreadable' }
+  const current = await (options.accountKey ?? getChatGptAccountKey)().catch(() => null)
+  return current === null ? 'signed-out' : accountKey === current ? 'this' : 'other'
+}
 type PublicConversationLine = { kind: 'input' | 'text'; text: string }
 const publicConversationFile = (id: string, storeDir?: string) => chatGptConversationFile(id, storeDir).replace(/\.json$/, '.public.json')
 const assertPublicLines: (lines: unknown) => asserts lines is PublicConversationLine[] = (lines) => {

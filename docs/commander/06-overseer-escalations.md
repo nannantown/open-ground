@@ -310,6 +310,30 @@ tier の意味(`swarmOverseer.ts:146`): **T3** = 受信箱(escalations.json)へ�
   (`swarmOrchestrator.ts` `raiseNoAllowedModelTier`)。3要素 = ①決めること ②選択肢(A:/B:)
   ③各選択の影響(生活言語)。従来の `question`(技術者向け原文)と `context`(技術詳細 —
   S3/S10 は `c.f.detail` 生値)は**そのまま不変** — 技術情報は失われない。
+- **Held operation (2026-11-28, AUTONOMY-SPEC R-B3/R-B4) = a template raise with
+  `plainQuestion`**: the engine, the boot check and the desk launches raise ONE question per
+  operation whose result nobody confirmed (`savedWorkHold.askAboutHeldOperation` →
+  `openEscalation`, `receiptKey: hold:<receipt id>` or `hold:native-<session>`, owner lane, NO
+  worker address, `taskId` when a worker's card is parked). `unconfirmedOperationQuestion`
+  writes the three parts: who (ワーカー / マネージャー / 社長 — the screen's names — and the
+  card title), when (local time), what (tool kind + the call's own `description` input only
+  when every word of it is plain — a path, option, identifier, branch name or command word
+  drops it whole — never its arguments), and options that say what they really do: a
+  worker's card gets A「引き継いで続ける」(back to `todo` on its branch) / B「初めからやり直す」
+  (back to `todo` without its branch — a fresh start from the main line, the old branch kept);
+  a desk or an unattributed conversation gets ONE option, A「確認した」(the stopped
+  conversation is never used again either way; its saved pointer is dropped). One that names
+  no conversation says it holds new work instead of 「ほかの作業は続いています」.
+  The answer is APPLIED before it is recorded (`answerEscalation` phase 0 →
+  `answerHeldOperation`): the review on the receipt / native conversation (note = the answer,
+  operation id = the question id; an `executing` receipt whose actor is gone is first recorded
+  `uncertain`), the card or desk effect above, `notifyRuntimeRecoveryChanged()`. An answer the
+  strict reader cannot take (`readHoldChoice`, not the wider `readUnparkIntent`: the first
+  line must be the letter alone, the owner's words go below it — review R2 N-M2), a held
+  conversation still running, or a review that did not take is REFUSED — 409 with a plain
+  sentence the president relays — and the question stays open (until 2026-11-28 it closed
+  silently and came back with no reason). The owner can press A / B in the bar's
+  「あなたへの質問」 (`HoldQuestionDialog`), the door when the president itself is held.
 - **worker 由来 raise(文面が worker 産のもの)= `plainQuestion` なし**:
   S4 の 3 経路(THROTTLED 直行 / proxy 注入失敗 / proxy escalate)と engine の TUI スクレイプ
   質問 arm。発火側にテンプレが無く平易文を合成できないため、**worker 自身に平易文3要素で

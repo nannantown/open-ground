@@ -24,6 +24,7 @@ const STATE_SURFACES = [
   'components/canvas/modules/SwarmManagerPane.tsx',
   'components/canvas/modules/SwarmSupplyPane.tsx',
   'components/canvas/modules/SwarmPowerBar.tsx',
+  'components/canvas/SwarmBottomBar.tsx',
 ]
 
 const RETIRED = [
@@ -72,4 +73,21 @@ describe('state surfaces speak only the three state colours', () => {
       expect(src, file).toContain('text-status-ask')
     }
   })
+
+  // WAITING (owner decision 2026-11-28, AUTONOMY-SPEC §7-4 = A / R-E2): the
+  // muted clock on the Ground card and beside the bar's switch adds NO colour —
+  // the three state colours stay three — and no word; the reason is hover text.
+  it.each(['components/canvas/ProjectCard.tsx', 'components/canvas/SwarmBottomBar.tsx'])(
+    '%s draws waiting as a muted clock: no state colour, no label',
+    (file) => {
+      const src = readFileSync(resolve(__dirname, file), 'utf8')
+      const m = src.match(/(<(div|span)\b[^>]*>)\s*(<Clock\b[^>]*\/>)\s*<\/\2>/)
+      expect(m, `${file} has no element wrapping only a <Clock />`).not.toBeNull()
+      const [, open, , icon] = m!
+      expect(open).toContain('text-ink-faint')
+      expect(open + icon).not.toMatch(/status-(run|done|ask)/)
+      expect(open).toMatch(/title=\{/) // the reason lives in the hover text…
+      expect(icon).toContain('aria-hidden') // …and the icon itself says nothing
+    },
+  )
 })

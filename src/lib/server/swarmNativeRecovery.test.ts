@@ -5,19 +5,21 @@ import { createHash, randomUUID } from 'node:crypto'
 import { openGroundHome } from './paths'
 import { sessionJsonlPath } from './transcript'
 import { inspectSwarmNativeConversation } from './swarmNativeTranscript'
-import { createNativeConversationRecovery, listNativeConversationRecoveryIssues, nativePresidentRecoveryAdmission, reviewNativeConversationRecovery, type NativeRecoverySource } from './swarmNativeRecovery'
+import { createNativeConversationRecovery, listNativeConversationRecoveryIssues, nativePresidentRecoveryAdmission, nativeReviewerKey, reviewNativeConversationRecovery, type NativeRecoverySource } from './swarmNativeRecovery'
 import { registerTestProject } from '../../test/registerProject'
 import { patchEngineIntent, readEngineIntent } from './swarmEnginePersistence'
 import { recordSwarmSession } from './swarmSessions'
 import { setSettings } from './store'
 import * as atomic from './atomicWrite'
-const currentOwner = vi.hoisted(() => ({ key: 'synthetic-owner' }))
+const currentOwner = vi.hoisted(() => ({ key: 'synthetic-owner', role: true }))
+// The signed-in app owner role (R-B5 keys a review by the local user without it).
+vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => currentOwner.role }))
 vi.mock('./runtimeOwner', async (original) => ({ ...(await original<typeof import('./runtimeOwner')>()), runtimeOwnerKey: async (expected?: string) => {
   if (expected && expected !== currentOwner.key) throw new Error('owner changed')
   return currentOwner.key
 } }))
 vi.mock('./swarmTranscriptProof', async (original) => ({ ...(await original<typeof import('./swarmTranscriptProof')>()), isSessionHeldByProcess: async () => false }))
-beforeEach(() => { currentOwner.key = 'synthetic-owner' })
+beforeEach(() => { currentOwner.key = 'synthetic-owner'; currentOwner.role = true })
 afterEach(() => vi.restoreAllMocks())
 const fixture = async () => {
   await mkdir(openGroundHome(), { recursive: true })
@@ -223,5 +225,21 @@ describe('native recovery inspection failures are per conversation', () => {
     const f = await fixture()
     f.deps.inspect = async () => { f.owner('replacement-owner'); throw new Error('private inspection failure') }
     await expect(f.recovery.list()).rejects.toThrow('owner changed')
+  })
+})
+
+// R-B5 (docs/AUTONOMY-SPEC.md): a user who is not the signed-in owner (public
+// opt-in, local unlock) has no owner key, yet their saved conversations can stop
+// mid-tool too. The review marker is then keyed by the local user, so their answer
+// in the inbox clears it instead of "Owner sign-in is required" forever.
+describe('a user without the owner role can answer for a saved conversation (R-B5)', () => {
+  it('reviews are keyed by the local user when no owner key exists — and by the owner when one does', async () => {
+    currentOwner.role = false
+    const local = await nativeReviewerKey()
+    expect(local).toMatch(/^[a-f0-9]{64}$/)
+    await expect(nativeReviewerKey(local)).resolves.toBe(local)
+    await expect(nativeReviewerKey('synthetic-owner')).rejects.toThrow('owner account changed')
+    currentOwner.role = true
+    expect(await nativeReviewerKey()).toBe('synthetic-owner')
   })
 })

@@ -33,7 +33,8 @@ import {
   type IntegrationDeps,
   type AnomalyDeps,
 } from './swarmOrchestrator'
-import { isTierCooling, __resetQuotaForTest } from './swarmQuota'
+import { isTierCooling, __resetQuotaForTest, __simulateRestartForTest, ensureCoolingTableLoaded, coolingSnapshot } from './swarmQuota'
+import { recordRateLimitEvent, flushUsageWindowsPersist, __resetUsageWindowsForTest } from './usageWindows'
 import { initOverseerRuntime } from './swarmOverseer'
 import { swarmNotificationsFile } from './paths'
 import type { OrchestratorWorker, ProjectTask } from '../types'
@@ -115,10 +116,13 @@ const stubDeps = (
 beforeEach(async () => {
   __resetOrchestratorForTests()
   __resetQuotaForTest()
+  __resetUsageWindowsForTest()
   await rm(swarmNotificationsFile(), { force: true })
 })
 
 afterEach(async () => {
+  await flushUsageWindowsPersist()
+  __resetUsageWindowsForTest()
   __resetOrchestratorForTests()
   __resetQuotaForTest()
   await rm(swarmNotificationsFile(), { force: true })
@@ -185,5 +189,90 @@ describe('quota stop — cool the tier, requeue the card, free the worker (one p
     expect(isTierCooling('fable', T0 + 1)).toBe(false)
     expect(deps.recoverCard).not.toHaveBeenCalled()
     expect(engine.workers).toHaveLength(1) // nudged, not stopped
+  })
+})
+
+// R-C1 (1): the reset instant comes from the SDK's structured rate_limit_event
+// first — the refusal sentence and the /usage cache only when the session saw
+// no event. The sentence here names a reset ("resets 9pm") that disagrees with
+// the structured window on purpose: the structured instant must win.
+describe('quota stop — the reset time is the structured window\'s, not the sentence\'s', () => {
+  it('an all-model refusal with resetsAt three days ahead cools every tier until exactly then, across a restart', async () => {
+    const reset = T0 + 3 * 24 * 3_600_000
+    recordRateLimitEvent(
+      { kind: 'rate_limit', status: 'rejected', utilization: null, resetsAt: reset / 1000, limitType: 'seven_day' },
+      T0 - 30_000,
+    )
+    const engine = newEngine()
+    const deps = stubDeps({
+      sdkWorkerFacts: () => ({ refusal: "You've hit your weekly limit · resets 9pm (UTC)" }) as never,
+    })
+    await runDispatchPass(engine, deps, T0)
+
+    expect(coolingSnapshot(T0 + 1).map((r) => r.until)).toEqual([reset, reset, reset, reset])
+    expect(deps.recoverCard).toHaveBeenCalledWith('/proj', 'q1', 'todo')
+
+    // The cooling table is the authority across a restart (swarm-quota.json).
+    await __simulateRestartForTest()
+    await ensureCoolingTableLoaded(T0 + 60_000)
+    expect(coolingSnapshot(T0 + 60_000).map((r) => r.until)).toEqual([reset, reset, reset, reset])
+    expect(isTierCooling('haiku', reset - 1)).toBe(true)
+    expect(isTierCooling('haiku', reset)).toBe(false)
+
+    // The requeued card: parked while every tier cools, dispatched by the first pass after the reset.
+    const spawned: number[] = []
+    const after = newEngine({ workers: [] })
+    const resumeDeps = stubDeps({
+      // No branch on the card: the re-entry path (git) is not what this case is about.
+      fetchTasks: async () => [{ ...card('q1', 'todo'), branch: undefined, notes: 'done when it works' } as ProjectTask],
+      spawnWorker: async () => {
+        spawned.push(Date.now())
+        return { terminalId: '', runtime: 'sdk', sdkSessionId: 'sdk-q2', agentSessionId: 'q2', worktree: '/wt/q1', branch: 'swarm/q1' } as never
+      },
+      resolveReusableWork: async () => null,
+    })
+    await runDispatchPass(after, resumeDeps, reset - 1)
+    expect(spawned).toHaveLength(0)
+    await runDispatchPass(after, resumeDeps, reset + 1)
+    expect(spawned).toHaveLength(1)
+  })
+
+  // A refusal's reset belongs to the window that refused. The table holds every
+  // window any session reported; a per-model week (seven_day_opus …) binds only
+  // its own model, so it must never lengthen another tier's cool (review
+  // 2026-11-28 B-M1: an opus weekly wall made a 5-hour wall cool EVERY tier for 4 days).
+  const HOUR = 3_600_000
+  const untilByTier = (at: number) => Object.fromEntries(coolingSnapshot(at).map((r) => [r.tier, r.until]))
+  const rejected = (limitType: string, reset: number, at: number) =>
+    recordRateLimitEvent({ kind: 'rate_limit', status: 'rejected', utilization: null, resetsAt: reset / 1000, limitType }, at)
+
+  it('an opus weekly wall does not stretch a later 5-hour wall: other tiers cool to the 5-hour reset', async () => {
+    const opusReset = T0 + 96 * HOUR
+    const fiveReset = T0 + 2 * HOUR
+    rejected('seven_day_opus', opusReset, T0 - 10 * 60_000)
+    rejected('five_hour', fiveReset, T0 - 30_000)
+    const engine = newEngine()
+    const deps = stubDeps({ sdkWorkerFacts: () => ({ refusal: "You've hit your 5-hour limit · resets in 2 hours" }) as never })
+    await runDispatchPass(engine, deps, T0)
+    // opus is still behind its own weekly wall; nobody else is.
+    expect(untilByTier(T0 + 1)).toEqual({ fable: fiveReset, opus: opusReset, sonnet: fiveReset, haiku: fiveReset })
+  })
+
+  it('a sonnet weekly wall does not stretch an opus wall', async () => {
+    const sonnetReset = T0 + 48 * HOUR
+    const opusReset = T0 + HOUR
+    rejected('seven_day_sonnet', sonnetReset, T0 - 5 * 60_000)
+    rejected('seven_day_opus', opusReset, T0 - 30_000)
+    const engine = newEngine({ workers: [sdkWorker({ model: 'opus' })] })
+    const deps = stubDeps({ sdkWorkerFacts: () => ({ refusal: "You've hit your Opus limit · resets in 1 hour" }) as never })
+    await runDispatchPass(engine, deps, T0)
+    expect(untilByTier(T0 + 1)).toEqual({ fable: null, opus: opusReset, sonnet: null, haiku: null })
+  })
+
+  it('no structured event ⇒ today\'s chain (the sentence) decides', async () => {
+    const engine = newEngine()
+    const deps = stubDeps({ sdkWorkerFacts: () => ({ refusal: "You've hit your 5-hour limit · resets in 45 minutes" }) as never })
+    await runDispatchPass(engine, deps, T0)
+    expect(coolingSnapshot(T0 + 1).map((r) => r.until)).toEqual([T0 + 45 * 60_000, T0 + 45 * 60_000, T0 + 45 * 60_000, T0 + 45 * 60_000])
   })
 })

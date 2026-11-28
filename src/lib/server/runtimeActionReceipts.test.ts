@@ -1,12 +1,14 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
-import { rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { claudeDirName } from './claudeProjectDir'
 import { pathToFileURL } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
 import type { HookCallback, HookInput } from '@anthropic-ai/claude-agent-sdk'
-import { createClaudeRuntimeToolAudit, guardClaudeRuntimeTools, assertNoUncertainRuntimeActions } from './runtimeActionReceipts'
+import { createClaudeRuntimeToolAudit, guardClaudeRuntimeTools, assertNoUncertainRuntimeActions, interruptRuntimeActions } from './runtimeActionReceipts'
 import { acceptConversationReceipt, claimConversationReceipt, listConversationReceipts } from './conversationReceipts'
 import * as receipts from './conversationReceipts'
 import * as atomic from './atomicWrite'
@@ -14,7 +16,9 @@ import * as ownerIdentity from './runtimeOwner'
 import { openGroundHome } from './paths'
 import { __resetSdkSessionsForTests, __setQuotaPrefixesForTests, __setSdkImporterForTests, getSdkSession, preloadSdk, sdkQuotaPause, spawnSdkSession, terminateSdkSession, type SdkQueryParams } from './sdkSession'
 
-const h = vi.hoisted(() => ({ owner: 'owner-a', access: true, occupied: false, liveHandle: 'fixture-handle' }))
+const h = vi.hoisted(() => ({ owner: 'owner-a', access: true, occupied: false, liveHandle: 'fixture-handle', projects: '' }))
+// Claude's transcripts are read from a throwaway folder, never the real ~/.claude.
+vi.mock('./transcript', async original => ({ ...(await original<typeof import('./transcript')>()), claudeProjectsRoot: () => h.projects }))
 vi.mock('./runtimeOwner', async original => ({ ...(await original<typeof import('./runtimeOwner')>()), runtimeOwnerKey: async (expected?: string) => {
   if (!h.owner || expected && expected !== h.owner) throw new Error('owner changed')
   return h.owner
@@ -56,7 +60,8 @@ const claimedVeto = async (raw?: Parameters<typeof createClaudeRuntimeToolAudit>
   await Promise.all(audit.hooks.PreToolUse!.flatMap(matcher => matcher.hooks.map(hook => hook(value, 'call-a', { signal: new AbortController().signal }))))
   return audit
 }
-beforeEach(async () => { h.owner = 'owner-a'; h.access = true; h.occupied = false; h.liveHandle = 'fixture-handle'; await rm(join(openGroundHome(), 'runtime'), { recursive: true, force: true }) })
+beforeEach(async () => { h.owner = 'owner-a'; h.access = true; h.occupied = false; h.liveHandle = 'fixture-handle'; await rm(join(openGroundHome(), 'runtime'), { recursive: true, force: true })
+  h.projects = await mkdtemp(join(tmpdir(), 'claude-projects-')) })
 afterEach(() => vi.restoreAllMocks())
 
 describe('strict native Bash PreToolUse failures', () => {
@@ -544,6 +549,161 @@ describe('durable Claude tool audit hooks', () => {
   })
 })
 
+// R-B1 (docs/AUTONOMY-SPEC.md): a tool call whose outcome the native transcript
+// records never holds anything. Measured 2026-11-28: seven of the owner's eight
+// holds had their result in a transcript — five of them in a sub-agent file,
+// four vetoed by a settings hook the audit does not wrap.
+describe('a tool receipt settled from the native Claude transcript', () => {
+  const NATIVE = { confirmed: true, source: 'native-transcript', automaticReplay: false }
+  const TOOL_INPUT = { command: 'synthetic, never executed' }
+  const VETO = 'PreToolUse:Bash hook error: [bash /Users/me/.claude/swarm-guard.sh]: swarm-guard BLOCKED: git worktree remove --force. (manager guardrail — never do this; do it the safe way or ask the user.)\n'
+  const ENDED = "[Tool call interrupted: the session ended before this call's result was recorded, so its outcome is unknown. Check whether it took effect before relying on it or running it again.]"
+  const toolUse = (callId: string, agentId?: string, input: unknown = TOOL_INPUT, name = 'Bash') => JSON.stringify({ type: 'assistant', isSidechain: !!agentId,
+    ...(agentId ? { agentId } : {}), sessionId: 'session-a', message: { role: 'assistant', content: [{ type: 'tool_use', id: callId, name, input }] } })
+  const toolResult = (callId: string, content: string, isError: boolean, extra: Record<string, unknown> = {}, agentId?: string) => JSON.stringify({ type: 'user',
+    isSidechain: !!agentId, ...(agentId ? { agentId } : {}), sessionId: 'session-a', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: callId, content, is_error: isError }] }, ...extra })
+  const vetoed = (callId: string, agentId?: string) => toolResult(callId, VETO, true, { toolUseResult: `Error: ${VETO}`, toolDenialKind: 'permission-rule' }, agentId)
+  const writeTranscript = async (cwd: string, files: { main?: string[]; sub?: string[] }) => {
+    const dir = join(h.projects, claudeDirName(cwd))
+    await mkdir(join(dir, 'session-a', 'subagents'), { recursive: true })
+    if (files.main) await writeFile(join(dir, 'session-a.jsonl'), files.main.join('\n') + '\n')
+    if (files.sub) await writeFile(join(dir, 'session-a', 'subagents', 'agent-fixture.jsonl'), files.sub.join('\n') + '\n')
+  }
+  const started = async () => {
+    const hooks = await guardClaudeRuntimeTools('/synthetic/project', 'session-a')
+    h.occupied = true
+    expect(decision(await invoke(last(hooks, 'PreToolUse'), 'PreToolUse'))).toBeUndefined()
+    return hooks
+  }
+
+  it('(a) settles a sub-agent call a settings hook denied, once its actor has ended', async () => {
+    await started()
+    await writeTranscript('/synthetic/project', { main: [toolUse('task-call')], sub: [toolUse('call-a', 'agent-fixture'), vetoed('call-a', 'agent-fixture')] })
+    h.occupied = false
+    await expect(assertNoUncertainRuntimeActions('/synthetic/project', false)).resolves.toBeUndefined()
+    expect((await listConversationReceipts())[0]).toMatchObject({ state: 'delivered', result: { ...NATIVE, failed: true } })
+  })
+  it('settles an old-build receipt (no cwd) that a restart left uncertain, finding its folder by session id', async () => {
+    await acceptConversationReceipt('project-a', 'tool-old-build', { kind: 'runtime-tool', provider: 'claude', sessionId: 'session-a', toolId: 'call-a', tool: 'Bash',
+      inputHash: createHash('sha256').update(JSON.stringify(TOOL_INPUT)).digest('hex') })
+    await claimConversationReceipt('project-a', 'tool-old-build', { sessionId: 'session-a', handleId: 'fixture-handle', runtime: 'sdk' })
+    vi.resetModules()
+    const restarted = await import('./runtimeActionReceipts'), journal = await import('./conversationReceipts')
+    expect((await journal.listConversationReceipts()).map(r => r.state)).toEqual(['uncertain'])
+    await expect(restarted.assertNoUncertainRuntimeActions('/synthetic/project', false)).rejects.toThrow('unconfirmed result')
+    await writeTranscript('/Users/me/projects/old-build-cwd', { sub: [toolUse('call-a', 'agent-fixture'), vetoed('call-a', 'agent-fixture')] })
+    await expect(restarted.assertNoUncertainRuntimeActions('/synthetic/project', false)).resolves.toBeUndefined()
+    expect((await journal.listConversationReceipts())[0]).toMatchObject({ state: 'delivered', result: { ...NATIVE, failed: true } })
+  })
+  it('(b) heals a session whose PostToolUse write failed once, when the transcript has that result', async () => {
+    const hooks = await started()
+    vi.spyOn(atomic, 'atomicWriteJson').mockRejectedValueOnce(new Error('synthetic post fsync failure'))
+    await expect(invoke(last(hooks, 'PostToolUse'), 'PostToolUse')).rejects.toThrow('post fsync failure')
+    await writeTranscript('/synthetic/project', { main: [toolUse('call-a'), toolResult('call-a', 'done', false, { toolUseResult: { stdout: 'done', stderr: '', interrupted: false } })] })
+    expect(decision(await invoke(last(hooks, 'PreToolUse'), 'PreToolUse', 'call-after-healed-post'))).toBeUndefined()
+    const saved = await listConversationReceipts()
+    expect(saved.find(r => (r.body as { toolId?: string }).toolId === 'call-a')).toMatchObject({ state: 'delivered', result: { ...NATIVE, failed: false } })
+    expect(saved.find(r => (r.body as { toolId?: string }).toolId === 'call-after-healed-post')?.state).toBe('executing')
+  })
+  it.each([
+    { what: 'started without a result', lines: [toolUse('call-a')] },
+    { what: 'interrupted (the CLI’s session-ended stand-in)', lines: [toolUse('call-a'), toolResult('call-a', ENDED, true, { toolUseResult: ENDED, toolDenialKind: 'interrupted' })] },
+    // Review A-M1: `user-rejected` without toolDenialBeforeRun is how the CLI writes a
+    // call an interrupt or a shutdown cut off WHILE RUNNING (real worker, a Bash 163 s in).
+    { what: 'cut off while running (user-rejected, no toolDenialBeforeRun)', lines: [toolUse('call-a'),
+      toolResult('call-a', "The user doesn't want to proceed with this tool use.", true, { toolUseResult: 'User rejected tool use', toolDenialKind: 'user-rejected' }),
+      JSON.stringify({ type: 'user', sessionId: 'session-a', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] } })] },
+    { what: 'written on shutdown (interruptedByShutdown)', lines: [toolUse('call-a'), toolResult('call-a', 'partial', true, { toolUseResult: 'Error: partial', interruptedByShutdown: true })] },
+    { what: 'not in any transcript', lines: [] },
+    { what: 'recorded only for other arguments under its ID', lines: [toolUse('call-a', undefined, { command: 'something else' }), toolResult('call-a', 'done', false)] },
+    { what: 'recorded only for another tool under its ID', lines: [toolUse('call-a', undefined, TOOL_INPUT, 'Write'), toolResult('call-a', 'done', false)] },
+  ])('(c) still holds a call that is $what once its actor ended', async ({ lines }) => {
+    await started()
+    await writeTranscript('/synthetic/project', { main: lines })
+    h.occupied = false
+    await expect(assertNoUncertainRuntimeActions('/synthetic/project', false)).rejects.toThrow('unconfirmed result')
+    expect((await listConversationReceipts()).map(r => r.state)).toEqual(['executing'])
+  })
+  it('(c) keeps a poisoned session refused while the transcript shows its call started without a result', async () => {
+    const hooks = await started()
+    vi.spyOn(atomic, 'atomicWriteJson').mockRejectedValueOnce(new Error('synthetic post fsync failure'))
+    await expect(invoke(last(hooks, 'PostToolUse'), 'PostToolUse')).rejects.toThrow('post fsync failure')
+    await writeTranscript('/synthetic/project', { main: [toolUse('call-a')] })
+    expect(decision(await invoke(last(hooks, 'PreToolUse'), 'PreToolUse', 'call-after-failed-post'))).toBe('deny')
+    expect(await listConversationReceipts()).toHaveLength(1)
+  })
+  it('(d) never rewrites a rejected or owner-reviewed receipt, nor one its own callback recorded as interrupted', async () => {
+    const audit = await claimedVeto()
+    await audit.observeSdkMessage(vetoResult())
+    const rejected = (await listConversationReceipts())[0]
+    expect(rejected).toMatchObject({ state: 'rejected', result: { source: 'sdk-guard-veto' } })
+    await writeTranscript('/synthetic/project', { main: [toolUse('call-a'), toolResult('call-a', 'done', false)] })
+    await expect(assertNoUncertainRuntimeActions('/synthetic/project', false)).resolves.toBeUndefined()
+    expect(await receipts.settleReceiptFromEvidence(rejected, { failed: false })).toMatchObject({ state: 'rejected', result: rejected.result })
+
+    await acceptConversationReceipt('project-a', 'tool-reviewed', { kind: 'runtime-tool', sessionId: 'session-a' })
+    await claimConversationReceipt('project-a', 'tool-reviewed', { sessionId: 'session-a', handleId: 'fixture-handle', runtime: 'sdk' })
+    await receipts.finishConversationReceipt('project-a', 'tool-reviewed', 'uncertain')
+    const reviewed = await receipts.reviewConversationReceipt('project-a', 'tool-reviewed', 'checked by the owner', 'review-op')
+    expect(await receipts.settleReceiptFromEvidence(reviewed, { failed: true })).toMatchObject({ state: 'delivered', result: { ownerReviewed: true, note: 'checked by the owner' } })
+
+    const hooks = await guardClaudeRuntimeTools('/synthetic/project', 'session-a')
+    await invoke(last(hooks, 'PreToolUse'), 'PreToolUse', 'call-b')
+    await last(hooks, 'PostToolUseFailure')({ ...input('PostToolUseFailure', 'call-b'), is_interrupt: true } as HookInput, 'call-b', { signal: new AbortController().signal })
+    await writeTranscript('/synthetic/project', { main: [toolUse('call-a'), toolResult('call-a', 'done', false), toolUse('call-b'), toolResult('call-b', 'done', false)] })
+    await expect(assertNoUncertainRuntimeActions('/synthetic/project', false)).rejects.toThrow('unconfirmed result')
+    const all = await listConversationReceipts(), interrupted = all.find(r => (r.body as { toolId?: string }).toolId === 'call-b')!
+    expect(all.find(r => r.id === rejected.id)).toEqual(rejected)
+    expect(interrupted).toMatchObject({ state: 'uncertain', result: { failed: true, interrupted: true } })
+    expect(await receipts.settleReceiptFromEvidence(interrupted, { failed: false })).toEqual(interrupted)
+  })
+  it('(d) settles only the tool receipt it read, and nothing that is not a tool receipt', async () => {
+    await started()
+    const tool = (await listConversationReceipts())[0]
+    await acceptConversationReceipt('project-a', 'president-input', { kind: 'president-input', sessionId: 'session-a' })
+    await claimConversationReceipt('project-a', 'president-input', { sessionId: 'session-a', handleId: 'fixture-handle', runtime: 'sdk' })
+    const president = (await listConversationReceipts()).find(r => r.id === 'president-input')!
+    expect(await receipts.settleReceiptFromEvidence({ ...tool, hash: '0'.repeat(64) }, { failed: false })).toBeUndefined()
+    expect(await receipts.settleReceiptFromEvidence(president, { failed: false })).toBeUndefined()
+    expect((await listConversationReceipts()).map(r => r.state)).toEqual(['executing', 'executing'])
+  })
+})
+
+// R-B3 (docs/AUTONOMY-SPEC.md, owner decision 2026-11-28 §7-1 = A): a truly
+// unknown result holds only the conversation that issued it. The only actor that
+// can run that call again is that conversation; refusing every other session in
+// the project protected nothing more and turned one stale receipt into days of no
+// automation (§1.1).
+describe('an unknown result holds only the conversation that issued it', () => {
+  const interrupted = async () => {
+    h.occupied = true // both sessions are alive
+    const s1 = await guardClaudeRuntimeTools('/synthetic/project', 'session-a')
+    expect(decision(await invoke(last(s1, 'PreToolUse'), 'PreToolUse', 'call-a'))).toBeUndefined()
+    // S1's call is cut off (a native abort): its result is unknown while S1 lives on.
+    await interruptRuntimeActions('session-a')
+    expect((await listConversationReceipts())[0]).toMatchObject({ state: 'uncertain' })
+    return s1
+  }
+  it('a tool call in another session of the same project is allowed while S1 holds', async () => {
+    await interrupted()
+    const s2 = await guardClaudeRuntimeTools('/synthetic/project', 'session-b')
+    expect(decision(await invoke(last(s2, 'PreToolUse'), 'PreToolUse', 'call-b'))).toBeUndefined()
+    await expect(assertNoUncertainRuntimeActions('/synthetic/project', false, 'session-b')).resolves.toBeUndefined()
+  })
+  it('S1 itself stays refused: its next tool call is denied and its launch is refused', async () => {
+    const s1 = await interrupted()
+    expect(decision(await invoke(last(s1, 'PreToolUse'), 'PreToolUse', 'call-a2'))).toBe('deny')
+    await expect(assertNoUncertainRuntimeActions('/synthetic/project', false, 'session-a')).rejects.toThrow('unconfirmed result')
+    // No session named — the whole-app and review callers — still sees it.
+    await expect(assertNoUncertainRuntimeActions('/synthetic/project', false)).rejects.toThrow('unconfirmed result')
+  })
+  it('a receipt that names no session holds every conversation (unattributable evidence holds)', async () => {
+    await acceptConversationReceipt('project-a', 'nameless', { kind: 'president-input' })
+    await receipts.finishConversationReceipt('project-a', 'nameless', 'uncertain')
+    await expect(assertNoUncertainRuntimeActions('/synthetic/project', false, 'session-b')).rejects.toThrow('unconfirmed result')
+  })
+})
+
 // A USAGE REFUSAL IS NOT AN ABORT (2026-11-23 22:21 / 11-24 04:38).
 //
 // Measured: three workers on one project, one 5-hour limit. The two that were
@@ -582,6 +742,19 @@ describe('a usage refusal while a command is still running somewhere in the proj
     expect(getSdkSession(session.id)).toMatchObject({ status: 'quota-parked' })
     expect(getSdkSession(session.id)?.exitReason).toBeUndefined()
     expect((await (await import('./conversationReceipts')).listConversationReceipts())[0]?.state).toBe('executing')
+  })
+  it('a named session is not ended by ANOTHER conversation\'s unconfirmed command (R-B3)', async () => {
+    await running()
+    h.occupied = false // the other worker's actor is gone: its command is unconfirmed
+    const session = spawnSdkSession({ cwd: '/synthetic/project', role: 'worker', agentSessionId: 'session-refused', options: {}, initialPrompt: 'synthetic',
+      queryFn: ({ prompt }) => ({ async *[Symbol.asyncIterator]() {
+        for await (const _input of prompt) {
+          yield { type: 'assistant', message: { content: [{ type: 'text', text: REFUSAL }] } }
+          yield { type: 'result', subtype: 'success', terminal_reason: 'completed' }
+        }
+      } }) })
+    await vi.waitFor(() => expect(sdkQuotaPause(session.id)).not.toBeNull())
+    expect(getSdkSession(session.id)?.exitReason).toBeUndefined()
   })
   it('still ends the session when the command really is unconfirmed (its actor is gone)', async () => {
     await running()

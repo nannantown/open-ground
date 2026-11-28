@@ -9,7 +9,7 @@
 //     overseer restore banner that re-armed monitoring from the screen.
 // Each test names the mutation that turns it red.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, cleanup, fireEvent, act } from '@testing-library/react'
 import type { ProjectMeta, SwarmOrchestratorState } from '@/lib/types'
 import { messages } from '@/i18n/messages'
 
@@ -72,7 +72,7 @@ type Posted = { url: string; body: unknown }
 
 /** Answer every route the bar polls and RECORD the POSTs, so a test can assert
  *  which endpoint a control reached. */
-const harness = (state: SwarmOrchestratorState) => {
+const harness = (state: SwarmOrchestratorState, escalations: unknown[] | (() => unknown[]) = []) => {
   const posted: Posted[] = []
   const current = state
   const json = (body: unknown) =>
@@ -91,6 +91,7 @@ const harness = (state: SwarmOrchestratorState) => {
       if (url.startsWith('/api/swarm/workers')) return json({ workers: [] })
       if (url.startsWith('/api/swarm/preflight')) return json({ issues: [] })
       if (url === '/api/swarm/notifications') return json({ items: [] })
+      if (url.startsWith('/api/swarm/escalations?')) return json({ escalations: typeof escalations === 'function' ? escalations() : escalations })
       return json({})
     }),
   )
@@ -217,6 +218,73 @@ describe('the header row opens and folds the bar (owner 2026-09-24)', () => {
     await waitFor(() => expect(posted.some((p) => p.url === '/api/swarm/orchestrator/stop')).toBe(true))
     // MUTATION: guard only on the toggle button instead of every control ⇒ red.
     expect(onToggle).not.toHaveBeenCalled()
+  })
+})
+
+// Review D-M3 (2026-11-28): a held operation's question (receiptKey `hold:`) is
+// answered right from the bar's 「あなたへの質問」 — the president cannot answer for
+// its own held conversation, and no screen posted an answer before.
+describe('the bar takes the answer to a held operation', () => {
+  const hold = { id: 'esc-1', status: 'open', receiptKey: 'hold:native-sid', plainQuestion: '決めていただきたいこと: 社長が…\nA「確認した」: …' }
+  it('with a held-operation question the count is a button that opens it; A posts the answer', async () => {
+    const { posted } = harness(engineState(), [hold])
+    render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
+    const chip = await screen.findByRole('button', { name: 'projectPanel.swarm.bar.questions:{"count":1}' })
+    expect(chip.getAttribute('title')).toBe('projectPanel.swarm.bar.answerHint')
+    fireEvent.click(chip)
+    expect(await screen.findByText(/決めていただきたいこと: 社長が/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'B' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'A' }))
+    await waitFor(() => expect(posted).toContainEqual({ url: '/api/swarm/escalations/answer', body: { id: 'esc-1', answer: 'A' } }))
+  })
+  // Review R2 S-1: after the last held question was answered the dialog stayed
+  // "open" with nothing in it, so the next poll's hold question (or the answered
+  // one, handed back by a poll already in flight) popped the modal with no click.
+  it('answering the last held question closes the dialog for good: no later poll reopens it by itself', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let list: unknown[] = [hold]
+      let reads = 0
+      harness(engineState(), () => { reads++; return list })
+      render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'projectPanel.swarm.bar.questions:{"count":1}' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'A' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      const poll = async () => {
+        const before = reads
+        await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+        await waitFor(() => expect(reads).toBeGreaterThan(before))
+        await act(async () => {})
+      }
+      // A poll already in flight hands back the question just answered…
+      await poll()
+      await screen.findByRole('button', { name: 'projectPanel.swarm.bar.questions:{"count":1}' })
+      expect(screen.queryByRole('dialog')).toBeNull()
+      // …and a new held question arrives on the next one.
+      list = [{ ...hold, id: 'esc-9', plainQuestion: '別の止まった操作' }]
+      await poll()
+      expect(screen.queryByText(/別の止まった操作/)).toBeNull()
+      expect(screen.queryByRole('dialog')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  // Review R2 S-8: the chip counted every open question while the dialog showed
+  // only the held ones, and the others lost their "tell the president" hint.
+  it('held and ordinary questions together: the chip and the dialog say the same count, and the others are named', async () => {
+    const other = (id: string) => ({ id, status: 'open', receiptKey: `commander:${id}`, question: 'q' })
+    harness(engineState(), [hold, other('esc-2'), other('esc-3')])
+    render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'projectPanel.swarm.bar.questions:{"count":3}' }))
+    expect(await screen.findByRole('dialog', { name: 'projectPanel.swarm.bar.questions:{"count":3}' })).toBeTruthy()
+    expect(screen.getByText('projectPanel.swarm.bar.otherQuestions:{"count":2}')).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: 'A' })).toHaveLength(1)
+  })
+  it('other questions keep the plain count (answered through the president)', async () => {
+    harness(engineState(), [{ id: 'esc-2', status: 'open', receiptKey: 'commander:x', question: 'q' }])
+    render(<SwarmModule project={project} collapsed onToggleCollapsed={() => {}} />)
+    await screen.findByText('projectPanel.swarm.bar.questions:{"count":1}')
+    expect(screen.queryByRole('button', { name: 'projectPanel.swarm.bar.questions:{"count":1}' })).toBeNull()
   })
 })
 

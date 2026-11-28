@@ -49,6 +49,7 @@ import { resumeQueuedAssistantTurns } from '@/lib/server/phoneAssistant'
 import { flushSwarmHandoffInputs } from '@/lib/server/swarmRuntimeTransition'
 import { registerRuntimeRecoveryResume, notifyRuntimeRecoveryChanged } from '@/lib/server/runtimeRecoveryBoot'
 import { resumeAssistantRuntime } from '@/lib/server/assistantRuntimeTransition'
+import { exitAfterShutdownOnSignals } from '@/lib/server/liveDesks'
 import { runtimeEffectiveProfile } from '@/lib/server/runtimeTransitionStore'
 
 const PORT = Number(process.env.PORT) || 47776
@@ -237,6 +238,13 @@ installGateGroupReaper()
 // ChatGPT's credential-sandboxed host tools use separate process groups too.
 // Reap them on normal quit, updater teardown, and caught server termination.
 installChatGptHostReaper()
+// STOPS THAT WAIT (AUTONOMY-SPEC R-B2) — this entry is the ONE owner of SIGTERM /
+// SIGINT. Electron SIGTERMs us on owner quit, "Restart now", update install and
+// engine switch: refuse new tool calls, wait ≤ SHUTDOWN_TOOL_GRACE_MS (20 s) for the
+// running ones, then exit — 'exit' runs both reapers above. Electron's SIGKILL
+// comes only at 25 s (electron/autoUpdate.js CHILD_SIGTERM_GRACE_MS). Through
+// the liveDesks seam: this file is PTY_BY_DESIGN in the desk-pool import ban.
+exitAfterShutdownOnSignals()
 
 // HOOK INSTALL — idempotently wire OPEN GROUND's Claude Code hooks into the
 // user's ~/.claude/settings.json at boot. This is the ONLY automatic caller

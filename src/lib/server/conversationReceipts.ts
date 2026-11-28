@@ -430,6 +430,27 @@ export const reviewConversationReceipt = async (scope: string, id: string, note:
     return { result: receipt, write: true }
   }, key).then(publish)
 }
+/** The native transcript recorded this tool call's result (runtimeToolEvidence.ts).
+ * Besides reviewConversationReceipt, the only writer that moves an `uncertain`
+ * receipt to `delivered`, and only as `source: 'native-transcript'`. It is a
+ * recorded fact, not an owner decision, so it is keyed by the receipt's own owner
+ * (the boot check reads every owner). A receipt that changed since it was read,
+ * is settled (owner-reviewed and rejected included) or that its own callback
+ * recorded as interrupted is returned unchanged. */
+export const settleReceiptFromEvidence = async (receipt: Pick<ConversationReceipt, 'owner' | 'scope' | 'id' | 'hash'>, evidence: { failed: boolean }): Promise<ConversationReceipt | undefined> => {
+  const key = keyFor(receipt.owner, receipt.scope, receipt.id)
+  let changed = false
+  const result = await transaction<ConversationReceipt | undefined>((receipts, _contexts, _accepted, archived) => {
+    const current = receipts[key] ?? archived
+    if (!current || current.hash !== receipt.hash || (current.body as { kind?: unknown } | null)?.kind !== 'runtime-tool') return { result: undefined, write: false }
+    if (current.state !== 'uncertain' && current.state !== 'executing' || (current.result as { interrupted?: unknown } | undefined)?.interrupted === true) return { result: current, write: false }
+    current.state = 'delivered'; current.updatedAt = new Date().toISOString()
+    current.result = { confirmed: true, failed: evidence.failed, source: 'native-transcript', automaticReplay: false }
+    changed = true
+    return { result: current, write: true }
+  }, key)
+  return result && changed ? publish(result) : result
+}
 export const settleRecoveryReviewReceipt = async (id: string, result: unknown, expectedOwnerKey?: string): Promise<void> => {
   const key = keyFor(await runtimeOwnerKey(expectedOwnerKey), 'control-recovery', id)
   await transaction((receipts, _contexts, _accepted, archived) => {

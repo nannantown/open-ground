@@ -1,12 +1,12 @@
 import { spawn as ptySpawn } from 'node-pty'
 import { existsSync, watch as fsWatch, type FSWatcher } from 'fs'
-import { homedir } from 'os'
-import { join } from 'path'
+import { claudeProjectsRoot } from './transcript'
 import {
   claudeConnection,
   resolvedClaudeBin,
   absoluteClaudeOnPath,
 } from './claudeConnection'
+import { recordUsageScrape } from './usageWindows'
 
 // The Claude Code interactive `/usage` view is the canonical source for the
 // numbers OPEN GROUND's HUD wants to show — it matches what the user sees on
@@ -140,8 +140,10 @@ export const peekCachedUsage = (): CliUsage | null => {
 // the overseer runs when its cache peek misses. Swallows every error; the next peek
 // picks up the result. fetchClaudeUsageCli already single-flights (state.inflight)
 // and only caches successes, so repeated calls never stack scrapes.
-export const refreshUsageCacheDetached = (): void => {
-  void fetchClaudeUsageCli().catch(() => {})
+// `bypassCache`: the budget gate's request (swarmOrchestrator.defaultRefreshUsage)
+// needs a NEW reading — see fetchClaudeUsageCli.
+export const refreshUsageCacheDetached = (opts?: { bypassCache?: boolean }): void => {
+  void fetchClaudeUsageCli(opts).catch(() => {})
 }
 
 // Subscribe to writes inside ~/.claude/projects. Claude writes one jsonl
@@ -150,7 +152,7 @@ export const refreshUsageCacheDetached = (): void => {
 // becomes one refresh, not one per turn.
 const ensureActivityWatcher = () => {
   if (state.watcher) return
-  const dir = join(homedir(), '.claude', 'projects')
+  const dir = claudeProjectsRoot()
   if (!existsSync(dir)) return
   try {
     state.watcher = fsWatch(dir, { recursive: true }, () => {
@@ -328,7 +330,15 @@ const drive = (claudeBin: string, cwd: string): Promise<CliUsage> =>
         cols: 120,
         rows: 50,
         cwd,
-        env: process.env as { [k: string]: string },
+        // ESSENTIAL-TRAFFIC MODE: an interactive claude.ai-subscriber session
+        // sends, as a startup prefetch, a billed 1-token model request
+        // (`messages.create({max_tokens: 1, messages: [{role:'user', content:'quota'}]})`,
+        // source "quota_check") to read the limit headers — once per scrape, i.e.
+        // every HUD poll while workers run. The CLI skips that prefetch when this
+        // variable is set (its essential-traffic check); /usage itself is a plain
+        // GET /api/oauth/usage and renders the same numbers (measured 2026-11-28
+        // on claude 2.1.332). docs/commander/04-quota-models.md §5.10.4.
+        env: { ...(process.env as { [k: string]: string }), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
       })
     } catch {
       fail()
@@ -371,13 +381,18 @@ const drive = (claudeBin: string, cwd: string): Promise<CliUsage> =>
     setTimeout(fail, 15000)
   })
 
-export const fetchClaudeUsageCli = async (): Promise<CliUsage> => {
+/** `bypassCache`: skip the display cache (still single-flight). The budget
+ *  gate asks only once its newest reading is 5 minutes old, and a cache answer
+ *  is that same old reading: while a budget hold parks every worker nothing
+ *  writes a transcript, the cache is never invalidated, and the hold lapsed when
+ *  the reading went stale at 30 minutes (review 2026-11-28 B-S2). */
+export const fetchClaudeUsageCli = async (opts: { bypassCache?: boolean } = {}): Promise<CliUsage> => {
   // Lazy-start the activity watcher on first fetch — keeps module init free
   // of side effects.
   ensureActivityWatcher()
   const now = Date.now()
   // A cache hit is always live 'ok' numbers — only successes are stored.
-  if (state.cache && now - state.cacheAt < CACHE_TTL_MS) return state.cache
+  if (!opts.bypassCache && state.cache && now - state.cacheAt < CACHE_TTL_MS) return state.cache
   if (state.inflight) return state.inflight
 
   state.inflight = (async (): Promise<CliUsage> => {
@@ -401,6 +416,9 @@ export const fetchClaudeUsageCli = async (): Promise<CliUsage> => {
     if (result.status === 'ok') {
       state.cache = result
       state.cacheAt = Date.now()
+      // The budget gate keeps the reading with its capture time: the display
+      // cache above is wiped 30 s after any transcript write (AUTONOMY-SPEC R-D1).
+      recordUsageScrape(result)
     }
     return result
   })()

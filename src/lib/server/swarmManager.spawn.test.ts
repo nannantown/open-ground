@@ -52,6 +52,13 @@ vi.mock('./swarmSessions', () => ({
   forgetSwarmSessionIf: mocks.forgetSwarmSessionIf,
 }))
 vi.mock('./ogManageSkill', () => ({ installOgManageSkill: mocks.installOgManageSkill }))
+// The commander's resume check (R-B3: a conversation an unconfirmed result holds
+// opens fresh) reads the receipt journal for the project; these launches run on a
+// fake, unregistered path with no receipts, so nothing holds.
+vi.mock('./savedWorkHold', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./savedWorkHold')>()),
+  savedWorkHolds: async () => [],
+}))
 vi.mock('./swarmManagerSdk', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./swarmManagerSdk')>()),
   sdkManagerPreflight: mocks.sdkManagerPreflight,
@@ -72,6 +79,8 @@ import {
   getSdkSession,
   __resetSdkSessionsForTests,
   __setDefaultQueryFnForTests,
+  beginShutdown,
+  SHUTDOWN_LAUNCH_REFUSAL,
 } from './sdkSession'
 
 const PROJ = '/repo/alpha'
@@ -604,5 +613,19 @@ describe('the SDK commander carries its conversation across a restart', () => {
     expect(mocks.recordSwarmSession).toHaveBeenCalled()
     const args = mocks.recordSwarmSession.mock.calls.at(-1) as unknown[]
     expect(JSON.stringify(args)).toContain('sid-rec')
+  })
+})
+
+// Review C-S2 (2026-11-28): once the server has begun its stop, no new SDK
+// conversation starts — the owner's own open included (it would be killed at
+// exit). The owner reads why in the launch-failed line, in plain words.
+describe('while the server is stopping', () => {
+  it('an owner-initiated open is refused with the plain reason: no desk, no session record', async () => {
+    void beginShutdown()
+    const out = await outcomeOf(spawnSwarmManager({ projectPath: PROJ, cause: 'owner' }))
+    expect(out).toBeInstanceOf(Error)
+    expect((out as Error).message).toContain(SHUTDOWN_LAUNCH_REFUSAL)
+    expect(deskCount()).toBe(0)
+    expect(mocks.recordSwarmSession).not.toHaveBeenCalled()
   })
 })

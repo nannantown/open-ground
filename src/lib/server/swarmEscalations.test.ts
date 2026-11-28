@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { getSettings, setSettings } from './store'
 import { mkdtemp, mkdir, rm, readFile, readdir, writeFile, realpath, stat } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -26,6 +27,43 @@ import { escalationsFile, escalationShotsDir } from './paths'
 import { readUnparkIntent } from './swarmOrchestrator'
 import { BRACKETED_PASTE_START, BRACKETED_PASTE_END } from './pastePrompt'
 import type { OpenEscalationInput } from './swarmEscalations'
+import { askAboutHeldOperation, readHoldChoice, savedWorkHolds, type HeldOperation } from './savedWorkHold'
+import { acceptConversationReceipt, claimConversationReceipt, finishConversationReceipt, listConversationReceipts } from './conversationReceipts'
+
+// Held-operation questions (AUTONOMY-SPEC R-B4) need a signed-in owner and a
+// registered project for the receipt journal. Pass-through unless a test sets
+// `held.owner` — every other test here runs on the real modules as before.
+// Claude transcripts are read from a throwaway folder, never the real ~/.claude.
+const held = vi.hoisted(() => ({ owner: '' as string, projects: '' as string, projectId: 'project-held', live: new Set<string>(), signedOut: false }))
+vi.mock('./runtimeOwner', async (original) => {
+  const real = await original<typeof import('./runtimeOwner')>()
+  return { ...real, runtimeOwnerKey: async (expected?: string) => {
+    if (held.signedOut) throw new Error('Owner sign-in is required.')
+    if (!held.owner) return real.runtimeOwnerKey(expected)
+    if (expected && expected !== held.owner) throw new Error('The owner account changed.')
+    return held.owner
+  } }
+})
+vi.mock('./chatgptAccess', async (original) => {
+  const real = await original<typeof import('./chatgptAccess')>()
+  return { ...real, hasChatGptAccess: async () => (held.owner ? true : real.hasChatGptAccess()) }
+})
+vi.mock('./projectDataPath', async (original) => {
+  const real = await original<typeof import('./projectDataPath')>()
+  return { ...real, projectUUIDFromPath: async (p: string) => (held.owner ? held.projectId : real.projectUUIDFromPath(p)) }
+})
+// A held conversation whose actor still runs (review R2 N-S1): handle ids or
+// session ids in `held.live` read as occupied; everything else as the real module.
+vi.mock('./liveDesks', async (original) => {
+  const real = await original<typeof import('./liveDesks')>()
+  return { ...real,
+    isRecordedRuntimeHandleOccupied: (runtime: 'sdk' | 'pty', handleId: string) => held.live.has(handleId) || real.isRecordedRuntimeHandleOccupied(runtime, handleId),
+    isAgentConversationOccupied: (sessionId: string) => held.live.has(sessionId) || real.isAgentConversationOccupied(sessionId) }
+})
+vi.mock('./transcript', async (original) => {
+  const real = await original<typeof import('./transcript')>()
+  return { ...real, claudeProjectsRoot: () => held.projects || real.claudeProjectsRoot() }
+})
 
 // The Escalations inbox (C1 — docs/OVERSEER_DESIGN.md §8), exercised against an
 // ISOLATED HOME so the suite never touches the real ~/.openground. Every PTY /
@@ -536,6 +574,31 @@ describe('answerEscalation — delivery, memory, idempotency', () => {
     await expect(answerEscalation(escalation.id, 'x', h.deps)).rejects.toBeInstanceOf(
       EscalationStateError,
     )
+  })
+
+  // Review R2 S-3: the engine withdraws a held operation's question when its result
+  // turns up (withdrawHoldQuestion). An owner answering it after that got the raw
+  // English above, which asks for something the owner cannot do. Now: one plain
+  // sentence in the owner's language, marked `code: 'hold'` (written for the owner).
+  it('answering a WITHDRAWN held-operation question is refused in plain words, marked for the owner', async () => {
+    const { notify } = makeNotify()
+    const { escalation } = await openEscalation(openInput({ receiptKey: 'hold:tool-x', taskId: undefined, branch: undefined }), { notify })
+    await dismissEscalation(escalation.id)
+    const { holdAnswerReason } = await import('./savedWorkHold')
+    const refused = await answerEscalation(escalation.id, 'A', answerDeps().deps).catch((e: unknown) => e)
+    expect(refused).toBeInstanceOf(EscalationStateError)
+    expect((refused as Error).message).toBe(holdAnswerReason('closed', 'en')) // Settings.language unset ⇒ English
+    expect((refused as EscalationStateError).code).toBe('hold')
+    // The commander's answer to it is no owner sentence.
+    const byCommander = await answerEscalation(escalation.id, 'A', answerDeps().deps, { by: 'commander' }).catch((e: unknown) => e)
+    expect((byCommander as EscalationStateError).code).toBeUndefined()
+    // An open one whose answer does not take carries the same mark.
+    const { HoldAnswerRefused } = await import('./savedWorkHold')
+    const { escalation: open } = await openEscalation(openInput({ receiptKey: 'hold:tool-y', taskId: undefined, branch: undefined }), { notify })
+    for (const [thrown, said] of [[new HoldAnswerRefused('plain words'), 'plain words'], [new Error('synthetic'), holdAnswerReason('failed', 'en')]] as const) {
+      const e = await answerEscalation(open.id, 'A', { ...answerDeps().deps, answerHeld: async () => { throw thrown } }).catch((x: unknown) => x)
+      expect([(e as Error).message, (e as EscalationStateError).code]).toEqual([said, 'hold'])
+    }
   })
 
   it('unknown id → EscalationNotFoundError', async () => {
@@ -1251,5 +1314,301 @@ describe('answers to the commander’s OWN questions reach the commander desk', 
     const r = recorder(true)
     expect(await redeliverAnswerToCommander(escalation.id, { isPathAllowed: async () => true, ...r })).toBe(false)
     expect(r.said).toHaveLength(0)
+  })
+})
+
+// R-B4 (docs/AUTONOMY-SPEC.md): an operation whose result nobody confirmed is ONE
+// question in the owner's inbox, and one answer clears it. A = 「止まったところから
+// 続ける」, B = 「その会話はやめて、この作業をやり直す」 — both record the owner's
+// decision on the receipt (so the hold lifts and nothing asks again) and put the
+// parked card back in the queue for a NEW conversation; neither re-runs the call
+// or hands anything to the held conversation.
+describe('a held operation is one question, and one answer clears it', () => {
+  // These cases read the owner's Japanese question: the owner's machine runs
+  // Settings.language = 'ja' (unset ⇒ English, promptLang.langOf).
+  let langBefore: 'en' | 'ja' | undefined
+  beforeEach(async () => { langBefore = (await getSettings()).language; await setSettings({ language: 'ja' }) })
+  afterEach(async () => { await setSettings({ language: langBefore }) })
+  const OWNER = 'owner-held'
+  beforeEach(async () => {
+    held.owner = OWNER
+    held.projects = await mkdtemp(join(tmpdir(), 'claude-projects-'))
+  })
+  afterEach(async () => {
+    held.owner = ''
+    held.live.clear()
+    held.signedOut = false
+    await rm(held.projects, { recursive: true, force: true })
+    held.projects = ''
+  })
+  /** A worker's Bash call cut off with its actor gone: uncertain, holding only its own conversation. */
+  const seedUncertain = async (id = 'tool-held') => {
+    await acceptConversationReceipt(held.projectId, id, { kind: 'runtime-tool', provider: 'claude', sessionId: 'sess-w1', toolId: 'call-1', tool: 'Bash', inputHash: 'x'.repeat(64), cwd: join(home, 'wt') })
+    await claimConversationReceipt(held.projectId, id, { sessionId: 'sess-w1', handleId: 'gone-handle', runtime: 'sdk' })
+    await finishConversationReceipt(held.projectId, id, 'uncertain', { interrupted: true })
+  }
+  const op = (id = 'tool-held'): HeldOperation => ({ id, sessionId: 'sess-w1', tool: 'Bash', at: '2026-11-26T23:02:21.000Z', description: 'Run the tests', seat: { role: 'worker', taskId: 'card-w1', title: 'card w1' } })
+  const openHold = async () => (await listEscalations({ status: 'open' })).filter((e) => e.receiptKey.startsWith('hold:'))
+
+  it('raising twice for one operation (or once more after a restart) leaves exactly one open question', async () => {
+    await askAboutHeldOperation(project, op())
+    await askAboutHeldOperation(project, op())
+    vi.resetModules() // a restart: nothing in memory, the inbox on disk decides
+    await (await import('./savedWorkHold')).askAboutHeldOperation(project, op())
+    const open = await openHold()
+    expect(open).toHaveLength(1)
+    expect(open[0]).toMatchObject({ receiptKey: 'hold:tool-held', taskId: 'card-w1', status: 'open' })
+    expect(open[0].sdkSessionId ?? open[0].terminalId).toBeUndefined()
+  })
+
+  it('answering A leaves the receipt delivered and owner-reviewed, the hold gone, and the card back in the queue', async () => {
+    await seedUncertain()
+    expect((await savedWorkHolds(project)).map((o) => o.id)).toEqual(['tool-held'])
+    await askAboutHeldOperation(project, op())
+    const [question] = await openHold()
+    const unpark = vi.fn(async () => true)
+    const queued: string[] = []
+    const { answerHeldOperation } = await import('./savedWorkHold')
+    await answerEscalation(question.id, 'A\n止まったところから続けてください', {
+      isPathAllowed: async () => true,
+      answerHeld: (record, answer) => answerHeldOperation(record, answer, { unpark }),
+      queueForNextDispatch: async (_p, taskId, line) => { queued.push(`${taskId}:${line}`) },
+    })
+    const receipt = (await listConversationReceipts(OWNER)).find((r) => r.id === 'tool-held')!
+    expect(receipt.state).toBe('delivered')
+    expect(receipt.result).toMatchObject({ ownerReviewed: true, operationId: question.id, note: 'A\n止まったところから続けてください', automaticReplay: false })
+    expect(await savedWorkHolds(project)).toEqual([])
+    // A = continue: the card goes back to the queue KEEPING its branch (the work saved so far).
+    expect(unpark).toHaveBeenCalledWith(project, 'card-w1', { fresh: false })
+    // The owner's words ride the card's NEXT dispatch — a new conversation.
+    expect(queued).toHaveLength(1)
+    expect(queued[0]).toMatch(/^card-w1:/)
+    expect(await openHold()).toHaveLength(0)
+  })
+
+  // Review D S3 (2026-11-28): A and B did the same thing (both unparked onto the same
+  // branch), so 「初めからやり直す」 was not enforced. B now drops the card's branch: the
+  // next dispatch starts from the main line (the old branch is kept, not continued).
+  it('answering B also clears the hold and moves the card back to todo WITHOUT its branch — a new conversation starts over', async () => {
+    await seedUncertain()
+    await askAboutHeldOperation(project, op())
+    const [question] = await openHold()
+    const unpark = vi.fn(async () => true)
+    const { answerHeldOperation } = await import('./savedWorkHold')
+    await answerEscalation(question.id, 'B', { isPathAllowed: async () => true, queueForNextDispatch: async () => {},
+      answerHeld: (record, answer) => answerHeldOperation(record, answer, { unpark }) })
+    expect((await listConversationReceipts(OWNER)).find((r) => r.id === 'tool-held')).toMatchObject({ state: 'delivered', result: { ownerReviewed: true, note: 'B' } })
+    expect(unpark).toHaveBeenCalledWith(project, 'card-w1', { fresh: true })
+    expect(await savedWorkHolds(project)).toEqual([])
+  })
+
+  // Review D-M2 / A-M3 (2026-11-28): an answer that picks neither used to CLOSE the
+  // question silently (the POST succeeded, the president said "delivered") and the
+  // engine raised the same question again with no reason given. Now it is refused
+  // with a plain reason the president relays, and the question stays open.
+  it('an answer that picks neither is refused with a plain reason; the hold and the question both stand', async () => {
+    await seedUncertain()
+    await askAboutHeldOperation(project, op())
+    const [question] = await openHold()
+    const unpark = vi.fn(async () => true)
+    const { answerHeldOperation } = await import('./savedWorkHold')
+    await expect(answerEscalation(question.id, 'ちょっと考えさせて', { isPathAllowed: async () => true, queueForNextDispatch: async () => {},
+      answerHeld: (record, answer) => answerHeldOperation(record, answer, { unpark }) })).rejects.toThrow(/「A」/)
+    expect((await listConversationReceipts(OWNER)).find((r) => r.id === 'tool-held')?.state).toBe('uncertain')
+    expect(unpark).not.toHaveBeenCalled()
+    expect((await savedWorkHolds(project)).map((o) => o.id)).toEqual(['tool-held'])
+    expect(await openHold()).toMatchObject([{ id: question.id, status: 'open' }])
+    expect((await openHold())[0].answer).toBeUndefined()
+  })
+
+  // THE ANSWER CONTRACT (review R2 N-M2, 2026-11-28): the first line is the letter
+  // alone — the reader is not tuned to guess choices out of prose any more. Every
+  // round of widening read some negation or hesitation as a choice: these 15 were
+  // read as a letter by the round-1 reader (「AでなくB」 as A, the opposite).
+  const R2_FALSE_ACCEPTS = ['AでなくB', 'Aでも Bでもない', 'Aにするか迷っています', 'Aに決めるのはまだ早い', 'Aでも構わないけど保留', 'Aではダメ', 'Aには反対です',
+    'Aにはしないで', 'Aでない方', 'Bにはしないでください', 'Bに変更しないで', 'Bで良いか確認させて', 'Bにしたいがまず状況を教えて', '「A」と「B」どっちがおすすめ', 'Aでいいですかね']
+  // …and what round 1 accepted on purpose is refused too: the letter must stand alone.
+  const NOT_ALONE = ['Aで', 'Aでお願いします', 'Ａでお願いします', 'Aにします', 'Bにします', 'B!', 'A 続けてください', 'B: その会話はやめて', 'A(続ける)', 'A「続ける」',
+    'B, please', 'A: continue', 'b) restart', 'a moment please', 'Before you do anything, wait']
+  // MUST-FIX 2 (review 2026-11-28): readUnparkIntent reads these as 'hold' or 'resume'.
+  const FREE_TEXT = ['待ってください', '再開しないで', '続けて', 'このまま保留で', 'Bではなく保留で', 'Bだとどうなりますか?', 'Aと Bの違いは?', 'Aが分からない', 'A or B?', 'Aは何？', 'AかBで迷っています', '']
+  it.each([...R2_FALSE_ACCEPTS, ...NOT_ALONE, ...FREE_TEXT])('a first line that is not the letter alone (%j) is refused with the format reason; nothing is released or recorded', async (said) => {
+    expect(readHoldChoice(said)).toBeNull()
+    if (!said.trim()) return // the route refuses an empty answer before this (400)
+    await seedUncertain()
+    await askAboutHeldOperation(project, op())
+    const [question] = await openHold()
+    const unpark = vi.fn(async () => true)
+    const queuedAnswers: (string | undefined)[] = []
+    const { answerHeldOperation } = await import('./savedWorkHold')
+    await expect(answerEscalation(question.id, said, { isPathAllowed: async () => true,
+      queueForNextDispatch: async (_p, _t, _l, o) => { queuedAnswers.push(o?.answer) },
+      answerHeld: (record, answer) => answerHeldOperation(record, answer, { unpark }) })).rejects.toThrow(/1行目/)
+    expect((await listConversationReceipts(OWNER)).find((r) => r.id === 'tool-held')?.state).toBe('uncertain')
+    expect(unpark).not.toHaveBeenCalled()
+    // …and nothing rides the card's next dispatch: the question is still open.
+    expect(queuedAnswers).toEqual([])
+    expect(await openHold()).toHaveLength(1)
+  })
+
+  // Review A-M2 (2026-11-28): a receipt still `executing` with its actor gone holds
+  // (listUncertainRuntimeActions) but could not be reviewed (ReceiptConflict, only
+  // logged): the answer was lost, the question closed, the engine asked again.
+  it('an answer to a receipt still executing with its actor gone takes: reviewed, hold gone, card back, question closed', async () => {
+    // One module registry for the journal and the hook: an earlier vi.resetModules()
+    // (the restart case above) would otherwise let a NEW journal module's boot sweep
+    // turn the receipt uncertain first and hide exactly the case under test.
+    const journal = await import('./conversationReceipts'), holds = await import('./savedWorkHold')
+    await journal.acceptConversationReceipt(held.projectId, 'tool-held', { kind: 'runtime-tool', provider: 'claude', sessionId: 'sess-w1', toolId: 'call-1', tool: 'Bash', inputHash: 'x'.repeat(64), cwd: join(home, 'wt') })
+    await journal.claimConversationReceipt(held.projectId, 'tool-held', { sessionId: 'sess-w1', handleId: 'gone-handle', runtime: 'sdk' })
+    expect((await holds.savedWorkHolds(project)).map((o) => o.id)).toEqual(['tool-held'])
+    expect((await journal.listConversationReceipts(OWNER)).find((r) => r.id === 'tool-held')?.state).toBe('executing')
+    await holds.askAboutHeldOperation(project, op())
+    const [question] = await openHold()
+    const unpark = vi.fn(async () => true)
+    await answerEscalation(question.id, 'A', { isPathAllowed: async () => true, queueForNextDispatch: async () => {},
+      answerHeld: (record, answer) => holds.answerHeldOperation(record, answer, { unpark }) })
+    expect((await journal.listConversationReceipts(OWNER)).find((r) => r.id === 'tool-held')).toMatchObject({ state: 'delivered', result: { ownerReviewed: true, operationId: question.id } })
+    expect(unpark).toHaveBeenCalledWith(project, 'card-w1', { fresh: false })
+    expect(await holds.savedWorkHolds(project)).toEqual([])
+    expect(await openHold()).toHaveLength(0)
+  })
+
+  it('an answer whose apply fails is refused and the question stays open — never a silent close', async () => {
+    await seedUncertain()
+    await askAboutHeldOperation(project, op())
+    const [question] = await openHold()
+    await expect(answerEscalation(question.id, 'A', { isPathAllowed: async () => true, queueForNextDispatch: async () => {},
+      answerHeld: async () => { throw new Error('synthetic journal failure') } })).rejects.toBeInstanceOf(EscalationStateError)
+    expect(await openHold()).toMatchObject([{ id: question.id, status: 'open' }])
+    expect((await savedWorkHolds(project)).map((o) => o.id)).toEqual(['tool-held'])
+  })
+
+  it('asked about ONE conversation, a receipt naming none still counts (it holds everyone)', async () => {
+    await acceptConversationReceipt(held.projectId, 'nameless', { kind: 'president-input' })
+    await finishConversationReceipt(held.projectId, 'nameless', 'uncertain')
+    expect((await savedWorkHolds(project, { anyOwner: true, sessionId: 'some-worker' })).map((o) => o.id)).toEqual(['nameless'])
+  })
+
+  // What IS a choice: the letter alone on the first line (full-width folded, any
+  // case), optionally in 「」 / quotes / brackets, optionally followed by 。.、, —
+  // anything on the following lines is the owner's note. The bar sends bare letters.
+  it.each([['A', 'A'], ['B', 'B'], ['ｂ', 'B'], ['Ａ', 'A'], ['a', 'A'], ['「A」', 'A'], ['"B"', 'B'], ["'A'", 'A'], ['(A)', 'A'], ['（Ｂ）', 'B'], ['【A】', 'A'], ['『B』', 'B'],
+    ['A。', 'A'], ['B.', 'B'], ['A、', 'A'], ['B,', 'B'], ['「A」。', 'A'], ['  A  ', 'A'], ['A\nでお願いします', 'A'], ['B\n初めからやり直してください。テストも見直して', 'B'],
+    ['「A」\n続けて', 'A'], ['A\r\nok', 'A'], ['B\n\nAではなくBで', 'B'], ['\nA', 'A']] as const)('the letter alone on the first line is the choice (%j → %s)', async (said, letter) => {
+    expect(readHoldChoice(said)).toBe(letter)
+  })
+
+  // A held desk conversation is never resumed (R-B3): whatever the owner chose, its
+  // saved pointer goes, so the next launch opens a NEW conversation and does not ask
+  // again (review A S3). The desk question offers one option for that reason.
+  it.each(['A'])('%s on a desk\'s operation drops that conversation\'s saved pointer, so its next launch is a NEW conversation', async (said) => {
+    await seedUncertain()
+    await askAboutHeldOperation(project, { ...op(), seat: { role: 'manager' } })
+    const [question] = await openHold()
+    const forgetDesk = vi.fn(async () => undefined)
+    const { answerHeldOperation } = await import('./savedWorkHold')
+    await answerEscalation(question.id, said, { isPathAllowed: async () => true, answerHeld: (record, answer) => answerHeldOperation(record, answer, { forgetDesk }) })
+    expect(forgetDesk).toHaveBeenCalledWith(project, 'sess-w1', ['supply', 'manager'])
+  })
+
+  // Review R2 NIT: a desk's question offers only A; a B was accepted (same effect,
+  // but not a choice the owner was offered). Refused with a plain reason now.
+  it('B on a desk\'s question (only A offered) is refused; nothing changes', async () => {
+    await seedUncertain()
+    await askAboutHeldOperation(project, { ...op(), seat: { role: 'manager' } })
+    const [question] = await openHold()
+    const forgetDesk = vi.fn(async () => undefined)
+    const { answerHeldOperation } = await import('./savedWorkHold')
+    await expect(answerEscalation(question.id, 'B', { isPathAllowed: async () => true, answerHeld: (record, answer) => answerHeldOperation(record, answer, { forgetDesk }) }))
+      .rejects.toThrow(/「A」だけ/)
+    expect(forgetDesk).not.toHaveBeenCalled()
+    expect((await listConversationReceipts(OWNER)).find((r) => r.id === 'tool-held')?.state).toBe('uncertain')
+    expect(await openHold()).toHaveLength(1)
+  })
+
+  // Review R2 N-S1: the two "still running" refusals had no test with teeth. A held
+  // conversation is normally asked about only once its actor is gone; if it runs
+  // again (re-attached), an answer must not review it under a live actor.
+  it('an answer while the receipt\'s actor still runs is refused (running); the receipt and the question stand', async () => {
+    const journal = await import('./conversationReceipts'), holds = await import('./savedWorkHold')
+    await journal.acceptConversationReceipt(held.projectId, 'tool-held', { kind: 'runtime-tool', provider: 'claude', sessionId: 'sess-w1', toolId: 'call-1', tool: 'Bash', inputHash: 'x'.repeat(64), cwd: join(home, 'wt') })
+    await journal.claimConversationReceipt(held.projectId, 'tool-held', { sessionId: 'sess-w1', handleId: 'live-handle', runtime: 'sdk' })
+    held.live.add('live-handle')
+    await holds.askAboutHeldOperation(project, op())
+    const [question] = await openHold()
+    const unpark = vi.fn(async () => true)
+    await expect(answerEscalation(question.id, 'A', { isPathAllowed: async () => true, answerHeld: (record, answer) => holds.answerHeldOperation(record, answer, { unpark }) }))
+      .rejects.toThrow(/まだ動いています/)
+    expect((await journal.listConversationReceipts(OWNER)).find((r) => r.id === 'tool-held')?.state).toBe('executing')
+    expect(unpark).not.toHaveBeenCalled()
+    expect(await openHold()).toHaveLength(1)
+  })
+
+  it('an answer while a native-held conversation still runs is refused (running), as the Settings route refuses it', async () => {
+    const holds = await import('./savedWorkHold')
+    held.live.add('sess-live')
+    await holds.askAboutHeldOperation(project, holds.nativeHeldOperation('sess-live', { name: 'Bash', at: '2026-11-26T23:01:03.000Z' }, { role: 'manager' }))
+    const [question] = await openHold()
+    const forgetDesk = vi.fn(async () => undefined)
+    await expect(answerEscalation(question.id, 'A', { isPathAllowed: async () => true, answerHeld: (record, answer) => holds.answerHeldOperation(record, answer, { forgetDesk }) }))
+      .rejects.toThrow(/まだ動いています/)
+    expect(forgetDesk).not.toHaveBeenCalled()
+    expect(await openHold()).toHaveLength(1)
+  })
+
+  // Review R2 NIT: signed out, the refusal said "try again in a moment" — retrying never helps.
+  it('signed out, an answer is refused with the sign-in reason; the hold and the question stand', async () => {
+    await seedUncertain()
+    await askAboutHeldOperation(project, op())
+    const [question] = await openHold()
+    held.signedOut = true
+    const { answerHeldOperation } = await import('./savedWorkHold')
+    await expect(answerEscalation(question.id, 'A', { isPathAllowed: async () => true, answerHeld: (record, answer) => answerHeldOperation(record, answer, { unpark: async () => true }) }))
+      .rejects.toThrow(/サインイン/)
+    held.signedOut = false
+    expect((await listConversationReceipts(OWNER)).find((r) => r.id === 'tool-held')?.state).toBe('uncertain')
+    expect(await openHold()).toHaveLength(1)
+  })
+
+  it('the default wiring applies the answer (no injected hook)', async () => {
+    await seedUncertain()
+    await askAboutHeldOperation(project, { ...op(), seat: { role: 'manager' } })
+    const [question] = await openHold()
+    await answerEscalation(question.id, 'A', { isPathAllowed: async () => true })
+    expect((await listConversationReceipts(OWNER)).find((r) => r.id === 'tool-held')).toMatchObject({ state: 'delivered', result: { ownerReviewed: true } })
+  })
+})
+
+// The desks act on these questions by their skills (reviews D-M2, D S7, D S9,
+// 2026-11-28): the president posted free text that the reader refused without a
+// word and promised a question where none existed; the commander had no rule for
+// `hold:` questions and could raise a second one for the same card.
+describe('the desks’ skills say how a held operation’s question is answered', () => {
+  const skill = async (name: string) => (await readFile(join(process.cwd(), 'skills', name, 'SKILL.md'), 'utf8')).replace(/\s+/g, ' ')
+  // Review R2 N-M2: the reader no longer interprets prose — the president sends the
+  // letter alone on the first line and fixes the format on a refusal.
+  it('supply: the letter alone on the first line, words below, fix the format on a refusal, the bar as the president-free door', async () => {
+    const text = await skill('supply')
+    expect(text).toContain('the letter ALONE on the first line')
+    expect(text).toContain('"answer":"B\\n初めからやり直してください"')
+    expect(text).toContain('`Aで`, `Aでお願いします`, `A: 続けて` are all refused')
+    expect(text).toContain('fix the FORMAT and post the same letter again — never re-interpret')
+    expect(text).not.toContain('the letter first')
+    expect(text).toContain('HTTP 409')
+    // Review R2: the president posts with `curl -s` and never sees a status code —
+    // it branches on the reply's `error` / `code` (the owner's sentence is `code:"hold"`).
+    expect(text).not.toContain('only on HTTP 200')
+    expect(text).toContain('`error` and `"code":"hold"` is written for the owner')
+    expect(text).toContain('A 引き継いで続ける / B 初めからやり直す')
+    expect(text).not.toContain('A 止まったところから続ける / B その会話はやめて、この作業をやり直す')
+    // no "a question waits" for notices that open none
+    expect(text).not.toContain('(a question waits in 「あなたへの質問」 on the agent-team bar — answer it there or tell you)')
+  })
+  it('og-manage: a blocked card with an open hold: question belongs to the engine — no second question, no move, no answer', async () => {
+    const text = await skill('og-manage')
+    expect(text).toContain('A `blocked` card with an open `hold:` question belongs to the engine')
+    expect(text).toContain('no `commander:blocked`')
+    expect(text).toContain('only the owner\'s A / B applies')
   })
 })

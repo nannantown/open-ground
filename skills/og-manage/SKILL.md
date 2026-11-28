@@ -220,11 +220,32 @@ First read the owner's answers (§Answers come back only when you look). Land on
 2. `git fetch origin main`.
 3. **Re-verify (mandatory)**: run the goal's own checks in `<wt>` yourself (`npx tsc --noEmit` / `npm test` etc). Green → continue; red → don't push, go §rework (heartbeat `ready` is unverified self-report — never push on it alone).
    **Full suite once, not twice** (owner decision 2026-09-26): in OPEN GROUND first run `npx tsx scripts/full-suite-passed.mts <wt>`. Exit 0 = the worker's own `npm test` exited 0 on exactly this HEAD's contents, the tree is clean, and HEAD already contains origin/main — FF push lands the tested tree, so skip `npm test` (tsc / lint still run). Exit 1 (prints why) = run `npm test`; if the reason is "HEAD does not contain origin/main", do step 5's rebase FIRST and run it once on the rebased tree (not once before and again after). Any rebase = the suite runs again. Never skip on the heartbeat's word. Full runs queue machine-wide (2 at once): run it in the background and wait.
-4. **独立レビュー(敵対・必須)**: Agent ツールでレビュアーを起動し、`git -C <wt> diff origin/main..HEAD` と
+4. **Review — its depth follows the card's effective tier** (owner decision 2026-11-28; the worker's
+   half is `TIER_DIRECTIVE`, swarmWorker.ts). Settle the depth BEFORE starting any reviewer. The card is
+   the one this worktree drains (`taskId` on its row in `GET /api/swarm/workers`):
+   ```bash
+   curl -s "$OG/api/settings" | jq -r '.executionMode // "optimize"'
+   curl -sfG "$OG/api/swarm/card-tier" --data-urlencode "path=$PWD" --data-urlencode "id=<full card id>" | jq -r '"\(.effectiveTier) \(.floored)"'
+   ```
+   The second prints `<tier> <floored>` — the app's own answer: the tier the worker ran at
+   (`resolveCardTier`, src/lib/cardTier.ts — never re-derive it yourself) and whether the card's
+   title/notes trip the safety floor.
+   - 【難易度: touch】No reviewer sub-agent. Read the whole diff yourself once, asking the reviewer's questions below; must-fix ⇒ §差し戻し. A diff you cannot read whole ⇒ one reviewer, as for design.
+   - 【難易度: standard】No reviewer sub-agent. Same as touch: you read the whole diff yourself; one you cannot read whole ⇒ one reviewer.
+   - 【難易度: design】Exactly ONE independent adversarial reviewer (below), once.
+   - 【難易度: ultra】The full panel, exactly as below.
+   - **Safety floor ⇒ the full panel, whatever the tier**: `<floored>` is `true`. **Also the full panel** when
+     `executionMode` is `max`, the command prints nothing (cardless one-off, card gone, the call failed), or
+     you cannot tell — an unknown never lightens a review.
+   - **The tier never lightens**: step 0's high-risk force-hold, step 3's gates (tsc / lint / the full suite or its pass record),
+     fail-CLOSED below, the specialist primary-source rule below (a diff in one of those domains
+     gets one specialist reviewer even on a touch/standard card), and who integrates (you).
+
+   Reviewer: Agent ツールでレビュアーを起動し、`git -C <wt> diff origin/main..HEAD` と
    ゴール(心拍 task / カード)を渡して「ゴールを本当に満たすか・バグ/退行/破壊的操作は?
    緑のテスト≠正しい前提で file:line+根拠」を出させる。must-fix が出たら入れず §差し戻し。
    **fail-CLOSED**: レビュアーがエラー/空 verdict なら1回だけ再試行→ダメなら止めて報告
-   (「レビューできなかった」を「クリーン」と同一視しない。報告の宛先は受信箱 — §Where reports go)。軽微な diff は1本、重い/危険な diff は複数で多数決。
+   (「レビューできなかった」を「クリーン」と同一視しない。報告の宛先は受信箱 — §Where reports go)。full panel = 軽微な diff は1本、重い/危険な diff は複数で多数決。
    - **専門領域は一次資料を先に**(`セキュリティ・認証/認可` / `暗号` / `外部 API の仕様` /
      `ライブラリ選定・バージョン依存の挙動` / `アルゴリズム・実装方式` など、
      **自分の知識が古かったら見抜けない領域**に diff が触れていたら): レビュアー sub-agent には
@@ -310,6 +331,16 @@ Everything else. **Read-only** (never touch a worker's session or write code); g
 - **`blocked` = human-judgment lane**, never auto-moved out; revive only via user `blocked`→`todo` (resets counter). Exception: orphan card already on main → finalize `done` after merge-base check.
 - **Reconcile mismatches** each "状況": READY but still `doing` (most common) → `move review`; on main but still `review` → confirm merge-base, `move done`; worktree gone+unmerged → investigate, usually `move blocked` + question inbox. STALL/silence → nudge only, don't move columns.
 - Engine ON handles ①②③ itself — don't duplicate, just bridge anomalies.
+- **A `blocked` card with an open `hold:` question belongs to the engine** — an operation whose
+  result nobody confirmed (AUTONOMY-SPEC R-B3/R-B4; the inbox row's `receiptKey` starts with
+  `hold:`, check `GET $OG/api/swarm/escalations?status=open&lane=owner&path=…`). Open **no**
+  question of your own for it (no `commander:blocked`), move no column, dispatch nothing (the
+  dispatch route answers 409), never answer it (`by:"commander"` is refused; only the owner's
+  A / B applies). The owner answers it — through the president, or in the bar's 「あなたへの質問」;
+  the answer itself moves the card (A: back to `todo` on its branch; B: back to `todo` without
+  its branch, a fresh start). In "状況" report it as one line: waiting on the owner's answer.
+  Your own conversation can be the held one: you are then a NEW conversation told what stopped
+  — check the current state (Board, Git) before doing anything similar.
 - **Called off (取りやめ / 見送り / replaced by new cards) → `setColumn` to `done` with `"abandoned":true`, never plain `done`.** Plain `done` reads as landed: the engine tells the owner 「本体に取り込まれました」 for work that never reached main.
 
 ## Guardrails

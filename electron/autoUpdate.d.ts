@@ -25,6 +25,37 @@ export interface ForkedChildHandles {
  *  preventDefault — the state "Restart now" must reach before quitAndInstall. */
 export function hasLiveForkedChildren(handles: ForkedChildHandles): boolean
 
+/** How long terminateChild waits after SIGTERM before it SIGKILLs. */
+export const CHILD_SIGTERM_GRACE_MS: number
+
+/** SIGTERM the child, SIGKILL it if it is still up after `graceMs`; resolves once
+ *  it has exited or been force-killed. */
+export function terminateChild(
+  child: (ForkedChildLike & { kill(signal: string): unknown; once(event: 'exit', cb: () => void): unknown }) | null | undefined,
+  graceMs?: number,
+): Promise<void>
+
+/** main.js's `before-quit` and relaunch decisions, with Electron injected. */
+export function createQuitGate(deps: {
+  /** hasLiveForkedChildren over the live child refs. */
+  hasChildren: () => boolean
+  hideWindows: () => void
+  /** Reap every forked child; the quit follows when it settles. */
+  teardown: () => Promise<unknown> | unknown
+  /** app.quit */
+  quit: () => void
+  /** app.relaunch */
+  relaunch: () => void
+}): {
+  beforeQuit(event: { preventDefault(): void }): void
+  /** Hold every quit while a teardown the gate did not start ("Restart now")
+   *  is pending; settles like `promise`, after the hold is released. */
+  track<T>(promise: Promise<T>): Promise<T>
+  /** A second launch / dock reopen: true when the app is quitting (a relaunch
+   *  was requested instead) and no window may be surfaced. */
+  relaunchIfQuitting(): boolean
+}
+
 /** How long after quitAndInstall() a still-running app counts as a failed install. */
 export const INSTALL_WATCHDOG_MS: number
 

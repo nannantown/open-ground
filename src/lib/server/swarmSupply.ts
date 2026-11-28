@@ -32,7 +32,9 @@ import { spawnSdkSession, terminateSdkSession } from './sdkSession'
 import { selectedRuntime, chatGptLaunchConfig } from './chatgptRuntime'
 import { assertSwarmRuntimeAdmission, trackSwarmRuntimeLaunch, type SwarmRuntimeHandoff } from './swarmRuntimeAdmission'
 import { assertAutomaticOperationAllowed } from './automationPolicy'
-import { validateNativePresidentRecoveryAdmission, type NativeRecoveryAdmission } from './swarmNativeRecovery'
+import { nativePresidentRecoveryAdmission, nativeReviewerKey, validateNativePresidentRecoveryAdmission, type NativeRecoveryAdmission } from './swarmNativeRecovery'
+import { NativeUnfinishedToolsError } from './swarmNativeTranscript'
+import { OWNER_REVIEW_HOLD_HINT, askAboutHeldOperation, heldOperationOpening, nativeHeldOperation, savedWorkHolds } from './savedWorkHold'
 import { assertClaudeSubscriptionLaunch } from './subscriptionOnly'
 import { runtimeOwnerKey } from './runtimeOwner'
 import { chatGptDeskOptions } from './chatgptLaunch'
@@ -77,6 +79,11 @@ export interface SpawnSwarmSupplyOpts {
    *  session id. The escape hatch for a desk whose restored context has gone bad
    *  — off by default, so the normal button always resumes. */
   fresh?: boolean
+  /** BOOT REVIVAL (docs/AUTONOMY-SPEC.md R-D3a, 2026-11-28): resume the Claude
+   *  president with NOTHING sent, so a desk nobody speaks to bills nothing; its
+   *  resume note rides the first line delivered (supplyNotice.SUPPLY_RESUME_NOTE).
+   *  Only resumeEngines passes it — every owner-initiated open stays as it was. */
+  quiet?: boolean
   runtimeHandoff?: SwarmRuntimeHandoff
   /** Internal owner recovery capability; never accepted from a client body. */
   nativeRecovery?: NativeRecoveryAdmission
@@ -118,6 +125,9 @@ export const supplyLaunchOpts = (
     cols?: number
     rows?: number
     resume?: boolean
+    /** With `resume` and no handoff: no positional prompt at all (boot revival).
+     *  Without `resume` it is ignored — a new conversation must take its role. */
+    quiet?: boolean
     remoteName?: string
     handoffInstructions?: string
     // Settings.language, resolved by the caller. REQUIRED — not optional, no
@@ -154,9 +164,17 @@ export const supplyLaunchOpts = (
   cols: opts.cols,
   rows: opts.rows,
   ...(opts.resume ? { resume: true } : {}),
-  initialPrompt:
-    (opts.resume ? SUPPLY_RESUME_INJECTION : SUPPLY_INJECTION) + languageDirective(opts.lang) + (opts.handoffInstructions ? `\n\n${opts.handoffInstructions}` : ''),
+  ...(quietResume(opts)
+    ? {}
+    : {
+        initialPrompt:
+          (opts.resume ? SUPPLY_RESUME_INJECTION : SUPPLY_INJECTION) + languageDirective(opts.lang) + (opts.handoffInstructions ? `\n\n${opts.handoffInstructions}` : ''),
+      }),
 })
+
+/** A launch that sends nothing: a quiet RESUME with no handoff to deliver. */
+const quietResume = (o: { quiet?: boolean; resume?: boolean; handoffInstructions?: string }): boolean =>
+  !!o.quiet && !!o.resume && !o.handoffInstructions
 
 /** Launch ONE interactive claude PTY in the project's primary checkout running
  *  the `/supply` skill (handed positionally so claude submits it on startup).
@@ -337,9 +355,36 @@ const launchNewSupplyDesk = async (
   }
   // `fresh` skips the lookup entirely (and overwrites the record below) — the
   // owner's way out of a restored context that has gone bad.
+  let recoveryNote: string | undefined
   const session = opts.fresh
     ? { agentSessionId: opts.runtimeHandoff?.operationId ?? randomUUID(), resume: false }
-    : await resolveSwarmSession(opts.projectPath, 'supply')
+    : await resolveSwarmSession(opts.projectPath, 'supply').catch(async (e: unknown) => {
+      // The president's OWN conversation saved a tool call with no recorded
+      // result (AUTONOMY-SPEC R-B3): never resumed. It is the one seat that waits
+      // for the owner instead of opening fresh — the owner's history lives in it —
+      // so its question goes to the inbox and the launch says where to answer.
+      // Once answered (the review marker), a NEW conversation opens, told what
+      // stopped and what the owner said.
+      if (!(e instanceof NativeUnfinishedToolsError)) throw e
+      const op = nativeHeldOperation(e.sessionId ?? '', e.tools[0], { role: 'supply' })
+      const reviewed = await nativeReviewerKey().then((key) => nativePresidentRecoveryAdmission(opts.projectPath, key)).catch(() => undefined)
+      if (!reviewed) {
+        await askAboutHeldOperation(opts.projectPath, op).catch(() => {})
+        throw new Error(`社長の前回の会話が、結果の分からない操作の途中で止まっています(${OWNER_REVIEW_HOLD_HINT})`)
+      }
+      recoveryNote = heldOperationOpening(op, reviewed.note)
+      return { agentSessionId: randomUUID(), resume: false }
+    })
+  // …and the same for an unconfirmed receipt on that conversation (an owner
+  // instruction delivered but never confirmed), read with every account's
+  // records: the boot check is not the only door that resumes the president.
+  if (session.resume) {
+    const [held] = await savedWorkHolds(opts.projectPath, { anyOwner: true, sessionId: session.agentSessionId })
+    if (held) {
+      await askAboutHeldOperation(opts.projectPath, { ...held, seat: { role: 'supply' } }).catch(() => {})
+      throw new Error(`社長の前回の会話に、結果の分からない操作が残っています(${OWNER_REVIEW_HOLD_HINT})`)
+    }
+  }
   // Token budget (card 68d8e00f): the execution MODE picks the desk's tier —
   // economy runs the supply officer on sonnet; optimize on opus since 2026-09-18
   // (owner: the desk investigates and specifies, sonnet was under-powered); max
@@ -376,13 +421,18 @@ const launchNewSupplyDesk = async (
   if (!opts.runtimeHandoff && opts.cause !== 'owner') await assertAutomaticOperationAllowed(opts.projectPath)
   const launchOptions = supplyLaunchOpts(
     opts.projectPath, session.agentSessionId,
-    { cols: opts.cols, rows: opts.rows, resume: session.resume, remoteName, lang, handoffInstructions: opts.runtimeHandoff?.instructions ?? opts.recoveryInstructions }, me,
+    { cols: opts.cols, rows: opts.rows, resume: session.resume, quiet: opts.quiet, remoteName, lang, handoffInstructions: opts.runtimeHandoff?.instructions ?? opts.recoveryInstructions ?? recoveryNote }, me,
   )
   if (typeof subscriptionEnv.CLAUDE_CONFIG_DIR === 'string')
     launchOptions.env = { ...launchOptions.env, CLAUDE_CONFIG_DIR: subscriptionEnv.CLAUDE_CONFIG_DIR }
   const ref = launchClaude(
     launchOptions,
   )
+  // Sent nothing: the resume note is owed to the first line this desk is handed.
+  // Awaited before returning, so no delivery can reach the desk first; lazy so the
+  // delivery module joins this module's graph only on the quiet path.
+  if (launchOptions.initialPrompt === undefined)
+    (await import('./supplyNotice')).owePresidentResumeNote(ref.terminalId)
   // Persist for the NEXT boot. Best-effort by design: a failed write only costs the
   // desk its memory on the following launch (it starts fresh — the old behaviour),
   // and must NEVER turn a successfully-spawned PTY into a 500.

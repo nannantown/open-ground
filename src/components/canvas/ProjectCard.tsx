@@ -1,5 +1,6 @@
 import {
   CircleCheck,
+  Clock,
   GitBranch,
   FolderClosed,
   Hand,
@@ -33,6 +34,11 @@ interface Props {
    *  and painted 'idle' amber — an "it needs you" band over a project that
    *  needed nothing. GroundLamp has no 'idle' to get wrong. */
   lamp?: GroundLamp
+  /** The hover text of a lamp the project's standing decided (swarmStanding.ts):
+   *  the reasons and the resume time, in the owner's words — 'waiting' (a muted
+   *  clock, owner decision 2026-11-28: no colour, no label, the reason on hover
+   *  only) or a hand for a hold only the owner can clear. */
+  lampHint?: string
   /** Set while the card was just jumped to by the search; a new value replays the flash. */
   flashKey?: number
   /** Audio from this project is playing somewhere in the app (the Songs
@@ -73,6 +79,7 @@ export const ProjectCard = memo(({
   selected,
   active,
   lamp,
+  lampHint,
   playback,
   flashKey,
   shared,
@@ -179,11 +186,26 @@ export const ProjectCard = memo(({
         // pulsing means activity.
         <div
           role="img"
-          title={t('projectPanel.groundMarkQuestion')}
-          aria-label={t('projectPanel.groundMarkQuestion')}
+          title={lampHint ?? t('projectPanel.groundMarkQuestion')}
+          aria-label={lampHint ?? t('projectPanel.groundMarkQuestion')}
           className="absolute -top-[8px] right-3 flex items-center bg-bg-card px-1 text-status-ask"
         >
           <Hand size={14} strokeWidth={2} aria-hidden />
+        </div>
+      )}
+      {lamp === 'waiting' && (
+        // Held for a reason that lifts by itself (owner decision 2026-11-28,
+        // AUTONOMY-SPEC §7-4 = A): a muted clock, steady — no band, no state
+        // colour (the three stay three), no label. The reason and the resume
+        // time are the hover text.
+        <div
+          role="img"
+          data-testid="ground-mark-waiting"
+          title={lampHint ?? t('projectPanel.groundMarkWaiting')}
+          aria-label={lampHint ?? t('projectPanel.groundMarkWaiting')}
+          className="absolute -top-[8px] right-3 flex items-center bg-bg-card px-1 text-ink-faint"
+        >
+          <Clock size={14} strokeWidth={2} aria-hidden />
         </div>
       )}
       {lamp === 'review' && (

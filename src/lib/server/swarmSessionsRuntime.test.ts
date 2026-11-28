@@ -98,6 +98,7 @@ describe('swarmSessions resume seam × PTY/SDK runtimes', () => {
   let proj: string
   let savedOgHome: string | undefined
   let savedHome: string | undefined
+  let savedClaudeConfig: string | undefined
   /** Releases every parked fake SDK iterator so the pumps unwind after a test. */
   let releaseIterators: Array<() => void>
 
@@ -185,6 +186,9 @@ describe('swarmSessions resume seam × PTY/SDK runtimes', () => {
   beforeEach(async () => {
     home = await realpath(await mkdtemp(join(tmpdir(), 'og-sessrt-home-')))
     claudeHome = await realpath(await mkdtemp(join(tmpdir(), 'og-sessrt-claude-')))
+    // claudeProjectsRoot() prefers CLAUDE_CONFIG_DIR (set by the test setup) over HOME.
+    savedClaudeConfig = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = join(claudeHome, '.claude')
     scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-sessrt-scratch-')))
     savedOgHome = process.env.OPENGROUND_HOME
     savedHome = process.env.HOME
@@ -210,6 +214,7 @@ describe('swarmSessions resume seam × PTY/SDK runtimes', () => {
     // resolution at the REAL home dir (the 2026-07-18 data loss).
     if (savedOgHome !== undefined) process.env.OPENGROUND_HOME = savedOgHome
     if (savedHome !== undefined) process.env.HOME = savedHome
+    if (savedClaudeConfig !== undefined) process.env.CLAUDE_CONFIG_DIR = savedClaudeConfig
     __resetMigrationCacheForTests()
     await rm(home, { recursive: true, force: true })
     await rm(claudeHome, { recursive: true, force: true })

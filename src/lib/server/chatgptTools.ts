@@ -129,18 +129,13 @@ export const reapAllChatGptHostGroups = (): number => {
 }
 
 /** Real-server entry only. Importing tools must not change signal handling.
- * The exit listener also runs when the existing gate reaper exits immediately
- * from its own signal listener, regardless of listener registration order. */
+ * 'exit' only: the server entry owns SIGTERM/SIGINT and ends with process.exit
+ * after its tool-call wait (liveDesks.exitAfterShutdownOnSignals), which runs
+ * this listener. A signal listener here that exited at once would cut that wait. */
 export const installChatGptHostReaper = (): void => {
   if (globalThis.__openground_chatgpt_host_reaper_installed || process.platform !== 'darwin') return
   globalThis.__openground_chatgpt_host_reaper_installed = true
   process.on('exit', reapAllChatGptHostGroups)
-  for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]] as const) {
-    process.on(signal, () => {
-      reapAllChatGptHostGroups()
-      process.exit(code)
-    })
-  }
 }
 
 interface HostProcessOptions {

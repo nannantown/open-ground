@@ -8,8 +8,9 @@
 // inside the row (the on/off switch) neither toggle nor drag.
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import type { ProjectMeta } from '@/lib/types'
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
+import type React from 'react'
+import type { ProjectMeta, ProjectStanding } from '@/lib/types'
 import type { SwarmBarHandle } from './SwarmBottomBar'
 
 vi.mock('@/i18n/I18nContext', () => ({
@@ -24,11 +25,13 @@ vi.mock('@/components/canvas/modules/SwarmModule', () => ({
     onToggleCollapsed,
     barHandle,
     ownerFeatures = false,
+    headerMark,
   }: {
     collapsed: boolean
     onToggleCollapsed: () => void
     barHandle: SwarmBarHandle
     ownerFeatures?: boolean
+    headerMark?: React.ReactNode
   }) => (
     <div
       data-testid="hdr"
@@ -42,6 +45,7 @@ vi.mock('@/components/canvas/modules/SwarmModule', () => ({
       <button type="button" data-testid="swarm-bar-toggle">
         {collapsed ? 'folded' : 'open'}
       </button>
+      {headerMark}
       <button type="button" role="switch" aria-checked={false}>
         power
       </button>
@@ -328,5 +332,54 @@ describe('SwarmBottomBar — looking at the president seat clears the Ground mar
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+// WAITING (owner decision 2026-11-28, AUTONOMY-SPEC §7-4 = A / R-E2): the bar
+// reads the project's standing and, when it is 'waiting', draws ONE muted clock
+// beside the switch — no label, no state colour, the reason on hover only.
+describe('SwarmBottomBar — the standing clock beside the switch', () => {
+  const standingOf = (s: Partial<ProjectStanding>): ProjectStanding => ({ state: 'running', needs: { dispatch: 0, integrate: 0 }, reasons: [], ...s })
+  const serve = (s: ProjectStanding) => {
+    const fetchMock = vi.fn(async (url: string) =>
+      url.startsWith('/api/swarm/standing') ? new Response(JSON.stringify(s), { status: 200 }) : new Response('{}', { status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('waiting ⇒ a muted clock whose hover text is the reason, read from GET /api/swarm/standing', async () => {
+    const plain = '使用量の上限のため、新しい作業は 14:30 ごろに自動で始まるまで待っています。'
+    const fetchMock = serve(standingOf({ state: 'waiting', needs: { dispatch: 1, integrate: 0 }, reasons: [{ kind: 'usage-limit', plain, until: 1 }] }))
+    render(<SwarmBottomBar project={project('p1')} />)
+    const mark = await screen.findByTestId('swarm-bar-waiting')
+    expect(fetchMock.mock.calls.some(([u]) => u === `/api/swarm/standing?path=${encodeURIComponent('/tmp/p1')}`)).toBe(true)
+    expect(mark.getAttribute('title')).toBe(plain)
+    expect(mark.getAttribute('aria-label')).toBe(plain)
+    // No label: the mark carries no text of its own — only the lucide clock.
+    expect(mark.textContent).toBe('')
+    expect(mark.querySelector('svg.lucide-clock')).toBeTruthy()
+    // No state colour: muted ink, never one of the three status tokens.
+    expect(mark.className).toContain('text-ink-faint')
+    expect(mark.outerHTML).not.toMatch(/status-(run|done|ask)/)
+    // Beside the switch, inside the header row.
+    expect(mark.nextElementSibling?.getAttribute('role')).toBe('switch')
+  })
+
+  it.each(['running', 'idle', 'off', 'needs-owner'] as const)('%s ⇒ no clock', async (state) => {
+    const fetchMock = serve(standingOf({ state }))
+    render(<SwarmBottomBar project={project('p1')} />)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    await nextTick()
+    expect(screen.queryByTestId('swarm-bar-waiting')).toBeNull()
+  })
+
+  it('an unreadable standing draws nothing and never throws', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('offline') }))
+    render(<SwarmBottomBar project={project('p1')} />)
+    await nextTick()
+    expect(screen.queryByTestId('swarm-bar-waiting')).toBeNull()
+    expect(screen.getByText('folded')).toBeTruthy()
   })
 })

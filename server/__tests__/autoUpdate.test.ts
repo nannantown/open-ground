@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { EventEmitter } from 'events'
 import { readFileSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -11,7 +12,11 @@ import {
   waitForInstallStaged,
   hasLiveForkedChildren,
   applyDownloadedUpdate,
+  terminateChild,
+  CHILD_SIGTERM_GRACE_MS,
+  createQuitGate,
 } from '../../electron/autoUpdate'
+import { SHUTDOWN_TOOL_GRACE_MS } from '@/lib/server/sdkSession'
 
 // Regression guard for the electron-updater "Restart now" no-op bug (observed
 // 2026-06-25, fixed in 0.11.8 / commit cc529d9; see electron/autoUpdate.js for the
@@ -828,5 +833,239 @@ describe('electron/main.js wiring — the ShipIt pre-flight (2026-09-21 "zero ru
     expect(fn).toContain("if (process.platform !== 'darwin') return null")
     expect(fn).toMatch(/timeout:\s*\d+/)
     expect(fn).toContain('err.stdout')
+  })
+})
+
+// ── Stops that wait (AUTONOMY-SPEC R-B2, 2026-11-28) ─────────────────────────
+// On SIGTERM the server refuses new tool calls and waits up to
+// SHUTDOWN_TOOL_GRACE_MS for the running ones before it exits. Electron's
+// SIGKILL used to follow 5 s after the SIGTERM — inside that wait — so a quit,
+// "Restart now" or update install still cut a running command off and left a
+// receipt nobody could confirm. The hard kill must come only after the wait.
+describe('terminateChild — the hard kill cannot land inside the server\'s tool wait', () => {
+  afterEach(() => { vi.useRealTimers() })
+  const fakeChild = () => {
+    const signals: string[] = []
+    const child = Object.assign(new EventEmitter(), {
+      killed: false,
+      exitCode: null as number | null,
+      signals,
+      kill(signal: string) { signals.push(signal); child.killed = true; return true },
+    })
+    return child
+  }
+
+  it('the grace is the server\'s bound plus 5 s', () => {
+    expect(CHILD_SIGTERM_GRACE_MS).toBe(SHUTDOWN_TOOL_GRACE_MS + 5_000)
+  })
+
+  it('a server that exits at the end of its full wait is never SIGKILLed', async () => {
+    vi.useFakeTimers()
+    const child = fakeChild()
+    const gone = terminateChild(child)
+    expect(child.signals).toEqual(['SIGTERM'])
+    await vi.advanceTimersByTimeAsync(SHUTDOWN_TOOL_GRACE_MS)
+    expect(child.signals, 'still inside the server\'s wait — no hard kill yet').toEqual(['SIGTERM'])
+    child.exitCode = 143
+    child.emit('exit', 143)
+    await gone
+    await vi.advanceTimersByTimeAsync(CHILD_SIGTERM_GRACE_MS)
+    expect(child.signals, 'it exited by itself — nothing left to kill').toEqual(['SIGTERM'])
+  })
+
+  it('a server still up at the grace is SIGKILLed then — not before, not never', async () => {
+    vi.useFakeTimers()
+    const child = fakeChild()
+    let done = false
+    const gone = terminateChild(child).then(() => { done = true })
+    await vi.advanceTimersByTimeAsync(CHILD_SIGTERM_GRACE_MS - 1)
+    expect(child.signals).toEqual(['SIGTERM'])
+    expect(done).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    await gone
+    expect(done).toBe(true)
+  })
+})
+
+// ── A quit that waits must look closed and must not be re-entered (2026-11-28) ─
+// The teardown now takes up to 20–25 s when a tool call is running. With the
+// window still on screen the owner presses ⌘Q again or force-quits. Worse, the
+// old before-quit asked hasLiveForkedChildren() on every entry, and SIGTERM sets
+// serverChild.killed = true at once — so a SECOND ⌘Q read "no live children" and
+// quit Electron in the middle of the wait, leaving the server to finish alone
+// (and a relaunch inside that window to hit "port 47776 in use").
+describe('createQuitGate — the quit hides at once, runs one teardown, and is not re-entered', () => {
+  /** Live refs as main.js holds them: SIGTERM flips `killed` synchronously, the
+   *  way terminateChild's child.kill('SIGTERM') does. */
+  const rig = () => {
+    const state = { serverChild: { killed: false } as { killed: boolean } | null }
+    const calls: string[] = []
+    let endTeardown: (() => void) | null = null
+    const gate = createQuitGate({
+      hasChildren: () => hasLiveForkedChildren(state),
+      hideWindows: () => { calls.push('hide') },
+      teardown: () => {
+        calls.push('teardown')
+        state.serverChild!.killed = true
+        return new Promise<void>((resolve) => {
+          endTeardown = () => { state.serverChild = null; resolve() }
+        })
+      },
+      quit: () => { calls.push('quit') },
+      relaunch: () => { calls.push('relaunch') },
+    })
+    const quitEvent = () => {
+      const e = { prevented: false, preventDefault() { e.prevented = true } }
+      return e
+    }
+    return { state, calls, gate, quitEvent, endTeardown: () => endTeardown!() }
+  }
+
+  it('a second ⌘Q (and a dock Quit) during the teardown is held, not let through on killed — exactly one teardown, quit only after it ends', async () => {
+    const { calls, gate, quitEvent, endTeardown } = rig()
+    const first = quitEvent()
+    gate.beforeQuit(first)
+    expect(first.prevented).toBe(true)
+    const second = quitEvent()
+    gate.beforeQuit(second)
+    const dock = quitEvent()
+    gate.beforeQuit(dock)
+    expect(second.prevented, 'serverChild.killed is already true — the old gate let this one through').toBe(true)
+    expect(dock.prevented).toBe(true)
+    expect(calls.filter((c) => c === 'teardown')).toEqual(['teardown'])
+    expect(calls, 'nothing quits while the server still waits').not.toContain('quit')
+    endTeardown()
+    await vi.waitFor(() => expect(calls).toContain('quit'))
+    expect(calls.filter((c) => c === 'quit')).toEqual(['quit'])
+    const final = quitEvent()
+    gate.beforeQuit(final)
+    expect(final.prevented, 'the teardown\'s own app.quit() goes through').toBe(false)
+  })
+
+  it('the first quit with live children hides every window at once, before the teardown starts', () => {
+    const { calls, gate, quitEvent } = rig()
+    gate.beforeQuit(quitEvent())
+    expect(calls).toEqual(['hide', 'teardown'])
+  })
+
+  it('a relaunch attempted while quitting asks app.relaunch() once and surfaces no window; before any quit it does nothing', async () => {
+    const { calls, gate, quitEvent, endTeardown } = rig()
+    expect(gate.relaunchIfQuitting(), 'not quitting: the window is raised as before').toBe(false)
+    expect(calls).not.toContain('relaunch')
+    gate.beforeQuit(quitEvent())
+    expect(gate.relaunchIfQuitting(), 'quitting: the caller must not show the hidden window').toBe(true)
+    expect(gate.relaunchIfQuitting()).toBe(true)
+    endTeardown()
+    await vi.waitFor(() => expect(calls).toContain('quit'))
+    expect(gate.relaunchIfQuitting(), 'still exiting after the teardown').toBe(true)
+    expect(calls.filter((c) => c === 'relaunch')).toEqual(['relaunch'])
+  })
+
+  it('a teardown that rejects still ends in the quit (no hostage)', async () => {
+    const calls: string[] = []
+    const gate = createQuitGate({
+      hasChildren: () => true,
+      hideWindows: () => {},
+      teardown: () => Promise.reject(new Error('child refused SIGTERM')),
+      quit: () => { calls.push('quit') },
+      relaunch: () => {},
+    })
+    gate.beforeQuit({ preventDefault() {} })
+    await vi.waitFor(() => expect(calls).toEqual(['quit']))
+  })
+
+  it('"Restart now" is unaffected: after applyDownloadedUpdate\'s own teardown, quitAndInstall\'s before-quit sails through', async () => {
+    for (const teardownStyle of ['null-out (happy path)', 'mark-killed (SIGKILL path)']) {
+      const { state, calls, gate, quitEvent } = rig()
+      let event: ReturnType<typeof quitEvent> | null = null
+      await applyDownloadedUpdate({
+        setQuitting: () => {},
+        // Tracked by the gate, as main.js passes it (review C-S1 below).
+        shutdownServerChild: () => gate.track((async () => {
+          if (teardownStyle.startsWith('null-out')) state.serverChild = null
+          else state.serverChild!.killed = true
+        })()),
+        quitAndInstall: () => {
+          event = quitEvent()
+          gate.beforeQuit(event)
+        },
+      })
+      expect(event!.prevented, teardownStyle).toBe(false)
+      expect(calls, `${teardownStyle}: no second teardown, no hidden window`).toEqual([])
+      expect(gate.relaunchIfQuitting(), 'an update quit is not a held quit').toBe(false)
+    }
+  })
+
+  // Review C-S1 (2026-11-28): "Restart now" tears the server down itself
+  // (applyDownloadedUpdate), so the gate stayed `idle`. During the server's wait
+  // (up to ~20 s for a running tool call) a ⌘Q read hasChildren() — false, since
+  // SIGTERM flips `killed` at once — and quit Electron: quitAndInstall never ran,
+  // the server finished alone, and a Squirrel relaunch met :47776 taken.
+  it('a ⌘Q during "Restart now"\'s own teardown is held until it ends; then quitAndInstall\'s quit goes through', async () => {
+    const { state, calls, gate, quitEvent } = rig()
+    let endShutdown: () => void = () => {}
+    const installQuits: Array<ReturnType<typeof quitEvent>> = []
+    const applying = applyDownloadedUpdate({
+      setQuitting: () => {},
+      shutdownServerChild: () => gate.track(new Promise<void>((resolve) => {
+        state.serverChild!.killed = true // SIGTERM sent; the server is in its wait
+        endShutdown = () => { state.serverChild = null; resolve() }
+      })),
+      quitAndInstall: () => {
+        calls.push('quitAndInstall')
+        const e = quitEvent()
+        installQuits.push(e)
+        gate.beforeQuit(e)
+      },
+    })
+    const cmdQ = quitEvent()
+    gate.beforeQuit(cmdQ)
+    const dockQuit = quitEvent()
+    gate.beforeQuit(dockQuit)
+    expect(cmdQ.prevented, 'the old gate let this through on killed').toBe(true)
+    expect(dockQuit.prevented).toBe(true)
+    expect(calls, 'held: no second teardown, no hide, no install yet').toEqual([])
+    endShutdown()
+    await applying
+    expect(calls).toEqual(['quitAndInstall'])
+    expect(installQuits[0].prevented, 'the install\'s own quit is not held').toBe(false)
+  })
+
+  it('a "Restart now" teardown that rejects releases the hold too (the install still quits)', async () => {
+    const { state, calls, gate, quitEvent } = rig()
+    let event: ReturnType<typeof quitEvent> | null = null
+    await applyDownloadedUpdate({
+      setQuitting: () => {},
+      shutdownServerChild: () => gate.track((async () => {
+        state.serverChild!.killed = true
+        throw new Error('teardown failed')
+      })()),
+      quitAndInstall: () => {
+        event = quitEvent()
+        gate.beforeQuit(event)
+      },
+    }).catch(() => {})
+    expect(event!.prevented).toBe(false)
+    expect(calls).toEqual([])
+  })
+
+  // main.js cannot run here, so its wiring is pinned as text (same convention as
+  // the main.js wiring blocks above): a handler that skips the gate would raise
+  // the hidden, dying window again.
+  it('main.js routes before-quit and every way back to the window through the gate', () => {
+    const main = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'electron/main.js'), 'utf8')
+    const handler = (name: string) => main.slice(main.indexOf(`app.on('${name}'`), main.indexOf(`app.on('${name}'`) + 400)
+    expect(main).toContain("app.on('before-quit', (event) => quitGate.beforeQuit(event))")
+    for (const name of ['second-instance', 'activate']) {
+      expect(handler(name), `${name} asks the gate before anything else`).toMatch(/^app\.on\('[a-z-]+', \([^)]*\) => \{\s*(\/\/[^\n]*\n\s*)*if \(quitGate\.relaunchIfQuitting\(\)\) return/)
+    }
+    const focus = main.slice(main.indexOf('function focusExistingWindow()'), main.indexOf('function focusExistingWindow()') + 300)
+    expect(focus).toMatch(/if \(quitGate\.relaunchIfQuitting\(\)\) return\n\s*if \(!mainWindow\) return/)
+    const hide = main.slice(main.indexOf('hideWindows: () => {'), main.indexOf('hideWindows: () => {') + 200)
+    expect(hide).toContain('for (const w of BrowserWindow.getAllWindows()) w.hide()')
+    // "Restart now" runs its own teardown; the gate must see it (review C-S1).
+    const apply = main.slice(main.indexOf('await applyDownloadedUpdate({'), main.indexOf('await applyDownloadedUpdate({') + 600)
+    expect(apply).toContain('shutdownServerChild: () => quitGate.track(shutdownServerChild()),')
   })
 })

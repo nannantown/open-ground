@@ -26,11 +26,12 @@ export const misc = {
     'misc.usage.breakdown.heading': 'What used it (7 days)',
     'misc.usage.breakdown.loading': 'Reading the last 7 days…',
     'misc.usage.breakdown.empty': 'No recorded usage in the last 7 days.',
-    'misc.usage.breakdown.worker': 'Agent Team workers',
-    'misc.usage.breakdown.manager': 'Agent Team commander desk',
-    'misc.usage.breakdown.supply': 'Agent Team supply desk',
+    'misc.usage.breakdown.worker': 'Workers',
+    'misc.usage.breakdown.manager': 'Manager',
+    'misc.usage.breakdown.supply': 'President',
     'misc.usage.breakdown.project': 'your projects (you, or a desk from before the ledger)',
     'misc.usage.breakdown.other': 'elsewhere',
+    'misc.usage.breakdown.cacheRead': 'Cache reads: context read again on each turn',
     'misc.usage.breakdown.note':
       '“your projects” covers both the Agent Team desks and your own claude sessions in those repos — the transcript does not separate them.',
     // EmptyState (Ground, no projects yet)
@@ -152,11 +153,12 @@ export const misc = {
     'misc.usage.breakdown.heading': '何が使ったか(7日)',
     'misc.usage.breakdown.loading': '直近7日を集計しています…',
     'misc.usage.breakdown.empty': '直近7日に記録された使用量はありません。',
-    'misc.usage.breakdown.worker': 'エージェントチームのワーカー',
-    'misc.usage.breakdown.manager': 'エージェントチームの司令官',
-    'misc.usage.breakdown.supply': 'エージェントチームの補給官',
+    'misc.usage.breakdown.worker': 'ワーカー',
+    'misc.usage.breakdown.manager': 'マネージャー',
+    'misc.usage.breakdown.supply': '社長',
     'misc.usage.breakdown.project': '自分のプロジェクト(自分の作業、または記録前の卓)',
     'misc.usage.breakdown.other': 'その他',
+    'misc.usage.breakdown.cacheRead': 'キャッシュ読み込み: 毎回読み直している文脈の量',
     'misc.usage.breakdown.note':
       '「自分のプロジェクト」にはエージェントチームの卓と、そのリポジトリでのあなた自身の claude の両方が入ります(記録からは区別できません)。',
     // EmptyState (Ground, no projects yet)

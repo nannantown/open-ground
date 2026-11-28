@@ -56,12 +56,12 @@ const BREAKDOWN = {
   total: 200,
   scannedAt: '2026-09-02T00:00:00.000Z',
   rows: [
-    { model: 'claude-fable-5-1', source: 'project', tokens: 120 },
-    { model: 'claude-fable-5-1', source: 'swarm-worker', tokens: 60 },
-    { model: 'claude-opus-5', source: 'other', tokens: 20 },
+    { model: 'claude-fable-5-1', source: 'project', tokens: 120, cacheRead: 4_500_000 },
+    { model: 'claude-fable-5-1', source: 'swarm-worker', tokens: 60, cacheRead: 340_000 },
+    { model: 'claude-opus-5', source: 'other', tokens: 20, cacheRead: 0 },
     // Desk rows (2026-09-22): attributed by the desk ledger, labelled as desks.
-    { model: 'claude-opus-5', source: 'manager', tokens: 15 },
-    { model: 'claude-opus-5', source: 'supply', tokens: 5 },
+    { model: 'claude-opus-5', source: 'manager', tokens: 15, cacheRead: 7_000 },
+    { model: 'claude-opus-5', source: 'supply', tokens: 5, cacheRead: 2_000 },
   ],
 }
 
@@ -136,6 +136,20 @@ describe('UsageHud — what used the budget (7 days)', () => {
     expect(text).toContain('20')
     // and the share is still there, because both are useful at a glance
     expect(text).toContain('60%')
+  })
+
+  // R-D4 (docs/AUTONOMY-SPEC.md): cache reads were 29x the billed figure in the
+  // week measured on 2026-11-28 and the panel never showed them. Each row now
+  // carries them as a SECOND figure — faint, explained only by its hover text
+  // (UI principle: no labels on screen).
+  it('shows the cache reads of each row as a second figure, explained on hover', async () => {
+    installFetch()
+    render(<UsageHud />)
+    await screen.findByText('Fable 5.1')
+    fireEvent.click(screen.getByLabelText('misc.usage.heading'))
+    await screen.findByText('misc.usage.breakdown.heading')
+    const figures = screen.getAllByTitle('misc.usage.breakdown.cacheRead')
+    expect(figures.map((f) => f.textContent)).toEqual(['4.5M', '340k', '0', '7k', '2k'])
   })
 
   it('formats large counts so a row stays one line', () => {

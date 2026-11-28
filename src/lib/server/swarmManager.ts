@@ -17,7 +17,7 @@ import { markRateLimited, isModelTier, MODEL_TIER_LADDER } from './swarmQuota'
 import { quotaRefusalKindOfText, refusalClosesEveryModel } from './swarmRateLimitText'
 import { installOgManageSkill } from './ogManageSkill'
 import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
-import { listManagerDesks } from './swarmManagerRuntime'
+import { listManagerDesks, type ManagerDeskHandle } from './swarmManagerRuntime'
 import {
   acquireDeskSpawnLock,
   deskSpawnLockKey,
@@ -32,14 +32,19 @@ import {
   spawnSdkSession,
   preloadSdk,
   attachSdkListener,
+  getSdkSession,
+  sdkInputAdmissionPaused,
   type SdkSessionInfo,
   type SdkStreamFrame,
 } from './sdkSession'
 import { watchSdkDeskForLimit } from './sdkDeskLimit'
 import { getExecutionMode, getAllowedModelTiers } from './store'
-import { recycleDeskSessionIfOverCap, deskRecycledLogLine } from './deskContextCap'
+import { recycleDeskSessionIfOverCap, deskRecycledLogLine, managerContextCapTokens } from './deskContextCap'
+import { sessionContextTokens } from './claudeUsage'
 import { logToEngine } from './engineLogSink'
 import { assertNoUncertainRuntimeActions } from './runtimeActionReceipts'
+import { NativeUnfinishedToolsError } from './swarmNativeTranscript'
+import { askAboutHeldOperation, heldOperationOpening, nativeHeldOperation, savedWorkHolds } from './savedWorkHold'
 import type { ClaudeEffort } from '../types'
 import { type SpawnSwarmManagerResponse } from '../types'
 
@@ -229,6 +234,61 @@ export const watchSdkDeskForDeathOnArrival = (
   return sub.detach
 }
 
+// ── CAP AT WAKE (docs/AUTONOMY-SPEC.md R-D3b, 2026-11-28) ──────────────────────
+// The spawn-time cap (launchNewDesk → recycleDeskSessionIfOverCap) only runs when a
+// desk is LAUNCHED, so a commander that stays up was never measured: every wake
+// re-read a conversation that kept growing. The engine asks this at a wake; an
+// answer makes it close the desk through the unresponsive-desk teardown, and the
+// next launch finds the conversation over the cap and opens a fresh one.
+
+export interface ManagerCapAtWakeDeps {
+  desks?: (projectPath: string) => ManagerDeskHandle[]
+  session?: (id: string) => SdkSessionInfo | null
+  paused?: (id: string) => boolean
+  /** A background command still running (Bash run_in_background): closing the
+   *  desk would kill it mid-way. Newest in-flight start, null when none. */
+  backgroundTaskAt?: (cwd: string, sessionId: string) => Promise<number | null>
+  contextTokens?: (sessionId: string) => Promise<number | null>
+  cap?: () => Promise<number>
+}
+
+/** Is this SDK commander desk IDLE — its turn ended, no command running, not
+ *  paused on a usage limit? Synchronous on purpose: the teardown re-asks it right
+ *  before it closes, after its last await, so a turn pushed meanwhile (pushSdkInput
+ *  flips 'waiting' to 'working' synchronously) is never cut. */
+export const managerDeskIdle = (handleId: string, deps: Pick<ManagerCapAtWakeDeps, 'session' | 'paused'> = {}): boolean => {
+  const s = (deps.session ?? getSdkSession)(handleId)
+  return !!s && s.status === 'waiting' && !(s.toolCallsInFlight ?? 0) && !(deps.paused ?? sdkInputAdmissionPaused)(handleId)
+}
+
+/** The commander conversation and its fill when the project's commander desk is an
+ *  IDLE SDK desk at or over the commander cap; null otherwise — no desk, a PTY desk
+ *  (the owner's terminal), a stopping or busy one, the cap off, or a fill that
+ *  cannot be read (fail-open: the desk is woken exactly as before). Never throws. */
+export const idleManagerDeskOverCap = async (
+  projectPath: string,
+  deps: ManagerCapAtWakeDeps = {},
+): Promise<{ agentSessionId: string; tokens: number } | null> => {
+  try {
+    const desk = (deps.desks ?? listManagerDesks)(projectPath).find((d) => !d.stopping)
+    if (!desk || desk.runtime !== 'sdk' || !desk.agentSessionId || !managerDeskIdle(desk.handleId, deps)) return null
+    const cap = await (deps.cap ?? managerContextCapTokens)()
+    if (!(cap > 0)) return null
+    const tokens = await (deps.contextTokens ?? sessionContextTokens)(desk.agentSessionId)
+    if (tokens === null || tokens < cap) return null
+    const background = deps.backgroundTaskAt ??
+      ((cwd: string, sid: string) => import('./swarmOrchestrator').then((m) => m.sessionBackgroundTaskAt(cwd, sid)))
+    // Busy only while the command is plausibly alive (the run grace every other
+    // reader applies): one start whose end record never landed refused the
+    // recycle for the rest of the conversation (review 2026-11-28 R2-M2).
+    const started = await background(desk.cwd, desk.agentSessionId)
+    if (started !== null && (await import('./swarmOrchestrator')).backgroundTaskAliveAt(started, Date.now()) !== null) return null
+    return { agentSessionId: desk.agentSessionId, tokens }
+  } catch {
+    return null
+  }
+}
+
 export interface SpawnSwarmManagerOpts {
   /** The registered project to command — the manager session's cwd (its primary
    *  checkout). The route validates this with validateProjectPath first. */
@@ -402,10 +462,6 @@ const spawnSwarmManagerInternal = async (
 const launchNewDesk = async (
   opts: SpawnSwarmManagerOpts,
 ): Promise<SpawnSwarmManagerResponse> => {
-  // Surface saved unknown effects before resolving/recycling a conversation or
-  // recording a new pointer. Healthy parallel workers keep their accepted turns;
-  // the SDK's query-time guard still checks changes after this launch boundary.
-  await assertNoUncertainRuntimeActions(opts.projectPath, false)
   // RESUME the project's previous commander conversation whenever claude can still
   // load it (swarmSessions.ts) — the commander is a days-long integration desk, not
   // a disposable worker, and an OPEN GROUND restart (i.e. every release) used to
@@ -414,16 +470,51 @@ const launchNewDesk = async (
   // always launches. `fresh` skips the lookup outright (and overwrites the record
   // below): the owner's way out of a restored context that has gone bad.
   const chatgpt = await selectedRuntime('swarm') === 'chatgpt'
-  const resolved = opts.fresh
-    ? { agentSessionId: chatgpt ? `chatgpt-${opts.runtimeHandoff?.operationId ?? randomUUID()}` : opts.runtimeHandoff?.operationId ?? randomUUID(), resume: false }
-    : await resolveSwarmSession(opts.projectPath, 'manager', chatgpt ? { provider: 'chatgpt' } : {})
+  const freshSession = () => ({ agentSessionId: chatgpt ? `chatgpt-${opts.runtimeHandoff?.operationId ?? randomUUID()}` : opts.runtimeHandoff?.operationId ?? randomUUID(), resume: false })
+  // A HELD conversation is never resumed (AUTONOMY-SPEC R-B3): one that saved a
+  // tool call with no recorded result (native transcript), or that an unconfirmed
+  // receipt holds. The commander then opens a FRESH conversation whose opening
+  // names what stopped — so the desk comes up instead of holding the project.
+  let heldNote: string | undefined
+  let resolved: { agentSessionId: string; resume: boolean } = freshSession()
+  if (!opts.fresh) {
+    try {
+      resolved = await resolveSwarmSession(opts.projectPath, 'manager', chatgpt ? { provider: 'chatgpt' } : {})
+    } catch (e) {
+      if (!(e instanceof NativeUnfinishedToolsError)) throw e
+      const op = nativeHeldOperation(e.sessionId ?? '', e.tools[0], { role: 'manager' })
+      // The owner still hears of it (R-B4) — once: an answer already given (the
+      // review marker, as the boot path checks it) is not asked for again (review A
+      // S3), and the fresh opening carries what the owner said (review R2).
+      const { nativeConversationRecoveryReview } = await import('./swarmNativeRecovery')
+      const { projectUUIDFromPath } = await import('./projectDataPath')
+      const review = e.sessionId ? await projectUUIDFromPath(opts.projectPath)
+        .then((projectId) => nativeConversationRecoveryReview(projectId, opts.projectPath, e.sessionId!)).catch(() => undefined) : undefined
+      heldNote = heldOperationOpening(op, review?.note)
+      if (!review) await askAboutHeldOperation(opts.projectPath, op).catch(() => {})
+    }
+    if (resolved.resume) {
+      const [held] = await savedWorkHolds(opts.projectPath, { anyOwner: true, sessionId: resolved.agentSessionId })
+      if (held) {
+        heldNote = heldOperationOpening(held)
+        resolved = freshSession()
+        // …and this branch asks too (review A S2): with the engine off nothing else
+        // raises the question for it. One open question per operation (the inbox dedupes).
+        await askAboutHeldOperation(opts.projectPath, { ...held, seat: { role: 'manager' } }).catch(() => {})
+      }
+    }
+  }
+  // Only this conversation's own unknown results refuse its launch (R-B3).
+  // Healthy parallel workers keep their accepted turns; the SDK's query-time
+  // guard still checks changes after this launch boundary.
+  await assertNoUncertainRuntimeActions(opts.projectPath, false, resolved.agentSessionId)
   // DESK CONTEXT CAP (owner decision 2026-09-18 — deskContextCap.ts): a resumable
   // conversation already over the cap is NOT resumed; a fresh one opens instead,
   // still handed MANAGER_RESUME_INJECTION (`recycled`) so the new desk re-reads
   // the world before it speaks. The commander is stateless by design, so this
   // loses nothing and stops every later turn re-reading a huge context.
   const capped = chatgpt ? { session: resolved, recycledFromTokens: null } : await recycleDeskSessionIfOverCap(resolved)
-  const session = { ...capped.session, recycled: capped.recycledFromTokens !== null }
+  const session = { ...capped.session, recycled: capped.recycledFromTokens !== null, ...(heldNote ? { heldNote } : {}) }
   const noteRecycled = (): void => {
     if (capped.recycledFromTokens !== null)
       logToEngine(opts.projectPath, 'info', deskRecycledLogLine('司令官', capped.recycledFromTokens))
@@ -492,7 +583,7 @@ const launchNewDesk = async (
  *  recovery policy. Never fall back to a terminal launch. */
 const launchSdkDesk = async (
   opts: SpawnSwarmManagerOpts,
-  session: { agentSessionId: string; resume: boolean; recycled?: boolean },
+  session: { agentSessionId: string; resume: boolean; recycled?: boolean; heldNote?: string },
   me: { model: string; effort?: ClaudeEffort },
   lang: PromptLang,
   chatgpt = false,
@@ -536,7 +627,7 @@ const launchSdkDesk = async (
       role: 'manager',
       agentSessionId: session.agentSessionId,
       options: { ...plan.options, ...(opts.runtimeHandoff?.runtimeOwnerKey ? { runtimeOwnerKey: opts.runtimeHandoff.runtimeOwnerKey } : {}) },
-      initialPrompt: plan.initialPrompt + (opts.runtimeHandoff ? `\n\n${opts.runtimeHandoff.instructions}` : ''),
+      initialPrompt: plan.initialPrompt + (session.heldNote ? `\n\n${session.heldNote}` : '') + (opts.runtimeHandoff ? `\n\n${opts.runtimeHandoff.instructions}` : ''),
       ...(chatgpt
         ? { provider: 'chatgpt' as const, queryFn: createChatGptQuery(), distillMessage: distillChatGptMessage }
         : { sdk: sdkReady! }),

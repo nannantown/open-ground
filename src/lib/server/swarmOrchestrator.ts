@@ -98,7 +98,12 @@ import {
   getSdkSession,
   listSdkSessionsIn,
   lastQuotaRefusalText,
+  readSdkFrames,
+  quotaPrefixes,
+  sdkShutdownBegun,
+  sdkQuotaPause,
 } from './sdkSession'
+import { apiErrorTurnSeq, lastTranscriptUsageRefusal } from './swarmResumeEvidence'
 import { classifyQuotaRefusal, quotaRefusalKindOfText, refusalClosesEveryModel } from './swarmRateLimitText'
 // card 2 (docs/ENGINE_PERSISTENCE_PLAN.md) — engine intent write-through +
 // boot-time crash-loop breaker. See resumeEngines() below.
@@ -136,6 +141,7 @@ import {
   getSettings,
   getExecutionMode,
   getAllowedModelTiers,
+  getSwarmBudget,
   rememberSwarmAutonomy,
   forgetSwarmAutonomy,
   isSwarmAutonomyRemembered,
@@ -161,6 +167,7 @@ import { execModeMaxWorkers, resolveSwarmModelEffort } from './swarmLaunch'
 // worker exactly as before but marks nothing (never poison a tier by guess).
 import {
   markRateLimited,
+  markCoolingUntil,
   MODEL_TIER_LADDER,
   ensureCoolingTableLoaded,
   coolingSnapshot,
@@ -177,7 +184,11 @@ import { type SpawnBlock } from './swarmAllowedModels'
 // A5 usage sensor, SYNC cache peek only (never awaited, never refreshed here) —
 // the second-priority reset-time source markRateLimited resolves against when
 // the worker's own screen wording didn't carry one.
-import { peekCachedUsage } from './claudeUsageCli'
+import { peekCachedUsage, refreshUsageCacheDetached } from './claudeUsageCli'
+// AUTONOMY-SPEC R-D1/R-D2/R-C1(1): the SDK's structured limit readings and the
+// budget gate that asks them before an automatic start.
+import { budgetReadings, claimUsageRefresh, ensureUsageWindowsLoaded, rejectedUntil } from './usageWindows'
+import { budgetGate, weeklyReserveHold, type BudgetHoldKind, type BudgetVerdict } from './swarmBudget'
 import {
   spawnSwarmWorker,
   removeSwarmWorktree,
@@ -188,7 +199,7 @@ import {
 } from './swarmWorker'
 import { SdkWorkerUnavailableError } from './swarmWorkerSdk'
 import { centralWorktreesDir } from './paths'
-import { liveDeskOccupies, deskRecentlyActiveIn } from './liveDesks'
+import { liveDeskOccupies, deskRecentlyActiveIn, listAllActiveDesks, listDeskIdsByRole } from './liveDesks'
 import { probeOnline } from './swarmConnectivity'
 import { projectUUIDFromPath } from './projectDataPath'
 import { taskAssetPath } from './taskAssets'
@@ -203,11 +214,15 @@ import {
 } from './swarmIntegrate'
 import { detectWorkerFreeTextQuestion } from './swarmQuestions'
 import {
+  countOpenEscalationsByProject,
   defaultReceiptKey,
   deliverAnswerToWorker,
   openEscalation,
   type OpenEscalationInput,
 } from './swarmEscalations'
+import { standingOf, type StandingFacts } from './swarmStanding'
+import { readProjectData } from './projectData'
+import { getPromptLang, type PromptLang } from './promptLang'
 import {
   runOverseerPass,
   initOverseerRuntime,
@@ -231,14 +246,18 @@ import type {
   SwarmManagerPresence,
   SwarmOrchestratorState,
   SwarmFatalNotification,
+  ProjectStanding,
   TaskTier,
 } from '../types'
 import { createSwarmFatalNotification, createSwarmInfoNotification } from './swarmNotifications'
-import { OWNER_REVIEW_HOLD_HINT, automationStartNotice, commanderFailureWords, dispatchFailureNotice, ownerUnconfirmedNotice, savedWorkHoldCount, savedWorkHoldNotice, toolDenialNotice } from './savedWorkHold'
+import { APP_SIGN_IN_WHERE, OWNER_REVIEW_HOLD_HINT, isOwnerReviewHold, askAboutHeldOperation, type HoldCause, automationStartNotice, commanderFailureWords, dispatchFailureNotice, holdKey, nativeHeldOperation, openHoldQuestions, ownerUnconfirmedNotice, savedWorkHolds, toolDenialNotice, withdrawHoldQuestion, type HeldOperation, type HeldSeat } from './savedWorkHold'
 import { isRuntimeActionDenial } from './runtimeActionReceipts'
+import { NativeUnfinishedToolsError } from './swarmNativeTranscript'
+import { hasChatGptAccess } from './chatgptAccess'
 // Manager-only integration (2026-07-15): the engine no longer merges — it WAKES the
 // commander when a worker is ready. These are the seams the default wake dep uses.
-import { spawnSwarmManager } from './swarmManager'
+import { spawnSwarmManager, idleManagerDeskOverCap, managerDeskIdle } from './swarmManager'
+import { deskClosedOverCapLogLine } from './deskContextCap'
 import {
   listManagerDesks,
   managerDeskForSession,
@@ -421,6 +440,14 @@ export const STALL_NUDGE_COOLDOWN_MS = 3 * 60_000
  *  stays silent. 2 ⇒ ~10min(detect)+2×3min(nudge cooldowns) ≈ 16min to reclaim a
  *  truly wedged worker, well under the 30-min read-only worker-stale backstop. */
 export const STALL_MAX_NUDGES = 2
+
+/** "Continue." after turns that ended on an API error (network loss, sleep,
+ *  provider 5xx — not a usage refusal): at most this many per card attempt for a
+ *  worker, per desk for the commander (R-C2). Past it the stall path decides. */
+export const API_ERROR_CONTINUE_MAX = 3
+/** What the commander is told then — the same turn sdkWorkerRuntime.nudge sends
+ *  a worker. A new turn, never a replay: the CLI re-runs no recorded tool call. */
+const API_ERROR_CONTINUE_TEXT = 'Continue.'
 
 /** PTY output within this window AFTER a nudge is treated as the Enter ECHO, not a
  *  sign of life. A bare CR makes a `claude` TUI repaint (stamping lastOutputAt),
@@ -1972,20 +1999,43 @@ export interface ProjectEngine {
    *  rest of the engine's cognition — a restart retries immediately, which is
    *  the right bias (the cause may have been fixed while we were down). */
   sdkSpawnHold?: { until: number; failures: number; reason: string; notifiedAt: number }
-  /** Saved-work hold (2026-11-23): the project has an operation whose result
-   *  nobody confirmed, so every SDK launch would die at its first step and every
-   *  running worker's tool call is denied (savedWorkHold.ts). While set, the fill
-   *  stage dispatches nothing and the commander is not woken; cards stay in todo.
-   *  Journalled and told to the president ONCE, on the entering edge; cleared by
-   *  the first pass that finds the operations reviewed. In-memory: after a
-   *  restart the boot resume owns the same hold (savedSwarmRuntimeHold). */
+  /** Saved-work hold (2026-11-23), PROJECT-WIDE only when the launch guard's
+   *  question cannot be answered at all (the owner's sign-in is gone, the record
+   *  cannot be read): every launch would then die at its first step, so the fill
+   *  stage dispatches nothing and the commander is not woken. Told to the
+   *  president once it lasts; cleared by the first pass that can ask again. A
+   *  known operation with an unconfirmed result no longer sets this: it holds
+   *  only its own conversation ({@link heldOps}, R-B3). */
   savedWorkHold?: { since: number; count: number; unanswered?: string; told?: boolean }
+  /** The standing watchdog's memory (AUTONOMY-SPEC R-A2, {@link watchStanding}):
+   *  the board's column signature, the last observed progress, since when a need
+   *  has stood with no progress and no reason, and whether this stall episode
+   *  was already told. In-memory: a restart starts a fresh window. */
+  standingWatch?: { sig: string; progressedAt?: number; quietSince: number; told?: boolean }
+  /** Operations with an unconfirmed result this engine has already acted on
+   *  (R-B3, 2026-11-28): id → the card it parked, if any. Each was asked about
+   *  once (`hold:<id>` in the owner's inbox); its worker was stopped and its card
+   *  parked in blocked, and the card is kept out of dispatch while the operation
+   *  holds. In-memory: after a restart the first pass acts again, and the inbox
+   *  dedupes the open question. */
+  heldOps?: Map<string, { taskId?: string }>
+  /** Held operations whose question could not be raised where their card was
+   *  parked (boot resume): retried by every pass until the question is open, so a
+   *  parked card is never left without one (review A S6). In-memory: a restart
+   *  runs the boot resume, which parks and asks again. */
+  unaskedHolds?: Map<string, HeldOperation>
+  /** Conversation → the card it worked, kept past a worker's prune so an
+   *  operation the engine's own stop cut off still finds its card (R-B3). */
+  sessionTasks?: Map<string, string>
   /** What the engine itself cut off mid-command (a forced stop after
    *  {@link TOOL_BOUNDARY_WAIT_MS}) — said in the saved-work notice it causes. */
-  forcedStopNote?: string
+  forcedStopNote?: HoldCause
   /** Per worker (workerKey): when the engine first wanted to stop it but a
    *  command was still running, and WHICH stop is waiting — see awaitToolBoundary. */
   toolBoundaryWaits?: Map<string, { since: number; stop: string }>
+  /** The commander's "continue" after API-error turns (R-C2): which desk, the
+   *  turn boundary last answered, how many sent. A new desk starts from zero. */
+  managerApiErrorRetry?: { desk: string; seq: number; count: number }
   /** Why the commander last failed to come up (its launch threw, or its SDK desk
    *  ended within seconds) — journalled when it happens and named in the
    *  'manager-unrevivable' notice, which used to say only "keeps dying". */
@@ -2188,6 +2238,11 @@ export interface ProjectEngine {
      *  a full disarm (swarmCards.length === 0) — a stale `true`/`false` must never judge a
      *  NEW episode's first give-up on a PREVIOUS episode's outcome. */
     lastWakeSpawned?: boolean
+    /** The commander conversation last CLOSED by the cap at wake (2026-11-28). Not
+     *  episode-scoped: it is about a conversation, and a reopen that resumed the same
+     *  one anyway (the spawn-time fill read failed open) must be woken, never closed
+     *  again in a loop that bills a resume turn per cycle. */
+    capRecycledSession?: string
   }
   /** How many times each card (taskId) has been RE-QUEUED after a lost worker —
    *  the {@link recoveryColumn} retry budget. Bumped on a 'todo' requeue, reset
@@ -2378,6 +2433,17 @@ export interface ProjectEngine {
    *  BOTH park kinds, where {@link parkUntil} can only express the cooling one
    *  (an all-tiers-disabled hold has no deadline). In-memory only. */
   spawnBlockSig?: string
+  /** The USAGE BUDGET's verdict on the last pass (AUTONOMY-SPEC R-D1/R-D2,
+   *  swarmBudget.budgetGate): the cards it held from an automatic start with
+   *  kind + `until`, or only `note: 'usage-unknown'` when no fresh reading
+   *  existed and nothing was held. For the standing / dashboard. In-memory only. */
+  budgetHold?: { held: { taskId: string; kind: BudgetHoldKind; until: number }[]; note?: 'usage-unknown' }
+  /** The owner's weekly reserve holds the commander's automatic wake for
+   *  finished work (R-D2, runIntegratePass); unset when it does not. */
+  commanderReserveHold?: { until: number; usedPct: number; linePct: number }
+  /** Edge signature of {@link budgetHold}'s held set, so each change is
+   *  journalled once instead of every 3s. In-memory only. */
+  budgetHoldSig?: string
   /** Card ids the engine is RIGHT NOW spawning a worker for — reserved BEFORE
    *  {@link OrchestratorDeps.spawnWorker} and released once that card's todo→doing
    *  move has settled (or the spawn threw). The window it covers: a worktree spawn
@@ -3216,19 +3282,40 @@ export interface OrchestratorDeps {
   }) => Promise<SpawnSwarmWorkerResponse>
   /** Is this worker's PTY still alive? (A freed slot ⇒ refill.) */
   isAlive: (w: WorkerHandle) => boolean
-  /** How many unconfirmed operations hold this project's automatic work
-   *  (savedWorkHold.ts). THROWS when the launch guard's question cannot be
-   *  answered (owner sign-in gone, record unreadable) — every launch would fail
-   *  the same way, so that holds too. Absent ⇒ never held (hermetic tests). */
-  savedWorkHold?: (projectPath: string) => Promise<number>
+  /** The operations with an unconfirmed result in this project, each with the
+   *  conversation it holds (savedWorkHold.ts). THROWS when the launch guard's
+   *  question cannot be answered (owner sign-in gone, record unreadable) — every
+   *  launch would fail the same way, so that holds the whole project. Absent ⇒
+   *  never held (hermetic tests). */
+  savedWorkHold?: (projectPath: string, opts?: { anyOwner?: boolean }) => Promise<HeldOperation[]>
+  /** The unconfirmed operation, if any, that holds ONE saved conversation —
+   *  asked before a boot resume of it, with every account's records so an
+   *  offline owner-role lookup never reads as "free" (R-B3). Absent ⇒ none. */
+  heldConversation?: (projectPath: string, sessionId: string) => Promise<HeldOperation | undefined>
   /** What the pool knows about an SDK worker's session beyond "alive": why it
    *  ended (the only record of a death at start — the pool forgets it after its
    *  linger), how many commands it is running right now, and the usage refusal
-   *  it is parked on (its own words — the SDK tail leaves them out). Absent ⇒ unknown. */
-  sdkWorkerFacts?: (sdkSessionId: string) => { exitReason?: string; toolCallsInFlight?: number; refusal?: string } | undefined
+   *  it is parked on (its own words — the SDK tail leaves them out). Absent ⇒ unknown.
+   *  `apiErrorTurnSeq`: set while the session sits `waiting` on a turn that ended on
+   *  an API error that is not a usage refusal — that turn boundary's seq (R-C2). */
+  sdkWorkerFacts?: (sdkSessionId: string) => { exitReason?: string; toolCallsInFlight?: number; refusal?: string; apiErrorTurnSeq?: number } | undefined
+  /** The usage-limit refusal a dead worker's TRANSCRIPT ends on, or null — asked
+   *  only once the pool has forgotten the session (R-C1(2)). Absent ⇒ never read. */
+  transcriptUsageRefusal?: (worktree: string, sessionId: string) => Promise<string | null>
+  /** The live SDK commander desk whose newest turn ended on a (non-quota) API
+   *  error, with that turn's seq and a way to speak to it; null when none (R-C2).
+   *  Absent ⇒ never checked. */
+  managerApiErrorTurn?: (projectPath: string) => { desk: string; seq: number; say: (text: string) => boolean } | null
+  /** Same sensor as {@link IntegrationDeps.isOnline}: the API-error "continue"
+   *  waits for it. Absent ⇒ {@link probeOnline}. */
+  isOnline?: () => Promise<boolean>
   /** How many of an SDK worker's newest tool calls in a row the runtime action
    *  guard refused (0 once one goes through). Absent ⇒ never watched. */
   toolDenialStreak?: (sdkSessionId: string) => number
+  /** Ask for a /usage scrape, detached (AUTONOMY-SPEC R-D1). The dispatch pass
+   *  calls it when a card waits and the newest usage reading is old
+   *  (usageWindows.claimUsageRefresh). Absent ⇒ never asked. */
+  refreshUsage?: () => void
   /** Where this card's work already lives, if anywhere — see
    *  {@link ensureSwarmWorktreeForBranch}. `null` ⇒ dispatch fresh. Optional so
    *  existing dep literals keep compiling; the default resolver is used when
@@ -3410,6 +3497,11 @@ export interface OrchestratorDeps {
    *  sessionBackgroundTaskAt. Closes the 2026-07-27 false-kill — see
    *  {@link BG_TASK_GRACE_MS}. */
   sessionBackgroundTaskAt?: (cwd: string, sessionId: string) => Promise<number | null>
+  /** The project's commander SDK desk has a background command in flight (the
+   *  start instant, else null) — its own full test run, which og-manage tells it
+   *  to wait for. The standing watchdog counts that as serving (review
+   *  2026-11-28 B-S3b). Absent ⇒ never counted. */
+  commanderBackgroundTaskAt?: (projectPath: string) => Promise<number | null>
 
   /** Persist a question in the human inbox. Optional for isolated engine tests. */
   raiseQuestion?: (input: OpenEscalationInput) => Promise<unknown>
@@ -3489,6 +3581,10 @@ export interface AnomalyDeps {
  *  OrchestratorDeps so the dispatch tests/contract stay untouched, and so the
  *  whole risky git path is unit-tested with fakes (no real repo, no push). */
 export interface IntegrationDeps {
+  /** The dispatch pass's /usage refresh request ({@link OrchestratorDeps.refreshUsage}),
+   *  asked here too while a commander wake is pending, so the reserve hold on it
+   *  rests on a fresh reading (review 2026-11-28 R2-S1). Absent ⇒ never asked. */
+  refreshUsage?: () => void
   /** Read this project's REVIEW-column cards. */
   fetchReview: (projectPath: string) => Promise<ProjectTask[]>
   /** Resolve + freshen the trunk branch; null when there is no usable trunk
@@ -3621,8 +3717,16 @@ export interface IntegrationDeps {
    *  a desk was actually terminated. Called at most ONCE per waiting episode
    *  (`managerResume.deskRecycled`) and ONLY when {@link managerDeskRuntime} said `'sdk'`.
    *  A throw is swallowed by the caller — the owner's bell must never depend on the
-   *  recycle succeeding. Optional. Default: {@link defaultRecycleManagerDesk}. */
-  recycleManagerDesk?: (projectPath: string) => Promise<boolean>
+   *  recycle succeeding. Optional. Default: {@link defaultRecycleManagerDesk}.
+   *  `idleOnly` (the cap at wake, 2026-11-28): close only a desk whose turn has ended,
+   *  re-checked right before the close. */
+  recycleManagerDesk?: (projectPath: string, opts?: { idleOnly?: boolean }) => Promise<boolean>
+  /** CAP AT WAKE (docs/AUTONOMY-SPEC.md R-D3b, 2026-11-28): the commander conversation
+   *  and its fill when the desk is an IDLE SDK desk at or over the commander cap, else
+   *  null (no desk, a PTY desk, a busy one, an unreadable fill — the desk is woken as
+   *  before). Asked only at a wake. Optional + MUST NOT throw. Default:
+   *  swarmManager.idleManagerDeskOverCap. */
+  managerDeskOverCap?: (projectPath: string) => Promise<{ agentSessionId: string; tokens: number } | null>
   /** Push a FATAL event to the human (bell + OS toast) — the SAME seam as
    *  {@link OrchestratorDeps.notify}, surfaced here so the integrate pass can escalate a
    *  commander that keeps dying ('manager-unrevivable', 完了条件5). OPTIONAL + best-effort
@@ -3658,7 +3762,9 @@ const setCardColumn = async (
   projectPath: string,
   taskId: string,
   column: 'todo' | 'doing' | 'review',
-  branch: string,
+  /** Recorded on the card; '' = leave it as it is; null = clear it (the route's own
+   *  empty-string clear). */
+  branch: string | null,
   /** 'todo' only: carry the 差し戻し counter over instead of resetting it. */
   keepReworkCount = false,
 ): Promise<boolean> => {
@@ -3671,7 +3777,7 @@ const setCardColumn = async (
       // Record the branch on the card too (same as the manual dispatch), so the
       // Review column's "merged?" check / the integration stage can find it.
       // Skip when unknown.
-      setBranch: branch ? [{ id: taskId, branch }] : [],
+      setBranch: branch === null ? [{ id: taskId, branch: '' }] : branch ? [{ id: taskId, branch }] : [],
     }),
     signal: AbortSignal.timeout(15_000),
   })
@@ -4687,7 +4793,7 @@ const defaultWakeManager = async (
   try {
     // Thrown, not returned, so this refusal reaches the journal and the notice
     // like every other reason the commander did not come up.
-    if (!await automaticOperationAllowed(projectPath)) throw new Error('オーナーのアカウントが確かめられません(設定でサインインすると起動します)')
+    if (!await automaticOperationAllowed(projectPath)) throw new Error(`オーナーのアカウントが確かめられません(${APP_SIGN_IN_WHERE.ja}からサインインすると起動します)`)
     await spawnSwarmManager({ projectPath })
   } catch (e) {
     // The reason used to be dropped here, and the reflex then journalled every
@@ -4750,12 +4856,16 @@ const defaultManagerDeskRuntime = async (projectPath: string): Promise<ManagerRu
  *  synchronous-and-idempotent (it flips `closed`/`status` at once and lets the pump
  *  unwind), so the absent-arm's next pass sees the desk go and seats a fresh one through
  *  the ordinary wake path — no second spawn road. */
-const defaultRecycleManagerDesk = async (projectPath: string): Promise<boolean> => {
+const defaultRecycleManagerDesk = async (projectPath: string, opts?: { idleOnly?: boolean }): Promise<boolean> => {
   if (!await automaticOperationAllowed(projectPath)) return false
   if (runtimeAdmissionBlocked('swarm')) return false
   const target = await resolveManagerTarget(projectPath)
   const desk = target.desk
   if (!desk || desk.runtime !== 'sdk' || !await managerTargetCurrent(projectPath, target, {}) || !managerTargetAdmitted(target)) return false
+  // The cap at wake closes only a desk whose turn has ended. Asked AFTER the last
+  // await, in the same tick as the close: a turn pushed meanwhile flips the status
+  // synchronously, so it is never cut off.
+  if (opts?.idleOnly && !managerDeskIdle(desk.handleId)) return false
   return terminateSdkSession(desk.handleId)
 }
 
@@ -5237,40 +5347,47 @@ const awaitToolBoundary = (
   return false
 }
 
-/** SAVED-WORK HOLD (2026-11-23). True while the project has an operation whose
- *  result nobody confirmed: every SDK launch into it would die at its first step
- *  (the measured "worker lost" spin: spawn → dead in seconds → card parked), and
- *  the commander cannot start either. Journalled and told to the president ONCE,
- *  on the entering edge — never per pass. Nothing here retries, clears or
- *  bypasses the operations: only the owner's review does (savedWorkHold.ts). */
+/** SAVED-WORK HOLD, SCOPED (AUTONOMY-SPEC R-B3, owner decision 2026-11-28).
+ *  An operation whose result nobody confirmed holds ONLY the conversation that
+ *  issued it — the launch guard and every tool call already ask with their own
+ *  session (runtimeActionReceipts.ts), so the rest of the project can run. Here
+ *  the engine makes the held side visible and safe, once per operation:
+ *    • a live worker on that conversation is stopped (normal teardown, its work
+ *      saved on the branch) — it is never resumed;
+ *    • that worker's card is parked in blocked and kept out of dispatch, so no
+ *      fresh worker redoes the work before the owner answers;
+ *    • ONE question waits in the owner's inbox (`hold:<id>`), in plain words.
+ *  A commander or president conversation only gets its question: its next launch
+ *  opens a fresh conversation told what stopped (swarmManager.launchNewDesk).
+ *  Nothing here retries, clears or bypasses an operation; only the owner's answer
+ *  (answerHeldOperation) or the native transcript's own record of the result
+ *  (R-B1) lifts it. When the guard cannot ask at all, every launch would fail the
+ *  same way: that alone still holds the whole project ('all').
+ *  Returns 'all', or the cards to keep out of dispatch. */
 const refreshSavedWorkHold = async (
   engine: ProjectEngine,
   deps: OrchestratorDeps & Pick<AnomalyDeps, 'notify'>,
+  byId: Map<string, ProjectTask>,
   now: number,
-): Promise<boolean> => {
-  let count = 0
+): Promise<'all' | Set<string>> => {
+  let ops: HeldOperation[] = []
   // The predicate asks the launch guard's own question, so when it cannot be
   // answered (the owner's sign-in is gone, the record cannot be read) every launch
   // would fail the same way — that holds too, under its own words. Fail-closed,
   // like the guard it mirrors.
   let unanswered: string | undefined
-  try { count = (await deps.savedWorkHold?.(engine.path)) ?? 0 } catch (e) { unanswered = errMsg(e).slice(0, 200) }
+  try { ops = (await deps.savedWorkHold?.(engine.path)) ?? [] } catch (e) { unanswered = errMsg(e).slice(0, 200) }
   const prev = engine.savedWorkHold
-  if (!count && unanswered === undefined) {
-    // A cut-off that left nothing unconfirmed names no later, unrelated hold.
-    engine.forcedStopNote = undefined
-    if (prev) {
-      engine.savedWorkHold = undefined
-      logLine(engine, 'info', 'saved-work hold lifted — nothing holds a launch any more; dispatch and the commander resume', 'dispatch')
-    }
-    return false
-  }
   const running = engine.workers.length
-  // Same KIND of hold (unanswered or counted) — an error whose wording varies
-  // pass to pass is one episode, not a new notice each time.
-  if (prev && (prev.unanswered !== undefined) === (unanswered !== undefined)) {
-    prev.count = count
-    if (unanswered !== undefined) {
+  // Which conversation worked which card, kept past the worker's prune: an
+  // operation the engine's own stop cut off shows up on the NEXT pass, after the
+  // worker (and, once synced, its roster row) is gone (review 2026-11-28).
+  // ponytail: in-memory, capped; the open question's taskId covers a restart.
+  const sessionTasks = (engine.sessionTasks ??= new Map())
+  for (const w of engine.workers) if (w.sessionId) sessionTasks.set(w.sessionId, w.taskId)
+  if (sessionTasks.size > 500) for (const k of Array.from(sessionTasks.keys()).slice(0, sessionTasks.size - 500)) sessionTasks.delete(k)
+  if (unanswered !== undefined) {
+    if (prev?.unanswered !== undefined) {
       prev.unanswered = unanswered
       // Told only once the question has stayed unanswerable a while: a single
       // read error (EMFILE, EBUSY on the record) holds dispatch for a pass but
@@ -5281,30 +5398,133 @@ const refreshSavedWorkHold = async (
         if (deps.notify) deps.notify(notice)
         else await createSwarmFatalNotification(notice).catch(() => {})
       }
+      return 'all'
     }
-    return true
+    engine.savedWorkHold = { since: now, count: 0, unanswered }
+    const stuck = running ? `; ${running} running worker(s) have every tool call refused` : ''
+    logLine(engine, 'warn', `saved-work hold — the launch guard cannot confirm the owner or read the operation record (${unanswered}): holding new dispatch and the commander's launch (cards stay in todo)${stuck}`, 'dispatch')
+    return 'all' // told once it lasts (above)
   }
-  engine.savedWorkHold = { since: now, count, ...(unanswered !== undefined ? { unanswered } : {}) }
-  const stuck = running ? `; ${running} running worker(s) have every tool call refused` : ''
-  logLine(
-    engine,
-    'warn',
-    unanswered !== undefined
-      ? `saved-work hold — the launch guard cannot confirm the owner or read the operation record (${unanswered}): holding new dispatch and the commander's launch (cards stay in todo)${stuck}`
-      : `saved-work hold — ${count} operation(s) with an unconfirmed result in this project: holding new dispatch and the commander's launch (cards stay in todo)${stuck}. ${OWNER_REVIEW_HOLD_HINT}`,
-    'dispatch',
-  )
-  if (unanswered !== undefined) return true // told once it lasts (above)
+  // A receipt that names no conversation holds every one (unattributable
+  // evidence): every launch here would die at its first step, so hold it all.
+  const nameless = ops.filter((op) => !op.sessionId).length
+  if (prev && (prev.unanswered !== undefined || !nameless)) {
+    engine.savedWorkHold = undefined
+    logLine(engine, 'info', 'saved-work hold lifted — the launch guard can ask again; dispatch and the commander resume', 'dispatch')
+  }
+  const known = (engine.heldOps ??= new Map())
+  const present = new Set(ops.map((op) => op.id))
+  const held = new Set<string>()
+  // The inbox is the durable side: which held operations still have an open
+  // question, and the card each named. Unreadable ⇒ null: nothing is re-asked
+  // and nothing is released on its account.
+  const open = await openHoldQuestions(engine.path).catch(() => null)
+  // EVERY open hold question's card stays out of dispatch and parked — also one
+  // the receipt read does not list (a native-only hold raised at boot, a user
+  // without the owner role): the same rule the manual dispatch route applies.
+  for (const [, q] of Array.from(open ?? [])) {
+    if (!q.taskId) continue
+    held.add(q.taskId)
+    const card = byId.get(q.taskId)
+    if (card && (columnOf(card) === 'todo' || columnOf(card) === 'doing') && !engine.workers.some((w) => w.taskId === q.taskId))
+      await deps.recoverCard(engine.path, card.id, 'blocked').catch(() => false)
+  }
+  // A question that could not be raised where its card was parked (boot resume,
+  // askOrRetry) is raised here, every pass, until it is open (review A S6).
+  for (const [id, op] of Array.from(engine.unaskedHolds ?? [])) {
+    if (op.seat.role === 'worker' && op.seat.taskId) held.add(op.seat.taskId)
+    if (open?.has(holdKey(id))) { engine.unaskedHolds?.delete(id); continue }
+    try {
+      await askAboutHeldOperation(engine.path, op)
+      engine.unaskedHolds?.delete(id)
+    } catch (e) {
+      logLine(engine, 'warn', `held conversation — could not raise the owner's question for operation ${id} (${errMsg(e)}); retrying next pass`, 'dispatch')
+    }
+  }
+  const absent = Array.from(known.keys()).filter((id) => !present.has(id))
+  if (absent.length) {
+    // Absence from the owner-gated read is not evidence (it reads [] while the
+    // owner-role lookup is offline): confirm with every account's records, and
+    // release only what is positively gone (AUTONOMY-SPEC §3 fail direction).
+    const confirmed = await deps.savedWorkHold?.(engine.path, { anyOwner: true }).then((all) => new Set(all.map((op) => op.id)), () => null)
+    for (const id of absent) {
+      const parked = known.get(id)
+      if (!confirmed || confirmed.has(id)) { if (parked?.taskId) held.add(parked.taskId); continue }
+      // Lifted without the owner's answer (the transcript recorded the result
+      // after all): the question is moot — withdraw it and put back the card we
+      // parked. Lifted BY the answer: its question is closed and
+      // answerHeldOperation already moved the card.
+      known.delete(id)
+      const withdrawn = await withdrawHoldQuestion(engine.path, id).catch(() => false)
+      const card = parked?.taskId ? byId.get(parked.taskId) : undefined
+      if (withdrawn && card && columnOf(card) === 'blocked') await deps.recoverCard(engine.path, card.id, 'todo').catch(() => false)
+      logLine(engine, 'info', `held conversation released — operation ${id} no longer holds${withdrawn ? ' (its result was recorded after all; question withdrawn)' : ''}`, 'dispatch')
+    }
+  }
+  if (!ops.length) {
+    if (!known.size) engine.forcedStopNote = undefined // a cut-off that left nothing unconfirmed names no later hold
+    return held
+  }
   const cause = engine.forcedStopNote
-  engine.forcedStopNote = undefined
-  const notice: SwarmFatalNotification = {
-    event: 'automation-held',
-    projectPath: engine.path,
-    detail: (cause ? `${cause}。` : '') + savedWorkHoldNotice(running),
+  for (const op of ops) {
+    const live = op.sessionId ? engine.workers.find((w) => w.sessionId === op.sessionId) : undefined
+    const taskId = live?.taskId ?? (op.seat.role === 'worker' ? op.seat.taskId : undefined)
+      ?? (op.sessionId ? sessionTasks.get(op.sessionId) : undefined) ?? open?.get(holdKey(op.id))?.taskId ?? known.get(op.id)?.taskId
+    const seat: HeldSeat = taskId
+      ? { role: 'worker', taskId, ...((live?.taskTitle ?? byId.get(taskId)?.title) ? { title: live?.taskTitle ?? byId.get(taskId)?.title } : {}) }
+      : op.seat
+    if (taskId) held.add(taskId)
+    // Asked, and the question is still open: nothing more to do. Asked, but the
+    // question was closed while the operation still holds (an answer that chose
+    // neither A nor B, a review that did not take): ask again — a hold is never
+    // left without its question.
+    const asked = known.has(op.id)
+    if (asked && (!open || open.has(holdKey(op.id)))) continue
+    if (live) {
+      // Its tool calls are already refused; stopping it frees the slot and makes
+      // sure nothing ever resumes it.
+      engine.workers = engine.workers.filter((w) => w !== live)
+      await deps.recoverWorker({ projectPath: engine.path, worktree: live.worktree, terminalId: live.terminalId,
+        ...(live.sdkSessionId ? { sdkSessionId: live.sdkSessionId } : {}), reason: 'stopped' }).catch(() => undefined)
+    }
+    const card = taskId ? byId.get(taskId) : undefined
+    if (card && (columnOf(card) === 'todo' || columnOf(card) === 'doing')) await deps.recoverCard(engine.path, card.id, 'blocked').catch(() => false)
+    try {
+      await askAboutHeldOperation(engine.path, { ...op, seat }, cause)
+    } catch (e) {
+      logLine(engine, 'warn', `held conversation — could not raise the owner's question for operation ${op.id} (${errMsg(e)}); retrying next pass`, 'dispatch')
+      continue // not remembered: asked again next pass (the card stays out of dispatch meanwhile)
+    }
+    known.set(op.id, taskId ? { taskId } : {})
+    engine.forcedStopNote = undefined
+    logLine(
+      engine,
+      'warn',
+      `held conversation — an operation with an unconfirmed result (${op.tool ?? 'owner instruction'}) holds only the ${seat.role} conversation that issued it` +
+        `${live ? '; that worker was stopped' : ''}${taskId ? `; its card waits in blocked: ${shorten((seat.role === 'worker' && seat.title) || taskId)}` : ''}` +
+        `${asked ? ' (asked again: the earlier question closed without an A or B)' : ''}. The rest of the project goes on. ${OWNER_REVIEW_HOLD_HINT}`,
+      'dispatch',
+    )
   }
-  if (deps.notify) deps.notify(notice)
-  else await createSwarmFatalNotification(notice).catch(() => {})
-  return true
+  if (nameless) {
+    if (!engine.savedWorkHold) {
+      engine.savedWorkHold = { since: now, count: nameless }
+      logLine(engine, 'warn', `saved-work hold — ${nameless} operation(s) with an unconfirmed result name no conversation, so they hold every launch here: holding new dispatch and the commander's launch until the owner answers. ${OWNER_REVIEW_HOLD_HINT}`, 'dispatch')
+    }
+    return 'all'
+  }
+  return held
+}
+
+/** Put a card the engine parked for the owner back into the dispatch queue —
+ *  only from blocked, and only that card. The owner's answer to a held
+ *  operation's question uses it (savedWorkHold.answerHeldOperation); a NEW
+ *  conversation then takes the card, never the held one. `fresh` (the owner's
+ *  「初めからやり直す」) also drops the card's branch, so the next dispatch starts
+ *  from the main line instead of re-entering it; the branch stays in git. */
+export const unparkBlockedCard = async (projectPath: string, taskId: string, opts: { fresh?: boolean } = {}): Promise<boolean> => {
+  const card = (await defaultFetchTasks(projectPath)).find((t) => t.id === taskId)
+  return !!card && columnOf(card) === 'blocked' && setCardColumn(projectPath, taskId, 'todo', opts.fresh ? null : '')
 }
 
 /** A commander SDK desk ended within seconds of its launch (swarmManager's
@@ -5398,13 +5618,22 @@ const coolQuotaWall = (w: OrchestratorWorker, refusal: string | undefined, scree
   if (!tier) return ''
   const accountWide = refusalClosesEveryModel(refusal ? quotaRefusalKindOfText(refusal) : classifyQuotaRefusal(screen), refusal ?? screen)
   const toCool = accountWide ? MODEL_TIER_LADDER : [tier]
-  let until = 0
+  // The SDK's structured refusal (rate_limit_event, usageWindows) states the
+  // reset outright and outranks every reading of the sentence; today's chain
+  // (sentence → /usage → grace) decides only when no session saw one (R-C1 1).
+  // Per tier: only the windows that bind THAT tier (the account-wide two and its
+  // own per-model week) — another model's weekly wall never lengthens it (B-M1).
+  const until = new Map<string, number>()
   for (const t of toCool) {
-    until = markRateLimited(t, { ptyText: refusal ?? screen, a5ResetsAt: a5CoolingHint(), graceMs: RATE_LIMIT_GRACE_MS, now })
+    const structured = rejectedUntil(now, t)
+    if (structured != null) markCoolingUntil(t, structured)
+    until.set(t, structured ?? markRateLimited(t, { ptyText: refusal ?? screen, a5ResetsAt: a5CoolingHint(), graceMs: RATE_LIMIT_GRACE_MS, now }))
   }
+  const iso = (t: number) => new Date(t).toISOString()
+  const times = Array.from(new Set(until.values()))
   return accountWide
-    ? ` · every tier cooling until ${new Date(until).toISOString()} (an all-model limit — a lower tier is refused too)`
-    : ` · tier ${tier} cooling until ${new Date(until).toISOString()}`
+    ? ` · every tier cooling until ${times.length === 1 ? iso(times[0]) : Array.from(until, ([t, u]) => `${t} ${iso(u)}`).join(', ')} (an all-model limit — a lower tier is refused too)`
+    : ` · tier ${tier} cooling until ${iso(until.get(tier) ?? now)}`
 }
 
 /** The owner's word for why the engine stopped a worker (the mid-command notice). */
@@ -5414,6 +5643,13 @@ const STOP_REASON_JA: Partial<Record<WorkerRecoveryReason, string>> = {
   'integration-wait': '時間切れ',
   stall: '応答が無いため',
   question: '質問の待ち時間切れ',
+}
+const STOP_REASON_EN: Partial<Record<WorkerRecoveryReason, string>> = {
+  'rate-limit': 'the usage limit',
+  runaway: 'out of time',
+  'integration-wait': 'out of time',
+  stall: 'no response',
+  question: 'a question waited too long',
 }
 
 // (isWorkerAlive / defaultLastOutputAt / defaultNudge lived here until 2026-07-30.
@@ -5964,19 +6200,49 @@ const defaultReadConsumption = async (opts: {
   }
 }
 
+/** The engine's scrape request. Never under vitest: the scrape spawns the
+ *  developer's REAL interactive `claude` (claudeConnection + node-pty), and many
+ *  suites run dispatch passes on `defaultDeps()` with waiting cards — the same
+ *  stance as swarmTierProbe's warm-up. Suites that test the request inject
+ *  `refreshUsage`; the wiring itself is tested with VITEST stubbed off.
+ *  Past the display cache: the request exists to get a NEWER reading, and the
+ *  cache only holds the one that is already 5 minutes old (B-S2). */
+export const defaultRefreshUsage = (): void => {
+  if (process.env.VITEST) return
+  refreshUsageCacheDetached({ bypassCache: true })
+}
+
 export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps => ({
   fetchTasks: defaultFetchTasks,
+  refreshUsage: defaultRefreshUsage,
   moveToDoing: defaultMoveToDoing,
   moveToReview: defaultMoveToReview,
   spawnWorker: defaultSpawnWorker,
   isAlive: (w) => runtimeOf(w).isAlive(w),
-  savedWorkHold: savedWorkHoldCount,
+  savedWorkHold: savedWorkHolds,
+  heldConversation: async (projectPath, sessionId) => (await savedWorkHolds(projectPath, { anyOwner: true, sessionId }))[0],
   toolDenialStreak: (id) => sdkToolDenialStreak(id, isRuntimeActionDenial),
   sdkWorkerFacts: (id) => {
     const s = getSdkSession(id)
     if (!s) return undefined
     const refusal = lastQuotaRefusalText(id)
-    return { exitReason: s.exitReason, toolCallsInFlight: s.toolCallsInFlight, ...(refusal ? { refusal } : {}) }
+    const apiErrorSeq = s.status === 'waiting' ? apiErrorTurnSeq(readSdkFrames(id, 0, 8)?.frames ?? []) : undefined
+    return {
+      exitReason: s.exitReason,
+      toolCallsInFlight: s.toolCallsInFlight,
+      ...(refusal ? { refusal } : {}),
+      ...(apiErrorSeq !== undefined ? { apiErrorTurnSeq: apiErrorSeq } : {}),
+    }
+  },
+  transcriptUsageRefusal: async (worktree, sessionId) =>
+    lastTranscriptUsageRefusal(sessionJsonlPath(worktree, sessionId), await quotaPrefixes()),
+  managerApiErrorTurn: (p) => {
+    const desk = listManagerDesks(p).find((d) => d.runtime === 'sdk' && !d.stopping)
+    const seq =
+      desk && getSdkSession(desk.handleId)?.status === 'waiting'
+        ? apiErrorTurnSeq(readSdkFrames(desk.handleId, 0, 8)?.frames ?? [])
+        : undefined
+    return desk && seq !== undefined ? { desk: desk.handleId, seq, say: (text) => sayToManagerDesk(desk, text).ok } : null
   },
   countCommitsAhead: defaultCountCommitsAhead,
   countNestedCommits: defaultCountNestedCommits,
@@ -5991,6 +6257,10 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   recentOutput: defaultRecentOutput,
   sessionAgentActivityAt,
   sessionBackgroundTaskAt,
+  commanderBackgroundTaskAt: async (p) => {
+    const desk = listManagerDesks(p).find((d) => d.runtime === 'sdk' && !d.stopping && d.agentSessionId)
+    return desk?.agentSessionId ? sessionBackgroundTaskAt(desk.cwd, desk.agentSessionId) : null
+  },
   raiseQuestion: openEscalation,
   readConsumption: defaultReadConsumption,
   fetchReview: defaultFetchReview,
@@ -6014,6 +6284,8 @@ export const defaultDeps = (): OrchestratorDeps & IntegrationDeps & AnomalyDeps 
   // read/called at most once per waiting episode, behind the spent nudge budget.
   managerDeskRuntime: defaultManagerDeskRuntime,
   recycleManagerDesk: defaultRecycleManagerDesk,
+  // The cap at wake (2026-11-28): measured only when a wake is about to happen.
+  managerDeskOverCap: (p) => idleManagerDeskOverCap(p),
   worktreeExists: defaultWorktreeExists,
   deskOccupies: defaultDeskOccupies,
   deskAttended: defaultDeskAttended,
@@ -6236,9 +6508,12 @@ const monitorWorkers = async (
         engine,
         'warn',
         `worker stopped in the middle of ${cutOff} running command(s) (${reason}): ${w.branch} (${shorten(w.taskTitle)}) — ` +
-          `the unfinished command is now an unconfirmed operation and holds this project's automatic work until reviewed. ${OWNER_REVIEW_HOLD_HINT}`,
+          `the unfinished command is now an unconfirmed operation: it holds that conversation (its card waits in blocked) until the owner answers. ${OWNER_REVIEW_HOLD_HINT}`,
       )
-      engine.forcedStopNote = `「${shorten(w.taskTitle)}」の担当を${STOP_REASON_JA[reason] ?? 'エンジンの判断'}で止めたとき、実行中だった操作が途中で切れました`
+      engine.forcedStopNote = {
+        ja: `「${shorten(w.taskTitle)}」のワーカーを${STOP_REASON_JA[reason] ?? 'エンジンの判断'}で止めたとき、実行中だった操作が途中で切れました`,
+        en: `when the worker on "${shorten(w.taskTitle)}" was stopped (${STOP_REASON_EN[reason] ?? 'by the engine'}), the operation it was running was cut off`,
+      }
     }
     // SALVAGE SURFACED (2026-07-12 全損): the reclaimed worktree held uncommitted
     // work and it was committed to the worker's branch instead of being destroyed.
@@ -6282,7 +6557,13 @@ const monitorWorkers = async (
     const probeForColumn = salvaged
       ? { ...probe, commitsAhead: (probe.commitsAhead ?? 0) + salvaged }
       : probe
-    let col = forceBlocked
+    // A command this stop cut off has no result (R-B3): the card waits in blocked
+    // ON DISK from this moment, so no restart before the next pass can hand it to
+    // a new conversation. Only for the owner role, where that result is recorded
+    // and asked about; elsewhere nothing would ever ask, and parking would be
+    // silent (review 2026-11-28).
+    const parkCutOff = cutOff > 0 && await hasChatGptAccess().catch(() => true)
+    let col = forceBlocked || parkCutOff
       ? ('blocked' as const)
       : recoveryColumn(probeForColumn, requeues, RECOVER_MAX_REQUEUE, reason)
     let moved = false
@@ -6695,8 +6976,19 @@ const monitorWorkers = async (
     // overnight. The pool still holds the session's last words for its linger;
     // they count as a refusal by the same decay rule as the live arm (nothing
     // worked after it). Handled in the `!alive` branch below.
-    const refusedThenGone =
-      !alive && w.sdkSessionId && heartbeat?.ready !== true ? deps.sdkWorkerFacts?.(w.sdkSessionId)?.refusal : undefined
+    //
+    // …AND ONCE THE POOL HAS FORGOTTEN THE SESSION (R-C1(2), 2026-11-28). Its
+    // 30-minute linger runs out whenever nobody looks in time — the engine OFF,
+    // the Mac asleep, a runtime switch holding the pass — and the refusal then
+    // read as a crash again: commits ⇒ `blocked`, never resumed. The transcript
+    // still holds the same last words: the CLI writes its refusal as an
+    // `isApiErrorMessage` entry, which a quote of the sentence never carries.
+    const gone = !alive && !!w.sdkSessionId && heartbeat?.ready !== true
+    const poolFacts = gone && w.sdkSessionId ? deps.sdkWorkerFacts?.(w.sdkSessionId) : undefined
+    const readTranscript = gone && !poolFacts && !!w.sessionId && !!deps.transcriptUsageRefusal
+    const refusedThenGone = readTranscript
+      ? ((await deps.transcriptUsageRefusal!(w.worktree, w.sessionId!).catch(() => null)) ?? undefined)
+      : poolFacts?.refusal
     if (promote && refusedThenGone) {
       promote = false
       stage = 'running'
@@ -6814,7 +7106,7 @@ const monitorWorkers = async (
         logLine(
           engine,
           'warn',
-          `worker ended on a usage refusal — a quota stop, not a crash: cooling and requeueing the card${coolQuotaWall(w, refusedThenGone, refusedThenGone, now)}: ${w.branch} (${shorten(w.taskTitle)})`,
+          `worker ended on a usage refusal${readTranscript ? ' (read from its transcript — the session had left the pool)' : ''} — a quota stop, not a crash: cooling and requeueing the card${coolQuotaWall(w, refusedThenGone, refusedThenGone, now)}: ${w.branch} (${shorten(w.taskTitle)})`,
         )
       }
       // Restore the SHAPE as well. Passing only the reason left `shape` undefined,
@@ -7351,6 +7643,40 @@ const monitorWorkers = async (
       continue
     }
 
+    // TRANSIENT API ERROR (R-C2, 2026-11-28). A turn that ended on
+    // `terminal_reason: api_error` with no usage refusal — network loss, a sleep,
+    // a provider 5xx — leaves the session `waiting`, and only the 10-minute stall
+    // arm would ever speak to it again (measured 11-23 after a lid-close). Once
+    // the API host answers (the offline hold's probe, 03 §5.9) it gets the stall
+    // nudge's "Continue." — a new turn, never a replay. Once per such turn, at
+    // most API_ERROR_CONTINUE_MAX per card attempt; past that, or while offline,
+    // the ordinary stall path below decides.
+    const apiErrorSeq = w.sdkSessionId ? deps.sdkWorkerFacts?.(w.sdkSessionId)?.apiErrorTurnSeq : undefined
+    const retried = w.apiErrorRetry
+    if (
+      apiErrorSeq !== undefined &&
+      apiErrorSeq > (retried?.seq ?? -1) &&
+      (retried?.count ?? 0) < API_ERROR_CONTINUE_MAX &&
+      (await automaticOperationAllowed(engine.path)) &&
+      (await apiHostReachable(deps))
+    ) {
+      let sent = false
+      try {
+        sent = deps.nudge(w)
+      } catch {
+        sent = false
+      }
+      const count = (retried?.count ?? 0) + 1
+      logLine(
+        engine,
+        'warn',
+        `worker turn ended on an API error — sent "Continue." (${count}/${API_ERROR_CONTINUE_MAX})` +
+          `${sent ? '' : ' · not delivered'}: ${w.branch} (${shorten(w.taskTitle)})`,
+      )
+      next.push(withHeartbeat({ ...w, stage, apiErrorRetry: { count, seq: apiErrorSeq } }, heartbeat))
+      continue
+    }
+
     // Only an ALREADY-SILENT worker is judged for a question WAIT. This is the
     // false-kill fix: a productive worker that merely PRINTS question-like text
     // is still streaming output ⇒ not silent ⇒ never classified, never held.
@@ -7568,8 +7894,45 @@ const monitorWorkers = async (
     if (!boundaryHeld.has(key)) engine.toolBoundaryWaits?.delete(key)
   })
 
+  // The commander gets the same "continue" after an API-error turn (R-C2),
+  // through its own conduit (sayToManagerDesk). Counted per desk: a fresh desk is
+  // a fresh conversation.
+  let desk: ReturnType<NonNullable<OrchestratorDeps['managerApiErrorTurn']>> = null
+  try {
+    desk = engine.running ? (deps.managerApiErrorTurn?.(engine.path) ?? null) : null
+  } catch {
+    desk = null
+  }
+  const prev = desk && engine.managerApiErrorRetry?.desk === desk.desk ? engine.managerApiErrorRetry : undefined
+  if (
+    desk &&
+    desk.seq > (prev?.seq ?? -1) &&
+    (prev?.count ?? 0) < API_ERROR_CONTINUE_MAX &&
+    (await automaticOperationAllowed(engine.path)) &&
+    (await apiHostReachable(deps))
+  ) {
+    let sent = false
+    try {
+      sent = desk.say(API_ERROR_CONTINUE_TEXT)
+    } catch {
+      sent = false
+    }
+    const count = (prev?.count ?? 0) + 1
+    engine.managerApiErrorRetry = { desk: desk.desk, seq: desk.seq, count }
+    logLine(
+      engine,
+      'warn',
+      `commander turn ended on an API error — sent "Continue." (${count}/${API_ERROR_CONTINUE_MAX})${sent ? '' : ' · not delivered'}`,
+    )
+  }
+
   engine.workers = next
 }
+
+/** The offline hold's sensor (03 §5.9), fail-open the same way: a probe that
+ *  cannot run answers reachable. */
+const apiHostReachable = (deps: Pick<OrchestratorDeps, 'isOnline'>): Promise<boolean> =>
+  (deps.isOnline ?? (() => probeOnline()))().catch(() => true)
 
 /** Tell a human that the swarm has no model left to run on. A `none-allowed` hold
  *  is the ONE park with no clock behind it: every tier is switched OFF in Settings,
@@ -8217,7 +8580,8 @@ export const runDispatchPass = async (
   deps: OrchestratorDeps & Pick<AnomalyDeps, 'notify'>,
   now: number = Date.now(),
 ): Promise<void> => {
-  if (!engine.running || runtimeAdmissionBlocked('swarm')) return
+  // sdkShutdownBegun: the server is in its stop wait — nothing new starts (review C-S2).
+  if (!engine.running || runtimeAdmissionBlocked('swarm') || sdkShutdownBegun()) return
   await refreshEngineAutomationPolicy(engine)
 
   // 1. Read the full board — the monitor needs each worker's current column, and
@@ -8252,7 +8616,7 @@ export const runDispatchPass = async (
   // 1d. SAVED-WORK HOLD (2026-11-23) — read BEFORE monitoring, so a worker whose
   //     tool calls the same cause refuses is not told twice (watchToolDenials
   //     stays quiet under the hold's own notice). Acted on at 3a.
-  const savedWorkHeld = await refreshSavedWorkHold(engine, deps, now)
+  const savedWorkHeld = await refreshSavedWorkHold(engine, deps, byId, now)
 
   // 2. Monitor existing workers: advance stages, promote the done ones
   //    doing→review, recover crashed AND stalled ones, and prune dead/finished
@@ -8266,21 +8630,24 @@ export const runDispatchPass = async (
   //     (it walks engine.workers; these are in neither that list nor the review
   //     column). AFTER the monitor, so its prune has already settled which
   //     workers are still counted. See promoteUnownedDelivered's header.
-  const claimedDelivered = await promoteUnownedDelivered(engine, deps, tasks)
+  // A card parked for the owner's answer about an unknown result is nobody's to
+  // promote, requeue or report as stranded from this pass's stale snapshot (R-B3).
+  const unheld = savedWorkHeld !== 'all' && savedWorkHeld.size ? tasks.filter((t) => !savedWorkHeld.has(t.id)) : tasks
+  const claimedDelivered = await promoteUnownedDelivered(engine, deps, unheld)
   if (!engine.running) return
 
   // 2c. …and the MID-TASK half of the same orphan class: an unowned doing card
   //     with no working desk behind it (quota-parked included) goes back to
   //     'todo', branch preserved, so the cooling clock — not a human — decides
   //     when it re-runs. See collectUnownedDoing's header (2026-09-01).
-  await collectUnownedDoing(engine, deps, tasks, claimedDelivered, now)
+  await collectUnownedDoing(engine, deps, unheld, claimedDelivered, now)
   if (!engine.running) return
 
   // 2d. The catch-all: a worker's "done" that none of the roads above picked up
   //     reaches the commander anyway (2026-10-07). See noticeStrandedReady.
   //     ponytail: reads the pass-start board, so a card moved THIS pass after 3+
   //     stranded minutes can draw one redundant notice; harmless, it says "look".
-  await noticeStrandedReady(engine, deps, tasks, now)
+  await noticeStrandedReady(engine, deps, unheld, now)
   if (!engine.running) return
 
   // 3. Reconcile: a counted worker whose card is STILL in todo means an earlier
@@ -8301,10 +8668,10 @@ export const runDispatchPass = async (
     }
   }
 
-  // 3a. SAVED-WORK HOLD (2026-11-23): an operation with an unconfirmed result
-  // holds every launch in this project — dispatch nothing into it. Cards stay in
-  // todo; monitor / promote / reclaim above are untouched.
-  if (savedWorkHeld) return
+  // 3a. SAVED-WORK HOLD: only when the launch guard cannot ask at all does it
+  // hold every launch in this project (cards stay in todo). A known operation
+  // with an unconfirmed result keeps only its own card out of dispatch (R-B3).
+  if (savedWorkHeld === 'all') return
 
   // 3b. SPAWN PARK (card 0add9d30 — churn stop; extended with the owner's model
   // mask): when no tier is BOTH enabled and cooled-down, hold ALL new dispatch
@@ -8355,7 +8722,52 @@ export const runDispatchPass = async (
   // Run it UNCAPPED-to-MAX first to read the INDEPENDENT backlog (its gates fold
   // same-file / duplicate / dep-blocked todos out), then DYNAMICALLY scale the
   // target to that backlog instead of always filling to MAX (card ea369937).
-  const dispatchable = selectDispatch(tasks, countedIds, ORCHESTRATOR_MAX_WORKERS)
+  let dispatchable = selectDispatch(tasks, savedWorkHeld.size ? new Set(Array.from(countedIds).concat(Array.from(savedWorkHeld))) : countedIds, ORCHESTRATOR_MAX_WORKERS)
+  // USAGE BUDGET (AUTONOMY-SPEC R-D1 / R-D2, swarmBudget.budgetGate): an
+  // automatic START waits while the subscription cannot carry the card — the
+  // 5-hour window at or above the card tier's start ceiling, the week inside the
+  // owner's reserve, or (pace 'even' only) ahead of the even line. Only starts:
+  // the workers running and the steps above are untouched, and the owner's own
+  // presses (Board Run, the president) never come through this pass. A held card
+  // stays in todo; the standing names the hold that lifts soonest (budgetFact),
+  // and the first pass past it starts them by itself. No fresh reading ⇒ nothing
+  // is held (today's behaviour), recorded as `usage-unknown`.
+  // NOT mirrored into `parkUntil`: that field means "the usage limit" to every
+  // reader (the standing's usage-limit sentence, the president's "the limit is
+  // back" recipe), and a budget hold is not a limit reached (review 2026-11-28 B-S1).
+  engine.budgetHold = undefined // nothing to judge this pass ⇒ nothing held
+  if (dispatchable.length && await selectedRuntime('swarm') === 'claude') {
+    await ensureUsageWindowsLoaded()
+    // A card waits and the newest reading is old: ask for a scrape — detached
+    // (never awaited in the tick), single-flight inside fetchClaudeUsageCli,
+    // backed off when one produces nothing. It lands for a later pass.
+    if (claimUsageRefresh(now)) deps.refreshUsage?.()
+    const policy = await getSwarmBudget()
+    const readings = budgetReadings(now)
+    const held: { card: ProjectTask; v: Extract<BudgetVerdict, { allow: false }> }[] = []
+    let note: 'usage-unknown' | undefined
+    dispatchable = dispatchable.filter((card) => {
+      const v = budgetGate(readings, now, policy, { title: card.title, notes: typeof card.notes === 'string' ? card.notes : undefined, tier: card.tier })
+      if (!v.allow) held.push({ card, v })
+      else note ??= v.note
+      return v.allow
+    })
+    engine.budgetHold = { held: held.map(({ card, v }) => ({ taskId: card.id, kind: v.kind, until: v.until })), ...(note ? { note } : {}) }
+    const sig = held.map(({ card, v }) => `${card.id}:${v.kind}@${v.until}`).sort().join(',')
+    if (sig !== (engine.budgetHoldSig ?? '')) {
+      if (!sig) logLine(engine, 'info', 'usage budget hold lifted — automatic dispatch resumes', 'dispatch')
+      engine.budgetHoldSig = sig
+      for (const { card, v } of held) {
+        const why =
+          v.kind === 'window-headroom'
+            ? `the 5-hour window is at ${v.usedPct}%, at or above this card's start ceiling ${v.linePct}%`
+            : v.kind === 'weekly-reserve'
+              ? `the week is at ${v.usedPct}%, inside the owner's reserve (line ${v.linePct}%)`
+              : `the week is at ${v.usedPct}%, ahead of the even pace line ${v.linePct.toFixed(1)}%`
+        logLine(engine, 'info', `dispatch held by the usage budget (${v.kind}) — ${why}; it stays in todo and starts by itself after ${new Date(v.until).toISOString()}: ${shorten(card.title ?? '')}`, 'dispatch')
+      }
+    }
+  }
   // SAY WHY A CARD IS SITTING (gate ⑦, 2026-09-11). A card held for an empty
   // body looks exactly like a card nobody has reached yet, and the owner's first
   // question after this fix is "why is my card not moving?" — so the engine
@@ -8916,6 +9328,24 @@ const escalateUnresponsiveManager = async (
  *  WRITE sections take the engine critical section (see runExclusive); the slow
  *  awaits deliberately don't. `integrateInFlight` bars two of these from ever
  *  overlapping each other. */
+/** The reserve hold on the commander's wake, read now (Claude runtime only — the
+ *  week is Claude's). Null when the week is outside the reserve or unread.
+ *
+ *  A wake is pending (a review card waits), so ask for a fresh reading exactly as
+ *  dispatch does for a waiting card: the same claim (≥ 5 min old, backed off,
+ *  global) and the same free scrape. Without it nothing refreshed the reading when
+ *  no todo card waited, the 95% reading went stale at 30 minutes and the commander
+ *  was started inside the reserve (review R2-S1). Chosen over "keep the last
+ *  verdict until a newer reading": that would rest a hold on one reading for days
+ *  — the spec's one freshness rule (unread ⇒ allow, said as usage-unknown) is the
+ *  same here as at dispatch, and while /usage answers the reading stays fresh. */
+const commanderReserveHoldNow = async (now: number, deps: Pick<IntegrationDeps, 'refreshUsage'>) => {
+  if ((await selectedRuntime('swarm')) !== 'claude') return null
+  await ensureUsageWindowsLoaded()
+  if (claimUsageRefresh(now)) deps.refreshUsage?.()
+  return weeklyReserveHold(budgetReadings(now), now, await getSwarmBudget())
+}
+
 export const runIntegratePass = async (
   engine: ProjectEngine,
   deps: IntegrationDeps,
@@ -9133,11 +9563,54 @@ export const runIntegratePass = async (
     // so nothing to prove" ⇒ treated as proven, which is also what protects a desk the
     // owner started by hand).
     rs.provenSinceWake = true
+    engine.commanderReserveHold = undefined
     // Nothing is waiting, so there is nothing to tell anyone. Drop a notice that never
     // found a quiet moment rather than delivering stale news at the next one: the cards
     // it names have already been integrated or moved on.
     engine.managerNotice = null
     return
+  }
+
+  // ── THE OWNER'S WEEKLY RESERVE (AUTONOMY-SPEC R-D2, review 2026-11-28 B-S4) ──────────
+  //  The commander's automatic wake for finished work is held by the reserve and by no
+  //  other budget kind: it serves work already done, so the 5-hour start ceiling and the
+  //  pace line (starts of NEW work) do not apply. Inside the reserve: no notice, no poke,
+  //  no start — the notice stays queued and the first pass outside it delivers. The
+  //  owner's own words (manager/say) never come through this pass.
+  const reserve = await commanderReserveHoldNow(now, deps)
+  const wasReserveHeld = engine.commanderReserveHold !== undefined
+  engine.commanderReserveHold = reserve ? { until: reserve.until, usedPct: reserve.usedPct, linePct: reserve.linePct } : undefined
+  if (reserve) {
+    if (!wasReserveHeld) {
+      logLine(
+        engine,
+        'info',
+        `commander wake held by the owner's weekly reserve — the week is at ${reserve.usedPct}% (line ${reserve.linePct}%); ${swarmCards.length} finished card(s) wait and it wakes by itself after ${new Date(reserve.until).toISOString()}`,
+        'integrate',
+      )
+    }
+    return
+  }
+  if (wasReserveHeld) logLine(engine, 'info', "commander wake no longer held by the owner's weekly reserve", 'integrate')
+
+  // ── CAP AT WAKE (docs/AUTONOMY-SPEC.md R-D3b, 2026-11-28) ──────────────────────────
+  //  The context cap used to run only when a desk was LAUNCHED, so a commander that
+  //  stayed up was woken into an ever-growing conversation (measured: 237k average
+  //  context per commander call). At each wake below — the notice and the poke — an
+  //  IDLE SDK desk over the commander cap is closed instead, through the same teardown
+  //  the unresponsive escalation uses; the absent arm then reopens it, and that launch
+  //  finds the conversation over the cap and opens a fresh one (MANAGER_RESUME_INJECTION
+  //  re-reads the world). A busy desk is never closed (re-checked inside the teardown),
+  //  and one conversation is closed at most once.
+  const closedOverCap = async (): Promise<boolean> => {
+    if (!deps.managerDeskOverCap || !deps.recycleManagerDesk) return false
+    const over = await deps.managerDeskOverCap(engine.path).catch(() => null)
+    if (!over || rs.capRecycledSession === over.agentSessionId || !engine.running) return false
+    if (!(await deps.recycleManagerDesk(engine.path, { idleOnly: true }).catch(() => false))) return false
+    rs.capRecycledSession = over.agentSessionId
+    rs.lastNudgeAt = now // the desk being closed is not to be poked while it unwinds
+    logLine(engine, 'info', deskClosedOverCapLogLine('司令官', over.tokens), 'integrate')
+    return true
   }
 
   // ── C. THE NOTICE (2026-07-27) — tell the commander, at once, without breaking it ────
@@ -9159,6 +9632,7 @@ export const runIntegratePass = async (
   //  nothing in flight, nothing half-typed and no chooser open, and it is raised only by
   //  a real arrival.
   if (engine.managerNotice && deps.notifyManagerReady) {
+    if (await closedOverCap()) return // the notice stays queued for the reopened desk
     const pending = engine.managerNotice
     // `total` is read HERE, not at queue time: the queue may have waited out a long
     // generation, and the number the commander is asked to act on has to be the number
@@ -9442,6 +9916,7 @@ export const runIntegratePass = async (
       return
     }
     if (lastNudgeAt > 0 && now - lastNudgeAt < MANAGER_NUDGE_INTERVAL_MS) return
+    if (await closedOverCap()) return
     const nudged = await deps.nudgeManager(engine.path)
     // A commander paused on the usage limit is neither unreachable nor ignoring us:
     // it takes input again by itself when the limit lifts. Counting it as
@@ -10256,6 +10731,201 @@ export const fireFatalNotifications = (
   }
 }
 
+// ── Standing (AUTONOMY-SPEC R-A1 / R-A2 / R-E1) ──────────────────────────────
+
+/** What one caller already holds when it asks for a project's standing. */
+export interface StandingContext {
+  now: number
+  lang: PromptLang
+  /** The board, or null/absent when unread (then no need can be claimed). */
+  tasks?: readonly ProjectTask[] | null
+  /** Open owner questions for the project; absent ⇒ the inbox was not read. */
+  openQuestions?: number
+  /** The persisted "stopped by hand" record (an engine-less project's only trace). */
+  manualStopPersisted?: boolean
+  /** The frame policy, for a project with no engine in memory. */
+  automation?: { enabled: boolean; allowed: boolean }
+  isAlive?: (w: WorkerHandle) => boolean
+  /** The commander desk's in-memory facts (injected in tests). */
+  commander?: (key: string) => { quotaPauseUntil?: number }
+}
+
+/** The project's commander SDK desk, read off the pool (in memory, sync). */
+const commanderDeskFacts = (key: string): { quotaPauseUntil?: number } => {
+  try {
+    const desk = listManagerDesks(key).find((d) => d.runtime === 'sdk' && !d.stopping)
+    const pause = desk ? sdkQuotaPause(desk.handleId) : null
+    return pause ? { quotaPauseUntil: pause.until } : {}
+  } catch {
+    return {}
+  }
+}
+
+/** Is the commander generating in this project right now (both pools, in memory)? */
+const commanderMidTurn = (key: string): boolean => {
+  try {
+    const ids = listDeskIdsByRole(MANAGER_DESK_LABEL, 'manager')
+    return ids.size > 0 && listAllActiveDesks().claude.some((a) => a.status === 'working' && ids.has(a.id) && (a.cwd === key || a.cwd.startsWith(key + '/')))
+  } catch {
+    return false
+  }
+}
+
+/** The facts {@link standingOf} reads, off the engine's own fields. The engine's
+ *  holds count only while it runs — a stopped engine dispatches nothing, so a
+ *  hold left in its memory holds nothing. */
+export const standingFactsOf = (engine: ProjectEngine | undefined, key: string, ctx: StandingContext): StandingFacts => {
+  const tasks = ctx.tasks ?? []
+  const isAlive = ctx.isAlive ?? ((w: WorkerHandle) => runtimeOf(w).isAlive(w))
+  const on = engine?.running === true ? engine : undefined
+  // Review cards parked for a human (high-risk paths, an indecisive panel) are
+  // not the commander's to integrate — each already rang its own bell.
+  const parked = new Set([
+    ...Array.from(engine?.highRiskHolds.keys() ?? []),
+    ...(engine?.anomalies ?? []).filter((a) => a.kind === 'review-panel-failed' && a.branch).map((a) => a.branch as string),
+  ])
+  const automation = engine?.automation ?? ctx.automation
+  const boot = bootResumePending.get(key)
+  const watch = engine?.standingWatch
+  const commanderPause = on ? (ctx.commander ?? commanderDeskFacts)(key).quotaPauseUntil : undefined
+  const todoIds = new Set(tasks.filter(isTodoCard).map((t) => t.id))
+  const rs = on?.managerResume
+  return {
+    now: ctx.now,
+    lang: ctx.lang,
+    engineRunning: on !== undefined,
+    needs: {
+      dispatch: selectDispatch(tasks, new Set(engine?.workers.map((w) => w.taskId) ?? []), ORCHESTRATOR_MAX_WORKERS).length,
+      integrate: tasks.filter((t) => columnOf(t) === 'review' && isSwarmBranch(t.branch ?? '') && !parked.has(t.branch ?? '')).length,
+    },
+    serving: (on?.workers.some((w) => isAlive(w)) ?? false) || commanderMidTurn(key),
+    ...(watch?.progressedAt !== undefined ? { progressedAt: watch.progressedAt } : {}),
+    ...(on && watch ? { quietSince: watch.quietSince } : {}),
+    ...(ctx.openQuestions !== undefined ? { openQuestions: ctx.openQuestions } : {}),
+    ...(on?.savedWorkHold ? { savedWorkHold: on.savedWorkHold } : {}),
+    ...(on?.spawnBlockSig === 'none-allowed' ? { modelsOff: true } : {}),
+    ...(boot?.reason ? { bootHold: { reason: boot.reason, ...(boot.ownerOnly ? { ownerOnly: true } : {}) } } : {}),
+    ...(engine?.manualStop === true || ctx.manualStopPersisted === true ? { manualStop: true } : {}),
+    ...(automation?.enabled && !automation.allowed ? { outsideFrame: true } : {}),
+    ...(on?.parkUntil !== undefined && on.parkUntil > ctx.now ? { parkUntil: on.parkUntil } : {}),
+    ...(on?.sdkSpawnHold && on.sdkSpawnHold.until > ctx.now ? { sdkSpawnHold: { until: on.sdkSpawnHold.until } } : {}),
+    ...(on?.managerResume?.offlineHold ? { offlineHold: true } : {}),
+    ...budgetFact(ctx.now, on?.budgetHold, on?.commanderReserveHold),
+    // Outside the frame automaticOperationAllowed is false too, so the flag is set
+    // there; that project is 'off' (outside-frame), not "sign in" (review R2-M1).
+    ...(on?.automationBlocked && !(automation?.enabled && !automation.allowed) ? { automationBlocked: true } : {}),
+    ...(commanderPause !== undefined && commanderPause > ctx.now ? { commanderQuotaPause: { until: commanderPause } } : {}),
+    ...(Array.from(on?.dispatchFailures ?? []).some(([id, s]) => s.told && todoIds.has(id)) ? { dispatchFailing: true } : {}),
+    ...(rs?.fatalFired || rs?.unresponsiveFatalFired ? { commanderDown: true } : {}),
+  }
+}
+
+/** The budget gate's verdict as a standing fact: the hold that lifts soonest,
+ *  else the note that no usage reading was fresh enough to judge. */
+const budgetFact = (
+  now: number,
+  hold: ProjectEngine['budgetHold'],
+  commanderReserve?: ProjectEngine['commanderReserveHold'],
+): Partial<Pick<StandingFacts, 'budget'>> => {
+  // A hold whose time has passed holds nothing: one left by a pass that returned
+  // early (a quota park, automation not allowed) must not show a past clock time
+  // (review R2 NIT 4 / B-N1).
+  const soonest = hold?.held.filter((h) => h.until > now).sort((a, b) => a.until - b.until)[0]
+  if (soonest) return { budget: { kind: soonest.kind, until: soonest.until } }
+  // Only finished work waits: the reserve holding the commander's wake (R-D2).
+  if (commanderReserve && commanderReserve.until > now) return { budget: { kind: 'weekly-reserve', until: commanderReserve.until } }
+  return hold?.note ? { budget: { kind: hold.note } } : {}
+}
+
+/** GET /api/swarm/standing — the project's standing, read fresh (the board from
+ *  disk, as the Ground lamp reads it). Never throws for an unreadable board /
+ *  inbox (they just contribute nothing). */
+export const readProjectStanding = async (projectPath: string): Promise<ProjectStanding> => {
+  const key = await canonicalize(projectPath)
+  const questions = await countOpenEscalationsByProject().catch(() => null)
+  return standingOf(standingFactsOf(store.engines.get(key), key, {
+    now: Date.now(),
+    lang: await getPromptLang(),
+    tasks: await readProjectData(projectPath).then((d) => d.tasks ?? [], () => null),
+    ...(questions ? { openQuestions: questions.get(key) ?? 0 } : {}),
+    manualStopPersisted: await isSwarmManualStopPersisted(key),
+    automation: await readProjectAutomationPolicy(projectPath),
+  }))
+}
+
+/** The Ground lamp's standing for one project — in-memory facts only (it is
+ *  asked for every project every few seconds). Undefined when the project has
+ *  no engine and no boot resume in memory: then it is 'off' or a question, which
+ *  the lamp already knows from the inbox. */
+export const groundStanding = (key: string, ctx: StandingContext): ProjectStanding | undefined => {
+  const engine = store.engines.get(key)
+  if (!engine && !bootResumePending.has(key)) return undefined
+  return standingOf(standingFactsOf(engine, key, ctx))
+}
+
+/** THE STALL WATCHDOG (AUTONOMY-SPEC R-A2), once per pass. A need that stands
+ *  STANDING_STALL_MS with no progress and no reason gets the reason
+ *  `unexplained` (swarmStanding.ts); this writes ONE journal line with the
+ *  measured facts and raises ONE 'automation-stalled' notice per episode. The
+ *  episode ends with progress, a reason, or the need going away. Existing
+ *  notices stay — this only catches what none of them names. */
+const watchStanding = async (
+  engine: ProjectEngine,
+  tasks: readonly ProjectTask[] | null,
+  deps: Pick<OrchestratorDeps, 'isAlive' | 'commanderBackgroundTaskAt'> & Pick<AnomalyDeps, 'notify'>,
+  now: number,
+): Promise<void> => {
+  if (!tasks) return // no fresh board, no claim either way
+  const sig = tasks.map((t) => `${t.id}:${columnOf(t)}`).sort().join('|')
+  const watch = (engine.standingWatch ??= { sig, quietSince: now })
+  const questions = await countOpenEscalationsByProject().catch(() => null)
+  const facts = standingFactsOf(engine, engine.path, {
+    now,
+    lang: await getPromptLang(),
+    tasks,
+    ...(questions ? { openQuestions: questions.get(engine.path) ?? 0 } : {}),
+    isAlive: deps.isAlive,
+  })
+  // The commander waiting on its own background command (its full test run) is
+  // working on the review need, not stalled (B-S3b). Asked only then: it reads
+  // the transcript. Two bounds (review R2-M2): only a start within the run grace
+  // counts (backgroundTaskAliveAt — one whose end record never landed must not
+  // silence the watchdog for good), and only when the review need is the only
+  // need — the commander's run serves nothing on the dispatch side.
+  const commanderBusy =
+    !facts.serving && facts.needs.integrate > 0 && facts.needs.dispatch === 0 &&
+    backgroundTaskAliveAt(await deps.commanderBackgroundTaskAt?.(engine.path).catch(() => null), now) != null
+  if (sig !== watch.sig || facts.serving || commanderBusy) {
+    watch.sig = sig
+    watch.progressedAt = now
+    watch.quietSince = now
+  }
+  const standing = standingOf({ ...facts, quietSince: watch.quietSince })
+  const stalled = standing.reasons.find((r) => r.kind === 'unexplained')
+  if (!stalled) {
+    // Held for a named reason, off, or nothing needed: the quiet interval
+    // restarts. Only 'running' with nobody serving (a need inside the window)
+    // keeps counting.
+    if (standing.state !== 'running') watch.quietSince = now
+    watch.told = false
+    return
+  }
+  if (watch.told) return
+  watch.told = true
+  const iso = (ms: number | undefined) => (ms === undefined ? 'never' : new Date(ms).toISOString())
+  logLine(
+    engine,
+    'warn',
+    `automation stalled — work needed (dispatch ${standing.needs.dispatch}, integrate ${standing.needs.integrate}) with no progress since ${iso(watch.progressedAt)} and no hold that explains it; ` +
+      `quiet since ${iso(watch.quietSince)}, ${engine.workers.length} counted worker(s), anomalies [${engine.anomalies.map((a) => a.kind).join(', ')}]` +
+      (engine.lastCommanderFailure ? `, last commander failure: ${engine.lastCommanderFailure}` : ''),
+    'dispatch',
+  )
+  const notice: SwarmFatalNotification = { event: 'automation-stalled', projectPath: engine.path, detail: stalled.plain }
+  if (deps.notify) deps.notify(notice)
+  else await createSwarmFatalNotification(notice).catch(() => {})
+}
+
 /** ONE full engine tick: dispatch, then (still running) integrate, then detect
  *  state inconsistencies. The stages share the engine + journal but are
  *  independently guarded/tested; anomaly detection is read-only and fully
@@ -10310,6 +10980,9 @@ export const runEnginePass = async (
         // are last pass's — escalation runs on that mix; both are re-derived next
         // pass, and detectAnomalies' own probes each catch their errors.
       }
+      // Standing + stall watchdog (R-A2): after detection, so parked review cards
+      // are read off this pass's anomalies. Never breaks a pass.
+      await watchStanding(engine, tasks, deps, Date.now()).catch(() => {})
       // Escalation safety valve — the SINGLE choke point, run at the END of the pass
       // and fully guarded, so a notification fault can never disturb dispatch /
       // integrate / detect (and a NORMAL pass with no fatal event notifies nothing).
@@ -11271,7 +11944,7 @@ export const reconcileAutomationOrchestrators = async (
       // A boot resume still pending for this engine owns its start (saved-work hold,
       // roster reconcile, --resume adoption). Starting it here bypassed all three.
       if (bootResumePending.get(project.path)?.engine && !previous?.running) throw new Error('再起動後の復帰を待っています。復帰が済むと自動運転が始まります。')
-      if (!await automaticOperationAllowed(project.path)) throw new Error('オーナーのアカウントが確かめられません(設定でサインインすると始まります)')
+      if (!await automaticOperationAllowed(project.path)) throw new Error(`オーナーのアカウントが確かめられません(${APP_SIGN_IN_WHERE.ja}からサインインすると始まります)`)
       if (runtimeAdmissionBlocked('swarm')) throw new Error('AI の接続の切り替えが終わるのを待っています')
       if (automationBootBlocked) throw new Error('Automatic operation is held by the boot crash-loop or storage safeguard.')
       if (previous?.running) {
@@ -11405,7 +12078,21 @@ export const resumeStartedAtMs = (entry: RosterEntry, now: number): number => {
  *  with no sessionId, a failed proof, or a thrown spawn is left to crash reclaim
  *  ("worst case = same as today", plan §5). Never throws — one bad candidate never
  *  aborts the others. */
-const adoptResumeCandidates = async (
+/** Raise a held operation's question where its card was just parked. A failed ask
+ *  is kept on the engine and retried by every later pass (refreshSavedWorkHold):
+ *  until 2026-11-28 it was swallowed, and a native hold — which no later pass
+ *  lists — left its card in blocked with no question at all (review A S6). */
+const askOrRetry = async (engine: ProjectEngine, op: HeldOperation): Promise<void> => {
+  try {
+    await askAboutHeldOperation(engine.path, op)
+  } catch (e) {
+    (engine.unaskedHolds ??= new Map()).set(op.id, op)
+    logLine(engine, 'warn', `held conversation — could not raise the owner's question for operation ${op.id} (${errMsg(e)}); retrying next pass`, 'dispatch')
+  }
+}
+
+// Exported for the A S6 test (swarmSavedWorkHold.test.ts); resumeEngines is its only caller.
+export const adoptResumeCandidates = async (
   engine: ProjectEngine,
   reconciled: RosterReconcileResult | void,
   deps: OrchestratorDeps,
@@ -11458,6 +12145,22 @@ const adoptResumeCandidates = async (
       )
       continue
     }
+    // A conversation an unconfirmed result holds is never resumed (R-B3): the card
+    // waits in blocked with ONE question, and only the owner's answer moves it on
+    // — to a NEW conversation. A lookup that fails resumes nothing either
+    // (fail-closed); the card stays where it is, and the launch guard that cannot
+    // read the record holds the project under its own words (refreshSavedWorkHold).
+    const heldBy = await (deps.heldConversation?.(engine.path, entry.sessionId) ?? Promise.resolve(undefined)).catch(() => null)
+    if (heldBy === null) {
+      logLine(engine, 'warn', `resume declined — could not read whether its conversation is held: ${shorten(titleById.get(entry.taskId) || entry.branch)}`, 'dispatch')
+      continue
+    }
+    if (heldBy) {
+      logLine(engine, 'warn', `resume refused — its conversation has an operation with an unconfirmed result → card waits in blocked for the owner's answer: ${shorten(titleById.get(entry.taskId) || entry.branch)}`, 'dispatch')
+      await deps.recoverCard(engine.path, entry.taskId, 'blocked').catch(() => false)
+      await askOrRetry(engine, { ...heldBy, seat: { role: 'worker', taskId: entry.taskId, ...(titleById.get(entry.taskId) ? { title: titleById.get(entry.taskId) } : {}) } })
+      continue
+    }
     // RE-READ THE STOP SWITCH after the proof (review 2026-09-24): the proof can
     // sleep up to one orphan window — precisely on an update restart — and the
     // re-read in resumeEngines ran BEFORE it. An OFF pressed meanwhile must not be
@@ -11498,6 +12201,16 @@ const adoptResumeCandidates = async (
       // branch over the card — the same accepted trade as the quota requeue
       // (recoveryColumn's KNOWN GAP note), and the commander can still adopt
       // the old branch by hand.
+      // A conversation saved in the middle of a tool call (its transcript shows a
+      // call with no result) is never resumed and its work is not redone before
+      // the owner answers (AUTONOMY-SPEC R-B3): the card waits in blocked with ONE
+      // question in the inbox, and the rest of the project goes on.
+      if (e instanceof NativeUnfinishedToolsError) {
+        logLine(engine, 'warn', `resume refused — the saved conversation stopped in the middle of a tool call → card waits in blocked for the owner's answer: ${shorten(title || entry.branch)}`, 'dispatch')
+        await deps.recoverCard(engine.path, entry.taskId, 'blocked').catch(() => false)
+        await askOrRetry(engine, nativeHeldOperation(entry.sessionId, e.tools[0], { role: 'worker', taskId: entry.taskId, ...(title ? { title } : {}) }))
+        continue
+      }
       logLine(engine, 'warn', `resume spawn failed → requeue to todo: ${shorten(title || entry.branch)} — ${errMsg(e)}`, 'dispatch')
       try {
         await deps.recoverCard(engine.path, entry.taskId, 'todo')
@@ -11616,7 +12329,8 @@ let automationBootBlocked = false
 /** What a project still owes its boot resume (true = not yet back). Re-read
  *  against the persisted wishes on every attempt, so an explicit stop drops it. */
 interface BootResumeEntry {
-  supply: boolean; manager: boolean; engine: boolean
+  /** No commander: it is not revived at boot (R-D3a — see the attempt below). */
+  supply: boolean; engine: boolean
   /** The current hold, and every reason already announced (one notice per reason). */
   reason?: string; told?: Set<string>
   /** Something actually came back on a later attempt — worth saying so. */
@@ -11701,11 +12415,9 @@ export const resumeEngines = async (
     proveResumable?: (worktree: string, sessionId: string) => Promise<boolean>
     /** DI for tests: the supply-desk boot resume (default spawnSwarmSupply).
      *  Injectable so the resume test proves the supplyDesired flag actually
-     *  spawns — and that its ABSENCE spawns nothing — without a real claude. */
-    spawnSupply?: (o: { projectPath: string }) => Promise<unknown>
-    /** DI for tests: the COMMANDER-desk boot resume (default spawnSwarmManager).
-     *  Same shape and same reason as {@link spawnSupply}. */
-    spawnManager?: (o: { projectPath: string }) => Promise<unknown>
+     *  spawns — and that its ABSENCE spawns nothing — without a real claude.
+     *  The boot always asks for a `quiet` launch (R-D3a). */
+    spawnSupply?: (o: { projectPath: string; quiet?: boolean }) => Promise<unknown>
     /** DI for tests: the per-actor saved-work safety check (default
      *  savedSwarmRuntimeHold). null = may resume, string = held, with why. */
     runtimeHold?: (projectPath: string, actor: 'supply' | 'manager' | 'engine') => Promise<string | null>
@@ -11799,20 +12511,19 @@ export const resumeEngines = async (
       const key = await canonicalize(projectPath)
       const intent = await readEngineIntent(projectPath)
       if (!intent.supplyDesired) entry.supply = false
-      if (!intent.managerDesired) entry.manager = false
       const automation = await readProjectAutomationPolicy(projectPath)
       if (!automation.allowed && automation.healthy) {
         // Deliberately outside the Ground frame: nothing comes back automatically
         // (as before); frame membership changes are the policy reconcile's job. Said
         // once, only when something had been up, and never retried.
-        if (entry.supply || entry.manager || intent.desiredRunning) {
+        if (entry.supply || intent.desiredRunning) {
           await createSwarmFatalNotification({
             event: 'engine-resume-suppressed',
             projectPath,
             detail: 'このプロジェクトは Ground の自動運転の枠の外なので、再起動前に動いていた社長・司令官・自動運転を自動では戻していません(手動で立ち上げられます)。',
           }).catch(() => {})
         }
-        entry.supply = entry.manager = entry.engine = false
+        entry.supply = entry.engine = false
         return null
       }
       if (!automation.allowed || automation.enabled && !await automaticOperationAllowed(projectPath)) {
@@ -11831,6 +12542,12 @@ export const resumeEngines = async (
       //
       // Not best-effort any more (2026-11-17): a desk that cannot come back yet is
       // held with its reason and retried, never silently dropped for the session.
+      //
+      // QUIET (2026-11-28, docs/AUTONOMY-SPEC.md R-D3a): the desk comes back with
+      // nothing sent. The auto-sent resume prompt was one full turn over the whole
+      // conversation per desk per start, whether or not anything was waiting; its
+      // note now rides the first line delivered (supplyNotice.ts SUPPLY_RESUME_NOTE).
+      // Owner-initiated opens are not quiet (spawnSwarmSupply's default).
       if (entry.supply) {
         try {
           const pre = await swarmRunPreflight()
@@ -11840,52 +12557,35 @@ export const resumeEngines = async (
           // Re-read the wish right before spawning: a stop pressed while the checks
           // above awaited must not be resurrected.
           else if (!(await readEngineIntent(projectPath)).supplyDesired) entry.supply = false
-          else { await (opts?.spawnSupply ?? spawnSwarmSupply)({ projectPath }); entry.supply = false; entry.started = true }
+          else { await (opts?.spawnSupply ?? spawnSwarmSupply)({ projectPath, quiet: true }); entry.supply = false; entry.started = true }
         } catch (e) { hold('社長', `卓を復帰できませんでした(${errMsg(e)})`) }
       }
-      // COMMANDER DESK RESUME (2026-08-26) — the twin of the supply block above,
-      // and the fix for the orphaned-commander incident.
+      // THE COMMANDER IS NOT REVIVED AT BOOT (2026-11-28, docs/AUTONOMY-SPEC.md
+      // R-D3a). From 2026-08-26 to 0.11.211 a `managerDesired` desk came back here
+      // with an auto-sent resume prompt — one full turn over its whole conversation
+      // per start, measured as part of the 6.4M billed commander tokens a week, with
+      // nothing waiting for it. `managerDesired` stays recorded (only the desk's stop
+      // route clears it); the commander is started by its first real need, each on
+      // its own lane, each proven to wake an ABSENT commander:
+      //   • a review-ready card — runIntegratePass's absent arm (wakeManager), the
+      //     first pass after this boot (swarmOrchestrator.idleDesks.test.ts);
+      //   • a worker's question or an owner's answer owed to it — the commander
+      //     question sweep, on the engine pass and the 60 s supply loop
+      //     (commanderWakeOnNeed.test.ts);
+      //   • the president relaying the owner — POST /api/swarm/manager/say
+      //     (managerSayWake.routes.test.ts).
+      // The 2026-08-26 orphaned-commander incident (finished work nobody integrated)
+      // is the first lane: the engine notices the card in review and wakes the desk.
+      // A commander that cannot start then is reported by that lane
+      // ('manager-unrevivable' with commanderFailureWords, or the relay's `why`).
       //
-      // THE INCIDENT. An OPEN GROUND update restarted the app while a worker was
-      // running. Everything came back except the commander: the engine resumed
-      // (`desiredRunning`), the worker roster reconciled, the supply desk
-      // relaunched — but the commander is a `claude` desk this server owns, so
-      // the restart killed it and NOTHING brought it back. `managerPresence`
-      // stayed 'missing' with `manager.updatedAt` frozen at 08:58:27Z against a
-      // boot at 09:07:58Z, while the orphaned worker ran on and FINISHED. Nobody
-      // integrates finished work without a commander, so the board looked like it
-      // was moving while the trunk stood still — the worst kind of stop, the kind
-      // that looks like progress. A restart is usually an UPDATE, i.e. exactly the
-      // moment work is most likely to be in flight.
-      //
-      // INDEPENDENT of `desiredRunning` (hence: before the continue below), for
-      // the same reason supply's is — a commander can be up with autonomy OFF,
-      // which is the owner talking to it. It is NOT gated on the manual-stop
-      // record either: that record is the ENGINE's pause, and pausing autonomy has
-      // never meant closing the desk. The flag's own stop route is the only thing
-      // that clears it.
-      //
-      // CANNOT DUPLICATE A DESK: spawnSwarmManager's singleton guard adopts any
-      // live commander in the project instead of launching a second one, so a
-      // resume that races anything (a fast owner, a double boot) returns the desk
-      // that already exists.
-      //
-      // ⚠ NOT SILENT when it cannot come back — the deliberate difference from
-      // supply, and the 2026-08-04 lesson from the branch below applied here: a
-      // supply desk that fails to relaunch is a window the owner will notice is
-      // missing, while a commander that fails to relaunch is INVISIBLE and leaves
-      // exactly the stall this whole block exists to end. Same event as the three
-      // engine-resume branches, once per project per boot.
-      if (entry.manager) {
-        try {
-          const pre = await swarmRunPreflight()
-          const why = !pre.ok ? `選択中のAIをすぐに使えませんでした(${pre.body?.error ?? '理由不明'})` : await holdOf(projectPath, 'manager')
-          if (why) hold('司令官', why)
-          else if (!await automaticOperationAllowed(projectPath)) hold('司令官', 'オーナーのアカウント確認がまだ取れていません')
-          else if (!(await readEngineIntent(projectPath)).managerDesired) entry.manager = false
-          else { await (opts?.spawnManager ?? spawnSwarmManager)({ projectPath }); entry.manager = false; entry.started = true }
-        } catch (e) { hold('司令官', `卓を復帰できませんでした(${errMsg(e)})`) }
-      }
+      // Not reviving it must not hide what its saved conversation left unconfirmed
+      // (R-B4): the check its revival used to run still runs here, for its
+      // questions only — every held operation in the project, and the commander's
+      // own conversation cut mid-tool, each get their ONE inbox question at boot,
+      // even when no desk and no autopilot comes back. Its verdict is unused: the
+      // commander opens a fresh conversation on its first need (launchNewDesk).
+      if (intent.managerDesired) await holdOf(projectPath, 'manager').catch(() => null)
       if (!entry.engine) return null
       if (!intent.desiredRunning && !automation.enabled || !automation.enabled && await isSwarmManualStopPersisted(key) || store.engines.get(key)?.running) {
         entry.engine = false
@@ -12024,7 +12724,7 @@ export const resumeEngines = async (
       const engine = store.engines.get(await canonicalize(projectPath).catch(() => projectPath))
       if (engine) logLine(engine, level, message)
     }
-    if (!entry.supply && !entry.manager && !entry.engine) {
+    if (!entry.supply && !entry.engine) {
       bootResumePending.delete(projectPath)
       if (entry.reason) {
         await engineLog('info', 'boot resume finished after an earlier hold (resumed or withdrawn)')
@@ -12047,7 +12747,7 @@ export const resumeEngines = async (
     // strength of an older, different hold (rework #2).
     if (!reason) entry.heldSince = undefined
     else if (reason !== previous || entry.heldSince === undefined) entry.heldSince = now
-    entry.ownerOnly = held.length > 0 && held.every((h) => h.includes(OWNER_REVIEW_HOLD_HINT))
+    entry.ownerOnly = held.length > 0 && held.every(isOwnerReviewHold)
     if (reason && reason !== previous) {
       entry.reason = reason
       await engineLog('warn', `boot resume held: ${reason}`)
@@ -12065,14 +12765,18 @@ export const resumeEngines = async (
       await createSwarmFatalNotification({
         event: 'engine-resume-suppressed',
         projectPath,
-        detail: `再起動後の復帰を待っています — ${reason}。条件が整いしだい自動で戻します(社長・司令官・自動運転を手動で立ち上げても構いません)。`,
+        // An owner-only hold says no "launch it by hand": a held president's manual
+        // open throws again (review D-M3). Its own words already name its door and
+        // that it then resumes — the bar's question, or Settings for a ChatGPT
+        // conversation (review R2 S-4) — so nothing is added.
+        detail: `再起動後の復帰を待っています — ${reason}。${entry.ownerOnly ? '' : '条件が整いしだい自動で戻します(社長・マネージャー・自動運転を手動で立ち上げても構いません)。'}`,
       }).catch(() => {})
     }
     return key
   }
 
   bootResumePending.clear()
-  for (const projectPath of paths) bootResumePending.set(projectPath, { supply: true, manager: true, engine: true })
+  for (const projectPath of paths) bootResumePending.set(projectPath, { supply: true, engine: true })
   bootResumeAttempt = resumeOne
   bootResumeList = listProjectPaths
   bootResumeClock = opts?.clock ?? (() => Date.now())

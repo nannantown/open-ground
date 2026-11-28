@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
 import type { HookCallbackMatcher, HookEvent } from '@anthropic-ai/claude-agent-sdk'
-import { acceptConversationReceipt, claimConversationReceipt, finishConversationReceipt, listConversationReceipts, listAllConversationReceipts, readConversationReceipt, type ConversationReceipt } from './conversationReceipts'
+import { acceptConversationReceipt, claimConversationReceipt, finishConversationReceipt, listConversationReceipts, listAllConversationReceipts, readConversationReceipt, settleReceiptFromEvidence, type ConversationReceipt } from './conversationReceipts'
 import { projectUUIDFromPath } from './projectDataPath'
 import { hasChatGptAccess } from './chatgptAccess'
 import { runtimeOwnerKey } from './runtimeOwner'
+import { findToolOutcome } from './runtimeToolEvidence'
 
 type Hooks = Partial<Record<HookEvent, HookCallbackMatcher[]>>
 const idFor = (sessionId: string, toolId: string) => `tool-${createHash('sha256').update(JSON.stringify([sessionId, toolId])).digest('hex')}`
@@ -33,10 +34,45 @@ const RECORDING_UNAVAILABLE = 'Owner authorization or durable action recording i
  *  commands merely fail (swarmOrchestrator's tool-denial watch). */
 export const isRuntimeActionDenial = (toolResult: string): boolean =>
   toolResult.includes(ALREADY_RECEIPTED) || toolResult.includes(RECORDING_UNAVAILABLE)
+/** AUTONOMY-SPEC R-B1: a tool receipt left open (its closing callback lost to a
+ * foreign hook veto, a sub-agent, a teardown, a limit refusal or a server exit) is
+ * settled when Claude's native transcript records the call's result. No record, a
+ * call started without a result, an interrupted result, a receipt its own
+ * callback recorded as interrupted, or any read failure leave it as it is: the
+ * hold stands and nothing is run again. */
+const settleFromTranscript = async (receipt: ConversationReceipt): Promise<ConversationReceipt> => {
+  const body = object(receipt.body)
+  if (receipt.state !== 'uncertain' && receipt.state !== 'executing' || body?.kind !== 'runtime-tool' || body.provider !== 'claude'
+    || typeof body.sessionId !== 'string' || typeof body.toolId !== 'string' || typeof body.tool !== 'string' || typeof body.inputHash !== 'string') return receipt
+  // The result counts only for the call that was claimed: same tool, same arguments
+  // (receipts from before 2026-11-28 carry only the plain hash).
+  const sameCall = (name: string, input: unknown): boolean => {
+    if (name !== body.tool) return false
+    try { return inputHash(input) === body.inputHash || inputValueHash(input) === body.inputValueHash } catch { return false }
+  }
+  try {
+    const outcome = await findToolOutcome(body.sessionId, body.toolId, { cwd: typeof body.cwd === 'string' ? body.cwd : undefined, use: sameCall })
+    if (outcome.kind !== 'result' || outcome.interrupted) return receipt
+    return await settleReceiptFromEvidence(receipt, { failed: outcome.isError }) ?? receipt
+  } catch { return receipt }
+}
+/** Every tool receipt that would hold — `uncertain`, or `executing` with its actor
+ * gone — settled first when its transcript records the result. The one reconcile
+ * behind listUncertainRuntimeActions and runtimeRecovery's review list. */
+export const settleHeldToolReceipts = async (receipts: ConversationReceipt[]): Promise<ConversationReceipt[]> => {
+  const { isAgentConversationOccupied, isRecordedRuntimeHandleOccupied } = await import('./liveDesks')
+  return Promise.all(receipts.map(r => {
+    const body = r.body as { kind?: unknown; sessionId?: unknown } | null
+    if (body?.kind !== 'runtime-tool') return r
+    const live = r.execution ? isRecordedRuntimeHandleOccupied(r.execution.runtime, r.execution.handleId) : typeof body.sessionId === 'string' && isAgentConversationOccupied(body.sessionId)
+    return r.state === 'uncertain' || r.state === 'executing' && !live ? settleFromTranscript(r) : r
+  }))
+}
 export interface ClaudeRuntimeToolAudit { hooks: Hooks; observeSdkMessage(message: unknown): Promise<void> }
 /** Audit hooks never grant permission: every existing guard remains authoritative.
  * Started-without-post receipts are conservative recovery holds, even when a
- * native permission denial may have prevented the effect. */
+ * native permission denial may have prevented the effect, until the native
+ * transcript shows their result (settleHeldToolReceipts). */
 export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: string, raw: unknown = {}, expectedOwnerKey?: string): Promise<ClaudeRuntimeToolAudit> => {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid runtime tool guards.')
   const hooks = raw as Hooks
@@ -89,13 +125,24 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
     const candidate = { id, tool: input.tool_name, inputHash: inputHash(input.tool_input), inputValueHash: inputValueHash(input.tool_input), claimed: false, ambiguous: false,
       backgroundRequested: object(input.tool_input)?.run_in_background === true }
     claimed.set(callId, candidate)
+    // A result that could not be written holds this whole session — until the
+    // journal or the native transcript shows that result after all (R-B1).
+    for (const fault of Array.from(recordingFaults)) {
+      const saved = fault.startsWith('tool-') ? await readConversationReceipt(scope, fault, owner) : undefined
+      const settled = saved && await settleFromTranscript(saved)
+      if (!settled || settled.state === 'executing' || settled.state === 'uncertain') continue
+      recordingFaults.delete(fault)
+      for (const [id, other] of Array.from(claimed)) if (other.id === fault) forget(id)
+    }
     if (recordingFaults.size) throw new Error('A tool result could not be recorded.')
     if (await runtimeOwnerKey() !== owner) throw new Error('The owner account changed.')
-    await assertNoUncertainRuntimeActions(cwd, false)
+    // R-B3: only this conversation's own unknown results refuse its calls.
+    await assertNoUncertainRuntimeActions(cwd, false, sessionId)
     await acceptConversationReceipt(scope, id, { kind: 'runtime-tool', provider: 'claude', sessionId, toolId: callId, tool: input.tool_name,
       // Hash arguments, rather than copying file contents or credentials into a
-      // second store. The native transcript supplies private inspection detail.
-      inputHash: inputHash(input.tool_input) }, undefined, owner)
+      // second store. The native transcript supplies private inspection detail;
+      // `cwd` names its folder and both hashes identify the call in it (R-B1).
+      inputHash: inputHash(input.tool_input), inputValueHash: candidate.inputValueHash, cwd }, undefined, owner)
     if (!await claimConversationReceipt(scope, id, execution, owner)) {
       candidate.ambiguous = true
       return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: ALREADY_RECEIPTED } }
@@ -190,22 +237,37 @@ export const createClaudeRuntimeToolAudit = async (cwd: string, sessionId: strin
 /** Compatibility for callers that need only the permission hooks. */
 export const guardClaudeRuntimeTools = async (cwd: string, sessionId: string, raw: unknown = {}, expectedOwnerKey?: string): Promise<Hooks> =>
   (await createClaudeRuntimeToolAudit(cwd, sessionId, raw, expectedOwnerKey)).hooks
+/** The conversation a receipt can hold (AUTONOMY-SPEC R-B3): the session that
+ * issued it. `undefined` = the receipt names none — such evidence cannot be
+ * attributed, so it holds every conversation in its project. */
+export const receiptSession = (r: ConversationReceipt): string | undefined => {
+  const body = r.body as { sessionId?: unknown } | null
+  return r.execution?.sessionId ?? (typeof body?.sessionId === 'string' ? body.sessionId : undefined)
+}
 /** The unconfirmed runtime effects in one project (or everywhere when `cwd` is
  * omitted). Boot resume reads this per project so one stale receipt holds only
- * its own project's actors, never every project's (2026-11-17). */
-export const listUncertainRuntimeActions = async (cwd?: string, includeExecuting = true, anyOwner = false): Promise<ConversationReceipt[]> => {
+ * its own project's actors, never every project's (2026-11-17). `sessionId`
+ * narrows it to what holds that one conversation (R-B3, owner decision
+ * 2026-11-28): only the conversation that issued an unknown call can run it
+ * again, so a receipt holds only its own session. Omitted = every receipt — the
+ * whole-app drain and the review lists. */
+export const listUncertainRuntimeActions = async (cwd?: string, includeExecuting = true, anyOwner = false, sessionId?: string): Promise<ConversationReceipt[]> => {
   if (!anyOwner && !await hasChatGptAccess()) return []
   const scope = cwd ? await projectUUIDFromPath(cwd) : undefined
   const { isAgentConversationOccupied, isRecordedRuntimeHandleOccupied } = await import('./liveDesks')
-  return (await (anyOwner ? listAllConversationReceipts() : listConversationReceipts())).filter((r) => {
+  const held = (await (anyOwner ? listAllConversationReceipts() : listConversationReceipts())).filter((r) => {
     const body = r.body as { kind?: unknown; sessionId?: unknown } | null
     const relevant = body?.kind === 'runtime-tool' || body?.kind === 'president-input'
     const originalActorLive = r.execution ? isRecordedRuntimeHandleOccupied(r.execution.runtime, r.execution.handleId) : typeof body?.sessionId === 'string' && isAgentConversationOccupied(body.sessionId)
-    return (!scope || r.scope === scope) && relevant && (r.state === 'uncertain' || (r.state === 'executing' && (includeExecuting || !originalActorLive)))
+    const holder = receiptSession(r)
+    return (!scope || r.scope === scope) && relevant && (sessionId === undefined || holder === undefined || holder === sessionId)
+      && (r.state === 'uncertain' || (r.state === 'executing' && (includeExecuting || !originalActorLive)))
   })
+  // R-B1: a tool whose result the native transcript records holds nothing.
+  return (await settleHeldToolReceipts(held)).filter(r => r.state === 'uncertain' || r.state === 'executing')
 }
-export const assertNoUncertainRuntimeActions = async (cwd?: string, includeExecuting = true): Promise<void> => {
-  const uncertain = await listUncertainRuntimeActions(cwd, includeExecuting)
+export const assertNoUncertainRuntimeActions = async (cwd?: string, includeExecuting = true, sessionId?: string): Promise<void> => {
+  const uncertain = await listUncertainRuntimeActions(cwd, includeExecuting, false, sessionId)
   if (uncertain.length) throw new Error('A previous tool operation has an unconfirmed result. Inspect the saved project work before resuming automatic work.')
 }
 /** A native abort only taints this actor's unconfirmed effects, never a

@@ -54,6 +54,19 @@ const mocks = vi.hoisted(() => ({
   selectedRuntime: vi.fn(async (): Promise<'claude' | 'chatgpt'> => 'claude'),
   spawnSdkSession: vi.fn(),
   publicConversation: vi.fn(async () => [{ kind: 'input' as const, text: 'previous confirmed owner words' }]),
+  savedWorkHolds: vi.fn(async (): Promise<import('./savedWorkHold').HeldOperation[]> => []),
+  askAboutHeldOperation: vi.fn(async () => ({ deduped: false })),
+  presidentAdmission: vi.fn(async (): Promise<{ note: string } | undefined> => undefined),
+}))
+vi.mock('./savedWorkHold', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./savedWorkHold')>()),
+  savedWorkHolds: mocks.savedWorkHolds,
+  askAboutHeldOperation: mocks.askAboutHeldOperation,
+}))
+vi.mock('./swarmNativeRecovery', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./swarmNativeRecovery')>()),
+  nativeReviewerKey: async () => 'local-key',
+  nativePresidentRecoveryAdmission: mocks.presidentAdmission,
 }))
 vi.mock('./chatgptResponses', async (importOriginal) => ({ ...(await importOriginal<typeof import('./chatgptResponses')>()), chatGptPublicConversation: mocks.publicConversation }))
 vi.mock('./chatgptRuntime', () => ({ selectedRuntime: mocks.selectedRuntime,
@@ -87,6 +100,8 @@ vi.mock('./swarmLaunch', async (importOriginal) => ({
 }))
 
 import { spawnSwarmSupply, SUPPLY_DESK_LABEL } from './swarmSupply'
+import { NativeUnfinishedToolsError } from './swarmNativeTranscript'
+import { OWNER_REVIEW_WHERE } from './savedWorkHold'
 import { DESK_SPAWN_LOCK_WAIT_MS } from './deskSpawnLock'
 import type { OwnerDeskTerminal } from './terminal'
 
@@ -363,5 +378,41 @@ describe('spawnSwarmSupply — one supply desk per project', () => {
     vi.useRealTimers()
     stuck.resolve({ model: 'opus', effort: 'max' })
     await held
+  })
+})
+
+// R-B3 / R-A3 (AUTONOMY-SPEC): the president's OWN held conversation is the one
+// seat that waits for the owner instead of opening fresh (the owner's history
+// lives in it). Its question goes to the inbox and the launch says where to
+// answer; once answered, a NEW conversation opens told what stopped and what the
+// owner said. It is never resumed.
+describe('the president\'s own held conversation waits with its question, then opens fresh', () => {
+  beforeEach(() => {
+    mocks.resolveSwarmModelEffortProbed.mockResolvedValue({ model: 'opus', effort: 'high' })
+    mocks.savedWorkHolds.mockResolvedValue([])
+    mocks.presidentAdmission.mockResolvedValue(undefined)
+  })
+  it('saved mid-tool and not answered yet ⇒ no launch, the question is asked, the error names the inbox', async () => {
+    mocks.resolveSwarmSession.mockRejectedValue(new NativeUnfinishedToolsError([{ id: 't', name: 'Bash', at: '2026-11-26T23:01:03.000Z', description: 'Check the board' }], 'pres-sid'))
+    await expect(spawnSwarmSupply({ projectPath: PROJ, cause: 'owner' })).rejects.toThrow(OWNER_REVIEW_WHERE)
+    expect(mocks.launchClaude).not.toHaveBeenCalled()
+    expect(mocks.askAboutHeldOperation).toHaveBeenCalledWith(PROJ, expect.objectContaining({ id: 'native-pres-sid', seat: { role: 'supply' } }))
+  })
+  it('answered ⇒ a NEW conversation opens (not --resume), told what stopped and what the owner said', async () => {
+    mocks.resolveSwarmSession.mockRejectedValue(new NativeUnfinishedToolsError([{ id: 't', name: 'Bash', at: '2026-11-26T23:01:03.000Z', description: 'Check the board' }], 'pres-sid'))
+    mocks.presidentAdmission.mockResolvedValue({ note: 'A: 止まったところから続ける' })
+    const r = await spawnSwarmSupply({ projectPath: PROJ, cause: 'owner' })
+    expect(r.resumed).toBe(false)
+    expect(r.agentSessionId).not.toBe('pres-sid')
+    const opts = mocks.launchClaude.mock.calls.at(-1)?.[0] as { agentSessionId: string; resume?: boolean; initialPrompt?: string; args?: string[] }
+    expect(JSON.stringify(opts)).toContain('Check the board')
+    expect(JSON.stringify(opts)).toContain('止まったところから続ける')
+    expect(JSON.stringify(opts)).not.toContain('--resume')
+  })
+  it('an unconfirmed owner instruction on the saved conversation ⇒ it waits too, never resumed', async () => {
+    mocks.resolveSwarmSession.mockResolvedValue({ agentSessionId: 'pres-sid', resume: true })
+    mocks.savedWorkHolds.mockResolvedValue([{ id: 'input-1', sessionId: 'pres-sid', at: '2026-11-26T23:01:03.000Z', seat: { role: 'supply' } }])
+    await expect(spawnSwarmSupply({ projectPath: PROJ, cause: 'owner' })).rejects.toThrow(OWNER_REVIEW_WHERE)
+    expect(mocks.launchClaude).not.toHaveBeenCalled()
   })
 })

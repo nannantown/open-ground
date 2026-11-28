@@ -55,9 +55,18 @@ export type SdkEvent =
   | { kind: 'tool_use'; name: string; detail: string; fromSubagent?: boolean }
   | { kind: 'tool_result'; ok: boolean; head: string; fromSubagent?: boolean }
   | { kind: 'turn_end'; reason: SdkTerminalReason; isError: boolean; usage?: SdkTurnUsage }
-  /** The pre-refusal warning channel the PTY path never had: utilization arrives
-   *  BEFORE the wall, so the engine can cool a tier proactively. */
-  | { kind: 'rate_limit'; utilization: number; resetsAt: number | null; limitType: string }
+  /** The SDK's structured limit state (`rate_limit_event`), emitted by the CLI
+   *  only when that state CHANGES. `utilization` (0–1) rides only
+   *  `allowed_warning` threshold events — null otherwise, never invented;
+   *  `resetsAt` is epoch SECONDS; `limitType` is the representative window
+   *  ('five_hour', 'seven_day', …). Read by usageWindows.ts (04 §5.10). */
+  | {
+      kind: 'rate_limit'
+      status: 'allowed' | 'allowed_warning' | 'rejected' | (string & {})
+      utilization: number | null
+      resetsAt: number | null
+      limitType: string
+    }
   | { kind: 'api_error'; status: number | null; head: string }
   /** The CLI's own "you've hit your limit" — matched against the SDK's exported
    *  prefix list, never a private copy of the wording. */
@@ -191,13 +200,18 @@ export const distillSdkMessage = (msg: unknown, prefixes: readonly string[]): Sd
 
     case 'rate_limit_event': {
       const info = m.rate_limit_info ?? {}
-      const util = typeof info.utilization === 'number' ? info.utilization : null
-      if (util === null) return []
+      const util = typeof info.utilization === 'number' && Number.isFinite(info.utilization) ? info.utilization : null
+      const resetsAt = typeof info.resetsAt === 'number' && Number.isFinite(info.resetsAt) ? info.resetsAt : null
+      const status = typeof info.status === 'string' ? info.status : 'unknown'
+      // A refusal carries no utilization (the CLI's 429 path sets status +
+      // resetsAt only), and that refusal's reset is the one fact R-C1 needs.
+      if (util === null && resetsAt === null && status !== 'rejected') return []
       return [
         {
           kind: 'rate_limit',
+          status,
           utilization: util,
-          resetsAt: typeof info.resetsAt === 'number' ? info.resetsAt : null,
+          resetsAt,
           limitType: typeof info.rateLimitType === 'string' ? info.rateLimitType : 'unknown',
         },
       ]

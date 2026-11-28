@@ -7,7 +7,7 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { pathToFileURL } from 'url'
 import { getEventListeners } from 'events'
-import { ChatGptConversation, chatGptConversationExists, chatGptConversationFile, chatGptPublicConversation, saveChatGptPublicConversation, readChatGptSse, type ChatGptTool } from './chatgptResponses'
+import { ChatGptConversation, chatGptConversationExists, chatGptConversationFile, chatGptHistoryAccount, chatGptPublicConversation, saveChatGptPublicConversation, readChatGptSse, type ChatGptTool } from './chatgptResponses'
 import { ChatGptQuotaError, chatGptCoolingUntil, clearChatGptCooling } from './chatgptQuota'
 import { coolingSnapshot } from './swarmQuota'
 import type { SdkEvent } from './sdkEvents'
@@ -45,6 +45,19 @@ describe('ChatGPT stateless function harness', () => {
     await saveChatGptPublicConversation(id, [], true, options)
     await expect(chatGptPublicConversation(id, options)).rejects.toThrow(/inspection/)
     expect(await readFile(chatGptConversationFile(id, storeDir), 'utf8')).toBe(nativeBefore)
+  })
+
+  // Review R3-ui S1: a held conversation's words depend on whose history it is.
+  it('says whose saved history it is: this account (even with an unfinished call), another, signed out, or unreadable', async () => {
+    const storeDir = await temp(), id = `chatgpt-${randomUUID()}`, broken = `chatgpt-${randomUUID()}`
+    await writeFile(chatGptConversationFile(id, storeDir), JSON.stringify({ version: 1, accountKey: 'account-a', input: [
+      { type: 'function_call', namespace: 'openground', name: 'look', call_id: 'call-cut', arguments: '{}' },
+    ] }))
+    await writeFile(chatGptConversationFile(broken, storeDir), '{"version":1,')
+    expect(await chatGptHistoryAccount(id, { storeDir, accountKey: async () => 'account-a' })).toBe('this')
+    expect(await chatGptHistoryAccount(id, { storeDir, accountKey: async () => 'account-b' })).toBe('other')
+    expect(await chatGptHistoryAccount(id, { storeDir, accountKey: async () => { throw new Error('ChatGPT に接続してください。') } })).toBe('signed-out')
+    expect(await chatGptHistoryAccount(broken, { storeDir, accountKey: async () => 'account-a' })).toBe('unreadable')
   })
 
   it('normalizes Japanese deltas to complete SDK prose blocks while keeping live onText deltas', async () => {

@@ -9,11 +9,13 @@ import {
   setAllowedModelTiersCache,
 } from './swarmAllowedModels'
 import { setLockdownCache } from './lockdown'
+import { mergeSwarmBudgetPatch, normalizeSwarmBudget } from './swarmBudget'
 import type {
   Settings,
   CanvasState,
   ExecutionMode,
   SwarmAllowedModels,
+  SwarmBudgetPolicy,
   WordPressSettings,
   WorkerTrialFlags,
 } from '../types'
@@ -355,6 +357,9 @@ const USER_SETTINGS_KEYS: readonly (keyof Settings)[] = [
   // it only decides WHEN a desk is recycled/compacted, never a path boundary.
   // Narrowed to a non-negative integer below.
   'deskContextCapTokens',
+  // The automatic-work budget (AUTONOMY-SPEC R-D2) — the president changes it on
+  // the owner's word. Narrowed below; a patch merges over the stored policy.
+  'swarmBudget',
 ]
 
 
@@ -479,6 +484,13 @@ const setPreferences = async (body: unknown, chatgptOnly: boolean): Promise<(key
     const v = safe.deskContextCapTokens
     if (typeof v === 'number' && Number.isFinite(v) && v >= 0) safe.deskContextCapTokens = Math.floor(v)
     else delete safe.deskContextCapTokens
+  }
+  // Budget policy: a valid partial patch merges over the stored policy; any
+  // invalid field refuses the whole patch (key dropped, previous value survives).
+  if (Object.prototype.hasOwnProperty.call(safe, 'swarmBudget')) {
+    const merged = mergeSwarmBudgetPatch((await getSettings()).swarmBudget, safe.swarmBudget)
+    if (merged) safe.swarmBudget = merged
+    else delete safe.swarmBudget
   }
   // WordPress target: `null` CLEARS (merged spread drops an undefined key on
   // write), a valid {baseUrl, username, appPassword} is stored trimmed with the
@@ -640,6 +652,12 @@ export const isSwarmManualStopPersisted = async (key: string): Promise<boolean> 
 // A hand-corrupted / absent value degrades to the smart default via asExecutionMode.
 export const getExecutionMode = async (): Promise<ExecutionMode> =>
   asExecutionMode((await getSettings()).executionMode)
+
+// ─── Automatic-work budget (Settings.swarmBudget) ────────────────────────────
+// The ONE reader the dispatch pass's budget gate consults. Absent / junk ⇒ the
+// owner's default (pace 'free', 10% reserve — swarmBudget.DEFAULT_SWARM_BUDGET).
+export const getSwarmBudget = async (): Promise<SwarmBudgetPolicy> =>
+  normalizeSwarmBudget((await getSettings()).swarmBudget)
 
 // ─── Worker-directive trials (Settings.workerTrials) ─────────────────────────
 // docs/trending/TRIALS.md §Trial 4. The ONE reader the SDK worker spawn consults.

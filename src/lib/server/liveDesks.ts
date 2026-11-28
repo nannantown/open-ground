@@ -42,6 +42,7 @@ import {
   currentSdkTurnId,
   sdkToolCallsInFlight,
   resumeSdkQuotaPauses,
+  beginShutdown,
 } from './sdkSession'
 import type { SdkSessionStatus } from './sdkEvents'
 import { canonicalize } from './canonicalize'
@@ -529,6 +530,20 @@ export const updateRestartSafety = async (): Promise<UpdateRestartSafetyResponse
   // ChatGPT alike, counted from its live stream (sdkSession.ts). PTY desks are
   // not counted — swarm workers and commanders are SDK-only.
   return computeRestartSafety(ptys, sdk.map((s) => s.status), Date.now(), activeOwnerTurns.size, sdkToolCallsInFlight())
+}
+
+/** The server-side half of the same question, asked as a wait (AUTONOMY-SPEC
+ *  R-B2). Real-server entry only (server/index.ts): SIGTERM / SIGINT — owner
+ *  quit, "Restart now", update install, engine switch — start
+ *  `sdkSession.beginShutdown` (new tool calls refused, running ones waited for,
+ *  bounded by SHUTDOWN_TOOL_GRACE_MS) and exit when it resolves; 'exit' runs the
+ *  gate and host reapers, which therefore own no signal listener: one that
+ *  exits at once would end this wait. A repeated signal joins the same wait.
+ *  PTY desks are not waited for, as above. 128+signum keeps the status honest. */
+export const exitAfterShutdownOnSignals = (proc: Pick<NodeJS.Process, 'on' | 'exit'> = process): void => {
+  for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]] as const) {
+    proc.on(signal, () => { void beginShutdown().then(() => proc.exit(code)) })
+  }
 }
 
 /** Is this SDK session a swarm ROLE DESK (commander / supply) rather than work?

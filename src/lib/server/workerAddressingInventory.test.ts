@@ -681,7 +681,10 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     tier: 'both-pools',
     why: 'The one seam that answers "who is alive / where" by asking BOTH pools in a single call — listAllLiveDeskCwds, canonicalLiveDeskCwds/isDirOccupied/liveDeskOccupies (the occupancy question a spawn must ask), listAllActiveDesks, stopAllDesksInDirAndWait, (0925) listDeskIdsByRole — the desk ids of one role from both pools (PTY deskLabel + SDK role) for the Ground president lamp, and (0803) updateRestartSafety/computeRestartSafety — the "may the app restart itself to apply an update?" verdict for the Electron shell (GET /api/update/restart-safety), and (1125) resumeQuotaPausedDesks — the owner\'s "the usage limit is back": every desk a usage refusal left unable to take input takes input again, on either runtime (only SDK desks hold such a pause).',
     ptyFns: ['killTerminalsByCwdAndWait', 'listActiveTerminalCwds', 'listActiveTerminals', 'listOwnerDeskTerminals', 'listPtySafetyViews'],
-    sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'currentSdkTurnId', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'resumeSdkQuotaPauses', 'sdkToolCallsInFlight', 'terminateSdkSessionsInDir'],
+    sdkCalls: ['canonicalLiveDeskCwds', 'computeRestartSafety', 'currentSdkTurnId', 'isDirOccupied', 'isSdkSessionLive', 'isSdkSessionReaped', 'listActiveSdkCwds', 'listAllLiveDeskCwds', 'listSdkSessions', 'resumeSdkQuotaPauses', 'sdkToolCallsInFlight', 'terminateSdkSessionsInDir',
+      // (2026-11-28, AUTONOMY-SPEC R-B2) exitAfterShutdownOnSignals waits for SDK tool calls only;
+      // a PTY desk has no tool-call receipt to protect and is cut by the server exit as before.
+      'beginShutdown'],
   },
   'src/lib/server/groundLamps.ts': {
     tier: 'both-pools',
@@ -764,6 +767,11 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     tier: 'both-pools',
     why: 'Tool audit receipts bind the exact original SDK or PTY handle. A replacement actor with the same conversation cannot make an old executing receipt safe, and native interrupts taint only their original actor.',
     ptyFns: [], sdkCalls: ['agentConversationHandles', 'isAgentConversationOccupied', 'isRecordedRuntimeHandleOccupied'],
+  },
+  'src/lib/server/savedWorkHold.ts': {
+    tier: 'both-pools',
+    why: '(2026-11-28, review A-M2) answerHeldOperation — the owner\'s answer to a hold: question. It refuses while the operation\'s original actor (its recorded SDK or PTY handle, or the conversation) is still occupied, and records an executing receipt as uncertain only once that actor is gone — the same liveDesks both-pool liveness runtimeRecovery uses for the Settings review.',
+    ptyFns: [], sdkCalls: ['isAgentConversationOccupied', 'isRecordedRuntimeHandleOccupied'],
   },
   'src/lib/server/runtimeRecovery.ts': {
     tier: 'both-pools',
@@ -862,6 +870,17 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
       'listLiveSupplyDesks',
       'terminateSdkSession',
       'waitForSdkSessionGone',
+      // (2026-11-28) standing: "is the commander mid-turn" asks BOTH pools through the liveDesks seam.
+      'listAllActiveDesks',
+      'listDeskIdsByRole',
+      // (2026-11-28) R-C2: sdkWorkerFacts reads the SDK worker's own recent frames for an api_error turn end.
+      'readSdkFrames',
+      // (2026-11-28) review C-S2: the dispatch pass starts nothing once the server's stop
+      // has begun. A process-wide flag, not a per-worker read: no handle, no pool arm.
+      'sdkShutdownBegun',
+      // (2026-11-28) review B-S3: the standing reads the commander SDK desk's usage-limit
+      // pause by its handle (commanderDeskFacts, runtime === 'sdk' desks only).
+      'sdkQuotaPause',
     ],
     sdkHandleFloor: 32,
   },
@@ -883,7 +902,8 @@ const FILES: Record<string, Decl & { ptyFns: string[]; sdkCalls?: string[] }> = 
     tier: 'runtime-dispatched',
     why: 'New managers are SDK-only; quota and early-exit watches consume SDK events. Legacy in-flight PTY adoption goes through listManagerDesks.',
     ptyFns: [],
-    sdkCalls: ['attachSdkListener', 'preloadSdk', 'spawnSdkSession'],
+    // (2026-11-28, R-D3) isIdleSdkCommander reads the SDK desk's status / paused flag before an over-cap recycle.
+    sdkCalls: ['attachSdkListener', 'getSdkSession', 'preloadSdk', 'sdkInputAdmissionPaused', 'spawnSdkSession'],
     sdkHandleFloor: 5,
   },
   'src/lib/server/swarmWorker.ts': {
@@ -1752,6 +1772,11 @@ const identityUsesIn = (rel: string, code: string): IdentityUse[] => {
  */
 const IDENTITY_SITES: Record<string, Decl & { count: number }> = {
   // ── the PTY pool's own internals: there is no second runtime in here ──
+  'src/lib/server/supplyNotice.ts::map-keyed': {
+    tier: 'pty-only-by-design',
+    count: 1,
+    why: '(2026-11-28, R-D3) resumeNoteOwed holds the PTY president desks revived quietly; swarmSupply calls owePresidentResumeNote only with the terminalId launchClaude returned (an SDK or ChatGPT president is never launched quiet), so the key is a unique PTY handle.',
+  },
   'src/lib/server/terminal.ts::map-keyed': {
     tier: 'pty-only-by-design',
     count: 2,

@@ -66,13 +66,14 @@ export const reapAllGateGroups = (): number => {
  *  server entry — importing this module in a vitest worker or a script must not
  *  change that process's signal disposition. Idempotent; no-op on win32.
  *
- *  BOTH handlers are required and neither suffices alone: 'exit' does NOT run on
- *  a default SIGTERM (Node terminates without it), and SIGTERM is the likely path
- *  — Electron SIGTERMs the forked server on quit. Installing a SIGTERM/SIGINT
- *  listener SUPPRESSES Node's default termination, so each handler must exit
- *  itself; 128+signum keeps the status a shell sees honest. A SIGKILL of the
- *  server is uncatchable and stays uncovered by construction — that residue is
- *  exactly what stuckProcessWatch is for. */
+ *  'exit' only. 'exit' does NOT run on a default SIGTERM (Node terminates without
+ *  it), and SIGTERM is the likely path — Electron SIGTERMs the forked server on
+ *  quit — so this relies on the server entry owning SIGTERM/SIGINT and ending
+ *  with process.exit (liveDesks.exitAfterShutdownOnSignals). It used to install
+ *  its own signal listeners that exited at once; that cut off the entry's wait
+ *  for running tool calls (AUTONOMY-SPEC R-B2), so there is exactly one owner
+ *  now. A SIGKILL of the server is uncatchable and stays uncovered by
+ *  construction — that residue is exactly what stuckProcessWatch is for. */
 export const installGateGroupReaper = (): void => {
   if (globalThis.__openground_gate_reaper_installed) return
   globalThis.__openground_gate_reaper_installed = true
@@ -80,12 +81,6 @@ export const installGateGroupReaper = (): void => {
   process.on('exit', () => {
     reapAllGateGroups()
   })
-  const onSignal = (code: number) => () => {
-    reapAllGateGroups()
-    process.exit(code)
-  }
-  process.on('SIGTERM', onSignal(143))
-  process.on('SIGINT', onSignal(130))
 }
 
 /** A child-process runner for any engine stage that spawns a tool which itself FORKS a

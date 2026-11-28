@@ -34,9 +34,10 @@ import { listSwarmWorkers } from './swarmWorkerRegistry'
 import { listAllActiveDesks, listDeskIdsByRole } from './liveDesks'
 import { SUPPLY_DESK_LABEL } from './swarmSupply'
 import { MANAGER_DESK_LABEL } from './swarmManagerLabel'
-import { isEngineRunning } from './swarmOrchestrator'
+import { groundStanding, isEngineRunning, type StandingContext } from './swarmOrchestrator'
+import { getPromptLang } from './promptLang'
 import { readDeliveredAt, readGroundOpenedAt, readGroundSeenAt, readPresidentAskedAt } from './groundMarks'
-import type { ClaudeActivity, GroundLampRow, GroundLampsResponse } from '@/lib/types'
+import type { ClaudeActivity, GroundLampRow, GroundLampsResponse, ProjectStanding, ProjectTask } from '@/lib/types'
 
 export interface GroundLampDeps {
   /** DI: every registered project, as `{ id, path }`. */
@@ -58,11 +59,16 @@ export interface GroundLampDeps {
   deliveredAtFor?: (projectPath: string) => Promise<number | undefined>
   seenAtFor?: (projectPath: string) => Promise<number | undefined>
   openedAtFor?: (projectPath: string) => Promise<number | undefined>
+  /** DI: the project's standing (swarmStanding.ts), or undefined when it has no
+   *  engine / boot resume in memory. */
+  standingFor?: (canonPath: string, ctx: StandingContext) => ProjectStanding | undefined
 }
 
 export interface BoardCounts {
   started: number
   inFlight: number
+  /** The cards themselves, for the standing's needs (same read). */
+  tasks?: readonly ProjectTask[]
 }
 
 /** The board's counts for one project. `undefined` (never 0) when the board
@@ -75,6 +81,7 @@ const defaultBoardFor = async (projectPath: string, canonPath: string): Promise<
     return {
       started: startedTaskCount(tasks),
       inFlight: inFlightTaskCount(tasks, { autopilot: isEngineRunning(canonPath) }),
+      tasks,
     }
   } catch {
     return undefined
@@ -252,6 +259,7 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
   const deliveredAtFor = deps.deliveredAtFor ?? readDeliveredAt
   const seenAtFor = deps.seenAtFor ?? readGroundSeenAt
   const openedAtFor = deps.openedAtFor ?? readGroundOpenedAt
+  const standingFor = deps.standingFor ?? groundStanding
 
   let projects: Array<{ id: string; path: string }>
   try {
@@ -273,6 +281,7 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
   const presidentCwds = cwdsOf(readPresident)
   const commanderCwds = cwdsOf(readCommander)
   const under = (cwds: string[], canon: string) => cwds.some((c) => c === canon || c.startsWith(canon + '/'))
+  const lang = await getPromptLang().catch(() => 'en' as const)
 
   const lamps = await Promise.all(
     projects.map(async (p): Promise<GroundLampRow> => {
@@ -283,11 +292,19 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
       if (questions) open = questions.get(canon) ?? 0
       const presidentWorking = under(presidentCwds, canon)
       const commanderWorking = under(commanderCwds, canon)
+      // Where it stands (R-E1) — in-memory facts plus the board and inbox read above.
+      let standing: ProjectStanding | undefined
+      try {
+        standing = standingFor(canon, { now: Date.now(), lang, tasks: board?.tasks, ...(open === undefined ? {} : { openQuestions: open }) })
+      } catch {
+        standing = undefined
+      }
       // The short-circuit that keeps this cheap: ask the worker registry ONLY
       // when its answer can change the verdict — something is started (else a
       // live process is not work) and nothing in flight (else it is running
-      // already). In practice: a board holding only blocked cards.
-      const liveWork = started && !board?.inFlight ? await liveWorkFor(p.path).catch(() => false) : false
+      // already) — or the standing says waiting, where a live pane still
+      // outranks the clock. In practice: a board holding only blocked cards.
+      const liveWork = started && (!board?.inFlight || standing?.state === 'waiting') ? await liveWorkFor(p.path).catch(() => false) : false
       // The timed marks (2026-09-26). Three small file reads per project; the
       // president's transcript tail is walked incrementally, cached on path+offset (groundMarks.ts).
       const quiet = (f: (x: string) => Promise<number | undefined>) =>
@@ -309,6 +326,7 @@ export const readGroundLamps = async (deps: GroundLampDeps = {}): Promise<Ground
         ...(deliveredAt === undefined ? {} : { deliveredAt }),
         ...(seenAt === undefined ? {} : { seenAt }),
         ...(openedAt === undefined ? {} : { openedAt }),
+        ...(standing ? { standing: { state: standing.state, reasons: standing.reasons } } : {}),
       }
     }),
   )

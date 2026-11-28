@@ -269,6 +269,9 @@ export default function App() {
   // three facts are read server-side (/api/ground/lamps), because the SDK
   // worker pool is invisible to the terminal list the old beacon polled.
   const [lampById, setLampById] = useState<ReadonlyMap<string, GroundLamp>>(() => new Map())
+  // The hover text of a lamp the project's STANDING decided (the clock, or a hand
+  // for a hold only the owner can clear) — the standing's own plain sentences.
+  const [lampHintById, setLampHintById] = useState<ReadonlyMap<string, string>>(() => new Map())
   // Count of RUNNING Canvas AI jobs (generate / tweak) across all projects —
   // polled from /api/canvas/ai/active (same cadence as the terminal beacon) so a
   // run started on one canvas stays visible from anywhere (Ground / another
@@ -769,6 +772,7 @@ export default function App() {
         if (cancelled) return
         const known = new Set(projects.map((p) => p.id))
         const next = new Map<string, GroundLamp>()
+        const hints = new Map<string, string>()
         for (const row of data.lamps ?? []) {
           if (!known.has(row.projectId)) continue
           // Optional fields are passed through ABSENT rather than defaulted:
@@ -787,8 +791,13 @@ export default function App() {
             deliveredAt: row.deliveredAt,
             seenAt: row.seenAt,
             openedAt: row.openedAt,
+            ...(row.standing ? { standing: row.standing.state } : {}),
           })
           if (lamp) next.set(row.projectId, lamp)
+          if (row.standing && (lamp === 'waiting' || (lamp === 'question' && row.standing.state === 'needs-owner' && !row.openQuestions))) {
+            const hint = row.standing.reasons.map((r) => [r.plain, r.ownerAction].filter(Boolean).join(' ')).join(' ')
+            if (hint) hints.set(row.projectId, hint)
+          }
         }
         // Keep the previous Map identity when nothing changed so the canvas
         // doesn't re-render every 5 seconds.
@@ -796,6 +805,11 @@ export default function App() {
           prev.size === next.size && Array.from(next).every(([id, l]) => prev.get(id) === l)
             ? prev
             : next,
+        )
+        setLampHintById((prev) =>
+          prev.size === hints.size && Array.from(hints).every(([id, h]) => prev.get(id) === h)
+            ? prev
+            : hints,
         )
       } catch {
         /* server restarting / offline — keep the last known state */
@@ -1371,6 +1385,7 @@ export default function App() {
         // The card being placed is hidden: its ghost stands in for it.
         projects={placingId ? visibleProjects.filter((p) => p.id !== placingId) : visibleProjects}
         lamps={lampById}
+        lampHints={lampHintById}
         playbackByProject={playbackByProjectId}
         // Ground member flow: pass shared cards ONLY when collab is enabled, so
         // the default build renders zero shared cards (undefined → none).

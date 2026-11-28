@@ -58,7 +58,8 @@ export const emojiHits = (src: string, allowed = ''): string[] =>
 
 describe('no emoji on screen', () => {
   it('detects the glyphs it exists to catch', () => {
-    for (const g of ['🔧', '✓', '✕', '✦', '⛓︎', '⚠', '↗']) {
+    // The clock glyphs too: the waiting mark is lucide's Clock, never ⏰ ⌛ 🕐.
+    for (const g of ['🔧', '✓', '✕', '✦', '⛓︎', '⚠', '↗', '⏰', '⌛', '🕐']) {
       expect(emojiHits(`const a = '${g} x'`)).toHaveLength(1)
     }
     // Keyboard glyphs and plain arrows are typography, not emoji.

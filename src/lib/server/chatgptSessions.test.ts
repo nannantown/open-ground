@@ -17,6 +17,7 @@ const GPT_MANAGER = 'chatgpt-33333333-3333-4333-8333-333333333333'
 const GPT_SUPPLY = 'chatgpt-44444444-4444-4444-8444-444444444444'
 let scratch: string, project: string, home: string
 let priorHome: string | undefined
+let priorClaudeConfig: string | undefined
 const idle = { isLive: () => false, awaitRelease: async () => {} }
 const response = () => new Response(`data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', model: 'synthetic-session-model', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'A synthetic saved answer.' }] }] } })}\n\n`)
 const saveChatGptTranscript = async (id: string) => {
@@ -33,12 +34,15 @@ beforeEach(async () => {
   scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-chatgpt-sessions-')))
   project = join(scratch, 'project'); home = join(scratch, 'user-home')
   await mkdir(project); await mkdir(home)
+  // claudeProjectsRoot() prefers CLAUDE_CONFIG_DIR (set by the test setup) over HOME.
+  priorClaudeConfig = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = join(home, '.claude')
   priorHome = process.env.HOME; process.env.HOME = home
   mock.account = 'synthetic-session-account'; __resetMigrationCacheForTests()
   await setSettings({ projects: [] }); await addProjectEntry(project)
 })
 afterEach(async () => {
   if (priorHome !== undefined) process.env.HOME = priorHome
+  if (priorClaudeConfig !== undefined) process.env.CLAUDE_CONFIG_DIR = priorClaudeConfig
   __resetMigrationCacheForTests()
   await rm(scratch, { recursive: true, force: true })
 })

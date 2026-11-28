@@ -92,6 +92,26 @@ You've reached your Fable 5 limit. Run /usage-credits to continue or switch mode
 
 **オーナー卓側の実測(上限表示 → ベル/トーストまで、設計上 約1.5〜2分)は次の枯渇イベント待ち。**
 
+#### Stopping before the wall — the usage budget gate and structured reset times (2026-11-28, AUTONOMY-SPEC U3)
+
+This section's ideal was "notice a wall within 2 minutes". U3 adds the step before it: **automatic dispatch
+starts a new worker only while the 5-hour window is below the card tier's start ceiling (touch 90 / standard
+80 / design 70 / ultra 60) and the week is outside the owner's reserve (default 10%)** — `swarmBudget.budgetGate`,
+asked by `runDispatchPass`. Running workers are never stopped. When cards are held, the standing names the hold and
+its lift time (not `parkUntil`, which stays the usage limit's) and the first pass after it resumes by itself. Board Run and the president are not gated. The
+reading is the SDK's `rate_limit_event` (`usageWindows.ts`), else the last recorded `/usage` scrape, each only when younger
+than 30 minutes; no reading ⇒ no hold (`usage-unknown`). At a wall, the reset time is the structured event's
+`resetsAt` before any reading of the refusal sentence (04 §2.4 item 0). Mechanism canon: 04 §5.10.
+
+- Measured 2026-11-28: `utilization` rides only threshold warnings, so the 60–80% decisions rest on `/usage`
+  scrapes in practice. Every successful scrape is recorded with its capture time (the display cache is
+  wiped while workers run, so it is not read). Scrapes run in essential-traffic mode, which skips the CLI's
+  billed 1-token quota check, and the engine asks for one (detached, backed off) when a card waits on a
+  reading older than 5 minutes (04 §5.10.4).
+- **Reach check (not yet measured — waits for the next real 5-hour limit):** no `dispatch:` journal line after
+  the ceiling, a `dispatch held by the usage budget (window-headroom)` line, and the first `dispatch:` within
+  5 minutes after the reset with no owner input (AUTONOMY-SPEC §6 check 4).
+
 ### 対応カード
 
 `4d1550d7-a815-40e1-a579-2cd366b76f7d` — 「[swarm] quota 検知が21分遅れる — 沈黙10分ゲート/装飾再描画/統合パスの飢餓」(起票時 blocked [保留] → doing → **`0d1f7f0` で修正・2026-07-10 時点 done 列**)。

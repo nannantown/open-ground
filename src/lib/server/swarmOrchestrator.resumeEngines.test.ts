@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, rm, readFile, writeFile, mkdir } from 'fs/promises'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import {
   resumeEngines,
@@ -23,8 +23,12 @@ import {
   type AnomalyDeps,
 } from './swarmOrchestrator'
 import { writeEngineIntent } from './swarmEnginePersistence'
+import { recordSwarmSession, readSwarmSessions } from './swarmSessions'
+import { sessionJsonlPath } from './transcript'
+import { listEscalations } from './swarmEscalations'
+import { OWNER_REVIEW_WHERE } from './savedWorkHold'
 import { canonicalize } from './canonicalize'
-import { rememberSwarmManualStop, forgetSwarmManualStop } from './store'
+import { rememberSwarmManualStop, forgetSwarmManualStop, getSettings, setSettings } from './store'
 import { settingsFile, engineBootsFile } from './paths'
 import type { AppNotification, SwarmInfoNotification, TaskTier } from '../types'
 import { desiredModelEffort } from './swarmLaunch'
@@ -42,6 +46,14 @@ import { startAutomationPolicyLoop, stopAutomationPolicyLoop } from './automatio
 // silently re-cap that global back down (setConfig runs after the global config).
 vi.setConfig({ testTimeout: 60_000 })
 
+// Claude transcripts are written to a throwaway folder, never the real ~/.claude.
+const claudeRoot = vi.hoisted(() => ({ dir: '' }))
+vi.mock('./transcript', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./transcript')>()
+  const { claudeDirName } = await import('./claudeProjectDir')
+  const root = () => claudeRoot.dir || real.claudeProjectsRoot()
+  return { ...real, claudeProjectsRoot: root, sessionJsonlPath: (cwd: string, sessionId: string) => join(root(), claudeDirName(cwd), `${sessionId}.jsonl`) }
+})
 const preflightMock = vi.hoisted(() => ({ ok: true }))
 vi.mock('./claudePreflight', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./claudePreflight')>()
@@ -72,6 +84,8 @@ let uuidB = ''
 beforeEach(async () => {
   __resetOrchestratorForTests()
   preflightMock.ok = true
+  claudeRoot.dir = await mkdtemp(join(tmpdir(), 'og-resume-claude-'))
+  await rm(join(process.env.OPENGROUND_HOME ?? '', 'escalations.json'), { force: true })
   projA = await mkdtemp(join(tmpdir(), 'og-resume-a-'))
   projB = await mkdtemp(join(tmpdir(), 'og-resume-b-'))
   uuidA = randomUUID()
@@ -404,111 +418,24 @@ describe('resumeEngines — boot re-hydration (card 2)', () => {
 // `--resume`-respawned into the SAME worktree and adopted into engine.workers
 // BEFORE the first pass. These drive that wiring with injected reconcile + proof +
 // spawnWorker fakes (no real ~/.claude JSONL, no real PTY).
-// ─── 司令官の卓が再起動をまたぐ (2026-08-26) ──────────────────────────────────
+// ─── 司令官の卓は起動時には戻さない (2026-11-28) — REVERSES 2026-08-26 ────────────
 //
-// THE INCIDENT, in one line: an update restarted the app mid-swarm and the
-// commander was the ONE thing that did not come back.
+// From 2026-08-26 to 0.11.211 a `managerDesired` commander came back here at boot,
+// with an auto-sent resume prompt: the fix for an update restart that left finished
+// work nobody integrated. docs/AUTONOMY-SPEC.md R-D3a reverses the boot half of that
+// decision on measurement — the boot revival billed one full turn over the
+// commander's whole conversation per start, whether or not anything was waiting
+// (§1.2). The incident stays closed, by the NEED instead of the boot: the engine's
+// integrate pass wakes an absent commander for a review-ready card, the question
+// sweep for a worker's question or an owed answer, POST /api/swarm/manager/say for
+// the president's relay. Pinned with a spawn spy in swarmOrchestrator.idleDesks.test.ts
+// (no commander at boot, `managerDesired` kept, the first review card wakes it once)
+// and commanderWakeOnNeed.test.ts / managerSayWake.routes.test.ts (the other lanes).
 //
-// Everything else did. The engine resumed from `desiredRunning`. The worker
-// roster reconciled and its conversations resumed. The supply desk relaunched
-// from `supplyDesired`. But the commander is a `claude` desk this server owns,
-// so the restart killed it, and no flag existed to bring it back:
-// `managerPresence` stayed 'missing' with `manager.updatedAt` frozen at
-// 08:58:27Z against a boot at 09:07:58Z, while the orphaned worker ran on and
-// FINISHED — and finished work with no commander is work nobody integrates.
-// The owner saw live workers and read the board as healthy. A restart is
-// usually an UPDATE, i.e. exactly when work is most likely to be in flight.
-//
-// ⚠ WHY THESE ARE NOT ONE TEST. Three of the four ways to get this wrong pass
-// the happy-path check: putting the block after `if (!intent.desiredRunning)
-// continue` (loses every autonomy-off desk), putting it after the manual-stop
-// guard (loses every paused-engine desk), and copying supply's silent catch
-// (turns a failed resume back into the invisible stall this whole card exists
-// to end). Each gets its own observation.
-describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
-  it('managerDesired:true brings the commander desk back at boot', async () => {
-    const spawned: string[] = []
-    await writeEngineIntent(projA, {
-      desiredRunning: true,
-      overseer: false,
-      managerDesired: true,
-    })
-    await resumeEngines(safeDeps(), {
-      listProjectPaths: async () => [projA],
-      spawnManager: async ({ projectPath }) => {
-        spawned.push(projectPath)
-        return {}
-      },
-    })
-    expect(spawned, 'the desk the owner had up must be relaunched').toEqual([projA])
-  })
-
-  it('no managerDesired ⇒ NOTHING is spawned (a desk the owner never opened stays closed)', async () => {
-    const spawned: string[] = []
-    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
-    await resumeEngines(safeDeps(), {
-      listProjectPaths: async () => [projA],
-      spawnManager: async ({ projectPath }) => {
-        spawned.push(projectPath)
-        return {}
-      },
-    })
-    expect(spawned).toEqual([])
-  })
-
-  it('INDEPENDENT of autonomy: a commander comes back even with desiredRunning:false', async () => {
-    // The failure mode this pins: the block placed one line too late, after
-    // `if (!intent.desiredRunning) continue`. A commander can be up with
-    // autonomy OFF — that is the owner TALKING to it, the most common way the
-    // desk is used — so gating the desk on the engine loses exactly that case,
-    // and every happy-path test above would still be green.
-    const spawned: string[] = []
-    await writeEngineIntent(projA, {
-      desiredRunning: false,
-      overseer: false,
-      managerDesired: true,
-    })
-    await resumeEngines(safeDeps(), {
-      listProjectPaths: async () => [projA],
-      spawnManager: async ({ projectPath }) => {
-        spawned.push(projectPath)
-        return {}
-      },
-    })
-    expect(spawned).toEqual([projA])
-    // …and the ENGINE genuinely stayed off — the desk did not drag autonomy back on.
-    const state = await getOrchestratorState(projA, safeDeps())
-    expect(state.running).toBe(false)
-  })
-
-  it('a persisted manual-stop pauses the ENGINE but never closes the commander desk', async () => {
-    // Sibling of the test above, one guard further down. `manualStop` is the
-    // owner pausing AUTONOMY; it has never meant "close the desk I am talking
-    // to", and only the desk's own stop route clears its flag.
-    const spawned: string[] = []
-    await rememberSwarmManualStop(await canonicalize(projA))
-    await writeEngineIntent(projA, {
-      desiredRunning: true,
-      overseer: false,
-      managerDesired: true,
-    })
-    const result = await resumeEngines(safeDeps(), {
-      listProjectPaths: async () => [projA],
-      spawnManager: async ({ projectPath }) => {
-        spawned.push(projectPath)
-        return {}
-      },
-    })
-    expect(result.resumed).toHaveLength(0) // supremacy — autonomy stays paused
-    expect(spawned).toEqual([projA]) // …the desk still comes back
-  })
-
-  it('NOT SILENT: a preflight failure that blocks the commander TELLS THE OWNER', async () => {
-    // The deliberate difference from the supply desk, whose resume swallows.
-    // A missing supply window is VISIBLE — the owner opens the tab and sees an
-    // empty pane. A missing commander is not: workers keep running, cards keep
-    // moving, and the only symptom is that nothing ever lands. Silence here
-    // recreates the exact stall this card removes.
+// What this file still pins: a commander wish no longer holds, announces or retries
+// anything at boot — a preflight that fails says nothing in the commander's name.
+describe('resumeEngines — the COMMANDER desk is not a boot actor (2026-11-28)', () => {
+  it('a preflight failure with only managerDesired raises no hold in the commander’s name', async () => {
     preflightMock.ok = false
     await writeEngineIntent(projA, {
       desiredRunning: false,
@@ -516,43 +443,11 @@ describe('resumeEngines — the COMMANDER desk comes back (2026-08-26)', () => {
       managerDesired: true,
     })
     await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA] })
-    // Announced once the hold has lasted 15 s (2026-11-17): a blip
-    // that clears within it is not an incident.
     await retryAfterAnnounceDelay()
     const fatal = (await readNotificationsFresh()).find(
-      (n) => n.kind === 'swarm-fatal' && n.swarmFatal?.event === 'engine-resume-suppressed',
+      (n) => n.kind === 'swarm-fatal' && n.swarmFatal?.event === 'engine-resume-suppressed' && n.swarmFatal?.projectPath === projA,
     )
-    expect(fatal, 'a commander that cannot come back must say so').toBeTruthy()
-    expect(fatal?.swarmFatal?.projectPath).toBe(projA)
-    expect(fatal?.swarmFatal?.detail).toContain('司令官')
-  })
-
-  it('NOT SILENT: a spawn that THROWS is reported, and the boot carries on', async () => {
-    await writeEngineIntent(projA, {
-      desiredRunning: false,
-      overseer: false,
-      managerDesired: true,
-    })
-    await writeEngineIntent(projB, { desiredRunning: true, overseer: false })
-    const result = await resumeEngines(safeDeps(), {
-      listProjectPaths: async () => [projA, projB],
-      spawnManager: async () => {
-        throw new Error('claude refused')
-      },
-    })
-    // Announced once the hold has lasted 15 s (2026-11-17): a blip
-    // that clears within it is not an incident.
-    await retryAfterAnnounceDelay()
-    const fatal = (await readNotificationsFresh()).find(
-      (n) =>
-        n.kind === 'swarm-fatal' &&
-        n.swarmFatal?.event === 'engine-resume-suppressed' &&
-        n.swarmFatal?.projectPath === projA,
-    )
-    expect(fatal, 'a failed commander spawn must not be swallowed').toBeTruthy()
-    expect(fatal?.swarmFatal?.detail).toContain('司令官')
-    // A desk that could not come back must not take the rest of the boot with it.
-    expect(result.resumed).toContain(await canonicalize(projB))
+    expect(fatal, 'nothing waits at boot on a desk the boot does not bring back').toBeUndefined()
   })
 })
 
@@ -1253,14 +1148,20 @@ describe('boot resume retry — a gate not ready at boot opens later (2026-11-17
 
 // The MEASURED root cause, reproduced: an unconfirmed tool result left in ONE
 // project by a restart (2026-11-09, a commander's Bash) held every project's
-// resume on every later boot. Now it holds only the actors it belongs to — and
-// the check works before the owner-role lookup has answered (no session here,
-// exactly like a launch whose role fetch is still offline).
-describe('boot resume — a stale unconfirmed receipt holds only its own project (2026-11-17)', () => {
+// resume on every later boot. 2026-11-17 narrowed it to the actors of its own
+// project; 2026-11-28 (AUTONOMY-SPEC R-B3, owner decision §7-1 = A) to the ONE
+// conversation that issued it: the commander's launch opens a FRESH conversation
+// told what stopped (swarmManager.launchNewDesk, which reads every account's
+// records, so an owner-role lookup that has not answered yet never resumes the
+// held one), so nothing at boot waits on it — not even B's commander.
+describe('boot resume — a stale unconfirmed receipt holds only its own conversation', () => {
   const receiptsPath = () => join(process.env.OPENGROUND_HOME ?? '', 'runtime', 'receipts-v2.json')
   afterEach(async () => { await rm(receiptsPath(), { force: true }) })
 
-  it('B\'s commander stays down (and says why); A\'s commander and B\'s president come back', async () => {
+  // Until 2026-11-28 B's commander (then, after R-D3a, B's autopilot) stayed held
+  // here. Now the commander is not a boot actor (R-D3a) and the receipt holds only
+  // the commander conversation that issued it (R-B3), so nothing at boot waits on it.
+  it('A\'s and B\'s autopilots and B\'s president all come back; nothing at boot waits on B\'s commander receipt', async () => {
     const owner = 'a'.repeat(64)
     const id = 'tool-' + 'b'.repeat(64)
     const { createHash } = await import('crypto')
@@ -1273,23 +1174,99 @@ describe('boot resume — a stale unconfirmed receipt holds only its own project
       body: { kind: 'runtime-tool', provider: 'claude', sessionId: 'commander-session-b', toolId: 'toolu_x', tool: 'Bash', inputHash: 'd'.repeat(64) },
       execution: { sessionId: 'commander-session-b', handleId: 'h1', runtime: 'sdk' },
     } } }))
-    await writeEngineIntent(projA, { desiredRunning: false, overseer: false, managerDesired: true })
-    await writeEngineIntent(projB, { desiredRunning: false, overseer: false, managerDesired: true, supplyDesired: true })
-    const managers: string[] = []
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+    await writeEngineIntent(projB, { desiredRunning: true, overseer: false, supplyDesired: true })
     const supplies: string[] = []
-    await resumeEngines(safeDeps(), {
+    const result = await resumeEngines(safeDeps(), {
       listProjectPaths: async () => [projA, projB],
-      spawnManager: async ({ projectPath }) => { managers.push(projectPath) },
       spawnSupply: async ({ projectPath }) => { supplies.push(projectPath) },
     })
-    expect(managers, 'one stale receipt in B must not hold A').toEqual([projA])
+    expect(result.resumed.slice().sort(), 'one stale receipt holds only the conversation that issued it').toEqual([await canonicalize(projA), await canonicalize(projB)].sort())
     expect(supplies, "B's president is not the actor with the unconfirmed result").toEqual([projB])
-    // No session here: the owner is not known yet, so the hold is the retried
-    // (transient) kind and is announced once it has lasted.
     await retryAfterAnnounceDelay()
     const held = (await readNotificationsFresh()).find(
       (n) => n.kind === 'swarm-fatal' && n.swarmFatal?.event === 'engine-resume-suppressed' && n.swarmFatal?.projectPath === projB,
     )
-    expect(held?.swarmFatal?.detail).toContain('司令官')
+    expect(held, 'nothing is held, so nothing is announced').toBeUndefined()
+  })
+})
+
+// R-B3 at boot: a worker conversation an unconfirmed result holds is never
+// resumed. Its card waits in blocked with one question; the owner's answer moves
+// it on to a NEW conversation. Asked with every account's records, so an
+// owner-role lookup that has not answered yet never reads as "free".
+describe('boot resume — a held worker conversation is never resumed (R-B3)', () => {
+  // These cases read the owner's Japanese question: the owner's machine runs
+  // Settings.language = 'ja' (unset ⇒ English, promptLang.langOf).
+  let langBefore: 'en' | 'ja' | undefined
+  beforeEach(async () => { langBefore = (await getSettings()).language; await setSettings({ language: 'ja' }) })
+  afterEach(async () => { await setSettings({ language: langBefore }) })
+  it('the held candidate is not --resume-d, its card is parked in blocked, the other one resumes, and one question waits', async () => {
+    await writeEngineIntent(projA, { desiredRunning: true, overseer: false })
+    const resumed: string[] = []
+    const parked: string[] = []
+    const columns: Record<string, string> = { 'held-card': 'doing', 'free-card': 'doing' }
+    const base = { branch: 'swarm/x', tier: 'fable', spawnAt: 1_700_000_000_000, workedMs: 0, reworkCount: 0 }
+    await resumeEngines({
+      ...defaultDeps(),
+      fetchTasks: async () => [{ id: 'held-card', title: 'held card', boardColumn: columns['held-card'] } as never, { id: 'free-card', title: 'free card', boardColumn: columns['free-card'] } as never],
+      isAlive: () => true,
+      moveToDoing: async () => true,
+      countCommitsAhead: async () => 0,
+      readHeartbeat: async () => null,
+      recoverCard: async (_p, taskId, to) => { if (to === 'blocked') parked.push(taskId); columns[taskId] = to; return true },
+      spawnWorker: async (o) => {
+        if (o.resumeSessionId) resumed.push(o.resumeSessionId)
+        return { terminalId: '', runtime: 'sdk', sdkSessionId: `sdk-${o.resumeSessionId}`, agentSessionId: o.resumeSessionId ?? 'fresh', worktree: o.worktree ?? '/wt', branch: 'swarm/x', model: 'fable' }
+      },
+      heldConversation: async (_p, sessionId) => (sessionId === 'sess-held' ? { id: 'tool-held', sessionId, tool: 'Bash', at: '2026-11-26T23:02:21.000Z', seat: { role: 'unknown' } } : undefined),
+    }, {
+      listProjectPaths: async () => [projA],
+      reconcileRoster: async () => ({ resumeCandidates: [
+        { ...base, sessionId: 'sess-held', taskId: 'held-card', worktree: '/central/wt/held' },
+        { ...base, sessionId: 'sess-free', taskId: 'free-card', worktree: '/central/wt/free' },
+      ], ready: [], vanished: [], cardGone: [] }),
+      proveResumable: async () => true,
+    })
+    expect(resumed).toEqual(['sess-free'])
+    expect(parked).toEqual(['held-card'])
+    const open = (await listEscalations({ projectPath: projA, status: 'open' })).filter((e) => e.receiptKey === 'hold:tool-held')
+    expect(open).toHaveLength(1)
+    expect(open[0]).toMatchObject({ taskId: 'held-card' })
+    expect(open[0].plainQuestion).toContain('「held card」のワーカー')
+  })
+})
+
+// R-B5 (AUTONOMY-SPEC): for a user who is not the signed-in owner (public opt-in,
+// local unlock — the role this file runs as: no session), no boot hold waits on a
+// condition that user cannot satisfy. A president conversation saved in the
+// middle of a tool call used to end in 「オーナーのアカウント確認がまだ取れていません」
+// forever (its review needed an owner key that user can never have).
+describe('a user without the owner role is never held without a door (R-B5)', () => {
+  // These cases read the owner's Japanese question: the owner's machine runs
+  // Settings.language = 'ja' (unset ⇒ English, promptLang.langOf).
+  let langBefore: 'en' | 'ja' | undefined
+  beforeEach(async () => { langBefore = (await getSettings()).language; await setSettings({ language: 'ja' }) })
+  afterEach(async () => { await setSettings({ language: langBefore }) })
+  it('president transcript cut mid-tool ⇒ the hold names the question inbox, and the question exists', async () => {
+    const sessionId = randomUUID()
+    await writeEngineIntent(projA, { desiredRunning: false, overseer: false, supplyDesired: true })
+    await recordSwarmSession(projA, 'supply', sessionId)
+    const file = sessionJsonlPath((await readSwarmSessions(projA)).supply!.cwd, sessionId)
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, JSON.stringify({ type: 'assistant', timestamp: '2026-11-26T23:01:03.000Z',
+      message: { content: [{ type: 'tool_use', id: 'toolu_cut', name: 'Bash', input: { command: 'synthetic, never run', description: 'Check the board' } }] } }) + '\n')
+    const supplies: string[] = []
+    await resumeEngines(safeDeps(), { listProjectPaths: async () => [projA], spawnSupply: async ({ projectPath }) => { supplies.push(projectPath) } })
+    expect(supplies, "the president's own held conversation waits for the answer").toEqual([])
+    const told = (await readNotificationsFresh()).find(
+      (n) => n.kind === 'swarm-fatal' && n.swarmFatal?.event === 'engine-resume-suppressed' && n.swarmFatal?.projectPath === projA,
+    )
+    expect(told?.swarmFatal?.detail).toContain(OWNER_REVIEW_WHERE)
+    expect(told?.swarmFatal?.detail).not.toContain('オーナーのアカウント確認')
+    const open = (await listEscalations({ projectPath: projA, status: 'open' })).filter((e) => e.receiptKey === `hold:native-${sessionId}`)
+    expect(open).toHaveLength(1)
+    expect(open[0].plainQuestion).toContain('社長')
+    expect(open[0].plainQuestion).toContain('Check the board')
   })
 })

@@ -104,7 +104,13 @@
   turns, proposals, reset epochs and action receipts. `conversationReceipts.ts`
   archives immutable terminal receipts; `conversationDrafts.ts` uses revision CAS
   and accepted-draft indices. `presidentInbox.ts` owns one ordered delivery lane;
-  `runtimeActionReceipts.ts` / `runtimeRecovery.ts` expose unconfirmed effects.
+  `runtimeActionReceipts.ts` / `runtimeRecovery.ts` expose unconfirmed effects;
+  a tool receipt whose result Claude's transcript recorded (main or
+  `subagents/*.jsonl`) is settled first and holds nothing
+  (`runtimeToolEvidence.ts` → `settleHeldToolReceipts` →
+  `conversationReceipts.settleReceiptFromEvidence`, `source: 'native-transcript'`;
+  started-without-result and interrupted results still hold — commander/01 §7.4e).
+  Tests inject the projects folder by mocking `transcript.claudeProjectsRoot`.
   `runtimeJournalOwner.ts`: one live process owns `runtime/receipts-v2.json`
   (`runtime/journal-owner/<n>.json`); any other process is refused
   (`RuntimeJournalOwnedElsewhere`) instead of marking the live app's in-flight
@@ -235,6 +241,16 @@
   罠(**沈黙もメッセージ**): ボードが読めなかったときに何も描かないのは「全部終わった」と
   同じ見た目 = 静かな嘘。`started` は optional で、欠けていたら `'unknown'`(No data スタンプ)。
   旧 `groundBeacon.ts`(active 一覧を1プロジェクト1判定に畳む集約)は**削除済み**。
+  **Waiting = a muted clock** (2026-11-28, owner decision AUTONOMY-SPEC §7-4 = A): each lamp row
+  carries `standing.{state,reasons}` from `groundStanding` (swarmOrchestrator.ts — in-memory
+  facts + this request's board and inbox; absent for a project with no engine / boot resume in
+  memory). `groundLamp` ranks question (open escalation OR standing `needs-owner`) > running
+  (live evidence first: commander / pane generating, standing `running`) > **waiting** (standing
+  `waiting` — drawn as lucide `Clock` in `text-ink-faint`, no band, no label, the reasons' plain
+  sentences as hover text via `App.tsx` `lampHintById` → `ProjectCard` `lampHint`) > the
+  in-flight count > review > unknown. A waiting project asks the liveness registry even with
+  work in flight (a live pane outranks the clock). Guards: `groundLamp.test.ts` "the standing",
+  `groundLamps.test.ts`, `ProjectCard.test.tsx`, `statusColors.test.ts`.
 - テスト: `src/lib/server/` の `projectPathSecurity.prop.test.ts`(境界の property test)/
   `registry.test.ts` / `scan.test.ts` / `homeBackup.test.ts` / `homeIntegrity.test.ts`
   (後2者は 45→3 という**実事故の形**を fixture 化した回帰。赤/緑の両方向を固定)
@@ -370,6 +386,18 @@
   あれば活動語ではなくそちらを言う(`spriteStateFor` の asking 優先と一致させる)。
 - **診断・改修の前に `docs/commander/00-INDEX.md`**(症状→章の直行表)。理想形 = `TARGET-STATE.md`。
   安全不変条件 = `docs/SWARM_SAFETY_INVARIANTS.md` + `src/lib/server/swarmSafety.test.ts`(触る前に緑確認)
+- **Standing — "is it held and why" (2026-11-28, AUTONOMY-SPEC U5)**: `src/lib/server/swarmStanding.ts`
+  (pure `standingOf` + one adapter per engine hold field + `STANDING_STALL_MS` 15 min) · facts
+  `standingFactsOf` / route reader `readProjectStanding` / lamp reader `groundStanding` / watchdog
+  `watchStanding` (one call per pass in `runEnginePass`) in `swarmOrchestrator.ts` · route
+  `GET /api/swarm/standing?path=` · text `projectPanel.standing.*` (ja/en). Read by the Ground lamp,
+  the agent-team bar (muted clock beside the switch, `SwarmBottomBar.tsx` → `SwarmModule`
+  `headerMark`) and the president (`skills/supply/SKILL.md` Status ⑤, word for word).
+  Tests: `swarmStanding.test.ts`, `server/routes/__tests__/swarmStanding.routes.test.ts`.
+  Trap (**adding a hold**): a new engine field that holds work needs a fact + one adapter line in
+  `STANDING_ADAPTERS`, or after 15 min it reads as `unexplained` (one `automation-stalled` notice —
+  that is the point: an unnamed hold is a defect). Trap (**a stopped engine's holds are stale**):
+  facts take engine holds only while `engine.running`. Rules: docs/commander/01 §7.4f.
 - **Finished-worker cleanup (2026-09-26)**: `swarmWorkerReaper.ts` — boot loop (every 3 min,
   engine-independent, **primary instance :47776 only**, kill-switch `OPENGROUND_WORKER_REAP=0`)
   removes a central `swarm/*` worktree only when it is clean AND its branch is already in main
@@ -408,7 +436,11 @@
   route `server/routes/sdkSession.ts`(SSE・**二重ゲート**)/ UI `modules/SdkWorkerPane.tsx`。
   (`swarmWorkerRuntimeDial.ts` は **2026-08-13 に削除** — worker は SDK 専用になり、
   ダイヤルも slot cap も存在しない。下の「kill switch」段を参照。)
-  ⚠ **SDK は filesystem settings を読まない → 素朴に spawn すると guard が黙って消える**。
+  ⚠ **worker / 司令官の SDK 卓は filesystem settings を全部読む**(2026-11-28 訂正 — 旧記述
+  「読まない」は誤り。`sdkManagerLaunchPlan` / worker plan は `settingSources` を省略し、SDK 0.3.220 は
+  省略で全ソースを読む)。だからオーナーの `~/.claude/settings.json` の hook(`swarm-guard.sh` 等)も
+  卓と sub-agent の中で動く。in-process の `sdkGuardHook` は再武装として残す(settings に依らない)。
+  `settingSources: []` で切り離しているのはアシスタントだけ(`assistantSession.ts`)。
   ⚠ **開発で100%動き、配布ビルドで100%動かない形を1回踏んだ**(0801 `dd311acc`)。
   `sdkGuardHook.loadGuardEvaluate` が `createRequire(import.meta.url)` を使っていた。
   esbuild の CJS 出力に `import.meta` は無く `{}` に置換されるので、Electron が fork する
@@ -752,15 +784,31 @@
   `resumeEngines`; per-actor holds + retry = docs/commander/01 §7.4b2). The hands-free update
   waits for an AI tool boundary (`toolCallsInFlight` in `/api/update/restart-safety`,
   `electron/autoUpdatePolicy.js`) so an update does not create those holds.
-- **Saved-work hold while the app runs** (2026-11-23): `savedWorkHold.ts` (ONE predicate +
-  ONE wording, built from the Settings screen's own labels) + `swarmOrchestrator.ts`
-  `refreshSavedWorkHold` (no dispatch, commander not woken, president told once via the
-  `automation-held` notice) / `awaitToolBoundary` (every engine stop waits for a running
-  command) / `watchToolDenials` / `tellRepeatedDispatchFailure` / `tellAutomationStartFailures`.
-  Tests: `swarmSavedWorkHold.test.ts`, `sdkQuotaPause.test.ts`. Canon: docs/commander/01 §7.4e,
-  04 §3.4.1–3.4.2 / §3.8. Trap: the hold is the launch guard's own question
-  (`listUncertainRuntimeActions(cwd, false)`) — never add a second, looser reader, and never
-  clear a receipt from the engine; only the owner's review in Settings does.
+- **Saved-work hold while the app runs** (2026-11-23, per conversation since 2026-11-28 —
+  AUTONOMY-SPEC R-B3/R-B4): `savedWorkHold.ts` (`savedWorkHolds` = the guard's question with
+  who issued each operation; the owner's question `unconfirmedOperationQuestion` /
+  `askAboutHeldOperation` (`hold:<id>`); `answerHeldOperation`; `heldOperationOpening` for
+  fresh desks) + `swarmOrchestrator.ts` `refreshSavedWorkHold` (stops the held worker, parks
+  its card in blocked, one inbox question; everything else dispatches; the whole project
+  holds only when the guard cannot ask, or when an operation names no conversation) /
+  `awaitToolBoundary` / `watchToolDenials` /
+  `tellRepeatedDispatchFailure` / `tellAutomationStartFailures`. The owner answers in the
+  agent-team bar: the 「あなたへの質問」 chip opens `HoldQuestionDialog.tsx` (A / B, posts
+  `/api/swarm/escalations/answer`; a refusal with `code:'hold'` is the owner's sentence, and
+  its `reason` (`HoldRefusal`: format / onlyA / failed / signIn / running / closed) is what a
+  seat branches on — never the sentence). A
+  held ChatGPT desk conversation raises no question: its door is Settings
+  (`CHATGPT_REVIEW_HOLD_HINT`) only while that panel can list it — otherwise
+  `chatGptHoldHint` names the conditions or, for an unreadable history, no door. Tests:
+  `swarmSavedWorkHold.test.ts`, `swarmEscalations.test.ts`, `sdkQuotaPause.test.ts`,
+  `HoldQuestionDialog.test.tsx`, `SwarmModule.header.test.tsx`. Canon:
+  docs/commander/01 §7.4e, 04 §3.4.1–3.4.2 / §3.8. Trap: the hold is the launch guard's own
+  question (`listUncertainRuntimeActions(cwd, false, anyOwner, sessionId)`) — every launch and
+  tool call asks it with ITS OWN session; never add a second, looser reader, and never clear a
+  receipt from the engine; only the owner's answer (the inbox question or the Settings panel,
+  same review functions) does — or the call's result recorded in Claude's transcript, read
+  inside that same predicate (`settleHeldToolReceipts`, §0). A resume decision reads it with
+  `anyOwner` so an offline owner-role lookup never reads as "free".
 - **worker roster の write-through + boot 照合**(2026-07-23, card 3): `swarmWorkerRoster.ts`
   (roster を心拍の隣 `~/.openground/swarm/<repoキー>/roster.json` へ write-through — sessionId /
   taskId / branch / worktree / tier / spawnAt / workedMs / reworkCount。状態遷移点のみ書く

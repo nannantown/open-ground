@@ -48,7 +48,18 @@
 // project never clears a hand. With no stamp on record there is no baseline,
 // so the timed mark does not light — a mark only a visit nobody has made yet
 // could clear would be furniture again.
-// Precedence: question > running > review > unknown > nothing.
+// Precedence: question > running > waiting > review > unknown > nothing.
+//
+// WAITING = HELD FOR A REASON THAT LIFTS BY ITSELF — 2026-11-28, owner decision
+// (AUTONOMY-SPEC §7-4 = A): 「灰色の小さな時計、文字なし、理由と再開時刻はホバーのみ」.
+// The project's standing (swarmStanding.ts) says 'waiting' when work is needed
+// and held — a usage limit, a spawn backoff, the machine offline, the boot
+// resume, or `unexplained`. Before this, a todo card under a running autopilot
+// lit 'working' for four hours of a usage limit while nothing moved. It is a
+// muted clock — no state colour (the three stay three), no label. A standing of
+// 'needs-owner' (an unconfirmed operation awaiting review, every model switched
+// off) is the hand, like an open question. Live evidence (a pane / the
+// commander generating) still outranks the clock: running outranks waiting.
 //
 // RUNNING = THE PROJECT'S WORK IS NOT FINISHED — 2026-09-26, owner: 「ワーカーとか
 // が動いてたりマネージャーが動いてるんだったら、そのタスクがまだ終わってなくて、その
@@ -71,14 +82,14 @@
 // the retired stalled-work branch was quietly doing again through the
 // Needs-decision column.
 
-import type { ProjectTask } from '@/lib/types'
+import type { ProjectTask, StandingState } from '@/lib/types'
 import { isDispatchableCard } from '@/lib/dispatchGate'
 
 /** What a Ground card's lamp says.
  *
  *  `null` = no lamp at all, and it is a REAL answer: the project is resting.
  *  `'unknown'` is the one that exists to stop a lie — see `started` below. */
-export type GroundLamp = 'working' | 'question' | 'review' | 'unknown' | null
+export type GroundLamp = 'working' | 'question' | 'waiting' | 'review' | 'unknown' | null
 
 export interface GroundLampInput {
   /** Unfinished work that keeps the lamp RUNNING by itself — see
@@ -122,6 +133,9 @@ export interface GroundLampInput {
   /** Epoch ms the owner last had this PROJECT open (any tab). Clears the check
    *  only — never a hand. */
   openedAt?: number
+  /** The project's standing (GroundLampRow.standing.state). Absent ⇒ no engine in
+   *  memory / an older server — the rules below decide as before. */
+  standing?: StandingState
 }
 
 /** An event the owner has not seen yet. No seenAt ⇒ no baseline ⇒ never. */
@@ -190,12 +204,13 @@ export const groundLamp = ({
   deliveredAt,
   seenAt,
   openedAt,
+  standing,
 }: GroundLampInput): GroundLamp => {
   // 1. A REAL QUESTION FOR YOU outranks everything, including running work:
   //    the swarm carrying on elsewhere does not make your answer less needed.
   //    `undefined` (inbox unreadable) is not zero and not a question — it just
   //    does not reach this branch.
-  if ((openQuestions ?? 0) > 0) return 'question'
+  if ((openQuestions ?? 0) > 0 || standing === 'needs-owner') return 'question'
 
   // 1a. THE PRESIDENT IS MID-TURN (2026-09-25). The owner asked it something and
   //     it is answering — that is work, whatever the board says: a project with
@@ -213,8 +228,14 @@ export const groundLamp = ({
   // 2. 作業中 — the work is not finished (see the header). Outranks "come and
   //    look": the delivery is not going away. A live process on a board with
   //    nothing started is NOT work (a stray pane cannot light a finished
-  //    project), hence `started > 0` beside liveWork.
-  if ((inFlight ?? 0) > 0 || commanderWorking || ((started ?? 0) > 0 && liveWork)) return 'working'
+  //    project), hence `started > 0` beside liveWork. Live evidence first:
+  //    something generating outranks the clock below.
+  if (commanderWorking || ((started ?? 0) > 0 && liveWork) || standing === 'running') return 'working'
+  // 2a. 待っている — work is needed and held for a reason that lifts by itself
+  //     (the standing's reasons are the hover text). Above the in-flight count:
+  //     unfinished cards that nothing can move right now are not running.
+  if (standing === 'waiting') return 'waiting'
+  if ((inFlight ?? 0) > 0) return 'working'
 
   // 1e. DELIVERED WHILE YOU WERE AWAY (2026-09-26): look, nothing to answer.
   //     Either stamp is a look — opening the seat means the project was open,

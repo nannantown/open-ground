@@ -205,6 +205,11 @@ export interface Settings {
    *  grow as before). User-settable through POST /api/settings (narrowed to a
    *  non-negative integer there), so it can be tuned without a UI. */
   deskContextCapTokens?: number
+  /** How much of the subscription automatic work may spend (AUTONOMY-SPEC R-D2).
+   *  Absent ⇒ `DEFAULT_SWARM_BUDGET` (swarmBudget.ts): the owner's 2026-11-28
+   *  decision, no even pacing and 10% of the week kept for the owner. Changed by
+   *  the president on the owner's word, through POST /api/settings. */
+  swarmBudget?: SwarmBudgetPolicy
   /** UI + prompt language. OPEN GROUND is English-first: unset means English.
    *  'ja' switches the UI strings AND the prompts sent to the spawned Claude
    *  (so its summaries/replies come back in Japanese). Persisted from the UI
@@ -1412,6 +1417,10 @@ export interface OrchestratorWorker {
    *  value. Card 3 persists it in the roster (plan §3). Display/accounting only;
    *  never gates the engine. Absent until first observed. In-memory + roster only. */
   reworkCount?: number
+  /** "Continue." sent after turns that ended on an API error (network loss, sleep,
+   *  provider 5xx): how many (at most 3 per card attempt — this record is one
+   *  attempt) and the turn boundary last answered. In-memory only. */
+  apiErrorRetry?: { count: number; seq: number }
 }
 
 /** One row of GET /api/swarm/workers — the SERVER-TRUTH worker list. Built by
@@ -2253,6 +2262,14 @@ export const DEFAULT_EXECUTION_MODE: ExecutionMode = 'optimize'
 /** Default for {@link Settings.deskContextCapTokens} (owner decision 2026-09-18). */
 export const DEFAULT_DESK_CONTEXT_CAP_TOKENS = 300_000
 
+/** {@link Settings.swarmBudget}. `pace: 'even'` holds automatic starts while the
+ *  week runs ahead of an even line (weekly-pace); `'free'` does not pace.
+ *  `ownerReservePct` of the week is never spent by automatic starts. */
+export interface SwarmBudgetPolicy {
+  pace: 'even' | 'free'
+  ownerReservePct: number
+}
+
 /** Per-card overrides for the drawer's 実行 button. Each key falls back to
  *  the board defaults when absent: flow → config.completionFlow,
  *  model/effort → launch.model/effort. Travels with the card (shared data)
@@ -2481,6 +2498,67 @@ export interface GroundLampRow {
   /** Epoch ms the owner last had this PROJECT open at all (POST
    *  /api/ground/opened). Clears the eye only, never a hand. Absent ⇒ never. */
   openedAt?: number
+  /** The project's standing (swarmStanding.ts) — the one answer to "is it held
+   *  and why". Absent ⇒ no engine and no boot resume in memory for this project
+   *  (nothing it could add to the verdict) or an older server. */
+  standing?: Pick<ProjectStanding, 'state' | 'reasons'>
+}
+
+/** Where a project stands (AUTONOMY-SPEC R-E1): one value, computed in ONE place
+ *  (`standingOf`, src/lib/server/swarmStanding.ts) and read by the Ground lamp,
+ *  the agent-team bar and the president's status answer.
+ *   • 'needs-owner' — something only the owner can do (a question, a review).
+ *   • 'running'     — work is being served right now.
+ *   • 'waiting'     — work is needed and held for a reason that clears by
+ *                     itself (or, as `unexplained`, for no reason it can name).
+ *   • 'idle'        — the autopilot is on and nothing needs doing.
+ *   • 'off'         — the autopilot is off (stopped by hand, outside the frame,
+ *                     or never started). */
+export type StandingState = 'running' | 'needs-owner' | 'waiting' | 'idle' | 'off'
+
+/** Why a project is held. `usage-unknown` is a note (it holds nothing);
+ *  `unexplained` is a defect report — a need stood 15 minutes with no progress
+ *  and no other reason. `window-headroom` / `weekly-pace` / `weekly-reserve` /
+ *  `usage-unknown` are produced by the budget gate (spec unit U3).
+ *  `commander-down`: the engine gave up reviving the commander, or it ignored
+ *  every poke — its own bell already rang (review 2026-11-28 B-S3). */
+export type StandingReasonKind =
+  | 'owner-question'
+  | 'usage-limit'
+  | 'commander-down'
+  | 'window-headroom'
+  | 'weekly-pace'
+  | 'weekly-reserve'
+  | 'spawn-backoff'
+  | 'offline'
+  | 'boot-pending'
+  | 'models-off'
+  | 'manual-stop'
+  | 'outside-frame'
+  | 'usage-unknown'
+  | 'unexplained'
+
+export interface StandingReason {
+  kind: StandingReasonKind
+  /** One sentence in the owner's language (Settings.language). */
+  plain: string
+  /** Epoch ms the hold lifts by itself, when known. */
+  until?: number
+  /** What the owner can press to clear it, in plain words. Present ⇔ only the
+   *  owner can clear it (that is what makes the state 'needs-owner'). */
+  ownerAction?: string
+}
+
+/** GET /api/swarm/standing?path= */
+export interface ProjectStanding {
+  state: StandingState
+  /** Work waiting to be served: todo cards the engine would start, and review
+   *  cards waiting for the commander (cards parked for a human excluded). */
+  needs: { dispatch: number; integrate: number }
+  /** Epoch ms of the last observed progress (a board move, a live worker, the
+   *  commander mid-turn). Absent ⇒ none observed since the engine started. */
+  progressedAt?: number
+  reasons: StandingReason[]
 }
 
 export interface GroundLampsResponse {
@@ -2833,6 +2911,11 @@ export type SwarmFatalEvent =
   // the Ground frame's automatic start failing. `detail` is the plain-language
   // reason plus where to go; raised once per hold, never per pass.
   | 'automation-held'
+  // 'automation-stalled' (AUTONOMY-SPEC R-A2): work was needed for 15 minutes,
+  // nothing progressed, and the standing (swarmStanding.ts) could name no reason.
+  // A defect report, not a normal state: raised once per episode by the engine's
+  // watchdog, with the measured facts in the engine journal.
+  | 'automation-stalled'
   // 'data-integrity' is NOT a swarm event: it is the boot-time home-data damage
   // check (src/lib/server/homeIntegrity.ts) reporting that settings.json /
   // canvas.json lost entries, became unreadable, or picked up a test fixture
@@ -3616,6 +3699,10 @@ export interface UsageBreakdownRow {
   /** input + output + cache_creation — the same metric as the headline total
    *  (cache READS are heavily discounted and would drown the real signal). */
   tokens: number
+  /** cache_read over the same turns, reported BESIDE `tokens`, never in it or
+   *  in `total`: context size × call count, 29× the billed figure in the week
+   *  measured 2026-11-28 (docs/AUTONOMY-SPEC.md R-D4). */
+  cacheRead: number
 }
 
 export interface UsageBreakdown {

@@ -100,6 +100,8 @@ interface Props {
    *  project is meant to be silent. The per-project Canvas tab renders no
    *  project cards, so it leaves this undefined. */
   lamps?: ReadonlyMap<string, GroundLamp>
+  /** Ground-only: the hover text of a lamp the project's standing decided. */
+  lampHints?: ReadonlyMap<string, string>
   /** Ground-only: projects whose audio is currently playing somewhere in the
    *  app (a custom tab's embedded player — the Songs tab). The matching card
    *  wears a "Playing" EQ stamp; the value carries the track title for its
@@ -448,6 +450,7 @@ interface FrameLeafCb {
 export const InfiniteCanvas = ({
   projects,
   lamps,
+  lampHints,
   playbackByProject,
   sharedProjects,
   onOpenShared,
@@ -3990,6 +3993,7 @@ export const InfiniteCanvas = ({
                 onPointerDown={cardPointerDown(p.id)}
                 selected={selectedSet.has(p.id)}
                 lamp={lamps?.get(p.id)}
+                lampHint={lampHints?.get(p.id)}
                 playback={playbackByProject?.get(p.id)}
                 flashKey={flash?.id === p.id ? flash.at : undefined}
               />

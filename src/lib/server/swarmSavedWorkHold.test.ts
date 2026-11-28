@@ -11,15 +11,26 @@
 // worker off in the middle of a running test command (JobSearch, 16:29).
 //
 // Pinned here, each measured red against the pre-fix engine:
-//   • a held project dispatches NOTHING, the card stays in todo, the journal says why;
-//   • the president is told once, in plain words, where to go and what to press;
-//   • the words name the Settings screen's real heading (not 「会話の復旧」);
+//   • SCOPED (AUTONOMY-SPEC R-B3, owner decision 2026-11-28 §7-1 = A): an unknown
+//     result holds ONLY the conversation that issued it. Its worker is stopped and
+//     never resumed, its card waits in blocked, ONE question waits in the owner's
+//     inbox — and every other worker, the commander and the president go on. This
+//     file used to pin the opposite ("a held project dispatches NOTHING"): that
+//     project-wide hold turned eight stale receipts into days without automation
+//     in seven projects (§1.1), while the only actor that can run an unknown call
+//     again is the conversation that issued it;
+//   • when the launch guard's question cannot be answered at all (sign-in gone,
+//     record unreadable) every launch would fail the same way — that still holds
+//     the whole project, under its own words;
+//   • the question names the seat, the time and the call's own description, in
+//     plain words, with no path, branch name or command text (R-B4);
 //   • a worker lost at start carries its session's exit reason into the journal;
 //   • a quota stop waits for a running command instead of cutting it off, and a
-//     stop that had to cut one off anyway is recorded and named in the notice.
+//     stop that had to cut one off anyway is recorded and named in the question.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { rm } from 'fs/promises'
+import { mkdir, rm } from 'fs/promises'
+import { NativeUnfinishedToolsError } from './swarmNativeTranscript'
 import {
   runDispatchPass,
   __resetOrchestratorForTests,
@@ -32,21 +43,30 @@ import {
   STALL_SILENCE_MS,
   STALL_NUDGE_COOLDOWN_MS,
   OWNER_REVIEW_HOLD_HINT,
+  unparkBlockedCard,
+  adoptResumeCandidates,
   type ProjectEngine,
   type OrchestratorDeps,
   type IntegrationDeps,
   type AnomalyDeps,
 } from './swarmOrchestrator'
-import { automationStartNotice, commanderFailureWords, dispatchFailureNotice, savedWorkHoldNotice } from './savedWorkHold'
+import { askAboutHeldOperation, automationStartNotice, commanderFailureWords, dispatchFailureNotice, unconfirmedOperationQuestion, heldOperationOpening, plainDescription, toolDenialNotice, ownerUnconfirmedNotice, holdAnswerReason, OWNER_REVIEW_WHERE, APP_SIGN_IN_WHERE, chatGptHoldHint, isOwnerReviewHold, CHATGPT_REVIEW_HOLD_HINT, CHATGPT_SIGN_IN_HOLD_HINT, CHATGPT_UNREADABLE_HOLD_HINT, type HeldOperation } from './savedWorkHold'
+import { getSettings, setSettings } from './store'
+import { answerEscalation, dismissEscalation, listEscalations, ownerQuestionDetail } from './swarmEscalations'
+import { projectPanel as panelMessages } from '../../i18n/messages/projectPanel'
+import { board as boardMessages } from '../../i18n/messages/board'
 import { quotaRefusalKindOfText, refusalClosesEveryModel } from './swarmRateLimitText'
-import { settings as settingsMessages } from '../../i18n/messages/settings'
 import { SUPPLY_NOTICE_MAX, sanitizeSupplyNotice } from './supplyNotice'
-import { __resetQuotaForTest, isTierCooling, MODEL_TIER_LADDER } from './swarmQuota'
+import { __resetQuotaForTest, flushQuotaPersist, isTierCooling, MODEL_TIER_LADDER } from './swarmQuota'
 import { initOverseerRuntime } from './swarmOverseer'
-import { swarmNotificationsFile } from './paths'
+import { escalationsFile, swarmNotificationsFile } from './paths'
 import type { OrchestratorWorker, ProjectTask, SpawnSwarmWorkerResponse, SwarmFatalNotification } from '../types'
 
 vi.setConfig({ testTimeout: 60_000 })
+// The signed-in owner role (receipts are recorded and asked about only for it).
+// Off by default, as these tests always ran; on where a test says so.
+const role = vi.hoisted(() => ({ owner: false }))
+vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => role.owner }))
 
 const T0 = Date.parse('2026-11-23T07:00:00Z')
 
@@ -125,7 +145,7 @@ const stubDeps = (over: Partial<Deps>): Deps => ({
   readHeartbeat: async () => null,
   lastOutputAt: () => null,
   isAlive: () => true,
-  savedWorkHold: async () => 0,
+  savedWorkHold: async () => [],
   sdkWorkerFacts: () => undefined,
   toolDenialStreak: () => 0,
   sessionAgentActivityAt: async () => null,
@@ -137,53 +157,194 @@ const held = (notify: (n: SwarmFatalNotification) => void) =>
   (notify as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0] as SwarmFatalNotification).filter((n) => n.event === 'automation-held')
 
 beforeEach(async () => {
+  role.owner = false
   __resetOrchestratorForTests()
   __resetQuotaForTest()
   await rm(swarmNotificationsFile(), { force: true })
+  await rm(escalationsFile(), { force: true })
 })
 
 afterEach(async () => {
   __resetOrchestratorForTests()
+  // A quota stop schedules the cooling table's write; let it (and its log line)
+  // finish inside the test, not after the file's worker has closed.
+  await flushQuotaPersist().catch(() => {})
   __resetQuotaForTest()
   await rm(swarmNotificationsFile(), { force: true })
+  await rm(escalationsFile(), { force: true })
 })
 
-describe('saved-work hold — no dispatch into a project with an unconfirmed operation', () => {
-  it('dispatches nothing, leaves the card in todo, journals the reason and tells the president once', async () => {
-    const engine = newEngine()
-    const spawnWorker = vi.fn(async () => sdkSpawn('a'))
-    const moveToDoing = vi.fn(async () => true)
-    const notify = vi.fn()
-    let unconfirmed = 1
-    const deps = stubDeps({ fetchTasks: async () => [card('a')], spawnWorker, moveToDoing, notify, savedWorkHold: async () => unconfirmed })
+const OP_AT = '2026-11-23T06:58:00.000Z'
+const heldOp = (over: Partial<HeldOperation> = {}): HeldOperation =>
+  ({ id: 'tool-w1', sessionId: 'sess-w1', tool: 'Bash', at: OP_AT, description: 'テストをすべて実行', seat: { role: 'unknown' }, ...over })
+const openHoldQuestions = async () => (await listEscalations({ status: 'open' })).filter((e) => e.receiptKey.startsWith('hold:'))
 
+describe('saved-work hold — only the conversation that issued the unknown call stops (R-B3)', () => {
+  // These cases read the owner's Japanese question: the owner's machine runs
+  // Settings.language = 'ja' (unset ⇒ English, promptLang.langOf).
+  let langBefore: 'en' | 'ja' | undefined
+  beforeEach(async () => { langBefore = (await getSettings()).language; await setSettings({ language: 'ja' }) })
+  afterEach(async () => { await setSettings({ language: langBefore }) })
+  const w1 = () => sdkWorker({ sdkSessionId: 'sdk-w1', sessionId: 'sess-w1', taskId: 'w1', taskTitle: 'card w1', branch: 'swarm/w1', worktree: '/central/wt/w1' })
+
+  it('W1 held: W1 is stopped and never resumed, its card waits in blocked, W2 is dispatched, nothing holds the project, one question is open', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const columns: Record<string, string> = { w1: 'doing', w2: 'todo' }
+    const spawnWorker = vi.fn(async () => sdkSpawn('w2'))
+    const recoverCard = vi.fn(async (_p: string, id: string, to: 'todo' | 'blocked') => { columns[id] = to; return true })
+    const notify = vi.fn()
+    const deps = stubDeps({ fetchTasks: async () => [card('w1', columns.w1), card('w2', columns.w2)], spawnWorker, recoverCard, notify, savedWorkHold: async () => [heldOp()] })
+
+    for (const at of [T0, T0 + 3000, T0 + 6000]) await runDispatchPass(engine, deps, at)
+
+    // W1: its session is ended through the normal teardown (work saved), once.
+    expect(deps.recoverWorker).toHaveBeenCalledTimes(1)
+    expect(deps.recoverWorker).toHaveBeenCalledWith(expect.objectContaining({ worktree: '/central/wt/w1', sdkSessionId: 'sdk-w1' }))
+    expect(recoverCard).toHaveBeenCalledWith('/proj', 'w1', 'blocked')
+    expect(columns.w1).toBe('blocked')
+    // W2 in the same project is dispatched. Nothing is ever spawned onto W1's card
+    // or its conversation — the unknown call is not run again, nor handed on.
+    expect(spawnWorker).toHaveBeenCalledTimes(1)
+    expect(spawnWorker.mock.calls[0]).toMatchObject([{ title: 'card w2' }])
+    expect((spawnWorker.mock.calls as unknown as { title?: string; resumeSessionId?: string }[][]).some(([o]) => o.title === 'card w1' || o.resumeSessionId === 'sess-w1')).toBe(false)
+    expect(engine.workers.map((w) => w.taskId)).toEqual(['w2'])
+    // Nothing holds the project: the commander's wake reads exactly this field.
+    expect(engine.savedWorkHold).toBeUndefined()
+    // ONE question in the owner's inbox for the operation — not addressed to W1.
+    const open = await openHoldQuestions()
+    expect(open).toHaveLength(1)
+    expect(open[0]).toMatchObject({ receiptKey: 'hold:tool-w1', taskId: 'w1', projectPath: '/proj' })
+    expect(open[0].sdkSessionId).toBeUndefined()
+    expect(open[0].terminalId).toBeUndefined()
+    expect(open[0].plainQuestion).toContain('「card w1」のワーカー')
+    // The president hears it through the question — no separate project-wide notice.
+    expect(held(notify)).toHaveLength(0)
+    expect(engine.log.filter((l) => l.message.includes('held conversation'))).toHaveLength(1)
+  })
+
+  it('after a restart (no live worker; a failed resume put the card back in todo) the card still waits and only the other card dispatches', async () => {
+    const engine = newEngine()
+    const columns: Record<string, string> = { w1: 'todo', w2: 'todo' }
+    const spawnWorker = vi.fn(async () => sdkSpawn('w2'))
+    const recoverCard = vi.fn(async (_p: string, id: string, to: 'todo' | 'blocked') => { columns[id] = to; return true })
+    const deps = stubDeps({ fetchTasks: async () => [card('w1', columns.w1), card('w2', columns.w2)], spawnWorker, recoverCard,
+      savedWorkHold: async () => [heldOp({ seat: { role: 'worker', taskId: 'w1' } })] })
     await runDispatchPass(engine, deps, T0)
     await runDispatchPass(engine, deps, T0 + 3000)
-    await runDispatchPass(engine, deps, T0 + 6000)
+    expect(recoverCard).toHaveBeenCalledWith('/proj', 'w1', 'blocked')
+    expect(spawnWorker).toHaveBeenCalledTimes(1)
+    expect(spawnWorker.mock.calls[0]).toMatchObject([{ title: 'card w2' }])
+    expect(await openHoldQuestions()).toHaveLength(1)
+  })
 
-    // No spawn → nothing to be "lost" three seconds later; the card never left todo.
-    expect(spawnWorker).not.toHaveBeenCalled()
-    expect(moveToDoing).not.toHaveBeenCalled()
-    expect(engine.workers).toHaveLength(0)
-    // The reason is in the engine's record, with where to go — once, not per pass.
-    const lines = engine.log.filter((l) => l.message.includes('saved-work hold —'))
-    expect(lines).toHaveLength(1)
-    expect(lines[0].message).toContain(OWNER_REVIEW_HOLD_HINT)
-    // The president hears it once, in plain words: what is happening, where, what to press.
-    const told = held(notify)
-    expect(told).toHaveLength(1)
-    expect(told[0].projectPath).toBe('/proj')
-    expect(told[0].detail).toContain('新しい作業の開始と司令官の起動を止めています')
-    expect(told[0].detail).toContain(settingsMessages.ja['settings.recovery.title'])
-    expect(told[0].detail).toContain(settingsMessages.ja['settings.recovery.review'])
-
-    // The owner reviews it → the very next pass dispatches, with no re-arm.
-    unconfirmed = 0
-    await runDispatchPass(engine, deps, T0 + 9000)
+  it('a held commander or president conversation: one question each, and every worker still dispatches', async () => {
+    const engine = newEngine()
+    const spawnWorker = vi.fn(async () => sdkSpawn('a'))
+    const deps = stubDeps({ fetchTasks: async () => [card('a')], spawnWorker,
+      savedWorkHold: async () => [heldOp({ id: 'tool-m', sessionId: 'sess-m', seat: { role: 'manager' } }), heldOp({ id: 'input-p', sessionId: 'sess-p', tool: undefined, description: undefined, seat: { role: 'supply' } })] })
+    await runDispatchPass(engine, deps, T0)
+    await runDispatchPass(engine, deps, T0 + 3000)
     expect(spawnWorker).toHaveBeenCalledTimes(1)
     expect(engine.savedWorkHold).toBeUndefined()
-    expect(engine.log.some((l) => l.message.includes('saved-work hold lifted'))).toBe(true)
-    expect(held(notify)).toHaveLength(1)
+    const open = await openHoldQuestions()
+    expect(open.map((e) => e.receiptKey).sort()).toEqual(['hold:input-p', 'hold:tool-m'])
+    expect(open.find((e) => e.receiptKey === 'hold:tool-m')?.plainQuestion).toContain('マネージャー')
+    expect(open.find((e) => e.receiptKey === 'hold:input-p')?.plainQuestion).toContain('社長')
+  })
+
+  // An answer that picks neither is refused and leaves the question open (review
+  // D-M2, 2026-11-28); a question closed some other way while the operation still
+  // holds is raised again.
+  it('a question closed without an A or B while the operation still holds is asked again (never a hold without its question)', async () => {
+    const engine = newEngine()
+    const deps = stubDeps({ fetchTasks: async () => [card('w1', 'blocked')], savedWorkHold: async () => [heldOp({ seat: { role: 'worker', taskId: 'w1' } })] })
+    await runDispatchPass(engine, deps, T0)
+    const [first] = await openHoldQuestions()
+    await expect(answerEscalation(first.id, 'ちょっと考えさせて', { isPathAllowed: async () => true, queueForNextDispatch: async () => {} })).rejects.toThrow()
+    expect(await openHoldQuestions()).toHaveLength(1)
+    await dismissEscalation(first.id)
+    expect(await openHoldQuestions()).toHaveLength(0)
+    await runDispatchPass(engine, deps, T0 + 3000)
+    const again = await openHoldQuestions()
+    expect(again).toHaveLength(1)
+    expect(again[0].id).not.toBe(first.id)
+    expect(again[0]).toMatchObject({ receiptKey: 'hold:tool-w1', taskId: 'w1' })
+  })
+
+  // Review R3-ui S2 (2026-11-28): the president branches on the 409 `reason`, never on
+  // the sentence — the onlyA sentence also asks for "the letter alone on the first line".
+  it('each refusal carries its reason: unreadable on a worker question = format naming A or B, on a desk question = format naming A only, B on a desk = onlyA', async () => {
+    const engine = newEngine()
+    const deps = stubDeps({ fetchTasks: async () => [card('w1', 'blocked')],
+      savedWorkHold: async () => [heldOp({ seat: { role: 'worker', taskId: 'w1' } }), heldOp({ id: 'tool-m', sessionId: 'sess-m', seat: { role: 'manager' } })] })
+    await runDispatchPass(engine, deps, T0)
+    const open = await openHoldQuestions()
+    const worker = open.find((e) => e.receiptKey === 'hold:tool-w1')!, desk = open.find((e) => e.receiptKey === 'hold:tool-m')!
+    const opts = { isPathAllowed: async () => true, queueForNextDispatch: async () => {} }
+    await expect(answerEscalation(worker.id, 'ちょっと考えさせて', opts)).rejects.toMatchObject({ code: 'hold', reason: 'format', message: holdAnswerReason('unread', 'ja') })
+    await expect(answerEscalation(desk.id, 'ちょっと考えさせて', opts)).rejects.toMatchObject({ code: 'hold', reason: 'format', message: holdAnswerReason('unreadA', 'ja') })
+    expect(holdAnswerReason('unreadA', 'ja')).not.toMatch(/B/)
+    await expect(answerEscalation(desk.id, 'B', opts)).rejects.toMatchObject({ code: 'hold', reason: 'onlyA', message: holdAnswerReason('onlyA', 'ja') })
+    expect(await openHoldQuestions()).toHaveLength(2)
+  })
+
+  it('missing from the owner-gated read but still on record (owner-role lookup offline): not released — the question stays, the card stays out of dispatch', async () => {
+    const engine = newEngine()
+    const columns: Record<string, string> = { w1: 'doing' }
+    const op = heldOp({ seat: { role: 'worker', taskId: 'w1' } })
+    let gated = [op]
+    const spawnWorker = vi.fn(async () => sdkSpawn('w1b'))
+    const recoverCard = vi.fn(async (_p: string, id: string, to: 'todo' | 'blocked') => { columns[id] = to; return true })
+    const deps = stubDeps({ fetchTasks: async () => [card('w1', columns.w1)], spawnWorker, recoverCard,
+      savedWorkHold: async (_p: string, opts?: { anyOwner?: boolean }) => (opts?.anyOwner ? [op] : gated) })
+    await runDispatchPass(engine, deps, T0)
+    expect(columns.w1).toBe('blocked')
+    gated = [] // the gated read goes blind
+    columns.w1 = 'todo' // whatever put it back in the queue, it must not be dispatched
+    await runDispatchPass(engine, deps, T0 + 3000)
+    expect(await openHoldQuestions()).toHaveLength(1)
+    expect(recoverCard).not.toHaveBeenCalledWith('/proj', 'w1', 'todo')
+    expect(spawnWorker).not.toHaveBeenCalled()
+  })
+
+  it('an operation that names no conversation holds every launch here — dispatch and the commander — with its question', async () => {
+    const engine = newEngine()
+    const spawnWorker = vi.fn(async () => sdkSpawn('a'))
+    const deps = stubDeps({ fetchTasks: async () => [card('a')], spawnWorker,
+      savedWorkHold: async () => [heldOp({ id: 'input-x', sessionId: undefined, tool: undefined, description: undefined, seat: { role: 'supply' } })] })
+    await runDispatchPass(engine, deps, T0)
+    await runDispatchPass(engine, deps, T0 + 3000)
+    expect(spawnWorker).not.toHaveBeenCalled()
+    expect(engine.savedWorkHold).toBeDefined()
+    expect(await openHoldQuestions()).toHaveLength(1)
+  })
+
+  it('an open hold question the receipt read does not list (a native-only hold raised at boot) still keeps its card parked and out of dispatch', async () => {
+    const engine = newEngine()
+    const columns: Record<string, string> = { n1: 'doing', free: 'todo' }
+    const spawnWorker = vi.fn(async () => sdkSpawn('free'))
+    const recoverCard = vi.fn(async (_p: string, id: string, to: 'todo' | 'blocked') => { columns[id] = to; return true })
+    await askAboutHeldOperation('/proj', { id: 'native-sess-n1', sessionId: 'sess-n1', tool: 'Bash', at: OP_AT, seat: { role: 'worker', taskId: 'n1' } })
+    const deps = stubDeps({ fetchTasks: async () => [card('n1', columns.n1), card('free', columns.free)], spawnWorker, recoverCard, savedWorkHold: async () => [] })
+    await runDispatchPass(engine, deps, T0)
+    await runDispatchPass(engine, deps, T0 + 3000)
+    expect(columns.n1).toBe('blocked')
+    expect(spawnWorker).toHaveBeenCalledTimes(1)
+    expect(spawnWorker.mock.calls[0]).toMatchObject([{ title: 'card free' }])
+  })
+
+  it('released without an answer (its transcript showed the result after all): the question is withdrawn and the card goes back to todo', async () => {
+    const engine = newEngine({ workers: [w1()] })
+    const columns: Record<string, string> = { w1: 'doing' }
+    let ops = [heldOp()]
+    const recoverCard = vi.fn(async (_p: string, id: string, to: 'todo' | 'blocked') => { columns[id] = to; return true })
+    const deps = stubDeps({ fetchTasks: async () => [card('w1', columns.w1)], recoverCard, savedWorkHold: async () => ops, spawnWorker: vi.fn(async () => sdkSpawn('w1b')) })
+    await runDispatchPass(engine, deps, T0)
+    expect(await openHoldQuestions()).toHaveLength(1)
+    ops = []
+    await runDispatchPass(engine, deps, T0 + 3000)
+    expect(await openHoldQuestions()).toHaveLength(0)
+    expect(recoverCard).toHaveBeenLastCalledWith('/proj', 'w1', 'todo')
   })
 
   it('when the question cannot be answered (owner sign-in gone) it holds too — the launch would die the same way — and says why', async () => {
@@ -197,7 +358,7 @@ describe('saved-work hold — no dispatch into a project with an unconfirmed ope
       notify,
       savedWorkHold: async () => {
         if (!signedIn) throw new Error('Owner sign-in is required.')
-        return 0
+        return []
       },
     })
     await runDispatchPass(engine, deps, T0)
@@ -209,7 +370,8 @@ describe('saved-work hold — no dispatch into a project with an unconfirmed ope
     await runDispatchPass(engine, deps, T0 + 64_000)
     const told = held(notify)
     expect(told).toHaveLength(1)
-    expect(told[0].detail).toContain('設定でサインインしているかを確かめてください')
+    // the app's sign-in is the toolbar's person icon, not Settings (review R5 S1)
+    expect(told[0].detail).toContain(`${APP_SIGN_IN_WHERE.ja}からサインインしているかを確かめてください`)
     signedIn = true
     await runDispatchPass(engine, deps, T0 + 67_000)
     expect(spawnWorker).toHaveBeenCalledTimes(1)
@@ -228,7 +390,7 @@ describe('saved-work hold — no dispatch into a project with an unconfirmed ope
       notify,
       savedWorkHold: async () => {
         if (failing) throw new Error('EMFILE: too many open files')
-        return 0
+        return []
       },
     })
     await runDispatchPass(engine, deps, T0)
@@ -248,20 +410,222 @@ describe('saved-work hold — no dispatch into a project with an unconfirmed ope
   })
 })
 
-describe('the words point at the Settings screen as it is actually labelled', () => {
-  const ja = settingsMessages.ja
-  it('names the real heading and the path to it, never 「会話の復旧」', () => {
-    expect(OWNER_REVIEW_HOLD_HINT).toContain(ja['settings.recovery.title'])
-    expect(OWNER_REVIEW_HOLD_HINT).toContain(ja['settings.advanced'])
-    expect(OWNER_REVIEW_HOLD_HINT).toContain('ChatGPT')
+describe('the question is plain, names who / when / what, and carries no path, branch or command (R-B4)', () => {
+  it('the hint points at the question inbox by the label the bar shows', () => {
+    expect(OWNER_REVIEW_WHERE).toContain(panelMessages.ja['projectPanel.swarm.bar.questions'].replace(/\s*\{count\}/, ''))
+    expect(OWNER_REVIEW_HOLD_HINT).toContain(OWNER_REVIEW_WHERE)
     expect(OWNER_REVIEW_HOLD_HINT).not.toContain('会話の復旧')
   })
 
-  it('the notice survives the supply desk line untouched (no redaction, under the cap)', () => {
-    const notice = `「長いカード名の作業」の担当を使用量の上限で止めたとき、実行中だった操作が途中で切れました。${savedWorkHoldNotice(3)}`
-    expect(Array.from(notice).length).toBeLessThan(SUPPLY_NOTICE_MAX)
-    expect(sanitizeSupplyNotice(notice)).toBe(notice)
-    expect(notice).toContain(ja['settings.recovery.note'])
+  it('a worker\'s question names the seat, the time and the call\'s own description; gives the two options and what each really does', () => {
+    const q = unconfirmedOperationQuestion(heldOp({ seat: { role: 'worker', taskId: 'w1', title: 'ログイン画面の修正' } }))
+    const local = new Date(OP_AT)
+    expect(q.plainQuestion).toContain('「ログイン画面の修正」のワーカー')
+    expect(q.plainQuestion).toContain(`${local.getMonth() + 1}月${local.getDate()}日 ${local.getHours()}:${String(local.getMinutes()).padStart(2, '0')}`)
+    expect(q.plainQuestion).toContain('テストをすべて実行')
+    expect(q.plainQuestion).toContain('決めていただきたいこと')
+    // A keeps the work saved so far; B starts over (the earlier changes are kept, not continued).
+    expect(q.plainQuestion).toContain('A「引き継いで続ける」')
+    expect(q.plainQuestion).toContain('B「初めからやり直す」')
+    expect(q.question).toMatch(/A: .*引き継いで続ける.* \/ B: .*初めからやり直す/)
+    expect(q.plainQuestion).toContain('もう一度実行することはありません')
+    expect(q.plainQuestion).toContain('ほかの作業は止まらずに続いています')
+    // "until you answer, the stopped conversation is not resumed" implied A resumes it — it never does.
+    expect(q.plainQuestion).not.toMatch(/再開しません/)
+  })
+
+  // Review R2 S-2: the question quoted a Board column 「保留」 / "On hold" that the
+  // Board does not have — its blocked column is 判断待ち / "Needs decision".
+  it('a worker\'s question names the Board column the card waits in by the Board\'s own label', () => {
+    const op = heldOp({ seat: { role: 'worker', taskId: 'w1', title: 'card w1' } })
+    const ja = unconfirmedOperationQuestion(op, undefined, 'ja').plainQuestion, en = unconfirmedOperationQuestion(op, undefined, 'en').plainQuestion
+    expect(ja).toContain(`「${boardMessages.ja['board.col.blocked']}」`)
+    expect(en).toContain(`"${boardMessages.en['board.col.blocked']}"`)
+    expect(ja).not.toContain('「保留」')
+    expect(en).not.toContain('On hold')
+  })
+
+  // Review R2 S-3: a question already withdrawn is refused in plain words that say
+  // no answer is needed, in both languages.
+  it('the refusal for a question that is already closed is plain and says nothing is needed', () => {
+    expect(holdAnswerReason('closed', 'ja')).toMatch(/答えは要りません/)
+    expect(holdAnswerReason('closed', 'en')).toMatch(/no answer is needed/)
+  })
+
+  it.each([
+    [{ role: 'manager' } as const, 'マネージャー'],
+    [{ role: 'supply' } as const, '社長'],
+  ])('a desk\'s question (%o) offers ONE honest option — both answers would open a new conversation', (seat, who) => {
+    const q = unconfirmedOperationQuestion(heldOp({ seat }))
+    expect(q.plainQuestion).toContain(who)
+    expect(q.plainQuestion).toContain('A「確認した」')
+    expect(q.plainQuestion).toContain('新しい会話')
+    expect(q.plainQuestion).not.toContain('B「')
+    expect(q.question).not.toContain('B:')
+    for (const text of [q.question, q.plainQuestion, q.context]) expect(text).not.toMatch(/司令官|作業の担当/)
+  })
+
+  it('an operation that names no conversation does not claim the rest of the project goes on — it holds every launch', () => {
+    const q = unconfirmedOperationQuestion(heldOp({ sessionId: undefined, tool: undefined, description: undefined, seat: { role: 'supply' } }))
+    expect(q.plainQuestion).not.toContain('ほかの作業は止まらずに続いています')
+    expect(q.plainQuestion).toContain('新しい作業を始めません')
+  })
+
+  it('a description with command words, a path, an option or a branch name is dropped whole; no path, branch or command reaches the owner', () => {
+    for (const description of ['Run npm test --watch in /Users/me/projects/app on swarm/w1 && rm -rf ~/tmp', 'Push to origin main', 'git push origin main --force to swarm/abc-123', 'Run npm test in and rm dist']) {
+      const q = unconfirmedOperationQuestion(heldOp({ seat: { role: 'worker', taskId: 'w1', title: 'card w1' }, description }))
+      for (const text of [q.question, q.plainQuestion, q.context]) {
+        expect(text).not.toMatch(/\/Users|swarm\/|--watch|&&|rm|~\/|npm|git|push|origin|main/)
+      }
+      expect(q.plainQuestion).toContain('コマンドの実行')
+      expect(plainDescription(description)).toBeUndefined()
+    }
+    expect(plainDescription('Run full verification on current fixed page')).toBe('Run full verification on current fixed page')
+    expect(plainDescription('テストをすべて実行')).toBe('テストをすべて実行')
+  })
+
+  it('the hold notices name the seats as the screen does (社長 / マネージャー / ワーカー)', () => {
+    for (const text of [toolDenialNotice('ログイン画面の修正'), ownerUnconfirmedNotice(1), ownerUnconfirmedNotice(0, false)]) expect(text).not.toMatch(/司令官|の担当/)
+    expect(toolDenialNotice('ログイン画面の修正')).toContain('「ログイン画面の修正」のワーカー')
+    expect(ownerUnconfirmedNotice(0)).toContain('マネージャー')
+  })
+
+  it('a fresh desk is told what stopped, when, and to look at the current state first — never the call\'s arguments', () => {
+    const line = heldOperationOpening(heldOp({ description: 'Deploy the site' }))
+    expect(line).toContain('Bash')
+    expect(line).toContain(OP_AT)
+    expect(line).toContain('Deploy the site')
+    expect(line).toContain('NEW conversation')
+    expect(line).toMatch(/current state/)
+  })
+
+  it('the line the president hears names who and what, and survives the supply desk untouched (no redaction, under the cap)', () => {
+    const q = unconfirmedOperationQuestion(heldOp({ seat: { role: 'worker', taskId: 'w1', title: '長いカード名の作業' } }), { ja: '「長いカード名の作業」の担当を使用量の上限で止めたとき、実行中だった操作が途中で切れました', en: 'unused' })
+    const bell = ownerQuestionDetail(q)
+    expect(Array.from(bell).length).toBeLessThan(SUPPLY_NOTICE_MAX)
+    expect(sanitizeSupplyNotice(bell)).toBe(bell.replace(/\s+/g, ' ').trim()) // line breaks fold; nothing is redacted
+    expect(bell).toContain('「長いカード名の作業」のワーカー')
+    expect(bell).toContain('テストをすべて実行')
+  })
+})
+
+// The owner's B on a worker's held operation means 「初めからやり直す」 (review D S3):
+// the card goes back to the queue without its branch, so the next dispatch starts
+// from the main line instead of re-entering the stopped work (the branch itself is
+// kept — only an explicit force sweep ever deletes an unmerged branch).
+describe('unparking a held card', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+  it.each([[false, []], [true, [{ id: 'w1', branch: '' }]]] as const)('fresh=%s → the card goes to todo, its branch cleared only when fresh', async (fresh, setBranch) => {
+    const posted: { setColumn?: unknown; setBranch?: unknown }[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: { method?: string; body?: string }) => {
+      if (init?.method === 'POST') { posted.push(JSON.parse(init.body ?? '{}')); return new Response('{}', { status: 200 }) }
+      return new Response(JSON.stringify({ tasks: [card('w1', 'blocked')] }), { status: 200 })
+    }))
+    expect(await unparkBlockedCard('/proj', 'w1', { fresh })).toBe(true)
+    expect(posted).toEqual([expect.objectContaining({ setColumn: [expect.objectContaining({ id: 'w1', column: 'todo' })], setBranch })])
+  })
+})
+
+// Review A S6 (2026-11-28): boot resume parks a card whose saved conversation
+// stopped mid-tool and raises its question once. If that ask failed, nothing raised
+// it again — refreshSavedWorkHold re-asks only receipt operations or cards that
+// already have a question — and the card sat in blocked with no question at all.
+describe('a card parked at boot for a held conversation is never left without its question', () => {
+  it('the ask fails at boot; the next pass raises it, once', async () => {
+    const engine = newEngine()
+    await mkdir(escalationsFile(), { recursive: true }) // the inbox cannot be written: the ask throws
+    const recoverCard = vi.fn(async () => true)
+    const deps = stubDeps({ fetchTasks: async () => [card('w1', 'doing')], recoverCard, heldConversation: async () => undefined,
+      spawnWorker: async () => { throw new NativeUnfinishedToolsError([{ id: 'toolu_1', name: 'Bash', at: OP_AT }], 'sess-w1') } })
+    await adoptResumeCandidates(engine, { resumeCandidates: [{ branch: 'swarm/w1', tier: 'fable', spawnAt: T0 - 60_000, workedMs: 0, reworkCount: 0,
+      sessionId: 'sess-w1', taskId: 'w1', worktree: '/central/wt/w1' }], ready: [], vanished: [], cardGone: [] } as never, deps, async () => true, T0)
+    expect(recoverCard).toHaveBeenCalledWith('/proj', 'w1', 'blocked')
+    await rm(escalationsFile(), { recursive: true, force: true })
+    expect(await openHoldQuestions()).toHaveLength(0)
+    const spawnWorker = vi.fn(async () => sdkSpawn('w1'))
+    const after = { ...deps, spawnWorker, fetchTasks: async () => [card('w1', 'blocked')] }
+    await runDispatchPass(engine, after, T0 + 3000)
+    expect(await openHoldQuestions()).toMatchObject([{ receiptKey: 'hold:native-sess-w1', taskId: 'w1' }])
+    await runDispatchPass(engine, after, T0 + 6000)
+    expect(await openHoldQuestions()).toHaveLength(1)
+    expect(spawnWorker).not.toHaveBeenCalled()
+  })
+})
+
+// Review A N4 (2026-11-28): hold questions were Japanese whatever Settings.language
+// said. They follow it now — Japanese by default (the coordinator's decision for
+// these questions: they were Japanese-only), English when the owner chose English —
+// with the same shape in both, as escalation questions should (CLAUDE.md policy).
+describe('a held operation\'s question follows Settings.language', () => {
+  const JAPANESE = /[\u3040-\u30ff\u4e00-\u9fff]/
+  const seats: HeldOperation['seat'][] = [{ role: 'worker', taskId: 'w1', title: 'Login page' }, { role: 'manager' }, { role: 'supply' }, { role: 'unknown' }]
+  it.each(seats)('ja and en have the same shape for %o (lines, letters offered, no Japanese in en)', (seat) => {
+    for (const sessionId of ['sess-1', undefined]) {
+      const op = heldOp({ seat, sessionId, description: 'Run the whole test suite' })
+      const cause = { ja: '止めたとき', en: 'when it was stopped' }
+      const ja = unconfirmedOperationQuestion(op, cause, 'ja'), en = unconfirmedOperationQuestion(op, cause, 'en')
+      expect(en.plainQuestion.split('\n')).toHaveLength(ja.plainQuestion.split('\n').length)
+      for (const letter of ['A', 'B']) expect(en.plainQuestion.includes(`${letter} "`)).toBe(ja.plainQuestion.includes(`${letter}「`))
+      for (const text of [en.question, en.plainQuestion, en.context]) expect(text).not.toMatch(JAPANESE)
+      expect(ja.plainQuestion).toMatch(JAPANESE)
+      expect(en.context).toContain('When it was stopped.')
+    }
+  })
+  // Review R5 S1: the app's sign-in is the toolbar's person icon; Settings shows only
+  // the Claude CLI's connection. Six owner-facing sentences in three files sent the
+  // owner to Settings to sign in — a false door. This guards the whole class.
+  it('no owner-facing text sends the owner to Settings to sign in', async () => {
+    const { readdir, readFile } = await import('fs/promises')
+    const offenders: string[] = []
+    for (const root of ['src/lib/server', 'src/i18n/messages', 'src/components', 'server/routes', 'skills']) {
+      for (const rel of await readdir(root, { recursive: true }) as string[]) {
+        if (!/\.(ts|tsx|md)$/.test(rel) || /\.test\.tsx?$/.test(rel)) continue
+        const text = await readFile(`${root}/${rel}`, 'utf8')
+        for (const bad of [/設定でサインイン/, /signed in \(Settings\)/, /in Settings that you are signed in/i]) if (bad.test(text)) offenders.push(`${root}/${rel}: ${bad}`)
+      }
+    }
+    expect(offenders).toEqual([])
+    for (const lang of ['ja', 'en'] as const) expect(holdAnswerReason('signIn', lang)).toContain(APP_SIGN_IN_WHERE[lang])
+  })
+  // Review R3-ui S1: the Settings door only while the panel can list it.
+  it('a held ChatGPT conversation names the Settings panel only when that panel can show it', () => {
+    // third argument: the panel's other conditions hold (app sign-in, live connection, work mode off)
+    expect(chatGptHoldHint('this', 'uncertain', true)).toBe(CHATGPT_REVIEW_HOLD_HINT)
+    for (const [account, recovery, panelShows] of [['this', 'uncertain', false], ['other', 'uncertain', true], ['signed-out', 'uncertain', true],
+      ['other', 'invalid', true], ['signed-out', 'invalid', true], ['this', 'invalid', true]] as const) {
+      expect(chatGptHoldHint(account, recovery, panelShows)).toBe(CHATGPT_SIGN_IN_HOLD_HINT)
+    }
+    expect(chatGptHoldHint('unreadable', 'invalid', true)).toBe(CHATGPT_UNREADABLE_HOLD_HINT)
+    expect(CHATGPT_SIGN_IN_HOLD_HINT).not.toContain(CHATGPT_REVIEW_HOLD_HINT)
+    // each is a hold only the owner clears: no "launch it by hand", retried on the owner's timer
+    for (const hint of [CHATGPT_REVIEW_HOLD_HINT, CHATGPT_SIGN_IN_HOLD_HINT, CHATGPT_UNREADABLE_HOLD_HINT]) expect(isOwnerReviewHold(`x(${hint})`)).toBe(true)
+  })
+  it('the refusal reasons exist in both languages', () => {
+    for (const kind of ['unread', 'unreadA', 'onlyA', 'failed', 'signIn', 'running', 'closed'] as const) {
+      expect(holdAnswerReason(kind, 'ja')).toMatch(JAPANESE)
+      expect(holdAnswerReason(kind, 'en')).not.toMatch(JAPANESE)
+    }
+  })
+  it('raised with Settings.language = en or unset, the inbox question is English; ja, Japanese', async () => {
+    const before = (await getSettings()).language
+    try {
+      await setSettings({ language: 'en' })
+      await askAboutHeldOperation('/proj', heldOp({ id: 'tool-en', seat: { role: 'manager' } }))
+      await setSettings({ language: undefined })
+      await askAboutHeldOperation('/proj', heldOp({ id: 'tool-unset', seat: { role: 'manager' } }))
+      await setSettings({ language: 'ja' })
+      await askAboutHeldOperation('/proj', heldOp({ id: 'tool-ja', seat: { role: 'manager' } }))
+      const open = await openHoldQuestions()
+      expect(open.find((e) => e.receiptKey === 'hold:tool-en')?.plainQuestion).toMatch(/^What to decide: The manager/)
+      // unset ⇒ English: the app's one resolver (promptLang.langOf), CLAUDE.md language policy
+      expect(open.find((e) => e.receiptKey === 'hold:tool-unset')?.plainQuestion).toMatch(/^What to decide: The manager/)
+      expect(open.find((e) => e.receiptKey === 'hold:tool-ja')?.plainQuestion).toMatch(/^決めていただきたいこと: マネージャー/)
+      // …and an answer it cannot read is refused in the owner's language.
+      await setSettings({ language: 'en' })
+      const en = open.find((e) => e.receiptKey === 'hold:tool-en')!
+      // (a manager's question offers only A, so the refusal names only A — R3-ui S2)
+      await expect(answerEscalation(en.id, 'ちょっと考えさせて', { isPathAllowed: async () => true })).rejects.toThrow(/^Please answer with "A" alone on the first line/)
+    } finally { await setSettings({ language: before }) }
   })
 })
 
@@ -280,6 +644,11 @@ describe('a worker lost at start says why', () => {
 })
 
 describe('the quota stop does not cut a worker off in the middle of a command', () => {
+  // These cases read the owner's Japanese question: the owner's machine runs
+  // Settings.language = 'ja' (unset ⇒ English, promptLang.langOf).
+  let langBefore: 'en' | 'ja' | undefined
+  beforeEach(async () => { langBefore = (await getSettings()).language; await setSettings({ language: 'ja' }) })
+  afterEach(async () => { await setSettings({ language: langBefore }) })
   const quotaDeps = (over: Partial<Deps>): Deps =>
     stubDeps({
       fetchTasks: async () => [card('q1', 'doing')],
@@ -311,11 +680,19 @@ describe('the quota stop does not cut a worker off in the middle of a command', 
     expect(engine.forcedStopNote).toBeUndefined()
   })
 
-  it('a command that never returns is cut off after the bound — recorded, and named in the notice', async () => {
-    const engine = newEngine({ workers: [sdkWorker()] })
-    const notify = vi.fn()
+  // The real reader names no card here: the cut-off worker is pruned and its
+  // roster row synced away before the next pass reads the hold, and the quota
+  // stop itself put the card back in todo (review 2026-11-28, MUST-FIX 1). The
+  // engine must still find the card — and keep every new worker off it.
+  it('a command the engine itself cut off: recorded, the requeued card is parked on the next pass, its question names the card and the stop, and no new worker takes it', async () => {
+    const engine = newEngine({ workers: [sdkWorker({ sessionId: 'sess-q1' })] })
+    const columns: Record<string, string> = { q1: 'doing' }
     let unconfirmed = 0
-    const deps = quotaDeps({ notify, sdkWorkerFacts: () => ({ toolCallsInFlight: 1 }), savedWorkHold: async () => unconfirmed })
+    const spawnWorker = vi.fn(async () => sdkSpawn('q1-again'))
+    const deps = quotaDeps({ sdkWorkerFacts: () => ({ toolCallsInFlight: 1 }), spawnWorker,
+      fetchTasks: async () => [card('q1', columns.q1)],
+      recoverCard: vi.fn(async (_p: string, id: string, to: 'todo' | 'blocked') => { columns[id] = to; return true }),
+      savedWorkHold: async () => (unconfirmed ? [heldOp({ id: 'tool-q1', sessionId: 'sess-q1', seat: { role: 'unknown' } })] : []) })
 
     await runDispatchPass(engine, deps, T0)
     expect(deps.recoverWorker).not.toHaveBeenCalled()
@@ -325,13 +702,29 @@ describe('the quota stop does not cut a worker off in the middle of a command', 
     await runDispatchPass(engine, deps, T0 + TOOL_BOUNDARY_WAIT_MS)
     expect(deps.recoverWorker).toHaveBeenCalledTimes(1)
     expect(engine.log.some((l) => l.message.includes('stopped in the middle of 1 running command(s) (rate-limit)'))).toBe(true)
+    expect(columns.q1, 'without the owner role nothing records or asks — the old requeue stands').toBe('todo')
 
-    // The hold is read at the top of the NEXT pass (3 s later) and names the stop.
-    await runDispatchPass(engine, deps, T0 + TOOL_BOUNDARY_WAIT_MS + 3000)
-    const told = held(notify)
-    expect(told).toHaveLength(1)
-    expect(told[0].detail).toContain('使用量の上限で止めたとき、実行中だった操作が途中で切れました')
-    expect(told[0].detail).toContain(settingsMessages.ja['settings.recovery.title'])
+    // The hold is read at the top of the NEXT pass (3 s later).
+    for (const at of [3000, 6000, 9000]) await runDispatchPass(engine, deps, T0 + TOOL_BOUNDARY_WAIT_MS + at)
+    expect(columns.q1).toBe('blocked')
+    expect(spawnWorker).not.toHaveBeenCalled()
+    const open = await openHoldQuestions()
+    expect(open).toHaveLength(1)
+    expect(open[0]).toMatchObject({ taskId: 'q1' })
+    expect(open[0].context).toContain('使用量の上限で止めたとき、実行中だった操作が途中で切れました')
+  })
+
+  it('for the owner role the cut-off card is parked ON DISK by the stop itself — a restart before the next pass cannot hand it on', async () => {
+    role.owner = true
+    const engine = newEngine({ workers: [sdkWorker({ sessionId: 'sess-q1' })] })
+    const columns: Record<string, string> = { q1: 'doing' }
+    const deps = quotaDeps({ sdkWorkerFacts: () => ({ toolCallsInFlight: 1 }),
+      fetchTasks: async () => [card('q1', columns.q1)],
+      recoverCard: vi.fn(async (_p: string, id: string, to: 'todo' | 'blocked') => { columns[id] = to; return true }) })
+    await runDispatchPass(engine, deps, T0)
+    await runDispatchPass(engine, deps, T0 + TOOL_BOUNDARY_WAIT_MS)
+    expect(deps.recoverWorker).toHaveBeenCalledTimes(1)
+    expect(columns.q1).toBe('blocked')
   })
 
   // A wait that ended because the worker went back to work used to leave its
@@ -550,7 +943,7 @@ describe('every engine stop waits for a running command', () => {
       recentOutput: (w) => (w.sdkSessionId === 'sdk-q1' ? '[sdk session quota-parked]' : '[sdk session working]'),
       quotaBlocked: (w) => w.sdkSessionId === 'sdk-q1',
       sdkWorkerFacts: (id) => (id === 'sdk-q1' ? { toolCallsInFlight: running } : {}),
-      savedWorkHold: async () => unconfirmed,
+      savedWorkHold: async () => (unconfirmed ? [heldOp({ sessionId: 'sess-q1' })] : []),
       recoverWorker: vi.fn(async () => {
         if (running > 0) unconfirmed = 1
         return { removed: true }
@@ -587,8 +980,8 @@ describe('a worker whose every tool call is refused is reported early', () => {
     expect(engine.log.filter((l) => l.message.includes('tool calls are all refused'))).toHaveLength(1)
     const told = held(notify)
     expect(told).toHaveLength(1)
-    expect(told[0].detail).toContain('「quota me」の担当が、道具(コマンドやファイルの操作)をすべて断られていて')
-    expect(told[0].detail).toContain(settingsMessages.ja['settings.recovery.title'])
+    expect(told[0].detail).toContain('「quota me」のワーカーが、道具(コマンドやファイルの操作)をすべて断られていて')
+    expect(told[0].detail).toContain(OWNER_REVIEW_WHERE)
     // A call that goes through re-arms it; a new run of refusals is told again.
     streak = 0
     await runDispatchPass(engine, deps, T0 + 7000)
@@ -597,22 +990,21 @@ describe('a worker whose every tool call is refused is reported early', () => {
     expect(held(notify)).toHaveLength(2)
   })
 
-  it('under a saved-work hold the hold notice already says so — no second notice for the same cause', async () => {
-    const engine = newEngine({ workers: [sdkWorker({ startedAt: new Date(T0).toISOString() })] })
+  it('a worker refused because its OWN conversation is held is stopped and parked first — its question says it, no second notice', async () => {
+    const engine = newEngine({ workers: [sdkWorker({ sessionId: 'sess-q1', startedAt: new Date(T0).toISOString() })] })
     const notify = vi.fn()
     const deps = stubDeps({
       fetchTasks: async () => [card('q1', 'doing')],
       notify,
-      savedWorkHold: async () => 1,
+      savedWorkHold: async () => [heldOp({ id: 'tool-q1', sessionId: 'sess-q1' })],
       toolDenialStreak: () => TOOL_DENIAL_ALERT,
       lastOutputAt: () => T0,
     })
     await runDispatchPass(engine, deps, T0 + 1000)
     await runDispatchPass(engine, deps, T0 + 4000)
-    const told = held(notify)
-    expect(told).toHaveLength(1)
-    expect(told[0].detail).toContain('新しい作業の開始と司令官の起動を止めています')
-    expect(engine.log.some((l) => l.message.includes('tool calls are all refused'))).toBe(true)
+    expect(held(notify)).toHaveLength(0)
+    expect(deps.recoverCard).toHaveBeenCalledWith('/proj', 'q1', 'blocked')
+    expect(await openHoldQuestions()).toHaveLength(1)
   })
 })
 

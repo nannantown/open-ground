@@ -58,6 +58,16 @@ boundary applies to both SDK and PTY presidents.
   remain distinct. The original persisted input hash format is unchanged.
   A manager's known recovery hold is checked before selecting or recording a
   replacement conversation, so a refused launch cannot overwrite its pointer.
+- Since 2026-11-28 (AUTONOMY-SPEC R-B3, owner decision) an unconfirmed result
+  holds only the conversation that issued it (`receipt.execution.sessionId`,
+  else `body.sessionId`; a receipt naming none still holds everyone). A held
+  commander conversation is not resumed: its next launch opens a fresh
+  conversation whose first message names the operation (tool, time, the call's
+  own description — never its arguments) and says to inspect the current state
+  first. The president's own held conversation is the exception: its seat waits,
+  and its question is in the owner's inbox (`hold:<id>`); once answered, a new
+  president conversation opens with the owner's note. Nothing is replayed, and
+  the held conversation's input is never handed to another actor.
 - The shared SDK/PTY resume prompt checks the live Board and waits for newly
   delivered input. President handoff also treats its old public conversation as
   context only. Neither prompt grants permission to resume an old owner command

@@ -711,19 +711,45 @@ supply desk: 965,390 → 170,458). Every turn below that re-reads the whole, gro
 conversation. Commander b6963523 sat at 346,076 with zero compactions.
 
 **What changed (owner decision: the means differ by role).** One setting,
-`Settings.deskContextCapTokens` (default **300,000**, `0` = off, POST /api/settings
-allowlisted — tune it without a UI). The fill is `sessionContextTokens`
+`Settings.deskContextCapTokens` (default **300,000** for the supply desk and
+**120,000** for the commander since 2026-11-28 — see below; `0` = off, POST
+/api/settings allowlisted — tune it without a UI). The fill is `sessionContextTokens`
 (`claudeUsage.ts`, the number `/context` prints).
 
 | Desk | At the cap | Where | Log line (engine log, next to `consumption:`) |
 |---|---|---|---|
-| Commander | **Recycle at spawn**: a resumable conversation at/over the cap is NOT `--resume`d; a fresh session opens, still booted on `MANAGER_RESUME_INJECTION` (it re-reads Board / workers / engine through the API and git) and the NEW id is recorded, so the next boot resumes the small one | `deskContextCap.recycleDeskSessionIfOverCap` called from `swarmManager.launchNewDesk` (both runtimes) | `司令官の卓を作り直した(文脈 N から 0 へ)` |
+| Commander | **Recycle at spawn**: a resumable conversation at/over the cap is NOT `--resume`d; a fresh session opens, still booted on `MANAGER_RESUME_INJECTION` (it re-reads Board / workers / engine through the API and git) and the NEW id is recorded, so the next boot resumes the small one. **Close at wake** (2026-11-28): an idle SDK desk over the cap is closed instead of woken, and reopened through the spawn above | `deskContextCap.recycleDeskSessionIfOverCap` called from `swarmManager.launchNewDesk` (both runtimes); `swarmManager.idleManagerDeskOverCap` asked by `runIntegratePass` | `司令官の卓を作り直した(文脈 N から 0 へ)` / `司令官の卓を閉じた(待機中・文脈 N が上限超え)…` |
 | Supply officer | **Compact while alive**: a boot loop (60s) types one `/compact` into the live supply PTY once idle | `supplyContextCap.ts` (`startSupplyContextCapLoop`, wired in `server/index.ts`) | `補給官の卓を圧縮した(文脈 N から M へ)` |
 
-- **Commander only at spawn.** A live commander is not interrupted; the cap applies at
-  its next spawn (app restart = every release, the engine's resuscitation, the 司令官
-  button). The response of `POST /api/swarm/manager` carries `recycledFromTokens`
-  when it happened (`resumed:false`).
+- **Commander at spawn — and, since 2026-11-28, at a wake.** A busy commander is never
+  interrupted. The cap applies at its next spawn (the engine's wake, the 司令官 button)
+  and the response of `POST /api/swarm/manager` carries `recycledFromTokens` when it
+  happened (`resumed:false`). It now ALSO applies when the engine is about to wake a
+  commander that is already up (the review notice or a poke, docs/AUTONOMY-SPEC.md
+  R-D3b): an SDK desk whose turn has ended, with no command or background task running
+  and not paused on a limit, at/over the commander cap is closed through the
+  `manager-unresponsive` teardown (`recycleManagerDesk(path, {idleOnly:true})`), and the
+  engine's absent arm reopens it fresh. Guard: `swarmOrchestrator.idleDesks.test.ts`
+  (cap at wake), `deskContextCap.test.ts` (`idleManagerDeskOverCap`). Log:
+  `司令官の卓を閉じた(待機中・文脈 N が上限超え)…`. A relay to a live desk
+  (`manager/say`, the question sweep) does not close it.
+- **The commander has its own default: `MANAGER_CONTEXT_CAP` = 120,000** (2026-11-28,
+  `deskContextCap.ts`; measured 237k average context per commander call against the
+  shared 300,000). `Settings.deskContextCapTokens`, when set, still overrides BOTH desks;
+  the supply desk's default stays 300,000 (`getDeskContextCapTokens`).
+- **Idle boot (2026-11-28, R-D3a).** The commander is no longer revived at boot — its
+  first need starts it (03 §2.3). The president is revived QUIET: `spawnSwarmSupply({quiet})`
+  resumes the PTY with no positional prompt, and `supplyNotice.SUPPLY_RESUME_NOTE` (the
+  obligations `SUPPLY_RESUME_INJECTION` carried, plus "re-read the /supply SKILL.md") is
+  APPENDED to the first line delivered to that desk — appended, because the leading prefix
+  is what `groundMarks.promptAuthor` reads — when both fit one measured paste (473 UTF-16
+  units), else it waits for the next line. The supply compaction below skips a desk still
+  owed its note only until its transcript fill moves — a turn by any path, the owner's
+  seat and Remote Control included (`supplyContextCap` `quietSinceLaunch`, review B-S5;
+  a compaction is a full turn, a desk nobody spoke to stays free). Owner-initiated opens are unchanged. Not
+  carried: the owner typing into the PTY directly, or through Remote Control, reaches the
+  resumed conversation without the note. Guards: `swarmSupply.test.ts` (quiet),
+  `supplyResumeNote.test.ts`.
 - **Supply writes obey the three live-desk refusals** — `noticeDeliverable` reused
   verbatim (not generating / input box read AND empty / no menu). Refused ⇒ next pass.
   After a send the desk is `pending` until its fill drops under the cap; a send that

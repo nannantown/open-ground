@@ -715,6 +715,7 @@ running in a removed worktree". Red measured with each layer reverted separately
 | 状況 | カードの行き先 |
 |---|---|
 | rate-limit | todo(自動リトライ — 作業は branch に保存済み) |
+| 上限で断られた直後に死んだ worker(プールが忘れた後は transcript の `isApiErrorMessage` 行で判定 — 04 章 §3.4.2) | todo(rate-limit と同じ。crash 扱いにしない) |
 | **integration-wait**(ready 到達済みで作業上限に到達)**かつ心拍が blocked を宣言していない** | **review**(司令官の統合待ち列。**blocked へは落とさない** — §5.6) |
 | integration-wait **だが心拍が `blocked:true`**(再作業中に本物の詰まりに当たった) | **blocked**(worker 自身の「人手が要る」申告が優先 — 2026-07-19) |
 | runaway / question | blocked(人手)(~~permission~~ は 0813 に腕ごと削除) |
@@ -759,6 +760,28 @@ running in a removed worktree". Red measured with each layer reverted separately
    諦めるときは error で1行出し、**カードは todo でなく blocked へ退避**(古い作業場の
    claude が生きているかもしれないので、同じカードに2人目を出さない)。
    番人: 同ファイル「a REFUSED teardown keeps the worker and retries」+「stops holding the slot, loudly」。
+
+#### A turn that ended on a transient API error resumes by itself (2026-11-28, AUTONOMY-SPEC R-C2)
+
+**Symptom it ends.** After a lid-close sleep (measured 11-23), a network drop or a provider 5xx, an SDK
+worker's turn ends with `terminal_reason: api_error`; the session sits `waiting` and nothing spoke to it
+until the 10-minute stall arm (nudge, nudge, escalate, reclaim — with commits, `blocked`).
+
+**Now** (`monitorWorkers`, between the quota arm and the question arm). `sdkWorkerFacts(...).apiErrorTurnSeq`
+is set while the session is `waiting` and its newest turn boundary is a `turn_end(api_error)` right after an
+`api_error` event (`swarmResumeEvidence.apiErrorTurnSeq` over the newest frames; a usage refusal distils to
+`quota_refusal` instead and stays the quota arm's). Once the API host answers — the offline hold's own probe
+(`isOnline` / `probeOnline`, 03 章 §5.9, fail-open) — and the automation frame allows it, the worker gets the
+stall nudge's `Continue.` (a new turn; the CLI re-runs no recorded tool call). Journal:
+`worker turn ended on an API error — sent "Continue." (n/3)`. Once per such turn (the boundary's seq is
+kept on the worker as `apiErrorRetry`), at most `API_ERROR_CONTINUE_MAX` = 3 per card attempt (a re-dispatch
+is a new record). Offline ⇒ nothing from this arm; past the three, or offline, the ordinary stall path
+decides, unchanged. The commander gets the same through `sayToManagerDesk` (`managerApiErrorTurn`, counted
+per desk — a fresh desk starts from zero; journal `commander turn ended on an API error …`).
+
+- Guards: `swarmResumeGaps.test.ts` (reachable ⇒ one within the next pass, not twice for one turn;
+  unreachable ⇒ none, then one when it answers; the fourth ⇒ none and the stall ladder pokes; the commander's
+  three-per-desk budget). Red before the fix: `expected "vi.fn()" to be called 1 times, but got 0 times`.
 
 ### 5.4a stall 判定の第3チャネル — sub-agent/transcript mtime(2026-07-23・**7517 の worker 版**)
 

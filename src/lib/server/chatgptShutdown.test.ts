@@ -46,9 +46,12 @@ describe.skipIf(process.platform !== 'darwin')('ChatGPT host process shutdown', 
     await writeFile(program, [
       `import { runChatGptCommand, installChatGptHostReaper } from ${JSON.stringify(resolve('src/lib/server/chatgptTools.ts'))};`,
       `import { installGateGroupReaper } from ${JSON.stringify(resolve('src/lib/server/gateProcess.ts'))};`,
-      // The real entry installs the gate reaper first. Its SIGTERM listener
-      // exits immediately, so the host's exit listener is essential.
+      // Both reapers hook 'exit' only; the server entry owns SIGTERM/SIGINT and
+      // ends with process.exit after its tool-call wait (liveDesks.
+      // exitAfterShutdownOnSignals — pinned in sdkSessionShutdown.test.ts). The
+      // two listeners below stand in for it, so this probe does not load the pools.
       'installGateGroupReaper(); installChatGptHostReaper(); installChatGptHostReaper();',
+      "process.on('SIGTERM', () => process.exit(143)); process.on('SIGINT', () => process.exit(130));",
       "process.on('message', () => process.exit(0));",
       `await runChatGptCommand({ cwd: ${JSON.stringify(cwd)}, command: ${JSON.stringify(`echo $$ > '${marker}'; exec /bin/sleep 30`)}, env: { PATH: '/usr/bin:/bin' }, protectedRoots: [${JSON.stringify(secrets)}], signal: new AbortController().signal, timeoutMs: 35000 });`,
     ].join('\n'))

@@ -419,7 +419,14 @@ the whole boot the same silent way.
   attempt from the automation policy loop (15 s, `automationPolicy.ts`) and
   after a recovery review (the `runtimeRecoveryBoot` re-notify, not awaited so
   an AI-switch settle never waits out a pass). A hold only the owner's review
-  clears (its reason carries `OWNER_REVIEW_HOLD_HINT`) is skipped by the 15 s
+  clears (`isOwnerReviewHold`: its reason carries `OWNER_REVIEW_HOLD_HINT` — the
+  bar's question — or, for a held ChatGPT desk conversation, which raises no
+  inbox question, one of three words `chatGptHoldHint` picks: `CHATGPT_REVIEW_HOLD_HINT`
+  — Settings › 詳細設定 › ChatGPT › 中断した作業の確認 — only while that panel can
+  list it (app sign-in, owner role, live ChatGPT connection to the account that
+  started it, work mode off); otherwise `CHATGPT_SIGN_IN_HOLD_HINT` (those
+  conditions), or `CHATGPT_UNREADABLE_HOLD_HINT` for a history that cannot be read
+  (no door promised); the standing names the same door) is skipped by the 15 s
   timer — each try ran the claude preflight and re-parsed transcripts up to
   32 MB — and retried on that re-notify (`retryBootResumes({ownerReview:true})`)
   or every `BOOT_OWNER_HOLD_RETRY_MS` (5 min), because it can also clear with no
@@ -568,6 +575,10 @@ journal either (`writer` serialises one process only).
   delete `runtime/journal-owner/`). Claims written before carry no holder and
   keep the old rule.
   `attemptHolder` is never shown (`publicConversationReceipt`).
+  A mark the sweep made for a call whose result Claude's transcript recorded (the
+  2026-11-20 worker call above completed normally) is settled from that record on
+  first use since 2026-11-28 (§7.4e, last paragraph); only a call with no recorded
+  result keeps holding.
 - **Builds from before the lock are shut out** (2026-11-24): the journal lives
   at `runtime/receipts-v2.json` (`version: 2`, same shape). Pre-fix builds read
   and replace `runtime/receipts.json` and know no lock, and an old checkout's
@@ -886,7 +897,7 @@ engine 非所有のとき `GET /api/swarm/workers`(union)を引き、生きた�
 孤児保留の3本(2026-09-24 — 孤児確認を外す / 'unavailable' を保留扱いにする / 5分の上限を外す / 毎回ログを書く / anomaly 条件を外す — 各1〜2本が赤)と、`BoardModule.drawerWorker.test.tsx` 4本(生存 id 条件を外す=残骸に画面が出る /
 中断分岐を外す=実行ボタンが戻る — 各赤)。
 
-### 7.4e Saved-work hold — no dispatch into a project with an unconfirmed operation (2026-11-23)
+### 7.4e Saved-work hold — an unconfirmed operation holds only its own conversation (2026-11-23, scoped 2026-11-28)
 
 **Symptom it ends.** A project in the automation frame where nothing starts: every
 dispatched worker is "worker lost" within seconds (the card lands in `blocked` after
@@ -895,28 +906,80 @@ refused with `Owner authorization or durable action recording is unavailable. No
 action was authorized.`, and nothing says why. Measured 2026-11-09 → 11-23 in five
 projects.
 
-**Cause.** One operation whose result nobody confirmed (an `uncertain` receipt, or an
-`executing` one whose actor is gone) holds the whole project: every SDK launch asserts
-`assertNoUncertainRuntimeActions(cwd, false)` at its first step and every PreToolUse
-hook asks the same (`runtimeActionReceipts.ts`). That safeguard is correct and is not
-weakened — nothing retries, clears or bypasses the operation; only the owner's review
-does. The engine simply did not know.
+**Cause, and the position reversed on 2026-11-28.** One operation whose result nobody
+confirmed (an `uncertain` receipt, or an `executing` one whose actor is gone) used to
+hold the WHOLE project: every SDK launch and every PreToolUse asked
+`assertNoUncertainRuntimeActions(cwd, false)` per project. This section used to call
+that "the safeguard, and correct". The rule worth keeping is narrower — *an unknown
+result is never run again automatically, and its input is never handed to another
+actor* — and the only actor that can run an unknown call again is the conversation
+that issued it. Stopping every other worker, the commander and the president
+protected nothing more and turned eight stale receipts into days without automation
+in seven projects (AUTONOMY-SPEC §1.1). Owner decision 2026-11-28 (§7-1 = A): the
+predicate takes the asking conversation's session (`listUncertainRuntimeActions(cwd,
+includeExecuting, anyOwner, sessionId)`); a receipt holds only
+`receipt.execution.sessionId` (`body.sessionId` for old receipts), and one that names
+no session still holds everyone. The audit's PreToolUse, `sdkSession.subscriptionQuery`,
+the two turn-end checks in the `sdkSession` pump and `swarmManager.launchNewDesk` ask
+with their own session; `drainSwarmRuntime`'s whole-app asserts are unchanged.
 
-**What the engine does now** (`refreshSavedWorkHold`, step 3a of `runDispatchPass`,
-predicate + wording in `savedWorkHold.ts`):
+**What the engine does now** (`refreshSavedWorkHold`, read at step 1d of
+`runDispatchPass`, wording in `savedWorkHold.ts`), once per held operation:
 
-- While the project holds such an operation the fill stage dispatches nothing — cards
-  stay in `todo` — and the commander is not woken (the wake reflex's absent arm
-  returns early, so the three strikes are not spent on a launch that must throw).
-  Monitor / promote / reclaim keep running.
-- On the ENTERING edge only: one journal line (`saved-work hold — N operation(s) …`)
-  and one `automation-held` fatal notification, which reaches the president's desk
-  through the existing notice lane. The detail says what is happening and where to
-  press what. Cleared by the first pass that reads zero (`saved-work hold lifted`).
-- The words name the Settings screen by its own labels, read from the i18n table
-  (`OWNER_REVIEW_WHERE` = 設定 ›「詳細設定」›「ChatGPT」›「中断した作業の確認」). The
-  old hint said 「会話の復旧」, a heading that screen does not have.
-- After a restart the boot resume owns the same hold (`savedSwarmRuntimeHold`, §7.4b2).
+- A live worker on that conversation is stopped through the normal teardown (its work
+  saved on the branch) and is never resumed; its card goes to `blocked` and is kept
+  out of dispatch while the operation holds. Every other card dispatches, and the
+  commander's wake is not held.
+- ONE question waits in the owner's inbox (the yellow hand): `openEscalation` with
+  `receiptKey: hold:<receipt id>` (deduped while open, also across restarts), no
+  worker address, the plain three-part shape (`unconfirmedOperationQuestion`: who —
+  ワーカー / マネージャー / 社長, the screen's names —, when, what — the call's own
+  `description` input only when every word of it is plain (`plainDescription` drops a
+  description with any path, option, identifier, branch name or command word whole),
+  never its arguments). Every answer records the owner's decision through the same
+  review the Settings panel writes (`answerHeldOperation` → `reviewConversationReceipt` /
+  `reviewNativeConversationRecovery`, note = the answer, operation id = the question's
+  id; a receipt still `executing` whose actor is gone is first recorded `uncertain`,
+  the write `runtimeRecoveryIssues` makes) and calls `notifyRuntimeRecoveryChanged()`.
+  What the answer does (review 2026-11-28 — A and B used to do the same thing):
+  - a worker's card: two options. A 「引き継いで続ける」 puts the card back in `todo`
+    with its branch (a NEW conversation continues the saved work; it gets the owner's
+    answer through the next-dispatch lane); B 「初めからやり直す」 puts it back WITHOUT
+    its branch (`unparkBlockedCard {fresh}`), so the next dispatch starts from the main
+    line — the old branch stays in git.
+  - a desk (manager / president) or an unattributed conversation: ONE option, A
+    「確認した」 — a held desk conversation is never resumed, so a second option would
+    promise nothing. The answer drops the desk's saved pointer (native holds: the
+    manager's only; the president's next open reads the review and opens fresh with it).
+  - the answer is APPLIED before it is recorded (`answerEscalation` phase 0): one that
+    picks nothing (`readHoldChoice` — THE CONTRACT since review R2 N-M2: the first line
+    is the letter alone, `A` or `B`, NFKC-folded, optionally in 「」/quotes/brackets and
+    followed by 。.、,; the lines below are the owner's note; nothing is guessed out of
+    prose, after two rounds of widening each read a negation such as 「AでなくB」 as a
+    letter), a B where only A is offered (a desk's question), a held conversation still
+    running, or a review that did not take is refused (409, a plain sentence in the
+    owner's language) and the question stays open. The owner can answer in the bar itself (`HoldQuestionDialog`,
+    opened from the 「あなたへの質問」 count while a `hold:` question is open) — the door
+    when the president's own conversation is the held one.
+- The question says the rest of the project goes on only when the operation names its
+  conversation; one that names none holds every launch here (`'all'`, below) and says so.
+- A commander conversation that is held is not resumed: its next launch opens a
+  FRESH conversation whose first message names the operation and says to look at the
+  current state first (`heldOperationOpening`), and asks the owner (both the receipt
+  and the native branch; the native branch not again once the review marker exists).
+  Only the president's own held
+  conversation waits for the answer (the owner's history lives there); once answered,
+  a new president conversation opens with the note.
+- An operation that stops holding without an answer (the transcript recorded its
+  result after all, R-B1) has its question withdrawn and its card unparked.
+- Only when the guard's question cannot be answered at all (owner sign-in gone,
+  record unreadable), or an operation names no conversation, does the whole project
+  hold (`engine.savedWorkHold`; the first told once it lasts, the second through its
+  question).
+- `OWNER_REVIEW_WHERE` names the question inbox by the bar's own label
+  (「あなたへの質問」). At boot `savedSwarmRuntimeHold` is per conversation the same way
+  and raises the questions; `adoptResumeCandidates` never `--resume`s a held or
+  natively unfinished worker conversation (card → `blocked`, question).
 
 **The engine no longer makes such operations itself.** Its quota stop used to cut a
 worker off in the middle of a running command (JobSearch, 2026-11-23 16:29: a test run
@@ -924,12 +987,48 @@ started 3 minutes earlier), which left exactly this kind of receipt and stopped 
 project. Every engine stop — the quota stop, the execution ceiling, the stall reclaim —
 now waits while the worker's session reports a tool call in flight
 (`awaitToolBoundary`, reading `sdkWorkerFacts(...).toolCallsInFlight`), up to
-`TOOL_BOUNDARY_WAIT_MS` (15 min); a parked worker costs nothing. A wait belongs to ONE
+`TOOL_BOUNDARY_WAIT_MS` (30 min in code — longer than one full test run; 15 cut that
+very command off, and this line said 15 until 2026-11-28); a parked worker costs nothing. A wait belongs to ONE
 stop: a worker the engine no longer wants to stop drops its stamp at the end of that
 pass (`monitorWorkers`' sweep), so a later stop waits from zero. A stop that still cuts
 a command off (the bound elapsing) journals `worker stopped in the middle of N running
 command(s) (<reason>)` and the saved-work notice it causes names that stop as the
 reason.
+
+**Nor do the app's own stops** (AUTONOMY-SPEC R-B2, 2026-11-28). Owner quit, "Restart
+now", an update install and the engine switch all reach the server as SIGTERM from
+`electron/autoUpdate.js` `terminateChild`. The server used to exit on the spot (the gate
+and host reapers' own signal listeners called `process.exit`), cutting off whatever was
+running. Now `server/index.ts` is the one owner of SIGTERM/SIGINT
+(`liveDesks.exitAfterShutdownOnSignals`; the reapers hook `exit` only):
+`sdkSession.beginShutdown()` flips a flag that every PreToolUse callback of an SDK launch
+reads first — `subscriptionQuery` wraps them all (`refuseWhileStopping`), the receipt
+audit's own included, so a NEW call is refused before anything is claimed ("OPEN GROUND
+is restarting; this call did not run." — no receipt, nothing to confirm; a separate
+refusing hook would not do, the CLI runs a call's hooks side by side). It resolves when
+`sdkToolCallsInFlight()` is 0 or at `SHUTDOWN_TOOL_GRACE_MS` (20 s), and the process
+exits; `exit` runs both reapers. Electron's SIGKILL comes at `CHILD_SIGTERM_GRACE_MS` =
+25 s (was 5 s, inside the wait). A call that outlives the 20 s is still cut and its
+receipt decides at the next start, as before. Nothing new starts during the wait (review
+C-S2): `spawnSdkSession` throws `SHUTDOWN_LAUNCH_REFUSAL` ("OPEN GROUND is shutting down,
+so no new conversation was started." — the owner's own opens too, shown in their
+launch-failed line), and `runDispatchPass` returns at once on `sdkShutdownBegun()`, so no
+card is claimed and no worker bills a first turn only to be killed at exit. A "Restart
+now" teardown is tracked by the Electron quit gate (`createQuitGate.track`, review
+C-S1): a ⌘Q during the wait is held. Not covered: an SDK launch with no PreToolUse hook
+at all, and — **known limitation (review A S4, AUTONOMY-SPEC R-B2)** — PTY desks: they have
+no receipts and no in-process hook, so a quit does not wait for a command running in the
+president's PTY (it is cut off), and a PTY launch is not refused. A cut-off PTY call becomes
+ONE held operation for the president's conversation alone (the native check), whose question
+the owner answers in the bar's 「あなたへの質問」 (`HoldQuestionDialog`) without the president;
+the seat then opens a new conversation. **Note (review A N5, not fixed):** a background Bash
+(`run_in_background`) has its receipt delivered when it starts, and `beginShutdown` does not
+wait for the background process — a quit kills it and nothing holds or asks. It predates
+the autonomy work and is outside the spec. Guards:
+`sdkSessionShutdown.test.ts`, `swarmOrchestrator.shutdown.test.ts`,
+`swarmManager.spawn.test.ts` ("while the server is stopping"), `autoUpdate.test.ts`
+("terminateChild — the hard kill cannot land inside the server's tool wait"; the quit
+gate's Restart-now cases), each measured red against the pre-fix code.
 
 **A usage refusal is not an abort** (2026-11-24, `sdkSession.ts` pump). A refused turn
 used to end its own session whenever ANY command in the project was still running
@@ -954,8 +1053,131 @@ session's own exit reason (before: nothing for SDK workers), and a failed comman
 wake journals `司令官を起動できませんでした — <reason>` instead of blaming model tiers.
 
 Guards: `swarmSavedWorkHold.test.ts`, `runtimeActionReceipts.test.ts` ("a usage refusal
-while a command is still running…"), `swarmOrchestrator.test.ts` ("the failed wake and
-the give-up say WHY…") — each measured red against the pre-fix code.
+while a command is still running…", "an unknown result holds only the conversation that
+issued it"), `swarmEscalations.test.ts` ("a held operation is one question…"),
+`swarmManagerContextCap.test.ts` ("a held commander conversation opens fresh…"),
+`swarmOrchestrator.resumeEngines.test.ts` (R-B3 / R-B5 blocks), `swarmOrchestrator.test.ts`
+("the failed wake and the give-up say WHY…") — each measured red against the pre-fix code.
+
+**A result the transcript recorded is not unconfirmed** (2026-11-28, AUTONOMY-SPEC
+R-B1). Measured on the owner's machine: seven of the eight open holds were tool calls
+whose result Claude's own transcript had recorded — four vetoed by a settings hook
+(`swarm-guard.sh`) inside a commander's sub-agent, one `Exit code 137`, two normal
+results whose closing callback was lost. A receipt closed only from live callbacks
+(`PostToolUse`, `PostToolUseFailure`, the two `observeSdkMessage` shapes), so each of
+those held its project for days. Now `listUncertainRuntimeActions` — the one predicate
+behind the launch guard, every PreToolUse, `savedWorkHolds` and the boot
+`savedSwarmRuntimeHold` — and the review list (`runtimeRecoveryIssues`) first pass
+every tool receipt that would hold (`uncertain`, or `executing` with its actor gone)
+through `settleHeldToolReceipts`: `runtimeToolEvidence.findToolOutcome` reads
+`<dir>/<sessionId>.jsonl` and `<dir>/<sessionId>/subagents/*.jsonl` (32 MB per file, a
+file that changes during the read is skipped), and a `tool_result` beside the claimed
+`tool_use` (same tool, same argument hash) that is not interrupted settles the receipt
+as `delivered` `{confirmed, failed: is_error, source: 'native-transcript',
+automaticReplay: false}` (`conversationReceipts.settleReceiptFromEvidence`, the only
+writer besides the owner's review that moves `uncertain → delivered`). A call started
+without a result, an interrupted result — including the stand-in a resumed session
+writes, `[Tool call interrupted: the session ended …]` with `toolDenialKind:
+'interrupted'`, and any denial kind not yet measured — a receipt its own callback
+recorded as interrupted, or a file that cannot be read keep the hold: nothing is run
+again, and owner-reviewed or rejected receipts are never rewritten.
+**Only a denial proven to precede the run counts as "never ran"** (review A-M1,
+2026-11-28; `runtimeToolEvidence.resultInterrupted`): `permission-rule` (every local
+line is a PreToolUse veto or a pre-call check) and `automode-blocked`, or any kind with
+`toolDenialBeforeRun: true`. `user-rejected` is NOT proof by itself: the CLI writes it
+for a prompt refusal AND for a call an interrupt or a shutdown cut off while running
+(a real worker's Bash, 163 s in, CLI 2.1.329, no flag); `interruptedByShutdown` (the
+CLI's own loader relabels it `interrupted`) and `toolDenialAfterRun` are interrupted
+too. Old CLIs that never wrote the flag hold — the safe side. The native resume check
+(`swarmNativeTranscript.inspect`) reads results the same way: an interrupted result
+keeps its call unfinished until a later assistant line a real model wrote, from a
+DIFFERENT response (`message.id`) than the cut call's, shows the conversation already
+went on past it. A synthetic / API-error / model-less line never counts, nor does a
+later block of the same response (written while it was still streaming, before the
+model saw the result) or a line with no `message.id`. A session whose
+`PostToolUse` write failed (`recordingFaults`, which denied every later call) heals
+the same way on its next call. New receipts carry `cwd` (the transcript folder) and
+`inputValueHash`; older ones are found by session id across the projects folder.
+The JSONL layout is not an official contract (ledger row "transcript JSONL"): a
+format change makes the lookup miss and the hold stands, as before. Guards:
+`runtimeToolEvidence.test.ts` (one fixture per measured shape), the R-B1 block in
+`runtimeActionReceipts.test.ts` and `runtimeRecovery.test.ts` — red measured before
+the fix and under each guard's mutation.
+
+### 7.4f Standing and the stall watchdog — no stop without a reason (2026-11-28, AUTONOMY-SPEC U5)
+
+**What it ends.** Every hold above (§7.4b2 boot map, §7.4e saved-work hold, the SDK spawn
+backoff, the quota park, the offline hold, the manual stop) told the owner through its own
+path, so a stop with a cause nobody had written a notice for was silent until the owner found
+it. Card 1123-151658 alone listed 13 such conditions, each patched one at a time.
+
+**One function says where a project stands.** `standingOf(facts)` (`swarmStanding.ts`, pure)
+returns `state` (`running` | `needs-owner` | `waiting` | `idle` | `off`), `needs`
+(`dispatch` = todo cards `selectDispatch` would start, `integrate` = swarm review cards not
+parked for a human — high-risk holds and failed panels excluded), `progressedAt` and
+`reasons[]` of `{kind, plain, until?, ownerAction?}`. The facts come off the engine
+(`standingFactsOf` in `swarmOrchestrator.ts`); one adapter per hold field turns a field into a
+reason, in the owner's language from `projectPanel.standing.*`:
+
+| Field | Kind | State |
+|---|---|---|
+| open owner escalations | `owner-question` | needs-owner |
+| `engine.savedWorkHold` (counted, or the guard's question unanswerable) | `owner-question` (U2 turns it into an inbox question) | needs-owner |
+| `spawnBlockSig === 'none-allowed'` | `models-off` | needs-owner |
+| boot-resume entry with a held `reason` (`ownerOnly` ⇒ owner action) | `boot-pending` | waiting / needs-owner |
+| `manualStop` or the persisted record | `manual-stop` | off |
+| frame policy enabled and not allowed | `outside-frame` | off |
+| `parkUntil` in the future (all-cooling park and the quota defer) | `usage-limit` + `until` | waiting |
+| `sdkSpawnHold.until` in the future | `spawn-backoff` + `until` | waiting |
+| `managerResume.offlineHold` | `offline` | waiting |
+| `engine.budgetHold` (the hold that lifts soonest; else the note), or `engine.commanderReserveHold` (the owner's weekly reserve holding the commander's wake, 04 §5.10.3) | `window-headroom` / `weekly-pace` / `weekly-reserve` + `until`; `usage-unknown` (note only) | waiting |
+| `engine.automationBlocked` (inside the frame, automatic operation not allowed — the owner signed out, the role lost). Outside the frame the same flag is set (`automaticOperationAllowed` is false there too) and is NOT reported: that project is `outside-frame` / off (review R2-M1) | `owner-question` (the sign-in sentence + where to check) | needs-owner |
+| the commander's SDK desk paused on a usage refusal (`sdkQuotaPause`; a per-model limit cools only its tier, so no park says it) — while a review card waits | `usage-limit` + `until` (the manager's sentence) | waiting |
+| `engine.dispatchFailures` — a todo card whose streak already told the president | `spawn-backoff` (no `until`: it retries every pass) | waiting |
+| `managerResume.fatalFired` / `unresponsiveFatalFired` ('manager-unrevivable' / 'manager-unresponsive' rang) — while a review card waits | `commander-down` + where to look | needs-owner |
+
+A hold of the engine counts only while the engine runs; the dispatch holds (usage limit,
+backoff, offline) only while work waits for them. Ranking: needs-owner > running (a live
+counted worker, or the commander mid-turn) > off > waiting > running-within-the-window > idle.
+A budget hold is never mirrored into `parkUntil`, so it is never told as `usage-limit` (review
+2026-11-28 B-S1).
+
+**The watchdog** (`watchStanding`, called once per pass in `runEnginePass` after
+`detectAnomalies`): a board column signature that changes, a live worker or the commander
+mid-turn is progress — and so is the commander waiting on its own background command (its full
+test run, which og-manage tells it to wait for: `deps.commanderBackgroundTaskAt`, read from the
+desk's transcript only when a review card is the only need and nothing else serves; counted only
+within the run grace, `backgroundTaskAliveAt` / `BG_TASK_GRACE_MS` 90 min, so a start whose end
+record never landed cannot silence the watchdog — review R2-M2; the cap-at-wake busy check in
+`idleManagerDeskOverCap` uses the same grace). A budget hold whose `until` has passed (left by a pass
+that returned early) is not reported. The last four rows
+above and this rule were added after review 2026-11-28 B-S3: each of those states read as
+`unexplained` after 15 quiet minutes, a false defect report and a second notice where the hold
+already had its own. Any state other than `running` restarts the quiet clock (a named hold,
+off, nothing needed). When a need stands `STANDING_STALL_MS` (15 min) with no progress and no
+reason, `standingOf` adds `unexplained`; the engine writes ONE journal line
+(`automation stalled — work needed (dispatch N, integrate N) with no progress since …; quiet
+since …, N counted worker(s), anomalies […]`) and raises ONE `automation-stalled` fatal
+notice per episode (bell + president; no OS toast). Progress, a reason, or the need going away
+ends the episode. Existing notices stay — this only catches what none of them names. The
+memory is in-memory (`engine.standingWatch`): the notice store keys by occurrence, so after a
+restart the same stall is told again once its 15-minute window has passed.
+
+**Where the owner sees it.** `GET /api/swarm/standing?path=` (owner-gated, read-only) — the
+president retells `reasons[].plain` word for word (`skills/supply/SKILL.md` "Status" ⑤). The
+Ground lamp rows carry `standing.{state,reasons}`; `groundLamp` draws `needs-owner` as the
+hand and `waiting` as a muted lucide `Clock` (`text-ink-faint`, no band, no label, the reasons
+as hover text — owner decision §7-4 = A). The agent-team bar polls the route every 10 s and
+draws the same clock beside its switch.
+
+Guards (each measured red, mutations restored to identical bytes): `swarmStanding.test.ts`
+(every field alone ⇒ its kind; removing each adapter turns exactly that field's cases red —
+measured for every adapter; the watchdog fires once, progress ends the episode, a named hold never
+fires; wiring removed / latch removed / clock not restarted / progress never seen ⇒ red),
+`server/routes/__tests__/swarmStanding.routes.test.ts` (fixtures × ja/en; route removed ⇒ 404),
+`groundLamp.test.ts` / `groundLamps.test.ts` (precedence), `SwarmBottomBar.test.tsx`,
+`ProjectCard.test.tsx`, `statusColors.test.ts` (the clock wears no state colour),
+`supplyNotice.test.ts` (the skill reads ⑤ word for word).
 
 ### 7.5 passInFlight / pendingDispatch は外から見えない
 

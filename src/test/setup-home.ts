@@ -64,6 +64,10 @@ const sandbox = mkdtempSync(join(baseTmp, TEST_HOME_PREFIX))
 const tmpHome = join(sandbox, 'home')
 mkdirSync(tmpHome)
 process.env.OPENGROUND_HOME = tmpHome
+// Claude transcripts too: code that derives a session's JSONL path from a test
+// cwd used to create a folder per run under the real ~/.claude/projects (about
+// 1,900 had piled up by 2026-11-28). claudeProjectsRoot() follows this variable.
+process.env.CLAUDE_CONFIG_DIR = join(tmpHome, '.claude')
 for (const key of ['TMPDIR', 'TMP', 'TEMP']) process.env[key] = sandbox
 // Registered first, so under vitest's 'stack' hook order it runs LAST — after
 // every afterAll of the file itself.

@@ -105,9 +105,9 @@ describe('collectUsageBreakdown — desk sessions leave "your projects"', () => 
       ]),
     })
     expect(b.rows).toEqual([
-      { model: 'claude-opus-5', source: 'manager', tokens: 100 },
-      { model: 'claude-opus-5', source: 'supply', tokens: 30 },
-      { model: 'claude-opus-5', source: 'project', tokens: 7 },
+      { model: 'claude-opus-5', source: 'manager', tokens: 100, cacheRead: 0 },
+      { model: 'claude-opus-5', source: 'supply', tokens: 30, cacheRead: 0 },
+      { model: 'claude-opus-5', source: 'project', tokens: 7, cacheRead: 0 },
     ])
   })
 
@@ -118,7 +118,7 @@ describe('collectUsageBreakdown — desk sessions leave "your projects"', () => 
     mkdirSync(proj)
     writeFileSync(join(proj, 'desk-m.jsonl'), rec(now - 60_000, 'a', { input_tokens: 100 }, 'claude-opus-5') + '\n')
     const b = await collectUsageBreakdown({ projectsDir: dir, days: 1, now, projectDirs: ['-Users-k-dev-QRmenu'] })
-    expect(b.rows).toEqual([{ model: 'claude-opus-5', source: 'project', tokens: 100 }])
+    expect(b.rows).toEqual([{ model: 'claude-opus-5', source: 'project', tokens: 100, cacheRead: 0 }])
   })
 
   it('a worker worktree session is a worker even if the ledger (wrongly) names it', async () => {
@@ -128,7 +128,7 @@ describe('collectUsageBreakdown — desk sessions leave "your projects"', () => 
     mkdirSync(wt)
     writeFileSync(join(wt, 'w.jsonl'), rec(now - 60_000, 'a', { input_tokens: 5 }, 'claude-opus-5') + '\n')
     const b = await collectUsageBreakdown({ projectsDir: dir, days: 1, now, deskSessions: new Map([['w', 'manager']]) })
-    expect(b.rows).toEqual([{ model: 'claude-opus-5', source: 'swarm-worker', tokens: 5 }])
+    expect(b.rows).toEqual([{ model: 'claude-opus-5', source: 'swarm-worker', tokens: 5, cacheRead: 0 }])
   })
 })
 

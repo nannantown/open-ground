@@ -169,6 +169,7 @@ describe('the rows drive the lamp the owner asked for', () => {
           ...(r.openQuestions === undefined ? {} : { openQuestions: r.openQuestions }),
           liveWork: r.liveWork,
           commanderWorking: r.commanderWorking === true,
+          ...(r.standing ? { standing: r.standing.state } : {}),
         })
 
   it('every task done ⇒ the card is DARK, desks or no desks', async () => {
@@ -263,6 +264,57 @@ describe('the rows drive the lamp the owner asked for', () => {
     }
     expect(await lampOf(['/repo/a/sub'])).toEqual(['working', null])
     expect(await lampOf([])).toEqual([null, null])
+  })
+
+  // R-E2 (owner decision 2026-11-28, §7-4 = A): a project held for a reason that
+  // lifts by itself shows a muted clock — the standing says so, and the row
+  // carries it. Before this, in-flight work read 'working' while nothing moved.
+  const WAITING = { state: 'waiting' as const, needs: { dispatch: 1, integrate: 0 }, reasons: [{ kind: 'usage-limit' as const, plain: 'limit', until: 1 }] }
+  it('a waiting standing rides the row and draws the clock over in-flight work', async () => {
+    const asked: string[] = []
+    const seen: unknown[] = []
+    const { lamps } = await readGroundLamps({
+      projects: async () => [P[0]],
+      boardFor: async () => ({ ...b(1, 1), tasks: [] }),
+      openQuestions: async () => new Map([['/repo/a', 0]]),
+      liveWorkFor: async (p) => {
+        asked.push(p)
+        return false
+      },
+      standingFor: (canon, ctx) => {
+        seen.push({ canon, tasks: ctx.tasks, openQuestions: ctx.openQuestions })
+        return WAITING
+      },
+    })
+    expect(lamps[0].standing).toEqual({ state: 'waiting', reasons: WAITING.reasons })
+    expect(lampFor(lamps[0])).toBe('waiting')
+    // The standing is computed from THIS request's board and inbox reads.
+    expect(seen).toEqual([{ canon: '/repo/a', tasks: [], openQuestions: 0 }])
+    // A live pane would still outrank the clock, so it is asked even with work in flight.
+    expect(asked).toEqual(['/repo/a'])
+  })
+
+  it('…and a pane generating under that clock still reads running', async () => {
+    const { lamps } = await readGroundLamps({
+      projects: async () => [P[0]],
+      boardFor: async () => b(1, 1),
+      openQuestions: async () => new Map(),
+      liveWorkFor: async () => true,
+      standingFor: () => WAITING,
+    })
+    expect(lampFor(lamps[0])).toBe('working')
+  })
+
+  it('no standing (no engine in memory) adds nothing to the row', async () => {
+    const { lamps } = await readGroundLamps({
+      projects: async () => [P[0]],
+      boardFor: async () => b(1, 1),
+      openQuestions: async () => new Map(),
+      liveWorkFor: async () => false,
+      standingFor: () => undefined,
+    })
+    expect(lamps[0]).not.toHaveProperty('standing')
+    expect(lampFor(lamps[0])).toBe('working')
   })
 
   it('an open question ⇒ question, even while the swarm runs', async () => {

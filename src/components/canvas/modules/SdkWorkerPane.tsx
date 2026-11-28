@@ -1034,6 +1034,9 @@ export const EventRow = ({ ev, t }: { ev: SdkEvent; t: (k: string) => string }) 
         </div>
       )
     case 'rate_limit':
+      // A status-only event (no share stated) has nothing to show here; a
+      // refusal is already shown by its quota_refusal line.
+      if (ev.utilization == null) return null
       return (
         <div className="font-mono text-micro text-ink-faint">
           {t('projectPanel.swarm.sdk.rateLimit')} {Math.round(ev.utilization * 100)}%

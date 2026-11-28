@@ -24,6 +24,7 @@ import { randomUUID } from 'crypto'
 import { resolve as pathResolve, sep } from 'path'
 import { currentRuntimeOwnerKey } from './runtimeOwner'
 import { resolveCoolingUntil, spentUsageResetsAt } from './swarmQuota'
+import { recordRateLimitEvent, rejectedResetOf, rejectedUntil } from './usageWindows'
 import {
   distillSdkMessage,
   isWorkEvidence,
@@ -246,6 +247,9 @@ interface Entry {
   activeActed?: boolean
   /** The newest `quota_refusal` sentence this session saw. */
   lastRefusalText?: string
+  /** The reset its newest `rate_limit` event stated, when that event was a
+   *  refusal (usageWindows.rejectedResetOf) — the wall that refused THIS session. */
+  ownRejectedUntil?: number | null
   gateWake?: (() => void) | null
   closed: boolean
   /** When the pump finished (ms epoch) — the retention clock. Unset while live. */
@@ -566,10 +570,11 @@ const subscriptionQuery: SdkQueryFn = (params) => {
       const source = { ...((params.options.env as NodeJS.ProcessEnv | undefined) ?? process.env) }
       if (typeof params.options.pathToClaudeCodeExecutable === 'string') source.OPENGROUND_CLAUDE_BIN = params.options.pathToClaudeCodeExecutable
       const env = await assertClaudeSubscriptionLaunch(params.options.cwd, source)
-      await assertNoUncertainRuntimeActions(params.options.cwd, false)
+      // R-B3: only this conversation's own unknown results refuse its launch.
+      await assertNoUncertainRuntimeActions(params.options.cwd, false, id)
       const audit = await createClaudeRuntimeToolAudit(params.options.cwd, id, params.options.hooks, typeof expectedOwner === 'string' ? expectedOwner : undefined)
       if (stopped) return
-      inner = sdk.query({ prompt: params.prompt, options: { ...vendorOptions, env, hooks: audit.hooks } })
+      inner = sdk.query({ prompt: params.prompt, options: { ...vendorOptions, env, hooks: refuseWhileStopping(audit.hooks) } })
       for await (const message of inner) {
         await audit.observeSdkMessage(message)
         yield message
@@ -685,7 +690,13 @@ const refuseInput = async (e: Entry): Promise<void> => {
   // turn admitted after that met the same wall (review 2026-11-26).
   const now = Date.now()
   const a5 = e.provider === 'chatgpt' ? null : spentUsageResetsAt((await import('./claudeUsageCli')).peekCachedUsage())
-  const until = resolveCoolingUntil({ ptyText: e.lastRefusalText, a5ResetsAt: a5, now, fresh: true })
+  // The SDK's structured refusal (rate_limit_event → usageWindows) states the
+  // reset outright: this session's own refusal event first, else an
+  // account-wide window another session saw refused — never another session's
+  // per-model week (review 2026-11-28 B-M1). The sentence chain below is for a
+  // session that saw neither.
+  const own = e.ownRejectedUntil != null && e.ownRejectedUntil > now ? e.ownRejectedUntil : null
+  const until = (e.provider === 'chatgpt' ? null : own ?? rejectedUntil(now)) ?? resolveCoolingUntil({ ptyText: e.lastRefusalText, a5ResetsAt: a5, now, fresh: true })
   e.quotaPause = { until, ...(e.lastRefusalText ? { text: e.lastRefusalText } : {}) }
   e.inputPaused = true
   // A message the limit refused before the desk did anything with it was never
@@ -826,6 +837,60 @@ export const sdkToolCallsInFlight = (): number => {
   return n
 }
 
+// ── stops that wait (AUTONOMY-SPEC R-B2, 2026-11-28) ─────────────────────────
+// Every stop the app starts (owner quit, "Restart now", update install, engine
+// switch) reaches this process as SIGTERM from electron/autoUpdate.js
+// terminateChild. Exiting on the spot cut off whatever command was running, and
+// its receipt then held the whole project at the next start. So a stop first
+// refuses NEW calls before any receipt is claimed (refuseWhileStopping), then
+// waits for the calls already running. A call that outlives the bound is cut as
+// before. The signal wiring is liveDesks.exitAfterShutdownOnSignals.
+
+/** How long a stop waits for tool calls in flight. Electron's hard kill
+ *  (CHILD_SIGTERM_GRACE_MS in electron/autoUpdate.js) is this plus 5 s, pinned
+ *  by server/__tests__/autoUpdate.test.ts, so it cannot land inside the wait. */
+export const SHUTDOWN_TOOL_GRACE_MS = 20_000
+const SHUTDOWN_POLL_MS = 200
+/** What the model reads when a call is refused because the app is stopping. */
+export const SHUTDOWN_DENIAL = 'OPEN GROUND is restarting; this call did not run.'
+/** What a launch is refused with once a stop has begun. The owner reads it in a
+ *  launch-failed line, so plain words. */
+export const SHUTDOWN_LAUNCH_REFUSAL = 'OPEN GROUND is shutting down, so no new conversation was started.'
+// Process-local on purpose (not globalThis): a stop belongs to this process only.
+let shutdown: Promise<void> | null = null
+
+/** Has a stop begun? The engine reads it so no pass dispatches during the wait. */
+export const sdkShutdownBegun = (): boolean => shutdown !== null
+
+/** One-way and idempotent: refuse new tool calls AND new launches
+ *  ({@link spawnSdkSession}) from now on — a conversation started now would bill
+ *  its first turn only to be killed at exit — and resolve when no call is in
+ *  flight or after {@link SHUTDOWN_TOOL_GRACE_MS}, whichever is first. */
+export const beginShutdown = (): Promise<void> => shutdown ??= new Promise<void>((resolve) => {
+  const done = () => { clearInterval(poll); clearTimeout(bound); resolve() }
+  const poll = setInterval(() => { if (sdkToolCallsInFlight() === 0) done() }, SHUTDOWN_POLL_MS)
+  const bound = setTimeout(done, SHUTDOWN_TOOL_GRACE_MS)
+  if (sdkToolCallsInFlight() === 0) done()
+})
+
+type PreToolUseCallback = (...args: never[]) => Promise<unknown>
+/** Every PreToolUse callback of a launch — the existing guards AND the receipt
+ *  audit's own (runtimeActionReceipts.createClaudeRuntimeToolAudit) — answers
+ *  "deny" without running once a stop has begun, so no receipt is claimed for a
+ *  call that will not run. Wrapping, not an extra refusing hook: the CLI runs a
+ *  call's hooks side by side, so a separate deny would not stop the audit from
+ *  claiming first. Read at call time, so sessions started before the stop are
+ *  covered. Order and matchers are kept (readers take the audit's as the last).
+ *  ponytail: a launch with no PreToolUse hook at all (a non-owner session without
+ *  guards) is waited for but not refused — it has no receipts to protect. */
+const refuseWhileStopping = (hooks: unknown): unknown => {
+  const all = (hooks ?? {}) as { PreToolUse?: { hooks: PreToolUseCallback[] }[] }
+  if (!all.PreToolUse) return hooks
+  const refusal = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: SHUTDOWN_DENIAL } }
+  const gate = (hook: PreToolUseCallback): PreToolUseCallback => (...args) => shutdown ? Promise.resolve(refusal) : hook(...args)
+  return { ...all, PreToolUse: all.PreToolUse.map((m) => ({ ...m, hooks: m.hooks.map(gate) })) }
+}
+
 /** Drain the SDK's output into the ring buffer until it ends. */
 const pump = async (e: Entry): Promise<void> => {
   // Awaited, not synchronous: the vocabulary comes out of the ESM SDK, which a
@@ -874,6 +939,10 @@ const pump = async (e: Entry): Promise<void> => {
         emit(e, ev)
         trackToolEvent(e, ev)
         if (ev.kind === 'tool_use') e.activeActed = true
+        if (ev.kind === 'rate_limit' && e.provider !== 'chatgpt') {
+          recordRateLimitEvent(ev)
+          e.ownRejectedUntil = rejectedResetOf(ev)
+        }
         if (ev.kind === 'quota_refusal') {
           e.activeRefused = true
           e.lastRefusalText = ev.raw
@@ -886,7 +955,7 @@ const pump = async (e: Entry): Promise<void> => {
             try {
               const actions = await import('./runtimeActionReceipts')
               if (e.agentSessionId) await actions.interruptRuntimeActions(e.agentSessionId, e.runtimeOwnerKey)
-              await actions.assertNoUncertainRuntimeActions(e.cwd, false)
+              await actions.assertNoUncertainRuntimeActions(e.cwd, false, e.agentSessionId)
             } catch { safe = false }
             await e.activeInput?.onInterrupted?.(safe)
             if (safe) { e.activeInput = undefined; await settleInput(e) }
@@ -906,7 +975,7 @@ const pump = async (e: Entry): Promise<void> => {
             // prevent held the project for eight hours. A result that really is
             // unconfirmed (its actor gone) still ends the session.
             const actions = await import('./runtimeActionReceipts')
-            await actions.assertNoUncertainRuntimeActions(e.cwd, false)
+            await actions.assertNoUncertainRuntimeActions(e.cwd, false, e.agentSessionId)
             await refuseInput(e)
           } else await settleInput(e)
         }
@@ -1035,6 +1104,8 @@ const pump = async (e: Entry): Promise<void> => {
 }
 
 export const spawnSdkSession = (opts: SpawnSdkSessionOpts): SdkSessionInfo => {
+  // Every launch, the owner's own included (review C-S2): see beginShutdown.
+  if (shutdown) throw new Error(SHUTDOWN_LAUNCH_REFUSAL)
   const admittedOwner = currentRuntimeOwnerKey()
   if (admittedOwner && opts.options.runtimeOwnerKey !== undefined && opts.options.runtimeOwnerKey !== admittedOwner)
     throw new Error('The SDK launch belongs to a different admitted owner.')
@@ -1593,6 +1664,7 @@ export const attachSdkListener = (
 /** Test seam: forget every session. Never call from server code. */
 export const __resetSdkSessionsForTests = (): void => {
   pool.sessions.clear()
+  shutdown = null
 }
 
 /** Test seam: rewind a finished session's `closedAt` by `ms`, so the retention

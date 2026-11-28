@@ -1,9 +1,9 @@
 import { readFile, readdir, realpath, stat } from 'fs/promises'
 import type { Dirent } from 'fs'
 import { basename, join, sep } from 'path'
-import { homedir } from 'os'
 import { openGroundHome } from './paths'
 import { claudeDirName } from './claudeProjectDir'
+import { claudeProjectsRoot } from './transcript'
 
 // ---------------------------------------------------------------------------
 // swarm token audit — the PERMANENT consumption meter (card: swarm-token).
@@ -405,7 +405,7 @@ export const readWorkerConsumptionLine = async (
 
 /** Root claude persists sessions under. Overridable for tests (isolated HOME
  *  fixtures) and resolved per call — never cached — so a test's HOME swap wins. */
-export const defaultClaudeProjectsRoot = (): string => join(homedir(), '.claude', 'projects')
+export const defaultClaudeProjectsRoot = (): string => claudeProjectsRoot()
 
 /** Does this ~/.claude/projects entry name a SWARM WORKER worktree session dir?
  *  Worker cwds live under ~/.openground/projects/<uuid>/worktrees/<branch>, which

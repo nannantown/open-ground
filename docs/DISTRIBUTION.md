@@ -182,6 +182,29 @@ curl -s -X POST http://127.0.0.1:47776/api/update/check-now \
   -H 'content-type: application/json' -d '{"apply":"asap"}'
 ```
 
+### Installing a published release on the owner's own Mac (standing permission)
+
+CLAUDE.md grants a standing permission to install every published release on
+the owner's Mac and restart the app. Do it **only through the app's own apply
+path** — the `asap` bell above — never by ending a process:
+
+- **Do not** `kill` / `pkill` / `killall` OPEN GROUND or its server, and do not
+  copy over or delete `/Applications/OPEN GROUND.app` while it runs. A killed
+  server cuts off the command an agent is running; that call's receipt cannot be
+  confirmed afterwards and holds the project's automatic work until the owner
+  reviews it (AUTONOMY-SPEC R-B2: three starts within 75 minutes on 11-26/27
+  coincide with two of the eight holds measured on 2026-11-28).
+- The apply path first waits for the tool boundary (`decideAutoApply`, up to
+  15 min), then tears the server down with `terminateChild`: SIGTERM, the server
+  refuses new tool calls and waits up to `SHUTDOWN_TOOL_GRACE_MS` (20 s) for the
+  running ones, and only then does Electron's SIGKILL become possible
+  (`CHILD_SIGTERM_GRACE_MS`, 25 s).
+- Confirm in `~/.openground/updater.log` (`quitting to install X (running Y)`)
+  and that `GET /api/health` answers from the new version afterwards. If the update setting is off,
+  `asap` cannot install: the update waits for the owner's "Restart now", or for
+  an ordinary quit of the app (which installs a staged update) — still never a
+  kill.
+
 ### Rebuilding a tag after a runner is retired
 
 The macOS build uses `macos-15`. GitHub retired its macOS 14 runners on

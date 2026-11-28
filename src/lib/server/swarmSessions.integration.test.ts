@@ -188,9 +188,10 @@ describe.skipIf(process.platform === 'win32')('swarm desks across an app restart
     home = await realpath(await mkdtemp(join(tmpdir(), 'og-resume-home-')))
     claudeHome = await realpath(await mkdtemp(join(tmpdir(), 'og-resume-claude-')))
     scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-resume-scratch-')))
-    for (const k of ['OPENGROUND_HOME', 'HOME', 'OPENGROUND_CLAUDE_BIN', 'OPENGROUND_TEST_LAUNCH_DIR']) saved[k] = process.env[k]
+    for (const k of ['OPENGROUND_HOME', 'HOME', 'CLAUDE_CONFIG_DIR', 'OPENGROUND_CLAUDE_BIN', 'OPENGROUND_TEST_LAUNCH_DIR']) saved[k] = process.env[k]
     process.env.OPENGROUND_HOME = home
     process.env.HOME = claudeHome
+    process.env.CLAUDE_CONFIG_DIR = join(claudeHome, '.claude') // claudeProjectsRoot() prefers it over HOME
     __resetMigrationCacheForTests()
 
     proj = join(scratch, 'proj')

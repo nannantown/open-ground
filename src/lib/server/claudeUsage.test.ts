@@ -346,11 +346,52 @@ describe('collectUsageBreakdown — model × source over a multi-day window', ()
     })
     expect(b.days).toBe(7)
     expect(b.rows).toEqual([
-      { model: 'claude-fable-5-1', source: 'swarm-worker', tokens: 110 },
-      { model: 'claude-fable-5-1', source: 'project', tokens: 45 },
-      { model: 'claude-opus-5', source: 'other', tokens: 7 },
+      { model: 'claude-fable-5-1', source: 'swarm-worker', tokens: 110, cacheRead: 0 },
+      { model: 'claude-fable-5-1', source: 'project', tokens: 45, cacheRead: 0 },
+      { model: 'claude-opus-5', source: 'other', tokens: 7, cacheRead: 0 },
     ])
     expect(b.total).toBe(162)
+  })
+
+  // R-D4 (docs/AUTONOMY-SPEC.md). Claude Code writes a sub-agent's transcript to
+  // `<dir>/<sessionId>/subagents/agent-*.jsonl`. Naming the source from the
+  // file's PARENT folder made every one of them 'other' (the parent is
+  // `subagents`) — measured 2026-11-28 on the owner's data: "other" was 39% of
+  // a week's billed tokens and 18.4 M of its 18.9 M were sub-agents of workers
+  // and the commander. A sub-agent belongs to the actor that started it.
+  it('attributes a sub-agent transcript exactly like its parent session', async () => {
+    const now = Date.now()
+    dir = mkdtempSync(join(tmpdir(), 'og-breakdown-sub-'))
+    const wt = join(dir, '-Users-k--openground-projects-abc-worktrees-swarm-300-x')
+    const proj = join(dir, '-Users-k-dev-QRmenu')
+    mkdirSync(join(wt, 'w-sess', 'subagents'), { recursive: true })
+    mkdirSync(join(proj, 'cmd-sess', 'subagents'), { recursive: true })
+    const fable = 'claude-fable-5-1'
+    // A worker session and the reviewer sub-agent it started.
+    writeFileSync(join(wt, 'w-sess.jsonl'), rec(now, 'w1', 60, { input_tokens: 100, cache_read_input_tokens: 1_000 }, fable) + '\n')
+    writeFileSync(
+      join(wt, 'w-sess', 'subagents', 'agent-a1.jsonl'),
+      rec(now, 'w2', 50, { input_tokens: 30, cache_read_input_tokens: 400 }, fable) + '\n',
+    )
+    // The commander desk (named by the ledger) and a sub-agent of it.
+    writeFileSync(join(proj, 'cmd-sess.jsonl'), rec(now, 'c1', 40, { input_tokens: 20, cache_read_input_tokens: 70 }, fable) + '\n')
+    writeFileSync(
+      join(proj, 'cmd-sess', 'subagents', 'agent-b1.jsonl'),
+      rec(now, 'c2', 30, { output_tokens: 8, cache_read_input_tokens: 5 }, fable) + '\n',
+    )
+    resetJsonlWalkMemo()
+    const b = await collectUsageBreakdown({
+      projectsDir: dir,
+      days: 7,
+      now,
+      projectDirs: ['-Users-k-dev-QRmenu'],
+      deskSessions: new Map([['cmd-sess', 'manager' as const]]),
+    })
+    expect(b.rows).toEqual([
+      { model: fable, source: 'swarm-worker', tokens: 130, cacheRead: 1_400 },
+      { model: fable, source: 'manager', tokens: 28, cacheRead: 75 },
+    ])
+    expect(b.rows.filter((r) => r.source === 'other')).toEqual([])
   })
 
   it('ignores cache READS, dedupes a resumed turn, and stops at the window edge', async () => {
@@ -369,8 +410,9 @@ describe('collectUsageBreakdown — model × source over a multi-day window', ()
     )
     resetJsonlWalkMemo()
     const b = await collectUsageBreakdown({ projectsDir: dir, days: 1, now, projectDirs: ['-Users-k-dev-QRmenu'] })
-    // 20 + 2, with the 9,000 cache READ excluded — billing matches the headline metric.
-    expect(b.rows).toEqual([{ model: 'claude-fable-5-1', source: 'project', tokens: 22 }])
+    // 20 + 2, with the 9,000 cache READ excluded — billing matches the headline
+    // metric. The read is reported BESIDE it (R-D4), deduped like the bill.
+    expect(b.rows).toEqual([{ model: 'claude-fable-5-1', source: 'project', tokens: 22, cacheRead: 9_000 }])
   })
 
   it('is empty (never throws) when the projects dir does not exist', async () => {

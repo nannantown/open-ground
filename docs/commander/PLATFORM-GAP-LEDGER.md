@@ -27,13 +27,13 @@ OG の swarm はプラットフォーム(claude CLI / Agent SDK)が**公開し�
 
 | 機構 | 正典(コード) | 補償しているプラットフォームギャップ | 削除トリガ(公式側にこれが来たら) | 方針 |
 |---|---|---|---|---|
-| quota 層A: 冷却テーブル(永続) | `swarmQuota.ts`(`markRateLimited` / cooling) | per-model の枯渇状態を問い合わせる API が無い | 公式 quota/usage API が per-model の残量・reset 時刻を返す | 維持のみ |
+| quota 層A: 冷却テーブル(永続) | `swarmQuota.ts`(`markRateLimited` / cooling) | per-model の枯渇状態を問い合わせる API が無い。**一部は公式経路が来た(2026-11-28)**: SDK の `rate_limit_event`(安定型)が拒否の解禁時刻と拘束中の窓を構造化で述べる — `usageWindows.rejectedUntil` が文言の解釈より先に使われる(04 章 §2.4 の 0 / §5.10)。照会 API ではなく「状態が変わった時だけ」流れる通知なので、テーブル自体は残る | 公式 quota/usage API が per-model の残量・reset 時刻を返す | 維持のみ |
 | quota 層B: rate-limit **画面スクレイプ**(45s 沈黙サンプリング・onset 窓・`limitScreen` クランプ) | `swarmRateLimitText.ts` + `swarmOrchestrator.ts` の検知部 | PTY worker では CLI の TUI 文言が枯渇の唯一の信号 | **公式 API 不要** — SDK worker は構造化イベント(`quota_refusal` = `sdkDeskLimit.ts`)で同じ事実を受け取れる | **凍結** — TARGET-STATE §9 の削除条件(PTY fallback 0 の 4 週)で worker 経路を削除 |
-| quota 層D: `/usage` キャッシュの pre-launch veto | `claudeUsageCli.ts` + `swarmLaunch.ts` | `/usage` が per-model 行を出さない(fable 単独枯渇が見えない — 04 章 §5.7) | 同上(per-model usage API) | 維持のみ |
-| quota 層E: 起動前プローブ(headless 1 発で拒否文言を読む) | `swarmTierProbe.ts` | per-model 枯渇を起動前に知る手段が無い(プローブ実測 19〜73s) | 同上 | 維持のみ・パターン追加は規則 1 の手続きで |
+| quota 層D: `/usage` キャッシュの pre-launch veto | `claudeUsageCli.ts` + `swarmLaunch.ts` | `/usage` が per-model 行を出さない(fable 単独枯渇が見えない — 04 章 §5.7)。**予算ゲート(04 章 §5.10)の主な読み手でもある**: `rate_limit_event` の `utilization` は閾値越えの警告(5時間 ≥ 0.9 等)にしか載らない(2026-11-28 実測)ので、それ未満の使用率は今も `/usage` スクレイプでしか分からない(成功したスクレイプは取得時刻つきで `usageWindows` に記録 — 表示キャッシュは worker 稼働中に消えるので読まない)。新しいセンサーは足していない。スクレイプは essential-traffic モード(`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`)で起動し、CLI 起動時の課金される 1 トークン推論 quota_check を止めた。エンジンは配る候補があり読み値が 5 分より古いときだけ、既存の `refreshUsageCacheDetached` を後退つきで呼ぶ(04 章 §5.10.4) | 同上(per-model usage API)。または `rate_limit_event` が常に `utilization` を載せるようになる | 維持のみ |
+| quota 層E: 起動前プローブ(headless 1 発で拒否文言を読む) | `swarmTierProbe.ts` | per-model 枯渇を起動前に知る手段が無い(プローブ実測 19〜73s)。構造化経路(`rate_limit_event`、2026-11-28 から `usageWindows.ts` が記録)は**起動済みセッションの**拘束窓しか語らず、未起動の tier については何も言わない — このギャップは残る | 同上 | 維持のみ・パターン追加は規則 1 の手続きで |
 | bash 心拍(`readyToMerge` の唯一の書き手) | `scripts/swarm-beat.sh` + `openground-swarm-lib.sh`(読み手は `swarmHeartbeatFiles.ts`) | PTY worker の完了自己申告に HTTP/イベント経路が無い(GAP-8 — 00-INDEX 0727/0728 追記) | **公式 API 不要** — SDK worker はセッションイベントで代替可能 | PTY 凍結と運命共同体(TARGET-STATE §9)。PowerShell 版は作らない(決定済み) |
 | オーナー卓の上限画面監視 | `ownerDeskLimit.ts` | 人間が開いている卓の枯渇を CLI が外部へ通知しない | CLI がネイティブ通知/イベントを出す | **維持**(人間の卓は SDK 化しないので、PTY 凍結後も残る唯一のスクレイプ) |
-| transcript JSONL 直読 | `transcript.ts` / `swarmTranscriptProof.ts` / `swarmTokenAudit.ts` | セッション内容・トークン消費を問い合わせる API が無い | 公式 transcript / usage-per-session API | 維持のみ |
+| transcript JSONL 直読 | `transcript.ts` / `swarmTranscriptProof.ts` / `swarmTokenAudit.ts` / `runtimeToolEvidence.ts`(2026-11-28: 受領記録が開いたままのツール呼び出しの結果を読む — sub-agent の `subagents/*.jsonl` を含む。形式が変われば見つからず保留が残るだけ=安全側) | セッション内容・トークン消費・ツール呼び出しの結果を問い合わせる API が無い | 公式 transcript / usage-per-session API | 維持のみ |
 | 会話 resume 台帳 | `swarmSessions.ts`(swarm-sessions.json) | セッション一覧と「この卓の前回会話」を引く API が限定的 | 公式 session list/resume API の拡充 | 維持のみ |
 | guard hook(PreToolUse deny) | `~/.openground/guard/openground-guard.js`(配備は `installHooks`) | 破壊操作の構造的封鎖を CLI 側 permission だけでは表現しきれない | CLI の permission 体系がパス単位 deny を吸収 | 維持(安全装置 — 消すのは最後) |
 

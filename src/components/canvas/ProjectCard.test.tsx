@@ -71,3 +71,27 @@ describe('ProjectCard', () => {
     expect(screen.queryByLabelText('projectPanel.groundSharedBadge')).toBeNull()
   })
 })
+
+// WAITING (owner decision 2026-11-28, AUTONOMY-SPEC §7-4 = A): a muted clock,
+// no band, no label — the standing's reason and resume time as hover text.
+describe('ProjectCard — the waiting clock', () => {
+  const hint = 'New work is waiting for the usage limit and starts by itself at about 14:30.'
+  it('draws one clock whose hover text is the reason, and no top band', () => {
+    const { container } = render(<ProjectCard project={owned} lamp="waiting" lampHint={hint} />)
+    const mark = screen.getByTestId('ground-mark-waiting')
+    expect(mark.getAttribute('title')).toBe(hint)
+    expect(mark.getAttribute('aria-label')).toBe(hint)
+    expect(mark.textContent).toBe('')
+    expect(mark.querySelector('svg.lucide-clock')).toBeTruthy()
+    // No state band: the coloured top edge belongs to the three states only.
+    expect(container.querySelector('.bg-status-run, .bg-status-ask, .bg-status-done')).toBeNull()
+  })
+  it('without a hint it still says what it is, on hover', () => {
+    render(<ProjectCard project={owned} lamp="waiting" />)
+    expect(screen.getByTestId('ground-mark-waiting').getAttribute('title')).toBe('projectPanel.groundMarkWaiting')
+  })
+  it('a hand the standing decided carries the standing’s words', () => {
+    render(<ProjectCard project={owned} lamp="question" lampHint="Review it in Settings to resume." />)
+    expect(screen.getByRole('img', { name: 'Review it in Settings to resume.' })).toBeTruthy()
+  })
+})

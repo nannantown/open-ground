@@ -27,6 +27,7 @@ describe('swarmTranscriptProof — proveTranscriptLoadable (card 4 fixtures)', (
   let scratch: string
   let cwd: string
   let savedHome: string | undefined
+  let savedClaudeConfig: string | undefined
 
   // Claude files a session at $HOME/.claude/projects/<hyphenated-cwd>/<id>.jsonl —
   // the same path sessionJsonlPath(cwd,id) derives, so the fixture writes it there.
@@ -40,6 +41,9 @@ describe('swarmTranscriptProof — proveTranscriptLoadable (card 4 fixtures)', (
 
   beforeEach(async () => {
     claudeHome = await realpath(await mkdtemp(join(tmpdir(), 'og-proof-home-')))
+    // claudeProjectsRoot() prefers CLAUDE_CONFIG_DIR (set by the test setup) over HOME.
+    savedClaudeConfig = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = join(claudeHome, '.claude')
     scratch = await realpath(await mkdtemp(join(tmpdir(), 'og-proof-scratch-')))
     savedHome = process.env.HOME
     process.env.HOME = claudeHome // os.homedir() honours $HOME on POSIX
@@ -51,6 +55,7 @@ describe('swarmTranscriptProof — proveTranscriptLoadable (card 4 fixtures)', (
     // Restore, never delete (an unset HOME would send later resolution at the REAL
     // home — the 2026-07-18 data loss; testHomeGuard.ts).
     if (savedHome !== undefined) process.env.HOME = savedHome
+    if (savedClaudeConfig !== undefined) process.env.CLAUDE_CONFIG_DIR = savedClaudeConfig
     await rm(claudeHome, { recursive: true, force: true })
     await rm(scratch, { recursive: true, force: true })
   })

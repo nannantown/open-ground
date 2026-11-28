@@ -8,6 +8,7 @@ import { isAgentConversationOccupied, isRecordedRuntimeHandleOccupied } from './
 import { runtimeOwnerKey } from './runtimeOwner'
 import { getSettings } from './store'
 import { presidentInputHasKnownFinal } from './presidentInbox'
+import { settleHeldToolReceipts } from './runtimeActionReceipts'
 import { listSwarmLaunchRecoveryIssues, listNativeConversationRecoveryIssues } from './swarmRuntimeTransition'
 
 export interface RuntimeRecoveryIssue {
@@ -27,7 +28,8 @@ export const runtimeRecoveryIssues = async (expectedOwnerKey?: string): Promise<
   if (!await hasChatGptAccess()) return []
   const owner = await runtimeOwnerKey(expectedOwnerKey)
   const settings = await getSettings()
-  const receipts = await listConversationReceipts(owner)
+  // R-B1: a tool whose result the native transcript records is settled, never listed.
+  const receipts = await settleHeldToolReceipts(await listConversationReceipts(owner))
   for (const receipt of receipts) {
     const body = receipt.body as { kind?: string; sessionId?: string; agentSessionId?: string } | null
     if (receipt.state !== 'executing' || !['president-input', 'runtime-tool', 'swarm-handoff-input'].includes(body?.kind ?? '') || presidentInputHasKnownFinal(receipt)) continue

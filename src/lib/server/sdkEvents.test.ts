@@ -227,8 +227,28 @@ describe('distillSdkMessage — rate limit', () => {
     })
   })
 
-  it('drops an event with no utilization rather than inventing 0', () => {
+  it('drops an event with nothing to report rather than inventing 0', () => {
     expect(distillSdkMessage({ type: 'rate_limit_event', rate_limit_info: {} }, P)).toEqual([])
+    expect(distillSdkMessage({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } }, P)).toEqual([])
+  })
+
+  // The CLI's own shape (claude-agent-sdk 0.3.220 bundled CLI, `IOu` / `fpo`):
+  // a refused request carries status + resetsAt + rateLimitType and NO
+  // utilization — utilization rides only `allowed_warning` threshold events.
+  it('a rejection WITHOUT utilization still distils, carrying status and the reset (R-C1)', () => {
+    const evs = distillSdkMessage(
+      { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1785736800, rateLimitType: 'five_hour', isUsingOverage: false } },
+      P,
+    )
+    expect(evs).toEqual([{ kind: 'rate_limit', status: 'rejected', utilization: null, resetsAt: 1785736800, limitType: 'five_hour' }])
+  })
+
+  it('an allowed status with a reset and no utilization distils too (it names the window)', () => {
+    const evs = distillSdkMessage(
+      { type: 'rate_limit_event', rate_limit_info: { status: 'allowed', resetsAt: 1785736800, rateLimitType: 'seven_day' } },
+      P,
+    )
+    expect(evs).toEqual([{ kind: 'rate_limit', status: 'allowed', utilization: null, resetsAt: 1785736800, limitType: 'seven_day' }])
   })
 })
 
@@ -311,6 +331,6 @@ describe('statusAfter', () => {
 
   it('implies nothing for ordinary content', () => {
     expect(statusAfter({ kind: 'text', text: 'hi' })).toBeNull()
-    expect(statusAfter({ kind: 'rate_limit', utilization: 0.5, resetsAt: null, limitType: 'seven_day' })).toBeNull()
+    expect(statusAfter({ kind: 'rate_limit', status: 'allowed_warning', utilization: 0.5, resetsAt: null, limitType: 'seven_day' })).toBeNull()
   })
 })

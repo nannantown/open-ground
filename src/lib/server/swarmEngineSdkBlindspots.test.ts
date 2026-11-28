@@ -68,6 +68,12 @@ vi.mock('./swarmSessions', async (importOriginal) => ({
   recordSwarmSession: wire.recordSwarmSession,
   forgetSwarmSessionIf: wire.forgetSwarmSessionIf,
 }))
+// The commander's resume check (R-B3) reads the receipt journal for the project;
+// '/repo/alpha' is a fake, unregistered path with no receipts, so nothing holds.
+vi.mock('./savedWorkHold', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./savedWorkHold')>()),
+  savedWorkHolds: async () => [],
+}))
 vi.mock('./ogManageSkill', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./ogManageSkill')>()),
   installOgManageSkill: wire.installOgManageSkill,

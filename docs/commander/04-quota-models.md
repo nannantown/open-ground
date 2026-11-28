@@ -84,7 +84,7 @@ spawn 経路(5+1)と fail-closed の実装箇所は §5.4。
 
 | 経路 | 関数 | 呼出箇所 |
 |---|---|---|
-| 自動(worker arm) | `markRateLimited` | swarmOrchestrator.ts(worker arm の QUOTA SENSOR) |
+| 自動(worker arm) | `markRateLimited`(SDK の構造化された解禁時刻があれば `markCoolingUntil` — §2.4 の 0、2026-11-28) | swarmOrchestrator.ts(worker arm の QUOTA SENSOR = `coolQuotaWall`) |
 | 自動(reviewer arm) | `markRateLimited` | swarmOrchestrator.ts(makeAdversarialReview 内) |
 | **自動(層E 起動前プローブ、2026-07-13)** | `markRateLimited` | swarmTierProbe.ts(`ensureTierProbed` — プローブが壁を確認したときだけ。§5.8) |
 | **自動(司令官卓の起動即死・DOA、2026-07-19)** | `markRateLimited` | swarmManager.ts(`watchDeskForDeathOnArrival` — 立てた卓が 90s 以内にクォータ拒否で死んだときだけ。§5.8.6) |
@@ -104,6 +104,7 @@ mutation 3関数とも `markTouched()` + `schedulePersist()` を呼ぶ(swarmQuot
 
 swarmQuota.ts:364-372。上から順に試し、**過去時刻は無視して次へ落ちる**(366, 369):
 
+0. **構造化イベント(2026-11-28、§5.10)— この3情報源より先に見る**: SDK の `rate_limit_event` が `status:'rejected'` で述べた解禁時刻(`usageWindows.rejectedUntil(now, tier?)` — 30 分以内に拒否された窓のうち未解禁のものの最遅 `resetsAt`。数えるのは**その相手を縛る窓だけ**: 全モデル共通の `five_hour` / `seven_day` と、tier を渡したときはその tier 自身の週窓(`seven_day_opus` / `seven_day_sonnet` / `seven_day_overage_included` = Fable)。他モデルの週窓は混ぜない — 混ぜていた頃は opus の週上限 1 件で 5 時間上限の冷却が全 tier 4 日・司令官の一時停止も 4 日になった、review 2026-11-28 B-M1)。`coolQuotaWall` は tier ごとにこれを引き、あれば `markCoolingUntil` で**その時刻ちょうど**に冷やす(文言の再解釈が無いので `markRateLimited` の min 規則は通さない)。`sdkSession.refuseInput` の一時停止は**そのセッション自身の拒否イベント**の時刻を先に使い(`Entry.ownRejectedUntil`)、無ければ全モデル共通の窓だけを見る。セッションがイベントを見ていなければ(PTY・ChatGPT・30 分より古い)、下の 1→2→3 が従来どおり決める。拒否文はもう「いつ解けるか」を読む一次情報ではない — 「全モデルか1モデルか」(§3.4.1)を読む役は文言のまま。
 1. **PTY 文言**(最優先・最具体): `extractPtyResetUntil`(326-348)が worker 画面から「resets in 5 minutes」「limit resets at 3pm」等を parse。相対形→絶対形の順。ラベル parse 本体は `parseResetLabel`(283-318): ①相対 "in N unit" ②裸時計 "3pm"(過ぎていれば翌日)③絶対日付(TZ suffix と " at " を除去して Date.parse)。
 2. **A5**(CLI usage センサーのキャッシュ値): 呼出側が `a5CoolingHint()` で渡す(swarmOrchestrator.ts:4098, 3574)。**pct >= 100 ゲート付き** — A5 の `resetsAt` は 3% 使用時でも常時表示される「現ウィンドウの終端」なので、その slot が実際に**枯れている**(session.pct>=100、次いで weekAll.pct>=100)ときだけ信用する(swarmOrchestrator.ts:1223-1238)。ゲートが無いと、一過性 429/5xx への RATE_LIMIT_PATTERNS ヒットで健全 tier を最長 ~5h 冷やしてしまう(0708 must-fix 差し戻しの教訓、1227-1230)。両 slot 枯れなら先に評価される session(=より早い reset)が勝つ(1230-1232, 1235-1236)。
 3. **フラット grace**: `now + graceMs`(371)。エンジンは `RATE_LIMIT_GRACE_MS` を渡す(swarmOrchestrator.ts:4099, 3575)。
@@ -255,7 +256,8 @@ monitor のセンサーは **worker 画面しか見ない**ので、レビュー
   every launch into that wall. Guards: `swarmTierProbe.test.ts` ("an ALL-MODEL limit cools every tier on one
   probe"), `swarmEngineSdkBlindspots.test.ts` ("an ALL-MODEL refusal followed by death cools EVERY tier").
 - **The mark is written on the first sighting**, then the stop waits for the worker's running command
-  (`awaitToolBoundary`, up to `TOOL_BOUNDARY_WAIT_MS` = 15 min — 01 章 §7.4e). A stop mid-command used to
+  (`awaitToolBoundary`, up to `TOOL_BOUNDARY_WAIT_MS` = 30 min in `swarmOrchestrator.ts` — this line said 15
+  until 2026-11-28; 01 章 §7.4e). A stop mid-command used to
   leave the command unconfirmed, which holds the whole project.
 - Guards: `swarmSavedWorkHold.test.ts` ("an all-model limit is not walked down tier by tier", "every engine
   stop waits for a running command").
@@ -276,14 +278,34 @@ since) and that had not itself declared ready is recovered as `rate-limit`: the 
 (`coolQuotaWall`, same reading as §3.4.1), the card goes back to `todo`, the journal says `worker ended on a
 usage refusal — a quota stop, not a crash` and `quota-stopped — requeued — card → todo · exit: <reason>`, and
 the dispatch after the reset re-enters the same branch. It is not promoted on "exited with commits" either.
-A death whose last words were not a refusal is still a crash. Once the pool has forgotten the session (its
-linger, or an app restart) there is nothing to read and the old crash rule applies.
+A death whose last words were not a refusal is still a crash.
+
+**Once the pool has forgotten the session (2026-11-28, AUTONOMY-SPEC R-C1(2)).** The pool keeps a closed
+session for `SDK_SESSION_LINGER_MS` (30 min). When nobody looks in time — the engine switched OFF (its
+workers stay on its list), the Mac asleep, a runtime switch holding every pass — the dead worker arrives
+with no last words, and the refusal read as a crash again (commits ⇒ `blocked`; a first-run worker was even
+promoted to `review` on "exited with commits"). Now the monitor reads the worker's transcript instead
+(`transcriptUsageRefusal` → `swarmResumeEvidence.lastTranscriptUsageRefusal`, the last 256 KB of
+`<sessionId>.jsonl`): when its newest `assistant` entry carries `isApiErrorMessage: true` and starts with
+one of the SDK's `USAGE_LIMIT_ERROR_PREFIXES`, the stop is recovered exactly as above, and the journal line
+adds `(read from its transcript — the session had left the pool)`. A quote of the sentence has no marker; a
+reply after the refusal, an `API Error: 529`, a missing or unreadable file ⇒ the crash rule, as before.
+While the pool still remembers the session its verdict stands and the transcript is not read.
+
+**An app restart is a different road, and it already ends in `todo`** (verified in code 2026-11-28; the
+spec assumed otherwise). A restart empties `engine.workers`, so the dead worker never reaches this path.
+The boot reconcile keeps its roster row as a resume candidate and `--resume`s it; a limit still in force
+refuses that resume at the spawn (`TierCoolingError` when the persisted cooling table has the tier —
+`adoptResumeCandidates` requeues to `todo`) or at its first turn (the live quota arm, or `refusedThenGone`
+through the new session). A candidate that is not adopted is collected by `collectUnownedDoing` (→ `todo`).
+Known cost, left as is: when the restart came before any cooling was written, one refused launch per card.
 
 Most of these deaths no longer happen at all: a refused turn used to end its own session whenever any
 command in the project was running — see 01 章 §7.4e "A usage refusal is not an abort".
 
 - Guards: `swarmSavedWorkHold.test.ts` ("a worker refused by the usage limit and gone at once is a quota
-  stop, not a crash").
+  stop, not a crash"), `swarmResumeGaps.test.ts` ("… gone, and forgotten by the pool is still a quota
+  stop" — red before the fix: `expected 'blocked' to be 'todo'`; the transcript reader's own cases).
 
 ### 3.8 A desk a usage limit refused hears again (2026-11-23)
 
@@ -1060,10 +1082,201 @@ tier」という形をしていた。存在検査は沈黙する):
 (`collectUsageBreakdown`、claudeUsage.ts / 5分キャッシュ / HUD のポップオーバーを
 開いたときだけ走る)。
 
-場所は**パスから証明できるものだけ**: `swarm-worker`(worktree)/ `project`(登録
-プロジェクトの cwd)/ `other`。⚠ `project` は**卓とオーナー自身の claude の合算**で、
-transcript では区別できない(両方リポジトリ直下で走る)。UI はそう書いてある —
-分けられないものを分けたふりをしない。
+場所は**パスと卓台帳から証明できるものだけ**: `swarm-worker`(worktree)/
+`manager`・`supply`(卓台帳 `~/.openground/swarm-desks.json` がその session id を
+名指ししている — 2026-09-22〜)/ `project`(登録プロジェクトの cwd で、台帳に無い
+session = オーナー自身の claude か台帳より前の卓)/ `other`(登録プロジェクトにも
+worktree にも属さない cwd)。⚠ `project` は区別できないものの合算で、UI はそう書いて
+ある — 分けられないものを分けたふりをしない。
+
+**sub-agent は起動した席に帰属する**(2026-11-28、AUTONOMY-SPEC R-D4)。claude は
+sub-agent の transcript を `<dir>/<sessionId>/subagents/agent-*.jsonl` に書く。以前は
+ファイルの**親フォルダ名**で場所を決めていたので親が `subagents` になり、全部 `other` に
+落ちていた(実測: 7日で `other` 39%、その 18.4M / 18.9M が worker と司令官の
+sub-agent)。いまは projects 直下からの**最初の2区画**(`<dir>` と `<sessionId>`)で
+親 session と同じ判定をする。修正後の同じ7日窓: `other` 0.95%・worker 53%・
+司令官 25%・社長 12%・`project` 9%。
+
+**cache read を課金トークンの横に出す**。各行に `cacheRead` があり、`tokens` と
+`total` には**入れない**(割合は課金トークンのまま)。同じ7日で cache read は約1,500M =
+課金の約29倍 — 文脈の大きさ × 呼び出し回数で伸びる量なので、「卓の文脈が伸び続けて
+いる」はこの数字で見る。HUD のポップオーバーでは各行の課金トークンの下に薄い数字で
+出し、説明はホバーの1行だけ(`misc.usage.breakdown.cacheRead`)。
+
+歯: `claudeUsage.test.ts`「attributes a sub-agent transcript exactly like its parent
+session」(親フォルダ名に戻す変異・cacheRead を足さない変異・cache read を課金に
+入れる変異で赤を実測)/ `UsageHud.breakdown.test.tsx`「shows the cache reads of each
+row as a second figure」(ホバー文を外す・別の数字を出す変異で赤を実測)。
+
+## 5.10 Layer F — structured limit readings and the usage budget gate (usageWindows.ts / swarmBudget.ts, 2026-11-28)
+
+AUTONOMY-SPEC R-D1 / R-D2 / R-C1 (1). Layers A–E learn about a wall when a launch meets it (or probe for
+it). Layer F looks at how much of the window is left BEFORE an automatic start, and takes the reset time of a
+refusal from the SDK's structured message instead of the sentence. It adds no sensor and no text pattern
+(PLATFORM-GAP-LEDGER rule 1): it consumes the stable SDK message type `rate_limit_event`, which the pool
+already distilled; the experimental `usage_EXPERIMENTAL_…` call is not used.
+
+### 5.10.1 What `rate_limit_event` really carries (measured 2026-11-28)
+
+Sources, all read-only: the SDK type `SDKRateLimitInfo` (`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts`,
+0.3.220); the JS embedded in the CLI that SDK spawns
+(`node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude`, byte search for `rate_limit_event`,
+`function fPp(`, `function IOu(`, `function fpo(`, `MZg=[`); a grep of all 1.5 GB of `~/.claude/projects`.
+
+- **When it is emitted.** The CLI keeps ONE limit state per process. Every response's headers are turned into
+  a new state, and the listeners that enqueue `rate_limit_event` fire only when that state differs (deep
+  equality) from the last one. It is not per request. A new process starts at `{status:'allowed'}`, so its
+  first response usually emits one event; after that, only a change emits another.
+- **`status`** — always present: `allowed` | `allowed_warning` | `rejected`.
+- **`resetsAt`** — header `anthropic-ratelimit-unified-reset`, **epoch SECONDS** (the CLI computes hours to
+  reset as `(resetsAt − Date.now()/1000)/3600`). Stored by OG as ms.
+- **`rateLimitType`** — header `anthropic-ratelimit-unified-representative-claim`: the window that binds right
+  now (`five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included`,
+  `overage`). One event names ONE window; it says nothing about the others.
+- **`utilization`** (0–1) — **only on `allowed_warning`**, which the CLI produces in exactly two ways: the
+  server sent `anthropic-ratelimit-unified-<5h|7d|7d_oi|overage>-surpassed-threshold`, or the CLI's own early
+  warning fired — `five_hour` ≥ 0.90 while at most 72% of the window has elapsed; `seven_day` ≥ 0.75 / 0.50 /
+  0.25 at ≤ 60% / 35% / 15% elapsed. Otherwise the status is `allowed` with NO utilization.
+- **A refusal** (HTTP 429, or the status header `rejected`) → `status:'rejected'`, `resetsAt`,
+  `rateLimitType`, no utilization. `rejected` together with `isUsingOverage:true` means the request was served
+  from extra-usage credit.
+- The CLI also reads per-window utilization headers on every response (`…-5h-utilization`,
+  `…-7d-utilization`, `…-7d_oi-…`, `…-overage-…`) but keeps them internal — they are NOT on the event.
+- **Captures.** The JSONL transcripts never contain it (0 files of 1.5 GB; the CLI filters it out of what it
+  writes), and OG keeps SDK events in memory only. The one real capture on record stays SDK_CLIENT_INVESTIGATION's
+  `{rateLimitType:"seven_day", utilization:0.55}` (= a 7-day 0.50-threshold warning; migration plan row S4).
+  Count per session was therefore read from the code, not counted live: one at a session's first response,
+  then one per change of status / window / reset / threshold.
+- **Consequence.** Below ~90% of the 5-hour window the event almost never states a share. A `/usage` scrape
+  (layer D's source) is the reading most of the time; the 30-minute freshness rule decides which one counts.
+  What the event gives reliably is the refusal and its reset instant.
+
+`sdkEvents.distillSdkMessage` emits `rate_limit` with `status` whenever the event has a utilization, a
+`resetsAt`, or `status:'rejected'` (it used to drop every event without utilization — i.e. every refusal);
+`utilization` is null when absent, never 0. `SdkWorkerPane` shows the line only when a share is stated.
+
+### 5.10.2 The window store (`usageWindows.ts`)
+
+| Item | Now |
+|---|---|
+| Feed | One line in `sdkSession`'s distil loop: every Claude session's `rate_limit` event → `recordRateLimitEvent`. And every SUCCESSFUL `/usage` scrape: `claudeUsageCli.fetchClaudeUsageCli`, where it caches one, → `recordUsageScrape` (`session` → five_hour, `weekAll` → seven_day, at its own `capturedAt`) |
+| Shape | `rateLimitType → {usedPct 0–100 \| null, resetsAt ms \| null, at, status}`. A share is stored when the event states one (×100) or when the window refused (= 100). A status-only event in the SAME window (same reset) keeps the last share and its age (usage only grows inside a window); a new reset starts unknown |
+| Where | `~/.openground/usage-windows.json`, beside the cooling table. In-memory table is the authority (sync reads); the file is a mirror, read once per process (`ensureUsageWindowsLoaded`, awaited by the dispatch pass), never written before the disk was seen, a live reading beats an older one from disk; unreadable/corrupt ⇒ boot empty + one log line |
+| `budgetReadings(now)` | `five_hour` / `seven_day`: the event's reading when it is fresh (share known, < 30 min old, window not reset), else the last recorded scrape, measured at its `capturedAt`, its reset label read relative to THAT instant (a passed label must not roll to tomorrow) and as fresh text — a bare clock already past at capture ("2:50am" at 22:00) is tomorrow's (review B-N2; read as stale it was null and the hold lifted at capture + 30 min). A scrape with no capture time is not recorded. The display cache (`peekCachedUsage`) is NOT read: it is wiped 30 s after any transcript write — exactly while workers run — which left the gate answering `usage-unknown` most of the time (found in review 2026-11-28, fixed the same day) |
+| `rejectedUntil(now, tier?)` | The latest reset among the windows that bind the asker, refused within 30 min, whose reset is still ahead (every wall must lift), else null. Binding = the account-wide `five_hour` / `seven_day`, plus the named tier's own week (`seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included` = Fable). Another model's week never counts (review 2026-11-28 B-M1). A desk's pause (`refuseInput`) takes its OWN refusal event's reset first (`Entry.ownRejectedUntil`), then the account-wide windows |
+
+### 5.10.3 The budget gate (`swarmBudget.budgetGate`, asked in `runDispatchPass`)
+
+Pure, clock-injected: `budgetGate(windows, now, policy, card)` → `{allow, note?}` or
+`{allow:false, kind, until, usedPct, linePct}`. Checked strongest first:
+
+| kind | Holds when | `until` |
+|---|---|---|
+| `weekly-reserve` | week used ≥ 100 − `ownerReservePct` | the week's reset |
+| `weekly-pace` | `pace:'even'` only: week used > elapsed share × 100 + `PACE_BURST_PCT` (15) | the instant the line reaches the used share |
+| `window-headroom` | 5-hour used ≥ `TIER_START_CEILING_PCT[resolveCardTier(card)]` — touch 90, standard 80, design 70, ultra 60 (the safety floor applies) | the window's reset |
+
+A reading without a reset holds until it goes stale (`at + USAGE_FRESH_MS`). No fresh reading of a window
+⇒ that window holds nothing and the verdict says `note:'usage-unknown'` — today's behaviour, now visible.
+
+- **Policy** `Settings.swarmBudget = {pace, ownerReservePct}`; default `{pace:'free', ownerReservePct:10}`
+  (owner decision 2026-11-28, AUTONOMY-SPEC §7-2 = B). So by default the gate's kinds in effect are
+  `window-headroom` and `weekly-reserve`; `weekly-pace` is implemented and off. On the POST allow-list
+  (`USER_SETTINGS_KEYS`); a valid partial patch merges over the stored policy, an invalid field refuses the
+  whole patch; reserve is 0–50. Reader: `store.getSwarmBudget()`.
+- **Where.** In `runDispatchPass`, right after `selectDispatch` and only for the Claude runtime: held cards
+  leave the candidate list (they stay in `todo`, no card write), so they do not take a slot and the scale
+  target is computed on what may start. `engine.budgetHold` carries the held cards (`taskId`, `kind`,
+  `until`) or `note:'usage-unknown'`; the standing names the hold that lifts soonest with its own sentence
+  (`window-headroom` / `weekly-pace` / `weekly-reserve`) and `until`, and the first pass past it starts them
+  by itself (the reading then belongs to a window that has reset). It is NOT mirrored into
+  `engine.parkUntil`: that field means "the usage limit" to every reader (the standing's `usage-limit`
+  sentence, the president's "the usage limit is back" recipe), and a budget hold is no limit reached —
+  mirrored, a 95% window was told to the owner as 「使用量の上限のため…」 (review 2026-11-28 B-S1 / D-S2).
+- **Journal.** Once per change of the held set: `dispatch held by the usage budget (<kind>) — the 5-hour
+  window is at 85%, at or above this card's start ceiling 80%; it stays in todo and starts by itself after
+  <ISO>: <title>`; and `usage budget hold lifted — automatic dispatch resumes`.
+- **The commander's wake for finished work** is held by `weekly-reserve` and by no other kind (R-D2; review
+  2026-11-28 B-S4): `runIntegratePass` asks `swarmBudget.weeklyReserveHold` (the same reserve check
+  `budgetGate` makes first) right after "no review card ⇒ disarm", Claude runtime only. A wake is then
+  pending, so the pass also claims the same free, backed-off refresh dispatch claims for a waiting card
+  (`claimUsageRefresh` → `deps.refreshUsage`): without it nothing refreshed the reading when no todo card
+  waited, the 95% reading went stale at 30 min and the commander was started inside the reserve (review
+  R2-S1). Keeping the last verdict instead was rejected: it rests a hold on one reading for days, against
+  the spec's one freshness rule (unread ⇒ allow, `usage-unknown`). Inside the reserve
+  the pass sends no notice, no poke and starts no commander; the queued notice stays and the first pass
+  outside the reserve delivers it. `engine.commanderReserveHold` carries it to the standing (`weekly-reserve`
+  + `until` while a review card waits). Journal, once per change: `commander wake held by the owner's weekly
+  reserve — the week is at N% (line L%); …` and `… no longer held …`. The 5-hour ceiling and the pace line
+  do not hold it — they gate starts of new work. Not held: the owner's own words (`manager/say`) and the
+  "Continue." after an API-error turn (R-C2 — it resumes an interrupted turn, not a wake for finished work).
+- **Not gated.** Running workers (never stopped by this rule), Board Run (`POST /api/terminal/claude`), the
+  manual `POST /api/swarm/worker`, the president.
+
+### 5.10.4 Fail direction and known limits
+
+- Missing reading ⇒ no hold (and `usage-unknown`); never a guess.
+- **Why a ≤ 30-minute-old reading is fine for a start ceiling** (and a tighter cutoff would not be safer):
+  inside one window usage only rises, so a reading of the current window is a LOWER bound of the share used
+  now. At or above the ceiling it holds correctly at any age; below it, dropping it would give
+  `usage-unknown` = allow, the same answer. The cutoff only bounds how long a hold rests on one reading.
+- **A scrape is free only in essential-traffic mode, and every scrape now runs in it.** A scrape spawns an
+  INTERACTIVE `claude`; an interactive claude.ai-subscriber session's startup prefetch (`xOu()` in the CLI
+  bundled with agent-sdk 0.3.220) sends `messages.create({max_tokens: 1, messages: [{role:'user',
+  content:'quota'}]})`, source `"quota_check"`, on the default model to read the limit headers — a billed
+  inference per scrape, i.e. per HUD poll while workers run. `xOu()` returns at once when `ca()` is true, and
+  `ca()` is `mDl()==="essential-traffic"`, which is `process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`.
+  The installed 2.1.332 has the same request and the same env check (`Srt()`); its caller sits in a separate
+  bundled chunk and was not traced. `/usage` itself is `GET /api/oauth/usage` (no inference, not gated by
+  that check). Measured 2026-11-28 on the owner's machine (claude 2.1.332, the exact `drive()` sequence,
+  three alternating runs quiet / normal / quiet): with the variable set the screen renders all three
+  "% used" rows with identical values (77% / 10–11% / 5%). `drive()` therefore spawns with
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` for every scrape, HUD poll included.
+- **The engine asks for a scrape** when it has a dispatch candidate — or a commander wake is pending (a review
+  card waits, §5.10.3) — and the newest reading is older than
+  `USAGE_REFRESH_AFTER_MS` (5 min): `usageWindows.claimUsageRefresh(now)` → `deps.refreshUsage()` =
+  `refreshUsageCacheDetached({bypassCache:true})` — never awaited in the tick, single-flight inside `fetchClaudeUsageCli`. One
+  request per backoff period (`USAGE_REFRESH_BACKOFF_MS` 5 min, doubling while requests produce no newer
+  reading, capped at 30 min), global (one CLI, not per project). No candidate ⇒ no request. 5 min: a reading
+  is a lower bound, so its age bounds how much a start is under-judged — 5 minutes of spend against 10-point
+  gaps between ceilings — at ≤ 12 PTY spawns an hour and none while the HUD keeps readings fresh. The
+  request skips the display cache (`bypassCache`; the HUD's own poll still uses it): the cache only holds the
+  reading that is already 5 minutes old, and while a budget hold parks every worker no transcript is written,
+  so the cache was never invalidated, every request was answered from it, the 85% reading went stale at
+  30 minutes and the gate allowed a start above its ceiling (review 2026-11-28 B-S2). `defaultRefreshUsage`
+  is a no-op under vitest (a real scrape spawns the developer's `claude`), like swarmTierProbe's warm-up.
+- `rejected` + `isUsingOverage` (extra-usage credit) counts as 100%: automatic starts do not spend credit.
+- Per-model weekly windows (`seven_day_opus`, …) are stored but not gated; the cooling table (layer A)
+  still handles a single model's wall. Their reset cools only their own tier (`rejectedUntil(now, tier)`).
+
+### 5.10.5 Guards (each mutated and seen red, 2026-11-28)
+
+`swarmBudget.test.ts` (each kind on both sides of its line, the pace `until`, staleness at exactly 30 min,
+a reset window, the safety floor) · `usageWindows.test.ts` (0–1 → 0–100, seconds → ms, same-window keep,
+`rejectedUntil`, a recorded scrape read at its capture time, restart read-back, corrupt file) ·
+`usageScrapeWindows.test.ts` (a production `fetchClaudeUsageCli` success over a fake PTY: a reading captured
+40 s ago still gates after the display cache is invalidated; 31 minutes old ⇒ allow + `usage-unknown`; the
+spawn env carries `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`) · `usageWindows.test.ts` `claimUsageRefresh`
+(fresh ⇒ no claim, one claim per period, doubling to the cap, reset when a scrape lands) ·
+`swarmBudgetDispatch.test.ts` refresh cases (candidate + stale ⇒ one per period; fresh ⇒ none; no candidate ⇒
+none; the production wiring calls `refreshUsageCacheDetached` and never under vitest) ·
+`sdkEvents.test.ts` (a rejection without utilization distils with `status`) · `sdkSessionRateLimit.test.ts`
+(the forwarding line; a refused desk pauses until the structured reset) · `swarmBudgetDispatch.test.ts`
+(85%: only the touch card dispatches, the running worker stays, Board Run still spawns; all held ⇒
+the standing says `window-headroom` + the reset, never `usage-limit`, `parkUntil` unset, resumes after it;
+stale reading ⇒ both dispatch) · `swarmQuotaStopFailFast.test.ts` (an all-model refusal with a 3-day
+structured reset cools every tier until exactly then, across a restart) ·
+`server/routes/__tests__/settingsSwarmBudget.test.ts` (POST → `getSwarmBudget`).
+
+Added after review 2026-11-28 (each red against the code before its fix, and each fix mutated back to
+red): `swarmQuotaStopFailFast.test.ts` (an opus weekly wall does not stretch a later 5-hour wall; a sonnet
+week does not stretch an opus wall) · `sdkSessionRateLimit.test.ts` (another session's opus week does not
+stretch a desk's 5-hour pause; the desk's own per-model refusal still sets it) · `usageWindows.test.ts`
+(a per-model week binds only its tier) · `usageScrapeWindows.test.ts` (the engine's request 5 min after a
+scrape spawns a new one and the hold still stands at 30.5 min; the HUD poll keeps the cache; two requests
+share one scrape) · `swarmBudgetDispatch.test.ts` (the wiring passes `bypassCache`; inside the reserve the
+commander gets no notice, poke or start and the standing says `weekly-reserve`; a 5-hour window near its
+ceiling does not hold the commander).
 
 ## 6. 状態機械 / データフロー(1周)
 

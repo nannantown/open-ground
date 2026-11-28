@@ -6,11 +6,12 @@ const mock = vi.hoisted(() => ({
   eligible: true, owner: 'owner-a',
   ownerKey: vi.fn(), receipts: vi.fn(), finish: vi.fn(), connection: vi.fn(),
   actions: vi.fn(), agentOccupied: vi.fn(), handleOccupied: vi.fn(), settings: vi.fn(),
-  knownFinal: vi.fn(), launches: vi.fn(), native: vi.fn(),
+  knownFinal: vi.fn(), launches: vi.fn(), native: vi.fn(), outcome: vi.fn(), settle: vi.fn(),
 }))
 vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => mock.eligible }))
 vi.mock('./runtimeOwner', () => ({ runtimeOwnerKey: mock.ownerKey }))
-vi.mock('./conversationReceipts', () => ({ listConversationReceipts: mock.receipts, finishConversationReceipt: mock.finish }))
+vi.mock('./conversationReceipts', () => ({ listConversationReceipts: mock.receipts, finishConversationReceipt: mock.finish, settleReceiptFromEvidence: mock.settle }))
+vi.mock('./runtimeToolEvidence', () => ({ findToolOutcome: mock.outcome }))
 vi.mock('./chatgptAuth', () => ({ getChatGptConnection: mock.connection }))
 vi.mock('./chatgptResponses', () => ({ listChatGptUncertainActions: mock.actions }))
 vi.mock('./liveDesks', () => ({ isAgentConversationOccupied: mock.agentOccupied, isRecordedRuntimeHandleOccupied: mock.handleOccupied }))
@@ -34,6 +35,28 @@ beforeEach(() => {
   mock.actions.mockResolvedValue([]); mock.settings.mockResolvedValue({ lockdownMode: false })
   mock.agentOccupied.mockReturnValue(false); mock.handleOccupied.mockReturnValue(false)
   mock.knownFinal.mockReturnValue(false); mock.launches.mockResolvedValue([]); mock.native.mockResolvedValue([])
+  mock.outcome.mockResolvedValue({ kind: 'no-record' })
+  mock.settle.mockImplementation(async (r: ConversationReceipt, e: { failed: boolean }) => ({ ...r, state: 'delivered', result: { confirmed: true, failed: e.failed, source: 'native-transcript', automaticReplay: false } }))
+})
+
+// R-B1: the review list asks the native transcript first (runtimeToolEvidence.test.ts
+// covers what it reads); a recorded result is settled and never shown to the owner.
+describe('runtime recovery settles what the native transcript records', () => {
+  const tool = (state: ConversationReceipt['state']) => receipt({ state, body: { kind: 'runtime-tool', provider: 'claude', sessionId: 'conversation-one',
+    toolId: 'toolu_fixture', tool: 'Bash', inputHash: 'b'.repeat(64), cwd: '/synthetic/project' } })
+  it.each(['executing', 'uncertain'] as const)('settles an %s tool receipt whose result is recorded instead of listing it', async (state) => {
+    const held = tool(state)
+    mock.receipts.mockResolvedValue([held]); mock.outcome.mockResolvedValue({ kind: 'result', isError: true, interrupted: false })
+    expect(await runtimeRecoveryIssues('owner-a')).toEqual([])
+    expect(mock.outcome).toHaveBeenCalledWith('conversation-one', 'toolu_fixture', expect.objectContaining({ cwd: '/synthetic/project' }))
+    expect(mock.settle).toHaveBeenCalledExactlyOnceWith(held, { failed: true })
+    expect(mock.finish).not.toHaveBeenCalled()
+  })
+  it.each([{ kind: 'started-no-result' }, { kind: 'result', isError: false, interrupted: true }])('keeps listing a tool receipt the transcript shows as $kind (interrupted: $interrupted)', async (outcome) => {
+    mock.receipts.mockResolvedValue([tool('uncertain')]); mock.outcome.mockResolvedValue(outcome)
+    expect(await runtimeRecoveryIssues('owner-a')).toEqual([{ id: 'input-one', scope: 'project-one', kind: 'tool', tool: 'Bash', state: 'uncertain' }])
+    expect(mock.settle).not.toHaveBeenCalled()
+  })
 })
 
 describe('runtime recovery uses the original actor handle and admitted owner', () => {

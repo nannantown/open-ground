@@ -35,7 +35,7 @@ import { sessionContextTokens } from './claudeUsage'
 import { getDeskContextCapTokens } from './store'
 import { logToEngine } from './engineLogSink'
 import { deskCompactedLogLine } from './deskContextCap'
-import { catchUpSupplyDesks, supplyDeliveryInFlight } from './supplyNotice'
+import { catchUpSupplyDesks, supplyDeliveryInFlight, presidentResumeNoteOwed } from './supplyNotice'
 import { kickAllCommanderQuestionSweeps } from './commanderQuestions'
 import type { OrchestratorLogLine } from '../types'
 
@@ -87,6 +87,11 @@ interface Pending {
 
 interface SupplyCapState {
   pending: Map<string, Pending>
+  /** Desks revived quiet (R-D3a) not yet seen to take a turn: terminal id → the
+   *  first fill read. */
+  quietFill: Map<string, number>
+  /** Desks revived quiet whose fill has since moved — spoken to by some path. */
+  spoken: Set<string>
   passInFlight: boolean
 }
 
@@ -110,11 +115,38 @@ const track = (p: Promise<unknown>): void => {
 
 const state: SupplyCapState =
   globalThis.__openground_supply_context_cap ??
-  (globalThis.__openground_supply_context_cap = { pending: new Map(), passInFlight: false })
+  (globalThis.__openground_supply_context_cap = { pending: new Map(), quietFill: new Map(), spoken: new Set(), passInFlight: false })
+// A state object left on globalThis by the code before these fields existed (dev reload).
+state.quietFill ??= new Map()
+state.spoken ??= new Set()
 
 export const resetSupplyContextCapState = (): void => {
   state.pending.clear()
+  state.quietFill.clear()
+  state.spoken.clear()
   state.passInFlight = false
+}
+
+/** Has this desk, revived quiet at boot, taken no turn yet? A compaction is a full
+ *  turn, so the cap waits for the desk's first one (R-D3a) — by ANY path: an app
+ *  line, the owner typing in its seat, Remote Control. The desk's transcript fill
+ *  moving is the signal all of them share. Whether the resume note is still owed
+ *  is not the test: only the app's own delivery clears that (review B-S5).
+ *  ponytail: the baseline is the first fill a pass reads, not the fill at launch,
+ *  so a turn inside the first interval is absorbed and the next turn unlocks. */
+const quietSinceLaunch = (deskId: string, tokens: number | null): boolean => {
+  if (!presidentResumeNoteOwed(deskId) || state.spoken.has(deskId)) return false
+  // An unreadable fill is no baseline: a read that fails once and then succeeds
+  // must not pass for a turn (the conservative side: a waiting desk costs nothing).
+  if (tokens === null) return true
+  if (!state.quietFill.has(deskId)) {
+    state.quietFill.set(deskId, tokens)
+    return true
+  }
+  if (state.quietFill.get(deskId) === tokens) return true
+  state.quietFill.delete(deskId)
+  state.spoken.add(deskId)
+  return false
 }
 
 export interface SupplyContextCapPassResult {
@@ -135,12 +167,15 @@ export const runSupplyContextCapPass = async (
   try {
     const cap = await deps.cap().catch(() => 0)
     const seen = new Set<string>()
+    const seenDesks = new Set<string>()
     for (const d of deps.desks()) {
       const sid = d.agentSessionId
       if (!sid || !deps.isAlive(d.id)) continue
       seen.add(sid)
+      seenDesks.add(d.id)
       if (!(cap > 0)) continue // 0 = off
       const tokens = await deps.contextTokens(sid).catch(() => null)
+      if (quietSinceLaunch(d.id, tokens)) continue
       const pending = state.pending.get(sid)
       if (pending) {
         if (tokens !== null && tokens < cap) {
@@ -165,6 +200,8 @@ export const runSupplyContextCapPass = async (
     }
     // Forget desks that are gone, so the map cannot grow across restarts of desks.
     for (const sid of Array.from(state.pending.keys())) if (!seen.has(sid)) state.pending.delete(sid)
+    for (const id of Array.from(state.quietFill.keys())) if (!seenDesks.has(id)) state.quietFill.delete(id)
+    for (const id of Array.from(state.spoken)) if (!seenDesks.has(id)) state.spoken.delete(id)
   } catch {
     /* a failed pass must never kill the loop */
   } finally {

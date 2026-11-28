@@ -17,6 +17,8 @@ vi.mock('./runtimeOwner', async (original) => ({ ...(await original<typeof impor
   if (expected && expected !== 'synthetic-owner') throw new Error('owner changed')
   return 'synthetic-owner'
 } }))
+// These controls are the signed-in owner's (a native review is keyed by the owner, R-B5).
+vi.mock('./chatgptAccess', () => ({ hasChatGptAccess: async () => true }))
 vi.mock('./swarmSupply', async (original) => ({ ...(await original<typeof import('./swarmSupply')>()), spawnSwarmSupply: h.launch }))
 const ids: string[] = []
 beforeEach(() => { h.launch.mockReset().mockRejectedValue(new Error('Unexpected actor launch in a stale-control fixture')) })

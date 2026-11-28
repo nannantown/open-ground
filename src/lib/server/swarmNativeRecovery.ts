@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { atomicWriteJson } from './atomicWrite'
 import { openGroundHome } from './paths'
 import { runtimeOwnerKey } from './runtimeOwner'
+import { hasChatGptAccess } from './chatgptAccess'
 import { getSettings, isSwarmManualStopPersisted } from './store'
 import { readEngineIntent } from './swarmEnginePersistence'
 import { readSwarmSessions } from './swarmSessions'
@@ -13,6 +14,18 @@ import { isAgentConversationOccupied } from './liveDesks'
 import { isSessionHeldByProcess } from './swarmTranscriptProof'
 import { inspectSwarmNativeConversation } from './swarmNativeTranscript'
 import { claudeDirName } from './claudeProjectDir'
+
+/** Who a native conversation review belongs to (AUTONOMY-SPEC R-B5): the
+ *  signed-in app owner — or, for a user without the owner role (public opt-in,
+ *  local unlock), who has no owner key yet can answer the question in their
+ *  inbox, the local user of this OPEN GROUND home. Without this, such a user's
+ *  boot hold waited on "Owner sign-in is required" forever, pointing nowhere. */
+export const nativeReviewerKey = async (expected?: string): Promise<string> => {
+  if (await hasChatGptAccess()) return runtimeOwnerKey(expected)
+  const local = createHash('sha256').update(`local-user:${openGroundHome()}`).digest('hex')
+  if (expected && expected !== local) throw new Error('The owner account changed.')
+  return local
+}
 
 export interface NativeRecoverySource { projectId: string; projectPath: string; cwd: string; role: 'supply' | 'manager' | 'worker'; sessionId: string; requestedFingerprint?: string }
 const marker = z.object({ ownerKey: z.string().min(1).max(128), projectId: z.string().min(1).max(128), role: z.enum(['supply', 'manager', 'worker']),
@@ -168,7 +181,7 @@ const sources = async (): Promise<NativeRecoverySource[]> => {
       if (!worker.sessionId.startsWith('chatgpt-')) result.push({ projectId: project.id, projectPath: project.path, cwd: worker.worktree, role: 'worker', sessionId: worker.sessionId })
     }
   }
-  const owner = await runtimeOwnerKey()
+  const owner = await nativeReviewerKey()
   for (const request of await pendingReviews()) {
     if (request.ownerKey !== owner || result.some(source => key(owner, source) === key(owner, request))) continue
     if (!settings.projects?.some(project => project.id === request.projectId && project.path === request.projectPath)) continue
@@ -188,7 +201,7 @@ const sources = async (): Promise<NativeRecoverySource[]> => {
 }
 const sameSource = (a: NativeRecoverySource, b: NativeRecoverySource) => a.projectId === b.projectId && a.projectPath === b.projectPath && a.cwd === b.cwd && a.role === b.role && a.sessionId === b.sessionId
 const removePendingReview = async (source: NativeRecoverySource, owner: string) => {
-  await runtimeOwnerKey(owner)
+  await nativeReviewerKey(owner)
   // atomicWriteJson fsyncs file data but its directory sync is best effort.
   // Request removal requires a durable marker entry, including a new directory.
   await syncDirectory(dirname(markerFile(owner, source)))
@@ -197,12 +210,12 @@ const removePendingReview = async (source: NativeRecoverySource, owner: string) 
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
   await syncDirectory(pendingDir())
 }
-const deps: NativeRecoveryDeps = { sources, inspect: inspectSwarmNativeConversation, owner: runtimeOwnerKey,
+const deps: NativeRecoveryDeps = { sources, inspect: inspectSwarmNativeConversation, owner: nativeReviewerKey,
   held: async sessionId => isAgentConversationOccupied(sessionId) || await isSessionHeldByProcess(sessionId) !== false, reviewed: removePendingReview }
 const recovery = createNativeConversationRecovery(deps)
 export const listNativeConversationRecoveryIssues = recovery.list
 export const reviewNativeConversationRecovery: typeof recovery.review = async options => {
-  const owner = await runtimeOwnerKey(options.expectedOwnerKey)
+  const owner = await nativeReviewerKey(options.expectedOwnerKey)
   const project = (await getSettings()).projects?.find(project => project.id === options.projectId)
   const source = project && await presidentSource(project.path)
   if (source?.sessionId === options.sessionId && options.id === `native-${source.sessionId}`) {
@@ -213,7 +226,7 @@ export const reviewNativeConversationRecovery: typeof recovery.review = async op
     if (existing?.operationId === options.operationId) {
       if (existing.note !== options.note.trim()) throw new Error('This review operation was already used for different work.')
       const replay = writer.then(async () => {
-        await runtimeOwnerKey(owner)
+        await nativeReviewerKey(owner)
         const current = await presidentSource(source.projectPath)
         if (!current || !sameSource(current, source)) throw new Error('The native recovery source changed.')
         const review = (await recovery.state(current, owner)).review
@@ -227,10 +240,14 @@ export const reviewNativeConversationRecovery: typeof recovery.review = async op
   }
   return recovery.review(options)
 }
-export const nativeConversationRecoveryReviewed = async (projectId: string, cwd: string, sessionId: string): Promise<boolean> => {
-  const owner = await runtimeOwnerKey(), source = (await sources()).find(source => source.projectId === projectId && source.cwd === cwd && source.sessionId === sessionId)
-  return !!source && !!(await recovery.state(source, owner)).review
+/** The owner's recorded review of a saved native conversation (its note), or
+ *  undefined — the commander's fresh opening carries the note (review R2, A-S3). */
+export const nativeConversationRecoveryReview = async (projectId: string, cwd: string, sessionId: string): Promise<{ note: string } | undefined> => {
+  const owner = await nativeReviewerKey(), source = (await sources()).find(source => source.projectId === projectId && source.cwd === cwd && source.sessionId === sessionId)
+  return source ? (await recovery.state(source, owner)).review : undefined
 }
+export const nativeConversationRecoveryReviewed = async (projectId: string, cwd: string, sessionId: string): Promise<boolean> =>
+  !!await nativeConversationRecoveryReview(projectId, cwd, sessionId)
 
 const presidentSource = async (projectPath: string): Promise<NativeRecoverySource | undefined> => {
   const { projectUUIDFromPath } = await import('./projectDataPath')
@@ -243,7 +260,7 @@ const presidentSource = async (projectPath: string): Promise<NativeRecoverySourc
 }
 const requestPresidentReview = async (source: NativeRecoverySource, owner: string, fingerprint: string): Promise<void> => {
   const write = writer.then(async () => {
-    await runtimeOwnerKey(owner)
+    await nativeReviewerKey(owner)
     const current = await presidentSource(source.projectPath)
     if (!current || !sameSource(current, source) || await deps.held(source.sessionId)
       || (await inspectSwarmNativeConversation(source.cwd, source.sessionId)).fingerprint !== fingerprint) throw new Error('The native conversation changed before recovery could be requested.')
@@ -258,7 +275,7 @@ const requestPresidentReview = async (source: NativeRecoverySource, owner: strin
     if (Buffer.byteLength(JSON.stringify(request, null, 2)) > PENDING_BYTES) throw new Error('Native recovery request exceeds its inspection limit.')
     await mkdir(pendingDir(), { recursive: true, mode: 0o700 })
     await syncDirectory(dirname(pendingDir()))
-    await runtimeOwnerKey(owner)
+    await nativeReviewerKey(owner)
     await atomicWriteJson(pendingFile(owner, source), request, { mode: 0o600, fsync: true })
     await syncDirectory(pendingDir())
   })
@@ -266,7 +283,7 @@ const requestPresidentReview = async (source: NativeRecoverySource, owner: strin
   await write
 }
 export const nativePresidentRecoveryAdmission = async (projectPath: string, expectedOwnerKey: string): Promise<NativeRecoveryAdmission | undefined> => {
-  const owner = await runtimeOwnerKey(expectedOwnerKey), source = await presidentSource(projectPath)
+  const owner = await nativeReviewerKey(expectedOwnerKey), source = await presidentSource(projectPath)
   if (!source) return undefined
   let current: Awaited<ReturnType<typeof recovery.state>>
   try { current = await recovery.state(source, owner) }
